@@ -1607,4 +1607,34 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     },
     listTeammatesHandler
   );
+
+  // Tool: agor_branches_retry_provisioning
+  // Idempotent, non-destructive repair for a branch whose filesystem
+  // provisioning is stuck in 'creating' or landed in 'failed'. Wraps the exact
+  // same `reposService.retryBranchProvisioning` implementation used by the REST
+  // route and the startup watchdog, so all three surfaces share one code path.
+  server.registerTool(
+    'agor_branches_retry_provisioning',
+    {
+      description:
+        'Repair a branch whose git working directory failed to materialize (filesystem_status ' +
+        "'failed') or is stuck 'creating'. Idempotent and non-destructive: if a valid checkout " +
+        'already exists on disk it is reconciled to ready; otherwise provisioning is re-dispatched. ' +
+        'Never deletes refs or directories. Returns the updated branch with its new filesystem_status.',
+      inputSchema: z.object({
+        branchId: mcpRequiredId('branchId', 'Branch'),
+      }),
+    },
+    async (args) => {
+      const branchId = await resolveBranchId(ctx, args.branchId);
+      const reposService = ctx.app.service('repos') as unknown as ReposServiceImpl;
+      const branch = await reposService.retryBranchProvisioning(branchId, ctx.baseServiceParams);
+      return textResult({
+        branch_id: branch.branch_id,
+        filesystem_status: branch.filesystem_status,
+        error_message: branch.error_message ?? null,
+        path: branch.path,
+      });
+    }
+  );
 }

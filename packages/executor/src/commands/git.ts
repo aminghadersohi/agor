@@ -1165,14 +1165,15 @@ export async function handleGitBranchAdd(
       }
     }
 
-    // Provide user-friendly error messages for common failures
+    // Provide user-friendly error messages for common failures. Match on the
+    // specific "ref already attached to another worktree" signal — NOT merely
+    // the word "branch", which also appears in the non-empty-directory message
+    // and would otherwise be misreported as a ref collision.
     let userMessage = errorMessage;
-    if (errorMessage.includes('already exists')) {
-      if (errorMessage.includes('branch')) {
-        userMessage = `A branch named '${resolvedBranchName || 'unknown'}' already exists and is in use by another branch. Please choose a different name.`;
-      } else {
-        userMessage = `Directory '${resolvedBranchPath || resolvedBranchName || 'unknown'}' already exists. An archived or partially-cleaned branch may still occupy this path.`;
-      }
+    if (errorMessage.includes('is in use by another')) {
+      userMessage = `A branch named '${resolvedBranchName || 'unknown'}' already exists and is in use by another branch. Please choose a different name.`;
+    } else if (errorMessage.includes('already exists') && errorMessage.includes('not empty')) {
+      userMessage = `Directory '${resolvedBranchPath || resolvedBranchName || 'unknown'}' already exists and is not empty. An archived or partially-cleaned branch may still occupy this path.`;
     }
 
     // Try to mark branch as failed with error details (if we have a branchId and client)
