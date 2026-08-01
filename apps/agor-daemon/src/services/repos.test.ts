@@ -921,4 +921,37 @@ describe('ReposService branch provisioning lifecycle (never stuck in creating)',
     expect(summary.retried).toBe(1); // missing dir → re-dispatch
     expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledTimes(1);
   });
+
+  it('retry on an already-ready branch is a no-op (no patch, no re-dispatch)', async () => {
+    executorMocks.spawnExecutorFireAndForget.mockClear();
+    const patch = vi.fn(async () => ({}));
+    const get = vi.fn(async () => branch({ filesystem_status: 'ready' }));
+    const { service } = makeService({ get, patch });
+
+    const result = await service.retryBranchProvisioning('b1');
+
+    expect(result.filesystem_status).toBe('ready');
+    expect(patch).not.toHaveBeenCalled();
+    expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
+  });
+
+  it('concurrent retries against a valid checkout both reconcile to ready, never re-dispatch', async () => {
+    // Two callers race a retry on the same failed row whose checkout is
+    // actually present on disk (e.g. a manually materialized worktree). Both
+    // must converge on ready and neither may spawn a duplicate materializer.
+    executorMocks.spawnExecutorFireAndForget.mockClear();
+    const dir = makeValidCheckout();
+    const patch = vi.fn(async () => ({ ...branch({ path: dir }), filesystem_status: 'ready' }));
+    const get = vi.fn(async () => branch({ path: dir, filesystem_status: 'failed' }));
+    const { service } = makeService({ get, patch });
+
+    const [a, b] = await Promise.all([
+      service.retryBranchProvisioning('b1'),
+      service.retryBranchProvisioning('b1'),
+    ]);
+
+    expect(a.filesystem_status).toBe('ready');
+    expect(b.filesystem_status).toBe('ready');
+    expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
+  });
 });
