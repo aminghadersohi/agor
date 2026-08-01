@@ -947,7 +947,12 @@ async function renderEnvironmentTemplates(
  *
  * Creates a git branch at the specified path.
  * The DB record is created by the daemon BEFORE this runs (with filesystem_status: 'creating').
- * This handler patches the branch to 'ready' when complete (or leaves as 'creating' on failure).
+ * On success this handler patches the branch to 'ready'; on a caught error it
+ * patches 'failed' with a sanitized message — but ONLY when it still holds a
+ * daemon connection (`client`). If this process is killed or crashes before its
+ * catch runs, or it never connected, it cannot patch anything. The daemon's
+ * onExit safety net (`ReposService.dispatchBranchProvisioning`) reconciles those
+ * cases so the branch is never left stuck in 'creating'.
  */
 export async function handleGitBranchAdd(
   payload: GitBranchAddPayload,
