@@ -29,6 +29,7 @@ import {
   BranchRepository,
   getCurrentTenantId,
   RepoRepository,
+  runWithTenantDatabaseScope,
   runWithTenantDatabaseTransaction,
   shortId,
   type TenantScopeAwareDatabase,
@@ -1020,6 +1021,11 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     const storageMode = branch.storage_mode ?? 'worktree';
     const logPrefix = `[branch-provisioning ${shortId(branch.branch_id)}]`;
     const branchesService = this.app.service('branches');
+    // Capture the tenant NOW (we are inside a request/startup scope). The
+    // executor's onExit fires asynchronously after that scope has unwound, so
+    // any DB write there must re-establish this tenant's transaction scope or
+    // Postgres rejects the SAVEPOINT the branch mutation opens.
+    const tenantId = getCurrentTenantId();
     try {
       const sessionToken = await issueExecutorCommandToken(
         this.app,
@@ -1071,7 +1077,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
             console.error(
               `${logPrefix} executor exited with code ${code ?? 'null'}; running safety-net reconcile`
             );
-            void this.reconcileBranchFilesystemAfterExit(branch.branch_id, code);
+            void this.reconcileBranchFilesystemAfterExit(branch.branch_id, code, tenantId);
           },
         }
       );
@@ -1103,25 +1109,31 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
    */
   private async reconcileBranchFilesystemAfterExit(
     branchId: string,
-    code: number | null
+    code: number | null,
+    tenantId: string | undefined
   ): Promise<void> {
     const branchesService = this.app.service('branches');
     const logPrefix = `[branch-provisioning ${shortId(branchId)}]`;
     try {
-      const current = (await branchesService.get(branchId)) as Branch;
-      if (current.filesystem_status !== 'creating') {
-        // Executor already reported a terminal status — nothing to do.
-        return;
-      }
-      if (isValidBranchCheckout(current.path)) {
-        console.log(`${logPrefix} reconcile → ready (valid checkout found on disk after exit)`);
-        await branchesService.patch(branchId, { filesystem_status: 'ready' });
-        return;
-      }
-      console.warn(`${logPrefix} reconcile → failed (no usable checkout after executor exit)`);
-      await branchesService.patch(branchId, {
-        filesystem_status: 'failed',
-        error_message: `Branch provisioning did not complete: the materialization process exited with code ${code ?? 'unknown'} before creating a usable working directory. Retry provisioning to try again.`,
+      // Re-establish the tenant DB transaction scope: this runs from the
+      // executor onExit callback, outside the request/startup scope that was
+      // active when provisioning was dispatched.
+      await runWithTenantDatabaseScope(this.db, tenantId, async () => {
+        const current = (await branchesService.get(branchId)) as Branch;
+        if (current.filesystem_status !== 'creating') {
+          // Executor already reported a terminal status — nothing to do.
+          return;
+        }
+        if (isValidBranchCheckout(current.path)) {
+          console.log(`${logPrefix} reconcile → ready (valid checkout found on disk after exit)`);
+          await branchesService.patch(branchId, { filesystem_status: 'ready' });
+          return;
+        }
+        console.warn(`${logPrefix} reconcile → failed (no usable checkout after executor exit)`);
+        await branchesService.patch(branchId, {
+          filesystem_status: 'failed',
+          error_message: `Branch provisioning did not complete: the materialization process exited with code ${code ?? 'unknown'} before creating a usable working directory. Retry provisioning to try again.`,
+        });
       });
     } catch (error) {
       console.error(
@@ -1133,15 +1145,18 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
   /** Patch a branch to 'failed' only if it is still 'creating' (idempotent, non-clobbering). */
   private async markBranchProvisioningFailedIfStuck(
     branchId: string,
-    message: string
+    message: string,
+    tenantId: string | undefined
   ): Promise<void> {
     const branchesService = this.app.service('branches');
     try {
-      const current = (await branchesService.get(branchId)) as Branch;
-      if (current.filesystem_status !== 'creating') return;
-      await branchesService.patch(branchId, {
-        filesystem_status: 'failed',
-        error_message: message,
+      await runWithTenantDatabaseScope(this.db, tenantId, async () => {
+        const current = (await branchesService.get(branchId)) as Branch;
+        if (current.filesystem_status !== 'creating') return;
+        await branchesService.patch(branchId, {
+          filesystem_status: 'failed',
+          error_message: message,
+        });
       });
     } catch (error) {
       console.error(
@@ -1238,7 +1253,8 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
         summary.failed++;
         await this.markBranchProvisioningFailedIfStuck(
           branch.branch_id,
-          `Provisioning could not be recovered after restart: ${sanitizeProvisioningError(error)}`
+          `Provisioning could not be recovered after restart: ${sanitizeProvisioningError(error)}`,
+          getCurrentTenantId()
         );
       }
     }
