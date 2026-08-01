@@ -1,6 +1,20 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Application } from '@agor/core/types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReposService } from './repos';
+
+/** Create a temp dir that looks like a materialized git checkout (has `.git`). */
+function makeValidCheckout(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'agor-branch-'));
+  writeFileSync(join(dir, '.git'), 'gitdir: /somewhere/.git/worktrees/x');
+  return dir;
+}
+/** A path guaranteed not to exist on disk. */
+function missingPath(): string {
+  return join(tmpdir(), `agor-missing-${Math.floor(performance.now())}-${process.pid}`);
+}
 
 vi.mock('@agor/core/config', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agor/core/config')>();
@@ -720,5 +734,191 @@ describe('ReposService.remove branch inventory', () => {
     );
     expect(branchService.removeMetadataWithRealtime).toHaveBeenCalledTimes(10_001);
     expect(repositoryMocks.deleteRepo).toHaveBeenCalledOnce();
+  });
+});
+
+describe('ReposService branch provisioning lifecycle (never stuck in creating)', () => {
+  type BranchesMock = {
+    get: ReturnType<typeof vi.fn>;
+    patch: ReturnType<typeof vi.fn>;
+    find?: ReturnType<typeof vi.fn>;
+  };
+
+  function makeService(branches: BranchesMock) {
+    const app = {
+      settings: { authentication: { secret: 'test-secret' } },
+      service: vi.fn((name: string) => {
+        if (name === 'branches') return branches;
+        throw new Error(`Unexpected service: ${name}`);
+      }),
+    } as unknown as Application;
+    const service = new ReposService({} as never, app);
+    return { service, app };
+  }
+
+  function grabOnExit(): (code: number | null) => void {
+    const opts = executorMocks.spawnExecutorFireAndForget.mock.calls.at(-1)?.[1] as {
+      onExit?: (code: number | null) => void;
+    };
+    if (!opts?.onExit) throw new Error('expected an onExit safety net to be wired');
+    return opts.onExit;
+  }
+
+  const branch = (over: Record<string, unknown> = {}) => ({
+    branch_id: 'b1',
+    repo_id: 'r1',
+    name: 'feature',
+    path: missingPath(),
+    storage_mode: 'worktree' as const,
+    created_by: 'user-1',
+    filesystem_status: 'creating' as const,
+    ...over,
+  });
+  const repo = { repo_id: 'r1', local_path: '/managed/repo', slug: 'acme/app' };
+
+  it('dispatch installs an onExit net that marks a crashed provision as failed', async () => {
+    executorMocks.spawnExecutorFireAndForget.mockClear();
+    const patch = vi.fn(async () => ({}));
+    const get = vi.fn(async () => branch({ path: missingPath(), filesystem_status: 'creating' }));
+    const { service } = makeService({ get, patch });
+
+    await (
+      service as unknown as {
+        dispatchBranchProvisioning: (...a: unknown[]) => Promise<void>;
+      }
+    ).dispatchBranchProvisioning(branch(), repo, 'user-1', undefined, 'create');
+
+    grabOnExit()(1); // simulate executor exit-1 (crash / SIGTERM / stale build)
+
+    await vi.waitFor(() =>
+      expect(patch).toHaveBeenCalledWith(
+        'b1',
+        expect.objectContaining({ filesystem_status: 'failed' })
+      )
+    );
+    // sanitized, actionable, no absolute-path leakage requirement: message set
+    const lastPatch = patch.mock.calls.at(-1);
+    const msg = (lastPatch?.[1] as { error_message?: string } | undefined)?.error_message;
+    expect(msg).toMatch(/provisioning/i);
+  });
+
+  it('onExit recovers to ready when a valid checkout is already on disk', async () => {
+    executorMocks.spawnExecutorFireAndForget.mockClear();
+    const dir = makeValidCheckout();
+    const patch = vi.fn(async () => ({}));
+    const get = vi.fn(async () => branch({ path: dir, filesystem_status: 'creating' }));
+    const { service } = makeService({ get, patch });
+
+    await (
+      service as unknown as { dispatchBranchProvisioning: (...a: unknown[]) => Promise<void> }
+    ).dispatchBranchProvisioning(branch({ path: dir }), repo, 'user-1', undefined, 'create');
+
+    grabOnExit()(1);
+
+    await vi.waitFor(() =>
+      expect(patch).toHaveBeenCalledWith('b1', { filesystem_status: 'ready' })
+    );
+  });
+
+  it('onExit code 0 does not double-write (executor already patched)', async () => {
+    executorMocks.spawnExecutorFireAndForget.mockClear();
+    const patch = vi.fn(async () => ({}));
+    const get = vi.fn(async () => branch({ filesystem_status: 'ready' }));
+    const { service } = makeService({ get, patch });
+
+    await (
+      service as unknown as { dispatchBranchProvisioning: (...a: unknown[]) => Promise<void> }
+    ).dispatchBranchProvisioning(branch(), repo, 'user-1', undefined, 'create');
+
+    grabOnExit()(0);
+    await new Promise((r) => setImmediate(r));
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it('synchronous spawn failure marks the branch failed (no lost provisioning)', async () => {
+    executorMocks.spawnExecutorFireAndForget.mockClear();
+    executorMocks.spawnExecutorFireAndForget.mockImplementationOnce(() => {
+      throw new Error('executor binary not found');
+    });
+    const patch = vi.fn(async () => ({}));
+    const get = vi.fn(async () => branch({ filesystem_status: 'creating' }));
+    const { service } = makeService({ get, patch });
+
+    await (
+      service as unknown as { dispatchBranchProvisioning: (...a: unknown[]) => Promise<void> }
+    ).dispatchBranchProvisioning(branch(), repo, 'user-1', undefined, 'create');
+
+    expect(patch).toHaveBeenCalledWith(
+      'b1',
+      expect.objectContaining({ filesystem_status: 'failed' })
+    );
+  });
+
+  it('retry is idempotent: an existing valid checkout is reconciled to ready without re-dispatch', async () => {
+    executorMocks.spawnExecutorFireAndForget.mockClear();
+    const dir = makeValidCheckout();
+    const patch = vi.fn(async () => ({ ...branch({ path: dir }), filesystem_status: 'ready' }));
+    const get = vi.fn(async () => branch({ path: dir, filesystem_status: 'failed' }));
+    const { service } = makeService({ get, patch });
+
+    await service.retryBranchProvisioning('b1');
+
+    expect(patch).toHaveBeenCalledWith(
+      'b1',
+      expect.objectContaining({ filesystem_status: 'ready' }),
+      undefined
+    );
+    expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
+  });
+
+  it('retry re-dispatches provisioning when the directory is missing', async () => {
+    executorMocks.spawnExecutorFireAndForget.mockClear();
+    const path = missingPath();
+    const creatingRow = branch({ path, filesystem_status: 'creating' });
+    const patch = vi.fn(async () => creatingRow);
+    const get = vi.fn(async () => branch({ path, filesystem_status: 'failed' }));
+    const { service } = makeService({ get, patch });
+    (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
+      vi.fn(async () => repo);
+
+    await service.retryBranchProvisioning('b1');
+
+    expect(patch).toHaveBeenCalledWith(
+      'b1',
+      expect.objectContaining({ filesystem_status: 'creating' }),
+      undefined
+    );
+    expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledWith(
+      expect.objectContaining({ command: 'git.branch.add' }),
+      expect.objectContaining({ asUser: 'daemon-user' })
+    );
+  });
+
+  it('watchdog recovers/retries/ignores stuck creating branches on restart', async () => {
+    executorMocks.spawnExecutorFireAndForget.mockClear();
+    const goodDir = makeValidCheckout();
+    const recoverable = branch({ branch_id: 'ok', path: goodDir, filesystem_status: 'creating' });
+    const retryable = branch({
+      branch_id: 'gone',
+      path: missingPath(),
+      filesystem_status: 'creating',
+    });
+    const alreadyReady = branch({ branch_id: 'rdy', filesystem_status: 'ready' });
+
+    const patch = vi.fn(async (id: string) => ({ branch_id: id, filesystem_status: 'creating' }));
+    const get = vi.fn(async (id: string) =>
+      [recoverable, retryable].find((b) => b.branch_id === id)
+    );
+    const find = vi.fn(async () => [recoverable, retryable, alreadyReady]);
+    const { service } = makeService({ get, patch, find });
+    (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
+      vi.fn(async () => repo);
+
+    const summary = await service.reconcileStuckCreatingBranches();
+
+    expect(summary.scanned).toBe(2); // the ready one is filtered out
+    expect(summary.recovered).toBe(1); // valid checkout → ready
+    expect(summary.retried).toBe(1); // missing dir → re-dispatch
+    expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledTimes(1);
   });
 });
