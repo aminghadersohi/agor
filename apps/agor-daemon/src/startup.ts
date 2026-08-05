@@ -691,15 +691,15 @@ export async function startup(ctx: StartupContext): Promise<void> {
   // Recover branches whose filesystem provisioning was interrupted by the
   // previous process exit (the git.branch.add executor is fire-and-forget, so a
   // daemon kill mid-provision would otherwise leave the row stuck in
-  // 'creating' forever). Reconcile to 'ready' when a valid checkout is already
-  // on disk, else re-dispatch provisioning; never deletes refs or worktrees.
+  // 'creating' forever). Conservatively transition any interrupted 'creating'
+  // branch to 'failed' with an actionable message — recovery is an explicit,
+  // human-triggered retry, not an automatic re-dispatch. Never deletes refs or
+  // worktrees.
   runPostStartJob('branch-provisioning-watchdog', () =>
     runStartupTenantDatabaseScope(ctx, async () => {
       const reposService = app.service('repos') as unknown as {
         reconcileStuckCreatingBranches: (params?: unknown) => Promise<{
           scanned: number;
-          recovered: number;
-          retried: number;
           failed: number;
         }>;
       };

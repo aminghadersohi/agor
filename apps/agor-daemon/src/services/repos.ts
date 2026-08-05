@@ -9,7 +9,6 @@
  * metadata only.
  */
 
-import { existsSync } from 'node:fs';
 import path from 'node:path';
 import {
   ensureBranchCloneDepthAllowed,
@@ -35,7 +34,13 @@ import {
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
 import { autoAssignBranchUniqueId } from '@agor/core/environment/variable-resolver';
-import { type Application, BadRequest, Forbidden, NotAuthenticated } from '@agor/core/feathers';
+import {
+  type Application,
+  BadRequest,
+  Conflict,
+  Forbidden,
+  NotAuthenticated,
+} from '@agor/core/feathers';
 import { redactGitUrlCredentials, stripGitUrlCredentials } from '@agor/core/git/pure';
 import type {
   AuthenticatedParams,
@@ -73,23 +78,6 @@ export type RepoParams = QueryParams<{
   managed_by_agor?: boolean;
   cleanup?: boolean; // For delete operations: true = delete filesystem, false = database only
 }>;
-
-/**
- * A branch working directory is "usable" if it exists and carries git metadata
- * (`.git` file for a worktree, `.git` dir for a clone). Cheap daemon-side check
- * used by provisioning reconciliation to recognize a materialized checkout
- * without shelling out to the executor. Deliberately conservative: it only ever
- * causes a `creating`→`ready` recovery for a directory that already looks like
- * a checkout; it never creates, mutates, or deletes anything.
- */
-function isValidBranchCheckout(branchPath: string | undefined | null): boolean {
-  if (!branchPath) return false;
-  try {
-    return existsSync(branchPath) && existsSync(path.join(branchPath, '.git'));
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Reduce an error to a short, log/DB-safe message. Strips embedded credentials
@@ -1101,100 +1089,109 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
   }
 
   /**
-   * onExit reconcile: after a non-zero executor exit, either recover the
-   * branch to 'ready' (a valid checkout exists on disk — the executor did the
-   * work but died before acking) or mark it 'failed'. Only acts while the row
-   * is still 'creating' so it never clobbers a richer status the executor
-   * already wrote. Never deletes refs or directories.
+   * onExit safety net: after a non-zero executor exit, move the branch to a
+   * terminal `failed` state IF it is still `creating` (the executor died before
+   * it could report success or failure itself). Deliberately does NOT inspect
+   * the daemon-local filesystem or promote to `ready` from a `.git` path — a
+   * daemon cannot reliably tell a complete checkout from a stale/partial/
+   * wrong-ref one, and in a multi-host deployment it may not even see the
+   * executor's filesystem. Surfacing `failed` keeps a human decision point;
+   * the user (or MCP/UI) retries explicitly. Never deletes refs or directories.
    */
   private async reconcileBranchFilesystemAfterExit(
     branchId: string,
     code: number | null,
     tenantId: string | undefined
   ): Promise<void> {
-    const branchesService = this.app.service('branches');
-    const logPrefix = `[branch-provisioning ${shortId(branchId)}]`;
-    try {
-      // Re-establish the tenant DB transaction scope: this runs from the
-      // executor onExit callback, outside the request/startup scope that was
-      // active when provisioning was dispatched.
-      await runWithTenantDatabaseScope(this.db, tenantId, async () => {
-        const current = (await branchesService.get(branchId)) as Branch;
-        if (current.filesystem_status !== 'creating') {
-          // Executor already reported a terminal status — nothing to do.
-          return;
-        }
-        if (isValidBranchCheckout(current.path)) {
-          console.log(`${logPrefix} reconcile → ready (valid checkout found on disk after exit)`);
-          await branchesService.patch(branchId, { filesystem_status: 'ready' });
-          return;
-        }
-        console.warn(`${logPrefix} reconcile → failed (no usable checkout after executor exit)`);
-        await branchesService.patch(branchId, {
-          filesystem_status: 'failed',
-          error_message: `Branch provisioning did not complete: the materialization process exited with code ${code ?? 'unknown'} before creating a usable working directory. Retry provisioning to try again.`,
-        });
-      });
-    } catch (error) {
-      console.error(
-        `${logPrefix} safety-net reconcile failed: ${sanitizeProvisioningError(error)}`
-      );
-    }
+    await this.markBranchProvisioningFailedIfStuck(
+      branchId,
+      `Branch provisioning did not complete: the materialization process exited with code ${code ?? 'unknown'} before it could confirm a usable working directory. Retry provisioning to try again.`,
+      tenantId
+    );
   }
 
-  /** Patch a branch to 'failed' only if it is still 'creating' (idempotent, non-clobbering). */
+  /**
+   * Atomically move a branch to `failed` with an actionable message IF (and
+   * only if) it is still `creating`. The compare-and-swap lives in the
+   * repository under a row lock, so it never clobbers a terminal status the
+   * executor already wrote and never races a concurrent transition. Emits a
+   * `patched` event so connected UIs update.
+   */
   private async markBranchProvisioningFailedIfStuck(
     branchId: string,
     message: string,
     tenantId: string | undefined
   ): Promise<void> {
-    const branchesService = this.app.service('branches');
+    const logPrefix = `[branch-provisioning ${shortId(branchId)}]`;
     try {
       await runWithTenantDatabaseScope(this.db, tenantId, async () => {
-        const current = (await branchesService.get(branchId)) as Branch;
-        if (current.filesystem_status !== 'creating') return;
-        await branchesService.patch(branchId, {
-          filesystem_status: 'failed',
-          error_message: message,
-        });
+        const branchRepo = new BranchRepository(this.db);
+        const { changed, branch } = await branchRepo.markProvisioningFailedIfCreating(
+          branchId,
+          message
+        );
+        if (changed) {
+          console.warn(`${logPrefix} → failed (interrupted provisioning surfaced for retry)`);
+          this.emitBranchPatched(branch);
+        }
       });
     } catch (error) {
       console.error(
-        `[branch-provisioning ${shortId(branchId)}] failed to mark stuck branch failed: ${sanitizeProvisioningError(error)}`
+        `${logPrefix} failed to mark stuck branch failed: ${sanitizeProvisioningError(error)}`
       );
     }
   }
 
   /**
-   * Safe, idempotent repair for a branch whose filesystem provisioning is
-   * stuck in 'creating' or landed in 'failed'. Non-destructive:
-   * - If a valid checkout already exists on disk, just mark it 'ready'
-   *   (reconciles a manually materialized directory or an executor that died
-   *   after doing the work but before acking).
-   * - Otherwise flip the row back to 'creating', clear the stale error, and
-   *   re-dispatch the git.branch.add executor (with the onExit safety net).
+   * Explicit, authorized repair for a branch whose provisioning FAILED.
    *
-   * The underlying `git worktree add` / clone refuses to clobber an existing
-   * ref or directory, so repeated retries never produce duplicate refs or
-   * directories. Refs and worktrees are never deleted here.
+   * The only automatic transition is out of `creating` (the crash/onExit/
+   * watchdog safety nets, which mark an interrupted attempt `failed`). Recovery
+   * is deliberately human-triggered from there:
+   *
+   * - `ready`                              → no-op (idempotent).
+   * - `creating`                           → 409 in-progress (never spawn a 2nd
+   *                                          materializer for a live attempt).
+   * - `failed`                             → atomically claim `failed → creating`
+   *                                          and re-dispatch the executor.
+   * - preserved/cleaned/deleted/other      → 409 not-retryable; those have their
+   *                                          own restore/unarchive lifecycle.
+   *
+   * The `failed → creating` claim is a row-locked compare-and-swap, so a
+   * double-click on Retry (or two clients racing) can only ever dispatch one
+   * executor — the loser sees the branch already `creating` and no-ops. The
+   * executor is idempotent against an already-materialized worktree, so the
+   * "died after materialize" case recovers without the daemon probing `.git`.
    */
   async retryBranchProvisioning(branchId: string, params?: RepoParams): Promise<Branch> {
     const branchesService = this.app.service('branches');
+    // Read through the service so short IDs resolve and RBAC hooks fire.
     const branch = (await branchesService.get(branchId, params)) as Branch;
+    const status = branch.filesystem_status;
+    const logPrefix = `[branch-provisioning ${shortId(branch.branch_id)}]`;
 
-    if (branch.filesystem_status === 'ready') {
+    if (status === 'ready') {
       return branch;
     }
-
-    if (isValidBranchCheckout(branch.path)) {
-      console.log(
-        `[branch-provisioning ${shortId(branchId)}] repair → ready (existing checkout reconciled)`
+    if (status === 'creating') {
+      throw new Conflict(
+        'Branch provisioning is already in progress. Wait for it to finish before retrying.',
+        {
+          code: 'BRANCH_PROVISIONING_IN_PROGRESS',
+          branchId: branch.branch_id,
+          filesystemStatus: status,
+        }
       );
-      return (await branchesService.patch(
-        branchId,
-        { filesystem_status: 'ready', error_message: '' },
-        params
-      )) as Branch;
+    }
+    if (status !== 'failed') {
+      throw new Conflict(
+        `Branch provisioning cannot be retried from status "${status ?? 'unknown'}". Only a failed provisioning attempt is retryable; use the branch restore/unarchive flow for archived or cleaned branches.`,
+        {
+          code: 'BRANCH_PROVISIONING_NOT_RETRYABLE',
+          branchId: branch.branch_id,
+          filesystemStatus: status ?? 'unknown',
+        }
+      );
     }
 
     const repo = await this.repoRepo.findById(branch.repo_id);
@@ -1202,68 +1199,96 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       throw new BadRequest(`Repo ${branch.repo_id} not found for branch ${branchId}`);
     }
 
+    // Atomic claim: only the caller that flips failed → creating dispatches.
+    const branchRepo = new BranchRepository(this.db);
+    const { claimed, branch: claimedBranch } = await branchRepo.claimFailedForProvisioningRetry(
+      branch.branch_id
+    );
+    if (!claimed) {
+      console.log(
+        `${logPrefix} retry ignored — another attempt already claimed it (status=${claimedBranch.filesystem_status})`
+      );
+      return claimedBranch;
+    }
+    this.emitBranchPatched(claimedBranch, params);
+
     // Provision as the branch's original owner so impersonation/credentials
     // match the create path.
     const userId = branch.created_by as UserID;
-    const creating = (await branchesService.patch(
-      branchId,
-      { filesystem_status: 'creating', error_message: '' },
-      params
-    )) as Branch;
-    await this.dispatchBranchProvisioning(creating, repo, userId, params, 'retry');
-    return creating;
+    await this.dispatchBranchProvisioning(claimedBranch, repo, userId, params, 'retry');
+    return claimedBranch;
   }
 
   /**
-   * Startup/watchdog reconciliation for branches left in 'creating' — e.g. the
-   * daemon (and its fire-and-forget executors) was killed mid-provision. For
-   * each such branch: recover to 'ready' if a valid checkout exists, otherwise
-   * re-dispatch provisioning. Never deletes user worktrees or refs. Returns a
-   * summary for logging. Safe to run on every boot (idempotent).
+   * Startup watchdog: a branch left `creating` means the daemon (and its
+   * fire-and-forget executor) died mid-provision. Conservatively transition
+   * each such branch to `failed` with an actionable message — we do NOT
+   * re-dispatch a materializer or infer success from a local `.git` path.
+   * Recovery is an explicit, human-triggered `retryBranchProvisioning`. Safe to
+   * run on every boot (idempotent). Returns a summary for logging.
    */
   async reconcileStuckCreatingBranches(
     params?: RepoParams
-  ): Promise<{ scanned: number; recovered: number; retried: number; failed: number }> {
+  ): Promise<{ scanned: number; failed: number }> {
     const branchesService = this.app.service('branches');
+    const SCAN_LIMIT = 5000;
     const result = (await branchesService.find({
-      query: { $limit: 5000 },
+      query: { $limit: SCAN_LIMIT },
       paginate: false,
       ...params,
     })) as Branch[] | { data: Branch[] };
     const all = Array.isArray(result) ? result : result.data;
+    if (all.length >= SCAN_LIMIT) {
+      console.warn(
+        `[branch-provisioning] watchdog: hit the ${SCAN_LIMIT}-row scan cap — some stuck branches may not be reconciled this pass.`
+      );
+    }
     // Filter in memory: `filesystem_status` is a real column but the generic
     // service find does not guarantee arbitrary-column pushdown, so don't rely
     // on the query narrowing it for us.
     const stuck = all.filter((branch) => branch.filesystem_status === 'creating');
 
-    const summary = { scanned: stuck.length, recovered: 0, retried: 0, failed: 0 };
+    const tenantId = getCurrentTenantId();
+    const summary = { scanned: stuck.length, failed: 0 };
     for (const branch of stuck) {
-      try {
-        if (isValidBranchCheckout(branch.path)) {
-          await branchesService.patch(branch.branch_id, { filesystem_status: 'ready' });
-          summary.recovered++;
-          console.log(
-            `[branch-provisioning ${shortId(branch.branch_id)}] watchdog → ready (checkout present)`
-          );
-          continue;
-        }
-        await this.retryBranchProvisioning(branch.branch_id);
-        summary.retried++;
-      } catch (error) {
-        summary.failed++;
-        await this.markBranchProvisioningFailedIfStuck(
-          branch.branch_id,
-          `Provisioning could not be recovered after restart: ${sanitizeProvisioningError(error)}`,
-          getCurrentTenantId()
-        );
-      }
+      await this.markBranchProvisioningFailedIfStuck(
+        branch.branch_id,
+        'Branch provisioning was interrupted — the daemon restarted before it completed. Retry provisioning to try again.',
+        tenantId
+      );
+      summary.failed++;
     }
     if (summary.scanned > 0) {
       console.log(
-        `[branch-provisioning] watchdog: scanned=${summary.scanned} recovered=${summary.recovered} retried=${summary.retried} failed=${summary.failed}`
+        `[branch-provisioning] watchdog: scanned=${summary.scanned} failed=${summary.failed} (interrupted → failed, awaiting explicit retry)`
       );
     }
     return summary;
+  }
+
+  /**
+   * Broadcast a `branches` `patched` event for a row we wrote directly through
+   * the repository (the atomic provisioning CAS bypasses the Feathers service,
+   * so its automatic event doesn't fire). Best-effort: if it can't emit, the
+   * executor's own terminal `patch` — or a client refetch — still converges.
+   * `params` carries the requester's tenant/connection context so the event
+   * reaches browser sockets; the crash/watchdog paths have none, which is fine
+   * (those set `failed`, which clients also pick up on their next read).
+   */
+  private emitBranchPatched(branch: Branch, params?: RepoParams): void {
+    try {
+      emitServiceEvent(this.app, {
+        path: 'branches',
+        event: 'patched',
+        data: branch,
+        params,
+        id: branch.branch_id,
+      });
+    } catch (error) {
+      console.warn(
+        `[branch-provisioning ${shortId(branch.branch_id)}] failed to emit patched event: ${sanitizeProvisioningError(error)}`
+      );
+    }
   }
 
   /**
