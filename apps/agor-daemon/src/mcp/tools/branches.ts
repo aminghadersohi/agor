@@ -1700,18 +1700,21 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
   );
 
   // Tool: agor_branches_retry_provisioning
-  // Idempotent, non-destructive repair for a branch whose filesystem
-  // provisioning is stuck in 'creating' or landed in 'failed'. Wraps the exact
-  // same `reposService.retryBranchProvisioning` implementation used by the REST
-  // route and the startup watchdog, so all three surfaces share one code path.
+  // Explicit, non-destructive repair for a branch whose filesystem provisioning
+  // landed in 'failed'. Wraps the exact same `reposService.retryBranchProvisioning`
+  // implementation used by the REST route and the UI, so all three surfaces share
+  // one code path. Only `failed → creating` is retryable; the transition is an
+  // atomic claim, so concurrent calls can never dispatch two materializers.
   server.registerTool(
     'agor_branches_retry_provisioning',
     {
       description:
-        'Repair a branch whose git working directory failed to materialize (filesystem_status ' +
-        "'failed') or is stuck 'creating'. Idempotent and non-destructive: if a valid checkout " +
-        'already exists on disk it is reconciled to ready; otherwise provisioning is re-dispatched. ' +
-        'Never deletes refs or directories. Returns the updated branch with its new filesystem_status.',
+        'Repair a branch whose git working directory failed to materialize ' +
+        "(filesystem_status 'failed') by re-dispatching provisioning. Only a 'failed' branch is " +
+        "retryable: 'ready' is returned unchanged, 'creating' (an attempt still in flight) is " +
+        "rejected as a conflict, and archived/'preserved'/'cleaned'/'deleted' branches must use " +
+        'the restore/unarchive flow instead. Non-destructive — never deletes refs or directories. ' +
+        'Returns the updated branch with its new filesystem_status.',
       inputSchema: z.object({
         branchId: mcpRequiredId('branchId', 'Branch'),
       }),
