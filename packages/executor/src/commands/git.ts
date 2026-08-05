@@ -952,8 +952,34 @@ async function renderEnvironmentTemplates(
  * daemon connection (`client`). If this process is killed or crashes before its
  * catch runs, or it never connected, it cannot patch anything. The daemon's
  * onExit safety net (`ReposService.dispatchBranchProvisioning`) reconciles those
- * cases so the branch is never left stuck in 'creating'.
+ * cases by marking the branch 'failed' for an explicit retry.
  */
+
+/**
+ * Idempotency preflight: is a working directory for exactly this ref already
+ * materialized at `branchPath`? Executor-local filesystem probe (the daemon
+ * deliberately does not do this — it can't reliably distinguish a complete
+ * checkout from a stale/partial/wrong-ref one, and may not even share the
+ * filesystem). Lets a retry after "executor materialized then crashed before
+ * acking" adopt the existing checkout instead of re-running `git worktree add`
+ * (which would fail on the already-attached ref). Only claims a match when the
+ * checkout's HEAD is the expected branch, so a stale or wrong-ref directory is
+ * NOT silently promoted — it falls through to normal materialization/guarding.
+ */
+async function isBranchAlreadyMaterialized(
+  branchPath: string,
+  expectedRef: string
+): Promise<boolean> {
+  if (!existsSync(join(branchPath, '.git'))) return false;
+  try {
+    const { git } = createGit(branchPath);
+    const head = (await git.revparse(['--abbrev-ref', 'HEAD'])).trim();
+    return head === expectedRef;
+  } catch {
+    return false;
+  }
+}
+
 export async function handleGitBranchAdd(
   payload: GitBranchAddPayload,
   options: CommandOptions
@@ -1025,8 +1051,19 @@ export async function handleGitBranchAdd(
       `[git.branch.add] Repo: ${repoPath}, Branch: ${branch}, CreateBranch: ${shouldCreateBranch}, RestoreMode: ${restoreMode}, RefType: ${refType || 'branch'}, StorageMode: ${storageMode}`
     );
 
-    // Create the git branch on filesystem
-    if (storageMode === 'clone') {
+    // Create the git branch on filesystem.
+    //
+    // Idempotency: a prior attempt may have materialized the worktree/clone
+    // and then died before acking (its branch was subsequently marked 'failed'
+    // by the daemon safety net). If a checkout for exactly this ref is already
+    // present, adopt it instead of re-running materialization — `git worktree
+    // add` / `git clone` would otherwise fail on the already-attached ref.
+    const alreadyMaterialized = await isBranchAlreadyMaterialized(branchPath, branch);
+    if (alreadyMaterialized) {
+      console.log(
+        `[git.branch.add] Existing checkout for '${branch}' already present at ${branchPath} — adopting it (idempotent retry)`
+      );
+    } else if (storageMode === 'clone') {
       // Self-standing clone path. The remote URL is daemon-resolved from the
       // repo record; refuse to silently fall through to worktree mode if it
       // didn't come along — that would defeat the leak-defense reason for
