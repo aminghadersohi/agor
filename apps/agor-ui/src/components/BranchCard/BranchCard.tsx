@@ -217,8 +217,9 @@ const BranchCardComponent = ({
 
   // Retry provisioning for a branch whose working directory failed to
   // materialize. Hits POST /branches/:id/retry-provisioning, which runs the
-  // exact same idempotent, non-destructive `retryBranchProvisioning` service
-  // the startup watchdog and MCP tool use. Feedback is surfaced explicitly so a
+  // exact same non-destructive `retryBranchProvisioning` service the MCP tool
+  // uses. Only offered while `isFailed` — the server accepts `failed` alone and
+  // conflicts on an in-flight `creating`. Feedback is surfaced explicitly so a
   // failed request never looks like a no-op.
   const { message } = App.useApp();
   const [isRetryingProvisioning, setIsRetryingProvisioning] = useState(false);

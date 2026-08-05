@@ -3478,10 +3478,11 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
-  // Idempotent, non-destructive repair for a branch whose filesystem
-  // provisioning is stuck in 'creating' or landed in 'failed'. Shares the exact
-  // same service implementation the startup watchdog and MCP tool use, so REST,
-  // MCP and UI can never drift. Returns the (possibly-updated) branch row.
+  // Explicit, non-destructive repair for a branch whose filesystem provisioning
+  // landed in 'failed'. Shares the exact same service implementation the MCP
+  // tool and UI use, so REST, MCP and UI can never drift. Only `failed` is
+  // retryable ('creating' conflicts, 'ready' no-ops); the transition is an
+  // atomic claim. Returns the (possibly-updated) branch row.
   registerLongAuthenticatedRoute(
     app,
     '/branches/:id/retry-provisioning',
