@@ -14,7 +14,7 @@ import { dbTest } from '../test-helpers';
 import { BranchRepository } from './branches';
 import { RepoRepository } from './repos';
 
-// biome-ignore lint/suspicious/noExplicitAny: dbTest hands us a loosely-typed Database fixture.
+// `db` is `any` because dbTest hands us a loosely-typed Database fixture.
 async function seedFailedBranch(
   db: any,
   over: Record<string, unknown> = {}

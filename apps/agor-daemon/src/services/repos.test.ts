@@ -1,6 +1,7 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { getCurrentTenantId } from '@agor/core/db';
 import type { Application } from '@agor/core/types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReposService } from './repos';
@@ -757,7 +758,7 @@ describe('ReposService branch provisioning lifecycle', () => {
     emit?: ReturnType<typeof vi.fn>;
   };
 
-  function makeService(branches: BranchesMock) {
+  function makeService(branches: BranchesMock, db: unknown = {}) {
     branches.emit ??= vi.fn();
     const app = {
       settings: { authentication: { secret: 'test-secret' } },
@@ -766,8 +767,20 @@ describe('ReposService branch provisioning lifecycle', () => {
         throw new Error(`Unexpected service: ${name}`);
       }),
     } as unknown as Application;
-    const service = new ReposService({} as never, app);
+    const service = new ReposService(db as never, app);
     return { service, app };
+  }
+
+  /**
+   * Minimal database stand-in that can back a real tenant scope: with a tenant
+   * id present, `runWithTenantDatabaseScope` opens a transaction to set the
+   * `agor.tenant_id` GUC, so the handle must expose `transaction`.
+   */
+  function fakeTenantCapableDb() {
+    return {
+      transaction: async (fn: (tx: unknown) => Promise<unknown>) =>
+        fn({ execute: async () => undefined }),
+    };
   }
 
   function grabOnExit(): (code: number | null) => void {
@@ -900,12 +913,79 @@ describe('ReposService branch provisioning lifecycle', () => {
     expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
   });
 
-  it('retry on a creating branch is refused (409 in-progress)', async () => {
-    const get = vi.fn(async () => branch({ filesystem_status: 'creating' }));
+  it('retry on a live creating branch is refused (409 in-progress)', async () => {
+    // Written by the current daemon lifetime → a materializer may still be
+    // running, so retry must not spawn a second one.
+    const get = vi.fn(async () =>
+      branch({ filesystem_status: 'creating', updated_at: new Date().toISOString() })
+    );
+    const { service } = makeService({ get, patch: vi.fn() });
+
+    await expect(service.retryBranchProvisioning('b1')).rejects.toThrow(/in progress/i);
+    expect(branchRepoMock.markProvisioningFailedIfCreating).not.toHaveBeenCalled();
+    expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
+  });
+
+  it('retry on a creating branch with an unparseable updated_at is refused (fails safe)', async () => {
+    const get = vi.fn(async () => branch({ filesystem_status: 'creating', updated_at: 'garbage' }));
     const { service } = makeService({ get, patch: vi.fn() });
 
     await expect(service.retryBranchProvisioning('b1')).rejects.toThrow(/in progress/i);
     expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
+  });
+
+  it('retry recovers a creating branch stranded by a daemon restart (surfaces failed, then claims)', async () => {
+    // Row last written before this process started ⇒ its materializer died with
+    // the previous daemon. This is the path that keeps a stranded branch
+    // repairable in tenants the startup watchdog never scans.
+    const get = vi.fn(async () =>
+      branch({ filesystem_status: 'creating', updated_at: '2020-01-01T00:00:00.000Z' })
+    );
+    branchRepoMock.markProvisioningFailedIfCreating.mockResolvedValue({
+      changed: true,
+      branch: branch({ filesystem_status: 'failed' }),
+    });
+    branchRepoMock.claimFailedForProvisioningRetry.mockResolvedValue({
+      claimed: true,
+      branch: branch({ filesystem_status: 'creating' }),
+    });
+    const { service } = makeService({ get, patch: vi.fn() });
+    (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
+      vi.fn(async () => repo);
+
+    const result = await service.retryBranchProvisioning('b1');
+
+    // Never bypasses the CAS: it is surfaced as failed, then claimed atomically.
+    expect(branchRepoMock.markProvisioningFailedIfCreating).toHaveBeenCalledWith(
+      'b1',
+      expect.stringMatching(/interrupted/i)
+    );
+    expect(branchRepoMock.claimFailedForProvisioningRetry).toHaveBeenCalledWith('b1');
+    expect(result.filesystem_status).toBe('creating');
+    expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledTimes(1);
+  });
+
+  it('a stranded creating branch still cannot double-dispatch (loser of the claim no-ops)', async () => {
+    const get = vi.fn(async () =>
+      branch({ filesystem_status: 'creating', updated_at: '2020-01-01T00:00:00.000Z' })
+    );
+    branchRepoMock.markProvisioningFailedIfCreating.mockResolvedValue({
+      changed: true,
+      branch: branch({ filesystem_status: 'failed' }),
+    });
+    branchRepoMock.claimFailedForProvisioningRetry
+      .mockResolvedValueOnce({ claimed: true, branch: branch({ filesystem_status: 'creating' }) })
+      .mockResolvedValueOnce({ claimed: false, branch: branch({ filesystem_status: 'creating' }) });
+    const { service } = makeService({ get, patch: vi.fn() });
+    (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
+      vi.fn(async () => repo);
+
+    await Promise.all([
+      service.retryBranchProvisioning('b1'),
+      service.retryBranchProvisioning('b1'),
+    ]);
+
+    expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledTimes(1);
   });
 
   it('retry on a non-failed lifecycle state (e.g. preserved) is refused (not retryable)', async () => {
@@ -934,6 +1014,30 @@ describe('ReposService branch provisioning lifecycle', () => {
       expect.objectContaining({ command: 'git.branch.add' }),
       expect.objectContaining({ asUser: 'daemon-user' })
     );
+  });
+
+  it("retry runs its CAS inside the caller's tenant database scope", async () => {
+    // retryBranchProvisioning is a custom method: no Feathers hook opens a
+    // tenant scope for it. In `required_from_auth` the daemon handle is a
+    // scope-requiring proxy, so an unscoped repository write throws
+    // MissingTenantDatabaseScopeError and retry would be dead in cloud. Assert
+    // the ambient tenant at the moment of the CAS — this fails if the wrapping
+    // unit of work is removed.
+    const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
+    let tenantDuringClaim: string | undefined;
+    branchRepoMock.claimFailedForProvisioningRetry.mockImplementation(async () => {
+      tenantDuringClaim = getCurrentTenantId() as string | undefined;
+      return { claimed: true, branch: branch({ filesystem_status: 'creating' }) };
+    });
+    const { service } = makeService({ get, patch: vi.fn() }, fakeTenantCapableDb());
+    (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
+      vi.fn(async () => repo);
+
+    await service.retryBranchProvisioning('b1', {
+      tenant: { tenant_id: 'tenant-a', source: 'auth_claim' },
+    } as never);
+
+    expect(tenantDuringClaim).toBe('tenant-a');
   });
 
   it('retry that loses the atomic claim (concurrent/double-click) does NOT dispatch a 2nd executor', async () => {

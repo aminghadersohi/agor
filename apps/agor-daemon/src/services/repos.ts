@@ -34,13 +34,7 @@ import {
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
 import { autoAssignBranchUniqueId } from '@agor/core/environment/variable-resolver';
-import {
-  type Application,
-  BadRequest,
-  Conflict,
-  Forbidden,
-  NotAuthenticated,
-} from '@agor/core/feathers';
+import { type Application, BadRequest, Conflict } from '@agor/core/feathers';
 import { redactGitUrlCredentials, stripGitUrlCredentials } from '@agor/core/git/pure';
 import type {
   AuthenticatedParams,
@@ -92,6 +86,38 @@ function sanitizeProvisioningError(error: unknown): string {
   } catch {
     return raw;
   }
+}
+
+/**
+ * Wall-clock instant this daemon process started.
+ *
+ * `git.branch.add` is dispatched fire-and-forget as a child of this process, so
+ * a materializer can only be live if the daemon that spawned it is still up. A
+ * branch row that is still `creating` but was last written *before* this process
+ * started therefore has no live materializer — it is an orphan from a previous
+ * daemon lifetime. This is the same assumption the startup watchdog already
+ * makes when it marks stuck `creating` branches `failed`; naming it here lets an
+ * explicit user retry apply it too, in whatever tenant the caller belongs to.
+ *
+ * NOTE (multi-daemon, deferred): with two daemons sharing a database, a branch
+ * being provisioned by daemon A could look orphaned to a newer daemon B. Single
+ * daemon is the only deployment shape today (same trade the scheduler and widget
+ * resolution already accept); a multi-daemon setup would need attempt-ID fencing
+ * on the row rather than a process-start comparison.
+ */
+const DAEMON_STARTED_AT_MS = Date.now() - Math.round(process.uptime() * 1000);
+
+/**
+ * Is this `creating` branch a leftover from a previous daemon lifetime (i.e. no
+ * materializer can still be running for it)? Conservative by construction: any
+ * write to the row during provisioning pushes `updated_at` forward, so an
+ * ambiguous row reads as "still in flight" and retry refuses it. False negatives
+ * just mean the user waits; a false positive would double-dispatch.
+ */
+function isOrphanedCreatingAttempt(branch: Branch): boolean {
+  const updatedAtMs = Date.parse(branch.updated_at);
+  if (Number.isNaN(updatedAtMs)) return false;
+  return updatedAtMs < DAEMON_STARTED_AT_MS;
 }
 
 function deriveLocalRepoSlug(remoteUrl: string | undefined, explicitSlug?: string): RepoSlug {
@@ -154,6 +180,25 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     this.repoRepo = repoRepo;
     this.app = app;
     this.db = db;
+  }
+
+  /**
+   * Short tenant/RLS unit of work for custom methods that bypass Feathers hooks.
+   *
+   * Custom route/MCP methods reach the repositories directly, so nothing else
+   * establishes a tenant database scope for them. In `required_from_auth` mode
+   * the daemon's database handle is a scope-requiring proxy, so an unscoped
+   * repository write throws `MissingTenantDatabaseScopeError`. Re-entrant: it
+   * no-ops when a compatible scope is already active.
+   */
+  private withTenantDatabase<T>(
+    params: RepoParams | undefined,
+    work: () => Promise<T>
+  ): Promise<T> {
+    const tenantId =
+      (params as { tenant?: { tenant_id?: string } } | undefined)?.tenant?.tenant_id ??
+      getCurrentTenantId();
+    return runWithTenantDatabaseScope(this.db, tenantId, work);
   }
 
   override async create(
@@ -1150,8 +1195,11 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
    * is deliberately human-triggered from there:
    *
    * - `ready`                              → no-op (idempotent).
-   * - `creating`                           → 409 in-progress (never spawn a 2nd
+   * - `creating`, live attempt             → 409 in-progress (never spawn a 2nd
    *                                          materializer for a live attempt).
+   * - `creating`, orphaned by a daemon
+   *   restart                              → surfaced as `failed` first, then
+   *                                          retried like any other failure.
    * - `failed`                             → atomically claim `failed → creating`
    *                                          and re-dispatch the executor.
    * - preserved/cleaned/deleted/other      → 409 not-retryable; those have their
@@ -1162,6 +1210,12 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
    * executor — the loser sees the branch already `creating` and no-ops. The
    * executor is idempotent against an already-materialized worktree, so the
    * "died after materialize" case recovers without the daemon probing `.git`.
+   *
+   * The orphaned-`creating` branch above is what keeps recovery reachable in a
+   * multi-tenant deployment: the startup watchdog only reconciles the daemon's
+   * own startup tenant scope, but this path runs inside the *caller's* tenant
+   * context, so a tenant whose branch was stranded by a restart can still repair
+   * it. Both routes converge on the same CAS, so neither can double-dispatch.
    */
   async retryBranchProvisioning(branchId: string, params?: RepoParams): Promise<Branch> {
     const branchesService = this.app.service('branches');
@@ -1169,21 +1223,35 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     const branch = (await branchesService.get(branchId, params)) as Branch;
     const status = branch.filesystem_status;
     const logPrefix = `[branch-provisioning ${shortId(branch.branch_id)}]`;
+    const branchRepo = new BranchRepository(this.db);
 
     if (status === 'ready') {
       return branch;
     }
     if (status === 'creating') {
-      throw new Conflict(
-        'Branch provisioning is already in progress. Wait for it to finish before retrying.',
-        {
-          code: 'BRANCH_PROVISIONING_IN_PROGRESS',
-          branchId: branch.branch_id,
-          filesystemStatus: status,
-        }
+      if (!isOrphanedCreatingAttempt(branch)) {
+        throw new Conflict(
+          'Branch provisioning is already in progress. Wait for it to finish before retrying.',
+          {
+            code: 'BRANCH_PROVISIONING_IN_PROGRESS',
+            branchId: branch.branch_id,
+            filesystemStatus: status,
+          }
+        );
+      }
+      // Stranded by a daemon restart: no materializer can still be running for
+      // it. Surface it as `failed` so the claim below is the single, atomic
+      // entry point into a retry — this never bypasses the CAS.
+      console.warn(
+        `${logPrefix} retry found an interrupted 'creating' attempt from a previous daemon lifetime — surfacing it as failed before retrying`
       );
-    }
-    if (status !== 'failed') {
+      await this.withTenantDatabase(params, () =>
+        branchRepo.markProvisioningFailedIfCreating(
+          branch.branch_id,
+          'Branch provisioning was interrupted — the daemon restarted before it completed. Retry provisioning to try again.'
+        )
+      );
+    } else if (status !== 'failed') {
       throw new Conflict(
         `Branch provisioning cannot be retried from status "${status ?? 'unknown'}". Only a failed provisioning attempt is retryable; use the branch restore/unarchive flow for archived or cleaned branches.`,
         {
@@ -1194,15 +1262,16 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       );
     }
 
-    const repo = await this.repoRepo.findById(branch.repo_id);
+    const repo = await this.withTenantDatabase(params, () =>
+      this.repoRepo.findById(branch.repo_id)
+    );
     if (!repo) {
       throw new BadRequest(`Repo ${branch.repo_id} not found for branch ${branchId}`);
     }
 
     // Atomic claim: only the caller that flips failed → creating dispatches.
-    const branchRepo = new BranchRepository(this.db);
-    const { claimed, branch: claimedBranch } = await branchRepo.claimFailedForProvisioningRetry(
-      branch.branch_id
+    const { claimed, branch: claimedBranch } = await this.withTenantDatabase(params, () =>
+      branchRepo.claimFailedForProvisioningRetry(branch.branch_id)
     );
     if (!claimed) {
       console.log(
@@ -1213,9 +1282,13 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     this.emitBranchPatched(claimedBranch, params);
 
     // Provision as the branch's original owner so impersonation/credentials
-    // match the create path.
+    // match the create path. Dispatch inside the tenant scope too: it reads
+    // impersonation config from the database, and it captures the ambient tenant
+    // so the executor's async onExit safety net can re-enter the right scope.
     const userId = branch.created_by as UserID;
-    await this.dispatchBranchProvisioning(claimedBranch, repo, userId, params, 'retry');
+    await this.withTenantDatabase(params, () =>
+      this.dispatchBranchProvisioning(claimedBranch, repo, userId, params, 'retry')
+    );
     return claimedBranch;
   }
 
@@ -1226,6 +1299,16 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
    * re-dispatch a materializer or infer success from a local `.git` path.
    * Recovery is an explicit, human-triggered `retryBranchProvisioning`. Safe to
    * run on every boot (idempotent). Returns a summary for logging.
+   *
+   * Tenant scope (deliberate, not incidental): this runs under the caller's
+   * scope, which for the startup job is the daemon's static/bootstrap tenant.
+   * It is NOT a cross-tenant sweep — there is no tenant registry to enumerate,
+   * and reading other tenants' rows would require a new RLS system capability.
+   * In a `required_from_auth` deployment it therefore only reconciles the
+   * startup tenant. That is not a dead end: `retryBranchProvisioning` detects an
+   * interrupted `creating` attempt on its own, inside the requesting tenant's
+   * context, so a stranded branch stays repairable in every tenant without this
+   * job having to see it.
    */
   async reconcileStuckCreatingBranches(
     params?: RepoParams
