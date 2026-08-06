@@ -5,7 +5,6 @@
  * Uses DrizzleService adapter with SessionRepository.
  */
 
-import { existsSync } from 'node:fs';
 import { getAgenticToolModelConfiguration } from '@agor/agentic-tools';
 import {
   isResolvedAgenticToolModelConfiguration,
@@ -459,15 +458,17 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
 
   /**
    * Assert a branch's filesystem is usable before a session is created in it.
-   * Translates provisioning lifecycle state into a clear domain error:
+   * Translates recorded provisioning lifecycle state into a clear domain error
+   * instead of letting a downstream simple-git call throw a raw ENOENT:
    * - `creating`  → 409 "provisioning in progress" (retryable, transient)
    * - `failed`    → 409 with the stored, sanitized provisioning error
-   * - `ready`/legacy(undefined) but directory missing → 409 (removed out-of-band)
-   * - other terminal states (cleaned/deleted/preserved-missing) → 409
+   * - other terminal states (cleaned/deleted) → 409
+   *
+   * Purely a read of recorded state — it never touches the filesystem. See the
+   * `usableStatus` branch below for why.
    *
    * Backward compatibility: rows predating `filesystem_status` (undefined) are
-   * treated as ready as long as their directory exists. Never throws for a
-   * genuinely usable checkout.
+   * treated as ready. Never throws for a genuinely usable checkout.
    */
   private async assertBranchFilesystemUsable(branchId: string): Promise<void> {
     const branch = await this.branchRepo.findById(branchId);
@@ -493,18 +494,21 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       );
     }
 
-    // 'ready', 'preserved', or legacy undefined: usable *if* the directory is
-    // actually present. A missing directory here means it was removed
-    // out-of-band (e.g. ephemeral volume, manual rm) — surface a clear error
-    // rather than a raw simple-git ENOENT downstream.
+    // 'ready', 'preserved', or legacy undefined: treated as usable.
+    //
+    // Deliberately NOT stat'd from here. The daemon does not own the branch
+    // filesystem — in a multi-host deployment it may not share one with the
+    // executor at all — so a daemon-local `existsSync` would be answering a
+    // question about somebody else's disk. It is also the same daemon-side
+    // filesystem guessing this PR removed from the provisioning lifecycle, and
+    // the repo's daemon-filesystem-boundary check enforces it.
+    //
+    // The trade: a directory deleted out-of-band while the row still says
+    // `ready` is not caught here and will surface downstream instead. Recording
+    // that state accurately is the executor's job (it owns the disk), not
+    // something the daemon can infer.
     const usableStatus = status === undefined || status === 'ready' || status === 'preserved';
     if (usableStatus) {
-      if (branch.path && !existsSync(branch.path)) {
-        throw new Conflict(
-          'Branch working directory is missing from disk even though it is marked ready. It may have been removed out-of-band. Repair/retry provisioning for this branch, then start the session again.',
-          { code: 'BRANCH_DIRECTORY_MISSING', branchId, filesystemStatus: status ?? 'unknown' }
-        );
-      }
       return;
     }
 

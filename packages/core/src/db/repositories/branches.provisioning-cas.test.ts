@@ -52,7 +52,10 @@ describe('BranchRepository provisioning CAS', () => {
     async ({ db }) => {
       const { branchRepo, branchId } = await seedFailedBranch(db);
 
-      const { claimed, branch } = await branchRepo.claimFailedForProvisioningRetry(branchId);
+      const { claimed, branch } = await branchRepo.claimFailedForProvisioningRetry(
+        branchId,
+        'attempt-new'
+      );
 
       expect(claimed).toBe(true);
       expect(branch.filesystem_status).toBe('creating');
@@ -69,7 +72,10 @@ describe('BranchRepository provisioning CAS', () => {
       error_message: undefined,
     });
 
-    const { claimed, branch } = await branchRepo.claimFailedForProvisioningRetry(branchId);
+    const { claimed, branch } = await branchRepo.claimFailedForProvisioningRetry(
+      branchId,
+      'attempt-new'
+    );
 
     expect(claimed).toBe(false);
     expect(branch.filesystem_status).toBe('ready');
@@ -85,8 +91,8 @@ describe('BranchRepository provisioning CAS', () => {
       // SQLITE_BUSY). Either way the CAS guarantees at most one WINNER, so a
       // double-click / concurrent retry can never dispatch two materializers.
       const settled = await Promise.allSettled([
-        branchRepo.claimFailedForProvisioningRetry(branchId),
-        branchRepo.claimFailedForProvisioningRetry(branchId),
+        branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-a'),
+        branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-b'),
       ]);
 
       const winners = settled.filter((r) => r.status === 'fulfilled' && r.value.claimed);
@@ -130,5 +136,87 @@ describe('BranchRepository provisioning CAS', () => {
 
     expect(changed).toBe(false);
     expect(branch.filesystem_status).toBe('ready');
+  });
+
+  // ---- attempt fence -------------------------------------------------------
+  //
+  // Status alone is a claim lock, not an attempt fence: it says a
+  // materialization is in flight, not which one. These pin the generation
+  // check that stops a superseded attempt from writing over a newer one.
+
+  dbTest('claim stamps the new generation onto the row', async ({ db }) => {
+    const { branchRepo, branchId } = await seedFailedBranch(db, {
+      provisioning_attempt_id: 'attempt-old',
+    });
+
+    const { claimed, branch } = await branchRepo.claimFailedForProvisioningRetry(
+      branchId,
+      'attempt-new'
+    );
+
+    expect(claimed).toBe(true);
+    expect(branch.provisioning_attempt_id).toBe('attempt-new');
+    const reloaded = await branchRepo.findById(branchId);
+    expect(reloaded?.provisioning_attempt_id).toBe('attempt-new');
+  });
+
+  dbTest(
+    "a superseded attempt's late onExit cannot fail the attempt that replaced it",
+    async ({ db }) => {
+      // Attempt A failed → user retried → attempt B now owns `creating`.
+      const { branchRepo, branchId } = await seedFailedBranch(db, {
+        provisioning_attempt_id: 'attempt-A',
+      });
+      await branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-B');
+
+      // Now A's delayed onExit fires, still carrying its own generation.
+      const { changed, branch } = await branchRepo.markProvisioningFailedIfCreating(
+        branchId,
+        'attempt A exited non-zero',
+        'attempt-A'
+      );
+
+      expect(changed).toBe(false);
+      expect(branch.filesystem_status).toBe('creating');
+      expect(branch.provisioning_attempt_id).toBe('attempt-B');
+      expect(branch.error_message ?? undefined).toBeUndefined();
+    }
+  );
+
+  dbTest("the current attempt's own onExit still applies", async ({ db }) => {
+    const { branchRepo, branchId } = await seedFailedBranch(db);
+    const { branch: claimed } = await branchRepo.claimFailedForProvisioningRetry(
+      branchId,
+      'attempt-B'
+    );
+    expect(claimed.filesystem_status).toBe('creating');
+
+    const { changed, branch } = await branchRepo.markProvisioningFailedIfCreating(
+      branchId,
+      'attempt B exited non-zero',
+      'attempt-B'
+    );
+
+    expect(changed).toBe(true);
+    expect(branch.filesystem_status).toBe('failed');
+    expect(branch.error_message).toBe('attempt B exited non-zero');
+  });
+
+  dbTest('an unfenced caller (startup watchdog) still transitions', async ({ db }) => {
+    // The watchdog runs when no attempt can still be live, so it deliberately
+    // targets whatever generation currently owns the row.
+    const { branchRepo, branchId } = await seedFailedBranch(db, {
+      filesystem_status: 'creating',
+      error_message: undefined,
+      provisioning_attempt_id: 'attempt-from-a-dead-daemon',
+    });
+
+    const { changed, branch } = await branchRepo.markProvisioningFailedIfCreating(
+      branchId,
+      'interrupted by restart'
+    );
+
+    expect(changed).toBe(true);
+    expect(branch.filesystem_status).toBe('failed');
   });
 });

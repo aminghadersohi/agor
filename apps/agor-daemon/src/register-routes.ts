@@ -4023,21 +4023,19 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       },
     },
     {
-      // Re-provisioning materializes a working directory for the branch, so it
-      // requires the same authority as creating one (MEMBER). Branch-scoped
-      // ownership/`all` control is enforced inside the service via the
-      // branches-service reads it performs.
+      // Global-role floor only. The branch-scoped gate that actually matters —
+      // effective `all` permission, branch owner, or global admin — is asserted
+      // inside `reposService.retryBranchProvisioning`, because the retry writes
+      // through the repository CAS and so never passes through the
+      // branches-service `patch` hook that normally demands `all`. Enforcing it
+      // in the service (not here) is what keeps REST, MCP and the UI on one
+      // check.
       //
-      // Identity split (intentional): the MEMBER + branch-read gate decides WHO
-      // may trigger the repair, but the executor runs as `branch.created_by`,
-      // not as the caller. So a member who can see a failed branch can cause
-      // work to run under the original creator's Unix identity/credentials.
-      // That mirrors the create path exactly (the branch's directory must be
-      // materialized as its owner for the checkout to be usable), and the
-      // operation is non-destructive and re-runs the same provisioning the
-      // owner already requested — so it grants no capability the owner had not
-      // already initiated. Tightening this to owner-only would make a failed
-      // branch unrepairable by teammates, which is the case this PR exists for.
+      // Identity split (intentional): the caller must hold branch control, but
+      // the executor runs as `branch.created_by`, not as the caller. That
+      // mirrors the create path (the directory must be materialized as its
+      // owner to be usable) and re-runs provisioning the owner already
+      // initiated, so it grants no capability the owner had not exercised.
       create: { role: ROLES.MEMBER, action: 'retry branch provisioning' },
     },
     requireAuth

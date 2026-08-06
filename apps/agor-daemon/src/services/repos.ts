@@ -26,6 +26,7 @@ import {
 } from '@agor/core/config';
 import {
   BranchRepository,
+  generateId,
   getCurrentTenantId,
   RepoRepository,
   runWithTenantDatabaseScope,
@@ -39,6 +40,7 @@ import { redactGitUrlCredentials, stripGitUrlCredentials } from '@agor/core/git/
 import type {
   AuthenticatedParams,
   Branch,
+  BranchID,
   CloneRepositoryResult,
   QueryParams,
   Repo,
@@ -52,6 +54,7 @@ import { hasMinimumRole, ROLES, TEAMMATE_FRAMEWORK_REPO_URL } from '@agor/core/t
 import { DrizzleService } from '../adapters/drizzle';
 import type { BranchesServiceImpl } from '../declarations.js';
 import { emitHaNativeSocketEvent, tenantChannelName } from '../realtime/routing.js';
+import { ensureCanControlBranchEnvironment } from '../utils/branch-authorization.js';
 import { ensureBranchWorkspaceAccess } from '../utils/branch-workspace-path.js';
 import { shouldUseCloneReferencePath } from '../utils/clone-reference.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
@@ -196,8 +199,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     work: () => Promise<T>
   ): Promise<T> {
     const tenantId =
-      (params as { tenant?: { tenant_id?: string } } | undefined)?.tenant?.tenant_id ??
-      getCurrentTenantId();
+      (params as AuthenticatedParams | undefined)?.tenant?.tenant_id ?? getCurrentTenantId();
     return runWithTenantDatabaseScope(this.db, tenantId, work);
   }
 
@@ -884,6 +886,9 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
         new_branch: data.createBranch ?? false,
         branch_unique_id: branchUniqueId,
         filesystem_status: 'creating', // Will be set to 'ready' by executor
+        // Generation owning this first attempt. Fences its acknowledgements
+        // against any later retry that supersedes it.
+        provisioning_attempt_id: generateId(),
         // Environment templates are rendered after filesystem materialization.
         // RBAC fields are intentionally omitted at creation: new branches
         // always align with their board defaults. Overrides are a deliberate
@@ -1059,6 +1064,11 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     // any DB write there must re-establish this tenant's transaction scope or
     // Postgres rejects the SAVEPOINT the branch mutation opens.
     const tenantId = getCurrentTenantId();
+    // The generation this dispatch owns. Captured by the onExit closure and
+    // handed to the executor so both acknowledgement paths can be fenced: if a
+    // retry supersedes this attempt, neither our late onExit nor the executor's
+    // late terminal patch may write over the newer attempt.
+    const attemptId = branch.provisioning_attempt_id;
     try {
       const sessionToken = await issueExecutorCommandToken(
         this.app,
@@ -1087,6 +1097,10 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
             repoId: repo.repo_id,
             userId: userId as string | undefined,
             principalBranchAccess: 'write',
+            // Echoed back on the executor's terminal patch so a superseded
+            // attempt's late ack can be discarded instead of overwriting a
+            // newer one.
+            ...(attemptId ? { provisioningAttemptId: attemptId } : {}),
             useReference:
               storageMode === 'clone' &&
               !!repo.local_path &&
@@ -1110,7 +1124,12 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
             console.error(
               `${logPrefix} executor exited with code ${code ?? 'null'}; running safety-net reconcile`
             );
-            void this.reconcileBranchFilesystemAfterExit(branch.branch_id, code, tenantId);
+            void this.reconcileBranchFilesystemAfterExit(
+              branch.branch_id,
+              code,
+              tenantId,
+              attemptId
+            );
           },
         }
       );
@@ -1142,16 +1161,23 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
    * wrong-ref one, and in a multi-host deployment it may not even see the
    * executor's filesystem. Surfacing `failed` keeps a human decision point;
    * the user (or MCP/UI) retries explicitly. Never deletes refs or directories.
+   *
+   * Fenced on `attemptId`: this net belongs to one specific dispatch. A slow
+   * attempt can exit long after a retry has already claimed `creating` for a
+   * newer attempt, and marking the row `failed` then would kill a healthy
+   * in-flight materialization.
    */
   private async reconcileBranchFilesystemAfterExit(
     branchId: string,
     code: number | null,
-    tenantId: string | undefined
+    tenantId: string | undefined,
+    attemptId: string | undefined
   ): Promise<void> {
     await this.markBranchProvisioningFailedIfStuck(
       branchId,
       `Branch provisioning did not complete: the materialization process exited with code ${code ?? 'unknown'} before it could confirm a usable working directory. Retry provisioning to try again.`,
-      tenantId
+      tenantId,
+      attemptId
     );
   }
 
@@ -1165,25 +1191,29 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
   private async markBranchProvisioningFailedIfStuck(
     branchId: string,
     message: string,
-    tenantId: string | undefined
-  ): Promise<void> {
+    tenantId: string | undefined,
+    expectedAttemptId?: string
+  ): Promise<boolean> {
     const logPrefix = `[branch-provisioning ${shortId(branchId)}]`;
     try {
-      await runWithTenantDatabaseScope(this.db, tenantId, async () => {
+      return await runWithTenantDatabaseScope(this.db, tenantId, async () => {
         const branchRepo = new BranchRepository(this.db);
         const { changed, branch } = await branchRepo.markProvisioningFailedIfCreating(
           branchId,
-          message
+          message,
+          expectedAttemptId
         );
         if (changed) {
           console.warn(`${logPrefix} → failed (interrupted provisioning surfaced for retry)`);
           this.emitBranchPatched(branch);
         }
+        return changed;
       });
     } catch (error) {
       console.error(
         `${logPrefix} failed to mark stuck branch failed: ${sanitizeProvisioningError(error)}`
       );
+      return false;
     }
   }
 
@@ -1224,6 +1254,37 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     const status = branch.filesystem_status;
     const logPrefix = `[branch-provisioning ${shortId(branch.branch_id)}]`;
     const branchRepo = new BranchRepository(this.db);
+
+    // Authorization. The `get` above only establishes VIEW access, and the CAS
+    // below writes through the repository — so it never passes through the
+    // branches-service `patch` hook that normally demands `all`. Without this
+    // gate any member who can *see* a failed branch could trigger provisioning
+    // under `branch.created_by`'s execution identity and credentials. Assert the
+    // canonical branch-control level (effective `all`, owner, or global admin)
+    // here in the service so REST, MCP and the UI are covered by one check;
+    // internal calls and service accounts bypass, as everywhere else.
+    await this.withTenantDatabase(params, () =>
+      ensureCanControlBranchEnvironment(
+        branchRepo,
+        branch.branch_id as BranchID,
+        params as AuthenticatedParams | undefined,
+        'retry branch provisioning'
+      )
+    );
+
+    // Archived branches have their own restore/unarchive lifecycle. Status alone
+    // does not catch this: archiving overwrites `filesystem_status`, but an
+    // already-`failed` branch that was then archived can still read `failed`.
+    if (branch.archived) {
+      throw new Conflict(
+        'This branch is archived. Unarchive it first — archived branches are restored through the unarchive flow, not by retrying provisioning.',
+        {
+          code: 'BRANCH_PROVISIONING_NOT_RETRYABLE',
+          branchId: branch.branch_id,
+          filesystemStatus: status ?? 'unknown',
+        }
+      );
+    }
 
     if (status === 'ready') {
       return branch;
@@ -1270,8 +1331,10 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     }
 
     // Atomic claim: only the caller that flips failed → creating dispatches.
+    // The claim stamps a fresh attempt generation onto the row, which fences
+    // this dispatch's acknowledgements against any attempt that came before it.
     const { claimed, branch: claimedBranch } = await this.withTenantDatabase(params, () =>
-      branchRepo.claimFailedForProvisioningRetry(branch.branch_id)
+      branchRepo.claimFailedForProvisioningRetry(branch.branch_id, generateId())
     );
     if (!claimed) {
       console.log(
@@ -1332,14 +1395,18 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     const stuck = all.filter((branch) => branch.filesystem_status === 'creating');
 
     const tenantId = getCurrentTenantId();
+    // Count only transitions the CAS actually applied. A row can leave
+    // `creating` between the scan and the write (the executor acks, or another
+    // reconcile wins), in which case the CAS reports `changed: false` — counting
+    // it anyway would over-report transitions in the operational summary.
     const summary = { scanned: stuck.length, failed: 0 };
     for (const branch of stuck) {
-      await this.markBranchProvisioningFailedIfStuck(
+      const changed = await this.markBranchProvisioningFailedIfStuck(
         branch.branch_id,
         'Branch provisioning was interrupted — the daemon restarted before it completed. Retry provisioning to try again.',
         tenantId
       );
-      summary.failed++;
+      if (changed) summary.failed++;
     }
     if (summary.scanned > 0) {
       console.log(
