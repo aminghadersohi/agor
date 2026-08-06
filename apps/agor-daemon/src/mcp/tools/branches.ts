@@ -1619,10 +1619,11 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     {
       description:
         'Repair a branch whose git working directory failed to materialize ' +
-        "(filesystem_status 'failed') by re-dispatching provisioning. Only a 'failed' branch is " +
-        "retryable: 'ready' is returned unchanged, 'creating' (an attempt still in flight) is " +
-        "rejected as a conflict, and archived/'preserved'/'cleaned'/'deleted' branches must use " +
-        'the restore/unarchive flow instead. Non-destructive — never deletes refs or directories. ' +
+        "(filesystem_status 'failed') by re-dispatching provisioning. Also recovers a branch " +
+        "left 'creating' by a daemon restart. Not retryable otherwise: 'ready' is returned " +
+        "unchanged, a still-in-flight 'creating' attempt is rejected as a conflict, and " +
+        "archived/'preserved'/'cleaned'/'deleted' branches must use the restore/unarchive flow " +
+        'instead. Non-destructive — never deletes refs or directories. ' +
         'Returns the updated branch with its new filesystem_status.',
       inputSchema: z.object({
         branchId: mcpRequiredId('branchId', 'Branch'),

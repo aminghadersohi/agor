@@ -140,6 +140,7 @@ const checks = [
     baseline: {
       // Test-only async flush helpers / event loop flushes.
       'apps/agor-daemon/src/services/branches.test.ts': 1,
+      'apps/agor-daemon/src/services/repos.test.ts': 1,
       'apps/agor-daemon/src/utils/tenant-db-scope.test.ts': 1,
       // The two tenant-aware deferral helpers deliberately leave the current
       // ALS store before scheduling and then re-enter identity or DB scope.
@@ -181,7 +182,13 @@ const checks = [
       // capabilities use a second transaction path so their RLS GUC is local
       // to one pooled connection checkout and cannot leak after discovery.
       'packages/core/src/db/tenant-scope.ts': 2,
-      'packages/core/src/db/repositories/branches.ts': 1,
+      // 1 pre-existing, plus the two provisioning compare-and-swaps
+      // (claimFailedForProvisioningRetry / markProvisioningFailedIfCreating).
+      // Those need a real transaction: the row lock and the state check must be
+      // in the same unit of work, or two callers could both claim a retry and
+      // dispatch two materializers. Callers enter runWithTenantDatabaseScope
+      // first, so the transaction runs on the tenant-scoped handle.
+      'packages/core/src/db/repositories/branches.ts': 3,
       'packages/core/src/db/repositories/knowledge.ts': 7,
       'packages/core/src/db/repositories/repos.ts': 3,
       // Session updates and archive cascades use raw repository transactions until

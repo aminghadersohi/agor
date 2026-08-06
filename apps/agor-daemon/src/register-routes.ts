@@ -3479,10 +3479,10 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   );
 
   // Explicit, non-destructive repair for a branch whose filesystem provisioning
-  // landed in 'failed'. Shares the exact same service implementation the MCP
-  // tool and UI use, so REST, MCP and UI can never drift. Only `failed` is
-  // retryable ('creating' conflicts, 'ready' no-ops); the transition is an
-  // atomic claim. Returns the (possibly-updated) branch row.
+  // landed in 'failed' (or was stranded 'creating' by a daemon restart). Shares
+  // the exact same service implementation the MCP tool and UI use, so REST, MCP
+  // and UI can never drift. A live 'creating' attempt conflicts, 'ready' no-ops;
+  // the transition is an atomic claim. Returns the (possibly-updated) branch row.
   registerLongAuthenticatedRoute(
     app,
     '/branches/:id/retry-provisioning',
@@ -3498,6 +3498,17 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       // requires the same authority as creating one (MEMBER). Branch-scoped
       // ownership/`all` control is enforced inside the service via the
       // branches-service reads it performs.
+      //
+      // Identity split (intentional): the MEMBER + branch-read gate decides WHO
+      // may trigger the repair, but the executor runs as `branch.created_by`,
+      // not as the caller. So a member who can see a failed branch can cause
+      // work to run under the original creator's Unix identity/credentials.
+      // That mirrors the create path exactly (the branch's directory must be
+      // materialized as its owner for the checkout to be usable), and the
+      // operation is non-destructive and re-runs the same provisioning the
+      // owner already requested — so it grants no capability the owner had not
+      // already initiated. Tightening this to owner-only would make a failed
+      // branch unrepairable by teammates, which is the case this PR exists for.
       create: { role: ROLES.MEMBER, action: 'retry branch provisioning' },
     },
     requireAuth
