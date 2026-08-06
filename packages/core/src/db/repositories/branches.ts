@@ -221,6 +221,7 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
         pull_request_url: branch.pull_request_url,
         notes: branch.notes,
         error_message: branch.error_message,
+        provisioning_attempt_id: branch.provisioning_attempt_id,
         environment_instance: branch.environment_instance,
         last_used: branch.last_used ?? new Date(now).toISOString(),
         custom_context: branch.custom_context,
@@ -634,8 +635,16 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
    *
    * This is the fencing that lets the daemon avoid a general provisioning-job
    * framework: the state transition itself is the lock.
+   *
+   * `attemptId` stamps the row with the generation that now owns `creating`, so
+   * a superseded attempt's late acknowledgement can be told apart from the
+   * current one's. The winner's branch (with the id applied) is returned; the
+   * caller passes that same id to the executor it dispatches.
    */
-  async claimFailedForProvisioningRetry(id: string): Promise<{ claimed: boolean; branch: Branch }> {
+  async claimFailedForProvisioningRetry(
+    id: string,
+    attemptId: string
+  ): Promise<{ claimed: boolean; branch: Branch }> {
     const existing = await this.findById(id);
     if (!existing) {
       throw new EntityNotFoundError('Branch', id);
@@ -664,6 +673,7 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
         ...current,
         filesystem_status: 'creating',
         error_message: undefined,
+        provisioning_attempt_id: attemptId,
       });
       const row = await update(txAsDb(tx), branches)
         .set(insertData)
@@ -683,10 +693,19 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
    * design — it does NOT inspect the daemon-local filesystem or infer success
    * from a `.git` path. An interrupted attempt is surfaced as `failed` so a
    * human can retry, rather than the daemon guessing and auto-promoting.
+   *
+   * `expectedAttemptId` fences the write to one generation. The status check
+   * alone is not enough: a superseded attempt's `onExit` can fire *after* a
+   * retry has already claimed `creating`, and would otherwise mark the new,
+   * healthy attempt `failed`. Pass the id the caller dispatched with and the
+   * write applies only while that attempt still owns the row. Omit it for
+   * callers that legitimately target whatever attempt is current (the startup
+   * watchdog, which by definition runs when no attempt can still be live).
    */
   async markProvisioningFailedIfCreating(
     id: string,
-    message: string
+    message: string,
+    expectedAttemptId?: string
   ): Promise<{ changed: boolean; branch: Branch }> {
     const existing = await this.findById(id);
     if (!existing) {
@@ -709,6 +728,13 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
       }
       const current = this.rowToBranch(currentRow, baseUrl);
       if (current.filesystem_status !== 'creating') {
+        return { changed: false, branch: current };
+      }
+      if (
+        expectedAttemptId !== undefined &&
+        current.provisioning_attempt_id !== expectedAttemptId
+      ) {
+        // A newer attempt owns `creating` now — this acknowledgement is stale.
         return { changed: false, branch: current };
       }
       const insertData = this.branchToInsert({

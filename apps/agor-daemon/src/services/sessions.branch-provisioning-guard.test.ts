@@ -74,10 +74,16 @@ describe('SessionsService branch provisioning guard', () => {
     await expect(guard(service)(branchId)).rejects.toThrow(/git fetch rejected the ref/);
   });
 
-  dbTest('rejects ready branches whose directory vanished out-of-band', async ({ db }) => {
+  dbTest('does not stat the filesystem for a ready branch', async ({ db }) => {
+    // The daemon does not own the branch filesystem and may not even share one
+    // with the executor, so the guard reads recorded state only. A `ready` row
+    // whose directory is absent from the *daemon's* view must still pass —
+    // stat'ing here would be the daemon-local filesystem guessing this PR
+    // removed from the provisioning lifecycle (and the repo's
+    // daemon-filesystem-boundary check forbids it).
     const branchId = await makeBranch(db, { filesystem_status: 'ready', path: missingDir() });
     const service = new SessionsService(db, STUB_APP);
-    await expect(guard(service)(branchId)).rejects.toThrow(/missing from disk/i);
+    await expect(guard(service)(branchId)).resolves.toBeUndefined();
   });
 
   dbTest('allows a ready branch with a real checkout on disk', async ({ db }) => {
@@ -86,7 +92,7 @@ describe('SessionsService branch provisioning guard', () => {
     await expect(guard(service)(branchId)).resolves.toBeUndefined();
   });
 
-  dbTest('allows legacy rows (undefined status) with an existing directory', async ({ db }) => {
+  dbTest('allows legacy rows (undefined status)', async ({ db }) => {
     const branchId = await makeBranch(db, { path: validCheckoutDir() });
     const service = new SessionsService(db, STUB_APP);
     await expect(guard(service)(branchId)).resolves.toBeUndefined();
