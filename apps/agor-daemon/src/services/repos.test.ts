@@ -766,6 +766,9 @@ describe('ReposService branch provisioning lifecycle', () => {
   function makeService(branches: BranchesMock, db: unknown = {}) {
     branches.emit ??= vi.fn();
     const app = {
+      // Provisioning reads deployment config off the app (impersonation
+      // resolution, clone-reference hints, daemon unix user).
+      get: () => ({}),
       settings: { authentication: { secret: 'test-secret' } },
       service: vi.fn((name: string) => {
         if (name === 'branches') return branches;
@@ -895,25 +898,30 @@ describe('ReposService branch provisioning lifecycle', () => {
     expect(branchRepoMock.markProvisioningFailedIfCreating).not.toHaveBeenCalled();
   });
 
-  it('synchronous spawn failure marks the branch failed (no lost provisioning)', async () => {
+  it('synchronous spawn failure marks the branch failed and returns that row', async () => {
+    // Fire-and-forget means no process exists to emit onExit, so the failure
+    // has to be recorded inline or the branch stays 'creating' with no signal.
+    // The patched row is returned so `createBranch` hands its caller the failed
+    // representation rather than a stale 'creating' one.
     executorMocks.spawnExecutorFireAndForget.mockImplementationOnce(() => {
       throw new Error('executor binary not found');
     });
-    branchRepoMock.markProvisioningFailedIfCreating.mockResolvedValue({
-      changed: true,
-      branch: branch({ filesystem_status: 'failed' }),
-    });
-    const { service } = makeService({ get: vi.fn(), patch: vi.fn() });
+    const patch = vi.fn(async () => branch({ filesystem_status: 'failed' }));
+    const { service } = makeService({ get: vi.fn(), patch });
 
-    await (
-      service as unknown as { dispatchBranchProvisioning: (...a: unknown[]) => Promise<void> }
+    const result = await (
+      service as unknown as { dispatchBranchProvisioning: (...a: unknown[]) => Promise<unknown> }
     ).dispatchBranchProvisioning(branch(), repo, 'user-1', undefined, 'create');
 
-    expect(branchRepoMock.markProvisioningFailedIfCreating).toHaveBeenCalledWith(
+    expect(patch).toHaveBeenCalledWith(
       'b1',
-      expect.stringMatching(/failed to start branch provisioning/i),
-      undefined
+      expect.objectContaining({
+        filesystem_status: 'failed',
+        error_message: expect.stringMatching(/failed to spawn executor/i),
+      }),
+      expect.any(Object)
     );
+    expect((result as { filesystem_status?: string }).filesystem_status).toBe('failed');
   });
 
   // ---- retry authorization (branch control, not just view) ----------------
@@ -1150,8 +1158,11 @@ describe('ReposService branch provisioning lifecycle', () => {
     );
     expect(result.filesystem_status).toBe('creating');
     expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledWith(
-      expect.objectContaining({ command: 'git.branch.add' }),
-      expect.objectContaining({ asUser: 'daemon-user' })
+      expect.objectContaining({
+        command: 'git.branch.add',
+        params: expect.objectContaining({ provisioningAttemptId: expect.any(String) }),
+      }),
+      expect.any(Object)
     );
   });
 
