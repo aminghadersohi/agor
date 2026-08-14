@@ -8,6 +8,8 @@
  *
  * These tests pin the server-side guard down against a real database.
  */
+
+import { tmpdir } from 'node:os';
 import {
   AgenticToolPresetRepository,
   BranchRepository,
@@ -57,10 +59,11 @@ async function createBranch(db: any): Promise<UUID> {
     name: 'feature',
     ref: 'feature',
     branch_unique_id: Math.floor(Math.random() * 1_000_000),
-    path: '/tmp/test-repo',
+    path: tmpdir(),
     base_ref: 'main',
     new_branch: false,
     created_by: TEST_USER_ID,
+    filesystem_status: 'ready',
   });
   return branch.branch_id as UUID;
 }

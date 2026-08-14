@@ -422,6 +422,10 @@ describe('ReposService branch provisioning lifecycle', () => {
     branches.emit ??= vi.fn();
     const app = {
       settings: { authentication: { secret: 'test-secret' } },
+      get: vi.fn((name: string) => {
+        if (name === 'config') return {};
+        throw new Error(`Unexpected setting: ${name}`);
+      }),
       service: vi.fn((name: string) => {
         if (name === 'branches') return branches;
         throw new Error(`Unexpected service: ${name}`);
