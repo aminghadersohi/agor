@@ -97,6 +97,7 @@ export default defineConfig({
     // Bind to 0.0.0.0 for Docker accessibility
     host: '0.0.0.0',
     port: 5173,
+    allowedHosts: ['agor.local.zone', 'agor.local'],
     // Proxy API and socket traffic to the daemon
     proxy: {
       '/authentication': { target: `http://localhost:${daemonPort}`, changeOrigin: true },
