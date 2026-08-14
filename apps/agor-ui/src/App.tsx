@@ -42,6 +42,7 @@ import { LoginPage } from './components/LoginPage';
 import { OnboardingBanners } from './components/OnboardingBanners';
 import { OnboardingWizard } from './components/OnboardingWizard';
 import { buildPromptWithAttachments } from './components/SessionPanel/composerAttachments';
+import { SettingsModal } from './components/SettingsModal';
 import { StreamdownPortalApp } from './components/StreamdownPortalApp';
 import { getDaemonUrl } from './config/daemon';
 import { CanvasNavigationProvider } from './contexts/CanvasNavigationContext';
@@ -285,7 +286,8 @@ function AppContent() {
   // makes the registry's `branding` field the single enforcement point so a new
   // static surface can't forget to wire it.
   useSurfaceBranding(currentSurface);
-  const sharedSurfaceOwnsUserSettings = currentSurface.usesSharedUserSettings;
+  const sharedSurfaceOwnsUserSettings =
+    currentSurface.usesSharedUserSettings || location.pathname.startsWith('/m');
   const routeModuleKey = getRouteModuleKey(currentSurface.id, location.pathname);
   const [routeModuleReady, setRouteModuleReady] = useState(() =>
     loadedRouteModuleKeys.has(routeModuleKey)
@@ -1930,6 +1932,43 @@ function AppContent() {
         />
       )}
 
+      {location.pathname.startsWith('/m') && (
+        <SettingsModal
+          open={settingsTabToOpen !== null}
+          onClose={handleSettingsClose}
+          client={client}
+          currentUser={currentUser}
+          activeTab={settingsTabToOpen ?? 'boards'}
+          onTabChange={setSettingsTabToOpen}
+          onCreateBoard={handleCreateBoard}
+          onUpdateBoard={handleUpdateBoard}
+          onDeleteBoard={handleDeleteBoard}
+          onArchiveBoard={handleArchiveBoard}
+          onUnarchiveBoard={handleUnarchiveBoard}
+          onCreateRepo={handleCreateRepo}
+          onCreateLocalRepo={handleCreateLocalRepo}
+          onUpdateRepo={handleUpdateRepo}
+          onDeleteRepo={handleDeleteRepo}
+          onArchiveOrDeleteBranch={handleArchiveOrDeleteBranch}
+          onUnarchiveBranch={handleUnarchiveBranch}
+          onUpdateBranch={handleUpdateBranch}
+          onCreateBranch={handleCreateBranch}
+          onStartEnvironment={handleStartEnvironment}
+          onStopEnvironment={handleStopEnvironment}
+          onCreateUser={handleCreateUser}
+          onUpdateUser={handleUpdateUser}
+          onDeleteUser={handleDeleteUser}
+          onCreateMCPServer={handleCreateMCPServer}
+          onDeleteMCPServer={handleDeleteMCPServer}
+          onCreateGatewayChannel={handleCreateGatewayChannel}
+          onUpdateGatewayChannel={handleUpdateGatewayChannel}
+          onDeleteGatewayChannel={handleDeleteGatewayChannel}
+          onUpdateArtifact={handleUpdateArtifact}
+          onDeleteArtifact={handleDeleteArtifact}
+          branchStorageConfig={featuresConfig?.branchStorage}
+        />
+      )}
+
       {/* Onboarding Wizard - shown for new users.
             Key by user identity so the wizard's local React state is bound to
             the signed-in user. On any user change (logout → login as someone
@@ -1990,6 +2029,8 @@ function AppContent() {
                 onLogout={logout}
                 promptDrafts={promptDrafts}
                 onUpdateDraft={handleUpdateDraft}
+                onOpenWorkspaceSettings={setSettingsTabToOpen}
+                onOpenUserSettings={() => setOpenUserSettings(true)}
               />
             }
           />
