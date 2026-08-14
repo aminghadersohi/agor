@@ -290,7 +290,7 @@ export const UsersTable: React.FC<UsersTableProps> = ({
             placeholder="Search name, email, username, role, or groups"
             value={searchTerm}
             onChange={(event) => setSearchTerm(event.target.value)}
-            style={{ width: 320 }}
+            style={{ width: 'min(100%, 320px)' }}
           />
           {isAdmin && (
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateModalOpen(true)}>
