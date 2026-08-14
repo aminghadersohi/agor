@@ -5,6 +5,7 @@
  * Uses DrizzleService adapter with SessionRepository.
  */
 
+import { existsSync } from 'node:fs';
 import { getAgenticToolModelConfiguration } from '@agor/agentic-tools';
 import {
   isResolvedAgenticToolModelConfiguration,
@@ -362,6 +363,15 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (!(await isTenantAgenticToolEnabled(agenticTool, this.db))) {
       throw new BadRequest(`${agenticTool} is disabled for this workspace`);
     }
+
+    // A session runs inside its branch's working directory. If that directory
+    // has not been materialized yet (provisioning still running, or it failed),
+    // fail with a clear domain error here instead of letting a downstream
+    // simple-git call throw a raw ENOENT ("Cannot use simple-git on a directory
+    // that does not exist"), which is opaque and unactionable.
+    if (data.branch_id) {
+      await this.assertBranchFilesystemUsable(data.branch_id as string);
+    }
     const {
       agentic_tool_preset_id: configurationReference,
       model_config: originalModelConfig,
@@ -430,6 +440,64 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       throw new Error('Single-session creation returned multiple sessions');
     }
     return created;
+  }
+
+  /**
+   * Assert a branch's filesystem is usable before a session is created in it.
+   * Translates provisioning lifecycle state into a clear domain error:
+   * - `creating`  → 409 "provisioning in progress" (retryable, transient)
+   * - `failed`    → 409 with the stored, sanitized provisioning error
+   * - `ready`/legacy(undefined) but directory missing → 409 (removed out-of-band)
+   * - other terminal states (cleaned/deleted/preserved-missing) → 409
+   *
+   * Backward compatibility: rows predating `filesystem_status` (undefined) are
+   * treated as ready as long as their directory exists. Never throws for a
+   * genuinely usable checkout.
+   */
+  private async assertBranchFilesystemUsable(branchId: string): Promise<void> {
+    const branch = await this.branchRepo.findById(branchId);
+    // If the branch can't be loaded, defer to existing downstream handling
+    // (creation will fail later with the normal not-found path).
+    if (!branch) return;
+
+    const status = branch.filesystem_status;
+
+    if (status === 'creating') {
+      throw new Conflict(
+        'Branch provisioning is still in progress. The working directory is not ready yet — wait for provisioning to finish, then start the session again.',
+        { code: 'BRANCH_PROVISIONING_INCOMPLETE', branchId, filesystemStatus: status }
+      );
+    }
+
+    if (status === 'failed') {
+      throw new Conflict(
+        `Branch provisioning failed and the working directory was not created${
+          branch.error_message ? `: ${branch.error_message}` : '.'
+        } Repair/retry provisioning for this branch, then start the session again.`,
+        { code: 'BRANCH_PROVISIONING_FAILED', branchId, filesystemStatus: status }
+      );
+    }
+
+    // 'ready', 'preserved', or legacy undefined: usable *if* the directory is
+    // actually present. A missing directory here means it was removed
+    // out-of-band (e.g. ephemeral volume, manual rm) — surface a clear error
+    // rather than a raw simple-git ENOENT downstream.
+    const usableStatus = status === undefined || status === 'ready' || status === 'preserved';
+    if (usableStatus) {
+      if (branch.path && !existsSync(branch.path)) {
+        throw new Conflict(
+          'Branch working directory is missing from disk even though it is marked ready. It may have been removed out-of-band. Repair/retry provisioning for this branch, then start the session again.',
+          { code: 'BRANCH_DIRECTORY_MISSING', branchId, filesystemStatus: status ?? 'unknown' }
+        );
+      }
+      return;
+    }
+
+    // cleaned / deleted / any other non-usable terminal state.
+    throw new Conflict(
+      `Branch working directory is not available (filesystem_status="${status}"). Restore or re-provision the branch before starting a session.`,
+      { code: 'BRANCH_FILESYSTEM_UNAVAILABLE', branchId, filesystemStatus: status }
+    );
   }
 
   /** Re-resolve a live preset immediately before a task starts. */

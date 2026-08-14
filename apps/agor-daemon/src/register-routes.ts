@@ -3573,6 +3573,30 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
+  // Idempotent, non-destructive repair for a branch whose filesystem
+  // provisioning is stuck in 'creating' or landed in 'failed'. Shares the exact
+  // same service implementation the startup watchdog and MCP tool use, so REST,
+  // MCP and UI can never drift. Returns the (possibly-updated) branch row.
+  registerLongAuthenticatedRoute(
+    app,
+    '/branches/:id/retry-provisioning',
+    {
+      async create(_data: unknown, params: RouteParams) {
+        const id = params.route?.id;
+        if (!id) throw new Error('Branch ID required');
+        return reposService.retryBranchProvisioning(id, params);
+      },
+    },
+    {
+      // Re-provisioning materializes a working directory for the branch, so it
+      // requires the same authority as creating one (MEMBER). Branch-scoped
+      // ownership/`all` control is enforced inside the service via the
+      // branches-service reads it performs.
+      create: { role: ROLES.MEMBER, action: 'retry branch provisioning' },
+    },
+    requireAuth
+  );
+
   registerLongAuthenticatedRoute(
     app,
     '/branches/:id/nuke',

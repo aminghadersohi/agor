@@ -22,18 +22,20 @@ import {
   normalizeRepoUrl,
   PAGINATION,
   resolveBranchStorageConfig,
+  resolveExecutionSecurityMode,
   resolveMultiTenancyConfig,
 } from '@agor/core/config';
 import {
   BranchRepository,
   getCurrentTenantId,
   RepoRepository,
+  runWithTenantDatabaseScope,
   runWithTenantDatabaseTransaction,
   shortId,
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
 import { autoAssignBranchUniqueId } from '@agor/core/environment/variable-resolver';
-import { type Application, BadRequest } from '@agor/core/feathers';
+import { type Application, BadRequest, Conflict } from '@agor/core/feathers';
 import { redactGitUrlCredentials, stripGitUrlCredentials } from '@agor/core/git/pure';
 import type {
   AuthenticatedParams,
@@ -51,7 +53,8 @@ import type { BranchesServiceImpl } from '../declarations.js';
 import { emitHaNativeSocketEvent, tenantChannelName } from '../realtime/routing.js';
 import { shouldUseCloneReferencePath } from '../utils/clone-reference.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
-import { resolveDelegatedExecutionHomeKey } from '../utils/executor-delegated-home.js';
+import { resolveExecutorReadAsUser } from '../utils/executor-read-impersonation.js';
+import { resolveGitImpersonationForUser } from '../utils/git-impersonation.js';
 import {
   generateScopedServiceToken,
   getDaemonUrl,
@@ -67,6 +70,21 @@ export type RepoParams = QueryParams<{
   managed_by_agor?: boolean;
   cleanup?: boolean; // For delete operations: true = delete filesystem, false = database only
 }>;
+
+/**
+ * Reduce an error to a short, log/DB-safe message. Strips embedded credentials
+ * from any remote URLs the underlying git error may have echoed back, so
+ * persisted `error_message` values and logs never leak secrets. Callers are
+ * responsible for not passing absolute user paths into user-facing copy.
+ */
+function sanitizeProvisioningError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  try {
+    return redactGitUrlCredentials(raw);
+  } catch {
+    return raw;
+  }
+}
 
 function deriveLocalRepoSlug(remoteUrl: string | undefined, explicitSlug?: string): RepoSlug {
   if (explicitSlug) {
@@ -188,6 +206,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
    * - Parse .agor.yml
    * - Patch the existing row to `'ready'` (with parsed env, default branch)
    *   or `'failed'` (with categorized clone_error)
+   * - Initialize Unix group
    *
    * Returns immediately with `{ status: 'pending', slug, repo_id }`.
    * Clients see a `repos.created` event for the placeholder row, then a
@@ -258,14 +277,16 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     // token ensures hooks like requireAdminForEnvConfig bypass via
     // _isServiceAccount. Executor fetches per-user credentials via Feathers
     // RPC (users.getGitEnvironment) using the same service JWT.
-    // A managed clone is lifecycle storage beneath the configured repo root,
-    // not a read/probe in the requesting user's home. Delegated substrates
-    // receive the caller's stable execution-home key for routing.
-    const delegatedHomeKey = await resolveDelegatedExecutionHomeKey(
-      this.db,
-      userId,
-      this.app.get('config')
-    );
+    // Unix group initialization is a filesystem concern controlled by
+    // unix_user_mode, not by app-level branch RBAC.
+    const initUnixGroup = resolveExecutionSecurityMode().shouldInitUnixGroups;
+
+    // A managed clone is lifecycle storage beneath the daemon-owned repo
+    // root, not a read/probe in the requesting user's home. Run it as the Git
+    // lifecycle identity; the post-clone group initialization grants the
+    // creator access. Requesting-user impersonation cannot create the first
+    // slug directory in strict mode.
+    const asUser = await resolveGitImpersonationForUser(this.db, userId, this.app.get('config'));
 
     // Pre-create the repo row with `clone_status: 'cloning'` so failures stay
     // queryable via `agor_repos_get(repoId)`. Pre-#1126 the row was only
@@ -325,11 +346,13 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
           ...(data.default_branch ? { default_branch: data.default_branch } : {}),
           createDbRecord: true,
           userId: userId as string | undefined,
+          initUnixGroup,
+          ...(initUnixGroup ? { daemonUser: this.app.get('config').daemon?.unix_user } : {}),
         },
       },
       {
         logPrefix: `[clone ${slug}]`,
-        delegatedHomeKey: delegatedHomeKey,
+        asUser, // Run as resolved user (fresh groups via sudo -u)
         templateVariables: {
           user_id: userId,
         },
@@ -520,18 +543,14 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     }
 
     const userId = (params as AuthenticatedParams | undefined)?.user?.user_id as UserID | undefined;
-    const delegatedHomeKey = await resolveDelegatedExecutionHomeKey(
-      this.db,
-      userId,
-      this.app.get('config')
-    );
+    const asUser = await resolveExecutorReadAsUser(this.db, userId, this.app.get('config'));
     const inspection = await runExecutorCommand(
       {
         command: 'git.repo.inspect',
         daemonUrl: getDaemonUrl(),
         params: { path: inputPath },
       },
-      { delegatedHomeKey: delegatedHomeKey, logPrefix: '[repos.local.inspect]' }
+      { asUser, logPrefix: '[repos.local.inspect]' }
     );
     if (!inspection.success)
       throw new Error(inspection.error?.message ?? 'Repository inspection failed');
@@ -575,6 +594,13 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       },
       params
     )) as Repo;
+
+    // TODO: Unix group initialization for local repos
+    // For local repos, Unix group init should also go through executor.
+    // Currently, local repos don't trigger git operations via executor,
+    // so we'd need a separate executor command (e.g., 'unix.init-repo-group').
+    // For now, local repos don't get Unix group isolation automatically.
+    // Use `agor local sync-unix` to initialize groups for existing repos.
 
     return repo;
   }
@@ -674,17 +700,8 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     }
     // Auth hooks (`requireMinimumRole`) guarantee `params.user` exists by
     // the time we get here. The identity is forwarded so executor-local Git
-    // can resolve the requesting user's credential route.
+    // can resolve the requesting user's credentials in strict Unix mode.
     const userId = (params as AuthenticatedParams).user!.user_id as UserID;
-
-    // Delegated routing is configuration/auth validation, not filesystem
-    // materialization. Resolve it before persisting a branch intent so an
-    // invalid or missing home key cannot leave a row stuck in `creating`.
-    const delegatedHomeKey = await resolveDelegatedExecutionHomeKey(
-      this.db,
-      userId,
-      this.app.get('config')
-    );
 
     if (storageMode === 'clone') {
       if (!repo.remote_url) {
@@ -751,8 +768,10 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
 
     const branchesService = this.app.service('branches');
 
-    // Environment command templates (start_command, stop_command, etc.) are
-    // rendered by the executor after filesystem materialization.
+    // NOTE: Environment command templates (start_command, stop_command, etc.) are NOT
+    // rendered here. They will be rendered by the executor after Unix groups are created
+    // and GID is available, ensuring {{branch.gid}} is populated in templates.
+    // See: packages/executor/src/commands/git.ts:renderEnvironmentTemplates()
 
     // Storage mode (storageMode + cloneDepth) was resolved + validated up
     // top so the preflights could gate on it; reuse those vars below.
@@ -760,9 +779,10 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     // Create DB record EARLY with 'creating' status
     // Executor will:
     // 1. Create git branch on filesystem
-    // 2. Render environment templates with the materialized branch context
-    // 3. Patch branch to 'ready' with rendered templates
-    let branch = (await branchesService.create(
+    // 2. Initialize Unix groups (if unix_user_mode needs filesystem isolation)
+    // 3. Render environment templates with full context including GID
+    // 4. Patch branch to 'ready' with rendered templates
+    const branch = (await branchesService.create(
       {
         repo_id: repo.repo_id,
         name: data.name,
@@ -773,7 +793,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
         new_branch: data.createBranch ?? false,
         branch_unique_id: branchUniqueId,
         filesystem_status: 'creating', // Will be set to 'ready' by executor
-        // Environment templates are rendered after filesystem materialization.
+        // Environment templates will be rendered by executor after Unix group creation
         // RBAC fields are intentionally omitted at creation: new branches
         // always align with their board defaults. Overrides are a deliberate
         // post-create action from the Branch permissions tab.
@@ -896,20 +916,73 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       );
     }
 
-    // Fire-and-forget: spawn executor to create git branch on filesystem.
-    // Executor will patch filesystem_status to 'ready' when done (or 'failed'
-    // on error), and along the way render environment command templates
-    // (start_command, stop_command, etc.) onto the branch. Those fields
-    // trip the requireAdminForEnvConfig hook on patch, so we authenticate
-    // the executor with a service JWT to bypass admin checks for internal
-    // materialization of admin-defined templates.
-    //
-    // Per-user credentials: Feathers RPC (users.getGitEnvironment)
-    // Filesystem authorization stays fail-closed inside the selected substrate.
+    // Spawn executor to materialize the git branch on the filesystem. The
+    // executor patches filesystem_status to 'ready' when done (or 'failed' on
+    // error) and renders environment command templates along the way. Because
+    // this is fire-and-forget, `dispatchBranchProvisioning` installs an
+    // onExit safety net that transitions the branch out of 'creating' even
+    // when the executor process dies before it can patch the row (crash,
+    // SIGTERM on daemon restart, lost daemon connection). Without that net a
+    // failed materialization leaves the branch stuck in 'creating' forever.
+    await this.dispatchBranchProvisioning(branch, repo, userId, params, 'create');
+
+    // Return immediately with 'creating' status - UI will see updates via WebSocket
+    return branch;
+  }
+
+  /**
+   * Spawn the `git.branch.add` executor that materializes a branch's working
+   * directory, with a daemon-side safety net so the branch never gets stuck in
+   * `filesystem_status='creating'`.
+   *
+   * The executor itself patches `ready`/`failed` when it can, but it can only
+   * do so if its own error handler runs AND it still holds a daemon
+   * connection. When the process is killed or crashes first (SIGTERM on a
+   * watch restart, OOM, a startup crash, or a dropped socket) nothing would
+   * otherwise transition the row. The `onExit` net below re-reads the branch
+   * after the process exits and, if it is still `creating`, reconciles it:
+   * a valid checkout on disk becomes `ready` (the executor did the work but
+   * died before acking), otherwise it becomes `failed` with a sanitized,
+   * actionable message. Mirrors the repo-clone safety net (`create()` above).
+   *
+   * Idempotent and reusable: `retryBranchProvisioning()` and the startup
+   * watchdog call this for existing rows too. Structured logs are emitted at
+   * enqueue / exit / reconcile so the lifecycle is traceable.
+   */
+  private async dispatchBranchProvisioning(
+    branch: Branch,
+    repo: Repo,
+    userId: UserID,
+    params: RepoParams | undefined,
+    reason: 'create' | 'retry' | 'reconcile'
+  ): Promise<void> {
+    const storageMode = branch.storage_mode ?? 'worktree';
+    const logPrefix = `[branch-provisioning ${shortId(branch.branch_id)}]`;
+    // Capture the tenant NOW (we are inside a request/startup scope). The
+    // executor's onExit fires asynchronously after that scope has unwound, so
+    // any DB write there must re-establish this tenant's transaction scope or
+    // Postgres rejects the SAVEPOINT the branch mutation opens.
+    const tenantId = getCurrentTenantId();
     try {
       const sessionToken = generateScopedServiceToken(
         this.app as unknown as { settings: { authentication?: { secret?: string } } },
         { command: 'git.branch.add', branch_id: branch.branch_id, repo_id: repo.repo_id }
+      );
+
+      // Unix group initialization is a filesystem concern controlled by
+      // unix_user_mode, not by app-level branch RBAC.
+      const executionMode = resolveExecutionSecurityMode();
+      const initUnixGroup = executionMode.shouldInitUnixGroups;
+
+      // Managed Git lifecycle operations must run as the daemon lifecycle
+      // identity. In strict mode the requesting user can read an initialized
+      // branch through its group/ACL, but cannot create a child beneath the
+      // daemon-owned worktree root or mutate the base repo's .git/worktrees.
+      // Keep resolveExecutorReadAsUser for read/probe commands only.
+      const asUser = await resolveGitImpersonationForUser(this.db, userId, this.app.get('config'));
+
+      console.log(
+        `${logPrefix} enqueue git.branch.add (reason=${reason}, storage_mode=${storageMode})`
       );
 
       spawnExecutorFireAndForget(
@@ -921,6 +994,10 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
             branchId: branch.branch_id,
             repoId: repo.repo_id,
             userId: userId as string | undefined,
+            // Unix group isolation (only when unix_user_mode is non-simple)
+            initUnixGroup,
+            ...(initUnixGroup ? { daemonUser: this.app.get('config').daemon?.unix_user } : {}),
+            fixBasicPermissions: !executionMode.appRbacEnabled && !initUnixGroup,
             useReference:
               storageMode === 'clone' &&
               !!repo.local_path &&
@@ -928,30 +1005,241 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
           },
         },
         {
-          logPrefix: `[ReposService.createBranch ${data.name}]`,
-          delegatedHomeKey: delegatedHomeKey,
+          logPrefix,
+          asUser, // Run as lifecycle identity with fresh supplemental groups
           templateVariables: {
             branch_id: branch.branch_id,
             user_id: userId,
           },
+          onExit: (code) => {
+            if (code === 0) {
+              // Success path: the executor patched 'ready' itself.
+              console.log(`${logPrefix} executor exited cleanly (code 0)`);
+              return;
+            }
+            console.error(
+              `${logPrefix} executor exited with code ${code ?? 'null'}; running safety-net reconcile`
+            );
+            void this.reconcileBranchFilesystemAfterExit(branch.branch_id, code, tenantId);
+          },
         }
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error('[ReposService.createBranch] Failed to spawn executor:', message);
-      branch = (await branchesService.patch(
+      // Synchronous spawn failure (e.g. token generation, impersonation
+      // resolution, or the executor binary is missing). Fire-and-forget means
+      // there is no process to emit onExit, so mark the branch failed here or
+      // it would be stuck in 'creating' with no signal at all.
+      const message = sanitizeProvisioningError(error);
+      console.error(`${logPrefix} failed to spawn executor: ${message}`);
+      await this.markBranchProvisioningFailedIfStuck(
         branch.branch_id,
+        `Failed to start branch provisioning: ${message}`,
+        tenantId
+      );
+    }
+  }
+
+  /**
+   * onExit safety net: after a non-zero executor exit, move the branch to a
+   * terminal `failed` state IF it is still `creating` (the executor died before
+   * it could report success or failure itself). Deliberately does NOT inspect
+   * the daemon-local filesystem or promote to `ready` from a `.git` path — a
+   * daemon cannot reliably tell a complete checkout from a stale/partial/
+   * wrong-ref one, and in a multi-host deployment it may not even see the
+   * executor's filesystem. Surfacing `failed` keeps a human decision point;
+   * the user (or MCP/UI) retries explicitly. Never deletes refs or directories.
+   */
+  private async reconcileBranchFilesystemAfterExit(
+    branchId: string,
+    code: number | null,
+    tenantId: string | undefined
+  ): Promise<void> {
+    await this.markBranchProvisioningFailedIfStuck(
+      branchId,
+      `Branch provisioning did not complete: the materialization process exited with code ${code ?? 'unknown'} before it could confirm a usable working directory. Retry provisioning to try again.`,
+      tenantId
+    );
+  }
+
+  /**
+   * Atomically move a branch to `failed` with an actionable message IF (and
+   * only if) it is still `creating`. The compare-and-swap lives in the
+   * repository under a row lock, so it never clobbers a terminal status the
+   * executor already wrote and never races a concurrent transition. Emits a
+   * `patched` event so connected UIs update.
+   */
+  private async markBranchProvisioningFailedIfStuck(
+    branchId: string,
+    message: string,
+    tenantId: string | undefined
+  ): Promise<void> {
+    const logPrefix = `[branch-provisioning ${shortId(branchId)}]`;
+    try {
+      await runWithTenantDatabaseScope(this.db, tenantId, async () => {
+        const branchRepo = new BranchRepository(this.db);
+        const { changed, branch } = await branchRepo.markProvisioningFailedIfCreating(
+          branchId,
+          message
+        );
+        if (changed) {
+          console.warn(`${logPrefix} → failed (interrupted provisioning surfaced for retry)`);
+          this.emitBranchPatched(branch);
+        }
+      });
+    } catch (error) {
+      console.error(
+        `${logPrefix} failed to mark stuck branch failed: ${sanitizeProvisioningError(error)}`
+      );
+    }
+  }
+
+  /**
+   * Explicit, authorized repair for a branch whose provisioning FAILED.
+   *
+   * The only automatic transition is out of `creating` (the crash/onExit/
+   * watchdog safety nets, which mark an interrupted attempt `failed`). Recovery
+   * is deliberately human-triggered from there:
+   *
+   * - `ready`                              → no-op (idempotent).
+   * - `creating`                           → 409 in-progress (never spawn a 2nd
+   *                                          materializer for a live attempt).
+   * - `failed`                             → atomically claim `failed → creating`
+   *                                          and re-dispatch the executor.
+   * - preserved/cleaned/deleted/other      → 409 not-retryable; those have their
+   *                                          own restore/unarchive lifecycle.
+   *
+   * The `failed → creating` claim is a row-locked compare-and-swap, so a
+   * double-click on Retry (or two clients racing) can only ever dispatch one
+   * executor — the loser sees the branch already `creating` and no-ops. The
+   * executor is idempotent against an already-materialized worktree, so the
+   * "died after materialize" case recovers without the daemon probing `.git`.
+   */
+  async retryBranchProvisioning(branchId: string, params?: RepoParams): Promise<Branch> {
+    const branchesService = this.app.service('branches');
+    // Read through the service so short IDs resolve and RBAC hooks fire.
+    const branch = (await branchesService.get(branchId, params)) as Branch;
+    const status = branch.filesystem_status;
+    const logPrefix = `[branch-provisioning ${shortId(branch.branch_id)}]`;
+
+    if (status === 'ready') {
+      return branch;
+    }
+    if (status === 'creating') {
+      throw new Conflict(
+        'Branch provisioning is already in progress. Wait for it to finish before retrying.',
         {
-          filesystem_status: 'failed',
-          error_message: `Failed to spawn executor: ${message}`,
-        },
-        { ...params, provider: undefined }
-      )) as Branch;
+          code: 'BRANCH_PROVISIONING_IN_PROGRESS',
+          branchId: branch.branch_id,
+          filesystemStatus: status,
+        }
+      );
+    }
+    if (status !== 'failed') {
+      throw new Conflict(
+        `Branch provisioning cannot be retried from status "${status ?? 'unknown'}". Only a failed provisioning attempt is retryable; use the branch restore/unarchive flow for archived or cleaned branches.`,
+        {
+          code: 'BRANCH_PROVISIONING_NOT_RETRYABLE',
+          branchId: branch.branch_id,
+          filesystemStatus: status ?? 'unknown',
+        }
+      );
     }
 
-    // Return immediately; asynchronous filesystem updates arrive via WebSocket.
-    // A synchronous dispatch failure instead returns the patched failed branch.
-    return branch;
+    const repo = await this.repoRepo.findById(branch.repo_id);
+    if (!repo) {
+      throw new BadRequest(`Repo ${branch.repo_id} not found for branch ${branchId}`);
+    }
+
+    // Atomic claim: only the caller that flips failed → creating dispatches.
+    const branchRepo = new BranchRepository(this.db);
+    const { claimed, branch: claimedBranch } = await branchRepo.claimFailedForProvisioningRetry(
+      branch.branch_id
+    );
+    if (!claimed) {
+      console.log(
+        `${logPrefix} retry ignored — another attempt already claimed it (status=${claimedBranch.filesystem_status})`
+      );
+      return claimedBranch;
+    }
+    this.emitBranchPatched(claimedBranch, params);
+
+    // Provision as the branch's original owner so impersonation/credentials
+    // match the create path.
+    const userId = branch.created_by as UserID;
+    await this.dispatchBranchProvisioning(claimedBranch, repo, userId, params, 'retry');
+    return claimedBranch;
+  }
+
+  /**
+   * Startup watchdog: a branch left `creating` means the daemon (and its
+   * fire-and-forget executor) died mid-provision. Conservatively transition
+   * each such branch to `failed` with an actionable message — we do NOT
+   * re-dispatch a materializer or infer success from a local `.git` path.
+   * Recovery is an explicit, human-triggered `retryBranchProvisioning`. Safe to
+   * run on every boot (idempotent). Returns a summary for logging.
+   */
+  async reconcileStuckCreatingBranches(
+    params?: RepoParams
+  ): Promise<{ scanned: number; failed: number }> {
+    const branchesService = this.app.service('branches');
+    const SCAN_LIMIT = 5000;
+    const result = (await branchesService.find({
+      query: { $limit: SCAN_LIMIT },
+      paginate: false,
+      ...params,
+    })) as Branch[] | { data: Branch[] };
+    const all = Array.isArray(result) ? result : result.data;
+    if (all.length >= SCAN_LIMIT) {
+      console.warn(
+        `[branch-provisioning] watchdog: hit the ${SCAN_LIMIT}-row scan cap — some stuck branches may not be reconciled this pass.`
+      );
+    }
+    // Filter in memory: `filesystem_status` is a real column but the generic
+    // service find does not guarantee arbitrary-column pushdown, so don't rely
+    // on the query narrowing it for us.
+    const stuck = all.filter((branch) => branch.filesystem_status === 'creating');
+
+    const tenantId = getCurrentTenantId();
+    const summary = { scanned: stuck.length, failed: 0 };
+    for (const branch of stuck) {
+      await this.markBranchProvisioningFailedIfStuck(
+        branch.branch_id,
+        'Branch provisioning was interrupted — the daemon restarted before it completed. Retry provisioning to try again.',
+        tenantId
+      );
+      summary.failed++;
+    }
+    if (summary.scanned > 0) {
+      console.log(
+        `[branch-provisioning] watchdog: scanned=${summary.scanned} failed=${summary.failed} (interrupted → failed, awaiting explicit retry)`
+      );
+    }
+    return summary;
+  }
+
+  /**
+   * Broadcast a `branches` `patched` event for a row we wrote directly through
+   * the repository (the atomic provisioning CAS bypasses the Feathers service,
+   * so its automatic event doesn't fire). Best-effort: if it can't emit, the
+   * executor's own terminal `patch` — or a client refetch — still converges.
+   * `params` carries the requester's tenant/connection context so the event
+   * reaches browser sockets; the crash/watchdog paths have none, which is fine
+   * (those set `failed`, which clients also pick up on their next read).
+   */
+  private emitBranchPatched(branch: Branch, params?: RepoParams): void {
+    try {
+      emitServiceEvent(this.app, {
+        path: 'branches',
+        event: 'patched',
+        data: branch,
+        params,
+        id: branch.branch_id,
+      });
+    } catch (error) {
+      console.warn(
+        `[branch-provisioning ${shortId(branch.branch_id)}] failed to emit patched event: ${sanitizeProvisioningError(error)}`
+      );
+    }
   }
 
   /**
@@ -984,7 +1272,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     const sessionToken = generateScopedServiceToken(
       this.app as unknown as { settings: { authentication?: { secret?: string } } }
     );
-    const delegatedHomeKey = await resolveDelegatedExecutionHomeKey(
+    const asUser = await resolveExecutorReadAsUser(
       this.db,
       (serviceParams as Partial<AuthenticatedParams> | undefined)?.user?.user_id as
         | UserID
@@ -1005,7 +1293,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       },
       {
         logPrefix: `[${command} ${repo.slug}/${branch.name}]`,
-        delegatedHomeKey: delegatedHomeKey,
+        asUser,
       }
     );
   }

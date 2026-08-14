@@ -626,6 +626,106 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
   }
 
   /**
+   * Atomically claim a `failed` branch for a provisioning retry: flip it to
+   * `creating` and clear the stored error, but ONLY if it is still `failed`
+   * while we hold the row lock. Returns `{ claimed: false }` when another caller
+   * (a double-click on Retry, or a concurrent retry) already moved it out of
+   * `failed`, so retry can never spawn two materializers for the same branch.
+   *
+   * This is the fencing that lets the daemon avoid a general provisioning-job
+   * framework: the state transition itself is the lock.
+   */
+  async claimFailedForProvisioningRetry(id: string): Promise<{ claimed: boolean; branch: Branch }> {
+    const existing = await this.findById(id);
+    if (!existing) {
+      throw new EntityNotFoundError('Branch', id);
+    }
+    const baseUrl = await getBaseUrl();
+    return await this.db.transaction(async (tx) => {
+      await lockRowForUpdate(
+        txAsDb(tx),
+        this.db,
+        branches,
+        eq(branches.branch_id, existing.branch_id)
+      );
+      const currentRow = await select(txAsDb(tx))
+        .from(branches)
+        .where(eq(branches.branch_id, existing.branch_id))
+        .one();
+      if (!currentRow) {
+        throw new EntityNotFoundError('Branch', id);
+      }
+      const current = this.rowToBranch(currentRow, baseUrl);
+      if (current.filesystem_status !== 'failed') {
+        // Lost the race (or never eligible) — do not write, do not re-dispatch.
+        return { claimed: false, branch: current };
+      }
+      const insertData = this.branchToInsert({
+        ...current,
+        filesystem_status: 'creating',
+        error_message: undefined,
+      });
+      const row = await update(txAsDb(tx), branches)
+        .set(insertData)
+        .where(eq(branches.branch_id, current.branch_id))
+        .returning()
+        .one();
+      return { claimed: true, branch: this.rowToBranch(row, baseUrl) };
+    });
+  }
+
+  /**
+   * Atomically move an interrupted provisioning attempt to a terminal `failed`
+   * state with an actionable message, but ONLY if it is still `creating`.
+   *
+   * Used by the crash/on-exit safety net and the startup watchdog. It never
+   * clobbers a status the executor already wrote (success/failure), and — by
+   * design — it does NOT inspect the daemon-local filesystem or infer success
+   * from a `.git` path. An interrupted attempt is surfaced as `failed` so a
+   * human can retry, rather than the daemon guessing and auto-promoting.
+   */
+  async markProvisioningFailedIfCreating(
+    id: string,
+    message: string
+  ): Promise<{ changed: boolean; branch: Branch }> {
+    const existing = await this.findById(id);
+    if (!existing) {
+      throw new EntityNotFoundError('Branch', id);
+    }
+    const baseUrl = await getBaseUrl();
+    return await this.db.transaction(async (tx) => {
+      await lockRowForUpdate(
+        txAsDb(tx),
+        this.db,
+        branches,
+        eq(branches.branch_id, existing.branch_id)
+      );
+      const currentRow = await select(txAsDb(tx))
+        .from(branches)
+        .where(eq(branches.branch_id, existing.branch_id))
+        .one();
+      if (!currentRow) {
+        throw new EntityNotFoundError('Branch', id);
+      }
+      const current = this.rowToBranch(currentRow, baseUrl);
+      if (current.filesystem_status !== 'creating') {
+        return { changed: false, branch: current };
+      }
+      const insertData = this.branchToInsert({
+        ...current,
+        filesystem_status: 'failed',
+        error_message: message,
+      });
+      const row = await update(txAsDb(tx), branches)
+        .set(insertData)
+        .where(eq(branches.branch_id, current.branch_id))
+        .returning()
+        .one();
+      return { changed: true, branch: this.rowToBranch(row, baseUrl) };
+    });
+  }
+
+  /**
    * Delete branch by ID
    */
   async delete(id: string): Promise<void> {
