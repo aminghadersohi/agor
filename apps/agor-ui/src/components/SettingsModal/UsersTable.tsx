@@ -36,6 +36,7 @@ import { filterBySettingsSearch } from '@/utils/settingsSearch';
 import { useThemedMessage } from '../../utils/message';
 import { HighlightMatch } from '../HighlightMatch';
 import { UserIdentityAvatar } from '../UserIdentityAvatar';
+import { ResponsiveSettingsHeader } from './ResponsiveSettingsHeader';
 import { SettingsActionGroup } from './SettingsActionGroup';
 import { UserAvatarsTab } from './UserAvatarsTab';
 import { UserSettingsModal } from './UserSettingsModal';
@@ -275,30 +276,25 @@ export const UsersTable: React.FC<UsersTableProps> = ({
 
   const usersTable = (
     <div>
-      <div
-        style={{
-          marginBottom: 16,
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-        }}
-      >
-        <Typography.Text type="secondary">Manage user accounts and permissions.</Typography.Text>
-        <Space>
-          <Input
-            allowClear
-            placeholder="Search name, email, username, role, or groups"
-            value={searchTerm}
-            onChange={(event) => setSearchTerm(event.target.value)}
-            style={{ width: 'min(100%, 320px)' }}
-          />
-          {isAdmin && (
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateModalOpen(true)}>
-              New User
-            </Button>
-          )}
-        </Space>
-      </div>
+      <ResponsiveSettingsHeader
+        description="Manage user accounts and permissions."
+        actions={(compact) => (
+          <Space wrap style={{ width: compact ? '100%' : undefined }}>
+            <Input
+              allowClear
+              placeholder="Search name, email, username, role, or groups"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              style={{ width: compact ? '100%' : 320, flex: compact ? '1 1 100%' : undefined }}
+            />
+            {isAdmin && (
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateModalOpen(true)}>
+                New User
+              </Button>
+            )}
+          </Space>
+        )}
+      />
 
       <Table
         dataSource={users}
