@@ -1052,6 +1052,9 @@ importers:
       js-yaml:
         specifier: '>=4.3.1 <5'
         version: 4.3.1
+      jsonc-parser:
+        specifier: ^3.3.1
+        version: 3.3.1
       postgres:
         specifier: ^3.4.9
         version: 3.4.9
@@ -5305,6 +5308,7 @@ packages:
   '@xmldom/xmldom@0.9.10':
     resolution: {integrity: sha512-A9gOqLdi6cV4ibazAjcQufGj0B1y/vDqYrcuP6d/6x8P27gRS8643Dj9o1dEKtB6O7fwxb2FgBmJS2mX7gpvdw==}
     engines: {node: '>=14.6'}
+    deprecated: this version has critical issues, please update to the latest version
 
   '@xterm/addon-clipboard@0.2.0':
     resolution: {integrity: sha512-Dl31BCtBhLaUEECUbEiVcCLvLBbaeGYdT7NofB8OJkGTD3MWgBsaLjXvfGAD4tQNHhm6mbKyYkR7XD8kiZsdNg==}

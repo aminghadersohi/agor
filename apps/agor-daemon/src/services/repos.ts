@@ -990,7 +990,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
   private async runAgorYmlExecutorCommand(
     repo: Repo,
     branch: Branch,
-    command: 'branch.agor-yml.import' | 'branch.agor-yml.export',
+    command: 'branch.agor-yml.import' | 'branch.agor-yml.export' | 'branch.launch-json.import',
     params: Record<string, unknown>,
     serviceParams?: RepoParams
   ) {
@@ -1086,6 +1086,44 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       params,
       id,
     });
+    return updated;
+  }
+
+  /**
+   * Import editor-style launch profiles from `.agor/launch.json`, falling
+   * back to `.vscode/launch.json`, and compile them into normal Agor variants.
+   */
+  async importFromLaunchJson(
+    id: string,
+    data: { branch_id: string },
+    params?: RepoParams
+  ): Promise<Repo> {
+    if (!data?.branch_id) throw new Error('branch_id is required to import launch.json');
+    const repo = await this.get(id, params);
+    const branch = await this.getAuthorizedAgorYmlBranch(repo, data.branch_id, params);
+    const importResult = await this.runAgorYmlExecutorCommand(
+      repo,
+      branch,
+      'branch.launch-json.import',
+      {},
+      params
+    );
+    if (!importResult.success) {
+      throw new Error(
+        `Cannot import launch.json from ${branch.name}: ${importResult.error?.message ?? 'executor failed'}`
+      );
+    }
+    const payload = importResult.data as
+      | { environment?: RepoEnvironment | null; path?: string }
+      | undefined;
+    if (!payload?.environment) {
+      throw new Error('No .agor/launch.json or .vscode/launch.json found in this branch');
+    }
+    const replacement: RepoEnvironment = repo.environment?.template_overrides
+      ? { ...payload.environment, template_overrides: repo.environment.template_overrides }
+      : payload.environment;
+    const updated = await this.repoRepo.setEnvironment(id, replacement);
+    emitServiceEvent(this.app, { path: 'repos', event: 'patched', data: updated, params, id });
     return updated;
   }
 

@@ -19,6 +19,7 @@ export default defineConfig({
     'codex/auth-file': 'src/codex/auth-file.ts', // Pure Codex auth.json schema inspection
     'config/index': 'src/config/index.ts',
     'config/agor-yml': 'src/config/agor-yml.ts', // Node-only .agor.yml file I/O
+    'config/launch-json': 'src/config/launch-json.ts', // Browser-safe launch profile compiler
     'config/browser': 'src/config/browser.ts', // Browser-safe config utilities
     'permissions/index': 'src/permissions/index.ts',
     'feathers/index': 'src/feathers/index.ts', // FeathersJS runtime re-exports

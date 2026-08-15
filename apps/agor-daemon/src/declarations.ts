@@ -235,6 +235,11 @@ export interface ReposServiceImpl extends Service<Repo, Partial<Repo>, FeathersP
     data: { branch_id: string },
     params?: FeathersParams
   ): Promise<Repo>;
+  importFromLaunchJson(
+    id: string,
+    data: { branch_id: string },
+    params?: FeathersParams
+  ): Promise<Repo>;
   exportToAgorYml(
     id: string,
     data: { branch_id: string },

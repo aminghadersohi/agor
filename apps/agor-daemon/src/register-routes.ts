@@ -3252,6 +3252,23 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
+  registerAuthenticatedRoute(
+    app,
+    '/repos/:id/import-launch-json',
+    {
+      async create(data: { branch_id: string }, params: RouteParams) {
+        const id = params.route?.id;
+        if (!id) throw new Error('Repo ID required');
+        if (!data?.branch_id) throw new Error('branch_id is required');
+        return reposService.importFromLaunchJson(id, data, params);
+      },
+    },
+    {
+      create: { role: ROLES.ADMIN, action: 'import environment config from launch.json' },
+    },
+    requireAuth
+  );
+
   // ============================================================================
   // User API Keys routes
   // ============================================================================
