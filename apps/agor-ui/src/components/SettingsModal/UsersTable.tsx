@@ -21,7 +21,6 @@ import {
   Checkbox,
   Form,
   Input,
-  Modal,
   Popconfirm,
   Select,
   Space,
@@ -36,6 +35,7 @@ import { filterBySettingsSearch } from '@/utils/settingsSearch';
 import { useThemedMessage } from '../../utils/message';
 import { HighlightMatch } from '../HighlightMatch';
 import { UserIdentityAvatar } from '../UserIdentityAvatar';
+import { AdaptiveSettingsModal } from './AdaptiveSettingsModal';
 import { ResponsiveSettingsHeader } from './ResponsiveSettingsHeader';
 import { SettingsActionGroup } from './SettingsActionGroup';
 import { UserAvatarsTab } from './UserAvatarsTab';
@@ -306,7 +306,7 @@ export const UsersTable: React.FC<UsersTableProps> = ({
       />
 
       {/* Create User Modal */}
-      <Modal
+      <AdaptiveSettingsModal
         title="Create User"
         open={createModalOpen}
         onOk={handleCreate}
@@ -379,7 +379,7 @@ export const UsersTable: React.FC<UsersTableProps> = ({
             <Checkbox>Force password change on first login</Checkbox>
           </Form.Item>
         </Form>
-      </Modal>
+      </AdaptiveSettingsModal>
 
       {/* Edit User Modal - reuses UserSettingsModal */}
       <UserSettingsModal
