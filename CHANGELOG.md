@@ -33,6 +33,29 @@ Every release-version bump PR must include its finalized changelog section; a ve
 
 ## Unreleased
 
+### Fixes
+
+- **Local CLI inspection no longer requires login** — `agor open` and `agor version` now target the local deployment by default, retain `--local` as a compatibility alias, and use the connected deployment only with `--remote`. ([#2468](https://github.com/preset-io/agor/pull/2468))
+- **Curated marketplace OAuth works across reviewed provider variations** — marketplace installs use a bounded interoperability profile while preserving PKCE S256 and issuer/resource binding; explicit strict and legacy policies remain available. Compatibility is re-evaluated against the current curated endpoint and auth policy, so imported, removed, or edited installs fail closed. ([#2377](https://github.com/preset-io/agor/pull/2377))
+  - GitHub, MongoDB, Box, HubSpot, Slack, Prisma, PagerDuty, and Kagi are no longer advertised because the read-only OAuth audit could not reach a safely bound client-registration boundary. Existing saved rows are not deleted.
+  - Existing strict grants retain their binding. Moving an install into or out of marketplace compatibility invalidates the old grant and requires authorization again.
+  - Standalone SQLite callbacks now bind the saved server through provider exchange, and Settings shows catalog-managed Marketplace policy instead of labeling it Strict.
+
+## 0.25.2 (2026-08-18)
+
+### Breaking
+
+- **CLI commands now have one explicit deployment context** — root help separates local administration from commands targeting the connected deployment. `repo add-local` moves to `local add-repo`, `user create-admin` moves to `local create-admin`, and the obsolete `branch cd`, `auth …`, and `whoami` commands are removed. `open` and `version` target the current login by default and accept `--local` only as an explicit override. ([#2391](https://github.com/preset-io/agor/pull/2391))
+
+### Fixes
+
+- **Remote user listing honors the active login** — `agor user list` now uses the shared authenticated daemon client instead of opening the local database. CLI architecture regressions prevent connection commands from bypassing that client boundary. ([#2391](https://github.com/preset-io/agor/pull/2391))
+- **Deployment targeting stays isolated** — an explicit `agor login --url` no longer depends on the presence or validity of unrelated local configuration, while daemon-backed local operations require authentication to the matching local deployment. Root help grouping and execution policy now derive from one command metadata model to prevent context drift. ([#2391](https://github.com/preset-io/agor/pull/2391))
+
+### Chores
+
+- **Align the 0.25.2 release train** — `agor-live`, the CLI, client, and version-aligned agentic-tool packages now share the release version.
+
 ## 0.25.1 (2026-08-18)
 
 > [!WARNING]

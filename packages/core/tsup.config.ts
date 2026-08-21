@@ -56,10 +56,12 @@ export default defineConfig({
     'client/claude-system-suppression': 'src/client/claude-system-suppression.ts', // Browser-safe Claude system event suppression rules
     'tools/mcp/http-headers': 'src/tools/mcp/http-headers.ts', // MCP custom HTTP header utilities
     'tools/mcp/auth-secrets': 'src/tools/mcp/auth-secrets.ts', // MCP auth secret redaction/restoration utilities
+    'tools/mcp/env-secrets': 'src/tools/mcp/env-secrets.ts', // MCP env secret redaction/restoration utilities
     'tools/mcp/jwt-auth': 'src/tools/mcp/jwt-auth.ts', // MCP JWT authentication utilities
     'tools/mcp/oauth-auth': 'src/tools/mcp/oauth-auth.ts', // MCP OAuth 2.0 authentication utilities
     'tools/mcp/oauth-mcp-transport': 'src/tools/mcp/oauth-mcp-transport.ts', // MCP OAuth 2.1 protocol transport
     'tools/mcp/oauth-refresh': 'src/tools/mcp/oauth-refresh.ts', // MCP OAuth refresh_token persistence + mutex
+    'tools/mcp/grant-entitlement': 'src/tools/mcp/grant-entitlement.ts', // MCP OAuth grant subject entitlement, enforced at the write
     'tools/mcp/oauth-token-expiry': 'src/tools/mcp/oauth-token-expiry.ts', // MCP OAuth token expiry resolution cascade
     'unix/index': 'src/unix/index.ts', // Sandbox and delegated-home compatibility utilities
     'local-actions/index': 'src/local-actions/index.ts', // Shared host-local maintenance actions

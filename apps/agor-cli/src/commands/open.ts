@@ -4,43 +4,81 @@
 
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
-import { Command } from '@oclif/core';
+import { Command, Flags } from '@oclif/core';
 import chalk from 'chalk';
-import { loadToken } from '../lib/auth.js';
 import { getUIUrl } from '../lib/context.js';
 import { probeAgorDaemon } from '../lib/daemon-probe.js';
+import {
+  resolveConnectedDeploymentTarget,
+  resolveLocalDeploymentTarget,
+} from '../lib/deployment-target.js';
 
 const execAsync = promisify(exec);
 
 export default class Open extends Command {
-  static description = 'Open Agor UI in browser';
+  static description = 'Open the local deployment in a browser';
 
-  static examples = ['<%= config.bin %> <%= command.id %>'];
+  static examples = [
+    '<%= config.bin %> <%= command.id %>',
+    '<%= config.bin %> <%= command.id %> --remote',
+  ];
+
+  static flags = {
+    local: Flags.boolean({
+      description: 'Open the locally configured deployment (default)',
+      default: false,
+      exclusive: ['remote'],
+    }),
+    remote: Flags.boolean({
+      description: 'Open the connected remote deployment',
+      default: false,
+      exclusive: ['local'],
+    }),
+  };
 
   async run(): Promise<void> {
-    const auth = await loadToken();
-    if (!auth) {
+    const { flags } = await this.parse(Open);
+    const target = flags.remote
+      ? await resolveConnectedDeploymentTarget()
+      : await resolveLocalDeploymentTarget();
+    if (!target) {
       this.error('Not connected. Run agor login --url <daemon-url>.');
     }
-    const daemonUrl = auth.target.url;
+    const isLocalTarget = target.source === 'local';
+    const daemonUrl = target.url;
 
     const probe = await probeAgorDaemon(daemonUrl);
 
     if (!probe.running) {
-      this.log(chalk.red('✗ Connected daemon is not reachable'));
+      this.log(
+        chalk.red(
+          isLocalTarget ? '✗ Local daemon is not reachable' : '✗ Connected daemon is not reachable'
+        )
+      );
       this.log('');
       this.log(`Target: ${chalk.cyan(daemonUrl)}`);
       this.log('');
       this.exit(1);
     }
-    if (probe.deploymentId !== auth.target.deploymentId) {
+    if (probe.deploymentId !== target.deploymentId) {
       this.error(
-        `The daemon identity at ${daemonUrl} changed. Run agor login --url ${daemonUrl} again.`
+        isLocalTarget
+          ? `The local daemon identity at ${daemonUrl} does not match config.yaml.`
+          : `The daemon identity at ${daemonUrl} changed. Run agor login --url ${daemonUrl} again.`
       );
     }
 
-    // Get UI URL (context-aware: dev/prod)
-    const uiUrl = getUIUrl(daemonUrl);
+    let localDevelopmentTarget = isLocalTarget;
+    if (!localDevelopmentTarget) {
+      try {
+        const localTarget = await resolveLocalDeploymentTarget();
+        localDevelopmentTarget =
+          localTarget.deploymentId === target.deploymentId && localTarget.url === target.url;
+      } catch {
+        // No valid local deployment; the connected target remains unambiguously remote.
+      }
+    }
+    const uiUrl = getUIUrl(daemonUrl, localDevelopmentTarget);
 
     // Local environment: try to open browser
     try {

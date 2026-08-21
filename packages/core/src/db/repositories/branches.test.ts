@@ -63,6 +63,7 @@ function createBranchData(overrides?: {
   updated_at?: string;
   storage_mode?: 'worktree' | 'clone';
   clone_depth?: number;
+  archived?: boolean;
   permission_source?: 'board' | 'override';
   others_can?: 'none' | 'view' | 'session' | 'prompt' | 'all';
   others_fs_access?: 'none' | 'read' | 'write';
@@ -96,6 +97,7 @@ function createBranchData(overrides?: {
     updated_at: overrides?.updated_at,
     storage_mode: overrides?.storage_mode,
     clone_depth: overrides?.clone_depth,
+    archived: overrides?.archived,
     permission_source: overrides?.permission_source,
     others_can: overrides?.others_can,
     others_fs_access: overrides?.others_fs_access,
@@ -692,8 +694,17 @@ describe('BranchRepository.findActiveEnvironmentRefs', () => {
       await branchRepo.create(
         createBranchData({
           repo_id: repo.repo_id as UUID,
-          name: 'env-missing',
+          name: 'env-archived-running',
           branch_unique_id: 5,
+          archived: true,
+          environment_instance: { status: 'running' },
+        })
+      );
+      await branchRepo.create(
+        createBranchData({
+          repo_id: repo.repo_id as UUID,
+          name: 'env-missing',
+          branch_unique_id: 6,
         })
       );
 
@@ -1765,6 +1776,19 @@ describe('BranchRepository.findTeammateBranches', () => {
       })
     );
     await branches.addOwner(privateTeammate.branch_id, owner.user_id as UUID);
+    const viewOnlyTeammate = await branches.create(
+      createBranchData({
+        repo_id: repo.repo_id as UUID,
+        created_by: owner.user_id as UUID,
+        branch_unique_id: 5,
+        name: 'view-only-teammate',
+        permission_source: 'override',
+        others_can: 'view',
+        custom_context: {
+          teammate: { kind: 'teammate', displayName: 'View-only Teammate' },
+        },
+      })
+    );
 
     const ownerResult = await branches.findTeammateBranches({
       archived: false,
@@ -1778,10 +1802,21 @@ describe('BranchRepository.findTeammateBranches', () => {
       userId: outsider.user_id as UUID,
       limit: 10,
     });
+    const outsiderSessionResult = await branches.findTeammateBranches({
+      archived: false,
+      repo_id: repo.repo_id as UUID,
+      userId: outsider.user_id as UUID,
+      minimumPermission: 'session',
+      limit: 10,
+    });
 
     expect(ownerResult.map((branch) => branch.branch_id)).toContain(privateTeammate.branch_id);
     expect(outsiderResult.map((branch) => branch.branch_id)).not.toContain(
       privateTeammate.branch_id
+    );
+    expect(outsiderResult.map((branch) => branch.branch_id)).toContain(viewOnlyTeammate.branch_id);
+    expect(outsiderSessionResult.map((branch) => branch.branch_id)).not.toContain(
+      viewOnlyTeammate.branch_id
     );
   });
 });

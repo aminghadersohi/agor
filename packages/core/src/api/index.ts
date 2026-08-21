@@ -5,6 +5,7 @@
  */
 
 import type {
+  AgenticToolName,
   AgenticToolPreset,
   Artifact,
   AuthenticationResult,
@@ -55,6 +56,7 @@ import type {
   SchedulePatchData,
   SdkHealthFailureInput,
   Session,
+  SessionID,
   SessionUpdate,
   Task,
   TeammateWelcomeNoteRequest,
@@ -66,6 +68,7 @@ import type {
   UserAvatarSettings,
   UserAvatarSyncRequest,
   UserAvatarSyncResult,
+  UserID,
   UUID,
 } from '@agor/core/types';
 import authentication from '@feathersjs/authentication-client';
@@ -122,33 +125,36 @@ export interface SessionPromptRequest {
   stream?: boolean;
 }
 
-export interface QueuedSessionPromptResult {
-  success: true;
-  queued: true;
-  message: Message;
-  queue_position: number;
-}
-
-export interface RunningSessionPromptResult {
-  success: true;
-  taskId: string;
-  status: string;
-  streaming: boolean;
-  queued?: false;
-}
-
-export type SessionPromptResult = QueuedSessionPromptResult | RunningSessionPromptResult;
-
 export interface SessionPromptOptions extends Omit<SessionPromptRequest, 'prompt'> {
   params?: Params;
 }
 
+/** Required setup for an already-created session, applied before its first prompt. */
+export interface SessionInitializationRequest {
+  /** Fence delayed calls to the identity that created the session. */
+  expectedUserId: UserID;
+  /** Validated and branded after crossing the daemon trust boundary. */
+  mcpServerIds?: string[];
+  envVarNames?: string[];
+  prompt?: string;
+  permissionMode?: PermissionMode;
+}
+
+export interface SessionInitializationOptions extends SessionInitializationRequest {
+  params?: Params;
+}
+
+export interface SessionInitializationResult {
+  sessionId: SessionID;
+  task?: Task;
+}
+
 export interface SessionsClientHelpers {
-  prompt(
+  prompt(sessionId: string, prompt: string, options?: SessionPromptOptions): Promise<Task>;
+  initialize(
     sessionId: string,
-    prompt: string,
-    options?: SessionPromptOptions
-  ): Promise<SessionPromptResult>;
+    options: SessionInitializationOptions
+  ): Promise<SessionInitializationResult>;
 }
 
 /**
@@ -581,6 +587,31 @@ export interface UsersService extends AgorService<User> {
     params?: Params
   ): Promise<UserAvatarSettings>;
   syncAvatars(data?: UserAvatarSyncRequest, params?: Params): Promise<UserAvatarSyncResult>;
+  /**
+   * Resolve the calling user's primary teammate branch, or null when unset or
+   * no longer accessible.
+   */
+  getPrimaryTeammate(data?: unknown, params?: Params): Promise<Branch | null>;
+  /** List active teammate branches the caller can start sessions on. */
+  getPrimaryTeammateCandidates(data?: unknown, params?: Params): Promise<Branch[]>;
+  /**
+   * Set the calling user's primary teammate to an accessible branch,
+   * recorded as an explicit user pick.
+   */
+  setPrimaryTeammate(
+    data: { branchId: string; expectedUserId: UserID },
+    params?: Params
+  ): Promise<Branch | null>;
+  /** Set an onboarding/default teammate only when the caller is still unset. */
+  setPrimaryTeammateIfUnset(
+    data: { branchId: string; expectedUserId: UserID },
+    params?: Params
+  ): Promise<Branch | null>;
+  /** Seed the caller's primary coding agent without overwriting an existing preference. */
+  setPrimaryAgenticToolIfUnset(
+    data: { tool: AgenticToolName; expectedUserId: UserID },
+    params?: Params
+  ): Promise<User>;
 }
 
 /**
@@ -1163,7 +1194,12 @@ function extendUsersService(client: AgorClient): void {
       'getGitEnvironment',
       'getAvatarSettings',
       'updateAvatarSettings',
-      'syncAvatars'
+      'syncAvatars',
+      'getPrimaryTeammate',
+      'getPrimaryTeammateCandidates',
+      'setPrimaryTeammate',
+      'setPrimaryTeammateIfUnset',
+      'setPrimaryAgenticToolIfUnset'
     );
   }
   usersService[USERS_SERVICE_EXTENDED] = true;
@@ -1242,7 +1278,14 @@ function extendSessionsHelpers(client: AgorClient): void {
       const response = await client
         .service(`sessions/${sessionId}/prompt`)
         .create({ prompt, ...requestOptions } as SessionPromptRequest, params);
-      return response as SessionPromptResult;
+      return response as Task;
+    },
+    initialize: async (sessionId: string, options: SessionInitializationOptions) => {
+      const { params, ...request } = options;
+      const response = await client
+        .service(`sessions/${sessionId}/initialize`)
+        .create(request, params);
+      return response as SessionInitializationResult;
     },
   };
 
@@ -1310,20 +1353,61 @@ export async function createRestClient(
   // Lazy-load REST client (only imported when needed, not in browser bundles)
   const { default: rest } = await import('@feathersjs/rest-client');
 
-  // When an API key is provided, wrap fetch to inject the Authorization header
-  const fetchFn = apiKey
-    ? (input: string | URL | globalThis.Request, init?: RequestInit) => {
-        const headers = new Headers(init?.headers);
-        headers.set('Authorization', `Bearer ${apiKey}`);
-        return fetchImpl(input, { ...init, headers });
-      }
-    : fetchImpl;
+  // Inject the Authorization header at the transport layer rather than relying on
+  // the Feathers authentication hook.
+  //
+  // That hook only decorates the *standard* service methods. Calls to custom methods
+  // registered via `service.methods(...)` — board `toYaml`/`clone`/`fromYaml`, repo
+  // `createBranch`, … — went out with no credentials at all, and the daemon correctly
+  // answered 401 "Not authenticated". Only the CLI hit this: the UI is on Socket.IO,
+  // where the connection itself is authenticated.
+  //
+  // The token is tracked here rather than read back from the authentication client
+  // because this client is configured with `storage: undefined`, so
+  // `getAccessToken()` resolves to null.
+  let bearerToken: string | null = apiKey ?? null;
+
+  const fetchFn = async (input: string | URL | globalThis.Request, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+
+    // Never attach a bearer to the login exchange itself: the credentials live in
+    // the request body, and a stale token here would 401 the very call meant to
+    // replace it.
+    const target = typeof input === 'string' ? input : input.toString();
+    const isAuthenticationRequest = /\/authentication\/?(?:\?|$)/.test(target);
+
+    if (!isAuthenticationRequest && !headers.has('Authorization') && bearerToken) {
+      headers.set('Authorization', `Bearer ${bearerToken}`);
+    }
+
+    return fetchImpl(input, { ...init, headers });
+  };
 
   // Configure REST transport
   client.configure(rest(url).fetch(fetchFn));
 
   // Configure authentication with no storage (CLI will manage tokens separately)
   client.configure(authentication({ storage: undefined }));
+
+  // Remember the credential each successful login establishes, so `fetchFn` above
+  // can authenticate custom-method calls the Feathers hook does not cover.
+  if (!apiKey) {
+    const authenticateWithClient = client.authenticate.bind(client);
+    client.authenticate = async (data?: Parameters<typeof authenticateWithClient>[0]) => {
+      const result = await authenticateWithClient(data);
+      const established =
+        (result as { accessToken?: unknown } | undefined)?.accessToken ??
+        (data as { accessToken?: unknown } | undefined)?.accessToken;
+      if (typeof established === 'string') bearerToken = established;
+      return result;
+    };
+
+    const logoutFromClient = client.logout.bind(client);
+    client.logout = async () => {
+      bearerToken = null;
+      return logoutFromClient();
+    };
+  }
 
   // Create a dummy socket object to satisfy the interface
   client.io = {

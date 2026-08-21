@@ -61,18 +61,33 @@ describe('connectBlockedReason', () => {
     expect(connectBlockedReason(entry({ auth_type: 'unknown' }))).toBeUndefined();
   });
 
-  it('refuses a locally-run server', () => {
+  it('refuses an entry with no endpoint to dial', () => {
+    // Unreachable for anything the loader served — it refuses such an entry
+    // outright now — but these arrive over the wire, so the UI still answers.
     expect(
       connectBlockedReason(entry({ transport: 'stdio', has_remote: false, remote_url: undefined }))
-    ).toMatch(/runs locally/i);
+    ).toMatch(/cannot be installed/i);
   });
 
-  it.each(['oauth', 'credentials'] as const)(
-    'refuses %s auth while only the no-auth branch exists',
-    (authType) => {
-      expect(connectBlockedReason(entry({ auth_type: authType }))).toMatch(/needs an account/i);
+  it('allows oauth: connecting sets it up and the user signs in afterwards', () => {
+    expect(connectBlockedReason(entry({ auth_type: 'oauth' }))).toBeUndefined();
+  });
+
+  it('allows credentials auth: the drawer takes a key before connecting', () => {
+    // This used to be a refusal. It stopped being one when the drawer gained
+    // somewhere to paste a key — `blocked` removes the connect form entirely,
+    // which is the opposite of what an entry asking for a key needs.
+    expect(connectBlockedReason(entry({ auth_type: 'credentials' }))).toBeUndefined();
+  });
+
+  it('refuses nothing on the grounds of auth any more', () => {
+    // The claim behind "every catalog entry is installable": no stated auth
+    // type is a dead end, and the only remaining refusal is an entry with no
+    // endpoint at all.
+    for (const auth_type of ['none', 'oauth', 'credentials', 'unknown'] as const) {
+      expect(connectBlockedReason(entry({ auth_type }))).toBeUndefined();
     }
-  );
+  });
 });
 
 describe('connectStatus', () => {
@@ -94,12 +109,34 @@ describe('connectStatus', () => {
       connectStatus(entry({ transport: 'stdio', has_remote: false, remote_url: undefined }))
     ).toMatchObject({
       readiness: 'blocked',
-      label: 'Runs locally',
+      label: 'Not installable',
     });
-    expect(connectStatus(entry({ auth_type: 'oauth' }))).toMatchObject({
-      readiness: 'blocked',
-      label: 'Needs an account',
+  });
+
+  it('separates "paste a key first" from both blocked and ready', () => {
+    // A third thing that is not a refusal: the entry connects, but it asks
+    // something of the user before it does rather than after. Sharing
+    // `blocked` with "no endpoint at all" is what used to hide the field.
+    const keyed = connectStatus(entry({ auth_type: 'credentials' }));
+    expect(keyed).toMatchObject({
+      readiness: 'api-key',
+      label: 'Needs a bearer access token',
     });
+    expect(keyed.detail).toMatch(/paste one when you connect/i);
+    // Says whose key it is and what becomes of it — the two things a user has
+    // to know before typing a credential into somebody else's software.
+    expect(keyed.detail).toMatch(/your own account/i);
+    expect(keyed.detail).toMatch(/never shows it again|never shown again|for you alone/i);
+  });
+
+  it('separates "sign in afterwards" from "no account needed"', () => {
+    // Both connect, so both must not be `blocked` — but a card promising "no
+    // account needed" over a server that wants the user's Notion login is the
+    // thing this vocabulary exists to prevent.
+    const oauth = connectStatus(entry({ auth_type: 'oauth' }));
+    expect(oauth.readiness).toBe('sign-in');
+    expect(oauth.readiness).not.toBe(connectStatus(entry()).readiness);
+    expect(oauth.detail).toMatch(/your own account/i);
   });
 });
 
@@ -110,10 +147,25 @@ describe('isConnectable', () => {
   });
 
   it('excludes what the card calls blocked', () => {
-    expect(isConnectable(entry({ auth_type: 'oauth' }))).toBe(false);
-    expect(isConnectable(entry({ auth_type: 'credentials' }))).toBe(false);
+    // Only one thing is blocked now: an entry naming no endpoint.
     expect(
       isConnectable(entry({ transport: 'stdio', has_remote: false, remote_url: undefined }))
+    ).toBe(false);
+  });
+
+  it('keeps credentials, which connects once a key is pasted', () => {
+    expect(isConnectable(entry({ auth_type: 'credentials' }))).toBe(true);
+  });
+
+  it('keeps oauth, which connects and then asks the user to sign in', () => {
+    expect(isConnectable(entry({ auth_type: 'oauth' }))).toBe(true);
+  });
+
+  it('still excludes an endpoint-less oauth entry — nothing to sign into', () => {
+    expect(
+      isConnectable(
+        entry({ auth_type: 'oauth', transport: 'stdio', has_remote: false, remote_url: undefined })
+      )
     ).toBe(false);
   });
 

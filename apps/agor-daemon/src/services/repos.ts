@@ -59,7 +59,7 @@ import { resolveDelegatedExecutionHomeKey } from '../utils/executor-delegated-ho
 import {
   generateScopedServiceToken,
   getDaemonUrl,
-  runExecutorCommand,
+  requestExecutor,
   spawnExecutorFireAndForget,
 } from '../utils/spawn-executor.js';
 
@@ -594,7 +594,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       userId,
       this.app.get('config')
     );
-    const inspection = await runExecutorCommand(
+    const inspection = await requestExecutor(
       {
         command: 'git.repo.inspect',
         daemonUrl: getDaemonUrl(),
@@ -1442,7 +1442,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       this.app.get('config')
     );
 
-    return runExecutorCommand(
+    return requestExecutor(
       {
         command,
         sessionToken,
@@ -1620,7 +1620,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
         this.app as unknown as { settings: { authentication?: { secret?: string } } }
       );
 
-      const cleanupResult = await runExecutorCommand(
+      const cleanupResult = await requestExecutor(
         {
           command: 'git.repo.delete',
           sessionToken,

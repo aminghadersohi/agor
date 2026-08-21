@@ -220,6 +220,11 @@ export const sessions = pgTable(
     boardIdx: index('sessions_board_idx').on(table.board_id),
     branchIdx: index('sessions_branch_idx').on(table.branch_id),
     createdIdx: index('sessions_created_idx').on(table.created_at),
+    tenantArchivedUpdatedIdx: index('sessions_tenant_archived_updated_idx').on(
+      table.tenant_id,
+      table.archived,
+      table.updated_at
+    ),
     parentIdx: index('sessions_parent_idx').on(table.parent_session_id),
     forkedIdx: index('sessions_forked_idx').on(table.forked_from_session_id),
     // Scheduler indexes — including the partial unique index below.
@@ -1020,7 +1025,7 @@ export const users = pgTable(
       .notNull()
       .default('member'),
 
-    // Opaque execution-home key (optional, app-enforced tenant uniqueness)
+    // Opaque execution-home key (optional, database-enforced per-tenant uniqueness)
     unix_username: text('unix_username'),
 
     // Absolute host home dir used as the per-user sandbox overlay SOURCE under
@@ -1149,6 +1154,8 @@ export const users = pgTable(
             permissionMode?: string;
           };
         };
+        primary_agentic_tool?: import('../types/agentic-tool').AgenticToolName;
+        primary_teammate_id?: import('../types/id').BranchID;
         default_mcp_server_ids?: string[];
         default_agentic_selection?: import('../types/user').UserAgenticDefaultSelections;
       }>()
@@ -1158,6 +1165,47 @@ export const users = pgTable(
     tenantIdx: index('users_tenant_id_idx').on(table.tenant_id),
     emailIdx: index('users_email_idx').on(table.email),
     emailTenantUnique: uniqueIndex('users_tenant_email_unique').on(table.tenant_id, table.email),
+    executionHomeTenantUnique: uniqueIndex('users_tenant_unix_username_unique').on(
+      table.tenant_id,
+      table.unix_username
+    ),
+  })
+);
+
+/**
+ * Database-enforced binding between one trusted external subject and its local
+ * user projection. The JSON copy on users remains a compatibility/audit cache;
+ * this relation is the lookup and uniqueness authority.
+ */
+export const userExternalIdentities = pgTable(
+  'user_external_identities',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    identity_key: varchar('identity_key', { length: 64 }).notNull(),
+    user_id: varchar('user_id', { length: 36 }).notNull(),
+    provider: text('provider').notNull(),
+    issuer: text('issuer').notNull(),
+    subject: text('subject').notNull(),
+    email: text('email'),
+    name: text('name'),
+    last_login_at: t.timestamp('last_login_at').notNull(),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.tenant_id, table.identity_key] }),
+    tenantUserFk: foreignKey({
+      columns: [table.tenant_id, table.user_id],
+      foreignColumns: [users.tenant_id, users.user_id],
+      name: 'user_external_identities_tenant_user_fk',
+    }).onDelete('cascade'),
+    providerSubjectUnique: uniqueIndex('user_external_identities_provider_subject_unique').on(
+      table.tenant_id,
+      table.provider,
+      table.issuer,
+      table.subject
+    ),
+    userIdx: index('user_external_identities_tenant_user_idx').on(table.tenant_id, table.user_id),
   })
 );
 
@@ -1406,6 +1454,7 @@ export const mcpServers = pgTable(
     source: text('source', {
       enum: ['user', 'imported', 'agor', 'catalog'],
     }).notNull(),
+    catalog_entry_name: text('catalog_entry_name'),
 
     // JSON blob for configuration and capabilities
     data: t
@@ -1482,6 +1531,9 @@ export const mcpServers = pgTable(
     scopeIdx: index('mcp_servers_scope_idx').on(table.scope),
     ownerIdx: index('mcp_servers_owner_idx').on(table.owner_user_id),
     enabledIdx: index('mcp_servers_enabled_idx').on(table.enabled),
+    catalogOwnerUq: uniqueIndex('mcp_servers_catalog_owner_uq')
+      .on(table.tenant_id, sql`coalesce(${table.owner_user_id}, '')`, table.catalog_entry_name)
+      .where(sql`${table.source} = 'catalog' AND ${table.catalog_entry_name} IS NOT NULL`),
   })
 );
 
@@ -2740,6 +2792,8 @@ export type ScheduleRow = typeof schedules.$inferSelect;
 export type ScheduleInsert = typeof schedules.$inferInsert;
 export type UserRow = typeof users.$inferSelect;
 export type UserInsert = typeof users.$inferInsert;
+export type UserExternalIdentityRow = typeof userExternalIdentities.$inferSelect;
+export type UserExternalIdentityInsert = typeof userExternalIdentities.$inferInsert;
 export type AppVariableRow = typeof appVariables.$inferSelect;
 export type AppVariableInsert = typeof appVariables.$inferInsert;
 export type AgenticToolPresetRow = typeof agenticToolPresets.$inferSelect;
