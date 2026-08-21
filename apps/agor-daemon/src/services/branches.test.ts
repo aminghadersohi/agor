@@ -2937,14 +2937,17 @@ describe('BranchesService.patch provisioning attempt fence', () => {
     await service.patch(branchId, {
       filesystem_status: 'ready',
       provisioning_attempt_id: 'attempt-A',
-      unix_group: 'agor_wt_x',
+      start_command: 'pnpm dev',
     } as never);
 
     const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
     expect(written).not.toHaveProperty('filesystem_status');
     expect(written).not.toHaveProperty('provisioning_attempt_id');
-    // The checkout really was materialized — keep the group it created.
-    expect(written.unix_group).toBe('agor_wt_x');
+    // The checkout really was materialized and its environment templates were
+    // rendered — those ride along on the same ack and are attempt-independent,
+    // so they must survive. (Rendered templates are what the executor actually
+    // sends here; unix groups were removed from that payload.)
+    expect(written.start_command).toBe('pnpm dev');
   });
 
   it('drops a superseded failure ack so it cannot fail the newer attempt', async () => {
