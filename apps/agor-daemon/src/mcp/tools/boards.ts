@@ -1,5 +1,6 @@
 import type {
   Board,
+  BoardEntityObject,
   BoardEntityType,
   BoardObject,
   BoardObjectType,
@@ -14,6 +15,7 @@ import {
   mcpListLimit,
   mcpOffset,
   mcpOptionalNonNegativeInt,
+  mcpOptionalNumber,
   mcpOptionalPositiveInt,
   mcpOptionalString,
   mcpPageResult,
@@ -340,7 +342,85 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 4: agor_boards_create
+  // Tool 4: agor_boards_auto_arrange
+  server.registerTool(
+    'agor_boards_auto_arrange',
+    {
+      description:
+        'Arrange the worktree/branch and card entities on a board in a deterministic grid. ' +
+        'By default, only free-floating entities are moved; zone-pinned entities stay in their zones. ' +
+        'Use this after creating or moving many worktrees/cards so the canvas is tidy and collision-free.',
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        boardId: mcpRequiredId('boardId', 'Board'),
+        entityType: z
+          .enum(BOARD_ENTITY_TYPES)
+          .optional()
+          .describe('Arrange only branch or card entities (default: both).'),
+        includePinned: z
+          .boolean()
+          .optional()
+          .describe('Also move entities currently pinned to zones (default: false).'),
+        columns: mcpOptionalPositiveInt(
+          'columns',
+          'Number of columns in the grid (default: square-ish layout).'
+        ),
+        startX: mcpOptionalNumber('startX', 'Canvas X origin (default: 80).'),
+        startY: mcpOptionalNumber('startY', 'Canvas Y origin (default: 80).'),
+        gapX: mcpOptionalNumber('gapX', 'Horizontal gap between cards (default: 40).'),
+        gapY: mcpOptionalNumber('gapY', 'Vertical gap between cards (default: 40).'),
+      }),
+    },
+    async (args) => {
+      const boardId = coerceString(args.boardId);
+      if (!boardId) throw new Error('boardId is required');
+      const boardObjectsService = ctx.app.service('board-objects');
+      const result = (await boardObjectsService.find({
+        query: {
+          board_id: boardId,
+          ...(args.entityType ? { entity_type: args.entityType } : {}),
+        },
+        ...ctx.baseServiceParams,
+      })) as { data: Array<BoardEntityObject> };
+      const entities = result.data
+        .filter((entity) => args.includePinned === true || !entity.zone_id)
+        .sort((a, b) => a.object_id.localeCompare(b.object_id));
+      const columns = Math.max(
+        1,
+        args.columns ?? Math.ceil(Math.sqrt(Math.max(1, entities.length)))
+      );
+      const startX = args.startX ?? 80;
+      const startY = args.startY ?? 80;
+      const gapX = args.gapX ?? 40;
+      const gapY = args.gapY ?? 40;
+      const updates: Array<{
+        objectId: string;
+        entityType: string;
+        position: { x: number; y: number };
+      }> = [];
+
+      for (const [index, entity] of entities.entries()) {
+        const column = index % columns;
+        const row = Math.floor(index / columns);
+        const position = {
+          x: startX + column * (500 + gapX),
+          y: startY + row * (220 + gapY),
+        };
+        await boardObjectsService.patch(entity.object_id, { position }, ctx.baseServiceParams);
+        updates.push({ objectId: entity.object_id, entityType: entity.entity_type, position });
+      }
+
+      return textResult({
+        boardId,
+        arranged: updates.length,
+        skippedPinned: result.data.length - entities.length,
+        columns,
+        updates,
+      });
+    }
+  );
+
+  // Tool 5: agor_boards_create
   server.registerTool(
     'agor_boards_create',
     {
