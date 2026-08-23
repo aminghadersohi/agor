@@ -24,6 +24,52 @@
   fill: currentColor;
 }
 
+.canvas-alignment-guides {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.canvas-layout-toolbar {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 24px);
+  padding: 6px 8px;
+  transform: translateX(-50%);
+  border: 1px solid var(--ant-color-border-secondary);
+  border-radius: 8px;
+  background: var(--ant-color-bg-elevated);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 18%);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.canvas-alignment-guide {
+  position: absolute;
+  display: block;
+  background: var(--ant-color-primary);
+  opacity: 0.9;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ant-color-primary) 28%, transparent);
+}
+
+.canvas-alignment-guide.vertical {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.canvas-alignment-guide.horizontal {
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
 /* Tool mode cursors - override React Flow defaults */
 .react-flow.tool-mode-zone .react-flow__pane {
   cursor: crosshair;
