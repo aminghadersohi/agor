@@ -657,6 +657,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const layoutUpdateTimerRef = useRef<NodeJS.Timeout | null>(null);
     const pendingLayoutUpdatesRef = useRef<Record<string, { x: number; y: number }>>({});
     const isDraggingRef = useRef(false);
+    const [isDraggingCanvas, setIsDraggingCanvas] = useState(false);
     const [alignmentGuides, setAlignmentGuides] = useState<LayoutGuide[]>([]);
 
     // Helper: Check if a node intersects with a zone
@@ -1800,6 +1801,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Handle node drag start
     const handleNodeDragStart: NodeDragHandler = useCallback(() => {
       isDraggingRef.current = true;
+      setIsDraggingCanvas(true);
       setAlignmentGuides([]);
     }, []);
 
@@ -1855,6 +1857,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
         // Reset dragging flag immediately to allow node sync effects to run
         isDraggingRef.current = false;
+        setIsDraggingCanvas(false);
         setAlignmentGuides([]);
 
         // Track final position locally
@@ -2906,7 +2909,15 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             disableKeyboardA11y={true}
             style={{ background: 'transparent' }}
           >
-            {!canvasBackground && <Background />}
+            {(!canvasBackground || isDraggingCanvas) && (
+              <Background
+                variant="dots"
+                gap={20}
+                size={1.5}
+                color={token.colorTextQuaternary}
+                style={{ opacity: isDraggingCanvas ? 0.75 : 0.35 }}
+              />
+            )}
             <Controls
               position="top-left"
               showZoom={false}
