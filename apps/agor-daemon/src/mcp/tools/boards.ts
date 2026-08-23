@@ -420,7 +420,85 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 5: agor_boards_create
+  // Tool 5: agor_boards_auto_arrange_zone
+  server.registerTool(
+    'agor_boards_auto_arrange_zone',
+    {
+      description:
+        'Arrange worktrees/branches and cards inside one board zone. Positions are stored relative to the zone, preserving the zone pin, and the grid is sized to the zone so items do not stack on top of each other. Use this after adding several entities to a zone.',
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        boardId: mcpRequiredId('boardId', 'Board'),
+        zoneId: mcpRequiredString('zoneId', 'Zone object ID'),
+        entityType: z
+          .enum(BOARD_ENTITY_TYPES)
+          .optional()
+          .describe('Arrange only branch or card entities (default: both).'),
+        columns: mcpOptionalPositiveInt(
+          'columns',
+          'Number of columns; defaults to the largest number that fits the zone width.'
+        ),
+        padding: mcpOptionalNumber('padding', 'Padding from the zone edges (default: 24).'),
+        gapX: mcpOptionalNumber('gapX', 'Horizontal gap between items (default: 24).'),
+        gapY: mcpOptionalNumber('gapY', 'Vertical gap between items (default: 24).'),
+      }),
+    },
+    async (args) => {
+      const boardId = coerceString(args.boardId);
+      const zoneId = coerceString(args.zoneId);
+      if (!boardId || !zoneId) throw new Error('boardId and zoneId are required');
+      const board = (await ctx.app.service('boards').get(boardId, ctx.baseServiceParams)) as Board;
+      const zone = board.objects?.[zoneId] as
+        | (BoardObject & { type: 'zone'; width: number; height: number })
+        | undefined;
+      if (!zone || zone.type !== 'zone') {
+        throw new Error(`Zone '${zoneId}' was not found on board '${boardId}'.`);
+      }
+
+      const boardObjectsService = ctx.app.service('board-objects');
+      const result = (await boardObjectsService.find({
+        query: {
+          board_id: boardId,
+          zone_id: zoneId,
+          ...(args.entityType ? { entity_type: args.entityType } : {}),
+        },
+        ...ctx.baseServiceParams,
+      })) as { data: Array<BoardEntityObject> };
+      const entities = result.data.sort((a, b) => a.object_id.localeCompare(b.object_id));
+      const padding = Math.max(0, args.padding ?? 24);
+      const gapX = Math.max(0, args.gapX ?? 24);
+      const gapY = Math.max(0, args.gapY ?? 24);
+      const maxColumns = Math.max(1, Math.floor((zone.width - 2 * padding + gapX) / (500 + gapX)));
+      const columns = Math.max(1, Math.min(args.columns ?? maxColumns, maxColumns));
+      const updates: Array<{
+        objectId: string;
+        entityType: string;
+        position: { x: number; y: number };
+      }> = [];
+
+      for (const [index, entity] of entities.entries()) {
+        const column = index % columns;
+        const row = Math.floor(index / columns);
+        const position = {
+          x: padding + column * (500 + gapX),
+          y: padding + row * (220 + gapY),
+        };
+        await boardObjectsService.patch(entity.object_id, { position }, ctx.baseServiceParams);
+        updates.push({ objectId: entity.object_id, entityType: entity.entity_type, position });
+      }
+
+      return textResult({
+        boardId,
+        zoneId,
+        arranged: updates.length,
+        columns,
+        zone: { width: zone.width, height: zone.height },
+        updates,
+      });
+    }
+  );
+
+  // Tool 6: agor_boards_create
   server.registerTool(
     'agor_boards_create',
     {
