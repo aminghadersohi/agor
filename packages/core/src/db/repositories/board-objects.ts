@@ -334,6 +334,7 @@ export class BoardObjectRepository {
     position: { x: number; y: number };
     size?: { width: number; height: number };
     zone_id?: string;
+    compact?: boolean;
   }): Promise<BoardEntityObject> {
     try {
       // Validate: exactly one of branch_id or card_id must be provided
@@ -365,6 +366,7 @@ export class BoardObjectRepository {
           position: data.position,
           size: data.size,
           zone_id: data.zone_id,
+          compact: data.compact,
         },
       };
 
@@ -414,9 +416,8 @@ export class BoardObjectRepository {
       await update(this.db, boardObjects)
         .set({
           data: {
+            ...existingData,
             position,
-            size: existingData.size,
-            zone_id: existingData.zone_id,
           },
         })
         .where(eq(boardObjects.object_id, objectId))
@@ -457,9 +458,8 @@ export class BoardObjectRepository {
       await update(this.db, boardObjects)
         .set({
           data: {
-            position: existingData.position,
+            ...existingData,
             size,
-            zone_id: existingData.zone_id,
           },
         })
         .where(eq(boardObjects.object_id, objectId))
@@ -503,8 +503,7 @@ export class BoardObjectRepository {
       await update(this.db, boardObjects)
         .set({
           data: {
-            position: existingData.position,
-            size: existingData.size,
+            ...existingData,
             // Convert null to undefined for consistency
             zone_id: zoneId === null ? undefined : zoneId,
           },
@@ -529,6 +528,27 @@ export class BoardObjectRepository {
         error
       );
     }
+  }
+
+  /** Update shared compact presentation state while preserving placement data. */
+  async updateCompact(objectId: string, compact: boolean): Promise<BoardEntityObject> {
+    const existing = await select(this.db)
+      .from(boardObjects)
+      .where(eq(boardObjects.object_id, objectId))
+      .one();
+    if (!existing) throw new EntityNotFoundError('BoardObject', objectId);
+    const existingData =
+      typeof existing.data === 'string' ? JSON.parse(existing.data) : existing.data;
+    await update(this.db, boardObjects)
+      .set({ data: { ...existingData, compact } })
+      .where(eq(boardObjects.object_id, objectId))
+      .run();
+    const row = await select(this.db)
+      .from(boardObjects)
+      .where(eq(boardObjects.object_id, objectId))
+      .one();
+    if (!row) throw new RepositoryError('Failed to retrieve updated board object');
+    return this.rowToEntity(row);
   }
 
   /**
@@ -634,6 +654,7 @@ export class BoardObjectRepository {
       entity_type: entityType,
       position: data.position,
       size: data.size,
+      compact: data.compact === true,
       zone_id: data.zone_id,
       created_at: new Date(row.created_at).toISOString(),
     };
