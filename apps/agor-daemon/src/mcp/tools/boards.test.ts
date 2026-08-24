@@ -542,7 +542,22 @@ describe('agor_boards_create schema', () => {
 describe('agor_boards_auto_arrange_zone', () => {
   const baseServiceParams = { authenticated: true, provider: 'mcp' };
 
-  it('uses accessible cascade offsets when an exact one-column grid is too tall', async () => {
+  it('exposes deck overflow as an explicit opt-in', () => {
+    const config = registerAndCaptureConfig('agor_boards_auto_arrange_zone', {
+      app: {},
+      userId: 'user-1',
+    });
+
+    expect(
+      config.inputSchema?.safeParse({
+        boardId: 'board-1',
+        zoneId: 'zone-1',
+        overflowStrategy: 'deck',
+      }).success
+    ).toBe(true);
+  });
+
+  it('uses accessible cascade offsets only when deck overflow is explicit', async () => {
     const patches: Array<{ id: string; position: { x: number; y: number } }> = [];
     const boardObjects = Array.from({ length: 20 }, (_, index) => ({
       object_id: `card-${index}`,
@@ -584,8 +599,28 @@ describe('agor_boards_auto_arrange_zone', () => {
       baseServiceParams,
     });
 
-    const parsed = JSON.parse(
+    const rejected = JSON.parse(
       (await arrange({ boardId: 'board-1', zoneId: 'zone-1', columns: 1 })).content[0].text
+    );
+    expect(rejected).toMatchObject({
+      applied: false,
+      arranged: 0,
+      requestedColumns: 1,
+      layoutMode: 'grid',
+      updates: [],
+    });
+    expect(rejected.overflowingObjectIds.length).toBeGreaterThan(0);
+    expect(patches).toHaveLength(0);
+
+    const parsed = JSON.parse(
+      (
+        await arrange({
+          boardId: 'board-1',
+          zoneId: 'zone-1',
+          columns: 1,
+          overflowStrategy: 'deck',
+        })
+      ).content[0].text
     );
 
     expect(parsed.arranged).toBe(20);

@@ -17,6 +17,8 @@ export interface RectangleLayoutOptions {
   /** Outer container size. Omit for an unbounded canvas layout. */
   bounds?: { width: number; height: number };
   padding?: number;
+  /** Smallest acceptable edge margin when a bounded grid needs compaction. */
+  minPadding?: number;
   gapX?: number;
   gapY?: number;
   /** Smallest acceptable gaps when a bounded grid needs gentle compaction. */
@@ -45,6 +47,7 @@ export interface RectangleLayoutResult {
   height: number;
   gapX: number;
   gapY: number;
+  padding: number;
   fitsWithoutOverlap: boolean;
   stackCount: number;
   maxDeckDepth: number;
@@ -61,6 +64,7 @@ interface GridCandidate {
   height: number;
   gapX: number;
   gapY: number;
+  padding: number;
 }
 
 const finiteNonNegative = (value: number | undefined, fallback: number): number =>
@@ -130,6 +134,7 @@ function buildGrid(
       Math.max(0, rows - 1) * gapY,
     gapX,
     gapY,
+    padding,
   };
 }
 
@@ -146,6 +151,7 @@ function chooseGrid(
     gapY: number;
     minGapX: number;
     minGapY: number;
+    minPadding: number;
     preferredColumns?: number;
     exactColumns?: number;
   }
@@ -157,34 +163,36 @@ function chooseGrid(
   const columnCounts = exactColumns
     ? [exactColumns]
     : Array.from({ length: items.length }, (_, index) => index + 1);
+  const bounds = options.bounds;
   const candidates = columnCounts
-    .map((columns) => {
-      if (!options.bounds) {
-        return buildGrid(items, columns, options.padding, options.gapX, options.gapY);
+    .flatMap((columns) => {
+      if (!bounds) {
+        return [buildGrid(items, columns, options.padding, options.gapX, options.gapY)];
       }
 
-      // First measure without inter-item gaps, then spend the remaining space on
-      // equal gaps up to the requested value. A few pixels of gap compaction is
-      // preferable to unnecessary overlap, but never cross the declared minima.
-      const compact = buildGrid(items, columns, options.padding, 0, 0);
-      const horizontalDivisors = Math.max(0, compact.columns - 1);
-      const verticalDivisors = Math.max(0, compact.rows - 1);
-      const fittingGapX =
-        horizontalDivisors === 0
-          ? options.gapX
-          : Math.floor((options.bounds.width - compact.width) / horizontalDivisors);
-      const fittingGapY =
-        verticalDivisors === 0
-          ? options.gapY
-          : Math.floor((options.bounds.height - compact.height) / verticalDivisors);
-      const effectiveGapX = Math.min(options.gapX, fittingGapX);
-      const effectiveGapY = Math.min(options.gapY, fittingGapY);
-      if (effectiveGapX < options.minGapX || effectiveGapY < options.minGapY) return undefined;
-      return buildGrid(items, columns, options.padding, effectiveGapX, effectiveGapY);
+      // First preserve the requested margins. If that cannot fit, compact the
+      // outer margin as well as the inter-item gaps before considering overlap.
+      return [...new Set([options.padding, options.minPadding])].flatMap((padding) => {
+        const compact = buildGrid(items, columns, padding, 0, 0);
+        const horizontalDivisors = Math.max(0, compact.columns - 1);
+        const verticalDivisors = Math.max(0, compact.rows - 1);
+        const fittingGapX =
+          horizontalDivisors === 0
+            ? options.gapX
+            : Math.floor((bounds.width - compact.width) / horizontalDivisors);
+        const fittingGapY =
+          verticalDivisors === 0
+            ? options.gapY
+            : Math.floor((bounds.height - compact.height) / verticalDivisors);
+        const effectiveGapX = Math.min(options.gapX, fittingGapX);
+        const effectiveGapY = Math.min(options.gapY, fittingGapY);
+        if (effectiveGapX < options.minGapX || effectiveGapY < options.minGapY) return [];
+        return [buildGrid(items, columns, padding, effectiveGapX, effectiveGapY)];
+      });
     })
     .filter(
       (candidate): candidate is GridCandidate =>
-        candidate !== undefined && (!options.bounds || fits(candidate, options.bounds))
+        candidate !== undefined && (!bounds || fits(candidate, bounds))
     );
   const preferred = options.preferredColumns
     ? Math.max(1, Math.min(items.length, Math.floor(options.preferredColumns)))
@@ -196,7 +204,13 @@ function chooseGrid(
     }
     // With no preference, use as many complete columns as the available
     // rectangle permits. This produces a compact top-left, row-major grid.
-    return b.columns - a.columns || a.height - b.height || a.width - b.width;
+    return (
+      b.columns - a.columns ||
+      b.padding - a.padding ||
+      b.gapX + b.gapY - (a.gapX + a.gapY) ||
+      a.height - b.height ||
+      a.width - b.width
+    );
   })[0];
 }
 
@@ -224,6 +238,7 @@ function buildDeck(
     gapY: number;
     minGapX: number;
     minGapY: number;
+    minPadding: number;
     preferredColumns?: number;
     exactColumns?: number;
     deckOffsetX: number;
@@ -276,6 +291,7 @@ function buildDeck(
       height: stackGrid.height,
       gapX: stackGrid.gapX,
       gapY: stackGrid.gapY,
+      padding: stackGrid.padding,
       fitsWithoutOverlap: false,
       stackCount,
       maxDeckDepth: Math.ceil(items.length / stackCount),
@@ -304,6 +320,7 @@ export function layoutRectangles(
   }
   const items = normalizedItems(sourceItems);
   const padding = finiteNonNegative(options.padding, 0);
+  const minPadding = Math.min(padding, finiteNonNegative(options.minPadding, Math.min(8, padding)));
   const gapX = finiteNonNegative(options.gapX, 24);
   const gapY = finiteNonNegative(options.gapY, 24);
   const minGapX = Math.min(gapX, finiteNonNegative(options.minGapX, Math.min(12, gapX)));
@@ -327,6 +344,7 @@ export function layoutRectangles(
     gapY,
     minGapX,
     minGapY,
+    minPadding,
     preferredColumns: options.preferredColumns,
     exactColumns: options.exactColumns,
   });
@@ -351,6 +369,7 @@ export function layoutRectangles(
           gapY,
           minGapX,
           minGapY,
+          minPadding,
           preferredColumns: options.preferredColumns,
           exactColumns: options.exactColumns,
           deckOffsetX,
