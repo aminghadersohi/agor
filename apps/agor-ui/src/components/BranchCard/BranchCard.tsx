@@ -68,6 +68,8 @@ interface BranchCardProps {
   isPinned?: boolean;
   zoneName?: string;
   zoneColor?: string;
+  /** Shared board presentation state, controlled by board layout/MCP tools. */
+  compact?: boolean;
   inPopover?: boolean; // NEW: Enable popover-optimized mode (hides board-specific controls)
   panelMode?: boolean; // Render inside side panel instead of as a draggable canvas card
   progressiveMountKey?: string | number | null;
@@ -103,6 +105,7 @@ const BranchCardComponent = ({
   isPinned = false,
   zoneName,
   zoneColor,
+  compact = false,
   inPopover = false,
   panelMode = false,
   progressiveMountKey,
@@ -537,33 +540,35 @@ const BranchCardComponent = ({
       </div>
 
       {/* Branch metadata - all pills on one row with wrapping */}
-      <div className={REACT_FLOW_NO_DRAG_CLASS} style={{ marginBottom: 8 }}>
-        <Space size={4} wrap>
-          {branch.created_by && (
-            <CreatedByTag
-              createdBy={branch.created_by}
-              currentUserId={currentUserId}
-              userById={userById}
-              prefix="Created by"
+      {!compact && (
+        <div className={REACT_FLOW_NO_DRAG_CLASS} style={{ marginBottom: 8 }}>
+          <Space size={4} wrap>
+            {branch.created_by && (
+              <CreatedByTag
+                createdBy={branch.created_by}
+                currentUserId={currentUserId}
+                userById={userById}
+                prefix="Created by"
+              />
+            )}
+            {branch.issue_url && <IssuePill issueUrl={branch.issue_url} currentRepo={repo} />}
+            {branch.pull_request_url && (
+              <PullRequestPill prUrl={branch.pull_request_url} currentRepo={repo} />
+            )}
+            <EnvironmentPill
+              repo={repo}
+              branch={branch}
+              onEdit={onOpenSettings ? () => onOpenSettings(branch.branch_id) : undefined}
+              onStartEnvironment={onStartEnvironment}
+              onStopEnvironment={onStopEnvironment}
+              onViewLogs={onViewLogs}
+              onNukeEnvironment={onNukeEnvironment}
+              connectionDisabled={connectionDisabled}
+              showNukeEnvironment={false}
             />
-          )}
-          {branch.issue_url && <IssuePill issueUrl={branch.issue_url} currentRepo={repo} />}
-          {branch.pull_request_url && (
-            <PullRequestPill prUrl={branch.pull_request_url} currentRepo={repo} />
-          )}
-          <EnvironmentPill
-            repo={repo}
-            branch={branch}
-            onEdit={onOpenSettings ? () => onOpenSettings(branch.branch_id) : undefined}
-            onStartEnvironment={onStartEnvironment}
-            onStopEnvironment={onStopEnvironment}
-            onViewLogs={onViewLogs}
-            onNukeEnvironment={onNukeEnvironment}
-            connectionDisabled={connectionDisabled}
-            showNukeEnvironment={false}
-          />
-        </Space>
-      </div>
+          </Space>
+        </div>
+      )}
 
       {/* Provisioning failure banner + retry. The working directory did not
           materialize; surface the sanitized error and a one-click, idempotent
@@ -615,7 +620,7 @@ const BranchCardComponent = ({
       )}
 
       {/* Notes */}
-      {branch.notes && (
+      {!compact && branch.notes && (
         <div className={REACT_FLOW_NO_DRAG_CLASS} style={{ marginBottom: 8 }}>
           <div
             className="markdown-compact"
@@ -654,40 +659,42 @@ const BranchCardComponent = ({
       )}
 
       {/* Sessions & Scheduled Runs - composable content shared with the teammate panel */}
-      <div
-        className={REACT_FLOW_NO_DRAG_CLASS}
-        style={sectionsReady ? undefined : { minHeight: sessionShellMinHeight }}
-      >
-        {sectionsReady ? (
-          <BranchSessionSections
-            branch={branch}
-            sessions={sessions}
-            userById={userById}
-            currentUserId={currentUserId}
-            selectedSessionId={selectedSessionId}
-            onSessionClick={onSessionClick}
-            onCreateSession={onCreateSession}
-            onForkSession={onForkSession}
-            onSpawnSession={onSpawnSession}
-            onOpenSessionSettings={onOpenSessionSettings}
-            peekedSessionIds={peekedSessionIdSet}
-            onTogglePeekSession={!inPopover && !panelMode ? handleTogglePeekSession : undefined}
-            mode="card"
-            client={client}
-          />
-        ) : (
-          // Truthful shell while this card waits for its hydration slot: real
-          // session count from data already in props, no fake placeholders.
-          <Typography.Text
-            type="secondary"
-            style={{ fontSize: 12, display: 'block', padding: '4px 0' }}
-          >
-            Sessions ({peekableSessions.length})
-          </Typography.Text>
-        )}
-      </div>
+      {!compact && (
+        <div
+          className={REACT_FLOW_NO_DRAG_CLASS}
+          style={sectionsReady ? undefined : { minHeight: sessionShellMinHeight }}
+        >
+          {sectionsReady ? (
+            <BranchSessionSections
+              branch={branch}
+              sessions={sessions}
+              userById={userById}
+              currentUserId={currentUserId}
+              selectedSessionId={selectedSessionId}
+              onSessionClick={onSessionClick}
+              onCreateSession={onCreateSession}
+              onForkSession={onForkSession}
+              onSpawnSession={onSpawnSession}
+              onOpenSessionSettings={onOpenSessionSettings}
+              peekedSessionIds={peekedSessionIdSet}
+              onTogglePeekSession={!inPopover && !panelMode ? handleTogglePeekSession : undefined}
+              mode="card"
+              client={client}
+            />
+          ) : (
+            // Truthful shell while this card waits for its hydration slot: real
+            // session count from data already in props, no fake placeholders.
+            <Typography.Text
+              type="secondary"
+              style={{ fontSize: 12, display: 'block', padding: '4px 0' }}
+            >
+              Sessions ({peekableSessions.length})
+            </Typography.Text>
+          )}
+        </div>
+      )}
 
-      {!inPopover && !panelMode && peekedSessions.length > 0 && (
+      {!compact && !inPopover && !panelMode && peekedSessions.length > 0 && (
         <BranchSessionPeekSection
           client={client}
           sessions={peekedSessions}
