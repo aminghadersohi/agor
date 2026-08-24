@@ -536,7 +536,7 @@ describe('agor_boards_create schema', () => {
 describe('agor_boards_auto_arrange_zone', () => {
   const baseServiceParams = { authenticated: true, provider: 'mcp' };
 
-  it('keeps every arranged origin within the zone and compresses oversized grids', async () => {
+  it('honors an exact one-column request and uses a contained deck when necessary', async () => {
     const patches: Array<{ id: string; position: { x: number; y: number } }> = [];
     const boardObjects = Array.from({ length: 20 }, (_, index) => ({
       object_id: `card-${index}`,
@@ -579,11 +579,13 @@ describe('agor_boards_auto_arrange_zone', () => {
     });
 
     const parsed = JSON.parse(
-      (await arrange({ boardId: 'board-1', zoneId: 'zone-1', columns: 3 })).content[0].text
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1', columns: 1 })).content[0].text
     );
 
     expect(parsed.arranged).toBe(20);
-    expect(parsed.columns).toBe(1); // 620px cannot fit three 380px cards without overlap.
+    expect(parsed.applied).toBe(true);
+    expect(parsed.requestedColumns).toBe(1);
+    expect(parsed.columns).toBe(1);
     expect(parsed.fitsWithoutOverlap).toBe(false);
     expect(parsed.layoutMode).toBe('deck');
     expect(parsed.deckOffset).toBe(8);
@@ -692,7 +694,7 @@ describe('agor_boards_auto_arrange_zone', () => {
     });
 
     const parsed = JSON.parse(
-      (await arrange({ boardId: 'board-1', zoneId: 'zone-1', columns: 3 })).content[0].text
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1' })).content[0].text
     );
 
     expect(parsed).toMatchObject({
@@ -710,6 +712,54 @@ describe('agor_boards_auto_arrange_zone', () => {
       expect(patch.position.x + (entity?.size.width ?? 0)).toBeLessThanOrEqual(620 - 24);
       expect(patch.position.y + (entity?.size.height ?? 0)).toBeLessThanOrEqual(1800 - 24);
     }
+  });
+
+  it('does not move anything when exact columns cannot fit inside the zone', async () => {
+    const patch = vi.fn();
+    const entities = Array.from({ length: 4 }, (_, index) => ({
+      object_id: `card-${index}`,
+      board_id: 'board-1',
+      card_id: `card-${index}`,
+      entity_type: 'card' as const,
+      position: { x: index * 10, y: 0 },
+      size: { width: 380, height: 80 },
+      zone_id: 'zone-1',
+      created_at: '2026-06-01T00:00:00.000Z',
+    }));
+    const app = {
+      service(name: string) {
+        if (name === 'boards')
+          return {
+            get: vi.fn(async () => ({
+              board_id: 'board-1',
+              objects: { 'zone-1': { type: 'zone', x: 0, y: 0, width: 620, height: 500 } },
+            })),
+          };
+        if (name === 'board-objects')
+          return { find: vi.fn(async () => ({ data: entities })), patch };
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1', columns: 3 })).content[0].text
+    );
+
+    expect(parsed).toMatchObject({
+      applied: false,
+      arranged: 0,
+      requestedColumns: 3,
+      columns: 3,
+      updates: [],
+    });
+    expect(parsed.overflowingObjectIds.length).toBeGreaterThan(0);
+    expect(parsed.warning).toContain('No positions were changed');
+    expect(patch).not.toHaveBeenCalled();
   });
 
   it('reports a rendered object that cannot physically fit inside its zone', async () => {

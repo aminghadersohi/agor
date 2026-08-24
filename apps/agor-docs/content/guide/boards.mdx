@@ -118,6 +118,8 @@ Agor can arrange mixed-size branches, cards, zones, notes, apps, and artifacts w
 
 Layouts read the rendered width and height of each branch or card, then fill rows from the top-left with equal spacing. A non-overlapping grid is always preferred. If a zone is genuinely too small for every full rectangle, Agor uses compact decks as a last resort; each upper item is offset down and right so the top and left edges underneath remain visible. The MCP result reports whether a grid fit, the applied gaps, required bounds, and any objects that could not be fully contained.
 
+For `agor_boards_auto_arrange_zone`, an explicit `columns` value is exact: Agor never silently substitutes another column count. Omit `columns` for automatic fitting. If the requested count cannot keep every full rectangle inside the zone—even with the deck fallback—the tool returns `applied: false` and leaves every position unchanged.
+
 ![A selected Review zone after arranging fourteen mixed-size branches and cards into a contained two-column grid.](/screenshots/board-auto-layout-zone-grid.png)
 
 ---
