@@ -156,6 +156,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
       fontSize: data.fontSize,
       zIndex: data.zIndex,
       trigger: data.trigger,
+      layout: data.layout,
     }),
     [
       data.x,
@@ -171,6 +172,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
       data.fontSize,
       data.zIndex,
       data.trigger,
+      data.layout,
     ]
   );
 
