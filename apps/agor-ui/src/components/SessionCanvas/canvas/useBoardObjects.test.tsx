@@ -3,7 +3,7 @@ import { act, renderHook } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import type { ReactNode } from 'react';
 import type { Node } from 'reactflow';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useBoardObjects } from './useBoardObjects';
 
 // Spy the themed error toast so the failure path of reorderObject is observable.
@@ -27,6 +27,10 @@ beforeEach(() => {
   showError.mockClear();
   showSuccess.mockClear();
   showWarning.mockClear();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 /**
@@ -369,5 +373,190 @@ describe('arrangeZoneContents', () => {
     expect(renderedNodes).toEqual(initialNodes);
     expect(patch).not.toHaveBeenCalled();
     expect(showWarning).toHaveBeenCalledWith(expect.stringContaining('No positions were changed'));
+  });
+
+  it('uses persisted latest-first ordering and compact dimensions for the list preset', async () => {
+    const { client, patch } = makeClient();
+    const board = makeBoard({
+      zone: {
+        type: 'zone',
+        x: 0,
+        y: 0,
+        width: 620,
+        height: 900,
+        label: 'Zone',
+        layout: {
+          mode: 'manual',
+          preset: 'compact_list',
+          sortBy: 'updated',
+          sortDirection: 'desc',
+          autoResizeHeight: true,
+        },
+      },
+    });
+    const initialNodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, data: {}, width: 620, height: 900 },
+      {
+        id: 'card-older',
+        type: 'cardNode',
+        parentId: 'zone',
+        position: { x: 200, y: 300 },
+        data: { card: { title: 'Older', updated_at: '2026-01-01T00:00:00.000Z' } },
+        width: 380,
+        height: 220,
+      },
+      {
+        id: 'card-newer',
+        type: 'cardNode',
+        parentId: 'zone',
+        position: { x: 200, y: 100 },
+        data: { card: { title: 'Newer', updated_at: '2026-02-01T00:00:00.000Z' } },
+        width: 380,
+        height: 260,
+      },
+    ];
+    let renderedNodes = initialNodes;
+    const setNodes: React.Dispatch<React.SetStateAction<Node[]>> = (value) => {
+      renderedNodes = typeof value === 'function' ? value(renderedNodes) : value;
+    };
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'placement-older',
+              board_id: 'board-1',
+              entity_type: 'card',
+              card_id: 'older',
+              position: { x: 200, y: 300 },
+              zone_id: 'zone',
+              compact: false,
+              created_at: '2026-01-01T00:00:00.000Z',
+            },
+            {
+              object_id: 'placement-newer',
+              board_id: 'board-1',
+              entity_type: 'card',
+              card_id: 'newer',
+              position: { x: 200, y: 100 },
+              zone_id: 'zone',
+              compact: false,
+              created_at: '2026-01-01T00:00:00.000Z',
+            },
+          ] as never,
+          nodes: initialNodes,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    const zoneNode = result.current.getBoardObjectNodes()[0];
+    await act(async () => {
+      await (zoneNode.data.onArrangeContents as (id: string) => Promise<void>)('zone');
+    });
+
+    expect(renderedNodes.find((node) => node.id === 'card-newer')?.position.y).toBe(88);
+    expect(renderedNodes.find((node) => node.id === 'card-older')?.position.y).toBe(168);
+    expect(patch).toHaveBeenCalledWith('placement-newer', { compact: true });
+    expect(patch).toHaveBeenCalledWith('placement-older', { compact: true });
+    expect(patch).toHaveBeenCalledWith('placement-newer', {
+      size: { width: 380, height: 56 },
+    });
+    expect(patch).toHaveBeenCalledWith('placement-older', {
+      size: { width: 380, height: 56 },
+    });
+    expect(patch).toHaveBeenCalledWith(
+      'board-1',
+      expect.objectContaining({
+        _action: 'upsertObject',
+        objectId: 'zone',
+        objectData: expect.objectContaining({ height: 248 }),
+      })
+    );
+  });
+
+  it('automatically reapplies a persisted zone policy when observed content changes', async () => {
+    vi.useFakeTimers();
+    const { client, patch } = makeClient();
+    const board = makeBoard({
+      zone: {
+        type: 'zone',
+        x: 0,
+        y: 0,
+        width: 900,
+        height: 500,
+        label: 'Zone',
+        layout: {
+          mode: 'auto',
+          preset: 'grid',
+          sortBy: 'updated',
+          sortDirection: 'desc',
+          autoResizeHeight: false,
+        },
+      },
+    });
+    const nodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, data: {}, width: 900, height: 500 },
+      {
+        id: 'card-older',
+        type: 'cardNode',
+        parentId: 'zone',
+        position: { x: 200, y: 200 },
+        data: { card: { title: 'Older', updated_at: '2026-01-01T00:00:00.000Z' } },
+        width: 300,
+        height: 100,
+      },
+      {
+        id: 'card-newer',
+        type: 'cardNode',
+        parentId: 'zone',
+        position: { x: 220, y: 210 },
+        data: { card: { title: 'Newer', updated_at: '2026-02-01T00:00:00.000Z' } },
+        width: 300,
+        height: 100,
+      },
+    ];
+    const { unmount } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'placement-older',
+              board_id: 'board-1',
+              entity_type: 'card',
+              card_id: 'older',
+              position: { x: 200, y: 200 },
+              zone_id: 'zone',
+              created_at: '2026-01-01T00:00:00.000Z',
+            },
+            {
+              object_id: 'placement-newer',
+              board_id: 'board-1',
+              entity_type: 'card',
+              card_id: 'newer',
+              position: { x: 220, y: 210 },
+              zone_id: 'zone',
+              created_at: '2026-01-01T00:00:00.000Z',
+            },
+          ] as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(patch).toHaveBeenCalledWith('placement-newer', { position: { x: 24, y: 88 } });
+    expect(patch).toHaveBeenCalledWith('placement-older', { position: { x: 348, y: 88 } });
+    unmount();
   });
 });

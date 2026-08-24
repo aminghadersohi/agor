@@ -1,11 +1,23 @@
 import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
+import {
+  normalizeZoneLayoutPolicy,
+  sortZoneLayoutItems,
+  ZONE_LAYOUT_MODES,
+  ZONE_LAYOUT_PRESETS,
+  ZONE_LAYOUT_SORT_DIRECTIONS,
+  ZONE_LAYOUT_SORT_FIELDS,
+  type ZoneLayoutSortItem,
+} from '@agor/core/layout/zone-layout';
 import type {
   Board,
   BoardEntityObject,
   BoardEntityType,
   BoardObject,
   BoardObjectType,
+  Branch,
   BranchID,
+  Card,
+  ZoneLayoutPolicy,
 } from '@agor/core/types';
 import { BRANCH_PERMISSION_LEVELS } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
@@ -48,6 +60,10 @@ const ARRANGE_DIMENSIONS = {
 } as const;
 const DECK_OFFSET_X = 12;
 const DECK_OFFSET_Y = 48;
+const COMPACT_ARRANGE_DIMENSIONS = {
+  branch: { width: 500, height: 88 },
+  card: { width: 380, height: 56 },
+} as const;
 
 function zoneContentTopInset(zone: { fontSize?: number; status?: string }): number {
   const labelFontSize =
@@ -68,6 +84,45 @@ function compareBoardEntitiesSpatially(a: BoardEntityObject, b: BoardEntityObjec
   );
 }
 
+type EntityLayoutMetadata = ZoneLayoutSortItem & {
+  card?: Card;
+  branch?: Branch;
+};
+
+async function loadEntityLayoutMetadata(
+  ctx: McpContext,
+  entities: readonly BoardEntityObject[]
+): Promise<Map<string, EntityLayoutMetadata>> {
+  const metadata = new Map<string, EntityLayoutMetadata>();
+  await Promise.all(
+    entities.map(async (entity) => {
+      let card: Card | undefined;
+      let branch: Branch | undefined;
+      if (entity.card_id) {
+        card = (await ctx.app.service('cards').get(entity.card_id, ctx.baseServiceParams)) as Card;
+      } else if (entity.branch_id) {
+        branch = (await ctx.app
+          .service('branches')
+          .get(entity.branch_id, ctx.baseServiceParams)) as Branch;
+      }
+      const cardData = card?.data ?? {};
+      metadata.set(entity.object_id, {
+        id: entity.object_id,
+        position: entity.position,
+        title: card?.title ?? branch?.name,
+        createdAt: card?.created_at ?? branch?.created_at ?? entity.created_at,
+        updatedAt: card?.updated_at ?? branch?.updated_at ?? entity.created_at,
+        rank: typeof cardData.rank === 'number' ? cardData.rank : undefined,
+        priority: cardData.priority,
+        status: cardData.status ?? branch?.filesystem_status,
+        card,
+        branch,
+      });
+    })
+  );
+  return metadata;
+}
+
 /**
  * CardNode grows with its description and (unlike the React Flow placeholder
  * height) renders the note in full. Estimate the rendered rectangle from the
@@ -75,16 +130,18 @@ function compareBoardEntitiesSpatially(a: BoardEntityObject, b: BoardEntityObjec
  * false overflow warning is preferable to putting the bottom of a card
  * outside its zone.
  */
-function estimateCardHeight(card: { title?: string; description?: string; note?: string }): number {
+function estimateCardHeight(
+  card: { title?: string; description?: string; note?: string } | undefined
+): number {
   const lineCount = (value: string | undefined, charsPerLine: number) =>
     value ? Math.max(1, Math.ceil(value.length / charsPerLine)) : 0;
   const header = 50;
-  const description = card.description
+  const description = card?.description
     ? 16 +
       lineCount(card.description.slice(0, 100), 48) * 18 +
       (card.description.length > 100 ? 18 : 0)
     : 0;
-  const note = card.note ? 16 + lineCount(card.note, 48) * 18 : 0;
+  const note = card?.note ? 16 + lineCount(card.note, 48) * 18 : 0;
   return Math.max(ARRANGE_DIMENSIONS.card.height, header + description + note);
 }
 
@@ -648,7 +705,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 5: agor_boards_auto_arrange_zone
+  // agor_boards_auto_arrange_zone
   server.registerTool(
     'agor_boards_auto_arrange_zone',
     {
@@ -684,6 +741,28 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .describe(
             'Behavior only when no non-overlapping grid fits. Defaults to fail (no board changes). Use deck only when deliberate visible-header overlap is acceptable.'
           ),
+        preset: z
+          .enum(ZONE_LAYOUT_PRESETS)
+          .optional()
+          .describe(
+            'Layout presentation. grid preserves current card density; compact_list collapses cards/worktrees and uses one column.'
+          ),
+        sortBy: z
+          .enum(ZONE_LAYOUT_SORT_FIELDS)
+          .optional()
+          .describe(
+            'Order items by current position, priority/rank, workflow status, updated time, created time, or title. Defaults to the zone policy, then position.'
+          ),
+        sortDirection: z
+          .enum(ZONE_LAYOUT_SORT_DIRECTIONS)
+          .optional()
+          .describe('Ascending or descending sort order. Defaults to the zone policy, then asc.'),
+        autoResizeHeight: z
+          .boolean()
+          .optional()
+          .describe(
+            'Resize the zone vertically to contain the layout. Defaults to the zone policy, then false.'
+          ),
         padding: mcpOptionalNumber('padding', 'Padding from the zone edges (default: 24).'),
         gapX: mcpOptionalNumber('gapX', 'Horizontal gap between items (default: 24).'),
         gapY: mcpOptionalNumber('gapY', 'Vertical gap between items (default: 24).'),
@@ -701,6 +780,15 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         throw new Error(`Zone '${zoneId}' was not found on board '${boardId}'.`);
       }
 
+      const zonePolicy = normalizeZoneLayoutPolicy({
+        ...zone.layout,
+        ...(args.preset === undefined ? {} : { preset: args.preset }),
+        ...(args.sortBy === undefined ? {} : { sortBy: args.sortBy }),
+        ...(args.sortDirection === undefined ? {} : { sortDirection: args.sortDirection }),
+        ...(args.columns === undefined ? {} : { columns: args.columns }),
+        ...(args.autoResizeHeight === undefined ? {} : { autoResizeHeight: args.autoResizeHeight }),
+      });
+
       const boardObjectsService = ctx.app.service('board-objects');
       const result = (await boardObjectsService.find({
         query: {
@@ -715,19 +803,33 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         result.data,
         args.includeArchived === true
       );
-      entities = entities.sort(compareBoardEntitiesSpatially);
+      const metadataEntities = entities.filter(
+        (entity) =>
+          zonePolicy.sortBy !== 'position' ||
+          (zonePolicy.preset === 'grid' &&
+            entity.compact !== true &&
+            entity.size === undefined &&
+            entity.card_id !== undefined)
+      );
+      const metadata = await loadEntityLayoutMetadata(ctx, metadataEntities);
+      entities = sortZoneLayoutItems(
+        entities.map((entity) => ({
+          entity,
+          ...(metadata.get(entity.object_id) ?? {
+            id: entity.object_id,
+            position: entity.position,
+          }),
+        })),
+        zonePolicy
+      ).map(({ entity }) => entity);
       const dimensions = new Map<string, { width: number; height: number }>();
       for (const entity of entities) {
-        if (entity.size) {
+        if (zonePolicy.preset === 'compact_list' || entity.compact === true) {
+          dimensions.set(entity.object_id, COMPACT_ARRANGE_DIMENSIONS[entity.entity_type]);
+        } else if (entity.size) {
           dimensions.set(entity.object_id, entity.size);
         } else if (entity.entity_type === 'card' && entity.card_id) {
-          const card = (await ctx.app
-            .service('cards')
-            .get(entity.card_id, ctx.baseServiceParams)) as {
-            title?: string;
-            description?: string;
-            note?: string;
-          };
+          const card = metadata.get(entity.object_id)?.card;
           dimensions.set(entity.object_id, {
             width: ARRANGE_DIMENSIONS.card.width,
             height: estimateCardHeight(card),
@@ -740,6 +842,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const gapX = Math.max(0, args.gapX ?? 24);
       const gapY = Math.max(0, args.gapY ?? 24);
       const titleInset = zoneContentTopInset(zone);
+      const autoResizeHeight = zonePolicy.autoResizeHeight === true;
       if (entities.length === 0) {
         return textResult({
           boardId,
@@ -762,16 +865,23 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           // The title/status sits inside the zone, above child nodes. Layout
           // against the remaining rectangle, then translate placements below
           // that reserved header so cards can never cover the title.
-          bounds: { width: zone.width, height: Math.max(0, zone.height - titleInset) },
+          bounds: {
+            width: zone.width,
+            height: autoResizeHeight
+              ? Number.MAX_SAFE_INTEGER
+              : Math.max(0, zone.height - titleInset),
+          },
           padding,
           minPadding: 8,
           gapX,
           gapY,
           minGapX: 8,
           minGapY: 8,
-          ...(args.strictColumns === true
-            ? { exactColumns: args.columns }
-            : { preferredColumns: args.columns }),
+          ...(zonePolicy.preset === 'compact_list'
+            ? { exactColumns: 1 }
+            : args.strictColumns === true
+              ? { exactColumns: args.columns ?? zonePolicy.columns }
+              : { preferredColumns: args.columns ?? zonePolicy.columns }),
           allowDeck: args.overflowStrategy === 'deck',
           deckOffsetX: DECK_OFFSET_X,
           deckOffsetY: DECK_OFFSET_Y,
@@ -823,6 +933,13 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         const placement = placementById.get(entity.object_id);
         if (!placement) throw new Error(`Layout did not place board object '${entity.object_id}'.`);
         const position = { x: placement.x, y: placement.y + titleInset };
+        if (zonePolicy.preset === 'compact_list' && entity.compact !== true) {
+          await boardObjectsService.patch(
+            entity.object_id,
+            { compact: true },
+            ctx.baseServiceParams
+          );
+        }
         await boardObjectsService.patch(entity.object_id, { position }, ctx.baseServiceParams);
         updates.push({
           objectId: entity.object_id,
@@ -833,6 +950,21 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           stackIndex: placement.stackIndex,
           deckDepth: placement.deckDepth,
         });
+      }
+
+      const appliedZoneHeight = autoResizeHeight
+        ? Math.max(200, Math.ceil(layout.height + titleInset))
+        : zone.height;
+      if (appliedZoneHeight !== zone.height) {
+        await ctx.app.service('boards').patch(
+          boardId,
+          {
+            _action: 'upsertObject',
+            objectId: zoneId,
+            objectData: { ...zone, height: appliedZoneHeight },
+          } as unknown as Partial<Board>,
+          ctx.baseServiceParams
+        );
       }
 
       return textResult({
@@ -847,6 +979,10 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         rows: layout.rows,
         fitsWithoutOverlap: layout.fitsWithoutOverlap,
         layoutMode: layout.mode,
+        preset: zonePolicy.preset,
+        sortBy: zonePolicy.sortBy,
+        sortDirection: zonePolicy.sortDirection,
+        autoResizeHeight,
         deckOffsetX: layout.mode === 'deck' ? layout.deckOffsetX : null,
         deckOffsetY: layout.mode === 'deck' ? layout.deckOffsetY : null,
         stackCount: layout.mode === 'deck' ? layout.stackCount : null,
@@ -867,13 +1003,72 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
               : requestedColumns !== null && layout.columns !== requestedColumns
                 ? `The requested ${requestedColumns}-column target could not fit without overlap; a contained ${layout.columns}-column grid was used.`
                 : null,
-        zone: { width: zone.width, height: zone.height },
+        zone: { width: zone.width, height: appliedZoneHeight },
         updates,
       });
     }
   );
 
-  // Tool 6: agor_boards_set_compact
+  server.registerTool(
+    'agor_boards_set_zone_layout',
+    {
+      description:
+        'Configure a zone layout policy. Manual mode preserves spatial memory until Arrange contents is requested. Auto mode maintains the selected ordering and preset as items or measured sizes change. Use grid for cards or compact_list for a collapsible one-row-per-item list.',
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        boardId: mcpRequiredId('boardId', 'Board'),
+        zoneId: mcpRequiredString('zoneId', 'Zone object ID'),
+        mode: z.enum(ZONE_LAYOUT_MODES),
+        preset: z.enum(ZONE_LAYOUT_PRESETS).optional(),
+        sortBy: z.enum(ZONE_LAYOUT_SORT_FIELDS).optional(),
+        sortDirection: z.enum(ZONE_LAYOUT_SORT_DIRECTIONS).optional(),
+        columns: z
+          .number()
+          .int()
+          .positive()
+          .nullable()
+          .optional()
+          .describe('Preferred grid columns. Use null to return to automatic column selection.'),
+        autoResizeHeight: z
+          .boolean()
+          .optional()
+          .describe('Grow or shrink the zone vertically to contain arranged items.'),
+      }),
+    },
+    async (args) => {
+      const boardId = coerceString(args.boardId);
+      const zoneId = coerceString(args.zoneId);
+      if (!boardId || !zoneId) throw new Error('boardId and zoneId are required');
+      const boardsService = ctx.app.service('boards');
+      const board = (await boardsService.get(boardId, ctx.baseServiceParams)) as Board;
+      const zone = board.objects?.[zoneId];
+      if (zone?.type !== 'zone') {
+        throw new Error(`Zone '${zoneId}' was not found on board '${boardId}'.`);
+      }
+      const layout = normalizeZoneLayoutPolicy({
+        ...zone.layout,
+        mode: args.mode,
+        ...(args.preset === undefined ? {} : { preset: args.preset }),
+        ...(args.sortBy === undefined ? {} : { sortBy: args.sortBy }),
+        ...(args.sortDirection === undefined ? {} : { sortDirection: args.sortDirection }),
+        ...(args.columns === undefined ? {} : { columns: args.columns ?? undefined }),
+        ...(args.autoResizeHeight === undefined ? {} : { autoResizeHeight: args.autoResizeHeight }),
+      } satisfies Partial<ZoneLayoutPolicy>);
+      const updatedZone = { ...zone, layout };
+      await boardsService.patch(
+        boardId,
+        {
+          _action: 'upsertObject',
+          objectId: zoneId,
+          objectData: updatedZone,
+        } as unknown as Partial<Board>,
+        ctx.baseServiceParams
+      );
+      return textResult({ boardId, zoneId, layout, note: 'Zone layout policy updated.' });
+    }
+  );
+
+  // agor_boards_set_compact
   server.registerTool(
     'agor_boards_set_compact',
     {
@@ -935,7 +1130,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 7: agor_boards_create
+  // agor_boards_create
   server.registerTool(
     'agor_boards_create',
     {
@@ -988,7 +1183,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 5: agor_boards_archive
+  // agor_boards_archive
   server.registerTool(
     'agor_boards_archive',
     {
@@ -1011,7 +1206,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 6: agor_boards_unarchive
+  // agor_boards_unarchive
   server.registerTool(
     'agor_boards_unarchive',
     {

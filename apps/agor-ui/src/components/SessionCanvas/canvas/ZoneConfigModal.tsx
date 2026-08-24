@@ -2,9 +2,18 @@
  * Modal for configuring zone settings (name, triggers, etc.)
  */
 
-import type { AgenticToolName, BoardObject, ZoneTriggerBehavior } from '@agor-live/client';
+import { normalizeZoneLayoutPolicy } from '@agor/core/layout/zone-layout';
+import type {
+  AgenticToolName,
+  BoardObject,
+  ZoneLayoutMode,
+  ZoneLayoutPreset,
+  ZoneLayoutSortBy,
+  ZoneLayoutSortDirection,
+  ZoneTriggerBehavior,
+} from '@agor-live/client';
 import { isAgenticToolName } from '@agor-live/client';
-import { Alert, Form, Input, Modal, Select } from 'antd';
+import { Alert, Divider, Flex, Form, Input, InputNumber, Modal, Radio, Select, Switch } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import { useMutationGate } from '../../../contexts/ConnectionContext';
 import { AgentSelectionGrid, AVAILABLE_AGENTS } from '../../AgentSelectionGrid';
@@ -23,6 +32,12 @@ interface ZoneFormValues {
   name: string;
   triggerBehavior: ZoneTriggerBehavior;
   triggerTemplate: string;
+  layoutMode: ZoneLayoutMode;
+  layoutPreset: ZoneLayoutPreset;
+  layoutSortBy: ZoneLayoutSortBy;
+  layoutSortDirection: ZoneLayoutSortDirection;
+  layoutColumns?: number;
+  layoutAutoResizeHeight: boolean;
 }
 
 // Sensible default so that a freshly-created zone always has a behavior
@@ -47,6 +62,8 @@ export const ZoneConfigModal = ({
   const mutationGate = useMutationGate();
 
   const triggerBehavior = Form.useWatch('triggerBehavior', form);
+  const layoutPreset = Form.useWatch('layoutPreset', form);
+  const layoutSortBy = Form.useWatch('layoutSortBy', form);
 
   const zoneTrigger = zoneData.type === 'zone' ? zoneData.trigger : undefined;
   const hasZoneTrigger = Boolean(zoneTrigger);
@@ -65,10 +82,19 @@ export const ZoneConfigModal = ({
     if (open && !isInitializingRef.current) {
       isInitializingRef.current = true;
       if (hasZoneTrigger) {
+        const layout = normalizeZoneLayoutPolicy(
+          zoneData.type === 'zone' ? zoneData.layout : undefined
+        );
         form.setFieldsValue({
           name: zoneName,
           triggerBehavior: zoneTriggerBehavior,
           triggerTemplate: zoneTriggerTemplate,
+          layoutMode: layout.mode,
+          layoutPreset: layout.preset,
+          layoutSortBy: layout.sortBy,
+          layoutSortDirection: layout.sortDirection,
+          layoutColumns: layout.columns,
+          layoutAutoResizeHeight: layout.autoResizeHeight === true,
         });
         setTriggerAgent(
           zoneTriggerAgent === undefined
@@ -78,10 +104,19 @@ export const ZoneConfigModal = ({
               : null
         );
       } else {
+        const layout = normalizeZoneLayoutPolicy(
+          zoneData.type === 'zone' ? zoneData.layout : undefined
+        );
         form.setFieldsValue({
           name: zoneName,
           triggerBehavior: DEFAULT_TRIGGER_BEHAVIOR,
           triggerTemplate: '',
+          layoutMode: layout.mode,
+          layoutPreset: layout.preset,
+          layoutSortBy: layout.sortBy,
+          layoutSortDirection: layout.sortDirection,
+          layoutColumns: layout.columns,
+          layoutAutoResizeHeight: layout.autoResizeHeight === true,
         });
         setTriggerAgent('claude-code');
       }
@@ -95,8 +130,47 @@ export const ZoneConfigModal = ({
     zoneTriggerBehavior,
     zoneTriggerTemplate,
     zoneTriggerAgent,
+    zoneData,
     form,
   ]);
+
+  const handleLayoutModeChange = (mode: ZoneLayoutMode) => {
+    if (mode !== 'auto' || form.getFieldValue('layoutSortBy') !== 'position') return;
+    form.setFieldsValue({ layoutSortBy: 'updated', layoutSortDirection: 'desc' });
+  };
+
+  const handleSortByChange = (sortBy: ZoneLayoutSortBy) => {
+    form.setFieldValue(
+      'layoutSortDirection',
+      sortBy === 'updated' || sortBy === 'created' ? 'desc' : 'asc'
+    );
+  };
+
+  const sortDirectionOptions =
+    layoutSortBy === 'updated' || layoutSortBy === 'created'
+      ? [
+          { value: 'desc', label: 'Newest first' },
+          { value: 'asc', label: 'Oldest first' },
+        ]
+      : layoutSortBy === 'priority'
+        ? [
+            { value: 'asc', label: 'Highest first' },
+            { value: 'desc', label: 'Lowest first' },
+          ]
+        : layoutSortBy === 'status'
+          ? [
+              { value: 'asc', label: 'Urgent to done' },
+              { value: 'desc', label: 'Done to urgent' },
+            ]
+          : layoutSortBy === 'title'
+            ? [
+                { value: 'asc', label: 'A to Z' },
+                { value: 'desc', label: 'Z to A' },
+              ]
+            : [
+                { value: 'asc', label: 'Top-left first' },
+                { value: 'desc', label: 'Bottom-right first' },
+              ];
 
   const handleSave = async () => {
     if (!mutationGate.canMutate) return;
@@ -106,11 +180,20 @@ export const ZoneConfigModal = ({
 
       if (zoneData.type === 'zone') {
         const template = values.triggerTemplate?.trim() || '';
+        const layout = normalizeZoneLayoutPolicy({
+          mode: values.layoutMode,
+          preset: values.layoutPreset,
+          sortBy: values.layoutSortBy,
+          sortDirection: values.layoutSortDirection,
+          columns: values.layoutPreset === 'grid' ? values.layoutColumns : 1,
+          autoResizeHeight: values.layoutAutoResizeHeight,
+        });
         const hasChanges =
           values.name !== zoneName ||
           template !== (zoneData.trigger?.template || '') ||
           values.triggerBehavior !== (zoneData.trigger?.behavior || undefined) ||
-          triggerAgent !== (zoneData.trigger?.agent || 'claude-code');
+          triggerAgent !== (zoneData.trigger?.agent || 'claude-code') ||
+          JSON.stringify(layout) !== JSON.stringify(normalizeZoneLayoutPolicy(zoneData.layout));
 
         if (hasChanges) {
           onUpdate(objectId, {
@@ -124,6 +207,7 @@ export const ZoneConfigModal = ({
                     agent: triggerAgent,
                   }
                 : undefined,
+            layout,
           });
         }
       }
@@ -150,6 +234,73 @@ export const ZoneConfigModal = ({
         <Form.Item name="name" label="Zone Name">
           <Input placeholder="Enter zone name..." size="large" />
         </Form.Item>
+
+        <Divider plain>Layout</Divider>
+
+        <Form.Item
+          name="layoutMode"
+          label="Maintenance"
+          help="Manual preserves spatial placement. Auto reflows after items or their measured sizes change."
+        >
+          <Radio.Group
+            optionType="button"
+            buttonStyle="solid"
+            onChange={(event) => handleLayoutModeChange(event.target.value as ZoneLayoutMode)}
+          >
+            <Radio.Button value="manual">Manual</Radio.Button>
+            <Radio.Button value="auto">Auto</Radio.Button>
+          </Radio.Group>
+        </Form.Item>
+
+        <Form.Item name="layoutPreset" label="Presentation">
+          <Radio.Group optionType="button" buttonStyle="solid">
+            <Radio.Button value="grid">Grid</Radio.Button>
+            <Radio.Button value="compact_list">Compact list</Radio.Button>
+          </Radio.Group>
+        </Form.Item>
+
+        <Flex gap="middle" wrap>
+          <Form.Item name="layoutSortBy" label="Sort by" style={{ flex: '1 1 220px' }}>
+            <Select
+              onChange={handleSortByChange}
+              options={[
+                { value: 'position', label: 'Current position' },
+                { value: 'priority', label: 'Priority / rank' },
+                { value: 'status', label: 'Workflow status' },
+                { value: 'updated', label: 'Last updated' },
+                { value: 'created', label: 'Created' },
+                { value: 'title', label: 'Title' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="layoutSortDirection" label="Order" style={{ flex: '1 1 150px' }}>
+            <Select options={sortDirectionOptions} />
+          </Form.Item>
+        </Flex>
+
+        <Flex gap="large" wrap align="start">
+          {layoutPreset === 'grid' && (
+            <Form.Item
+              name="layoutColumns"
+              label="Preferred columns"
+              help="Leave blank to choose the nearest fitting grid."
+              style={{ flex: '1 1 200px' }}
+            >
+              <InputNumber min={1} precision={0} style={{ width: '100%' }} placeholder="Auto" />
+            </Form.Item>
+          )}
+          <Form.Item
+            name="layoutAutoResizeHeight"
+            label="Fit zone height"
+            valuePropName="checked"
+            help="Grow or shrink vertically so every arranged item remains visible."
+            style={{ flex: '1 1 200px' }}
+          >
+            <Switch checkedChildren="Auto" unCheckedChildren="Fixed" />
+          </Form.Item>
+        </Flex>
+
+        <Divider plain>Automation prompt</Divider>
 
         <Form.Item name="triggerBehavior" label="Trigger Behavior">
           {/* No allowClear / no placeholder: the field always has a value

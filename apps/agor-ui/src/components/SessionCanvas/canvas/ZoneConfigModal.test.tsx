@@ -80,4 +80,41 @@ describe('ZoneConfigModal historical tool migration', () => {
       },
     });
   });
+
+  it('uses latest-first as the opinionated default when automatic layout is enabled', async () => {
+    const onUpdate = vi.fn();
+    render(
+      <AntdApp>
+        <ZoneConfigModal
+          open
+          onCancel={vi.fn()}
+          zoneName="Review"
+          objectId="zone-1"
+          onUpdate={onUpdate}
+          zoneData={{
+            type: 'zone',
+            x: 0,
+            y: 0,
+            width: 620,
+            height: 900,
+            label: 'Review',
+          }}
+        />
+      </AntdApp>
+    );
+
+    fireEvent.click(await screen.findByRole('radio', { name: 'Auto' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate.mock.calls[0][1]).toMatchObject({
+      layout: {
+        mode: 'auto',
+        preset: 'grid',
+        sortBy: 'updated',
+        sortDirection: 'desc',
+        autoResizeHeight: false,
+      },
+    });
+  });
 });

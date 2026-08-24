@@ -20,13 +20,20 @@ import type {
   ZoneTrigger,
 } from '@agor-live/client';
 import {
+  AlignCenterOutlined,
+  AlignLeftOutlined,
+  AppstoreOutlined,
   BorderOutlined,
+  ColumnHeightOutlined,
+  ColumnWidthOutlined,
   CommentOutlined,
   DeleteOutlined,
   FileMarkdownOutlined,
   MinusOutlined,
   PlusOutlined,
   SelectOutlined,
+  VerticalAlignMiddleOutlined,
+  VerticalAlignTopOutlined,
   ZoomInOutlined,
 } from '@ant-design/icons';
 import { Button, Input, Modal, Popover, Slider, Tooltip, Typography, theme } from 'antd';
@@ -2880,23 +2887,24 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               </Typography.Text>
               {(
                 [
-                  ['arrange', 'Auto arrange'],
-                  ['left', 'Align left'],
-                  ['center', 'Align center'],
-                  ['top', 'Align top'],
-                  ['middle', 'Align middle'],
-                  ['width', 'Match width'],
-                  ['height', 'Match height'],
+                  ['arrange', 'Auto arrange', <AppstoreOutlined key="arrange" />],
+                  ['left', 'Align left', <AlignLeftOutlined key="left" />],
+                  ['center', 'Align center', <AlignCenterOutlined key="center" />],
+                  ['top', 'Align top', <VerticalAlignTopOutlined key="top" />],
+                  ['middle', 'Align middle', <VerticalAlignMiddleOutlined key="middle" />],
+                  ['width', 'Match width', <ColumnWidthOutlined key="width" />],
+                  ['height', 'Match height', <ColumnHeightOutlined key="height" />],
                 ] as const
-              ).map(([action, label]) => (
-                <Button
-                  key={action}
-                  size="small"
-                  onMouseDown={(event) => event.stopPropagation()}
-                  onClick={() => void handleLayoutAction(action)}
-                >
-                  {label}
-                </Button>
+              ).map(([action, label, icon]) => (
+                <Tooltip key={action} title={label}>
+                  <Button
+                    size="small"
+                    icon={icon}
+                    aria-label={label}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={() => void handleLayoutAction(action)}
+                  />
+                </Tooltip>
               ))}
             </div>
           )}
