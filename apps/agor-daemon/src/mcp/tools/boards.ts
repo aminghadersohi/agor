@@ -1,3 +1,4 @@
+import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
 import type {
   Board,
   BoardEntityObject,
@@ -478,7 +479,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       }> = [];
       for (const entity of entities) {
         let entityDimensions: { width: number; height: number };
-        if (entity.entity_type === 'card' && entity.card_id) {
+        if (entity.size) {
+          entityDimensions = entity.size;
+        } else if (entity.entity_type === 'card' && entity.card_id) {
           const card = (await ctx.app
             .service('cards')
             .get(entity.card_id, ctx.baseServiceParams)) as {
@@ -517,27 +520,16 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         }
       }
       items.sort((a, b) => a.y - b.y || a.x - b.x || a.id.localeCompare(b.id));
-      const columns = Math.max(
-        1,
-        Math.min(items.length || 1, args.columns ?? Math.ceil(Math.sqrt(Math.max(1, items.length))))
+      const layout = layoutRectangles(
+        items.map(({ id, width, height }) => ({ id, width, height })),
+        {
+          preferredColumns: args.columns ?? Math.ceil(Math.sqrt(Math.max(1, items.length))),
+          gapX,
+          gapY,
+        }
       );
-      const rows = Math.ceil(items.length / columns);
-      const columnWidths = Array.from({ length: columns }, (_, column) =>
-        Math.max(
-          0,
-          ...items.filter((_, index) => index % columns === column).map((item) => item.width)
-        )
-      );
-      const rowHeights = Array.from({ length: rows }, (_, row) =>
-        Math.max(0, ...items.slice(row * columns, (row + 1) * columns).map((item) => item.height))
-      );
-      const columnOffsets = columnWidths.map(
-        (_, column) =>
-          startX + columnWidths.slice(0, column).reduce((sum, width) => sum + width + gapX, 0)
-      );
-      const rowOffsets = rowHeights.map(
-        (_, row) =>
-          startY + rowHeights.slice(0, row).reduce((sum, height) => sum + height + gapY, 0)
+      const placementById = new Map(
+        layout.placements.map((placement) => [placement.id, placement])
       );
       const updates: Array<{
         objectId: string;
@@ -546,12 +538,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         position: { x: number; y: number };
       }> = [];
 
-      for (const [index, item] of items.entries()) {
-        const column = index % columns;
-        const row = Math.floor(index / columns);
+      for (const item of items) {
+        const placement = placementById.get(item.id);
+        if (!placement) throw new Error(`Layout did not place board object '${item.id}'.`);
         const position = {
-          x: columnOffsets[column] ?? startX,
-          y: rowOffsets[row] ?? startY,
+          x: startX + placement.x,
+          y: startY + placement.y,
         };
         if (item.kind === 'entity' && item.entity) {
           await boardObjectsService.patch(item.id, { position }, ctx.baseServiceParams);
@@ -585,8 +577,14 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           (update) => !BOARD_ENTITY_TYPES.includes(update.objectType as BoardEntityType)
         ).length,
         skippedPinned: result.data.length - entities.length,
-        columns,
-        rows,
+        columns: layout.columns,
+        rows: layout.rows,
+        layoutMode: layout.mode,
+        fitsWithoutOverlap: layout.fitsWithoutOverlap,
+        width: layout.width,
+        height: layout.height,
+        appliedGapX: layout.gapX,
+        appliedGapY: layout.gapY,
         updates,
       });
     }
@@ -597,7 +595,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_auto_arrange_zone',
     {
       description:
-        'Arrange worktrees/branches and cards inside one board zone. Positions are stored relative to the zone, preserving the zone pin. The solver evaluates rows and columns together and prefers a non-overlapping row-major grid. Only a zone that cannot fit every rendered rectangle uses distributed stacks with an 8px down-right offset so underlying top and left edges remain visible. The result reports fitsWithoutOverlap and layoutMode.',
+        'Arrange worktrees/branches and cards inside one board zone using their measured rendered rectangles. Positions are relative to the zone and ordered top-left, left-to-right, then row-by-row. Every possible column count is evaluated and a non-overlapping grid is always preferred. Only when no complete grid fits does the tool use the maximum number of distributed stacks, offsetting deck layers down-right so underlying top and left edges remain visible. The result reports exact containment and overflow.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
@@ -639,7 +637,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const entities = result.data.sort(compareBoardEntitiesSpatially);
       const dimensions = new Map<string, { width: number; height: number }>();
       for (const entity of entities) {
-        if (entity.entity_type === 'card' && entity.card_id) {
+        if (entity.size) {
+          dimensions.set(entity.object_id, entity.size);
+        } else if (entity.entity_type === 'card' && entity.card_id) {
           const card = (await ctx.app
             .service('cards')
             .get(entity.card_id, ctx.baseServiceParams)) as {
@@ -670,119 +670,25 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           updates: [],
         });
       }
-      const maxWidth = entities.reduce(
-        (width, entity) => Math.max(width, dimensions.get(entity.object_id)?.width ?? 0),
-        0
-      );
-      const maxHeight = entities.reduce(
-        (height, entity) => Math.max(height, dimensions.get(entity.object_id)?.height ?? 0),
-        0
-      );
-      const availableWidth = Math.max(0, zone.width - 2 * padding);
-      const availableHeight = Math.max(0, zone.height - 2 * padding);
-      const maxColumns = Math.max(1, Math.floor((availableWidth + gapX) / (maxWidth + gapX)));
-      const preferredColumns = Math.max(1, Math.min(args.columns ?? maxColumns, maxColumns));
-
-      // Check both axes for every possible column count. Row heights come from
-      // the actual cards assigned to the row, so grid mode is only selected
-      // when every full rectangle fits without overlap.
-      const grid = Array.from({ length: maxColumns }, (_, index) => index + 1)
-        .map((candidateColumns) => {
-          const candidateRows = Math.ceil(entities.length / candidateColumns);
-          const rowHeights = Array.from({ length: candidateRows }, (_, row) =>
-            Math.max(
-              0,
-              ...entities
-                .slice(row * candidateColumns, (row + 1) * candidateColumns)
-                .map((entity) => dimensions.get(entity.object_id)?.height ?? 0)
-            )
-          );
-          const requiredHeight =
-            rowHeights.reduce((sum, height) => sum + height, 0) +
-            Math.max(0, candidateRows - 1) * gapY;
-          return { columns: candidateColumns, rows: candidateRows, rowHeights, requiredHeight };
-        })
-        .filter((candidate) => candidate.requiredHeight <= availableHeight)
-        .sort(
-          (a, b) =>
-            Math.abs(a.columns - preferredColumns) - Math.abs(b.columns - preferredColumns) ||
-            b.columns - a.columns
-        )[0];
-
-      const layoutMode = grid ? ('grid' as const) : ('deck' as const);
-      let columns = grid?.columns ?? 1;
-      let rows = grid?.rows ?? 1;
-      let stackCount = entities.length;
-      let maxDeckDepth = 1;
-      let requiredHeight = grid?.requiredHeight ?? 0;
-
-      if (!grid && entities.length > 0) {
-        // Spread multiple stacks across the zone in row-major order. Within a
-        // stack each upper card moves down-right so the card underneath keeps
-        // visible top and left edges. Maximize stack count to minimize overlap.
-        const deckCandidates: Array<{
-          columns: number;
-          rows: number;
-          stackCount: number;
-          depth: number;
-          requiredHeight: number;
-        }> = [];
-        const maxDeckColumns = Math.max(
-          1,
-          Math.min(entities.length, Math.floor((availableWidth + gapX) / (maxWidth + gapX)))
-        );
-        const maxDeckRows = Math.max(
-          1,
-          Math.min(entities.length, Math.floor((availableHeight + gapY) / (maxHeight + gapY)))
-        );
-        for (let candidateColumns = 1; candidateColumns <= maxDeckColumns; candidateColumns++) {
-          for (let candidateRows = 1; candidateRows <= maxDeckRows; candidateRows++) {
-            const candidateStacks = candidateColumns * candidateRows;
-            const depth = Math.ceil(entities.length / candidateStacks);
-            const stackWidth = maxWidth + Math.max(0, depth - 1) * DECK_OFFSET;
-            const stackHeight = maxHeight + Math.max(0, depth - 1) * DECK_OFFSET;
-            const requiredWidth =
-              candidateColumns * stackWidth + Math.max(0, candidateColumns - 1) * gapX;
-            const candidateHeight =
-              candidateRows * stackHeight + Math.max(0, candidateRows - 1) * gapY;
-            if (requiredWidth <= availableWidth && candidateHeight <= availableHeight) {
-              deckCandidates.push({
-                columns: candidateColumns,
-                rows: candidateRows,
-                stackCount: Math.min(entities.length, candidateStacks),
-                depth,
-                requiredHeight: candidateHeight,
-              });
-            }
-          }
+      const layout = layoutRectangles(
+        entities.map((entity) => {
+          const size = dimensions.get(entity.object_id);
+          if (!size) throw new Error(`Missing dimensions for board object '${entity.object_id}'.`);
+          return { id: entity.object_id, ...size };
+        }),
+        {
+          bounds: { width: zone.width, height: zone.height },
+          padding,
+          gapX,
+          gapY,
+          preferredColumns: args.columns,
+          allowDeck: true,
+          deckOffset: DECK_OFFSET,
         }
-        const deck = deckCandidates.sort(
-          (a, b) =>
-            b.stackCount - a.stackCount ||
-            a.depth - b.depth ||
-            Math.abs(a.columns - preferredColumns) - Math.abs(b.columns - preferredColumns) ||
-            a.rows - b.rows
-        )[0];
-        if (deck) {
-          columns = deck.columns;
-          rows = deck.rows;
-          stackCount = deck.stackCount;
-          maxDeckDepth = deck.depth;
-          requiredHeight = deck.requiredHeight;
-        } else {
-          stackCount = 1;
-          maxDeckDepth = Math.max(1, entities.length);
-          requiredHeight = maxHeight + Math.max(0, entities.length - 1) * DECK_OFFSET;
-        }
-      }
-
-      const gridRowOffsets = grid
-        ? grid.rowHeights.map(
-            (_, row) =>
-              padding +
-              grid.rowHeights.slice(0, row).reduce((sum, height) => sum + height + gapY, 0)
-          )
-        : [];
+      );
+      const placementById = new Map(
+        layout.placements.map((placement) => [placement.id, placement])
+      );
       const updates: Array<{
         objectId: string;
         entityType: string;
@@ -793,36 +699,19 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         deckDepth: number;
       }> = [];
 
-      for (const [index, entity] of entities.entries()) {
-        const stackIndex = layoutMode === 'grid' ? index : index % stackCount;
-        const deckDepth = layoutMode === 'grid' ? 0 : Math.floor(index / stackCount);
-        const column = stackIndex % columns;
-        const row = Math.floor(stackIndex / columns);
-        const entityWidth = dimensions.get(entity.object_id)?.width ?? maxWidth;
-        const entityHeight = dimensions.get(entity.object_id)?.height ?? maxHeight;
-        const stackWidth = maxWidth + Math.max(0, maxDeckDepth - 1) * DECK_OFFSET;
-        const stackHeight = maxHeight + Math.max(0, maxDeckDepth - 1) * DECK_OFFSET;
-        const rawX =
-          layoutMode === 'grid'
-            ? padding + column * (maxWidth + gapX)
-            : padding + column * (stackWidth + gapX) + deckDepth * DECK_OFFSET;
-        const rawY =
-          layoutMode === 'grid'
-            ? (gridRowOffsets[row] ?? padding)
-            : padding + row * (stackHeight + gapY) + deckDepth * DECK_OFFSET;
-        const position = {
-          x: Math.min(rawX, Math.max(0, zone.width - padding - entityWidth)),
-          y: Math.min(rawY, Math.max(0, zone.height - padding - entityHeight)),
-        };
+      for (const entity of entities) {
+        const placement = placementById.get(entity.object_id);
+        if (!placement) throw new Error(`Layout did not place board object '${entity.object_id}'.`);
+        const position = { x: placement.x, y: placement.y };
         await boardObjectsService.patch(entity.object_id, { position }, ctx.baseServiceParams);
         updates.push({
           objectId: entity.object_id,
           entityType: entity.entity_type,
           position,
-          row,
-          column,
-          stackIndex,
-          deckDepth,
+          row: placement.row,
+          column: placement.column,
+          stackIndex: placement.stackIndex,
+          deckDepth: placement.deckDepth,
         });
       }
 
@@ -830,15 +719,24 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         boardId,
         zoneId,
         arranged: updates.length,
-        columns,
-        rows,
-        fitsWithoutOverlap: layoutMode === 'grid',
-        layoutMode,
-        deckOffset: layoutMode === 'deck' ? DECK_OFFSET : null,
-        stackCount: layoutMode === 'deck' ? stackCount : null,
-        maxDeckDepth: layoutMode === 'deck' ? maxDeckDepth : 1,
-        requiredHeight,
-        overflowingObjectIds: [],
+        columns: layout.columns,
+        rows: layout.rows,
+        fitsWithoutOverlap: layout.fitsWithoutOverlap,
+        layoutMode: layout.mode,
+        deckOffset: layout.mode === 'deck' ? DECK_OFFSET : null,
+        stackCount: layout.mode === 'deck' ? layout.stackCount : null,
+        maxDeckDepth: layout.maxDeckDepth,
+        requiredWidth: layout.width,
+        requiredHeight: layout.height,
+        appliedGapX: layout.gapX,
+        appliedGapY: layout.gapY,
+        overflowingObjectIds: layout.overflowingItemIds,
+        warning:
+          layout.overflowingItemIds.length > 0
+            ? 'One or more rendered objects are larger than the available zone rectangle.'
+            : layout.mode === 'deck'
+              ? 'The zone cannot fit every rendered object without overlap; the least-overlapping distributed deck was used.'
+              : null,
         zone: { width: zone.width, height: zone.height },
         updates,
       });
