@@ -9,6 +9,8 @@ export interface LayoutRect {
 export interface LayoutGuide {
   orientation: 'vertical' | 'horizontal';
   offset: number;
+  kind?: 'alignment' | 'size' | 'gap';
+  label?: string;
 }
 
 export interface SnapResult {
@@ -49,12 +51,84 @@ export function snapRectToPeers(
 
   const bestX = xCandidates.sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta))[0];
   const bestY = yCandidates.sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta))[0];
+  const guides: LayoutGuide[] = [
+    ...(bestX ? [{ orientation: 'vertical' as const, offset: bestX.guide }] : []),
+    ...(bestY ? [{ orientation: 'horizontal' as const, offset: bestY.guide }] : []),
+  ];
+
+  // Show size-match indicators without changing the rectangle's dimensions.
+  // These are intentionally tolerant because React Flow reports fractional
+  // measured sizes while a node is settling after a render.
+  const sameWidth = peers.find((peer) => Math.abs(peer.width - moving.width) <= threshold);
+  const sameHeight = peers.find((peer) => Math.abs(peer.height - moving.height) <= threshold);
+  if (sameWidth) {
+    guides.push({
+      orientation: 'horizontal',
+      offset: moving.y + moving.height / 2,
+      kind: 'size',
+      label: `${Math.round(moving.width)}px wide`,
+    });
+  }
+  if (sameHeight) {
+    guides.push({
+      orientation: 'vertical',
+      offset: moving.x + moving.width / 2,
+      kind: 'size',
+      label: `${Math.round(moving.height)}px high`,
+    });
+  }
+
+  // When the moving item has peers on both sides (or above and below), show
+  // an equal-spacing indicator when those two gaps match. This mirrors the
+  // spacing hints in common design tools while leaving the user in control of
+  // whether to snap the final position.
+  const overlapsY = (peer: LayoutRect) =>
+    peer.y < moving.y + moving.height && peer.y + peer.height > moving.y;
+  const overlapsX = (peer: LayoutRect) =>
+    peer.x < moving.x + moving.width && peer.x + peer.width > moving.x;
+  const left = peers.filter((peer) => peer.x + peer.width <= moving.x && overlapsY(peer));
+  const right = peers.filter((peer) => peer.x >= moving.x + moving.width && overlapsY(peer));
+  const above = peers.filter((peer) => peer.y + peer.height <= moving.y && overlapsX(peer));
+  const below = peers.filter((peer) => peer.y >= moving.y + moving.height && overlapsX(peer));
+  const leftGap = left.length
+    ? moving.x - Math.max(...left.map((peer) => peer.x + peer.width))
+    : undefined;
+  const rightGap = right.length
+    ? Math.min(...right.map((peer) => peer.x)) - (moving.x + moving.width)
+    : undefined;
+  const aboveGap = above.length
+    ? moving.y - Math.max(...above.map((peer) => peer.y + peer.height))
+    : undefined;
+  const belowGap = below.length
+    ? Math.min(...below.map((peer) => peer.y)) - (moving.y + moving.height)
+    : undefined;
+  if (
+    leftGap !== undefined &&
+    rightGap !== undefined &&
+    Math.abs(leftGap - rightGap) <= threshold
+  ) {
+    guides.push({
+      orientation: 'horizontal',
+      offset: moving.y + moving.height / 2,
+      kind: 'gap',
+      label: `${Math.round(leftGap)}px gap`,
+    });
+  }
+  if (
+    aboveGap !== undefined &&
+    belowGap !== undefined &&
+    Math.abs(aboveGap - belowGap) <= threshold
+  ) {
+    guides.push({
+      orientation: 'vertical',
+      offset: moving.x + moving.width / 2,
+      kind: 'gap',
+      label: `${Math.round(aboveGap)}px gap`,
+    });
+  }
   return {
     x: moving.x + (bestX?.delta ?? 0),
     y: moving.y + (bestY?.delta ?? 0),
-    guides: [
-      ...(bestX ? [{ orientation: 'vertical' as const, offset: bestX.guide }] : []),
-      ...(bestY ? [{ orientation: 'horizontal' as const, offset: bestY.guide }] : []),
-    ],
+    guides,
   };
 }
