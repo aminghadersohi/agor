@@ -43,6 +43,7 @@ const ARRANGE_DIMENSIONS = {
   branch: { width: 500, height: 200 },
   card: { width: 380, height: 150 },
 } as const;
+const DECK_OFFSET = 2;
 
 /**
  * CardNode grows with its description and (unlike the React Flow placeholder
@@ -468,7 +469,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_auto_arrange_zone',
     {
       description:
-        'Arrange worktrees/branches and cards inside one board zone. Positions are stored relative to the zone, preserving the zone pin. The grid is clamped to the zone bounds and adapts its row spacing to tall lists; the result reports fitsWithoutOverlap when the zone is large enough for every rendered item.',
+        'Arrange worktrees/branches and cards inside one board zone. Positions are stored relative to the zone, preserving the zone pin. Items are placed row-major from top-left; a zone that cannot fit every rendered rectangle switches to a deterministic 2px-offset deck instead of collapsing items onto one coordinate. The result reports fitsWithoutOverlap and layoutMode.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
@@ -551,15 +552,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const totalRowHeight = rowHeights.reduce((sum, height) => sum + height, 0);
       const requiredHeight = totalRowHeight + Math.max(0, rows - 1) * gapY;
       const fitsWithoutOverlap = requiredHeight <= availableHeight;
-      const effectiveGapY =
-        fitsWithoutOverlap || rows <= 1
-          ? gapY
-          : Math.max(0, (availableHeight - totalRowHeight) / (rows - 1));
-      const rowOffsets = rowHeights.map(
-        (_, row) =>
-          padding +
-          rowHeights.slice(0, row).reduce((sum, height) => sum + height + effectiveGapY, 0)
-      );
+      const rowOffsets = fitsWithoutOverlap
+        ? rowHeights.map(
+            (_, row) =>
+              padding + rowHeights.slice(0, row).reduce((sum, height) => sum + height + gapY, 0)
+          )
+        : rowHeights.map((_, row) => padding + row * DECK_OFFSET);
       const overflowingObjectIds = entities
         .filter((entity, index) => {
           const row = Math.floor(index / columns);
@@ -600,6 +598,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         columns,
         rows,
         fitsWithoutOverlap: fitsWithoutOverlap && overflowingObjectIds.length === 0,
+        layoutMode: fitsWithoutOverlap ? 'grid' : 'deck',
+        deckOffset: fitsWithoutOverlap ? null : DECK_OFFSET,
         requiredHeight,
         overflowingObjectIds,
         zone: { width: zone.width, height: zone.height },
