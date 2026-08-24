@@ -584,7 +584,15 @@ describe('agor_boards_auto_arrange_zone', () => {
     expect(parsed.arranged).toBe(20);
     expect(parsed.columns).toBe(1); // 620px cannot fit three 380px cards without overlap.
     expect(parsed.fitsWithoutOverlap).toBe(false);
+    expect(parsed.layoutMode).toBe('deck');
+    expect(parsed.deckOffset).toBe(2);
     expect(patches).toHaveLength(20);
+    expect(patches.slice(0, 4).map((update) => update.position)).toEqual([
+      { x: 24, y: 24 },
+      { x: 24, y: 26 },
+      { x: 24, y: 28 },
+      { x: 24, y: 30 },
+    ]);
     for (const update of patches) {
       expect(update.position.x).toBeGreaterThanOrEqual(0);
       expect(update.position.x).toBeLessThanOrEqual(240);
