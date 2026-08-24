@@ -580,7 +580,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_auto_arrange_zone',
     {
       description:
-        'Arrange worktrees/branches and cards inside one board zone using their measured rendered rectangles. Positions are relative to the zone and ordered top-left, left-to-right, then row-by-row. Every possible column count is evaluated and a non-overlapping grid is always preferred. Only when no complete grid fits does the tool use the maximum number of distributed stacks, offsetting deck layers down-right so underlying top and left edges remain visible. The result reports exact containment and overflow.',
+        'Arrange worktrees/branches and cards inside one board zone using their measured rendered rectangles. Positions are relative to the zone and ordered top-left, left-to-right, then row-by-row. When columns is omitted, every possible column count is evaluated; when provided, that exact occupied count is locked and never silently replaced. A non-overlapping grid is always preferred. Only when no complete grid fits does the tool use distributed stacks, offsetting deck layers down-right so underlying top and left edges remain visible. If an explicit count cannot be contained, no positions are changed. The result reports exact containment and overflow.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
@@ -591,7 +591,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .describe('Arrange only branch or card entities (default: both).'),
         columns: mcpOptionalPositiveInt(
           'columns',
-          'Preferred number of columns. The solver may use a different count when needed to fit complete rows inside the zone.'
+          'Exact number of occupied columns (capped by the number of entities). When omitted, the solver chooses a fitting count automatically. An explicit count is never silently replaced; if it cannot fit, no positions are changed and the result explains why.'
         ),
         padding: mcpOptionalNumber('padding', 'Padding from the zone edges (default: 24).'),
         gapX: mcpOptionalNumber('gapX', 'Horizontal gap between items (default: 24).'),
@@ -666,11 +666,37 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           padding,
           gapX,
           gapY,
-          preferredColumns: args.columns,
+          exactColumns: args.columns,
           allowDeck: true,
           deckOffset: DECK_OFFSET,
         }
       );
+      const requestedColumns =
+        args.columns === undefined ? null : Math.min(args.columns, entities.length);
+      if (requestedColumns !== null && layout.overflowingItemIds.length > 0) {
+        return textResult({
+          boardId,
+          zoneId,
+          applied: false,
+          arranged: 0,
+          requestedColumns,
+          columns: layout.columns,
+          rows: layout.rows,
+          fitsWithoutOverlap: layout.fitsWithoutOverlap,
+          layoutMode: layout.mode,
+          requiredWidth: layout.width,
+          requiredHeight: layout.height,
+          appliedGapX: layout.gapX,
+          appliedGapY: layout.gapY,
+          overflowingObjectIds: layout.overflowingItemIds,
+          warning:
+            `The requested ${requestedColumns}-column layout cannot fit every rendered object inside ` +
+            `the ${zone.width}×${zone.height} zone. No positions were changed. Increase the zone size, ` +
+            'reduce the requested columns, or omit columns to allow automatic fitting.',
+          zone: { width: zone.width, height: zone.height },
+          updates: [],
+        });
+      }
       const placementById = new Map(
         layout.placements.map((placement) => [placement.id, placement])
       );
@@ -703,7 +729,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       return textResult({
         boardId,
         zoneId,
+        applied: true,
         arranged: updates.length,
+        requestedColumns,
         columns: layout.columns,
         rows: layout.rows,
         fitsWithoutOverlap: layout.fitsWithoutOverlap,
