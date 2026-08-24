@@ -43,6 +43,9 @@ export interface BoardEntityObject {
   /** Position on canvas */
   position: BoardPosition;
 
+  /** Last measured rendered size, used by server-side layout tools. */
+  size?: { width: number; height: number };
+
   /** Zone this entity is pinned to (optional) */
   zone_id?: string;
 

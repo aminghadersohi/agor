@@ -1,17 +1,22 @@
 import type { Board } from '@agor-live/client';
-import { renderHook } from '@testing-library/react';
+import { act, renderHook } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import type { ReactNode } from 'react';
+import type { Node } from 'reactflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useBoardObjects } from './useBoardObjects';
 
 // Spy the themed error toast so the failure path of reorderObject is observable.
-const { showError } = vi.hoisted(() => ({ showError: vi.fn() }));
+const { showError, showSuccess, showWarning } = vi.hoisted(() => ({
+  showError: vi.fn(),
+  showSuccess: vi.fn(),
+  showWarning: vi.fn(),
+}));
 vi.mock('../../../utils/message', () => ({
   useThemedMessage: () => ({
     showError,
-    showSuccess: vi.fn(),
-    showWarning: vi.fn(),
+    showSuccess,
+    showWarning,
     showInfo: vi.fn(),
     showLoading: vi.fn(),
     destroy: vi.fn(),
@@ -20,6 +25,8 @@ vi.mock('../../../utils/message', () => ({
 
 beforeEach(() => {
   showError.mockClear();
+  showSuccess.mockClear();
+  showWarning.mockClear();
 });
 
 /**
@@ -52,6 +59,7 @@ function renderReorder(board: Board, client: unknown) {
         board,
         client: client as never,
         boardObjectsForBoard: [],
+        nodes: [],
         setNodes: vi.fn(),
         deletedObjectsRef: { current: new Set<string>() },
       }),
@@ -193,5 +201,101 @@ describe('reorderObject', () => {
       _action: 'mergeObjectFields',
       objects: { a: { zIndex: 499 }, b: { zIndex: 498 } },
     });
+  });
+});
+
+describe('arrangeZoneContents', () => {
+  it('packs measured children row-major and persists position and size as separate patches', async () => {
+    const { client, patch } = makeClient();
+    const board = makeBoard({
+      zone: { type: 'zone', x: 0, y: 0, width: 900, height: 500, label: 'Zone' },
+    });
+    const initialNodes: Node[] = [
+      {
+        id: 'zone',
+        type: 'zone',
+        position: { x: 0, y: 0 },
+        data: {},
+        width: 900,
+        height: 500,
+      },
+      {
+        id: 'branch-1',
+        type: 'branchNode',
+        parentId: 'zone',
+        position: { x: 200, y: 200 },
+        data: {},
+        width: 400,
+        height: 180,
+      },
+      {
+        id: 'card-card-1',
+        type: 'cardNode',
+        parentId: 'zone',
+        position: { x: 220, y: 210 },
+        data: {},
+        width: 300,
+        height: 100,
+      },
+    ];
+    let renderedNodes = initialNodes;
+    const setNodes: React.Dispatch<React.SetStateAction<Node[]>> = (value) => {
+      renderedNodes = typeof value === 'function' ? value(renderedNodes) : value;
+    };
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'placement-branch',
+              board_id: 'board-1',
+              entity_type: 'branch',
+              branch_id: 'branch-1',
+              position: { x: 200, y: 200 },
+              zone_id: 'zone',
+              created_at: '2026-01-01T00:00:00.000Z',
+            },
+            {
+              object_id: 'placement-card',
+              board_id: 'board-1',
+              entity_type: 'card',
+              card_id: 'card-1',
+              position: { x: 220, y: 210 },
+              zone_id: 'zone',
+              created_at: '2026-01-01T00:00:00.000Z',
+            },
+          ] as never,
+          nodes: initialNodes,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    const zoneNode = result.current.getBoardObjectNodes()[0];
+    await act(async () => {
+      await (zoneNode.data.onArrangeContents as (id: string) => Promise<void>)('zone');
+    });
+
+    expect(renderedNodes.find((node) => node.id === 'branch-1')?.position).toEqual({
+      x: 24,
+      y: 24,
+    });
+    expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual({
+      x: 448,
+      y: 24,
+    });
+    expect(patch).toHaveBeenCalledTimes(4);
+    expect(patch).toHaveBeenCalledWith('placement-branch', { position: { x: 24, y: 24 } });
+    expect(patch).toHaveBeenCalledWith('placement-branch', {
+      size: { width: 400, height: 180 },
+    });
+    expect(patch).toHaveBeenCalledWith('placement-card', { position: { x: 448, y: 24 } });
+    expect(patch).toHaveBeenCalledWith('placement-card', {
+      size: { width: 300, height: 100 },
+    });
+    expect(showSuccess).toHaveBeenCalledWith('Arranged 2 items in a non-overlapping grid.');
   });
 });

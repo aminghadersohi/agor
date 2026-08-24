@@ -40,6 +40,12 @@
       "import": "./dist/design/board-backgrounds.js",
       "require": "./dist/design/board-backgrounds.cjs"
     },
+    "./layout/rectangle-packing": {
+      "source": "./src/layout/rectangle-packing.ts",
+      "types": "./dist/layout/rectangle-packing.d.ts",
+      "import": "./dist/layout/rectangle-packing.js",
+      "require": "./dist/layout/rectangle-packing.cjs"
+    },
     "./db": {
       "source": "./src/db/index.ts",
       "types": "./dist/db/index.d.ts",
