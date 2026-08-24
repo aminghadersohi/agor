@@ -753,10 +753,10 @@ describe('agor_boards_auto_arrange_zone', () => {
 
     expect(parsed).toMatchObject({ layoutMode: 'grid', columns: 2, rows: 2 });
     expect(patches.map((update) => update.position)).toEqual([
-      { x: 24, y: 24 },
-      { x: 428, y: 24 },
-      { x: 24, y: 104 },
-      { x: 428, y: 104 },
+      { x: 24, y: 88 },
+      { x: 428, y: 88 },
+      { x: 24, y: 168 },
+      { x: 428, y: 168 },
     ]);
   });
 
