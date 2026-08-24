@@ -53,12 +53,13 @@ import type { BranchesServiceImpl } from '../declarations.js';
 import { emitHaNativeSocketEvent, tenantChannelName } from '../realtime/routing.js';
 import { shouldUseCloneReferencePath } from '../utils/clone-reference.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
+import { resolveDelegatedExecutionHomeKey } from '../utils/executor-delegated-home.js';
 import { resolveExecutorReadAsUser } from '../utils/executor-read-impersonation.js';
 import { resolveGitImpersonationForUser } from '../utils/git-impersonation.js';
 import {
   generateScopedServiceToken,
   getDaemonUrl,
-  runExecutorCommand,
+  requestExecutor,
   spawnExecutorFireAndForget,
 } from '../utils/spawn-executor.js';
 
@@ -543,14 +544,18 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     }
 
     const userId = (params as AuthenticatedParams | undefined)?.user?.user_id as UserID | undefined;
-    const asUser = await resolveExecutorReadAsUser(this.db, userId, this.app.get('config'));
-    const inspection = await runExecutorCommand(
+    const delegatedHomeKey = await resolveDelegatedExecutionHomeKey(
+      this.db,
+      userId,
+      this.app.get('config')
+    );
+    const inspection = await requestExecutor(
       {
         command: 'git.repo.inspect',
         daemonUrl: getDaemonUrl(),
         params: { path: inputPath },
       },
-      { asUser, logPrefix: '[repos.local.inspect]' }
+      { delegatedHomeKey, logPrefix: '[repos.local.inspect]' }
     );
     if (!inspection.success)
       throw new Error(inspection.error?.message ?? 'Repository inspection failed');
@@ -1280,7 +1285,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       this.app.get('config')
     );
 
-    return runExecutorCommand(
+    return requestExecutor(
       {
         command,
         sessionToken,
@@ -1458,7 +1463,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
         this.app as unknown as { settings: { authentication?: { secret?: string } } }
       );
 
-      const cleanupResult = await runExecutorCommand(
+      const cleanupResult = await requestExecutor(
         {
           command: 'git.repo.delete',
           sessionToken,

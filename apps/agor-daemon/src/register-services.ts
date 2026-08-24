@@ -129,6 +129,8 @@ import { createClaudeModelsService } from './services/claude-models.js';
 import { createCodexAuthImportService } from './services/codex-auth-import.js';
 import { createCodexAuthLogoutService } from './services/codex-auth-logout.js';
 import { createCodexDeviceAuthService } from './services/codex-device-auth.js';
+import { CodexDeviceAuthAttemptAuthority } from './services/codex-device-auth-attempt-authority.js';
+import { createDurableCodexDeviceAuthService } from './services/codex-device-auth-durable.js';
 import { createConfigService } from './services/config.js';
 import { createCopilotModelsService } from './services/copilot-models.js';
 import { createCursorModelsService } from './services/cursor-models.js';
@@ -704,22 +706,30 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   // Imports a pasted Codex CLI auth.json for the authenticated user — writes
   // it 0600 into the resolved Codex credential home and flips the caller's auth
   // method to subscription. Token material never leaves the daemon.
-  app.use('/codex-auth/import', createCodexAuthImportService(app, db));
+  const codexDeviceAttempts =
+    ctx.deployment.mode === 'ha' ? new CodexDeviceAuthAttemptAuthority(db) : undefined;
+
+  app.use('/codex-auth/import', createCodexAuthImportService(app, db, codexDeviceAttempts));
   app.service('/codex-auth/import').hooks({ before: { create: [ctx.requireAuth] } });
 
   // ChatGPT device-code sign-in: create starts an attempt (code + verification
   // URL back to the UI, daemon polls OpenAI for approval); find reports the
   // caller's attempt status. Tokens stay daemon-side end to end.
-  app.use('/codex-auth/device', createCodexDeviceAuthService(app, db));
-  app
-    .service('/codex-auth/device')
-    .hooks({ before: { create: [ctx.requireAuth], find: [ctx.requireAuth] } });
+  app.use(
+    '/codex-auth/device',
+    codexDeviceAttempts
+      ? createDurableCodexDeviceAuthService(app, db, codexDeviceAttempts)
+      : createCodexDeviceAuthService(app, db)
+  );
+  app.service('/codex-auth/device').hooks({
+    before: { create: [ctx.requireAuth], find: [ctx.requireAuth], remove: [ctx.requireAuth] },
+  });
 
   // Removes the caller's Codex login — deletes auth.json through the resolved
   // credential route and clears the stored auth method (emitting `patched` so the
   // UI re-probes to disconnected). Server-local only; does not revoke the OAuth
   // grant, so other machines stay signed in.
-  app.use('/codex-auth/logout', createCodexAuthLogoutService(app, db));
+  app.use('/codex-auth/logout', createCodexAuthLogoutService(app, db, codexDeviceAttempts));
   app.service('/codex-auth/logout').hooks({ before: { create: [ctx.requireAuth] } });
 
   // Claude dynamic model discovery via @anthropic-ai/sdk's models.list().
@@ -1030,8 +1040,13 @@ function createExecuteHandler(
         const branch = await branchRepo.findById(session.branch_id);
         if (!branch?.path) return undefined;
         let baseRepoPath: string | undefined;
-        // Only linked worktrees need the shared git dir; a self-standing clone
-        // carries its own `.git` inside the branch dir.
+        // Only linked worktrees need the shared git dir; a clone carries its
+        // own `.git` inside the branch dir — EXCEPT for its object store when
+        // it was created with `git clone --reference`, which leaves an
+        // alternates pointer into `<data_home>/repos/<slug>/.git/objects`.
+        // The daemon refuses to create that pointer when this sandbox would
+        // hide it (see `shouldUseCloneReferencePath`), so a clone-mode branch
+        // needs nothing mounted from `repos/`.
         if (branch.storage_mode !== 'clone' && branch.repo_id) {
           const repo = await new RepoRepository(tenantDb).findById(branch.repo_id);
           baseRepoPath = repo?.local_path ?? undefined;

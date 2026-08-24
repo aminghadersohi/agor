@@ -27,6 +27,7 @@ import {
   type BranchRepository,
   getCurrentTenantDatabaseScope,
   isPostgresDatabaseHandle,
+  isTenantWriteMethodName,
   requireCurrentTenantId,
   runWithTenantDatabaseScope,
   ScheduleRepository,
@@ -115,6 +116,7 @@ import { resolveForUserIdWithGate } from './oauth-auth-helpers.js';
 import { protectExternalPermissionMessageWrites } from './permissions/permission-message-boundary.js';
 import type { RedisRealtimeRuntime } from './realtime/redis-realtime.js';
 import type { ArtifactsService } from './services/artifacts.js';
+import { CODEX_AUTH_DEFER_USER_REALTIME } from './services/codex-auth-shared.js';
 import type { GatewayService } from './services/gateway.js';
 import { groupMembershipsHooks, groupsHooks } from './services/groups.js';
 import {
@@ -158,6 +160,7 @@ import {
   scopeFindToAccessibleBoardsSql,
   scopeFindToAccessibleBranchesSql,
   scopeFindToAccessibleSessionsSql,
+  scopeReadToAccessibleBoardsSql,
   scopeScheduleQuery,
   setSessionUnixUsername,
   validateSessionUnixUsername,
@@ -276,7 +279,7 @@ function branchEnvFieldsFromItem(item: Partial<Branch>) {
   };
 }
 
-function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
+export function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
   return async (context: HookContext) => {
     const items = Array.isArray(context.data) ? context.data : [context.data];
     const shouldValidate = (items as Array<Record<string, unknown>>).some((item) =>
@@ -298,8 +301,11 @@ function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
           mode,
           'branch environment'
         );
+        // The app URL is rendered metadata consumed directly by clients, so it
+        // must be safe before persistence. The health URL is outbound runtime
+        // configuration: validate it at the observation boundary instead of
+        // making branch materialization depend on an inactive environment.
         validateRenderedManagedEnvUrlFields({
-          health: item.health_check_url,
           app: item.app_url,
         });
       } catch (error) {
@@ -474,6 +480,7 @@ export const TENANT_OWNED_SERVICE_PATHS = [
   'session-env-selections',
   'kb/namespaces',
   'kb/documents',
+  'kb/graph',
   'kb/document-edits',
   'kb/versions',
   'kb/search',
@@ -635,7 +642,11 @@ export function authorizeUsersGet(context: HookContext): HookContext {
     return context;
   }
 
-  ensureMinimumRole(params, ROLES.MEMBER, 'view users');
+  // The user directory is a tenant-owned read model used by every workspace
+  // surface for attribution. Viewers already receive its redacted realtime
+  // events tenant-wide, so the initial find/get must use the same read floor or
+  // a legitimate read-only login can never hydrate the application.
+  ensureMinimumRole(params, ROLES.VIEWER, 'view users');
   return context;
 }
 
@@ -912,13 +923,12 @@ export function registerHooks(ctx: RegisterHooksContext): void {
 
   // Enforce the per-tenant write gate on request-driven writes. Runs after
   // scopeTenantBefore has resolved the trusted tenant. Reads are never gated;
-  // only create/update/patch/remove are blocked while a freeze is held. This is
+  // custom mutators as well as CRUD writes are blocked while a freeze is held. This is
   // the request-traffic enforcement point for the generic write gate; deferred
   // operators (scheduler/gateway/executor/queue) enforce at their own entry
   // points. Fails closed with 503 so an orchestrator sees a transient block.
-  const WRITE_METHODS = new Set(['create', 'update', 'patch', 'remove']);
   const writeGateBefore = async (context: HookContext): Promise<HookContext> => {
-    if (!WRITE_METHODS.has(context.method)) return context;
+    if (!isTenantWriteMethodName(context.method)) return context;
     const tenantId = context.params.tenant?.tenant_id;
     if (!tenantId) return context;
     // Only enforce inside an active tenant database scope — the one the around
@@ -1196,18 +1206,21 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   // ============================================================================
   safeService('board-objects')?.hooks({
     before: {
-      all: [
-        typedValidateQuery(boardObjectQueryValidator),
-        requireAuth,
-        requireMinimumRole(ROLES.MEMBER, 'manage board objects'),
-      ],
+      all: [typedValidateQuery(boardObjectQueryValidator), requireAuth],
       // Board-objects may reference a branch or may be loose board/card/layout
       // rows. The service composes this marker into an object-specific SQL
       // predicate: branch-bound rows require branch access; loose rows require
       // board visibility.
       find: [
-        ...(executionMode.appRbacEnabled ? [scopeFindToAccessibleBoardsSql(superadminOpts)] : []),
+        ...(executionMode.appRbacEnabled ? [scopeReadToAccessibleBoardsSql(superadminOpts)] : []),
       ],
+      get: [
+        ...(executionMode.appRbacEnabled ? [scopeReadToAccessibleBoardsSql(superadminOpts)] : []),
+      ],
+      create: [requireMinimumRole(ROLES.MEMBER, 'create board objects')],
+      update: [requireMinimumRole(ROLES.MEMBER, 'update board objects')],
+      patch: [requireMinimumRole(ROLES.MEMBER, 'update board objects')],
+      remove: [requireMinimumRole(ROLES.MEMBER, 'delete board objects')],
     },
   });
 
@@ -2338,7 +2351,11 @@ export function registerHooks(ctx: RegisterHooksContext): void {
           }
 
           if (params.user) {
-            ensureMinimumRole(params, ROLES.MEMBER, 'list users');
+            // Viewers need the same redacted tenant directory that realtime
+            // publishes for attribution. Tenant scoping remains owned by the
+            // shared users service hook/RLS path; this only aligns the role
+            // floor with the rest of the read-only workspace surface.
+            ensureMinimumRole(params, ROLES.VIEWER, 'list users');
             return context;
           }
 
@@ -2394,6 +2411,26 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         },
       ],
       patch: [
+        (context: HookContext) => {
+          const params = context.params as HookContext['params'] & {
+            [CODEX_AUTH_DEFER_USER_REALTIME]?: boolean;
+          };
+          if (!params[CODEX_AUTH_DEFER_USER_REALTIME]) return context;
+
+          // Codex HA completion/import/logout runs the users patch inside the
+          // same generation-fenced transaction as its credential mutation.
+          // Suppress Feathers' pre-commit automatic event and enqueue one
+          // redacted event that can be observed only after commit.
+          context.event = null;
+          emitServiceEvent(app, {
+            path: 'users',
+            event: 'patched',
+            id: context.id,
+            data: redactUserPayload(context.result),
+            params,
+          });
+          return context;
+        },
         async (context: HookContext) => {
           if ((context.params as Params & { skipAvatarRefresh?: boolean }).skipAvatarRefresh) {
             return context;

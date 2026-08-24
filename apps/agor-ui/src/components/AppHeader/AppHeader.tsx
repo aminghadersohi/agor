@@ -1,4 +1,5 @@
 import type { ActiveUser, AgorClient, Board, BoardID, Branch, User } from '@agor-live/client';
+import { hasMinimumRole, ROLES } from '@agor-live/client';
 import { BulbOutlined, PlayCircleOutlined } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import { Button, Divider, Layout, Popover, Space, Tag, Tooltip, theme } from 'antd';
@@ -7,6 +8,7 @@ import { useHref, useNavigate } from 'react-router-dom';
 import { mapToArray } from '@/utils/mapHelpers';
 import { useConnectionDisabled } from '../../contexts/ConnectionContext';
 import { useTheme } from '../../contexts/ThemeContext';
+import type { NewSessionConfig, SessionCreationResult } from '../../domain/sessionCreation';
 import { useRecentBoards } from '../../hooks/useRecentBoards';
 import { useAgorStore } from '../../store/agorStore';
 import { selectBoardById, selectBranchById, selectUserById } from '../../store/selectors';
@@ -21,12 +23,15 @@ import { MarkdownRenderer } from '../MarkdownRenderer';
 import { buildThemeMenuItems } from '../ThemeSwitcher';
 import { AppHeaderGlobalSearch } from './AppHeaderGlobalSearch';
 import { GlobalPresenceFacepile } from './GlobalPresenceFacepile';
+import { NavbarComposeButton } from './NavbarComposeButton';
 import { SettingsDropdown } from './SettingsDropdown';
 
 const { Header } = Layout;
 
 export interface AppHeaderProps {
   user?: User | null;
+  authenticationGeneration?: number;
+  isAuthenticationGenerationCurrent?: (generation: number) => boolean;
   presenceClient?: AgorClient | null;
   currentUserId?: string;
   /** Demo/screenshot-only fixture: render static presence while keeping AppHeader chrome. */
@@ -56,6 +61,11 @@ export interface AppHeaderProps {
   instanceLabel?: string;
   /** Instance description (markdown) shown in popover around the instance label */
   instanceDescription?: string;
+  /** Session-creation seam behind the navbar compose affordance. */
+  onCreateSession?: (
+    config: NewSessionConfig,
+    boardId: string
+  ) => Promise<SessionCreationResult | null>;
 }
 
 const RecentBoardPills: React.FC<{
@@ -112,6 +122,8 @@ function isPlainLeftClick(event: React.MouseEvent): boolean {
 
 const AppHeaderInner: React.FC<AppHeaderProps> = ({
   user,
+  authenticationGeneration = 0,
+  isAuthenticationGenerationCurrent,
   presenceClient = null,
   currentUserId,
   staticActiveUsers,
@@ -132,6 +144,7 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
   onUserClick,
   instanceLabel,
   instanceDescription,
+  onCreateSession,
 }) => {
   const { token } = theme.useToken();
   const navigate = useNavigate();
@@ -296,6 +309,18 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
           staticActiveUsers={staticActiveUsers}
           maxVisible={presenceMaxVisible}
         />
+        {onCreateSession && hasMinimumRole(user?.role, ROLES.MEMBER) && (
+          <NavbarComposeButton
+            key={`${user?.user_id ?? 'anonymous'}:${authenticationGeneration}`}
+            client={presenceClient}
+            currentUser={user}
+            authenticationGeneration={authenticationGeneration}
+            isAuthenticationGenerationCurrent={isAuthenticationGenerationCurrent}
+            currentBoardId={currentBoardId}
+            onCreateSession={onCreateSession}
+            disabled={mutationDisabled}
+          />
+        )}
         <AppHeaderGlobalSearch
           currentUserId={currentUserId}
           branchById={branchById}

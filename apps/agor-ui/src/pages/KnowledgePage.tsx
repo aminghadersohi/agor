@@ -2052,6 +2052,7 @@ export function KnowledgePage({
     pendingEditModeRef.current = true;
     setIsEditing(true);
     navigate(`${buildKnowledgeRoutePath(routeBasePath, namespaceSlug)}?draft=page&mode=edit`);
+    setMobileBrowserOpen(false);
   };
 
   const openCreateModal = async (kind: KnowledgeDocumentKind) => {
@@ -2462,6 +2463,7 @@ export function KnowledgePage({
         { editing: false }
       )}`
     );
+    setMobileBrowserOpen(false);
   };
 
   const selectKnowledgeSearchResult = async (result: KnowledgeSearchResult) => {
@@ -2489,6 +2491,7 @@ export function KnowledgePage({
     const targetPath =
       activeSpace === 'all' ? routeBasePath : buildKnowledgeRoutePath(routeBasePath, activeSpace);
     navigate(`${targetPath}${buildKnowledgeSearch({ editing: false })}`);
+    setMobileBrowserOpen(false);
   };
 
   const openGraphDoc = async (documentId: string) => {
@@ -2528,6 +2531,7 @@ export function KnowledgePage({
     const targetPath =
       space === 'all' ? routeBasePath : buildKnowledgeRoutePath(routeBasePath, space);
     navigate(`${targetPath}${buildKnowledgeSearch({ editing: false })}`);
+    setMobileBrowserOpen(false);
   };
 
   const renderDocumentRow = (doc: KnowledgeDocument, depth = 0): React.ReactNode => {
@@ -3673,10 +3677,7 @@ export function KnowledgePage({
               style={{ flex: 1 }}
               type="primary"
               icon={<FileAddOutlined />}
-              onClick={() => {
-                setMobileBrowserOpen(false);
-                openCreateModal('doc');
-              }}
+              onClick={() => void openCreateModal('doc')}
               disabled={!client}
             >
               New Page
@@ -3704,9 +3705,6 @@ export function KnowledgePage({
                 background: token.colorFillQuaternary,
                 borderRadius: token.borderRadiusLG,
                 padding: 4,
-              }}
-              onClick={(event) => {
-                if ((event.target as HTMLElement).closest('button')) setMobileBrowserOpen(false);
               }}
             >
               <button

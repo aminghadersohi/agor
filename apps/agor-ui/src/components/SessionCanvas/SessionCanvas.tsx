@@ -75,6 +75,7 @@ import {
   selectUserById,
 } from '../../store/selectors';
 import type { AgenticToolOption } from '../../types';
+import { useThemedMessage } from '../../utils/message';
 import { REACT_FLOW_DRAG_HANDLE_SELECTOR } from '../../utils/reactFlowDragClasses';
 import { buildScopedBoardCss } from '../../utils/sanitizeCss';
 import { isDarkTheme } from '../../utils/theme';
@@ -454,6 +455,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
   ) => {
     const { token } = theme.useToken();
     const mutationGate = useMutationGate();
+    const { showError } = useThemedMessage();
 
     // Entity state via narrow store subscriptions. Each whole-map selector is a
     // stable module-level reference, so a slice only re-renders the canvas when
@@ -619,7 +621,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             case 'fork': {
               const forkedSession = (await client
                 .service(`sessions/${targetSessionId}/fork`)
-                .create({})) as Session;
+                .create({ prompt: renderedTemplate })) as Session;
               await client.sessions.prompt(forkedSession.session_id, renderedTemplate, {
                 permissionMode,
               });
@@ -629,7 +631,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             case 'spawn': {
               const spawnedSession = (await client
                 .service(`sessions/${targetSessionId}/spawn`)
-                .create({})) as Session;
+                .create({ prompt: renderedTemplate })) as Session;
               await client.sessions.prompt(spawnedSession.session_id, renderedTemplate, {
                 permissionMode,
               });
@@ -642,6 +644,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           if (resultSessionId) onSessionClick?.(resultSessionId);
         } catch (error) {
           console.error('❌ Failed to execute zone trigger:', error);
+          showError(
+            `Failed to ${action} session: ${error instanceof Error ? error.message : String(error)}`
+          );
         } finally {
           setBranchTriggerModal(null);
         }

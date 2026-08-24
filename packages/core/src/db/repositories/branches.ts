@@ -53,7 +53,7 @@ import {
   RepositoryError,
   resolveByShortIdPrefix,
 } from './base';
-import { visibleBranchAccessCondition } from './branch-access';
+import { sessionBranchAccessCondition, visibleBranchAccessCondition } from './branch-access';
 import { GroupRepository } from './groups';
 import { deepMerge } from './merge-utils';
 
@@ -446,7 +446,9 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
     const statusExpr = sql`${jsonExtract(this.db, branches.data, 'environment_instance.status')}`;
     const rows = await select(this.db, columns)
       .from(branches)
-      .where(or(eq(statusExpr, 'running'), eq(statusExpr, 'starting')))
+      .where(
+        and(eq(branches.archived, false), or(eq(statusExpr, 'running'), eq(statusExpr, 'starting')))
+      )
       .all();
 
     return (rows as Array<{ branch_id: string; tenant_id?: unknown }>).map((row) => ({
@@ -469,6 +471,7 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
     repo_id?: UUID;
     archived?: boolean;
     userId?: UUID;
+    minimumPermission?: 'view' | 'session';
     limit?: number;
     offset?: number;
   }): Promise<Branch[]> {
@@ -498,7 +501,13 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
     const conditions = [or(...teammateKindConditions, hasEnabledSchedule) ?? sql`false`];
     if (filter?.repo_id) conditions.push(eq(branches.repo_id, filter.repo_id));
     if (filter?.archived !== undefined) conditions.push(eq(branches.archived, filter.archived));
-    if (filter?.userId) conditions.push(visibleBranchAccessCondition(this.db, filter.userId));
+    if (filter?.userId) {
+      conditions.push(
+        filter.minimumPermission === 'session'
+          ? sessionBranchAccessCondition(this.db, filter.userId)
+          : visibleBranchAccessCondition(this.db, filter.userId)
+      );
+    }
 
     const baseQuery = select(this.db, getTableColumns(branches)).from(branches);
     const query = filter?.userId
@@ -1394,6 +1403,28 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
       result.push(this.rowToBranch(row, baseUrl));
     }
     return result;
+  }
+
+  /** Find a branch by ID when the caller meets the requested point-access policy. */
+  async findAccessibleById(
+    branchId: string,
+    userId: UUID,
+    options: {
+      /** Minimum app-layer permission required when access enforcement is enabled. */
+      minimumPermission?: NonNullable<Branch['others_can']>;
+      /** Disable the point check when branch RBAC is disabled instance-wide. */
+      enforceAccess?: boolean;
+    } = {}
+  ): Promise<Branch | null> {
+    const branch = await this.findById(branchId);
+    if (!branch) return null;
+    if (options.enforceAccess === false) return branch;
+
+    const effectivePermission = await this.resolveUserPermission(branch, userId);
+    const minimumPermission = options.minimumPermission ?? 'view';
+    return BRANCH_PERMISSION_RANK[effectivePermission] >= BRANCH_PERMISSION_RANK[minimumPermission]
+      ? branch
+      : null;
   }
 
   /**

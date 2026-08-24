@@ -20,6 +20,7 @@ import {
   Typography,
   theme,
 } from 'antd';
+import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getSessionDisplayTitle } from '@/utils/sessionTitle';
 import { formatRelativeTime } from '@/utils/time';
@@ -48,14 +49,30 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
 }) => {
   const navigate = useNavigate();
   const { token } = theme.useToken();
-  const boards = Array.from(boardById.values()).filter((board) => !board.archived);
-  const sessions = Array.from(sessionById.values())
-    .filter((session) => !session.archived && (!user || session.created_by === user.user_id))
-    .sort((a, b) => new Date(b.last_updated).getTime() - new Date(a.last_updated).getTime());
+  const boards = useMemo(
+    () => Array.from(boardById.values()).filter((board) => !board.archived),
+    [boardById]
+  );
+  const sessions = useMemo(
+    () =>
+      Array.from(sessionById.values())
+        .filter((session) => !session.archived && (!user || session.created_by === user.user_id))
+        .sort((a, b) => new Date(b.last_updated).getTime() - new Date(a.last_updated).getTime()),
+    [sessionById, user]
+  );
+  const { activeBranches, branchCountByBoard } = useMemo(() => {
+    let count = 0;
+    const byBoard = new Map<string, number>();
+    for (const branch of branchById.values()) {
+      if (branch.archived) continue;
+      count += 1;
+      if (branch.board_id) {
+        byBoard.set(branch.board_id, (byBoard.get(branch.board_id) ?? 0) + 1);
+      }
+    }
+    return { activeBranches: count, branchCountByBoard: byBoard };
+  }, [branchById]);
   const running = sessions.filter((session) => session.status === 'running').length;
-  const activeBranches = Array.from(branchById.values()).filter(
-    (branch) => !branch.archived
-  ).length;
 
   return (
     <>
@@ -114,30 +131,34 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
                   renderItem={(session) => {
                     const branch = branchById.get(session.branch_id);
                     return (
-                      <List.Item
-                        onClick={() => navigate(`/m/session/${session.session_id}`)}
-                        style={{ cursor: 'pointer', paddingInline: token.paddingSM }}
-                      >
-                        <List.Item.Meta
-                          avatar={
-                            <Badge
-                              status={session.status === 'running' ? 'processing' : 'default'}
-                            />
-                          }
-                          title={
-                            <Text ellipsis>
-                              {getSessionDisplayTitle(session, { includeAgentFallback: true })}
-                            </Text>
-                          }
-                          description={
-                            <Space size={token.marginXS} wrap>
-                              {branch && <Text type="secondary">{branch.name}</Text>}
-                              <Text type="secondary">
-                                {formatRelativeTime(session.last_updated)}
+                      <List.Item style={{ padding: 0 }}>
+                        <Button
+                          type="text"
+                          block
+                          onClick={() => navigate(`/m/session/${session.session_id}`)}
+                          style={{ height: 'auto', padding: token.paddingSM, textAlign: 'start' }}
+                        >
+                          <List.Item.Meta
+                            avatar={
+                              <Badge
+                                status={session.status === 'running' ? 'processing' : 'default'}
+                              />
+                            }
+                            title={
+                              <Text ellipsis>
+                                {getSessionDisplayTitle(session, { includeAgentFallback: true })}
                               </Text>
-                            </Space>
-                          }
-                        />
+                            }
+                            description={
+                              <Space size={token.marginXS} wrap>
+                                {branch && <Text type="secondary">{branch.name}</Text>}
+                                <Text type="secondary">
+                                  {formatRelativeTime(session.last_updated)}
+                                </Text>
+                              </Space>
+                            }
+                          />
+                        </Button>
                       </List.Item>
                     );
                   }}
@@ -161,30 +182,34 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
             ) : (
               <Flex vertical gap={token.marginSM}>
                 {boards.map((board) => {
-                  const branchCount = Array.from(branchById.values()).filter(
-                    (branch) => !branch.archived && branch.board_id === board.board_id
-                  ).length;
+                  const branchCount = branchCountByBoard.get(board.board_id) ?? 0;
                   return (
                     <Card
                       key={board.board_id}
                       size="small"
                       hoverable
-                      onClick={() => navigate(`/m/board/${board.board_id}`)}
-                      style={{ cursor: 'pointer' }}
+                      styles={{ body: { padding: 0 } }}
                     >
-                      <Flex align="center" gap={token.marginSM}>
-                        <span aria-hidden style={{ fontSize: 28 }}>
-                          {getBoardEmoji(board, branchById)}
-                        </span>
-                        <div style={{ minWidth: 0, flex: 1 }}>
-                          <Text strong ellipsis style={{ display: 'block' }}>
-                            {board.name}
-                          </Text>
-                          <Text type="secondary">
-                            {branchCount} {branchCount === 1 ? 'branch' : 'branches'}
-                          </Text>
-                        </div>
-                      </Flex>
+                      <Button
+                        type="text"
+                        block
+                        onClick={() => navigate(`/m/board/${board.board_id}`)}
+                        style={{ height: 'auto', padding: token.paddingSM, textAlign: 'start' }}
+                      >
+                        <Flex align="center" gap={token.marginSM}>
+                          <span aria-hidden style={{ fontSize: 28 }}>
+                            {getBoardEmoji(board, branchById)}
+                          </span>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <Text strong ellipsis style={{ display: 'block' }}>
+                              {board.name}
+                            </Text>
+                            <Text type="secondary">
+                              {branchCount} {branchCount === 1 ? 'branch' : 'branches'}
+                            </Text>
+                          </div>
+                        </Flex>
+                      </Button>
                     </Card>
                   );
                 })}
@@ -201,7 +226,7 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
                   <Text type="secondary">Browse team context and documentation</Text>
                 </div>
               </Space>
-              <Button type="link" href="/knowledge">
+              <Button type="link" onClick={() => navigate('/knowledge')}>
                 Open
               </Button>
             </Flex>

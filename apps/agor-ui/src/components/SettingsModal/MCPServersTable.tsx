@@ -21,7 +21,6 @@ import {
   Badge,
   Button,
   Descriptions,
-  Flex,
   Form,
   Input,
   Popconfirm,
@@ -31,7 +30,6 @@ import {
   Tag,
   Tooltip,
   Typography,
-  theme,
 } from 'antd';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useMcpMemberPolicy } from '@/hooks/useMcpMemberPolicy';
@@ -61,8 +59,8 @@ import {
   explainManageRestriction,
   type MCPServerCapabilityContext,
 } from '../MCPServer/memberPolicy';
-import { MCPMemberPolicySetting } from './MCPMemberPolicySetting';
 import { AdaptiveSettingsModal } from './AdaptiveSettingsModal';
+import { MCPMemberPolicySetting } from './MCPMemberPolicySetting';
 import { ResponsiveSettingsHeader } from './ResponsiveSettingsHeader';
 import { SettingsActionGroup } from './SettingsActionGroup';
 
@@ -143,7 +141,6 @@ export const MCPServersTable: React.FC<MCPServersTableProps> = ({
   onDelete,
 }) => {
   const { showError } = useThemedMessage();
-  const { token } = theme.useToken();
   // Same set the session panel and the picker read, so an install is
   // "unfinished" in exactly one sense across all three.
   const userAuthenticatedMcpServerIds = useAgorStore(selectUserAuthenticatedMcpServerIds);
@@ -660,7 +657,9 @@ export const MCPServersTable: React.FC<MCPServersTableProps> = ({
                 New MCP Server
               </Button>
             ) : (
-              <Tooltip title={policyPending ? policyPendingHint : explainAddRestriction(capability)}>
+              <Tooltip
+                title={policyPending ? policyPendingHint : explainAddRestriction(capability)}
+              >
                 <span>
                   <Button type="primary" icon={<PlusOutlined />} disabled>
                     New MCP Server
