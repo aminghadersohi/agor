@@ -430,6 +430,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .enum(BOARD_ENTITY_TYPES)
           .optional()
           .describe('Arrange only branch or card entities (default: both).'),
+        includeArchived: z
+          .boolean()
+          .optional()
+          .describe(
+            'Include archived branches and cards. Defaults to false so layout matches the visible board.'
+          ),
         includePinned: z
           .boolean()
           .optional()
@@ -596,7 +602,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_auto_arrange_zone',
     {
       description:
-        'Arrange worktrees/branches and cards inside one board zone using their measured rendered rectangles. Positions are relative to the zone and ordered top-left, left-to-right, then row-by-row. A fully separated grid is always preferred, including compact edge margins and gaps when needed. If it still cannot fit, the default is no position changes. An accessible cascade deck is available only through explicit overflowStrategy:"deck". When columns is provided, that exact occupied count is locked; it is never silently replaced. The result reports exact containment and overflow.',
+        'Arrange worktrees/branches and cards inside one board zone using their measured rendered rectangles. Positions are relative to the zone and ordered top-left, left-to-right, then row-by-row. A fully separated grid is always preferred, including compact edge margins and gaps when needed. columns is a target by default: when it cannot fit, the nearest contained non-overlapping grid is used and reported. Set strictColumns for a hard column count. If no grid can fit, the default is no position changes. An accessible cascade deck is available only through explicit overflowStrategy:"deck". The result reports exact containment and overflow.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
@@ -607,8 +613,14 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .describe('Arrange only branch or card entities (default: both).'),
         columns: mcpOptionalPositiveInt(
           'columns',
-          'Exact number of occupied columns (capped by the number of entities). When omitted, the solver chooses a fitting count automatically. An explicit count is never silently replaced. If it cannot fit as a grid, no positions are changed unless overflowStrategy:"deck" is explicitly selected.'
+          'Target number of occupied columns (capped by the number of entities). When omitted, the solver chooses automatically. If this target cannot fit without overlap, the nearest contained grid is used unless strictColumns is true.'
         ),
+        strictColumns: z
+          .boolean()
+          .optional()
+          .describe(
+            'Require columns exactly as requested. Defaults to false, which allows a reported non-overlapping grid fallback.'
+          ),
         overflowStrategy: z
           .enum(['fail', 'deck'])
           .optional()
@@ -641,7 +653,53 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         },
         ...ctx.baseServiceParams,
       })) as { data: Array<BoardEntityObject> };
-      const entities = result.data.sort(compareBoardEntitiesSpatially);
+      let entities = result.data;
+      if (args.includeArchived !== true) {
+        const activeCardIds = new Set<string>();
+        const cardIds = entities
+          .map((entity) => entity.card_id)
+          .filter((cardId): cardId is string => typeof cardId === 'string');
+        if (cardIds.length > 0) {
+          const activeCardsResult = await ctx.app.service('cards').find({
+            query: {
+              card_id: { $in: Array.from(new Set(cardIds)) },
+              archived: false,
+            },
+            paginate: false,
+            ...ctx.baseServiceParams,
+          });
+          const activeCards = Array.isArray(activeCardsResult)
+            ? activeCardsResult
+            : (activeCardsResult as { data: Array<{ card_id: string }> }).data;
+          for (const card of activeCards) activeCardIds.add(card.card_id);
+        }
+
+        const activeBranchIds = new Set<string>();
+        const branchIds = entities
+          .map((entity) => entity.branch_id)
+          .filter((branchId): branchId is string => typeof branchId === 'string');
+        if (branchIds.length > 0) {
+          const activeBranchesResult = await ctx.app.service('branches').find({
+            query: {
+              branch_id: { $in: Array.from(new Set(branchIds)) },
+              archived: false,
+            },
+            paginate: false,
+            ...ctx.baseServiceParams,
+          });
+          const activeBranches = Array.isArray(activeBranchesResult)
+            ? activeBranchesResult
+            : (activeBranchesResult as { data: Array<{ branch_id: string }> }).data;
+          for (const branch of activeBranches) activeBranchIds.add(branch.branch_id);
+        }
+
+        entities = entities.filter(
+          (entity) =>
+            (entity.card_id === undefined || activeCardIds.has(entity.card_id)) &&
+            (entity.branch_id === undefined || activeBranchIds.has(entity.branch_id))
+        );
+      }
+      entities = entities.sort(compareBoardEntitiesSpatially);
       const dimensions = new Map<string, { width: number; height: number }>();
       for (const entity of entities) {
         if (entity.size) {
@@ -691,7 +749,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           gapY,
           minGapX: 8,
           minGapY: 8,
-          exactColumns: args.columns,
+          ...(args.strictColumns === true
+            ? { exactColumns: args.columns }
+            : { preferredColumns: args.columns }),
           allowDeck: args.overflowStrategy === 'deck',
           deckOffsetX: DECK_OFFSET_X,
           deckOffsetY: DECK_OFFSET_Y,
@@ -699,7 +759,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       );
       const requestedColumns =
         args.columns === undefined ? null : Math.min(args.columns, entities.length);
-      if (requestedColumns !== null && layout.overflowingItemIds.length > 0) {
+      if (layout.overflowingItemIds.length > 0) {
         return textResult({
           boardId,
           zoneId,
@@ -717,9 +777,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           appliedPadding: layout.padding,
           overflowingObjectIds: layout.overflowingItemIds,
           warning:
-            `The requested ${requestedColumns}-column layout cannot fit every rendered object inside ` +
+            `One or more rendered objects are larger than the available zone rectangle, or no non-overlapping ${requestedColumns === null ? 'automatic' : `${requestedColumns}-column`} layout can fit every rendered object inside ` +
             `the ${zone.width}×${zone.height} zone. No positions were changed. Increase the zone size, ` +
-            'reduce the requested columns, omit columns to allow automatic fitting, or explicitly choose overflowStrategy:"deck".',
+            'reduce the requested columns, allow a non-strict grid fallback, or explicitly choose overflowStrategy:"deck".',
           zone: { width: zone.width, height: zone.height },
           updates: [],
         });
@@ -759,6 +819,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         applied: true,
         arranged: updates.length,
         requestedColumns,
+        strictColumns: args.strictColumns === true,
+        usedColumnFallback: requestedColumns !== null && layout.columns !== requestedColumns,
         columns: layout.columns,
         rows: layout.rows,
         fitsWithoutOverlap: layout.fitsWithoutOverlap,
@@ -778,7 +840,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
             ? 'One or more rendered objects are larger than the available zone rectangle.'
             : layout.mode === 'deck'
               ? `The zone cannot fit every rendered object without overlap; a contained cascade deck was used with ${layout.deckOffsetX}px left-edge and ${layout.deckOffsetY}px header reveals.`
-              : null,
+              : requestedColumns !== null && layout.columns !== requestedColumns
+                ? `The requested ${requestedColumns}-column target could not fit without overlap; a contained ${layout.columns}-column grid was used.`
+                : null,
         zone: { width: zone.width, height: zone.height },
         updates,
       });
