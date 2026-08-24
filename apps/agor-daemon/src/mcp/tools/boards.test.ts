@@ -969,7 +969,13 @@ describe('agor_boards_auto_arrange', () => {
               return data;
             }),
           };
-        if (name === 'cards') return { get: vi.fn(async () => ({ title: 'Card' })) };
+        if (name === 'cards')
+          return {
+            find: vi.fn(async () => ({ data: [{ card_id: 'card-1' }, { card_id: 'card-2' }] })),
+            get: vi.fn(async () => ({ title: 'Card' })),
+          };
+        if (name === 'branches')
+          return { find: vi.fn(async () => ({ data: [{ branch_id: 'branch-1' }] })) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -1031,6 +1037,87 @@ describe('agor_boards_auto_arrange', () => {
       expect.objectContaining({ x: 80, y: 80 }),
       expect.objectContaining({ x: 320, y: 80 }),
     ]);
+  });
+
+  it('can arrange zones as containers without requiring other canvas objects', async () => {
+    const boardPatches: Array<Record<string, unknown>> = [];
+    const app = {
+      service(name: string) {
+        if (name === 'board-objects')
+          return { find: vi.fn(async () => ({ data: [] })), patch: vi.fn() };
+        if (name === 'boards')
+          return {
+            get: vi.fn(async () => ({
+              board_id: 'board-1',
+              objects: {
+                'zone-1': { type: 'zone', x: 900, y: 0, width: 400, height: 300, label: 'One' },
+                'zone-2': { type: 'zone', x: 0, y: 0, width: 400, height: 300, label: 'Two' },
+              },
+            })),
+            patch: vi.fn(async (_id: string, data: Record<string, unknown>) => {
+              boardPatches.push(data);
+              return data;
+            }),
+          };
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange', {
+      app,
+      userId: 'user-1',
+      baseServiceParams: {},
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', columns: 2, includeZones: true })).content[0].text
+    );
+
+    expect(parsed).toMatchObject({ arranged: 2, arrangedEntities: 0, arrangedCanvasObjects: 2 });
+    expect(boardPatches.map((patch) => patch.objectId)).toEqual(['zone-2', 'zone-1']);
+  });
+});
+
+describe('agor_boards_set_compact', () => {
+  it('updates only explicitly targeted placements on the requested board', async () => {
+    const patch = vi.fn(async (objectId: string, data: { compact: boolean }) => ({
+      object_id: objectId,
+      board_id: 'board-1',
+      entity_type: objectId === 'branch-1' ? 'branch' : 'card',
+      compact: data.compact,
+    }));
+    const app = {
+      service(name: string) {
+        if (name === 'board-objects')
+          return {
+            find: vi.fn(async () => ({
+              data: [
+                { object_id: 'branch-1', board_id: 'board-1', entity_type: 'branch' },
+                { object_id: 'card-1', board_id: 'board-1', entity_type: 'card' },
+              ],
+            })),
+            patch,
+          };
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+    const setCompact = registerAndCaptureHandler('agor_boards_set_compact', {
+      app,
+      userId: 'user-1',
+      baseServiceParams: { authenticated: true, provider: 'mcp' },
+    });
+
+    const parsed = JSON.parse(
+      (await setCompact({ boardId: 'board-1', objectIds: ['card-1'], compact: true })).content[0]
+        .text
+    );
+
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(patch).toHaveBeenCalledWith(
+      'card-1',
+      { compact: true },
+      expect.objectContaining({ provider: 'mcp' })
+    );
+    expect(parsed).toMatchObject({ boardId: 'board-1', compact: true, updated: 1 });
   });
 });
 
