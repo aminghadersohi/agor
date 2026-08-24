@@ -281,18 +281,18 @@ describe('arrangeZoneContents', () => {
 
     expect(renderedNodes.find((node) => node.id === 'branch-1')?.position).toEqual({
       x: 24,
-      y: 24,
+      y: 88,
     });
     expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual({
       x: 448,
-      y: 24,
+      y: 88,
     });
     expect(patch).toHaveBeenCalledTimes(4);
-    expect(patch).toHaveBeenCalledWith('placement-branch', { position: { x: 24, y: 24 } });
+    expect(patch).toHaveBeenCalledWith('placement-branch', { position: { x: 24, y: 88 } });
     expect(patch).toHaveBeenCalledWith('placement-branch', {
       size: { width: 400, height: 180 },
     });
-    expect(patch).toHaveBeenCalledWith('placement-card', { position: { x: 448, y: 24 } });
+    expect(patch).toHaveBeenCalledWith('placement-card', { position: { x: 448, y: 88 } });
     expect(patch).toHaveBeenCalledWith('placement-card', {
       size: { width: 300, height: 100 },
     });

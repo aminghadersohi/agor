@@ -3,6 +3,7 @@
  */
 
 import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
+import { zoneContentTopInset } from '@agor/core/layout/zone-content-inset';
 import type { AgorClient, Board, BoardEntityObject, BoardObject } from '@agor-live/client';
 import { useCallback, useRef } from 'react';
 import type { Node } from 'reactflow';
@@ -273,7 +274,13 @@ export const useBoardObjects = ({
       const layout = layoutRectangles(
         children.map((node) => ({ id: node.id, ...itemSize(node) })),
         {
-          bounds: { width: zone.width, height: zone.height },
+          // Zone labels/status render within the zone above their children.
+          // Reserve that header before packing so an arranged card never
+          // obscures the zone title.
+          bounds: {
+            width: zone.width,
+            height: Math.max(0, zone.height - zoneContentTopInset(zone)),
+          },
           padding: 24,
           minPadding: 8,
           gapX: 24,
@@ -295,9 +302,12 @@ export const useBoardObjects = ({
       const placementById = new Map(
         layout.placements.map((placement) => [placement.id, placement])
       );
+      const titleInset = zoneContentTopInset(zone);
       changedNodes = children.map((node) => {
         const placement = placementById.get(node.id);
-        return placement ? { ...node, position: { x: placement.x, y: placement.y } } : node;
+        return placement
+          ? { ...node, position: { x: placement.x, y: placement.y + titleInset } }
+          : node;
       });
       const changedById = new Map(changedNodes.map((node) => [node.id, node]));
       setNodes((currentNodes) => currentNodes.map((node) => changedById.get(node.id) ?? node));
