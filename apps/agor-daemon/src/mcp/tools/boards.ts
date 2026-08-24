@@ -104,6 +104,45 @@ function getCanvasObjectDimensions(object: BoardObject): { width: number; height
   return { width: 240, height: 120 };
 }
 
+async function filterVisibleBoardEntities(
+  ctx: McpContext,
+  entities: BoardEntityObject[],
+  includeArchived: boolean
+): Promise<BoardEntityObject[]> {
+  if (includeArchived) return entities;
+  const activeCardIds = new Set<string>();
+  const cardIds = entities.flatMap((entity) => (entity.card_id ? [entity.card_id] : []));
+  if (cardIds.length > 0) {
+    const result = await ctx.app.service('cards').find({
+      query: { card_id: { $in: Array.from(new Set(cardIds)) }, archived: false },
+      paginate: false,
+      ...ctx.baseServiceParams,
+    });
+    const cards = Array.isArray(result)
+      ? result
+      : (result as { data: Array<{ card_id: string }> }).data;
+    for (const card of cards) activeCardIds.add(card.card_id);
+  }
+  const activeBranchIds = new Set<string>();
+  const branchIds = entities.flatMap((entity) => (entity.branch_id ? [entity.branch_id] : []));
+  if (branchIds.length > 0) {
+    const result = await ctx.app.service('branches').find({
+      query: { branch_id: { $in: Array.from(new Set(branchIds)) }, archived: false },
+      paginate: false,
+      ...ctx.baseServiceParams,
+    });
+    const branches = Array.isArray(result)
+      ? result
+      : (result as { data: Array<{ branch_id: string }> }).data;
+    for (const branch of branches) activeBranchIds.add(branch.branch_id);
+  }
+  return entities.filter(
+    (entity) =>
+      (entity.card_id === undefined || activeCardIds.has(entity.card_id)) &&
+      (entity.branch_id === undefined || activeBranchIds.has(entity.branch_id))
+  );
+}
+
 function filterBoardCanvasObjects(board: Board, objectTypes?: BoardObjectType[]): Board {
   if (!objectTypes) return board;
 
@@ -432,7 +471,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       description:
         'Arrange worktrees/branches and cards on a board in a dimension-aware row-major grid. ' +
         'By default, only free-floating entities are moved; zone-pinned entities stay in their zones. ' +
-        'Set includeCanvasObjects=true to include text, markdown, apps, and artifacts while leaving zones fixed. ' +
+        'Set includeCanvasObjects=true to include text, markdown, apps, and artifacts, and includeZones=true to arrange zones as movable containers. ' +
         'Use this after creating or moving many board items so the canvas is tidy and collision-free.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
@@ -457,6 +496,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .describe(
             'Also arrange text, markdown, app, and artifact canvas objects (default: false).'
           ),
+        includeZones: z
+          .boolean()
+          .optional()
+          .describe(
+            'Also arrange zone containers. Their pinned children move with their parent zone.'
+          ),
         columns: mcpOptionalPositiveInt(
           'columns',
           'Number of columns in the grid (default: square-ish layout).'
@@ -478,7 +523,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         },
         ...ctx.baseServiceParams,
       })) as { data: Array<BoardEntityObject> };
-      const entities = result.data
+      const visibleEntities = await filterVisibleBoardEntities(
+        ctx,
+        result.data,
+        args.includeArchived === true
+      );
+      const entities = visibleEntities
         .filter((entity) => args.includePinned === true || !entity.zone_id)
         .sort(compareBoardEntitiesSpatially);
       const startX = args.startX ?? 80;
@@ -522,11 +572,15 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           ...entityDimensions,
         });
       }
-      const boardsService = args.includeCanvasObjects === true ? ctx.app.service('boards') : null;
-      if (args.includeCanvasObjects === true) {
+      const boardsService =
+        args.includeCanvasObjects === true || args.includeZones === true
+          ? ctx.app.service('boards')
+          : null;
+      if (boardsService) {
         const board = (await boardsService?.get(boardId, ctx.baseServiceParams)) as Board;
         for (const [objectId, object] of Object.entries(board.objects ?? {})) {
-          if (object.type === 'zone') continue;
+          if (object.type === 'zone' && args.includeZones !== true) continue;
+          if (object.type !== 'zone' && args.includeCanvasObjects !== true) continue;
           items.push({
             id: objectId,
             kind: 'canvas',
@@ -594,7 +648,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         arrangedCanvasObjects: updates.filter(
           (update) => !BOARD_ENTITY_TYPES.includes(update.objectType as BoardEntityType)
         ).length,
-        skippedPinned: result.data.length - entities.length,
+        skippedPinned: visibleEntities.length - entities.length,
+        skippedArchived: result.data.length - visibleEntities.length,
         columns: layout.columns,
         rows: layout.rows,
         layoutMode: layout.mode,
@@ -868,7 +923,69 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 6: agor_boards_create
+  // Tool 6: agor_boards_set_compact
+  server.registerTool(
+    'agor_boards_set_compact',
+    {
+      description:
+        'Collapse or expand board cards/worktrees in the shared board presentation. Compact cards keep their identity header visible while hiding secondary content, which is useful before arranging a dense board. Target explicit board-object IDs, a zone, an entity type, or the entire board.',
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        boardId: mcpRequiredId('boardId', 'Board'),
+        compact: z.boolean().describe('true collapses secondary card content; false expands it.'),
+        objectIds: z
+          .array(mcpRequiredString('objectId', 'Board object ID'))
+          .min(1)
+          .optional()
+          .describe('Specific board placement IDs to update.'),
+        zoneId: mcpOptionalString('zoneId', 'Zone object ID'),
+        entityType: z
+          .enum(BOARD_ENTITY_TYPES)
+          .optional()
+          .describe('Limit targets to branch/worktree or card placements.'),
+      }),
+    },
+    async (args) => {
+      const boardId = coerceString(args.boardId);
+      if (!boardId) throw new Error('boardId is required');
+      const boardObjectsService = ctx.app.service('board-objects');
+      const requestedIds = new Set(args.objectIds ?? []);
+      const found = (await boardObjectsService.find({
+        query: {
+          board_id: boardId,
+          ...(args.zoneId ? { zone_id: args.zoneId } : {}),
+          ...(args.entityType ? { entity_type: args.entityType } : {}),
+        },
+        ...ctx.baseServiceParams,
+      })) as { data: Array<BoardEntityObject> };
+      const targets = requestedIds.size
+        ? found.data.filter((object) => requestedIds.has(object.object_id))
+        : found.data;
+      if (requestedIds.size && targets.length !== requestedIds.size) {
+        throw new Error('One or more board object IDs do not belong to this accessible board.');
+      }
+      if (targets.length === 0) {
+        return textResult({ boardId, compact: args.compact, updated: 0, updates: [] });
+      }
+      const updates = await Promise.all(
+        targets.map(async (object) => {
+          const updated = (await boardObjectsService.patch(
+            object.object_id,
+            { compact: args.compact },
+            ctx.baseServiceParams
+          )) as BoardEntityObject;
+          return {
+            objectId: updated.object_id,
+            entityType: updated.entity_type,
+            compact: updated.compact === true,
+          };
+        })
+      );
+      return textResult({ boardId, compact: args.compact, updated: updates.length, updates });
+    }
+  );
+
+  // Tool 7: agor_boards_create
   server.registerTool(
     'agor_boards_create',
     {

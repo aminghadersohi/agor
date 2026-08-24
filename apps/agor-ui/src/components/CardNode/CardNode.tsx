@@ -38,13 +38,15 @@ export interface CardNodeData {
   isPinned?: boolean;
   zoneName?: string;
   zoneColor?: string;
+  /** Shared board presentation state, controlled by board layout/MCP tools. */
+  compact?: boolean;
   onClick?: (cardId: string) => void;
   onUnpin?: (cardId: string) => void;
 }
 
 const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
   const { token } = theme.useToken();
-  const { card, isPinned, zoneName, zoneColor, onClick, onUnpin } = data;
+  const { card, isPinned, zoneName, zoneColor, compact = false, onClick, onUnpin } = data;
   const [descExpanded, setDescExpanded] = useState(false);
 
   const borderColor = card.effective_color || token.colorBorder;
@@ -95,7 +97,9 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
           padding: '10px 12px',
           cursor: 'grab',
           borderBottom:
-            card.description || card.note ? `1px solid ${token.colorBorderSecondary}` : 'none',
+            !compact && (card.description || card.note)
+              ? `1px solid ${token.colorBorderSecondary}`
+              : 'none',
         }}
       >
         {emoji && <span style={{ fontSize: 16, flexShrink: 0 }}>{emoji}</span>}
@@ -155,7 +159,7 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
       </div>
 
       {/* Description (collapsed) */}
-      {card.description && (
+      {!compact && card.description && (
         <div
           className={REACT_FLOW_NO_DRAG_CLASS}
           style={{
@@ -197,7 +201,7 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
       )}
 
       {/* Note (always shown in full, distinct background) */}
-      {card.note && (
+      {!compact && card.note && (
         <div
           style={{
             padding: '8px 12px',
