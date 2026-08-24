@@ -888,6 +888,31 @@ describe('BoardObjectRepository.updateSize', () => {
   });
 });
 
+describe('BoardObjectRepository.updateCompact', () => {
+  dbTest('persists compact presentation through position and size updates', async ({ db }) => {
+    const repoRepo = new RepoRepository(db);
+    const branchRepo = new BranchRepository(db);
+    const boardObjectRepo = new BoardObjectRepository(db);
+    const repo = await repoRepo.create(createRepoData());
+    const branch = await branchRepo.create(createBranchData({ repo_id: repo.repo_id }));
+    const boardId = await createBoard(db);
+    const created = await boardObjectRepo.create({
+      board_id: boardId,
+      branch_id: branch.branch_id,
+      position: { x: 10, y: 20 },
+      size: { width: 500, height: 200 },
+    });
+
+    const compacted = await boardObjectRepo.updateCompact(created.object_id, true);
+    const moved = await boardObjectRepo.updatePosition(created.object_id, { x: 30, y: 40 });
+    const resized = await boardObjectRepo.updateSize(created.object_id, { width: 500, height: 64 });
+
+    expect(compacted.compact).toBe(true);
+    expect(moved).toMatchObject({ compact: true, position: { x: 30, y: 40 } });
+    expect(resized).toMatchObject({ compact: true, size: { width: 500, height: 64 } });
+  });
+});
+
 // ============================================================================
 // UpdateZone
 // ============================================================================
