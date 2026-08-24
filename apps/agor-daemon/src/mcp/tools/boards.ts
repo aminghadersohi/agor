@@ -1,5 +1,4 @@
 import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
-import { zoneContentTopInset } from '@agor/core/layout/zone-content-inset';
 import type {
   Board,
   BoardEntityObject,
@@ -49,6 +48,17 @@ const ARRANGE_DIMENSIONS = {
 } as const;
 const DECK_OFFSET_X = 12;
 const DECK_OFFSET_Y = 48;
+
+function zoneContentTopInset(zone: { fontSize?: number; status?: string }): number {
+  const labelFontSize =
+    typeof zone.fontSize === 'number' && Number.isFinite(zone.fontSize)
+      ? Math.min(48, Math.max(10, zone.fontSize))
+      : 14;
+  const labelHeight = Math.ceil(labelFontSize * 1.2);
+  const statusHeight = zone.status ? 8 + Math.ceil(labelFontSize * 1.05) : 0;
+
+  return Math.max(64, 32 + labelHeight + statusHeight);
+}
 
 function compareBoardEntitiesSpatially(a: BoardEntityObject, b: BoardEntityObject): number {
   return (
