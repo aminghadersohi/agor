@@ -539,6 +539,66 @@ describe('agor_boards_create schema', () => {
   });
 });
 
+describe('agor_boards_auto_arrange_zone', () => {
+  const baseServiceParams = { authenticated: true, provider: 'mcp' };
+
+  it('keeps every arranged origin within the zone and compresses oversized grids', async () => {
+    const patches: Array<{ id: string; position: { x: number; y: number } }> = [];
+    const boardObjects = Array.from({ length: 20 }, (_, index) => ({
+      object_id: `card-${index}`,
+      board_id: 'board-1',
+      card_id: `card-${index}`,
+      entity_type: 'card' as const,
+      position: { x: 0, y: 0 },
+      zone_id: 'zone-1',
+      created_at: '2026-06-01T00:00:00.000Z',
+    }));
+    const boardObjectsService = {
+      find: vi.fn(async () => ({ data: boardObjects })),
+      patch: vi.fn(async (id: string, data: { position: { x: number; y: number } }) => {
+        patches.push({ id, position: data.position });
+        return data;
+      }),
+    };
+    const app = {
+      service(name: string) {
+        if (name === 'boards') {
+          return {
+            get: vi.fn(async () => ({
+              board_id: 'board-1',
+              objects: {
+                'zone-1': { type: 'zone', x: 100, y: 100, width: 620, height: 1800 },
+              },
+            })),
+          };
+        }
+        if (name === 'board-objects') return boardObjectsService;
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1', columns: 3 })).content[0].text
+    );
+
+    expect(parsed.arranged).toBe(20);
+    expect(parsed.columns).toBe(1); // 620px cannot fit three 380px cards without overlap.
+    expect(parsed.fitsWithoutOverlap).toBe(false);
+    expect(patches).toHaveLength(20);
+    for (const update of patches) {
+      expect(update.position.x).toBeGreaterThanOrEqual(0);
+      expect(update.position.x).toBeLessThanOrEqual(240);
+      expect(update.position.y).toBeGreaterThanOrEqual(0);
+      expect(update.position.y).toBeLessThanOrEqual(1650);
+    }
+  });
+});
+
 describe('agor_boards_update realtime events', () => {
   it('replaces the normalized board access and branch-default package', async () => {
     const permissions = {
