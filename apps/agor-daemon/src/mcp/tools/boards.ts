@@ -1,4 +1,5 @@
 import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
+import { zoneContentTopInset } from '@agor/core/layout/zone-content-inset';
 import type {
   Board,
   BoardEntityObject,
@@ -708,6 +709,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const padding = Math.max(0, args.padding ?? 24);
       const gapX = Math.max(0, args.gapX ?? 24);
       const gapY = Math.max(0, args.gapY ?? 24);
+      const titleInset = zoneContentTopInset(zone);
       if (entities.length === 0) {
         return textResult({
           boardId,
@@ -727,7 +729,10 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           return { id: entity.object_id, ...size };
         }),
         {
-          bounds: { width: zone.width, height: zone.height },
+          // The title/status sits inside the zone, above child nodes. Layout
+          // against the remaining rectangle, then translate placements below
+          // that reserved header so cards can never cover the title.
+          bounds: { width: zone.width, height: Math.max(0, zone.height - titleInset) },
           padding,
           minPadding: 8,
           gapX,
@@ -756,7 +761,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           fitsWithoutOverlap: layout.fitsWithoutOverlap,
           layoutMode: layout.mode,
           requiredWidth: layout.width,
-          requiredHeight: layout.height,
+          requiredHeight: layout.height + titleInset,
+          reservedTitleHeight: titleInset,
+          availableContentHeight: Math.max(0, zone.height - titleInset),
           appliedGapX: layout.gapX,
           appliedGapY: layout.gapY,
           appliedPadding: layout.padding,
@@ -785,7 +792,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       for (const entity of entities) {
         const placement = placementById.get(entity.object_id);
         if (!placement) throw new Error(`Layout did not place board object '${entity.object_id}'.`);
-        const position = { x: placement.x, y: placement.y };
+        const position = { x: placement.x, y: placement.y + titleInset };
         await boardObjectsService.patch(entity.object_id, { position }, ctx.baseServiceParams);
         updates.push({
           objectId: entity.object_id,
@@ -815,7 +822,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         stackCount: layout.mode === 'deck' ? layout.stackCount : null,
         maxDeckDepth: layout.maxDeckDepth,
         requiredWidth: layout.width,
-        requiredHeight: layout.height,
+        requiredHeight: layout.height + titleInset,
+        reservedTitleHeight: titleInset,
+        availableContentHeight: Math.max(0, zone.height - titleInset),
         appliedGapX: layout.gapX,
         appliedGapY: layout.gapY,
         appliedPadding: layout.padding,
