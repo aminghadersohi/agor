@@ -123,6 +123,7 @@ export class BoardObjectsService {
       position: data.position,
       size: data.size,
       zone_id: data.zone_id,
+      compact: data.compact,
     });
 
     return boardObject;
@@ -213,7 +214,11 @@ export class BoardObjectsService {
       return toBoardObjectPatchedEventPayload(boardObject) as BoardEntityObject;
     }
 
-    throw new Error('Only position, size, and zone_id updates are supported via patch');
+    if (typeof data.compact === 'boolean') {
+      return this.boardObjectRepo.updateCompact(id, data.compact);
+    }
+
+    throw new Error('Only position, size, zone_id, and compact updates are supported via patch');
   }
 
   /**
