@@ -174,6 +174,7 @@ interface SessionNodeData {
   parentZoneId?: string;
   zoneName?: string;
   zoneColor?: string;
+  compact?: boolean;
   isActiveUrlTarget?: boolean;
 }
 
