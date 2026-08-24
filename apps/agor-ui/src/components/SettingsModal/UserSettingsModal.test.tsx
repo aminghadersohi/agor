@@ -1,6 +1,6 @@
 import type { AgenticToolName, AgorClient, User } from '@agor-live/client';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { App as AntApp, ConfigProvider, type FormInstance } from 'antd';
+import { App as AntApp, ConfigProvider, type FormInstance, Grid } from 'antd';
 import { type ReactNode, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { __resetAuthConfigForTests, __setAuthConfigForTests } from '../../hooks/useAuthConfig';
@@ -391,13 +391,13 @@ describe('UserSettingsModal', { timeout: 60_000 }, () => {
     await screen.findByRole('heading', { name: 'Security' });
 
     const passwordInput = screen.getByPlaceholderText('••••••••') as HTMLInputElement;
-    fireEvent.change(passwordInput, { target: { value: 'new-password' } });
+    fireEvent.change(passwordInput, { target: { value: 'new-secure-password' } });
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
 
     await waitFor(() => {
       expect(onUpdate).toHaveBeenCalledWith(
         'user-1',
-        expect.objectContaining({ password: 'new-password' })
+        expect.objectContaining({ password: 'new-secure-password' })
       );
     }, ASYNC);
 
@@ -814,14 +814,16 @@ describe('UserSettingsModal', { timeout: 60_000 }, () => {
     fireEvent.change(screen.getByPlaceholderText('John Doe'), { target: { value: 'Renamed' } });
     fireEvent.click(screen.getByRole('menuitem', { name: /security/i }));
     await screen.findByRole('heading', { name: 'Security' });
-    fireEvent.change(screen.getByPlaceholderText('••••••••'), { target: { value: 'new-pass' } });
+    fireEvent.change(screen.getByPlaceholderText('••••••••'), {
+      target: { value: 'new-secure-password' },
+    });
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
 
     // Both the Profile edit and the Security edit land in the flush.
     await waitFor(() => expect(onUpdate).toHaveBeenCalled(), ASYNC);
     const patch = onUpdate.mock.calls[0][1];
     expect(patch.name).toBe('Renamed');
-    expect(patch.password).toBe('new-pass');
+    expect(patch.password).toBe('new-secure-password');
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -1379,6 +1381,7 @@ describe('UserSettingsModal', { timeout: 60_000 }, () => {
 // per-test override afterwards so visibility never leaks between tests.
 beforeEach(() => {
   __setAuthConfigForTests({ requireAuth: true });
+  vi.spyOn(Grid, 'useBreakpoint').mockReturnValue({ md: true });
   agorStore.getState().setAgenticToolSettings([]);
 });
 afterEach(() => {

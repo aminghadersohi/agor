@@ -207,6 +207,7 @@ export interface AppProps {
       refType?: 'branch' | 'tag';
       createBranch: boolean;
       sourceBranch: string;
+      sourceRemoteUrl?: string;
       pullLatest: boolean;
       issue_url?: string;
       pull_request_url?: string;
@@ -222,8 +223,8 @@ export interface AppProps {
   onStopEnvironment?: (branchId: string) => void;
   onNukeEnvironment?: (branchId: string) => void;
   onExecuteScheduleNow?: (branchId: string) => Promise<void>;
-  onCreateUser?: (data: CreateUserInput) => void;
-  onUpdateUser?: (userId: string, updates: UpdateUserInput) => void;
+  onCreateUser?: (data: CreateUserInput) => Promise<void>;
+  onUpdateUser?: (userId: string, updates: UpdateUserInput) => Promise<void>;
   onDeleteUser?: (userId: string) => void;
   onCreateMCPServer?: (data: CreateMCPServerInput) => void;
   onDeleteMCPServer?: (mcpServerId: string) => void;
@@ -1848,7 +1849,7 @@ export const App: React.FC<AppProps> = ({
           onArchiveOrDelete={onArchiveOrDeleteBranch}
           onOpenSettings={() => {
             setBranchModalBranchId(null);
-            openSettings();
+            openSettings('repos');
           }}
           onSessionClick={handleSessionClick}
           onExecuteScheduleNow={onExecuteScheduleNow}

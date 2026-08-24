@@ -44,6 +44,7 @@ import { LoginPage } from './components/LoginPage';
 import { OnboardingBanners } from './components/OnboardingBanners';
 import { type OnboardingCompletionResult, OnboardingWizard } from './components/OnboardingWizard';
 import { buildPromptWithAttachments } from './components/SessionPanel/composerAttachments';
+import { SettingsModal } from './components/SettingsModal';
 import { StreamdownPortalApp } from './components/StreamdownPortalApp';
 import { getDaemonUrl } from './config/daemon';
 import { CanvasNavigationProvider } from './contexts/CanvasNavigationContext';
@@ -57,6 +58,7 @@ import {
 } from './domain/sessionCreation';
 import {
   IdentityContractState,
+  isIdentityCapabilityAvailable,
   useAgorClient,
   useAgorData,
   useAuth,
@@ -83,13 +85,16 @@ import { useWorkspaceSurfaceLifecycle } from './surfaces/useWorkspaceSurfaceLife
 import type { CreateRepoOptions } from './types';
 import { cloneErrorHint } from './utils/cloneErrorHint';
 import { isMobileDevice } from './utils/deviceDetection';
-import { completeForcedPasswordChange } from './utils/forcePasswordChange';
+import {
+  completeForcedPasswordChange,
+  completeLocalPasswordChange,
+} from './utils/forcePasswordChange';
 import { useThemedMessage } from './utils/message';
 import { buildCompletedOnboardingPreferences } from './utils/onboardingGoals';
 import { savePromptDraft } from './utils/promptDrafts';
 import { seedOnboardingTeammate } from './utils/seedOnboardingTeammate';
 import { updateSessionMcpServers } from './utils/sessionMcpServers';
-import { getRouterBasename } from './utils/uiRoutes';
+import { getRouterBasename, responsiveRoutePath } from './utils/uiRoutes';
 
 type RouteModuleKey = RouteSurfaceId | 'mobile';
 
@@ -270,13 +275,23 @@ function DeviceRouter() {
       const isMobile = isMobileDevice();
       const isOnMobilePath = location.pathname.startsWith('/m');
 
+      const state = agorStore.getState();
+      const routeEntities = {
+        boards: state.boardById.values(),
+        sessions: state.sessionById.values(),
+      };
+
       // Redirect mobile devices to mobile site
       if (isMobile && !isOnMobilePath) {
-        navigate('/m', { replace: true });
+        navigate(responsiveRoutePath(location.pathname, 'mobile', routeEntities), {
+          replace: true,
+        });
       }
       // Redirect desktop devices away from mobile site
       else if (!isMobile && isOnMobilePath) {
-        navigate('/', { replace: true });
+        navigate(responsiveRoutePath(location.pathname, 'desktop', routeEntities), {
+          replace: true,
+        });
       }
     };
 
@@ -315,7 +330,8 @@ function AppContent() {
   // makes the registry's `branding` field the single enforcement point so a new
   // static surface can't forget to wire it.
   useSurfaceBranding(currentSurface);
-  const sharedSurfaceOwnsUserSettings = currentSurface.usesSharedUserSettings;
+  const sharedSurfaceOwnsUserSettings =
+    currentSurface.usesSharedUserSettings || location.pathname.startsWith('/m');
   const routeModuleKey = getRouteModuleKey(currentSurface.id, location.pathname);
   const [routeModuleReady, setRouteModuleReady] = useState(() =>
     loadedRouteModuleKeys.has(routeModuleKey)
@@ -351,6 +367,11 @@ function AppContent() {
     identityContractState,
     retry: retryAuthConfig,
   } = useAuthConfig();
+  const passwordWriteAvailable = isIdentityCapabilityAvailable(
+    authConfig,
+    identityContractState,
+    'passwordWrite'
+  );
 
   // Authentication
   const {
@@ -379,6 +400,7 @@ function AppContent() {
     retryConnection,
   } = useAgorClient({
     accessToken: authenticated ? accessToken : null,
+    authorityGeneration: authenticationGeneration,
   });
   const pendingEnvironmentToastsRef = useRef<Map<string, PendingEnvironmentToast>>(new Map());
 
@@ -429,7 +451,8 @@ function AppContent() {
     [connected, connecting, outOfSync, capturedSha, currentSha]
   );
 
-  const directSessionIdFromPath = location.pathname.match(/^\/s\/([^/]+)\/?$/)?.[1] ?? null;
+  const directSessionIdFromPath =
+    location.pathname.match(/^\/(?:s|m\/session)\/([^/]+)\/?$/)?.[1] ?? null;
 
   // Pass the stable client lifetime, not `connected ? client : null`:
   // useAgorData owns reconnect refetches and `null` is reserved for logout /
@@ -443,7 +466,7 @@ function AppContent() {
     loading,
     error: dataError,
   } = useAgorData(client, {
-    enabled: workspaceSurfaceShouldRun && !user?.must_change_password,
+    enabled: workspaceSurfaceShouldRun && !(user?.must_change_password && passwordWriteAvailable),
     directSessionId: directSessionIdFromPath,
   });
 
@@ -494,7 +517,7 @@ function AppContent() {
     }
   }, [loading, initialLoadComplete, dataError]);
 
-  const mustChangePassword = !!user?.must_change_password;
+  const mustChangePassword = !!user?.must_change_password && passwordWriteAvailable;
   const loaderPhase = useInitialLoaderPhase({
     connecting,
     loading,
@@ -786,7 +809,7 @@ function AppContent() {
       currentUser &&
       canRunOnboarding &&
       currentUser.onboarding_completed === false &&
-      !currentUser.must_change_password &&
+      !(currentUser.must_change_password && passwordWriteAvailable) &&
       connected &&
       workspaceSurfaceShouldRun &&
       currentSurface.startsWorkspaceRuntime &&
@@ -802,6 +825,7 @@ function AppContent() {
     currentSurface.startsWorkspaceRuntime,
     loading,
     authenticationGeneration,
+    passwordWriteAvailable,
     activateOnboardingWizard,
     setOnboardingWizardOwner,
   ]);
@@ -870,6 +894,7 @@ function AppContent() {
       teammateName: result.teammateName,
       teammateEmoji: result.teammateEmoji,
       sourceBranch: result.sourceBranch,
+      sourceRemoteUrl: result.sourceRemoteUrl,
       agent: result.agent,
       suggestedIntegrations: result.suggestedIntegrations,
       // Goals drive the first-session prompt; [] (skipped) yields the generic
@@ -1097,7 +1122,7 @@ function AppContent() {
   }
 
   // Show data error (but not if user needs to change password - let the modal render)
-  if (workspaceSurfaceShouldRun && dataError && !user?.must_change_password) {
+  if (workspaceSurfaceShouldRun && dataError && !mustChangePassword) {
     return (
       <div
         style={{
@@ -1293,6 +1318,7 @@ function AppContent() {
       showSuccess('User created successfully!');
     } catch (error) {
       showError(`Failed to create user: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
     }
   };
 
@@ -1303,13 +1329,35 @@ function AppContent() {
   ) => {
     if (!client) return;
     try {
-      // Cast UpdateUserInput to Partial<User> - backend handles encryption/conversion
-      await client.service('users').patch(userId, updates as Partial<User>);
+      const newPassword =
+        typeof updates.password === 'string' && updates.password.length > 0
+          ? updates.password
+          : undefined;
+      const changesCurrentPassword = userId === currentUser?.user_id && !!newPassword;
+      let signedIn = true;
+      if (changesCurrentPassword && currentUser && newPassword) {
+        signedIn = await completeLocalPasswordChange({
+          client,
+          userId,
+          emailAfterChange: updates.email ?? currentUser.email,
+          newPassword,
+          updates: updates as UpdateUserInput & { password: string },
+          login,
+          logout,
+        });
+      } else {
+        // Cast UpdateUserInput to Partial<User> - backend handles encryption/conversion
+        await client.service('users').patch(userId, updates as Partial<User>);
+      }
       if (updates.agentic_tools || updates.env_vars) {
         setCredentialVersion((v) => v + 1);
       }
       if (!options.silent) {
-        showSuccess('User updated successfully!');
+        showSuccess(
+          signedIn
+            ? 'User updated successfully!'
+            : 'Password changed successfully. Please sign in again.'
+        );
       }
     } catch (error) {
       if (!options.silent) {
@@ -1552,6 +1600,7 @@ function AppContent() {
       refType?: 'branch' | 'tag';
       createBranch: boolean;
       sourceBranch: string;
+      sourceRemoteUrl?: string;
       pullLatest: boolean;
       issue_url?: string;
       pull_request_url?: string;
@@ -1574,6 +1623,7 @@ function AppContent() {
         createBranch: data.createBranch,
         pullLatest: data.pullLatest, // Fetch latest from remote before creating
         sourceBranch: data.sourceBranch, // Base new branch on specified source branch
+        sourceRemoteUrl: data.sourceRemoteUrl, // Qualify a cross-repository base ref
         issue_url: data.issue_url,
         pull_request_url: data.pull_request_url,
         boardId: data.boardId, // Optional: add to board
@@ -1807,9 +1857,7 @@ function AppContent() {
     try {
       await client.service('board-comments').create({
         board_id: boardId,
-        created_by: user?.user_id || 'unknown',
         content,
-        content_preview: content.slice(0, 200),
       });
     } catch (error) {
       showError(
@@ -1850,7 +1898,6 @@ function AppContent() {
       // Use the custom route for creating replies
       await client.service(`board-comments/${parentId}/reply`).create({
         content,
-        created_by: user?.user_id || 'unknown',
       });
     } catch (error) {
       showError(`Failed to send reply: ${error instanceof Error ? error.message : String(error)}`);
@@ -1861,8 +1908,9 @@ function AppContent() {
     if (!client) return;
     try {
       // Use the custom route for toggling reactions
+      // The server derives the reactor from the authenticated session; do not
+      // send a client user_id (it is ignored).
       await client.service(`board-comments/${commentId}/toggle-reaction`).create({
-        user_id: user?.user_id || 'unknown',
         emoji,
       });
     } catch (error) {
@@ -2009,7 +2057,7 @@ function AppContent() {
     <ConnectionProvider value={connectionContextValue}>
       {/* Force Password Change Modal - shown when user.must_change_password is true */}
       <ForcePasswordChangeModal
-        open={!!currentUser?.must_change_password}
+        open={!!currentUser?.must_change_password && passwordWriteAvailable}
         user={currentUser}
         onChangePassword={handleForcePasswordChange}
         onLogout={logout}
@@ -2031,6 +2079,43 @@ function AppContent() {
           onRefreshCurrentUser={reAuthenticate}
           onRestartOnboarding={canRunOnboarding ? handleRestartOnboarding : undefined}
           initialTab={userSettingsInitialTab}
+        />
+      )}
+
+      {location.pathname.startsWith('/m') && (
+        <SettingsModal
+          open={settingsTabToOpen !== null}
+          onClose={handleSettingsClose}
+          client={client}
+          currentUser={currentUser}
+          activeTab={settingsTabToOpen ?? 'boards'}
+          onTabChange={setSettingsTabToOpen}
+          onCreateBoard={handleCreateBoard}
+          onUpdateBoard={handleUpdateBoard}
+          onDeleteBoard={handleDeleteBoard}
+          onArchiveBoard={handleArchiveBoard}
+          onUnarchiveBoard={handleUnarchiveBoard}
+          onCreateRepo={handleCreateRepo}
+          onCreateLocalRepo={handleCreateLocalRepo}
+          onUpdateRepo={handleUpdateRepo}
+          onDeleteRepo={handleDeleteRepo}
+          onArchiveOrDeleteBranch={handleArchiveOrDeleteBranch}
+          onUnarchiveBranch={handleUnarchiveBranch}
+          onUpdateBranch={handleUpdateBranch}
+          onCreateBranch={handleCreateBranch}
+          onStartEnvironment={handleStartEnvironment}
+          onStopEnvironment={handleStopEnvironment}
+          onCreateUser={handleCreateUser}
+          onUpdateUser={handleUpdateUser}
+          onDeleteUser={handleDeleteUser}
+          onCreateMCPServer={handleCreateMCPServer}
+          onDeleteMCPServer={handleDeleteMCPServer}
+          onCreateGatewayChannel={handleCreateGatewayChannel}
+          onUpdateGatewayChannel={handleUpdateGatewayChannel}
+          onDeleteGatewayChannel={handleDeleteGatewayChannel}
+          onUpdateArtifact={handleUpdateArtifact}
+          onDeleteArtifact={handleDeleteArtifact}
+          branchStorageConfig={featuresConfig?.branchStorage}
         />
       )}
 
@@ -2113,6 +2198,12 @@ function AppContent() {
                 onToggleReaction={handleToggleReaction}
                 onDeleteComment={handleDeleteComment}
                 onLogout={logout}
+                onOpenWorkspaceSettings={setSettingsTabToOpen}
+                onOpenUserSettings={() => setOpenUserSettings(true)}
+                onUpdateBranch={handleUpdateBranch}
+                onUpdateRepo={handleUpdateRepo}
+                onArchiveOrDeleteBranch={handleArchiveOrDeleteBranch}
+                onExecuteScheduleNow={handleExecuteScheduleNow}
               />
             }
           />
