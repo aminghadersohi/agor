@@ -536,7 +536,7 @@ describe('agor_boards_create schema', () => {
 describe('agor_boards_auto_arrange_zone', () => {
   const baseServiceParams = { authenticated: true, provider: 'mcp' };
 
-  it('honors an exact one-column request and uses a contained deck when necessary', async () => {
+  it('uses accessible cascade offsets when an exact one-column grid is too tall', async () => {
     const patches: Array<{ id: string; position: { x: number; y: number } }> = [];
     const boardObjects = Array.from({ length: 20 }, (_, index) => ({
       object_id: `card-${index}`,
@@ -588,18 +588,26 @@ describe('agor_boards_auto_arrange_zone', () => {
     expect(parsed.columns).toBe(1);
     expect(parsed.fitsWithoutOverlap).toBe(false);
     expect(parsed.layoutMode).toBe('deck');
-    expect(parsed.deckOffset).toBe(8);
-    expect(parsed.stackCount).toBeGreaterThanOrEqual(10);
-    expect(parsed.maxDeckDepth).toBe(2);
+    expect(parsed.deckOffsetX).toBe(12);
+    expect(parsed.deckOffsetY).toBe(48);
+    expect(parsed.overflowingObjectIds).toEqual([]);
+    expect(parsed.warning).toContain('48px header reveals');
     expect(patches).toHaveLength(20);
-    expect(patches[0]?.position).toEqual({ x: 24, y: 24 });
-    expect(patches[parsed.stackCount]?.position).toEqual({ x: 32, y: 32 });
-    for (const update of patches) {
-      expect(update.position.x).toBeGreaterThanOrEqual(0);
-      expect(update.position.x).toBeLessThanOrEqual(240);
-      expect(update.position.y).toBeGreaterThanOrEqual(0);
-      expect(update.position.y).toBeLessThan(1800);
-    }
+
+    const secondLayer = parsed.updates.find(
+      (update: { deckDepth: number }) => update.deckDepth === 1
+    );
+    const stackBase = parsed.updates.find(
+      (update: { stackIndex: number; deckDepth: number }) =>
+        update.stackIndex === secondLayer?.stackIndex && update.deckDepth === 0
+    );
+    expect(secondLayer).toBeDefined();
+    expect(stackBase).toBeDefined();
+    expect(secondLayer.position).toEqual({
+      x: stackBase.position.x + 12,
+      y: stackBase.position.y + 48,
+    });
+    expect(parsed.requiredHeight).toBeLessThanOrEqual(1800);
   });
 
   it('prefers a fully separated row-major grid when rows and columns fit', async () => {
