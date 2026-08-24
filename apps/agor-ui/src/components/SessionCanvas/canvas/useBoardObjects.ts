@@ -2,6 +2,7 @@
  * Hook for managing board objects (text labels, zones, etc.)
  */
 
+import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
 import type { AgorClient, Board, BoardEntityObject, BoardObject } from '@agor-live/client';
 import { useCallback, useRef } from 'react';
 import type { Node } from 'reactflow';
@@ -17,6 +18,7 @@ interface UseBoardObjectsProps {
   board: Board | null;
   client: AgorClient | null;
   boardObjectsForBoard: BoardEntityObject[];
+  nodes: Node[];
   setNodes: React.Dispatch<React.SetStateAction<Node[]>>;
   deletedObjectsRef: React.MutableRefObject<Set<string>>;
   eraserMode?: boolean;
@@ -31,6 +33,7 @@ export const useBoardObjects = ({
   board,
   client,
   boardObjectsForBoard,
+  nodes,
   setNodes,
   deletedObjectsRef,
   eraserMode = false,
@@ -40,8 +43,10 @@ export const useBoardObjects = ({
   // Use ref to avoid recreating callbacks when board changes
   const boardRef = useRef(board);
   boardRef.current = board;
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
 
-  const { showError } = useThemedMessage();
+  const { showError, showSuccess, showWarning } = useThemedMessage();
 
   // Use the board object's reference directly. The store already preserves
   // unchanged board references, and serializing every object on every canvas
@@ -229,6 +234,108 @@ export const useBoardObjects = ({
   );
 
   /**
+   * Pack every branch/card pinned to a zone using its actual rendered size.
+   * Child positions are zone-relative in both React Flow and board_objects, so
+   * placements can be applied without translating through canvas coordinates.
+   */
+  const arrangeZoneContents = useCallback(
+    async (zoneId: string) => {
+      const currentBoard = boardRef.current;
+      const zone = currentBoard?.objects?.[zoneId];
+      if (!currentBoard || !client || zone?.type !== 'zone') return;
+
+      let changedNodes: Node[] = [];
+      let layoutMode: 'grid' | 'deck' = 'grid';
+      let overflowCount = 0;
+
+      const children = nodesRef.current
+        .filter(
+          (node) =>
+            node.parentId === zoneId && (node.type === 'branchNode' || node.type === 'cardNode')
+        )
+        .sort(
+          (a, b) =>
+            a.position.y - b.position.y || a.position.x - b.position.x || a.id.localeCompare(b.id)
+        );
+      if (children.length < 2) {
+        showWarning('This zone needs at least two pinned items to arrange.');
+        return;
+      }
+
+      const itemSize = (node: Node) => ({
+        width: Number(node.width ?? node.style?.width ?? 380),
+        height: Number(node.height ?? node.style?.height ?? 120),
+      });
+      const layout = layoutRectangles(
+        children.map((node) => ({ id: node.id, ...itemSize(node) })),
+        {
+          bounds: { width: zone.width, height: zone.height },
+          padding: 24,
+          gapX: 24,
+          gapY: 24,
+          minGapX: 12,
+          minGapY: 12,
+          preferredColumns: Math.ceil(Math.sqrt(children.length)),
+          allowDeck: true,
+          deckOffset: 8,
+        }
+      );
+      layoutMode = layout.mode;
+      overflowCount = layout.overflowingItemIds.length;
+      const placementById = new Map(
+        layout.placements.map((placement) => [placement.id, placement])
+      );
+      changedNodes = children.map((node) => {
+        const placement = placementById.get(node.id);
+        return placement ? { ...node, position: { x: placement.x, y: placement.y } } : node;
+      });
+      const changedById = new Map(changedNodes.map((node) => [node.id, node]));
+      setNodes((currentNodes) => currentNodes.map((node) => changedById.get(node.id) ?? node));
+
+      if (changedNodes.length < 2) return;
+
+      const placementByNodeId = new Map<string, BoardEntityObject>();
+      for (const placement of boardObjectsForBoard) {
+        if (placement.zone_id !== zoneId) continue;
+        if (placement.branch_id) placementByNodeId.set(placement.branch_id, placement);
+        if (placement.card_id) placementByNodeId.set(`card-${placement.card_id}`, placement);
+      }
+
+      try {
+        await Promise.all(
+          changedNodes.map(async (node) => {
+            const placement = placementByNodeId.get(node.id);
+            if (!placement) return;
+            const width = Number(node.width ?? node.style?.width ?? 380);
+            const height = Number(node.height ?? node.style?.height ?? 120);
+            await client.service('board-objects').patch(placement.object_id, {
+              position: node.position,
+            });
+            await client.service('board-objects').patch(placement.object_id, {
+              size: { width, height },
+            });
+          })
+        );
+        if (overflowCount > 0) {
+          showWarning(
+            `Arranged ${changedNodes.length} items, but ${overflowCount} cannot fit inside this zone.`
+          );
+        } else if (layoutMode === 'deck') {
+          showWarning(
+            `The zone is too small for a non-overlapping grid. Arranged ${changedNodes.length} items in compact decks.`
+          );
+        } else {
+          showSuccess(`Arranged ${changedNodes.length} items in a non-overlapping grid.`);
+        }
+      } catch (error) {
+        console.error('Failed to arrange zone contents:', error);
+        showError('Failed to arrange zone contents');
+      }
+    },
+    [boardObjectsForBoard, client, setNodes, showError, showSuccess, showWarning]
+  );
+
+  /**
    * Convert board.objects to React Flow nodes
    */
   const getBoardObjectNodes = useCallback((): Node[] => {
@@ -384,6 +491,7 @@ export const useBoardObjects = ({
             onUpdate: handleUpdateObject,
             onDelete: deleteZone,
             onReorder: reorderObject,
+            onArrangeContents: arrangeZoneContents,
           },
         };
       });
@@ -395,6 +503,7 @@ export const useBoardObjects = ({
     deleteObject,
     deleteArtifact,
     reorderObject,
+    arrangeZoneContents,
     eraserMode,
     activeUrlTargetArtifactId,
     onEditMarkdown,

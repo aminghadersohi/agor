@@ -349,6 +349,7 @@ export class BoardObjectRepository {
     branch_id?: BranchID;
     card_id?: CardID;
     position: { x: number; y: number };
+    size?: { width: number; height: number };
     zone_id?: string;
   }): Promise<BoardEntityObject> {
     try {
@@ -379,6 +380,7 @@ export class BoardObjectRepository {
         created_at: new Date(),
         data: {
           position: data.position,
+          size: data.size,
           zone_id: data.zone_id,
         },
       };
@@ -430,6 +432,7 @@ export class BoardObjectRepository {
         .set({
           data: {
             position,
+            size: existingData.size,
             zone_id: existingData.zone_id,
           },
         })
@@ -450,6 +453,44 @@ export class BoardObjectRepository {
       if (error instanceof EntityNotFoundError) throw error;
       throw new RepositoryError(
         `Failed to update board object position: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /** Update the last measured rendered size while preserving placement. */
+  async updateSize(
+    objectId: string,
+    size: { width: number; height: number }
+  ): Promise<BoardEntityObject> {
+    try {
+      const existing = await select(this.db)
+        .from(boardObjects)
+        .where(eq(boardObjects.object_id, objectId))
+        .one();
+      if (!existing) throw new EntityNotFoundError('BoardObject', objectId);
+      const existingData =
+        typeof existing.data === 'string' ? JSON.parse(existing.data) : existing.data;
+      await update(this.db, boardObjects)
+        .set({
+          data: {
+            position: existingData.position,
+            size,
+            zone_id: existingData.zone_id,
+          },
+        })
+        .where(eq(boardObjects.object_id, objectId))
+        .run();
+      const row = await select(this.db)
+        .from(boardObjects)
+        .where(eq(boardObjects.object_id, objectId))
+        .one();
+      if (!row) throw new RepositoryError('Failed to retrieve resized board object');
+      return this.rowToEntity(row);
+    } catch (error) {
+      if (error instanceof EntityNotFoundError) throw error;
+      throw new RepositoryError(
+        `Failed to update board object size: ${error instanceof Error ? error.message : String(error)}`,
         error
       );
     }
@@ -480,6 +521,7 @@ export class BoardObjectRepository {
         .set({
           data: {
             position: existingData.position,
+            size: existingData.size,
             // Convert null to undefined for consistency
             zone_id: zoneId === null ? undefined : zoneId,
           },
@@ -553,6 +595,7 @@ export class BoardObjectRepository {
             .set({
               data: {
                 position: absolutePosition,
+                size: data.size,
                 zone_id: undefined,
               },
             })
@@ -607,6 +650,7 @@ export class BoardObjectRepository {
       card_id: (row.card_id as CardID) ?? undefined,
       entity_type: entityType,
       position: data.position,
+      size: data.size,
       zone_id: data.zone_id,
       created_at: new Date(row.created_at).toISOString(),
     };
