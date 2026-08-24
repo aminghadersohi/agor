@@ -108,6 +108,18 @@ You can also build asymmetric pipelines: a "Stuck" zone that escalates to a diff
 
 ---
 
+## Arranging board content
+
+Agor can arrange mixed-size branches, cards, zones, notes, apps, and artifacts without treating every object as the same-sized tile.
+
+- **Arrange a selection:** multi-select two or more top-level items, then choose **Auto arrange** in the selection toolbar.
+- **Arrange a zone:** select a zone and choose **Arrange contents** in its toolbar. Pinned branches and cards remain pinned and are laid out relative to that zone.
+- **Arrange through MCP:** use `agor_boards_auto_arrange` for top-level objects or `agor_boards_auto_arrange_zone` for one zone.
+
+Layouts read the rendered width and height of each branch or card, then fill rows from the top-left with equal spacing. A non-overlapping grid is always preferred. If a zone is genuinely too small for every full rectangle, Agor uses compact decks as a last resort; each upper item is offset down and right so the top and left edges underneath remain visible. The MCP result reports whether a grid fit, the applied gaps, required bounds, and any objects that could not be fully contained.
+
+---
+
 ## Multiple boards, one workspace
 
 A workspace can have many boards, one per team, one per project, one per long-running initiative. Boards are independent canvases with their own branches, zones, and members.
