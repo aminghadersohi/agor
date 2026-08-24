@@ -45,7 +45,7 @@
   border: 1px solid var(--ant-color-border-secondary);
   border-radius: 8px;
   background: var(--ant-color-bg-elevated);
-  box-shadow: 0 4px 14px rgb(0 0 0 / 18%);
+  box-shadow: var(--ant-box-shadow-secondary);
   overflow-x: auto;
   white-space: nowrap;
 }
