@@ -28,7 +28,12 @@ export interface RectangleLayoutOptions {
   exactColumns?: number;
   /** Used only when no non-overlapping grid fits. */
   allowDeck?: boolean;
+  /** Legacy diagonal deck offset. Prefer deckOffsetX/deckOffsetY. */
   deckOffset?: number;
+  /** Visible left-edge reveal between deck layers. */
+  deckOffsetX?: number;
+  /** Visible header reveal between deck layers. */
+  deckOffsetY?: number;
 }
 
 export interface RectangleLayoutResult {
@@ -43,6 +48,8 @@ export interface RectangleLayoutResult {
   fitsWithoutOverlap: boolean;
   stackCount: number;
   maxDeckDepth: number;
+  deckOffsetX: number;
+  deckOffsetY: number;
   overflowingItemIds: string[];
 }
 
@@ -219,7 +226,8 @@ function buildDeck(
     minGapY: number;
     preferredColumns?: number;
     exactColumns?: number;
-    deckOffset: number;
+    deckOffsetX: number;
+    deckOffsetY: number;
   }
 ): RectangleLayoutResult | undefined {
   // Try the maximum possible number of stacks first. Overlap grows only when
@@ -233,8 +241,10 @@ function buildDeck(
       const members = items.filter((_, index) => index % stackCount === stackIndex);
       return {
         id: `stack-${stackIndex}`,
-        width: Math.max(...members.map((item, depth) => item.width + depth * options.deckOffset)),
-        height: Math.max(...members.map((item, depth) => item.height + depth * options.deckOffset)),
+        width: Math.max(...members.map((item, depth) => item.width + depth * options.deckOffsetX)),
+        height: Math.max(
+          ...members.map((item, depth) => item.height + depth * options.deckOffsetY)
+        ),
       };
     });
     const stackGrid = chooseGrid(stacks, options);
@@ -249,8 +259,8 @@ function buildDeck(
       if (!base) throw new Error(`Missing deck stack ${stackIndex}.`);
       return {
         ...item,
-        x: base.x + deckDepth * options.deckOffset,
-        y: base.y + deckDepth * options.deckOffset,
+        x: base.x + deckDepth * options.deckOffsetX,
+        y: base.y + deckDepth * options.deckOffsetY,
         row: base.row,
         column: base.column,
         stackIndex,
@@ -269,6 +279,8 @@ function buildDeck(
       fitsWithoutOverlap: false,
       stackCount,
       maxDeckDepth: Math.ceil(items.length / stackCount),
+      deckOffsetX: options.deckOffsetX,
+      deckOffsetY: options.deckOffsetY,
       overflowingItemIds: overflowingIds(placements, options.bounds),
     };
   }
@@ -296,7 +308,12 @@ export function layoutRectangles(
   const gapY = finiteNonNegative(options.gapY, 24);
   const minGapX = Math.min(gapX, finiteNonNegative(options.minGapX, Math.min(12, gapX)));
   const minGapY = Math.min(gapY, finiteNonNegative(options.minGapY, Math.min(12, gapY)));
-  const deckOffset = finiteNonNegative(options.deckOffset, 8);
+  const legacyDeckOffset = finiteNonNegative(options.deckOffset, 12);
+  const deckOffsetX = finiteNonNegative(options.deckOffsetX, legacyDeckOffset);
+  const deckOffsetY = finiteNonNegative(
+    options.deckOffsetY,
+    options.deckOffset === undefined ? 48 : legacyDeckOffset
+  );
   const bounds = options.bounds
     ? {
         width: finiteNonNegative(options.bounds.width, 0),
@@ -320,6 +337,8 @@ export function layoutRectangles(
       fitsWithoutOverlap: true,
       stackCount: items.length,
       maxDeckDepth: 1,
+      deckOffsetX: 0,
+      deckOffsetY: 0,
       overflowingItemIds: bounds ? overflowingIds(grid.placements, bounds) : [],
     };
   }
@@ -334,7 +353,8 @@ export function layoutRectangles(
           minGapY,
           preferredColumns: options.preferredColumns,
           exactColumns: options.exactColumns,
-          deckOffset,
+          deckOffsetX,
+          deckOffsetY,
         })
       : undefined;
   if (deck) return deck;
@@ -355,6 +375,8 @@ export function layoutRectangles(
     fitsWithoutOverlap: true,
     stackCount: items.length,
     maxDeckDepth: 1,
+    deckOffsetX: 0,
+    deckOffsetY: 0,
     overflowingItemIds: bounds ? overflowingIds(fallback.placements, bounds) : [],
   };
 }

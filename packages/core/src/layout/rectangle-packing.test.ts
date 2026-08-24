@@ -113,16 +113,18 @@ describe('layoutRectangles', () => {
     expect(result.overflowingItemIds).toEqual([]);
   });
 
-  it('keeps an exact one-column request when bounded content requires a deck', () => {
+  it('keeps exact deck columns and exposes every cascade layer', () => {
     const result = layoutRectangles(
       Array.from({ length: 6 }, (_, index) => ({ id: `card-${index}`, width: 180, height: 140 })),
       {
-        bounds: { width: 450, height: 350 },
+        bounds: { width: 450, height: 500 },
         exactColumns: 1,
         padding: 20,
         gapX: 20,
         gapY: 20,
-        deckOffset: 8,
+        allowDeck: true,
+        deckOffsetX: 12,
+        deckOffsetY: 48,
       }
     );
 
@@ -133,9 +135,25 @@ describe('layoutRectangles', () => {
       stackCount: 1,
       maxDeckDepth: 6,
       fitsWithoutOverlap: false,
+      deckOffsetX: 12,
+      deckOffsetY: 48,
+      width: 280,
+      height: 420,
     });
     expect(result.overflowingItemIds).toEqual([]);
     expect(result.placements.every((placement) => placement.column === 0)).toBe(true);
+    expect(result.placements[1]).toMatchObject({
+      x: result.placements[0]?.x + 12,
+      y: result.placements[0]?.y + 48,
+      stackIndex: 0,
+      deckDepth: 1,
+    });
+    expect(result.placements.at(-1)).toMatchObject({
+      x: result.placements[0]?.x + 60,
+      y: result.placements[0]?.y + 240,
+      stackIndex: 0,
+      deckDepth: 5,
+    });
   });
 
   it('does not silently substitute a fitting count for exact columns', () => {
