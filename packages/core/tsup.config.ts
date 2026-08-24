@@ -9,6 +9,7 @@ export default defineConfig({
     'tracing/datadog': 'src/tracing/datadog.ts', // Shared Datadog tracer type + optional-peer resolver
     'types/index': 'src/types/index.ts',
     'layout/rectangle-packing': 'src/layout/rectangle-packing.ts',
+    'layout/zone-layout': 'src/layout/zone-layout.ts',
     'realtime/index': 'src/realtime/index.ts',
     'executor-protocol': 'src/executor-protocol.ts',
     'db/index': 'src/db/index.ts',
