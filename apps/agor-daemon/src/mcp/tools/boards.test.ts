@@ -573,7 +573,8 @@ describe('agor_boards_auto_arrange_zone', () => {
           };
         }
         if (name === 'board-objects') return boardObjectsService;
-        if (name === 'cards') return { get: vi.fn(async () => ({ title: 'Card' })) };
+        if (name === 'cards')
+          return { get: vi.fn(async () => ({ title: 'Card', description: 'x'.repeat(1000) })) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };

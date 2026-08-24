@@ -41,7 +41,10 @@ const BOARD_ENTITY_TYPES = ['branch', 'card'] as const satisfies readonly BoardE
 // every entity or it can place the last row below the zone.
 const ARRANGE_DIMENSIONS = {
   branch: { width: 500, height: 200 },
-  card: { width: 380, height: 150 },
+  // A card with only a title is roughly one header row. Content adds height
+  // below; using 150px as the minimum made normal cards look artificially
+  // oversized and caused unnecessary deck layouts.
+  card: { width: 380, height: 56 },
 } as const;
 const DECK_OFFSET = 2;
 
