@@ -4,6 +4,7 @@
 
 import type { BoardComment, BoardObject, User } from '@agor-live/client';
 import {
+  AppstoreOutlined,
   CaretDownOutlined,
   CaretUpOutlined,
   CommentOutlined,
@@ -63,6 +64,7 @@ interface ZoneNodeData extends Omit<ZoneBoardObject, 'type'> {
   onUpdate?: (objectId: string, objectData: BoardObject) => void;
   onDelete?: (objectId: string, deleteAssociatedSessions: boolean) => void;
   onReorder?: (objectId: string, op: LayerOp) => void;
+  onArrangeContents?: (objectId: string) => void;
 }
 
 // Local storage key for recent colors
@@ -639,6 +641,14 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
               />
             )}
           </button>
+          {verticalDivider}
+          {renderActionButton(
+            'arrange-contents',
+            'Arrange contents',
+            <AppstoreOutlined style={layerIconStyle} />,
+            () => data.onArrangeContents?.(data.objectId),
+            (data.pinnedItemCount ?? 0) < 2
+          )}
           {verticalDivider}
           {/* Layer (z-order) controls */}
           <div

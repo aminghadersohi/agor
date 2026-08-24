@@ -153,3 +153,44 @@ describe('BoardObjectsService.get', () => {
     expect(findVisibleByObjectId).not.toHaveBeenCalled();
   });
 });
+
+describe('BoardObjectsService.patch', () => {
+  it('persists a valid measured size through the repository boundary', async () => {
+    const service = new BoardObjectsService({} as Database);
+    const updateSize = vi.fn(async (_id, size) => ({ object_id: 'object-1', size }));
+    (
+      service as unknown as {
+        boardObjectRepo: { updateSize: typeof updateSize };
+      }
+    ).boardObjectRepo = { updateSize };
+
+    await expect(
+      service.patch('object-1', { size: { width: 486, height: 237 } })
+    ).resolves.toMatchObject({ size: { width: 486, height: 237 } });
+    expect(updateSize).toHaveBeenCalledWith('object-1', { width: 486, height: 237 });
+  });
+
+  it.each([
+    { width: 0, height: 100 },
+    { width: 100, height: -1 },
+    { width: Number.NaN, height: 100 },
+    { width: 100, height: Number.POSITIVE_INFINITY },
+  ])('rejects invalid measured size $width x $height', async (size) => {
+    const service = new BoardObjectsService({} as Database);
+
+    await expect(service.patch('object-1', { size })).rejects.toThrow(
+      'size width and height must be positive finite numbers'
+    );
+  });
+
+  it('rejects mixing size and position so placement updates stay atomic', async () => {
+    const service = new BoardObjectsService({} as Database);
+
+    await expect(
+      service.patch('object-1', {
+        size: { width: 486, height: 237 },
+        position: { x: 20, y: 30 },
+      })
+    ).rejects.toThrow('size must be patched separately');
+  });
+});

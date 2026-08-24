@@ -1,3 +1,4 @@
+import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
 import type {
   AgenticToolName,
   AgorClient,
@@ -40,6 +41,7 @@ import React, {
 } from 'react';
 import {
   Background,
+  BackgroundVariant,
   ControlButton,
   Controls,
   type Edge,
@@ -748,6 +750,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       board,
       client,
       boardObjectsForBoard,
+      nodes,
       setNodes,
       deletedObjectsRef,
       eraserMode: activeTool === 'eraser',
@@ -1731,12 +1734,20 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // `getNode` is a stable reference and only runs inside this dimensions
             // branch, so the hot drag/position path does zero O(n) work.
             const node = reactFlowInstanceRef.current?.getNode(change.id);
-            if (node?.type === 'zone') {
+            if (node && ['zone', 'branchNode', 'cardNode'].includes(node.type ?? '')) {
               // Check if dimensions actually changed (to avoid infinite loop from React Flow emitting unchanged dimensions)
-              const currentWidth = node.style?.width;
-              const currentHeight = node.style?.height;
               const newWidth = change.dimensions.width;
               const newHeight = change.dimensions.height;
+              const entityBoardObject =
+                node.type === 'branchNode'
+                  ? boardObjectByBranch.get(node.id)
+                  : node.type === 'cardNode'
+                    ? boardObjectByCard.get(node.id.replace('card-', ''))
+                    : undefined;
+              const currentWidth =
+                node.type === 'zone' ? node.style?.width : entityBoardObject?.size?.width;
+              const currentHeight =
+                node.type === 'zone' ? node.style?.height : entityBoardObject?.size?.height;
 
               // Skip if dimensions haven't changed (tolerance of 1px for floating point)
               if (
@@ -1785,6 +1796,20 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                     } catch (error) {
                       console.error('Failed to persist zone resize:', error);
                     }
+                    continue;
+                  }
+
+                  const entityBoardObject = nodeId.startsWith('card-')
+                    ? boardObjectByCard.get(nodeId.replace('card-', ''))
+                    : boardObjectByBranch.get(nodeId);
+                  if (entityBoardObject) {
+                    try {
+                      await client.service('board-objects').patch(entityBoardObject.object_id, {
+                        size: dimensions,
+                      });
+                    } catch (error) {
+                      console.error('Failed to persist board entity dimensions:', error);
+                    }
                   }
                 }
               }, 500);
@@ -1795,7 +1820,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         // Call the original handler
         onNodesChangeInternal(changes);
       },
-      [board, client, onNodesChangeInternal, setNodes]
+      [board, boardObjectByBranch, boardObjectByCard, client, onNodesChangeInternal, setNodes]
     );
 
     // Handle node drag start
@@ -2271,16 +2296,23 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
     const selectedLayoutNodes = nodes.filter((node) => node.selected && !node.parentId);
     const handleLayoutAction = useCallback(
-      async (action: 'left' | 'center' | 'top' | 'middle' | 'width' | 'height') => {
+      async (action: 'arrange' | 'left' | 'center' | 'top' | 'middle' | 'width' | 'height') => {
         if (!board || !client || selectedLayoutNodes.length < 2) return;
         const size = (node: Node) => ({
           width: Number(node.width ?? node.style?.width ?? 240),
           height: Number(node.height ?? node.style?.height ?? 120),
         });
-        const rects = selectedLayoutNodes.map((node) => {
-          const position = getNodeAbsolutePosition(node, nodes);
-          return { node, position, ...size(node) };
-        });
+        const rects = selectedLayoutNodes
+          .map((node) => {
+            const position = getNodeAbsolutePosition(node, nodes);
+            return { node, position, ...size(node) };
+          })
+          .sort(
+            (a, b) =>
+              a.position.y - b.position.y ||
+              a.position.x - b.position.x ||
+              a.node.id.localeCompare(b.node.id)
+          );
         const left = Math.min(...rects.map((item) => item.position.x));
         const right = Math.max(...rects.map((item) => item.position.x + item.width));
         const top = Math.min(...rects.map((item) => item.position.y));
@@ -2289,11 +2321,30 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         const middle = (top + bottom) / 2;
         const targetWidth = rects[0]?.width ?? 240;
         const targetHeight = rects[0]?.height ?? 120;
+        const autoLayout =
+          action === 'arrange'
+            ? layoutRectangles(
+                rects.map(({ node, width, height }) => ({ id: node.id, width, height })),
+                {
+                  preferredColumns: Math.ceil(Math.sqrt(rects.length)),
+                  gapX: 32,
+                  gapY: 32,
+                }
+              )
+            : null;
+        const autoPlacementById = new Map(
+          autoLayout?.placements.map((placement) => [placement.id, placement]) ?? []
+        );
         const updates = rects.map(({ node, position, width, height }) => {
           const nextWidth = action === 'width' ? targetWidth : width;
           const nextHeight = action === 'height' ? targetHeight : height;
           let x = position.x;
           let y = position.y;
+          const autoPlacement = autoPlacementById.get(node.id);
+          if (autoPlacement) {
+            x = left + autoPlacement.x;
+            y = top + autoPlacement.y;
+          }
           if (action === 'left') x = left;
           if (action === 'center') x = center - width / 2;
           if (action === 'top') y = top;
@@ -2824,6 +2875,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               </Typography.Text>
               {(
                 [
+                  ['arrange', 'Auto arrange'],
                   ['left', 'Align left'],
                   ['center', 'Align center'],
                   ['top', 'Align top'],
@@ -2916,7 +2968,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           >
             {(!canvasBackground || isDraggingCanvas) && (
               <Background
-                variant="dots"
+                variant={BackgroundVariant.Dots}
                 gap={20}
                 size={1.5}
                 color={token.colorTextQuaternary}

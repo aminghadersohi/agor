@@ -121,6 +121,7 @@ export class BoardObjectsService {
       board_id: data.board_id,
       branch_id: data.branch_id,
       position: data.position,
+      size: data.size,
       zone_id: data.zone_id,
     });
 
@@ -179,6 +180,21 @@ export class BoardObjectsService {
     data: Partial<BoardEntityObject>,
     _params?: BoardObjectParams
   ): Promise<BoardEntityObject> {
+    if (data.size) {
+      if (
+        !Number.isFinite(data.size.width) ||
+        !Number.isFinite(data.size.height) ||
+        data.size.width <= 0 ||
+        data.size.height <= 0
+      ) {
+        throw new Error('size width and height must be positive finite numbers');
+      }
+      if (data.position || 'zone_id' in data) {
+        throw new Error('size must be patched separately from position or zone_id');
+      }
+      return this.boardObjectRepo.updateSize(id, data.size);
+    }
+
     // Handle simultaneous position + zone_id update
     if (data.position && 'zone_id' in data) {
       // Update both atomically without emitting intermediate events
@@ -197,7 +213,7 @@ export class BoardObjectsService {
       return toBoardObjectPatchedEventPayload(boardObject) as BoardEntityObject;
     }
 
-    throw new Error('Only position and zone_id updates are supported via patch');
+    throw new Error('Only position, size, and zone_id updates are supported via patch');
   }
 
   /**
