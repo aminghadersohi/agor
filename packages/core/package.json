@@ -46,12 +46,6 @@
       "import": "./dist/layout/rectangle-packing.js",
       "require": "./dist/layout/rectangle-packing.cjs"
     },
-    "./layout/zone-content-inset": {
-      "source": "./src/layout/zone-content-inset.ts",
-      "types": "./dist/layout/zone-content-inset.d.ts",
-      "import": "./dist/layout/zone-content-inset.js",
-      "require": "./dist/layout/zone-content-inset.cjs"
-    },
     "./db": {
       "source": "./src/db/index.ts",
       "types": "./dist/db/index.d.ts",
