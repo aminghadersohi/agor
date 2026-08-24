@@ -581,7 +581,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_auto_arrange_zone',
     {
       description:
-        'Arrange worktrees/branches and cards inside one board zone using their measured rendered rectangles. Positions are relative to the zone and ordered top-left, left-to-right, then row-by-row. A fully separated grid is always preferred. If it cannot fit, an accessible cascade deck exposes each card header while accounting for every full rendered rectangle in the zone bounds. When columns is provided, that exact occupied count is locked for both grid and deck layouts; it is never silently replaced. If neither layout can fit, no positions are changed. The result reports exact containment and overflow.',
+        'Arrange worktrees/branches and cards inside one board zone using their measured rendered rectangles. Positions are relative to the zone and ordered top-left, left-to-right, then row-by-row. A fully separated grid is always preferred, including compact edge margins and gaps when needed. If it still cannot fit, the default is no position changes. An accessible cascade deck is available only through explicit overflowStrategy:"deck". When columns is provided, that exact occupied count is locked; it is never silently replaced. The result reports exact containment and overflow.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
@@ -592,8 +592,14 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .describe('Arrange only branch or card entities (default: both).'),
         columns: mcpOptionalPositiveInt(
           'columns',
-          'Exact number of occupied columns (capped by the number of entities). When omitted, the solver chooses a fitting count automatically. An explicit count is never silently replaced. A readable cascade may be used if a separated grid is too tall; if neither layout fits, no positions are changed and the result explains why.'
+          'Exact number of occupied columns (capped by the number of entities). When omitted, the solver chooses a fitting count automatically. An explicit count is never silently replaced. If it cannot fit as a grid, no positions are changed unless overflowStrategy:"deck" is explicitly selected.'
         ),
+        overflowStrategy: z
+          .enum(['fail', 'deck'])
+          .optional()
+          .describe(
+            'Behavior only when no non-overlapping grid fits. Defaults to fail (no board changes). Use deck only when deliberate visible-header overlap is acceptable.'
+          ),
         padding: mcpOptionalNumber('padding', 'Padding from the zone edges (default: 24).'),
         gapX: mcpOptionalNumber('gapX', 'Horizontal gap between items (default: 24).'),
         gapY: mcpOptionalNumber('gapY', 'Vertical gap between items (default: 24).'),
@@ -665,10 +671,13 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         {
           bounds: { width: zone.width, height: zone.height },
           padding,
+          minPadding: 8,
           gapX,
           gapY,
+          minGapX: 8,
+          minGapY: 8,
           exactColumns: args.columns,
-          allowDeck: true,
+          allowDeck: args.overflowStrategy === 'deck',
           deckOffsetX: DECK_OFFSET_X,
           deckOffsetY: DECK_OFFSET_Y,
         }
@@ -690,11 +699,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           requiredHeight: layout.height,
           appliedGapX: layout.gapX,
           appliedGapY: layout.gapY,
+          appliedPadding: layout.padding,
           overflowingObjectIds: layout.overflowingItemIds,
           warning:
             `The requested ${requestedColumns}-column layout cannot fit every rendered object inside ` +
             `the ${zone.width}×${zone.height} zone. No positions were changed. Increase the zone size, ` +
-            'reduce the requested columns, or omit columns to allow automatic fitting.',
+            'reduce the requested columns, omit columns to allow automatic fitting, or explicitly choose overflowStrategy:"deck".',
           zone: { width: zone.width, height: zone.height },
           updates: [],
         });
@@ -746,6 +756,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         requiredHeight: layout.height,
         appliedGapX: layout.gapX,
         appliedGapY: layout.gapY,
+        appliedPadding: layout.padding,
         overflowingObjectIds: layout.overflowingItemIds,
         warning:
           layout.overflowingItemIds.length > 0

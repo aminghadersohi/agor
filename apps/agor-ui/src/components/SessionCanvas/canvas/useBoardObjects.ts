@@ -7,6 +7,7 @@ import type { AgorClient, Board, BoardEntityObject, BoardObject } from '@agor-li
 import { useCallback, useRef } from 'react';
 import type { Node } from 'reactflow';
 import { useThemedMessage } from '../../../utils/message';
+import type { ReactFlowNode } from './utils/reactFlowTypes';
 import {
   computeLayerChanges,
   DEFAULT_BOARD_OBJECT_Z_INDEX,
@@ -262,26 +263,35 @@ export const useBoardObjects = ({
         return;
       }
 
-      const itemSize = (node: Node) => ({
-        width: Number(node.width ?? node.style?.width ?? 380),
-        height: Number(node.height ?? node.style?.height ?? 120),
-      });
+      const itemSize = (node: Node) => {
+        const measured = (node as ReactFlowNode).measured;
+        return {
+          width: Number(measured?.width ?? node.width ?? node.style?.width ?? 380),
+          height: Number(measured?.height ?? node.height ?? node.style?.height ?? 120),
+        };
+      };
       const layout = layoutRectangles(
         children.map((node) => ({ id: node.id, ...itemSize(node) })),
         {
           bounds: { width: zone.width, height: zone.height },
           padding: 24,
+          minPadding: 8,
           gapX: 24,
           gapY: 24,
-          minGapX: 12,
-          minGapY: 12,
+          minGapX: 8,
+          minGapY: 8,
           preferredColumns: Math.ceil(Math.sqrt(children.length)),
-          allowDeck: true,
-          deckOffset: 8,
+          allowDeck: false,
         }
       );
       layoutMode = layout.mode;
       overflowCount = layout.overflowingItemIds.length;
+      if (overflowCount > 0) {
+        showWarning(
+          `This zone cannot fit ${children.length} items without overlap. No positions were changed; enlarge the zone or arrange fewer items.`
+        );
+        return;
+      }
       const placementById = new Map(
         layout.placements.map((placement) => [placement.id, placement])
       );
@@ -306,8 +316,7 @@ export const useBoardObjects = ({
           changedNodes.map(async (node) => {
             const placement = placementByNodeId.get(node.id);
             if (!placement) return;
-            const width = Number(node.width ?? node.style?.width ?? 380);
-            const height = Number(node.height ?? node.style?.height ?? 120);
+            const { width, height } = itemSize(node);
             await client.service('board-objects').patch(placement.object_id, {
               position: node.position,
             });
