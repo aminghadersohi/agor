@@ -567,6 +567,7 @@ describe('agor_boards_auto_arrange_zone', () => {
           };
         }
         if (name === 'board-objects') return boardObjectsService;
+        if (name === 'cards') return { get: vi.fn(async () => ({ title: 'Card' })) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -588,7 +589,7 @@ describe('agor_boards_auto_arrange_zone', () => {
       expect(update.position.x).toBeGreaterThanOrEqual(0);
       expect(update.position.x).toBeLessThanOrEqual(240);
       expect(update.position.y).toBeGreaterThanOrEqual(0);
-      expect(update.position.y).toBeLessThanOrEqual(1650);
+      expect(update.position.y).toBeLessThanOrEqual(1626);
     }
   });
 });
