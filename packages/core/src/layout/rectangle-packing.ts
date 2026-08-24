@@ -22,8 +22,10 @@ export interface RectangleLayoutOptions {
   /** Smallest acceptable gaps when a bounded grid needs gentle compaction. */
   minGapX?: number;
   minGapY?: number;
-  /** Requested grid width. The nearest fitting width wins. */
+  /** Soft grid-width preference. The nearest fitting width wins. */
   preferredColumns?: number;
+  /** Exact grid width. Bounded layouts never substitute another column count. */
+  exactColumns?: number;
   /** Used only when no non-overlapping grid fits. */
   allowDeck?: boolean;
   deckOffset?: number;
@@ -138,37 +140,45 @@ function chooseGrid(
     minGapX: number;
     minGapY: number;
     preferredColumns?: number;
+    exactColumns?: number;
   }
 ): GridCandidate | undefined {
   if (items.length === 0) return buildGrid(items, 1, options.padding, options.gapX, options.gapY);
-  const candidates = Array.from({ length: items.length }, (_, index) => {
-    const columns = index + 1;
-    if (!options.bounds) {
-      return buildGrid(items, columns, options.padding, options.gapX, options.gapY);
-    }
+  const exactColumns = options.exactColumns
+    ? Math.max(1, Math.min(items.length, Math.floor(options.exactColumns)))
+    : undefined;
+  const columnCounts = exactColumns
+    ? [exactColumns]
+    : Array.from({ length: items.length }, (_, index) => index + 1);
+  const candidates = columnCounts
+    .map((columns) => {
+      if (!options.bounds) {
+        return buildGrid(items, columns, options.padding, options.gapX, options.gapY);
+      }
 
-    // First measure without inter-item gaps, then spend the remaining space on
-    // equal gaps up to the requested value. A few pixels of gap compaction is
-    // preferable to unnecessary overlap, but never cross the declared minima.
-    const compact = buildGrid(items, columns, options.padding, 0, 0);
-    const horizontalDivisors = Math.max(0, compact.columns - 1);
-    const verticalDivisors = Math.max(0, compact.rows - 1);
-    const fittingGapX =
-      horizontalDivisors === 0
-        ? options.gapX
-        : Math.floor((options.bounds.width - compact.width) / horizontalDivisors);
-    const fittingGapY =
-      verticalDivisors === 0
-        ? options.gapY
-        : Math.floor((options.bounds.height - compact.height) / verticalDivisors);
-    const effectiveGapX = Math.min(options.gapX, fittingGapX);
-    const effectiveGapY = Math.min(options.gapY, fittingGapY);
-    if (effectiveGapX < options.minGapX || effectiveGapY < options.minGapY) return undefined;
-    return buildGrid(items, columns, options.padding, effectiveGapX, effectiveGapY);
-  }).filter(
-    (candidate): candidate is GridCandidate =>
-      candidate !== undefined && (!options.bounds || fits(candidate, options.bounds))
-  );
+      // First measure without inter-item gaps, then spend the remaining space on
+      // equal gaps up to the requested value. A few pixels of gap compaction is
+      // preferable to unnecessary overlap, but never cross the declared minima.
+      const compact = buildGrid(items, columns, options.padding, 0, 0);
+      const horizontalDivisors = Math.max(0, compact.columns - 1);
+      const verticalDivisors = Math.max(0, compact.rows - 1);
+      const fittingGapX =
+        horizontalDivisors === 0
+          ? options.gapX
+          : Math.floor((options.bounds.width - compact.width) / horizontalDivisors);
+      const fittingGapY =
+        verticalDivisors === 0
+          ? options.gapY
+          : Math.floor((options.bounds.height - compact.height) / verticalDivisors);
+      const effectiveGapX = Math.min(options.gapX, fittingGapX);
+      const effectiveGapY = Math.min(options.gapY, fittingGapY);
+      if (effectiveGapX < options.minGapX || effectiveGapY < options.minGapY) return undefined;
+      return buildGrid(items, columns, options.padding, effectiveGapX, effectiveGapY);
+    })
+    .filter(
+      (candidate): candidate is GridCandidate =>
+        candidate !== undefined && (!options.bounds || fits(candidate, options.bounds))
+    );
   const preferred = options.preferredColumns
     ? Math.max(1, Math.min(items.length, Math.floor(options.preferredColumns)))
     : undefined;
@@ -208,12 +218,17 @@ function buildDeck(
     minGapX: number;
     minGapY: number;
     preferredColumns?: number;
+    exactColumns?: number;
     deckOffset: number;
   }
 ): RectangleLayoutResult | undefined {
   // Try the maximum possible number of stacks first. Overlap grows only when
   // the zone truly cannot fit another fully separated stack.
   for (let stackCount = items.length - 1; stackCount >= 1; stackCount--) {
+    const exactColumns = options.exactColumns
+      ? Math.max(1, Math.min(items.length, Math.floor(options.exactColumns)))
+      : undefined;
+    if (exactColumns !== undefined && stackCount < exactColumns) continue;
     const stacks = Array.from({ length: stackCount }, (_, stackIndex) => {
       const members = items.filter((_, index) => index % stackCount === stackIndex);
       return {
@@ -272,6 +287,9 @@ export function layoutRectangles(
   sourceItems: readonly RectangleLayoutItem[],
   options: RectangleLayoutOptions = {}
 ): RectangleLayoutResult {
+  if (options.preferredColumns !== undefined && options.exactColumns !== undefined) {
+    throw new Error('Specify either preferredColumns or exactColumns, not both.');
+  }
   const items = normalizedItems(sourceItems);
   const padding = finiteNonNegative(options.padding, 0);
   const gapX = finiteNonNegative(options.gapX, 24);
@@ -293,6 +311,7 @@ export function layoutRectangles(
     minGapX,
     minGapY,
     preferredColumns: options.preferredColumns,
+    exactColumns: options.exactColumns,
   });
   if (grid) {
     return {
@@ -314,6 +333,7 @@ export function layoutRectangles(
           minGapX,
           minGapY,
           preferredColumns: options.preferredColumns,
+          exactColumns: options.exactColumns,
           deckOffset,
         })
       : undefined;
@@ -322,7 +342,13 @@ export function layoutRectangles(
   // An individual item is larger than the usable container, or deck mode was
   // disabled. Keep deterministic origins and report the exact rectangles that
   // cannot be contained instead of pretending the arrangement succeeded.
-  const fallback = buildGrid(items, options.preferredColumns ?? 1, padding, gapX, gapY);
+  const fallback = buildGrid(
+    items,
+    options.exactColumns ?? options.preferredColumns ?? 1,
+    padding,
+    gapX,
+    gapY
+  );
   return {
     mode: 'grid',
     ...fallback,
