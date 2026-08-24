@@ -2801,12 +2801,17 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   <span
                     key={`${guide.orientation}-${guide.offset}`}
                     className={`canvas-alignment-guide ${guide.orientation}`}
+                    data-guide-kind={guide.kind ?? 'alignment'}
                     style={
                       guide.orientation === 'vertical'
                         ? { left: guide.offset * viewport.zoom + viewport.x }
                         : { top: guide.offset * viewport.zoom + viewport.y }
                     }
-                  />
+                  >
+                    {guide.label && (
+                      <span className="canvas-alignment-guide-label">{guide.label}</span>
+                    )}
+                  </span>
                 ));
               })()}
             </div>
