@@ -551,6 +551,59 @@ describe('agor_boards_auto_arrange_zone', () => {
     ).toBe(true);
   });
 
+  it('arranges only active cards, never hidden archived cards', async () => {
+    const patches = vi.fn(
+      async (_id: string, data: { position: { x: number; y: number } }) => data
+    );
+    const entities = Array.from({ length: 20 }, (_, index) => ({
+      object_id: `card-${index}`,
+      board_id: 'board-1',
+      card_id: `card-${index}`,
+      entity_type: 'card' as const,
+      position: { x: 0, y: index * 10 },
+      zone_id: 'zone-1',
+      created_at: '2026-06-01T00:00:00.000Z',
+    }));
+    const cardsFind = vi.fn(async () => ({
+      data: entities.slice(0, 5).map((entity) => ({ card_id: entity.card_id })),
+    }));
+    const app = {
+      service(name: string) {
+        if (name === 'boards')
+          return {
+            get: vi.fn(async () => ({
+              board_id: 'board-1',
+              objects: { 'zone-1': { type: 'zone', x: 0, y: 0, width: 1200, height: 1800 } },
+            })),
+          };
+        if (name === 'board-objects')
+          return { find: vi.fn(async () => ({ data: entities })), patch: patches };
+        if (name === 'cards')
+          return { find: cardsFind, get: vi.fn(async () => ({ title: 'Card' })) };
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1', columns: 1, strictColumns: true }))
+        .content[0].text
+    );
+
+    expect(cardsFind).toHaveBeenCalledWith(
+      expect.objectContaining({ query: expect.objectContaining({ archived: false }) })
+    );
+    expect(parsed).toMatchObject({ applied: true, arranged: 5, columns: 1, rows: 5 });
+    expect(patches).toHaveBeenCalledTimes(5);
+    expect(patches.mock.calls.map(([objectId]) => objectId)).toEqual(
+      entities.slice(0, 5).map((entity) => entity.object_id)
+    );
+  });
+
   it('uses accessible cascade offsets only when deck overflow is explicit', async () => {
     const patches: Array<{ id: string; position: { x: number; y: number } }> = [];
     const boardObjects = Array.from({ length: 20 }, (_, index) => ({
@@ -583,7 +636,12 @@ describe('agor_boards_auto_arrange_zone', () => {
         }
         if (name === 'board-objects') return boardObjectsService;
         if (name === 'cards')
-          return { get: vi.fn(async () => ({ title: 'Card', description: 'x'.repeat(1000) })) };
+          return {
+            find: vi.fn(async () => ({
+              data: boardObjects.map((object) => ({ card_id: object.card_id })),
+            })),
+            get: vi.fn(async () => ({ title: 'Card', description: 'x'.repeat(1000) })),
+          };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -673,7 +731,13 @@ describe('agor_boards_auto_arrange_zone', () => {
               return data;
             }),
           };
-        if (name === 'cards') return { get: vi.fn(async () => ({ title: 'Card' })) };
+        if (name === 'cards')
+          return {
+            find: vi.fn(async () => ({
+              data: entities.map((entity) => ({ card_id: entity.card_id })),
+            })),
+            get: vi.fn(async () => ({ title: 'Card' })),
+          };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -726,7 +790,13 @@ describe('agor_boards_auto_arrange_zone', () => {
               return data;
             }),
           };
-        if (name === 'cards') return { get: cardsGet };
+        if (name === 'cards')
+          return {
+            find: vi.fn(async () => ({
+              data: entities.map((entity) => ({ card_id: entity.card_id })),
+            })),
+            get: cardsGet,
+          };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -780,6 +850,12 @@ describe('agor_boards_auto_arrange_zone', () => {
           };
         if (name === 'board-objects')
           return { find: vi.fn(async () => ({ data: entities })), patch };
+        if (name === 'cards')
+          return {
+            find: vi.fn(async () => ({
+              data: entities.map((entity) => ({ card_id: entity.card_id })),
+            })),
+          };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -790,7 +866,8 @@ describe('agor_boards_auto_arrange_zone', () => {
     });
 
     const parsed = JSON.parse(
-      (await arrange({ boardId: 'board-1', zoneId: 'zone-1', columns: 3 })).content[0].text
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1', columns: 3, strictColumns: true }))
+        .content[0].text
     );
 
     expect(parsed).toMatchObject({
@@ -833,6 +910,8 @@ describe('agor_boards_auto_arrange_zone', () => {
             })),
             patch: vi.fn(async (_id: string, data: unknown) => data),
           };
+        if (name === 'branches')
+          return { find: vi.fn(async () => ({ data: [{ branch_id: 'branch-1' }] })) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
