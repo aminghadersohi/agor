@@ -46,7 +46,8 @@ const ARRANGE_DIMENSIONS = {
   // oversized and caused unnecessary deck layouts.
   card: { width: 380, height: 56 },
 } as const;
-const DECK_OFFSET = 8;
+const DECK_OFFSET_X = 12;
+const DECK_OFFSET_Y = 48;
 
 function compareBoardEntitiesSpatially(a: BoardEntityObject, b: BoardEntityObject): number {
   return (
@@ -580,7 +581,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_auto_arrange_zone',
     {
       description:
-        'Arrange worktrees/branches and cards inside one board zone using their measured rendered rectangles. Positions are relative to the zone and ordered top-left, left-to-right, then row-by-row. When columns is omitted, every possible column count is evaluated; when provided, that exact occupied count is locked and never silently replaced. A non-overlapping grid is always preferred. Only when no complete grid fits does the tool use distributed stacks, offsetting deck layers down-right so underlying top and left edges remain visible. If an explicit count cannot be contained, no positions are changed. The result reports exact containment and overflow.',
+        'Arrange worktrees/branches and cards inside one board zone using their measured rendered rectangles. Positions are relative to the zone and ordered top-left, left-to-right, then row-by-row. A fully separated grid is always preferred. If it cannot fit, an accessible cascade deck exposes each card header while accounting for every full rendered rectangle in the zone bounds. When columns is provided, that exact occupied count is locked for both grid and deck layouts; it is never silently replaced. If neither layout can fit, no positions are changed. The result reports exact containment and overflow.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
@@ -591,7 +592,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .describe('Arrange only branch or card entities (default: both).'),
         columns: mcpOptionalPositiveInt(
           'columns',
-          'Exact number of occupied columns (capped by the number of entities). When omitted, the solver chooses a fitting count automatically. An explicit count is never silently replaced; if it cannot fit, no positions are changed and the result explains why.'
+          'Exact number of occupied columns (capped by the number of entities). When omitted, the solver chooses a fitting count automatically. An explicit count is never silently replaced. A readable cascade may be used if a separated grid is too tall; if neither layout fits, no positions are changed and the result explains why.'
         ),
         padding: mcpOptionalNumber('padding', 'Padding from the zone edges (default: 24).'),
         gapX: mcpOptionalNumber('gapX', 'Horizontal gap between items (default: 24).'),
@@ -668,7 +669,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           gapY,
           exactColumns: args.columns,
           allowDeck: true,
-          deckOffset: DECK_OFFSET,
+          deckOffsetX: DECK_OFFSET_X,
+          deckOffsetY: DECK_OFFSET_Y,
         }
       );
       const requestedColumns =
@@ -736,7 +738,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         rows: layout.rows,
         fitsWithoutOverlap: layout.fitsWithoutOverlap,
         layoutMode: layout.mode,
-        deckOffset: layout.mode === 'deck' ? DECK_OFFSET : null,
+        deckOffsetX: layout.mode === 'deck' ? layout.deckOffsetX : null,
+        deckOffsetY: layout.mode === 'deck' ? layout.deckOffsetY : null,
         stackCount: layout.mode === 'deck' ? layout.stackCount : null,
         maxDeckDepth: layout.maxDeckDepth,
         requiredWidth: layout.width,
@@ -748,7 +751,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           layout.overflowingItemIds.length > 0
             ? 'One or more rendered objects are larger than the available zone rectangle.'
             : layout.mode === 'deck'
-              ? 'The zone cannot fit every rendered object without overlap; the least-overlapping distributed deck was used.'
+              ? `The zone cannot fit every rendered object without overlap; a contained cascade deck was used with ${layout.deckOffsetX}px left-edge and ${layout.deckOffsetY}px header reveals.`
               : null,
         zone: { width: zone.width, height: zone.height },
         updates,
