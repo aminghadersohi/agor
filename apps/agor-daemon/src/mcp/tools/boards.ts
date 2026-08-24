@@ -36,6 +36,14 @@ const BOARD_OBJECT_TYPES = [
 ] as const satisfies readonly BoardObjectType[];
 const BOARD_ENTITY_TYPES = ['branch', 'card'] as const satisfies readonly BoardEntityType[];
 
+// These match the rendered React Flow nodes.  Keeping the dimensions here is
+// important: a zone arrange must never blindly use the branch-card spacing for
+// every entity or it can place the last row below the zone.
+const ARRANGE_DIMENSIONS = {
+  branch: { width: 500, height: 200 },
+  card: { width: 380, height: 150 },
+} as const;
+
 function filterBoardCanvasObjects(board: Board, objectTypes?: BoardObjectType[]): Board {
   if (!objectTypes) return board;
 
@@ -440,7 +448,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_auto_arrange_zone',
     {
       description:
-        'Arrange worktrees/branches and cards inside one board zone. Positions are stored relative to the zone, preserving the zone pin, and the grid is sized to the zone so items do not stack on top of each other. Use this after adding several entities to a zone.',
+        'Arrange worktrees/branches and cards inside one board zone. Positions are stored relative to the zone, preserving the zone pin. The grid is clamped to the zone bounds and adapts its row spacing to tall lists; the result reports fitsWithoutOverlap when the zone is large enough for every rendered item.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
@@ -466,7 +474,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const zone = board.objects?.[zoneId] as
         | (BoardObject & { type: 'zone'; width: number; height: number })
         | undefined;
-      if (!zone || zone.type !== 'zone') {
+      if (zone?.type !== 'zone') {
         throw new Error(`Zone '${zoneId}' was not found on board '${boardId}'.`);
       }
 
@@ -483,8 +491,26 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const padding = Math.max(0, args.padding ?? 24);
       const gapX = Math.max(0, args.gapX ?? 24);
       const gapY = Math.max(0, args.gapY ?? 24);
-      const maxColumns = Math.max(1, Math.floor((zone.width - 2 * padding + gapX) / (500 + gapX)));
+      const maxWidth = entities.reduce(
+        (width, entity) => Math.max(width, ARRANGE_DIMENSIONS[entity.entity_type].width),
+        0
+      );
+      const maxHeight = entities.reduce(
+        (height, entity) => Math.max(height, ARRANGE_DIMENSIONS[entity.entity_type].height),
+        0
+      );
+      const maxColumns = Math.max(
+        1,
+        Math.floor((Math.max(0, zone.width - 2 * padding) + gapX) / (maxWidth + gapX))
+      );
       const columns = Math.max(1, Math.min(args.columns ?? maxColumns, maxColumns));
+      const rows = Math.ceil(entities.length / columns);
+      const maxY = Math.max(0, zone.height - padding - maxHeight);
+      // Compress row spacing when a zone contains more rows than its height
+      // can accommodate. This keeps every persisted origin inside the zone and
+      // makes the limitation explicit in the result instead of silently
+      // writing y positions below the zone boundary.
+      const rowStep = rows > 1 ? Math.min(maxHeight + gapY, maxY / (rows - 1)) : 0;
       const updates: Array<{
         objectId: string;
         entityType: string;
@@ -495,8 +521,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         const column = index % columns;
         const row = Math.floor(index / columns);
         const position = {
-          x: padding + column * (500 + gapX),
-          y: padding + row * (220 + gapY),
+          x: Math.min(padding + column * (maxWidth + gapX), Math.max(0, zone.width - maxWidth)),
+          y: Math.min(padding + row * rowStep, maxY),
         };
         await boardObjectsService.patch(entity.object_id, { position }, ctx.baseServiceParams);
         updates.push({ objectId: entity.object_id, entityType: entity.entity_type, position });
@@ -507,6 +533,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         zoneId,
         arranged: updates.length,
         columns,
+        rows,
+        rowStep,
+        fitsWithoutOverlap: rows <= 1 || rowStep >= maxHeight + gapY,
         zone: { width: zone.width, height: zone.height },
         updates,
       });
