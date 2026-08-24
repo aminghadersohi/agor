@@ -70,6 +70,36 @@
   height: 1px;
 }
 
+.canvas-alignment-guide[data-guide-kind="size"],
+.canvas-alignment-guide[data-guide-kind="gap"] {
+  background: var(--ant-color-success);
+}
+
+.canvas-alignment-guide-label {
+  position: absolute;
+  z-index: 1;
+  padding: 2px 5px;
+  border: 1px solid var(--ant-color-success-border);
+  border-radius: 4px;
+  background: var(--ant-color-bg-elevated);
+  color: var(--ant-color-success);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+  white-space: nowrap;
+  transform: translate(-50%, -100%);
+}
+
+.canvas-alignment-guide.vertical .canvas-alignment-guide-label {
+  top: 50%;
+  left: 0;
+}
+
+.canvas-alignment-guide.horizontal .canvas-alignment-guide-label {
+  top: 0;
+  left: 50%;
+}
+
 /* Tool mode cursors - override React Flow defaults */
 .react-flow.tool-mode-zone .react-flow__pane {
   cursor: crosshair;
