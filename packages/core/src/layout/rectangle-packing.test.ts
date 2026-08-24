@@ -113,6 +113,56 @@ describe('layoutRectangles', () => {
     expect(result.overflowingItemIds).toEqual([]);
   });
 
+  it('keeps an exact one-column request when bounded content requires a deck', () => {
+    const result = layoutRectangles(
+      Array.from({ length: 6 }, (_, index) => ({ id: `card-${index}`, width: 180, height: 140 })),
+      {
+        bounds: { width: 450, height: 350 },
+        exactColumns: 1,
+        padding: 20,
+        gapX: 20,
+        gapY: 20,
+        deckOffset: 8,
+      }
+    );
+
+    expect(result).toMatchObject({
+      mode: 'deck',
+      columns: 1,
+      rows: 1,
+      stackCount: 1,
+      maxDeckDepth: 6,
+      fitsWithoutOverlap: false,
+    });
+    expect(result.overflowingItemIds).toEqual([]);
+    expect(result.placements.every((placement) => placement.column === 0)).toBe(true);
+  });
+
+  it('does not silently substitute a fitting count for exact columns', () => {
+    const result = layoutRectangles(
+      Array.from({ length: 4 }, (_, index) => ({ id: `card-${index}`, width: 180, height: 80 })),
+      {
+        bounds: { width: 450, height: 300 },
+        exactColumns: 3,
+        padding: 20,
+        gapX: 20,
+        gapY: 20,
+      }
+    );
+
+    expect(result).toMatchObject({ mode: 'grid', columns: 3, rows: 2 });
+    expect(result.overflowingItemIds.length).toBeGreaterThan(0);
+  });
+
+  it('rejects ambiguous exact and preferred column options', () => {
+    expect(() =>
+      layoutRectangles([{ id: 'card', width: 100, height: 100 }], {
+        preferredColumns: 1,
+        exactColumns: 1,
+      })
+    ).toThrow('Specify either preferredColumns or exactColumns, not both.');
+  });
+
   it('reports items that are physically larger than the container', () => {
     const result = layoutRectangles([{ id: 'oversized', width: 700, height: 300 }], {
       bounds: { width: 620, height: 400 },
