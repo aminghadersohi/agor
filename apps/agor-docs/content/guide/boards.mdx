@@ -118,7 +118,7 @@ Agor can arrange mixed-size branches, cards, zones, notes, apps, and artifacts w
 
 Layouts read the rendered width and height of each branch or card, then fill rows from the top-left with equal spacing. A non-overlapping grid is always preferred, compacting edge margins and gaps down to a small safe minimum before overlap is considered. The UI will not apply an overlapping layout. The MCP result reports whether a grid fit, the applied gaps and padding, required bounds, and any objects that could not be fully contained.
 
-For `agor_boards_auto_arrange_zone`, an explicit `columns` value is exact: Agor never substitutes another column count. If a compact, fully separated grid at that width cannot fit, the tool returns `applied: false`, reports the required dimensions, and leaves every position unchanged. A deliberate `overflowStrategy: "deck"` is available for the rare case where visible-header overlap is preferable to no arrangement.
+For `agor_boards_auto_arrange_zone`, `columns` is a layout target by default. If that target cannot fit, Agor reports and uses the nearest contained, non-overlapping grid instead of overlapping cards. Set `strictColumns: true` when an exact count must be enforced; then an impossible request returns `applied: false` without moving anything. A deliberate `overflowStrategy: "deck"` is available for the rare case where visible-header overlap is preferable to no arrangement. By default, archived cards and branches are excluded so MCP lays out the same visible items as the board.
 
 ![A selected Review zone after arranging fourteen mixed-size branches and cards into a contained two-column grid.](/screenshots/board-auto-layout-zone-grid.png)
 
