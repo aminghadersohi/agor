@@ -7,6 +7,7 @@ export default defineConfig({
     'analytics/index': 'src/analytics/index.ts', // Backend analytics logger and plugin resolution
     'telemetry/index': 'src/telemetry/index.ts', // Community install telemetry helpers
     'types/index': 'src/types/index.ts',
+    'layout/rectangle-packing': 'src/layout/rectangle-packing.ts',
     'realtime/index': 'src/realtime/index.ts',
     'executor-protocol': 'src/executor-protocol.ts',
     'db/index': 'src/db/index.ts',

@@ -1,3 +1,4 @@
+import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
 import type {
   Board,
   BoardEntityObject,
@@ -45,7 +46,15 @@ const ARRANGE_DIMENSIONS = {
   // oversized and caused unnecessary deck layouts.
   card: { width: 380, height: 56 },
 } as const;
-const DECK_OFFSET = 2;
+const DECK_OFFSET = 8;
+
+function compareBoardEntitiesSpatially(a: BoardEntityObject, b: BoardEntityObject): number {
+  return (
+    a.position.y - b.position.y ||
+    a.position.x - b.position.x ||
+    a.object_id.localeCompare(b.object_id)
+  );
+}
 
 /**
  * CardNode grows with its description and (unlike the React Flow placeholder
@@ -65,6 +74,21 @@ function estimateCardHeight(card: { title?: string; description?: string; note?:
     : 0;
   const note = card.note ? 16 + lineCount(card.note, 48) * 18 : 0;
   return Math.max(ARRANGE_DIMENSIONS.card.height, header + description + note);
+}
+
+function getCanvasObjectDimensions(object: BoardObject): { width: number; height: number } {
+  if (object.type === 'text') {
+    return { width: object.width ?? 240, height: object.height ?? 120 };
+  }
+  if (object.type === 'markdown') {
+    const charsPerLine = Math.max(20, Math.floor(object.width / 8));
+    const lines = Math.max(3, Math.ceil(object.content.length / charsPerLine));
+    return { width: object.width, height: Math.max(140, 48 + lines * 20) };
+  }
+  if (object.type === 'app' || object.type === 'artifact' || object.type === 'zone') {
+    return { width: object.width, height: object.height };
+  }
+  return { width: 240, height: 120 };
 }
 
 function filterBoardCanvasObjects(board: Board, objectTypes?: BoardObjectType[]): Board {
@@ -379,9 +403,10 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_auto_arrange',
     {
       description:
-        'Arrange the worktree/branch and card entities on a board in a deterministic grid. ' +
+        'Arrange worktrees/branches and cards on a board in a dimension-aware row-major grid. ' +
         'By default, only free-floating entities are moved; zone-pinned entities stay in their zones. ' +
-        'Use this after creating or moving many worktrees/cards so the canvas is tidy and collision-free.',
+        'Set includeCanvasObjects=true to include text, markdown, apps, and artifacts while leaving zones fixed. ' +
+        'Use this after creating or moving many board items so the canvas is tidy and collision-free.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
@@ -393,6 +418,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .boolean()
           .optional()
           .describe('Also move entities currently pinned to zones (default: false).'),
+        includeCanvasObjects: z
+          .boolean()
+          .optional()
+          .describe(
+            'Also arrange text, markdown, app, and artifact canvas objects (default: false).'
+          ),
         columns: mcpOptionalPositiveInt(
           'columns',
           'Number of columns in the grid (default: square-ish layout).'
@@ -416,37 +447,129 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       })) as { data: Array<BoardEntityObject> };
       const entities = result.data
         .filter((entity) => args.includePinned === true || !entity.zone_id)
-        .sort((a, b) => a.object_id.localeCompare(b.object_id));
-      const columns = Math.max(
-        1,
-        args.columns ?? Math.ceil(Math.sqrt(Math.max(1, entities.length)))
-      );
+        .sort(compareBoardEntitiesSpatially);
       const startX = args.startX ?? 80;
       const startY = args.startY ?? 80;
       const gapX = args.gapX ?? 40;
       const gapY = args.gapY ?? 40;
+      const items: Array<{
+        id: string;
+        kind: 'entity' | 'canvas';
+        entity?: BoardEntityObject;
+        object?: BoardObject;
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+      }> = [];
+      for (const entity of entities) {
+        let entityDimensions: { width: number; height: number };
+        if (entity.size) {
+          entityDimensions = entity.size;
+        } else if (entity.entity_type === 'card' && entity.card_id) {
+          const card = (await ctx.app
+            .service('cards')
+            .get(entity.card_id, ctx.baseServiceParams)) as {
+            title?: string;
+            description?: string;
+            note?: string;
+          };
+          entityDimensions = {
+            width: ARRANGE_DIMENSIONS.card.width,
+            height: estimateCardHeight(card),
+          };
+        } else {
+          entityDimensions = ARRANGE_DIMENSIONS[entity.entity_type];
+        }
+        items.push({
+          id: entity.object_id,
+          kind: 'entity',
+          entity,
+          ...entity.position,
+          ...entityDimensions,
+        });
+      }
+      const boardsService = args.includeCanvasObjects === true ? ctx.app.service('boards') : null;
+      if (args.includeCanvasObjects === true) {
+        const board = (await boardsService?.get(boardId, ctx.baseServiceParams)) as Board;
+        for (const [objectId, object] of Object.entries(board.objects ?? {})) {
+          if (object.type === 'zone') continue;
+          items.push({
+            id: objectId,
+            kind: 'canvas',
+            object,
+            x: object.x,
+            y: object.y,
+            ...getCanvasObjectDimensions(object),
+          });
+        }
+      }
+      items.sort((a, b) => a.y - b.y || a.x - b.x || a.id.localeCompare(b.id));
+      const layout = layoutRectangles(
+        items.map(({ id, width, height }) => ({ id, width, height })),
+        {
+          preferredColumns: args.columns ?? Math.ceil(Math.sqrt(Math.max(1, items.length))),
+          gapX,
+          gapY,
+        }
+      );
+      const placementById = new Map(
+        layout.placements.map((placement) => [placement.id, placement])
+      );
       const updates: Array<{
         objectId: string;
-        entityType: string;
+        objectType: string;
+        entityType?: string;
         position: { x: number; y: number };
       }> = [];
 
-      for (const [index, entity] of entities.entries()) {
-        const column = index % columns;
-        const row = Math.floor(index / columns);
+      for (const item of items) {
+        const placement = placementById.get(item.id);
+        if (!placement) throw new Error(`Layout did not place board object '${item.id}'.`);
         const position = {
-          x: startX + column * (500 + gapX),
-          y: startY + row * (220 + gapY),
+          x: startX + placement.x,
+          y: startY + placement.y,
         };
-        await boardObjectsService.patch(entity.object_id, { position }, ctx.baseServiceParams);
-        updates.push({ objectId: entity.object_id, entityType: entity.entity_type, position });
+        if (item.kind === 'entity' && item.entity) {
+          await boardObjectsService.patch(item.id, { position }, ctx.baseServiceParams);
+          updates.push({
+            objectId: item.id,
+            objectType: item.entity.entity_type,
+            entityType: item.entity.entity_type,
+            position,
+          });
+        } else if (item.object && boardsService) {
+          await boardsService.patch(
+            boardId,
+            {
+              _action: 'upsertObject',
+              objectId: item.id,
+              objectData: { ...item.object, ...position },
+            },
+            ctx.baseServiceParams
+          );
+          updates.push({ objectId: item.id, objectType: item.object.type, position });
+        }
       }
 
       return textResult({
         boardId,
         arranged: updates.length,
+        arrangedEntities: updates.filter((update) =>
+          BOARD_ENTITY_TYPES.includes(update.objectType as BoardEntityType)
+        ).length,
+        arrangedCanvasObjects: updates.filter(
+          (update) => !BOARD_ENTITY_TYPES.includes(update.objectType as BoardEntityType)
+        ).length,
         skippedPinned: result.data.length - entities.length,
-        columns,
+        columns: layout.columns,
+        rows: layout.rows,
+        layoutMode: layout.mode,
+        fitsWithoutOverlap: layout.fitsWithoutOverlap,
+        width: layout.width,
+        height: layout.height,
+        appliedGapX: layout.gapX,
+        appliedGapY: layout.gapY,
         updates,
       });
     }
@@ -457,7 +580,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_auto_arrange_zone',
     {
       description:
-        'Arrange worktrees/branches and cards inside one board zone. Positions are stored relative to the zone, preserving the zone pin. Items are placed row-major from top-left; a zone that cannot fit every rendered rectangle switches to a deterministic 2px-offset deck instead of collapsing items onto one coordinate. The result reports fitsWithoutOverlap and layoutMode.',
+        'Arrange worktrees/branches and cards inside one board zone using their measured rendered rectangles. Positions are relative to the zone and ordered top-left, left-to-right, then row-by-row. Every possible column count is evaluated and a non-overlapping grid is always preferred. Only when no complete grid fits does the tool use the maximum number of distributed stacks, offsetting deck layers down-right so underlying top and left edges remain visible. The result reports exact containment and overflow.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
@@ -468,7 +591,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .describe('Arrange only branch or card entities (default: both).'),
         columns: mcpOptionalPositiveInt(
           'columns',
-          'Number of columns; defaults to the largest number that fits the zone width.'
+          'Preferred number of columns. The solver may use a different count when needed to fit complete rows inside the zone.'
         ),
         padding: mcpOptionalNumber('padding', 'Padding from the zone edges (default: 24).'),
         gapX: mcpOptionalNumber('gapX', 'Horizontal gap between items (default: 24).'),
@@ -496,10 +619,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         },
         ...ctx.baseServiceParams,
       })) as { data: Array<BoardEntityObject> };
-      const entities = result.data.sort((a, b) => a.object_id.localeCompare(b.object_id));
+      const entities = result.data.sort(compareBoardEntitiesSpatially);
       const dimensions = new Map<string, { width: number; height: number }>();
       for (const entity of entities) {
-        if (entity.entity_type === 'card' && entity.card_id) {
+        if (entity.size) {
+          dimensions.set(entity.object_id, entity.size);
+        } else if (entity.entity_type === 'card' && entity.card_id) {
           const card = (await ctx.app
             .service('cards')
             .get(entity.card_id, ctx.baseServiceParams)) as {
@@ -518,78 +643,85 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const padding = Math.max(0, args.padding ?? 24);
       const gapX = Math.max(0, args.gapX ?? 24);
       const gapY = Math.max(0, args.gapY ?? 24);
-      const maxWidth = entities.reduce(
-        (width, entity) => Math.max(width, dimensions.get(entity.object_id)?.width ?? 0),
-        0
+      if (entities.length === 0) {
+        return textResult({
+          boardId,
+          zoneId,
+          arranged: 0,
+          columns: 0,
+          rows: 0,
+          fitsWithoutOverlap: true,
+          layoutMode: 'grid',
+          updates: [],
+        });
+      }
+      const layout = layoutRectangles(
+        entities.map((entity) => {
+          const size = dimensions.get(entity.object_id);
+          if (!size) throw new Error(`Missing dimensions for board object '${entity.object_id}'.`);
+          return { id: entity.object_id, ...size };
+        }),
+        {
+          bounds: { width: zone.width, height: zone.height },
+          padding,
+          gapX,
+          gapY,
+          preferredColumns: args.columns,
+          allowDeck: true,
+          deckOffset: DECK_OFFSET,
+        }
       );
-      const maxColumns = Math.max(
-        1,
-        Math.floor((Math.max(0, zone.width - 2 * padding) + gapX) / (maxWidth + gapX))
+      const placementById = new Map(
+        layout.placements.map((placement) => [placement.id, placement])
       );
-      const columns = Math.max(1, Math.min(args.columns ?? maxColumns, maxColumns));
-      const rows = Math.ceil(entities.length / columns);
-      const rowHeights = Array.from({ length: rows }, (_, row) =>
-        Math.max(
-          0,
-          ...entities
-            .slice(row * columns, (row + 1) * columns)
-            .map((entity) => dimensions.get(entity.object_id)?.height ?? 0)
-        )
-      );
-      const availableHeight = Math.max(0, zone.height - 2 * padding);
-      const totalRowHeight = rowHeights.reduce((sum, height) => sum + height, 0);
-      const requiredHeight = totalRowHeight + Math.max(0, rows - 1) * gapY;
-      const fitsWithoutOverlap = requiredHeight <= availableHeight;
-      const rowOffsets = fitsWithoutOverlap
-        ? rowHeights.map(
-            (_, row) =>
-              padding + rowHeights.slice(0, row).reduce((sum, height) => sum + height + gapY, 0)
-          )
-        : rowHeights.map((_, row) => padding + row * DECK_OFFSET);
-      const overflowingObjectIds = entities
-        .filter((entity, index) => {
-          const row = Math.floor(index / columns);
-          return (
-            (rowOffsets[row] ?? padding) + (dimensions.get(entity.object_id)?.height ?? 0) >
-            zone.height - padding
-          );
-        })
-        .map((entity) => entity.object_id);
       const updates: Array<{
         objectId: string;
         entityType: string;
         position: { x: number; y: number };
+        row: number;
+        column: number;
+        stackIndex: number;
+        deckDepth: number;
       }> = [];
 
-      for (const [index, entity] of entities.entries()) {
-        const column = index % columns;
-        const row = Math.floor(index / columns);
-        const entityWidth = dimensions.get(entity.object_id)?.width ?? maxWidth;
-        const position = {
-          x: Math.min(padding + column * (maxWidth + gapX), Math.max(0, zone.width - entityWidth)),
-          // Clamp the persisted origin as a final safety net. If the content
-          // cannot fit, cards may overlap, but their full rectangles remain
-          // visible inside the zone and overflowingObjectIds explains why.
-          y: Math.min(
-            rowOffsets[row] ?? padding,
-            Math.max(0, zone.height - padding - (dimensions.get(entity.object_id)?.height ?? 0))
-          ),
-        };
+      for (const entity of entities) {
+        const placement = placementById.get(entity.object_id);
+        if (!placement) throw new Error(`Layout did not place board object '${entity.object_id}'.`);
+        const position = { x: placement.x, y: placement.y };
         await boardObjectsService.patch(entity.object_id, { position }, ctx.baseServiceParams);
-        updates.push({ objectId: entity.object_id, entityType: entity.entity_type, position });
+        updates.push({
+          objectId: entity.object_id,
+          entityType: entity.entity_type,
+          position,
+          row: placement.row,
+          column: placement.column,
+          stackIndex: placement.stackIndex,
+          deckDepth: placement.deckDepth,
+        });
       }
 
       return textResult({
         boardId,
         zoneId,
         arranged: updates.length,
-        columns,
-        rows,
-        fitsWithoutOverlap: fitsWithoutOverlap && overflowingObjectIds.length === 0,
-        layoutMode: fitsWithoutOverlap ? 'grid' : 'deck',
-        deckOffset: fitsWithoutOverlap ? null : DECK_OFFSET,
-        requiredHeight,
-        overflowingObjectIds,
+        columns: layout.columns,
+        rows: layout.rows,
+        fitsWithoutOverlap: layout.fitsWithoutOverlap,
+        layoutMode: layout.mode,
+        deckOffset: layout.mode === 'deck' ? DECK_OFFSET : null,
+        stackCount: layout.mode === 'deck' ? layout.stackCount : null,
+        maxDeckDepth: layout.maxDeckDepth,
+        requiredWidth: layout.width,
+        requiredHeight: layout.height,
+        appliedGapX: layout.gapX,
+        appliedGapY: layout.gapY,
+        overflowingObjectIds: layout.overflowingItemIds,
+        warning:
+          layout.overflowingItemIds.length > 0
+            ? 'One or more rendered objects are larger than the available zone rectangle.'
+            : layout.mode === 'deck'
+              ? 'The zone cannot fit every rendered object without overlap; the least-overlapping distributed deck was used.'
+              : null,
         zone: { width: zone.width, height: zone.height },
         updates,
       });

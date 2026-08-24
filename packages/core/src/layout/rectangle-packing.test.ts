@@ -1,0 +1,125 @@
+import { describe, expect, it } from 'vitest';
+import { layoutRectangles, type RectanglePlacement } from './rectangle-packing';
+
+function expectNoOverlap(placements: RectanglePlacement[]): void {
+  for (const [index, a] of placements.entries()) {
+    for (const b of placements.slice(index + 1)) {
+      const separated =
+        a.x + a.width <= b.x ||
+        b.x + b.width <= a.x ||
+        a.y + a.height <= b.y ||
+        b.y + b.height <= a.y;
+      expect(separated, `${a.id} overlaps ${b.id}`).toBe(true);
+    }
+  }
+}
+
+describe('layoutRectangles', () => {
+  it('packs different rendered sizes into complete row-major rows and columns', () => {
+    const result = layoutRectangles(
+      [
+        { id: 'worktree', width: 500, height: 200 },
+        { id: 'short-card', width: 280, height: 64 },
+        { id: 'note', width: 320, height: 180 },
+        { id: 'tall-card', width: 280, height: 240 },
+      ],
+      { preferredColumns: 2, padding: 20, gapX: 30, gapY: 40 }
+    );
+
+    expect(result).toMatchObject({ mode: 'grid', columns: 2, rows: 2 });
+    expect(
+      result.placements.map(({ id, x, y, row, column }) => ({ id, x, y, row, column }))
+    ).toEqual([
+      { id: 'worktree', x: 20, y: 20, row: 0, column: 0 },
+      { id: 'short-card', x: 550, y: 20, row: 0, column: 1 },
+      { id: 'note', x: 20, y: 260, row: 1, column: 0 },
+      { id: 'tall-card', x: 550, y: 260, row: 1, column: 1 },
+    ]);
+    expectNoOverlap(result.placements);
+  });
+
+  it('uses actual per-column widths instead of multiplying the widest item', () => {
+    const result = layoutRectangles(
+      [
+        { id: 'wide', width: 500, height: 100 },
+        { id: 'narrow-a', width: 120, height: 100 },
+        { id: 'medium', width: 260, height: 100 },
+        { id: 'narrow-b', width: 120, height: 100 },
+      ],
+      {
+        bounds: { width: 700, height: 300 },
+        preferredColumns: 2,
+        padding: 20,
+        gapX: 20,
+        gapY: 20,
+      }
+    );
+
+    expect(result).toMatchObject({ mode: 'grid', columns: 2, rows: 2 });
+    expect(result.width).toBe(680);
+    expect(result.overflowingItemIds).toEqual([]);
+    expectNoOverlap(result.placements);
+  });
+
+  it('chooses the nearest fitting column count and contains every full rectangle', () => {
+    const result = layoutRectangles(
+      Array.from({ length: 20 }, (_, index) => ({
+        id: `card-${index}`,
+        width: 380,
+        height: 56,
+      })),
+      {
+        bounds: { width: 620, height: 1800 },
+        preferredColumns: 3,
+        padding: 24,
+        gapX: 24,
+        gapY: 24,
+      }
+    );
+
+    expect(result).toMatchObject({ mode: 'grid', columns: 1, rows: 20 });
+    expect(result.overflowingItemIds).toEqual([]);
+    expect(result.placements.at(-1)).toMatchObject({ x: 24, y: 1544 });
+    expectNoOverlap(result.placements);
+  });
+
+  it('uses the maximum number of stacks only when a separated grid cannot fit', () => {
+    const result = layoutRectangles(
+      Array.from({ length: 6 }, (_, index) => ({ id: `card-${index}`, width: 180, height: 140 })),
+      {
+        bounds: { width: 450, height: 350 },
+        preferredColumns: 2,
+        padding: 20,
+        gapX: 20,
+        gapY: 20,
+        deckOffset: 8,
+      }
+    );
+
+    expect(result).toMatchObject({
+      mode: 'deck',
+      columns: 2,
+      rows: 2,
+      stackCount: 4,
+      maxDeckDepth: 2,
+      fitsWithoutOverlap: false,
+    });
+    expect(result.placements[4]).toMatchObject({
+      x: result.placements[0]?.x + 8,
+      y: result.placements[0]?.y + 8,
+      stackIndex: 0,
+      deckDepth: 1,
+    });
+    expect(result.overflowingItemIds).toEqual([]);
+  });
+
+  it('reports items that are physically larger than the container', () => {
+    const result = layoutRectangles([{ id: 'oversized', width: 700, height: 300 }], {
+      bounds: { width: 620, height: 400 },
+      padding: 24,
+    });
+
+    expect(result.overflowingItemIds).toEqual(['oversized']);
+    expect(result.placements[0]).toMatchObject({ x: 24, y: 24 });
+  });
+});
