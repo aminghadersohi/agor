@@ -44,6 +44,26 @@ const ARRANGE_DIMENSIONS = {
   card: { width: 380, height: 150 },
 } as const;
 
+/**
+ * CardNode grows with its description and (unlike the React Flow placeholder
+ * height) renders the note in full. Estimate the rendered rectangle from the
+ * persisted content before laying out. This is deliberately conservative: a
+ * false overflow warning is preferable to putting the bottom of a card
+ * outside its zone.
+ */
+function estimateCardHeight(card: { title?: string; description?: string; note?: string }): number {
+  const lineCount = (value: string | undefined, charsPerLine: number) =>
+    value ? Math.max(1, Math.ceil(value.length / charsPerLine)) : 0;
+  const header = 50;
+  const description = card.description
+    ? 16 +
+      lineCount(card.description.slice(0, 100), 48) * 18 +
+      (card.description.length > 100 ? 18 : 0)
+    : 0;
+  const note = card.note ? 16 + lineCount(card.note, 48) * 18 : 0;
+  return Math.max(ARRANGE_DIMENSIONS.card.height, header + description + note);
+}
+
 function filterBoardCanvasObjects(board: Board, objectTypes?: BoardObjectType[]): Board {
   if (!objectTypes) return board;
 
@@ -488,15 +508,29 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         ...ctx.baseServiceParams,
       })) as { data: Array<BoardEntityObject> };
       const entities = result.data.sort((a, b) => a.object_id.localeCompare(b.object_id));
+      const dimensions = new Map<string, { width: number; height: number }>();
+      for (const entity of entities) {
+        if (entity.entity_type === 'card' && entity.card_id) {
+          const card = (await ctx.app
+            .service('cards')
+            .get(entity.card_id, ctx.baseServiceParams)) as {
+            title?: string;
+            description?: string;
+            note?: string;
+          };
+          dimensions.set(entity.object_id, {
+            width: ARRANGE_DIMENSIONS.card.width,
+            height: estimateCardHeight(card),
+          });
+        } else {
+          dimensions.set(entity.object_id, ARRANGE_DIMENSIONS[entity.entity_type]);
+        }
+      }
       const padding = Math.max(0, args.padding ?? 24);
       const gapX = Math.max(0, args.gapX ?? 24);
       const gapY = Math.max(0, args.gapY ?? 24);
       const maxWidth = entities.reduce(
-        (width, entity) => Math.max(width, ARRANGE_DIMENSIONS[entity.entity_type].width),
-        0
-      );
-      const maxHeight = entities.reduce(
-        (height, entity) => Math.max(height, ARRANGE_DIMENSIONS[entity.entity_type].height),
+        (width, entity) => Math.max(width, dimensions.get(entity.object_id)?.width ?? 0),
         0
       );
       const maxColumns = Math.max(
@@ -505,12 +539,36 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       );
       const columns = Math.max(1, Math.min(args.columns ?? maxColumns, maxColumns));
       const rows = Math.ceil(entities.length / columns);
-      const maxY = Math.max(0, zone.height - padding - maxHeight);
-      // Compress row spacing when a zone contains more rows than its height
-      // can accommodate. This keeps every persisted origin inside the zone and
-      // makes the limitation explicit in the result instead of silently
-      // writing y positions below the zone boundary.
-      const rowStep = rows > 1 ? Math.min(maxHeight + gapY, maxY / (rows - 1)) : 0;
+      const rowHeights = Array.from({ length: rows }, (_, row) =>
+        Math.max(
+          0,
+          ...entities
+            .slice(row * columns, (row + 1) * columns)
+            .map((entity) => dimensions.get(entity.object_id)?.height ?? 0)
+        )
+      );
+      const availableHeight = Math.max(0, zone.height - 2 * padding);
+      const totalRowHeight = rowHeights.reduce((sum, height) => sum + height, 0);
+      const requiredHeight = totalRowHeight + Math.max(0, rows - 1) * gapY;
+      const fitsWithoutOverlap = requiredHeight <= availableHeight;
+      const effectiveGapY =
+        fitsWithoutOverlap || rows <= 1
+          ? gapY
+          : Math.max(0, (availableHeight - totalRowHeight) / (rows - 1));
+      const rowOffsets = rowHeights.map(
+        (_, row) =>
+          padding +
+          rowHeights.slice(0, row).reduce((sum, height) => sum + height + effectiveGapY, 0)
+      );
+      const overflowingObjectIds = entities
+        .filter((entity, index) => {
+          const row = Math.floor(index / columns);
+          return (
+            (rowOffsets[row] ?? padding) + (dimensions.get(entity.object_id)?.height ?? 0) >
+            zone.height - padding
+          );
+        })
+        .map((entity) => entity.object_id);
       const updates: Array<{
         objectId: string;
         entityType: string;
@@ -520,9 +578,16 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       for (const [index, entity] of entities.entries()) {
         const column = index % columns;
         const row = Math.floor(index / columns);
+        const entityWidth = dimensions.get(entity.object_id)?.width ?? maxWidth;
         const position = {
-          x: Math.min(padding + column * (maxWidth + gapX), Math.max(0, zone.width - maxWidth)),
-          y: Math.min(padding + row * rowStep, maxY),
+          x: Math.min(padding + column * (maxWidth + gapX), Math.max(0, zone.width - entityWidth)),
+          // Clamp the persisted origin as a final safety net. If the content
+          // cannot fit, cards may overlap, but their full rectangles remain
+          // visible inside the zone and overflowingObjectIds explains why.
+          y: Math.min(
+            rowOffsets[row] ?? padding,
+            Math.max(0, zone.height - padding - (dimensions.get(entity.object_id)?.height ?? 0))
+          ),
         };
         await boardObjectsService.patch(entity.object_id, { position }, ctx.baseServiceParams);
         updates.push({ objectId: entity.object_id, entityType: entity.entity_type, position });
@@ -534,8 +599,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         arranged: updates.length,
         columns,
         rows,
-        rowStep,
-        fitsWithoutOverlap: rows <= 1 || rowStep >= maxHeight + gapY,
+        fitsWithoutOverlap: fitsWithoutOverlap && overflowingObjectIds.length === 0,
+        requiredHeight,
+        overflowingObjectIds,
         zone: { width: zone.width, height: zone.height },
         updates,
       });
