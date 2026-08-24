@@ -934,6 +934,162 @@ describe('agor_boards_auto_arrange_zone', () => {
     expect(parsed.overflowingObjectIds).toEqual(['branch-too-wide']);
     expect(parsed.warning).toMatch(/larger than the available zone/i);
   });
+
+  it('sorts by persisted metadata and can vertically fit a compact list', async () => {
+    const entities = ['older', 'latest', 'middle'].map((id) => ({
+      object_id: `placement-${id}`,
+      board_id: 'board-1',
+      card_id: id,
+      entity_type: 'card' as const,
+      position: { x: 0, y: 0 },
+      zone_id: 'zone-1',
+      created_at: '2026-01-01T00:00:00.000Z',
+    }));
+    const cards = {
+      older: { title: 'Older', updated_at: '2026-01-01T00:00:00.000Z' },
+      latest: { title: 'Latest', updated_at: '2026-03-01T00:00:00.000Z' },
+      middle: { title: 'Middle', updated_at: '2026-02-01T00:00:00.000Z' },
+    };
+    const entityPatches: Array<{ id: string; data: Record<string, unknown> }> = [];
+    const boardPatch = vi.fn(async () => undefined);
+    const app = {
+      service(name: string) {
+        if (name === 'boards') {
+          return {
+            get: vi.fn(async () => ({
+              board_id: 'board-1',
+              objects: {
+                'zone-1': {
+                  type: 'zone',
+                  x: 0,
+                  y: 0,
+                  width: 620,
+                  height: 900,
+                  layout: {
+                    mode: 'auto',
+                    preset: 'compact_list',
+                    sortBy: 'updated',
+                    sortDirection: 'desc',
+                    autoResizeHeight: true,
+                  },
+                },
+              },
+            })),
+            patch: boardPatch,
+          };
+        }
+        if (name === 'board-objects') {
+          return {
+            find: vi.fn(async () => ({ data: entities })),
+            patch: vi.fn(async (id: string, data: Record<string, unknown>) => {
+              entityPatches.push({ id, data });
+              return data;
+            }),
+          };
+        }
+        if (name === 'cards') {
+          return {
+            find: vi.fn(async () => ({ data: entities.map(({ card_id }) => ({ card_id })) })),
+            get: vi.fn(async (id: keyof typeof cards) => cards[id]),
+          };
+        }
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1' })).content[0].text
+    );
+
+    expect(parsed).toMatchObject({
+      applied: true,
+      preset: 'compact_list',
+      sortBy: 'updated',
+      sortDirection: 'desc',
+      columns: 1,
+      rows: 3,
+      autoResizeHeight: true,
+    });
+    expect(parsed.zone.height).toBeLessThan(900);
+    expect(entityPatches.filter(({ data }) => 'position' in data).map(({ id }) => id)).toEqual([
+      'placement-latest',
+      'placement-middle',
+      'placement-older',
+    ]);
+    expect(entityPatches.filter(({ data }) => data.compact === true)).toHaveLength(3);
+    expect(boardPatch).toHaveBeenCalledWith(
+      'board-1',
+      expect.objectContaining({
+        _action: 'upsertObject',
+        objectId: 'zone-1',
+        objectData: expect.objectContaining({ height: parsed.zone.height }),
+      }),
+      baseServiceParams
+    );
+  });
+});
+
+describe('agor_boards_set_zone_layout', () => {
+  it('persists an explicit zone policy without crossing the caller service scope', async () => {
+    const baseServiceParams = { authenticated: true, provider: 'mcp' };
+    const patch = vi.fn(async () => undefined);
+    const setLayout = registerAndCaptureHandler('agor_boards_set_zone_layout', {
+      app: {
+        service: (name: string) => {
+          if (name !== 'boards') throw new Error(`Unexpected service call: ${name}`);
+          return {
+            get: vi.fn(async () => ({
+              board_id: 'board-1',
+              objects: {
+                'zone-1': { type: 'zone', x: 0, y: 0, width: 620, height: 900, label: 'Work' },
+              },
+            })),
+            patch,
+          };
+        },
+      },
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (
+        await setLayout({
+          boardId: 'board-1',
+          zoneId: 'zone-1',
+          mode: 'auto',
+          preset: 'grid',
+          sortBy: 'priority',
+          sortDirection: 'asc',
+          columns: 2,
+          autoResizeHeight: true,
+        })
+      ).content[0].text
+    );
+
+    expect(parsed.layout).toEqual({
+      mode: 'auto',
+      preset: 'grid',
+      sortBy: 'priority',
+      sortDirection: 'asc',
+      columns: 2,
+      autoResizeHeight: true,
+    });
+    expect(patch).toHaveBeenCalledWith(
+      'board-1',
+      expect.objectContaining({
+        _action: 'upsertObject',
+        objectId: 'zone-1',
+        objectData: expect.objectContaining({ layout: parsed.layout }),
+      }),
+      baseServiceParams
+    );
+  });
 });
 
 describe('agor_boards_auto_arrange', () => {
