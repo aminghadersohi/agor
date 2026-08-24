@@ -3,11 +3,22 @@
  */
 
 import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
-import { zoneContentTopInset } from '@agor/core/layout/zone-content-inset';
 import type { AgorClient, Board, BoardEntityObject, BoardObject } from '@agor-live/client';
 import { useCallback, useRef } from 'react';
 import type { Node } from 'reactflow';
 import { useThemedMessage } from '../../../utils/message';
+
+function zoneContentTopInset(zone: { fontSize?: number; status?: string }): number {
+  const labelFontSize =
+    typeof zone.fontSize === 'number' && Number.isFinite(zone.fontSize)
+      ? Math.min(48, Math.max(10, zone.fontSize))
+      : 14;
+  const labelHeight = Math.ceil(labelFontSize * 1.2);
+  const statusHeight = zone.status ? 8 + Math.ceil(labelFontSize * 1.05) : 0;
+
+  return Math.max(64, 32 + labelHeight + statusHeight);
+}
+
 import type { ReactFlowNode } from './utils/reactFlowTypes';
 import {
   computeLayerChanges,
