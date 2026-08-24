@@ -677,6 +677,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .enum(BOARD_ENTITY_TYPES)
           .optional()
           .describe('Arrange only branch or card entities (default: both).'),
+        includeArchived: z
+          .boolean()
+          .optional()
+          .describe(
+            'Include archived branches and cards. Defaults to false so layout matches the visible board.'
+          ),
         columns: mcpOptionalPositiveInt(
           'columns',
           'Target number of occupied columns (capped by the number of entities). When omitted, the solver chooses automatically. If this target cannot fit without overlap, the nearest contained grid is used unless strictColumns is true.'
@@ -719,52 +725,11 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         },
         ...ctx.baseServiceParams,
       })) as { data: Array<BoardEntityObject> };
-      let entities = result.data;
-      if (args.includeArchived !== true) {
-        const activeCardIds = new Set<string>();
-        const cardIds = entities
-          .map((entity) => entity.card_id)
-          .filter((cardId): cardId is string => typeof cardId === 'string');
-        if (cardIds.length > 0) {
-          const activeCardsResult = await ctx.app.service('cards').find({
-            query: {
-              card_id: { $in: Array.from(new Set(cardIds)) },
-              archived: false,
-            },
-            paginate: false,
-            ...ctx.baseServiceParams,
-          });
-          const activeCards = Array.isArray(activeCardsResult)
-            ? activeCardsResult
-            : (activeCardsResult as { data: Array<{ card_id: string }> }).data;
-          for (const card of activeCards) activeCardIds.add(card.card_id);
-        }
-
-        const activeBranchIds = new Set<string>();
-        const branchIds = entities
-          .map((entity) => entity.branch_id)
-          .filter((branchId): branchId is string => typeof branchId === 'string');
-        if (branchIds.length > 0) {
-          const activeBranchesResult = await ctx.app.service('branches').find({
-            query: {
-              branch_id: { $in: Array.from(new Set(branchIds)) },
-              archived: false,
-            },
-            paginate: false,
-            ...ctx.baseServiceParams,
-          });
-          const activeBranches = Array.isArray(activeBranchesResult)
-            ? activeBranchesResult
-            : (activeBranchesResult as { data: Array<{ branch_id: string }> }).data;
-          for (const branch of activeBranches) activeBranchIds.add(branch.branch_id);
-        }
-
-        entities = entities.filter(
-          (entity) =>
-            (entity.card_id === undefined || activeCardIds.has(entity.card_id)) &&
-            (entity.branch_id === undefined || activeBranchIds.has(entity.branch_id))
-        );
-      }
+      let entities = await filterVisibleBoardEntities(
+        ctx,
+        result.data,
+        args.includeArchived === true
+      );
       entities = entities.sort(compareBoardEntitiesSpatially);
       const dimensions = new Map<string, { width: number; height: number }>();
       for (const entity of entities) {
