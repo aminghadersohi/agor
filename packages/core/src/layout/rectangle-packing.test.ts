@@ -83,6 +83,32 @@ describe('layoutRectangles', () => {
     expectNoOverlap(result.placements);
   });
 
+  it('compacts outer margins before it considers overlapping a roomy zone', () => {
+    const result = layoutRectangles(
+      Array.from({ length: 20 }, (_, index) => ({ id: `card-${index}`, width: 380, height: 200 })),
+      {
+        bounds: { width: 1200, height: 1800 },
+        preferredColumns: 3,
+        padding: 24,
+        minPadding: 8,
+        gapX: 24,
+        gapY: 24,
+        minGapX: 8,
+        minGapY: 8,
+      }
+    );
+
+    expect(result).toMatchObject({
+      mode: 'grid',
+      columns: 3,
+      rows: 7,
+      padding: 8,
+      fitsWithoutOverlap: true,
+      overflowingItemIds: [],
+    });
+    expectNoOverlap(result.placements);
+  });
+
   it('uses the maximum number of stacks only when a separated grid cannot fit', () => {
     const result = layoutRectangles(
       Array.from({ length: 6 }, (_, index) => ({ id: `card-${index}`, width: 180, height: 140 })),
@@ -120,6 +146,7 @@ describe('layoutRectangles', () => {
         bounds: { width: 450, height: 500 },
         exactColumns: 1,
         padding: 20,
+        minPadding: 20,
         gapX: 20,
         gapY: 20,
         allowDeck: true,
