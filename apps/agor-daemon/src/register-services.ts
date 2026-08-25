@@ -15,7 +15,6 @@ import {
   isDeploymentAgenticToolAvailable,
   MESSAGE_PAGINATION,
   type ResolvedDeploymentConfig,
-  requirePublicBaseUrl,
   resolveDeploymentAgenticToolPolicy,
   resolveExecutionSecurityMode,
   resolveMultiTenancyConfig,
@@ -203,6 +202,7 @@ import {
   MCPMarketplaceRemoveServerService,
   MCPMarketplaceToolPermissionService,
 } from './services/mcp-marketplace-actions.js';
+import type { MCPOAuthCallbackHandler } from './services/mcp-oauth-callback-route.js';
 import {
   logMCPOAuthCompatibilityPolicy,
   resolveMCPOAuthCompatibilityPolicy,
@@ -224,6 +224,7 @@ import {
   shouldVerifyMCPOAuthGrantBinding,
 } from './services/mcp-oauth-grant-binding.js';
 import { MCPOAuthPendingFlowAuthority } from './services/mcp-oauth-pending-flow-authority.js';
+import { resolveMCPOAuthRedirectUri as resolveRedirectUri } from './services/mcp-oauth-redirect-uri.js';
 import { resolveAuthenticatedServerIds } from './services/mcp-oauth-status.js';
 import {
   createMCPServersService,
@@ -324,6 +325,7 @@ export interface RegisteredServices {
   terminalsService: TerminalsService | null;
   configService: ReturnType<typeof createConfigService>;
   boardCommentsService: unknown;
+  oauthCallbackHandler: MCPOAuthCallbackHandler;
 }
 
 /**
@@ -653,7 +655,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   // MCP Servers (conditionally registered)
   // ============================================================================
 
-  let oauthCallbackHandler: ((req: express.Request, res: express.Response) => void) | null = null;
+  let oauthCallbackHandler: MCPOAuthCallbackHandler;
 
   // The OAuth callback middleware is registered in boot.ts; here we set the handler
   {
@@ -947,9 +949,6 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   // Bootstrap superadmin users
   await bootstrapSuperadminUsers(config, db, allowSuperadmin);
 
-  // Store oauthCallbackHandler on app for boot.ts to wire up
-  appRecord.oauthCallbackHandler = oauthCallbackHandler;
-
   // Store sessionTokenService for auth setup
   appRecord.sessionTokenServiceInstance = sessionTokenService;
 
@@ -965,6 +964,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
     terminalsService,
     configService,
     boardCommentsService: safeService('board-comments'),
+    oauthCallbackHandler,
   };
 }
 
@@ -1734,9 +1734,9 @@ export async function registerMCPServices(
    * All daemon-side OAuth paths (Settings "Start OAuth Flow", discover probe,
    * test-oauth `start_browser_flow`) MUST go through one of these two helpers
    * so that:
-   *   1. The `redirect_uri` is always the daemon's PUBLIC base URL, not
-   *      `127.0.0.1:<random>` — the browser completing the flow may be on a
-   *      different machine than the daemon (e.g. any remotely-deployed Agor).
+   *   1. Standalone flows default to this daemon's stable loopback callback,
+   *      matching native developer tools without public DNS. A remote-browser
+   *      deployment may explicitly select the configured public HTTPS base.
    *   2. The authorization URL is returned only to the initiating request;
    *      it is never broadcast over a shared realtime channel.
    *   3. PostgreSQL deployments persist a sealed, tenant/user/server-bound
@@ -1761,13 +1761,15 @@ export async function registerMCPServices(
    */
   const DISCOVERY_CASCADE_TRIED =
     'Tried: (1) WWW-Authenticate resource_metadata hint, ' +
-    '(2) /.well-known/oauth-protected-resource (RFC 9728), ' +
+    '(2) path-specific then root /.well-known/oauth-protected-resource (RFC 9728), ' +
     '(3) /.well-known/oauth-authorization-server at MCP origin (RFC 8414), ' +
     '(4) /.well-known/openid-configuration at MCP origin (OIDC).';
 
   async function resolveMCPOAuthRedirectUri(): Promise<string> {
-    const baseUrl = await requirePublicBaseUrl();
-    return new URL('/mcp-servers/oauth-callback', baseUrl).toString();
+    return resolveRedirectUri({
+      daemonPort: ctx.DAEMON_PORT,
+      usePublicHttps: ctx.config.daemon?.mcp_oauth_callback_mode === 'public',
+    });
   }
 
   type OAuthBrowserReservationClaim = {
@@ -1882,7 +1884,8 @@ export async function registerMCPServices(
       () => import('@agor/core/tools/mcp/oauth-mcp-transport')
     );
 
-    // Strict public base URL — see oauth-start endpoint for the rationale.
+    // Stable loopback by default; remote-browser deployments explicitly opt
+    // into the configured public HTTPS base.
     const redirectUri = await runWithinOAuthAuthority(
       assertFlowAuthority,
       resolveMCPOAuthRedirectUri
@@ -3572,10 +3575,9 @@ export async function registerMCPServices(
             console.log('[OAuth Test] Starting browser-based OAuth 2.1 flow...');
 
             try {
-              // Route through the daemon's two-phase flow so the redirect_uri
-              // is the daemon's public base URL (browser-reachable for any
-              // user) rather than a 127.0.0.1 callback server bound to the
-              // daemon process.
+              // Route through the daemon's two-phase flow so every entry point
+              // uses the same loopback/public callback policy and pending-flow
+              // authority.
               let started: StartTwoPhaseOAuthAndAwaitResult;
               try {
                 started = await startTwoPhaseMCPOAuthFlowAndAwaitToken({

@@ -462,7 +462,9 @@ async function createHarness(
   const { oauthCallbackHandler } = await registerMCPServices({
     db,
     app,
-    config: {} as RegisterServicesContext['config'],
+    config: {
+      daemon: { mcp_oauth_callback_mode: 'public' },
+    } as RegisterServicesContext['config'],
     jwtSecret: 'test-jwt',
     daemonUrl: 'http://127.0.0.1:3030',
     bundledUiAvailable: false,

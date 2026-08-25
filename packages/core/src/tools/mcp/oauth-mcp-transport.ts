@@ -194,8 +194,8 @@ function parseWWWAuthenticate(header: string): string | null {
  * However, they DO serve the metadata at the well-known path.
  *
  * This function tries to discover it by probing:
- *   1. {origin}/.well-known/oauth-protected-resource  (root-level)
- *   2. {origin}/.well-known/oauth-protected-resource{path}  (path-aware per RFC)
+ *   1. {origin}/.well-known/oauth-protected-resource{path}  (path-aware per RFC)
+ *   2. {origin}/.well-known/oauth-protected-resource  (root fallback)
  *
  * @param mcpUrl - The MCP server URL
  * @returns The resource metadata URL if discoverable, null otherwise
@@ -568,9 +568,16 @@ function registrationFailure(
 function missingRegistrationEndpointFailure(): OAuthDCRFailure {
   const diagnostic: MCPOAuthDCRDiagnostic = { stage: 'dcr_endpoint_discovery' };
   return new OAuthDCRFailure(
-    'OAuth client_id is required because the authorization server does not advertise a Dynamic Client Registration endpoint (stage: dcr_endpoint_discovery). The provider may require a pre-registered OAuth app. Enter the Client ID and Client Secret in Advanced — OAuth settings, then retry.',
+    'OAuth client credentials required: this authorization server does not support Dynamic Client Registration (stage: dcr_endpoint_discovery). Create or select a pre-registered OAuth app, enter its Client ID and provider-required Client Secret in Advanced — OAuth settings, then retry.',
     diagnostic
   );
+}
+
+function oauthClientApplicationType(redirectUri: string): 'native' | 'web' {
+  const hostname = new URL(redirectUri).hostname.replace(/^\[(.*)\]$/, '$1').toLowerCase();
+  return hostname === 'localhost' || hostname === '::1' || hostname.startsWith('127.')
+    ? 'native'
+    : 'web';
 }
 
 /**
@@ -624,6 +631,7 @@ async function registerDynamicClient(
   const registrationRequest: any = {
     client_name: clientName,
     redirect_uris: [redirectUri],
+    application_type: oauthClientApplicationType(redirectUri),
     grant_types: ['authorization_code', 'refresh_token'],
     response_types: ['code'],
     token_endpoint_auth_method: 'none', // Public client (no client_secret)
@@ -1623,10 +1631,7 @@ async function startMCPOAuthFlowWithAS(opts: {
       );
     }
     assertSafeOAuthUrl(authServerMetadata.issuer, { allowLocalhostHttp });
-    const issuerMatches =
-      compatibilityMode === 'strict'
-        ? authServerMetadata.issuer === issuer
-        : oauthIssuerIdentifiersMatch(authServerMetadata.issuer, issuer);
+    const issuerMatches = oauthIssuerIdentifiersMatch(authServerMetadata.issuer, issuer);
     if (!issuerMatches) {
       throw new OAuthConfigurationError('issuer_mismatch', 'Authorization server issuer mismatch');
     }
@@ -1639,15 +1644,6 @@ async function startMCPOAuthFlowWithAS(opts: {
       throw new OAuthConfigurationError(
         'pkce_required',
         'Authorization server does not advertise required PKCE S256 support'
-      );
-    }
-    if (
-      compatibilityMode === 'strict' &&
-      authServerMetadata.authorization_response_iss_parameter_supported !== true
-    ) {
-      throw new OAuthConfigurationError(
-        'metadata_incompatible',
-        'Authorization server does not advertise the required callback issuer parameter'
       );
     }
     if (
@@ -2007,11 +2003,7 @@ export async function completeMCPOAuthFlow(
   if (context.authorizationResponseIssuerParameterSupported && options.issuer == null) {
     throw new OAuthCallbackValidationError('callback_issuer_missing');
   }
-  if (
-    context.compatibilityMode !== 'legacy' &&
-    options.issuer != null &&
-    options.issuer !== context.issuer
-  ) {
+  if (options.issuer != null && options.issuer !== context.issuer) {
     throw new OAuthCallbackValidationError('callback_issuer_mismatch');
   }
 

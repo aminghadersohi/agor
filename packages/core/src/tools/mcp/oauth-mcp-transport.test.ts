@@ -301,6 +301,19 @@ describe('completeMCPOAuthFlow token exchange', () => {
     expect(failure).toMatchObject({ ambiguous: false, failureCode: 'provider_rejected' });
   });
 
+  it('validates a returned issuer even in legacy compatibility mode', async () => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    await expect(
+      completeMCPOAuthFlow(context, 'single-use-code', context.state, {
+        cacheToken: false,
+        issuer: 'https://attacker.example.test',
+      })
+    ).rejects.toMatchObject({ failureCode: 'callback_issuer_mismatch' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['wrong state', 'wrong-state', 'https://provider.example.test', 'callback_state_mismatch'],
     ['missing issuer', 'state', undefined, 'callback_issuer_missing'],
@@ -1375,7 +1388,7 @@ describe('marketplace oauth-start production boundary', () => {
     ).resolves.toMatchObject({ access_token: 'linear-access-token' });
   });
 
-  it('retains explicit strict opt-in and validates it before DCR', async () => {
+  it('allows strict mode when the optional RFC 9207 capability flag is absent', async () => {
     const fixture = linearFetch();
     globalThis.fetch = fixture.fetch as unknown as typeof fetch;
     await expect(
@@ -1385,8 +1398,11 @@ describe('marketplace oauth-start production boundary', () => {
         redirectUri,
         { resourceUri: fixture.mcpUrl, compatibilityMode: 'strict' }
       )
-    ).rejects.toThrow('required callback issuer');
-    expect(fixture.fetch).not.toHaveBeenCalledWith(
+    ).resolves.toMatchObject({
+      compatibilityMode: 'strict',
+      authorizationResponseIssuerParameterSupported: false,
+    });
+    expect(fixture.fetch).toHaveBeenCalledWith(
       `${fixture.issuer}/register`,
       expect.objectContaining({ method: 'POST' })
     );
@@ -1477,6 +1493,168 @@ describe('marketplace oauth-start production boundary', () => {
   });
 });
 
+describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
+  const originalFetch = globalThis.fetch;
+  const redirectUri = 'http://127.0.0.1:3030/mcp-servers/oauth-callback';
+
+  beforeEach(() => {
+    clearAuthCodeTokenCache();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+
+  it.each([
+    ['Gmail', 'https://gmailmcp.googleapis.com/mcp/v1'],
+    ['Calendar', 'https://calendarmcp.googleapis.com/mcp/v1'],
+  ])(
+    '%s uses path-inserted RFC 9728 discovery and reaches explicit client credentials',
+    async (_provider, mcpUrl) => {
+      const resourceUrl = new URL(mcpUrl);
+      const metadataUrl = `${resourceUrl.origin}/.well-known/oauth-protected-resource${resourceUrl.pathname}`;
+      const rootMetadataUrl = `${resourceUrl.origin}/.well-known/oauth-protected-resource`;
+      const googleIssuerAdvertised = 'https://accounts.google.com/';
+      const googleIssuerMetadata = 'https://accounts.google.com';
+      const fetchMock = vi.fn(async (input: string | URL) => {
+        const url = String(input);
+        if (url === metadataUrl) {
+          return json({
+            resource: mcpUrl,
+            authorization_servers: [googleIssuerAdvertised],
+            scopes_supported: ['https://www.googleapis.com/auth/example.readonly'],
+          });
+        }
+        if (url === 'https://accounts.google.com/.well-known/oauth-authorization-server') {
+          return json({
+            issuer: googleIssuerMetadata,
+            authorization_endpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
+            token_endpoint: 'https://oauth2.googleapis.com/token',
+            code_challenge_methods_supported: ['plain', 'S256'],
+            authorization_response_iss_parameter_supported: true,
+          });
+        }
+        return json({}, 404);
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const discovery = await resolveMCPOAuthDiscovery('Bearer', mcpUrl, {
+        compatibilityMode: 'strict',
+        allowLocalhostHttp: true,
+      });
+      expect(discovery).toEqual({
+        kind: 'resource-metadata',
+        metadataUrl,
+        source: 'well-known',
+      });
+      expect(fetchMock).toHaveBeenCalledWith(metadataUrl, expect.any(Object));
+      expect(fetchMock).not.toHaveBeenCalledWith(rootMetadataUrl, expect.any(Object));
+
+      for (const compatibilityMode of ['strict', 'legacy'] as const) {
+        await expect(
+          startMCPOAuthFlow('Bearer', undefined, redirectUri, {
+            resourceMetadataUrl: metadataUrl,
+            resourceUri: mcpUrl,
+            compatibilityMode,
+            dcrMode: 'advertised',
+            allowLocalhostHttp: true,
+          })
+        ).rejects.toThrow(/^OAuth client credentials required:/);
+      }
+
+      await expect(
+        startMCPOAuthFlow('Bearer', 'google-desktop-client', redirectUri, {
+          resourceMetadataUrl: metadataUrl,
+          resourceUri: mcpUrl,
+          compatibilityMode: 'strict',
+          allowLocalhostHttp: true,
+        })
+      ).resolves.toMatchObject({
+        clientId: 'google-desktop-client',
+        redirectUri,
+        issuer: googleIssuerMetadata,
+      });
+    }
+  );
+
+  it('Sentry completes strict OAuth without advertising the optional RFC 9207 flag', async () => {
+    const mcpUrl = 'https://mcp.sentry.dev/mcp';
+    const metadataUrl = 'https://mcp.sentry.dev/.well-known/oauth-protected-resource/mcp';
+    const issuer = 'https://mcp.sentry.dev';
+    let registrationBody: Record<string, unknown> | undefined;
+    globalThis.fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === metadataUrl) {
+        return json({
+          resource: mcpUrl,
+          authorization_servers: [issuer],
+          scopes_supported: ['org:read'],
+        });
+      }
+      if (url === `${issuer}/.well-known/oauth-authorization-server`) {
+        return json({
+          issuer,
+          authorization_endpoint: `${issuer}/oauth/authorize`,
+          token_endpoint: `${issuer}/oauth/token`,
+          registration_endpoint: `${issuer}/oauth/register`,
+          code_challenge_methods_supported: ['plain', 'S256'],
+        });
+      }
+      if (url === `${issuer}/oauth/register` && init?.method === 'POST') {
+        registrationBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return json(
+          {
+            client_id: 'sentry-dcr-client',
+            redirect_uris: [redirectUri],
+            token_endpoint_auth_method: 'none',
+          },
+          201
+        );
+      }
+      if (url === `${issuer}/oauth/token` && init?.method === 'POST') {
+        return json({ access_token: 'sentry-access-token', token_type: 'Bearer' });
+      }
+      return json({}, 404);
+    }) as unknown as typeof fetch;
+
+    const discovery = await resolveMCPOAuthDiscovery('Bearer', mcpUrl, {
+      compatibilityMode: 'strict',
+      allowLocalhostHttp: true,
+    });
+    expect(discovery).toEqual({
+      kind: 'resource-metadata',
+      metadataUrl,
+      source: 'well-known',
+    });
+    const context = await startMCPOAuthFlow('Bearer', undefined, redirectUri, {
+      resourceMetadataUrl: metadataUrl,
+      resourceUri: mcpUrl,
+      compatibilityMode: 'strict',
+      allowLocalhostHttp: true,
+    });
+    expect(context.authorizationResponseIssuerParameterSupported).toBe(false);
+    expect(registrationBody).toMatchObject({
+      application_type: 'native',
+      redirect_uris: [redirectUri],
+    });
+
+    await expect(
+      completeMCPOAuthFlow(context, 'sentry-code', context.state, {
+        cacheToken: false,
+        issuer,
+      })
+    ).resolves.toMatchObject({ access_token: 'sentry-access-token' });
+  });
+});
+
 describe('strict current MCP OAuth profile', () => {
   const originalFetch = globalThis.fetch;
   const resourceUri = 'https://mcp.example.com/mcp';
@@ -1525,7 +1703,9 @@ describe('strict current MCP OAuth profile', () => {
               ? `${issuer}/register`
               : undefined,
             code_challenge_methods_supported: overrides.s256 === false ? ['plain'] : ['S256'],
-            authorization_response_iss_parameter_supported: overrides.responseIssuer !== false,
+            ...(overrides.responseIssuer === false
+              ? {}
+              : { authorization_response_iss_parameter_supported: true }),
           }),
           { status: 200, headers: { 'content-type': 'application/json' } }
         );
@@ -1600,12 +1780,14 @@ describe('strict current MCP OAuth profile', () => {
     await expect(startStrict()).rejects.toThrow('Failed to fetch authorization server metadata');
   });
 
-  it('rejects missing S256 and authorization-response issuer support', async () => {
+  it('rejects missing S256 but accepts omitted optional RFC 9207 metadata', async () => {
     globalThis.fetch = strictFetch({ s256: false });
     await expect(startStrict()).rejects.toThrow('required PKCE S256');
 
     globalThis.fetch = strictFetch({ responseIssuer: false });
-    await expect(startStrict()).rejects.toThrow('required callback issuer');
+    await expect(startStrict()).resolves.toMatchObject({
+      authorizationResponseIssuerParameterSupported: false,
+    });
   });
 
   it('validates strict metadata before creating a dynamic client', async () => {
@@ -1831,7 +2013,7 @@ describe('strict current MCP OAuth profile', () => {
         'https://agor.example.com/mcp-servers/oauth-callback',
         { resourceUri, compatibilityMode: 'legacy', dcrMode: 'advertised' }
       )
-    ).rejects.toThrow('does not advertise');
+    ).rejects.toThrow(/^OAuth client credentials required:/);
     expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalledWith(
       `${issuer}/register`,
       expect.objectContaining({ method: 'POST' })
