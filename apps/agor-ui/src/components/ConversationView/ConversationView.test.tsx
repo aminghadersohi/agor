@@ -66,8 +66,12 @@ vi.mock('../../hooks/useSharedReactiveSession', () => ({
 }));
 
 vi.mock('../TaskBlock', () => ({
-  TaskBlock: ({ task, isExpanded, onExpandChange, taskMessagesLoaded }: any) => (
-    <section data-testid={`task-${task.task_id}`} data-expanded={String(isExpanded)}>
+  TaskBlock: ({ task, isExpanded, onExpandChange, taskMessagesLoaded, simple }: any) => (
+    <section
+      data-testid={`task-${task.task_id}`}
+      data-expanded={String(isExpanded)}
+      data-simple={String(Boolean(simple))}
+    >
       <h2>{task.full_prompt}</h2>
       <button type="button" onClick={() => onExpandChange(task.task_id, !isExpanded)}>
         toggle {task.task_id}
@@ -184,6 +188,19 @@ describe('ConversationView auto-scroll integration', () => {
     render(<ConversationView client={null} sessionId={'session-1' as any} sessionModel="loaded" />);
 
     expect(mockScrollToBottom).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps every task expanded and forwards conversation-first mode', () => {
+    const tasks = [makeTask('task-1', 'first task'), makeTask('task-2', 'latest task')];
+    const state = makeState({ loading: false, tasks });
+    mockUseSharedReactiveSession.mockImplementation(() => ({ handle: null, state }));
+
+    render(<ConversationView client={null} sessionId={'session-1' as any} simple />);
+
+    for (const task of tasks) {
+      expect(screen.getByTestId(`task-${task.task_id}`)).toHaveAttribute('data-expanded', 'true');
+      expect(screen.getByTestId(`task-${task.task_id}`)).toHaveAttribute('data-simple', 'true');
+    }
   });
 
   it('re-engages the bottom lock when the session switches', () => {

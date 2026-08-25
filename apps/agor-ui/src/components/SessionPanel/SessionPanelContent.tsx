@@ -37,6 +37,8 @@ export interface SessionPanelContentProps {
   isOpen: boolean;
   /** When true, all task blocks are force-expanded (used by in-session search) */
   forceExpandAll?: boolean;
+  /** Conversation-first presentation that hides branch and task chrome. */
+  simple?: boolean;
 }
 
 export const SessionPanelContent = React.memo<SessionPanelContentProps>(
@@ -57,6 +59,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
     inputValueRef,
     isOpen,
     forceExpandAll = false,
+    simple = false,
   }) => {
     const { token } = theme.useToken();
     const { showSuccess, showError } = useThemedMessage();
@@ -116,7 +119,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
         <div
           style={{
             marginBottom: token.sizeUnit,
-            display: 'flex',
+            display: simple ? 'none' : 'flex',
             // Keep navigation aligned with the branch pill's first row when metadata wraps below it.
             alignItems: 'flex-start',
             justifyContent: 'space-between',
@@ -166,7 +169,12 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
           </Space>
         </div>
 
-        <Divider style={{ margin: `${token.sizeUnit * 2}px 0` }} />
+        <Divider
+          style={{
+            display: simple ? 'none' : undefined,
+            margin: `${token.sizeUnit * 2}px 0`,
+          }}
+        />
 
         <ConversationView
           client={client}
@@ -187,6 +195,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
           }
           forceExpandAll={forceExpandAll}
           onOpenAgenticToolSettings={onOpenAgenticToolSettings}
+          simple={simple}
         />
 
         {/* Queued Tasks Drawer - Above Footer.
