@@ -104,6 +104,8 @@ interface TaskBlockProps {
   isLatestTask?: boolean;
   /** Phone-sized transcript presentation without desktop-only indents or gradients. */
   compact?: boolean;
+  /** Conversation-first mode: keep messages, hide tool and accounting chrome. */
+  simple?: boolean;
 }
 
 /**
@@ -430,6 +432,11 @@ export function groupMessagesIntoBlocks(messages: Message[]): Block[] {
   return blocks;
 }
 
+/** Focus chat keeps user-facing message blocks and omits operational timelines. */
+export function isBlockVisibleInSimpleChat(block: Block): boolean {
+  return block.type === 'message';
+}
+
 /**
  * Identity key for reconciling a block across renders — mirrors the React
  * `key` each block type renders with.
@@ -488,6 +495,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
     isLatestTask = false,
     client = null,
     compact = false,
+    simple = false,
   }) => {
     const { token } = theme.useToken();
     const runtimeLive = shouldRenderLiveTaskProgress(task);
@@ -621,7 +629,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
           </CopyableContent>
 
           {/* Task metadata */}
-          <Flex wrap gap={token.sizeUnit}>
+          <Flex wrap gap={token.sizeUnit} style={{ display: simple ? 'none' : undefined }}>
             <TimerPill
               status={task.status}
               startedAt={task.started_at || task.message_range?.start_timestamp || task.created_at}
@@ -713,8 +721,8 @@ export const TaskBlock = React.memo<TaskBlockProps>(
           expandIcon={() => null}
           style={{
             background: 'transparent',
-            margin: compact ? '8px 0' : `${token.sizeUnit * 3}px 0`,
-            borderRadius: compact ? token.borderRadiusLG : undefined,
+            margin: compact || simple ? '8px 0' : `${token.sizeUnit * 3}px 0`,
+            borderRadius: compact || simple ? token.borderRadiusLG : undefined,
             overflow: 'hidden',
           }}
           items={[
@@ -723,16 +731,18 @@ export const TaskBlock = React.memo<TaskBlockProps>(
               label: taskHeader,
               styles: {
                 header: {
-                  padding: compact ? '10px 8px' : token.sizeUnit * 2,
+                  padding: compact || simple ? '10px 8px' : token.sizeUnit * 2,
                   alignItems: 'flex-start',
-                  background: compact
-                    ? token.colorBgContainer
-                    : taskHeaderGradient || 'transparent',
+                  background:
+                    compact || simple
+                      ? token.colorBgContainer
+                      : taskHeaderGradient || 'transparent',
                   borderRadius: isExpanded ? '8px 8px 0 0' : 8,
                 },
                 body: {
                   background: 'transparent',
-                  padding: compact ? '8px' : `${token.sizeUnit * 2}px ${token.sizeUnit * 2}px`,
+                  padding:
+                    compact || simple ? '8px' : `${token.sizeUnit * 2}px ${token.sizeUnit * 2}px`,
                 },
               },
               children: (
@@ -761,6 +771,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
                       from per-frame streaming churn inside a block. */}
                   {!messagesLoading &&
                     blocks.map((block, blockIndex) => {
+                      if (simple && !isBlockVisibleInSimpleChat(block)) return null;
                       if (block.type === 'message') {
                         // Find if this is a permission request and if it's the first pending one
                         const isPermissionRequest = block.message.type === 'permission_request';
@@ -851,7 +862,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
                     })}
 
                   {/* Keep latest TODO visible even after completion (Claude parity). */}
-                  <StickyTodoRenderer messages={messages} taskStatus={task.status} />
+                  {!simple && <StickyTodoRenderer messages={messages} taskStatus={task.status} />}
 
                   {/* Show typing indicator whenever the executor may still be live.
                       Marked as a conversation block so its unmount at stream
@@ -881,7 +892,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
                   )}
 
                   {/* Show commit message if available */}
-                  {task.git_state.commit_message && (
+                  {!simple && task.git_state.commit_message && (
                     <div
                       style={{
                         marginTop: token.sizeUnit * 1.5,
@@ -902,7 +913,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
                   )}
 
                   {/* Show report if available */}
-                  {task.report && (
+                  {!simple && task.report && (
                     <div style={{ marginTop: token.sizeUnit * 1.5 }}>
                       <Tag icon={<FileTextOutlined />} color="green">
                         Task Report

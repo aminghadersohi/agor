@@ -131,6 +131,20 @@ describe('SessionFooter', () => {
     expect(screen.getByRole('button', { name: /stop/i })).toBeInTheDocument();
   });
 
+  it('simple mode keeps only the prompt and primary run controls', () => {
+    render(
+      <SessionFooter {...baseProps} simple hasInput isRunning sessionMcpServerIds={['server-1']} />,
+      { wrapper: Wrapper }
+    );
+
+    expect(screen.getByTestId('prompt-input')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /queue/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /stop/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /mcp servers/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /more options/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /attach files/i })).not.toBeInTheDocument();
+  });
+
   it('shows stopping feedback immediately while the Stop request is in flight', () => {
     const { container } = render(
       <SessionFooter {...baseProps} isRunning={true} stopRequestInFlight={true} />,

@@ -27,7 +27,9 @@ import {
   DownOutlined,
   EditOutlined,
   EllipsisOutlined,
+  ExpandOutlined,
   InboxOutlined,
+  MessageOutlined,
   RobotOutlined,
   SearchOutlined,
   SettingOutlined,
@@ -282,6 +284,7 @@ PromptInput.displayName = 'PromptInput';
 // a fresh array — the memos deriving footer props from `tasks` (and through
 // them the memoized SessionFooter) key on its identity.
 const EMPTY_TASKS: Task[] = [];
+const SIMPLE_CHAT_STORAGE_KEY = 'agor.session.simple-chat';
 
 export interface SessionPanelProps {
   client: AgorClient | null;
@@ -309,6 +312,24 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   const { showSuccess, showInfo, showError } = useThemedMessage();
   const connectionDisabled = useConnectionDisabled();
   const recenterMap = useRecenterMap();
+  const [simpleChat, setSimpleChat] = React.useState(() => {
+    try {
+      return localStorage.getItem(SIMPLE_CHAT_STORAGE_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const toggleSimpleChat = React.useCallback(() => {
+    setSimpleChat((current) => {
+      const next = !current;
+      try {
+        localStorage.setItem(SIMPLE_CHAT_STORAGE_KEY, String(next));
+      } catch {
+        // Storage can be unavailable in privacy-restricted browser contexts.
+      }
+      return next;
+    });
+  }, []);
 
   // Subscribe only to the entity families this panel needs via narrow store
   // selectors. SessionPanel intentionally does NOT subscribe to live (sessions
@@ -1433,6 +1454,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       onPermissionModeChange={stableFooterHandlers.onPermissionModeChange}
       onCodexPermissionChange={stableFooterHandlers.onCodexPermissionChange}
       promptInputSlot={promptInputSlot}
+      simple={simpleChat}
     />
   ) : null;
 
@@ -1451,7 +1473,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       <div
         style={{
           flexShrink: 0,
-          padding: `${token.sizeUnit * 3}px ${token.sizeUnit * 6}px`,
+          padding: simpleChat
+            ? `${token.sizeUnit * 2}px ${token.sizeUnit * 4}px`
+            : `${token.sizeUnit * 3}px ${token.sizeUnit * 6}px`,
           borderBottom: `1px solid ${token.colorBorder}`,
           background: token.colorBgContainer,
         }}
@@ -1460,10 +1484,14 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ display: 'flex', gap: 12, alignItems: 'center', flex: 1, minWidth: 0 }}>
             <div style={{ flexShrink: 0 }}>
-              <ToolIcon tool={session.agentic_tool} size={40} />
+              <ToolIcon tool={session.agentic_tool} size={simpleChat ? 24 : 40} />
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              {editingTitle ? (
+              {simpleChat ? (
+                <Typography.Text strong ellipsis style={{ fontSize: 15 }}>
+                  {getSessionDisplayTitle(session, { includeAgentFallback: true })}
+                </Typography.Text>
+              ) : editingTitle ? (
                 <Input
                   ref={titleInputRef}
                   value={titleDraft}
@@ -1523,8 +1551,11 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
                   </button>
                 </Tooltip>
               )}
-              <Badge status={getStatusColor()} text={session.status.toUpperCase()} />
-              {session.created_by && (
+              <Badge
+                status={getStatusColor()}
+                text={simpleChat ? undefined : session.status.toUpperCase()}
+              />
+              {!simpleChat && session.created_by && (
                 <div style={{ marginTop: token.sizeUnit }}>
                   <CreatedByTag
                     createdBy={session.created_by}
@@ -1537,20 +1568,44 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             </div>
           </div>
           <Space size={4}>
-            <SessionAttachmentsDropdown items={attachmentItems} />
-            <Dropdown menu={{ items: moreMenuItems }} trigger={['click']} placement="bottomRight">
-              <Tooltip title="More actions">
-                <Button type="text" icon={<EllipsisOutlined />} />
+            {simpleChat && (
+              <Tooltip title="Show full session details">
+                <Button
+                  type="text"
+                  aria-label="Show full session details"
+                  icon={<ExpandOutlined />}
+                  onClick={toggleSimpleChat}
+                />
               </Tooltip>
-            </Dropdown>
-            <Tooltip title="Search session">
-              <Button
-                type="text"
-                aria-label="Search session"
-                icon={<SearchOutlined />}
-                onClick={openSearch}
-              />
-            </Tooltip>
+            )}
+            {!simpleChat && <SessionAttachmentsDropdown items={attachmentItems} />}
+            {!simpleChat && (
+              <Dropdown menu={{ items: moreMenuItems }} trigger={['click']} placement="bottomRight">
+                <Tooltip title="More actions">
+                  <Button type="text" icon={<EllipsisOutlined />} />
+                </Tooltip>
+              </Dropdown>
+            )}
+            {!simpleChat && (
+              <Tooltip title="Search session">
+                <Button
+                  type="text"
+                  aria-label="Search session"
+                  icon={<SearchOutlined />}
+                  onClick={openSearch}
+                />
+              </Tooltip>
+            )}
+            {!simpleChat && (
+              <Tooltip title="Focus chat">
+                <Button
+                  type="text"
+                  aria-label="Focus chat"
+                  icon={<MessageOutlined />}
+                  onClick={toggleSimpleChat}
+                />
+              </Tooltip>
+            )}
             <Tooltip title="Close Panel">
               <Button
                 type="text"
@@ -1564,6 +1619,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
         {/* Row 2: search bar — always in DOM, animates in/out */}
         <div
           style={{
+            display: simpleChat ? 'none' : undefined,
             overflow: 'hidden',
             maxHeight: searchOpen ? '36px' : '0px',
             opacity: searchOpen ? 1 : 0,
@@ -1634,7 +1690,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
           overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
-          padding: `${token.sizeUnit * 3}px ${token.sizeUnit * 6}px 0`,
+          padding: simpleChat
+            ? `${token.sizeUnit * 2}px ${token.sizeUnit * 4}px 0`
+            : `${token.sizeUnit * 3}px ${token.sizeUnit * 6}px 0`,
           position: 'relative',
         }}
       >
@@ -1723,6 +1781,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             inputValueRef={inputValueRef}
             isOpen={open}
             forceExpandAll={searchOpen && query.trim().length > 0}
+            simple={simpleChat}
           />
         </div>
 
