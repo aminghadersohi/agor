@@ -866,7 +866,13 @@ describe('resolveMCPOAuthDiscovery', () => {
   });
 
   it('returns RFC 9728 result when WWW-Authenticate has resource_metadata', async () => {
-    globalThis.fetch = vi.fn() as unknown as typeof fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        resource: 'https://example.com/mcp',
+        authorization_servers: ['https://auth.example.com'],
+      }),
+    }) as unknown as typeof fetch;
     const header =
       'Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource"';
 
@@ -877,8 +883,49 @@ describe('resolveMCPOAuthDiscovery', () => {
       metadataUrl: 'https://example.com/.well-known/oauth-protected-resource',
       source: 'header',
     });
-    // RFC 9728 header parse short-circuits — no fetch needed.
-    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      'https://example.com/.well-known/oauth-protected-resource',
+      expect.any(Object)
+    );
+  });
+
+  it('rejects a mismatched header hint and falls back to endpoint-specific metadata', async () => {
+    const mcpUrl = 'https://example.com/mcp/v1';
+    const hintedUrl = 'https://example.com/.well-known/oauth-protected-resource/read_messages';
+    const endpointMetadataUrl = 'https://example.com/.well-known/oauth-protected-resource/mcp/v1';
+    globalThis.fetch = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url === hintedUrl) {
+        return new Response(
+          JSON.stringify({
+            resource: 'https://example.com/mcp',
+            authorization_servers: ['https://auth.example.com'],
+          })
+        );
+      }
+      if (url === endpointMetadataUrl) {
+        return new Response(
+          JSON.stringify({
+            resource: mcpUrl,
+            authorization_servers: ['https://auth.example.com'],
+          })
+        );
+      }
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const result = await resolveMCPOAuthDiscovery(
+      `Bearer resource_metadata="${hintedUrl}"`,
+      mcpUrl
+    );
+
+    expect(result).toEqual({
+      kind: 'resource-metadata',
+      metadataUrl: endpointMetadataUrl,
+      source: 'well-known',
+    });
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(1, hintedUrl, expect.any(Object));
+    expect(globalThis.fetch).toHaveBeenNthCalledWith(2, endpointMetadataUrl, expect.any(Object));
   });
 
   it('falls through to AS-direct when RFC 9728 is unavailable (Reo.Dev case)', async () => {
@@ -957,6 +1004,7 @@ describe('resolveMCPOAuthDiscovery', () => {
         return {
           ok: true,
           json: async () => ({
+            resource: 'https://example.com/mcp',
             authorization_servers: ['https://auth.example.com'],
           }),
         };
@@ -1539,18 +1587,28 @@ describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
     });
 
   it.each([
-    ['Gmail', 'https://gmailmcp.googleapis.com/mcp/v1'],
-    ['Calendar', 'https://calendarmcp.googleapis.com/mcp/v1'],
+    ['Gmail', 'https://gmailmcp.googleapis.com/mcp/v1', 'list_drafts'],
+    ['Calendar', 'https://calendarmcp.googleapis.com/mcp/v1', 'list_events'],
   ])(
-    '%s uses path-inserted RFC 9728 discovery and reaches explicit client credentials',
-    async (_provider, mcpUrl) => {
+    '%s ignores mismatched tool metadata, uses path-inserted RFC 9728 discovery, and reaches explicit client credentials',
+    async (_provider, mcpUrl, toolName) => {
       const resourceUrl = new URL(mcpUrl);
       const metadataUrl = `${resourceUrl.origin}/.well-known/oauth-protected-resource${resourceUrl.pathname}`;
+      const toolMetadataUrl = `${resourceUrl.origin}/.well-known/oauth-protected-resource/${toolName}`;
       const rootMetadataUrl = `${resourceUrl.origin}/.well-known/oauth-protected-resource`;
+      const wwwAuthenticate = `Bearer resource_metadata="${toolMetadataUrl}"`;
       const googleIssuerAdvertised = 'https://accounts.google.com/';
       const googleIssuerMetadata = 'https://accounts.google.com';
       const fetchMock = vi.fn(async (input: string | URL) => {
         const url = String(input);
+        if (url === toolMetadataUrl) {
+          return json({
+            // Google's tool-level challenge currently identifies the parent
+            // `/mcp` resource, not the configured `/mcp/v1` endpoint.
+            resource: `${resourceUrl.origin}/mcp`,
+            authorization_servers: [googleIssuerAdvertised],
+          });
+        }
         if (url === metadataUrl) {
           return json({
             resource: mcpUrl,
@@ -1571,7 +1629,7 @@ describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
       });
       globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-      const discovery = await resolveMCPOAuthDiscovery('Bearer', mcpUrl, {
+      const discovery = await resolveMCPOAuthDiscovery(wwwAuthenticate, mcpUrl, {
         compatibilityMode: 'strict',
         allowLocalhostHttp: true,
       });
@@ -1580,12 +1638,13 @@ describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
         metadataUrl,
         source: 'well-known',
       });
+      expect(fetchMock).toHaveBeenCalledWith(toolMetadataUrl, expect.any(Object));
       expect(fetchMock).toHaveBeenCalledWith(metadataUrl, expect.any(Object));
       expect(fetchMock).not.toHaveBeenCalledWith(rootMetadataUrl, expect.any(Object));
 
       for (const compatibilityMode of ['strict', 'legacy'] as const) {
         await expect(
-          startMCPOAuthFlow('Bearer', undefined, redirectUri, {
+          startMCPOAuthFlow(wwwAuthenticate, undefined, redirectUri, {
             resourceMetadataUrl: metadataUrl,
             resourceUri: mcpUrl,
             compatibilityMode,
@@ -1596,7 +1655,7 @@ describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
       }
 
       await expect(
-        startMCPOAuthFlow('Bearer', 'google-desktop-client', redirectUri, {
+        startMCPOAuthFlow(wwwAuthenticate, 'google-desktop-client', redirectUri, {
           resourceMetadataUrl: metadataUrl,
           resourceUri: mcpUrl,
           compatibilityMode: 'strict',
