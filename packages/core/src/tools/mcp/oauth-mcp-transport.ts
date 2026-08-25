@@ -1459,7 +1459,7 @@ export interface OAuthFlowContext {
   compatibilityMode: MCPOAuthRuntimeCompatibilityMode;
   /** Require `iss` when the AS advertised RFC 9207 support for this flow. */
   authorizationResponseIssuerParameterSupported: boolean;
-  /** Narrow standalone-development exception; durable daemon flows leave this false. */
+  /** Narrow outbound-endpoint exception; durable daemon flows leave this false. */
   allowLocalhostHttp: boolean;
 }
 
@@ -1557,6 +1557,8 @@ async function startMCPOAuthFlowWithAS(opts: {
   issuer: string;
   compatibilityMode: MCPOAuthRuntimeCompatibilityMode;
   dcrMode: MCPOAuthDCRMode;
+  /** Permit an exact HTTP loopback redirect without permitting loopback provider endpoints. */
+  allowLoopbackRedirectUri: boolean;
   allowLocalhostHttp: boolean;
   /** Daemon-owned authority/deadline assertion around provider side effects. */
   assertCurrent?: () => void;
@@ -1574,6 +1576,7 @@ async function startMCPOAuthFlowWithAS(opts: {
     issuer,
     compatibilityMode,
     dcrMode,
+    allowLoopbackRedirectUri,
     allowLocalhostHttp,
   } = opts;
 
@@ -1588,7 +1591,7 @@ async function startMCPOAuthFlowWithAS(opts: {
   // Validate before registration: DCR sends this value to an external service
   // and must not turn an unsafe configured callback into durable provider-side
   // client metadata.
-  assertSafeOAuthUrl(actualRedirectUri, { allowLocalhostHttp });
+  assertSafeOAuthUrl(actualRedirectUri, { allowLocalhostHttp: allowLoopbackRedirectUri });
 
   // Scope: explicit option > resource-metadata advertised scopes > none
   // (Skip auto-populating when client_id is pre-registered — see comment in
@@ -1800,12 +1803,22 @@ export async function startMCPOAuthFlow(
      * discovery and DCR boundaries; standalone/CLI callers omit it.
      */
     assertCurrent?: () => void;
+    /**
+     * Permit an exact HTTP loopback callback without permitting private OAuth
+     * metadata, authorization, registration, or token endpoints.
+     */
+    allowLoopbackRedirectUri?: boolean;
   }
 ): Promise<OAuthFlowContext> {
   console.log('[MCP OAuth] Starting two-phase OAuth 2.1 flow');
   const compatibilityMode = options?.compatibilityMode ?? 'strict';
   const dcrMode = options?.dcrMode ?? 'advertised';
   const allowLocalhostHttp = options?.allowLocalhostHttp === true;
+  // Preserve the legacy standalone helper contract while allowing daemons to
+  // grant only the redirect exception. This distinction matters for local
+  // PostgreSQL: its browser callback is loopback, but provider egress must
+  // retain the durable/multi-tenant private-network denial.
+  const allowLoopbackRedirectUri = options?.allowLoopbackRedirectUri ?? allowLocalhostHttp;
   const resourceUri = options?.resourceUri;
   options?.assertCurrent?.();
   if (!resourceUri) {
@@ -1863,6 +1876,7 @@ export async function startMCPOAuthFlow(
       issuer: options.prefetchedAuthServerMetadata.issuer,
       compatibilityMode,
       dcrMode,
+      allowLoopbackRedirectUri,
       allowLocalhostHttp,
       assertCurrent: options.assertCurrent,
     });
@@ -1972,6 +1986,7 @@ export async function startMCPOAuthFlow(
     issuer: authServerUrl,
     compatibilityMode,
     dcrMode,
+    allowLoopbackRedirectUri,
     allowLocalhostHttp,
     assertCurrent: options?.assertCurrent,
   });

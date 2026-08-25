@@ -42,6 +42,13 @@ describe('register-services OAuth callback URL regression', () => {
     );
   });
 
+  it('keeps loopback callback permission independent from provider endpoint egress', () => {
+    expect(codeOnly).toMatch(
+      /allowLoopbackRedirectUri:\s*ctx\.config\.daemon\?\.mcp_oauth_callback_mode\s*!==\s*['"]public['"]/
+    );
+    expect(codeOnly).toMatch(/allowLocalhostHttp:\s*!durableOAuthFlows/);
+  });
+
   it('preserves tenant scope across unauthenticated OAuth callbacks', () => {
     // Browser redirects to /mcp-servers/oauth-callback do not carry the
     // originating Feathers auth params or tenant headers, so the pending OAuth

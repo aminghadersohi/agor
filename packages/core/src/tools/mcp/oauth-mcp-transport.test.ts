@@ -1119,6 +1119,31 @@ describe('startMCPOAuthFlow with prefetchedAuthServerMetadata', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
+  it('allows a loopback callback without allowing loopback provider endpoints', async () => {
+    const context = await startMCPOAuthFlow('', 'configured-client', redirectUri, {
+      ...prefetchedOptions,
+      dcrMode: 'disabled',
+      allowLocalhostHttp: false,
+      allowLoopbackRedirectUri: true,
+    });
+
+    expect(context.redirectUri).toBe(redirectUri);
+    expect(context.allowLocalhostHttp).toBe(false);
+
+    await expect(
+      startMCPOAuthFlow('', 'configured-client', redirectUri, {
+        ...prefetchedOptions,
+        prefetchedAuthServerMetadata: {
+          ...prefetchedOptions.prefetchedAuthServerMetadata,
+          token_endpoint: 'http://127.0.0.1:9999/oauth/token',
+        },
+        dcrMode: 'disabled',
+        allowLocalhostHttp: false,
+        allowLoopbackRedirectUri: true,
+      })
+    ).rejects.toThrow('OAuth endpoints require HTTPS');
+  });
+
   it.each([
     [
       'blank client ID',
