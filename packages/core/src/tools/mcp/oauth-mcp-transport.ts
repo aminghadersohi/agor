@@ -184,7 +184,12 @@ function parseWWWAuthenticate(header: string): string | null {
  */
 export async function discoverResourceMetadataUrl(
   mcpUrl: string,
-  options: { allowLocalhostHttp?: boolean } = {}
+  options: {
+    allowLocalhostHttp?: boolean;
+    /** When set, only return metadata bound to this exact MCP resource policy. */
+    resourceUri?: string;
+    compatibilityMode?: MCPOAuthRuntimeCompatibilityMode;
+  } = {}
 ): Promise<string | null> {
   const url = new URL(mcpUrl);
   const origin = url.origin;
@@ -207,8 +212,17 @@ export async function discoverResourceMetadataUrl(
       });
       if (response.ok) {
         // Validate it looks like proper metadata
-        const data = (await response.json()) as Record<string, unknown>;
-        if (data.authorization_servers && Array.isArray(data.authorization_servers)) {
+        const data = (await response.json()) as OAuthMetadata;
+        if (
+          data.authorization_servers &&
+          Array.isArray(data.authorization_servers) &&
+          resourceMetadataMatches(
+            candidate,
+            data.resource,
+            options.resourceUri,
+            options.compatibilityMode
+          )
+        ) {
           console.log('[MCP OAuth] Resource metadata discovered');
           return candidate;
         }
@@ -235,13 +249,48 @@ export async function discoverResourceMetadataUrl(
 export async function resolveResourceMetadataUrl(
   wwwAuthenticateHeader: string | null,
   mcpUrl: string,
-  options: { allowLocalhostHttp?: boolean } = {}
+  options: {
+    allowLocalhostHttp?: boolean;
+    /** When set, reject a header hint that is not bound to this MCP resource. */
+    resourceUri?: string;
+    compatibilityMode?: MCPOAuthRuntimeCompatibilityMode;
+  } = {}
 ): Promise<{ metadataUrl: string; source: 'header' | 'well-known' } | null> {
   // Strategy 1: Parse from WWW-Authenticate header
   if (wwwAuthenticateHeader) {
     const parsed = parseWWWAuthenticate(wwwAuthenticateHeader);
     if (parsed) {
-      return { metadataUrl: parsed, source: 'header' };
+      // A tool-level 401 can advertise metadata for a coarser resource than
+      // the configured MCP endpoint. Validate the binding before accepting
+      // the hint so discovery can safely continue to the endpoint-specific
+      // RFC 9728 location when the hint is not applicable.
+      if (!options.resourceUri) {
+        return { metadataUrl: parsed, source: 'header' };
+      }
+      try {
+        const response = await safeOutboundFetch(parsed, {
+          redirect: 'follow',
+          timeoutMs: 10_000,
+          allowLocalhostHttp: options.allowLocalhostHttp,
+        });
+        if (response.ok) {
+          const data = (await response.json()) as OAuthMetadata;
+          if (
+            Array.isArray(data.authorization_servers) &&
+            resourceMetadataMatches(
+              parsed,
+              data.resource,
+              options.resourceUri,
+              options.compatibilityMode
+            )
+          ) {
+            return { metadataUrl: parsed, source: 'header' };
+          }
+        }
+      } catch {
+        // Continue to endpoint-specific well-known discovery below.
+      }
+      console.log('[MCP OAuth] Advertised resource metadata does not bind the MCP endpoint');
     }
   }
 
@@ -378,7 +427,10 @@ export async function resolveMCPOAuthDiscovery(
   } = {}
 ): Promise<MCPOAuthDiscoveryResult | null> {
   // Strategies 1 + 2: RFC 9728 (header hint, then well-known fallback)
-  const rfc9728 = await resolveResourceMetadataUrl(wwwAuthenticateHeader, mcpUrl, options);
+  const rfc9728 = await resolveResourceMetadataUrl(wwwAuthenticateHeader, mcpUrl, {
+    ...options,
+    resourceUri: mcpUrl,
+  });
   if (rfc9728) {
     return { kind: 'resource-metadata', ...rfc9728 };
   }
@@ -1366,6 +1418,23 @@ function marketplaceResourceMetadataMatches(
 }
 
 /**
+ * Apply the same resource-binding policy during discovery and flow startup.
+ * Legacy mode intentionally preserves its historical permissive behavior;
+ * strict and reviewed-marketplace modes must never select mismatched metadata.
+ */
+function resourceMetadataMatches(
+  metadataUrl: string,
+  statedResource: OAuthMetadata['resource'],
+  resourceUri: string | undefined,
+  compatibilityMode: MCPOAuthRuntimeCompatibilityMode = 'strict'
+): boolean {
+  if (!resourceUri || compatibilityMode === 'legacy') return true;
+  return compatibilityMode === 'strict'
+    ? statedResource === resourceUri
+    : marketplaceResourceMetadataMatches(metadataUrl, statedResource, resourceUri);
+}
+
+/**
  * Start the OAuth 2.1 Authorization Code flow with PKCE
  *
  * This is the first phase of a two-phase OAuth flow for remote daemon scenarios.
@@ -1596,7 +1665,7 @@ export async function startMCPOAuthFlow(
     tokenUrlOverride?: string;
     clientSecret?: string;
     scope?: string;
-    /** Pre-discovered resource metadata URL (used when WWW-Authenticate lacks resource_metadata) */
+    /** Pre-discovered resource metadata URL. Takes precedence over the raw challenge. */
     resourceMetadataUrl?: string;
     /**
      * Pre-discovered Authorization Server metadata. Used when the MCP server
@@ -1695,8 +1764,11 @@ export async function startMCPOAuthFlow(
     });
   }
 
-  // Step 1: Parse WWW-Authenticate header, fall back to pre-discovered URL
-  const metadataUrl = parseWWWAuthenticate(wwwAuthenticateHeader) || options?.resourceMetadataUrl;
+  // Step 1: Prefer the resolver's validated choice over the raw challenge.
+  // Tool-level challenges can point at metadata for a different (coarser)
+  // resource; the daemon passes the endpoint-bound candidate selected by
+  // `resolveMCPOAuthDiscovery` here.
+  const metadataUrl = options?.resourceMetadataUrl || parseWWWAuthenticate(wwwAuthenticateHeader);
   if (!metadataUrl) {
     throw new Error(
       'Could not determine OAuth resource metadata URL. ' +
@@ -1710,10 +1782,7 @@ export async function startMCPOAuthFlow(
   const resourceMetadata = await fetchResourceMetadata(metadataUrl, { allowLocalhostHttp });
 
   if (
-    compatibilityMode === 'strict'
-      ? resourceMetadata.resource !== resourceUri
-      : compatibilityMode === 'marketplace' &&
-        !marketplaceResourceMetadataMatches(metadataUrl, resourceMetadata.resource, resourceUri)
+    !resourceMetadataMatches(metadataUrl, resourceMetadata.resource, resourceUri, compatibilityMode)
   ) {
     throw new Error('Protected resource metadata does not match the MCP resource URI');
   }
