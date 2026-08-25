@@ -421,6 +421,19 @@ export const BranchFilesReadPayloadSchema = BasePayloadSchema.extend({
 
 export type BranchFilesReadPayload = z.infer<typeof BranchFilesReadPayloadSchema>;
 
+export const BranchFilesWritePayloadSchema = BasePayloadSchema.extend({
+  command: z.literal('branch.files.write'),
+  sessionToken: z.string(),
+  params: z.object({
+    branchId: z.string().uuid(),
+    filePath: z.string().min(1),
+    content: z.string().max(1024 * 1024),
+    expectedLastModified: z.string().datetime(),
+  }),
+});
+
+export type BranchFilesWritePayload = z.infer<typeof BranchFilesWritePayloadSchema>;
+
 export const BranchFilesystemStatusPayloadSchema = BasePayloadSchema.extend({
   command: z.literal('branch.filesystem.status'),
   sessionToken: z.string(),
@@ -833,6 +846,7 @@ const ExecutorPayloadUnionSchema = z.discriminatedUnion('command', [
   BranchFilesListPayloadSchema,
   BranchFilesBrowsePayloadSchema,
   BranchFilesReadPayloadSchema,
+  BranchFilesWritePayloadSchema,
   BranchFilesystemStatusPayloadSchema,
   BranchArtifactPublishPayloadSchema,
   BranchArtifactLandPayloadSchema,
@@ -912,6 +926,7 @@ export function getSupportedCommands(): string[] {
     'branch.files.list',
     'branch.files.browse',
     'branch.files.read',
+    'branch.files.write',
     'branch.filesystem.status',
     'branch.artifact.publish',
     'branch.artifact.land',

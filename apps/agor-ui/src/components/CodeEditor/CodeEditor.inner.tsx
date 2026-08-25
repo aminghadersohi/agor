@@ -23,7 +23,7 @@ import type React from 'react';
 import { useMemo } from 'react';
 import { useTheme } from '../../contexts/ThemeContext';
 
-export type CodeEditorLanguage = 'json' | 'yaml' | 'markdown';
+export type CodeEditorLanguage = 'text' | 'json' | 'yaml' | 'markdown';
 
 export interface CodeEditorInnerProps {
   value: string;

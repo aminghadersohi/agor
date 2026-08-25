@@ -23,6 +23,9 @@ import type {
   CloneRepositoryResult,
   CreateAgenticToolPreset,
   CreateSessionInput,
+  FileDetail,
+  FileListItem,
+  FilePatchData,
   GatewayChannel,
   GatewayChannelCreateData,
   GatewayChannelPatchData,
@@ -201,6 +204,13 @@ export interface TemplatesService {
   create(data: TemplateRenderRequest, params?: Params): Promise<TemplateRenderResponse>;
 }
 
+export interface FilesService {
+  find(params?: Params): Promise<FileListItem[]>;
+  findAll(params?: Params): Promise<FileListItem[]>;
+  get(id: string, params?: Params): Promise<FileDetail>;
+  patch(id: string, data: FilePatchData, params?: Params): Promise<FileDetail>;
+}
+
 /**
  * Service interfaces for type safety
  */
@@ -215,6 +225,7 @@ export interface ServiceTypes {
   branches: Branch;
   schedules: Schedule;
   'gateway-channels': GatewayChannel;
+  file: FileDetail;
   users: User;
   groups: Group;
   'group-memberships': GroupMembership;
@@ -758,6 +769,7 @@ export interface AgorClient
   service(path: 'boards'): BoardsService;
   service(path: 'schedules'): SchedulesService;
   service(path: 'gateway-channels'): GatewayChannelsService;
+  service(path: 'file'): FilesService;
   service(path: 'kb/settings'): KnowledgeSettingsService;
   service(path: 'kb/indexing/status'): KnowledgeIndexingStatusService;
   service(path: 'kb/indexing/reindex'): KnowledgeReindexService;
