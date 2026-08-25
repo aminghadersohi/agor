@@ -1847,6 +1847,11 @@ export async function registerMCPServices(
       resourceUri: effectiveMcpUrl,
       compatibilityMode: effectiveCompatibilityMode,
       dcrMode: effectiveDcrMode,
+      // Callback transport is a deployment choice, independent of database
+      // durability. Local PostgreSQL still uses the native-app loopback flow,
+      // while `allowLocalhostHttp` below remains false so OAuth provider
+      // metadata/token egress cannot target daemon-local services.
+      allowLoopbackRedirectUri: ctx.config.daemon?.mcp_oauth_callback_mode !== 'public',
       allowLocalhostHttp: !durableOAuthFlows,
     });
 
