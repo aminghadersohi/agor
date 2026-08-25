@@ -29,7 +29,9 @@ import {
   DownOutlined,
   EditOutlined,
   EllipsisOutlined,
+  ExpandOutlined,
   InboxOutlined,
+  MessageOutlined,
   PushpinFilled,
   PushpinOutlined,
   RobotOutlined,
@@ -343,6 +345,8 @@ PromptInput.displayName = 'PromptInput';
 // a fresh array — the memos deriving footer props from `tasks` (and through
 // them the memoized SessionFooter) key on its identity.
 const EMPTY_TASKS: Task[] = [];
+const SIMPLE_CHAT_STORAGE_KEY = 'agor.session.simple-chat';
+
 export interface SessionPanelProps {
   client: AgorClient | null;
   session: Session | null;
@@ -373,6 +377,24 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   const { showSuccess, showInfo, showError } = useThemedMessage();
   const connectionDisabled = useConnectionDisabled();
   const recenterMap = useRecenterMap();
+  const [simpleChat, setSimpleChat] = React.useState(() => {
+    try {
+      return localStorage.getItem(SIMPLE_CHAT_STORAGE_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const toggleSimpleChat = React.useCallback(() => {
+    setSimpleChat((current) => {
+      const next = !current;
+      try {
+        localStorage.setItem(SIMPLE_CHAT_STORAGE_KEY, String(next));
+      } catch {
+        // Storage can be unavailable in privacy-restricted browser contexts.
+      }
+      return next;
+    });
+  }, []);
 
   // Subscribe only to the entity families this panel needs via narrow store
   // selectors. SessionPanel intentionally does NOT subscribe to live (sessions
@@ -1487,6 +1509,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       onPermissionModeChange={stableFooterHandlers.onPermissionModeChange}
       onCodexPermissionChange={stableFooterHandlers.onCodexPermissionChange}
       promptInputSlot={promptInputSlot}
+      simple={simpleChat}
     />
   ) : null;
 
@@ -1540,7 +1563,11 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
               <ToolIcon tool={session.agentic_tool} size={24} />
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              {editingTitle ? (
+              {simpleChat ? (
+                <Typography.Text strong ellipsis style={{ fontSize: token.fontSizeLG }}>
+                  {getSessionDisplayTitle(session, { includeAgentFallback: true })}
+                </Typography.Text>
+              ) : editingTitle ? (
                 <Input
                   ref={titleInputRef}
                   value={titleDraft}
@@ -1612,9 +1639,11 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
               )}
               <Flex align="center" gap={token.marginXXS} wrap>
                 <Badge status={getStatusColor()} />
-                <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                  {getSessionStatusLabel(session.status)}
-                </Typography.Text>
+                {!simpleChat && (
+                  <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                    {getSessionStatusLabel(session.status)}
+                  </Typography.Text>
+                )}
                 {isFrontDesk && (
                   <Tooltip title="Messages addressed to this teammate by name reach this session">
                     <Tag
@@ -1626,7 +1655,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
                     </Tag>
                   </Tooltip>
                 )}
-                {session.created_by && session.created_by !== currentUserId && (
+                {!simpleChat && session.created_by && session.created_by !== currentUserId && (
                   <>
                     <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                       ·
@@ -1645,26 +1674,52 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             </div>
           </div>
           <Space size={4}>
-            <SessionAttachmentsDropdown items={attachmentItems} />
-            <Dropdown menu={{ items: moreMenuItems }} trigger={['click']} placement="bottomRight">
-              <Tooltip title="More actions">
+            {simpleChat && (
+              <Tooltip title="Show full session details">
                 <Button
                   type="text"
-                  aria-label="More actions"
-                  icon={<EllipsisOutlined />}
+                  aria-label="Show full session details"
+                  icon={<ExpandOutlined />}
+                  onClick={toggleSimpleChat}
                   style={mobileHeaderButtonStyle}
                 />
               </Tooltip>
-            </Dropdown>
-            <Tooltip title="Search session">
-              <Button
-                type="text"
-                aria-label="Search session"
-                icon={<SearchOutlined />}
-                onClick={openSearch}
-                style={mobileHeaderButtonStyle}
-              />
-            </Tooltip>
+            )}
+            {!simpleChat && <SessionAttachmentsDropdown items={attachmentItems} />}
+            {!simpleChat && (
+              <Dropdown menu={{ items: moreMenuItems }} trigger={['click']} placement="bottomRight">
+                <Tooltip title="More actions">
+                  <Button
+                    type="text"
+                    aria-label="More actions"
+                    icon={<EllipsisOutlined />}
+                    style={mobileHeaderButtonStyle}
+                  />
+                </Tooltip>
+              </Dropdown>
+            )}
+            {!simpleChat && (
+              <Tooltip title="Search session">
+                <Button
+                  type="text"
+                  aria-label="Search session"
+                  icon={<SearchOutlined />}
+                  onClick={openSearch}
+                  style={mobileHeaderButtonStyle}
+                />
+              </Tooltip>
+            )}
+            {!simpleChat && (
+              <Tooltip title="Focus chat">
+                <Button
+                  type="text"
+                  aria-label="Focus chat"
+                  icon={<MessageOutlined />}
+                  onClick={toggleSimpleChat}
+                  style={mobileHeaderButtonStyle}
+                />
+              </Tooltip>
+            )}
             {/* Desktop closes from the right; mobile closes from the leading X above. */}
             {!isMobileShell && (
               <Tooltip title="Close Panel">
@@ -1682,6 +1737,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
         {/* Row 2: search bar — always in DOM, animates in/out */}
         <div
           style={{
+            display: simpleChat ? 'none' : undefined,
             overflow: 'hidden',
             maxHeight: searchOpen ? '36px' : '0px',
             opacity: searchOpen ? 1 : 0,
@@ -1753,7 +1809,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
           overflowY: 'auto',
           display: 'flex',
           flexDirection: 'column',
-          padding: `${token.sizeUnit * 3}px ${token.sizeUnit * 6}px 0`,
+          padding: simpleChat
+            ? `${token.sizeUnit * 2}px ${token.sizeUnit * 4}px 0`
+            : `${token.sizeUnit * 3}px ${token.sizeUnit * 6}px 0`,
           position: 'relative',
         }}
       >
@@ -1840,6 +1898,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             onSpawnModalConfirm={handleSpawnModalConfirm}
             inputValueRef={inputValueRef}
             isOpen={open}
+            simple={simpleChat}
           />
         </div>
 
