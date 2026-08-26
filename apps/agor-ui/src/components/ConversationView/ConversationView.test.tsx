@@ -190,6 +190,30 @@ describe('ConversationView auto-scroll integration', () => {
     expect(mockScrollToBottom).toHaveBeenCalledTimes(1);
   });
 
+  it('bounds the initial mobile transcript and reveals older tasks on demand', () => {
+    const tasks = Array.from({ length: 75 }, (_, index) =>
+      makeTask(`task-${index + 1}`, `prompt ${index + 1}`)
+    );
+    const state = makeState({ sessionId: 'long-session', loading: false, tasks });
+    mockUseSharedReactiveSession.mockImplementation(() => ({ handle: null, state }));
+
+    render(<ConversationView client={null} sessionId={'long-session' as any} compact />);
+
+    expect(screen.queryByTestId('task-task-1')).not.toBeInTheDocument();
+    expect(screen.getByTestId('task-task-26')).toBeInTheDocument();
+    expect(screen.getByTestId('task-task-75')).toBeInTheDocument();
+
+    const scroller = screen.getByTestId('conversation-scroll-container');
+    Object.defineProperty(scroller, 'scrollHeight', {
+      configurable: true,
+      get: () => screen.queryAllByTestId(/^task-task-/).length * 100,
+    });
+    scroller.scrollTop = 200;
+    fireEvent.click(screen.getByRole('button', { name: 'Show 25 earlier tasks' }));
+    expect(screen.getByTestId('task-task-1')).toBeInTheDocument();
+    expect(scroller.scrollTop).toBe(2700);
+  });
+
   it('keeps every task expanded and forwards conversation-first mode', () => {
     const tasks = [makeTask('task-1', 'first task'), makeTask('task-2', 'latest task')];
     const state = makeState({ loading: false, tasks });
