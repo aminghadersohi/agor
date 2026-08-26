@@ -140,7 +140,10 @@ export const SessionPage: React.FC<SessionPageProps> = ({
       <div
         style={{
           flex: 1,
-          overflowY: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+          minHeight: 0,
           minWidth: 0,
           paddingInline: 8,
           paddingBottom: 80, // Space for fixed input
