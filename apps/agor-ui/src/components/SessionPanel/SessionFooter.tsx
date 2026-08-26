@@ -112,6 +112,8 @@ export interface SessionFooterProps {
   onCodexPermissionChange: (sandbox: CodexSandboxMode, approval: CodexApprovalPolicy) => void;
   // Prompt textarea rendered between the two bars
   promptInputSlot: React.ReactNode;
+  /** Minimal composer presentation for conversation-first mode. */
+  simple?: boolean;
 }
 
 // Memoized: the panel re-renders once per animation frame while its session
@@ -159,6 +161,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   onPermissionModeChange,
   onCodexPermissionChange,
   promptInputSlot,
+  simple = false,
 }) => {
   const managedByPreset = Boolean(session.agentic_tool_preset_id);
   const supportsLiveEffort = Boolean(toolCaps?.reasoningEffortLevels?.length);
@@ -1325,13 +1328,13 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
         flexShrink: 0,
         background: token.colorBgContainer,
         borderTop: `1px solid ${token.colorBorder}`,
-        padding: `${token.sizeUnit * 2}px ${token.sizeUnit * 6}px ${token.sizeUnit * 3}px`,
-        marginLeft: -token.sizeUnit * 6,
-        marginRight: -token.sizeUnit * 6,
+        padding: `${token.sizeUnit * 2}px ${token.sizeUnit * (simple ? 4 : 6)}px ${token.sizeUnit * 3}px`,
+        marginLeft: -token.sizeUnit * (simple ? 4 : 6),
+        marginRight: -token.sizeUnit * (simple ? 4 : 6),
       }}
     >
       {/* Context window gradient overlay */}
-      {footerGradient && (
+      {!simple && footerGradient && (
         <div
           style={{
             position: 'absolute',
@@ -1358,7 +1361,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
           pinnedChips.includes('session-ids')) && (
           <div
             style={{
-              display: 'flex',
+              display: simple ? 'none' : 'flex',
               gap: token.sizeUnit,
               alignItems: 'center',
               marginBottom: token.sizeUnit * 2,
@@ -1598,7 +1601,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
           }}
         >
           {/* Left group */}
-          <Space size={4}>
+          <Space size={4} style={{ display: simple ? 'none' : undefined }}>
             {pinnedItems.includes('upload') && (
               <Tooltip
                 title={

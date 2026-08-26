@@ -137,6 +137,9 @@ export interface ConversationViewProps {
 
   /** Use the denser, full-width task treatment for phone-sized session routes. */
   compact?: boolean;
+
+  /** Hide operational detail and keep the transcript conversation-first. */
+  simple?: boolean;
 }
 
 export const ConversationView = React.memo<ConversationViewProps>(
@@ -159,6 +162,7 @@ export const ConversationView = React.memo<ConversationViewProps>(
     forceExpandAll = false,
     onOpenAgenticToolSettings,
     compact = false,
+    simple = false,
   }) => {
     const { token } = theme.useToken();
     const [copied, copy] = useCopyToClipboard();
@@ -482,7 +486,7 @@ export const ConversationView = React.memo<ConversationViewProps>(
       >
         <div ref={contentRef}>
           {/* Genealogy Banner */}
-          <GenealogyBanner />
+          {!simple && <GenealogyBanner />}
 
           {/* Task-organized conversation */}
           {tasks.map((task, taskIndex) => (
@@ -493,7 +497,7 @@ export const ConversationView = React.memo<ConversationViewProps>(
               sessionModel={sessionModel}
               userById={userById}
               currentUserId={currentUserId}
-              isExpanded={forceExpandAll || expandedTaskIds.has(task.task_id)}
+              isExpanded={simple || forceExpandAll || expandedTaskIds.has(task.task_id)}
               onExpandChange={handleTaskExpandChange}
               sessionId={sessionId}
               onPermissionDecision={onPermissionDecision}
@@ -512,6 +516,7 @@ export const ConversationView = React.memo<ConversationViewProps>(
               client={client}
               onOpenAgenticToolSettings={onOpenAgenticToolSettings}
               compact={compact}
+              simple={simple}
             />
           ))}
         </div>

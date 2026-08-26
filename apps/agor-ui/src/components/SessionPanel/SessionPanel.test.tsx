@@ -241,6 +241,22 @@ describe('SessionPanel search control', () => {
     fireEvent.keyDown(searchInput, { key: 'Escape' });
     expect(getSearchRow()).toHaveStyle({ maxHeight: '0px' });
   });
+
+  it('toggles a remembered conversation-first view without losing the session', () => {
+    localStorage.removeItem('agor.session.simple-chat');
+    renderPanel();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Focus chat' }));
+
+    expect(screen.getByText('Session content')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Search session' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Show full session details' })).toBeVisible();
+    expect(localStorage.getItem('agor.session.simple-chat')).toBe('true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show full session details' }));
+    expect(screen.getByRole('button', { name: 'Focus chat' })).toBeVisible();
+    expect(localStorage.getItem('agor.session.simple-chat')).toBe('false');
+  });
 });
 
 describe('SessionPanel historical runtime handling and terminal actions', () => {
