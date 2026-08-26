@@ -2220,9 +2220,10 @@ describe('SQLite saved-row OAuth authority', () => {
     const harness = await createHarness(provider);
     databases.push(harness.rawDb);
     const issuedAt = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(issuedAt);
     const request = await reserveBrowserEvent(harness, 'discover');
     const before = provider.requests.length;
-    const clock = vi.spyOn(Date, 'now').mockReturnValue(issuedAt + 60_001);
+    clock.mockReturnValue(issuedAt + 60_001);
     try {
       await expect(
         harness.app.service('mcp-servers/discover').create(
@@ -2245,6 +2246,7 @@ describe('SQLite saved-row OAuth authority', () => {
     const harness = await createHarness(provider);
     databases.push(harness.rawDb);
     const issuedAt = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(issuedAt);
     const request = await reserveBrowserEvent(harness, 'test-oauth');
     const before = provider.requests.length;
     const lookupStarted = deferred<void>();
@@ -2261,7 +2263,7 @@ describe('SQLite saved-row OAuth authority', () => {
         }
         return originalFindById.call(this, id);
       });
-    const clock = vi.spyOn(Date, 'now').mockReturnValue(issuedAt + 59_999);
+    clock.mockReturnValue(issuedAt + 59_999);
     try {
       const test = harness.app.service('mcp-servers/test-oauth').create(
         {
@@ -2296,6 +2298,8 @@ describe('SQLite saved-row OAuth authority', () => {
       const harness = await createHarness(provider);
       databases.push(harness.rawDb);
       const issuedAt = Date.now();
+      const clock =
+        transition === 'expiry' ? vi.spyOn(Date, 'now').mockReturnValue(issuedAt) : undefined;
       const request = await reserveBrowserEvent(harness, 'discover');
       const lookupStarted = deferred<void>();
       const releaseLookup = deferred<void>();
@@ -2315,10 +2319,7 @@ describe('SQLite saved-row OAuth authority', () => {
           }
           return originalGetToken.apply(this, args);
         });
-      const clock =
-        transition === 'expiry'
-          ? vi.spyOn(Date, 'now').mockReturnValue(issuedAt + 59_999)
-          : undefined;
+      clock?.mockReturnValue(issuedAt + 59_999);
       try {
         const discover = harness.app.service('mcp-servers/discover').create(
           {
@@ -2382,8 +2383,9 @@ describe('SQLite saved-row OAuth authority', () => {
     });
     databases.push(harness.rawDb);
     const issuedAt = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(issuedAt);
     const request = await reserveBrowserEvent(harness, 'discover');
-    const clock = vi.spyOn(Date, 'now').mockReturnValue(issuedAt + 59_999);
+    clock.mockReturnValue(issuedAt + 59_999);
     try {
       const discover = harness.app.service('mcp-servers/discover').create(
         {
@@ -2475,8 +2477,9 @@ describe('SQLite saved-row OAuth authority', () => {
       },
     });
     const issuedAt = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(issuedAt);
     const request = await reserveBrowserEvent(harness, 'discover');
-    const clock = vi.spyOn(Date, 'now').mockReturnValue(issuedAt + 59_999);
+    clock.mockReturnValue(issuedAt + 59_999);
     try {
       const discover = harness.app.service('mcp-servers/discover').create(
         {
