@@ -73,7 +73,14 @@ async function currentCompletionContext(ctx: McpContext): Promise<{
   const sessionTasks = await runWithMcpTenantDatabaseScope(ctx, (db) =>
     new TaskRepository(db).findBySession(session.session_id)
   );
-  const task = sessionTasks.findLast(isTaskExecuting);
+  let task: (typeof sessionTasks)[number] | undefined;
+  for (let index = sessionTasks.length - 1; index >= 0; index -= 1) {
+    const candidate = sessionTasks[index];
+    if (candidate && isTaskExecuting(candidate)) {
+      task = candidate;
+      break;
+    }
+  }
   if (!task) {
     throw new Error(
       'The current session has no executing task to associate with completion propagation'
