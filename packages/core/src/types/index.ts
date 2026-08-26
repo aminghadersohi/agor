@@ -9,6 +9,7 @@ export * from './board';
 export * from './board-comment';
 export * from './branch';
 export * from './card';
+export * from './completion-subscription';
 export * from './context';
 export * from './feathers';
 export * from './file';
