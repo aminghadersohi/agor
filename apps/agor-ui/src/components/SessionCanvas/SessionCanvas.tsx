@@ -53,7 +53,9 @@ import {
   type Edge,
   MiniMap,
   type Node,
+  type NodeChange,
   type NodeDragHandler,
+  type NodeSelectionChange,
   ReactFlow,
   type ReactFlowInstance,
   useEdgesState,
@@ -1751,11 +1753,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
     // Intercept onNodesChange to detect resize events
     const onNodesChange = useCallback(
-      // biome-ignore lint/suspicious/noExplicitAny: React Flow change event types are not exported
-      (changes: any) => {
+      (changes: NodeChange[]) => {
         let effectiveChanges = changes;
-        // biome-ignore lint/suspicious/noExplicitAny: React Flow change event types are not exported
-        const incomingSelectChanges = changes.filter((c: any) => c.type === 'select');
+        const incomingSelectChanges = changes.filter(
+          (change): change is NodeSelectionChange => change.type === 'select'
+        );
         if (incomingSelectChanges.length > 0) {
           const currentNodes =
             typeof reactFlowInstanceRef.current?.getNodes === 'function'
@@ -1779,21 +1781,23 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             }
           }
           effectiveChanges = [
-            ...changes.filter((change) => change.type !== 'select'),
+            ...changes.filter(
+              (change): change is Exclude<NodeChange, NodeSelectionChange> =>
+                change.type !== 'select'
+            ),
             ...selectChangeById.values(),
           ];
         }
-        // biome-ignore lint/suspicious/noExplicitAny: React Flow change event types are not exported
-        const selectChanges = effectiveChanges.filter((c: any) => c.type === 'select');
+        const selectChanges = effectiveChanges.filter(
+          (change): change is NodeSelectionChange => change.type === 'select'
+        );
         if (selectChanges.length > 0) {
           setNodes((currentNodes) => {
-            // biome-ignore lint/suspicious/noExplicitAny: React Flow change event types are not exported
-            const zoneSelectById = new Map(selectChanges.map((c: any) => [c.id, c]));
+            const zoneSelectById = new Map(selectChanges.map((change) => [change.id, change]));
             let changed = false;
             const nextNodes = currentNodes.map((n) => {
               if (n.type !== 'zone') return n;
-              // biome-ignore lint/suspicious/noExplicitAny: React Flow change event types are not exported
-              const change = zoneSelectById.get(n.id) as any;
+              const change = zoneSelectById.get(n.id);
               if (!change) return n;
 
               // Bump above the zone's own base order while selected; restore the
@@ -1814,8 +1818,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         }
 
         // Detect resize by checking for dimensions changes
-        // biome-ignore lint/suspicious/noExplicitAny: React Flow change event types are not exported
-        effectiveChanges.forEach((change: any) => {
+        effectiveChanges.forEach((change) => {
           if (change.type === 'dimensions' && change.dimensions) {
             // O(1) lookup against React Flow's internal node map. Avoids both the
             // old per-event `nodes.find()` scan AND a per-nodes-change Map rebuild:
