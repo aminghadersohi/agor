@@ -1639,8 +1639,8 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
           }}
         >
           {/* Left group */}
-          <Space size={4} style={{ display: simple ? 'none' : undefined }}>
-            {barPinnedItems.includes('upload') && (
+          <Space size={4}>
+            {!simple && barPinnedItems.includes('upload') && (
               <Tooltip
                 title={
                   composerAttachmentUploading
@@ -1663,7 +1663,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                 />
               </Tooltip>
             )}
-            {barPinnedItems.includes('advanced-upload') && (
+            {!simple && barPinnedItems.includes('advanced-upload') && (
               <Tooltip
                 title={
                   composerAttachmentUploading
@@ -1685,48 +1685,54 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                 />
               </Tooltip>
             )}
-            {barPinnedItems.includes('fork') && toolCaps?.supportsSessionFork !== false && (
-              <Tooltip title={connectionDisabled ? 'Disconnected from daemon' : 'Fork Session'}>
-                <Button
-                  size={actionSize}
-                  style={touchActionStyle}
-                  type="text"
-                  aria-label="Fork session"
-                  icon={<ForkOutlined />}
-                  onClick={onFork}
-                  disabled={forkDisabled}
-                  data-testid="fork-bar-btn"
-                />
-              </Tooltip>
-            )}
+            {!simple &&
+              barPinnedItems.includes('fork') &&
+              toolCaps?.supportsSessionFork !== false && (
+                <Tooltip title={connectionDisabled ? 'Disconnected from daemon' : 'Fork Session'}>
+                  <Button
+                    size={actionSize}
+                    style={touchActionStyle}
+                    type="text"
+                    aria-label="Fork session"
+                    icon={<ForkOutlined />}
+                    onClick={onFork}
+                    disabled={forkDisabled}
+                    data-testid="fork-bar-btn"
+                  />
+                </Tooltip>
+              )}
             {/* Dynamically pinned items */}
-            {barPinnedItems.includes('btw-fork') && toolCaps?.supportsSessionFork !== false && (
-              <Tooltip title="BTW fork">
-                <Button
-                  size={actionSize}
-                  style={touchActionStyle}
-                  type="text"
-                  aria-label="Ask side question via BTW fork"
-                  icon={<QuestionCircleOutlined />}
-                  onClick={onBtwSend}
-                  disabled={btwForkDisabled}
-                  data-testid="btw-fork-bar-btn"
-                />
-              </Tooltip>
-            )}
-            {barPinnedItems.includes('spawn') && toolCaps?.supportsChildSpawn !== false && (
-              <Tooltip title="Spawn subsession">
-                <Button
-                  size={actionSize}
-                  style={touchActionStyle}
-                  type="text"
-                  aria-label="Spawn subsession"
-                  icon={<BranchesOutlined />}
-                  onClick={onSpawnOpen}
-                  disabled={spawnDisabled}
-                />
-              </Tooltip>
-            )}
+            {!simple &&
+              barPinnedItems.includes('btw-fork') &&
+              toolCaps?.supportsSessionFork !== false && (
+                <Tooltip title="BTW fork">
+                  <Button
+                    size={actionSize}
+                    style={touchActionStyle}
+                    type="text"
+                    aria-label="Ask side question via BTW fork"
+                    icon={<QuestionCircleOutlined />}
+                    onClick={onBtwSend}
+                    disabled={btwForkDisabled}
+                    data-testid="btw-fork-bar-btn"
+                  />
+                </Tooltip>
+              )}
+            {!simple &&
+              barPinnedItems.includes('spawn') &&
+              toolCaps?.supportsChildSpawn !== false && (
+                <Tooltip title="Spawn subsession">
+                  <Button
+                    size={actionSize}
+                    style={touchActionStyle}
+                    type="text"
+                    aria-label="Spawn subsession"
+                    icon={<BranchesOutlined />}
+                    onClick={onSpawnOpen}
+                    disabled={spawnDisabled}
+                  />
+                </Tooltip>
+              )}
             {isMobile ? (
               moreButton
             ) : (
