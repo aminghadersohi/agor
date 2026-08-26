@@ -171,8 +171,8 @@ export function TeammateStage({ name, imageUrl, emoji = '🤖', active = true }:
         antialias: true,
         powerPreference: 'high-performance',
       } as const;
-      const context =
-        canvas.getContext('webgl2', contextOptions) ?? canvas.getContext('webgl', contextOptions);
+      const context = (canvas.getContext('webgl2', contextOptions) ??
+        canvas.getContext('webgl', contextOptions)) as WebGLRenderingContext | null;
       if (!context) {
         if (!disposed) setStatus('fallback');
         return;
