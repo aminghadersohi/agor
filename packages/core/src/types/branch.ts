@@ -817,6 +817,8 @@ export interface TeammateConfig {
   displayName: string;
   /** Emoji icon for this teammate (e.g., "🧑‍💻") */
   emoji?: string;
+  /** Primary image in this teammate's tenant-owned profile gallery. */
+  profileImageId?: import('./profile-image').ProfileImageID;
   /** Template repo slug this teammate was created from */
   frameworkRepo?: string;
   /** Framework version at creation time, for upgrade detection */

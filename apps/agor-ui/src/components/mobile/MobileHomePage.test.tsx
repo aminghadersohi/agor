@@ -21,6 +21,7 @@ describe('MobileHomePage', () => {
     render(
       <MemoryRouter>
         <MobileHomePage
+          client={null}
           user={{ user_id: 'user-1', name: 'Amin' } as User}
           boardById={
             new Map([

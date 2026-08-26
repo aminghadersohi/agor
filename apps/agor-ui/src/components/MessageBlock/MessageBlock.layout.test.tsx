@@ -4,6 +4,30 @@ import { describe, expect, it, vi } from 'vitest';
 import { MessageBlock } from './MessageBlock';
 
 describe('MessageBlock layout', () => {
+  it('prefers the teammate profile photo over the emoji fallback', () => {
+    const message = {
+      message_id: 'message-agent-photo',
+      session_id: 'session-1',
+      type: 'message',
+      role: 'assistant',
+      index: 0,
+      timestamp: '2026-07-23T00:00:00.000Z',
+      content: 'Profile photo response',
+      content_preview: 'Profile photo response',
+    } as unknown as Message;
+
+    render(
+      <MessageBlock
+        message={message}
+        teammateEmoji="🧭"
+        teammateAvatarUrl="blob:private-teammate-photo"
+      />
+    );
+
+    expect(screen.getByRole('img')).toHaveAttribute('src', 'blob:private-teammate-photo');
+    expect(screen.queryByText('🧭')).not.toBeInTheDocument();
+  });
+
   it('lets a user bubble shrink around intrinsically wide markdown', () => {
     const message = {
       message_id: 'message-1',

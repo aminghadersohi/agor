@@ -18,6 +18,7 @@ import { HomeActivitySection } from './HomeActivitySection';
 import { HomeBoardsSection } from './HomeBoardsSection';
 import { HomeChatWorkspaceNav } from './HomeChatWorkspaceNav';
 import { HomeKnowledgeSection } from './HomeKnowledgeSection';
+import { HomeSchedulesSection } from './HomeSchedulesSection';
 import { HomeSessionsSection } from './HomeSessionsSection';
 import { HomeStatsBar } from './HomeStatsBar';
 import { HomeTeammateChatsSection } from './HomeTeammateChatsSection';
@@ -378,6 +379,12 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
               <HomeSessionsSection
                 currentUserId={props.currentUserId}
                 onSessionClick={props.onSessionClick}
+              />
+
+              <HomeSchedulesSection
+                client={props.client}
+                currentUserId={props.currentUserId}
+                onBranchClick={props.onBranchClick}
               />
 
               {/* Boards grid */}

@@ -145,6 +145,7 @@ import {
   deliverPermissionDecision,
   type PermissionDecisionSubmission,
 } from './permissions/deliver-permission-decision.js';
+import { registerProfileImageRoutes } from './profile-image-routes.js';
 import { publicBoardCommentRepositionInput } from './services/board-comments.js';
 import type { GatewayService } from './services/gateway.js';
 import { createMCPCatalogConnectService } from './services/mcp-catalog-connect.js';
@@ -2718,6 +2719,14 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   const uploadAuthMiddleware = createUploadAuthMiddleware({
     authentication: app.service('authentication'),
     multiTenancy,
+  });
+
+  registerProfileImageRoutes({
+    app,
+    db,
+    authMiddleware: uploadAuthMiddleware,
+    branchRbacEnabled,
+    allowSuperadmin: superadminOpts.allowSuperadmin,
   });
 
   // biome-ignore lint/suspicious/noExplicitAny: Express route method not on FeathersJS Application type

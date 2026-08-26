@@ -8,7 +8,7 @@ import type {
   User,
 } from '@agor-live/client';
 import { getTeammateConfig, isTeammate } from '@agor-live/client';
-import { LeftOutlined, RobotOutlined } from '@ant-design/icons';
+import { LeftOutlined } from '@ant-design/icons';
 import {
   Alert,
   Badge,
@@ -42,6 +42,7 @@ import { BranchMetadataRow } from '../BranchMetadataRow';
 import type { BranchModalTab } from '../BranchModal';
 import { CommentsPanel } from '../CommentsPanel';
 import { MarkdownRenderer } from '../MarkdownRenderer';
+import { TeammateIdentityAvatar } from '../TeammateIdentityAvatar';
 
 export type BoardTeammatePanelTab = 'teammate' | 'all-sessions' | 'all-branches' | 'comments';
 
@@ -381,10 +382,8 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
               >
                 {isCreating ? (
                   <Spin />
-                ) : teammateConfig?.emoji ? (
-                  <span style={{ fontSize: 30 }}>{teammateConfig.emoji}</span>
                 ) : (
-                  <RobotOutlined style={{ fontSize: 30, color: token.colorInfo }} />
+                  <TeammateIdentityAvatar branch={primaryTeammateBranch} size={36} />
                 )}
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
