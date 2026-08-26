@@ -913,10 +913,8 @@ export async function fetchAuthorizationServerMetadata(
     }
     options.assertCurrent?.();
     if (
-      compatibilityMode === 'strict'
-        ? metadata.issuer !== authServerUrl
-        : compatibilityMode === 'marketplace' &&
-          !oauthIssuerIdentifiersMatch(metadata.issuer, authServerUrl)
+      compatibilityMode !== 'legacy' &&
+      !oauthIssuerIdentifiersMatch(metadata.issuer, authServerUrl)
     ) {
       errors.push(`${label}: request failed`);
       continue;

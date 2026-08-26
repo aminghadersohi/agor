@@ -46,7 +46,7 @@ describe('register-services OAuth callback URL regression', () => {
     expect(codeOnly).toMatch(
       /allowLoopbackRedirectUri:\s*ctx\.config\.daemon\?\.mcp_oauth_callback_mode\s*!==\s*['"]public['"]/
     );
-    expect(codeOnly).toMatch(/allowLocalhostHttp:\s*!durableOAuthFlows/);
+    expect(codeOnly).toMatch(/allowLocalhostHttp:\s*!postgresOAuthDeployment/);
   });
 
   it('preserves tenant scope across unauthenticated OAuth callbacks', () => {
