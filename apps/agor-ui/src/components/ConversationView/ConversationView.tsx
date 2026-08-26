@@ -21,7 +21,7 @@ import type {
 import { shortId, TaskStatus } from '@agor-live/client';
 import { BranchesOutlined, CopyOutlined, ForkOutlined } from '@ant-design/icons';
 import { Alert, Button, Spin, Typography, theme } from 'antd';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { useStickToBottom } from 'use-stick-to-bottom';
 import { useSharedReactiveSession } from '../../hooks/useSharedReactiveSession';
 import { useStreamingMessagesByTask } from '../../hooks/useStreamingMessagesByTask';
@@ -38,6 +38,23 @@ const EMPTY_USER_MAP = new Map<string, User>();
 // reference for tasks whose messages haven't been loaded — otherwise `|| []`
 // would mint a fresh array on every render and thrash TaskBlock's React.memo.
 const EMPTY_MESSAGES: Message[] = [];
+const MAX_REMEMBERED_CONVERSATION_SCROLLS = 100;
+const rememberedConversationScrolls = new Map<
+  SessionID,
+  { atBottom: boolean; scrollTop: number }
+>();
+
+function rememberConversationScroll(
+  sessionId: SessionID,
+  value: { atBottom: boolean; scrollTop: number }
+): void {
+  rememberedConversationScrolls.delete(sessionId);
+  rememberedConversationScrolls.set(sessionId, value);
+  const oldest = rememberedConversationScrolls.keys().next().value;
+  if (rememberedConversationScrolls.size > MAX_REMEMBERED_CONVERSATION_SCROLLS && oldest) {
+    rememberedConversationScrolls.delete(oldest);
+  }
+}
 
 export interface ConversationViewProps {
   /**
@@ -140,6 +157,9 @@ export interface ConversationViewProps {
 
   /** Hide operational detail and keep the transcript conversation-first. */
   simple?: boolean;
+
+  /** Remember deliberate scroll-away positions while switching among workspace chats. */
+  rememberScrollPosition?: boolean;
 }
 
 export const ConversationView = React.memo<ConversationViewProps>(
@@ -163,6 +183,7 @@ export const ConversationView = React.memo<ConversationViewProps>(
     onOpenAgenticToolSettings,
     compact = false,
     simple = false,
+    rememberScrollPosition = false,
   }) => {
     const { token } = theme.useToken();
     const [copied, copy] = useCopyToClipboard();
@@ -243,11 +264,44 @@ export const ConversationView = React.memo<ConversationViewProps>(
     // mounts. handleScrollToBottom also clears the escape so the library's
     // persistent observer reliably follows lazy/streamed growth from there.
     const hasContent = tasks.length > 0;
-    useEffect(() => {
-      if (isActive && sessionId && hasContent) {
-        handleScrollToBottom();
+
+    // Capture the outgoing chat before React swaps its transcript DOM. We keep
+    // only in-memory viewport state: chats left at the tail reopen at the new
+    // tail, while a chat deliberately scrolled away from the bottom returns to
+    // that reading position. This avoids persisting session identifiers in the
+    // browser and bounds the cache for long-running workspaces.
+    useLayoutEffect(() => {
+      if (!rememberScrollPosition || !sessionId) return;
+      return () => {
+        const scroller = scrollRef.current;
+        if (!scroller) return;
+        rememberConversationScroll(sessionId, {
+          atBottom: state.isAtBottom && !state.escapedFromLock,
+          scrollTop: scroller.scrollTop,
+        });
+      };
+    }, [rememberScrollPosition, scrollRef, sessionId, state]);
+
+    useLayoutEffect(() => {
+      if (!isActive || !sessionId || !hasContent) return;
+      const remembered = rememberScrollPosition
+        ? rememberedConversationScrolls.get(sessionId)
+        : undefined;
+      if (remembered && !remembered.atBottom) {
+        stopScroll();
+        if (scrollRef.current) scrollRef.current.scrollTop = remembered.scrollTop;
+        return;
       }
-    }, [isActive, sessionId, hasContent, handleScrollToBottom]);
+      handleScrollToBottom();
+    }, [
+      handleScrollToBottom,
+      hasContent,
+      isActive,
+      rememberScrollPosition,
+      scrollRef,
+      sessionId,
+      stopScroll,
+    ]);
 
     const allStreamingMessages =
       currentReactiveState?.streamingMessages || EMPTY_STREAMING_MESSAGES;

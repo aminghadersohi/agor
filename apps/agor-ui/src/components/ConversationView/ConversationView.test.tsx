@@ -223,6 +223,98 @@ describe('ConversationView auto-scroll integration', () => {
     expect(mockScrollToBottom).toHaveBeenCalledTimes(1);
   });
 
+  it('restores a chat only when it was deliberately scrolled away from the tail', () => {
+    let state = makeState({
+      sessionId: 'remember-session-1',
+      loading: false,
+      tasks: [makeTask('task-1', 'a')],
+    });
+    mockUseSharedReactiveSession.mockImplementation(() => ({ handle: null, state }));
+
+    const { rerender } = render(
+      <ConversationView
+        client={null}
+        sessionId={'remember-session-1' as any}
+        rememberScrollPosition
+      />
+    );
+    const scroller = screen.getByTestId('conversation-scroll-container');
+    scroller.scrollTop = 320;
+    mockState.escapedFromLock = true;
+    mockState.isAtBottom = false;
+
+    state = makeState({
+      sessionId: 'remember-session-2',
+      loading: false,
+      tasks: [makeTask('task-2', 'b')],
+    });
+    rerender(
+      <ConversationView
+        client={null}
+        sessionId={'remember-session-2' as any}
+        rememberScrollPosition
+      />
+    );
+
+    mockState.escapedFromLock = false;
+    mockState.isAtBottom = true;
+    mockStopScroll.mockClear();
+    mockScrollToBottom.mockClear();
+    state = makeState({
+      sessionId: 'remember-session-1',
+      loading: false,
+      tasks: [makeTask('task-1', 'a')],
+    });
+    rerender(
+      <ConversationView
+        client={null}
+        sessionId={'remember-session-1' as any}
+        rememberScrollPosition
+      />
+    );
+
+    expect(mockStopScroll).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('conversation-scroll-container').scrollTop).toBe(320);
+    expect(mockScrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('reopens a chat left at the tail at its newest content', () => {
+    let state = makeState({
+      sessionId: 'tail-session-1',
+      loading: false,
+      tasks: [makeTask('task-1', 'a')],
+    });
+    mockUseSharedReactiveSession.mockImplementation(() => ({ handle: null, state }));
+    const { rerender } = render(
+      <ConversationView client={null} sessionId={'tail-session-1' as any} rememberScrollPosition />
+    );
+
+    mockState.escapedFromLock = false;
+    mockState.isAtBottom = true;
+    state = makeState({
+      sessionId: 'tail-session-2',
+      loading: false,
+      tasks: [makeTask('task-2', 'b')],
+    });
+    rerender(
+      <ConversationView client={null} sessionId={'tail-session-2' as any} rememberScrollPosition />
+    );
+
+    mockState.escapedFromLock = false;
+    mockState.isAtBottom = true;
+    mockScrollToBottom.mockClear();
+    state = makeState({
+      sessionId: 'tail-session-1',
+      loading: false,
+      tasks: [makeTask('task-3', 'newest')],
+    });
+    rerender(
+      <ConversationView client={null} sessionId={'tail-session-1' as any} rememberScrollPosition />
+    );
+
+    expect(mockScrollToBottom).toHaveBeenCalledTimes(1);
+  });
+
   it('does not scroll to the bottom while the view is inactive', () => {
     const state = makeState({ loading: false, tasks: [makeTask('task-1', 'a')] });
     mockUseSharedReactiveSession.mockImplementation(() => ({ handle: null, state }));
