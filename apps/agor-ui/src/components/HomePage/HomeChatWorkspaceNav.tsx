@@ -7,7 +7,8 @@ import {
 } from '@ant-design/icons';
 import type { TreeDataNode } from 'antd';
 import { Button, Empty, Flex, Tree, Typography, theme } from 'antd';
-import { useMemo } from 'react';
+import type { Key } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAgorStore } from '../../store/agorStore';
 import { selectBranchById, selectSessionById, selectUserById } from '../../store/selectors';
 import { getSessionDisplayTitle } from '../../utils/sessionTitle';
@@ -35,9 +36,15 @@ export function HomeChatWorkspaceNav({
   const userById = useAgorStore(selectUserById);
   const sessionById = useAgorStore(selectSessionById);
   const branchById = useAgorStore(selectBranchById);
-  const preferences = readTeammateChatPreferences(
-    currentUserId ? userById.get(currentUserId)?.preferences : undefined
+  const currentUserPreferences = currentUserId
+    ? userById.get(currentUserId)?.preferences
+    : undefined;
+  const preferences = useMemo(
+    () => readTeammateChatPreferences(currentUserPreferences),
+    [currentUserPreferences]
   );
+  const [expandedKeys, setExpandedKeys] = useState<Key[]>([]);
+  const initializedExpansion = useRef(false);
 
   const treeData = useMemo<TreeDataNode[]>(
     () =>
@@ -96,10 +103,23 @@ export function HomeChatWorkspaceNav({
       }),
     [branchById, preferences.collections, sessionById]
   );
-  const expandedKeys = treeData.flatMap((collection) => [
-    collection.key,
-    ...(collection.children ?? []).map((branch) => branch.key),
-  ]);
+  const initiallyExpandedKeys = useMemo(
+    () =>
+      treeData.flatMap((collection) => [
+        collection.key,
+        ...(collection.children ?? []).map((branch) => branch.key),
+      ]),
+    [treeData]
+  );
+  useEffect(() => {
+    if (treeData.length === 0) {
+      initializedExpansion.current = false;
+      setExpandedKeys([]);
+    } else if (!initializedExpansion.current) {
+      initializedExpansion.current = true;
+      setExpandedKeys(initiallyExpandedKeys);
+    }
+  }, [initiallyExpandedKeys, treeData.length]);
   const selectedKeys = activeSessionId
     ? treeData.flatMap((collection) =>
         (collection.children ?? []).flatMap((branch) =>
@@ -156,6 +176,7 @@ export function HomeChatWorkspaceNav({
             showLine={{ showLeafIcon: false }}
             treeData={treeData}
             expandedKeys={expandedKeys}
+            onExpand={setExpandedKeys}
             selectedKeys={selectedKeys}
             onSelect={(keys) => {
               const key = String(keys[0] ?? '');

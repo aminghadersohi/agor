@@ -75,5 +75,10 @@ describe('HomeChatWorkspaceNav', () => {
     fireEvent.click(screen.getByText('Release planning'));
 
     expect(onSessionClick).toHaveBeenCalledWith(alternateSession.session_id);
+
+    const collectionNode = screen.getByText('Support crew').closest('[role="treeitem"]');
+    expect(collectionNode).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(collectionNode!.querySelector('.ant-tree-switcher')!);
+    expect(collectionNode).toHaveAttribute('aria-expanded', 'false');
   });
 });

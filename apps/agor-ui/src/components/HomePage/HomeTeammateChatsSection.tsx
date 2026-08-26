@@ -97,8 +97,12 @@ export const HomeTeammateChatsSection: React.FC<
   const userById = useAgorStore(selectUserById);
   const sessionById = useAgorStore(selectSessionById);
   const branchById = useAgorStore(selectBranchById);
-  const preferences = readTeammateChatPreferences(
-    currentUserId ? userById.get(currentUserId)?.preferences : undefined
+  const currentUserPreferences = currentUserId
+    ? userById.get(currentUserId)?.preferences
+    : undefined;
+  const preferences = useMemo(
+    () => readTeammateChatPreferences(currentUserPreferences),
+    [currentUserPreferences]
   );
 
   const collections = useMemo(
