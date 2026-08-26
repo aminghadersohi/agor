@@ -3292,35 +3292,6 @@ export async function registerMCPServices(
               throw new Forbidden('Shared MCP OAuth grants can only be started by an admin');
             }
           }
-
-          // Resolve `{{ user.env.X }}` templates before they hit the
-          // authorization URL, so a saved server with a templated
-          // oauth_client_id / oauth_authorization_url doesn't send the literal
-          // `{{ user.env.X }}` text to the provider as `client_id` (providers
-          // like Google reject it with an opaque "malformed request" 400).
-          if (userId) {
-            const { resolveUserEnvironment } = await import('@agor/core/config');
-            const { resolveProbeServerTemplates } = await import('./utils/mcp-probe-templates.js');
-            const userEnv = await resolveUserEnvironment(userId as UserID, db);
-            const resolution = resolveProbeServerTemplates(
-              {
-                url: effectiveMcpUrl,
-                transport: savedServer?.transport,
-                auth: savedServer?.auth,
-                mcpServerId: savedServer?.mcp_server_id,
-                name: savedServer?.name,
-              },
-              userEnv
-            );
-            if (!resolution.ok) {
-              return { success: false, error: resolution.error };
-            }
-            authorizationUrlOverride = resolution.resolved.auth?.oauth_authorization_url;
-            tokenUrlOverride = resolution.resolved.auth?.oauth_token_url;
-            clientIdFromConfig = resolution.resolved.auth?.oauth_client_id;
-            clientSecretOverride = resolution.resolved.auth?.oauth_client_secret;
-            scopeOverride = resolution.resolved.auth?.oauth_scope;
-          }
         }
 
         let probeResponse = await oauthFetch(effectiveMcpUrl, {
