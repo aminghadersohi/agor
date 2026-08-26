@@ -29,6 +29,7 @@ import {
   KnowledgeNamespaceRepository,
   runWithTenantDatabaseScope,
   runWithTenantDatabaseTransaction,
+  shortId,
   TaskRepository,
   type TenantScopeAwareDatabase,
   type TenantScopedDatabase,
@@ -1044,6 +1045,50 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
   }
 
   /**
+   * Discard a provisioning acknowledgement from an attempt that has since been
+   * superseded.
+   *
+   * `git.branch.add` is fire-and-forget and can be slow. If a user retries while
+   * an older attempt is still running, that older executor will eventually patch
+   * its own outcome — `ready` or `failed` — and without a fence it would land on
+   * the *newer* attempt: reporting a stale success as ready, or failing a
+   * healthy in-flight materialization. `filesystem_status` alone can't catch
+   * this; it says an attempt is in flight, not which one.
+   *
+   * Each dispatch carries a generation id, echoed back here. When it no longer
+   * matches the row, only the provisioning fields are dropped — any real work
+   * product on the same patch (unix group, rendered templates) still applies,
+   * since those are attempt-independent.
+   *
+   * Backward compatible: an ack with no generation (older executor, or a path
+   * that never dispatched one) is left alone rather than rejected.
+   */
+  private dropSupersededProvisioningAck(
+    currentBranch: Branch,
+    data: Partial<Branch>,
+    id: BranchID
+  ): Partial<Branch> {
+    const ackAttemptId = data.provisioning_attempt_id;
+    if (!ackAttemptId || data.filesystem_status === undefined) {
+      return data;
+    }
+    const currentAttemptId = currentBranch.provisioning_attempt_id;
+    if (!currentAttemptId || currentAttemptId === ackAttemptId) {
+      return data;
+    }
+    console.warn(
+      `[branch-provisioning ${shortId(id)}] discarding '${data.filesystem_status}' ack from superseded attempt ${shortId(ackAttemptId)} (current attempt is ${shortId(currentAttemptId)})`
+    );
+    const {
+      filesystem_status: _status,
+      error_message: _error,
+      provisioning_attempt_id: _attempt,
+      ...rest
+    } = data;
+    return rest;
+  }
+
+  /**
    * Override patch to handle board_objects when board_id changes.
    *
    * Schedule config lives on the `schedules` table now (see
@@ -1062,6 +1107,7 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
     const currentBranch = await super.get(id, params);
     await this.assertCanMutateTeammateKnowledgeConfig(currentBranch, data, params);
     this.assertTeammateKindIsStable(currentBranch, data);
+    data = this.dropSupersededProvisioningAck(currentBranch, data, id);
 
     const oldBoardId = currentBranch.board_id;
     const boardIdProvided = Object.hasOwn(data, 'board_id');
