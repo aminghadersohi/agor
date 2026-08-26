@@ -93,8 +93,10 @@ export class ProfileImageRepository {
         .where(subjectPredicate(input.subject))
         .orderBy(asc(profileImages.position), asc(profileImages.created_at))
         .all();
-      const isPrimary = existing.length === 0 || !existing.some((row) => row.is_primary);
-      const position = existing.reduce((max, row) => Math.max(max, row.position), -1) + 1;
+      const isPrimary =
+        existing.length === 0 || !existing.some((row: ProfileImageRow) => row.is_primary);
+      const position =
+        existing.reduce((max: number, row: ProfileImageRow) => Math.max(max, row.position), -1) + 1;
       await insert(tx, profileImages)
         .values({
           image_id: imageId,
