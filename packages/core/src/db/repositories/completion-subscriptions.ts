@@ -337,7 +337,9 @@ export class CompletionSubscriptionRepository {
     const rows = await select(db, {
       ...(isSQLiteDatabase(db)
         ? {}
-        : { tenant_id: sql<string>`${completionSubscriptions.tenant_id}` }),
+        : {
+            tenant_id: sql<string>`${completionSubscriptions}.${sql.identifier('tenant_id')}`,
+          }),
       subscription_id: completionSubscriptions.subscription_id,
     })
       .from(completionSubscriptions)
@@ -372,7 +374,9 @@ export class CompletionSubscriptionRepository {
     const rows = await select(db, {
       ...(isSQLiteDatabase(db)
         ? {}
-        : { tenant_id: sql<string>`${completionSubscriptions.tenant_id}` }),
+        : {
+            tenant_id: sql<string>`${completionSubscriptions}.${sql.identifier('tenant_id')}`,
+          }),
       subscription_id: completionSubscriptions.subscription_id,
     })
       .from(completionSubscriptions)
