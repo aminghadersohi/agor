@@ -303,6 +303,108 @@ describe('arrangeZoneContents', () => {
     expect(showSuccess).toHaveBeenCalledWith('Arranged 2 items in a non-overlapping grid.');
   });
 
+  it('uses the live rendered height when dynamic branch content exceeds React Flow dimensions', async () => {
+    const renderedBranch = document.createElement('div');
+    renderedBranch.className = 'react-flow__node';
+    renderedBranch.dataset.id = 'branch-1';
+    Object.defineProperties(renderedBranch, {
+      offsetWidth: { configurable: true, value: 500 },
+      offsetHeight: { configurable: true, value: 236 },
+    });
+    const renderedCard = document.createElement('div');
+    renderedCard.className = 'react-flow__node';
+    renderedCard.dataset.id = 'card-card-1';
+    Object.defineProperties(renderedCard, {
+      offsetWidth: { configurable: true, value: 380 },
+      offsetHeight: { configurable: true, value: 85 },
+    });
+    document.body.append(renderedBranch, renderedCard);
+
+    const { client, patch } = makeClient();
+    const board = makeBoard({
+      zone: { type: 'zone', x: 0, y: 0, width: 620, height: 1200, label: 'Zone' },
+    });
+    const initialNodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, data: {}, width: 620, height: 1200 },
+      {
+        id: 'branch-1',
+        type: 'branchNode',
+        parentId: 'zone',
+        position: { x: 20, y: 60 },
+        data: {},
+        width: 500,
+        height: 200,
+      },
+      {
+        id: 'card-card-1',
+        type: 'cardNode',
+        parentId: 'zone',
+        position: { x: 20, y: 300 },
+        data: {},
+        width: 380,
+        height: 120,
+      },
+    ];
+    let renderedNodes = initialNodes;
+    const setNodes: React.Dispatch<React.SetStateAction<Node[]>> = (value) => {
+      renderedNodes = typeof value === 'function' ? value(renderedNodes) : value;
+    };
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'placement-branch',
+              board_id: 'board-1',
+              entity_type: 'branch',
+              branch_id: 'branch-1',
+              position: { x: 20, y: 60 },
+              zone_id: 'zone',
+              created_at: '2026-01-01T00:00:00.000Z',
+            },
+            {
+              object_id: 'placement-card',
+              board_id: 'board-1',
+              entity_type: 'card',
+              card_id: 'card-1',
+              position: { x: 20, y: 300 },
+              zone_id: 'zone',
+              created_at: '2026-01-01T00:00:00.000Z',
+            },
+          ] as never,
+          nodes: initialNodes,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    const zoneNode = result.current.getBoardObjectNodes()[0];
+    await act(async () => {
+      await (zoneNode.data.onArrangeContents as (id: string) => Promise<void>)('zone');
+    });
+
+    expect(renderedNodes.find((node) => node.id === 'branch-1')?.position).toEqual({
+      x: 24,
+      y: 88,
+    });
+    expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual({
+      x: 24,
+      y: 348,
+    });
+    expect(patch).toHaveBeenCalledWith('placement-branch', {
+      size: { width: 500, height: 236 },
+    });
+    expect(patch).toHaveBeenCalledWith('placement-card', {
+      size: { width: 380, height: 85 },
+    });
+
+    renderedBranch.remove();
+    renderedCard.remove();
+  });
+
   it('does not persist an overlapping fallback when the zone cannot contain its children', async () => {
     const { client, patch } = makeClient();
     const board = makeBoard({
