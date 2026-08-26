@@ -58,6 +58,7 @@ export const discordMessageDeliveries = schema.discordMessageDeliveries;
 export const gatewayOutboundMessages = schema.gatewayOutboundMessages;
 export const gatewayInboundEvents = schema.gatewayInboundEvents;
 export const uploads = schema.uploads;
+export const profileImages = schema.profileImages;
 export const userApiKeys = schema.userApiKeys;
 export const kbNamespaces = schema.kbNamespaces;
 export const kbNamespaceAcl = schema.kbNamespaceAcl;

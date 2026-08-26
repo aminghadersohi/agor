@@ -84,6 +84,29 @@ describe('migration status introspection', () => {
     expect(sqliteMigration?.impact).toBe(postgresqlMigration?.impact);
   });
 
+  it('describes profile-image galleries as an online schema migration for both dialects', () => {
+    const postgresqlMigration = introspectMigrationStatus('postgresql', {
+      applied: ['0000_init'],
+      pending: ['0095_profile_image_galleries'],
+      dbAheadOfBinary: false,
+    }).pendingMigrations[0];
+    const sqliteMigration = introspectMigrationStatus('sqlite', {
+      applied: ['0000_init'],
+      pending: ['0098_profile_image_galleries'],
+      dbAheadOfBinary: false,
+    }).pendingMigrations[0];
+
+    expect(postgresqlMigration).toMatchObject({
+      requiresOfflineCutover: false,
+      impact: {
+        classification: 'schema',
+        userAction: 'none',
+        rollbackCompatibility: 'compatible',
+      },
+    });
+    expect(sqliteMigration?.impact).toBe(postgresqlMigration?.impact);
+  });
+
   it('never requires offline acknowledgement for an existing SQLite database', () => {
     const report = introspectMigrationStatus('sqlite', {
       applied: ['0000_init'],

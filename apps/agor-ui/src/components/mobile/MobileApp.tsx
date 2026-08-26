@@ -118,6 +118,7 @@ export const MobileApp: React.FC<MobileAppProps> = ({
           path="/"
           element={
             <MobileHomePage
+              client={client}
               user={user}
               boardById={boardById}
               branchById={branchById}

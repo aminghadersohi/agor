@@ -1,9 +1,10 @@
 import type { Branch } from '@agor-live/client';
 import { getTeammateConfig } from '@agor-live/client';
-import { RobotOutlined } from '@ant-design/icons';
-import { Descriptions, Form, Input, Space, Typography } from 'antd';
+import { Descriptions, Form, Grid, Input, Space, Typography } from 'antd';
 import { EmojiPickerInput } from '../../EmojiPickerInput/EmojiPickerInput';
+import { ProfileImageGalleryEditor } from '../../ProfileImage';
 import { Tag } from '../../Tag';
+import { TeammateIdentityAvatar } from '../../TeammateIdentityAvatar';
 import type { TeammateFormState } from '../useBranchModalForm';
 
 interface TeammateTabProps {
@@ -15,25 +16,27 @@ interface TeammateTabProps {
 
 export const TeammateTab: React.FC<TeammateTabProps> = ({ branch, canEdit, state, setField }) => {
   const config = getTeammateConfig(branch);
+  const screens = Grid.useBreakpoint();
+  const compact = !screens.md;
   if (!config) return null;
 
   return (
     <div style={{ width: '100%', maxHeight: '70vh', overflowY: 'auto' }}>
       <Space orientation="vertical" size="large" style={{ width: '100%' }}>
         <Space>
-          {config.emoji ? (
-            <span style={{ fontSize: 20 }}>{config.emoji}</span>
-          ) : (
-            <RobotOutlined style={{ fontSize: 20 }} />
-          )}
+          <TeammateIdentityAvatar branch={branch} size={32} />
           <Typography.Text strong style={{ fontSize: 16 }}>
             Teammate Configuration
           </Typography.Text>
         </Space>
 
         {/* Editable fields */}
-        <Form layout="horizontal" colon={false}>
-          <Form.Item label="Display Name" labelCol={{ span: 6 }} wrapperCol={{ span: 18 }}>
+        <Form layout={compact ? 'vertical' : 'horizontal'} colon={false}>
+          <Form.Item
+            label="Display Name"
+            labelCol={compact ? undefined : { span: 6 }}
+            wrapperCol={compact ? undefined : { span: 18 }}
+          >
             <Input
               value={state.displayName}
               onChange={(e) => setField('displayName', e.target.value)}
@@ -41,7 +44,11 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({ branch, canEdit, state
               disabled={!canEdit}
             />
           </Form.Item>
-          <Form.Item label="Icon" labelCol={{ span: 6 }} wrapperCol={{ span: 18 }}>
+          <Form.Item
+            label="Icon"
+            labelCol={compact ? undefined : { span: 6 }}
+            wrapperCol={compact ? undefined : { span: 18 }}
+          >
             <EmojiPickerInput
               value={state.emoji}
               onChange={(val) => setField('emoji', val)}
@@ -51,8 +58,8 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({ branch, canEdit, state
           </Form.Item>
           <Form.Item
             label="Description"
-            labelCol={{ span: 6 }}
-            wrapperCol={{ span: 18 }}
+            labelCol={compact ? undefined : { span: 6 }}
+            wrapperCol={compact ? undefined : { span: 18 }}
             tooltip="What does this AI teammate do? Visible to other agents via MCP."
           >
             <Input.TextArea
@@ -64,6 +71,12 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({ branch, canEdit, state
             />
           </Form.Item>
         </Form>
+
+        <ProfileImageGalleryEditor
+          subject={{ type: 'teammate', id: branch.branch_id }}
+          canEdit={canEdit}
+          label="Teammate photos"
+        />
 
         {/* Read-only metadata */}
         <Descriptions column={1} bordered size="small">

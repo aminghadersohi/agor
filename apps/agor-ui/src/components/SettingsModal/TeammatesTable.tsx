@@ -16,6 +16,7 @@ import { ArchiveDeleteBranchModal } from '../ArchiveDeleteBranchModal';
 import { HighlightMatch } from '../HighlightMatch';
 import { MarkdownRenderer } from '../MarkdownRenderer/MarkdownRenderer';
 import { UserAvatar } from '../metadata/UserAvatar';
+import { TeammateIdentityAvatar } from '../TeammateIdentityAvatar';
 import { ResponsiveSettingsHeader } from './ResponsiveSettingsHeader';
 import { SettingsActionGroup } from './SettingsActionGroup';
 
@@ -106,11 +107,7 @@ export const TeammatesTable: React.FC<TeammatesTableProps> = ({
         const config = getTeammateConfig(record);
         return (
           <Space>
-            {config?.emoji ? (
-              <span style={{ fontSize: 18 }}>{config.emoji}</span>
-            ) : (
-              <RobotOutlined style={{ color: token.colorInfo }} />
-            )}
+            <TeammateIdentityAvatar branch={record} size={28} />
             <Typography.Text strong>
               <HighlightMatch text={config?.displayName ?? record.name} query={searchTerm} />
             </Typography.Text>

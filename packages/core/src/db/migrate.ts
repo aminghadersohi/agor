@@ -117,6 +117,16 @@ const QUEUED_MESSAGES_MIGRATION_POLICY: MigrationImpactPolicy = {
   }),
 };
 
+const PROFILE_IMAGE_GALLERIES_MIGRATION_POLICY: MigrationImpactPolicy = {
+  requiresOfflineCutover: false,
+  impact: defineMigrationImpact({
+    classification: 'schema',
+    userAction: 'none',
+    rollbackCompatibility: 'compatible',
+    summary: 'Adds private profile-image galleries without requiring an offline cutover.',
+  }),
+};
+
 export function createMigrationImpactRegistry(
   entries: ReadonlyArray<readonly [string, MigrationImpactPolicy]>
 ): {
@@ -133,6 +143,8 @@ export function createMigrationImpactRegistry(
 const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
   ['0030_migrate_queued_messages', QUEUED_MESSAGES_MIGRATION_POLICY],
   ['0040_migrate_queued_messages', QUEUED_MESSAGES_MIGRATION_POLICY],
+  ['0095_profile_image_galleries', PROFILE_IMAGE_GALLERIES_MIGRATION_POLICY],
+  ['0098_profile_image_galleries', PROFILE_IMAGE_GALLERIES_MIGRATION_POLICY],
   ...[
     '0074_knowledge_embedding_claims',
     '0078_mcp_oauth_pending_flows',

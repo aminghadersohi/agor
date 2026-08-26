@@ -13,6 +13,7 @@ import { useParams } from 'react-router-dom';
 import { getSessionDisplayTitle } from '../../utils/sessionTitle';
 import { resolveSessionFromShortIdPure } from '../../utils/urlResolution';
 import { ConversationView } from '../ConversationView';
+import { useProfileImageUrl } from '../ProfileImage/useProfileImageUrl';
 import { MobileHeader } from './MobileHeader';
 import { MobilePromptInput } from './MobilePromptInput';
 
@@ -50,6 +51,8 @@ export const SessionPage: React.FC<SessionPageProps> = ({
     : undefined;
   const session = resolvedSessionId ? sessionById.get(resolvedSessionId) : undefined;
   const branch = session?.branch_id ? branchById.get(session.branch_id) || null : null;
+  const teammateConfig = branch && isTeammate(branch) ? getTeammateConfig(branch) : undefined;
+  const teammateAvatarUrl = useProfileImageUrl(teammateConfig?.profileImageId, 'small');
 
   if (!sessionId) {
     return (
@@ -136,9 +139,8 @@ export const SessionPage: React.FC<SessionPageProps> = ({
           scheduledRunAt={session.scheduled_run_at}
           genealogy={session.genealogy}
           emptyStateMessage="Tap the menu icon to browse boards and sessions"
-          teammateEmoji={
-            branch && isTeammate(branch) ? getTeammateConfig(branch)?.emoji : undefined
-          }
+          teammateEmoji={teammateConfig?.emoji}
+          teammateAvatarUrl={teammateAvatarUrl}
           compact
         />
       </div>

@@ -1,6 +1,8 @@
 import type { CodexApprovalPolicy, CodexNetworkAccess, CodexSandboxMode } from './agentic-tool';
 import { type AgenticToolName, DEFAULT_AGENTIC_TOOL_NAME, isAgenticToolName } from './agentic-tool';
 import type { BranchID, UserID } from './id';
+import type { ProfileImageID } from './profile-image';
+import type { ScheduleID } from './schedule';
 import type { EffortLevel, PermissionMode } from './session';
 
 /** Canonical syntax for the transitional delegated execution-home key. */
@@ -461,8 +463,15 @@ export interface UserPreferences {
   mainBoardId?: string;
   /** Whether to render Slack-synced avatar_url when available. Undefined defaults to true. */
   use_slack_avatar?: boolean;
+  /** User-owned choice of which canonical schedules appear in the Home overview. */
+  home_schedules?: HomeSchedulePreferences;
   // Future preferences can be added here
   [key: string]: unknown;
+}
+
+export interface HomeSchedulePreferences {
+  mode: 'all' | 'selected';
+  schedule_ids: ScheduleID[];
 }
 
 /** Stable external identity link stored with a local user. */
@@ -506,6 +515,8 @@ export interface User extends BaseUserFields {
   avatar_source?: 'manual' | 'slack' | 'launch-auth' | string;
   avatar_source_id?: string;
   avatar_synced_at?: string;
+  /** Primary image in the user's tenant-owned profile gallery. */
+  profile_image_id?: ProfileImageID;
   preferences?: UserPreferences;
   onboarding_completed: boolean;
   /** Force password change on next login (admin-settable, auto-cleared on password change) */
@@ -698,6 +709,7 @@ export interface UpdateUserInput extends Partial<BaseUserFields> {
   avatar_source?: string | null;
   avatar_source_id?: string | null;
   avatar_synced_at?: string | null;
+  profile_image_id?: ProfileImageID | null;
   preferences?: UserPreferences;
   onboarding_completed?: boolean;
   unix_username?: string;

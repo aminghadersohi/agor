@@ -32,6 +32,7 @@ export * from './mcp-member-policy';
 export * from './mcp-oauth-pending-flows';
 export * from './mcp-servers';
 export * from './messages';
+export * from './profile-images';
 export * from './repos';
 export * from './schedules';
 export * from './session-env-selections';

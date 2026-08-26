@@ -1,4 +1,4 @@
-import type { Board, Branch, Session, User } from '@agor-live/client';
+import type { AgorClient, Board, Branch, Session, User } from '@agor-live/client';
 import {
   AppstoreAddOutlined,
   AppstoreOutlined,
@@ -25,12 +25,14 @@ import { useNavigate } from 'react-router-dom';
 import { getSessionDisplayTitle } from '@/utils/sessionTitle';
 import { formatRelativeTime } from '@/utils/time';
 import { getBoardEmoji } from '../BoardTile';
+import { HomeSchedulesSection } from '../HomePage/HomeSchedulesSection';
 import { MobileHeader } from './MobileHeader';
 
 const { Content } = Layout;
 const { Text, Title } = Typography;
 
 interface MobileHomePageProps {
+  client: AgorClient | null;
   user?: User | null;
   boardById: Map<string, Board>;
   branchById: Map<string, Branch>;
@@ -40,6 +42,7 @@ interface MobileHomePageProps {
 }
 
 export const MobileHomePage: React.FC<MobileHomePageProps> = ({
+  client,
   user,
   boardById,
   branchById,
@@ -166,6 +169,15 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
               )}
             </Card>
           </section>
+          <HomeSchedulesSection
+            client={client}
+            currentUserId={user?.user_id}
+            compact
+            onBranchClick={(branchId) => {
+              const branch = branchById.get(branchId);
+              if (branch?.board_id) navigate(`/m/board/${branch.board_id}`);
+            }}
+          />
           <section aria-labelledby="mobile-home-boards">
             <Flex justify="space-between" align="center" style={{ marginBottom: token.marginSM }}>
               <Title id="mobile-home-boards" level={5} style={{ margin: 0 }}>

@@ -17,6 +17,7 @@ import { BranchHeaderPill } from '../BranchHeaderPill';
 import { BranchMetadataRow } from '../BranchMetadataRow';
 import { ConversationView } from '../ConversationView';
 import { ForkSpawnModal } from '../ForkSpawnModal';
+import { useProfileImageUrl } from '../ProfileImage/useProfileImageUrl';
 
 export interface SessionPanelContentProps {
   client: AgorClient | null;
@@ -59,6 +60,8 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
     forceExpandAll = false,
   }) => {
     const { token } = theme.useToken();
+    const teammateConfig = branch && isTeammate(branch) ? getTeammateConfig(branch) : undefined;
+    const teammateAvatarUrl = useProfileImageUrl(teammateConfig?.profileImageId, 'small');
     const { showSuccess, showError } = useThemedMessage();
     const [resumeQueueInFlight, setResumeQueueInFlight] = React.useState(false);
     const isQueueHeldByFailure = queuedTasks.length > 0 && session.status === 'failed';
@@ -182,9 +185,8 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
           scheduledRunAt={session.scheduled_run_at}
           isActive={isOpen}
           genealogy={session.genealogy}
-          teammateEmoji={
-            branch && isTeammate(branch) ? getTeammateConfig(branch)?.emoji : undefined
-          }
+          teammateEmoji={teammateConfig?.emoji}
+          teammateAvatarUrl={teammateAvatarUrl}
           forceExpandAll={forceExpandAll}
           onOpenAgenticToolSettings={onOpenAgenticToolSettings}
         />

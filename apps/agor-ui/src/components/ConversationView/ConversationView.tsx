@@ -128,6 +128,9 @@ export interface ConversationViewProps {
    */
   teammateEmoji?: string;
 
+  /** Authenticated object URL for the teammate's private profile image. */
+  teammateAvatarUrl?: string;
+
   /**
    * When true, all task blocks are force-expanded (used by in-session search)
    */
@@ -156,6 +159,7 @@ export const ConversationView = React.memo<ConversationViewProps>(
     isActive = true,
     genealogy,
     teammateEmoji,
+    teammateAvatarUrl,
     forceExpandAll = false,
     onOpenAgenticToolSettings,
     compact = false,
@@ -508,6 +512,7 @@ export const ConversationView = React.memo<ConversationViewProps>(
               onLoadTaskMessages={handleLoadTaskMessages}
               onUnloadTaskMessages={handleUnloadTaskMessages}
               teammateEmoji={teammateEmoji}
+              teammateAvatarUrl={teammateAvatarUrl}
               isLatestTask={taskIndex === tasks.length - 1}
               client={client}
               onOpenAgenticToolSettings={onOpenAgenticToolSettings}

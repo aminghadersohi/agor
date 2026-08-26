@@ -97,6 +97,7 @@ interface TaskBlockProps {
   onLoadTaskMessages: (taskId: string) => Promise<void> | void;
   onUnloadTaskMessages: (taskId: string) => void;
   teammateEmoji?: string;
+  teammateAvatarUrl?: string;
   onOpenAgenticToolSettings?: (tool: AgenticToolName) => void;
   /** Authenticated Feathers client, forwarded to MessageBlock → WidgetBlock for inline submission. */
   client?: AgorClient | null;
@@ -484,6 +485,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
     onLoadTaskMessages,
     onUnloadTaskMessages,
     teammateEmoji,
+    teammateAvatarUrl,
     onOpenAgenticToolSettings,
     isLatestTask = false,
     client = null,
@@ -814,6 +816,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
                               isLatestMessage={isLatestMessage}
                               taskId={task.task_id}
                               teammateEmoji={teammateEmoji}
+                              teammateAvatarUrl={teammateAvatarUrl}
                               client={client}
                               onOpenAgenticToolSettings={onOpenAgenticToolSettings}
                               compact={compact}
@@ -862,8 +865,8 @@ export const TaskBlock = React.memo<TaskBlockProps>(
                       <Bubble
                         placement="start"
                         avatar={
-                          teammateEmoji ? (
-                            <AgorAvatar>{teammateEmoji}</AgorAvatar>
+                          teammateAvatarUrl || teammateEmoji ? (
+                            <AgorAvatar src={teammateAvatarUrl}>{teammateEmoji}</AgorAvatar>
                           ) : agentic_tool ? (
                             <ToolIcon tool={agentic_tool} size={32} />
                           ) : (
