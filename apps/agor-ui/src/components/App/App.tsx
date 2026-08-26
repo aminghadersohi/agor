@@ -1851,7 +1851,13 @@ export const App: React.FC<AppProps> = ({
           onStartEnvironment={onStartEnvironment}
           onStopEnvironment={onStopEnvironment}
           onCreateUser={onCreateUser}
-          onUpdateUser={onUpdateUser}
+          onUpdateUser={
+            onUpdateUser
+              ? async (userId, updates) => {
+                  await onUpdateUser(userId, updates);
+                }
+              : undefined
+          }
           onDeleteUser={onDeleteUser}
           onCreateMCPServer={onCreateMCPServer}
           onDeleteMCPServer={onDeleteMCPServer}
@@ -1945,7 +1951,13 @@ export const App: React.FC<AppProps> = ({
           currentUser={user}
           preselectedSessionId={teammateChatsSessionId}
           onClose={closeTeammateChats}
-          onUpdateUser={onUpdateUser}
+          onUpdateUser={
+            onUpdateUser
+              ? async (userId, updates) => {
+                  await onUpdateUser(userId, updates);
+                }
+              : undefined
+          }
         />
         <UserSettingsModal
           open={effectiveUserSettingsOpen}
