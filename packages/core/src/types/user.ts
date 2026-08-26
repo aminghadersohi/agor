@@ -1,6 +1,6 @@
 import type { CodexApprovalPolicy, CodexNetworkAccess, CodexSandboxMode } from './agentic-tool';
 import { type AgenticToolName, DEFAULT_AGENTIC_TOOL_NAME, isAgenticToolName } from './agentic-tool';
-import type { BranchID, SessionID, UserID } from './id';
+import type { ArtifactID, BranchID, SessionID, UserID } from './id';
 import type { EffortLevel, PermissionMode } from './session';
 
 /** Canonical syntax for the transitional delegated execution-home key. */
@@ -463,6 +463,8 @@ export interface UserPreferences {
   use_slack_avatar?: boolean;
   /** Lightweight, user-owned groupings of canonical sessions shown on Home. */
   chat_collections?: ChatCollectionPreferences;
+  /** Artifact shortcuts pinned to Home by this user. */
+  home_artifact_ids?: ArtifactID[];
   // Future preferences can be added here
   [key: string]: unknown;
 }

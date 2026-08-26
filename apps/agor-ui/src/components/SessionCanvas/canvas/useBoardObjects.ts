@@ -25,6 +25,8 @@ interface UseBoardObjectsProps {
    *  "selected" outline. */
   activeUrlTargetArtifactId?: string | null;
   onEditMarkdown?: (objectId: string, content: string, width: number) => void;
+  onSessionClick?: (sessionId: string) => void;
+  currentUserId?: string;
 }
 
 export const useBoardObjects = ({
@@ -36,6 +38,8 @@ export const useBoardObjects = ({
   eraserMode = false,
   activeUrlTargetArtifactId,
   onEditMarkdown,
+  onSessionClick,
+  currentUserId,
 }: UseBoardObjectsProps) => {
   // Use ref to avoid recreating callbacks when board changes
   const boardRef = useRef(board);
@@ -303,6 +307,10 @@ export const useBoardObjects = ({
               isActiveUrlTarget: objectData.artifact_id === activeUrlTargetArtifactId,
               onUpdate: handleUpdateObject,
               onDeleteArtifact: deleteArtifact,
+              onOpenSession: onSessionClick,
+              client,
+              currentUserId,
+              boardId: board?.board_id,
             },
           };
         }
@@ -397,7 +405,11 @@ export const useBoardObjects = ({
     reorderObject,
     eraserMode,
     activeUrlTargetArtifactId,
+    onSessionClick,
+    currentUserId,
     onEditMarkdown,
+    client,
+    board?.board_id,
   ]);
 
   /**

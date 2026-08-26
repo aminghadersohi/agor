@@ -1,10 +1,11 @@
-import type { ArtifactPayload } from '@agor-live/client';
+import type { ArtifactInteractionConfig, ArtifactPayload } from '@agor-live/client';
 import { SafetyOutlined, WarningOutlined } from '@ant-design/icons';
 import { useSandpack, useSandpackConsole } from '@codesandbox/sandpack-react';
-import { Tooltip, theme } from 'antd';
+import { App, Tooltip, theme } from 'antd';
 import type { CSSProperties } from 'react';
 import { useEffect, useRef } from 'react';
 import { getDaemonUrl } from '@/config/daemon';
+import { runArtifactScheduleAction } from '@/utils/artifactActions';
 import { getAuthHeaders, getCurrentUserIdFromJwt } from '@/utils/authHeaders';
 
 /** Max console entries to send per batch, and minimum interval between sends. */
@@ -235,6 +236,103 @@ export function ArtifactRuntimeBridge({ artifactId }: { artifactId: string }) {
     window.addEventListener('agor:artifact-runtime-query', handleQuery);
     return () => window.removeEventListener('agor:artifact-runtime-query', handleQuery);
   }, [artifactId]);
+
+  return null;
+}
+
+/**
+ * Constrained iframe → Agor bridge for human-triggered artifact controls.
+ * The iframe can only invoke bindings declared in persisted metadata; the
+ * resulting schedule request still passes through the normal authenticated
+ * schedule RBAC route.
+ */
+export function ArtifactInteractionBridge({
+  artifactId,
+  config,
+  onOpenSession,
+}: {
+  artifactId: string;
+  config?: ArtifactInteractionConfig;
+  onOpenSession?: (sessionId: string) => void;
+}) {
+  const { sandpack } = useSandpack();
+  const { modal } = App.useApp();
+  const sandpackRef = useRef(sandpack);
+  sandpackRef.current = sandpack;
+
+  useEffect(() => {
+    const reply = (
+      target: Window,
+      requestId: string,
+      body: { ok: boolean; result?: unknown; error?: string }
+    ) => {
+      target.postMessage({ type: 'agor:interaction-result', requestId, ...body }, '*');
+    };
+
+    const confirmRun = (label: string, description?: string) =>
+      new Promise<boolean>((resolve) => {
+        modal.confirm({
+          title: `Run “${label}”?`,
+          content: description || 'This starts a new agent session using the configured action.',
+          okText: 'Run action',
+          cancelText: 'Cancel',
+          onOk: () => resolve(true),
+          onCancel: () => resolve(false),
+        });
+      });
+
+    const handler = async (event: MessageEvent) => {
+      const current = sandpackRef.current;
+      const firstClientId = Object.keys(current.clients)[0];
+      const target = firstClientId ? current.clients[firstClientId]?.iframe?.contentWindow : null;
+      if (!target || event.source !== target) return;
+      const message = event.data as
+        | { type?: unknown; requestId?: unknown; actionId?: unknown }
+        | undefined;
+      if (!message || typeof message.requestId !== 'string') return;
+
+      if (message.type === 'agor:open-chat') {
+        const sessionId = config?.chat_session_id;
+        if (!sessionId || !onOpenSession) {
+          reply(target, message.requestId, { ok: false, error: 'No chat is configured' });
+          return;
+        }
+        onOpenSession(sessionId);
+        reply(target, message.requestId, { ok: true, result: { session_id: sessionId } });
+        return;
+      }
+
+      if (message.type !== 'agor:run-action' || typeof message.actionId !== 'string') return;
+      const action = config?.actions?.find((item) => item.action_id === message.actionId);
+      if (!action) {
+        reply(target, message.requestId, { ok: false, error: 'Action is not configured' });
+        return;
+      }
+      if (action.confirm && !(await confirmRun(action.label, action.description))) {
+        reply(target, message.requestId, { ok: false, error: 'Action cancelled' });
+        return;
+      }
+      try {
+        const result = await runArtifactScheduleAction(action.schedule_id);
+        reply(target, message.requestId, {
+          ok: true,
+          result: {
+            artifact_id: artifactId,
+            action_id: action.action_id,
+            session_id: result.session_id,
+          },
+        });
+      } catch (error) {
+        reply(target, message.requestId, {
+          ok: false,
+          error: error instanceof Error ? error.message : 'Action failed',
+        });
+      }
+    };
+
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [artifactId, config, modal, onOpenSession]);
 
   return null;
 }

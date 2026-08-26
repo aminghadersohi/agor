@@ -23,15 +23,24 @@ import {
   BranchRepository,
   bindRepositoryToTenantUnitOfWork,
   generateId,
+  ScheduleRepository,
+  SessionRepository,
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
-import { type Application, Forbidden, NotAuthenticated, Unavailable } from '@agor/core/feathers';
+import {
+  type Application,
+  BadRequest,
+  Forbidden,
+  NotAuthenticated,
+  Unavailable,
+} from '@agor/core/feathers';
 import type {
   AgorGrants,
   AgorRuntimeConfig,
   Artifact,
   ArtifactBuildStatus,
   ArtifactConsoleEntry,
+  ArtifactInteractionConfig,
   ArtifactPayload,
   ArtifactStatus,
   ArtifactTrustScopeType,
@@ -42,6 +51,7 @@ import type {
   SandpackConfig,
   SandpackError,
   SandpackTemplate,
+  ScheduleID,
   SessionID,
   UserID,
   UserRole,
@@ -129,6 +139,53 @@ interface ArtifactSidecar {
   agor_runtime?: AgorRuntimeConfig;
 }
 
+const MAX_ARTIFACT_ACTIONS = 12;
+const ACTION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+
+/** Treat persisted and agent-authored interaction metadata as untrusted input. */
+export function sanitizeArtifactInteractionConfig(
+  value: ArtifactInteractionConfig | null | undefined
+): ArtifactInteractionConfig | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const seen = new Set<string>();
+  const actions = Array.isArray(value.actions)
+    ? value.actions.slice(0, MAX_ARTIFACT_ACTIONS).flatMap((candidate) => {
+        if (!candidate || typeof candidate !== 'object') return [];
+        const actionId = typeof candidate.action_id === 'string' ? candidate.action_id.trim() : '';
+        const label =
+          typeof candidate.label === 'string' ? candidate.label.trim().slice(0, 80) : '';
+        const scheduleId =
+          typeof candidate.schedule_id === 'string' ? candidate.schedule_id.trim() : '';
+        if (!ACTION_ID_PATTERN.test(actionId) || !label || !scheduleId || seen.has(actionId)) {
+          return [];
+        }
+        seen.add(actionId);
+        const description =
+          typeof candidate.description === 'string'
+            ? candidate.description.trim().slice(0, 240)
+            : '';
+        return [
+          {
+            action_id: actionId,
+            label,
+            schedule_id: scheduleId as ScheduleID,
+            ...(description ? { description } : {}),
+            ...(candidate.confirm === true ? { confirm: true } : {}),
+          },
+        ];
+      })
+    : [];
+  const chatSessionId =
+    typeof value.chat_session_id === 'string' && value.chat_session_id.trim()
+      ? (value.chat_session_id.trim() as SessionID)
+      : undefined;
+  if (actions.length === 0 && !chatSessionId) return undefined;
+  return {
+    ...(actions.length > 0 ? { actions } : {}),
+    ...(chatSessionId ? { chat_session_id: chatSessionId } : {}),
+  };
+}
+
 interface ArtifactValidationDiagnostic {
   code: string;
   severity: 'error' | 'warning';
@@ -157,6 +214,7 @@ export const ARTIFACTS_SERVICE_TRANSPORT_METHODS = [
   'remove',
   'publishFromExecutor',
   'validateFromExecutor',
+  'createChatArtifact',
 ] as const;
 
 export type ArtifactParams = QueryParams<{
@@ -210,6 +268,8 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
   private trustRepo: ArtifactTrustGrantRepository;
   private branchRepo: BranchRepository;
   private boardRepo: BoardRepository;
+  private scheduleRepo: ScheduleRepository;
+  private sessionRepo: SessionRepository;
   private app: Application;
   /** Held for `resolveUserEnvironment` (scope-aware env-var resolution). */
   private dbRef: TenantScopeAwareDatabase;
@@ -289,6 +349,8 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     this.trustRepo = bindRepositoryToTenantUnitOfWork(db, new ArtifactTrustGrantRepository(db));
     this.branchRepo = bindRepositoryToTenantUnitOfWork(db, new BranchRepository(db));
     this.boardRepo = bindRepositoryToTenantUnitOfWork(db, new BoardRepository(db));
+    this.scheduleRepo = bindRepositoryToTenantUnitOfWork(db, new ScheduleRepository(db));
+    this.sessionRepo = bindRepositoryToTenantUnitOfWork(db, new SessionRepository(db));
     this.app = app;
     this.dbRef = db;
     this.runtimeIntrospectionEnabled = options.runtimeIntrospectionEnabled !== false;
@@ -301,6 +363,29 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
         { code: 'HA_FEATURE_UNSUPPORTED', feature: 'artifactRuntime' }
       );
     }
+  }
+
+  private async validateInteractionConfig(
+    value: ArtifactInteractionConfig | null | undefined,
+    branchId: BranchID
+  ): Promise<ArtifactInteractionConfig | undefined> {
+    const config = sanitizeArtifactInteractionConfig(value);
+    if (!config) return undefined;
+    for (const action of config.actions ?? []) {
+      const schedule = await this.scheduleRepo.findById(action.schedule_id);
+      if (!schedule || schedule.branch_id !== branchId) {
+        throw new BadRequest(
+          `Artifact action ${action.action_id} must reference a schedule on the artifact branch`
+        );
+      }
+    }
+    if (config.chat_session_id) {
+      const session = await this.sessionRepo.findById(config.chat_session_id);
+      if (!session || session.branch_id !== branchId) {
+        throw new BadRequest('Artifact chat must reference a session on the artifact branch');
+      }
+    }
+    return config;
   }
 
   /**
@@ -373,6 +458,79 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     );
   }
 
+  /** Create a controlled, private board artifact that opens one canonical session. */
+  async createChatArtifact(
+    data: { session_id: SessionID; x?: number; y?: number; width?: number; height?: number },
+    params?: ArtifactParams
+  ): Promise<Artifact> {
+    const userId = params?.user?.user_id;
+    if (!userId) throw new NotAuthenticated('Authentication required');
+    const session = await this.sessionRepo.findById(data.session_id);
+    if (!session) throw new BadRequest('Session not found');
+    const branch = await this.branchRepo.findById(session.branch_id);
+    if (!branch?.board_id) throw new BadRequest('Session branch is not on a board');
+    await ensureBranchWorkspaceAccess(
+      this.branchRepo,
+      branch,
+      userId,
+      params?.user?.role as UserRole | undefined,
+      'session'
+    );
+
+    const files = {
+      '/index.html': `<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>html,body{height:100%;margin:0;font-family:system-ui,sans-serif;background:#101315;color:#eef5f5}body{display:grid;place-items:center}.card{max-width:28rem;padding:2rem;text-align:center}.mark{font-size:2rem}h1{font-size:1.25rem;margin:.7rem 0}.hint{color:#9caeae;font-size:.9rem;line-height:1.45}button{margin-top:1rem;border:0;border-radius:999px;padding:.7rem 1.1rem;background:#167f79;color:white;font-weight:650;cursor:pointer}button:focus-visible{outline:3px solid #7ee2db;outline-offset:3px}</style></head>
+<body><main class="card"><div class="mark">💬</div><h1>Session chat</h1><div class="hint">Open the live conversation with its full session controls.</div><button id="open" type="button">Open chat</button><div id="status" class="hint" role="status"></div></main>
+<script>document.getElementById('open').addEventListener('click',async()=>{const status=document.getElementById('status');status.textContent='Opening…';try{await window.agor.openChat();status.textContent='Chat opened';}catch(error){status.textContent=error&&error.message?error.message:'Could not open chat';}});</script></body></html>`,
+    };
+    const artifactId = generateId();
+    const artifact = await this.artifactRepo.create({
+      artifact_id: artifactId,
+      board_id: branch.board_id,
+      branch_id: branch.branch_id,
+      source_session_id: session.session_id,
+      name: `${session.title?.trim() || 'Session'} chat`,
+      description: 'A board shortcut to the live session conversation.',
+      path: null,
+      template: 'static',
+      files,
+      content_hash: this.computeHashFromFiles(files),
+      build_status: 'success',
+      agor_runtime: { interactions: { chat_session_id: session.session_id } },
+      public: false,
+      created_by: userId,
+    });
+    const objectId = `artifact-${artifactId}`;
+    try {
+      const updatedBoard = await this.boardRepo.upsertBoardObject(branch.board_id, objectId, {
+        type: 'artifact',
+        artifact_id: artifactId,
+        x: data.x ?? 40,
+        y: data.y ?? 40,
+        width: Math.max(300, data.width ?? 420),
+        height: Math.max(200, data.height ?? 280),
+      });
+      emitServiceEvent(this.app, {
+        path: 'boards',
+        event: 'patched',
+        data: updatedBoard,
+        id: branch.board_id,
+      });
+    } catch (error) {
+      await this.artifactRepo.delete(artifactId);
+      throw error;
+    }
+    emitServiceEvent(this.app, {
+      path: 'artifacts',
+      event: 'created',
+      data: artifact,
+      id: artifact.artifact_id,
+      params,
+    });
+    return artifact;
+  }
+
   /**
    * Direct REST/service updates are metadata-only and must not rewrite
    * provenance. `source_session_id` is stamped by publishArtifact() from the
@@ -408,11 +566,17 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       y?: number;
       width?: number;
       height?: number;
+      interaction_config?: ArtifactInteractionConfig;
     };
     const placementFields =
       d.x !== undefined || d.y !== undefined || d.width !== undefined || d.height !== undefined;
 
-    if (d.board_id !== undefined || placementFields) {
+    if (
+      d.board_id !== undefined ||
+      d.agor_runtime !== undefined ||
+      d.interaction_config !== undefined ||
+      placementFields
+    ) {
       const artifactId = String(id);
       const existing = await this.artifactRepo.findById(artifactId);
       if (!existing) throw new Error(`Artifact ${artifactId} not found`);
@@ -432,6 +596,8 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
           y: d.y,
           width: d.width,
           height: d.height,
+          agor_runtime: d.agor_runtime,
+          interaction_config: d.interaction_config,
         },
         callerUserId,
         callerRole
@@ -506,6 +672,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       required_env_vars?: string[];
       agor_grants?: AgorGrants;
       agor_runtime?: AgorRuntimeConfig;
+      interaction_config?: ArtifactInteractionConfig;
       x?: number;
       y?: number;
       width?: number;
@@ -584,6 +751,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       required_env_vars?: string[];
       agor_grants?: AgorGrants;
       agor_runtime?: AgorRuntimeConfig;
+      interaction_config?: ArtifactInteractionConfig;
       x?: number;
       y?: number;
       width?: number;
@@ -635,10 +803,10 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     const agorGrants = canonicalizeAgorGrants(
       data.agor_grants ?? sidecar?.agor_grants ?? existing?.agor_grants
     );
-    // agor_runtime is a small flag bag (currently just `enabled`). Same
+    // agor_runtime is a small flag bag. Same
     // explicit-data > sidecar > existing > default chain. Default is
     // implicit-enabled (i.e. `undefined` reads as enabled at render time).
-    const agorRuntime: AgorRuntimeConfig | undefined =
+    const resolvedAgorRuntime: AgorRuntimeConfig | undefined =
       data.agor_runtime ?? sidecar?.agor_runtime ?? existing?.agor_runtime ?? undefined;
 
     // Name and board are required on create; on update they default to the
@@ -656,6 +824,18 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     if (branch.board_id !== resolvedBoardId) {
       throw new Forbidden('Artifact board must match the source branch board');
     }
+    const interactionConfig = await this.validateInteractionConfig(
+      data.interaction_config ??
+        resolvedAgorRuntime?.interactions ??
+        existing?.agor_runtime?.interactions ??
+        undefined,
+      matchedBranchId
+    );
+    const agorRuntime: AgorRuntimeConfig | undefined = resolvedAgorRuntime
+      ? { ...resolvedAgorRuntime, interactions: interactionConfig }
+      : interactionConfig
+        ? { interactions: interactionConfig }
+        : undefined;
 
     const isPublic = data.public ?? existing?.public ?? true;
 
@@ -797,6 +977,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       required_env_vars?: string[];
       agor_grants?: AgorGrants;
       agor_runtime?: AgorRuntimeConfig;
+      interaction_config?: ArtifactInteractionConfig;
       sandpack_config?: SandpackConfig;
     },
     userId?: string,
@@ -855,8 +1036,27 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     if (updates.agor_grants !== undefined) {
       dbUpdates.agor_grants = canonicalizeAgorGrants(updates.agor_grants);
     }
-    if (updates.agor_runtime !== undefined) {
-      dbUpdates.agor_runtime = updates.agor_runtime;
+    if (updates.agor_runtime !== undefined || updates.interaction_config !== undefined) {
+      if (!existing.branch_id) {
+        throw new BadRequest('Artifact interactions require a source branch');
+      }
+      const runtimeExplicitlyUpdatesInteractions = Object.hasOwn(
+        updates.agor_runtime ?? {},
+        'interactions'
+      );
+      const interactionConfig = await this.validateInteractionConfig(
+        updates.interaction_config !== undefined
+          ? updates.interaction_config
+          : runtimeExplicitlyUpdatesInteractions
+            ? updates.agor_runtime?.interactions
+            : existing.agor_runtime?.interactions,
+        existing.branch_id
+      );
+      dbUpdates.agor_runtime = {
+        ...(existing.agor_runtime ?? {}),
+        ...(updates.agor_runtime ?? {}),
+        interactions: interactionConfig,
+      };
     }
     if (updates.sandpack_config !== undefined) {
       const sanitizedConfig = sanitizeSandpackConfig(updates.sandpack_config);
@@ -925,6 +1125,9 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
               // value in place.
               rollback.entry = existing.entry ?? (null as unknown as string);
             }
+            if (updates.agor_runtime !== undefined || updates.interaction_config !== undefined) {
+              rollback.agor_runtime = existing.agor_runtime;
+            }
             if (Object.keys(rollback).length > 0) {
               await this.artifactRepo.update(fullArtifactId, rollback);
             }
@@ -957,7 +1160,8 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       updates.sandpack_config !== undefined ||
       updates.required_env_vars !== undefined ||
       updates.agor_grants !== undefined ||
-      updates.agor_runtime !== undefined
+      updates.agor_runtime !== undefined ||
+      updates.interaction_config !== undefined
     ) {
       this.clearAllViewerBuffersFor(fullArtifactId);
     }
@@ -1152,6 +1356,20 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       '/.agor/sandpack-config.json': JSON.stringify(servedSandpackConfig ?? {}),
     });
     const legacy = detectLegacyFormat(artifact);
+    let interactionConfig = sanitizeArtifactInteractionConfig(artifact.agor_runtime?.interactions);
+    if (interactionConfig?.chat_session_id) {
+      try {
+        const linkedSession = await this.sessionRepo.findById(interactionConfig.chat_session_id);
+        const linkedBranch = linkedSession
+          ? await this.branchRepo.findById(linkedSession.branch_id)
+          : null;
+        if (!linkedSession || !linkedBranch) throw new Error('Linked chat is unavailable');
+        await ensureBranchWorkspaceAccess(this.branchRepo, linkedBranch, userId, undefined, 'view');
+      } catch {
+        const { chat_session_id: _chatSessionId, ...safeConfig } = interactionConfig;
+        interactionConfig = safeConfig.actions?.length ? safeConfig : undefined;
+      }
+    }
 
     const payload: ArtifactPayload = {
       artifact_id: artifact.artifact_id,
@@ -1170,6 +1388,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       runtime_report_hash: this.computeRuntimeReportHash(artifact),
       required_env_vars: requiredEnvVars.length > 0 ? requiredEnvVars : undefined,
       agor_grants: Object.keys(grants).length > 0 ? grants : undefined,
+      interaction_config: interactionConfig,
       trust_state: trustState,
       ...(trustScope ? { trust_scope: trustScope } : {}),
       ...(legacy.is_legacy ? { legacy } : {}),
@@ -1914,6 +2133,8 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
         required_env_vars: artifact.required_env_vars ?? [],
         agor_grants: canonicalizeAgorGrants(artifact.agor_grants),
         agor_runtime_enabled: artifact.agor_runtime?.enabled !== false,
+        interaction_config:
+          sanitizeArtifactInteractionConfig(artifact.agor_runtime?.interactions) ?? null,
       }),
     });
   }
