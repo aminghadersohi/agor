@@ -36,7 +36,9 @@ describe('AgenticToolPresetsManager authority lifetime', () => {
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'A reconnect draft' } });
     fireEvent.click(screen.getByRole('button', { name: 'OK' }));
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
-    expect(screen.getByRole('button', { name: /OK$/ })).toHaveClass('ant-btn-loading');
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /OK$/ })).toHaveClass('ant-btn-loading')
+    );
 
     rendered.rerender(view(2));
     await waitFor(() => expect(find).toHaveBeenCalledTimes(2));
