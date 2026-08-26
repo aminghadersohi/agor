@@ -49,6 +49,9 @@ function migrationTenantTables(): string[] {
   const discordGatewayHybridMigration = readRepoFile(
     'packages/core/drizzle/postgres/0094_discord_gateway_hybrid.sql'
   );
+  const completionSubscriptionsMigration = readRepoFile(
+    'packages/core/drizzle/postgres/0096_transitive_completion_subscriptions.sql'
+  );
   const externalIdentitiesMigration = readRepoFile(
     'packages/core/drizzle/postgres/0090_external_user_identities.sql'
   );
@@ -70,6 +73,9 @@ function migrationTenantTables(): string[] {
         ...mcpOauthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...githubInstallStateMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...discordGatewayHybridMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...completionSubscriptionsMigration.matchAll(
+          /CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g
+        ),
         ...externalIdentitiesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...codexDeviceAuthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...capabilityPoliciesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
@@ -90,6 +96,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0078_mcp_oauth_pending_flows.sql'),
     readRepoFile('packages/core/drizzle/postgres/0082_github_install_state.sql'),
     readRepoFile('packages/core/drizzle/postgres/0094_discord_gateway_hybrid.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0096_transitive_completion_subscriptions.sql'),
     readRepoFile('packages/core/drizzle/postgres/0090_external_user_identities.sql'),
     readRepoFile('packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'),
     readRepoFile('packages/core/drizzle/postgres/0095_board_branch_capability_policies.sql'),
@@ -186,6 +193,23 @@ describe('Postgres multitenancy schema coverage', () => {
     expect(migration).toContain("current_setting('agor.system_scope', true)");
     expect(migration).toContain("= 'task_runtime_discovery'");
     expect(migration).not.toContain('WITH CHECK');
+  });
+
+  it('limits completion recovery to active subscription routing Tasks', () => {
+    const migration = readRepoFile(
+      'packages/core/drizzle/postgres/0096_transitive_completion_subscriptions.sql'
+    );
+
+    expect(migration).toContain('CREATE POLICY "completion_callback_discovery"');
+    expect(migration).toContain('CREATE POLICY "completion_callback_task_discovery"');
+    expect(migration).toContain('FOR SELECT');
+    expect(migration).toContain("= 'completion_callback_discovery'");
+    expect(migration).toContain('AND EXISTS');
+    expect(migration).toContain('"completion_subscriptions"."active_task_id" = "tasks"."task_id"');
+    expect(migration).toContain("IN ('pending', 'delegated', 'running_downstream')");
+    expect(migration).not.toMatch(
+      /CREATE POLICY "completion_callback_(?:task_)?discovery"[\s\S]*WITH CHECK/
+    );
   });
 
   it('limits Knowledge embedding discovery to routing-only candidate rows', () => {
