@@ -998,6 +998,9 @@ describe('GatewayChannelsTable Discord create wizard', () => {
     expect(screen.queryByText('Discord (coming soon)')).not.toBeInTheDocument();
   }, 30_000);
 
+  // This exercises the complete four-step wizard twice and can contend with
+  // hundreds of parallel jsdom tests in CI. Keep enough timeout headroom for
+  // a loaded runner while retaining the full secret-preservation regression.
   it('preserves secrets through Back/Continue and submits the complete payload', async () => {
     const { client, channelCreate, channelPatch, testCreate } = makeClient({
       ok: true,
@@ -1113,5 +1116,5 @@ describe('GatewayChannelsTable Discord create wizard', () => {
       },
     });
     expect(JSON.stringify(channelCreate.mock.calls[0][0])).not.toContain('••••••••');
-  }, 30_000);
+  }, 60_000);
 });
