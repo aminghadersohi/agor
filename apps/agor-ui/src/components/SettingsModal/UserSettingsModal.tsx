@@ -87,6 +87,7 @@ import { CodexAuthSettings } from '../CodexAuth';
 import { EnvVarEditor } from '../EnvVarEditor';
 import { HighlightMatch } from '../HighlightMatch';
 import { SessionMcpServersField } from '../MCPServerSelect';
+import { ProfileImageGalleryEditor } from '../ProfileImage';
 import { ToolIcon } from '../ToolIcon';
 import { UserIdentityAvatar } from '../UserIdentityAvatar';
 import { AudioSettingsTab } from './AudioSettingsTab';
@@ -1616,6 +1617,17 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
           />
         </FieldRow>
       </Form>
+
+      {user && (
+        <>
+          <SectionDivider label="Photos" />
+          <ProfileImageGalleryEditor
+            subject={{ type: 'user', id: user.user_id }}
+            canEdit={canEditTarget}
+            label="Profile photos"
+          />
+        </>
+      )}
 
       {onRestartOnboarding && isSelf && (
         <>

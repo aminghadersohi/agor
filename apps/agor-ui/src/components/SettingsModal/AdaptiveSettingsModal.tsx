@@ -87,7 +87,7 @@ export function AdaptiveSettingsModal({
         if (!isOpen) afterClose?.();
       }}
       styles={{
-        content: { borderStartStartRadius: 16, borderStartEndRadius: 16, overflow: 'hidden' },
+        section: { borderStartStartRadius: 16, borderStartEndRadius: 16, overflow: 'hidden' },
         body: { overflowX: 'hidden', overflowY: 'auto', padding: 16 },
         footer: { padding: '12px 16px' },
       }}
