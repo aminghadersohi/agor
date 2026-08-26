@@ -1,6 +1,6 @@
 import type { MCPMarketplaceOverview } from '@agor/core/types';
 import type { AgorClient } from '@agor-live/client';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { message } from 'antd';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MyServersTab } from './MyServersTab';
@@ -26,7 +26,10 @@ const overview: MCPMarketplaceOverview = {
 };
 
 describe('Marketplace server actions', () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
 
   it('renders a dedicated empty state when the caller owns no servers', () => {
     render(
