@@ -5,6 +5,7 @@
  * Uses DrizzleService adapter with SessionRepository.
  */
 
+import { existsSync } from 'node:fs';
 import { getAgenticToolModelConfiguration } from '@agor/agentic-tools';
 import {
   isResolvedAgenticToolModelConfiguration,
