@@ -428,7 +428,9 @@ export function useAgorData(
             client.service('artifacts').findAll({
               query: {
                 $limit: PAGINATION.DEFAULT_LIMIT,
-                $select: [...ARTIFACT_METADATA_LIST_FIELDS],
+                // Home and canvas action controls need the small interaction
+                // manifest, while artifact source files remain lazy-loaded.
+                $select: [...ARTIFACT_METADATA_LIST_FIELDS, 'agor_runtime'],
               },
             }),
           (list) =>

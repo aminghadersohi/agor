@@ -14,7 +14,8 @@
  */
 
 import type { SandpackTemplate } from './board';
-import type { ArtifactID, BoardID, BranchID, ScheduleID, SessionID, UserID, UUID } from './id';
+import type { ArtifactID, BoardID, BranchID, SessionID, UserID, UUID } from './id';
+import type { ScheduleID } from './schedule';
 
 /** A user-triggered control exposed to an artifact through the Agor runtime. */
 export interface ArtifactActionBinding {
