@@ -27,11 +27,13 @@ import {
   BoardRepository,
   BranchRepository,
   bindRepositoryToTenantUnitOfWork,
+  CompletionSubscriptionRepository,
   generateId,
   getCurrentTenantId,
   MessagesRepository,
   resolveMcpMemberPolicy,
   runWithTenantDatabaseScope,
+  runWithTenantDatabaseTransaction,
   ScheduleRepository,
   type SessionRepository,
   setMcpMemberPolicy,
@@ -292,6 +294,20 @@ export interface RouteParams extends Params {
   user?: User;
   /** Trusted internal callback request, populated by MCP tooling only. */
   _taskCompletionCallback?: NonNullable<TaskMetadata['completion_callback']>;
+  /** Trusted MCP-only durable root completion request. */
+  _completionSubscriptionRequest?: {
+    subscription_id: import('@agor/core/types').CompletionSubscriptionID;
+    origin_session_id: import('@agor/core/types').SessionID;
+    origin_task_id: import('@agor/core/types').TaskID;
+    callback_session_id: import('@agor/core/types').SessionID;
+    requested_by_user_id: import('@agor/core/types').UserID;
+    max_depth?: number;
+  };
+  /** Trusted MCP-only transfer of the caller's active requested work. */
+  _completionContinuation?: {
+    subscription_id: import('@agor/core/types').CompletionSubscriptionID;
+    from_task_id: import('@agor/core/types').TaskID;
+  };
 }
 
 /** Compatibility tombstone retained for stale Claude CLI restart clients. */
@@ -1802,6 +1818,10 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         );
         id = session.session_id;
         const taskRepo = bindRepositoryToTenantUnitOfWork(db, new TaskRepository(db));
+        const completionSubscriptionRepo = bindRepositoryToTenantUnitOfWork(
+          db,
+          new CompletionSubscriptionRepository(db)
+        );
 
         // Branch RBAC — fail fast before admitting a Task. This route creates
         // its Task via `taskRepo.createPending` (repository admission), which
@@ -1966,14 +1986,50 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             if (params._taskCompletionCallback) {
               taskMetadata.completion_callback = params._taskCompletionCallback;
             }
-            const task = await taskRepo.createPending({
-              task_id: data.idempotencyTaskId,
-              session_id: id as SessionID,
-              full_prompt: data.prompt,
-              created_by: createdBy,
-              status: TaskStatus.QUEUED,
-              metadata: Object.keys(taskMetadata).length > 0 ? taskMetadata : undefined,
-            });
+            const completionRequest = params._completionSubscriptionRequest;
+            const continuation = params._completionContinuation;
+            if (completionRequest && continuation) {
+              throw new BadRequest(
+                'A task cannot start and continue a completion subscription simultaneously'
+              );
+            }
+            const completionSubscriptionId =
+              completionRequest?.subscription_id ?? continuation?.subscription_id;
+            if (completionSubscriptionId) {
+              taskMetadata.completion_subscription_id = completionSubscriptionId;
+            }
+            const admitTask = async () => {
+              const admitted = await taskRepo.createPending({
+                task_id: data.idempotencyTaskId,
+                session_id: id as SessionID,
+                full_prompt: data.prompt,
+                created_by: createdBy,
+                status: TaskStatus.QUEUED,
+                metadata: Object.keys(taskMetadata).length > 0 ? taskMetadata : undefined,
+              });
+              if (completionRequest) {
+                await completionSubscriptionRepo.createRoot({
+                  ...completionRequest,
+                  root_session_id: id as SessionID,
+                  root_task_id: admitted.task_id,
+                  root_branch_id: lockedSession.branch_id,
+                });
+              } else if (continuation) {
+                await completionSubscriptionRepo.designateContinuation({
+                  ...continuation,
+                  to_session_id: id as SessionID,
+                  to_task_id: admitted.task_id,
+                  to_branch_id: lockedSession.branch_id,
+                });
+              }
+              return admitted;
+            };
+            // The Task row and its root/continuation routing fact are one
+            // metadata commit. A crash or rejected continuation can never
+            // leave an executable Task that advertises a missing subscription.
+            const task = completionSubscriptionId
+              ? await runWithTenantDatabaseTransaction(db, promptTenantId, admitTask)
+              : await admitTask();
             await tasksService.autoTitleSession(task, params);
 
             if (!prior) {
