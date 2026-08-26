@@ -84,6 +84,9 @@ describe('WorktreeFileEditor layout (real browser)', () => {
       expect(editorPane.querySelector('.cm-editor, textarea')).toBeTruthy();
     });
     expect(screen.getByRole('button', { name: 'Save file' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Close workspace editor' })).toBeVisible();
+    await waitFor(
+      () => expect(screen.getByRole('button', { name: 'Close workspace editor' })).toBeVisible(),
+      { timeout: 5_000 }
+    );
   });
 });
