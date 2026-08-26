@@ -702,6 +702,7 @@ describe('getSupportedCommands', () => {
     expect(commands).toContain('branch.files.list');
     expect(commands).toContain('branch.files.browse');
     expect(commands).toContain('branch.files.read');
+    expect(commands).toContain('branch.files.write');
     expect(commands).toContain('branch.filesystem.status');
     expect(commands).toContain('branch.artifact.publish');
     expect(commands).toContain('branch.artifact.land');
@@ -720,6 +721,6 @@ describe('getSupportedCommands', () => {
     expect(commands).toContain('zellij.tab');
     expect(commands).toContain('agentic-tool.invoke');
     expect(commands).toContain('codex.auth-file');
-    expect(commands.length).toBe(28);
+    expect(commands.length).toBe(29);
   });
 });
