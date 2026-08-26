@@ -1945,7 +1945,13 @@ export const App: React.FC<AppProps> = ({
           currentUser={user}
           preselectedSessionId={teammateChatsSessionId}
           onClose={closeTeammateChats}
-          onUpdateUser={onUpdateUser}
+          onUpdateUser={
+            onUpdateUser
+              ? async (userId, updates) => {
+                  await onUpdateUser(userId, updates);
+                }
+              : undefined
+          }
         />
         <UserSettingsModal
           open={effectiveUserSettingsOpen}
