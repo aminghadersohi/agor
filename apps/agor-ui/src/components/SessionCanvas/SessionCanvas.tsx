@@ -114,6 +114,11 @@ import {
   relativeToAbsolute,
 } from './canvas/utils/coordinateTransforms';
 import { type LayoutGuide, snapRectToPeers } from './canvas/utils/layoutGuides';
+import {
+  getMarqueeSelection,
+  getSelectedLayoutNodes,
+  removeSelectedDescendants,
+} from './canvas/utils/marqueeSelection';
 import { getValidZoneParentId, sanitizeOrphanedNodeParents } from './canvas/utils/nodeParentUtils';
 import { ZoneTriggerModal } from './canvas/ZoneTriggerModal';
 import { DEFAULT_BOARD_OBJECT_Z_INDEX, selectedZIndex } from './canvas/zOrder';
@@ -543,6 +548,23 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       end: { x: number; y: number };
     } | null>(null);
 
+    // Custom marquee selection supports starting inside a zone's empty body.
+    // React Flow's built-in marquee only starts on the bare pane, which makes
+    // large container zones effectively block selection of their contents.
+    const marqueeGestureRef = useRef<{
+      pointerId: number;
+      start: { x: number; y: number };
+      initialSelectedIds: Set<string>;
+      additive: boolean;
+      startedOnZoneId?: string;
+      active: boolean;
+    } | null>(null);
+    const [marqueeSelection, setMarqueeSelection] = useState<{
+      start: { x: number; y: number };
+      end: { x: number; y: number };
+    } | null>(null);
+    const suppressCanvasClickRef = useRef(false);
+
     // Comment placement state (click-to-place)
     const [commentPlacement, setCommentPlacement] = useState<{
       position: { x: number; y: number }; // React Flow coordinates
@@ -735,6 +757,27 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         });
       },
       [setNodesUnsafe, onOrphanedParent]
+    );
+
+    const applySelectedNodeIds = useCallback(
+      (selectedIds: ReadonlySet<string>) => {
+        setNodes((currentNodes) => {
+          let changed = false;
+          const nextNodes = currentNodes.map((node) => {
+            const selected = selectedIds.has(node.id);
+            const base =
+              node.type === 'zone'
+                ? ((node.data?.zIndex as number) ?? DEFAULT_BOARD_OBJECT_Z_INDEX.zone)
+                : undefined;
+            const zIndex = base === undefined ? node.zIndex : selectedZIndex(base, selected);
+            if (node.selected === selected && node.zIndex === zIndex) return node;
+            changed = true;
+            return { ...node, selected, zIndex };
+          });
+          return changed ? nextNodes : currentNodes;
+        });
+      },
+      [setNodes]
     );
 
     // Track resize state
@@ -1710,8 +1753,38 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const onNodesChange = useCallback(
       // biome-ignore lint/suspicious/noExplicitAny: React Flow change event types are not exported
       (changes: any) => {
+        let effectiveChanges = changes;
         // biome-ignore lint/suspicious/noExplicitAny: React Flow change event types are not exported
-        const selectChanges = changes.filter((c: any) => c.type === 'select');
+        const incomingSelectChanges = changes.filter((c: any) => c.type === 'select');
+        if (incomingSelectChanges.length > 0) {
+          const currentNodes =
+            typeof reactFlowInstanceRef.current?.getNodes === 'function'
+              ? reactFlowInstanceRef.current.getNodes()
+              : nodes;
+          const requestedIds = new Set(
+            currentNodes.filter((node) => node.selected).map((node) => node.id)
+          );
+          for (const change of incomingSelectChanges) {
+            if (change.selected) requestedIds.add(change.id);
+            else requestedIds.delete(change.id);
+          }
+          const normalizedIds = removeSelectedDescendants(currentNodes, requestedIds);
+          const selectChangeById = new Map(
+            incomingSelectChanges.map((change) => [change.id, change])
+          );
+          for (const node of currentNodes) {
+            const selected = normalizedIds.has(node.id);
+            if (node.selected !== selected || selectChangeById.has(node.id)) {
+              selectChangeById.set(node.id, { type: 'select', id: node.id, selected });
+            }
+          }
+          effectiveChanges = [
+            ...changes.filter((change) => change.type !== 'select'),
+            ...selectChangeById.values(),
+          ];
+        }
+        // biome-ignore lint/suspicious/noExplicitAny: React Flow change event types are not exported
+        const selectChanges = effectiveChanges.filter((c: any) => c.type === 'select');
         if (selectChanges.length > 0) {
           setNodes((currentNodes) => {
             // biome-ignore lint/suspicious/noExplicitAny: React Flow change event types are not exported
@@ -1742,7 +1815,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
         // Detect resize by checking for dimensions changes
         // biome-ignore lint/suspicious/noExplicitAny: React Flow change event types are not exported
-        changes.forEach((change: any) => {
+        effectiveChanges.forEach((change: any) => {
           if (change.type === 'dimensions' && change.dimensions) {
             // O(1) lookup against React Flow's internal node map. Avoids both the
             // old per-event `nodes.find()` scan AND a per-nodes-change Map rebuild:
@@ -1833,9 +1906,17 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         });
 
         // Call the original handler
-        onNodesChangeInternal(changes);
+        onNodesChangeInternal(effectiveChanges);
       },
-      [board, boardObjectByBranch, boardObjectByCard, client, onNodesChangeInternal, setNodes]
+      [
+        board,
+        boardObjectByBranch,
+        boardObjectByCard,
+        client,
+        nodes,
+        onNodesChangeInternal,
+        setNodes,
+      ]
     );
 
     // Handle node drag start
@@ -2256,7 +2337,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       ]
     );
 
-    const selectedLayoutNodes = nodes.filter((node) => node.selected && !node.parentId);
+    const selectedLayoutNodes = useMemo(() => getSelectedLayoutNodes(nodes), [nodes]);
     const handleLayoutAction = useCallback(
       async (action: 'arrange' | 'left' | 'center' | 'top' | 'middle' | 'width' | 'height') => {
         if (!board || !client || selectedLayoutNodes.length < 2) return;
@@ -2314,13 +2395,23 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           return { node, x, y, width: nextWidth, height: nextHeight };
         });
 
+        const updateById = new Map(updates.map((update) => [update.node.id, update]));
         setNodes((currentNodes) =>
           currentNodes.map((node) => {
-            const update = updates.find((item) => item.node.id === node.id);
+            const update = updateById.get(node.id);
             if (!update) return node;
+            const parent = node.parentId
+              ? currentNodes.find((candidate) => candidate.id === node.parentId)
+              : undefined;
+            const position = parent
+              ? absoluteToRelative(
+                  { x: update.x, y: update.y },
+                  getNodeAbsolutePosition(parent, currentNodes)
+                )
+              : { x: update.x, y: update.y };
             return {
               ...node,
-              position: { x: update.x, y: update.y },
+              position,
               ...(action === 'width' || action === 'height'
                 ? { style: { ...node.style, width: update.width, height: update.height } }
                 : {}),
@@ -2350,8 +2441,20 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           const cardObject = boardObjectByCard.get(update.node.id.replace('card-', ''));
           const placement = branchObject ?? cardObject;
           if (placement) {
+            const parent = update.node.parentId
+              ? nodes.find((candidate) => candidate.id === update.node.parentId)
+              : undefined;
+            const position = parent
+              ? absoluteToRelative(
+                  { x: update.x, y: update.y },
+                  getNodeAbsolutePosition(parent, nodes)
+                )
+              : { x: update.x, y: update.y };
             await client.service('board-objects').patch(placement.object_id, {
-              position: { x: update.x, y: update.y },
+              position,
+              ...(action === 'width' || action === 'height'
+                ? { size: { width: update.width, height: update.height } }
+                : {}),
             });
           }
         }
@@ -2371,7 +2474,59 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       };
     }, []);
 
-    // Canvas pointer handlers for drag-to-draw zones
+    const handleSelectionPointerDownCapture = useCallback(
+      (event: React.PointerEvent<HTMLDivElement>) => {
+        if (activeTool !== 'select' || event.button !== 0 || !reactFlowInstanceRef.current) return;
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+
+        if (
+          target.closest(
+            '.canvas-layout-toolbar, .react-flow__controls, .react-flow__minimap, button, input, textarea, select, a, [role="button"]'
+          )
+        ) {
+          return;
+        }
+
+        const nodeElement = target.closest<HTMLElement>('.react-flow__node');
+        const zoneElement = nodeElement?.classList.contains('react-flow__node-zone')
+          ? nodeElement
+          : null;
+        if (nodeElement && !zoneElement) return;
+        if (
+          zoneElement &&
+          target.closest(
+            '[data-zone-marquee-ignore], .nodrag, .nopan, .react-flow__resize-control, button, input, textarea, select, a, [role="button"]'
+          )
+        ) {
+          return;
+        }
+
+        const currentNodes = reactFlowInstanceRef.current.getNodes();
+        marqueeGestureRef.current = {
+          pointerId: event.pointerId,
+          start: { x: event.clientX, y: event.clientY },
+          initialSelectedIds: new Set(
+            currentNodes.filter((node) => node.selected).map((node) => node.id)
+          ),
+          additive: event.shiftKey || event.metaKey || event.ctrlKey,
+          startedOnZoneId: zoneElement?.dataset.id,
+          active: false,
+        };
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+
+        // A zone wrapper would otherwise begin dragging before the movement
+        // threshold tells us whether this is a marquee. We handle a no-drag
+        // release as an ordinary zone click below.
+        if (zoneElement) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      },
+      [activeTool]
+    );
+
+    // Canvas pointer handlers for marquee selection and drag-to-draw zones.
     const handlePointerDown = useCallback(
       (event: React.PointerEvent) => {
         if (!reactFlowInstanceRef.current) return;
@@ -2390,6 +2545,51 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
     const handlePointerMove = useCallback(
       (event: React.PointerEvent) => {
+        const gesture = marqueeGestureRef.current;
+        if (
+          activeTool === 'select' &&
+          gesture &&
+          gesture.pointerId === event.pointerId &&
+          reactFlowInstanceRef.current
+        ) {
+          const distance = Math.hypot(
+            event.clientX - gesture.start.x,
+            event.clientY - gesture.start.y
+          );
+          if (!gesture.active && distance >= 4) gesture.active = true;
+          if (gesture.active) {
+            const end = { x: event.clientX, y: event.clientY };
+            setMarqueeSelection({ start: gesture.start, end });
+            const minScreen = {
+              x: Math.min(gesture.start.x, end.x),
+              y: Math.min(gesture.start.y, end.y),
+            };
+            const maxScreen = {
+              x: Math.max(gesture.start.x, end.x),
+              y: Math.max(gesture.start.y, end.y),
+            };
+            const minFlow = reactFlowInstanceRef.current.screenToFlowPosition(minScreen);
+            const maxFlow = reactFlowInstanceRef.current.screenToFlowPosition(maxScreen);
+            const currentNodes = reactFlowInstanceRef.current.getNodes();
+            applySelectedNodeIds(
+              getMarqueeSelection(
+                currentNodes,
+                {
+                  x: Math.min(minFlow.x, maxFlow.x),
+                  y: Math.min(minFlow.y, maxFlow.y),
+                  width: Math.abs(maxFlow.x - minFlow.x),
+                  height: Math.abs(maxFlow.y - minFlow.y),
+                },
+                gesture.initialSelectedIds,
+                gesture.additive
+              )
+            );
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
+        }
+
         if (activeTool === 'zone' && drawingZone && event.buttons === 1) {
           setDrawingZone({
             start: drawingZone.start,
@@ -2397,10 +2597,37 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           });
         }
       },
-      [activeTool, drawingZone]
+      [activeTool, applySelectedNodeIds, drawingZone]
     );
 
-    const handlePointerUp = useCallback(() => {
+    const handlePointerUp = useStableCallback((event: React.PointerEvent<HTMLDivElement>) => {
+      const gesture = marqueeGestureRef.current;
+      if (gesture?.pointerId === event.pointerId) {
+        if (gesture.active) {
+          suppressCanvasClickRef.current = true;
+          event.preventDefault();
+          event.stopPropagation();
+        } else if (gesture.startedOnZoneId && reactFlowInstanceRef.current) {
+          const currentNodes = reactFlowInstanceRef.current.getNodes();
+          const selectedIds = gesture.additive
+            ? new Set(gesture.initialSelectedIds)
+            : new Set<string>();
+          if (gesture.additive && selectedIds.has(gesture.startedOnZoneId)) {
+            selectedIds.delete(gesture.startedOnZoneId);
+          } else {
+            selectedIds.add(gesture.startedOnZoneId);
+          }
+          applySelectedNodeIds(removeSelectedDescendants(currentNodes, selectedIds));
+          event.preventDefault();
+          event.stopPropagation();
+        } else if (!gesture.additive) {
+          applySelectedNodeIds(new Set());
+        }
+        event.currentTarget.releasePointerCapture?.(event.pointerId);
+        marqueeGestureRef.current = null;
+        setMarqueeSelection(null);
+      }
+
       if (activeTool === 'zone' && drawingZone && reactFlowInstanceRef.current) {
         // Bail out if the daemon isn't usable — the in-flight gesture is
         // discarded rather than persisted as a half-formed zone.
@@ -2499,7 +2726,25 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         setDrawingZone(null);
         setActiveTool('select');
       }
-    }, [activeTool, drawingZone, board, client, setNodes, mutationGate.canMutate]);
+    });
+
+    const handlePointerCancel = useCallback(
+      (event: React.PointerEvent<HTMLDivElement>) => {
+        const gesture = marqueeGestureRef.current;
+        if (gesture?.pointerId !== event.pointerId) return;
+        applySelectedNodeIds(gesture.initialSelectedIds);
+        marqueeGestureRef.current = null;
+        setMarqueeSelection(null);
+      },
+      [applySelectedNodeIds]
+    );
+
+    const handleCanvasClickCapture = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+      if (!suppressCanvasClickRef.current) return;
+      suppressCanvasClickRef.current = false;
+      event.preventDefault();
+      event.stopPropagation();
+    }, []);
 
     const openMarkdownPlacementModal = useCallback(
       (event: Pick<React.MouseEvent, 'clientX' | 'clientY'>): boolean => {
@@ -2788,6 +3033,19 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       }
     }, [mutationGate.canMutate, activeTool]);
 
+    useEffect(() => {
+      const handleEscape = (event: KeyboardEvent) => {
+        if (event.key !== 'Escape') return;
+        const gesture = marqueeGestureRef.current;
+        if (!gesture) return;
+        applySelectedNodeIds(gesture.initialSelectedIds);
+        marqueeGestureRef.current = null;
+        setMarqueeSelection(null);
+      };
+      window.addEventListener('keydown', handleEscape);
+      return () => window.removeEventListener('keydown', handleEscape);
+    }, [applySelectedNodeIds]);
+
     return (
       <div
         style={{
@@ -2795,9 +3053,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           height,
           position: 'relative',
         }}
+        onPointerDownCapture={handleSelectionPointerDownCapture}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
+        onClickCapture={handleCanvasClickCapture}
       >
         {/* Drawing preview for zone */}
         {drawingZone && (
@@ -2812,6 +3073,19 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               background: token.colorPrimaryBg,
               pointerEvents: 'none',
               zIndex: 1000,
+            }}
+          />
+        )}
+
+        {marqueeSelection && (
+          <div
+            className="canvas-marquee-selection"
+            aria-hidden="true"
+            style={{
+              left: Math.min(marqueeSelection.start.x, marqueeSelection.end.x),
+              top: Math.min(marqueeSelection.start.y, marqueeSelection.end.y),
+              width: Math.abs(marqueeSelection.end.x - marqueeSelection.start.x),
+              height: Math.abs(marqueeSelection.end.y - marqueeSelection.start.y),
             }}
           />
         )}
@@ -2913,7 +3187,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // Disable all panning when actively drawing a zone to prevent interference
             panOnScroll={activeTool === 'select' && !drawingZone}
             panOnDrag={activeTool !== 'select' && !drawingZone}
-            selectionOnDrag={activeTool === 'select'}
+            // SessionCanvas owns marquee selection so it can begin on empty
+            // zone bodies as well as the bare pane and can normalize selected
+            // container hierarchies before group drag.
+            selectionOnDrag={false}
             className={`tool-mode-${activeTool}`}
             // Disable React Flow's keyboard shortcuts that conflict with typing/spatial messages.
             // Keep modifier-scroll zoom enabled so Command/Control + scroll behaves like Figma.
