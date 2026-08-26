@@ -2204,6 +2204,7 @@ function AppContent() {
                 onUpdateRepo={handleUpdateRepo}
                 onArchiveOrDeleteBranch={handleArchiveOrDeleteBranch}
                 onExecuteScheduleNow={handleExecuteScheduleNow}
+                onUpdateUser={handleUpdateUser}
               />
             }
           />
@@ -2230,6 +2231,8 @@ function AppContent() {
             path={`/${ENTITY_PATH_SEGMENTS.artifact}/:artifactShortId/`}
             element={desktopAppElement}
           />
+          <Route path="/chats/" element={desktopAppElement} />
+          <Route path="/chats/:sessionShortId/" element={desktopAppElement} />
 
           {/* Fallback for unknown / root paths */}
           <Route path="/*" element={desktopAppElement} />
