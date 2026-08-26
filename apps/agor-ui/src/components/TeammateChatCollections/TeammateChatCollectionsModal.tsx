@@ -19,7 +19,19 @@ import {
 const { Text } = Typography;
 
 function makeCollectionId(): string {
-  return globalThis.crypto.randomUUID();
+  const random = new Uint8Array(12);
+  if (typeof globalThis.crypto?.getRandomValues === 'function') {
+    globalThis.crypto.getRandomValues(random);
+  } else {
+    // Collection IDs identify entries inside one user's preferences; they are
+    // not authorization tokens. Keep creation functional in restricted or
+    // older browser contexts where Web Crypto is unavailable.
+    for (let index = 0; index < random.length; index += 1) {
+      random[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  const suffix = Array.from(random, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `chat-${Date.now().toString(36)}-${suffix}`;
 }
 
 export interface TeammateChatCollectionsModalProps {
