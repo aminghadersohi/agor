@@ -1391,6 +1391,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
             {showMcpControl && (
               <SessionMcpFooterControl
                 client={client}
+                currentUserId={currentUserId}
                 sessionId={session.session_id}
                 sessionMcpServerIds={sessionMcpServerIds}
                 mcpServerById={mcpServerById}
