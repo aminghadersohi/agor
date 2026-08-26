@@ -85,7 +85,8 @@ describe('register-services OAuth callback URL regression', () => {
       codeOnly.indexOf('const tenantIdFromParams')
     );
     expect(flowHelper).toMatch(/resolveMCPOAuthCompatibilityPolicy\s*\(\s*server\s*\)/);
-    expect(flowHelper).toMatch(/effectiveClientId\s*=\s*server\.auth\.oauth_client_id/);
+    expect(flowHelper).toMatch(/resolveProbeServerTemplates\s*\(/);
+    expect(flowHelper).toMatch(/effectiveClientId\s*=\s*resolvedOAuthAuth\.oauth_client_id/);
     expect(flowHelper).toMatch(/effectiveCompatibilityMode\s*=\s*compatibilityPolicy\.mode/);
     expect(flowHelper).toMatch(/compatibilityMode:\s*context\.compatibilityMode/);
 
