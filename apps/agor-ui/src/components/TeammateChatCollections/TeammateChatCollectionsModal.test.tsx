@@ -83,4 +83,21 @@ describe('TeammateChatCollectionsModal', () => {
     ]);
     expect(onClose).toHaveBeenCalledOnce();
   });
+
+  it('creates a collection without requiring secure-context randomUUID', () => {
+    render(
+      <AntApp>
+        <TeammateChatCollectionsModal
+          open
+          currentUser={{ ...user, preferences: {} }}
+          onClose={vi.fn()}
+          onUpdateUser={vi.fn()}
+        />
+      </AntApp>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Create collection/ }));
+
+    expect(screen.getByRole('textbox', { name: 'Collection name' })).toHaveValue('Chat group 1');
+  });
 });
