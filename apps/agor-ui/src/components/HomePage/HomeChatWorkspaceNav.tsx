@@ -384,7 +384,7 @@ export function HomeChatWorkspaceNav({
             description="Pin sessions to build your chat workspace."
             style={{ marginTop: 32 }}
           >
-            <Button size="small" type="primary" icon={<PlusOutlined />} onClick={onManage}>
+            <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => onManage()}>
               Create collection
             </Button>
           </Empty>
