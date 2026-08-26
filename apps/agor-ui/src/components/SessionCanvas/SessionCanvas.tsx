@@ -1,3 +1,4 @@
+import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
 import type {
   AgenticToolName,
   AgorClient,
@@ -18,13 +19,20 @@ import type {
   ZoneTrigger,
 } from '@agor-live/client';
 import {
+  AlignCenterOutlined,
+  AlignLeftOutlined,
+  AppstoreOutlined,
   BorderOutlined,
+  ColumnHeightOutlined,
+  ColumnWidthOutlined,
   CommentOutlined,
   DeleteOutlined,
   FileMarkdownOutlined,
   MinusOutlined,
   PlusOutlined,
   SelectOutlined,
+  VerticalAlignMiddleOutlined,
+  VerticalAlignTopOutlined,
   ZoomInOutlined,
 } from '@ant-design/icons';
 import { Button, Input, Modal, Popover, Slider, Tooltip, Typography, theme } from 'antd';
@@ -39,6 +47,7 @@ import React, {
 } from 'react';
 import {
   Background,
+  BackgroundVariant,
   ControlButton,
   Controls,
   type Edge,
@@ -104,6 +113,7 @@ import {
   type ParentInfo,
   relativeToAbsolute,
 } from './canvas/utils/coordinateTransforms';
+import { type LayoutGuide, snapRectToPeers } from './canvas/utils/layoutGuides';
 import { getValidZoneParentId, sanitizeOrphanedNodeParents } from './canvas/utils/nodeParentUtils';
 import { ZoneTriggerModal } from './canvas/ZoneTriggerModal';
 import { DEFAULT_BOARD_OBJECT_Z_INDEX, selectedZIndex } from './canvas/zOrder';
@@ -167,11 +177,11 @@ interface SessionNodeData {
   onDelete?: (sessionId: string) => void;
   onOpenSettings?: (sessionId: string) => void;
   onUnpin?: (sessionId: string) => void;
-  compact?: boolean;
   isPinned?: boolean;
   parentZoneId?: string;
   zoneName?: string;
   zoneColor?: string;
+  compact?: boolean;
   isActiveUrlTarget?: boolean;
 }
 
@@ -227,6 +237,7 @@ interface BranchNodeData {
   parentZoneId?: string;
   zoneName?: string;
   zoneColor?: string;
+  compact?: boolean;
   selectedSessionId?: string | null;
   isActiveUrlTarget?: boolean;
   client: AgorClient | null;
@@ -303,6 +314,7 @@ const BranchNode = React.memo(
           zoneName={data.zoneName}
           client={data.client}
           zoneColor={data.zoneColor}
+          compact={data.compact}
         />
       </div>
     );
@@ -324,6 +336,7 @@ const BranchNode = React.memo(
       p.isPinned === n.isPinned &&
       p.zoneName === n.zoneName &&
       p.zoneColor === n.zoneColor &&
+      p.compact === n.compact &&
       p.client === n.client &&
       p.onTaskClick === n.onTaskClick &&
       p.onSessionClick === n.onSessionClick &&
@@ -659,6 +672,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const layoutUpdateTimerRef = useRef<NodeJS.Timeout | null>(null);
     const pendingLayoutUpdatesRef = useRef<Record<string, { x: number; y: number }>>({});
     const isDraggingRef = useRef(false);
+    const [isDraggingCanvas, setIsDraggingCanvas] = useState(false);
+    const [alignmentGuides, setAlignmentGuides] = useState<LayoutGuide[]>([]);
 
     // Helper: Check if a node intersects with a zone
     const _findIntersectingZone = useCallback(
@@ -748,6 +763,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       board,
       client,
       boardObjectsForBoard,
+      nodes,
       setNodes,
       deletedObjectsRef,
       eraserMode: activeTool === 'eraser',
@@ -929,6 +945,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             isPinned: !!validZoneParentId,
             zoneName,
             zoneColor,
+            compact: boardObject?.compact === true,
             client,
           },
         });
@@ -1043,6 +1060,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             zoneColor,
             onClick: handleCardClick,
             onUnpin: handleUnpinCard,
+            compact: boardObject.compact === true,
           } satisfies CardNodeData,
         });
       }
@@ -1731,12 +1749,20 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // `getNode` is a stable reference and only runs inside this dimensions
             // branch, so the hot drag/position path does zero O(n) work.
             const node = reactFlowInstanceRef.current?.getNode(change.id);
-            if (node?.type === 'zone') {
+            if (node && ['zone', 'branchNode', 'cardNode'].includes(node.type ?? '')) {
               // Check if dimensions actually changed (to avoid infinite loop from React Flow emitting unchanged dimensions)
-              const currentWidth = node.style?.width;
-              const currentHeight = node.style?.height;
               const newWidth = change.dimensions.width;
               const newHeight = change.dimensions.height;
+              const entityBoardObject =
+                node.type === 'branchNode'
+                  ? boardObjectByBranch.get(node.id)
+                  : node.type === 'cardNode'
+                    ? boardObjectByCard.get(node.id.replace('card-', ''))
+                    : undefined;
+              const currentWidth =
+                node.type === 'zone' ? node.style?.width : entityBoardObject?.size?.width;
+              const currentHeight =
+                node.type === 'zone' ? node.style?.height : entityBoardObject?.size?.height;
 
               // Skip if dimensions haven't changed (tolerance of 1px for floating point)
               if (
@@ -1785,6 +1811,20 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                     } catch (error) {
                       console.error('Failed to persist zone resize:', error);
                     }
+                    continue;
+                  }
+
+                  const entityBoardObject = nodeId.startsWith('card-')
+                    ? boardObjectByCard.get(nodeId.replace('card-', ''))
+                    : boardObjectByBranch.get(nodeId);
+                  if (entityBoardObject) {
+                    try {
+                      await client.service('board-objects').patch(entityBoardObject.object_id, {
+                        size: dimensions,
+                      });
+                    } catch (error) {
+                      console.error('Failed to persist board entity dimensions:', error);
+                    }
                   }
                 }
               }, 500);
@@ -1795,24 +1835,60 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         // Call the original handler
         onNodesChangeInternal(changes);
       },
-      [board, client, onNodesChangeInternal, setNodes]
+      [board, boardObjectByBranch, boardObjectByCard, client, onNodesChangeInternal, setNodes]
     );
 
     // Handle node drag start
     const handleNodeDragStart: NodeDragHandler = useCallback(() => {
       isDraggingRef.current = true;
+      setIsDraggingCanvas(true);
+      setAlignmentGuides([]);
     }, []);
 
     // Handle node drag - track local position changes
-    const handleNodeDrag: NodeDragHandler = useCallback((_event, node) => {
-      // Track this position locally so we don't get overwritten by WebSocket updates
-      // IMPORTANT: Store ABSOLUTE position, not relative!
-      const absolutePos = node.positionAbsolute || node.position;
-      localPositionsRef.current[node.id] = {
-        x: absolutePos.x,
-        y: absolutePos.y,
-      };
-    }, []);
+    const handleNodeDrag: NodeDragHandler = useCallback(
+      (_event, node) => {
+        // Alignment is intentionally limited to top-level objects. Child nodes
+        // already inherit a zone's coordinate system, so snapping them against
+        // unrelated world-space objects would feel unpredictable.
+        const absolutePos = node.positionAbsolute || node.position;
+        if (!node.parentId) {
+          const size = (item: Node) => ({
+            width: Number(item.width ?? item.style?.width ?? 240),
+            height: Number(item.height ?? item.style?.height ?? 120),
+          });
+          const currentSize = size(node);
+          const peers = nodes
+            .filter((peer) => peer.id !== node.id && !peer.parentId)
+            .map((peer) => {
+              const peerSize = size(peer);
+              const peerPosition = peer.positionAbsolute || peer.position;
+              return { id: peer.id, ...peerPosition, ...peerSize };
+            });
+          const snapped = snapRectToPeers({ id: node.id, ...absolutePos, ...currentSize }, peers);
+          setAlignmentGuides(snapped.guides);
+          if (snapped.x !== absolutePos.x || snapped.y !== absolutePos.y) {
+            setNodes((currentNodes) =>
+              currentNodes.map((current) =>
+                current.id === node.id
+                  ? { ...current, position: { x: snapped.x, y: snapped.y } }
+                  : current
+              )
+            );
+            localPositionsRef.current[node.id] = { x: snapped.x, y: snapped.y };
+            return;
+          }
+        }
+
+        // Track this position locally so we don't get overwritten by WebSocket updates
+        // IMPORTANT: Store ABSOLUTE position, not relative!
+        localPositionsRef.current[node.id] = {
+          x: absolutePos.x,
+          y: absolutePos.y,
+        };
+      },
+      [nodes, setNodes]
+    );
 
     // Handle node drag end - persist layout to board (debounced)
     const handleNodeDragStop: NodeDragHandler = useCallback(
@@ -1821,6 +1897,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
         // Reset dragging flag immediately to allow node sync effects to run
         isDraggingRef.current = false;
+        setIsDraggingCanvas(false);
+        setAlignmentGuides([]);
 
         // Track final position locally
         // IMPORTANT: Store ABSOLUTE position, not relative!
@@ -2176,6 +2254,109 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         commentById,
         setNodes,
       ]
+    );
+
+    const selectedLayoutNodes = nodes.filter((node) => node.selected && !node.parentId);
+    const handleLayoutAction = useCallback(
+      async (action: 'arrange' | 'left' | 'center' | 'top' | 'middle' | 'width' | 'height') => {
+        if (!board || !client || selectedLayoutNodes.length < 2) return;
+        const size = (node: Node) => ({
+          width: Number(node.width ?? node.style?.width ?? 240),
+          height: Number(node.height ?? node.style?.height ?? 120),
+        });
+        const rects = selectedLayoutNodes
+          .map((node) => {
+            const position = getNodeAbsolutePosition(node, nodes);
+            return { node, position, ...size(node) };
+          })
+          .sort(
+            (a, b) =>
+              a.position.y - b.position.y ||
+              a.position.x - b.position.x ||
+              a.node.id.localeCompare(b.node.id)
+          );
+        const left = Math.min(...rects.map((item) => item.position.x));
+        const right = Math.max(...rects.map((item) => item.position.x + item.width));
+        const top = Math.min(...rects.map((item) => item.position.y));
+        const bottom = Math.max(...rects.map((item) => item.position.y + item.height));
+        const center = (left + right) / 2;
+        const middle = (top + bottom) / 2;
+        const targetWidth = rects[0]?.width ?? 240;
+        const targetHeight = rects[0]?.height ?? 120;
+        const autoLayout =
+          action === 'arrange'
+            ? layoutRectangles(
+                rects.map(({ node, width, height }) => ({ id: node.id, width, height })),
+                {
+                  preferredColumns: Math.ceil(Math.sqrt(rects.length)),
+                  gapX: 32,
+                  gapY: 32,
+                }
+              )
+            : null;
+        const autoPlacementById = new Map(
+          autoLayout?.placements.map((placement) => [placement.id, placement]) ?? []
+        );
+        const updates = rects.map(({ node, position, width, height }) => {
+          const nextWidth = action === 'width' ? targetWidth : width;
+          const nextHeight = action === 'height' ? targetHeight : height;
+          let x = position.x;
+          let y = position.y;
+          const autoPlacement = autoPlacementById.get(node.id);
+          if (autoPlacement) {
+            x = left + autoPlacement.x;
+            y = top + autoPlacement.y;
+          }
+          if (action === 'left') x = left;
+          if (action === 'center') x = center - width / 2;
+          if (action === 'top') y = top;
+          if (action === 'middle') y = middle - height / 2;
+          return { node, x, y, width: nextWidth, height: nextHeight };
+        });
+
+        setNodes((currentNodes) =>
+          currentNodes.map((node) => {
+            const update = updates.find((item) => item.node.id === node.id);
+            if (!update) return node;
+            return {
+              ...node,
+              position: { x: update.x, y: update.y },
+              ...(action === 'width' || action === 'height'
+                ? { style: { ...node.style, width: update.width, height: update.height } }
+                : {}),
+            };
+          })
+        );
+
+        for (const update of updates) {
+          localPositionsRef.current[update.node.id] = { x: update.x, y: update.y };
+          const objectData = board.objects?.[update.node.id];
+          if (objectData) {
+            await client.service('boards').patch(board.board_id, {
+              _action: 'upsertObject',
+              objectId: update.node.id,
+              objectData: {
+                ...objectData,
+                x: update.x,
+                y: update.y,
+                ...(action === 'width' || action === 'height'
+                  ? { width: update.width, height: update.height }
+                  : {}),
+              },
+            } as unknown as Partial<Board>);
+            continue;
+          }
+          const branchObject = boardObjectByBranch.get(update.node.id);
+          const cardObject = boardObjectByCard.get(update.node.id.replace('card-', ''));
+          const placement = branchObject ?? cardObject;
+          if (placement) {
+            await client.service('board-objects').patch(placement.object_id, {
+              position: { x: update.x, y: update.y },
+            });
+          }
+        }
+      },
+      [board, boardObjectByBranch, boardObjectByCard, client, nodes, selectedLayoutNodes, setNodes]
     );
 
     // Cleanup debounce timers on unmount
@@ -2645,6 +2826,61 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             background: canvasBackground,
           }}
         >
+          {selectedLayoutNodes.length >= 2 && activeTool === 'select' && (
+            <div className="canvas-layout-toolbar" role="toolbar" aria-label="Align selected items">
+              <Typography.Text type="secondary">
+                {selectedLayoutNodes.length} selected
+              </Typography.Text>
+              {(
+                [
+                  ['arrange', 'Auto arrange', <AppstoreOutlined key="arrange" />],
+                  ['left', 'Align left', <AlignLeftOutlined key="left" />],
+                  ['center', 'Align center', <AlignCenterOutlined key="center" />],
+                  ['top', 'Align top', <VerticalAlignTopOutlined key="top" />],
+                  ['middle', 'Align middle', <VerticalAlignMiddleOutlined key="middle" />],
+                  ['width', 'Match width', <ColumnWidthOutlined key="width" />],
+                  ['height', 'Match height', <ColumnHeightOutlined key="height" />],
+                ] as const
+              ).map(([action, label, icon]) => (
+                <Tooltip key={action} title={label}>
+                  <Button
+                    size="small"
+                    icon={icon}
+                    aria-label={label}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={() => void handleLayoutAction(action)}
+                  />
+                </Tooltip>
+              ))}
+            </div>
+          )}
+          {alignmentGuides.length > 0 && (
+            <div className="canvas-alignment-guides" aria-hidden="true">
+              {(() => {
+                const viewport = reactFlowInstanceRef.current?.getViewport() ?? {
+                  x: 0,
+                  y: 0,
+                  zoom: 1,
+                };
+                return alignmentGuides.map((guide) => (
+                  <span
+                    key={`${guide.orientation}-${guide.offset}`}
+                    className={`canvas-alignment-guide ${guide.orientation}`}
+                    data-guide-kind={guide.kind ?? 'alignment'}
+                    style={
+                      guide.orientation === 'vertical'
+                        ? { left: guide.offset * viewport.zoom + viewport.x }
+                        : { top: guide.offset * viewport.zoom + viewport.y }
+                    }
+                  >
+                    {guide.label && (
+                      <span className="canvas-alignment-guide-label">{guide.label}</span>
+                    )}
+                  </span>
+                ));
+              })()}
+            </div>
+          )}
           <ReactFlow
             nodes={nodes}
             edges={edges}
@@ -2676,20 +2912,28 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // Also allow click-drag to pan since selection box isn't useful here
             // Disable all panning when actively drawing a zone to prevent interference
             panOnScroll={activeTool === 'select' && !drawingZone}
-            panOnDrag={!drawingZone} // Always allow drag to pan (left mouse in select, any in other modes)
-            selectionOnDrag={false} // Disable selection box - not useful for branch cards
+            panOnDrag={activeTool !== 'select' && !drawingZone}
+            selectionOnDrag={activeTool === 'select'}
             className={`tool-mode-${activeTool}`}
             // Disable React Flow's keyboard shortcuts that conflict with typing/spatial messages.
             // Keep modifier-scroll zoom enabled so Command/Control + scroll behaves like Figma.
             deleteKeyCode={null}
             selectionKeyCode={null}
-            multiSelectionKeyCode={null}
+            multiSelectionKeyCode={['Meta', 'Control', 'Shift']}
             panActivationKeyCode={null}
             zoomActivationKeyCode={['Meta', 'Control']}
             disableKeyboardA11y={true}
             style={{ background: 'transparent' }}
           >
-            {!canvasBackground && <Background />}
+            {(!canvasBackground || isDraggingCanvas) && (
+              <Background
+                variant={BackgroundVariant.Dots}
+                gap={20}
+                size={1.5}
+                color={token.colorTextQuaternary}
+                style={{ opacity: isDraggingCanvas ? 0.75 : 0.35 }}
+              />
+            )}
             <Controls
               position="top-left"
               showZoom={false}

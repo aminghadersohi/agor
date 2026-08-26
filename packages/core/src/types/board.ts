@@ -43,6 +43,12 @@ export interface BoardEntityObject {
   /** Position on canvas */
   position: BoardPosition;
 
+  /** Last measured rendered size, used by server-side layout tools. */
+  size?: { width: number; height: number };
+
+  /** Shared compact presentation state for a board card/worktree. */
+  compact?: boolean;
+
   /** Zone this entity is pinned to (optional) */
   zone_id?: string;
 
@@ -93,6 +99,34 @@ export interface ZoneTrigger {
   agent?: PersistedAgenticToolName;
 }
 
+/** Whether a zone preserves spatial placement or continuously maintains its layout. */
+export type ZoneLayoutMode = 'manual' | 'auto';
+
+/** Opinionated v1 presentation presets for the contents of a zone. */
+export type ZoneLayoutPreset = 'grid' | 'compact_list';
+
+/** Stable fields available for deterministic zone ordering. */
+export type ZoneLayoutSortBy = 'position' | 'priority' | 'status' | 'updated' | 'created' | 'title';
+
+export type ZoneLayoutSortDirection = 'asc' | 'desc';
+
+/**
+ * Persisted zone layout policy.
+ *
+ * Missing policies intentionally mean manual spatial placement for backwards
+ * compatibility. Unknown future fields survive board-object shallow merges.
+ */
+export interface ZoneLayoutPolicy {
+  mode: ZoneLayoutMode;
+  preset: ZoneLayoutPreset;
+  sortBy: ZoneLayoutSortBy;
+  sortDirection: ZoneLayoutSortDirection;
+  /** Preferred grid width. Compact lists always use one column. */
+  columns?: number;
+  /** Grow or shrink the zone vertically to contain the arranged rectangles. */
+  autoResizeHeight?: boolean;
+}
+
 /**
  * Zone rectangle object (for organizing sessions visually)
  */
@@ -114,6 +148,8 @@ export interface ZoneBoardObject {
   locked?: boolean;
   /** Trigger configuration for sessions dropped into this zone */
   trigger?: ZoneTrigger;
+  /** Optional persisted sorting and automatic layout policy. */
+  layout?: ZoneLayoutPolicy;
   /** Label/status font size in px. Falls back to the theme default when unset. */
   fontSize?: number;
   /** Explicit stacking order. Falls back to the per-type default when unset. */
