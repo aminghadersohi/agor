@@ -1823,6 +1823,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             isOpen={open}
             forceExpandAll={searchOpen && query.trim().length > 0}
             simple={simpleChat}
+            rememberScrollPosition={preferFocusChat}
           />
         </div>
 

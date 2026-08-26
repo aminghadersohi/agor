@@ -39,6 +39,8 @@ export interface SessionPanelContentProps {
   forceExpandAll?: boolean;
   /** Conversation-first presentation that hides branch and task chrome. */
   simple?: boolean;
+  /** Preserve per-chat reading positions inside the dedicated chat workspace. */
+  rememberScrollPosition?: boolean;
 }
 
 export const SessionPanelContent = React.memo<SessionPanelContentProps>(
@@ -60,6 +62,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
     isOpen,
     forceExpandAll = false,
     simple = false,
+    rememberScrollPosition = false,
   }) => {
     const { token } = theme.useToken();
     const { showSuccess, showError } = useThemedMessage();
@@ -196,6 +199,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
           forceExpandAll={forceExpandAll}
           onOpenAgenticToolSettings={onOpenAgenticToolSettings}
           simple={simple}
+          rememberScrollPosition={rememberScrollPosition}
         />
 
         {/* Queued Tasks Drawer - Above Footer.
