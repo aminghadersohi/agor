@@ -1,10 +1,13 @@
 import type { Branch } from '@agor-live/client';
 import { getTeammateConfig } from '@agor-live/client';
-import { Descriptions, Form, Grid, Input, Space, Typography } from 'antd';
+import { BgColorsOutlined } from '@ant-design/icons';
+import { Button, Descriptions, Flex, Form, Grid, Input, Space, Typography } from 'antd';
+import { useState } from 'react';
 import { EmojiPickerInput } from '../../EmojiPickerInput/EmojiPickerInput';
 import { ProfileImageGalleryEditor } from '../../ProfileImage';
 import { Tag } from '../../Tag';
 import { TeammateIdentityAvatar } from '../../TeammateIdentityAvatar';
+import { TeammateStageModal } from '../../TeammateStage';
 import type { TeammateFormState } from '../useBranchModalForm';
 
 interface TeammateTabProps {
@@ -18,17 +21,23 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({ branch, canEdit, state
   const config = getTeammateConfig(branch);
   const screens = Grid.useBreakpoint();
   const compact = !screens.md;
+  const [stageOpen, setStageOpen] = useState(false);
   if (!config) return null;
 
   return (
     <div style={{ width: '100%', maxHeight: '70vh', overflowY: 'auto' }}>
       <Space orientation="vertical" size="large" style={{ width: '100%' }}>
-        <Space>
-          <TeammateIdentityAvatar branch={branch} size={32} />
-          <Typography.Text strong style={{ fontSize: 16 }}>
-            Teammate Configuration
-          </Typography.Text>
-        </Space>
+        <Flex align="center" justify="space-between" gap="small" wrap>
+          <Space>
+            <TeammateIdentityAvatar branch={branch} size={32} />
+            <Typography.Text strong style={{ fontSize: 16 }}>
+              Teammate Configuration
+            </Typography.Text>
+          </Space>
+          <Button icon={<BgColorsOutlined />} onClick={() => setStageOpen(true)}>
+            View 3D stage
+          </Button>
+        </Flex>
 
         {/* Editable fields */}
         <Form layout={compact ? 'vertical' : 'horizontal'} colon={false}>
@@ -99,6 +108,7 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({ branch, canEdit, state
           </Descriptions.Item>
         </Descriptions>
       </Space>
+      <TeammateStageModal branch={branch} open={stageOpen} onClose={() => setStageOpen(false)} />
     </div>
   );
 };
