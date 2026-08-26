@@ -39,6 +39,7 @@ import type { BranchUpdate } from './components/BranchModal/tabs/GeneralTab';
 import { ErrorBoundary, setCrashContext } from './components/ErrorBoundary';
 import { uploadFilesToSession } from './components/FileUpload/upload';
 import { ForcePasswordChangeModal } from './components/ForcePasswordChangeModal';
+import { IdleGlyphScreensaver } from './components/IdleGlyphScreensaver';
 import { InitialLoadingScreen } from './components/InitialLoadingScreen';
 import { LoginPage } from './components/LoginPage';
 import { OnboardingBanners } from './components/OnboardingBanners';
@@ -2055,6 +2056,7 @@ function AppContent() {
   // Render main app
   return (
     <ConnectionProvider value={connectionContextValue}>
+      <IdleGlyphScreensaver />
       {/* Force Password Change Modal - shown when user.must_change_password is true */}
       <ForcePasswordChangeModal
         open={!!currentUser?.must_change_password && passwordWriteAvailable}
