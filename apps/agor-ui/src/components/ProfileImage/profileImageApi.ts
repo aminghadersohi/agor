@@ -37,7 +37,11 @@ export async function listProfileImages(
 ): Promise<ProfileImageListResult> {
   const query = new URLSearchParams({ subjectType: subject.type, subjectId: subject.id });
   const response = await fetch(`${endpoint()}?${query}`, { headers: getAuthHeaders() });
-  return (await (await assertOk(response)).json()) as ProfileImageListResult;
+  const result = (await (await assertOk(response)).json()) as Partial<ProfileImageListResult>;
+  if (!Array.isArray(result.images) || typeof result.max_images !== 'number') {
+    throw new Error('Profile image response was invalid');
+  }
+  return result as ProfileImageListResult;
 }
 
 export async function uploadProfileImage(
