@@ -47,7 +47,7 @@ vi.mock('../ToolIcon', () => ({
 }));
 
 vi.mock('./SessionAttachmentsDropdown', () => ({
-  SessionAttachmentsDropdown: () => null,
+  SessionAttachmentsDropdown: () => <button type="button">Attachments</button>,
 }));
 
 vi.mock('./SessionMcpFooterControl', () => ({
@@ -270,6 +270,11 @@ describe('SessionPanel search control', () => {
 
     expect(screen.queryByRole('button', { name: 'Show full session details' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Focus chat' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Attachments' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'More actions' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Search session' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Fork session' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'More options' })).toBeVisible();
     expect(localStorage.getItem('agor.session.focus-chat.v2')).toBeNull();
   });

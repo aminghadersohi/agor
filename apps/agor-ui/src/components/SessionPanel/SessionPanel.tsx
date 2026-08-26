@@ -1470,6 +1470,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       onCodexPermissionChange={stableFooterHandlers.onCodexPermissionChange}
       promptInputSlot={promptInputSlot}
       simple={simpleChat}
+      showSessionActions={preferFocusChat}
     />
   ) : null;
 
@@ -1599,7 +1600,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
                 />
               </Tooltip>
             )}
-            {onOpenChatWorkspace && (
+            {onOpenChatWorkspace && !preferFocusChat && (
               <Tooltip title="Open in chat workspace">
                 <Button
                   type="text"
@@ -1619,15 +1620,17 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
                 />
               </Tooltip>
             )}
-            {!simpleChat && <SessionAttachmentsDropdown items={attachmentItems} />}
-            {!simpleChat && (
+            {(!simpleChat || preferFocusChat) && (
+              <SessionAttachmentsDropdown items={attachmentItems} />
+            )}
+            {(!simpleChat || preferFocusChat) && (
               <Dropdown menu={{ items: moreMenuItems }} trigger={['click']} placement="bottomRight">
                 <Tooltip title="More actions">
-                  <Button type="text" icon={<EllipsisOutlined />} />
+                  <Button type="text" aria-label="More actions" icon={<EllipsisOutlined />} />
                 </Tooltip>
               </Dropdown>
             )}
-            {!simpleChat && (
+            {(!simpleChat || preferFocusChat) && (
               <Tooltip title="Search session">
                 <Button
                   type="text"
@@ -1660,7 +1663,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
         {/* Row 2: search bar — always in DOM, animates in/out */}
         <div
           style={{
-            display: simpleChat ? 'none' : undefined,
+            display: simpleChat && !preferFocusChat ? 'none' : undefined,
             overflow: 'hidden',
             maxHeight: searchOpen ? '36px' : '0px',
             opacity: searchOpen ? 1 : 0,
