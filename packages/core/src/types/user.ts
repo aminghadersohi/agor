@@ -1,6 +1,6 @@
 import type { CodexApprovalPolicy, CodexNetworkAccess, CodexSandboxMode } from './agentic-tool';
 import { type AgenticToolName, DEFAULT_AGENTIC_TOOL_NAME, isAgenticToolName } from './agentic-tool';
-import type { BranchID, UserID } from './id';
+import type { BranchID, SessionID, UserID } from './id';
 import type { EffortLevel, PermissionMode } from './session';
 
 /** Canonical syntax for the transitional delegated execution-home key. */
@@ -461,8 +461,23 @@ export interface UserPreferences {
   mainBoardId?: string;
   /** Whether to render Slack-synced avatar_url when available. Undefined defaults to true. */
   use_slack_avatar?: boolean;
+  /** Lightweight, user-owned groupings of canonical sessions shown on Home. */
+  chat_collections?: ChatCollectionPreferences;
   // Future preferences can be added here
   [key: string]: unknown;
+}
+
+/** A named Home collection of existing sessions, including teammate and gateway sessions. */
+export interface ChatCollection {
+  collection_id: string;
+  name: string;
+  /** References only: messages and transcripts remain owned by their canonical sessions. */
+  session_ids: SessionID[];
+}
+
+/** User preference envelope for Home chat collections. */
+export interface ChatCollectionPreferences {
+  collections: ChatCollection[];
 }
 
 /** Stable external identity link stored with a local user. */

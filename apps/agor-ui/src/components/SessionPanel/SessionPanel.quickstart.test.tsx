@@ -114,6 +114,7 @@ function renderPanel(
   actions: {
     onUpdateSession?: ReturnType<typeof vi.fn>;
     onChooseAgenticTool?: ReturnType<typeof vi.fn>;
+    onPinToChatCollection?: ReturnType<typeof vi.fn>;
   } = {}
 ) {
   render(
@@ -126,7 +127,14 @@ function renderPanel(
         }}
       >
         <AntApp>
-          <SessionPanel client={null} session={session} branch={branch} open onClose={vi.fn()} />
+          <SessionPanel
+            client={null}
+            session={session}
+            branch={branch}
+            open
+            onClose={vi.fn()}
+            onPinToChatCollection={actions.onPinToChatCollection}
+          />
         </AntApp>
       </AppActionsProvider>
     </ConnectionProvider>
@@ -162,6 +170,18 @@ describe('SessionPanel inline title edit', () => {
 
     expect(onUpdateSession).not.toHaveBeenCalled();
     expect(screen.getByText('Original title')).toBeInTheDocument();
+  });
+});
+
+describe('SessionPanel chat collections', () => {
+  it('pins the current session from the more menu', async () => {
+    const onPinToChatCollection = vi.fn();
+    renderPanel(makeSession({ title: 'Release planning' }), { onPinToChatCollection });
+
+    fireEvent.click(screen.getAllByRole('img', { name: 'ellipsis' })[0].closest('button')!);
+    fireEvent.click(await screen.findByText('Pin to chat collection…'));
+
+    expect(onPinToChatCollection).toHaveBeenCalledWith('session-1');
   });
 });
 

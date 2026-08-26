@@ -25,6 +25,7 @@ import { useNavigate } from 'react-router-dom';
 import { getSessionDisplayTitle } from '@/utils/sessionTitle';
 import { formatRelativeTime } from '@/utils/time';
 import { getBoardEmoji } from '../BoardTile';
+import { HomeTeammateChatsSection } from '../HomePage/HomeTeammateChatsSection';
 import { MobileHeader } from './MobileHeader';
 
 const { Content } = Layout;
@@ -37,6 +38,7 @@ interface MobileHomePageProps {
   sessionById: Map<string, Session>;
   onMenuClick: () => void;
   onOpenSettings: (section: string) => void;
+  onManageTeammateChats: () => void;
 }
 
 export const MobileHomePage: React.FC<MobileHomePageProps> = ({
@@ -46,6 +48,7 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
   sessionById,
   onMenuClick,
   onOpenSettings,
+  onManageTeammateChats,
 }) => {
   const navigate = useNavigate();
   const { token } = theme.useToken();
@@ -115,6 +118,11 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
               <Statistic title="Running now" value={running} prefix={<ThunderboltOutlined />} />
             </Card>
           </Flex>
+          <HomeTeammateChatsSection
+            currentUserId={user?.user_id}
+            onSessionClick={(sessionId) => navigate(`/m/session/${sessionId}`)}
+            onManageTeammateChats={onManageTeammateChats}
+          />
           <section aria-labelledby="mobile-home-sessions">
             <Flex justify="space-between" align="center" style={{ marginBottom: token.marginSM }}>
               <Title id="mobile-home-sessions" level={5} style={{ margin: 0 }}>
