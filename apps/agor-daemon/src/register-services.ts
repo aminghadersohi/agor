@@ -1945,18 +1945,53 @@ export async function registerMCPServices(
         resolveMCPOAuthCompatibilityPolicy(server)
       );
       logMCPOAuthCompatibilityPolicy('flow-start', server.mcp_server_id, compatibilityPolicy);
+
+      // Saved MCP rows may keep OAuth credentials as `{{ user.env.X }}`
+      // placeholders. Session hydration and Test Connection already resolve
+      // those placeholders against the authenticated user's encrypted env,
+      // but this two-phase path used to pass the literal template through as
+      // `client_id`. Providers then reported `invalid_client`, even though the
+      // same server configuration worked in an agent session.
+      //
+      // Resolve inside the central flow helper (rather than only in the HTTP
+      // route) because oauth-start, discover, and test-oauth all converge here
+      // and this helper deliberately reloads the saved row as its authority.
+      const { resolveUserEnvironment } = await import('@agor/core/config');
+      const { resolveProbeServerTemplates } = await import('./utils/mcp-probe-templates.js');
+      const userEnv = await runInOAuthTenantScope(db, opts.tenantId, () =>
+        resolveUserEnvironment(opts.userId as UserID, db)
+      );
+      const templateResolution = resolveProbeServerTemplates(
+        {
+          url: server.url,
+          transport: server.transport,
+          auth: server.auth,
+          headers: server.headers,
+          name: server.name,
+          mcpServerId: server.mcp_server_id,
+        },
+        userEnv
+      );
+      if (!templateResolution.ok) {
+        throw new Error(templateResolution.error);
+      }
+      const resolvedOAuthAuth = templateResolution.resolved.auth;
+      if (resolvedOAuthAuth?.type !== 'oauth') {
+        throw new Error('The saved MCP server no longer has OAuth configuration');
+      }
+
       // The row reloaded in the tenant scope is the only durable authority.
       // Callers may have discovered metadata from a transient form snapshot,
       // but no grant may bind values that differ from the saved definition.
       effectiveMcpUrl = server.url;
-      effectiveClientId = server.auth.oauth_client_id;
-      effectiveClientSecret = server.auth.oauth_client_secret;
-      effectiveAuthorizationUrlOverride = server.auth.oauth_authorization_url;
-      effectiveTokenUrlOverride = server.auth.oauth_token_url;
-      effectiveScope = server.auth.oauth_scope;
+      effectiveClientId = resolvedOAuthAuth.oauth_client_id;
+      effectiveClientSecret = resolvedOAuthAuth.oauth_client_secret;
+      effectiveAuthorizationUrlOverride = resolvedOAuthAuth.oauth_authorization_url;
+      effectiveTokenUrlOverride = resolvedOAuthAuth.oauth_token_url;
+      effectiveScope = resolvedOAuthAuth.oauth_scope;
       effectiveCompatibilityMode = compatibilityPolicy.mode;
-      effectiveDcrMode = server.auth.oauth_dcr_mode;
-      effectiveOAuthMode = server.auth.oauth_mode ?? 'per_user';
+      effectiveDcrMode = resolvedOAuthAuth.oauth_dcr_mode;
+      effectiveOAuthMode = resolvedOAuthAuth.oauth_mode ?? 'per_user';
       if (effectiveOAuthMode === 'shared') {
         const initiatingUser = await runWithinOAuthAuthority(assertFlowAuthority, () =>
           runInOAuthTenantScope(db, opts.tenantId, () =>

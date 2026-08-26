@@ -1,15 +1,18 @@
 import http, { type Server as HttpServer } from 'node:http';
 import {
   createDatabaseAsync,
+  encryptApiKey,
   eq,
   MCPServerRepository,
   mcpServers,
   runMigrations,
+  select,
   shortId,
   type TenantScopeAwareDatabase,
   UserMCPOAuthTokenRepository,
   UsersRepository,
   update,
+  users,
 } from '@agor/core/db';
 import {
   type Application,
@@ -400,6 +403,9 @@ async function createHarness(
     lockGrantConfiguration?: NonNullable<RegisterServicesContext['lockMcpOAuthGrantConfiguration']>;
     outboundDnsLookup?: OutboundDnsLookup;
     requireAuth?: RegisterServicesContext['requireAuth'];
+    oauthClientId?: string;
+    oauthClientSecret?: string;
+    userEnv?: Record<string, string>;
   } = {}
 ) {
   const rawDb = await createDatabaseAsync({ dialect: 'sqlite', url: ':memory:' });
@@ -409,6 +415,23 @@ async function createHarness(
     email: `sqlite-oauth-${Math.random()}@example.com`,
     role: 'admin',
   });
+  if (options.userEnv) {
+    const row = await select(rawDb).from(users).where(eq(users.user_id, user.user_id)).one();
+    await update(rawDb, users)
+      .set({
+        data: {
+          ...(row?.data ?? {}),
+          env_vars: Object.fromEntries(
+            Object.entries(options.userEnv).map(([name, value]) => [
+              name,
+              { value_encrypted: encryptApiKey(value), scope: 'global' },
+            ])
+          ),
+        },
+      })
+      .where(eq(users.user_id, user.user_id))
+      .run();
+  }
   const catalogEntry = options.catalogEntry;
   const server = await new MCPServerRepository(rawDb).create({
     name: 'sqlite-oauth-authority',
@@ -420,7 +443,14 @@ async function createHarness(
     ...(catalogEntry ? { source: 'catalog' as const, catalog_entry_name: catalogEntry.name } : {}),
     auth: {
       type: 'oauth',
-      ...(catalogEntry ? {} : { oauth_client_id: 'saved-client-id' }),
+      ...(catalogEntry
+        ? {}
+        : {
+            oauth_client_id: options.oauthClientId ?? 'saved-client-id',
+            ...(options.oauthClientSecret
+              ? { oauth_client_secret: options.oauthClientSecret }
+              : {}),
+          }),
       ...(options.catalogPeer ? { oauth_compatibility_mode: 'strict' as const } : {}),
       ...(catalogEntry || oauthMode ? { oauth_mode: oauthMode ?? 'per_user' } : {}),
     },
@@ -1199,6 +1229,38 @@ describe('real Feathers Socket.IO request authority', () => {
 });
 
 describe('SQLite saved-row OAuth authority', () => {
+  it('resolves saved OAuth client templates for the authenticated user before authorization', async () => {
+    const provider = await createTestProvider();
+    providers.push(provider);
+    const harness = await createHarness(provider, undefined, {
+      oauthClientId: '{{ user.env.GOOGLE_OAUTH_CLIENT_ID }}',
+      oauthClientSecret: '{{ user.env.GOOGLE_OAUTH_CLIENT_SECRET }}',
+      userEnv: {
+        GOOGLE_OAUTH_CLIENT_ID: 'resolved-google-client',
+        GOOGLE_OAUTH_CLIENT_SECRET: 'resolved-google-secret',
+      },
+    });
+    databases.push(harness.rawDb);
+
+    const started = (await harness.app
+      .service('mcp-servers/oauth-start')
+      .create({ mcp_server_id: harness.server.mcp_server_id }, paramsFor(harness))) as {
+      success: boolean;
+      authorizationUrl?: string;
+    };
+
+    expect(started.success).toBe(true);
+    const authorizationUrl = new URL(started.authorizationUrl!);
+    expect(authorizationUrl.searchParams.get('client_id')).toBe('resolved-google-client');
+    expect(started.authorizationUrl).not.toContain('{{');
+
+    const callback = await harness.callback(authorizationUrl.searchParams.get('state')!);
+    expect(callback.status).toBe(200);
+    expect(provider.requests.find((request) => request.path === '/token')?.authorization).toBe(
+      `Basic ${Buffer.from('resolved-google-client:resolved-google-secret').toString('base64')}`
+    );
+  });
+
   it('authenticates REST mutations before the MCP OAuth around hook can read or write', async () => {
     const provider = await createTestProvider();
     providers.push(provider);
