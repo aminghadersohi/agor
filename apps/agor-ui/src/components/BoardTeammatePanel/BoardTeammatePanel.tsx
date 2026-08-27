@@ -383,8 +383,8 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
             >
               <div
                 style={{
-                  minWidth: 196,
-                  minHeight: 196,
+                  minWidth: 300,
+                  minHeight: 300,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -395,8 +395,8 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
                 ) : (
                   <TeammateBoardPortrait
                     branch={primaryTeammateBranch}
-                    primarySize={196}
-                    alternativeSize={42}
+                    primarySize={300}
+                    alternativeSize={40}
                   />
                 )}
               </div>

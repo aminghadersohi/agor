@@ -72,13 +72,13 @@ describe('TeammateBoardPortrait', () => {
 
     render(
       <ConfigProvider>
-        <TeammateBoardPortrait branch={branch} primarySize={196} alternativeSize={42} />
+        <TeammateBoardPortrait branch={branch} primarySize={300} alternativeSize={40} />
       </ConfigProvider>
     );
 
     expect(screen.getByTestId('teammate-board-portrait')).toHaveStyle({
-      width: '196px',
-      height: '196px',
+      width: '300px',
+      height: '300px',
     });
   });
 });
