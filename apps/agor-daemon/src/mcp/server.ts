@@ -52,6 +52,7 @@ import { registerGatewayChannelTools } from './tools/gateway-channels.js';
 import { registerKnowledgeTools } from './tools/knowledge.js';
 import { registerMcpServerTools } from './tools/mcp-servers.js';
 import { registerMessageTools } from './tools/messages.js';
+import { registerProfileImageTools } from './tools/profile-images.js';
 import { registerRepoTools } from './tools/repos.js';
 import { registerScheduleTools } from './tools/schedules.js';
 import { registerSearchTools } from './tools/search.js';
@@ -224,7 +225,13 @@ const DOMAIN_TOOL_REGISTRARS: DomainToolRegistrar[] = [
     },
   },
   { domain: 'artifacts', register: registerArtifactTools },
-  { domain: 'users', register: registerUserTools },
+  {
+    domain: 'users',
+    register: (server, ctx) => {
+      registerUserTools(server, ctx);
+      registerProfileImageTools(server, ctx);
+    },
+  },
   { domain: 'analytics', register: registerAnalyticsTools },
   { domain: 'mcp-servers', register: registerMcpServerTools },
   { domain: 'gateway', register: registerGatewayChannelTools },
