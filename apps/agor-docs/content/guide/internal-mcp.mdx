@@ -38,7 +38,7 @@ This is the foundational layer: [teammates](/guide/teammates), [scheduled prompt
 | **Branches & Boards** | List or fetch branches, create new ones, assign them to boards, update metadata, move cards spatially   |
 | **Board Zones**       | Create zones on boards, update zone properties (position, size, color), manage zone triggers            |
 | **Tasks & Reports**   | Fetch task history, create follow-up tasks, log progress, generate reports                              |
-| **Users & Teams**     | Create users, update profiles or avatars, assign roles, invite collaborators                            |
+| **Users & Teams**     | Create users, update profiles, inspect permitted user/teammate galleries, and load processed images     |
 | **Context Resources** | Enumerate context files, load concept docs, ingest repo metadata                                        |
 
 Because tools route through FeathersJS services, every action emits the same events the UI listens to. Real-time updates appear instantly for everyone watching the board.
@@ -82,6 +82,7 @@ From there agents can:
 - **Spawn subsessions** to fan out work (e.g., spin up multiple coders to process a checklist).
 - Inspect the **board layout** to decide where to place new branches or sessions.
 - Update their own **user profile** to signal who is speaking.
+- List an accessible user or teammate's profile gallery with `agor_profile_images_list`, then load a permission-checked small or large image with `agor_profile_images_get` for artifact and visual identity work. Original uploads and storage paths are not exposed.
 
 This self-awareness is what lets agents behave like team members instead of detached copilots.
 
