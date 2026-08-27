@@ -23,6 +23,7 @@ import { relations, sql } from 'drizzle-orm';
 import {
   type AnySQLiteColumn,
   blob,
+  check,
   index,
   integer,
   primaryKey,
@@ -1104,6 +1105,7 @@ export const users = sqliteTable(
         avatar_source?: string;
         avatar_source_id?: string;
         avatar_synced_at?: string;
+        profile_image_id?: string;
         preferences?: Record<string, unknown>;
         // Stable external-auth identity mappings used by generic launch-code auth.
         external_identities?: UserExternalIdentity[];
@@ -2085,6 +2087,56 @@ export const uploads = sqliteTable(
 );
 
 /**
+ * Durable, processed profile galleries for users and teammate branches.
+ * Exactly one subject FK is populated; services enforce that invariant and
+ * the partial unique indexes enforce at most one primary image per subject.
+ */
+export const profileImages = sqliteTable(
+  'profile_images',
+  {
+    image_id: text('image_id', { length: 36 }).primaryKey(),
+    user_id: text('user_id', { length: 36 }).references(() => users.user_id, {
+      onDelete: 'cascade',
+    }),
+    branch_id: text('branch_id', { length: 36 }).references(() => branches.branch_id, {
+      onDelete: 'cascade',
+    }),
+    created_by: text('created_by', { length: 36 }).notNull(),
+    original_name: text('original_name').notNull(),
+    alt_text: text('alt_text'),
+    position: integer('position').notNull().default(0),
+    is_primary: t.bool('is_primary').notNull().default(false),
+    small_data: blob('small_data').notNull(),
+    small_content_type: text('small_content_type').notNull(),
+    small_width: integer('small_width').notNull(),
+    small_height: integer('small_height').notNull(),
+    large_data: blob('large_data').notNull(),
+    large_content_type: text('large_content_type').notNull(),
+    large_width: integer('large_width').notNull(),
+    large_height: integer('large_height').notNull(),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+  },
+  (table) => ({
+    subjectXor: check(
+      'profile_images_subject_xor_check',
+      sql`((${table.user_id} IS NOT NULL AND ${table.branch_id} IS NULL) OR (${table.user_id} IS NULL AND ${table.branch_id} IS NOT NULL))`
+    ),
+    userPositionIdx: index('profile_images_user_position_idx').on(table.user_id, table.position),
+    branchPositionIdx: index('profile_images_branch_position_idx').on(
+      table.branch_id,
+      table.position
+    ),
+    onePrimaryUser: uniqueIndex('profile_images_one_primary_user_idx')
+      .on(table.user_id)
+      .where(sql`${table.user_id} IS NOT NULL AND ${table.is_primary} = 1`),
+    onePrimaryBranch: uniqueIndex('profile_images_one_primary_branch_idx')
+      .on(table.branch_id)
+      .where(sql`${table.branch_id} IS NOT NULL AND ${table.is_primary} = 1`),
+  })
+);
+
+/**
  * Gateway Channels table - Registered messaging platform integrations
  *
  * Users create channels to connect messaging platforms (Slack, Discord, etc.)
@@ -2895,6 +2947,8 @@ export type GatewayInboundEventRow = typeof gatewayInboundEvents.$inferSelect;
 export type GatewayInboundEventInsert = typeof gatewayInboundEvents.$inferInsert;
 export type UploadRow = typeof uploads.$inferSelect;
 export type UploadInsert = typeof uploads.$inferInsert;
+export type ProfileImageRow = typeof profileImages.$inferSelect;
+export type ProfileImageInsert = typeof profileImages.$inferInsert;
 export type KBNamespaceRow = typeof kbNamespaces.$inferSelect;
 export type KBNamespaceInsert = typeof kbNamespaces.$inferInsert;
 export type KBNamespaceAclRow = typeof kbNamespaceAcl.$inferSelect;

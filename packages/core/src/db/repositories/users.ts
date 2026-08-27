@@ -49,6 +49,7 @@ const USER_DATA_UPDATE_FIELDS = [
   'avatar_source',
   'avatar_source_id',
   'avatar_synced_at',
+  'profile_image_id',
   'preferences',
   'agentic_auth_methods',
   'default_agentic_config',
@@ -208,6 +209,7 @@ export class UsersRepository
       avatar_source: row.data.avatar_source,
       avatar_source_id: row.data.avatar_source_id,
       avatar_synced_at: row.data.avatar_synced_at,
+      profile_image_id: row.data.profile_image_id as User['profile_image_id'],
       preferences: row.data.preferences as User['preferences'],
       // Convert encrypted per-tool credential blobs into boolean presence flags.
       agentic_tools: toAgenticToolsStatus(row.data.agentic_tools as StoredAgenticTools | undefined),
@@ -278,6 +280,7 @@ export class UsersRepository
         avatar_source: user.avatar_source,
         avatar_source_id: user.avatar_source_id,
         avatar_synced_at: user.avatar_synced_at,
+        profile_image_id: user.profile_image_id,
         preferences: user.preferences,
         // Encrypted per-tool credentials. Only forwarded when caller passes the
         // raw shape (internal credential mutators); regular updates leave it undefined,

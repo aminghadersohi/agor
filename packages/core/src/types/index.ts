@@ -24,6 +24,7 @@ export * from './message';
 export * from './opencode-auth';
 export * from './opencode-models';
 export * from './presence';
+export * from './profile-image';
 export * from './realtime';
 export * from './repo';
 export * from './report';

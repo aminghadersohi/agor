@@ -241,6 +241,9 @@ importers:
       multer:
         specifier: ^2.2.0
         version: 2.2.0
+      sharp:
+        specifier: ^0.34.5
+        version: 0.34.5
       socket.io:
         specifier: ^4.8.3
         version: 4.8.3(supports-color@8.1.1)
@@ -923,6 +926,9 @@ importers:
       proper-lockfile:
         specifier: 4.1.2
         version: 4.1.2
+      sharp:
+        specifier: ^0.34.5
+        version: 0.34.5
       simple-git:
         specifier: ^3.36.0
         version: 3.36.0(supports-color@8.1.1)
@@ -12042,7 +12048,7 @@ snapshots:
       '@google-cloud/logging': 11.2.1(encoding@0.1.13)(supports-color@8.1.1)
       '@google-cloud/opentelemetry-cloud-monitoring-exporter': 0.21.0(@opentelemetry/api@1.9.0)(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.0))(@opentelemetry/resources@2.7.1(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-metrics@2.7.1(@opentelemetry/api@1.9.0))(encoding@0.1.13)(supports-color@8.1.1)
       '@google-cloud/opentelemetry-cloud-trace-exporter': 3.0.0(@opentelemetry/api@1.9.0)(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.0))(@opentelemetry/resources@2.7.1(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.7.1(@opentelemetry/api@1.9.0))(encoding@0.1.13)(supports-color@8.1.1)
-      '@google/genai': 1.43.0(@modelcontextprotocol/sdk@1.29.0(supports-color@8.1.1)(zod@4.4.3))(supports-color@8.1.1)
+      '@google/genai': 1.43.0(@modelcontextprotocol/sdk@1.29.0(supports-color@8.1.1)(zod@3.25.76))(supports-color@8.1.1)
       '@grpc/grpc-js': 1.14.4
       '@iarna/toml': 2.2.5
       '@modelcontextprotocol/sdk': 1.29.0(supports-color@8.1.1)(zod@3.25.76)
@@ -12127,6 +12133,19 @@ snapshots:
       - tree-sitter
       - utf-8-validate
 
+  '@google/genai@1.43.0(@modelcontextprotocol/sdk@1.29.0(supports-color@8.1.1)(zod@3.25.76))(supports-color@8.1.1)':
+    dependencies:
+      google-auth-library: 10.9.0(supports-color@8.1.1)
+      p-retry: 4.6.2
+      protobufjs: 7.6.5
+      ws: 8.21.0
+    optionalDependencies:
+      '@modelcontextprotocol/sdk': 1.29.0(supports-color@8.1.1)(zod@3.25.76)
+    transitivePeerDependencies:
+      - bufferutil
+      - supports-color
+      - utf-8-validate
+
   '@google/genai@1.43.0(@modelcontextprotocol/sdk@1.29.0(supports-color@8.1.1)(zod@4.4.3))(supports-color@8.1.1)':
     dependencies:
       google-auth-library: 10.9.0(supports-color@8.1.1)
@@ -12192,8 +12211,7 @@ snapshots:
       '@iconify/types': 2.0.0
       import-meta-resolve: 4.2.0
 
-  '@img/colour@1.1.0':
-    optional: true
+  '@img/colour@1.1.0': {}
 
   '@img/sharp-darwin-arm64@0.34.5':
     optionalDependencies:
@@ -20789,7 +20807,6 @@ snapshots:
       '@img/sharp-win32-arm64': 0.34.5
       '@img/sharp-win32-ia32': 0.34.5
       '@img/sharp-win32-x64': 0.34.5
-    optional: true
 
   shebang-command@2.0.0:
     dependencies:

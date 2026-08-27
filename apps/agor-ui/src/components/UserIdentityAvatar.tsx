@@ -3,13 +3,14 @@ import { Avatar, type AvatarProps, theme } from 'antd';
 import type { CSSProperties } from 'react';
 import { getUserAvatarColor } from '../utils/avatarPalette';
 import { getContrastingTextColor } from '../utils/theme';
+import { useUserProfileImageUrl } from './ProfileImage/useUserProfileImageUrl';
 
 // Re-exported so existing importers keep resolving the color util from here.
 export { getUserAvatarColor };
 
 type IdentityUser = Pick<
   User,
-  'user_id' | 'avatar_url' | 'avatar_source' | 'name' | 'email' | 'preferences'
+  'user_id' | 'avatar_url' | 'avatar_source' | 'name' | 'email' | 'preferences' | 'profile_image_id'
 >;
 
 export interface UserIdentityAvatarProps extends Omit<AvatarProps, 'src' | 'style'> {
@@ -45,9 +46,11 @@ export const UserIdentityAvatar: React.FC<UserIdentityAvatarProps> = ({
 }) => {
   const { token } = theme.useToken();
   const prefersSlackAvatar = user?.preferences?.use_slack_avatar !== false;
+  const profileImageUrl = useUserProfileImageUrl(user, size > 96 ? 'large' : 'small');
   const rawAvatarUrl = getUserAvatarUrl(user);
   const avatarUrl =
-    user?.avatar_source === 'slack' && !prefersSlackAvatar ? undefined : rawAvatarUrl;
+    profileImageUrl ??
+    (user?.avatar_source === 'slack' && !prefersSlackAvatar ? undefined : rawAvatarUrl);
 
   // Humans always show photo-or-initials — a user's emoji is never their face
   // (emoji identity is reserved for assistants).

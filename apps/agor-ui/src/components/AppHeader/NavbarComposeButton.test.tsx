@@ -256,9 +256,9 @@ describe('NavbarComposeButton', () => {
     expect(await screen.findByText('🎨')).toBeInTheDocument();
   });
 
-  it('shows the 🤖 placeholder emoji on the trigger when no primary is set', async () => {
+  it('shows the robot placeholder on the trigger when no primary is set', async () => {
     renderCompose({ primary: null });
-    expect(await screen.findByText('🤖')).toBeInTheDocument();
+    expect(await screen.findByLabelText('robot')).toBeInTheDocument();
   });
 
   it('shows a "Start quick session" tooltip on the trigger', async () => {
