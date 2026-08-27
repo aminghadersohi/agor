@@ -1,5 +1,5 @@
 import type { ContextUsageSnapshot } from '@agor/core/types';
-import type { SessionStatus, TaskStatus } from '@agor-live/client';
+import type { Branch, SessionStatus, TaskStatus, User } from '@agor-live/client';
 import { shortId } from '@agor-live/client';
 // TODO: Move normalization to DB or daemon API
 import {
@@ -23,7 +23,6 @@ import {
   ThunderboltOutlined,
   ToolOutlined,
   UnorderedListOutlined,
-  UserOutlined,
 } from '@ant-design/icons';
 import { Badge, Collapse, Popover, Tooltip, theme } from 'antd';
 import type React from 'react';
@@ -33,6 +32,8 @@ import { parseGitStateSha } from '../../utils/gitState';
 import { NeutralBoardIcon } from '../BoardTile/BoardTile';
 import { type SessionForIds, SessionIdsList } from '../SessionIds';
 import { Tag } from '../Tag';
+import { TeammateIdentityAvatar } from '../TeammateIdentityAvatar';
+import { UserIdentityAvatar } from '../UserIdentityAvatar';
 import { getModelDisplayName } from './modelDisplay';
 import { getUrlDisplayLabel, isGitHubUrl, type UrlDisplayRepo } from './url-helpers';
 
@@ -966,10 +967,7 @@ export const BoardPill: React.FC<BoardPillProps> = ({
 );
 
 interface UserPillProps extends BasePillProps {
-  user: {
-    name?: string | null;
-    email?: string | null;
-  };
+  user: User;
   compact?: boolean;
   title?: string;
   onClick?: (e: EntityPillInteractionEvent) => void;
@@ -986,7 +984,7 @@ export const UserPill: React.FC<UserPillProps> = ({
 
   return (
     <EntityPill
-      icon={<UserOutlined />}
+      icon={<UserIdentityAvatar user={user} size={14} />}
       color={ENTITY_PILL_COLORS.user}
       label={label}
       compact={compact}
@@ -1000,6 +998,7 @@ export const UserPill: React.FC<UserPillProps> = ({
 
 interface TeammatePillProps extends BasePillProps {
   name: string;
+  branch?: Branch;
   emoji?: string | null;
   compact?: boolean;
   title?: string;
@@ -1008,6 +1007,7 @@ interface TeammatePillProps extends BasePillProps {
 
 export const TeammatePill: React.FC<TeammatePillProps> = ({
   name,
+  branch,
   emoji,
   compact = false,
   title,
@@ -1015,10 +1015,10 @@ export const TeammatePill: React.FC<TeammatePillProps> = ({
   style,
 }) => (
   <EntityPill
-    icon={<RobotOutlined />}
+    icon={branch ? <TeammateIdentityAvatar branch={branch} size={14} /> : <RobotOutlined />}
     color={ENTITY_PILL_COLORS.teammate}
     label={name}
-    emoji={emoji}
+    emoji={branch ? undefined : emoji}
     compact={compact}
     title={title ?? name}
     onClick={onClick}

@@ -34,7 +34,7 @@ import { EnvironmentPill } from '../EnvironmentPill';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 import { CreatedByTag } from '../metadata';
 import { IssuePill, PullRequestPill } from '../Pill';
-import { TeammateIdentityAvatar } from '../TeammateIdentityAvatar';
+import { TeammateBoardPortrait } from '../ProfileImage';
 import { BranchSessionPeekSection } from './BranchSessionPeekSection';
 import { BranchSessionSections } from './BranchSessionSections';
 import { estimateBranchSessionSectionsHeight } from './branchCardLayout';
@@ -406,8 +406,8 @@ const BranchCardComponent = ({
                 display: 'flex',
                 alignItems: 'center',
                 cursor: panelMode ? 'default' : 'grab',
-                width: 32,
-                height: 32,
+                width: isAgent ? 72 : 32,
+                height: isAgent ? 56 : 32,
                 justifyContent: 'center',
                 flexShrink: 0,
               }}
@@ -415,7 +415,7 @@ const BranchCardComponent = ({
               {isCreating || hasRunningSession ? (
                 <Spin size="large" />
               ) : isAgent ? (
-                <TeammateIdentityAvatar branch={branch} size={32} />
+                <TeammateBoardPortrait branch={branch} />
               ) : (
                 <BranchesOutlined
                   style={{
