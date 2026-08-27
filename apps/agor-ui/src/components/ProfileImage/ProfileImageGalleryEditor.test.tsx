@@ -4,7 +4,12 @@ import { App, ConfigProvider } from 'antd';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProfileImageGalleryEditor } from './ProfileImageGalleryEditor';
-import { deleteProfileImage, listProfileImages, patchProfileImage } from './profileImageApi';
+import {
+  deleteProfileImage,
+  listProfileImages,
+  patchProfileImage,
+  uploadProfileImage,
+} from './profileImageApi';
 
 vi.mock('./profileImageApi', async (loadOriginal) => {
   const original = await loadOriginal<typeof import('./profileImageApi')>();
@@ -76,6 +81,7 @@ describe('ProfileImageGalleryEditor', () => {
       .mockReset()
       .mockResolvedValue({ ...images[1], is_primary: true });
     vi.mocked(deleteProfileImage).mockReset().mockResolvedValue();
+    vi.mocked(uploadProfileImage).mockReset();
   });
 
   afterEach(() => {
@@ -125,7 +131,61 @@ describe('ProfileImageGalleryEditor', () => {
       />
     );
     expect(await screen.findByText('Main')).toBeVisible();
-    expect(screen.queryByRole('button', { name: 'Add photo' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Add images' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Use' })).toBeNull();
+  });
+
+  it('uploads multiple selected images sequentially and refreshes once', async () => {
+    vi.mocked(uploadProfileImage)
+      .mockResolvedValueOnce({ ...images[0], image_id: 'image-3', is_primary: false })
+      .mockResolvedValueOnce({ ...images[1], image_id: 'image-4', is_primary: false });
+    renderEditor(
+      <ProfileImageGalleryEditor
+        subject={{ type: 'user', id: 'user-1' }}
+        canEdit
+        label="Profile photos"
+      />
+    );
+    await screen.findByText('Main');
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const first = new File(['first'], 'first.png', { type: 'image/png' });
+    const second = new File(['second'], 'second.webp', { type: 'image/webp' });
+
+    fireEvent.change(input, { target: { files: [first, second] } });
+
+    await waitFor(() => expect(uploadProfileImage).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(uploadProfileImage).mock.calls.map((call) => call[1].name)).toEqual([
+      'first.png',
+      'second.webp',
+    ]);
+    expect(listProfileImages).toHaveBeenCalledTimes(2);
+  });
+
+  it('uploads only the files that fit in the remaining gallery slots', async () => {
+    vi.mocked(listProfileImages).mockResolvedValue({ images, max_images: 3 });
+    vi.mocked(uploadProfileImage).mockResolvedValue({
+      ...images[0],
+      image_id: 'image-3',
+      is_primary: false,
+    });
+    renderEditor(
+      <ProfileImageGalleryEditor
+        subject={{ type: 'board', id: 'board-1' }}
+        canEdit
+        label="Board photos"
+      />
+    );
+    await screen.findByText('Main');
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const first = new File(['first'], 'first.png', { type: 'image/png' });
+    const second = new File(['second'], 'second.png', { type: 'image/png' });
+
+    fireEvent.change(input, { target: { files: [first, second] } });
+
+    await waitFor(() => expect(uploadProfileImage).toHaveBeenCalledTimes(1));
+    expect(uploadProfileImage).toHaveBeenCalledWith(
+      { type: 'board', id: 'board-1' },
+      expect.objectContaining({ name: 'first.png' })
+    );
   });
 });
