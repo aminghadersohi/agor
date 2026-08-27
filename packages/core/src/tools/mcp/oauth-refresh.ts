@@ -9,7 +9,12 @@ import {
   UserMCPOAuthTokenRepository,
 } from '../../db/repositories';
 import type { MCPServerID, UserID } from '../../types';
-import { safeOutboundFetch } from '../../utils/safe-outbound-fetch';
+import {
+  type OutboundDnsLookup,
+  OutboundPreDispatchAuthorityError,
+  safeOutboundFetch,
+} from '../../utils/safe-outbound-fetch';
+import { assertMcpGrantSubjectEntitled } from './grant-entitlement';
 import { inferOAuthTokenUrl } from './oauth-auth';
 import { resolveTokenExpiry } from './oauth-token-expiry';
 
@@ -65,6 +70,14 @@ export class FailedRefreshError extends Error {
   }
 }
 
+export class GrantConfigurationChangedError extends Error {
+  readonly code = 'grant_configuration_changed';
+  constructor(message = 'MCP OAuth grant or server configuration changed during refresh') {
+    super(message);
+    this.name = 'GrantConfigurationChangedError';
+  }
+}
+
 export class OAuthRefreshExchangeError extends Error {
   constructor(
     readonly category: 'provider_rejected' | 'transport_ambiguous' | 'response_ambiguous',
@@ -72,6 +85,16 @@ export class OAuthRefreshExchangeError extends Error {
   ) {
     super(`OAuth refresh failed (${category})`);
     this.name = 'OAuthRefreshExchangeError';
+  }
+}
+
+/** No refresh credential was dispatched because caller authority changed. */
+export class OAuthRefreshAuthorityCancelledError extends Error {
+  readonly code = 'oauth_refresh_authority_cancelled';
+
+  constructor(readonly authorityCause: unknown) {
+    super('OAuth refresh authority changed before dispatch');
+    this.name = 'OAuthRefreshAuthorityCancelledError';
   }
 }
 
@@ -83,6 +106,9 @@ export interface RefreshMCPTokenOptions {
   resourceUri?: string;
   /** Exact loopback HTTP exception for standalone development/tests only. */
   allowLocalhostHttp?: boolean;
+  /** Task/session/rollout fence checked immediately before credential dispatch. */
+  assertCurrent?: () => void | Promise<void>;
+  resolveDns?: OutboundDnsLookup;
 }
 
 export interface RefreshMCPTokenResult {
@@ -130,8 +156,13 @@ export async function refreshMCPToken(
       redirect: 'error',
       timeoutMs: 15_000,
       allowLocalhostHttp: opts.allowLocalhostHttp,
+      assertCurrent: opts.assertCurrent,
+      resolveDns: opts.resolveDns,
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof OutboundPreDispatchAuthorityError) {
+      throw new OAuthRefreshAuthorityCancelledError(error.authorityCause);
+    }
     throw new OAuthRefreshExchangeError('transport_ambiguous', true);
   }
 
@@ -157,7 +188,11 @@ export async function refreshMCPToken(
 }
 
 type MutexKey = string;
-const _inFlightRefreshes = new Map<MutexKey, Promise<string>>();
+interface StandaloneRefreshFlight {
+  version: Pick<MCPOAuthRefreshVersion, 'grantGeneration' | 'grantBindingFingerprint'>;
+  promise: Promise<string>;
+}
+const _inFlightRefreshes = new Map<MutexKey, StandaloneRefreshFlight>();
 export function __resetRefreshMutexForTests(): void {
   _inFlightRefreshes.clear();
 }
@@ -174,14 +209,67 @@ export interface RefreshAndPersistDeps {
   userId: UserID | null;
   mcpServerId: MCPServerID;
   /**
-   * Version read by the caller when it decided a PostgreSQL refresh was
-   * needed. Required at runtime for PostgreSQL so a delayed caller cannot
-   * refresh a peer's newly rotated token.
+   * Exact version read by the caller when it decided a refresh was needed.
+   * Both database implementations fence the exchange and any joined refresh
+   * result to this version so a stale caller cannot adopt a replacement grant.
    */
-  observedRefreshVersion?: MCPOAuthRefreshVersion;
+  observedRefreshVersion: MCPOAuthRefreshVersion;
+  /**
+   * Re-resolve the authoritative saved server and verify this exact grant's
+   * binding inside the supplied database unit. Daemon callers acquire the
+   * server-configuration lock here on PostgreSQL before refresh completion.
+   */
+  validateGrant: (
+    grant: UserMCPOAuthToken,
+    db: Database | TenantScopeAwareDatabase
+  ) => boolean | Promise<boolean>;
   onInvalidGrant?: (info: { userId: UserID | null; mcpServerId: MCPServerID }) => void;
   /** Internal test/development seam; daemon PostgreSQL callers leave this false. */
   allowLocalhostHttpDevelopment?: boolean;
+  assertCurrent?: () => void | Promise<void>;
+  /** Deterministic DNS seam used by pre-dispatch authority race tests. */
+  resolveDns?: OutboundDnsLookup;
+}
+
+function exactGrantMatches(
+  token: UserMCPOAuthToken,
+  expected: Pick<MCPOAuthRefreshVersion, 'grantGeneration' | 'grantBindingFingerprint'>
+): boolean {
+  return (
+    (token.grant_generation ?? 0) === expected.grantGeneration &&
+    (token.grant_binding_fingerprint ?? undefined) === expected.grantBindingFingerprint
+  );
+}
+
+function exactGrantVersionsMatch(
+  left: Pick<MCPOAuthRefreshVersion, 'grantGeneration' | 'grantBindingFingerprint'>,
+  right: Pick<MCPOAuthRefreshVersion, 'grantGeneration' | 'grantBindingFingerprint'>
+): boolean {
+  return (
+    left.grantGeneration === right.grantGeneration &&
+    left.grantBindingFingerprint === right.grantBindingFingerprint
+  );
+}
+
+async function assertGrantStillAuthorized(
+  deps: RefreshAndPersistDeps,
+  grant: UserMCPOAuthToken,
+  db: Database | TenantScopeAwareDatabase
+): Promise<void> {
+  if (!(await deps.validateGrant(grant, db))) throw new GrantConfigurationChangedError();
+}
+
+async function loadExactAuthorizedGrant(
+  deps: RefreshAndPersistDeps,
+  expected: Pick<MCPOAuthRefreshVersion, 'grantGeneration' | 'grantBindingFingerprint'>
+): Promise<UserMCPOAuthToken> {
+  return tenantWork(deps, async (db) => {
+    const token = await new UserMCPOAuthTokenRepository(db).getToken(deps.userId, deps.mcpServerId);
+    if (!token) throw new InvalidGrantError();
+    if (!exactGrantMatches(token, expected)) throw new GrantConfigurationChangedError();
+    await assertGrantStillAuthorized(deps, token, db);
+    return token;
+  });
 }
 
 function resolveTenantId(deps: RefreshAndPersistDeps): string {
@@ -217,14 +305,11 @@ async function observeCommittedRefresh(
       new UserMCPOAuthTokenRepository(db).getToken(deps.userId, deps.mcpServerId)
     );
     if (!token) throw new InvalidGrantError();
+    if (!exactGrantMatches(token, expected)) throw new GrantConfigurationChangedError();
     if (token.refresh_status === 'ambiguous') throw new AmbiguousRefreshError();
     if (token.refresh_status === 'idle') {
-      // A newer authorization replaced the old grant atomically and is valid
-      // independently of the old refresh attempt.
-      if (token.grant_generation !== expected.grantGeneration) {
-        return token.oauth_access_token;
-      }
       if (token.refresh_success_generation >= expected.refreshGeneration) {
+        await tenantWork(deps, (db) => assertGrantStillAuthorized(deps, token, db));
         return token.oauth_access_token;
       }
       // `idle` alone is not success: a known provider rejection releases the
@@ -238,13 +323,16 @@ async function observeCommittedRefresh(
 
 async function settleObservedRefresh(
   deps: RefreshAndPersistDeps,
-  token: UserMCPOAuthToken | null
+  token: UserMCPOAuthToken | null,
+  expected: MCPOAuthRefreshVersion
 ): Promise<string> {
   if (!token) throw new InvalidGrantError();
+  if (!exactGrantMatches(token, expected)) throw new GrantConfigurationChangedError();
   if (token.refresh_status === 'ambiguous') throw new AmbiguousRefreshError();
   if (token.refresh_status === 'refreshing') {
     return observeCommittedRefresh(deps, {
       grantGeneration: token.grant_generation,
+      grantBindingFingerprint: token.grant_binding_fingerprint,
       refreshGeneration: token.refresh_generation,
     });
   }
@@ -254,6 +342,7 @@ async function settleObservedRefresh(
   }
   // A stale caller lost its expected-version CAS to a successfully refreshed
   // row or to a newer atomic grant replacement. It must observe, not exchange.
+  await tenantWork(deps, (db) => assertGrantStillAuthorized(deps, token, db));
   return token.oauth_access_token;
 }
 
@@ -262,11 +351,16 @@ async function refreshPostgres(deps: RefreshAndPersistDeps): Promise<string> {
   if (!expected) {
     throw new Error('PostgreSQL MCP OAuth refresh requires an observed grant version');
   }
+  if (!expected.grantBindingFingerprint) {
+    throw new GrantConfigurationChangedError(
+      'PostgreSQL MCP OAuth refresh requires the observed grant fingerprint'
+    );
+  }
   const claim = await tenantWork(deps, (db) =>
     new UserMCPOAuthTokenRepository(db).claimRefresh(deps.userId, deps.mcpServerId, expected)
   );
   if (claim.outcome === 'observed') {
-    return settleObservedRefresh(deps, claim.token);
+    return settleObservedRefresh(deps, claim.token, expected);
   }
 
   const row = claim.token;
@@ -274,6 +368,7 @@ async function refreshPostgres(deps: RefreshAndPersistDeps): Promise<string> {
     claimId: claim.claimId,
     refreshGeneration: claim.refreshGeneration,
     grantGeneration: claim.grantGeneration,
+    grantBindingFingerprint: row.grant_binding_fingerprint,
   };
   const releaseUnstartedClaim = async (error: Error): Promise<never> => {
     await tenantWork(deps, (db) =>
@@ -294,6 +389,13 @@ async function refreshPostgres(deps: RefreshAndPersistDeps): Promise<string> {
     return releaseUnstartedClaim(new MissingTokenEndpointError());
   }
   try {
+    await tenantWork(deps, (db) => assertGrantStillAuthorized(deps, row, db));
+  } catch (error) {
+    return releaseUnstartedClaim(
+      error instanceof Error ? error : new GrantConfigurationChangedError()
+    );
+  }
+  try {
     const result = await refreshMCPToken({
       tokenEndpoint: row.oauth_token_endpoint,
       refreshToken: row.oauth_refresh_token,
@@ -301,10 +403,18 @@ async function refreshPostgres(deps: RefreshAndPersistDeps): Promise<string> {
       clientSecret: row.oauth_client_secret,
       resourceUri: row.oauth_resource_uri,
       allowLocalhostHttp: deps.allowLocalhostHttpDevelopment,
+      assertCurrent: deps.assertCurrent,
+      resolveDns: deps.resolveDns,
     });
     const expiry = resolveTokenExpiry(result, result.access_token);
-    const committed = await tenantWork(deps, (db) =>
-      new UserMCPOAuthTokenRepository(db).completeClaimedRefresh(
+    const committed = await tenantWork(deps, async (db) => {
+      // Inside this unit of work rather than before it: the entitlement is a
+      // precondition of the write, and on PostgreSQL this callback is the
+      // transaction the write commits in. See `assertMcpGrantSubjectEntitled`
+      // for the residual window this still leaves open.
+      await assertGrantSubjectForRefresh(deps, db);
+      await assertGrantStillAuthorized(deps, row, db);
+      return new UserMCPOAuthTokenRepository(db).completeClaimedRefresh(
         deps.userId,
         deps.mcpServerId,
         fence,
@@ -313,11 +423,11 @@ async function refreshPostgres(deps: RefreshAndPersistDeps): Promise<string> {
           refreshToken: result.refresh_token,
           expiresAt: expiry.expiresAt,
         }
-      )
-    );
+      );
+    });
     if (!committed) return observeCommittedRefresh(deps, fence);
     console.log('[MCP OAuth Refresh] refresh_succeeded category=committed');
-    return result.access_token;
+    return (await loadExactAuthorizedGrant(deps, fence)).oauth_access_token;
   } catch (error) {
     if (error instanceof InvalidGrantError) {
       const deleted = await tenantWork(deps, (db) =>
@@ -330,6 +440,18 @@ async function refreshPostgres(deps: RefreshAndPersistDeps): Promise<string> {
       if (!deleted) return observeCommittedRefresh(deps, fence);
       console.warn('[MCP OAuth Refresh] refresh_failed category=invalid_grant');
       notifyInvalidGrant(deps);
+      throw error;
+    }
+    if (error instanceof OAuthRefreshAuthorityCancelledError) {
+      await tenantWork(deps, (db) =>
+        new UserMCPOAuthTokenRepository(db).finishRefreshClaim(
+          deps.userId,
+          deps.mcpServerId,
+          fence,
+          'idle'
+        )
+      );
+      console.warn('[MCP OAuth Refresh] refresh_cancelled category=authority_pre_dispatch');
       throw error;
     }
     const ambiguous = !(error instanceof OAuthRefreshExchangeError) || error.ambiguous;
@@ -350,10 +472,48 @@ async function refreshPostgres(deps: RefreshAndPersistDeps): Promise<string> {
   }
 }
 
-async function refreshStandalone(deps: RefreshAndPersistDeps): Promise<string> {
+/**
+ * The grant subject's standing, as a precondition of persisting a refreshed
+ * token. `userId === null` is the tenant-owned `shared` grant, which has no
+ * individual subject to re-check.
+ */
+async function assertGrantSubjectForRefresh(
+  deps: RefreshAndPersistDeps,
+  db: Database | TenantScopeAwareDatabase
+): Promise<void> {
+  await assertMcpGrantSubjectEntitled({
+    db,
+    tenantId: deps.tenantId ?? getCurrentTenantId(),
+    subjectUserId: deps.userId,
+    oauthMode: deps.userId === null ? 'shared' : 'per_user',
+  });
+}
+
+async function loadObservedStandaloneGrant(
+  deps: RefreshAndPersistDeps,
+  expected: Pick<MCPOAuthRefreshVersion, 'grantGeneration' | 'grantBindingFingerprint'>
+): Promise<UserMCPOAuthToken> {
   const userTokenRepo = new UserMCPOAuthTokenRepository(deps.db as Database);
   const row = await userTokenRepo.getToken(deps.userId, deps.mcpServerId);
-  if (!row?.oauth_refresh_token) throw new MissingRefreshTokenError();
+  if (!row) throw new MissingRefreshTokenError();
+  if (!exactGrantMatches(row, expected)) throw new GrantConfigurationChangedError();
+  await assertGrantStillAuthorized(deps, row, deps.db);
+  return row;
+}
+
+async function refreshStandalone(
+  deps: RefreshAndPersistDeps,
+  observedVersion: Pick<MCPOAuthRefreshVersion, 'grantGeneration' | 'grantBindingFingerprint'>
+): Promise<string> {
+  const userTokenRepo = new UserMCPOAuthTokenRepository(deps.db as Database);
+  const exactGrantVersion = {
+    grantGeneration: observedVersion.grantGeneration,
+    grantBindingFingerprint: observedVersion.grantBindingFingerprint,
+  };
+  // Repeat the caller-bound check inside the mutex owner. The saved row may
+  // have changed after the pre-mutex validation but before this promise ran.
+  const row = await loadObservedStandaloneGrant(deps, exactGrantVersion);
+  if (!row.oauth_refresh_token) throw new MissingRefreshTokenError();
   const server = await new MCPServerRepository(deps.db as Database).findById(deps.mcpServerId);
   const clientId = row.oauth_client_id ?? server?.auth?.oauth_client_id;
   if (!clientId) throw new MissingClientIdError();
@@ -368,18 +528,38 @@ async function refreshStandalone(deps: RefreshAndPersistDeps): Promise<string> {
       clientSecret: row.oauth_client_secret ?? server?.auth?.oauth_client_secret,
       resourceUri: row.oauth_resource_uri,
       allowLocalhostHttp: true,
+      assertCurrent: deps.assertCurrent,
+      resolveDns: deps.resolveDns,
     });
     const expiry = resolveTokenExpiry(result, result.access_token);
-    await userTokenRepo.saveToken(deps.userId, deps.mcpServerId, {
-      accessToken: result.access_token,
-      refreshToken: result.refresh_token,
-      expiresAt: expiry.expiresAt,
-    });
+    await assertGrantSubjectForRefresh(deps, deps.db);
+    await assertGrantStillAuthorized(deps, row, deps.db);
+    const committed = await userTokenRepo.completeStandaloneRefresh(
+      deps.userId,
+      deps.mcpServerId,
+      exactGrantVersion,
+      {
+        accessToken: result.access_token,
+        refreshToken: result.refresh_token,
+        expiresAt: expiry.expiresAt,
+      }
+    );
+    if (!committed) throw new GrantConfigurationChangedError();
+    const current = await userTokenRepo.getToken(deps.userId, deps.mcpServerId);
+    if (!current) throw new InvalidGrantError();
+    if (!exactGrantMatches(current, exactGrantVersion)) throw new GrantConfigurationChangedError();
+    await assertGrantStillAuthorized(deps, current, deps.db);
     return result.access_token;
   } catch (error) {
     if (error instanceof InvalidGrantError) {
-      await userTokenRepo.deleteToken(deps.userId, deps.mcpServerId);
-      notifyInvalidGrant(deps);
+      const deleted = await userTokenRepo.deleteGrantVersion(
+        deps.userId,
+        deps.mcpServerId,
+        exactGrantVersion.grantGeneration,
+        exactGrantVersion.grantBindingFingerprint
+      );
+      if (deleted) notifyInvalidGrant(deps);
+      else throw new GrantConfigurationChangedError();
     }
     throw error;
   }
@@ -387,15 +567,39 @@ async function refreshStandalone(deps: RefreshAndPersistDeps): Promise<string> {
 
 export async function refreshAndPersistToken(deps: RefreshAndPersistDeps): Promise<string> {
   if (isPostgresDatabaseHandle(deps.db)) return refreshPostgres(deps);
+  const expected = deps.observedRefreshVersion;
+  if (!expected) {
+    throw new Error('Standalone MCP OAuth refresh requires an observed grant version');
+  }
+
+  // Validate the caller's exact observation before it may create or join a
+  // user/server mutex. A caller authorized against an old row must not learn,
+  // refresh, or invalidate the replacement row occupying the same subject.
+  await loadObservedStandaloneGrant(deps, expected);
   const key = mutexKey(deps.userId, deps.mcpServerId);
   const existing = _inFlightRefreshes.get(key);
-  if (existing) return existing;
-  const refresh = refreshStandalone(deps);
-  _inFlightRefreshes.set(key, refresh);
+  if (existing) {
+    if (!exactGrantVersionsMatch(existing.version, expected)) {
+      throw new GrantConfigurationChangedError();
+    }
+    const result = await existing.promise;
+    // A Settings mutation or replacement may have landed while this caller
+    // was awaiting another request's exchange. Fence the shared result too.
+    await loadObservedStandaloneGrant(deps, expected);
+    return result;
+  }
+  const flight: StandaloneRefreshFlight = {
+    version: {
+      grantGeneration: expected.grantGeneration,
+      grantBindingFingerprint: expected.grantBindingFingerprint,
+    },
+    promise: refreshStandalone(deps, expected),
+  };
+  _inFlightRefreshes.set(key, flight);
   try {
-    return await refresh;
+    return await flight.promise;
   } finally {
-    _inFlightRefreshes.delete(key);
+    if (_inFlightRefreshes.get(key) === flight) _inFlightRefreshes.delete(key);
   }
 }
 

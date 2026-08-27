@@ -8,7 +8,17 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/server';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { mockGetOAuthToken, mockFindMCPServer, mockGrantAuthority } = vi.hoisted(() => ({
+  mockGetOAuthToken: vi.fn(async () => null),
+  mockFindMCPServer: vi.fn(async (mcpServerId: string) => ({
+    mcp_server_id: mcpServerId,
+    enabled: true,
+    auth: { type: 'oauth', oauth_mode: 'per_user' },
+  })),
+  mockGrantAuthority: vi.fn(async () => true),
+}));
 
 vi.mock('../resolve-ids.js', () => ({
   resolveBoardId: async (_ctx: unknown, id: string) => id,
@@ -19,12 +29,90 @@ vi.mock('../resolve-ids.js', () => ({
 
 vi.mock('@agor/core/db', () => ({
   BranchRepository: class FakeBranchRepository {},
+  MCPServerRepository: class FakeMCPServerRepository {
+    findById = mockFindMCPServer;
+  },
   UserMCPOAuthTokenRepository: class FakeUserMCPOAuthTokenRepository {
-    getToken = vi.fn(async () => null);
+    getToken = mockGetOAuthToken;
   },
 }));
 
-import { vi } from 'vitest';
+vi.mock('../../services/mcp-oauth-grant-authority.js', () => ({
+  isMCPOAuthGrantAuthorizedForServer: mockGrantAuthority,
+}));
+
+beforeEach(() => {
+  mockGetOAuthToken.mockReset().mockResolvedValue(null);
+  mockFindMCPServer.mockReset().mockImplementation(async (mcpServerId: string) => ({
+    mcp_server_id: mcpServerId,
+    enabled: true,
+    auth: { type: 'oauth', oauth_mode: 'per_user' },
+  }));
+  mockGrantAuthority.mockReset().mockResolvedValue(true);
+});
+
+describe('safe MCP server config readback', () => {
+  it('redacts auth, header, and environment secrets even for an internal service result', async () => {
+    const { safeMcpServerConfigReadback } = await import('./mcp-servers.js');
+    const readback = safeMcpServerConfigReadback({
+      mcp_server_id: 'server-1',
+      name: 'private',
+      transport: 'http',
+      url: 'https://mcp.example.test',
+      scope: 'global',
+      source: 'user',
+      enabled: true,
+      headers: { 'X-Api-Key': 'header-secret' },
+      env: { API_KEY: 'env-secret' },
+      auth: { type: 'oauth', oauth_client_secret: 'client-secret' },
+      created_at: new Date(),
+      updated_at: new Date(),
+    } as never);
+
+    const serialized = JSON.stringify(readback);
+    expect(serialized).not.toContain('header-secret');
+    expect(serialized).not.toContain('env-secret');
+    expect(serialized).not.toContain('client-secret');
+    expect(readback.auth_secret_fields_configured).toEqual(['oauth_client_secret']);
+  });
+});
+
+describe('surface-neutral MCP authentication recovery', () => {
+  it.each(['<@U123> **urgent**', '[click me](https://evil.test) @channel'])(
+    'keeps markup-shaped server label %s out of recovery prose',
+    async (label) => {
+      const { summarizeMcpServer } = await import('./mcp-servers.js');
+      const summary = await summarizeMcpServer(
+        {
+          db: {} as never,
+          userId: '01900000-0000-7000-8000-000000000001' as never,
+          authenticatedUser: {} as never,
+          baseServiceParams: {} as never,
+          app: {} as never,
+        },
+        {
+          mcp_server_id: '01900000-0000-7000-8000-000000000002',
+          name: label,
+          display_name: label,
+          transport: 'http',
+          url: 'https://mcp.example.test',
+          scope: 'global',
+          source: 'user',
+          enabled: true,
+          auth: { type: 'oauth' },
+          created_at: new Date(),
+          updated_at: new Date(),
+        } as never
+      );
+
+      expect(summary.display_name).toBe(label);
+      expect(summary.recovery?.message).toBe(
+        'Sign in to this MCP server from an available authentication surface, then retry the task.'
+      );
+      expect(summary.recovery?.message).not.toContain(label);
+    }
+  );
+});
 
 type ServiceStub = Record<string, (...args: unknown[]) => unknown>;
 function makeFakeApp(services: Record<string, ServiceStub>) {
@@ -342,6 +430,37 @@ describe('agor_mcp_servers_list', () => {
       oauth_authenticated: false,
     });
   });
+
+  it('does not report raw token presence when the authoritative binding is invalid', async () => {
+    mockGetOAuthToken.mockResolvedValue({
+      oauth_access_token: 'raw-but-mismatched',
+      oauth_token_expires_at: new Date(Date.now() + 60_000),
+      refresh_status: 'idle',
+    });
+    mockGrantAuthority.mockResolvedValue(false);
+    const app = makeFakeApp({
+      'mcp-servers': {
+        get: async () => ({
+          mcp_server_id: 'owned-server',
+          name: 'private-owned',
+          transport: 'http',
+          scope: 'session',
+          source: 'user',
+          owner_user_id: 'user-1',
+          enabled: true,
+          auth: { type: 'oauth' },
+        }),
+      },
+    });
+    const authStatus = await captureTool(
+      { app, userId: 'user-1', sessionId: 'sess-1' },
+      'agor_mcp_servers_auth_status'
+    );
+
+    const result = await authStatus({ mcpServerId: 'owned-server' });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ oauth_authenticated: false });
+    expect(mockGrantAuthority).toHaveBeenCalledOnce();
+  });
 });
 
 describe('agor_mcp_servers_create/update/attach', () => {
@@ -382,18 +501,18 @@ describe('agor_mcp_servers_create/update/attach', () => {
         transport: 'http',
         url: 'https://mcp.context7.com/mcp',
         scope: 'global',
-        source: 'user',
         enabled: true,
         auth: { type: 'oauth' },
       }),
     ]);
+    expect(createCalls[0]).not.toHaveProperty('source');
     expect(payload.mcp_server).toMatchObject({
       mcp_server_id: 'srv-new',
       name: 'context7',
       auth_type: 'oauth',
       oauth_authenticated: false,
     });
-    expect(payload.next_steps.join('\n')).toContain('Settings > MCP Servers');
+    expect(payload.next_steps.join('\n')).toContain('available MCP authentication surface');
   });
 
   it('does not create a server when attachToCurrentSession is requested without session context', async () => {

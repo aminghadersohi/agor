@@ -17,7 +17,7 @@ import {
 import { AGENTIC_TOOL_NAMES, getRequiredSecretFields } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { runExecutorCommand } from '../../utils/spawn-executor.js';
+import { requestExecutor } from '../../utils/spawn-executor.js';
 import { getUploadDirectory, MAX_UPLOAD_FILE_SIZE } from '../../utils/upload.js';
 
 const uploadStoreMock = vi.hoisted(() => ({
@@ -56,13 +56,15 @@ vi.mock('../../utils/upload.js', async (importOriginal) => {
     getUploadDirectory: vi.fn(actual.getUploadDirectory),
   };
 });
-vi.mock('../../utils/executor-read-impersonation.js', () => ({
-  resolveExecutorReadAsUser: vi.fn(async () => undefined),
+vi.mock('../../utils/executor-delegated-home.js', () => ({
+  resolveDelegatedExecutionHomeKey: vi.fn(async () => undefined),
 }));
 vi.mock('../../utils/spawn-executor.js', () => ({
-  generateScopedServiceToken: vi.fn(() => 'service-token'),
   getDaemonUrl: vi.fn(() => 'http://daemon.test'),
-  runExecutorCommand: vi.fn(),
+  requestExecutor: vi.fn(),
+}));
+vi.mock('../../services/session-token-service.js', () => ({
+  issueExecutorCommandToken: vi.fn(async () => 'delegated-user-token'),
 }));
 vi.mock('../../utils/upload-staging.js', () => ({
   getUploadStagingStore: () => uploadStoreMock,
@@ -211,13 +213,88 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.mocked(getConnector).mockReset();
   vi.mocked(getUploadDirectory).mockReset();
-  vi.mocked(runExecutorCommand).mockReset();
+  vi.mocked(requestExecutor).mockReset();
   uploadStoreMock.inspect.mockReset();
   uploadStoreMock.read.mockReset();
   uploadStoreMock.consume.mockClear();
 });
 
 describe('agor_gateway_channels MCP tools', () => {
+  it('rejects daemon-owned and unrecognized Discord configuration', async () => {
+    const tools = await captureTools();
+    const createSchema = tools.agor_gateway_channels_create.cfg.inputSchema;
+    const updateSchema = tools.agor_gateway_channels_update.cfg.inputSchema;
+
+    for (const key of [
+      'provider_installation_id',
+      'provider_config_generation',
+      'listener_checkpoint',
+      'discord_last_admitted_message_id',
+      'delivery_status',
+      'repair',
+      'redrive',
+      'history',
+      'provider_actions',
+    ]) {
+      const input = {
+        name: 'Discord',
+        targetBranchId: 'branch-1',
+        channelType: 'discord',
+        enabled: false,
+        config: { [key]: 'not-operator-config' },
+      };
+      expect(createSchema.safeParse(input).success, key).toBe(false);
+      expect(
+        updateSchema.safeParse({
+          gatewayChannelId: 'gateway-1',
+          channelType: 'discord',
+          config: { [key]: 'not-operator-config' },
+        }).success,
+        key
+      ).toBe(false);
+    }
+
+    expect(
+      createSchema.safeParse({
+        name: 'Discord',
+        targetBranchId: 'branch-1',
+        channelType: 'discord',
+        enabled: false,
+        config: { unsupported_provider_option: true },
+      }).success
+    ).toBe(false);
+  });
+
+  it('projects runtime provider identity out of list responses', async () => {
+    const app = makeFakeApp({
+      'gateway-channels': {
+        find: async () => ({
+          total: 1,
+          data: [
+            {
+              ...slackChannel,
+              provider_installation_id: 'application-snowflake',
+              provider_config_generation: 7,
+              config: {
+                bot_token: 'xoxb-secret',
+                listener_checkpoint: 'transport-sequence',
+              },
+            },
+          ],
+        }),
+      },
+    });
+    const tools = await captureTools('admin', app);
+    const result = await tools.agor_gateway_channels_list.handler({});
+    const payload = JSON.parse(result.content[0].text);
+    const channel = payload.gateway_channels[0];
+
+    expect(channel).not.toHaveProperty('provider_installation_id');
+    expect(channel).not.toHaveProperty('provider_config_generation');
+    expect(channel.config).not.toHaveProperty('listener_checkpoint');
+    expect(channel.config.bot_token).toBe('••••••••');
+  });
+
   it('validates Slack Socket Mode config on create', async () => {
     const tools = await captureTools();
     const missingBot = tools.agor_gateway_channels_create.cfg.inputSchema.safeParse({
@@ -307,6 +384,56 @@ describe('agor_gateway_channels MCP tools', () => {
       config: { app_id: '123', installation_id: '456', watch_repos: ['org/repo'] },
     });
     expect(githubDraftComplete.success).toBe(true);
+
+    const discordDraftIncomplete = tools.agor_gateway_channels_create.cfg.inputSchema.safeParse({
+      name: 'Draft Discord',
+      targetBranchId: 'branch-1',
+      channelType: 'discord',
+      enabled: false,
+      agorUserId: 'user-runner',
+      config: { application_id: '111111111111111111' },
+    });
+    expect(discordDraftIncomplete.success).toBe(false);
+
+    const discordDraftComplete = tools.agor_gateway_channels_create.cfg.inputSchema.safeParse({
+      name: 'Draft Discord',
+      targetBranchId: 'branch-1',
+      channelType: 'discord',
+      enabled: false,
+      agorUserId: 'user-runner',
+      config: {
+        application_id: '111111111111111111',
+        guild_id: '222222222222222222',
+        allowed_channel_ids: ['333333333333333333'],
+        allowed_user_ids: ['444444444444444444'],
+        allowed_role_ids: [],
+        message_content_enabled: true,
+        thread_mode: 'public_thread_per_summon',
+        align_discord_users: false,
+      },
+    });
+    expect(discordDraftComplete.success).toBe(true);
+
+    const discordDraftWithToken = tools.agor_gateway_channels_create.cfg.inputSchema.safeParse({
+      name: 'Draft Discord',
+      targetBranchId: 'branch-1',
+      channelType: 'discord',
+      enabled: false,
+      agorUserId: 'user-runner',
+      config: {
+        application_id: '111111111111111111',
+        guild_id: '222222222222222222',
+        allowed_channel_ids: ['333333333333333333'],
+        allowed_user_ids: ['444444444444444444'],
+        allowed_role_ids: [],
+        message_content_enabled: true,
+        thread_mode: 'public_thread_per_summon',
+        align_discord_users: false,
+        bot_token: 'discord-secret',
+      },
+    });
+    expect(discordDraftWithToken.success).toBe(false);
+    expect(String(discordDraftWithToken.error)).toContain('secure gateway token widget');
   });
 
   it('requires agorUserId for run-as-selected-user Slack channels', async () => {
@@ -422,6 +549,63 @@ describe('agor_gateway_channels MCP tools', () => {
     expect(JSON.stringify(payload)).not.toContain('raw-channel-key');
     expect(JSON.stringify(payload)).not.toContain('raw-env-secret');
     expect(JSON.stringify(payload.next_steps)).toContain('agor_widgets_request_gateway_token');
+  });
+
+  it('normalizes a fresh disabled Discord draft before service persistence', async () => {
+    const createCalls: Array<Record<string, unknown>> = [];
+    const app = makeFakeApp({
+      'gateway-channels': {
+        create: async (data: Record<string, unknown>) => {
+          createCalls.push(data);
+          return {
+            id: 'discord-draft',
+            created_by: 'admin-1',
+            name: data.name,
+            channel_type: 'discord',
+            target_branch_id: data.target_branch_id,
+            agor_user_id: data.agor_user_id,
+            channel_key: 'raw-key',
+            config: data.config,
+            agentic_config: null,
+            enabled: false,
+            created_at: '2026-06-22T00:00:00.000Z',
+            updated_at: '2026-06-22T00:00:00.000Z',
+            last_message_at: null,
+          };
+        },
+      },
+    });
+    const tools = await captureTools('admin', app);
+
+    await tools.agor_gateway_channels_create.handler({
+      name: 'Draft Discord',
+      targetBranchId: 'branch-1',
+      channelType: 'discord',
+      enabled: false,
+      agorUserId: 'user-runner',
+      config: {
+        application_id: '111111111111111111',
+        guild_id: '222222222222222222',
+        allowed_channel_ids: ['333333333333333333'],
+        allowed_user_ids: ['444444444444444444'],
+        allowed_role_ids: [],
+        message_content_enabled: true,
+        thread_mode: 'public_thread_per_summon',
+        align_discord_users: false,
+      },
+    });
+
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0]?.config).toMatchObject({
+      catch_up: expect.objectContaining({
+        max_pages: 5,
+        max_messages: 200,
+        max_prompt_bytes: 32768,
+      }),
+      files: false,
+      agent_tools: [],
+    });
+    expect(createCalls[0]?.config).not.toHaveProperty('bot_token');
   });
 
   it('lists with filters and redacts Teams app_password', async () => {
@@ -561,6 +745,88 @@ describe('agor_gateway_channels MCP tools', () => {
     });
 
     expect(patchCalls).toEqual([{ id: 'chan-1', data: { agentic_config: null } }]);
+  });
+
+  it('validates the stored Discord provider when channelType is omitted', async () => {
+    const patch = vi.fn(async (id: string, data: Record<string, unknown>) => ({
+      id,
+      created_by: 'admin-1',
+      name: 'Discord',
+      channel_type: 'discord',
+      target_branch_id: 'branch-1',
+      agor_user_id: 'user-1',
+      channel_key: 'raw-key',
+      config: {
+        application_id: '111111111111111111',
+        guild_id: '222222222222222222',
+        allowed_channel_ids: ['333333333333333333'],
+        allowed_user_ids: ['444444444444444444'],
+        allowed_role_ids: [],
+        message_content_enabled: true,
+        thread_mode: 'public_thread_per_summon',
+        thread_auto_archive_minutes: 1440,
+        align_discord_users: false,
+        catch_up: {
+          max_pages: 5,
+          max_messages: 200,
+          max_prompt_bytes: 32768,
+          request_timeout_ms: 30000,
+          rate_limit_max_retries: 2,
+          rate_limit_max_total_delay_ms: 10000,
+        },
+        files: false,
+        agent_tools: [],
+        ...(data.config as Record<string, unknown>),
+      },
+      agentic_config: null,
+      enabled: false,
+      created_at: '2026-06-22T00:00:00.000Z',
+      updated_at: '2026-06-22T00:00:00.000Z',
+      last_message_at: null,
+    }));
+    const app = makeFakeApp({
+      'gateway-channels': {
+        get: async () => ({
+          id: 'chan-1',
+          name: 'Discord',
+          channel_type: 'discord',
+          target_branch_id: 'branch-1',
+          agor_user_id: 'user-1',
+          config: {
+            application_id: '111111111111111111',
+            guild_id: '222222222222222222',
+            allowed_channel_ids: ['333333333333333333'],
+            allowed_user_ids: ['444444444444444444'],
+            allowed_role_ids: [],
+            message_content_enabled: true,
+            thread_mode: 'public_thread_per_summon',
+            thread_auto_archive_minutes: 1440,
+            align_discord_users: false,
+            catch_up: {
+              max_pages: 5,
+              max_messages: 200,
+              max_prompt_bytes: 32768,
+              request_timeout_ms: 30000,
+              rate_limit_max_retries: 2,
+              rate_limit_max_total_delay_ms: 10000,
+            },
+            files: false,
+            agent_tools: [],
+          },
+        }),
+        patch,
+      },
+    });
+    const tools = await captureTools('admin', app);
+    await tools.agor_gateway_channels_update.handler({
+      gatewayChannelId: 'chan-1',
+      config: { bot_token: '••••••••' },
+    });
+    expect(patch).toHaveBeenCalledWith(
+      'chan-1',
+      { config: { bot_token: '••••••••' } },
+      expect.anything()
+    );
   });
 
   it('denies list/create/update for non-admin users before service calls', async () => {
@@ -1702,7 +1968,7 @@ describe('gateway agent-tool capability gating (MCP)', () => {
         vi.spyOn(BranchRepository.prototype, 'findById').mockResolvedValue(branch as any);
 
         const tools = await captureTools('member');
-        vi.mocked(runExecutorCommand).mockResolvedValue({
+        vi.mocked(requestExecutor).mockResolvedValue({
           success: true,
           data: { uploaded: { id: 'F999', name: 'screenshot.png' } },
         });
@@ -1712,7 +1978,7 @@ describe('gateway agent-tool capability gating (MCP)', () => {
         });
         const payload = JSON.parse(result.content[0].text);
 
-        expect(runExecutorCommand).toHaveBeenCalledWith(
+        expect(requestExecutor).toHaveBeenCalledWith(
           expect.objectContaining({
             params: expect.objectContaining({ channel: 'D123', filePath: 'screenshot.png' }),
           }),
@@ -1786,7 +2052,7 @@ describe('gateway agent-tool capability gating (MCP)', () => {
     });
 
     it('uploads a file from a path relative to the branch workspace', async () => {
-      vi.mocked(runExecutorCommand).mockResolvedValue({
+      vi.mocked(requestExecutor).mockResolvedValue({
         success: true,
         data: { uploaded: { id: 'F456', name: 'chart.png' } },
       });
@@ -1803,7 +2069,7 @@ describe('gateway agent-tool capability gating (MCP)', () => {
       });
       const payload = JSON.parse(result.content[0].text);
 
-      expect(runExecutorCommand).toHaveBeenCalledWith(
+      expect(requestExecutor).toHaveBeenCalledWith(
         expect.objectContaining({
           command: 'branch.gateway.slack-file-upload',
           params: expect.objectContaining({
@@ -1815,7 +2081,7 @@ describe('gateway agent-tool capability gating (MCP)', () => {
         }),
         expect.any(Object)
       );
-      const executorPayload = vi.mocked(runExecutorCommand).mock.calls[0]?.[0];
+      const executorPayload = vi.mocked(requestExecutor).mock.calls[0]?.[0];
       expect(JSON.stringify(executorPayload)).not.toContain('xoxb');
       expect(executorPayload?.params).not.toHaveProperty('connectorConfig');
       expect(payload).toMatchObject({ uploaded: true });
@@ -1827,7 +2093,7 @@ describe('gateway agent-tool capability gating (MCP)', () => {
       const outsideFile = path.join(outsideDir, 'secret.txt');
       fs.writeFileSync(outsideFile, 'nope');
       try {
-        vi.mocked(runExecutorCommand).mockResolvedValue({
+        vi.mocked(requestExecutor).mockResolvedValue({
           success: false,
           error: { code: 'BRANCH_SLACK_FILE_UPLOAD_FAILED', message: 'Path must be relative' },
         });
@@ -1850,7 +2116,7 @@ describe('gateway agent-tool capability gating (MCP)', () => {
     });
 
     it('surfaces executor rejection for relative path traversal', async () => {
-      vi.mocked(runExecutorCommand).mockResolvedValue({
+      vi.mocked(requestExecutor).mockResolvedValue({
         success: false,
         error: { code: 'BRANCH_SLACK_FILE_UPLOAD_FAILED', message: 'Path escapes branch root' },
       });
@@ -1877,7 +2143,7 @@ describe('gateway agent-tool capability gating (MCP)', () => {
       const symlinkPath = path.join(dir, 'innocuous.png');
       fs.symlinkSync(outsideFile, symlinkPath);
       try {
-        vi.mocked(runExecutorCommand).mockResolvedValue({
+        vi.mocked(requestExecutor).mockResolvedValue({
           success: false,
           error: { code: 'BRANCH_SLACK_FILE_UPLOAD_FAILED', message: 'Path must be relative' },
         });
@@ -1927,7 +2193,7 @@ describe('gateway agent-tool capability gating (MCP)', () => {
         fileUploadEnabled as any
       );
       vi.spyOn(BranchRepository.prototype, 'findById').mockResolvedValue(branch as any);
-      vi.mocked(runExecutorCommand).mockResolvedValue({
+      vi.mocked(requestExecutor).mockResolvedValue({
         success: false,
         error: { code: 'BRANCH_SLACK_FILE_UPLOAD_FAILED', message: 'File exceeds the limit' },
       });
@@ -2385,6 +2651,132 @@ describe('agor_gateway_slack_manifest_generate MCP tool', () => {
     expect(tools.agor_gateway_slack_manifest_generate.cfg.annotations).toMatchObject({
       readOnlyHint: true,
     });
+  });
+
+  it('exposes a secret-free Discord setup guide', async () => {
+    const tools = await captureTools('admin');
+    expect(tools.agor_gateway_discord_setup.cfg.annotations).toMatchObject({
+      readOnlyHint: true,
+    });
+    const result = await tools.agor_gateway_discord_setup.handler({
+      applicationId: '111111111111111111',
+      guildId: '222222222222222222',
+      messageContentAcknowledged: true,
+      allowedChannelIds: ['333333333333333333'],
+      allowedUserIds: ['444444444444444444'],
+      allowedRoleIds: [],
+      agorUserId: '00000000-0000-4000-8000-000000000001',
+      outbound: true,
+    });
+    const payload = JSON.parse(result.content[0].text);
+
+    expect(payload.config_hint).toEqual({
+      application_id: '111111111111111111',
+      guild_id: '222222222222222222',
+      allowed_channel_ids: ['333333333333333333'],
+      allowed_user_ids: ['444444444444444444'],
+      allowed_role_ids: [],
+      message_content_enabled: true,
+      thread_mode: 'public_thread_per_summon',
+      thread_auto_archive_minutes: 1440,
+      align_discord_users: false,
+      catch_up: {
+        max_pages: 5,
+        max_messages: 200,
+        max_prompt_bytes: 32768,
+        request_timeout_ms: 30000,
+        rate_limit_max_retries: 2,
+        rate_limit_max_total_delay_ms: 10000,
+      },
+      files: false,
+      agent_tools: [],
+      outbound_enabled: true,
+      default_outbound_target: 'channel:333333333333333333',
+    });
+    expect(payload.validation).toEqual({ ok: true, errors: [] });
+    expect(payload.setup_artifact.permissions.bitmask).toBe('309237713920');
+    expect(payload.setup_artifact.botInviteUrl).toContain('permissions=309237713920');
+    expect(payload.setup_artifact.draft.enabled).toBe(false);
+    expect(payload.setup_artifact.draft.config.bot_token).toBeUndefined();
+    expect(JSON.stringify(payload)).not.toContain('bot_token');
+  });
+
+  it('keeps Discord setup and channel creation admin-only', async () => {
+    const memberTools = await captureTools('member');
+    await expect(
+      memberTools.agor_gateway_discord_setup.handler({
+        applicationId: '111111111111111111',
+        guildId: '222222222222222222',
+        messageContentAcknowledged: true,
+        allowedChannelIds: ['333333333333333333'],
+      })
+    ).rejects.toThrow(/admin role required/);
+
+    const createSchema = memberTools.agor_gateway_channels_create.cfg.inputSchema;
+    expect(
+      createSchema.safeParse({
+        name: 'Discord beta',
+        channelType: 'discord',
+        targetBranchId: 'branch-1',
+        agorUserId: 'user-1',
+        enabled: false,
+        config: {
+          application_id: '111111111111111111',
+          guild_id: '222222222222222222',
+          allowed_channel_ids: ['333333333333333333'],
+          allowed_user_ids: ['444444444444444444'],
+          allowed_role_ids: [],
+          message_content_enabled: true,
+          thread_mode: 'public_thread_per_summon',
+          align_discord_users: false,
+        },
+      }).success
+    ).toBe(true);
+    const setupSchema = memberTools.agor_gateway_discord_setup.cfg.inputSchema;
+    expect(
+      setupSchema.safeParse({
+        applicationId: '111111111111111111',
+        guildId: '222222222222222222',
+        messageContentAcknowledged: true,
+        allowedChannelIds: ['333333333333333333'],
+        allowedUserIds: ['444444444444444444'],
+      }).success
+    ).toBe(false);
+  });
+
+  it('exposes bounded Discord catch-up settings without internal state', async () => {
+    const tools = await captureTools('admin');
+    const setupSchema = tools.agor_gateway_discord_setup.cfg.inputSchema;
+    const base = {
+      applicationId: '111111111111111111',
+      guildId: '222222222222222222',
+      messageContentAcknowledged: true,
+      allowedChannelIds: ['333333333333333333'],
+    };
+    expect(setupSchema.safeParse({ ...base, catchUp: { maxPages: 11 } }).success).toBe(false);
+
+    const result = await tools.agor_gateway_discord_setup.handler({
+      ...base,
+      catchUp: {
+        maxPages: 10,
+        maxMessages: 500,
+        maxPromptBytes: 131072,
+        requestTimeoutMs: 60000,
+        rateLimitMaxRetries: 5,
+        rateLimitMaxTotalDelayMs: 30000,
+      },
+    });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.config_hint.catch_up).toEqual({
+      max_pages: 10,
+      max_messages: 500,
+      max_prompt_bytes: 131072,
+      request_timeout_ms: 60000,
+      rate_limit_max_retries: 5,
+      rate_limit_max_total_delay_ms: 30000,
+    });
+    expect(payload.config_hint).not.toHaveProperty('provider_installation_id');
+    expect(payload.config_hint).not.toHaveProperty('listener_checkpoint');
   });
 
   it('generates a DM-only manifest matching the core generator', async () => {

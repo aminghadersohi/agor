@@ -28,7 +28,8 @@ import type {
   UUID,
 } from '@agor/core/types';
 import { BRANCH_PERMISSION_LEVELS, hasMinimumRole, ROLES } from '@agor/core/types';
-import { assertUnixUsernameSatisfiesMode } from '@agor/core/unix';
+import { assertExecutionHomeKeySatisfiesMode } from '@agor/core/unix';
+import { executorRuntimeScopeSessionId } from '../auth/executor-runtime-scope.js';
 
 /**
  * Check if a user has the superadmin role (or deprecated 'owner' alias).
@@ -312,8 +313,9 @@ export async function cacheBranchAccess(
  * Managed environment controls may run shell/webhook actions with impact tied
  * to the branch rather than the triggering user. Keep these controls limited
  * to users with effective `all` permission on the branch and global admins.
- * Internal daemon/service-account calls bypass so health loops and executor
- * plumbing can continue to operate.
+ * Internal daemon/service-account calls bypass so daemon-owned health and
+ * maintenance work can continue to operate. User-triggered executors do not
+ * use that bypass; they retain the initiating user's ordinary branch RBAC.
  */
 export async function ensureCanControlBranchEnvironment(
   branchRepo: BranchRepository,
@@ -442,7 +444,7 @@ export function ensureBranchPermission(
     }
 
     // Service accounts (executor) bypass RBAC — they perform privileged
-    // internal operations (unix.sync-branch, git.branch.add, etc.)
+    // internal operations (git.branch.add, etc.)
     if (context.params.user._isServiceAccount) {
       return context;
     }
@@ -1054,8 +1056,8 @@ export function loadBranchFromSession(branchRepo: BranchRepository) {
  * Ensure session is immutable to its creator
  *
  * Validates that critical session fields (created_by, unix_username) cannot be changed.
- * This is CRITICAL for Unix isolation - session execution context is determined
- * by session.created_by (which maps to Unix user) and session.unix_username.
+ * These fields bind the immutable principal, execution home, credentials, and
+ * resumable SDK state for the session.
  *
  * @see context/guides/rbac-and-unix-isolation.md — Session Ownership / Execution Model
  */
@@ -1072,14 +1074,14 @@ export function ensureSessionImmutability() {
     // Check if created_by is being changed
     if (data?.created_by !== undefined) {
       throw new Forbidden(
-        'session.created_by is immutable - it determines execution context (Unix user, credentials, SDK state)'
+        'session.created_by is immutable - it determines execution context, credentials, and SDK state'
       );
     }
 
     // Check if unix_username is being changed
     if (data?.unix_username !== undefined) {
       throw new Forbidden(
-        'session.unix_username is immutable - it determines SDK session storage location and execution user'
+        'session.unix_username is immutable - it determines the execution-home and SDK state location'
       );
     }
 
@@ -1153,7 +1155,7 @@ export async function loadUnixUsernameForUser(
  * When a session is created, stamp it with the creator's current unix_username.
  * This unix_username is IMMUTABLE and determines:
  * - SDK session storage location (~/.claude/, ~/.codex/, etc.)
- * - Unix user for all session operations (sudo -u)
+ * - immutable execution-home key for session operations
  *
  * IMPORTANT: Run this hook BEFORE any permission checks that might need the unix_username.
  *
@@ -1163,8 +1165,8 @@ export async function loadUnixUsernameForUser(
  * {@link loadUnixUsernameForUser} to keep the two paths in sync.
  *
  * @param userRepo - UserRepository instance
- * @param unixUserMode - When the mode requires per-user unix_username
- *   (strict/delegated), a creator without one is rejected at create time
+ * @param unixUserMode - When delegated mode requires a per-user home key,
+ *   a creator without one is rejected at create time
  *   instead of failing later at prompt time.
  */
 export function setSessionUnixUsername(
@@ -1195,11 +1197,58 @@ export function setSessionUnixUsername(
     // IMMUTABLE - even if user's unix_username changes later, session keeps this value.
     data.unix_username = await loadUnixUsernameForUser(userRepo, userId);
     if (unixUserMode) {
-      assertUnixUsernameSatisfiesMode(data.unix_username, unixUserMode);
+      assertExecutionHomeKeySatisfiesMode(data.unix_username, unixUserMode);
     }
 
     return context;
   };
+}
+
+/** Loads a user by id for an identity-consistency comparison. */
+export type SessionCreatorLoader = (
+  userId: string
+) => Promise<{ unix_username?: string | null } | null | undefined>;
+
+/**
+ * Refuse a session whose creator no longer owns the `unix_username` the
+ * session was stamped with.
+ *
+ * In `delegated` mode the stamp is the opaque execution-home key forwarded to
+ * the external substrate. Once it drifts, that key is no longer the caller's,
+ * and the SDK state the session resumes from may be inaccessible.
+ *
+ * That is the stamp's role as an *execution* identity, and the only one this
+ * refusal covers. Local execution modes do not consume the stamp.
+ *
+ * Shared by the transport guard ({@link validateSessionUnixUsername}) and the
+ * executor-startup guard, so both refuse on the same terms with the same
+ * message.
+ *
+ * A session with no stamp is not covered: there is no identity to have drifted,
+ * and `resolveUnixUserForImpersonation` already refuses a missing username in
+ * the modes that need one.
+ */
+export async function assertSessionUnixIdentityUnchanged(
+  session: { created_by: string; unix_username?: string | null },
+  loadCreator: SessionCreatorLoader
+): Promise<void> {
+  if (!session.unix_username) return;
+
+  const creator = await loadCreator(session.created_by);
+
+  if (!creator) {
+    throw new Forbidden(`Session creator not found: ${session.created_by}`);
+  }
+
+  if (creator.unix_username !== session.unix_username) {
+    throw new Forbidden(
+      `Session security context has changed. ` +
+        `Session was created with unix_username="${session.unix_username}" ` +
+        `but creator's current unix_username="${creator.unix_username || 'null'}". ` +
+        `Cannot execute this session with a different unix user. ` +
+        `SDK session data is stored in the original user's home directory and cannot be accessed.`
+    );
+  }
 }
 
 /**
@@ -1213,7 +1262,16 @@ export function setSessionUnixUsername(
  * This prevents security issues where:
  * - User's unix_username changed after session creation
  * - SDK session data would be inaccessible (stored in old home directory)
- * - Execution would happen as wrong Unix user
+ * - Execution would use a different home and credential namespace
+ *
+ * The executor of this very session is exempt. It authenticates with a session
+ * token minted for the prompting user, so it is not a service account and would
+ * otherwise be held to this check on every transcript row it writes. By then the
+ * process is already running as the stamped user: refusing its writes only loses
+ * the transcript, and the launch that mattered was already gated by
+ * `prepareSessionForExecutorStart`. The exemption compares the token's own
+ * session claim rather than merely asking whether an executor credential is
+ * present, so taskless command executors cannot acquire the exemption.
  *
  * @param userRepo - UserRepository instance
  */
@@ -1237,28 +1295,11 @@ export function validateSessionUnixUsername(
       throw new Error('loadSession hook must run before validateSessionUnixUsername');
     }
 
-    // If session has no unix_username, allow (backward compatibility)
-    if (!session.unix_username) {
+    if (executorRuntimeScopeSessionId(context) === session.session_id) {
       return context;
     }
 
-    // Load session creator to check current unix_username
-    const creator = await userRepo.findById(session.created_by);
-
-    if (!creator) {
-      throw new Forbidden(`Session creator not found: ${session.created_by}`);
-    }
-
-    // DEFENSIVE CHECK: Creator's current unix_username must match session's
-    if (creator.unix_username !== session.unix_username) {
-      throw new Forbidden(
-        `Session security context has changed. ` +
-          `Session was created with unix_username="${session.unix_username}" ` +
-          `but creator's current unix_username="${creator.unix_username || 'null'}". ` +
-          `Cannot execute this session with a different unix user. ` +
-          `SDK session data is stored in the original user's home directory and cannot be accessed.`
-      );
-    }
+    await assertSessionUnixIdentityUnchanged(session, (userId) => userRepo.findById(userId));
 
     return context;
   };
@@ -1503,16 +1544,20 @@ type FindSqlScopeDecision =
 
 async function resolveFindSqlScopeAccess(
   context: HookContext,
-  options: { allowSuperadmin?: boolean } | undefined
+  options: { allowSuperadmin?: boolean } | undefined,
+  methods: readonly string[] = ['find']
 ): Promise<FindSqlScopeDecision> {
-  if (context.method !== 'find') return { kind: 'passThrough' };
+  if (!methods.includes(context.method)) return { kind: 'passThrough' };
   if (!context.params.provider) return { kind: 'passThrough' };
   if (context.params.user?._isServiceAccount) return { kind: 'passThrough' };
 
   const userId = context.params.user?.user_id as UUID | undefined;
   if (!userId) {
-    emptyFindResult(context);
-    return { kind: 'handled' };
+    if (context.method === 'find') {
+      emptyFindResult(context);
+      return { kind: 'handled' };
+    }
+    throw new NotAuthenticated('Authentication required');
   }
 
   const userRole = context.params.user?.role as string | undefined;
@@ -1724,6 +1769,22 @@ export function scopeFindToAccessibleBoardsSql(options?: { allowSuperadmin?: boo
 }
 
 /**
+ * Mark board-object find/get requests for repository-level visibility
+ * pushdown. Unlike board list scoping, object hydration also exposes a get
+ * endpoint, so both read methods must carry the same authenticated user.
+ */
+export function scopeReadToAccessibleBoardsSql(options?: { allowSuperadmin?: boolean }) {
+  return async (context: HookContext) => {
+    const decision = await resolveFindSqlScopeAccess(context, options, ['find', 'get']);
+    if (decision.kind !== 'filter') return context;
+
+    (context.params as { _agorSqlBoardAccessUserId?: UUID })._agorSqlBoardAccessUserId =
+      decision.userId;
+    return context;
+  };
+}
+
+/**
  * Core check: is the caller the session's creator OR a global admin/superadmin?
  *
  * Pure function (no FeathersJS dependency) so it can be reused from Feathers
@@ -1732,7 +1793,8 @@ export function scopeFindToAccessibleBoardsSql(options?: { allowSuperadmin?: boo
  *
  * Behavior:
  * - Service accounts (executor) pass through.
- * - Admin / superadmin pass through (respecting `allowSuperadmin`).
+ * - Admin / superadmin pass through. `allowSuperadmin` only controls the
+ *   exceptional branch-RBAC bypass; it cannot remove ordinary admin authority.
  * - Session creator passes through.
  * - Everyone else → Forbidden. Branch `all` does NOT grant access: session
  *   env selections expose the creator's private credentials to the executor.
@@ -1748,10 +1810,9 @@ export function checkSessionOwnerOrAdmin(
   // Service accounts (executor) bypass RBAC
   if (user._isServiceAccount) return;
 
-  const allowSuperadmin = options?.allowSuperadmin ?? true;
   const userRole = user.role;
 
-  if (userRole === ROLES.ADMIN || isSuperAdmin(userRole, allowSuperadmin)) {
+  if (hasMinimumRole(userRole, ROLES.ADMIN)) {
     return;
   }
 
@@ -1814,7 +1875,7 @@ export function ensureSessionOwnerOrAdmin(options?: { allowSuperadmin?: boolean 
  *
  * Default behavior — and the behavior whenever the caller is the parent owner,
  * an admin, or a superadmin — attributes the child to the **caller** so it
- * runs under the caller's Unix identity, credentials, and env vars.
+ * uses the caller's execution-home, credentials, and env vars.
  *
  * Legacy "identity borrowing" (child inherits parent.created_by, so it runs
  * under the *parent owner's* identity even when spawned by a different user)
@@ -1838,7 +1899,6 @@ export function determineSpawnIdentity(
   branch: { branch_id: string; dangerously_allow_session_sharing?: boolean } | undefined,
   options?: { allowSuperadmin?: boolean }
 ): { created_by: string; usedLegacySharing: boolean } {
-  const allowSuperadmin = options?.allowSuperadmin ?? true;
   const callerId = caller.user_id;
   const role = caller.role;
 
@@ -1851,7 +1911,9 @@ export function determineSpawnIdentity(
 
   // Admin / superadmin → always attributed to themselves so the audit trail
   // points at the human who pressed the button. Never inherit parent identity.
-  if (role === ROLES.ADMIN || isSuperAdmin(role, allowSuperadmin)) {
+  // `allow_superadmin` only gates exceptional branch-RBAC bypasses. A
+  // superadmin always retains the ordinary admin authority represented here.
+  if (hasMinimumRole(role, ROLES.ADMIN)) {
     if (!callerId) {
       // Should not happen — admins always have an id — but fall back safely.
       return { created_by: parent.created_by, usedLegacySharing: false };

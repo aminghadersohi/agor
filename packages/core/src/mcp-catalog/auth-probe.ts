@@ -1,19 +1,25 @@
 /**
- * Auth probe for catalog entries.
+ * Auth probe for one remote MCP endpoint.
  *
- * The MCP registry does not declare whether a server requires authorization, so
- * the only way to know is to try: send an unauthenticated `initialize` and read
- * the response. A `401` carrying an OAuth `WWW-Authenticate` challenge means
- * the connect flow has to run the browser OAuth dance; a successful handshake
- * means it can connect straight away. Caching the verdict on the row is what
- * lets the marketplace render the right connect button before the user clicks.
+ * Nothing states in a form worth trusting whether a server requires
+ * authorization — a catalog entry says what was true when it was last edited,
+ * and the vendor may since have changed it — so the only way to know is to try:
+ * send an unauthenticated `initialize` and read the answer. A `401` carrying an
+ * OAuth `WWW-Authenticate` challenge means a browser OAuth dance would have to
+ * run; a completed handshake means a client can connect straight away. Connect
+ * runs this against the endpoint it is about to install and installs only on
+ * the second answer, so this is where "can this be connected" is decided.
  *
- * The discovery cascade itself is not reimplemented here — `oauth-mcp-transport`
- * already owns RFC 9728 / 8414 / OIDC discovery and this calls into it.
+ * {@link probeRemoteApiKey} asks the same question of the same endpoint with a
+ * key attached: not "what does this server want" but "does this key work". Both
+ * send one `initialize` through the pinned transport and read the answer the
+ * same way, because the thing that makes an answer trustworthy — a complete
+ * JSON-RPC handshake rather than a 2xx — does not change when a credential is
+ * added.
  */
 
-import type { MCPCatalogProbedAuthType, MCPCatalogProbeResult } from '@agor/core/types';
-import { isOAuthRequired, resolveMCPOAuthDiscovery } from '../tools/mcp/oauth-mcp-transport';
+import type { MCPCatalogProbedAuthType } from '@agor/core/types';
+import { isOAuthRequired } from '../tools/mcp/oauth-mcp-transport';
 import { createPinnedFetch, isOutboundRefusal } from '../utils/pinned-fetch';
 import { isPublicHttpUrl } from '../utils/url';
 
@@ -23,16 +29,14 @@ const PROBE_PROTOCOL_VERSION = '2025-06-18';
 /** JSON-RPC id the probe sends, and the only id an accepted answer may carry. */
 const PROBE_REQUEST_ID = 1;
 
-/** Default per-probe budget. A catalog sweep must not stall on one slow host. */
+/** Default probe budget. A user is waiting on this, behind a Connect press. */
 const DEFAULT_PROBE_TIMEOUT_MS = 8_000;
 
-/** Cap on a metadata document, which is a handful of JSON keys. */
-const MAX_METADATA_BYTES = 256 * 1024;
+/** Cap on the handshake response, which is a handful of JSON keys. */
+const MAX_RESPONSE_BYTES = 256 * 1024;
 
 export interface AuthProbeOptions {
   timeoutMs?: number;
-  /** Injected so tests and the ingestion run share one clock. */
-  now?: () => Date;
   /**
    * Transport seam, so the status-to-verdict rules can be exercised without a
    * network. Production leaves it unset and gets {@link createPinnedFetch},
@@ -40,28 +44,6 @@ export interface AuthProbeOptions {
    * that supplies its own is supplying its own guarantees with it.
    */
   fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
-}
-
-/**
- * The fetch every probe request goes through, including the ones the shared
- * discovery cascade makes on the probe's behalf.
- *
- * The interactive connect flow's default fetch is deliberately more permissive:
- * the user chose that server. Here the input is whatever an anonymous stranger
- * published to a public registry, so every request — the initial handshake, the
- * `.well-known` probes discovery derives from the origin, and the metadata URL
- * a `WWW-Authenticate` header names — is held to the same rules: a destination
- * that is public both as a URL and as a resolved address, no redirect
- * following, and a bounded body.
- *
- * Rejecting by throwing is deliberate. Discovery already treats a thrown fetch
- * as "this candidate failed" and moves on, so a refused host degrades to no
- * discovery rather than needing new error plumbing.
- */
-function createProbeFetch(
-  timeoutMs: number
-): (input: string, init?: RequestInit) => Promise<Response> {
-  return createPinnedFetch({ timeoutMs, maxBytes: MAX_METADATA_BYTES });
 }
 
 /** True for a non-null, non-array object. */
@@ -74,10 +56,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * asked for.
  *
  * Status alone says nothing about what answered. A marketing page, a captive
- * portal, and an API gateway's "healthy" stub all return 200, and recording
- * that as `none` would put a connect-directly button in front of something that
- * is not an MCP server at all. Only a complete handshake means the endpoint
- * both speaks MCP and accepted an unauthenticated client.
+ * portal, and an API gateway's "healthy" stub all return 200, and reading that
+ * as `none` would attach something that is not an MCP server at all to a
+ * session. Only a complete handshake means the endpoint both speaks MCP and
+ * accepted an unauthenticated client.
  *
  * Every prescribed member of `InitializeResult` is required, and the response
  * `id` must be the one this probe sent — an unsolicited notification or an
@@ -136,99 +118,60 @@ function* jsonPayloadsIn(body: string): Generator<string> {
   if (event.length > 0) yield event.join('\n');
 }
 
-/**
- * Name the auth scheme a non-OAuth challenge asked for, e.g. `Basic`, `ApiKey`.
- *
- * Bounded and character-restricted because it is stored and later rendered:
- * an unbounded header value is attacker-controlled text.
- */
-function parseChallengeScheme(header: string | null): string | undefined {
-  const scheme = /^\s*([A-Za-z][A-Za-z0-9._-]{0,31})\b/.exec(header ?? '')?.[1];
-  return scheme || undefined;
-}
+/** What one `initialize` attempt came back with, or why it never happened. */
+type ProbeAttempt = { response: Response } | { failure: 'refused' | 'unreachable' };
 
 /**
- * Origin of the first authorization server the discovery cascade found.
+ * Send one `initialize` to `remoteUrl` and hand back whatever answered.
  *
- * Every URL reached here is third-party-controlled, and not only at the first
- * hop: discovery derives `.well-known` candidates from the probed origin,
- * `resource_metadata="..."` is read verbatim out of that server's own
- * `WWW-Authenticate` header, and the authorization server list comes out of
- * whatever those return. The cascade guards its own requests — it resolves and
- * pins every destination and revalidates each redirect — so only the metadata
- * URL this function fetches directly needs the probe's own transport.
+ * Exactly one request is issued, to the URL given and nowhere else. Never
+ * throws — a malformed URL, a destination the outbound filter declined, a
+ * timeout, or a TLS error all come back as a `failure` for the caller to
+ * classify, because "the request was refused before it left" and "nothing
+ * answered" are different facts and only the caller knows what to call them.
+ *
+ * `authorization`, when given, is a credential. It is passed to the transport
+ * and never anywhere else: nothing in this module logs a request, a header, or
+ * a response body, and {@link createPinnedFetch} does not follow redirects — so
+ * the header reaches the host that was resolved and checked, and no other. A
+ * followed redirect would be a credential handed to whatever the vendor's DNS
+ * points at next, which is the whole reason the pinned transport is the default
+ * rather than `fetch`.
  */
-async function resolveAuthServerOrigin(
-  wwwAuthenticate: string | null,
+async function sendInitialize(
   remoteUrl: string,
-  probeFetch: (input: string, init?: RequestInit) => Promise<Response>
-): Promise<string | undefined> {
-  const discovery = await resolveMCPOAuthDiscovery(wwwAuthenticate, remoteUrl);
-  if (!discovery) return undefined;
-
-  try {
-    if (discovery.kind === 'authorization-server') {
-      const issuer = discovery.authServerMetadata.issuer;
-      return isPublicHttpUrl(issuer) ? new URL(issuer).origin : undefined;
-    }
-    // `probeFetch` re-checks this, but returning early keeps a refused host out
-    // of the logs discovery would otherwise emit for a thrown candidate.
-    if (!isPublicHttpUrl(discovery.metadataUrl)) return undefined;
-    const response = await probeFetch(discovery.metadataUrl, {
-      headers: { accept: 'application/json' },
-    });
-    if (!response.ok) return undefined;
-    const metadata = (await response.json()) as { authorization_servers?: string[] };
-    const [authServer] = metadata?.authorization_servers ?? [];
-    if (!authServer || !isPublicHttpUrl(authServer)) return undefined;
-    return new URL(authServer).origin;
-  } catch {
-    // The entry is still known to need OAuth; only the AS origin is unknown.
-    return undefined;
-  }
-}
-
-/**
- * Probe one remote MCP URL.
- *
- * Never throws: an unreachable host, a timeout, or a malformed URL resolves to
- * `unknown` so one bad entry cannot abort a catalog-wide sweep. `unknown` means
- * "not determined", never "open".
- */
-export async function probeRemoteAuthType(
-  remoteUrl: string,
-  options: AuthProbeOptions = {}
-): Promise<MCPCatalogProbeResult> {
-  const now = options.now ?? (() => new Date());
+  options: AuthProbeOptions,
+  authorization?: string
+): Promise<ProbeAttempt> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
-  const unresolved = (type: MCPCatalogProbedAuthType = 'unknown'): MCPCatalogProbeResult => ({
-    probed_auth_type: type,
-    probed_at: now(),
-    probed_url: remoteUrl,
-  });
 
-  if (!isPublicHttpUrl(remoteUrl)) return unresolved();
+  // Review vouches for the URL as a string, not for where it lands. The host is
+  // resolved at request time by whoever runs the domain and a redirect can name
+  // any destination at all, either of which can point back inside the daemon's
+  // own network — so the request goes through the pinned transport: a
+  // destination that is public both as a URL and as the address actually dialled,
+  // no redirect following, and a bounded body.
+  if (!isPublicHttpUrl(remoteUrl)) return { failure: 'refused' };
 
-  const discoveryFetch = options.fetchImpl ?? createProbeFetch(timeoutMs);
-  const handshakeFetch =
+  const probeFetch =
     options.fetchImpl ??
     createPinnedFetch({
       timeoutMs,
-      maxBytes: MAX_METADATA_BYTES,
+      maxBytes: MAX_RESPONSE_BYTES,
       // A server that answers over SSE holds the stream open for the rest of
       // the session, so waiting for `end` would time out on exactly the servers
       // that answered correctly.
       isBodyComplete: isInitializeResult,
     });
 
-  let response: Response;
   try {
-    response = await handshakeFetch(remoteUrl, {
+    const response = await probeFetch(remoteUrl, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         // Streamable HTTP servers negotiate between JSON and SSE replies.
         accept: 'application/json, text/event-stream',
+        ...(authorization ? { authorization } : {}),
       },
       body: JSON.stringify({
         jsonrpc: '2.0',
@@ -241,42 +184,99 @@ export async function probeRemoteAuthType(
         },
       }),
     });
+    return { response };
   } catch (error) {
     // A destination the outbound filter declined was never contacted, so
     // "unreachable" would be a claim about a host nothing was learned about.
-    if (isOutboundRefusal(error)) return unresolved();
+    if (isOutboundRefusal(error)) return { failure: 'refused' };
     // Timeout, DNS failure, connection refused, TLS error.
-    return unresolved('unreachable');
+    return { failure: 'unreachable' };
   }
+}
 
-  if (isOAuthRequired(response.status, response.headers)) {
-    const origin = await resolveAuthServerOrigin(
-      response.headers.get('www-authenticate'),
-      remoteUrl,
-      discoveryFetch
-    );
-    return {
-      ...unresolved('oauth'),
-      ...(origin ? { auth_server_origin: origin } : {}),
-    };
+/**
+ * Probe one remote MCP URL.
+ *
+ * Exactly one request is issued, to the URL given and nowhere else. Never
+ * throws: an unreachable host, a timeout, or a malformed URL resolves to
+ * `unknown` or `unreachable`, so a connect gets a clean refusal rather than a
+ * stack trace. `unknown` means "not determined", never "open".
+ */
+export async function probeRemoteAuthType(
+  remoteUrl: string,
+  options: AuthProbeOptions = {}
+): Promise<MCPCatalogProbedAuthType> {
+  const attempt = await sendInitialize(remoteUrl, options);
+  if ('failure' in attempt) {
+    return attempt.failure === 'refused' ? 'unknown' : 'unreachable';
   }
+  const { response } = attempt;
+
+  if (isOAuthRequired(response.status, response.headers)) return 'oauth';
 
   // A 401/403 without an OAuth challenge needs credentials the browser flow
-  // cannot obtain. The scheme it names is what the connect form should ask for.
-  if (response.status === 401 || response.status === 403) {
-    const scheme = parseChallengeScheme(response.headers.get('www-authenticate'));
-    return {
-      ...unresolved('credentials'),
-      ...(scheme ? { probed_auth_scheme: scheme } : {}),
-    };
-  }
+  // cannot obtain, which is a different refusal to write than "sign in".
+  if (response.status === 401 || response.status === 403) return 'credentials';
 
   if (response.ok) {
-    // `none` is the one verdict that renders a connect-directly button, so it
-    // has to be earned by a real handshake rather than by a 2xx. Anything else
-    // answering on this URL is something the probe failed to identify.
-    return unresolved(isInitializeResult(await response.text()) ? 'none' : 'unknown');
+    // `none` is the one verdict that installs anything, so it has to be earned
+    // by a real handshake rather than by a 2xx. Anything else answering on this
+    // URL is something the probe failed to identify.
+    return isInitializeResult(await response.text()) ? 'none' : 'unknown';
   }
 
-  return unresolved('unreachable');
+  return 'unreachable';
 }
+
+/**
+ * What an endpoint made of a key that was presented to it.
+ *
+ * Three answers rather than a boolean, because "this key is wrong" and "nothing
+ * usable answered" call for different sentences and only one of them is the
+ * user's to fix. Collapsing them would tell somebody their key was rejected
+ * because the vendor was having an outage.
+ */
+export type MCPApiKeyProbeVerdict = 'accepted' | 'rejected' | 'unusable';
+
+/**
+ * Try `apiKey` against a remote MCP endpoint before anything is installed with
+ * it.
+ *
+ * A key that is wrong at install time produces a server whose every tool fails,
+ * at a moment far from the paste that caused it — the agent reports a broken
+ * tool, not a bad credential, and the row sits in Settings looking configured.
+ * The endpoint has already told us it wants credentials by this point, so one
+ * more `initialize` is the cheapest question that distinguishes a working key
+ * from a typo, and it is the same handshake the client will perform anyway.
+ *
+ * `accepted` has to be earned by a complete JSON-RPC handshake, exactly as
+ * `none` is in {@link probeRemoteAuthType}: a 2xx from a marketing page or an
+ * API gateway stub is not a server that will answer `tools/list`. Everything
+ * unrecognised lands on `unusable`, never on `accepted`, so the failure mode is
+ * a refused install rather than a broken one.
+ *
+ * `rejected` covers every authentication answer, OAuth challenge included. A
+ * key was presented and the endpoint still would not let the client in, which
+ * is one fact from the user's side however the server chose to phrase it.
+ */
+export async function probeRemoteBearerToken(
+  remoteUrl: string,
+  apiKey: string,
+  options: AuthProbeOptions = {}
+): Promise<MCPApiKeyProbeVerdict> {
+  const attempt = await sendInitialize(remoteUrl, options, `Bearer ${apiKey}`);
+  if ('failure' in attempt) return 'unusable';
+  const { response } = attempt;
+
+  if (response.status === 401 || response.status === 403) return 'rejected';
+  if (isOAuthRequired(response.status, response.headers)) return 'rejected';
+
+  if (response.ok) {
+    return isInitializeResult(await response.text()) ? 'accepted' : 'unusable';
+  }
+
+  return 'unusable';
+}
+
+/** @deprecated Use the scheme-explicit name. */
+export const probeRemoteApiKey = probeRemoteBearerToken;

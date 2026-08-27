@@ -104,7 +104,7 @@ Combined with the **[favicon status dots](/guide/rich-chat-ux#-favicon-status-in
 
 Terminal sessions are branch-scoped. Users only see terminals for branches they're actively using.
 
-> **Privacy note:** With `unix_user_mode: simple` (the default), the terminal runs as the daemon user and gives `member+` users access to daemon-readable files (config, DB, JWT secret). Use `insulated` or `strict` mode in shared environments. See [Security](/security).
+> **Privacy note:** With `unix_user_mode: simple` (the default), the terminal runs as the daemon user and gives `member+` users access to daemon-readable files (config, DB, JWT secret). Use `sandbox` mode in shared Linux environments. See [Security](/security).
 
 ---
 
@@ -149,7 +149,7 @@ When teammates share a board, sessions still execute under a specific user's ide
 
 - The session's Anthropic / OpenAI key is the **session creator's** key (billing follows usage).
 - Env vars merge: `gateway/channel → user globals → session-scoped`, so a Slack-driven session run as you carries _your_ `GITHUB_TOKEN`, not a shared bot token.
-- In `unix_user_mode: strict`, the executor process literally runs as the user's Unix account.
+- In `unix_user_mode: sandbox`, the executor runs as the daemon user inside an RBAC-derived filesystem boundary.
 
 This is what makes co-locating teams on one Agor instance work without secret-sharing: everyone keeps their own credentials, but the boards, branches, and conversations are shared.
 
@@ -170,6 +170,10 @@ Agor speaks the full MCP transport matrix:
 ### Per-user, not per-instance
 
 Each user authenticates **their own** OAuth grant per MCP server. When a session attaches an OAuth-secured MCP server, Agor injects the _acting user's_ token, never another user's. PostgreSQL coordinates rotating-token refresh across daemons. The UI refetches durable state after realtime hints, so a callback handled by another daemon still converges correctly.
+
+Marketplace Connect first prefers the user's canonical install of that catalog entry. It may reuse an existing or freshly refreshed credential peer only when endpoint, transport, scope, client-registration settings, and effective compatibility policy exactly match the current catalog. The connect response identifies `catalog_install`, `credential_peer`, or `refreshed_credential_peer` reuse and exposes the secret-free effective policy. A credential peer remains the original Settings row: disabling or deleting it also disables or removes the session dependency; deleting the session does not delete that pre-existing row. Catalog drift or removal makes an unstated peer policy strict and prevents reuse when the current entry differs.
+
+New SQLite and PostgreSQL grants carry a versioned configuration fingerprint. Historical SQLite grants may be unbound; they are accepted only when their recorded protected-resource URI still matches. Standalone SQLite assumes the daemon account and database file are trusted—direct database write access can forge configuration and grant metadata and is therefore equivalent to deployment compromise. Hosted PostgreSQL additionally enforces tenant scoping/RLS and durable binding at the database boundary.
 
 Per-user grants are self-service. A server configured with a **shared** grant uses one workspace credential; only a current admin can start, complete, refresh/replace, or disconnect it. Disconnect removes the grant from Agor but **does not revoke it at the OAuth provider**. Use the provider's security settings when provider-side revocation is required.
 

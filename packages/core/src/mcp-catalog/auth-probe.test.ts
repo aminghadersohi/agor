@@ -1,13 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { probeRemoteAuthType } from './auth-probe';
+import { describe, expect, it, vi } from 'vitest';
+import { probeRemoteAuthType, probeRemoteBearerToken } from './auth-probe';
 
-// These cover the status-to-verdict rules and the discovery cascade the probe
-// delegates to `oauth-mcp-transport`, so the transport is injected rather than
-// mocked globally. The outbound destination filter is not exercised here: it
-// lives in `createPinnedFetch`, which this seam replaces, and is tested against
-// a real socket in `utils/pinned-fetch.test.ts`.
-const NOW = new Date('2026-07-28T00:00:00.000Z');
-const now = () => NOW;
+// These cover the status-to-verdict rules, so the transport is injected. The
+// outbound destination filter is not exercised here: it lives in
+// `createPinnedFetch`, which this seam replaces, and is tested against a real
+// socket in `utils/pinned-fetch.test.ts`.
 
 /** A well-formed unauthenticated handshake, which is what earns `none`. */
 const INITIALIZE_RESULT = JSON.stringify({
@@ -25,14 +22,6 @@ function jsonResponse(status: number, headers: Record<string, string> = {}): Res
 }
 
 describe('probeRemoteAuthType', () => {
-  beforeEach(() => {
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
   let fetchImpl: (input: string, init?: RequestInit) => Promise<Response>;
 
   function mockFetch(impl: (input: unknown, init?: RequestInit) => Promise<Response>) {
@@ -41,48 +30,38 @@ describe('probeRemoteAuthType', () => {
     return spy;
   }
 
-  it('reports oauth when the server answers 401 with an RFC 9728 challenge', async () => {
-    mockFetch(async (input) => {
-      if (String(input).endsWith('/mcp')) {
-        return jsonResponse(401, {
-          'www-authenticate':
-            'Bearer realm="OAuth", resource_metadata="https://example.com/.well-known/oauth-protected-resource"',
-        });
-      }
-      return new Response(
-        JSON.stringify({ authorization_servers: ['https://auth.example.com/tenant'] }),
-        { status: 200 }
-      );
-    });
+  it.each([
+    [
+      'an RFC 9728 challenge naming resource metadata',
+      'Bearer realm="OAuth", resource_metadata="https://example.com/.well-known/oauth-protected-resource"',
+    ],
+    ['a bare Bearer challenge', 'Bearer realm="OAuth"'],
+  ])('reports oauth when the server answers 401 with %s', async (_label, challenge) => {
+    mockFetch(async () => jsonResponse(401, { 'www-authenticate': challenge }));
 
-    const result = await probeRemoteAuthType('https://example.com/mcp', { now, fetchImpl });
-
-    expect(result.probed_auth_type).toBe('oauth');
-    expect(result.auth_server_origin).toBe('https://auth.example.com');
-    expect(result.probed_at).toEqual(NOW);
+    expect(await probeRemoteAuthType('https://example.com/mcp', { fetchImpl })).toBe('oauth');
   });
 
-  it('still reports oauth when the authorization server cannot be resolved', async () => {
-    mockFetch(async (input) => {
-      if (String(input).endsWith('/mcp')) {
-        return jsonResponse(401, { 'www-authenticate': 'Bearer realm="OAuth"' });
-      }
-      throw new Error('metadata host unreachable');
-    });
+  it('issues exactly one request, to the URL it was given', async () => {
+    // The verdict is read off a single handshake. Nothing here follows a URL
+    // the probed server names in its own headers, which is what would turn the
+    // daemon into a proxy for whatever that server wants fetched.
+    const spy = mockFetch(async () =>
+      jsonResponse(401, {
+        'www-authenticate':
+          'Bearer realm="OAuth", resource_metadata="http://169.254.169.254/latest/meta-data/"',
+      })
+    );
 
-    const result = await probeRemoteAuthType('https://example.com/mcp', { now, fetchImpl });
-
-    expect(result.probed_auth_type).toBe('oauth');
-    expect(result.auth_server_origin).toBeUndefined();
+    expect(await probeRemoteAuthType('https://example.com/mcp', { fetchImpl })).toBe('oauth');
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(String(spy.mock.calls[0][0])).toBe('https://example.com/mcp');
   });
 
   it('reports none when an unauthenticated initialize succeeds', async () => {
     mockFetch(async () => new Response(INITIALIZE_RESULT, { status: 200 }));
 
-    const result = await probeRemoteAuthType('https://open.example.com/mcp', { now, fetchImpl });
-
-    expect(result.probed_auth_type).toBe('none');
-    expect(result.probed_url).toBe('https://open.example.com/mcp');
+    expect(await probeRemoteAuthType('https://open.example.com/mcp', { fetchImpl })).toBe('none');
   });
 
   it('reads an initialize result delivered as an SSE event', async () => {
@@ -96,9 +75,7 @@ describe('probeRemoteAuthType', () => {
         })
     );
 
-    const result = await probeRemoteAuthType('https://sse.example.com/mcp', { now, fetchImpl });
-
-    expect(result.probed_auth_type).toBe('none');
+    expect(await probeRemoteAuthType('https://sse.example.com/mcp', { fetchImpl })).toBe('none');
   });
 
   it.each([
@@ -155,54 +132,40 @@ describe('probeRemoteAuthType', () => {
       JSON.stringify({ result: { protocolVersion: '1' } }),
     ],
   ])('reports unknown, not none, when a 200 carries %s', async (_label, body) => {
-    // `none` is the verdict that renders a connect-directly button. Anything
-    // that merely returned 200 has not shown it is an MCP server, let alone an
-    // open one, and `verified` would compound the claim.
+    // `none` is the verdict that installs a server into a session. Anything that
+    // merely returned 200 has not shown it is an MCP server, let alone an open
+    // one.
     mockFetch(async () => new Response(body, { status: 200 }));
 
-    const result = await probeRemoteAuthType('https://notmcp.example.com/mcp', { now, fetchImpl });
-
-    expect(result.probed_auth_type).toBe('unknown');
+    expect(await probeRemoteAuthType('https://notmcp.example.com/mcp', { fetchImpl })).toBe(
+      'unknown'
+    );
   });
 
-  it('distinguishes a non-OAuth challenge from an unreachable host, and names the scheme', async () => {
+  it('distinguishes a non-OAuth challenge from an unreachable host', async () => {
+    // The refusal a user reads differs — "sign in" against "this needs an API
+    // key" — so collapsing this into `unknown` would render it identically to
+    // "we could not reach it".
     mockFetch(async () => jsonResponse(401, { 'www-authenticate': 'ApiKey realm="internal"' }));
 
-    const result = await probeRemoteAuthType('https://apikey.example.com/mcp', { now, fetchImpl });
-
-    // The connect form can ask for a key; collapsing this into `unknown` would
-    // render it identically to "we could not reach it".
-    expect(result.probed_auth_type).toBe('credentials');
-    expect(result.probed_auth_scheme).toBe('ApiKey');
+    expect(await probeRemoteAuthType('https://apikey.example.com/mcp', { fetchImpl })).toBe(
+      'credentials'
+    );
   });
 
   it('reports credentials for a 403', async () => {
     mockFetch(async () => jsonResponse(403, { 'www-authenticate': 'Basic realm="x"' }));
-    const result = await probeRemoteAuthType('https://example.com/mcp', { now, fetchImpl });
-    expect(result.probed_auth_type).toBe('credentials');
-    expect(result.probed_auth_scheme).toBe('Basic');
+    expect(await probeRemoteAuthType('https://example.com/mcp', { fetchImpl })).toBe('credentials');
   });
 
-  it.each([
-    ['A'.repeat(200), 'over-long token'],
-    ['<script>alert(1)</script>', 'markup'],
-    ['', 'empty header'],
-  ])('records no challenge scheme for %s (%s)', async (header) => {
-    // The header is attacker-controlled and the value is persisted and later
-    // rendered, so anything that is not a plausible scheme token is dropped
-    // rather than truncated into something that looks legitimate.
-    mockFetch(async () => jsonResponse(401, { 'www-authenticate': header }));
-
-    const result = await probeRemoteAuthType('https://example.com/mcp', { now, fetchImpl });
-
-    expect(result.probed_auth_type).toBe('credentials');
-    expect(result.probed_auth_scheme).toBeUndefined();
+  it('reports credentials for a 401 carrying no challenge at all', async () => {
+    mockFetch(async () => jsonResponse(401));
+    expect(await probeRemoteAuthType('https://example.com/mcp', { fetchImpl })).toBe('credentials');
   });
 
   it('reports unreachable for a server error', async () => {
     mockFetch(async () => jsonResponse(503));
-    const result = await probeRemoteAuthType('https://example.com/mcp', { now, fetchImpl });
-    expect(result.probed_auth_type).toBe('unreachable');
+    expect(await probeRemoteAuthType('https://example.com/mcp', { fetchImpl })).toBe('unreachable');
   });
 
   it('reports unreachable without throwing when the host does not answer', async () => {
@@ -210,10 +173,9 @@ describe('probeRemoteAuthType', () => {
       throw new TypeError('fetch failed');
     });
 
-    const result = await probeRemoteAuthType('https://gone.example.com/mcp', { now, fetchImpl });
-
-    expect(result.probed_auth_type).toBe('unreachable');
-    expect(result.probed_at).toEqual(NOW);
+    expect(await probeRemoteAuthType('https://gone.example.com/mcp', { fetchImpl })).toBe(
+      'unreachable'
+    );
   });
 
   it('reports unreachable without throwing when the request times out', async () => {
@@ -221,9 +183,9 @@ describe('probeRemoteAuthType', () => {
       throw new DOMException('The operation was aborted', 'TimeoutError');
     });
 
-    const result = await probeRemoteAuthType('https://slow.example.com/mcp', { now, fetchImpl });
-
-    expect(result.probed_auth_type).toBe('unreachable');
+    expect(await probeRemoteAuthType('https://slow.example.com/mcp', { fetchImpl })).toBe(
+      'unreachable'
+    );
   });
 
   it.each([
@@ -246,136 +208,8 @@ describe('probeRemoteAuthType', () => {
   ])('never issues a request to %s (%s)', async (url) => {
     const spy = mockFetch(async () => jsonResponse(200));
 
-    const result = await probeRemoteAuthType(url, { now, fetchImpl });
-
+    expect(await probeRemoteAuthType(url, { fetchImpl })).toBe('unknown');
     expect(spy).not.toHaveBeenCalled();
-    expect(result.probed_auth_type).toBe('unknown');
-  });
-
-  it.each([
-    ['http://169.254.169.254/latest/meta-data/', 'cloud metadata'],
-    ['http://10.0.0.5/admin', 'RFC 1918'],
-    ['http://[::1]/', 'IPv6 loopback'],
-    ['file:///etc/passwd', 'non-http scheme'],
-  ])(
-    'refuses to follow a WWW-Authenticate resource_metadata pointing at %s (%s)',
-    async (metadataUrl) => {
-      // The header comes from the probed server, which any stranger can publish
-      // to the public registry. Following it unchecked would turn the daemon
-      // into a blind SSRF proxy into its own network.
-      const spy = mockFetch(async (input) => {
-        if (String(input).endsWith('/mcp')) {
-          return jsonResponse(401, {
-            'www-authenticate': `Bearer realm="OAuth", resource_metadata="${metadataUrl}"`,
-          });
-        }
-        throw new Error(`probe must not fetch ${String(input)}`);
-      });
-
-      const result = await probeRemoteAuthType('https://example.com/mcp', { now, fetchImpl });
-
-      expect(result.probed_auth_type).toBe('oauth');
-      expect(result.auth_server_origin).toBeUndefined();
-      // The probe request itself is the only fetch that may have happened.
-      for (const call of spy.mock.calls) {
-        expect(String(call[0])).toBe('https://example.com/mcp');
-      }
-    }
-  );
-
-  it('refuses to record an authorization server that resolves to a private host', async () => {
-    mockFetch(async (input) => {
-      if (String(input).endsWith('/mcp')) {
-        return jsonResponse(401, {
-          'www-authenticate':
-            'Bearer realm="OAuth", resource_metadata="https://example.com/.well-known/oauth-protected-resource"',
-        });
-      }
-      return new Response(JSON.stringify({ authorization_servers: ['http://192.168.0.1/'] }), {
-        status: 200,
-      });
-    });
-
-    const result = await probeRemoteAuthType('https://example.com/mcp', { now, fetchImpl });
-
-    expect(result.probed_auth_type).toBe('oauth');
-    expect(result.auth_server_origin).toBeUndefined();
-  });
-
-  it.each([
-    ['well-known', 'Bearer realm="OAuth"'],
-    [
-      'header-named',
-      'Bearer realm="OAuth", resource_metadata="https://example.com/.well-known/oauth-protected-resource"',
-    ],
-  ])('never follows a %s discovery redirect into a private host', async (_label, challenge) => {
-    // The candidate URL is derived from an origin that passes the filter, so
-    // only the redirect is hostile. Discovery makes these fetches itself, so
-    // guarding the URLs the probe sees directly is not enough.
-    const spy = mockFetch(async (input) => {
-      if (String(input).endsWith('/mcp')) {
-        return jsonResponse(401, { 'www-authenticate': challenge });
-      }
-      return new Response(null, {
-        status: 302,
-        headers: { location: 'http://169.254.169.254/latest/meta-data/' },
-      });
-    });
-
-    const result = await probeRemoteAuthType('https://example.com/mcp', { now, fetchImpl });
-
-    expect(result.probed_auth_type).toBe('oauth');
-    expect(result.auth_server_origin).toBeUndefined();
-    // No request may have reached the metadata host. That the redirect is not
-    // followed in the first place is a property of the transport, covered
-    // against a real socket in `utils/pinned-fetch.test.ts`.
-    for (const call of spy.mock.calls) {
-      expect(String(call[0])).not.toContain('169.254.169.254');
-    }
-  });
-
-  it('yields no authorization server when the metadata document is unusable', async () => {
-    // 1 MiB of non-JSON, with a Content-Length that lies about it. The transport
-    // refuses it on size; this asserts the probe survives either way and still
-    // reports the OAuth requirement it already established.
-    const oversized = 'x'.repeat(1024 * 1024);
-    mockFetch(async (input) => {
-      if (String(input).endsWith('/mcp')) {
-        return jsonResponse(401, {
-          'www-authenticate':
-            'Bearer realm="OAuth", resource_metadata="https://example.com/.well-known/oauth-protected-resource"',
-        });
-      }
-      return new Response(oversized, { status: 200, headers: { 'content-length': '10' } });
-    });
-
-    const result = await probeRemoteAuthType('https://example.com/mcp', { now, fetchImpl });
-
-    expect(result.probed_auth_type).toBe('oauth');
-    expect(result.auth_server_origin).toBeUndefined();
-  });
-
-  it('routes discovery requests through the probe transport, not the global fetch', async () => {
-    // Discovery follows URLs the probed server names in its own headers. Left on
-    // the global fetch it would reach them unpinned and unbounded, which is the
-    // hop the destination filter exists to cover.
-    const spy = mockFetch(async (input) => {
-      if (String(input).endsWith('/mcp')) {
-        return jsonResponse(401, {
-          'www-authenticate':
-            'Bearer realm="OAuth", resource_metadata="https://example.com/.well-known/oauth-protected-resource"',
-        });
-      }
-      return new Response(JSON.stringify({ authorization_servers: ['https://auth.example.com'] }), {
-        status: 200,
-      });
-    });
-
-    await probeRemoteAuthType('https://example.com/mcp', { now, fetchImpl });
-
-    expect(
-      spy.mock.calls.some((call) => String(call[0]).includes('oauth-protected-resource'))
-    ).toBe(true);
   });
 
   it.each(['https://fdn.example.com/mcp', 'https://fc-cdn.net/mcp', 'https://fd7.io/mcp'])(
@@ -383,10 +217,8 @@ describe('probeRemoteAuthType', () => {
     async (url) => {
       const spy = mockFetch(async () => new Response(INITIALIZE_RESULT, { status: 200 }));
 
-      const result = await probeRemoteAuthType(url, { now, fetchImpl });
-
+      expect(await probeRemoteAuthType(url, { fetchImpl })).toBe('none');
       expect(spy).toHaveBeenCalled();
-      expect(result.probed_auth_type).toBe('none');
     }
   );
 
@@ -409,15 +241,13 @@ describe('probeRemoteAuthType', () => {
         )
     );
 
-    const result = await probeRemoteAuthType('https://open.example.com/mcp', { now, fetchImpl });
-
-    expect(result.probed_auth_type).toBe('none');
+    expect(await probeRemoteAuthType('https://open.example.com/mcp', { fetchImpl })).toBe('none');
   });
 
   it('sends an unauthenticated initialize as the handshake', async () => {
     const spy = mockFetch(async () => new Response(INITIALIZE_RESULT, { status: 200 }));
 
-    await probeRemoteAuthType('https://example.com/mcp', { now, fetchImpl });
+    await probeRemoteAuthType('https://example.com/mcp', { fetchImpl });
 
     const init = spy.mock.calls[0][1] as RequestInit;
     expect(init.method).toBe('POST');
@@ -425,5 +255,123 @@ describe('probeRemoteAuthType', () => {
     // No Authorization header: the question is what the server does with an
     // anonymous client.
     expect(new Headers(init.headers).get('authorization')).toBeNull();
+  });
+});
+
+/**
+ * Trying a user's API key against the endpoint before anything is installed
+ * with it.
+ *
+ * Same handshake, same reading of the answer, one added header. What differs is
+ * the question: not "what does this server want" but "does this key work", and
+ * the three verdicts exist because "wrong key" and "nothing usable answered"
+ * send a user to different places.
+ *
+ * The key is an obvious fake. A fixture is a file in a public repository.
+ */
+describe('probeRemoteBearerToken', () => {
+  const KEY = 'fake-not-a-real-key-0000';
+  let fetchImpl: (input: string, init?: RequestInit) => Promise<Response>;
+
+  function mockFetch(impl: (input: unknown, init?: RequestInit) => Promise<Response>) {
+    const spy = vi.fn(impl);
+    fetchImpl = spy as unknown as typeof fetchImpl;
+    return spy;
+  }
+
+  it('accepts a key the endpoint completes a handshake for', async () => {
+    mockFetch(async () => new Response(INITIALIZE_RESULT, { status: 200 }));
+
+    expect(await probeRemoteBearerToken('https://example.com/mcp', KEY, { fetchImpl })).toBe(
+      'accepted'
+    );
+  });
+
+  it('sends the key as a bearer credential, once, to the URL it was given', async () => {
+    // The one request in this module that carries a secret. A second request,
+    // or a request to a URL the server named, would be that secret handed
+    // somewhere nobody chose.
+    const spy = mockFetch(async () => new Response(INITIALIZE_RESULT, { status: 200 }));
+
+    await probeRemoteBearerToken('https://example.com/mcp', KEY, { fetchImpl });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(String(spy.mock.calls[0][0])).toBe('https://example.com/mcp');
+    const headers = spy.mock.calls[0][1]?.headers as Record<string, string>;
+    expect(headers.authorization).toBe(`Bearer ${KEY}`);
+  });
+
+  it.each([401, 403])('rejects a key the endpoint answers %s to', async (status) => {
+    mockFetch(async () => jsonResponse(status));
+
+    expect(await probeRemoteBearerToken('https://example.com/mcp', KEY, { fetchImpl })).toBe(
+      'rejected'
+    );
+  });
+
+  it('rejects a key the endpoint answers with an OAuth challenge', async () => {
+    // A credential was presented and the client still was not let in. However
+    // the server phrases it, that is one fact from the user's side.
+    mockFetch(async () => jsonResponse(401, { 'www-authenticate': 'Bearer realm="OAuth"' }));
+
+    expect(await probeRemoteBearerToken('https://example.com/mcp', KEY, { fetchImpl })).toBe(
+      'rejected'
+    );
+  });
+
+  it('does not accept a 200 that is not an MCP handshake', async () => {
+    // A marketing page, a captive portal, and an API gateway stub all answer
+    // 200. Installing on the strength of one produces a server whose every tool
+    // fails — the failure this check exists to prevent.
+    mockFetch(async () => new Response('<html>Welcome</html>', { status: 200 }));
+
+    expect(await probeRemoteBearerToken('https://example.com/mcp', KEY, { fetchImpl })).toBe(
+      'unusable'
+    );
+  });
+
+  it('reads an accepted handshake delivered as an SSE event', async () => {
+    mockFetch(
+      async () =>
+        new Response(`event: message\ndata: ${INITIALIZE_RESULT}\n\n`, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        })
+    );
+
+    expect(await probeRemoteBearerToken('https://example.com/mcp', KEY, { fetchImpl })).toBe(
+      'accepted'
+    );
+  });
+
+  it.each([500, 502, 404])('calls a %s unusable rather than a bad key', async (status) => {
+    // Reporting a vendor outage as a rejected key sends somebody to rotate a
+    // credential that is fine.
+    mockFetch(async () => jsonResponse(status));
+
+    expect(await probeRemoteBearerToken('https://example.com/mcp', KEY, { fetchImpl })).toBe(
+      'unusable'
+    );
+  });
+
+  it('calls an unreachable endpoint unusable rather than throwing', async () => {
+    mockFetch(async () => {
+      throw new Error('ECONNREFUSED');
+    });
+
+    expect(await probeRemoteBearerToken('https://example.com/mcp', KEY, { fetchImpl })).toBe(
+      'unusable'
+    );
+  });
+
+  it('does not dial a non-public URL at all', async () => {
+    // The key would otherwise be posted to whatever answers inside the daemon's
+    // own network.
+    const spy = mockFetch(async () => new Response(INITIALIZE_RESULT, { status: 200 }));
+
+    expect(await probeRemoteBearerToken('http://169.254.169.254/mcp', KEY, { fetchImpl })).toBe(
+      'unusable'
+    );
+    expect(spy).not.toHaveBeenCalled();
   });
 });

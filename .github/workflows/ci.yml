@@ -15,12 +15,11 @@
 name: CI
 
 on:
+  # Do not path-filter main pushes: every main-head transition must complete
+  # this gate so a docs-only successor cannot strand an already-tested image
+  # promotion. PRs keep the fast path filters below.
   push:
     branches: [main]
-    paths-ignore:
-      - 'apps/agor-docs/**'
-      - '*.md'
-      - 'context/**'
   pull_request:
     branches: [main]
     paths-ignore:
@@ -50,10 +49,20 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # Cheap structural check — runs before lint so its output is the
-      # first thing you see in failure output.
+      # Cheap structural checks — run before lint so their output is the
+      # first thing you see in failure output. Each stays its own step so a
+      # failure names the specific guard rather than a generic `pnpm check`.
       - run: pnpm check:agor-live-deps
       - run: pnpm check:agentic-tool-packages
+
+      # Boundary guards. These encode invariants no type or lint rule can
+      # express — ID handling, tenant isolation, realtime scoping, and the
+      # daemon's declared filesystem capability surface — so they have to be
+      # enforced here, not left to whoever remembers to run `pnpm check`.
+      - run: pnpm check:shortid
+      - run: pnpm check:multitenancy-boundaries
+      - run: pnpm check:daemon-filesystem-boundaries
+      - run: pnpm check:realtime-boundaries
 
       # Biome at the repo root — not a turbo task. Runs independently of
       # the build graph.
@@ -70,6 +79,12 @@ jobs:
       # only the packages with real test suites worth gating on. Kept as
       # a separate turbo invocation to preserve that filter.
       - run: pnpm turbo run test --filter=agor-ui --filter=@agor/daemon --filter=@agor/core --filter=@agor/executor --filter=agor-live
+
+      # Onboarding has responsive/focus/layout contracts that jsdom cannot
+      # observe. Keep its small real-browser suite required at the phone,
+      # short-landscape and desktop viewports it explicitly supports.
+      - run: pnpm --filter agor-ui exec playwright install --with-deps chromium
+      - run: pnpm --filter agor-ui test:browser
 
       # CLI init tests spawn real child processes and pseudo-terminals. Keep
       # them required, but outside Turbo's CPU-heavy parallel test fanout.

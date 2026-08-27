@@ -11,7 +11,6 @@ import type {
   CodexApprovalPolicy,
   CodexSandboxMode,
   EffortLevel,
-  MCPCatalogEntryData,
   Message,
   PermissionMode,
   SandpackConfig,
@@ -57,7 +56,7 @@ export const sessions = sqliteTable(
     // User attribution
     created_by: text('created_by', { length: 36 }).notNull(),
 
-    // Unix username for SDK impersonation (immutable once set)
+    // Immutable execution-home key (legacy column name)
     // Set from creator's unix_username at session creation time
     // NEVER changes, even if user's unix_username changes later
     // This ensures SDK session data remains accessible in the original home directory
@@ -112,6 +111,14 @@ export const sessions = sqliteTable(
     // migration; new occurrences remain NULL until initialization, retention,
     // and schedule metadata are durable.
     scheduler_init_completed_at: t.timestamp('scheduler_init_completed_at'),
+    // Durable diagnosis/retry state for an admitted occurrence that could not
+    // finish initialization. A failure code with no retry timestamp is a
+    // deliberate permanent terminal diagnosis; retryable failures carry the
+    // next database-visible attempt time.
+    scheduler_init_failure_code: text('scheduler_init_failure_code'),
+    scheduler_init_failure_stage: text('scheduler_init_failure_stage'),
+    scheduler_init_attempt_count: integer('scheduler_init_attempt_count').notNull().default(0),
+    scheduler_init_retry_at: t.timestamp('scheduler_init_retry_at'),
 
     // UI state (materialized for efficient highlighting queries)
     ready_for_prompt: t.bool('ready_for_prompt').notNull().default(false),
@@ -206,6 +213,7 @@ export const sessions = sqliteTable(
     boardIdx: index('sessions_board_idx').on(table.board_id),
     branchIdx: index('sessions_branch_idx').on(table.branch_id),
     createdIdx: index('sessions_created_idx').on(table.created_at),
+    archivedUpdatedIdx: index('sessions_archived_updated_idx').on(table.archived, table.updated_at),
     parentIdx: index('sessions_parent_idx').on(table.parent_session_id),
     forkedIdx: index('sessions_forked_idx').on(table.forked_from_session_id),
     // Scheduler indexes — including the partial unique index below.
@@ -225,7 +233,7 @@ export const sessions = sqliteTable(
     schedulerInitPendingIdx: index('sessions_scheduler_init_pending_idx')
       .on(table.created_at, table.session_id)
       .where(
-        sql`${table.scheduled_from_branch} = true AND ${table.scheduled_run_at} IS NOT NULL AND ${table.scheduler_init_completed_at} IS NULL`
+        sql`${table.scheduled_from_branch} = true AND ${table.scheduled_run_at} IS NOT NULL AND ${table.scheduler_init_completed_at} IS NULL AND (${table.scheduler_init_failure_code} IS NULL OR ${table.scheduler_init_retry_at} IS NOT NULL)`
       ),
   })
 );
@@ -604,12 +612,8 @@ export const repos = sqliteTable(
       .notNull()
       .default('remote'),
 
-    // Unix group for repo-level git access (canonical 24-char suffix; legacy 8-char valid)
-    // Users who have access to ANY branch in this repo get added to this group.
-    // Applied to repo Unix-group-managed paths:
-    // - repo root (non-recursive) for traversal into .git/worktrees/<name>
-    // - .git (recursive) for shared git objects/refs and git operations
-    unix_group: text('unix_group'),
+    // Retired nullable compatibility stamp retained for rollback/audit only.
+    unix_group: text('unix_group'), // retired nullable compatibility stamp; runtime ignores it
 
     data: t
       .json<unknown>('data')
@@ -748,7 +752,7 @@ export const branches = sqliteTable(
     }).default('view'),
 
     // RBAC: OS-layer permissions (unix-user-modes.md)
-    unix_group: text('unix_group'), // canonical 24-char suffix; legacy 8-char stamps remain valid
+    unix_group: text('unix_group'), // retired nullable compatibility stamp; runtime ignores it
     others_fs_access: text('others_fs_access', {
       enum: ['none', 'read', 'write'],
     })
@@ -779,6 +783,7 @@ export const branches = sqliteTable(
 
         // Git state (current)
         base_ref?: string; // Branch this diverged from (e.g., "main")
+        base_remote_url?: string; // Optional remote that owns base_ref
         base_sha?: string; // SHA at branch creation
         last_commit_sha?: string; // Latest commit
         tracking_branch?: string; // Remote tracking branch
@@ -823,10 +828,6 @@ export const branches = sqliteTable(
         // attribute the new child session to the parent owner instead of the
         // MCP-authenticated caller. See packages/core/src/types/branch.ts.
         dangerously_allow_session_sharing?: boolean;
-
-        // Unix integration
-        // Note: unix_gid was previously stored here but is now resolved dynamically
-        // via getGidFromGroupName(unix_group) at execution time. See id-lookups.ts.
       }>()
       .notNull(),
   },
@@ -985,14 +986,22 @@ export const users = sqliteTable(
       .notNull()
       .default('member'),
 
-    // Unix username for process impersonation (optional, app-enforced uniqueness)
+    // Opaque execution-home key (optional, database-enforced uniqueness)
     unix_username: text('unix_username'),
+
+    // Absolute host home dir used as the per-user sandbox overlay SOURCE under
+    // unix_user_mode: sandbox (home_mode: per_user). Null → canonical store
+    // <data_home>/tenants/<tenant>/homes/<user_id>. See types/user.ts.
+    filesystem_home: text('filesystem_home'),
 
     // Onboarding state
     onboarding_completed: t.bool('onboarding_completed').notNull().default(false),
 
     // Force password change flag (admin-settable, auto-cleared on password change)
     must_change_password: t.bool('must_change_password').notNull().default(false),
+
+    // Monotonic local-credential generation copied into interactive JWTs.
+    credential_generation: integer('credential_generation').notNull().default(0),
 
     // Auth invalidation marker. Password changes set this timestamp so any
     // previously issued browser access or refresh token is rejected.
@@ -1111,6 +1120,8 @@ export const users = sqliteTable(
             permissionMode?: string;
           };
         };
+        primary_agentic_tool?: import('../types/agentic-tool').AgenticToolName;
+        primary_teammate_id?: import('../types/id').BranchID;
         default_mcp_server_ids?: string[];
         default_agentic_selection?: import('../types/user').UserAgenticDefaultSelections;
       }>()
@@ -1118,6 +1129,37 @@ export const users = sqliteTable(
   },
   (table) => ({
     emailIdx: index('users_email_idx').on(table.email),
+    executionHomeUnique: uniqueIndex('users_unix_username_unique').on(table.unix_username),
+  })
+);
+
+/**
+ * Database-enforced binding between one trusted external subject and its local
+ * user projection. SQLite is single-tenant, so identity_key is globally unique.
+ */
+export const userExternalIdentities = sqliteTable(
+  'user_external_identities',
+  {
+    identity_key: text('identity_key', { length: 64 }).primaryKey(),
+    user_id: text('user_id', { length: 36 })
+      .notNull()
+      .references(() => users.user_id, { onDelete: 'cascade' }),
+    provider: text('provider').notNull(),
+    issuer: text('issuer').notNull(),
+    subject: text('subject').notNull(),
+    email: text('email'),
+    name: text('name'),
+    last_login_at: t.timestamp('last_login_at').notNull(),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+  },
+  (table) => ({
+    providerSubjectUnique: uniqueIndex('user_external_identities_provider_subject_unique').on(
+      table.provider,
+      table.issuer,
+      table.subject
+    ),
+    userIdx: index('user_external_identities_user_idx').on(table.user_id),
   })
 );
 
@@ -1343,6 +1385,7 @@ export const mcpServers = sqliteTable(
     source: text('source', {
       enum: ['user', 'imported', 'agor', 'catalog'],
     }).notNull(),
+    catalog_entry_name: text('catalog_entry_name'),
 
     // JSON blob for configuration and capabilities
     data: t
@@ -1354,6 +1397,9 @@ export const mcpServers = sqliteTable(
         // Catalog entry this server was installed from, by the registry name
         // that outlives the entry row.
         catalog_entry_name?: string;
+
+        // Daemon-owned optimistic-concurrency revision for public edits.
+        config_version?: number;
 
         // Transport config
         command?: string;
@@ -1390,20 +1436,21 @@ export const mcpServers = sqliteTable(
         // Discovered capabilities
         tools?: Array<{
           name: string;
-          description: string;
+          description?: string;
           input_schema?: Record<string, unknown>; // Optional - not all MCP servers provide schemas
         }>;
         resources?: Array<{
           uri: string;
           name: string;
+          description?: string;
           mimeType?: string;
         }>;
         prompts?: Array<{
           name: string;
-          description: string;
+          description?: string;
           arguments?: Array<{
             name: string;
-            description: string;
+            description?: string;
             required?: boolean;
           }>;
         }>;
@@ -1418,107 +1465,9 @@ export const mcpServers = sqliteTable(
     scopeIdx: index('mcp_servers_scope_idx').on(table.scope),
     ownerIdx: index('mcp_servers_owner_idx').on(table.owner_user_id),
     enabledIdx: index('mcp_servers_enabled_idx').on(table.enabled),
-  })
-);
-
-/**
- * MCP Catalog Entries table - browsable index of connectable MCP servers
- *
- * A mirror of the official MCP registry (breadth + reverse-DNS identity) with a
- * curated overlay from `packages/core/src/mcp-catalog/curated.yaml` (category,
- * capabilities, benefit copy, starter prompt, permission disclosure) joined on
- * by `name`.
- *
- * Holds no tenant data: every field originates from a public unauthenticated
- * HTTP registry or from a file checked into this repository. See the Postgres
- * schema for the tenancy rationale and the RLS contract.
- *
- * Columns are materialized when the marketplace filters or sorts on them; the
- * rest lives in `data`, matching `mcp_servers`.
- */
-export const mcpCatalogEntries = sqliteTable(
-  'mcp_catalog_entries',
-  {
-    // Primary identity
-    catalog_entry_id: text('catalog_entry_id', { length: 36 }).primaryKey(),
-    created_at: t.timestamp('created_at').notNull(),
-    updated_at: t.timestamp('updated_at').notNull(),
-
-    // Registry identity. `name` is the join key between the registry mirror and
-    // the curated overlay, so it is unique.
-    name: text('name').notNull(),
-    version: text('version'),
-    registry_updated_at: t.timestamp('registry_updated_at'),
-
-    // Registry presentation (materialized for search)
-    title: text('title'),
-    description: text('description'),
-    website_url: text('website_url'),
-    repository_url: text('repository_url'),
-
-    // Connect surface
-    transport: text('transport', {
-      enum: ['streamable-http', 'sse', 'stdio'],
-    }),
-    remote_url: text('remote_url'),
-    has_remote: t.bool('has_remote').notNull().default(false),
-    has_package: t.bool('has_package').notNull().default(false),
-
-    // Curation overlay
-    curated: t.bool('curated').notNull().default(false),
-    category: text('category'),
-    /**
-     * Curated capability tags as a delimiter-wrapped lowercase string
-     * (`|issues|repos|ci|`), matched with `LIKE '%|issues|%'`. See the Postgres
-     * schema for why this is denormalized rather than a join table.
-     */
-    capability_tags: text('capability_tags'),
-    benefit: text('benefit'),
-    starter_prompt: text('starter_prompt'),
-    permission_disclosure: text('permission_disclosure'),
-    icon_url: text('icon_url'),
-    verified: t.bool('verified').notNull().default(false),
-    /** 1 = most popular. Null sorts last. */
-    popularity_rank: integer('popularity_rank'),
-
-    // Auth probe results, cached so the connect UI knows which branch to render
-    // before the user clicks.
-    probed_auth_type: text('probed_auth_type', {
-      enum: ['none', 'oauth', 'credentials', 'unreachable', 'unknown'],
-    })
-      .notNull()
-      .default('unknown'),
-    probed_at: t.timestamp('probed_at'),
-    auth_server_origin: text('auth_server_origin'),
-
-    /**
-     * Registry lifecycle state, e.g. `active` or `deleted`.
-     *
-     * A real column rather than a blob key because the browse read filters on
-     * it: a withdrawn server left only in the blob still matches every query
-     * and, being curated, still sorts to the top of the catalog.
-     */
-    registry_status: text('registry_status'),
-
-    /**
-     * When a registry walk last returned this server.
-     *
-     * Stamped on every observation, including the `unchanged` fast path, so it
-     * answers "is this still published" rather than "when did this last
-     * change". A hard deletion leaves no record behind for a walk to notice, so
-     * a staleness sweep is the only way to reconcile one — and the column has to
-     * exist from the start, because adding it later leaves every row NULL and
-     * unable to distinguish "never observed" from "the registry dropped it".
-     */
-    last_registry_seen_at: t.timestamp('last_registry_seen_at'),
-
-    data: t.json<MCPCatalogEntryData>('data').notNull(),
-  },
-  (table) => ({
-    nameIdx: uniqueIndex('mcp_catalog_entries_name_unique').on(table.name),
-    categoryIdx: index('mcp_catalog_entries_category_idx').on(table.category),
-    popularityIdx: index('mcp_catalog_entries_popularity_idx').on(table.popularity_rank),
-    probedAtIdx: index('mcp_catalog_entries_probed_at_idx').on(table.probed_at),
+    catalogOwnerUq: uniqueIndex('mcp_servers_catalog_owner_uq')
+      .on(sql`coalesce(${table.owner_user_id}, '')`, table.catalog_entry_name)
+      .where(sql`${table.source} = 'catalog' AND ${table.catalog_entry_name} IS NOT NULL`),
   })
 );
 
@@ -1851,6 +1800,72 @@ export const mcpOauthPendingFlows = sqliteTable(
 );
 
 /**
+ * Cross-dialect schema mirror. Standalone SQLite continues to use the simple
+ * process-local Codex device flow; durable polling authority is HA/PostgreSQL-only.
+ */
+export const codexDeviceAuthAttempts = sqliteTable(
+  'codex_device_auth_attempts',
+  {
+    attempt_id: text('attempt_id', { length: 36 }).primaryKey(),
+    user_id: text('user_id', { length: 36 })
+      .notNull()
+      .references(() => users.user_id, { onDelete: 'cascade' }),
+    attempt_generation: integer('attempt_generation').notNull(),
+    envelope_version: integer('envelope_version').notNull(),
+    is_current: integer('is_current', { mode: 'boolean' }).notNull().default(true),
+    status: text('status', {
+      enum: [
+        'starting',
+        'pending',
+        'exchanging',
+        'persisting',
+        'succeeded',
+        'unavailable',
+        'denied',
+        'failed',
+        'ambiguous',
+        'expired',
+        'superseded',
+        'cancelled',
+      ],
+    })
+      .notNull()
+      .default('starting'),
+    sealed_material: text('sealed_material'),
+    poll_interval_ms: integer('poll_interval_ms'),
+    poll_next_at: t.timestamp('poll_next_at'),
+    poll_claim_id: text('poll_claim_id', { length: 36 }),
+    poll_claim_generation: integer('poll_claim_generation').notNull().default(0),
+    poll_lease_expires_at: t.timestamp('poll_lease_expires_at'),
+    exchange_claim_id: text('exchange_claim_id', { length: 36 }),
+    failure_code: text('failure_code'),
+    plan_type: text('plan_type'),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+    expires_at: t.timestamp('expires_at').notNull(),
+    exchange_started_at: t.timestamp('exchange_started_at'),
+    finished_at: t.timestamp('finished_at'),
+  },
+  (table) => ({
+    currentUserUnique: uniqueIndex('codex_device_auth_attempts_current_user_uq')
+      .on(table.user_id)
+      .where(sql`${table.is_current} = 1`),
+    userIdx: index('codex_device_auth_attempts_user_idx').on(table.user_id, table.created_at),
+    pollIdx: index('codex_device_auth_attempts_poll_idx').on(
+      table.status,
+      table.poll_next_at,
+      table.poll_lease_expires_at
+    ),
+    maintenanceIdx: index('codex_device_auth_attempts_maintenance_idx').on(
+      table.status,
+      table.expires_at,
+      table.exchange_started_at,
+      table.finished_at
+    ),
+  })
+);
+
+/**
  * Board Comments table - Human-to-human conversations and collaboration
  *
  * Flexible attachment strategy:
@@ -2005,7 +2020,9 @@ export const gatewayChannels = sqliteTable(
     target_branch_id: text('target_branch_id', { length: 36 })
       .notNull()
       .references(() => branches.branch_id, { onDelete: 'cascade' }),
-    agor_user_id: text('agor_user_id', { length: 36 }).notNull(),
+    agor_user_id: text('agor_user_id', { length: 36 }),
+    provider_installation_id: text('provider_installation_id'),
+    provider_config_generation: integer('provider_config_generation').notNull().default(1),
     channel_key: text('channel_key').notNull().unique(),
     enabled: t.bool('enabled').notNull().default(true),
     last_message_at: t.timestamp('last_message_at'),
@@ -2038,6 +2055,11 @@ export const gatewayChannels = sqliteTable(
       table.agentic_tool_preset_id
     ),
     enabledTypeIdx: index('idx_gateway_enabled_type').on(table.enabled, table.channel_type),
+    discordInstallationUnique: uniqueIndex('gateway_channels_discord_installation_unique')
+      .on(table.channel_type, table.provider_installation_id)
+      .where(
+        sql`${table.channel_type} = 'discord' AND ${table.enabled} = 1 AND ${table.provider_installation_id} IS NOT NULL`
+      ),
     listenerLeaseIdx: index('gateway_channels_listener_lease_idx').on(
       table.enabled,
       table.listener_lease_expires_at,
@@ -2117,6 +2139,9 @@ export const threadSessionMap = sqliteTable(
 
     // JSON blob for extra metadata
     metadata: t.json<Record<string, unknown>>('metadata'),
+
+    // Durable Discord catch-up cursor. Provider history itself is never stored.
+    discord_last_admitted_message_id: text('discord_last_admitted_message_id'),
   },
   (table) => ({
     uniqueChannelThread: uniqueIndex('uniq_thread_map_channel_thread').on(
@@ -2126,6 +2151,61 @@ export const threadSessionMap = sqliteTable(
     sessionIdx: index('idx_thread_map_session_id').on(table.session_id),
     threadIdx: index('idx_thread_map_thread_id').on(table.thread_id),
     channelStatusIdx: index('idx_thread_map_channel_status').on(table.channel_id, table.status),
+  })
+);
+
+/** Standalone SQLite mirror of the narrow Discord final-delivery intent. */
+export const discordMessageDeliveries = sqliteTable(
+  'discord_message_deliveries',
+  {
+    delivery_id: text('delivery_id', { length: 36 }).primaryKey(),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+    message_id: text('message_id', { length: 36 })
+      .notNull()
+      .references(() => messages.message_id, { onDelete: 'cascade' }),
+    gateway_channel_id: text('gateway_channel_id', { length: 36 })
+      .notNull()
+      .references(() => gatewayChannels.id, { onDelete: 'cascade' }),
+    thread_session_map_id: text('thread_session_map_id', { length: 36 })
+      .notNull()
+      .references(() => threadSessionMap.id, { onDelete: 'cascade' }),
+    provider_installation_id: text('provider_installation_id').notNull(),
+    provider_config_generation: integer('provider_config_generation').notNull(),
+    status: text('status', {
+      enum: ['pending', 'processing', 'completed', 'canceled', 'dead_letter'],
+    })
+      .notNull()
+      .default('pending'),
+    attempt_count: integer('attempt_count').notNull().default(0),
+    next_attempt_at: t.timestamp('next_attempt_at').notNull(),
+    claim_token: text('claim_token'),
+    claim_expires_at: t.timestamp('claim_expires_at'),
+    claim_generation: integer('claim_generation').notNull().default(0),
+    ambiguous_chunk_index: integer('ambiguous_chunk_index'),
+    effect_started_at: t.timestamp('effect_started_at'),
+    effect_recovery_grace_until: t.timestamp('effect_recovery_grace_until'),
+    chunk_receipts: t
+      .json<import('../types/gateway').DiscordMessageDeliveryChunkReceipt[]>('chunk_receipts')
+      .notNull(),
+    reply_aliases: t.json<string[]>('reply_aliases').notNull(),
+    last_error_code: text('last_error_code'),
+    completed_at: t.timestamp('completed_at'),
+    canceled_at: t.timestamp('canceled_at'),
+    dead_lettered_at: t.timestamp('dead_lettered_at'),
+  },
+  (table) => ({
+    messageUnique: uniqueIndex('discord_message_deliveries_message_unique').on(table.message_id),
+    dueIdx: index('discord_message_deliveries_due_idx').on(
+      table.status,
+      table.next_attempt_at,
+      table.delivery_id
+    ),
+    claimIdx: index('discord_message_deliveries_claim_idx').on(
+      table.status,
+      table.claim_expires_at,
+      table.delivery_id
+    ),
   })
 );
 
@@ -2352,6 +2432,9 @@ export const kbDocuments = sqliteTable(
     updated_by: text('updated_by', { length: 36 }).references(() => users.user_id, {
       onDelete: 'set null',
     }),
+    updated_by_session_id: text('updated_by_session_id', { length: 36 }),
+    updated_by_agentic_tool: text('updated_by_agentic_tool'),
+    updated_by_teammate_name: text('updated_by_teammate_name'),
     updated_at: t.timestamp('updated_at'),
     archived: t.bool('archived').notNull().default(false),
     archived_at: t.timestamp('archived_at'),
@@ -2395,6 +2478,9 @@ export const kbDocumentVersions = sqliteTable(
     created_by: text('created_by', { length: 36 }).references(() => users.user_id, {
       onDelete: 'set null',
     }),
+    created_by_session_id: text('created_by_session_id', { length: 36 }),
+    created_by_agentic_tool: text('created_by_agentic_tool'),
+    created_by_teammate_name: text('created_by_teammate_name'),
     created_at: t.timestamp('created_at').notNull(),
   },
   (table) => ({
@@ -2671,6 +2757,8 @@ export type ScheduleRow = typeof schedules.$inferSelect;
 export type ScheduleInsert = typeof schedules.$inferInsert;
 export type UserRow = typeof users.$inferSelect;
 export type UserInsert = typeof users.$inferInsert;
+export type UserExternalIdentityRow = typeof userExternalIdentities.$inferSelect;
+export type UserExternalIdentityInsert = typeof userExternalIdentities.$inferInsert;
 export type AppVariableRow = typeof appVariables.$inferSelect;
 export type AppVariableInsert = typeof appVariables.$inferInsert;
 export type AgenticToolPresetRow = typeof agenticToolPresets.$inferSelect;
@@ -2685,8 +2773,6 @@ export type BoardOwnerRow = typeof boardOwners.$inferSelect;
 export type BranchGroupGrantInsert = typeof branchGroupGrants.$inferInsert;
 export type MCPServerRow = typeof mcpServers.$inferSelect;
 export type MCPServerInsert = typeof mcpServers.$inferInsert;
-export type MCPCatalogEntryRow = typeof mcpCatalogEntries.$inferSelect;
-export type MCPCatalogEntryInsert = typeof mcpCatalogEntries.$inferInsert;
 export type SessionMCPServerRow = typeof sessionMcpServers.$inferSelect;
 export type SessionMCPServerInsert = typeof sessionMcpServers.$inferInsert;
 export type SessionEnvSelectionRow = typeof sessionEnvSelections.$inferSelect;
@@ -2695,6 +2781,8 @@ export type UserMCPOAuthTokenRow = typeof userMcpOauthTokens.$inferSelect;
 export type UserMCPOAuthTokenInsert = typeof userMcpOauthTokens.$inferInsert;
 export type MCPOAuthPendingFlowRow = typeof mcpOauthPendingFlows.$inferSelect;
 export type MCPOAuthPendingFlowInsert = typeof mcpOauthPendingFlows.$inferInsert;
+export type CodexDeviceAuthAttemptRow = typeof codexDeviceAuthAttempts.$inferSelect;
+export type CodexDeviceAuthAttemptInsert = typeof codexDeviceAuthAttempts.$inferInsert;
 export type CardTypeRow = typeof cardTypes.$inferSelect;
 export type CardTypeInsert = typeof cardTypes.$inferInsert;
 export type CardRow = typeof cards.$inferSelect;
@@ -2707,6 +2795,8 @@ export type GatewayChannelRow = typeof gatewayChannels.$inferSelect;
 export type GatewayChannelInsert = typeof gatewayChannels.$inferInsert;
 export type ThreadSessionMapRow = typeof threadSessionMap.$inferSelect;
 export type ThreadSessionMapInsert = typeof threadSessionMap.$inferInsert;
+export type DiscordMessageDeliveryRow = typeof discordMessageDeliveries.$inferSelect;
+export type DiscordMessageDeliveryInsert = typeof discordMessageDeliveries.$inferInsert;
 export type GatewayOutboundMessageRow = typeof gatewayOutboundMessages.$inferSelect;
 export type GatewayOutboundMessageInsert = typeof gatewayOutboundMessages.$inferInsert;
 export type GatewayInboundEventRow = typeof gatewayInboundEvents.$inferSelect;

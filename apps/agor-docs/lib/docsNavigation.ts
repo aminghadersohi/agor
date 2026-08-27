@@ -25,6 +25,8 @@ export const guideNavigation: Record<string, NavigationItem> = {
   assistants: { title: 'Assistants', display: 'hidden' },
   knowledge: 'Knowledge',
   'internal-mcp': 'Agor MCP Server',
+  'mcp-servers': 'External MCP Servers',
+  'mcp-egress-gateway': 'MCP Egress Operations',
   'multiplayer-social': 'Multiplayer & Social',
   'environment-configuration': 'Environments',
   scheduler: 'Scheduler',
@@ -53,6 +55,6 @@ export const guideNavigation: Record<string, NavigationItem> = {
   'daemon-ha': 'Daemon High Availability',
   'multi-tenant-filesystem': 'Multi-Tenant Filesystem',
   'tenant-data-portability': 'Tenant Data Portability',
-  'multiplayer-unix-isolation': 'Full Multiplayer Mode',
+  'multiplayer-unix-isolation': 'Execution Isolation',
   'containerized-execution': 'Containerized Execution',
 };

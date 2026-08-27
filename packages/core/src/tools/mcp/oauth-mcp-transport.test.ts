@@ -7,6 +7,7 @@
  * - resolveResourceMetadataUrl(): header parse + .well-known fallback
  */
 
+import { request as httpRequest } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MCPOAuthDCRDiagnostic } from '../../types/mcp.js';
 
@@ -45,6 +46,7 @@ import {
   OAuthCallbackValidationError,
   OAuthCodeExchangeError,
   parseOAuthCallback,
+  performMCPOAuthFlow,
   resolveMCPOAuthDiscovery,
   resolveResourceMetadataUrl,
   startMCPOAuthFlow,
@@ -59,6 +61,104 @@ async function rejectedError<T extends Error>(promise: Promise<unknown>): Promis
   }
   throw new Error('Expected OAuth flow to reject');
 }
+
+describe('loopback OAuth callback response', () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    { validState: false, expectedHeading: 'Invalid Callback' },
+    { validState: true, expectedHeading: 'Authentication Failed' },
+  ])(
+    'validates state before provider errors (valid state: $validState) and never reflects error query HTML or secrets',
+    async ({ validState, expectedHeading }) => {
+      const sentinel = 'SENTINEL_LOOPBACK_CALLBACK_XSS_92f1';
+      const issuer = 'http://127.0.0.1:45555';
+      const metadataUrl = 'http://127.0.0.1:45554/.well-known/oauth-protected-resource';
+      globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url === metadataUrl) {
+          return new Response(
+            JSON.stringify({
+              resource: 'http://127.0.0.1:45554/mcp',
+              authorization_servers: [issuer],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        if (url.startsWith(`${issuer}/.well-known/`)) {
+          return new Response(
+            JSON.stringify({
+              issuer,
+              authorization_endpoint: `${issuer}/authorize`,
+              token_endpoint: `${issuer}/token`,
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        throw new Error('unexpected test URL');
+      }) as unknown as typeof fetch;
+
+      let callbackResponse:
+        | {
+            status: number | undefined;
+            headers: Record<string, string | string[] | undefined>;
+            body: string;
+          }
+        | undefined;
+      const flow = performMCPOAuthFlow(
+        `Bearer resource_metadata="${metadataUrl}"`,
+        'client-id',
+        async (authorizationUrl) => {
+          const auth = new URL(authorizationUrl);
+          const callback = new URL(auth.searchParams.get('redirect_uri')!);
+          callback.searchParams.set(
+            'state',
+            validState ? auth.searchParams.get('state')! : 'wrong-state'
+          );
+          callback.searchParams.set('error', `<script>${sentinel}</script>`);
+
+          callbackResponse = await new Promise<NonNullable<typeof callbackResponse>>(
+            (resolve, reject) => {
+              const request = httpRequest(callback, (response) => {
+                const chunks: Buffer[] = [];
+                response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+                response.on('end', () =>
+                  resolve({
+                    status: response.statusCode,
+                    headers: response.headers,
+                    body: Buffer.concat(chunks).toString('utf8'),
+                  })
+                );
+              });
+              request.on('error', reject);
+              request.end();
+            }
+          );
+        }
+      );
+
+      const failure = await rejectedError(flow);
+      expect(failure.message).toBe(
+        validState ? 'No authorization code received' : 'State mismatch - possible CSRF attack'
+      );
+      expect(callbackResponse?.status).toBe(400);
+      expect(callbackResponse?.headers['content-type']).toBe('text/html; charset=utf-8');
+      expect(callbackResponse?.headers['content-security-policy']).toContain("default-src 'none'");
+      expect(callbackResponse?.headers['x-content-type-options']).toBe('nosniff');
+      expect(callbackResponse?.headers['cache-control']).toBe('no-store');
+      expect(callbackResponse?.body).toContain(expectedHeading);
+      expect(JSON.stringify({ callbackResponse, failure: String(failure) })).not.toContain(
+        sentinel
+      );
+      expect(callbackResponse?.body).not.toContain('<script>');
+    }
+  );
+});
 
 // ---------------------------------------------------------------------------
 // completeMCPOAuthFlow — token exchange request contract
@@ -89,6 +189,7 @@ describe('completeMCPOAuthFlow token exchange', () => {
     state: 'state',
     authorizationUrl: 'https://provider.example.test/authorize',
     compatibilityMode: 'legacy' as const,
+    authorizationResponseIssuerParameterSupported: false,
     allowLocalhostHttp: false,
   };
 
@@ -115,6 +216,7 @@ describe('completeMCPOAuthFlow token exchange', () => {
         state: 'state',
         authorizationUrl: 'https://github.com/login/oauth/authorize',
         compatibilityMode: 'legacy',
+        authorizationResponseIssuerParameterSupported: false,
         allowLocalhostHttp: true,
       },
       'authorization-code',
@@ -167,6 +269,7 @@ describe('completeMCPOAuthFlow token exchange', () => {
         state: sentinels.state,
         authorizationUrl: `https://provider.example.test/authorize?state=${sentinels.state}`,
         compatibilityMode: 'legacy',
+        authorizationResponseIssuerParameterSupported: false,
         allowLocalhostHttp: false,
       },
       sentinels.code,
@@ -213,7 +316,11 @@ describe('completeMCPOAuthFlow token exchange', () => {
       const fetchSpy = vi.fn();
       globalThis.fetch = fetchSpy as unknown as typeof fetch;
       const failure = await completeMCPOAuthFlow(
-        { ...context, compatibilityMode: 'strict' },
+        {
+          ...context,
+          compatibilityMode: 'strict',
+          authorizationResponseIssuerParameterSupported: true,
+        },
         'single-use-code',
         state,
         { cacheToken: false, issuer }
@@ -802,6 +909,32 @@ describe('resolveMCPOAuthDiscovery', () => {
     expect(result).toBeNull();
   });
 
+  it('stops between well-known candidates when the authority deadline expires', async () => {
+    let current = true;
+    const fetchMock = vi.fn(async () => {
+      // The first path-aware candidate began while current, but its held
+      // response crossed the reservation deadline. The post-await assertion
+      // must abort rather than issuing the root fallback request.
+      current = false;
+      return { ok: false, status: 404 };
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      resolveMCPOAuthDiscovery(null, 'https://example.com/mcp', {
+        compatibilityMode: 'legacy',
+        assertCurrent: () => {
+          if (!current) throw new Error('reservation expired');
+        },
+      })
+    ).rejects.toThrow('reservation expired');
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://example.com/.well-known/oauth-protected-resource/mcp',
+      expect.anything()
+    );
+  });
+
   it('prefers RFC 9728 well-known over AS-direct when both succeed', async () => {
     // If a server publishes both RFC 9728 *and* serves AS metadata at its
     // origin, RFC 9728 should win — it's the spec-compliant indirection that
@@ -899,6 +1032,57 @@ describe('startMCPOAuthFlow with prefetchedAuthServerMetadata', () => {
     expect(authUrl.searchParams.get('redirect_uri')).toBe('http://127.0.0.1:9999/oauth/callback');
   });
 
+  it('accepts a confidential client when DCR returns a secret with auth method none/omitted, then uses HTTP Basic on token exchange', async () => {
+    // Reproduces Atlassian's remote MCP: we request a public client
+    // (token_endpoint_auth_method: 'none'), but the provider registers a *confidential* client —
+    // HTTP 201 with a client_secret and no auth method echoed back. This previously failed DCR
+    // validation ("incompatible public-client credentials"); it must now be accepted.
+    const clientSecret = 'atlassian-dcr-secret';
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === 'https://auth.reo.dev/oauth/register' && init?.method === 'POST') {
+        return {
+          ok: true,
+          json: async () => ({
+            client_id: 'dcr-confidential-client',
+            client_secret: clientSecret,
+            redirect_uris: ['http://127.0.0.1:9999/oauth/callback'],
+          }),
+        };
+      }
+      if (url === 'https://auth.reo.dev/oauth/token' && init?.method === 'POST') {
+        return new Response(JSON.stringify({ access_token: 'confidential-token' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+
+    // DCR no longer rejects the returned secret — the flow starts and carries the secret.
+    const ctx = await startMCPOAuthFlow('', undefined, redirectUri, prefetchedOptions);
+    expect(ctx.clientSecret).toBe(clientSecret);
+    expect(new URL(ctx.authorizationUrl).searchParams.get('client_id')).toBe(
+      'dcr-confidential-client'
+    );
+
+    // The secret must flow into the token exchange as HTTP Basic auth (RFC 6749 §2.3.1),
+    // and client_id must NOT be duplicated in the request body.
+    const tokenResponse = await completeMCPOAuthFlow(ctx, 'auth-code', ctx.state, {
+      cacheToken: false,
+    });
+    expect(tokenResponse.access_token).toBe('confidential-token');
+
+    const tokenCall = vi
+      .mocked(globalThis.fetch)
+      .mock.calls.find(([url]) => String(url) === 'https://auth.reo.dev/oauth/token');
+    expect(tokenCall).toBeTruthy();
+    const headers = (tokenCall?.[1]?.headers ?? {}) as Record<string, string>;
+    expect(headers.Authorization).toBe(
+      `Basic ${Buffer.from(`dcr-confidential-client:${clientSecret}`).toString('base64')}`
+    );
+    expect(String(tokenCall?.[1]?.body)).not.toContain('client_id=');
+  });
+
   it('throws when cacheKey is missing (would silently break token reuse)', async () => {
     globalThis.fetch = vi.fn() as unknown as typeof fetch;
 
@@ -976,6 +1160,320 @@ describe('startMCPOAuthFlow with prefetchedAuthServerMetadata', () => {
     await expect(startMCPOAuthFlow('', undefined, redirectUri, prefetchedOptions)).rejects.toThrow(
       'Dynamic Client Registration failed'
     );
+  });
+});
+
+describe('marketplace oauth-start production boundary', () => {
+  const originalFetch = globalThis.fetch;
+  const redirectUri = 'https://agor.example.com/mcp-servers/oauth-callback';
+
+  beforeEach(() => {
+    clearAuthCodeTokenCache();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+
+  it('takes an Airtable-style origin-scoped resource through discovery and advertised DCR', async () => {
+    const mcpUrl = 'https://mcp.airtable.example/mcp';
+    const metadataUrl = 'https://mcp.airtable.example/.well-known/oauth-protected-resource';
+    const issuer = 'https://airtable.example/oauth2/v1';
+    globalThis.fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === `${metadataUrl}/mcp`) return json({}, 404);
+      if (url === metadataUrl) {
+        return json({
+          resource: 'https://mcp.airtable.example',
+          authorization_servers: [issuer],
+        });
+      }
+      if (url === 'https://airtable.example/.well-known/oauth-authorization-server/oauth2/v1') {
+        return json({
+          issuer,
+          authorization_endpoint: `${issuer}/authorize`,
+          token_endpoint: `${issuer}/token`,
+          registration_endpoint: `${issuer}/register`,
+          code_challenge_methods_supported: ['S256'],
+        });
+      }
+      if (url === `${issuer}/register` && init?.method === 'POST') {
+        return json(
+          {
+            client_id: 'airtable-dcr-client',
+            redirect_uris: [redirectUri],
+            token_endpoint_auth_method: 'none',
+          },
+          201
+        );
+      }
+      return json({}, 404);
+    }) as unknown as typeof fetch;
+
+    const discovery = await resolveMCPOAuthDiscovery('Bearer', mcpUrl, {
+      compatibilityMode: 'marketplace',
+    });
+    expect(discovery).toEqual({
+      kind: 'resource-metadata',
+      metadataUrl,
+      source: 'well-known',
+    });
+    const context = await startMCPOAuthFlow('Bearer', undefined, redirectUri, {
+      resourceMetadataUrl: metadataUrl,
+      resourceUri: mcpUrl,
+      compatibilityMode: 'marketplace',
+    });
+
+    const authorizationUrl = new URL(context.authorizationUrl);
+    expect(context.clientId).toBe('airtable-dcr-client');
+    expect(context.authorizationResponseIssuerParameterSupported).toBe(false);
+    expect(authorizationUrl.searchParams.get('resource')).toBe(mcpUrl);
+    expect(authorizationUrl.searchParams.get('code_challenge_method')).toBe('S256');
+  });
+
+  it('takes Atlassian-style AS-direct discovery through the same oauth-start path', async () => {
+    const mcpUrl = 'https://mcp.atlassian.example/v1/mcp';
+    const issuer = 'https://mcp.atlassian.example';
+    const registrationEndpoint = `${issuer}/v1/register`;
+    globalThis.fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/.well-known/oauth-protected-resource')) return json({}, 404);
+      if (url === `${issuer}/.well-known/oauth-authorization-server`) {
+        return json({
+          issuer,
+          authorization_endpoint: `${issuer}/v1/authorize`,
+          token_endpoint: `${issuer}/v1/token`,
+          registration_endpoint: registrationEndpoint,
+          code_challenge_methods_supported: ['plain', 'S256'],
+        });
+      }
+      if (url === registrationEndpoint && init?.method === 'POST') {
+        return json(
+          {
+            client_id: 'atlassian-dcr-client',
+            redirect_uris: [redirectUri],
+            token_endpoint_auth_method: 'none',
+          },
+          201
+        );
+      }
+      return json({}, 404);
+    }) as unknown as typeof fetch;
+
+    const discovery = await resolveMCPOAuthDiscovery('Bearer', mcpUrl, {
+      compatibilityMode: 'marketplace',
+    });
+    expect(discovery?.kind).toBe('authorization-server');
+    if (discovery?.kind !== 'authorization-server') throw new Error('expected AS-direct');
+
+    const context = await startMCPOAuthFlow('Bearer', undefined, redirectUri, {
+      prefetchedAuthServerMetadata: discovery.authServerMetadata,
+      cacheKey: mcpUrl,
+      resourceUri: mcpUrl,
+      compatibilityMode: 'marketplace',
+    });
+    expect(context.clientId).toBe('atlassian-dcr-client');
+    expect(new URL(context.authorizationUrl).pathname).toBe('/v1/authorize');
+  });
+
+  it('rejects a cross-origin issuer from AS-direct discovery before DCR', async () => {
+    const mcpUrl = 'https://mcp.example.com/mcp';
+    const registrationEndpoint = 'https://attacker.example/register';
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      startMCPOAuthFlow('Bearer', undefined, redirectUri, {
+        prefetchedAuthServerMetadata: {
+          issuer: 'https://attacker.example',
+          authorization_endpoint: 'https://attacker.example/authorize',
+          token_endpoint: 'https://attacker.example/token',
+          registration_endpoint: registrationEndpoint,
+          code_challenge_methods_supported: ['S256'],
+        },
+        cacheKey: mcpUrl,
+        resourceUri: mcpUrl,
+        compatibilityMode: 'marketplace',
+      })
+    ).rejects.toThrow('does not match the MCP resource origin');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  function linearFetch(options: { callbackIssuer?: boolean; metadataIssuer?: string } = {}) {
+    const mcpUrl = 'https://mcp.linear.example/mcp';
+    const metadataUrl = 'https://mcp.linear.example/.well-known/oauth-protected-resource/mcp';
+    const issuer = 'https://mcp.linear.example';
+    return {
+      mcpUrl,
+      metadataUrl,
+      issuer,
+      fetch: vi.fn(async (input: string | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === metadataUrl) {
+          return json({ resource: mcpUrl, authorization_servers: [issuer] });
+        }
+        if (url === `${issuer}/.well-known/oauth-authorization-server`) {
+          return json({
+            issuer: options.metadataIssuer ?? issuer,
+            authorization_endpoint: `${issuer}/authorize`,
+            token_endpoint: `${issuer}/token`,
+            registration_endpoint: `${issuer}/register`,
+            code_challenge_methods_supported: ['S256'],
+            ...(options.callbackIssuer
+              ? { authorization_response_iss_parameter_supported: true }
+              : {}),
+          });
+        }
+        if (url === `${issuer}/register` && init?.method === 'POST') {
+          return json(
+            {
+              client_id: 'linear-dcr-client',
+              redirect_uris: [redirectUri],
+              token_endpoint_auth_method: 'none',
+            },
+            201
+          );
+        }
+        if (url === `${issuer}/token` && init?.method === 'POST') {
+          return json({ access_token: 'linear-access-token' });
+        }
+        return json({}, 404);
+      }),
+    };
+  }
+
+  it('does not require Linear-style optional RFC 9207 declarations, but rejects a supplied wrong issuer', async () => {
+    const fixture = linearFetch();
+    globalThis.fetch = fixture.fetch as unknown as typeof fetch;
+    const context = await startMCPOAuthFlow(
+      `Bearer resource_metadata="${fixture.metadataUrl}"`,
+      undefined,
+      redirectUri,
+      {
+        resourceUri: fixture.mcpUrl,
+        compatibilityMode: 'marketplace',
+      }
+    );
+    expect(context.authorizationResponseIssuerParameterSupported).toBe(false);
+
+    await expect(
+      completeMCPOAuthFlow(context, 'code', context.state, {
+        cacheToken: false,
+        issuer: 'https://attacker.example',
+      })
+    ).rejects.toMatchObject({ failureCode: 'callback_issuer_mismatch' });
+    await expect(
+      completeMCPOAuthFlow(context, 'code', context.state, { cacheToken: false })
+    ).resolves.toMatchObject({ access_token: 'linear-access-token' });
+  });
+
+  it('retains explicit strict opt-in and validates it before DCR', async () => {
+    const fixture = linearFetch();
+    globalThis.fetch = fixture.fetch as unknown as typeof fetch;
+    await expect(
+      startMCPOAuthFlow(
+        `Bearer resource_metadata="${fixture.metadataUrl}"`,
+        undefined,
+        redirectUri,
+        { resourceUri: fixture.mcpUrl, compatibilityMode: 'strict' }
+      )
+    ).rejects.toThrow('required callback issuer');
+    expect(fixture.fetch).not.toHaveBeenCalledWith(
+      `${fixture.issuer}/register`,
+      expect.objectContaining({ method: 'POST' })
+    );
+  });
+
+  it('rejects cross-origin protected-resource metadata instead of relaxing validation wholesale', async () => {
+    const mcpUrl = 'https://mcp.example.com/mcp';
+    const metadataUrl = 'https://metadata.attacker.example/oauth-protected-resource';
+    const issuer = 'https://issuer.example.com';
+    globalThis.fetch = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url === metadataUrl) {
+        return json({
+          resource: 'https://mcp.example.com',
+          authorization_servers: [issuer],
+        });
+      }
+      return json({}, 404);
+    }) as unknown as typeof fetch;
+
+    await expect(
+      startMCPOAuthFlow(`Bearer resource_metadata="${metadataUrl}"`, 'client-id', redirectUri, {
+        resourceUri: mcpUrl,
+        compatibilityMode: 'marketplace',
+      })
+    ).rejects.toThrow('Protected resource metadata does not match');
+  });
+
+  it('rejects an authorization-server issuer alias that crosses origins', async () => {
+    const fixture = linearFetch({ metadataIssuer: 'https://attacker.example' });
+    globalThis.fetch = fixture.fetch as unknown as typeof fetch;
+    await expect(
+      startMCPOAuthFlow(
+        `Bearer resource_metadata="${fixture.metadataUrl}"`,
+        'client-id',
+        redirectUri,
+        { resourceUri: fixture.mcpUrl, compatibilityMode: 'marketplace' }
+      )
+    ).rejects.toThrow('Failed to fetch authorization server metadata');
+  });
+
+  it('accepts exactly one trailing-slash spelling difference for a marketplace issuer', async () => {
+    const fixture = linearFetch({ metadataIssuer: 'https://mcp.linear.example/' });
+    globalThis.fetch = fixture.fetch as unknown as typeof fetch;
+    await expect(
+      startMCPOAuthFlow(
+        `Bearer resource_metadata="${fixture.metadataUrl}"`,
+        'pre-registered-client',
+        redirectUri,
+        { resourceUri: fixture.mcpUrl, compatibilityMode: 'marketplace' }
+      )
+    ).resolves.toMatchObject({
+      issuer: 'https://mcp.linear.example/',
+      compatibilityMode: 'marketplace',
+    });
+  });
+
+  it.each([
+    'https://MCP.linear.example',
+    'https://mcp.linear.example:443',
+    'https://mcp.linear.example/a/../',
+    'https://mcp.linear.example//',
+  ])('does not accept URL canonicalization of marketplace issuer %s', async (metadataIssuer) => {
+    const fixture = linearFetch({ metadataIssuer });
+    globalThis.fetch = fixture.fetch as unknown as typeof fetch;
+    await expect(
+      startMCPOAuthFlow(
+        `Bearer resource_metadata="${fixture.metadataUrl}"`,
+        'pre-registered-client',
+        redirectUri,
+        { resourceUri: fixture.mcpUrl, compatibilityMode: 'marketplace' }
+      )
+    ).rejects.toThrow('Failed to fetch authorization server metadata');
+  });
+
+  it('requires the callback issuer when a marketplace authorization server advertises RFC 9207', async () => {
+    const fixture = linearFetch({ callbackIssuer: true });
+    globalThis.fetch = fixture.fetch as unknown as typeof fetch;
+    const context = await startMCPOAuthFlow(
+      `Bearer resource_metadata="${fixture.metadataUrl}"`,
+      undefined,
+      redirectUri,
+      { resourceUri: fixture.mcpUrl, compatibilityMode: 'marketplace' }
+    );
+    await expect(
+      completeMCPOAuthFlow(context, 'code', context.state, { cacheToken: false })
+    ).rejects.toMatchObject({ failureCode: 'callback_issuer_missing' });
   });
 });
 

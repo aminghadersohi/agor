@@ -1,3 +1,5 @@
+import { AgorUserLifecycleAuthority } from '@agor/core/config/browser';
+import { EXECUTION_HOME_KEY_PATTERN } from '@agor/core/types';
 import type {
   AgorClient,
   CreateUserInput,
@@ -7,14 +9,19 @@ import type {
   UpdateUserInput,
   User,
 } from '@agor-live/client';
-import { hasMinimumRole, ROLE_OPTIONS, ROLES } from '@agor-live/client';
+import {
+  canAssignUserRole,
+  hasMinimumRole,
+  hasRoleAuthorityOver,
+  ROLE_OPTIONS,
+  ROLES,
+} from '@agor-live/client';
 import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
 import {
   Button,
   Checkbox,
   Form,
   Input,
-  Modal,
   Popconfirm,
   Select,
   Space,
@@ -23,12 +30,24 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { mapToSortedArray } from '@/utils/mapHelpers';
+import {
+  passwordPolicyHelp,
+  passwordPolicyRequirements,
+  passwordRules,
+} from '@/utils/passwordPolicy';
 import { filterBySettingsSearch } from '@/utils/settingsSearch';
+import { isIdentityCapabilityAvailable, useAuthConfig } from '../../hooks/useAuthConfig';
+import {
+  useAuthenticatedAuthorityScope,
+  useAuthorityOperationGuard,
+} from '../../hooks/useAuthorityOperationGuard';
 import { useThemedMessage } from '../../utils/message';
 import { HighlightMatch } from '../HighlightMatch';
 import { UserIdentityAvatar } from '../UserIdentityAvatar';
+import { AdaptiveSettingsModal } from './AdaptiveSettingsModal';
+import { ResponsiveSettingsHeader } from './ResponsiveSettingsHeader';
 import { SettingsActionGroup } from './SettingsActionGroup';
 import { UserAvatarsTab } from './UserAvatarsTab';
 import { UserSettingsModal } from './UserSettingsModal';
@@ -38,9 +57,13 @@ interface UsersTableProps {
   gatewayChannelById?: Map<string, GatewayChannel>;
   client: AgorClient | null;
   currentUser?: User | null;
-  onCreate?: (data: CreateUserInput) => void;
-  onUpdate?: (userId: string, updates: UpdateUserInput) => void;
-  onDelete?: (userId: string) => void;
+  onCreate?: (data: CreateUserInput, shouldApply?: () => boolean) => void | Promise<void>;
+  onUpdate?: (
+    userId: string,
+    updates: UpdateUserInput,
+    shouldApply?: () => boolean
+  ) => void | Promise<void>;
+  onDelete?: (userId: string, shouldApply?: () => boolean) => void | Promise<void>;
 }
 
 export const UsersTable: React.FC<UsersTableProps> = ({
@@ -53,6 +76,7 @@ export const UsersTable: React.FC<UsersTableProps> = ({
   onDelete,
 }) => {
   const { showError } = useThemedMessage();
+  const { config: authConfig, identityContractState } = useAuthConfig();
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [groups, setGroups] = useState<Group[]>([]);
@@ -60,28 +84,68 @@ export const UsersTable: React.FC<UsersTableProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [form] = Form.useForm();
   const isAdmin = hasMinimumRole(currentUser?.role, ROLES.ADMIN);
+  const callerAuthority = useAuthenticatedAuthorityScope(
+    client,
+    currentUser ? `${currentUser.user_id}:${currentUser.role}` : null
+  );
+  const operationGuard = useAuthorityOperationGuard(callerAuthority.operationScope);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: authenticated identity and role intentionally erase password-bearing forms
+  useLayoutEffect(() => {
+    form.resetFields();
+    setCreateModalOpen(false);
+    setEditingUser(null);
+  }, [currentUser?.role, currentUser?.user_id, form]);
+  const externallyManaged =
+    authConfig?.identity?.userLifecycle === AgorUserLifecycleAuthority.EXTERNAL;
+  const canCreateUsers =
+    isAdmin && isIdentityCapabilityAvailable(authConfig, identityContractState, 'create');
+  const canDeleteUsers = isIdentityCapabilityAvailable(authConfig, identityContractState, 'delete');
+  const passwordRequirements = passwordPolicyRequirements(authConfig?.passwordPolicy);
+  const canManageAvatarSettings =
+    isAdmin &&
+    isIdentityCapabilityAvailable(authConfig, identityContractState, 'avatarSettingsWrite');
+  const assignableRoleOptions = ROLE_OPTIONS.filter((option) =>
+    canAssignUserRole(currentUser?.role, option.value)
+  );
+
+  const canEditUser = (target: User): boolean =>
+    currentUser?.user_id === target.user_id ||
+    (isAdmin && hasRoleAuthorityOver(currentUser?.role, target.role));
+
+  const canDeleteUser = (target: User): boolean =>
+    !!currentUser &&
+    currentUser.user_id !== target.user_id &&
+    isAdmin &&
+    canDeleteUsers &&
+    hasRoleAuthorityOver(currentUser.role, target.role);
 
   const loadGroups = useCallback(async () => {
+    const operation = operationGuard.begin();
     if (!client || !isAdmin) {
       setGroups([]);
       setMemberships([]);
       return;
     }
-    const [nextGroups, nextMemberships] = await Promise.all([
-      client.service('groups').findAll({ query: { archived: false } }),
-      client.service('group-memberships').findAll({}),
-    ]);
-    setGroups(nextGroups as Group[]);
-    setMemberships(nextMemberships as GroupMembership[]);
-  }, [client, isAdmin]);
-
-  useEffect(() => {
-    loadGroups().catch((error) =>
+    try {
+      const [nextGroups, nextMemberships] = await Promise.all([
+        client.service('groups').findAll({ query: { archived: false } }),
+        client.service('group-memberships').findAll({}),
+      ]);
+      if (!operation.isCurrent()) return;
+      setGroups(nextGroups as Group[]);
+      setMemberships(nextMemberships as GroupMembership[]);
+    } catch (error) {
+      if (!operation.isCurrent()) return;
       showError(
         `Failed to load user groups: ${error instanceof Error ? error.message : String(error)}`
-      )
-    );
-  }, [loadGroups, showError]);
+      );
+    }
+  }, [client, isAdmin, operationGuard, showError]);
+
+  useEffect(() => {
+    void loadGroups();
+  }, [loadGroups]);
 
   const groupsByUser = useMemo(() => {
     const map = new Map<string, Group['group_id'][]>();
@@ -116,27 +180,45 @@ export const UsersTable: React.FC<UsersTableProps> = ({
   }, [userById, searchTerm, groupsByUser, groupById]);
 
   const handleDelete = (userId: string) => {
-    onDelete?.(userId);
+    const operation = operationGuard.begin();
+    if (!operation.isCurrent()) return;
+    onDelete?.(userId, operation.isCurrent);
   };
 
-  const handleCreate = () => {
-    form
-      .validateFields()
-      .then((values) => {
-        onCreate?.({
+  const handleCreate = async () => {
+    const operation = operationGuard.begin();
+    if (!operation.isCurrent()) return;
+    try {
+      const values = await form.validateFields();
+      if (!operation.isCurrent()) return;
+      await onCreate?.(
+        {
           email: values.email,
           password: values.password,
           name: values.name,
           role: values.role || ROLES.MEMBER,
           unix_username: values.unix_username,
           must_change_password: values.must_change_password || false,
-        });
-        form.resetFields();
-        setCreateModalOpen(false);
-      })
-      .catch(() => {
-        // Form validation failed - Ant Design will show field errors automatically
-      });
+        },
+        operation.isCurrent
+      );
+      if (!operation.isCurrent()) return;
+      form.resetFields();
+      setCreateModalOpen(false);
+    } catch (error) {
+      if (!operation.isCurrent()) return;
+      const code = (error as { data?: { code?: unknown } } | undefined)?.data?.code;
+      if (typeof code === 'string' && code.startsWith('PASSWORD_')) {
+        form.setFields([
+          {
+            name: 'password',
+            errors: [error instanceof Error ? error.message : 'Password was rejected'],
+          },
+        ]);
+      }
+      // Client-side validation already renders field errors. Server failures
+      // are toasted by the owning handler; keep the modal and values intact.
+    }
   };
 
   const getRoleColor = (role: User['role']) => {
@@ -214,53 +296,74 @@ export const UsersTable: React.FC<UsersTableProps> = ({
       title: 'Actions',
       key: 'actions',
       width: 88,
-      render: (_: unknown, user: User) => (
-        <SettingsActionGroup>
-          <Button
-            type="text"
-            size="small"
-            icon={<EditOutlined />}
-            onClick={() => setEditingUser(user)}
-          />
-          <Popconfirm
-            title="Delete user?"
-            description={`Are you sure you want to delete user "${user.email}"?`}
-            onConfirm={() => handleDelete(user.user_id)}
-            okText="Delete"
-            cancelText="Cancel"
-            okButtonProps={{ danger: true }}
-          >
-            <Button type="text" size="small" icon={<DeleteOutlined />} danger />
-          </Popconfirm>
-        </SettingsActionGroup>
-      ),
+      render: (_: unknown, user: User) => {
+        const showEdit = canEditUser(user);
+        const showDelete = canDeleteUser(user);
+        if (!showEdit && !showDelete) return null;
+        return (
+          <SettingsActionGroup>
+            {showEdit && (
+              <Button
+                type="text"
+                size="small"
+                icon={<EditOutlined />}
+                aria-label={`Edit ${user.email}`}
+                onClick={() => setEditingUser(user)}
+              />
+            )}
+            {showDelete && (
+              <Popconfirm
+                title="Delete user?"
+                description={`Are you sure you want to delete user "${user.email}"?`}
+                onConfirm={() => handleDelete(user.user_id)}
+                okText="Delete"
+                cancelText="Cancel"
+                okButtonProps={{ danger: true }}
+              >
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<DeleteOutlined />}
+                  aria-label={`Delete ${user.email}`}
+                  danger
+                />
+              </Popconfirm>
+            )}
+          </SettingsActionGroup>
+        );
+      },
     },
   ];
 
   const usersTable = (
     <div>
-      <div
-        style={{
-          marginBottom: 16,
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-        }}
-      >
-        <Typography.Text type="secondary">Manage user accounts and permissions.</Typography.Text>
-        <Space>
-          <Input
-            allowClear
-            placeholder="Search name, email, username, role, or groups"
-            value={searchTerm}
-            onChange={(event) => setSearchTerm(event.target.value)}
-            style={{ width: 320 }}
-          />
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateModalOpen(true)}>
-            New User
-          </Button>
-        </Space>
-      </div>
+      <ResponsiveSettingsHeader
+        description={
+          externallyManaged
+            ? 'User accounts and roles are managed by your identity provider.'
+            : 'Manage user accounts and permissions.'
+        }
+        actions={(compact) => (
+          <Space wrap style={{ width: compact ? '100%' : undefined }}>
+            <Input
+              allowClear
+              placeholder="Search name, email, username, role, or groups"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              style={{ width: compact ? '100%' : 320, flex: compact ? '1 1 100%' : undefined }}
+            />
+            {canCreateUsers && (
+              <Button
+                type="primary"
+                icon={<PlusOutlined />}
+                onClick={() => setCreateModalOpen(true)}
+              >
+                New User
+              </Button>
+            )}
+          </Space>
+        )}
+      />
 
       <Table
         dataSource={users}
@@ -268,82 +371,84 @@ export const UsersTable: React.FC<UsersTableProps> = ({
         rowKey="user_id"
         pagination={false}
         size="small"
+        scroll={{ x: 900 }}
       />
 
       {/* Create User Modal */}
-      <Modal
-        title="Create User"
-        open={createModalOpen}
-        onOk={handleCreate}
-        onCancel={() => {
-          form.resetFields();
-          setCreateModalOpen(false);
-        }}
-        okText="Create"
-        width={800}
-      >
-        <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
-          <Form.Item label="Name" name="name" style={{ marginBottom: 24 }}>
-            <Input placeholder="John Doe" />
-          </Form.Item>
+      {canCreateUsers && (
+        <AdaptiveSettingsModal
+          title="Create User"
+          open={createModalOpen}
+          onOk={handleCreate}
+          onCancel={() => {
+            form.resetFields();
+            setCreateModalOpen(false);
+          }}
+          okText="Create"
+          width={800}
+        >
+          <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
+            <Form.Item label="Name" name="name" style={{ marginBottom: 24 }}>
+              <Input placeholder="John Doe" />
+            </Form.Item>
 
-          <Form.Item
-            label="Email"
-            name="email"
-            rules={[
-              { required: true, message: 'Please enter an email' },
-              { type: 'email', message: 'Please enter a valid email' },
-            ]}
-          >
-            <Input placeholder="user@example.com" />
-          </Form.Item>
+            <Form.Item
+              label="Email"
+              name="email"
+              rules={[
+                { required: true, message: 'Please enter an email' },
+                { type: 'email', message: 'Please enter a valid email' },
+              ]}
+            >
+              <Input placeholder="user@example.com" />
+            </Form.Item>
 
-          <Form.Item
-            label="Unix Username"
-            name="unix_username"
-            help="Optional. Unix user for process impersonation (alphanumeric, hyphens, underscores only)"
-            rules={[
-              {
-                pattern: /^[a-z0-9_-]+$/,
-                message: 'Only lowercase letters, numbers, hyphens, and underscores allowed',
-              },
-              { max: 32, message: 'Unix username must be 32 characters or less' },
-            ]}
-          >
-            <Input placeholder="johnsmith" maxLength={32} />
-          </Form.Item>
+            <Form.Item
+              label="Execution Home Key"
+              name="unix_username"
+              help="Optional transitional home key for delegated execution"
+              rules={[
+                {
+                  pattern: EXECUTION_HOME_KEY_PATTERN,
+                  message:
+                    'Start with a lowercase letter or underscore; then use lowercase letters, numbers, hyphens, or underscores',
+                },
+                { max: 32, message: 'Execution home key must be 32 characters or less' },
+              ]}
+            >
+              <Input placeholder="johnsmith" maxLength={32} />
+            </Form.Item>
 
-          <Form.Item
-            label="Password"
-            name="password"
-            rules={[
-              { required: true, message: 'Please enter a password' },
-              { min: 8, message: 'Password must be at least 8 characters' },
-            ]}
-          >
-            <Input.Password placeholder="••••••••" />
-          </Form.Item>
+            <Form.Item
+              label="Password"
+              name="password"
+              extra={passwordPolicyHelp(passwordRequirements)}
+              rules={passwordRules(passwordRequirements, { required: true })}
+            >
+              <Input.Password placeholder="••••••••" autoComplete="new-password" />
+            </Form.Item>
 
-          <Form.Item
-            label="Role"
-            name="role"
-            initialValue={ROLES.MEMBER}
-            rules={[{ required: true, message: 'Please select a role' }]}
-          >
-            <Select
-              options={ROLE_OPTIONS.map((opt) => ({
-                value: opt.value,
-                label: opt.label,
-                title: opt.description,
-              }))}
-            />
-          </Form.Item>
+            <Form.Item
+              label="Role"
+              name="role"
+              initialValue={ROLES.MEMBER}
+              rules={[{ required: true, message: 'Please select a role' }]}
+            >
+              <Select
+                options={assignableRoleOptions.map((opt) => ({
+                  value: opt.value,
+                  label: opt.label,
+                  title: opt.description,
+                }))}
+              />
+            </Form.Item>
 
-          <Form.Item name="must_change_password" valuePropName="checked" initialValue={false}>
-            <Checkbox>Force password change on first login</Checkbox>
-          </Form.Item>
-        </Form>
-      </Modal>
+            <Form.Item name="must_change_password" valuePropName="checked" initialValue={false}>
+              <Checkbox>Force password change on first login</Checkbox>
+            </Form.Item>
+          </Form>
+        </AdaptiveSettingsModal>
+      )}
 
       {/* Edit User Modal - reuses UserSettingsModal */}
       <UserSettingsModal
@@ -365,13 +470,18 @@ export const UsersTable: React.FC<UsersTableProps> = ({
       defaultActiveKey="users"
       items={[
         { key: 'users', label: 'Users', children: usersTable },
-        ...(isAdmin
+        ...(canManageAvatarSettings
           ? [
               {
                 key: 'avatars',
                 label: 'Avatars',
                 children: (
-                  <UserAvatarsTab client={client} gatewayChannelById={gatewayChannelById} />
+                  <UserAvatarsTab
+                    client={client}
+                    gatewayChannelById={gatewayChannelById}
+                    identityKey={callerAuthority.identityKey}
+                    operationScope={callerAuthority.operationScope}
+                  />
                 ),
               },
             ]

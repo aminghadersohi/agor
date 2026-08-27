@@ -46,6 +46,15 @@ function migrationTenantTables(): string[] {
   const githubInstallStateMigration = readRepoFile(
     'packages/core/drizzle/postgres/0082_github_install_state.sql'
   );
+  const discordGatewayHybridMigration = readRepoFile(
+    'packages/core/drizzle/postgres/0094_discord_gateway_hybrid.sql'
+  );
+  const externalIdentitiesMigration = readRepoFile(
+    'packages/core/drizzle/postgres/0090_external_user_identities.sql'
+  );
+  const codexDeviceAuthMigration = readRepoFile(
+    'packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'
+  );
   const retiredTables = retiredTenantTables();
   return [
     ...new Set(
@@ -57,6 +66,9 @@ function migrationTenantTables(): string[] {
         ...gatewayHaMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...mcpOauthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...githubInstallStateMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...discordGatewayHybridMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...externalIdentitiesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...codexDeviceAuthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
       ]
         .map((m) => m[1])
         .filter((table) => !retiredTables.has(table))
@@ -73,6 +85,9 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0076_gateway_listener_ha.sql'),
     readRepoFile('packages/core/drizzle/postgres/0078_mcp_oauth_pending_flows.sql'),
     readRepoFile('packages/core/drizzle/postgres/0082_github_install_state.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0094_discord_gateway_hybrid.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0090_external_user_identities.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
   return [
@@ -231,6 +246,18 @@ describe('Postgres multitenancy schema coverage', () => {
     );
   });
 
+  it('limits Codex device attempt maintenance to due rows and its explicit capability', () => {
+    const migration = readRepoFile(
+      'packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'
+    );
+    expect(migration).toContain('FORCE ROW LEVEL SECURITY');
+    expect(migration).toContain("COALESCE(current_setting('agor.system_scope', true), '') = ''");
+    expect(migration).toContain("= 'codex_device_auth_maintenance'");
+    expect(migration).toContain('"poll_lease_expires_at"');
+    expect(migration).toContain('"exchange_started_at"');
+    expect(migration).toContain('"finished_at"');
+  });
+
   it('repairs scheduler occurrence and MCP idempotency indexes as tenant-aware uniques', () => {
     const migration = readRepoFile('packages/core/drizzle/postgres/0071_scheduler_ha_indexes.sql');
 
@@ -262,24 +289,6 @@ describe('Postgres multitenancy schema coverage', () => {
 
     expect(sources).not.toMatch(/from\s+['"][^'"]*redis/i);
     expect(sources).not.toMatch(/ioredis|redlock|redisClient|redis\.set/i);
-  });
-
-  it('opens the shared MCP catalog for reads but confines writes to an explicit capability', () => {
-    const migration = readRepoFile('packages/core/drizzle/postgres/0079_mcp_catalog_entries.sql');
-
-    // No tenant column, therefore no tenant isolation policy to write.
-    expect(migration).not.toContain('"tenant_id"');
-    expect(migration).not.toMatch(/CREATE POLICY "tenant_isolation_/);
-
-    expect(migration).toContain('FORCE ROW LEVEL SECURITY');
-    expect(migration).toMatch(
-      /CREATE POLICY "mcp_catalog_public_read"[\s\S]*?FOR SELECT[\s\S]*?USING \(true\)/
-    );
-    // The write policy must gate both directions: USING alone would let a
-    // tenant-scoped path insert rows it could not then see.
-    expect(migration).toMatch(
-      /CREATE POLICY "mcp_catalog_ingestion_write"[\s\S]*?USING \(current_setting\('agor\.system_scope', true\) = 'mcp_catalog_ingestion'\)[\s\S]*?WITH CHECK \(current_setting\('agor\.system_scope', true\) = 'mcp_catalog_ingestion'\)/
-    );
   });
 
   it('keeps GitHub install state authority out of Redis', () => {

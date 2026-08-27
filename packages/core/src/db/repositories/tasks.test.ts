@@ -873,6 +873,50 @@ describe('TaskRepository.findBySession', () => {
 });
 
 // ============================================================================
+// Nonterminal cascade guards
+// ============================================================================
+
+describe('TaskRepository nonterminal cascade guards', () => {
+  dbTest('detects unfinished work by session and by its owning branch', async ({ db }) => {
+    const taskRepo = new TaskRepository(db);
+    const sessionRepo = new SessionRepository(db);
+    const sessionId = await createSessionWithDeps(db);
+    const session = await sessionRepo.findById(sessionId);
+    expect(session).not.toBeNull();
+
+    const task = await taskRepo.create(
+      createTaskData({ session_id: sessionId, status: TaskStatus.RUNNING })
+    );
+
+    expect(await taskRepo.hasNonterminalForSession(sessionId)).toBe(true);
+    expect(await taskRepo.hasNonterminalForBranch(session!.branch_id)).toBe(true);
+
+    await taskRepo.update(task.task_id, { status: TaskStatus.COMPLETED });
+
+    expect(await taskRepo.hasNonterminalForSession(sessionId)).toBe(false);
+    expect(await taskRepo.hasNonterminalForBranch(session!.branch_id)).toBe(false);
+  });
+
+  dbTest('does not widen a branch guard to an unrelated branch', async ({ db }) => {
+    const taskRepo = new TaskRepository(db);
+    const sessionRepo = new SessionRepository(db);
+    const activeSessionId = await createSessionWithDeps(db);
+    const otherSessionId = await createSessionWithDeps(db);
+    const activeSession = await sessionRepo.findById(activeSessionId);
+    const otherSession = await sessionRepo.findById(otherSessionId);
+    expect(activeSession).not.toBeNull();
+    expect(otherSession).not.toBeNull();
+
+    await taskRepo.create(
+      createTaskData({ session_id: activeSessionId, status: TaskStatus.RUNNING })
+    );
+
+    expect(await taskRepo.hasNonterminalForBranch(activeSession!.branch_id)).toBe(true);
+    expect(await taskRepo.hasNonterminalForBranch(otherSession!.branch_id)).toBe(false);
+  });
+});
+
+// ============================================================================
 // FindRunning
 // ============================================================================
 
@@ -2342,8 +2386,7 @@ describe('TaskRepository.update', () => {
     const data = createTaskData({ session_id: sessionId, status: TaskStatus.RUNNING });
     await taskRepo.create(data);
 
-    const errorMessage =
-      'Unix user agor_123 not found. Ensure the Unix user is created before attempting to execute sessions.';
+    const errorMessage = 'Delegated execution home key is unavailable for this session.';
     const updated = await taskRepo.update(data.task_id!, {
       status: TaskStatus.FAILED,
       completed_at: new Date().toISOString(),

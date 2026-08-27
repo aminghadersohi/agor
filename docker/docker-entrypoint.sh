@@ -38,12 +38,10 @@ git config --global --add safe.directory /app 2>/dev/null || true
 
 # Fix home directory permissions (volumes may have wrong UID/GID from previous builds)
 echo "🔧 Fixing home directory permissions..."
-mkdir -p /home/agor/.agor /home/agor/.cache
+mkdir -p -m 0700 /home/agor/.agor
+mkdir -p /home/agor/.cache
 sudo -n chown -R agor:agor /home/agor 2>/dev/null || true
 
-# Setup agor_executor home (for Unix isolation when executor_unix_user is configured)
-sudo -n mkdir -p /home/agor_executor/.cache /home/agor_executor/.agor
-sudo -n chown -R agor_executor:agor_executor /home/agor_executor 2>/dev/null || true
 echo "✅ Home directory permissions fixed"
 
 # Fix build directory permissions (clean stale dist files with wrong ownership)
@@ -177,30 +175,7 @@ while [ ! -f "/app/packages/executor/dist/index.d.ts" ]; do
 done
 echo "✅ @agor/executor initial build complete (including type definitions)"
 
-# In strict/insulated Unix modes, executors are launched as non-daemon Unix
-# users. Expose only the compiled runtime packages through the group-private
-# /app bind mount. Keeping the executor in place means the watch processes below
-# update exactly the files subsequent executor launches use; no second pnpm
-# installation or stale runtime copy is involved.
-if [ "${AGOR_UNIX_USER_MODE:-simple}" != "simple" ] || [ "${AGOR_USE_EXECUTOR:-false}" = "true" ]; then
-  echo "📦 Exposing compiled executor runtime for Unix impersonation..."
-  sudo chmod o+x /app /app/packages \
-    /app/packages/core /app/packages/git /app/packages/agentic-tool-opencode \
-    /app/packages/agentic-tools /app/packages/executor
-  sudo chmod a+r /app/packages/core/package.json \
-    /app/packages/git/package.json /app/packages/agentic-tool-opencode/package.json \
-    /app/packages/agentic-tools/package.json /app/packages/executor/package.json
-  sudo chmod -R a+rX /app/packages/core/dist /app/packages/git/dist \
-    /app/packages/agentic-tool-opencode/dist /app/packages/agentic-tools/dist \
-    /app/packages/executor/bin /app/packages/executor/dist
-  # Preserve runtime readability for files added later by the watch compilers.
-  find /app/packages/core/dist /app/packages/git/dist \
-    /app/packages/agentic-tool-opencode/dist /app/packages/agentic-tools/dist \
-    /app/packages/executor/dist \
-    -type d -exec sudo setfacl -m d:o::rx {} +
-  export AGOR_EXECUTOR_PATH=/app/packages/executor/bin/agor-executor
-  echo "✅ Compiled executor runtime ready: $AGOR_EXECUTOR_PATH"
-fi
+export AGOR_EXECUTOR_PATH=/app/packages/executor/bin/agor-executor
 
 echo "🔨 Building @agor-live/client (initial build)..."
 pnpm --filter @agor-live/client build
@@ -242,10 +217,13 @@ echo "✅ Watch modes started (git, core, agentic tools, executor, and client wi
 
 # `agor init` is the SQLite installation bootstrap and intentionally creates
 # ~/.agor/agor.db. PostgreSQL deployments get their database state from the
-# migrations and daemon bootstrap below, and receive stable development
-# secrets from the postgres Compose overlay.
+# migrations and daemon bootstrap below, but still need the deployment-owned
+# identity and secrets that `agor init` normally creates. Generate a complete
+# config on first start and persist it in the agor-home volume.
 if [ "${AGOR_DB_DIALECT:-sqlite}" = "postgresql" ]; then
-  echo "⏭️  Skipping SQLite agor init for PostgreSQL deployment"
+  echo "🪪 Ensuring PostgreSQL development deployment config exists..."
+  pnpm tsx scripts/ensure-development-config.ts
+  echo "⏭️  Skipping SQLite database initialization for PostgreSQL deployment"
 else
   echo "📦 Initializing Agor environment..."
   pnpm agor init --skip-if-exists --non-interactive --agentic-tools "${AGOR_AGENTIC_TOOLS:-none}" --daemon-port "${DAEMON_PORT:-3030}" --daemon-host "${DAEMON_HOST:-0.0.0.0}"
@@ -262,18 +240,8 @@ pnpm agor db migrate --yes
 
 # Always create/update admin user (safe: only upserts)
 echo "👤 Ensuring development admin user exists..."
-ADMIN_OUTPUT=$(pnpm --filter @agor/cli exec tsx bin/dev.ts user create-admin --dev-default 2>&1)
+ADMIN_OUTPUT=$(pnpm --filter @agor/cli exec tsx bin/dev.ts local create-admin --dev-default 2>&1)
 echo "$ADMIN_OUTPUT"
-
-# In strict mode the daemon validates that a session creator's unix_username exists as a
-# real OS account before spawning the executor. The admin DB user is created above via the
-# CLI (direct DB write, no Feathers hook), so the normal after-create hook that calls
-# unix.sync-user never fires. Provision the OS account explicitly here while we still have
-# a clean pre-daemon window and sudoers access.
-if [ "${AGOR_UNIX_USER_MODE:-simple}" = "strict" ]; then
-  echo "🔒 Provisioning bootstrap admin OS user (strict mode)..."
-  pnpm agor local ensure-user --username admin || echo "⚠️  Could not provision admin OS user — check sudoers"
-fi
 
 # Get FULL admin user UUID from database (the CLI only shows short ID)
 # Use dedicated script to query the database

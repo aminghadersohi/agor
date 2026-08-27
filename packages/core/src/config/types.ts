@@ -4,6 +4,7 @@
 
 import type { InstallableAgenticTool } from '../agentic-integrations';
 import type { ManagedEnvExecutionMode } from '../environment/webhook';
+import type { AgorPasswordPolicyProfile } from './password-policy';
 
 export type { ManagedEnvExecutionMode };
 export type ManagedEnvsExecutionMode = ManagedEnvExecutionMode;
@@ -26,6 +27,9 @@ export type UnknownJson = any;
  * Daemon settings
  */
 export interface AgorDaemonSettings {
+  /** Stable identity shared by every process belonging to this deployment. */
+  deployment_id?: string;
+
   /** Daemon port (default: 3030) */
   port?: number;
 
@@ -90,13 +94,6 @@ export interface AgorDaemonSettings {
   /** Enable tool search mode: tools/list returns only essential tools,
    *  agents discover others via agor_search_tools (default: true) */
   mcpToolSearch?: boolean;
-
-  /** Unix user the daemon runs as. Used to refresh supplemental Unix groups.
-   * Required when Unix impersonation/isolation is enabled (`unix_user_mode`
-   * is `insulated` or `strict`). App-level `branch_rbac` alone does not
-   * require Unix impersonation. In dev mode without isolation, falls back to
-   * current process user. */
-  unix_user?: string;
 
   /** Instance label for deployment identification (e.g., "staging", "prod-us-east").
    * Displayed as a Tag in the UI navbar when set. */
@@ -206,11 +203,11 @@ export interface AgorExternalLaunchSettings {
   /** Environment variable that contains the exchange endpoint bearer credential. */
   service_credential_env?: string;
 
-  /** Backchannel request timeout in milliseconds (default: 10000). */
+  /** Backchannel request timeout in milliseconds, from 1 to 120000 (default: 10000). */
   request_timeout_ms?: number;
 
-  /** Optional allow-list of JWT algorithms for returned launch assertions. */
-  algorithms?: string[];
+  /** Optional non-empty allow-list of supported JWT algorithms for returned assertions. */
+  algorithms?: AgorExternalLaunchAlgorithm[];
 
   /** Allow launch assertions to assign admin/superadmin roles (default: false). */
   allow_admin_roles?: boolean;
@@ -258,6 +255,123 @@ export interface AgorExternalLaunchSettings {
    * the deep-link with the host. Rejected during config validation.
    */
   return_host_param?: string;
+}
+
+/** Algorithms accepted by the launch assertion verifier. `none` is never valid. */
+export const AgorExternalLaunchAlgorithm = {
+  HS256: 'HS256',
+  HS384: 'HS384',
+  HS512: 'HS512',
+  RS256: 'RS256',
+  RS384: 'RS384',
+  RS512: 'RS512',
+  ES256: 'ES256',
+  ES384: 'ES384',
+  ES512: 'ES512',
+  PS256: 'PS256',
+  PS384: 'PS384',
+  PS512: 'PS512',
+} as const;
+export type AgorExternalLaunchAlgorithm =
+  (typeof AgorExternalLaunchAlgorithm)[keyof typeof AgorExternalLaunchAlgorithm];
+
+/** Which system may create and remove user projections in this daemon. */
+export const AgorUserLifecycleAuthority = {
+  INTERNAL: 'internal',
+  EXTERNAL: 'external',
+} as const;
+export type AgorUserLifecycleAuthority =
+  (typeof AgorUserLifecycleAuthority)[keyof typeof AgorUserLifecycleAuthority];
+
+/** Which system owns the effective Agor role. */
+export const AgorRoleAuthority = {
+  INTERNAL: 'internal',
+  CLAIMS: 'claims',
+} as const;
+export type AgorRoleAuthority = (typeof AgorRoleAuthority)[keyof typeof AgorRoleAuthority];
+
+/** Whether password-based authentication is available on this daemon. */
+export const AgorLocalAuthMode = {
+  ENABLED: 'enabled',
+  DISABLED: 'disabled',
+} as const;
+export type AgorLocalAuthMode = (typeof AgorLocalAuthMode)[keyof typeof AgorLocalAuthMode];
+
+/** Supported external projection providers. */
+export const AgorExternalIdentityProvider = {
+  EXTERNAL_LAUNCH: 'external_launch',
+} as const;
+export type AgorExternalIdentityProvider =
+  (typeof AgorExternalIdentityProvider)[keyof typeof AgorExternalIdentityProvider];
+
+/** Supported external projection provisioning strategies. */
+export const AgorExternalIdentityProvisioning = {
+  JIT: 'jit',
+} as const;
+export type AgorExternalIdentityProvisioning =
+  (typeof AgorExternalIdentityProvisioning)[keyof typeof AgorExternalIdentityProvisioning];
+
+/** External identity provisioning settings. */
+export interface AgorExternalIdentitySettings {
+  /** Verified authentication handoff that provisions users. */
+  provider?: AgorExternalIdentityProvider;
+  /** Create/update a local projection when a verified external login succeeds. */
+  provisioning?: AgorExternalIdentityProvisioning;
+}
+
+/**
+ * Deployment-owned authority contract for user identity.
+ *
+ * The section is optional. Omitting it preserves Agor's normal local user,
+ * role, and password authority. The only external profile supported in v1 is
+ * deliberately coherent: external lifecycle, claim-owned roles, disabled
+ * local login, and verified launch-time JIT provisioning.
+ */
+export interface AgorIdentitySettings {
+  user_lifecycle?: AgorUserLifecycleAuthority;
+  role_authority?: AgorRoleAuthority;
+  local_auth?: AgorLocalAuthMode;
+  /** Named policy for newly assigned local passwords. Defaults to `secure`. */
+  password_policy?: AgorPasswordPolicyProfile;
+  external?: AgorExternalIdentitySettings;
+}
+
+export const IDENTITY_AUTHORITY_CONTRACT_VERSION = 1 as const;
+
+/** Stable identifiers returned in externally-managed mutation errors. */
+export const AgorIdentityCapability = {
+  USER_CREATE: 'users.create',
+  USER_DELETE: 'users.delete',
+  USER_IDENTITY_WRITE: 'users.identity.write',
+  USER_ROLE_WRITE: 'users.role.write',
+  USER_PASSWORD_WRITE: 'users.password.write',
+  USER_AVATAR_SETTINGS_WRITE: 'users.avatar-settings.write',
+  USER_SELF_CONFIGURATION_WRITE: 'users.self-configuration.write',
+} as const;
+export type AgorIdentityCapability =
+  (typeof AgorIdentityCapability)[keyof typeof AgorIdentityCapability];
+
+/** Resolved identity policy and client capability contract exposed by the daemon. */
+export interface ResolvedIdentityAuthority {
+  contractVersion: typeof IDENTITY_AUTHORITY_CONTRACT_VERSION;
+  userLifecycle: AgorUserLifecycleAuthority;
+  roleAuthority: AgorRoleAuthority;
+  localAuth: AgorLocalAuthMode;
+  external?: {
+    provider: AgorExternalIdentityProvider;
+    provisioning: AgorExternalIdentityProvisioning;
+  };
+  capabilities: {
+    users: {
+      create: boolean;
+      delete: boolean;
+      identityWrite: boolean;
+      roleWrite: boolean;
+      passwordWrite: boolean;
+      avatarSettingsWrite: boolean;
+      selfConfigurationWrite: true;
+    };
+  };
 }
 
 /**
@@ -314,19 +428,22 @@ export interface AgorDatabaseSettings {
 }
 
 /**
- * Unix user isolation mode controlling how session processes get mapped to
- * OS identities.
+ * Execution substrate and local filesystem-isolation mode.
  *
  * - `simple` — all processes run as the daemon user (no OS isolation)
- * - `delegated` — like `simple` (no sudo impersonation, no Unix groups), but
- *   every user MUST have a `unix_username`: it is passed to the execution
+ * - `delegated` — external launcher/substrate execution; every user MUST have
+ *   a `unix_username` home key, which is passed to the execution
  *   substrate (e.g. the `{unix_user}` executor-command-template variable, which
  *   hosted deployments use to select per-user home mounts) and its absence
  *   fails loudly instead of silently sharing an identity
- * - `insulated` — executors run as a dedicated user with per-branch groups
- * - `strict` — sessions run as the session creator's own Unix user
+ * - `sandbox` — daemon-user execution with isolation enforced by the executor
+ *   **filesystem sandbox** (bubblewrap): RBAC is on,
+ *   each session gets a per-owner home overlay (`sandbox.home_mode: per_user`),
+ *   and the branch is mounted per the caller's effective permission tier.
+ *   Linux only. See
+ *   `context/explorations/executor-sandboxing.md`.
  */
-export type UnixUserMode = 'simple' | 'delegated' | 'insulated' | 'strict';
+export type UnixUserMode = 'simple' | 'delegated' | 'sandbox';
 
 export interface AgorExecutorHeartbeatSettings {
   /** Enable executor task heartbeats (default: true). */
@@ -345,6 +462,98 @@ export interface AgorExecutorHeartbeatSettings {
     /** Callback timeout in milliseconds (default: 3000). */
     timeout_ms?: number;
   };
+}
+
+/**
+ * Which Agor-managed dynamic roots the sandbox should grant WRITE access to.
+ * The daemon/executor resolves each `true` flag to the concrete absolute path
+ * it already knows (branch working dir, base repo, /tmp, $HOME) and merges it
+ * into the effective `filesystem.allowWrite` list. Reads stay open by default
+ * (SRT model); see `protect_secrets` / `isolate_branches` for read denials.
+ */
+export interface AgorSandboxIncludeSettings {
+  /** Branch working directory. Effectively always true. Default: true. */
+  branch?: boolean;
+  /**
+   * The shared base repository (`~/.agor/repos/<slug>`), REQUIRED for git in
+   * worktree storage mode (the branch's `.git` is a pointer into it). Default: true.
+   */
+  base_repo?: boolean;
+  /** `/tmp` (+ a task-private temp). Default: true. */
+  tmp?: boolean;
+  /** All of `$HOME` (dangerous — secrets still denied via `protect_secrets`). Default: false. */
+  home?: boolean;
+}
+
+/**
+ * OS-level executor sandbox policy. Global, single-policy — deliberately NOT
+ * per-session to avoid config-hell. Disabled by default; `agor init` offers a
+ * one-shot opt-in.
+ *
+ * When enabled, Agor wraps each AGENT executor spawn (prompt tasks + web
+ * terminals) in `bubblewrap` at the `spawnExecutorLocal` chokepoint, so the
+ * isolation policy is uniform across tools — not per-tool. (Daemon-internal
+ * bounded executor commands run unwrapped as Agor's own code.) The sandbox
+ * unshares the user + mount namespaces (and PID where the host allows it) but
+ * NOT the network (`--share-net`), so the executor keeps its daemon/model
+ * connectivity. Network egress control, if wanted, is left to each tool's own config.
+ *
+ * Agor resolves `include.*` / `protect_secrets` / `isolate_branches` into
+ * bubblewrap bind mounts + masks using paths it already knows. See
+ * `context/explorations/executor-sandboxing.md`.
+ */
+export interface AgorSandboxSettings {
+  /** Master switch. Default: false (open filesystem; tool approval flows still apply). */
+  enabled?: boolean;
+  /** Dynamic write roots Agor grants (branch/base_repo/tmp/home). */
+  include?: AgorSandboxIncludeSettings;
+  /**
+   * Deny reads of the daemon trust-root + common credential dirs
+   * (`~/.agor/config.yaml`, `agor.db`, `~/.ssh`, `~/.gnupg`, `~/.aws`,
+   * `~/.config/gcloud`, `~/.npmrc`). Applied even when `include.home` is true.
+   * Default: true.
+   */
+  protect_secrets?: boolean;
+  /**
+   * Cross-branch read isolation: mask the worktrees root, then re-expose only
+   * the current branch. Gives isolation even in `simple`/`delegated` mode
+   * (where all branches share the daemon uid). Default: true.
+   */
+  isolate_branches?: boolean;
+  /**
+   * How the executor's `$HOME` is presented inside the sandbox:
+   *  - `shared` (default): the daemon user's real home, with tool state/cache
+   *    dirs writable and the daemon trust-root + credential dirs masked.
+   *  - `per_user`: overlay a **per-owner home store**
+   *    (`<data_home>/tenants/<tenant>/homes/<owner_id>`) at the passwd home, so
+   *    `~` is a private, persistent home per session owner. The overlay hides
+   *    the entire daemon `.agor` tree (config, db, worktrees, repos) and every
+   *    other user's home by construction. When the data root lives outside the
+   *    passwd home, Agor masks that root explicitly. Symlink aliases of the
+   *    home and data root are masked as well. The branch, base repo, and
+   *    managed agentic-tools are re-exposed on top. This is the substrate that
+   *    lets per-user isolation work without host accounts. Default: `shared`.
+   */
+  home_mode?: 'shared' | 'per_user';
+  /**
+   * Preserve a symlinked daemon home's canonical alias inside a per-user
+   * sandbox. The owner store and authorized dynamic paths are exposed at both
+   * the passwd-home path and its daemon-resolved canonical path, and the
+   * canonical branch path becomes the executor cwd. This keeps path-keyed SDK
+   * state resumable on non-standard hosts without exposing the canonical homes
+   * parent. Default: false.
+   */
+  preserve_canonical_home_alias?: boolean;
+  /** Extra writable paths added to the `include.*` roots (escape hatch). */
+  extra_allow_write?: string[];
+  /** Extra denied-read paths added to `protect_secrets` (escape hatch). */
+  extra_deny_read?: string[];
+  /**
+   * Hard-fail a task if the sandbox cannot start (missing `bwrap` / unsupported
+   * platform) instead of running unsandboxed. Recommended `true` for
+   * production security gates. Default: false.
+   */
+  fail_if_unavailable?: boolean;
 }
 
 /**
@@ -370,13 +579,13 @@ export interface AgorExecutionSettings {
 
   dispatch_connect_timeout_ms?: number | null;
 
-  /** Unix user to run executors as (default: undefined = run as daemon user). When set, uses sudo impersonation. */
-  executor_unix_user?: string;
+  /** Bounded executor-to-daemon response channel for synchronous commands. */
+  executor_response?: AgorExecutorResponseSettings;
 
-  /** Unix user mode: simple (no isolation), insulated (branch groups), strict (enforce process impersonation) */
+  /** Execution mode: trusted local, delegated external, or local Linux sandbox. */
   unix_user_mode?: UnixUserMode;
 
-  /** Enable branch RBAC and ownership system (default: false). When enabled, enforces permission checks and Unix group isolation. */
+  /** Enable branch RBAC and ownership enforcement (default: false). */
   branch_rbac?: boolean;
 
   /**
@@ -389,8 +598,7 @@ export interface AgorExecutionSettings {
    * ⚠️ Security note: this flag does NOT reason about Unix isolation. In
    * `unix_user_mode: simple` the terminal runs as the daemon user and gives the
    * user a shell with access to `~/.agor/config.yaml`, `agor.db`, and the JWT
-   * secret. Safe combinations are `unix_user_mode: strict` (per-user Unix
-   * account) or `insulated` (shared executor user, no daemon access). The
+   * secret. Use `unix_user_mode: sandbox` for local multi-user isolation. The
    * daemon emits a startup warning when this flag is enabled in `simple` mode.
    *
    * Branch-level permissions still apply: opening a terminal against a
@@ -432,9 +640,6 @@ export interface AgorExecutionSettings {
    */
   mcp_token_expiration_ms?: number;
 
-  /** Sync web passwords to Unix user passwords (default: true). When enabled, passwords are synced on user creation/update. */
-  sync_unix_passwords?: boolean;
-
   /**
    * When true (default), the daemon writes the initial user-message row inside
    * `POST /sessions/:id/prompt`, immediately after the task is created. This
@@ -464,9 +669,7 @@ export interface AgorExecutionSettings {
    * Template variables (substituted at spawn time):
    * - {task_id} - Unique task identifier (for pod naming)
    * - {command} - Executor command (prompt, git.clone, etc.)
-   * - {unix_user} - Target Unix username
-   * - {unix_user_uid} - Target Unix UID (for runAsUser)
-   * - {unix_user_gid} - Target Unix GID (for fsGroup)
+   * - {unix_user} - Compatibility delegated home key
    * - {session_id} - Session ID (if available)
    * - {branch_id} - Branch ID (if available)
    * - {user_id} - Trusted authenticated Agor user UUID (if available)
@@ -481,14 +684,7 @@ export interface AgorExecutionSettings {
    *   kubectl run executor-{task_id} \
    *     --image=ghcr.io/preset-io/agor-executor:latest \
    *     --rm -i --restart=Never \
-   *     --overrides='{
-   *       "spec": {
-   *         "securityContext": {
-   *           "runAsUser": {unix_user_uid},
-   *           "fsGroup": {unix_user_gid}
-   *         }
-   *       }
-   *     }' \
+   *     --labels="agor-tenant={tenant_id},agor-user={user_id}" \
    *     -- agor-executor --stdin
    * ```
    *
@@ -496,7 +692,7 @@ export interface AgorExecutionSettings {
    * ```yaml
    * executor_command_template: |
    *   docker run --rm -i \
-   *     --user {unix_user_uid}:{unix_user_gid} \
+   *     --label agor.tenant={tenant_id} --label agor.user={user_id} \
    *     -v /data/agor:/data/agor \
    *     ghcr.io/preset-io/agor-executor:latest \
    *     agor-executor --stdin
@@ -583,6 +779,35 @@ export interface AgorExecutionSettings {
    * ```
    */
   branch_storage?: AgorBranchStorageSettings;
+
+  /**
+   * OS-level executor sandbox policy (SRT: bubblewrap / Seatbelt). Disabled by
+   * default. Global, single-policy. See `context/explorations/executor-sandboxing.md`.
+   */
+  sandbox?: AgorSandboxSettings;
+}
+
+export interface AgorExecutorResponseSettings {
+  /** Maximum uncompressed framed response-body bytes. Default: 8 MiB. */
+  max_response_bytes?: number;
+  /** Maximum in-flight response reservations on one daemon. Default: 16. */
+  max_active_requests?: number;
+  /** Request-mode timeout defaults and optional exact-command overrides. */
+  timeout_ms?: {
+    /** Default timeout for request-mode commands. Default: 5 minutes. */
+    default?: number;
+    /** Overrides keyed by the executor payload's exact `command` value. */
+    by_command?: Record<string, number>;
+  };
+  /**
+   * Exact initiating-daemon origin reachable by executors. In standalone
+   * local mode startup derives this from the daemon listener. HA/external
+   * deployments must configure an origin that does not load-balance to
+   * another replica.
+   */
+  origin_url?: string;
+  /** Operator assertion required for request-mode templated execution. */
+  external_protocol?: 'executor-response-v1';
 }
 
 /**
@@ -630,6 +855,41 @@ export interface AgorBranchStorageSettings {
    * carry complete history.
    */
   allow_shallow_clones?: boolean;
+
+  /**
+   * Whether clone-mode branches may borrow objects from the daemon-managed
+   * base clone via `git clone --reference` (an `alternates` pointer into
+   * `<data_home>/repos/<slug>/.git/objects`). On a single-mount install this
+   * is a large disk win and nothing else changes.
+   *
+   * The alternates pointer is baked into the branch at create time and
+   * consumed by every later `git` command, so a branch created with a borrow
+   * it cannot resolve is permanently broken:
+   *
+   * ```
+   * error: unable to normalize alternate object path: /…/.agor/repos/<org>/<repo>/.git/objects
+   * fatal: Failed to traverse parents of commit <sha>
+   * ```
+   *
+   * Tri-state — leave unset unless you have a reason:
+   *  - unset (default): borrow, unless Agor can see that sessions will not be
+   *    able to resolve the pointer. Today that inference fires for
+   *    `execution.sandbox.enabled` + `home_mode: per_user`, whose owner-home
+   *    overlay hides the whole daemon `.agor` tree including `repos/`.
+   *  - `false`: never borrow. Use this for containerized / templated executors
+   *    that bind only the branch workspace — Agor cannot inspect an external
+   *    substrate's mounts, so it has to be told.
+   *  - `true`: always borrow, even where Agor would have inferred otherwise.
+   *    You are asserting the base clone is reachable from sessions (for
+   *    example via `execution.sandbox.extra_allow_write`).
+   *
+   * `execution.executor_storage.base_repository: 'unavailable'` outranks all
+   * three: it asserts the base checkout does not exist for executors at all.
+   *
+   * Disabling costs disk (each branch carries a full object store) and buys
+   * mount-independence.
+   */
+  borrow_base_objects?: boolean;
 }
 
 /** Consistency of the effective user's home across executor invocations. */
@@ -644,6 +904,9 @@ export type AgorExecutorBranchWorkspaceStorage =
 /** Availability of the registered repository's base checkout to executors. */
 export type AgorExecutorBaseRepositoryStorage = 'replica-local' | 'shared' | 'unavailable';
 
+/** Scope in which advisory locks on the user-home filesystem are coherent. */
+export type AgorExecutorUserHomeLocking = 'local-only' | 'cross-replica-flock';
+
 /**
  * Declarative execution-substrate storage contract.
  *
@@ -654,6 +917,11 @@ export type AgorExecutorBaseRepositoryStorage = 'replica-local' | 'shared' | 'un
  */
 export interface AgorExecutorStorageSettings {
   user_home?: AgorExecutorUserHomeStorage;
+  /**
+   * Operator assertion about the backing filesystem, not a mount option Agor
+   * configures. HA Codex credential mutation requires `cross-replica-flock`.
+   */
+  user_home_locking?: AgorExecutorUserHomeLocking;
   branch_workspace?: AgorExecutorBranchWorkspaceStorage;
   base_repository?: AgorExecutorBaseRepositoryStorage;
 }
@@ -905,6 +1173,67 @@ export interface AgorTelemetrySettings {
 }
 
 /**
+ * DogStatsD transport settings for daemon operational metrics.
+ *
+ * Metrics are process-global operational signals, not tenant analytics. Keep
+ * global tags deployment-level and low-cardinality; request/resource IDs are
+ * deliberately forbidden by config validation.
+ */
+export interface AgorStatsDSettings {
+  /** Master switch. Defaults to false. */
+  enabled?: boolean;
+
+  /** Datadog Agent / StatsD UDP host. Defaults to 127.0.0.1. */
+  host?: string;
+
+  /** Datadog Agent / StatsD UDP port. Defaults to 8125. */
+  port?: number;
+
+  /** Namespace prepended to every daemon metric. Must end in a dot. */
+  prefix?: string;
+
+  /** Static, deployment-level DogStatsD tags applied to every metric. */
+  global_tags?: Record<string, string>;
+}
+
+/** Valid depths for FeathersJS service-method tracing, cheapest first. */
+export const APM_TRACE_SERVICE_DEPTHS = ['off', 'entrypoint', 'full'] as const;
+export type ApmTraceServiceDepth = (typeof APM_TRACE_SERVICE_DEPTHS)[number];
+
+/**
+ * Datadog APM (dd-trace) tracing knobs for the daemon.
+ *
+ * The tracer itself is loaded process-wide (single-step / `NODE_OPTIONS`
+ * injection), which already auto-instruments HTTP, Express, Postgres, and
+ * Redis. These settings only govern the FeathersJS service-method layer, which
+ * dd-trace has no native plugin for — the calls that ride socket.io are
+ * otherwise invisible to APM.
+ */
+export interface AgorApmSettings {
+  /**
+   * Depth of FeathersJS service-method span instrumentation. Defaults to `off`.
+   *
+   * - `off`: the Feathers tracing hook is not registered at all — zero overhead.
+   * - `entrypoint`: one span per top-level request; nested service-to-service
+   *   fan-out is suppressed (mirrors the StatsD metrics hook). Cheap and
+   *   bounded — safe to leave on in production.
+   * - `full`: a span per service-method invocation including nested calls, so
+   *   the fan-out and its child Postgres queries are visible in the flame
+   *   graph. Highest span volume (and ingestion cost) — intended for active
+   *   investigation, not steady state.
+   */
+  trace_services?: ApmTraceServiceDepth;
+}
+
+/** Optional daemon operational metrics exporters. */
+export interface AgorMetricsSettings {
+  statsd?: AgorStatsDSettings;
+
+  /** Datadog APM (dd-trace) tracing knobs. */
+  apm?: AgorApmSettings;
+}
+
+/**
  * Backend analytics settings.
  *
  * Disabled by default. When enabled, daemon/server code sends curated
@@ -1117,36 +1446,6 @@ export interface AgorDeploymentSettings {
 /**
  * Complete Agor configuration
  */
-/**
- * MCP marketplace catalog settings.
- *
- * The catalog mirrors the public MCP registry, which means the daemon makes
- * periodic outbound requests to a third party and, during the auth probe, to
- * arbitrary registry-published hosts. Air-gapped and network-restricted
- * installs need an off switch for that; the curated overlay shipped in the
- * repository still seeds, so the marketplace stays usable offline.
- */
-export interface AgorMCPCatalogSettings {
-  /**
-   * Mirror the public MCP registry into the catalog.
-   *
-   * Off by default: nothing renders the ~18,000 uncurated registry rows yet, so
-   * every install would make hundreds of outbound requests, four times a day,
-   * for data no user can see. The ~50 curated entries seed regardless. Turn
-   * this on when a UI exists that uses the breadth.
-   */
-  registry_sync_enabled?: boolean;
-
-  /** Hours between registry syncs (default: 6). */
-  sync_interval_hours?: number;
-
-  /** Entries auth-probed per sync (default: 40). Set 0 to disable probing. */
-  probe_budget?: number;
-
-  /** Advanced override for the registry base URL. Usually omitted. */
-  registry_url?: string;
-}
-
 export interface AgorConfig {
   /** Deployment-owned agentic-tool package selection. */
   agentic_tools?: AgorAgenticToolsSettings;
@@ -1166,6 +1465,9 @@ export interface AgorConfig {
   /** Generic external one-time launch-code authentication. */
   external_launch?: AgorExternalLaunchSettings;
 
+  /** User identity, lifecycle, role, and local-login authority. */
+  identity?: AgorIdentitySettings;
+
   /** Execution isolation settings */
   execution?: AgorExecutionSettings;
 
@@ -1184,14 +1486,14 @@ export interface AgorConfig {
   /** Public community telemetry settings. */
   telemetry?: AgorTelemetrySettings;
 
+  /** Operational daemon metrics. Disabled by default. */
+  metrics?: AgorMetricsSettings;
+
   /** App-level multi-tenancy settings. Defaults to static/default tenant. */
   multi_tenancy?: AgorMultiTenancySettings;
 
   /** Upload storage and lifecycle policy. */
   uploads?: AgorUploadSettings;
-
-  /** MCP marketplace catalog ingestion settings. */
-  mcp_catalog?: AgorMCPCatalogSettings;
 }
 
 /**
@@ -1204,12 +1506,13 @@ export type ConfigKey =
   | `ui.${keyof AgorUISettings}`
   | `database.${keyof AgorDatabaseSettings}`
   | `external_launch.${keyof AgorExternalLaunchSettings}`
+  | `identity.${keyof AgorIdentitySettings}`
   | `execution.${keyof AgorExecutionSettings}`
   | `security.${keyof AgorSecuritySettings}`
   | `teammates.${keyof AgorTeammateSettings}`
   | `paths.${keyof AgorPathSettings}`
   | `analytics.${keyof AgorAnalyticsSettings}`
   | `telemetry.${keyof AgorTelemetrySettings}`
+  | `metrics.${keyof AgorMetricsSettings}`
   | `multi_tenancy.${keyof AgorMultiTenancySettings}`
-  | `uploads.${keyof AgorUploadSettings}`
-  | `mcp_catalog.${keyof AgorMCPCatalogSettings}`;
+  | `uploads.${keyof AgorUploadSettings}`;

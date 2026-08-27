@@ -20,7 +20,7 @@ import type {
   User,
 } from '@agor-live/client';
 import { hasMinimumRole, PermissionScope } from '@agor-live/client';
-import { Layout, theme, Upload } from 'antd';
+import { Flex, Layout, theme, Upload } from 'antd';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   type ImperativePanelHandle,
@@ -32,10 +32,12 @@ import { useLocation, useParams } from 'react-router-dom';
 import type { BranchStorageConfig } from '@/utils/branchStorage';
 import { AppActionsProvider } from '../../contexts/AppActionsContext';
 import { useRegisterBoardSwitcher } from '../../contexts/CanvasNavigationContext';
+import type { NewSessionConfig, SessionCreationResult } from '../../domain/sessionCreation';
 import { useAppNavigation } from '../../hooks/useAppNavigation';
 import { useBoardTitle } from '../../hooks/useBoardTitle';
 import { useEventStream } from '../../hooks/useEventStream';
 import { useFaviconStatus } from '../../hooks/useFaviconStatus';
+import { findFrameworkRepo } from '../../hooks/useFrameworkRepo';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useRecentBoards } from '../../hooks/useRecentBoards';
 import { useSettingsRoute } from '../../hooks/useSettingsRoute';
@@ -62,7 +64,7 @@ import {
   selectFirstBoardId,
   selectSessionById,
 } from '../../store/selectors';
-import type { AgenticToolOption } from '../../types';
+import type { AgenticToolOption, CreateRepoOptions } from '../../types';
 import { initializeAudioOnInteraction } from '../../utils/audio';
 import { useThemedMessage } from '../../utils/message';
 import { resolveQuickStartMcpServerIds } from '../../utils/resolveQuickStartMcpServerIds';
@@ -70,9 +72,10 @@ import { hasExplicitEntityRouteTarget } from '../../utils/routeTargets';
 import { startTeammateBootstrapSession } from '../../utils/startTeammateBootstrapSession';
 import {
   buildTeammateBootstrapPrompt,
-  buildTeammateOnboardingSessionTitle,
+  buildTeammateFirstSessionTitle,
 } from '../../utils/teammateBootstrapPrompt';
 import { createTeammateBranch } from '../../utils/teammateCreation';
+import { getTemplateForFrameworkSource } from '../../utils/teammateTemplates';
 import { getUserDefaultConfigurationSource } from '../AgenticToolConfigurationPicker/useAgenticConfigurationSources';
 import { AppHeader } from '../AppHeader';
 import type { BoardTeammatePanelTab } from '../BoardTeammatePanel';
@@ -86,7 +89,7 @@ import { EnvironmentLogsModal } from '../EnvironmentLogsModal';
 import { EventStreamPanel } from '../EventStreamPanel';
 import { HomePage } from '../HomePage';
 import { NewSessionButton } from '../NewSessionButton';
-import { type NewSessionConfig, NewSessionModal } from '../NewSessionModal';
+import { NewSessionModal } from '../NewSessionModal';
 import { SessionCanvas, type SessionCanvasRef } from '../SessionCanvas';
 import { SessionPanel } from '../SessionPanel';
 import { PendingToolChoicePanel } from '../SessionPanel/PendingToolChoicePanel';
@@ -153,6 +156,8 @@ const UrlStateBridge: React.FC<{
 export interface AppProps {
   client: AgorClient | null;
   user?: User | null;
+  authenticationGeneration?: number;
+  isAuthenticationGenerationCurrent?: (generation: number) => boolean;
   connected?: boolean;
   connecting?: boolean;
   availableAgents: AgenticToolOption[];
@@ -162,13 +167,16 @@ export interface AppProps {
   openUserSettings?: boolean; // Open user settings modal directly (e.g., from onboarding)
   initialUserSettingsTab?: string; // Deep-link target tab when opening user settings
   onUserSettingsClose?: () => void; // Called when user settings modal closes
-  onRestartOnboarding?: () => void | Promise<void>;
+  onRestartOnboarding?: (shouldApply?: () => boolean) => void | Promise<void>;
   openNewBranchModal?: boolean; // Open new branch modal
   onNewBranchModalClose?: () => void; // Called when new branch modal closes
   suppressLeftPanel?: boolean; // Temporarily hide the teammate/comments panel behind modal-first flows
   /** Rendered between AppHeader and main content (used for onboarding banners). */
   topBanner?: React.ReactNode;
-  onCreateSession?: (config: NewSessionConfig, boardId: string) => Promise<string | null>;
+  onCreateSession?: (
+    config: NewSessionConfig,
+    boardId: string
+  ) => Promise<SessionCreationResult | null>;
   onForkSession?: (sessionId: string, prompt: string) => Promise<void>;
   onBtwForkSession?: (sessionId: string, prompt: string) => Promise<void>;
   onSpawnSession?: (sessionId: string, config: string | Partial<SpawnConfig>) => Promise<void>;
@@ -184,10 +192,13 @@ export interface AppProps {
   onDeleteBoard?: (boardId: string) => void;
   onArchiveBoard?: (boardId: string) => void;
   onUnarchiveBoard?: (boardId: string) => void;
-  onCreateRepo?: (data: CreateRepoRequest) => unknown;
-  onCreateLocalRepo?: (data: CreateLocalRepoRequest) => void | Promise<void>;
-  onUpdateRepo?: (repoId: string, updates: Partial<Repo>) => void;
-  onDeleteRepo?: (repoId: string, cleanup: boolean) => void;
+  onCreateRepo?: (data: CreateRepoRequest, options?: CreateRepoOptions) => unknown;
+  onCreateLocalRepo?: (
+    data: CreateLocalRepoRequest,
+    shouldApply?: () => boolean
+  ) => void | Promise<void>;
+  onUpdateRepo?: (repoId: string, updates: Partial<Repo>, shouldApply?: () => boolean) => void;
+  onDeleteRepo?: (repoId: string, cleanup: boolean, shouldApply?: () => boolean) => void;
   onArchiveOrDeleteBranch?: (branchId: string, options: BranchArchiveOrDeleteOptions) => void;
   onUnarchiveBranch?: (branchId: string, options?: { boardId?: string }) => void;
   onUpdateBranch?: (branchId: string, updates: BranchUpdate) => void | Promise<void>;
@@ -199,6 +210,7 @@ export interface AppProps {
       refType?: 'branch' | 'tag';
       createBranch: boolean;
       sourceBranch: string;
+      sourceRemoteUrl?: string;
       pullLatest: boolean;
       issue_url?: string;
       pull_request_url?: string;
@@ -214,14 +226,25 @@ export interface AppProps {
   onStopEnvironment?: (branchId: string) => void;
   onNukeEnvironment?: (branchId: string) => void;
   onExecuteScheduleNow?: (branchId: string) => Promise<void>;
-  onCreateUser?: (data: CreateUserInput) => void;
-  onUpdateUser?: (userId: string, updates: UpdateUserInput) => void;
-  onDeleteUser?: (userId: string) => void;
-  onCreateMCPServer?: (data: CreateMCPServerInput) => void;
-  onDeleteMCPServer?: (mcpServerId: string) => void;
+  onCreateUser?: (data: CreateUserInput, shouldApply?: () => boolean) => void | Promise<void>;
+  onUpdateUser?: (
+    userId: string,
+    updates: UpdateUserInput,
+    shouldApply?: () => boolean
+  ) => void | Promise<void>;
+  onDeleteUser?: (userId: string, shouldApply?: () => boolean) => void | Promise<void>;
+  onCreateMCPServer?: (
+    data: CreateMCPServerInput,
+    shouldApply?: () => boolean
+  ) => void | Promise<void>;
+  onDeleteMCPServer?: (mcpServerId: string, shouldApply?: () => boolean) => void | Promise<void>;
   onCreateGatewayChannel?: (data: GatewayChannelCreateData) => void;
-  onUpdateGatewayChannel?: (channelId: string, updates: GatewayChannelPatchData) => void;
-  onDeleteGatewayChannel?: (channelId: string) => void;
+  onUpdateGatewayChannel?: (
+    channelId: string,
+    updates: GatewayChannelPatchData,
+    shouldApply?: () => boolean
+  ) => void;
+  onDeleteGatewayChannel?: (channelId: string, shouldApply?: () => boolean) => void;
   onUpdateArtifact?: (artifactId: string, updates: Partial<Artifact>) => void;
   onDeleteArtifact?: (artifactId: string) => void;
   onUpdateSessionMcpServers?: (sessionId: string, mcpServerIds: string[]) => void;
@@ -289,6 +312,8 @@ const clampPercent = (value: number, min: number, max: number) =>
 export const App: React.FC<AppProps> = ({
   client,
   user,
+  authenticationGeneration = 0,
+  isAuthenticationGenerationCurrent,
   connected = false,
   connecting = false,
   availableAgents,
@@ -844,7 +869,8 @@ export const App: React.FC<AppProps> = ({
   };
 
   const handleCreateSession = async (config: NewSessionConfig) => {
-    const sessionId = await onCreateSession?.(config, currentBoardId);
+    const outcome = await onCreateSession?.(config, currentBoardId);
+    const sessionId = outcome?.sessionId ?? null;
     setNewSessionBranchId(null);
 
     // Select synchronously, then let the URL catch up. The create seam inserts
@@ -857,6 +883,7 @@ export const App: React.FC<AppProps> = ({
       setSelectedSessionId(sessionId);
       navigation.goToSession(sessionId);
     }
+    return outcome ?? null;
   };
 
   // Single mechanism behind both "pick a tool" entry points: the quick-start
@@ -878,7 +905,7 @@ export const App: React.FC<AppProps> = ({
       const branch = agorStore.getState().branchById.get(branchId as Branch['branch_id']);
       const mcpServerIds = resolveQuickStartMcpServerIds(user, branch);
 
-      const sessionId = await onCreateSession?.(
+      const outcome = await onCreateSession?.(
         {
           branch_id: branchId,
           agent: tool,
@@ -887,7 +914,8 @@ export const App: React.FC<AppProps> = ({
         },
         currentBoardId
       );
-      if (!sessionId) return null;
+      if (!outcome) return null;
+      const sessionId = outcome.sessionId;
 
       // Select the new session synchronously, in the same render that clears
       // the picker, so the drawer never has a frame with neither target set.
@@ -1026,18 +1054,26 @@ export const App: React.FC<AppProps> = ({
       );
     }
 
+    const template = getTemplateForFrameworkSource({
+      sourceBranch: result.sourceBranch,
+      selectedRepoId: result.repoId,
+      frameworkRepoId: findFrameworkRepo(agorStore.getState().repoById)?.[0],
+    });
+
     const sessionConfig: NewSessionConfig = {
       branch_id: branch.branch_id,
       agent: result.agent,
       agenticToolPresetId: result.agenticToolPresetId,
-      title: buildTeammateOnboardingSessionTitle(result),
+      title: buildTeammateFirstSessionTitle(result),
       initialPrompt: buildTeammateBootstrapPrompt({
         displayName: result.displayName,
         emoji: result.emoji,
         description: result.description,
         userName: user?.name,
         userEmail: user?.email,
-        persona: user?.preferences?.onboarding?.persona,
+        // This path carries no explicit template id, so recover the persona
+        // only when the source belongs to the detected framework repository.
+        templateId: template?.id,
       }),
       modelConfig: result.modelConfig,
       effort: result.effort,
@@ -1052,7 +1088,7 @@ export const App: React.FC<AppProps> = ({
       if (!onCreateSession) {
         throw new Error('Missing session creation handler.');
       }
-      const sessionId = await startTeammateBootstrapSession({
+      const initialization = await startTeammateBootstrapSession({
         client,
         branchId: branch.branch_id,
         boardId: branch.board_id || currentBoardId,
@@ -1060,7 +1096,7 @@ export const App: React.FC<AppProps> = ({
         onCreateSession,
         onStatusChange: progress?.onStatusChange,
       });
-      navigation.goToSession(sessionId);
+      navigation.goToSession(initialization.sessionId);
       return;
     } catch (error) {
       console.error('AI teammate session bootstrap failed:', error);
@@ -1411,6 +1447,7 @@ export const App: React.FC<AppProps> = ({
   );
   const stableOnLogout = useStableCallback(onLogout);
   const stableOnRetryConnection = useStableCallback(onRetryConnection);
+  const stableOnCreateSession = useStableCallback(onCreateSession);
 
   return (
     <AppActionsProvider value={appActionsValue}>
@@ -1425,6 +1462,8 @@ export const App: React.FC<AppProps> = ({
       <Layout style={{ height: '100vh' }}>
         <AppHeader
           user={user}
+          authenticationGeneration={authenticationGeneration}
+          isAuthenticationGenerationCurrent={isAuthenticationGenerationCurrent}
           presenceClient={client}
           currentUserId={user?.user_id}
           connected={connected}
@@ -1444,6 +1483,7 @@ export const App: React.FC<AppProps> = ({
           onUserClick={handleHeaderUserClick}
           instanceLabel={instanceLabel}
           instanceDescription={instanceDescription}
+          onCreateSession={stableOnCreateSession}
         />
         {topBanner}
         <Content style={{ position: 'relative', overflow: 'hidden', display: 'flex' }}>
@@ -1677,16 +1717,20 @@ export const App: React.FC<AppProps> = ({
                       maxSize={sessionPanelMaxSizeWithinContent}
                     >
                       {effectiveSelectedSessionId ? (
-                        <SessionPanel
-                          client={client}
-                          session={selectedSession}
-                          branch={selectedSessionBranch}
-                          currentUserId={user?.user_id}
-                          sessionMcpServerIds={selectedSessionMcpServerIds}
-                          open={!!effectiveSelectedSessionId}
-                          onClose={handleCloseSessionPanel}
-                          uploadPolicy={uploadPolicy}
-                        />
+                        <Flex vertical style={{ height: '100%' }}>
+                          <div style={{ flex: 1, minHeight: 0 }}>
+                            <SessionPanel
+                              client={client}
+                              session={selectedSession}
+                              branch={selectedSessionBranch}
+                              currentUserId={user?.user_id}
+                              sessionMcpServerIds={selectedSessionMcpServerIds}
+                              open={!!effectiveSelectedSessionId}
+                              onClose={handleCloseSessionPanel}
+                              uploadPolicy={uploadPolicy}
+                            />
+                          </div>
+                        </Flex>
                       ) : pendingToolChoiceBranchId ? (
                         <PendingToolChoicePanel
                           branch={pendingToolChoiceBranch}
@@ -1761,7 +1805,7 @@ export const App: React.FC<AppProps> = ({
           onDeleteBoard={onDeleteBoard}
           onArchiveBoard={onArchiveBoard}
           onUnarchiveBoard={onUnarchiveBoard}
-          onCreateRepo={onCreateRepo}
+          onCreateRepo={(data, shouldApply) => onCreateRepo?.(data, { shouldApply })}
           onCreateLocalRepo={onCreateLocalRepo}
           onUpdateRepo={onUpdateRepo}
           onDeleteRepo={onDeleteRepo}
@@ -1819,7 +1863,7 @@ export const App: React.FC<AppProps> = ({
           onArchiveOrDelete={onArchiveOrDeleteBranch}
           onOpenSettings={() => {
             setBranchModalBranchId(null);
-            openSettings();
+            openSettings('repos');
           }}
           onSessionClick={handleSessionClick}
           onExecuteScheduleNow={onExecuteScheduleNow}
@@ -1873,11 +1917,13 @@ export const App: React.FC<AppProps> = ({
           currentUser={user || null}
           client={client}
           onUpdate={onUpdateUser}
-          onRestartOnboarding={async () => {
+          onRestartOnboarding={async (shouldApply) => {
+            if (shouldApply && !shouldApply()) return;
+            await onRestartOnboarding?.(shouldApply);
+            if (shouldApply && !shouldApply()) return;
             setUserSettingsOpen(false);
             setUserSettingsInitialTool(undefined);
             onUserSettingsClose?.();
-            await onRestartOnboarding?.();
           }}
         />
       </Layout>

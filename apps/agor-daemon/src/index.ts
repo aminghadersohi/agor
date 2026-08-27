@@ -14,7 +14,8 @@
  */
 
 import 'dotenv/config';
-import { platform } from 'node:os';
+import { homedir, platform } from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
 
 // Patch console methods to respect LOG_LEVEL env var
 import { configureAnalyticsLogger } from '@agor/core/analytics';
@@ -24,22 +25,35 @@ import {
   openSourceTelemetryLogger,
 } from '@agor/core/telemetry';
 import { patchConsole } from '@agor/core/utils/logger';
-import { UI_MOUNT_PATH } from '@agor/core/utils/url';
+import { extractDbFilePath } from '@agor/core/utils/path';
+import { deriveLoopbackReachableOrigin, UI_MOUNT_PATH } from '@agor/core/utils/url';
 
 patchConsole();
 
+import {
+  assertConfiguredAgenticToolsReady,
+  getAgenticToolsRoot,
+} from '@agor/core/agentic-integrations';
 import type { AgorConfig, ResolvedSecurity } from '@agor/core/config';
 import {
+  assertValidEffectiveExecutionConfig,
+  assertValidEffectiveIdentityConfig,
+  assertValidRawConfig,
+  getConfigPath,
   loadConfig,
   loadConfigFromFile,
   renderGitConfigParametersForLog,
+  requireDeploymentId,
+  resolveDataHomeFromConfig,
   resolveDeploymentConfig,
   resolveEffectiveConfig,
   resolveGitConfigParameters,
+  resolveIdentityAuthority,
   resolveMultiTenancyConfig,
   resolveSecurity,
+  resolveValidExternalLaunchProvider,
 } from '@agor/core/config';
-import { generateId, getDatabaseUrl } from '@agor/core/db';
+import { generateId, resolveDatabaseUrl } from '@agor/core/db';
 import {
   authenticate,
   Forbidden,
@@ -54,13 +68,16 @@ import type { HookContext, User } from '@agor/core/types';
 import cors from 'cors';
 import express from 'express';
 import expressStaticGzip from 'express-static-gzip';
-import { scopeExecutorRuntimeAuth } from './auth/executor-runtime-scope.js';
 import { createRequireAuthHook } from './auth/require-auth.js';
+import { reconcileTrackedExecutorGauge } from './executor-tracking.js';
+import { createHttpMetricsMiddleware } from './metrics/http.js';
+import { createDaemonMetrics, NOOP_METRICS, resolveMetricsWorkIdentity } from './metrics/index.js';
+import { type OwnStartupMetrics, runWithStartupMetricsOwner } from './metrics/startup-ownership.js';
 import { RedisRealtimeRuntime } from './realtime/redis-realtime.js';
+import { LOCAL_AUTHORIZATION_INVALIDATION_EVENT } from './realtime/routing.js';
 import { registerHooks } from './register-hooks.js';
 import { registerRoutes } from './register-routes.js';
 import { registerServices } from './register-services.js';
-import { assertConfiguredAgenticToolsAligned } from './setup/agentic-tool-alignment.js';
 import { loadBuildInfo } from './setup/build-info.js';
 import { createDynamicCompressionMiddleware } from './setup/compression.js';
 import { buildCorsConfig, isSandpackOrigin } from './setup/cors.js';
@@ -80,6 +97,8 @@ import { deepFreezeClone } from './utils/deep-freeze.js';
 import { ensureOpenSourceTelemetryEnvEnabledConfig } from './utils/open-source-telemetry-config.js';
 import { shouldEmitOpenSourceTelemetryDaemonActive } from './utils/open-source-telemetry-heartbeat.js';
 import { startOpenSourceTelemetryUsageSummaryInterval } from './utils/open-source-telemetry-usage.js';
+import { assertRealtimePublishPolicyCoverage } from './utils/realtime-publish-policy.js';
+import { resolveSandboxProtectedDataRoots } from './utils/sandbox-context.js';
 import { configureDaemonUrl, configureExecutor } from './utils/spawn-executor.js';
 import { configureUploadStagingStoreFromConfig } from './utils/upload-staging.js';
 import { registerAllWidgets } from './widgets/index.js';
@@ -96,9 +115,6 @@ console.log(
     `builtAt=${DAEMON_BUILD_INFO.builtAt ?? 'unknown'} ` +
     `(source=${DAEMON_BUILD_INFO.source})`
 );
-
-// Database URL (env vars > config.yaml > defaults)
-const DB_PATH = getDatabaseUrl();
 
 // ============================================================================
 // GLOBAL ERROR HANDLERS
@@ -143,6 +159,15 @@ export interface DaemonStartOptions {
  * or from main.ts with no args for direct execution.
  */
 export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
+  await runWithStartupMetricsOwner((ownMetrics) =>
+    startDaemonWithOwnedMetrics(options, ownMetrics)
+  );
+}
+
+async function startDaemonWithOwnedMetrics(
+  options: DaemonStartOptions | undefined,
+  ownMetrics: OwnStartupMetrics
+): Promise<void> {
   // Initialize Handlebars helpers for template rendering
   registerHandlebarsHelpers();
   console.log('✅ Handlebars helpers registered');
@@ -166,14 +191,23 @@ export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
       ? await loadConfigFromFile(options.configPath)
       : await loadConfig();
 
+  // Programmatic startup must cross the same untrusted config boundary as
+  // YAML before environment projection reads nested scalar values.
+  assertValidRawConfig(config);
+
   // Deployment environment overrides are resolved in memory. Container and
   // Kubernetes entrypoints must never materialize them back into config.yaml.
   config = resolveEffectiveConfig(config);
+  const deploymentId = requireDeploymentId(config);
+  assertValidEffectiveExecutionConfig(config);
+  const externalLaunchProvider = resolveValidExternalLaunchProvider(config);
+  assertValidEffectiveIdentityConfig(config);
+  const databaseUrl = resolveDatabaseUrl({ config, env: process.env });
 
   // Deployment package availability is instance-global. Validate it before
   // database or tenant initialization so no tenant can expand the daemon's
   // installed-code surface and a broken upgrade never starts listening.
-  const resolvedAgenticTools = await assertConfiguredAgenticToolsAligned(config);
+  const resolvedAgenticTools = await assertConfiguredAgenticToolsReady(config);
   if (resolvedAgenticTools) {
     // In-memory projection only: config.yaml remains immutable while every
     // service consumes the same deployment policy resolved at startup.
@@ -186,7 +220,7 @@ export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
   // HA is an explicit, validated topology boundary. REDIS_URL alone never
   // changes standalone behavior. Resolve this after immutable environment
   // projection so every startup consumer observes one effective snapshot.
-  const deployment = resolveDeploymentConfig(config, process.env, DB_PATH);
+  const deployment = resolveDeploymentConfig(config, process.env, databaseUrl);
   console.log(`🌐 Deployment mode: ${deployment.mode}`);
 
   const multiTenancy = resolveMultiTenancyConfig(config);
@@ -234,10 +268,8 @@ export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
   // --------------------------------------------------------------------------
   // Auth configuration
   // --------------------------------------------------------------------------
-  const authenticatedHook = scopeExecutorRuntimeAuth(
-    authenticate({ strategies: ['api-key', 'jwt'] })
-  );
-  const requireAuth = createRequireAuthHook(authenticatedHook, multiTenancy);
+  const authenticatedHook = authenticate({ strategies: ['api-key', 'jwt'] });
+  const requireAuthOnly = createRequireAuthHook(authenticatedHook, multiTenancy);
 
   const enforcePasswordChange = async (context: HookContext) => {
     const user = context.params?.user as User | undefined;
@@ -249,7 +281,12 @@ export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
     } catch {
       return context;
     }
-    if (!freshUser.must_change_password) return context;
+    if (
+      !freshUser.must_change_password ||
+      !resolveIdentityAuthority(effectiveConfig).capabilities.users.passwordWrite
+    ) {
+      return context;
+    }
     if (context.path === 'authentication' || context.path === 'authentication/refresh')
       return context;
     if (context.path === 'health') return context;
@@ -272,6 +309,21 @@ export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
     });
   };
 
+  /**
+   * `enforcePasswordChange` is also registered as a global app hook, but Feathers
+   * runs app-level hooks *before* service-level ones — so over REST it fired while
+   * `params.user` was still unset by the service's own `requireAuth`, hit its
+   * `if (!user) return context` guard, and silently passed the request through. A
+   * user flagged for a password change could do anything the CLI offered. On
+   * Socket.IO the connection already carries `params.user`, which is why the gate
+   * worked there and the gap only ever showed up over REST.
+   *
+   * Running it here, immediately after authentication resolves, means the check
+   * happens once at the auth chokepoint with the user actually populated.
+   */
+  const requireAuth = async (context: HookContext): Promise<HookContext> =>
+    enforcePasswordChange(await requireAuthOnly(context));
+
   // --------------------------------------------------------------------------
   // Ports, daemon URL, credentials
   // --------------------------------------------------------------------------
@@ -285,13 +337,37 @@ export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
   const daemonUrl = effectiveConfig.daemon?.public_url || `http://localhost:${DAEMON_PORT}`;
   configureDaemonUrl(daemonUrl);
 
-  // Wire the configured executor command template + impersonation user so the
+  const dataHome = resolveDataHomeFromConfig(effectiveConfig);
+  if (effectiveConfig.execution?.sandbox?.enabled === true && !isAbsolute(dataHome)) {
+    throw new Error(
+      `execution.sandbox.enabled requires an absolute effective paths.data_home; received ${dataHome}`
+    );
+  }
+  const configuredPath = resolve(
+    options?.configPath ?? process.env.AGOR_CONFIG_PATH ?? getConfigPath()
+  );
+  const localDatabasePath =
+    databaseUrl.startsWith('file:') || isAbsolute(databaseUrl) || databaseUrl.startsWith('~/')
+      ? extractDbFilePath(databaseUrl)
+      : undefined;
+
+  // Wire the configured executor command template and delegated home key so the
   // ~10 spawnExecutorFireAndForget() call sites pick them up without needing
   // their own config-threading code. Local-subprocess remains the default
   // when execution.executor_command_template is unset (no behavior change
   // for existing deployments).
   configureExecutor(effectiveConfig.execution, {
     requireTenantContext: multiTenancy.mode === 'required_from_auth',
+    localResponseOriginUrl: deriveLoopbackReachableOrigin(DAEMON_HOST, DAEMON_PORT),
+    sandboxRuntimePaths: {
+      homeDir: homedir(),
+      dataHome,
+      protectedDataRoots: resolveSandboxProtectedDataRoots(effectiveConfig),
+      worktreesRoot: join(dataHome, 'worktrees'),
+      agenticToolsPath: getAgenticToolsRoot(),
+      agorConfigPath: configuredPath,
+      agorDbPath: localDatabasePath,
+    },
   });
 
   // --------------------------------------------------------------------------
@@ -308,9 +384,45 @@ export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
     },
     generateBootId: generateId,
   });
+  const explicitMetricsInstanceId = process.env.AGOR_DAEMON_INSTANCE_ID?.trim();
+  const metricsWorkIdentity = resolveMetricsWorkIdentity(
+    deployment.mode,
+    distributedWorkIdentity,
+    explicitMetricsInstanceId
+  );
+  const unsafeHaMetricsIdentity =
+    effectiveConfig.metrics?.statsd?.enabled === true && !metricsWorkIdentity;
+  const metrics = unsafeHaMetricsIdentity
+    ? NOOP_METRICS
+    : createDaemonMetrics(effectiveConfig.metrics?.statsd, {
+        workIdentity: metricsWorkIdentity ?? distributedWorkIdentity,
+        deploymentMode: deployment.mode,
+        deploymentId,
+      });
+  ownMetrics(metrics);
+  app.set('metrics', metrics);
+  reconcileTrackedExecutorGauge(app);
+  if (unsafeHaMetricsIdentity) {
+    console.warn(
+      '[metrics.statsd] Metrics disabled: HA requires a stable, unique AGOR_DAEMON_INSTANCE_ID per replica (letters, digits, dot, underscore, or hyphen; max 100 characters) so gauges cannot collapse into a last-writer-wins series.'
+    );
+  }
+  if (metrics.enabled) {
+    console.log(
+      `📈 DogStatsD metrics enabled (${effectiveConfig.metrics?.statsd?.host}:${effectiveConfig.metrics?.statsd?.port}, prefix=${effectiveConfig.metrics?.statsd?.prefix})`
+    );
+  }
   const realtimeRuntime =
     deployment.mode === 'ha'
-      ? new RedisRealtimeRuntime(deployment.redis, distributedWorkIdentity)
+      ? new RedisRealtimeRuntime(deployment.redis, distributedWorkIdentity, {
+          onUnavailable: () => {
+            // Redis is the required HA invalidation/fanout plane. Clear every
+            // local authorization cache and terminal capability before the
+            // runtime closes transports; reconnects are admitted only after
+            // both Redis clients return to ready.
+            app.emit(LOCAL_AUTHORIZATION_INVALIDATION_EVENT, {});
+          },
+        })
       : undefined;
 
   // Configure how many reverse proxies we trust in front of the daemon.
@@ -463,6 +575,15 @@ export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
     );
   }
 
+  // Start API transport timing before body parsing so malformed/oversized
+  // payload responses are visible too. Static/UI and the OAuth callback are
+  // excluded by code-defined prefixes rather than becoming route tags.
+  app.use(
+    createHttpMetricsMiddleware(app, metrics, {
+      excludedPathPrefixes: [UI_MOUNT_PATH, '/static', '/mcp-servers/oauth-callback'],
+    }) as never
+  );
+
   // Default to a 10MB JSON body. The previous 10MB pre-hardening default was
   // unbounded enough to allow trivial memory-pressure DoS, and a 1MB ceiling
   // turned out to break legitimate flows (large prompts and oversized
@@ -605,7 +726,6 @@ export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
 
   const socketIOConfig = createSocketIOConfig(app, {
     corsOrigin,
-    jwtSecret,
     credentialsAllowed,
     // Mirror the HTTP terminals service gate (register-hooks.ts) so the
     // `allow_web_terminal: false` kill-switch is enforced on the WebSocket
@@ -626,13 +746,14 @@ export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
       : {}),
   });
   app.configure(socketio(socketIOConfig.serverOptions, socketIOConfig.callback));
-  configureChannels(app, { multiTenancy });
+  configureChannels(app);
   configureSwagger(app, { version: DAEMON_VERSION, port: DAEMON_PORT });
 
-  const { db } = await initializeDatabase(DB_PATH, {
+  const { db } = await initializeDatabase(databaseUrl, {
     tenantId: multiTenancy.mode === 'static' ? multiTenancy.static_tenant_id : undefined,
     requireTenantScope: multiTenancy.mode === 'required_from_auth',
-    skipFirstRunAdminBootstrap: effectiveConfig.external_launch?.enabled === true,
+    skipFirstRunAdminBootstrap:
+      !resolveIdentityAuthority(effectiveConfig).capabilities.users.create,
     // The URL may come from DATABASE_URL, but operators still need to size the
     // per-replica pool from config.yaml. Keep this deliberately limited to max:
     // the public idleTimeout setting is documented in milliseconds while the
@@ -730,7 +851,6 @@ export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
     app,
     config: effectiveConfig,
     jwtSecret,
-    branchRbacEnabled,
     requireAuth,
     superadminOpts,
     sessionsService: services.sessionsService,
@@ -750,12 +870,13 @@ export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
     db,
     app,
     config: effectiveConfig,
+    externalLaunchProvider,
     jwtSecret,
     branchRbacEnabled,
     requireAuth,
     enforcePasswordChange,
     superadminOpts,
-    DB_PATH,
+    DB_PATH: databaseUrl,
     DAEMON_PORT,
     DAEMON_VERSION,
     AGOR_VERSION,
@@ -773,6 +894,15 @@ export async function startDaemon(options?: DaemonStartOptions): Promise<void> {
     sessionEnvSelectionsService: services.sessionEnvSelectionsService,
     terminalsService: services.terminalsService,
   });
+
+  // --------------------------------------------------------------------------
+  // Phase 3.5: Every registered service must have declared its realtime
+  // audience. Undeclared services publish to nobody, which is the safe failure
+  // but an invisible one — so refuse to boot rather than let realtime for a new
+  // service quietly do nothing. Deterministic: it reads the registration table,
+  // not request data.
+  // --------------------------------------------------------------------------
+  assertRealtimePublishPolicyCoverage(app);
 
   // --------------------------------------------------------------------------
   // Phase 4: Startup (orphan cleanup, health, scheduler, listen, shutdown)

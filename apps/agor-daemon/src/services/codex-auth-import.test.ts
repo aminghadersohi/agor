@@ -1,8 +1,9 @@
 import { isTenantAgenticToolEnabled, loadConfigSync } from '@agor/core/config';
-import { runWithTenantContext, UsersRepository } from '@agor/core/db';
+import { runWithTenantContext } from '@agor/core/db';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { writeCodexAuthViaExecutor } from '../utils/executor-codex-auth.js';
+import { writeCodexAuthCredential } from '../utils/executor-codex-auth.js';
 import { createCodexAuthImportService } from './codex-auth-import';
+import { CODEX_AUTH_DEFER_USER_REALTIME } from './codex-auth-shared.js';
 
 vi.mock('@agor/core/config', async () => {
   const actual = await vi.importActual<typeof import('@agor/core/config')>('@agor/core/config');
@@ -17,17 +18,6 @@ vi.mock('@agor/core/db', async () => {
   const actual = await vi.importActual<typeof import('@agor/core/db')>('@agor/core/db');
   return {
     ...actual,
-    UsersRepository: vi.fn(),
-  };
-});
-
-vi.mock('@agor/core/unix', async () => {
-  const actual = await vi.importActual<typeof import('@agor/core/unix')>('@agor/core/unix');
-  return {
-    ...actual,
-    // The real validator asserts against /etc/passwd — the mocked Unix
-    // accounts in these tests don't exist on the test host.
-    validateResolvedUnixUser: vi.fn(),
   };
 });
 
@@ -37,14 +27,13 @@ vi.mock('../utils/executor-codex-auth.js', async () => {
   );
   return {
     ...actual,
-    writeCodexAuthViaExecutor: vi.fn(),
+    writeCodexAuthCredential: vi.fn(),
   };
 });
 
 const isTenantAgenticToolEnabledMock = vi.mocked(isTenantAgenticToolEnabled);
 const loadConfigSyncMock = vi.mocked(loadConfigSync);
-const writeCodexAuthViaExecutorMock = vi.mocked(writeCodexAuthViaExecutor);
-const usersRepositoryMock = vi.mocked(UsersRepository);
+const writeCodexAuthCredentialMock = vi.mocked(writeCodexAuthCredential);
 
 const TEST_DB = { run: vi.fn() } as never;
 
@@ -83,14 +72,14 @@ beforeEach(() => {
   vi.clearAllMocks();
   isTenantAgenticToolEnabledMock.mockResolvedValue(true);
   loadConfigSyncMock.mockReturnValue({ execution: { unix_user_mode: 'simple' } } as never);
-  writeCodexAuthViaExecutorMock.mockResolvedValue({ authMode: 'chatgpt' });
+  writeCodexAuthCredentialMock.mockResolvedValue({ authMode: 'chatgpt' });
 });
 
 describe('codex-auth-import', () => {
   it('rejects unauthenticated callers before touching anything', async () => {
     const { app } = makeApp();
     await expect(service(app).create({ authJson: VALID_AUTH_JSON })).rejects.toThrow(/Sign in/);
-    expect(writeCodexAuthViaExecutorMock).not.toHaveBeenCalled();
+    expect(writeCodexAuthCredentialMock).not.toHaveBeenCalled();
   });
 
   it('rejects hosted multi-tenant mode', async () => {
@@ -101,7 +90,7 @@ describe('codex-auth-import', () => {
     await expect(service(app).create({ authJson: VALID_AUTH_JSON }, AUTH_PARAMS)).rejects.toThrow(
       /hosted multi-tenant/
     );
-    expect(writeCodexAuthViaExecutorMock).not.toHaveBeenCalled();
+    expect(writeCodexAuthCredentialMock).not.toHaveBeenCalled();
   });
 
   it('admits hosted auth-file import with persistent per-user executor homes', async () => {
@@ -135,7 +124,7 @@ describe('codex-auth-import', () => {
     await expect(service(app).create({ authJson: 'not json' }, AUTH_PARAMS)).rejects.toThrow(
       /valid JSON/
     );
-    expect(writeCodexAuthViaExecutorMock).not.toHaveBeenCalled();
+    expect(writeCodexAuthCredentialMock).not.toHaveBeenCalled();
   });
 
   it('rejects a credential-free file', async () => {
@@ -143,17 +132,17 @@ describe('codex-auth-import', () => {
     await expect(
       service(app).create({ authJson: JSON.stringify({ tokens: {} }) }, AUTH_PARAMS)
     ).rejects.toThrow(/codex login/);
-    expect(writeCodexAuthViaExecutorMock).not.toHaveBeenCalled();
+    expect(writeCodexAuthCredentialMock).not.toHaveBeenCalled();
   });
 
   it('writes, verifies, flips the auth method, and returns non-secret metadata only', async () => {
     const { app, usersService } = makeApp();
     const result = await service(app).create({ authJson: VALID_AUTH_JSON }, AUTH_PARAMS);
 
-    expect(writeCodexAuthViaExecutorMock).toHaveBeenCalledTimes(1);
-    const [writtenContent, asUser] = writeCodexAuthViaExecutorMock.mock.calls[0];
+    expect(writeCodexAuthCredentialMock).toHaveBeenCalledTimes(1);
+    const [writtenContent, routing] = writeCodexAuthCredentialMock.mock.calls[0];
     expect(JSON.parse(writtenContent)).toEqual(JSON.parse(VALID_AUTH_JSON));
-    expect(asUser).toBeNull();
+    expect(routing).toEqual({ delegatedHomeKey: null, userId: 'user-1', codexHome: undefined });
 
     expect(usersService.patch).toHaveBeenCalledWith(
       'user-1',
@@ -166,8 +155,37 @@ describe('codex-auth-import', () => {
     expect(JSON.stringify(result)).not.toContain('access-abc');
   });
 
+  it('generation-fences HA import and defers its users event until commit', async () => {
+    const { app, usersService } = makeApp();
+    const coordinator = {
+      runCredentialMutation: vi.fn(
+        async (
+          _tenantId: string,
+          _userId: string,
+          _reason: string,
+          work: (generation: number) => Promise<unknown>
+        ) => work(41)
+      ),
+    };
+    const delegate = createCodexAuthImportService(app as never, TEST_DB, coordinator as never);
+
+    await runWithTenantContext('tenant-test', () =>
+      delegate.create({ authJson: VALID_AUTH_JSON }, AUTH_PARAMS)
+    );
+
+    expect(writeCodexAuthCredentialMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ userId: 'user-1' }),
+      41
+    );
+    expect(usersService.patch.mock.calls[0]?.[2]).toMatchObject({
+      authenticated: true,
+      [CODEX_AUTH_DEFER_USER_REALTIME]: true,
+    });
+  });
+
   it('maps write failures to a friendly error and logs only the error class', async () => {
-    writeCodexAuthViaExecutorMock.mockImplementationOnce(async () => {
+    writeCodexAuthCredentialMock.mockImplementationOnce(async () => {
       throw new Error('sudo: a password is required; stderr: refresh-xyz');
     });
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -183,49 +201,5 @@ describe('codex-auth-import', () => {
     } finally {
       errorSpy.mockRestore();
     }
-  });
-
-  it('strict mode targets the caller’s unix_username', async () => {
-    loadConfigSyncMock.mockReturnValue({ execution: { unix_user_mode: 'strict' } } as never);
-    // `new UsersRepository(db)` — the implementation must be constructible.
-    usersRepositoryMock.mockImplementation(function mockRepo() {
-      return { findById: vi.fn(async () => ({ unix_username: 'alice' })) };
-    } as never);
-    const { app } = makeApp();
-    const result = await service(app).create({ authJson: VALID_AUTH_JSON }, AUTH_PARAMS);
-    expect(result.status).toBe('authenticated');
-    expect(writeCodexAuthViaExecutorMock).toHaveBeenCalledWith(expect.any(String), 'alice', {
-      reportedUnixUser: 'alice',
-      userId: 'user-1',
-    });
-  });
-
-  it('strict mode without a unix_username rejects before writing', async () => {
-    loadConfigSyncMock.mockReturnValue({ execution: { unix_user_mode: 'strict' } } as never);
-    usersRepositoryMock.mockImplementation(function mockRepo() {
-      return { findById: vi.fn(async () => ({ unix_username: null })) };
-    } as never);
-    const { app } = makeApp();
-    await expect(service(app).create({ authJson: VALID_AUTH_JSON }, AUTH_PARAMS)).rejects.toThrow(
-      /Unix account/
-    );
-    expect(writeCodexAuthViaExecutorMock).not.toHaveBeenCalled();
-  });
-
-  it('insulated mode targets the configured executor user', async () => {
-    loadConfigSyncMock.mockReturnValue({
-      execution: { unix_user_mode: 'insulated', executor_unix_user: 'agor_executor' },
-    } as never);
-    const { app } = makeApp();
-    const result = await service(app).create({ authJson: VALID_AUTH_JSON }, AUTH_PARAMS);
-    expect(result.status).toBe('authenticated');
-    expect(writeCodexAuthViaExecutorMock).toHaveBeenCalledWith(
-      expect.any(String),
-      'agor_executor',
-      {
-        reportedUnixUser: 'agor_executor',
-        userId: 'user-1',
-      }
-    );
   });
 });

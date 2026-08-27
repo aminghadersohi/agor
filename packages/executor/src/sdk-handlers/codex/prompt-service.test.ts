@@ -459,7 +459,7 @@ describe('CodexPromptService - prompt flow client initialization', () => {
       expectedApps: undefined,
     },
   ])(
-    'builds session config for $name permissions and uses the configured accessor',
+    'builds policy-enforced session config for $name permissions and uses the configured accessor',
     async ({
       persistedPermissionMode,
       promptPermissionMode,
@@ -504,7 +504,7 @@ describe('CodexPromptService - prompt flow client initialization', () => {
           ...(persistedPermissionMode ? { mode: persistedPermissionMode } : {}),
           codex: codexPermissions,
         },
-        model_config: { effort: 'medium' },
+        model_config: { model: 'gpt-5.4', effort: 'medium' },
         mcp_token: 'test-token',
       });
       mockSessionsRepo.update.mockResolvedValue(undefined);
@@ -533,6 +533,7 @@ describe('CodexPromptService - prompt flow client initialization', () => {
       expect(mockInstanceCount).toBe(1);
       expect(mockInstanceConfigs).toEqual([
         {
+          features: { goals: false, multi_agent: false },
           model_instructions_file: '/tmp/agor-codex-instructions-flow.md',
           mcp_servers: {
             agor: {
@@ -547,6 +548,7 @@ describe('CodexPromptService - prompt flow client initialization', () => {
         threadId: 'mock-thread-id',
       });
       expect(mockStartThreadOptions.at(-1)).toMatchObject({
+        model: 'gpt-5.4',
         modelReasoningEffort: 'medium',
       });
     }
@@ -709,7 +711,7 @@ describe('CodexPromptService - prompt flow client initialization', () => {
           mockStreamFailure = new Error('event iterator failed after thread capture');
 
           await expect(tool.executePromptWithStreaming(sessionId, 'continue')).rejects.toThrow(
-            'event iterator failed after thread capture'
+            'The Codex turn was interrupted before completion. Retry the prompt.'
           );
         }
       );
@@ -1295,7 +1297,7 @@ describe('CodexPromptService - tool payload mapping', () => {
     });
   });
 
-  it('preserves MCP error message on failure', () => {
+  it('sanitizes MCP provider error messages on failure', () => {
     const service = new CodexPromptService(
       mockMessagesRepo,
       mockSessionsRepo,
@@ -1325,9 +1327,52 @@ describe('CodexPromptService - tool payload mapping', () => {
       id: 'mcp-2',
       name: 'agor.agor_execute_tool',
       input: {},
-      output: 'permission denied',
+      output:
+        'The MCP operation failed. Retry, then ask an administrator to review the secure operational event if it continues.',
       status: 'failed',
     });
+  });
+
+  it('does not invoke or retain hostile MCP error metadata getters', () => {
+    const service = new CodexPromptService(
+      mockMessagesRepo,
+      mockSessionsRepo,
+      mockSessionMCPServerRepo,
+      mockBranchesRepo,
+      undefined,
+      'test-api-key',
+      mockDb
+    );
+    const sentinel = 'SENTINEL_CODEX_METADATA_GETTER';
+    const providerError = new Error(sentinel);
+    Object.defineProperties(providerError, {
+      code: {
+        get() {
+          throw new Error(sentinel);
+        },
+      },
+      name: {
+        get() {
+          throw new Error(sentinel);
+        },
+      },
+    });
+
+    const toolUse = (service as any).itemToToolUse(
+      {
+        id: 'mcp-hostile',
+        type: 'mcp_tool_call',
+        server: 'agor',
+        tool: 'agor_execute_tool',
+        arguments: {},
+        error: providerError,
+        status: 'failed',
+      },
+      'completed'
+    );
+
+    expect(JSON.stringify(toolUse)).not.toContain(sentinel);
+    expect(toolUse.output).toContain('The MCP operation failed');
   });
 
   it('falls back to structured_content when MCP content blocks are empty', () => {
@@ -1440,7 +1485,7 @@ describe('CodexPromptService - tool payload mapping', () => {
           // no-op
         }
       })()
-    ).rejects.toThrow('Codex stream error: stream exploded');
+    ).rejects.toThrow('The MCP operation failed');
 
     expect(mockSessionsRepo.update).toHaveBeenCalledWith('session-1', {
       sdk_session_id: null,
@@ -1539,6 +1584,36 @@ describe('CodexPromptService - event_msg terminal handling (issue #1749)', () =>
     delete process.env.OPENAI_BASE_URL;
     vi.clearAllMocks();
     appServerMocks.forkCodexThreadViaAppServer.mockReset();
+  });
+
+  it('projects turn completion accounting without raw SDK extension metadata', async () => {
+    const { service } = await makeInitializedStreamingService('existing-thread-id');
+    const sentinel = 'SENTINEL_CODEX_COMPLETION_METADATA';
+    mockStreamEvents = [
+      {
+        type: 'turn.completed',
+        usage: {
+          input_tokens: 8,
+          cached_input_tokens: 2,
+          output_tokens: 3,
+          reasoning_output_tokens: 1,
+        },
+        metadata: { exception: new Error(sentinel) },
+      },
+    ];
+
+    const completed = (await drain(service)).find((event) => event.type === 'complete');
+
+    expect(completed?.rawSdkEvent).toEqual({
+      type: 'turn.completed',
+      usage: {
+        input_tokens: 8,
+        cached_input_tokens: 2,
+        output_tokens: 3,
+        reasoning_output_tokens: 1,
+      },
+    });
+    expect(JSON.stringify(completed)).not.toContain(sentinel);
   });
 
   it('surfaces event_msg agent_message via the actual "message" field (real rollout shape)', async () => {
@@ -1834,7 +1909,7 @@ describe('CodexPromptService - event_msg terminal handling (issue #1749)', () =>
     });
   });
 
-  it('ignores reconnect progress until turn.completed and preserves the existing thread', async () => {
+  it('treats the SDK-defined fatal error event as authoritative without parsing reconnect prose', async () => {
     const { service } = await makeInitializedStreamingService('existing-thread-id');
 
     const reconnectMessage =
@@ -1846,40 +1921,80 @@ describe('CodexPromptService - event_msg terminal handling (issue #1749)', () =>
         usage: { input_tokens: 5, cached_input_tokens: 0, output_tokens: 2 },
       },
     ];
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    const emitted: Array<Record<string, unknown>> = [];
-    for await (const event of service.promptSessionStreaming('session-1' as any, 'go')) {
-      emitted.push(event as Record<string, unknown>);
-    }
-
-    expect(emitted.some((event) => event.type === 'complete')).toBe(true);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining(reconnectMessage));
+    await expect(drain(service)).rejects.toThrow('The MCP operation failed');
     expect(mockSessionsRepo.update).not.toHaveBeenCalled();
-    warn.mockRestore();
   });
 
   it.each([
     ['fresh', null],
     ['established', 'existing-thread-id'],
   ])(
-    'lets turn.failed remain authoritative after reconnect progress for a %s thread',
+    'classifies a real SDK-shaped turn.failed as unknown for a %s thread',
     async (_threadKind, sdkSessionId) => {
       const { service } = await makeInitializedStreamingService(sdkSessionId);
 
       mockStreamEvents = [
-        { type: 'error', message: 'Reconnecting... 2/5' },
         { type: 'turn.failed', error: { message: 'provider rejected the turn' } },
       ];
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-      await expect(drain(service)).rejects.toThrow('provider rejected the turn');
+      await expect(drain(service)).rejects.toThrow('The MCP operation failed');
 
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Reconnecting... 2/5'));
       expect(mockSessionsRepo.update).not.toHaveBeenCalled();
-      warn.mockRestore();
     }
   );
+
+  it('never logs or returns a secret-bearing runtime provider exception', async () => {
+    const { service } = await makeInitializedStreamingService('existing-thread-id');
+    const sentinel = 'SENTINEL_CODEX_RUNTIME_PROVIDER_4e2b';
+    mockStreamEvents = [
+      {
+        type: 'turn.failed',
+        error: { message: `TLS failure for https://${sentinel}.example.test` },
+      },
+    ];
+    const spies = [
+      vi.spyOn(console, 'log').mockImplementation(() => undefined),
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined),
+      vi.spyOn(console, 'error').mockImplementation(() => undefined),
+      vi.spyOn(console, 'debug').mockImplementation(() => undefined),
+    ];
+    try {
+      const failure = await drain(service).catch((error: unknown) => error);
+      expect(String(failure)).not.toContain(sentinel);
+      expect(JSON.stringify(spies.flatMap((spy) => spy.mock.calls))).not.toContain(sentinel);
+      expect(JSON.stringify(mockSessionsRepo.update.mock.calls)).not.toContain(sentinel);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
+  it('does not claim reauthentication authority from arbitrary ThreadError prose', async () => {
+    const { service } = await makeInitializedStreamingService('existing-thread-id');
+    mockStreamEvents = [
+      {
+        type: 'turn.failed',
+        error: { message: 'provider_rejected SENTINEL_REJECTED_BODY' },
+      },
+    ];
+
+    const failure = await drain(service).catch((error: unknown) => error);
+    expect(String(failure)).toContain('The MCP operation failed');
+    expect(String(failure)).not.toContain('SENTINEL_REJECTED_BODY');
+    expect(String(failure)).not.toContain('sign in again');
+  });
+
+  it('reports missing local Codex authentication as configuration required', async () => {
+    const { service } = await makeInitializedStreamingService('existing-thread-id');
+    (service as any).apiKey = '';
+    (service as any).useNativeAuth = false;
+    mockStreamEvents = [
+      { type: 'turn.failed', error: { message: 'SENTINEL_MISSING_AUTH_PROVIDER_BODY' } },
+    ];
+
+    await expect(drain(service)).rejects.toThrow(
+      'This MCP authentication configuration is incomplete. Review the saved server settings and retry.'
+    );
+  });
 
   it.each([
     ['reconnecting... 2/5', 'lowercase'],
@@ -1891,7 +2006,7 @@ describe('CodexPromptService - event_msg terminal handling (issue #1749)', () =>
 
     mockStreamEvents = [{ type: 'error', message }];
 
-    await expect(drain(service)).rejects.toThrow(`Codex stream error: ${message}`);
+    await expect(drain(service)).rejects.toThrow('The MCP operation failed');
 
     expect(mockSessionsRepo.update).not.toHaveBeenCalled();
   });
@@ -1912,7 +2027,7 @@ describe('CodexPromptService - event_msg terminal handling (issue #1749)', () =>
       ];
 
       await expect(drain(service)).rejects.toThrow(
-        'Codex stream ended without a terminal completion event'
+        'Codex ended the turn without a completion event'
       );
 
       if (sdkSessionId === null) {
@@ -1956,8 +2071,8 @@ describe('CodexPromptService - event_msg terminal handling (issue #1749)', () =>
 
       await expect(drain(service)).rejects.toThrow(
         failurePoint === 'before event iteration'
-          ? 'runStreamed aborted unexpectedly'
-          : 'event iterator failed'
+          ? 'Codex could not start the turn. Retry the prompt.'
+          : 'The Codex turn was interrupted before completion. Retry the prompt.'
       );
 
       if (sdkSessionId === null) {
@@ -2186,6 +2301,67 @@ describe('CodexPromptService - buildMcpServersConfig', () => {
     });
   });
 
+  it('never logs a resolved remote URL even when Codex MCP debugging is enabled', async () => {
+    const secretUrl = 'https://example.test/mcp?credential=do-not-log';
+    mcpScopingMocks.getMcpServersForSession.mockResolvedValue([
+      {
+        server: {
+          name: 'remote-secret-url',
+          transport: 'http',
+          url: secretUrl,
+        },
+      },
+    ]);
+    const previous = process.env.AGOR_DEBUG_CODEX;
+    process.env.AGOR_DEBUG_CODEX = '1';
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+    try {
+      await (makeService() as any).buildMcpServersConfig(
+        '019e3700-aaaa-bbbb-cccc-dddddddddddd',
+        undefined,
+        { sessionOwnerId }
+      );
+      expect(JSON.stringify(debug.mock.calls)).not.toContain(secretUrl);
+      expect(JSON.stringify(debug.mock.calls)).not.toContain('do-not-log');
+    } finally {
+      debug.mockRestore();
+      if (previous === undefined) delete process.env.AGOR_DEBUG_CODEX;
+      else process.env.AGOR_DEBUG_CODEX = previous;
+    }
+  });
+
+  it('never logs secret-bearing auth resolution exceptions', async () => {
+    const sentinel = 'SENTINEL_AUTH_EXCEPTION_3c90';
+    mcpScopingMocks.getMcpServersForSession.mockResolvedValue([
+      {
+        server: {
+          mcp_server_id: '01900000-0000-7000-8000-000000000091',
+          name: 'remote-auth-error',
+          transport: 'http',
+          url: 'https://example.test/mcp',
+          auth: { type: 'bearer', token: 'configured' },
+        },
+      },
+    ]);
+    mcpAuthMocks.resolveMCPAuthHeaders.mockRejectedValueOnce(
+      new Error(`provider endpoint included ${sentinel}`)
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await (makeService() as any).buildMcpServersConfig(
+        '019e3700-aaaa-bbbb-cccc-dddddddddddd',
+        undefined,
+        { sessionOwnerId }
+      );
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(sentinel);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('Auth header resolution failed server_id=')
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('passes custom HTTP headers through Codex env_http_headers without inlining secrets', async () => {
     mcpScopingMocks.getMcpServersForSession.mockResolvedValue([
       {
@@ -2381,5 +2557,116 @@ describe('CodexPromptService - buildMcpServersConfig', () => {
       expect(servers[name].required).toBeUndefined();
       expect(servers[name].startup_timeout_ms).toBeUndefined();
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MCP `tool_permissions` enforcement
+//
+// `disabled_tools` is the ONLY thing standing between the model and a switched-
+// off tool on Codex. Every block above asserts Agor also emits
+// `default_tools_approval_mode: "approve"`, which auto-approves every MCP tool
+// call — so there is no prompt to fall back on, and no `canUseTool` equivalent:
+// Codex resolves the config in native code and Agor never sees the call.
+//
+// That makes an omission here silent and total. It is also easy to introduce:
+// the config is assembled in two separate transport branches, and the HTTP one
+// carries essentially every marketplace server (the catalog is remote
+// endpoints), so a `disabled_tools` line dropped from that branch alone would
+// leave stdio coverage intact and look fine.
+//
+// These cases therefore drive the real `buildMcpServersConfig` per transport.
+// The rest of the suite stubs that method out, which is exactly why this was
+// uncovered. Each case pairs the denied tool with an allowed one, so a passing
+// assertion means the filter is selective rather than empty or total.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('CodexPromptService - MCP tool_permissions', () => {
+  const sessionOwnerId = '019e3700-owner-owner-owner-owner000001';
+  const sessionId = '019e3700-aaaa-bbbb-cccc-dddddddddddd';
+  const mockMcpServerRepo = { findById: vi.fn() } as any;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mcpScopingMocks.getMcpServersForSession.mockResolvedValue([]);
+    mcpAuthMocks.resolveMCPAuthHeaders.mockResolvedValue(null);
+    configMocks.getDaemonUrl.mockResolvedValue('http://localhost:3030');
+  });
+
+  const makeService = () =>
+    new CodexPromptService(
+      mockMessagesRepo,
+      mockSessionsRepo,
+      mockSessionMCPServerRepo,
+      mockBranchesRepo,
+      undefined,
+      'test-api-key',
+      mockMcpServerRepo
+    );
+
+  const build = async () =>
+    (await (makeService() as any).buildMcpServersConfig(sessionId, undefined, {
+      sessionOwnerId,
+    })) as { servers: Record<string, any>; total: number };
+
+  /** Same server, same permissions, addressed over each transport Codex accepts. */
+  const gatedServer = (transport: 'stdio' | 'http' | 'sse') => ({
+    server: {
+      name: 'sentry',
+      transport,
+      ...(transport === 'stdio'
+        ? { command: 'npx', args: ['-y', 'sentry-mcp'] }
+        : { url: 'https://mcp.sentry.dev/mcp' }),
+      tool_permissions: { delete_project: 'deny', list_issues: 'allow' },
+    },
+  });
+
+  for (const transport of ['stdio', 'http', 'sse'] as const) {
+    it(`disables a denied tool on a ${transport} server, leaving allowed tools reachable`, async () => {
+      mcpScopingMocks.getMcpServersForSession.mockResolvedValue([gatedServer(transport)]);
+
+      const { servers } = await build();
+
+      expect(servers.sentry.disabled_tools).toEqual(['delete_project']);
+      expect(servers.sentry.disabled_tools).not.toContain('list_issues');
+      // The gate has to coexist with the auto-approval that makes it load-bearing.
+      expect(servers.sentry.default_tools_approval_mode).toBe('approve');
+    });
+  }
+
+  it('fails closed on "ask", because Codex runs headless with no approval channel', async () => {
+    mcpScopingMocks.getMcpServersForSession.mockResolvedValue([
+      {
+        server: {
+          name: 'sentry',
+          transport: 'http',
+          url: 'https://mcp.sentry.dev/mcp',
+          tool_permissions: { update_issue: 'ask', list_issues: 'allow' },
+        },
+      },
+    ]);
+
+    const { servers } = await build();
+
+    // An unanswerable "ask" must collapse onto deny, never onto allow.
+    expect(servers.sentry.disabled_tools).toEqual(['update_issue']);
+  });
+
+  it('leaves disabled_tools unset when a server gates nothing', async () => {
+    mcpScopingMocks.getMcpServersForSession.mockResolvedValue([
+      {
+        server: {
+          name: 'sentry',
+          transport: 'http',
+          url: 'https://mcp.sentry.dev/mcp',
+          tool_permissions: { list_issues: 'allow' },
+        },
+      },
+    ]);
+
+    const { servers } = await build();
+
+    // Guards the other direction: an empty list must not be emitted as a filter
+    // Codex could read as "disable everything", and must not appear as noise.
+    expect(servers.sentry.disabled_tools).toBeUndefined();
   });
 });

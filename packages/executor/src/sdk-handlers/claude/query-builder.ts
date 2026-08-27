@@ -23,6 +23,7 @@ import {
   getMcpServersForSession,
   listMcpToolsWithPermission,
   PERMISSIONS_BLOCKED_WITHOUT_PROMPT,
+  sanitizeMCPExternalError,
 } from '@agor/core/mcp';
 import { getDaemonUrl } from '../../config.js';
 import type {
@@ -37,6 +38,7 @@ import type {
 } from '../../db/feathers-repositories.js';
 import type { PermissionService } from '../../permissions/permission-service.js';
 import type { MCPServersConfig, SessionID, TaskID } from '../../types.js';
+import { resolveExecutorWorkingDirectory } from '../../user-runtime-paths.js';
 import { resolveContextUserId } from '../base/context-user.js';
 import type { MessagesService, SessionsPatchClient, TasksService } from '../base/index.js';
 import { createMcpToolPermissionHook } from '../base/mcp-tool-permission-hook.js';
@@ -150,7 +152,7 @@ export async function setupQuery(
     try {
       const branch = await deps.branchesRepo.findById(session.branch_id);
       if (branch) {
-        cwd = branch.path;
+        cwd = resolveExecutorWorkingDirectory(branch.path);
       } else {
         console.warn(
           `⚠️  Session ${sessionId} references non-existent branch ${session.branch_id}, using process.cwd(): ${cwd}`
@@ -261,7 +263,7 @@ export async function setupQuery(
   // `os.tmpdir()` resolves to the shared, sticky-bit `/tmp` (the daemon runs with
   // TMPDIR stripped), so every session with identical advisor settings targets the
   // SAME path. The first writer owns it mode 0600; later sessions — or other Unix
-  // users under insulated/strict isolation — then fail to open it with
+  // users in separate execution homes — then fail to open it with
   // `EACCES ... claude-settings-*.json`, crashing the CLI before the first message.
   // `--advisor <model>` is the CLI's dedicated, server-validated flag (Claude Code
   // >= 2.1.175) and writes no settings file, so it sidesteps the collision entirely.
@@ -338,8 +340,8 @@ export async function setupQuery(
               break;
             }
           }
-        } catch (error) {
-          console.warn('⚠️  Failed to check MCP server timestamps:', error);
+        } catch {
+          console.warn('⚠️  Failed to check MCP server timestamps');
         }
       }
 
@@ -463,8 +465,8 @@ export async function setupQuery(
         // Convert to SDK format
         const mcpConfig: MCPServersConfig = {};
         const deniedTools: string[] = [];
-        const missingAuthServers: string[] = [];
-        const unresolvedAuthServers: string[] = [];
+        const missingAuthServerIds: string[] = [];
+        const unresolvedAuthServerIds: string[] = [];
 
         for (const { server } of attachableServers) {
           // Infer transport if missing (backwards compatibility)
@@ -501,12 +503,15 @@ export async function setupQuery(
             }
             if (missingRequiredAuth) {
               // Auth-backed remote server but no usable token. Track one concise summary below.
-              missingAuthServers.push(server.name);
+              missingAuthServerIds.push(server.mcp_server_id);
               canAlwaysLoad = false;
             }
           } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            unresolvedAuthServers.push(`${server.name}: ${message}`);
+            const safe = sanitizeMCPExternalError(error, { stage: 'runtime' });
+            console.warn(
+              `   ⚠️  Failed to resolve MCP auth server_id=${server.mcp_server_id} category=${safe.category} type=${safe.diagnostic.type}`
+            );
+            unresolvedAuthServerIds.push(server.mcp_server_id);
             canAlwaysLoad = false;
           }
 
@@ -541,16 +546,16 @@ export async function setupQuery(
           ...(queryOptions.mcpServers || {}),
           ...mcpConfig,
         };
-        if (missingAuthServers.length > 0) {
+        if (missingAuthServerIds.length > 0) {
           console.warn(
-            `   ⚠️  ${missingAuthServers.length} MCP server(s) have configured auth but no valid token: ` +
-              `${formatListForLog(missingAuthServers)}. Check Settings → MCP Servers.`
+            `   ⚠️  ${missingAuthServerIds.length} MCP server(s) have configured auth but no valid token; ` +
+              `server_ids=${formatListForLog(missingAuthServerIds)}. Check Settings → MCP Servers.`
           );
         }
-        if (unresolvedAuthServers.length > 0) {
+        if (unresolvedAuthServerIds.length > 0) {
           console.warn(
-            `   ⚠️  Failed to resolve MCP auth for ${unresolvedAuthServers.length} server(s): ` +
-              formatListForLog(unresolvedAuthServers, 3)
+            `   ⚠️  Failed to resolve MCP auth for ${unresolvedAuthServerIds.length} server(s); ` +
+              `server_ids=${formatListForLog(unresolvedAuthServerIds, 3)}`
           );
         }
         if (deniedTools.length > 0) {
@@ -561,7 +566,10 @@ export async function setupQuery(
         }
       }
     } catch (error) {
-      console.warn('⚠️  Failed to fetch MCP servers for session:', error);
+      const safe = sanitizeMCPExternalError(error, { stage: 'runtime' });
+      console.warn(
+        `⚠️  Failed to fetch MCP servers for session category=${safe.category} type=${safe.diagnostic.type}`
+      );
       // Continue without MCP servers - non-fatal error
     }
   }
@@ -641,11 +649,11 @@ export async function setupQuery(
     });
   } catch (syncError) {
     // This is rare - SDK usually returns AsyncGenerator that throws later
-    console.error(`❌ CRITICAL: query() threw synchronous error (very unusual):`, syncError);
-    console.error(`   CWD: ${cwd}`);
-    console.error(`   API key set: ${deps.apiKey ? 'YES' : 'NO'}`);
-    console.error(`   Resume session: ${queryOptions.resume || 'none (fresh session)'}`);
-    throw syncError;
+    const safe = sanitizeMCPExternalError(syncError, { stage: 'runtime' });
+    console.error(
+      `❌ CRITICAL: query() threw synchronously category=${safe.category} type=${safe.diagnostic.type}`
+    );
+    throw new Error(safe.message);
   }
 
   // Store stderr buffer getter for error reporting

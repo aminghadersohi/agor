@@ -5,9 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  clearTrackedExecutorGauge,
   containExecutorProcess,
   getTrackedExecutor,
+  getTrackedExecutorCount,
   markExecutorProcessExited,
+  reconcileTrackedExecutorGauge,
   releaseExecutorContainmentFenceIntent,
   reserveExecutorContainmentFence,
   retainExecutorContainmentFence,
@@ -15,6 +18,7 @@ import {
   untrackExecutorProcess,
   verifyExecutorContainmentFence,
 } from './executor-tracking.js';
+import { NOOP_METRICS } from './metrics/noop.js';
 
 describe.runIf(process.platform === 'linux' || process.platform === 'darwin')(
   'executor process-group containment',
@@ -43,39 +47,78 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')(
       }
     });
 
-    it('waits through transient strict-mode EPERM after cooperative quiescence', async () => {
+    it('initializes and reconciles an absolute per-daemon running-executor gauge', () => {
+      const gauge = vi.fn();
+      const owner = {
+        get: (name: string) =>
+          name === 'metrics'
+            ? {
+                ...NOOP_METRICS,
+                enabled: true,
+                gauge,
+              }
+            : undefined,
+      };
+      reconcileTrackedExecutorGauge(owner);
+      expect(gauge).toHaveBeenLastCalledWith('executors.running', 0, {
+        mode: 'local',
+        scope: 'process_group',
+      });
+
+      trackExecutorProcess(
+        { sessionId: 'session-gauge', taskId: 'task-gauge', pid: process.pid },
+        owner
+      );
+      expect(getTrackedExecutorCount(owner)).toBe(1);
+      expect(gauge).toHaveBeenLastCalledWith('executors.running', 1, {
+        mode: 'local',
+        scope: 'process_group',
+      });
+
+      // Leader exit is not absence proof: descendants may still be alive in
+      // the tracked process group, so the gauge remains one until settlement.
+      markExecutorProcessExited('session-gauge', process.pid, owner);
+      expect(getTrackedExecutorCount(owner)).toBe(1);
+      untrackExecutorProcess('session-gauge', 'task-gauge', owner);
+      expect(getTrackedExecutorCount(owner)).toBe(0);
+      expect(gauge).toHaveBeenLastCalledWith('executors.running', 0, {
+        mode: 'local',
+        scope: 'process_group',
+      });
+
+      clearTrackedExecutorGauge(owner);
+      expect(gauge).toHaveBeenLastCalledWith('executors.running', 0, {
+        mode: 'local',
+        scope: 'process_group',
+      });
+    });
+
+    it('waits through transient inspection uncertainty after cooperative quiescence', async () => {
       const owner = {};
       const inspectGroupForTest = vi
-        .fn<
-          (
-            pgid: number,
-            signal?: 0 | NodeJS.Signals,
-            asUser?: string
-          ) => 'present' | 'absent' | 'unverified'
-        >()
+        .fn<(pgid: number, signal?: 0 | NodeJS.Signals) => 'present' | 'absent' | 'unverified'>()
         .mockReturnValueOnce('unverified')
         .mockReturnValue('absent');
       trackExecutorProcess(
         {
-          sessionId: 'session-strict-wrapper',
-          taskId: 'task-strict-wrapper',
+          sessionId: 'session-wrapper',
+          taskId: 'task-wrapper',
           pid: process.pid,
-          asUser: 'alice',
         },
         owner
       );
       try {
         await expect(
           containExecutorProcess(
-            'session-strict-wrapper',
-            'task-strict-wrapper',
+            'session-wrapper',
+            'task-wrapper',
             { preSignalGraceMs: 25, pollMs: 1, inspectGroupForTest },
             owner
           )
         ).resolves.toEqual({ status: 'verified_absent' });
         expect(inspectGroupForTest).toHaveBeenCalledTimes(2);
       } finally {
-        untrackExecutorProcess('session-strict-wrapper', 'task-strict-wrapper', owner);
+        untrackExecutorProcess('session-wrapper', 'task-wrapper', owner);
       }
     });
 
@@ -137,28 +180,6 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')(
           process.kill(-leader.pid, 'SIGKILL');
         } catch {}
         untrackExecutorProcess('session-orphan');
-      }
-    });
-
-    it('fails closed when cross-UID signaling is unavailable', async () => {
-      const leader = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
-        detached: true,
-        stdio: 'ignore',
-      });
-      if (!leader.pid) throw new Error('leader PID missing');
-      trackExecutorProcess({
-        sessionId: 'session-uid',
-        taskId: 'task-uid',
-        pid: leader.pid,
-        asUser: 'agor_executor',
-      });
-      try {
-        await expect(containExecutorProcess('session-uid', 'task-uid')).resolves.toMatchObject({
-          status: 'unverified',
-        });
-      } finally {
-        process.kill(-leader.pid, 'SIGKILL');
-        untrackExecutorProcess('session-uid');
       }
     });
 

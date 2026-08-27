@@ -11,6 +11,7 @@ import {
   type TenantScopeAwareDatabase,
   UserMCPOAuthTokenRepository,
 } from '@agor/core/db';
+import { assertMcpGrantSubjectEntitled } from '@agor/core/tools/mcp/grant-entitlement';
 import type { OAuthTokenResponse } from '@agor/core/tools/mcp/oauth-mcp-transport';
 import { resolveTokenExpiry } from '@agor/core/tools/mcp/oauth-token-expiry';
 import type { MCPServerID, UserID } from '@agor/core/types';
@@ -81,6 +82,22 @@ export async function persistOAuthToken(
     throw new Error('Per-user OAuth flow is missing its user binding');
   }
 
+  // The moment the grant becomes durable, and so the moment the subject's
+  // standing has to hold. Enforced here rather than at the endpoints that reach
+  // it: the OAuth callback is an unauthenticated browser redirect, and a check
+  // on one endpoint's caller says nothing about the next endpoint, an aliased
+  // import, or a wrapper. Everything that persists a grant this way arrives at
+  // this line.
+  //
+  // The flow's initiator is the subject even for a `shared` grant, which keeps
+  // the admin floor `oauth-start` applies. See `assertMcpGrantSubjectEntitled`
+  // for the residual window between this check and the write.
+  await assertMcpGrantSubjectEntitled({
+    db,
+    subjectUserId: pendingFlow.userId ?? null,
+    oauthMode,
+  });
+
   await userTokenRepo.saveToken(tokenUserId, pendingFlow.mcpServerId as MCPServerID, {
     accessToken: tokenResponse.access_token,
     expiresAt: expiry.expiresAt, // Date | null — null means "unknown"
@@ -92,5 +109,8 @@ export async function persistOAuthToken(
     grantBinding: pendingFlow.grantBinding,
   });
 
-  console.log(`[${logPrefix}] OAuth token persisted mode=${oauthMode} expiry=${expiry.source}`);
+  console.log(
+    `[${logPrefix}] OAuth token persisted mode=${oauthMode} ` +
+      `binding_version=${pendingFlow.grantBinding?.version ?? 'legacy_unbound'} expiry=${expiry.source}`
+  );
 }

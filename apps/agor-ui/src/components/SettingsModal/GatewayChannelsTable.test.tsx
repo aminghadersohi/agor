@@ -1,8 +1,9 @@
 import type { AgorClient, Branch, GatewayChannel, MCPServer, User } from '@agor-live/client';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { App as AntdApp } from 'antd';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
+import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { GatewayChannelsTable } from './GatewayChannelsTable';
 
 // The real branch/user pickers are antd v6 `Select`s; opening their dropdowns in
@@ -115,6 +116,7 @@ function makeUser(overrides: Partial<User> = {}): User {
     user_id: 'user-1',
     name: 'Ada Lovelace',
     email: 'ada@example.com',
+    role: 'admin',
     ...overrides,
   } as unknown as User;
 }
@@ -140,20 +142,21 @@ function makeSlackChannel(): GatewayChannel {
  * and the `gateway-channels/app-info` resolution fired on edit open.
  */
 function makeClient(testResult?: unknown, appInfo?: unknown) {
-  const channelCreate = vi.fn().mockResolvedValue({});
+  const channelCreate = vi.fn().mockResolvedValue({ id: 'channel-discord' });
+  const channelPatch = vi.fn().mockResolvedValue({ id: 'channel-discord' });
   const testCreate = vi
     .fn()
     .mockResolvedValue(testResult ?? { ok: true, failures: [], notVerifiable: [] });
   const appInfoCreate = vi.fn().mockResolvedValue(appInfo ?? { appId: null, teamId: null });
   const client = {
     service: (name: string) => {
-      if (name === 'gateway-channels') return { create: channelCreate };
+      if (name === 'gateway-channels') return { create: channelCreate, patch: channelPatch };
       if (name === 'gateway-channels/test') return { create: testCreate };
       if (name === 'gateway-channels/app-info') return { create: appInfoCreate };
       return { create: vi.fn(), get: vi.fn() };
     },
   } as unknown as AgorClient;
-  return { client, channelCreate, testCreate, appInfoCreate };
+  return { client, channelCreate, channelPatch, testCreate, appInfoCreate };
 }
 
 function renderTable(client: AgorClient | null) {
@@ -166,6 +169,7 @@ function renderTable(client: AgorClient | null) {
       branchById={new Map([[branch.branch_id, branch]])}
       userById={new Map([[user.user_id, user]])}
       mcpServerById={new Map<string, MCPServer>()}
+      currentUser={user}
     />
   );
 }
@@ -187,8 +191,41 @@ function getButton(text: RegExp): HTMLButtonElement {
 function clickButton(text: RegExp) {
   fireEvent.click(getButton(text));
 }
-/** Drain microtasks so a Form.validateFields()-gated step transition settles. */
+
+const ASYNC = { timeout: 10_000 };
+
+/** Wait for an async validation-gated wizard transition without rescanning the form DOM. */
+async function waitForStep(title: string) {
+  await waitFor(() => {
+    const currentTitle = document.querySelector(
+      '.ant-steps-item-process .ant-steps-item-title'
+    )?.textContent;
+    expect(currentTitle).toBe(title);
+  }, ASYNC);
+}
+
+/** Wait until switching channel type has committed the destination wizard structure. */
+async function waitForAvailableStep(title: string) {
+  await waitFor(() => {
+    const titles = Array.from(document.querySelectorAll('.ant-steps-item-title')).map(
+      (stepTitle) => stepTitle.textContent
+    );
+    expect(titles).toContain(title);
+  }, ASYNC);
+}
+
+/** Yield one event-loop turn for non-form fire-and-forget work. */
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/**
+ * Text of the rendered scope/event Tags. Scoped to `.ant-tag` on purpose: the
+ * Options step's explainer prose names `app_mention` in a `<code>`, so a bare
+ * `queryByText` would match the copy instead of the derived list — passing the
+ * "absent before the surface is enabled" check for the wrong reason.
+ */
+function scopeTagTexts(): string[] {
+  return Array.from(document.querySelectorAll('.ant-tag')).map((el) => el.textContent ?? '');
+}
 
 /**
  * Open the (real) channel-type antd Select and pick a platform by its option
@@ -222,14 +259,14 @@ async function advanceToOptions() {
 async function advanceToCreateAppStep() {
   await advanceToOptions();
   clickButton(/^Continue$/);
-  await flush();
+  await waitForStep('Create app');
 }
 
 /** Advance all the way to the final "Tokens & test" step (step 3). */
 async function advanceToTokensStep() {
   await advanceToCreateAppStep();
   clickButton(/^Continue$/);
-  await flush();
+  await waitForStep('Tokens & test');
 }
 
 describe('GatewayChannelsTable Slack create wizard', () => {
@@ -275,34 +312,40 @@ describe('GatewayChannelsTable Slack create wizard', () => {
 
     // Slack aligns users by default, so no run-as user is required to advance.
     clickButton(/^Continue$/);
-    await flush();
+    await waitForStep('Create app');
     expect(getButton(/Copy manifest/)).toBeInTheDocument();
     clickButton(/^Continue$/);
-    await flush();
+    await waitForStep('Tokens & test');
     expect(getButton(/Create channel/)).toBeInTheDocument();
     expect(queryButton(/^Continue$/)).toBeUndefined();
     expect(screen.getByPlaceholderText('xoxb-...')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('xapp-...')).toBeInTheDocument();
   });
 
-  it('updates the manifest preview and scope list as surfaces change', async () => {
+  it('updates the derived scope/event list as surfaces change, without the raw manifest', async () => {
     renderTable(null);
     clickButton(/Add Channel/);
     // Surfaces live on the Options step (step 1).
     await advanceToOptions();
 
+    // The Options step configures; the raw JSON manifest is reserved for the
+    // "Create app" step, where it has a working copy button (issue #2448).
+    const manifestBlocks = Array.from(document.querySelectorAll('pre')).filter((el) =>
+      el.textContent?.includes('display_information')
+    );
+    expect(manifestBlocks).toHaveLength(1);
+    expect(manifestBlocks[0]).not.toBeVisible();
+
     // Public-channel scopes/events are absent until the surface is enabled.
-    expect(screen.queryByText('channels:history')).not.toBeInTheDocument();
-    expect(screen.queryByText('app_mention')).not.toBeInTheDocument();
+    expect(scopeTagTexts()).not.toContain('channels:history');
+    expect(scopeTagTexts()).not.toContain('app_mention');
 
     fireEvent.click(screen.getByText('Public channels'));
 
     // Now they appear in the derived scope/event list (Form.useWatch flush).
-    await waitFor(() =>
-      expect(screen.queryAllByText('channels:history').length).toBeGreaterThan(0)
-    );
-    expect(screen.queryAllByText('app_mentions:read').length).toBeGreaterThan(0);
-    expect(screen.queryAllByText('app_mention').length).toBeGreaterThan(0);
+    await waitFor(() => expect(scopeTagTexts()).toContain('channels:history'));
+    expect(scopeTagTexts()).toContain('app_mentions:read');
+    expect(scopeTagTexts()).toContain('app_mention');
   });
 
   it('runs the connection probe and renders team/bot/notVerifiable honestly', async () => {
@@ -367,6 +410,51 @@ describe('GatewayChannelsTable Slack create wizard', () => {
     expect(channelCreate.mock.calls[0][0].agor_user_id).toBeFalsy();
   });
 
+  it('erases create secrets and cancels validation continuation on admin A -> admin B', async () => {
+    const { client, channelCreate } = makeClient();
+    const branch = makeBranch();
+    const adminA = makeUser({ user_id: 'admin-a', email: 'a@example.test' });
+    const adminB = makeUser({ user_id: 'admin-b', email: 'b@example.test' });
+    const users = new Map([
+      [adminA.user_id, adminA],
+      [adminB.user_id, adminB],
+    ]);
+    const table = (currentUser: User) => (
+      <MemoryRouter>
+        <AntdApp>
+          <GatewayChannelsTable
+            client={client}
+            gatewayChannelById={new Map()}
+            branchById={new Map([[branch.branch_id, branch]])}
+            userById={users}
+            mcpServerById={new Map()}
+            currentUser={currentUser}
+          />
+        </AntdApp>
+      </MemoryRouter>
+    );
+    const rendered = render(table(adminA));
+    clickButton(/Add Channel/);
+    await advanceToTokensStep();
+    fireEvent.change(screen.getByPlaceholderText('xoxb-...'), {
+      target: { value: 'xoxb-admin-a-secret' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('xapp-...'), {
+      target: { value: 'xapp-admin-a-secret' },
+    });
+
+    // Ant validation resolves in a microtask. Commit B before that continuation
+    // can read the registered A form values and dispatch them.
+    clickButton(/Create channel/);
+    rendered.rerender(table(adminB));
+    await flush();
+
+    expect(channelCreate).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.queryByDisplayValue('xoxb-admin-a-secret')).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue('xapp-admin-a-secret')).not.toBeInTheDocument();
+  });
+
   it('invalidates a passing test result when a channel-scope option changes', async () => {
     const { client } = makeClient({ ok: true, failures: [], notVerifiable: [] });
     renderTable(client);
@@ -378,9 +466,9 @@ describe('GatewayChannelsTable Slack create wizard', () => {
 
     // Slack aligns users by default — no run-as user needed. Walk to Tokens step.
     clickButton(/^Continue$/);
-    await flush();
+    await waitForStep('Create app');
     clickButton(/^Continue$/);
-    await flush();
+    await waitForStep('Tokens & test');
     fireEvent.change(screen.getByPlaceholderText('xoxb-...'), { target: { value: 'xoxb-test' } });
     fireEvent.change(screen.getByPlaceholderText('xapp-...'), { target: { value: 'xapp-test' } });
     clickButton(/Test connection/);
@@ -480,6 +568,43 @@ describe('GatewayChannelsTable Slack edit mode', () => {
     // No unified step indicator and no wizard footer in edit mode.
     expect(screen.queryByText('Tokens & test')).not.toBeInTheDocument();
     expect(queryButton(/^Continue$/)).toBeUndefined();
+  });
+
+  it('erases edit secrets and cancels save continuation on admin A -> admin B', async () => {
+    const branch = makeBranch();
+    const channel = makeSlackChannel();
+    const adminA = makeUser({ user_id: 'admin-a', email: 'a@example.test' });
+    const adminB = makeUser({ user_id: 'admin-b', email: 'b@example.test' });
+    const onUpdate = vi.fn();
+    const table = (currentUser: User) => (
+      <MemoryRouter>
+        <AntdApp>
+          <GatewayChannelsTable
+            client={null}
+            gatewayChannelById={new Map([[channel.id, channel]])}
+            branchById={new Map([[branch.branch_id, branch]])}
+            userById={new Map([[currentUser.user_id, currentUser]])}
+            mcpServerById={new Map()}
+            currentUser={currentUser}
+            onUpdate={onUpdate}
+          />
+        </AntdApp>
+      </MemoryRouter>
+    );
+    const rendered = render(table(adminA));
+    fireEvent.click(screen.getByTitle('Edit'));
+    expandPanel('Credentials');
+    fireEvent.change(screen.getByLabelText(/Bot Token/), {
+      target: { value: 'xoxb-admin-a-rotation' },
+    });
+
+    clickButton(/^Save$/);
+    rendered.rerender(table(adminB));
+    await flush();
+
+    expect(onUpdate).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.queryByDisplayValue('xoxb-admin-a-rotation')).not.toBeInTheDocument();
   });
 
   it('copies the recommended manifest derived from the channel options', async () => {
@@ -828,6 +953,73 @@ describe('GatewayChannelsTable Slack edit mode', () => {
   });
 });
 
+describe('GatewayChannelsTable socket authority generations', () => {
+  it('preserves a same-admin edit secret but does not close from the obsolete save', async () => {
+    let resolve!: () => void;
+    const pending = new Promise<void>((done) => {
+      resolve = done;
+    });
+    const onUpdate = vi.fn(() => pending);
+    const branch = makeBranch();
+    const user = makeUser();
+    const channel = {
+      ...makeSlackChannel(),
+      channel_type: 'teams',
+      name: 'Team Teams',
+      config: {
+        app_id: 'azure-app',
+        tenant_id: 'azure-tenant',
+      },
+    } as GatewayChannel;
+    const table = (
+      <GatewayChannelsTable
+        client={null}
+        gatewayChannelById={new Map([[channel.id, channel]])}
+        branchById={new Map([[branch.branch_id, branch]])}
+        userById={new Map([[user.user_id, user]])}
+        mcpServerById={new Map<string, MCPServer>()}
+        currentUser={user}
+        onUpdate={onUpdate}
+      />
+    );
+    const view = (generation: number) => (
+      <MemoryRouter>
+        <AntdApp>
+          <ConnectionProvider
+            value={{
+              connected: true,
+              connecting: false,
+              authGeneration: generation,
+              outOfSync: false,
+              capturedSha: null,
+              currentSha: null,
+            }}
+          >
+            {table}
+          </ConnectionProvider>
+        </AntdApp>
+      </MemoryRouter>
+    );
+    const rendered = render(view(20));
+    fireEvent.click(screen.getByTitle('Edit'));
+    expandPanel('Azure Bot Credentials');
+    fireEvent.change(screen.getByPlaceholderText('••••••••'), {
+      target: { value: 'same-admin-azure-secret' },
+    });
+    clickButton(/^Save$/);
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledOnce());
+
+    rendered.rerender(view(21));
+    await act(async () => {
+      resolve();
+      await pending;
+    });
+
+    expect(screen.getByText('Edit Gateway Channel')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('••••••••')).toHaveValue('same-admin-azure-secret');
+  });
+});
+
 describe('GatewayChannelsTable GitHub create wizard', () => {
   it('walks Channel → Create app → Credentials → Configure and builds a github payload', async () => {
     const { client, channelCreate } = makeClient();
@@ -836,6 +1028,7 @@ describe('GatewayChannelsTable GitHub create wizard', () => {
 
     // Switch the channel type to GitHub via the (real) antd Select.
     selectChannelType('GitHub');
+    await waitForAvailableStep('Credentials');
 
     // Step 0 (Channel): GitHub picks identity later, so only name + branch here.
     fireEvent.change(screen.getByPlaceholderText('e.g., Team Slack, Personal Discord'), {
@@ -843,12 +1036,12 @@ describe('GatewayChannelsTable GitHub create wizard', () => {
     });
     fireEvent.change(screen.getByLabelText('branch-select'), { target: { value: 'branch-1' } });
     clickButton(/^Continue$/);
-    await flush();
+    await waitForStep('Create app');
 
     // Step 1 (Create app): no required fields — Continue straight through.
-    expect(screen.getByText(/Create GitHub App on GitHub/)).toBeInTheDocument();
+    expect(await screen.findByText(/Create GitHub App on GitHub/)).toBeInTheDocument();
     clickButton(/^Continue$/);
-    await flush();
+    await waitForStep('Credentials');
 
     // Step 2 (Credentials): App ID + private key, then Continue.
     fireEvent.change(screen.getByPlaceholderText('123456'), { target: { value: '111' } });
@@ -866,8 +1059,6 @@ describe('GatewayChannelsTable GitHub create wizard', () => {
     fireEvent.change(screen.getByLabelText('user-select'), { target: { value: 'user-1' } });
 
     clickButton(/Create channel/);
-    await flush();
-
     await waitFor(() => expect(channelCreate).toHaveBeenCalledTimes(1));
     expect(channelCreate.mock.calls[0][0]).toMatchObject({
       channel_type: 'github',
@@ -890,6 +1081,7 @@ describe('GatewayChannelsTable Teams create wizard', () => {
 
     // Switch the channel type to Microsoft Teams via the (real) antd Select.
     selectChannelType('Microsoft Teams');
+    await waitForAvailableStep('Setup');
 
     // Step 0 for Teams includes the generic "Post messages as" identity.
     fireEvent.change(screen.getByPlaceholderText('e.g., Team Slack, Personal Discord'), {
@@ -898,7 +1090,7 @@ describe('GatewayChannelsTable Teams create wizard', () => {
     fireEvent.change(screen.getByLabelText('branch-select'), { target: { value: 'branch-1' } });
     fireEvent.change(screen.getByLabelText('user-select'), { target: { value: 'user-1' } });
     clickButton(/^Continue$/);
-    await flush();
+    await waitForStep('Setup');
 
     // Setup step (final): Azure Bot credentials.
     fireEvent.change(document.querySelector('#teams_app_id') as HTMLInputElement, {
@@ -912,8 +1104,6 @@ describe('GatewayChannelsTable Teams create wizard', () => {
     });
 
     clickButton(/Create channel/);
-    await flush();
-
     await waitFor(() => expect(channelCreate).toHaveBeenCalledTimes(1));
     expect(channelCreate.mock.calls[0][0]).toMatchObject({
       channel_type: 'teams',

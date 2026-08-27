@@ -316,6 +316,12 @@
       "import": "./dist/tools/mcp/auth-secrets.js",
       "require": "./dist/tools/mcp/auth-secrets.cjs"
     },
+    "./tools/mcp/env-secrets": {
+      "source": "./src/tools/mcp/env-secrets.ts",
+      "types": "./dist/tools/mcp/env-secrets.d.ts",
+      "import": "./dist/tools/mcp/env-secrets.js",
+      "require": "./dist/tools/mcp/env-secrets.cjs"
+    },
     "./tools/mcp/jwt-auth": {
       "source": "./src/tools/mcp/jwt-auth.ts",
       "types": "./dist/tools/mcp/jwt-auth.d.ts",
@@ -339,6 +345,12 @@
       "types": "./dist/tools/mcp/oauth-refresh.d.ts",
       "import": "./dist/tools/mcp/oauth-refresh.js",
       "require": "./dist/tools/mcp/oauth-refresh.cjs"
+    },
+    "./tools/mcp/grant-entitlement": {
+      "source": "./src/tools/mcp/grant-entitlement.ts",
+      "types": "./dist/tools/mcp/grant-entitlement.d.ts",
+      "import": "./dist/tools/mcp/grant-entitlement.js",
+      "require": "./dist/tools/mcp/grant-entitlement.cjs"
     },
     "./tools/mcp/oauth-token-expiry": {
       "source": "./src/tools/mcp/oauth-token-expiry.ts",
@@ -364,6 +376,12 @@
       "import": "./dist/mcp-catalog/index.js",
       "require": "./dist/mcp-catalog/index.cjs"
     },
+    "./mcp-catalog/query": {
+      "source": "./src/mcp-catalog/query.ts",
+      "types": "./dist/mcp-catalog/query.d.ts",
+      "import": "./dist/mcp-catalog/query.js",
+      "require": "./dist/mcp-catalog/query.cjs"
+    },
     "./mcp": {
       "source": "./src/mcp/index.ts",
       "types": "./dist/mcp/index.d.ts",
@@ -387,6 +405,12 @@
       "types": "./dist/gateway/connectors/slack-manifest.d.ts",
       "import": "./dist/gateway/connectors/slack-manifest.js",
       "require": "./dist/gateway/connectors/slack-manifest.cjs"
+    },
+    "./gateway/discord-setup": {
+      "source": "./src/gateway/connectors/discord-setup.ts",
+      "types": "./dist/gateway/connectors/discord-setup.d.ts",
+      "import": "./dist/gateway/connectors/discord-setup.js",
+      "require": "./dist/gateway/connectors/discord-setup.cjs"
     },
     "./git/pure": {
       "source": "./src/git/pure.ts",
@@ -412,12 +436,6 @@
       "import": "./dist/local-actions/index.js",
       "require": "./dist/local-actions/index.cjs"
     },
-    "./local-actions/identity": {
-      "source": "./src/local-actions/identity.ts",
-      "types": "./dist/local-actions/identity.d.ts",
-      "import": "./dist/local-actions/identity.js",
-      "require": "./dist/local-actions/identity.cjs"
-    },
     "./templates/teammate-welcome-note": {
       "source": "./src/templates/teammate-welcome-note.ts",
       "types": "./dist/templates/teammate-welcome-note.d.ts",
@@ -429,6 +447,12 @@
       "types": "./dist/codex/auth-file.d.ts",
       "import": "./dist/codex/auth-file.js",
       "require": "./dist/codex/auth-file.cjs"
+    },
+    "./codex/credential-file": {
+      "source": "./src/codex/credential-file.ts",
+      "types": "./dist/codex/credential-file.d.ts",
+      "import": "./dist/codex/credential-file.js",
+      "require": "./dist/codex/credential-file.cjs"
     },
     "./agentic-integrations": {
       "source": "./src/agentic-integrations.ts",
@@ -458,6 +482,8 @@
   "dependencies": {
     "@agor/git": "workspace:*",
     "@anthropic-ai/sdk": "^0.109.0",
+    "@discordjs/rest": "^2.6.3",
+    "@discordjs/ws": "^2.0.4",
     "@feathersjs/authentication": "^5.0.46",
     "@feathersjs/authentication-client": "^5.0.46",
     "@feathersjs/authentication-local": "^5.0.46",
@@ -476,6 +502,7 @@
     "bcryptjs": "^2.4.3",
     "cron-parser": "^5.7.0",
     "cronstrue": "^3.24.0",
+    "discord-api-types": "^0.38.53",
     "drizzle-orm": "^0.45.2",
     "emojibase-data": "^17.0.0",
     "js-yaml": "^5.2.3",

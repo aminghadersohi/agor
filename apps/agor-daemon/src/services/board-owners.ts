@@ -1,9 +1,9 @@
 /** Board Owners Service - nested route: boards/:id/owners */
 
 import type { BoardRepository } from '@agor/core/db';
-import { type Application, Forbidden, NotAuthenticated } from '@agor/core/feathers';
-import type { HookContext, User, UUID } from '@agor/core/types';
-import { hasMinimumRole, ROLES } from '@agor/core/types';
+import type { Application } from '@agor/core/feathers';
+import type { User, UUID } from '@agor/core/types';
+import { requireAuthorizedBoardRoute } from '../utils/board-route-authorization.js';
 
 interface BoardOwnerCreateData {
   user_id: string;
@@ -18,29 +18,8 @@ interface BoardOwnerParams {
   };
 }
 
-function requireBoardAccess(boardRepo: BoardRepository, mode: 'view' | 'mutate') {
-  return async (context: HookContext) => {
-    if (!context.params.provider) return context;
-    if (context.params.user?._isServiceAccount) return context;
-    const user = context.params.user;
-    if (!user?.user_id) throw new NotAuthenticated('Authentication required');
-    if (hasMinimumRole(user.role, ROLES.ADMIN)) return context;
-
-    const boardId = context.params.route?.id;
-    if (!boardId) throw new Error('Board ID is required');
-    const allowed =
-      mode === 'view'
-        ? await boardRepo.canView(boardId, user.user_id as UUID)
-        : await boardRepo.canMutate(boardId, user.user_id as UUID);
-    if (allowed) return context;
-    throw new Forbidden(
-      mode === 'view'
-        ? 'You need board access to view board owners'
-        : "You need board owner or board group 'all' access to manage board owners"
-    );
-  };
-}
-
+/** Public nested-owner surface; whole-row replacement is not a valid operation. */
+export const BOARD_OWNERS_SERVICE_TRANSPORT_METHODS = ['find', 'create', 'remove'] as const;
 export function setupBoardOwnersService(app: Application, boardRepo: BoardRepository) {
   app.use(
     'boards/:id/owners',
@@ -79,14 +58,14 @@ export function setupBoardOwnersService(app: Application, boardRepo: BoardReposi
         return user;
       },
     },
-    { methods: ['find', 'create', 'remove'] }
+    { methods: [...BOARD_OWNERS_SERVICE_TRANSPORT_METHODS] }
   );
 
   app.service('boards/:id/owners').hooks({
     before: {
-      find: [requireBoardAccess(boardRepo, 'view')],
-      create: [requireBoardAccess(boardRepo, 'mutate')],
-      remove: [requireBoardAccess(boardRepo, 'mutate')],
+      find: [requireAuthorizedBoardRoute(boardRepo, 'view', 'view board owners')],
+      create: [requireAuthorizedBoardRoute(boardRepo, 'mutate', 'manage board owners')],
+      remove: [requireAuthorizedBoardRoute(boardRepo, 'mutate', 'manage board owners')],
     },
   });
 }
