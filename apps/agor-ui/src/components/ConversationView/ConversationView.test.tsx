@@ -214,6 +214,21 @@ describe('ConversationView auto-scroll integration', () => {
     expect(scroller.scrollTop).toBe(2700);
   });
 
+  it('bounds focused chat hydration to a small recent page', () => {
+    const tasks = Array.from({ length: 45 }, (_, index) =>
+      makeTask(`simple-${index + 1}`, `prompt ${index + 1}`)
+    );
+    const state = makeState({ sessionId: 'focused-chat', loading: false, tasks });
+    mockUseSharedReactiveSession.mockImplementation(() => ({ handle: null, state }));
+
+    render(<ConversationView client={null} sessionId={'focused-chat' as any} simple />);
+
+    expect(screen.queryByTestId('task-simple-25')).not.toBeInTheDocument();
+    expect(screen.getByTestId('task-simple-26')).toHaveAttribute('data-expanded', 'true');
+    expect(screen.getByTestId('task-simple-45')).toHaveAttribute('data-expanded', 'true');
+    expect(screen.getByRole('button', { name: 'Show 20 earlier tasks' })).toBeVisible();
+  });
+
   it('keeps every task expanded and forwards conversation-first mode', () => {
     const tasks = [makeTask('task-1', 'first task'), makeTask('task-2', 'latest task')];
     const state = makeState({ loading: false, tasks });
