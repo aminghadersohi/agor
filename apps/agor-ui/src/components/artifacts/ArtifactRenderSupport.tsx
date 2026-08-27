@@ -88,9 +88,12 @@ export function ArtifactConsoleReporter({
 export function ArtifactSandpackErrorReporter({
   artifactId,
   contentHash,
+  statusOverride,
 }: {
   artifactId: string;
   contentHash?: string;
+  /** Effective lifecycle status for clients whose provider status is not terminal. */
+  statusOverride?: string;
 }) {
   const { sandpack } = useSandpack();
   const lastSentRef = useRef<string | null>(null);
@@ -98,7 +101,8 @@ export function ArtifactSandpackErrorReporter({
   const pendingSendRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
-    const stateKey = `${sandpack.error?.message ?? ''}\0${sandpack.status}`;
+    const effectiveStatus = statusOverride ?? sandpack.status;
+    const stateKey = `${sandpack.error?.message ?? ''}\0${effectiveStatus}`;
     if (stateKey === lastSentRef.current) return;
 
     const sendError = () => {
@@ -124,7 +128,7 @@ export function ArtifactSandpackErrorReporter({
               ...(sandpack.error.column != null ? { column: sandpack.error.column } : {}),
             }
           : null,
-        status: sandpack.status,
+        status: effectiveStatus,
       };
 
       fetch(`${getDaemonUrl()}/artifacts/${artifactId}/sandpack-error`, {
@@ -148,7 +152,7 @@ export function ArtifactSandpackErrorReporter({
         pendingSendRef.current?.();
       }
     };
-  }, [sandpack.error, sandpack.status, artifactId, contentHash]);
+  }, [sandpack.error, sandpack.status, artifactId, contentHash, statusOverride]);
 
   return null;
 }
