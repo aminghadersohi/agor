@@ -8,14 +8,12 @@ import type {
   User,
 } from '@agor-live/client';
 import { getTeammateConfig, isTeammate } from '@agor-live/client';
-import { LeftOutlined } from '@ant-design/icons';
+import { ExpandAltOutlined, LeftOutlined } from '@ant-design/icons';
 import {
   Alert,
   Badge,
   Button,
   Empty,
-  Flex,
-  Segmented,
   Select,
   Skeleton,
   Space,
@@ -77,6 +75,12 @@ const TEAMMATE_PORTRAIT_SIZES: Record<
   medium: { primary: 200, alternative: 32 },
   large: { primary: 300, alternative: 40 },
 };
+const TEAMMATE_PORTRAIT_SIZE_ORDER: TeammatePortraitSize[] = ['small', 'medium', 'large'];
+
+function nextTeammatePortraitSize(current: TeammatePortraitSize): TeammatePortraitSize {
+  const currentIndex = TEAMMATE_PORTRAIT_SIZE_ORDER.indexOf(current);
+  return TEAMMATE_PORTRAIT_SIZE_ORDER[(currentIndex + 1) % TEAMMATE_PORTRAIT_SIZE_ORDER.length];
+}
 
 function initialTeammatePortraitSize(): TeammatePortraitSize {
   try {
@@ -182,6 +186,18 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
     initialTeammatePortraitSize
   );
   const teammatePortraitDimensions = TEAMMATE_PORTRAIT_SIZES[teammatePortraitSize];
+  const nextPortraitSize = nextTeammatePortraitSize(teammatePortraitSize);
+  const cycleTeammatePortraitSize = useCallback(() => {
+    setTeammatePortraitSize((currentSize) => {
+      const nextSize = nextTeammatePortraitSize(currentSize);
+      try {
+        localStorage.setItem(TEAMMATE_PORTRAIT_SIZE_STORAGE_KEY, nextSize);
+      } catch {
+        // The in-memory choice still works when storage is unavailable.
+      }
+      return nextSize;
+    });
+  }, []);
   const isControlled = controlledActiveTab !== undefined;
   const activeTab = controlledActiveTab ?? uncontrolledActiveTab;
   const [sessionDetailsHydrated, setSessionDetailsHydrated] = useState(() => !deferSessionDetails);
@@ -407,35 +423,6 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
                 paddingBlock: 4,
               }}
             >
-              <Flex
-                justify="space-between"
-                align="center"
-                gap={8}
-                style={{ width: '100%', minWidth: 0 }}
-              >
-                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                  Portrait size
-                </Typography.Text>
-                <Segmented
-                  size="small"
-                  aria-label="Teammate portrait size"
-                  value={teammatePortraitSize}
-                  options={[
-                    { label: 'Small', value: 'small' },
-                    { label: 'Medium', value: 'medium' },
-                    { label: 'Large', value: 'large' },
-                  ]}
-                  onChange={(value) => {
-                    const nextSize = value as TeammatePortraitSize;
-                    setTeammatePortraitSize(nextSize);
-                    try {
-                      localStorage.setItem(TEAMMATE_PORTRAIT_SIZE_STORAGE_KEY, nextSize);
-                    } catch {
-                      // The in-memory choice still works when storage is unavailable.
-                    }
-                  }}
-                />
-              </Flex>
               <div
                 style={{
                   width: '100%',
@@ -443,8 +430,21 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
+                  position: 'relative',
                 }}
               >
+                <Tooltip
+                  title={`Portrait size: ${teammatePortraitSize}. Click for ${nextPortraitSize}.`}
+                >
+                  <Button
+                    type="text"
+                    shape="circle"
+                    icon={<ExpandAltOutlined />}
+                    aria-label={`Portrait size: ${teammatePortraitSize}. Click for ${nextPortraitSize}.`}
+                    onClick={cycleTeammatePortraitSize}
+                    style={{ position: 'absolute', insetInlineEnd: 0, top: 0, zIndex: 1 }}
+                  />
+                </Tooltip>
                 {isCreating ? (
                   <Spin />
                 ) : (
