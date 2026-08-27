@@ -1731,7 +1731,9 @@ export const boardObjects = pgTable(
       .json<unknown>('data')
       .$type<{
         position: { x: number; y: number };
+        size?: { width: number; height: number };
         zone_id?: string; // Optional zone pinning
+        compact?: boolean; // Shared collapsed board-card presentation state
       }>()
       .notNull(),
   },

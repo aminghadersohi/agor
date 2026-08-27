@@ -1,9 +1,23 @@
+import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
+import {
+  normalizeZoneLayoutPolicy,
+  sortZoneLayoutItems,
+  ZONE_LAYOUT_MODES,
+  ZONE_LAYOUT_PRESETS,
+  ZONE_LAYOUT_SORT_DIRECTIONS,
+  ZONE_LAYOUT_SORT_FIELDS,
+  type ZoneLayoutSortItem,
+} from '@agor/core/layout/zone-layout';
 import type {
   Board,
+  BoardEntityObject,
   BoardEntityType,
   BoardObject,
   BoardObjectType,
+  Branch,
   BranchID,
+  Card,
+  ZoneLayoutPolicy,
 } from '@agor/core/types';
 import { BRANCH_PERMISSION_LEVELS } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
@@ -14,6 +28,7 @@ import {
   mcpListLimit,
   mcpOffset,
   mcpOptionalNonNegativeInt,
+  mcpOptionalNumber,
   mcpOptionalPositiveInt,
   mcpOptionalString,
   mcpPageResult,
@@ -32,6 +47,157 @@ const BOARD_OBJECT_TYPES = [
   'artifact',
 ] as const satisfies readonly BoardObjectType[];
 const BOARD_ENTITY_TYPES = ['branch', 'card'] as const satisfies readonly BoardEntityType[];
+
+// These match the rendered React Flow nodes.  Keeping the dimensions here is
+// important: a zone arrange must never blindly use the branch-card spacing for
+// every entity or it can place the last row below the zone.
+const ARRANGE_DIMENSIONS = {
+  branch: { width: 500, height: 200 },
+  // A card with only a title is roughly one header row. Content adds height
+  // below; using 150px as the minimum made normal cards look artificially
+  // oversized and caused unnecessary deck layouts.
+  card: { width: 380, height: 56 },
+} as const;
+const DECK_OFFSET_X = 12;
+const DECK_OFFSET_Y = 48;
+const COMPACT_ARRANGE_DIMENSIONS = {
+  branch: { width: 500, height: 88 },
+  card: { width: 380, height: 56 },
+} as const;
+
+function zoneContentTopInset(zone: { fontSize?: number; status?: string }): number {
+  const labelFontSize =
+    typeof zone.fontSize === 'number' && Number.isFinite(zone.fontSize)
+      ? Math.min(48, Math.max(10, zone.fontSize))
+      : 14;
+  const labelHeight = Math.ceil(labelFontSize * 1.2);
+  const statusHeight = zone.status ? 8 + Math.ceil(labelFontSize * 1.05) : 0;
+
+  return Math.max(64, 32 + labelHeight + statusHeight);
+}
+
+function compareBoardEntitiesSpatially(a: BoardEntityObject, b: BoardEntityObject): number {
+  return (
+    a.position.y - b.position.y ||
+    a.position.x - b.position.x ||
+    a.object_id.localeCompare(b.object_id)
+  );
+}
+
+type EntityLayoutMetadata = ZoneLayoutSortItem & {
+  card?: Card;
+  branch?: Branch;
+};
+
+async function loadEntityLayoutMetadata(
+  ctx: McpContext,
+  entities: readonly BoardEntityObject[]
+): Promise<Map<string, EntityLayoutMetadata>> {
+  const metadata = new Map<string, EntityLayoutMetadata>();
+  await Promise.all(
+    entities.map(async (entity) => {
+      let card: Card | undefined;
+      let branch: Branch | undefined;
+      if (entity.card_id) {
+        card = (await ctx.app.service('cards').get(entity.card_id, ctx.baseServiceParams)) as Card;
+      } else if (entity.branch_id) {
+        branch = (await ctx.app
+          .service('branches')
+          .get(entity.branch_id, ctx.baseServiceParams)) as Branch;
+      }
+      const cardData = card?.data ?? {};
+      metadata.set(entity.object_id, {
+        id: entity.object_id,
+        position: entity.position,
+        title: card?.title ?? branch?.name,
+        createdAt: card?.created_at ?? branch?.created_at ?? entity.created_at,
+        updatedAt: card?.updated_at ?? branch?.updated_at ?? entity.created_at,
+        rank: typeof cardData.rank === 'number' ? cardData.rank : undefined,
+        priority: cardData.priority,
+        status: cardData.status ?? branch?.filesystem_status,
+        card,
+        branch,
+      });
+    })
+  );
+  return metadata;
+}
+
+/**
+ * CardNode grows with its description and (unlike the React Flow placeholder
+ * height) renders the note in full. Estimate the rendered rectangle from the
+ * persisted content before laying out. This is deliberately conservative: a
+ * false overflow warning is preferable to putting the bottom of a card
+ * outside its zone.
+ */
+function estimateCardHeight(
+  card: { title?: string; description?: string; note?: string } | undefined
+): number {
+  const lineCount = (value: string | undefined, charsPerLine: number) =>
+    value ? Math.max(1, Math.ceil(value.length / charsPerLine)) : 0;
+  const header = 50;
+  const description = card?.description
+    ? 16 +
+      lineCount(card.description.slice(0, 100), 48) * 18 +
+      (card.description.length > 100 ? 18 : 0)
+    : 0;
+  const note = card?.note ? 16 + lineCount(card.note, 48) * 18 : 0;
+  return Math.max(ARRANGE_DIMENSIONS.card.height, header + description + note);
+}
+
+function getCanvasObjectDimensions(object: BoardObject): { width: number; height: number } {
+  if (object.type === 'text') {
+    return { width: object.width ?? 240, height: object.height ?? 120 };
+  }
+  if (object.type === 'markdown') {
+    const charsPerLine = Math.max(20, Math.floor(object.width / 8));
+    const lines = Math.max(3, Math.ceil(object.content.length / charsPerLine));
+    return { width: object.width, height: Math.max(140, 48 + lines * 20) };
+  }
+  if (object.type === 'app' || object.type === 'artifact' || object.type === 'zone') {
+    return { width: object.width, height: object.height };
+  }
+  return { width: 240, height: 120 };
+}
+
+async function filterVisibleBoardEntities(
+  ctx: McpContext,
+  entities: BoardEntityObject[],
+  includeArchived: boolean
+): Promise<BoardEntityObject[]> {
+  if (includeArchived) return entities;
+  const activeCardIds = new Set<string>();
+  const cardIds = entities.flatMap((entity) => (entity.card_id ? [entity.card_id] : []));
+  if (cardIds.length > 0) {
+    const result = await ctx.app.service('cards').find({
+      query: { card_id: { $in: Array.from(new Set(cardIds)) }, archived: false },
+      paginate: false,
+      ...ctx.baseServiceParams,
+    });
+    const cards = Array.isArray(result)
+      ? result
+      : (result as { data: Array<{ card_id: string }> }).data;
+    for (const card of cards) activeCardIds.add(card.card_id);
+  }
+  const activeBranchIds = new Set<string>();
+  const branchIds = entities.flatMap((entity) => (entity.branch_id ? [entity.branch_id] : []));
+  if (branchIds.length > 0) {
+    const result = await ctx.app.service('branches').find({
+      query: { branch_id: { $in: Array.from(new Set(branchIds)) }, archived: false },
+      paginate: false,
+      ...ctx.baseServiceParams,
+    });
+    const branches = Array.isArray(result)
+      ? result
+      : (result as { data: Array<{ branch_id: string }> }).data;
+    for (const branch of branches) activeBranchIds.add(branch.branch_id);
+  }
+  return entities.filter(
+    (entity) =>
+      (entity.card_id === undefined || activeCardIds.has(entity.card_id)) &&
+      (entity.branch_id === undefined || activeBranchIds.has(entity.branch_id))
+  );
+}
 
 function filterBoardCanvasObjects(board: Board, objectTypes?: BoardObjectType[]): Board {
   if (!objectTypes) return board;
@@ -340,7 +506,631 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 4: agor_boards_create
+  // Tool 4: agor_boards_auto_arrange
+  server.registerTool(
+    'agor_boards_auto_arrange',
+    {
+      description:
+        'Arrange worktrees/branches and cards on a board in a dimension-aware row-major grid. ' +
+        'By default, only free-floating entities are moved; zone-pinned entities stay in their zones. ' +
+        'Set includeCanvasObjects=true to include text, markdown, apps, and artifacts, and includeZones=true to arrange zones as movable containers. ' +
+        'Use this after creating or moving many board items so the canvas is tidy and collision-free.',
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        boardId: mcpRequiredId('boardId', 'Board'),
+        entityType: z
+          .enum(BOARD_ENTITY_TYPES)
+          .optional()
+          .describe('Arrange only branch or card entities (default: both).'),
+        includeArchived: z
+          .boolean()
+          .optional()
+          .describe(
+            'Include archived branches and cards. Defaults to false so layout matches the visible board.'
+          ),
+        includePinned: z
+          .boolean()
+          .optional()
+          .describe('Also move entities currently pinned to zones (default: false).'),
+        includeCanvasObjects: z
+          .boolean()
+          .optional()
+          .describe(
+            'Also arrange text, markdown, app, and artifact canvas objects (default: false).'
+          ),
+        includeZones: z
+          .boolean()
+          .optional()
+          .describe(
+            'Also arrange zone containers. Their pinned children move with their parent zone.'
+          ),
+        columns: mcpOptionalPositiveInt(
+          'columns',
+          'Number of columns in the grid (default: square-ish layout).'
+        ),
+        startX: mcpOptionalNumber('startX', 'Canvas X origin (default: 80).'),
+        startY: mcpOptionalNumber('startY', 'Canvas Y origin (default: 80).'),
+        gapX: mcpOptionalNumber('gapX', 'Horizontal gap between cards (default: 40).'),
+        gapY: mcpOptionalNumber('gapY', 'Vertical gap between cards (default: 40).'),
+      }),
+    },
+    async (args) => {
+      const boardId = coerceString(args.boardId);
+      if (!boardId) throw new Error('boardId is required');
+      const boardObjectsService = ctx.app.service('board-objects');
+      const result = (await boardObjectsService.find({
+        query: {
+          board_id: boardId,
+          ...(args.entityType ? { entity_type: args.entityType } : {}),
+        },
+        ...ctx.baseServiceParams,
+      })) as { data: Array<BoardEntityObject> };
+      const visibleEntities = await filterVisibleBoardEntities(
+        ctx,
+        result.data,
+        args.includeArchived === true
+      );
+      const entities = visibleEntities
+        .filter((entity) => args.includePinned === true || !entity.zone_id)
+        .sort(compareBoardEntitiesSpatially);
+      const startX = args.startX ?? 80;
+      const startY = args.startY ?? 80;
+      const gapX = args.gapX ?? 40;
+      const gapY = args.gapY ?? 40;
+      const items: Array<{
+        id: string;
+        kind: 'entity' | 'canvas';
+        entity?: BoardEntityObject;
+        object?: BoardObject;
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+      }> = [];
+      for (const entity of entities) {
+        let entityDimensions: { width: number; height: number };
+        if (entity.size) {
+          entityDimensions = entity.size;
+        } else if (entity.entity_type === 'card' && entity.card_id) {
+          const card = (await ctx.app
+            .service('cards')
+            .get(entity.card_id, ctx.baseServiceParams)) as {
+            title?: string;
+            description?: string;
+            note?: string;
+          };
+          entityDimensions = {
+            width: ARRANGE_DIMENSIONS.card.width,
+            height: estimateCardHeight(card),
+          };
+        } else {
+          entityDimensions = ARRANGE_DIMENSIONS[entity.entity_type];
+        }
+        items.push({
+          id: entity.object_id,
+          kind: 'entity',
+          entity,
+          ...entity.position,
+          ...entityDimensions,
+        });
+      }
+      const boardsService =
+        args.includeCanvasObjects === true || args.includeZones === true
+          ? ctx.app.service('boards')
+          : null;
+      if (boardsService) {
+        const board = (await boardsService?.get(boardId, ctx.baseServiceParams)) as Board;
+        for (const [objectId, object] of Object.entries(board.objects ?? {})) {
+          if (object.type === 'zone' && args.includeZones !== true) continue;
+          if (object.type !== 'zone' && args.includeCanvasObjects !== true) continue;
+          items.push({
+            id: objectId,
+            kind: 'canvas',
+            object,
+            x: object.x,
+            y: object.y,
+            ...getCanvasObjectDimensions(object),
+          });
+        }
+      }
+      items.sort((a, b) => a.y - b.y || a.x - b.x || a.id.localeCompare(b.id));
+      const layout = layoutRectangles(
+        items.map(({ id, width, height }) => ({ id, width, height })),
+        {
+          preferredColumns: args.columns ?? Math.ceil(Math.sqrt(Math.max(1, items.length))),
+          gapX,
+          gapY,
+        }
+      );
+      const placementById = new Map(
+        layout.placements.map((placement) => [placement.id, placement])
+      );
+      const updates: Array<{
+        objectId: string;
+        objectType: string;
+        entityType?: string;
+        position: { x: number; y: number };
+      }> = [];
+
+      for (const item of items) {
+        const placement = placementById.get(item.id);
+        if (!placement) throw new Error(`Layout did not place board object '${item.id}'.`);
+        const position = {
+          x: startX + placement.x,
+          y: startY + placement.y,
+        };
+        if (item.kind === 'entity' && item.entity) {
+          await boardObjectsService.patch(item.id, { position }, ctx.baseServiceParams);
+          updates.push({
+            objectId: item.id,
+            objectType: item.entity.entity_type,
+            entityType: item.entity.entity_type,
+            position,
+          });
+        } else if (item.object && boardsService) {
+          await boardsService.patch(
+            boardId,
+            {
+              _action: 'upsertObject',
+              objectId: item.id,
+              objectData: { ...item.object, ...position },
+            },
+            ctx.baseServiceParams
+          );
+          updates.push({ objectId: item.id, objectType: item.object.type, position });
+        }
+      }
+
+      return textResult({
+        boardId,
+        arranged: updates.length,
+        arrangedEntities: updates.filter((update) =>
+          BOARD_ENTITY_TYPES.includes(update.objectType as BoardEntityType)
+        ).length,
+        arrangedCanvasObjects: updates.filter(
+          (update) => !BOARD_ENTITY_TYPES.includes(update.objectType as BoardEntityType)
+        ).length,
+        skippedPinned: visibleEntities.length - entities.length,
+        skippedArchived: result.data.length - visibleEntities.length,
+        columns: layout.columns,
+        rows: layout.rows,
+        layoutMode: layout.mode,
+        fitsWithoutOverlap: layout.fitsWithoutOverlap,
+        width: layout.width,
+        height: layout.height,
+        appliedGapX: layout.gapX,
+        appliedGapY: layout.gapY,
+        updates,
+      });
+    }
+  );
+
+  // agor_boards_auto_arrange_zone
+  server.registerTool(
+    'agor_boards_auto_arrange_zone',
+    {
+      description:
+        'Arrange worktrees/branches and cards inside one board zone using their measured rendered rectangles. Positions are relative to the zone and ordered top-left, left-to-right, then row-by-row. A fully separated grid is always preferred, including compact edge margins and gaps when needed. columns is a target by default: when it cannot fit, the nearest contained non-overlapping grid is used and reported. Set strictColumns for a hard column count. If no grid can fit, the default is no position changes. An accessible cascade deck is available only through explicit overflowStrategy:"deck". The result reports exact containment and overflow.',
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        boardId: mcpRequiredId('boardId', 'Board'),
+        zoneId: mcpRequiredString('zoneId', 'Zone object ID'),
+        entityType: z
+          .enum(BOARD_ENTITY_TYPES)
+          .optional()
+          .describe('Arrange only branch or card entities (default: both).'),
+        includeArchived: z
+          .boolean()
+          .optional()
+          .describe(
+            'Include archived branches and cards. Defaults to false so layout matches the visible board.'
+          ),
+        columns: mcpOptionalPositiveInt(
+          'columns',
+          'Target number of occupied columns (capped by the number of entities). When omitted, the solver chooses automatically. If this target cannot fit without overlap, the nearest contained grid is used unless strictColumns is true.'
+        ),
+        strictColumns: z
+          .boolean()
+          .optional()
+          .describe(
+            'Require columns exactly as requested. Defaults to false, which allows a reported non-overlapping grid fallback.'
+          ),
+        overflowStrategy: z
+          .enum(['fail', 'deck'])
+          .optional()
+          .describe(
+            'Behavior only when no non-overlapping grid fits. Defaults to fail (no board changes). Use deck only when deliberate visible-header overlap is acceptable.'
+          ),
+        preset: z
+          .enum(ZONE_LAYOUT_PRESETS)
+          .optional()
+          .describe(
+            'Layout presentation. grid preserves current card density; compact_list collapses cards/worktrees and uses one column.'
+          ),
+        sortBy: z
+          .enum(ZONE_LAYOUT_SORT_FIELDS)
+          .optional()
+          .describe(
+            'Order items by current position, priority/rank, workflow status, updated time, created time, or title. Defaults to the zone policy, then position.'
+          ),
+        sortDirection: z
+          .enum(ZONE_LAYOUT_SORT_DIRECTIONS)
+          .optional()
+          .describe('Ascending or descending sort order. Defaults to the zone policy, then asc.'),
+        autoResizeHeight: z
+          .boolean()
+          .optional()
+          .describe(
+            'Resize the zone vertically to contain the layout. Defaults to the zone policy, then false.'
+          ),
+        padding: mcpOptionalNumber('padding', 'Padding from the zone edges (default: 24).'),
+        gapX: mcpOptionalNumber('gapX', 'Horizontal gap between items (default: 24).'),
+        gapY: mcpOptionalNumber('gapY', 'Vertical gap between items (default: 24).'),
+      }),
+    },
+    async (args) => {
+      const boardId = coerceString(args.boardId);
+      const zoneId = coerceString(args.zoneId);
+      if (!boardId || !zoneId) throw new Error('boardId and zoneId are required');
+      const board = (await ctx.app.service('boards').get(boardId, ctx.baseServiceParams)) as Board;
+      const zone = board.objects?.[zoneId] as
+        | (BoardObject & { type: 'zone'; width: number; height: number })
+        | undefined;
+      if (zone?.type !== 'zone') {
+        throw new Error(`Zone '${zoneId}' was not found on board '${boardId}'.`);
+      }
+
+      const zonePolicy = normalizeZoneLayoutPolicy({
+        ...zone.layout,
+        ...(args.preset === undefined ? {} : { preset: args.preset }),
+        ...(args.sortBy === undefined ? {} : { sortBy: args.sortBy }),
+        ...(args.sortDirection === undefined ? {} : { sortDirection: args.sortDirection }),
+        ...(args.columns === undefined ? {} : { columns: args.columns }),
+        ...(args.autoResizeHeight === undefined ? {} : { autoResizeHeight: args.autoResizeHeight }),
+      });
+
+      const boardObjectsService = ctx.app.service('board-objects');
+      const result = (await boardObjectsService.find({
+        query: {
+          board_id: boardId,
+          zone_id: zoneId,
+          ...(args.entityType ? { entity_type: args.entityType } : {}),
+        },
+        ...ctx.baseServiceParams,
+      })) as { data: Array<BoardEntityObject> };
+      let entities = await filterVisibleBoardEntities(
+        ctx,
+        result.data,
+        args.includeArchived === true
+      );
+      const metadataEntities = entities.filter(
+        (entity) =>
+          zonePolicy.sortBy !== 'position' ||
+          (zonePolicy.preset === 'grid' &&
+            entity.compact !== true &&
+            entity.size === undefined &&
+            entity.card_id !== undefined)
+      );
+      const metadata = await loadEntityLayoutMetadata(ctx, metadataEntities);
+      entities = sortZoneLayoutItems(
+        entities.map((entity) => ({
+          entity,
+          ...(metadata.get(entity.object_id) ?? {
+            id: entity.object_id,
+            position: entity.position,
+          }),
+        })),
+        zonePolicy
+      ).map(({ entity }) => entity);
+      const dimensions = new Map<string, { width: number; height: number }>();
+      for (const entity of entities) {
+        if (zonePolicy.preset === 'compact_list' || entity.compact === true) {
+          dimensions.set(entity.object_id, COMPACT_ARRANGE_DIMENSIONS[entity.entity_type]);
+        } else if (entity.size) {
+          dimensions.set(entity.object_id, entity.size);
+        } else if (entity.entity_type === 'card' && entity.card_id) {
+          const card = metadata.get(entity.object_id)?.card;
+          dimensions.set(entity.object_id, {
+            width: ARRANGE_DIMENSIONS.card.width,
+            height: estimateCardHeight(card),
+          });
+        } else {
+          dimensions.set(entity.object_id, ARRANGE_DIMENSIONS[entity.entity_type]);
+        }
+      }
+      const padding = Math.max(0, args.padding ?? 24);
+      const gapX = Math.max(0, args.gapX ?? 24);
+      const gapY = Math.max(0, args.gapY ?? 24);
+      const titleInset = zoneContentTopInset(zone);
+      const autoResizeHeight = zonePolicy.autoResizeHeight === true;
+      if (entities.length === 0) {
+        return textResult({
+          boardId,
+          zoneId,
+          arranged: 0,
+          columns: 0,
+          rows: 0,
+          fitsWithoutOverlap: true,
+          layoutMode: 'grid',
+          updates: [],
+        });
+      }
+      const layout = layoutRectangles(
+        entities.map((entity) => {
+          const size = dimensions.get(entity.object_id);
+          if (!size) throw new Error(`Missing dimensions for board object '${entity.object_id}'.`);
+          return { id: entity.object_id, ...size };
+        }),
+        {
+          // The title/status sits inside the zone, above child nodes. Layout
+          // against the remaining rectangle, then translate placements below
+          // that reserved header so cards can never cover the title.
+          bounds: {
+            width: zone.width,
+            height: autoResizeHeight
+              ? Number.MAX_SAFE_INTEGER
+              : Math.max(0, zone.height - titleInset),
+          },
+          padding,
+          minPadding: 8,
+          gapX,
+          gapY,
+          minGapX: 8,
+          minGapY: 8,
+          ...(zonePolicy.preset === 'compact_list'
+            ? { exactColumns: 1 }
+            : args.strictColumns === true
+              ? { exactColumns: args.columns ?? zonePolicy.columns }
+              : { preferredColumns: args.columns ?? zonePolicy.columns }),
+          allowDeck: args.overflowStrategy === 'deck',
+          deckOffsetX: DECK_OFFSET_X,
+          deckOffsetY: DECK_OFFSET_Y,
+        }
+      );
+      const requestedColumns =
+        args.columns === undefined ? null : Math.min(args.columns, entities.length);
+      if (layout.overflowingItemIds.length > 0) {
+        return textResult({
+          boardId,
+          zoneId,
+          applied: false,
+          arranged: 0,
+          requestedColumns,
+          columns: layout.columns,
+          rows: layout.rows,
+          fitsWithoutOverlap: layout.fitsWithoutOverlap,
+          layoutMode: layout.mode,
+          requiredWidth: layout.width,
+          requiredHeight: layout.height + titleInset,
+          reservedTitleHeight: titleInset,
+          availableContentHeight: Math.max(0, zone.height - titleInset),
+          appliedGapX: layout.gapX,
+          appliedGapY: layout.gapY,
+          appliedPadding: layout.padding,
+          overflowingObjectIds: layout.overflowingItemIds,
+          warning:
+            `One or more rendered objects are larger than the available zone rectangle, or no non-overlapping ${requestedColumns === null ? 'automatic' : `${requestedColumns}-column`} layout can fit every rendered object inside ` +
+            `the ${zone.width}×${zone.height} zone. No positions were changed. Increase the zone size, ` +
+            'reduce the requested columns, allow a non-strict grid fallback, or explicitly choose overflowStrategy:"deck".',
+          zone: { width: zone.width, height: zone.height },
+          updates: [],
+        });
+      }
+      const placementById = new Map(
+        layout.placements.map((placement) => [placement.id, placement])
+      );
+      const updates: Array<{
+        objectId: string;
+        entityType: string;
+        position: { x: number; y: number };
+        row: number;
+        column: number;
+        stackIndex: number;
+        deckDepth: number;
+      }> = [];
+
+      for (const entity of entities) {
+        const placement = placementById.get(entity.object_id);
+        if (!placement) throw new Error(`Layout did not place board object '${entity.object_id}'.`);
+        const position = { x: placement.x, y: placement.y + titleInset };
+        if (zonePolicy.preset === 'compact_list' && entity.compact !== true) {
+          await boardObjectsService.patch(
+            entity.object_id,
+            { compact: true },
+            ctx.baseServiceParams
+          );
+        }
+        await boardObjectsService.patch(entity.object_id, { position }, ctx.baseServiceParams);
+        updates.push({
+          objectId: entity.object_id,
+          entityType: entity.entity_type,
+          position,
+          row: placement.row,
+          column: placement.column,
+          stackIndex: placement.stackIndex,
+          deckDepth: placement.deckDepth,
+        });
+      }
+
+      const appliedZoneHeight = autoResizeHeight
+        ? Math.max(200, Math.ceil(layout.height + titleInset))
+        : zone.height;
+      if (appliedZoneHeight !== zone.height) {
+        await ctx.app.service('boards').patch(
+          boardId,
+          {
+            _action: 'upsertObject',
+            objectId: zoneId,
+            objectData: { ...zone, height: appliedZoneHeight },
+          } as unknown as Partial<Board>,
+          ctx.baseServiceParams
+        );
+      }
+
+      return textResult({
+        boardId,
+        zoneId,
+        applied: true,
+        arranged: updates.length,
+        requestedColumns,
+        strictColumns: args.strictColumns === true,
+        usedColumnFallback: requestedColumns !== null && layout.columns !== requestedColumns,
+        columns: layout.columns,
+        rows: layout.rows,
+        fitsWithoutOverlap: layout.fitsWithoutOverlap,
+        layoutMode: layout.mode,
+        preset: zonePolicy.preset,
+        sortBy: zonePolicy.sortBy,
+        sortDirection: zonePolicy.sortDirection,
+        autoResizeHeight,
+        deckOffsetX: layout.mode === 'deck' ? layout.deckOffsetX : null,
+        deckOffsetY: layout.mode === 'deck' ? layout.deckOffsetY : null,
+        stackCount: layout.mode === 'deck' ? layout.stackCount : null,
+        maxDeckDepth: layout.maxDeckDepth,
+        requiredWidth: layout.width,
+        requiredHeight: layout.height + titleInset,
+        reservedTitleHeight: titleInset,
+        availableContentHeight: Math.max(0, zone.height - titleInset),
+        appliedGapX: layout.gapX,
+        appliedGapY: layout.gapY,
+        appliedPadding: layout.padding,
+        overflowingObjectIds: layout.overflowingItemIds,
+        warning:
+          layout.overflowingItemIds.length > 0
+            ? 'One or more rendered objects are larger than the available zone rectangle.'
+            : layout.mode === 'deck'
+              ? `The zone cannot fit every rendered object without overlap; a contained cascade deck was used with ${layout.deckOffsetX}px left-edge and ${layout.deckOffsetY}px header reveals.`
+              : requestedColumns !== null && layout.columns !== requestedColumns
+                ? `The requested ${requestedColumns}-column target could not fit without overlap; a contained ${layout.columns}-column grid was used.`
+                : null,
+        zone: { width: zone.width, height: appliedZoneHeight },
+        updates,
+      });
+    }
+  );
+
+  server.registerTool(
+    'agor_boards_set_zone_layout',
+    {
+      description:
+        'Configure a zone layout policy. Manual mode preserves spatial memory until Arrange contents is requested. Auto mode maintains the selected ordering and preset as items or measured sizes change. Use grid for cards or compact_list for a collapsible one-row-per-item list.',
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        boardId: mcpRequiredId('boardId', 'Board'),
+        zoneId: mcpRequiredString('zoneId', 'Zone object ID'),
+        mode: z.enum(ZONE_LAYOUT_MODES),
+        preset: z.enum(ZONE_LAYOUT_PRESETS).optional(),
+        sortBy: z.enum(ZONE_LAYOUT_SORT_FIELDS).optional(),
+        sortDirection: z.enum(ZONE_LAYOUT_SORT_DIRECTIONS).optional(),
+        columns: z
+          .number()
+          .int()
+          .positive()
+          .nullable()
+          .optional()
+          .describe('Preferred grid columns. Use null to return to automatic column selection.'),
+        autoResizeHeight: z
+          .boolean()
+          .optional()
+          .describe('Grow or shrink the zone vertically to contain arranged items.'),
+      }),
+    },
+    async (args) => {
+      const boardId = coerceString(args.boardId);
+      const zoneId = coerceString(args.zoneId);
+      if (!boardId || !zoneId) throw new Error('boardId and zoneId are required');
+      const boardsService = ctx.app.service('boards');
+      const board = (await boardsService.get(boardId, ctx.baseServiceParams)) as Board;
+      const zone = board.objects?.[zoneId];
+      if (zone?.type !== 'zone') {
+        throw new Error(`Zone '${zoneId}' was not found on board '${boardId}'.`);
+      }
+      const layout = normalizeZoneLayoutPolicy({
+        ...zone.layout,
+        mode: args.mode,
+        ...(args.preset === undefined ? {} : { preset: args.preset }),
+        ...(args.sortBy === undefined ? {} : { sortBy: args.sortBy }),
+        ...(args.sortDirection === undefined ? {} : { sortDirection: args.sortDirection }),
+        ...(args.columns === undefined ? {} : { columns: args.columns ?? undefined }),
+        ...(args.autoResizeHeight === undefined ? {} : { autoResizeHeight: args.autoResizeHeight }),
+      } satisfies Partial<ZoneLayoutPolicy>);
+      const updatedZone = { ...zone, layout };
+      await boardsService.patch(
+        boardId,
+        {
+          _action: 'upsertObject',
+          objectId: zoneId,
+          objectData: updatedZone,
+        } as unknown as Partial<Board>,
+        ctx.baseServiceParams
+      );
+      return textResult({ boardId, zoneId, layout, note: 'Zone layout policy updated.' });
+    }
+  );
+
+  // agor_boards_set_compact
+  server.registerTool(
+    'agor_boards_set_compact',
+    {
+      description:
+        'Collapse or expand board cards/worktrees in the shared board presentation. Compact cards keep their identity header visible while hiding secondary content, which is useful before arranging a dense board. Target explicit board-object IDs, a zone, an entity type, or the entire board.',
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        boardId: mcpRequiredId('boardId', 'Board'),
+        compact: z.boolean().describe('true collapses secondary card content; false expands it.'),
+        objectIds: z
+          .array(mcpRequiredString('objectId', 'Board object ID'))
+          .min(1)
+          .optional()
+          .describe('Specific board placement IDs to update.'),
+        zoneId: mcpOptionalString('zoneId', 'Zone object ID'),
+        entityType: z
+          .enum(BOARD_ENTITY_TYPES)
+          .optional()
+          .describe('Limit targets to branch/worktree or card placements.'),
+      }),
+    },
+    async (args) => {
+      const boardId = coerceString(args.boardId);
+      if (!boardId) throw new Error('boardId is required');
+      const boardObjectsService = ctx.app.service('board-objects');
+      const requestedIds = new Set(args.objectIds ?? []);
+      const found = (await boardObjectsService.find({
+        query: {
+          board_id: boardId,
+          ...(args.zoneId ? { zone_id: args.zoneId } : {}),
+          ...(args.entityType ? { entity_type: args.entityType } : {}),
+        },
+        ...ctx.baseServiceParams,
+      })) as { data: Array<BoardEntityObject> };
+      const targets = requestedIds.size
+        ? found.data.filter((object) => requestedIds.has(object.object_id))
+        : found.data;
+      if (requestedIds.size && targets.length !== requestedIds.size) {
+        throw new Error('One or more board object IDs do not belong to this accessible board.');
+      }
+      if (targets.length === 0) {
+        return textResult({ boardId, compact: args.compact, updated: 0, updates: [] });
+      }
+      const updates = await Promise.all(
+        targets.map(async (object) => {
+          const updated = (await boardObjectsService.patch(
+            object.object_id,
+            { compact: args.compact },
+            ctx.baseServiceParams
+          )) as BoardEntityObject;
+          return {
+            objectId: updated.object_id,
+            entityType: updated.entity_type,
+            compact: updated.compact === true,
+          };
+        })
+      );
+      return textResult({ boardId, compact: args.compact, updated: updates.length, updates });
+    }
+  );
+
+  // agor_boards_create
   server.registerTool(
     'agor_boards_create',
     {
@@ -393,7 +1183,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 5: agor_boards_archive
+  // agor_boards_archive
   server.registerTool(
     'agor_boards_archive',
     {
@@ -416,7 +1206,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 6: agor_boards_unarchive
+  // agor_boards_unarchive
   server.registerTool(
     'agor_boards_unarchive',
     {

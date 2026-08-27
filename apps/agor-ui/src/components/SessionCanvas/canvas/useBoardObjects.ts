@@ -2,10 +2,29 @@
  * Hook for managing board objects (text labels, zones, etc.)
  */
 
+import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
+import {
+  normalizeZoneLayoutPolicy,
+  sortZoneLayoutItems,
+  type ZoneLayoutSortItem,
+} from '@agor/core/layout/zone-layout';
 import type { AgorClient, Board, BoardEntityObject, BoardObject } from '@agor-live/client';
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import type { Node } from 'reactflow';
 import { useThemedMessage } from '../../../utils/message';
+
+function zoneContentTopInset(zone: { fontSize?: number; status?: string }): number {
+  const labelFontSize =
+    typeof zone.fontSize === 'number' && Number.isFinite(zone.fontSize)
+      ? Math.min(48, Math.max(10, zone.fontSize))
+      : 14;
+  const labelHeight = Math.ceil(labelFontSize * 1.2);
+  const statusHeight = zone.status ? 8 + Math.ceil(labelFontSize * 1.05) : 0;
+
+  return Math.max(64, 32 + labelHeight + statusHeight);
+}
+
+import type { ReactFlowNode } from './utils/reactFlowTypes';
 import {
   computeLayerChanges,
   DEFAULT_BOARD_OBJECT_Z_INDEX,
@@ -13,10 +32,32 @@ import {
   sanitizeZIndex,
 } from './zOrder';
 
+function renderedNodeSize(node: Node): { width: number; height: number } {
+  const measured = (node as ReactFlowNode).measured;
+  const fallback = {
+    width: Number(measured?.width ?? node.width ?? node.style?.width ?? 380),
+    height: Number(measured?.height ?? node.height ?? node.style?.height ?? 120),
+  };
+
+  if (typeof document === 'undefined') return fallback;
+  const element = Array.from(
+    document.querySelectorAll<HTMLElement>('.react-flow__node[data-id]')
+  ).find((candidate) => candidate.dataset.id === node.id);
+  if (!element) return fallback;
+
+  const width = Math.max(element.offsetWidth, element.scrollWidth);
+  const height = Math.max(element.offsetHeight, element.scrollHeight);
+  return {
+    width: Number.isFinite(width) && width > 0 ? Math.ceil(width) : fallback.width,
+    height: Number.isFinite(height) && height > 0 ? Math.ceil(height) : fallback.height,
+  };
+}
+
 interface UseBoardObjectsProps {
   board: Board | null;
   client: AgorClient | null;
   boardObjectsForBoard: BoardEntityObject[];
+  nodes: Node[];
   setNodes: React.Dispatch<React.SetStateAction<Node[]>>;
   deletedObjectsRef: React.MutableRefObject<Set<string>>;
   eraserMode?: boolean;
@@ -31,6 +72,7 @@ export const useBoardObjects = ({
   board,
   client,
   boardObjectsForBoard,
+  nodes,
   setNodes,
   deletedObjectsRef,
   eraserMode = false,
@@ -40,8 +82,12 @@ export const useBoardObjects = ({
   // Use ref to avoid recreating callbacks when board changes
   const boardRef = useRef(board);
   boardRef.current = board;
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
 
-  const { showError } = useThemedMessage();
+  const { showError, showSuccess, showWarning } = useThemedMessage();
+  const autoArrangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastAutoLayoutSignatureRef = useRef('');
 
   // Use the board object's reference directly. The store already preserves
   // unchanged board references, and serializing every object on every canvas
@@ -229,6 +275,279 @@ export const useBoardObjects = ({
   );
 
   /**
+   * Pack every branch/card pinned to a zone using its actual rendered size.
+   * Child positions are zone-relative in both React Flow and board_objects, so
+   * placements can be applied without translating through canvas coordinates.
+   */
+  const arrangeZoneContents = useCallback(
+    async (zoneId: string, options: { silent?: boolean } = {}) => {
+      const currentBoard = boardRef.current;
+      const zone = currentBoard?.objects?.[zoneId];
+      if (!currentBoard || !client || zone?.type !== 'zone') return;
+
+      let changedNodes: Node[] = [];
+      let layoutMode: 'grid' | 'deck' = 'grid';
+      let overflowCount = 0;
+
+      const policy = normalizeZoneLayoutPolicy(zone.layout);
+      const sortItem = (node: Node): ZoneLayoutSortItem & { node: Node } => {
+        const data = node.data as {
+          branch?: {
+            name?: string;
+            created_at?: string;
+            updated_at?: string;
+            filesystem_status?: string;
+          };
+          card?: {
+            title?: string;
+            created_at?: string;
+            updated_at?: string;
+            data?: Record<string, unknown>;
+          };
+        };
+        const cardData = data.card?.data ?? {};
+        return {
+          node,
+          id: node.id,
+          position: node.position,
+          title: data.card?.title ?? data.branch?.name,
+          createdAt: data.card?.created_at ?? data.branch?.created_at,
+          updatedAt: data.card?.updated_at ?? data.branch?.updated_at,
+          rank: typeof cardData.rank === 'number' ? cardData.rank : undefined,
+          priority: cardData.priority,
+          status: cardData.status ?? data.branch?.filesystem_status,
+        };
+      };
+      const children = sortZoneLayoutItems(
+        nodesRef.current
+          .filter(
+            (node) =>
+              node.parentId === zoneId && (node.type === 'branchNode' || node.type === 'cardNode')
+          )
+          .map(sortItem),
+        policy
+      ).map(({ node }) => node);
+      if (children.length === 0) {
+        if (!options.silent) showWarning('This zone has no pinned items to arrange.');
+        return;
+      }
+
+      const itemSize = renderedNodeSize;
+      const layout = layoutRectangles(
+        children.map((node) => ({
+          id: node.id,
+          ...(policy.preset === 'compact_list'
+            ? {
+                width: node.type === 'branchNode' ? 500 : 380,
+                height: node.type === 'branchNode' ? 88 : 56,
+              }
+            : itemSize(node)),
+        })),
+        {
+          // Zone labels/status render within the zone above their children.
+          // Reserve that header before packing so an arranged card never
+          // obscures the zone title.
+          bounds: {
+            width: zone.width,
+            height: policy.autoResizeHeight
+              ? Number.MAX_SAFE_INTEGER
+              : Math.max(0, zone.height - zoneContentTopInset(zone)),
+          },
+          padding: 24,
+          minPadding: 8,
+          gapX: 24,
+          gapY: 24,
+          minGapX: 8,
+          minGapY: 8,
+          ...(policy.preset === 'compact_list'
+            ? { exactColumns: 1 }
+            : { preferredColumns: policy.columns ?? Math.ceil(Math.sqrt(children.length)) }),
+          allowDeck: false,
+        }
+      );
+      layoutMode = layout.mode;
+      overflowCount = layout.overflowingItemIds.length;
+      if (overflowCount > 0) {
+        if (!options.silent) {
+          showWarning(
+            `This zone cannot fit ${children.length} items without overlap. No positions were changed; enlarge the zone, enable vertical auto-resize, or arrange fewer items.`
+          );
+        }
+        return;
+      }
+      const placementById = new Map(
+        layout.placements.map((placement) => [placement.id, placement])
+      );
+      const titleInset = zoneContentTopInset(zone);
+      changedNodes = children.map((node) => {
+        const placement = placementById.get(node.id);
+        return placement
+          ? { ...node, position: { x: placement.x, y: placement.y + titleInset } }
+          : node;
+      });
+      const positionChanged = changedNodes.some((node) => {
+        const current = children.find((child) => child.id === node.id);
+        return (
+          !current ||
+          Math.abs(current.position.x - node.position.x) >= 0.5 ||
+          Math.abs(current.position.y - node.position.y) >= 0.5
+        );
+      });
+      const nextZoneHeight = policy.autoResizeHeight
+        ? Math.max(200, Math.ceil(layout.height + titleInset))
+        : zone.height;
+      const zoneHeightChanged = Math.abs(nextZoneHeight - zone.height) >= 0.5;
+      const compactChanged =
+        policy.preset === 'compact_list' &&
+        children.some((node) => {
+          const placement = boardObjectsForBoard.find(
+            (candidate) =>
+              candidate.branch_id === node.id ||
+              (candidate.card_id !== undefined && `card-${candidate.card_id}` === node.id)
+          );
+          return placement?.compact !== true;
+        });
+      if (!positionChanged && !zoneHeightChanged && !compactChanged) return;
+      const changedById = new Map(changedNodes.map((node) => [node.id, node]));
+      setNodes((currentNodes) =>
+        currentNodes.map((node) => {
+          if (node.id === zoneId && zoneHeightChanged) {
+            return {
+              ...node,
+              height: nextZoneHeight,
+              style: { ...node.style, height: nextZoneHeight },
+              data: { ...node.data, height: nextZoneHeight },
+            };
+          }
+          return changedById.get(node.id) ?? node;
+        })
+      );
+
+      if (changedNodes.length === 0) return;
+
+      const placementByNodeId = new Map<string, BoardEntityObject>();
+      for (const placement of boardObjectsForBoard) {
+        if (placement.zone_id !== zoneId) continue;
+        if (placement.branch_id) placementByNodeId.set(placement.branch_id, placement);
+        if (placement.card_id) placementByNodeId.set(`card-${placement.card_id}`, placement);
+      }
+
+      try {
+        if (zoneHeightChanged) {
+          await client.service('boards').patch(currentBoard.board_id, {
+            _action: 'upsertObject',
+            objectId: zoneId,
+            objectData: { ...zone, height: nextZoneHeight },
+          } as unknown as Partial<Board>);
+        }
+        await Promise.all(
+          changedNodes.map(async (node) => {
+            const placement = placementByNodeId.get(node.id);
+            if (!placement) return;
+            const { width, height } =
+              policy.preset === 'compact_list'
+                ? {
+                    width: node.type === 'branchNode' ? 500 : 380,
+                    height: node.type === 'branchNode' ? 88 : 56,
+                  }
+                : itemSize(node);
+            if (policy.preset === 'compact_list' && placement.compact !== true) {
+              await client.service('board-objects').patch(placement.object_id, { compact: true });
+            }
+            if (positionChanged) {
+              await client.service('board-objects').patch(placement.object_id, {
+                position: node.position,
+              });
+            }
+            await client.service('board-objects').patch(placement.object_id, {
+              size: { width, height },
+            });
+          })
+        );
+        if (overflowCount > 0) {
+          showWarning(
+            `Arranged ${changedNodes.length} items, but ${overflowCount} cannot fit inside this zone.`
+          );
+        } else if (layoutMode === 'deck') {
+          showWarning(
+            `The zone is too small for a non-overlapping grid. Arranged ${changedNodes.length} items in compact decks.`
+          );
+        } else if (!options.silent) {
+          showSuccess(`Arranged ${changedNodes.length} items in a non-overlapping grid.`);
+        }
+      } catch (error) {
+        console.error('Failed to arrange zone contents:', error);
+        showError('Failed to arrange zone contents');
+      }
+    },
+    [boardObjectsForBoard, client, setNodes, showError, showSuccess, showWarning]
+  );
+
+  useEffect(() => {
+    const autoZones = Object.entries(boardObjects ?? {}).flatMap(([objectId, object]) =>
+      object.type === 'zone' && normalizeZoneLayoutPolicy(object.layout).mode === 'auto'
+        ? ([[objectId, object]] as const)
+        : []
+    );
+    if (!client || autoZones.length === 0) return;
+
+    const signature = autoZones
+      .map(([zoneId, zone]) => {
+        const children = nodes
+          .filter(
+            (node) =>
+              node.parentId === zoneId && (node.type === 'branchNode' || node.type === 'cardNode')
+          )
+          .map((node) => {
+            const measured = (node as ReactFlowNode).measured;
+            const data = node.data as {
+              branch?: {
+                name?: string;
+                created_at?: string;
+                updated_at?: string;
+                filesystem_status?: string;
+              };
+              card?: {
+                title?: string;
+                created_at?: string;
+                updated_at?: string;
+                data?: Record<string, unknown>;
+              };
+            };
+            return [
+              node.id,
+              node.position.x,
+              node.position.y,
+              measured?.width ?? node.width,
+              measured?.height ?? node.height,
+              data.branch?.name,
+              data.branch?.created_at,
+              data.branch?.updated_at,
+              data.branch?.filesystem_status,
+              data.card?.title,
+              data.card?.created_at,
+              data.card?.updated_at,
+              data.card?.data?.priority,
+              data.card?.data?.rank,
+              data.card?.data?.status,
+            ];
+          });
+        return [zoneId, zone.width, zone.height, zone.layout, children];
+      })
+      .map((value) => JSON.stringify(value))
+      .join('|');
+    if (signature === lastAutoLayoutSignatureRef.current) return;
+    lastAutoLayoutSignatureRef.current = signature;
+    if (autoArrangeTimerRef.current) clearTimeout(autoArrangeTimerRef.current);
+    autoArrangeTimerRef.current = setTimeout(() => {
+      void Promise.all(autoZones.map(([zoneId]) => arrangeZoneContents(zoneId, { silent: true })));
+    }, 400);
+    return () => {
+      if (autoArrangeTimerRef.current) clearTimeout(autoArrangeTimerRef.current);
+    };
+  }, [arrangeZoneContents, boardObjects, client, nodes]);
+
+  /**
    * Convert board.objects to React Flow nodes
    */
   const getBoardObjectNodes = useCallback((): Node[] => {
@@ -380,10 +699,12 @@ export const useBoardObjects = ({
             x: objectData.x, // Include position in data for updates
             y: objectData.y,
             trigger: objectData.type === 'zone' ? objectData.trigger : undefined,
+            layout: objectData.type === 'zone' ? objectData.layout : undefined,
             pinnedItemCount,
             onUpdate: handleUpdateObject,
             onDelete: deleteZone,
             onReorder: reorderObject,
+            onArrangeContents: arrangeZoneContents,
           },
         };
       });
@@ -395,6 +716,7 @@ export const useBoardObjects = ({
     deleteObject,
     deleteArtifact,
     reorderObject,
+    arrangeZoneContents,
     eraserMode,
     activeUrlTargetArtifactId,
     onEditMarkdown,

@@ -24,6 +24,91 @@
   fill: currentColor;
 }
 
+.canvas-alignment-guides {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.canvas-marquee-selection {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  border: 1px solid var(--ant-color-primary);
+  background: color-mix(in srgb, var(--ant-color-primary) 12%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ant-color-primary) 16%, transparent);
+}
+
+.canvas-layout-toolbar {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 24px);
+  padding: 6px 8px;
+  transform: translateX(-50%);
+  border: 1px solid var(--ant-color-border-secondary);
+  border-radius: 8px;
+  background: var(--ant-color-bg-elevated);
+  box-shadow: var(--ant-box-shadow-secondary);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.canvas-alignment-guide {
+  position: absolute;
+  display: block;
+  background: var(--ant-color-primary);
+  opacity: 0.9;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ant-color-primary) 28%, transparent);
+}
+
+.canvas-alignment-guide.vertical {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.canvas-alignment-guide.horizontal {
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+.canvas-alignment-guide[data-guide-kind="size"],
+.canvas-alignment-guide[data-guide-kind="gap"] {
+  background: var(--ant-color-success);
+}
+
+.canvas-alignment-guide-label {
+  position: absolute;
+  z-index: 1;
+  padding: 2px 5px;
+  border: 1px solid var(--ant-color-success-border);
+  border-radius: 4px;
+  background: var(--ant-color-bg-elevated);
+  color: var(--ant-color-success);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+  white-space: nowrap;
+  transform: translate(-50%, -100%);
+}
+
+.canvas-alignment-guide.vertical .canvas-alignment-guide-label {
+  top: 50%;
+  left: 0;
+}
+
+.canvas-alignment-guide.horizontal .canvas-alignment-guide-label {
+  top: 0;
+  left: 50%;
+}
+
 /* Tool mode cursors - override React Flow defaults */
 .react-flow.tool-mode-zone .react-flow__pane {
   cursor: crosshair;

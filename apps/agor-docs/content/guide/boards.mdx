@@ -108,6 +108,33 @@ You can also build asymmetric pipelines: a "Stuck" zone that escalates to a diff
 
 ---
 
+## Arranging board content
+
+Agor can arrange mixed-size branches, cards, zones, notes, apps, and artifacts without treating every object as the same-sized tile.
+
+- **Arrange a selection:** with the Select tool, drag a marquee from empty canvas or an empty part of a zone. Worktrees, cards, zones, notes, apps, and artifacts can be selected; hold Shift, Command, or Control to add to the selection. Choose **Auto arrange** in the selection toolbar for two or more items, including items inside the same zone. Selecting a whole zone treats its contents as one hierarchy so a group drag does not move children twice.
+- **Arrange a zone:** select a zone and choose **Arrange contents** in its toolbar. Pinned branches and cards remain pinned and are laid out relative to that zone.
+- **Arrange through MCP:** use `agor_boards_auto_arrange` for top-level objects or `agor_boards_auto_arrange_zone` for one zone.
+- **Maintain a zone:** open the zone settings and switch **Maintenance** from **Manual** to **Auto**. The board reflows that zone when its items, ordering metadata, or measured card sizes change.
+- **Compact through MCP:** use `agor_boards_set_compact` to collapse or expand cards/worktrees by placement ID, zone, type, or across a board. This is shared board presentation state, so collaborators and agents see the same density.
+
+Layouts read the rendered width and height of each branch or card, then fill rows from the top-left with equal spacing. A non-overlapping grid is always preferred, compacting edge margins and gaps down to a small safe minimum before overlap is considered. The UI will not apply an overlapping layout. The MCP result reports whether a grid fit, the applied gaps and padding, required bounds, and any objects that could not be fully contained.
+
+Zone settings provide two opinionated presentations:
+
+- **Grid** keeps each card/worktree's current expanded or collapsed density and chooses a contained row-and-column layout. You can supply a preferred column count or let Agor choose the nearest fitting grid.
+- **Compact list** collapses each item to a one-row summary and arranges a single readable column. This is useful for dense triage, ranking, and status queues.
+
+Both presentations can sort by current spatial order, priority/rank, workflow status, last updated, creation time, or title, in either direction. Switching a previously-unsorted zone to automatic maintenance defaults to **Last updated · Descending**, so active work appears first. **Fit zone height** can grow or shrink the zone vertically to contain every row instead of refusing an otherwise-valid layout.
+
+For `agor_boards_auto_arrange_zone`, `columns` is a layout target by default. If that target cannot fit, Agor reports and uses the nearest contained, non-overlapping grid instead of overlapping cards. Set `strictColumns: true` when an exact count must be enforced; then an impossible request returns `applied: false` without moving anything. A deliberate `overflowStrategy: "deck"` is available for the rare case where visible-header overlap is preferable to no arrangement. By default, archived cards and branches are excluded so MCP lays out the same visible items as the board. The tool also accepts `preset`, `sortBy`, `sortDirection`, and `autoResizeHeight`; use `agor_boards_set_zone_layout` to persist those choices and select manual or automatic maintenance.
+
+For a whole-board arrangement, `includeCanvasObjects: true` brings text, markdown, apps, and artifacts into the grid. Add `includeZones: true` to arrange the zones themselves as containers; children pinned to a zone retain their relative positions and move with it.
+
+![A selected Review zone after arranging fourteen mixed-size branches and cards into a contained two-column grid.](/screenshots/board-auto-layout-zone-grid.png)
+
+---
+
 ## Multiple boards, one workspace
 
 A workspace can have many boards, one per team, one per project, one per long-running initiative. Boards are independent canvases with their own branches, zones, and members.

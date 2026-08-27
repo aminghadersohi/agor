@@ -215,6 +215,30 @@ describe('BoardObjectRepository.create', () => {
     expect(created.zone_id).toBe('zone-123');
   });
 
+  dbTest('should persist measured size with placement metadata', async ({ db }) => {
+    const repoRepo = new RepoRepository(db);
+    const wtRepo = new BranchRepository(db);
+    const boRepo = new BoardObjectRepository(db);
+
+    const repo = await repoRepo.create(createRepoData());
+    const branch = await wtRepo.create(createBranchData({ repo_id: repo.repo_id }));
+    const boardId = await createBoard(db);
+
+    const created = await boRepo.create({
+      board_id: boardId,
+      branch_id: branch.branch_id,
+      position: { x: 50, y: 75 },
+      size: { width: 486, height: 237 },
+      zone_id: 'zone-measured',
+    });
+
+    expect(created).toMatchObject({
+      position: { x: 50, y: 75 },
+      size: { width: 486, height: 237 },
+      zone_id: 'zone-measured',
+    });
+  });
+
   dbTest('should prevent duplicate branch on boards', async ({ db }) => {
     const repoRepo = new RepoRepository(db);
     const wtRepo = new BranchRepository(db);
@@ -762,6 +786,25 @@ describe('BoardObjectRepository.updatePosition', () => {
     expect(updated.zone_id).toBe('zone-preserved');
   });
 
+  dbTest('should preserve measured size when updating position', async ({ db }) => {
+    const repoRepo = new RepoRepository(db);
+    const wtRepo = new BranchRepository(db);
+    const boRepo = new BoardObjectRepository(db);
+    const repo = await repoRepo.create(createRepoData());
+    const branch = await wtRepo.create(createBranchData({ repo_id: repo.repo_id }));
+    const boardId = await createBoard(db);
+    const created = await boRepo.create({
+      board_id: boardId,
+      branch_id: branch.branch_id,
+      position: { x: 0, y: 0 },
+      size: { width: 500, height: 221 },
+    });
+
+    const updated = await boRepo.updatePosition(created.object_id, { x: 500, y: 600 });
+
+    expect(updated.size).toEqual({ width: 500, height: 221 });
+  });
+
   dbTest('should preserve undefined zone_id', async ({ db }) => {
     const repoRepo = new RepoRepository(db);
     const wtRepo = new BranchRepository(db);
@@ -809,6 +852,64 @@ describe('BoardObjectRepository.updatePosition', () => {
     const updated = await boRepo.updatePosition(created.object_id, { x: -50, y: -75 });
 
     expect(updated.position).toEqual({ x: -50, y: -75 });
+  });
+});
+
+describe('BoardObjectRepository.updateSize', () => {
+  dbTest('should update size while preserving position and zone', async ({ db }) => {
+    const repoRepo = new RepoRepository(db);
+    const wtRepo = new BranchRepository(db);
+    const boRepo = new BoardObjectRepository(db);
+    const repo = await repoRepo.create(createRepoData());
+    const branch = await wtRepo.create(createBranchData({ repo_id: repo.repo_id }));
+    const boardId = await createBoard(db);
+    const created = await boRepo.create({
+      board_id: boardId,
+      branch_id: branch.branch_id,
+      position: { x: 31, y: 47 },
+      zone_id: 'zone-sized',
+    });
+
+    const updated = await boRepo.updateSize(created.object_id, { width: 492, height: 318 });
+
+    expect(updated).toMatchObject({
+      position: { x: 31, y: 47 },
+      size: { width: 492, height: 318 },
+      zone_id: 'zone-sized',
+    });
+  });
+
+  dbTest('should throw EntityNotFoundError for a missing object', async ({ db }) => {
+    const boRepo = new BoardObjectRepository(db);
+
+    await expect(boRepo.updateSize('non-existent-id', { width: 100, height: 100 })).rejects.toThrow(
+      EntityNotFoundError
+    );
+  });
+});
+
+describe('BoardObjectRepository.updateCompact', () => {
+  dbTest('persists compact presentation through position and size updates', async ({ db }) => {
+    const repoRepo = new RepoRepository(db);
+    const branchRepo = new BranchRepository(db);
+    const boardObjectRepo = new BoardObjectRepository(db);
+    const repo = await repoRepo.create(createRepoData());
+    const branch = await branchRepo.create(createBranchData({ repo_id: repo.repo_id }));
+    const boardId = await createBoard(db);
+    const created = await boardObjectRepo.create({
+      board_id: boardId,
+      branch_id: branch.branch_id,
+      position: { x: 10, y: 20 },
+      size: { width: 500, height: 200 },
+    });
+
+    const compacted = await boardObjectRepo.updateCompact(created.object_id, true);
+    const moved = await boardObjectRepo.updatePosition(created.object_id, { x: 30, y: 40 });
+    const resized = await boardObjectRepo.updateSize(created.object_id, { width: 500, height: 64 });
+
+    expect(compacted.compact).toBe(true);
+    expect(moved).toMatchObject({ compact: true, position: { x: 30, y: 40 } });
+    expect(resized).toMatchObject({ compact: true, size: { width: 500, height: 64 } });
   });
 });
 
