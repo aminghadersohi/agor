@@ -22,6 +22,23 @@ export const REFRESH_BUFFER_MS = 60_000;
 const REFRESH_OBSERVE_TIMEOUT_MS = 20_000;
 const REFRESH_OBSERVE_INTERVAL_MS = 100;
 
+/**
+ * Google's OAuth refresh tokens are reusable and are not rotated by a normal
+ * access-token refresh. An ambiguous network failure can therefore be retried
+ * later without risking replay of a single-use rotating refresh token.
+ */
+export function isReplaySafeRefreshTokenEndpoint(tokenEndpoint: string): boolean {
+  try {
+    const url = new URL(tokenEndpoint);
+    return (
+      url.protocol === 'https:' &&
+      ['oauth2.googleapis.com', 'www.googleapis.com'].includes(url.hostname.toLowerCase())
+    );
+  } catch {
+    return false;
+  }
+}
+
 export class InvalidGrantError extends Error {
   readonly code = 'invalid_grant';
   constructor(message = 'OAuth refresh grant is no longer valid') {
@@ -455,12 +472,15 @@ async function refreshPostgres(deps: RefreshAndPersistDeps): Promise<string> {
       throw error;
     }
     const ambiguous = !(error instanceof OAuthRefreshExchangeError) || error.ambiguous;
+    const retryableWithoutRefreshReplayRisk = isReplaySafeRefreshTokenEndpoint(
+      row.oauth_token_endpoint
+    );
     await tenantWork(deps, (db) =>
       new UserMCPOAuthTokenRepository(db).finishRefreshClaim(
         deps.userId,
         deps.mcpServerId,
         fence,
-        ambiguous ? 'ambiguous' : 'idle'
+        ambiguous && !retryableWithoutRefreshReplayRisk ? 'ambiguous' : 'idle'
       )
     );
     console.warn(

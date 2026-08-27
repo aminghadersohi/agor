@@ -3,8 +3,9 @@
  *
  * The answer drives an auth badge in the UI, so it is a read of durable state
  * rather than of whatever a realtime hint last said: a grant is advertised only
- * if it has not expired, is not mid-refresh in an ambiguous state, and still
- * binds to the server it was issued against. Historical standalone grants
+ * if it has a usable access token or a durable refresh token capable of
+ * renewing it, is not in an ambiguous refresh state, and still binds to the
+ * server it was issued against. Historical standalone grants
  * predate binding and are intentionally grandfathered; newly issued SQLite
  * grants carry the same versioned configuration envelope.
  *
@@ -52,6 +53,24 @@ function isVisibleTo(server: MCPServer, viewer: OAuthStatusViewer): boolean {
   return isMCPServerUsableBy(server, viewer.user_id);
 }
 
+/**
+ * An expired access token is not the same thing as an expired OAuth grant.
+ * The daemon refreshes an idle/refreshing grant just-in-time before vending
+ * the next Authorization header, so status surfaces must keep it authenticated
+ * while a durable refresh token remains available.
+ */
+export function oauthGrantCanAuthenticate(
+  token: Pick<
+    UserMCPOAuthToken,
+    'oauth_token_expires_at' | 'oauth_refresh_token' | 'refresh_status'
+  >,
+  now = new Date()
+): boolean {
+  if (token.refresh_status === 'ambiguous') return false;
+  if (!token.oauth_token_expires_at || token.oauth_token_expires_at > now) return true;
+  return Boolean(token.oauth_refresh_token);
+}
+
 export async function resolveAuthenticatedServerIds(deps: OAuthStatusDeps): Promise<MCPServerID[]> {
   const now = deps.now ?? new Date();
   const [perUserTokens, sharedTokens] = await Promise.all([
@@ -61,8 +80,7 @@ export async function resolveAuthenticatedServerIds(deps: OAuthStatusDeps): Prom
 
   const authenticatedServerIds = new Set<MCPServerID>();
   for (const token of [...perUserTokens, ...sharedTokens]) {
-    if (token.oauth_token_expires_at && token.oauth_token_expires_at <= now) continue;
-    if (token.refresh_status === 'ambiguous') continue;
+    if (!oauthGrantCanAuthenticate(token, now)) continue;
 
     const server = await deps.findServer(token.mcp_server_id);
     if (!server || !isVisibleTo(server, deps.viewer)) continue;

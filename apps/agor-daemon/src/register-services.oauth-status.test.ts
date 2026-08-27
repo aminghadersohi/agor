@@ -11,6 +11,15 @@ describe('register-services durable OAuth status authority', () => {
   const refreshEnd = source.indexOf('// Discover endpoint', refreshStart);
   const refreshBlock =
     refreshStart < 0 || refreshEnd < 0 ? '' : source.slice(refreshStart, refreshEnd);
+  const authHeadersStart = source.indexOf("app.use('/mcp-servers/oauth-auth-headers'");
+  const authHeadersEnd = source.indexOf(
+    "app.service('mcp-servers/oauth-auth-headers').hooks",
+    authHeadersStart
+  );
+  const authHeadersBlock =
+    authHeadersStart < 0 || authHeadersEnd < 0
+      ? ''
+      : source.slice(authHeadersStart, authHeadersEnd);
 
   // What the endpoint may advertise — expiry, refresh-ambiguity, grant
   // binding, and which servers it will name to which caller — is decided by
@@ -26,6 +35,16 @@ describe('register-services durable OAuth status authority', () => {
   it('gives the refresh owner and observer the same retryable known-failure response', () => {
     expect(refreshBlock).toMatch(
       /err instanceof FailedRefreshError[\s\S]{0,160}error: 'token_refresh_failed'/
+    );
+  });
+
+  it('supports a daemon-only forced refresh without treating transient failures as revocation', () => {
+    expect(authHeadersBlock).toContain('force_refresh?: boolean');
+    expect(authHeadersBlock).toContain('data?.force_refresh === true');
+    expect(authHeadersBlock).toContain('forceRefresh || needsRefresh');
+    expect(authHeadersBlock).toContain("error: 'token_refresh_failed'");
+    expect(authHeadersBlock).toMatch(
+      /refreshErr instanceof InvalidGrantError[\s\S]{0,100}'needs_reauth'/
     );
   });
 });
