@@ -244,6 +244,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         permission_config: session.permission_config,
         model_config: session.model_config ?? undefined,
         callback_config: session.callback_config,
+        queue_config: session.queue_config,
         fork_origin: session.fork_origin,
         custom_context: session.custom_context,
         current_context_usage: session.current_context_usage,

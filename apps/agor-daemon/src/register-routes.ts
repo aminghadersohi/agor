@@ -1945,6 +1945,16 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           if (prior.created_by !== expectedCreator || prior.full_prompt !== data.prompt) {
             throw new Conflict(`Task identity ${data.idempotencyTaskId} is already in use`);
           }
+          const coalescedInto = prior.metadata?.queue_coalescing?.coalesced_into_task_id;
+          if (coalescedInto) {
+            const leader = await taskRepo.findById(coalescedInto);
+            if (!leader || leader.session_id !== prior.session_id) {
+              throw new Conflict(
+                `Task identity ${data.idempotencyTaskId} has invalid queue lineage`
+              );
+            }
+            return leader;
+          }
           if (isTaskPendingDispatch(prior)) return null;
 
           await reconcileStableInitialUserMessage(

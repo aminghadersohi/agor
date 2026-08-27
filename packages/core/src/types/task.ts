@@ -194,6 +194,21 @@ export interface TaskMetadata {
     requested_from_session_id: SessionID;
     requested_by_user_id: string;
   };
+
+  /**
+   * Durable queue-coalescing provenance for trusted system updates.
+   *
+   * Producers set `kind` + `group_key`. When the queue head is claimed, Agor
+   * may fold a contiguous compatible prefix into that head. Folded rows remain
+   * addressable and point at the task that owns the combined model turn.
+   */
+  queue_coalescing?: {
+    kind: 'gateway' | 'callback';
+    group_key: string;
+    coalesced_into_task_id?: TaskID;
+    coalesced_task_ids?: TaskID[];
+    item_count?: number;
+  };
 }
 
 /**

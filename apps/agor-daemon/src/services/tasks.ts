@@ -206,6 +206,21 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         params,
         id: result.task.task_id,
       });
+      for (const coalescedTask of result.coalesced_tasks ?? []) {
+        emitServiceEvent(this.app, {
+          path: 'tasks',
+          event: 'patched',
+          data: coalescedTask,
+          params,
+          id: coalescedTask.task_id,
+        });
+      }
+      if (result.coalesced_tasks?.length) {
+        console.info(
+          `[task-queue] event=coalesced session_id=${JSON.stringify(result.task.session_id)} ` +
+            `leader_task_id=${JSON.stringify(result.task.task_id)} item_count=${result.coalesced_tasks.length + 1}`
+        );
+      }
     }
     return result;
   }
@@ -1315,6 +1330,10 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
             child_task_id: task.task_id,
             queued_by_user_id: callbackCreator,
             initial_message_id: callbackTaskId as MessageID,
+            queue_coalescing: {
+              kind: 'callback',
+              group_key: 'session-system-updates',
+            },
           },
         });
       const tenantId = getCurrentTenantId() ?? params?.tenant?.tenant_id;

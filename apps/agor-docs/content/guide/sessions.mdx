@@ -135,6 +135,26 @@ Agor-launched Codex processes. Use Agor subsessions instead: they keep child wor
 the session tree and provide durable status and callback semantics. Agor provides the same
 observable orchestration boundary for every supported agent.
 
+### Batching queued system updates
+
+A busy orchestration session can receive several gateway summons and child-completion callbacks
+before its current turn ends. In **Session Settings → Queued updates**, enable **Batch queued
+system updates** to process a compatible adjacent group as one ordered model turn.
+
+- The setting is off by default and does not change existing queue behavior until enabled.
+- Only daemon-authored gateway and callback updates are eligible. Human prompts always remain
+  separate and stop a batch boundary.
+- Updates from different users are never combined. Tenant isolation is preserved by the existing
+  tenant-scoped queue transaction.
+- Exact duplicate update bodies are represented once with a repetition count.
+- Every original durable task ID remains queryable and links to the task that owns the combined
+  turn. A daemon restart cannot lose the relationship or cause another executor launch.
+- **Maximum updates per turn** bounds the batch (8 by default, configurable from 2 to 25). Later
+  updates remain queued for the next turn.
+
+This reduces repeated context loading and callback chatter without making `btw` messages or prompt
+conventions part of queue correctness.
+
 ---
 
 ## Real patterns
