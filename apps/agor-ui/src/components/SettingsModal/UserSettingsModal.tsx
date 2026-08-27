@@ -88,6 +88,7 @@ import { EnvVarEditor } from '../EnvVarEditor';
 import { HighlightMatch } from '../HighlightMatch';
 import { SessionMcpServersField } from '../MCPServerSelect';
 import { ProfileImageGalleryEditor } from '../ProfileImage';
+import { UserStagePreview } from '../TeammateStage';
 import { ToolIcon } from '../ToolIcon';
 import { UserIdentityAvatar } from '../UserIdentityAvatar';
 import { AudioSettingsTab } from './AudioSettingsTab';
@@ -1626,6 +1627,9 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
             canEdit={canEditTarget}
             label="Profile photos"
           />
+          <div style={{ marginTop: token.marginLG }}>
+            <UserStagePreview user={user} />
+          </div>
         </>
       )}
 

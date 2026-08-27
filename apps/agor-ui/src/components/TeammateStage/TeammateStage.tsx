@@ -490,7 +490,7 @@ export function TeammateStage({ name, imageUrl, emoji = '🤖', active = true }:
           <Typography.Title level={compact ? 4 : 3} style={{ margin: 0 }}>
             {name}
           </Typography.Title>
-          <Typography.Text type="secondary">Teammate stage prototype</Typography.Text>
+          <Typography.Text type="secondary">3D identity stage</Typography.Text>
         </Flex>
       </div>
 
