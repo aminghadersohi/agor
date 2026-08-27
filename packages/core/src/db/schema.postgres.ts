@@ -180,6 +180,9 @@ export const sessions = pgTable(
         // Callback config (child/remote session completion notifications)
         callback_config?: Session['callback_config'];
 
+        // Busy-session queue behavior (opt-in system update coalescing)
+        queue_config?: Session['queue_config'];
+
         // Fork origin tracking (set to 'btw' for ephemeral btw forks)
         fork_origin?: 'btw';
 
@@ -1570,6 +1573,9 @@ export const mcpServers = pgTable(
         // that outlives the entry row.
         catalog_entry_name?: string;
 
+        // Daemon-owned optimistic-concurrency revision for public edits.
+        config_version?: number;
+
         // Transport config
         command?: string;
         args?: string[];
@@ -1605,20 +1611,21 @@ export const mcpServers = pgTable(
         // Discovered capabilities
         tools?: Array<{
           name: string;
-          description: string;
-          input_schema: Record<string, unknown>;
+          description?: string;
+          input_schema?: Record<string, unknown>;
         }>;
         resources?: Array<{
           uri: string;
           name: string;
+          description?: string;
           mimeType?: string;
         }>;
         prompts?: Array<{
           name: string;
-          description: string;
+          description?: string;
           arguments?: Array<{
             name: string;
-            description: string;
+            description?: string;
             required?: boolean;
           }>;
         }>;
@@ -2254,6 +2261,15 @@ export const profileImages = pgTable(
     large_content_type: text('large_content_type').notNull(),
     large_width: integer('large_width').notNull(),
     large_height: integer('large_height').notNull(),
+    identity_model_provider: text('identity_model_provider'),
+    identity_model_task_id: text('identity_model_task_id'),
+    identity_model_status: text('identity_model_status'),
+    identity_model_progress: integer('identity_model_progress'),
+    identity_model_data: bytea('identity_model_data'),
+    identity_model_content_type: text('identity_model_content_type'),
+    identity_model_error: text('identity_model_error'),
+    identity_model_created_at: t.timestamp('identity_model_created_at'),
+    identity_model_updated_at: t.timestamp('identity_model_updated_at'),
     created_at: t.timestamp('created_at').notNull(),
     updated_at: t.timestamp('updated_at').notNull(),
   },

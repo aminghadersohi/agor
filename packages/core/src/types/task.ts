@@ -172,6 +172,19 @@ export interface TaskMetadata {
   widget_id?: MessageID;
   /** User who resolved the widget; Task execution remains session-owner attributed. */
   widget_resolved_by_user_id?: UserID;
+  /**
+   * Durable restart-continuation state. A terminal source Task stays pending
+   * until its deterministic continuation Task has been admitted. The
+   * continuation carries the same source ID for transcript/audit context.
+   */
+  restart_recovery?: {
+    source_task_id: TaskID;
+    state: 'pending' | 'admitted' | 'superseded';
+    requested_at: string;
+    admitted_task_id?: TaskID;
+    admitted_at?: string;
+    disposition_reason?: 'session_advanced' | 'session_archived';
+  };
   /** Provider-event occurrence that durably admitted this gateway prompt. */
   gateway_inbound_event_id?: GatewayInboundEventID;
   /** Provider reply target captured for this gateway Task (for example an editable ack ID). */
@@ -196,6 +209,21 @@ export interface TaskMetadata {
   };
   /** Durable root-propagation request currently associated with this Task. */
   completion_subscription_id?: CompletionSubscriptionID;
+
+  /**
+   * Durable queue-coalescing provenance for trusted system updates.
+   *
+   * Producers set `kind` + `group_key`. When the queue head is claimed, Agor
+   * may fold a contiguous compatible prefix into that head. Folded rows remain
+   * addressable and point at the task that owns the combined model turn.
+   */
+  queue_coalescing?: {
+    kind: 'gateway' | 'callback';
+    group_key: string;
+    coalesced_into_task_id?: TaskID;
+    coalesced_task_ids?: TaskID[];
+    item_count?: number;
+  };
 }
 
 /**
@@ -272,7 +300,7 @@ export function isTaskExecuting(task: TaskExecutionState): boolean {
 export interface ContextUsageSnapshot {
   totalTokens: number;
   maxTokens: number;
-  /** 0–100, integer, ready to display */
+  /** Finite 0–100 percentage reported by the source tool. */
   percentage: number;
 }
 
@@ -340,13 +368,14 @@ export interface Task {
   // Model (resolved model ID used for this task, e.g., "claude-sonnet-4-5-20250929")
   model?: string;
 
-  // Raw SDK response - single source of truth for token accounting
-  // Stores the unmutated SDK event (turn.completed for Codex, Finished for Gemini, etc.)
+  // Closed SDK response projection - source of truth for token accounting.
+  // Provider prose and unknown SDK extension objects are removed before storage.
   // Access token usage, context window, costs, etc. via normalizers
   // Optional to support legacy tasks that don't have this field
   raw_sdk_response?: unknown; // Raw SDK response stored as JSON
 
-  // Normalized SDK response - computed from raw_sdk_response by executor
+  // Normalized SDK response - computed and runtime-projected by the executor,
+  // then projected again by the daemon before persistence/realtime.
   // Stored here so UI doesn't need SDK-specific normalization logic
   // Will be empty for legacy tasks (pre-normalization)
   normalized_sdk_response?: {

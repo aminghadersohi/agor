@@ -160,6 +160,27 @@ Click any teammate's branch card to open its modal. The **Teammate** tab shows:
 - Framework repo and version
 - Creation method (onboarding vs manual)
 
+### Profile galleries and the optional 3D stage
+
+Users and teammates can have a small gallery of private profile photos. The selected primary
+photo is used consistently across boards, settings, and teammate panels. Authorized viewers fetch
+the processed image through authenticated routes; Agor does not publish a permanent image URL.
+
+An administrator can optionally turn one selected photo into a textured GLB for the identity
+stage. Set `MESHY_API_KEY` in the daemon environment, restart the daemon, and choose **Generate 3D
+model** from the stage. Agor always shows a confirmation before sending that photo to Meshy because
+generation may disclose personal data and consume provider credits. The provider API key and its
+signed download URL remain server-side. After generation, Agor copies the GLB into the same
+tenant-owned profile-image record, asks Meshy to delete the provider task and its associated data,
+and serves the stored model through an authenticated private route. If that cleanup request fails,
+Agor retains the opaque task ID and retries cleanup on a later authenticated status read.
+
+Starting a regeneration keeps the last completed model available until its replacement succeeds.
+Deleting the profile photo also deletes its stored model. If provider cleanup is still pending,
+Agor removes the Meshy task first and refuses the local deletion when that cleanup cannot be
+confirmed, preventing an unreachable provider orphan. Removing `MESHY_API_KEY` disables new
+generation and provider reconciliation; already stored models remain viewable.
+
 ### Boards
 
 Teammates appear as branch cards on boards, distinguished by a robot icon and blue border. We recommend giving each teammate its own board for clarity.

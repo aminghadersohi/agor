@@ -31,6 +31,15 @@
   pointer-events: none;
 }
 
+.canvas-marquee-selection {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  border: 1px solid var(--ant-color-primary);
+  background: color-mix(in srgb, var(--ant-color-primary) 12%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ant-color-primary) 16%, transparent);
+}
+
 .canvas-layout-toolbar {
   position: absolute;
   top: 12px;

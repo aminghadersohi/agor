@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { RepoEnvironment, RepoEnvironmentConfigV1 } from '../types/branch';
-import { parseAgorYml, resolveVariant, writeAgorYml } from './agor-yml';
+import { parseAgorYml, parseLaunchJson, resolveVariant, writeAgorYml } from './agor-yml';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
 const REPO_ROOT_AGOR_YML = path.join(REPO_ROOT, '.agor.yml');
@@ -262,6 +262,32 @@ describe('parseAgorYml — misc', () => {
       fs.writeFileSync(file, `invalid: yaml: syntax:`);
       expect(() => parseAgorYml(file)).toThrow(/Invalid YAML/);
     });
+  });
+});
+
+describe('parseLaunchJson', () => {
+  it('prefers .agor/launch.json and accepts comments and trailing commas', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agor-launch-json-test-'));
+    try {
+      fs.mkdirSync(path.join(tmpDir, '.agor'));
+      fs.mkdirSync(path.join(tmpDir, '.vscode'));
+      fs.writeFileSync(
+        path.join(tmpDir, '.agor/launch.json'),
+        `{
+          // Agor-specific launch profile
+          "configurations": [{ "name": "Agor", "command": "pnpm dev", }],
+        }`
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, '.vscode/launch.json'),
+        JSON.stringify({ configurations: [{ name: 'VS Code', command: 'npm start' }] })
+      );
+      const result = parseLaunchJson(tmpDir);
+      expect(result?.path).toBe('.agor/launch.json');
+      expect(result?.environment.default).toBe('Agor');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 

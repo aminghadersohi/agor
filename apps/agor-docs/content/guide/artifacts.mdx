@@ -26,7 +26,7 @@ Under the hood, artifacts are powered by [Sandpack](https://sandpack.codesandbox
 ## How it works
 
 1. **Agent writes a folder** of ordinary source files (a regular `package.json`, `App.tsx`, etc.), typically inside the branch so the code is version-controlled.
-2. **Agent calls `agor_artifacts_publish`** with the folder path, the board, the Sandpack template, and (optionally) declarative metadata: `requiredEnvVars`, `agorGrants`, `sandpackConfig`. The daemon serializes the file map into the database.
+2. **Agent calls `agor_artifacts_publish`** with the folder path, the board, the Sandpack template, and (optionally) declarative metadata: `requiredEnvVars`, `agorGrants`, `sandpackConfig`, and `interactionConfig`. The daemon serializes the file map into the database.
 3. **The artifact appears on the board** as an interactive node with a live Sandpack preview.
 4. **Agent edits files and republishes** with the same `artifactId`. The board hot-reloads via WebSocket.
 5. **You interact with the running app** directly on the canvas: click buttons, fill forms, see state updates.
@@ -52,7 +52,8 @@ Each artifact is a stored file map plus a small set of declarative metadata colu
 - `sandpack_config`: Author-controlled SandpackProvider props (template, customSetup, options). Sanitized on write.
 - `required_env_vars`: Names of env vars the artifact needs (e.g. `["OPENAI_KEY"]`). The daemon synthesizes a per-viewer `.env` at render time.
 - `agor_grants`: Declarative daemon capabilities (`agor_api_url`, viewer email, and metadata grants).
-- `agor_runtime`: Controls injection of the daemon-side `agor-runtime.js` (which powers agent DOM introspection via `agor_artifacts_query_dom`). Enabled by default; opt out per-artifact with `{ enabled: false }`. The runtime ships as an iframe-level `<script>` tag via Sandpack's `externalResources`, so it works regardless of which user files exist (no entry-file detection, no file mutation, no template-specific gotchas).
+- `agor_runtime`: Controls injection of the daemon-side `agor-runtime.js` (which powers agent DOM introspection and declared actions). Enabled by default; opt out per-artifact with `{ enabled: false }`. The runtime ships as an iframe-level `<script>` tag via Sandpack's `externalResources`, so it works regardless of which user files exist (no entry-file detection, no file mutation, no template-specific gotchas).
+- `agor_runtime.interactions`: Server-validated action and chat bindings. Action bindings reference existing schedules, which remain the source of truth for prompts, models, tools, and execution policy. Chat bindings reference a canonical session ID rather than a mutable title.
 
 **On the board:**
 
@@ -134,10 +135,11 @@ Agents manage artifacts through Agor's [MCP tools](/guide/internal-mcp):
 
 | Tool                                | Purpose                                                                                                                                                                                                               |
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `agor_artifacts_publish`            | Publish a folder as a new artifact, OR re-publish an existing one with `artifactId`. Optional `waitForStatus: true` waits for this user's browser-reported Sandpack status/logs.                                      |
+| `agor_artifacts_publish`            | Publish a folder as a new artifact, OR re-publish an existing one with `artifactId`. Can declare schedule-backed actions and a chat binding through `interactionConfig`.                                             |
+| `agor_artifacts_create_chat`        | Create a private chat artifact bound to one canonical session UUID on that session's board                                                                                                                           |
 | `agor_artifacts_get`                | Read an artifact's full file map + declarative metadata                                                                                                                                                               |
 | `agor_artifacts_land`               | Materialize an artifact's stored files back into a branch (round-trip with publish)                                                                                                                                   |
-| `agor_artifacts_update`             | Patch metadata only (board move, name, `requiredEnvVars`, `agorGrants`, `sandpackConfig`)                                                                                                                             |
+| `agor_artifacts_update`             | Patch metadata only (board move, name, `requiredEnvVars`, `agorGrants`, `sandpackConfig`, `interactionConfig`)                                                                                                        |
 | `agor_artifacts_check_build`        | Browserless folder validation: source presence, package.json syntax, configured entry, missing local imports, env/template warnings. Does not run Sandpack.                                                           |
 | `agor_artifacts_validate_folder`    | Clearer alias for `agor_artifacts_check_build`; prefer this name for new agent workflows.                                                                                                                             |
 | `agor_artifacts_status`             | Get build status + Sandpack errors + console logs + compact diagnostic suggestions for debugging                                                                                                                      |
@@ -160,6 +162,34 @@ Artifacts live on the React Flow canvas, which means mouse events need careful h
 - **Interact mode**: Click the eye icon in the header to enable direct interaction. Mouse events pass through to the iframe so you can click buttons, scroll, and type
 
 This toggle prevents the iframe from capturing canvas navigation while still letting you use the running app when needed.
+
+### Schedule-backed actions and chat artifacts
+
+An artifact can expose buttons without receiving an API token or choosing an arbitrary prompt at runtime. Declare each action with an artifact-local ID and an existing schedule ID:
+
+```ts
+agor_artifacts_publish({
+  branchId,
+  boardId,
+  subpath: '.agor/artifacts/release-console',
+  name: 'Release console',
+  interactionConfig: {
+    actions: [
+      {
+        actionId: 'review',
+        label: 'Run release review',
+        scheduleId,
+        confirm: true,
+      },
+    ],
+    chatSessionId,
+  },
+});
+```
+
+Artifact code calls `await window.agor.runAction('review')` or `await window.agor.openChat()`. The parent accepts only declared bindings and uses the normal authenticated schedule/session paths, so existing authorization and audit behavior still applies. Schedule and session bindings must belong to the artifact's source branch.
+
+Use the pin control in an artifact header to add it to **Home**. Pinned action buttons run directly from Home, while chat pins open the normal live session surface with its full controls. Use the move control to place the artifact on another board; an artifact has one canonical board placement rather than duplicated mutable copies.
 
 ---
 

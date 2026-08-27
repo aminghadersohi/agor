@@ -812,6 +812,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
           </button>
         </div>
         <div
+          data-zone-marquee-ignore="true"
           style={{
             pointerEvents: 'auto',
             // Position label to allow for inverse scaling

@@ -16,7 +16,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { getReposDir } from '@agor/core/config';
-import { parseAgorYml, writeAgorYml } from '@agor/core/config/node';
+import { parseAgorYml, parseLaunchJson, writeAgorYml } from '@agor/core/config/node';
 import { shortId } from '@agor/core/db';
 import { TEAMMATE_FRAMEWORK_REPO_URL } from '@agor/core/types';
 import { diagnoseGit } from '@agor/git';
@@ -47,6 +47,7 @@ import type {
   BranchAgorYmlExportPayload,
   BranchAgorYmlImportPayload,
   BranchFilesListPayload,
+  BranchLaunchJsonImportPayload,
   ExecutorResult,
   GitBranchAddPayload,
   GitBranchCleanPayload,
@@ -379,6 +380,34 @@ export async function handleBranchAgorYmlImport(
         // Ignore disconnect errors
       }
     }
+  }
+}
+
+/** Read and compile a branch-scoped editor-style launch file. */
+export async function handleBranchLaunchJsonImport(
+  payload: BranchLaunchJsonImportPayload,
+  options: CommandOptions
+): Promise<ExecutorResult> {
+  const { repoId, branchId } = payload.params;
+  if (options.dryRun) {
+    return { success: true, data: { dryRun: true, command: payload.command, repoId, branchId } };
+  }
+  let client: AgorClient | null = null;
+  try {
+    const daemonUrl = payload.daemonUrl || 'http://localhost:3030';
+    client = await createExecutorClient(daemonUrl, payload.sessionToken);
+    const branch = await fetchBranchForRepo(client, repoId, branchId);
+    const result = parseLaunchJson(branch.path);
+    return { success: true, data: { repoId, branchId, ...result } };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[branch.launch-json.import] Failed:', message);
+    return {
+      success: false,
+      error: { code: 'BRANCH_LAUNCH_JSON_IMPORT_FAILED', message, details: { repoId, branchId } },
+    };
+  } finally {
+    client?.io.disconnect();
   }
 }
 

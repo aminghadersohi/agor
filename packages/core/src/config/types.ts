@@ -571,6 +571,23 @@ export interface AgorSandboxSettings {
  */
 export interface AgorExecutionSettings {
   /**
+   * Opt-in recovery for Tasks interrupted by a standalone daemon restart.
+   * Recovery creates a new, system-authored continuation Task; it never
+   * replays the interrupted prompt. Abrupt-crash recovery is separately
+   * gated because executor containment cannot be verified after process loss.
+   */
+  restart_recovery?: {
+    /** Enable paced continuation admission after daemon restart. Default: false. */
+    enabled?: boolean;
+    /** Delay between continuation admissions. Default: 2000; minimum: 250. */
+    delay_ms?: number;
+    /** Maximum pending recoveries admitted during one daemon boot. Default: 50. */
+    max_tasks_per_start?: number;
+    /** Also recover after an unclean daemon exit. Default: false. */
+    resume_after_crash?: boolean;
+  };
+
+  /**
    * Lightweight heartbeat settings for long-running executor tasks.
    *
    * The executor reports `tasks.last_executor_heartbeat_at` immediately and
@@ -1206,9 +1223,41 @@ export interface AgorStatsDSettings {
   global_tags?: Record<string, string>;
 }
 
+/** Valid depths for FeathersJS service-method tracing, cheapest first. */
+export const APM_TRACE_SERVICE_DEPTHS = ['off', 'entrypoint', 'full'] as const;
+export type ApmTraceServiceDepth = (typeof APM_TRACE_SERVICE_DEPTHS)[number];
+
+/**
+ * Datadog APM (dd-trace) tracing knobs for the daemon.
+ *
+ * The tracer itself is loaded process-wide (single-step / `NODE_OPTIONS`
+ * injection), which already auto-instruments HTTP, Express, Postgres, and
+ * Redis. These settings only govern the FeathersJS service-method layer, which
+ * dd-trace has no native plugin for — the calls that ride socket.io are
+ * otherwise invisible to APM.
+ */
+export interface AgorApmSettings {
+  /**
+   * Depth of FeathersJS service-method span instrumentation. Defaults to `off`.
+   *
+   * - `off`: the Feathers tracing hook is not registered at all — zero overhead.
+   * - `entrypoint`: one span per top-level request; nested service-to-service
+   *   fan-out is suppressed (mirrors the StatsD metrics hook). Cheap and
+   *   bounded — safe to leave on in production.
+   * - `full`: a span per service-method invocation including nested calls, so
+   *   the fan-out and its child Postgres queries are visible in the flame
+   *   graph. Highest span volume (and ingestion cost) — intended for active
+   *   investigation, not steady state.
+   */
+  trace_services?: ApmTraceServiceDepth;
+}
+
 /** Optional daemon operational metrics exporters. */
 export interface AgorMetricsSettings {
   statsd?: AgorStatsDSettings;
+
+  /** Datadog APM (dd-trace) tracing knobs. */
+  apm?: AgorApmSettings;
 }
 
 /**

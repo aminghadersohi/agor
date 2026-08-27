@@ -2,6 +2,7 @@
 import type { AgorClient, Board } from '@agor-live/client';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ButtonHTMLAttributes, MouseEventHandler, ReactNode } from 'react';
+import type { Node } from 'reactflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import SessionCanvas from './SessionCanvas';
@@ -34,7 +35,16 @@ vi.mock('reactflow', () => ({
   MiniMap: () => <div data-testid="react-flow-minimap" />,
   ReactFlow: (props: Record<string, unknown> & { children?: ReactNode }) => {
     reactFlowProps = props;
-    return <div data-testid="react-flow">{props.children}</div>;
+    return (
+      <div data-testid="react-flow" className="react-flow__pane">
+        <div
+          data-testid="zone-selection-surface"
+          className="react-flow__node react-flow__node-zone"
+          data-id="zone-1"
+        />
+        {props.children}
+      </div>
+    );
   },
   useViewport: () => ({ x: 0, y: 0, zoom: 1 }),
   useEdgesState: (initialEdges: unknown[]) => [initialEdges, vi.fn(), vi.fn()],
@@ -65,6 +75,63 @@ describe('SessionCanvas zoom shortcuts', () => {
 
     expect(reactFlowProps?.panOnScroll).toBe(true);
     expect(reactFlowProps?.zoomActivationKeyCode).toEqual(['Meta', 'Control']);
+    expect(reactFlowProps?.selectionOnDrag).toBe(false);
+  });
+
+  it('marquee-selects nested items when dragging from an empty zone surface', () => {
+    render(<SessionCanvas board={null} client={null} branches={[]} />);
+    const flowNodes: Node[] = [
+      {
+        id: 'zone-1',
+        type: 'zone',
+        position: { x: 100, y: 100 },
+        width: 600,
+        height: 500,
+        data: {},
+      },
+      {
+        id: 'branch-1',
+        type: 'branchNode',
+        parentId: 'zone-1',
+        position: { x: 40, y: 80 },
+        width: 200,
+        height: 120,
+        data: {},
+      },
+      {
+        id: 'card-1',
+        type: 'cardNode',
+        parentId: 'zone-1',
+        position: { x: 280, y: 80 },
+        width: 180,
+        height: 100,
+        data: {},
+      },
+    ];
+    act(() => {
+      (reactFlowProps?.onInit as (instance: unknown) => void)?.({
+        getNodes: () => flowNodes,
+        screenToFlowPosition: ({ x, y }: { x: number; y: number }) => ({ x, y }),
+      });
+    });
+    setNodesUnsafeSpy.mockClear();
+
+    const surface = screen.getByTestId('zone-selection-surface');
+    fireEvent.pointerDown(surface, { button: 0, pointerId: 7, clientX: 120, clientY: 160 });
+    fireEvent.pointerMove(surface, { pointerId: 7, clientX: 650, clientY: 400, buttons: 1 });
+
+    expect(document.querySelector('.canvas-marquee-selection')).toBeInTheDocument();
+    const updater = setNodesUnsafeSpy.mock.calls.at(-1)?.[0] as
+      | ((current: Node[]) => Node[])
+      | undefined;
+    const updated = updater?.(flowNodes);
+    expect(updated?.filter((node) => node.selected).map((node) => node.id)).toEqual([
+      'branch-1',
+      'card-1',
+    ]);
+
+    fireEvent.pointerUp(surface, { button: 0, pointerId: 7, clientX: 650, clientY: 400 });
+    expect(document.querySelector('.canvas-marquee-selection')).not.toBeInTheDocument();
   });
 
   it('opens the markdown note modal when the markdown tool clicks a board node', async () => {

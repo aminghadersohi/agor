@@ -1,5 +1,7 @@
 import type {
   BranchID,
+  ProfileIdentityModelProvider,
+  ProfileIdentityModelStatus,
   ProfileImage,
   ProfileImageID,
   ProfileImageSubjectType,
@@ -7,7 +9,7 @@ import type {
   TenantID,
   UserID,
 } from '@agor/core/types';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, isNull, notInArray, or } from 'drizzle-orm';
 import { generateId } from '../../lib/ids';
 import type { Database } from '../client';
 import { deleteFrom, insert, runDatabaseTransaction, select, update } from '../database-wrapper';
@@ -45,6 +47,21 @@ function rowSubject(row: ProfileImageRow): ProfileImageSubject {
 
 function logical(row: ProfileImageRow): ProfileImage {
   const subject = rowSubject(row);
+  const identityModel =
+    row.identity_model_provider &&
+    row.identity_model_status &&
+    row.identity_model_created_at &&
+    row.identity_model_updated_at
+      ? {
+          provider: row.identity_model_provider as ProfileIdentityModelProvider,
+          status: row.identity_model_status as ProfileIdentityModelStatus,
+          progress: row.identity_model_progress ?? 0,
+          model_available: Boolean(row.identity_model_data),
+          ...(row.identity_model_error ? { error_message: row.identity_model_error } : {}),
+          created_at: new Date(row.identity_model_created_at).toISOString(),
+          updated_at: new Date(row.identity_model_updated_at).toISOString(),
+        }
+      : undefined;
   return {
     image_id: row.image_id as ProfileImageID,
     subject_type: subject.type,
@@ -58,6 +75,7 @@ function logical(row: ProfileImageRow): ProfileImage {
     small_height: row.small_height,
     large_width: row.large_width,
     large_height: row.large_height,
+    ...(identityModel ? { identity_model: identityModel } : {}),
     created_at: new Date(row.created_at).toISOString(),
     updated_at: new Date(row.updated_at).toISOString(),
   };
@@ -201,5 +219,174 @@ export class ProfileImageRepository {
       data: Buffer.from(variant === 'small' ? row.small_data : row.large_data),
       contentType: variant === 'small' ? row.small_content_type : row.large_content_type,
     };
+  }
+
+  /** Claim one provider submission while preserving any previously completed model. */
+  async claimIdentityModelGeneration(
+    _tenantId: TenantID,
+    imageId: ProfileImageID,
+    provider: ProfileIdentityModelProvider
+  ): Promise<boolean> {
+    const now = new Date();
+    const result = await update(this.db, profileImages)
+      .set({
+        identity_model_provider: provider,
+        identity_model_task_id: null,
+        identity_model_status: 'submitting',
+        identity_model_progress: 0,
+        identity_model_error: null,
+        identity_model_created_at: now,
+        identity_model_updated_at: now,
+        updated_at: now,
+      })
+      .where(
+        and(
+          eq(profileImages.image_id, imageId),
+          or(
+            isNull(profileImages.identity_model_status),
+            notInArray(profileImages.identity_model_status, [
+              'submitting',
+              'pending',
+              'in_progress',
+            ])
+          )
+        )
+      )
+      .run();
+    return result.rowsAffected === 1;
+  }
+
+  async setIdentityModelTask(
+    _tenantId: TenantID,
+    imageId: ProfileImageID,
+    providerTaskId: string
+  ): Promise<void> {
+    const result = await update(this.db, profileImages)
+      .set({
+        identity_model_task_id: providerTaskId,
+        identity_model_status: 'pending',
+        identity_model_updated_at: new Date(),
+      })
+      .where(
+        and(
+          eq(profileImages.image_id, imageId),
+          eq(profileImages.identity_model_status, 'submitting')
+        )
+      )
+      .run();
+    if (result.rowsAffected !== 1) throw new RepositoryError('Identity model claim was lost');
+  }
+
+  async readIdentityModelState(
+    _tenantId: TenantID,
+    imageId: ProfileImageID
+  ): Promise<{
+    image: ProfileImage;
+    providerTaskId: string | null;
+    data: Buffer | null;
+    contentType: string | null;
+  } | null> {
+    const row = await select(this.db)
+      .from(profileImages)
+      .where(eq(profileImages.image_id, imageId))
+      .one();
+    if (!row) return null;
+    return {
+      image: logical(row),
+      providerTaskId: row.identity_model_task_id,
+      data: row.identity_model_data ? Buffer.from(row.identity_model_data) : null,
+      contentType: row.identity_model_content_type,
+    };
+  }
+
+  async updateIdentityModelProgress(
+    _tenantId: TenantID,
+    imageId: ProfileImageID,
+    providerTaskId: string,
+    status: 'pending' | 'in_progress',
+    progress: number
+  ): Promise<void> {
+    await update(this.db, profileImages)
+      .set({
+        identity_model_status: status,
+        identity_model_progress: Math.max(0, Math.min(99, Math.round(progress))),
+        identity_model_updated_at: new Date(),
+      })
+      .where(
+        and(
+          eq(profileImages.image_id, imageId),
+          eq(profileImages.identity_model_task_id, providerTaskId)
+        )
+      )
+      .run();
+  }
+
+  async completeIdentityModel(
+    _tenantId: TenantID,
+    imageId: ProfileImageID,
+    providerTaskId: string,
+    data: Buffer
+  ): Promise<void> {
+    await update(this.db, profileImages)
+      .set({
+        identity_model_status: 'succeeded',
+        identity_model_progress: 100,
+        identity_model_data: data,
+        identity_model_content_type: 'model/gltf-binary',
+        identity_model_error: null,
+        identity_model_updated_at: new Date(),
+        updated_at: new Date(),
+      })
+      .where(
+        and(
+          eq(profileImages.image_id, imageId),
+          eq(profileImages.identity_model_task_id, providerTaskId)
+        )
+      )
+      .run();
+  }
+
+  async clearIdentityModelTask(
+    _tenantId: TenantID,
+    imageId: ProfileImageID,
+    providerTaskId: string
+  ): Promise<void> {
+    await update(this.db, profileImages)
+      .set({
+        identity_model_task_id: null,
+        identity_model_updated_at: new Date(),
+      })
+      .where(
+        and(
+          eq(profileImages.image_id, imageId),
+          eq(profileImages.identity_model_task_id, providerTaskId),
+          eq(profileImages.identity_model_status, 'succeeded')
+        )
+      )
+      .run();
+  }
+
+  async failIdentityModel(
+    _tenantId: TenantID,
+    imageId: ProfileImageID,
+    providerTaskId: string | null,
+    status: 'failed' | 'canceled',
+    errorMessage: string
+  ): Promise<void> {
+    await update(this.db, profileImages)
+      .set({
+        identity_model_status: status,
+        identity_model_error: errorMessage.slice(0, 300),
+        identity_model_updated_at: new Date(),
+      })
+      .where(
+        and(
+          eq(profileImages.image_id, imageId),
+          providerTaskId
+            ? eq(profileImages.identity_model_task_id, providerTaskId)
+            : eq(profileImages.identity_model_status, 'submitting')
+        )
+      )
+      .run();
   }
 }

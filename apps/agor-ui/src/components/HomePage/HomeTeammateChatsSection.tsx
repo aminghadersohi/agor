@@ -141,7 +141,7 @@ export const HomeTeammateChatsSection: React.FC<
               type="primary"
               size="small"
               icon={<PlusOutlined />}
-              onClick={onManageTeammateChats}
+              onClick={() => onManageTeammateChats()}
             >
               Create chat collection
             </Button>
@@ -165,7 +165,12 @@ export const HomeTeammateChatsSection: React.FC<
         <Text strong style={{ fontSize: 14 }}>
           Chat collections
         </Text>
-        <Button size="small" type="text" icon={<SettingOutlined />} onClick={onManageTeammateChats}>
+        <Button
+          size="small"
+          type="text"
+          icon={<SettingOutlined />}
+          onClick={() => onManageTeammateChats()}
+        >
           Manage
         </Button>
       </div>

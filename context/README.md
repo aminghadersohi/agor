@@ -68,6 +68,7 @@ Designs that are referenced from code or in flight. Anything here is either stil
 - [`transitive-completion-propagation.md`](explorations/transitive-completion-propagation.md) — durable, designated-child completion routing across delegated session chains.
 - [`frontend-hardcoded-colors.md`](explorations/frontend-hardcoded-colors.md) — Biome/GritQL color audit, classification, and enforcement rollout.
 - [`web-terminal-ownership-ha.md`](explorations/web-terminal-ownership-ha.md) — process-affine terminal ownership, HA support, and failure semantics.
+- [`mcp-authoritative-egress-gateway.md`](explorations/mcp-authoritative-egress-gateway.md) — issue-ready design for strong MCP credential/request revocation at a daemon-owned egress boundary.
 
 ### Messaging & positioning (now in the Knowledge base)
 

@@ -219,6 +219,34 @@ may retry after an existing request settles. For timeouts, a `by_command` value
 overrides that command's built-in call-specific default; otherwise the
 call-specific default wins over `timeout_ms.default`.
 
+## Optional restart continuation
+
+Standalone installations can opt into slowly resuming work that a daemon
+restart interrupted:
+
+```yaml
+execution:
+  restart_recovery:
+    enabled: true
+    delay_ms: 2000
+    max_tasks_per_start: 50
+    resume_after_crash: false
+```
+
+Agor never replays an interrupted prompt. It terminalizes the old Task, records
+a durable pending marker, and creates a new system-authored continuation that
+instructs the agent to inspect prior state before proceeding. Admissions are
+sequential and deterministic, so retries do not create duplicate turns. A user
+prompt or archive supersedes pending recovery; Tasks stopped intentionally or
+waiting for permission/input are excluded.
+
+`resume_after_crash` is a separate, higher-risk opt-in because an abrupt local
+daemon loss cannot prove the old executor is contained. Leave it disabled
+unless the execution substrate guarantees process loss with the daemon. This
+feature is disabled by default and is not used in shared-replica mode. Rollback
+is configuration-only: disable `restart_recovery`; existing terminal history
+and continuation Tasks remain ordinary auditable Tasks.
+
 ## Inspecting and materializing effective configuration
 
 `agor config` shows the effective result after defaults and supported environment overrides are
@@ -303,3 +331,50 @@ signals.
 Older Agor versions reject the unknown top-level `metrics` key. During a
 mixed-version rollout, upgrade every daemon first, then add the block and
 restart the fleet.
+
+## Datadog APM (dd-trace) tracing
+
+When the daemon runs under a Datadog APM tracer — typically loaded process-wide
+by [single-step instrumentation](https://docs.datadoghq.com/tracing/trace_collection/automatic_instrumentation/single-step-apm/)
+via `NODE_OPTIONS` — HTTP, Express, Postgres, and Redis are auto-instrumented.
+FeathersJS is not: dd-trace ships no Feathers plugin, so service-method calls
+that ride socket.io are invisible to APM. This setting adds an app-level hook
+that wraps each service method in a `feathers.request` span whose **resource**
+name is `<service>.<method>` (for example `sessions.find`), nested under the
+active HTTP span so child Postgres queries appear beneath the method that
+issued them:
+
+```yaml
+metrics:
+  apm:
+    trace_services: off # off | entrypoint | full
+```
+
+- **`off`** (default) — the hook is not registered; zero overhead.
+- **`entrypoint`** — one span per top-level request; nested service-to-service
+  fan-out is suppressed. Cheap and bounded — safe to leave on in production.
+- **`full`** — a span per service-method invocation including nested calls, so
+  the full fan-out and its child queries are visible. Highest span volume (and
+  ingestion cost) — intended for active investigation, not steady state.
+
+`AGOR_APM_TRACE_SERVICES` (`off`, `entrypoint`, or `full`) overrides the YAML
+value so depth can be changed without editing config. Like all metrics
+settings, this is resolved into the daemon's immutable startup snapshot and
+takes effect on restart.
+
+The tracer is an **optional runtime dependency** that Agor never declares or
+bundles: the hook resolves `dd-trace-api` (Datadog's supported bridge for
+custom instrumentation under single-step) or `dd-trace` at runtime and no-ops
+if neither is installed. Note that single-step instrumentation does not
+necessarily make these packages resolvable from Agor's own module tree, so on
+deployments that enable `entrypoint`/`full` you may need to install one
+alongside `agor-live`:
+
+```bash
+npm install -g --ignore-scripts dd-trace-api
+```
+
+If `trace_services` is enabled but no tracer resolves, the daemon logs a
+one-time warning at startup and continues with Feathers tracing disabled — it
+never fails closed or blocks requests. This setting carries no credentials; span
+delivery is handled entirely by the ambient Datadog tracer/Agent.

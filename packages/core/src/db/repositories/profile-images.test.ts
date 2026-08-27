@@ -137,4 +137,58 @@ describe('ProfileImageRepository galleries', () => {
     expect(removed?.replacementPrimary?.image_id).toBe(first.image_id);
     expect((await repository.findById(tenantId, first.image_id))?.is_primary).toBe(true);
   });
+
+  dbTest('fences provider tasks and durably stores a private generated GLB', async ({ db }) => {
+    const subjects = await makeSubjects(db);
+    const repository = new ProfileImageRepository(db);
+    const created = await repository.create({
+      tenantId,
+      subject: subjects.user,
+      createdBy: subjects.userId,
+      originalName: 'identity-source.webp',
+      ...variants(3),
+    });
+
+    await expect(
+      repository.claimIdentityModelGeneration(tenantId, created.image_id, 'meshy')
+    ).resolves.toBe(true);
+    await expect(
+      repository.claimIdentityModelGeneration(tenantId, created.image_id, 'meshy')
+    ).resolves.toBe(false);
+    await repository.setIdentityModelTask(tenantId, created.image_id, 'provider-task-1');
+    await repository.updateIdentityModelProgress(
+      tenantId,
+      created.image_id,
+      'provider-task-1',
+      'in_progress',
+      43.6
+    );
+    const glb = Buffer.from([0x67, 0x6c, 0x54, 0x46, 1, 2, 3, 4]);
+    await repository.completeIdentityModel(tenantId, created.image_id, 'provider-task-1', glb);
+
+    const completed = await repository.readIdentityModelState(tenantId, created.image_id);
+    expect(completed?.image.identity_model).toMatchObject({
+      provider: 'meshy',
+      status: 'succeeded',
+      progress: 100,
+      model_available: true,
+    });
+    expect(completed?.data).toEqual(glb);
+    expect(completed?.image).not.toHaveProperty('identity_model_data');
+    expect(completed?.providerTaskId).toBe('provider-task-1');
+    await repository.clearIdentityModelTask(tenantId, created.image_id, 'provider-task-1');
+    expect(
+      (await repository.readIdentityModelState(tenantId, created.image_id))?.providerTaskId
+    ).toBeNull();
+
+    await expect(
+      repository.claimIdentityModelGeneration(tenantId, created.image_id, 'meshy')
+    ).resolves.toBe(true);
+    const regenerating = await repository.readIdentityModelState(tenantId, created.image_id);
+    expect(regenerating?.image.identity_model).toMatchObject({
+      status: 'submitting',
+      model_available: true,
+    });
+    expect(regenerating?.data).toEqual(glb);
+  });
 });

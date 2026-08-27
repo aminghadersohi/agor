@@ -114,3 +114,27 @@ export async function fetchProfileImageBlob(
   );
   return (await assertOk(response)).blob();
 }
+
+export async function generateProfileIdentityModel(imageId: string): Promise<ProfileImage> {
+  const response = await profileFetch(endpoint(`/${encodeURIComponent(imageId)}/identity-model`), {
+    method: 'POST',
+    body: JSON.stringify({ consent: true }),
+  });
+  return (await (await assertOk(response)).json()) as ProfileImage;
+}
+
+export async function refreshProfileIdentityModel(imageId: string): Promise<ProfileImage> {
+  const response = await profileFetch(endpoint(`/${encodeURIComponent(imageId)}/identity-model`));
+  return (await (await assertOk(response)).json()) as ProfileImage;
+}
+
+export async function fetchProfileIdentityModelBlob(
+  imageId: string,
+  modelVersion?: string
+): Promise<Blob> {
+  const query = modelVersion ? `?version=${encodeURIComponent(modelVersion)}` : '';
+  const response = await profileFetch(
+    endpoint(`/${encodeURIComponent(imageId)}/identity-model/file${query}`)
+  );
+  return (await assertOk(response)).blob();
+}

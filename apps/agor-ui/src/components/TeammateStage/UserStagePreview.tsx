@@ -1,7 +1,11 @@
 import type { User } from '@agor-live/client';
 import { Button, Flex, Typography, theme } from 'antd';
 import { useState } from 'react';
-import { useUserProfileImageUrl } from '../ProfileImage';
+import {
+  useProfileIdentityModel,
+  useProfileImageGallery,
+  useProfileImageUrl,
+} from '../ProfileImage';
 import { getUserInitials } from '../UserIdentityAvatar';
 import { TeammateStage } from './TeammateStage';
 
@@ -12,7 +16,13 @@ interface UserStagePreviewProps {
 export function UserStagePreview({ user }: UserStagePreviewProps) {
   const { token } = theme.useToken();
   const [open, setOpen] = useState(false);
-  const imageUrl = useUserProfileImageUrl(user, 'large');
+  const gallery = useProfileImageGallery({ type: 'user', id: user.user_id }, open);
+  const sourceImage =
+    gallery.find((image) => image.image_id === user.profile_image_id) ??
+    gallery.find((image) => image.is_primary) ??
+    gallery[0];
+  const imageUrl = useProfileImageUrl(sourceImage?.image_id, 'large');
+  const identity = useProfileIdentityModel(sourceImage, open);
   const name = user.name || user.email || 'User';
 
   return (
@@ -21,7 +31,7 @@ export function UserStagePreview({ user }: UserStagePreviewProps) {
         <div>
           <Typography.Text strong>3D identity stage</Typography.Text>
           <Typography.Text type="secondary" style={{ display: 'block' }}>
-            Preview this profile locally with interactive stage lighting.
+            Generate and preview a textured identity model with interactive stage lighting.
           </Typography.Text>
         </div>
         <Button onClick={() => setOpen((current) => !current)}>
@@ -32,8 +42,13 @@ export function UserStagePreview({ user }: UserStagePreviewProps) {
         <TeammateStage
           name={name}
           imageUrl={imageUrl}
+          modelUrl={identity.modelUrl}
+          identityModel={identity.identityModel}
           emoji={getUserInitials(user)}
           active={open}
+          generating={identity.generating}
+          generationError={identity.error}
+          onGenerate={sourceImage ? identity.generate : undefined}
         />
       )}
     </Flex>

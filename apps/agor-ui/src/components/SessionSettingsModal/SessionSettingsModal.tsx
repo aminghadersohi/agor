@@ -29,9 +29,15 @@ import {
   isAgenticToolName,
   mapToCodexPermissionConfig,
 } from '@agor-live/client';
-import { DownOutlined, KeyOutlined, SettingOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import {
+  DownOutlined,
+  InboxOutlined,
+  KeyOutlined,
+  SettingOutlined,
+  ThunderboltOutlined,
+} from '@ant-design/icons';
 import type { CollapseProps } from 'antd';
-import { Collapse, Divider, Form, Modal, Typography, theme } from 'antd';
+import { Collapse, Divider, Form, InputNumber, Modal, Switch, Typography, theme } from 'antd';
 import React from 'react';
 import { useAgorStore } from '../../store/agorStore';
 import { selectMcpServerById, selectSessionMcpServerIds } from '../../store/selectors';
@@ -87,6 +93,10 @@ interface FormValues {
     includeLastMessage: boolean;
     template?: string;
   };
+  queueConfig: {
+    coalesceSystemUpdates: boolean;
+    maxCoalescedUpdates: number;
+  };
 }
 
 // Stable empty array for sessions with no attached MCP servers — keeps the
@@ -122,6 +132,10 @@ function buildInitialValues(session: Session, sessionMcpServerIds: string[]): Fo
       enabled: session.callback_config?.enabled ?? true,
       includeLastMessage: session.callback_config?.include_last_message ?? true,
       template: session.callback_config?.template,
+    },
+    queueConfig: {
+      coalesceSystemUpdates: session.queue_config?.coalesce_system_updates ?? false,
+      maxCoalescedUpdates: session.queue_config?.max_coalesced_updates ?? 8,
     },
   };
 }
@@ -191,6 +205,16 @@ function buildUpdates(values: FormValues, session: Session): Partial<Session> {
       enabled: values.callbackConfig.enabled ?? true,
       include_last_message: values.callbackConfig.includeLastMessage ?? true,
       template: values.callbackConfig.template || undefined,
+    };
+  }
+
+  if (values.queueConfig) {
+    updates.queue_config = {
+      coalesce_system_updates: values.queueConfig.coalesceSystemUpdates ?? false,
+      max_coalesced_updates: Math.min(
+        25,
+        Math.max(2, Math.floor(values.queueConfig.maxCoalescedUpdates || 8))
+      ),
     };
   }
 
@@ -387,6 +411,50 @@ export const SessionSettingsModal: React.FC<SessionSettingsModalProps> = ({
       <>
         <CallbackTargetDisplay session={session} onNavigate={onClose} />
         <CallbackConfigForm showHelpText />
+      </>
+    ),
+  });
+
+  secondaryItems.push({
+    key: 'queue-config',
+    label: (
+      <Typography.Text strong>
+        <InboxOutlined style={{ marginRight: 8 }} />
+        Queued updates
+      </Typography.Text>
+    ),
+    children: (
+      <>
+        <Form.Item
+          name={['queueConfig', 'coalesceSystemUpdates']}
+          label="Batch queued system updates"
+          valuePropName="checked"
+        >
+          <Switch />
+        </Form.Item>
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -16 }}>
+          When this session is busy, combine adjacent gateway messages and completion callbacks into
+          one ordered turn. Human prompts remain separate. This can reduce repeated model context
+          and callback chatter.
+        </Typography.Paragraph>
+        <Form.Item
+          noStyle
+          shouldUpdate={(previous, current) =>
+            previous.queueConfig?.coalesceSystemUpdates !==
+            current.queueConfig?.coalesceSystemUpdates
+          }
+        >
+          {({ getFieldValue }) =>
+            getFieldValue(['queueConfig', 'coalesceSystemUpdates']) ? (
+              <Form.Item
+                name={['queueConfig', 'maxCoalescedUpdates']}
+                label="Maximum updates per turn"
+              >
+                <InputNumber min={2} max={25} precision={0} style={{ width: '100%' }} />
+              </Form.Item>
+            ) : null
+          }
+        </Form.Item>
       </>
     ),
   });

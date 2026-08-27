@@ -18,16 +18,17 @@ import {
   type Database,
   eq,
   RepoRepository,
+  ScheduleRepository,
   SessionRepository,
   shortId,
   UsersRepository,
   update,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
-import type { Artifact, BoardID, BranchID, SessionID, UUID } from '@agor/core/types';
+import type { Artifact, BoardID, BranchID, ScheduleID, SessionID, UUID } from '@agor/core/types';
 import { describe, expect, vi } from 'vitest';
 import { dbTest } from '../../../../packages/core/src/db/test-helpers';
-import { ArtifactsService } from './artifacts';
+import { ArtifactsService, sanitizeArtifactInteractionConfig } from './artifacts';
 
 vi.mock('@agor/core/config', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agor/core/config')>();
@@ -62,7 +63,11 @@ async function seedBoard(db: Database) {
   });
 }
 
-async function seedRepoAndBranch(db: Database, branchPath: string) {
+async function seedRepoAndBranch(
+  db: Database,
+  branchPath: string,
+  options?: { boardId?: BoardID; createdBy?: string; othersCan?: 'none' | 'view' | 'session' }
+) {
   const repo = await new RepoRepository(db).create({
     repo_id: generateId() as UUID,
     slug: `artifact-test-${generateId()}`,
@@ -79,8 +84,9 @@ async function seedRepoAndBranch(db: Database, branchPath: string) {
     ref: 'refs/heads/artifact-branch',
     branch_unique_id: 1,
     path: branchPath,
-    created_by: 'user-owner' as UUID,
-    others_can: 'session',
+    board_id: options?.boardId,
+    created_by: (options?.createdBy ?? 'user-owner') as UUID,
+    others_can: options?.othersCan ?? 'session',
   });
 }
 
@@ -118,6 +124,7 @@ async function seedArtifact(
     isPublic?: boolean;
     files?: Record<string, string>;
     placement?: { x: number; y: number; width: number; height: number };
+    branchId?: BranchID;
   }
 ): Promise<Artifact> {
   const artifactRepo = new ArtifactRepository(db);
@@ -131,6 +138,7 @@ async function seedArtifact(
   const created = await artifactRepo.create({
     artifact_id: artifactId,
     board_id: boardId,
+    branch_id: options?.branchId,
     name: 'Seeded Artifact',
     template: 'react',
     files,
@@ -148,6 +156,176 @@ async function seedArtifact(
 
   return created;
 }
+
+async function seedSchedule(db: Database, branchId: BranchID) {
+  return new ScheduleRepository(db).create({
+    schedule_id: generateId() as ScheduleID,
+    branch_id: branchId,
+    name: 'Artifact action',
+    cron_expression: '0 9 * * *',
+    timezone_mode: 'utc',
+    prompt: 'Perform the configured action.',
+    agentic_tool_config: { agentic_tool: 'codex' },
+    enabled: false,
+    created_by: 'user-owner' as UUID,
+  });
+}
+
+describe('sanitizeArtifactInteractionConfig', () => {
+  it('keeps bounded unique valid actions and canonical chat IDs', () => {
+    const scheduleId = generateId() as ScheduleID;
+    const sessionId = generateId() as SessionID;
+    expect(
+      sanitizeArtifactInteractionConfig({
+        actions: [
+          { action_id: 'deploy-preview', label: ' Deploy preview ', schedule_id: scheduleId },
+          { action_id: 'deploy-preview', label: 'Duplicate', schedule_id: scheduleId },
+          { action_id: 'bad id', label: 'Invalid', schedule_id: scheduleId },
+        ],
+        chat_session_id: sessionId,
+      })
+    ).toEqual({
+      actions: [{ action_id: 'deploy-preview', label: 'Deploy preview', schedule_id: scheduleId }],
+      chat_session_id: sessionId,
+    });
+  });
+
+  it('returns undefined for an empty or unusable config', () => {
+    expect(sanitizeArtifactInteractionConfig({ actions: [] })).toBeUndefined();
+    expect(
+      sanitizeArtifactInteractionConfig({
+        actions: [{ action_id: 'bad id', label: '', schedule_id: '' as ScheduleID }],
+      })
+    ).toBeUndefined();
+  });
+});
+
+describe('ArtifactsService interaction bindings', () => {
+  dbTest('persists validated same-branch schedule and session bindings', async ({ db }) => {
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'artifact-interactions-'));
+    try {
+      const board = await seedBoard(db);
+      await seedUser(db, 'user-owner');
+      const branch = await seedRepoAndBranch(db, tmpRoot, { boardId: board.board_id });
+      const session = await seedSession(db, branch.branch_id);
+      const schedule = await seedSchedule(db, branch.branch_id);
+      const artifact = await seedArtifact(db, board.board_id, {
+        branchId: branch.branch_id,
+      });
+      const service = new ArtifactsService(db, makeFakeApp());
+
+      const updated = await service.updateMetadata(
+        artifact.artifact_id,
+        {
+          interaction_config: {
+            actions: [
+              {
+                action_id: 'review',
+                label: 'Run review',
+                schedule_id: schedule.schedule_id,
+                confirm: true,
+              },
+            ],
+            chat_session_id: session.session_id,
+          },
+        },
+        'user-owner'
+      );
+
+      expect(updated.agor_runtime?.interactions).toEqual({
+        actions: [
+          {
+            action_id: 'review',
+            label: 'Run review',
+            schedule_id: schedule.schedule_id,
+            confirm: true,
+          },
+        ],
+        chat_session_id: session.session_id,
+      });
+      const disabled = await service.updateMetadata(
+        artifact.artifact_id,
+        { agor_runtime: { enabled: false } },
+        'user-owner'
+      );
+      expect(disabled.agor_runtime).toEqual({
+        enabled: false,
+        interactions: updated.agor_runtime?.interactions,
+      });
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  dbTest('rejects cross-branch bindings without changing the artifact', async ({ db }) => {
+    const rootA = mkdtempSync(path.join(tmpdir(), 'artifact-bindings-a-'));
+    const rootB = mkdtempSync(path.join(tmpdir(), 'artifact-bindings-b-'));
+    try {
+      const board = await seedBoard(db);
+      await seedUser(db, 'user-owner');
+      const branchA = await seedRepoAndBranch(db, rootA, { boardId: board.board_id });
+      const branchB = await seedRepoAndBranch(db, rootB, { boardId: board.board_id });
+      const schedule = await seedSchedule(db, branchB.branch_id);
+      const artifact = await seedArtifact(db, board.board_id, {
+        branchId: branchA.branch_id,
+      });
+      const service = new ArtifactsService(db, makeFakeApp());
+
+      await expect(
+        service.updateMetadata(
+          artifact.artifact_id,
+          {
+            interaction_config: {
+              actions: [
+                {
+                  action_id: 'cross-branch',
+                  label: 'Must fail',
+                  schedule_id: schedule.schedule_id,
+                },
+              ],
+            },
+          },
+          'user-owner'
+        )
+      ).rejects.toThrow('must reference a schedule on the artifact branch');
+      expect((await new ArtifactRepository(db).findById(artifact.artifact_id))?.agor_runtime).toBe(
+        undefined
+      );
+    } finally {
+      rmSync(rootA, { recursive: true, force: true });
+      rmSync(rootB, { recursive: true, force: true });
+    }
+  });
+
+  dbTest('creates a private UUID-bound chat artifact on the canonical board', async ({ db }) => {
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'artifact-chat-'));
+    try {
+      const board = await seedBoard(db);
+      const branch = await seedRepoAndBranch(db, tmpRoot, { boardId: board.board_id });
+      const session = await seedSession(db, branch.branch_id);
+      const service = new ArtifactsService(db, makeFakeApp());
+
+      const artifact = await service.createChatArtifact({ session_id: session.session_id }, {
+        user: { user_id: 'user-owner', role: 'member' },
+      } as never);
+
+      expect(artifact).toMatchObject({
+        board_id: board.board_id,
+        branch_id: branch.branch_id,
+        source_session_id: session.session_id,
+        public: false,
+        agor_runtime: { interactions: { chat_session_id: session.session_id } },
+      });
+      const placed = await new BoardRepository(db).findById(board.board_id);
+      expect(placed?.objects?.[`artifact-${artifact.artifact_id}`]).toMatchObject({
+        type: 'artifact',
+        artifact_id: artifact.artifact_id,
+      });
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('ArtifactRepository URL fields', () => {
   dbTest('returns both board url and fullscreen_url from repository reads', async ({ db }) => {

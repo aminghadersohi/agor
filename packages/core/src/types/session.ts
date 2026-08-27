@@ -437,6 +437,22 @@ export interface Session {
     callback_mode?: 'once' | 'persistent';
   };
 
+  // ===== Queue Configuration =====
+
+  /**
+   * Optional controls for prompts that arrive while this Session is busy.
+   *
+   * Coalescing is deliberately opt-in and applies only to trusted,
+   * daemon-authored gateway/callback updates. Human-authored prompts remain
+   * independent queue entries and form hard ordering boundaries.
+   */
+  queue_config?: {
+    /** Combine compatible queued system updates into one ordered model turn. */
+    coalesce_system_updates?: boolean;
+    /** Maximum updates in one turn. Defaults to 8 and is clamped to 2..25. */
+    max_coalesced_updates?: number;
+  };
+
   // ===== Fork Origin =====
 
   /**

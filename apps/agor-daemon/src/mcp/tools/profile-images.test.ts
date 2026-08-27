@@ -13,6 +13,11 @@ vi.mock('@agor/core/db', () => ({
     findById = repositoryMocks.findById;
     readVariant = repositoryMocks.readVariant;
   },
+  runWithTenantDatabaseScope: async (
+    _db: unknown,
+    _tenantId: string,
+    work: () => Promise<unknown>
+  ) => work(),
 }));
 
 const { registerProfileImageTools } = await import('./profile-images.js');

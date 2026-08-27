@@ -18,6 +18,12 @@ vi.mock('../BranchHeaderPill', () => ({
   ),
 }));
 
+vi.mock('../TeammateIdentityAvatar', () => ({
+  TeammateIdentityAvatar: ({ size, shape }: { size?: number; shape?: string }) => (
+    <div data-testid="teammate-portrait" data-size={String(size)} data-shape={shape} />
+  ),
+}));
+
 const board = { board_id: 'board-1', name: 'Board', slug: 'board' } as Board;
 const primaryTeammateBranch = {
   branch_id: 'branch-1',
@@ -53,5 +59,7 @@ describe('BoardTeammatePanel teammate tab', () => {
       'data-truncate-to-fit',
       'true'
     );
+    expect(screen.getByTestId('teammate-portrait')).toHaveAttribute('data-size', '72');
+    expect(screen.getByTestId('teammate-portrait')).toHaveAttribute('data-shape', 'square');
   });
 });

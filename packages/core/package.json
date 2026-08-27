@@ -112,6 +112,12 @@
       "import": "./dist/config/browser.js",
       "require": "./dist/config/browser.cjs"
     },
+    "./config/launch-json": {
+      "source": "./src/config/launch-json.ts",
+      "types": "./dist/config/launch-json.d.ts",
+      "import": "./dist/config/launch-json.js",
+      "require": "./dist/config/launch-json.cjs"
+    },
     "./permissions": {
       "source": "./src/permissions/index.ts",
       "types": "./dist/permissions/index.d.ts",
@@ -195,6 +201,12 @@
       "types": "./dist/utils/safe-outbound-fetch.d.ts",
       "import": "./dist/utils/safe-outbound-fetch.js",
       "require": "./dist/utils/safe-outbound-fetch.cjs"
+    },
+    "./utils/pinned-fetch": {
+      "source": "./src/utils/pinned-fetch.ts",
+      "types": "./dist/utils/pinned-fetch.d.ts",
+      "import": "./dist/utils/pinned-fetch.js",
+      "require": "./dist/utils/pinned-fetch.cjs"
     },
     "./utils/permission-mode-mapper": {
       "source": "./src/utils/permission-mode-mapper.ts",
@@ -518,6 +530,7 @@
     "drizzle-orm": "^0.45.2",
     "emojibase-data": "^17.0.0",
     "js-yaml": "^5.2.3",
+    "jsonc-parser": "^3.3.1",
     "postgres": "^3.4.9",
     "simple-git": "^3.36.0",
     "slackify-markdown": "^5.0.0",

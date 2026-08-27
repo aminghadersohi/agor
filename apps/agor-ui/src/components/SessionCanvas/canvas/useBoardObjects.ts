@@ -32,6 +32,27 @@ import {
   sanitizeZIndex,
 } from './zOrder';
 
+function renderedNodeSize(node: Node): { width: number; height: number } {
+  const measured = (node as ReactFlowNode).measured;
+  const fallback = {
+    width: Number(measured?.width ?? node.width ?? node.style?.width ?? 380),
+    height: Number(measured?.height ?? node.height ?? node.style?.height ?? 120),
+  };
+
+  if (typeof document === 'undefined') return fallback;
+  const element = Array.from(
+    document.querySelectorAll<HTMLElement>('.react-flow__node[data-id]')
+  ).find((candidate) => candidate.dataset.id === node.id);
+  if (!element) return fallback;
+
+  const width = Math.max(element.offsetWidth, element.scrollWidth);
+  const height = Math.max(element.offsetHeight, element.scrollHeight);
+  return {
+    width: Number.isFinite(width) && width > 0 ? Math.ceil(width) : fallback.width,
+    height: Number.isFinite(height) && height > 0 ? Math.ceil(height) : fallback.height,
+  };
+}
+
 interface UseBoardObjectsProps {
   board: Board | null;
   client: AgorClient | null;
@@ -45,6 +66,8 @@ interface UseBoardObjectsProps {
    *  "selected" outline. */
   activeUrlTargetArtifactId?: string | null;
   onEditMarkdown?: (objectId: string, content: string, width: number) => void;
+  onSessionClick?: (sessionId: string) => void;
+  currentUserId?: string;
 }
 
 export const useBoardObjects = ({
@@ -57,6 +80,8 @@ export const useBoardObjects = ({
   eraserMode = false,
   activeUrlTargetArtifactId,
   onEditMarkdown,
+  onSessionClick,
+  currentUserId,
 }: UseBoardObjectsProps) => {
   // Use ref to avoid recreating callbacks when board changes
   const boardRef = useRef(board);
@@ -311,13 +336,7 @@ export const useBoardObjects = ({
         return;
       }
 
-      const itemSize = (node: Node) => {
-        const measured = (node as ReactFlowNode).measured;
-        return {
-          width: Number(measured?.width ?? node.width ?? node.style?.width ?? 380),
-          height: Number(measured?.height ?? node.height ?? node.style?.height ?? 120),
-        };
-      };
+      const itemSize = renderedNodeSize;
       const layout = layoutRectangles(
         children.map((node) => ({
           id: node.id,
@@ -607,6 +626,10 @@ export const useBoardObjects = ({
               isActiveUrlTarget: objectData.artifact_id === activeUrlTargetArtifactId,
               onUpdate: handleUpdateObject,
               onDeleteArtifact: deleteArtifact,
+              onOpenSession: onSessionClick,
+              client,
+              currentUserId,
+              boardId: board?.board_id,
             },
           };
         }
@@ -704,7 +727,11 @@ export const useBoardObjects = ({
     arrangeZoneContents,
     eraserMode,
     activeUrlTargetArtifactId,
+    onSessionClick,
+    currentUserId,
     onEditMarkdown,
+    client,
+    board?.board_id,
   ]);
 
   /**

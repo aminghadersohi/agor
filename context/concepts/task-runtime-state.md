@@ -266,6 +266,22 @@ resume heartbeat through a peer. Shared-local/container deployment does not
 guarantee that survival; the policy only avoids destroying the process and the
 sole process-local evidence itself.
 
+### Optional standalone restart continuation
+
+`execution.restart_recovery.enabled` opts a standalone deployment into paced,
+durable continuation after restart. It does not replay the interrupted prompt.
+Startup terminalizes the old Task and atomically records a pending recovery on
+that source row; the post-start worker then creates a new system-authored Task
+whose prompt tells the agent to inspect prior state before continuing.
+
+The continuation Task ID is derived deterministically from the source Task ID,
+so a worker retry or daemon death during admission converges on one turn. A
+user-created Task or session archive supersedes a pending recovery. `stopping`,
+`awaiting_permission`, and `awaiting_input` are never automatically continued.
+Abrupt-crash recovery is separately gated by `resume_after_crash` because a
+lost local launcher cannot prove executor containment. The feature is disabled
+by default and is unsupported in shared-replica mode.
+
 ## Task truth and session projection
 
 The task row describes the active turn. The session row is a coarser

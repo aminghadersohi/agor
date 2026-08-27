@@ -114,6 +114,8 @@ export interface SessionFooterProps {
   promptInputSlot: React.ReactNode;
   /** Minimal composer presentation for conversation-first mode. */
   simple?: boolean;
+  /** Keep the compact presentation while exposing the normal session actions. */
+  showSessionActions?: boolean;
 }
 
 // Memoized: the panel re-renders once per animation frame while its session
@@ -162,6 +164,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   onCodexPermissionChange,
   promptInputSlot,
   simple = false,
+  showSessionActions = false,
 }) => {
   const managedByPreset = Boolean(session.agentic_tool_preset_id);
   const supportsLiveEffort = Boolean(toolCaps?.reasoningEffortLevels?.length);
@@ -1391,6 +1394,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
             {showMcpControl && (
               <SessionMcpFooterControl
                 client={client}
+                currentUserId={currentUserId}
                 sessionId={session.session_id}
                 sessionMcpServerIds={sessionMcpServerIds}
                 mcpServerById={mcpServerById}
@@ -1602,7 +1606,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
         >
           {/* Left group */}
           <Space size={4}>
-            {!simple && pinnedItems.includes('upload') && (
+            {(!simple || showSessionActions) && pinnedItems.includes('upload') && (
               <Tooltip
                 title={
                   composerAttachmentUploading
@@ -1624,7 +1628,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                 />
               </Tooltip>
             )}
-            {!simple && pinnedItems.includes('advanced-upload') && (
+            {(!simple || showSessionActions) && pinnedItems.includes('advanced-upload') && (
               <Tooltip
                 title={
                   composerAttachmentUploading
@@ -1645,21 +1649,23 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                 />
               </Tooltip>
             )}
-            {!simple && pinnedItems.includes('fork') && toolCaps?.supportsSessionFork !== false && (
-              <Tooltip title={connectionDisabled ? 'Disconnected from daemon' : 'Fork Session'}>
-                <Button
-                  size="small"
-                  type="text"
-                  aria-label="Fork session"
-                  icon={<ForkOutlined />}
-                  onClick={onFork}
-                  disabled={forkDisabled}
-                  data-testid="fork-bar-btn"
-                />
-              </Tooltip>
-            )}
+            {(!simple || showSessionActions) &&
+              pinnedItems.includes('fork') &&
+              toolCaps?.supportsSessionFork !== false && (
+                <Tooltip title={connectionDisabled ? 'Disconnected from daemon' : 'Fork Session'}>
+                  <Button
+                    size="small"
+                    type="text"
+                    aria-label="Fork session"
+                    icon={<ForkOutlined />}
+                    onClick={onFork}
+                    disabled={forkDisabled}
+                    data-testid="fork-bar-btn"
+                  />
+                </Tooltip>
+              )}
             {/* Dynamically pinned items */}
-            {!simple &&
+            {(!simple || showSessionActions) &&
               pinnedItems.includes('btw-fork') &&
               toolCaps?.supportsSessionFork !== false && (
                 <Tooltip title="BTW fork">
@@ -1674,18 +1680,20 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                   />
                 </Tooltip>
               )}
-            {!simple && pinnedItems.includes('spawn') && toolCaps?.supportsChildSpawn !== false && (
-              <Tooltip title="Spawn subsession">
-                <Button
-                  size="small"
-                  type="text"
-                  aria-label="Spawn subsession"
-                  icon={<BranchesOutlined />}
-                  onClick={onSpawnOpen}
-                  disabled={spawnDisabled}
-                />
-              </Tooltip>
-            )}
+            {(!simple || showSessionActions) &&
+              pinnedItems.includes('spawn') &&
+              toolCaps?.supportsChildSpawn !== false && (
+                <Tooltip title="Spawn subsession">
+                  <Button
+                    size="small"
+                    type="text"
+                    aria-label="Spawn subsession"
+                    icon={<BranchesOutlined />}
+                    onClick={onSpawnOpen}
+                    disabled={spawnDisabled}
+                  />
+                </Tooltip>
+              )}
             <Popover
               open={moreOpen}
               onOpenChange={setMoreOpen}
