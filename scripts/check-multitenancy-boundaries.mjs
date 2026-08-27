@@ -149,6 +149,7 @@ const checks = [
     baseline: {
       // Test-only async flush helpers / event loop flushes.
       'apps/agor-daemon/src/services/branches.test.ts': 1,
+      'apps/agor-daemon/src/services/repos.test.ts': 1,
       // Executor-token revocation clears authority synchronously, then uses a
       // transport-only deferral helper to drain the terminal RPC ack before
       // teardown. Its callbacks perform no database or tenant-owned work.
@@ -195,12 +196,18 @@ const checks = [
       // capabilities use a second transaction path so their RLS GUC is local
       // to one pooled connection checkout and cannot leak after discovery.
       'packages/core/src/db/tenant-scope.ts': 2,
+      // 1 pre-existing, plus the two provisioning compare-and-swaps
+      // (claimFailedForProvisioningRetry / markProvisioningFailedIfCreating).
+      // Those need a real transaction: the row lock and the state check must be
+      // in the same unit of work, or two callers could both claim a retry and
+      // dispatch two materializers. Callers enter runWithTenantDatabaseScope
+      // first, so the transaction runs on the tenant-scoped handle.
+      'packages/core/src/db/repositories/branches.ts': 3,
       // Test-only security harness deliberately invokes every direct libsql
       // and Drizzle transaction surface to prove the literal-memory client
       // coordinator cannot be bypassed. No application database access lives
       // in this file.
       'packages/core/src/db/in-memory-sqlite-coordinator.test.ts': 10,
-      'packages/core/src/db/repositories/branches.ts': 1,
       'packages/core/src/db/repositories/knowledge.ts': 7,
       'packages/core/src/db/repositories/repos.ts': 3,
       // Session updates and archive cascades use raw repository transactions until

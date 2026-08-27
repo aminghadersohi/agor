@@ -234,6 +234,7 @@ export interface ReposServiceImpl extends Service<Repo, Partial<Repo>, FeathersP
     },
     params?: FeathersParams
   ): Promise<Branch>;
+  retryBranchProvisioning(branchId: string, params?: FeathersParams): Promise<Branch>;
   removeBranch(id: string, name: string, params?: FeathersParams): Promise<Repo>;
   importFromAgorYml(
     id: string,

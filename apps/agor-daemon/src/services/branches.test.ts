@@ -2510,3 +2510,91 @@ describe('BranchesService environment health requests', () => {
     expect(branchesService.emit).not.toHaveBeenCalled();
   });
 });
+
+describe('BranchesService.patch provisioning attempt fence', () => {
+  // `git.branch.add` is fire-and-forget and can be slow. If a user retries
+  // while an older attempt is still running, that older executor eventually
+  // patches its own outcome — and without a fence it lands on the *newer*
+  // attempt: a stale success reported as ready, or a healthy in-flight
+  // materialization marked failed. Each dispatch carries a generation id,
+  // echoed back on the ack; a mismatch drops just the provisioning fields.
+  const branchId = 'branch-fence' as BranchID;
+
+  function harness(currentAttemptId?: string) {
+    return createPatchHarness({
+      current: {
+        branch_id: branchId,
+        board_id: undefined,
+        filesystem_status: 'creating',
+        ...(currentAttemptId ? { provisioning_attempt_id: currentAttemptId } : {}),
+      },
+      updated: { branch_id: branchId, filesystem_status: 'creating' },
+    });
+  }
+
+  it('drops a superseded success ack but keeps its attempt-independent work', async () => {
+    const { service, repository } = harness('attempt-B');
+
+    await service.patch(branchId, {
+      filesystem_status: 'ready',
+      provisioning_attempt_id: 'attempt-A',
+      start_command: 'pnpm dev',
+    } as never);
+
+    const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    expect(written).not.toHaveProperty('filesystem_status');
+    expect(written).not.toHaveProperty('provisioning_attempt_id');
+    // The checkout really was materialized and its environment templates were
+    // rendered — those ride along on the same ack and are attempt-independent,
+    // so they must survive. (Rendered templates are what the executor actually
+    // sends here; unix groups were removed from that payload.)
+    expect(written.start_command).toBe('pnpm dev');
+  });
+
+  it('drops a superseded failure ack so it cannot fail the newer attempt', async () => {
+    const { service, repository } = harness('attempt-B');
+
+    await service.patch(branchId, {
+      filesystem_status: 'failed',
+      error_message: 'attempt A blew up',
+      provisioning_attempt_id: 'attempt-A',
+    } as never);
+
+    const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    expect(written).not.toHaveProperty('filesystem_status');
+    expect(written).not.toHaveProperty('error_message');
+  });
+
+  it('applies the ack from the attempt that currently owns the row', async () => {
+    const { service, repository } = harness('attempt-B');
+
+    await service.patch(branchId, {
+      filesystem_status: 'ready',
+      provisioning_attempt_id: 'attempt-B',
+    } as never);
+
+    const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    expect(written.filesystem_status).toBe('ready');
+  });
+
+  it('leaves an unfenced ack alone (older executor sends no generation)', async () => {
+    const { service, repository } = harness('attempt-B');
+
+    await service.patch(branchId, { filesystem_status: 'ready' } as never);
+
+    const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    expect(written.filesystem_status).toBe('ready');
+  });
+
+  it('leaves an ack alone when the row carries no generation', async () => {
+    const { service, repository } = harness(undefined);
+
+    await service.patch(branchId, {
+      filesystem_status: 'ready',
+      provisioning_attempt_id: 'attempt-A',
+    } as never);
+
+    const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    expect(written.filesystem_status).toBe('ready');
+  });
+});
