@@ -5,6 +5,25 @@ export type ProfileImageID = UUID;
 
 export type ProfileImageSubjectType = 'user' | 'teammate';
 export type ProfileImageVariant = 'small' | 'large';
+export type ProfileIdentityModelProvider = 'meshy';
+export type ProfileIdentityModelStatus =
+  | 'submitting'
+  | 'pending'
+  | 'in_progress'
+  | 'succeeded'
+  | 'failed'
+  | 'canceled';
+
+/** Public, secret-free state for a generated 3D identity model. */
+export interface ProfileIdentityModel {
+  provider: ProfileIdentityModelProvider;
+  status: ProfileIdentityModelStatus;
+  progress: number;
+  model_available: boolean;
+  error_message?: string;
+  created_at: string;
+  updated_at: string;
+}
 
 /** Public metadata for a tenant-owned profile image. Pixel bytes are served separately. */
 export interface ProfileImage {
@@ -20,6 +39,7 @@ export interface ProfileImage {
   small_height: number;
   large_width: number;
   large_height: number;
+  identity_model?: ProfileIdentityModel;
   created_at: string;
   updated_at: string;
 }
