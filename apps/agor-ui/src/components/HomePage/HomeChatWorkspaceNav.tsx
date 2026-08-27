@@ -16,7 +16,9 @@ import { useAgorStore } from '../../store/agorStore';
 import { selectBranchById, selectSessionById, selectUserById } from '../../store/selectors';
 import { getSessionDisplayTitle } from '../../utils/sessionTitle';
 import { formatRelativeTimeSafe } from '../../utils/time';
+import { BoardTile } from '../BoardTile';
 import { readTeammateChatPreferences } from '../TeammateChatCollections/preferences';
+import { TeammateIdentityAvatar } from '../TeammateIdentityAvatar';
 import { StatusDot } from './StatusDot';
 
 const { Text, Title } = Typography;
@@ -267,20 +269,11 @@ export function HomeChatWorkspaceNav({
                                 }}
                               >
                                 {disclosureIcon(branchExpanded)}
-                                <span
-                                  aria-hidden
-                                  style={{
-                                    width: 32,
-                                    height: 32,
-                                    display: 'grid',
-                                    placeItems: 'center',
-                                    borderRadius: '50%',
-                                    background: token.colorFillSecondary,
-                                    fontSize: 18,
-                                  }}
-                                >
-                                  {teammate?.emoji || '💬'}
-                                </span>
+                                {teammate ? (
+                                  <TeammateIdentityAvatar branch={branch} size={32} />
+                                ) : (
+                                  <BoardTile size={32} />
+                                )}
                                 <Text ellipsis style={{ minWidth: 0, fontSize: 12 }}>
                                   {teammate?.displayName || branch.name}
                                 </Text>
