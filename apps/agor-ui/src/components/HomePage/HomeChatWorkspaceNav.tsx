@@ -24,8 +24,7 @@ const { Text, Title } = Typography;
 interface ChatSidebarBranch {
   key: string;
   branch: Branch;
-  sessions: Array<{ session: Session; pinned: boolean }>;
-  pinnedCount: number;
+  sessions: Session[];
 }
 
 interface ChatSidebarCollection {
@@ -95,22 +94,10 @@ export function HomeChatWorkspaceNav({
             0
           ),
           branches: Array.from(sessionsByBranch.entries()).map(([branchId, pinnedSessions]) => {
-            const pinnedIds = new Set(pinnedSessions.map((session) => session.session_id));
-            const sessions = Array.from(sessionById.values())
-              .filter(
-                (session) =>
-                  !session.archived &&
-                  session.branch_id === branchId &&
-                  branchById.has(session.branch_id)
-              )
-              .sort((left, right) => Date.parse(right.last_updated) - Date.parse(left.last_updated))
-              .slice(0, 50)
-              .map((session) => ({ session, pinned: pinnedIds.has(session.session_id) }));
             return {
               key: `branch:${collection.collection_id}:${branchId}`,
               branch: branchById.get(branchId)!,
-              sessions,
-              pinnedCount: pinnedSessions.length,
+              sessions: pinnedSessions,
             };
           }),
         };
@@ -216,7 +203,7 @@ export function HomeChatWorkspaceNav({
                         width: '100%',
                         minHeight: 34,
                         display: 'grid',
-                        gridTemplateColumns: '14px 20px minmax(0, 1fr) auto',
+                        gridTemplateColumns: '14px 32px minmax(0, 1fr) auto',
                         alignItems: 'center',
                         gap: 7,
                         padding: '6px 8px',
@@ -229,7 +216,21 @@ export function HomeChatWorkspaceNav({
                       }}
                     >
                       {disclosureIcon(collectionExpanded)}
-                      <FolderOpenOutlined style={{ color: token.colorTextSecondary }} />
+                      <span
+                        aria-hidden
+                        style={{
+                          width: 30,
+                          height: 30,
+                          display: 'grid',
+                          placeItems: 'center',
+                          borderRadius: token.borderRadiusLG,
+                          background: token.colorFillSecondary,
+                        }}
+                      >
+                        <FolderOpenOutlined
+                          style={{ color: token.colorTextSecondary, fontSize: 18 }}
+                        />
+                      </span>
                       <Text strong ellipsis style={{ minWidth: 0, fontSize: 13 }}>
                         {collection.name}
                       </Text>
@@ -240,7 +241,7 @@ export function HomeChatWorkspaceNav({
 
                     {collectionExpanded && (
                       <Flex vertical gap={5} style={{ padding: '6px 0 0 8px' }}>
-                        {collection.branches.map(({ key, branch, sessions, pinnedCount }) => {
+                        {collection.branches.map(({ key, branch, sessions }) => {
                           const branchExpanded = expandedKeys.has(key);
                           const teammate = getTeammateConfig(branch);
                           return (
@@ -251,9 +252,9 @@ export function HomeChatWorkspaceNav({
                                 onClick={() => toggleExpanded(key)}
                                 style={{
                                   width: '100%',
-                                  minHeight: 30,
+                                  minHeight: 40,
                                   display: 'grid',
-                                  gridTemplateColumns: '14px 22px minmax(0, 1fr) auto',
+                                  gridTemplateColumns: '14px 34px minmax(0, 1fr) auto',
                                   alignItems: 'center',
                                   gap: 6,
                                   padding: '4px 8px',
@@ -266,20 +267,31 @@ export function HomeChatWorkspaceNav({
                                 }}
                               >
                                 {disclosureIcon(branchExpanded)}
-                                <span aria-hidden style={{ textAlign: 'center' }}>
+                                <span
+                                  aria-hidden
+                                  style={{
+                                    width: 32,
+                                    height: 32,
+                                    display: 'grid',
+                                    placeItems: 'center',
+                                    borderRadius: '50%',
+                                    background: token.colorFillSecondary,
+                                    fontSize: 18,
+                                  }}
+                                >
                                   {teammate?.emoji || '💬'}
                                 </span>
                                 <Text ellipsis style={{ minWidth: 0, fontSize: 12 }}>
                                   {teammate?.displayName || branch.name}
                                 </Text>
                                 <Text type="secondary" style={{ fontSize: 10 }}>
-                                  {pinnedCount}/{sessions.length}
+                                  {sessions.length}
                                 </Text>
                               </button>
 
                               {branchExpanded && (
                                 <Flex vertical gap={2} style={{ padding: '2px 0 2px 20px' }}>
-                                  {sessions.map(({ session, pinned }) => {
+                                  {sessions.map((session) => {
                                     const active = session.session_id === activeSessionId;
                                     return (
                                       <div
@@ -300,11 +312,7 @@ export function HomeChatWorkspaceNav({
                                         <button
                                           type="button"
                                           aria-current={active ? 'page' : undefined}
-                                          onClick={() =>
-                                            pinned
-                                              ? onSessionClick(session.session_id)
-                                              : onManage(session.session_id)
-                                          }
+                                          onClick={() => onSessionClick(session.session_id)}
                                           style={{
                                             minHeight: 30,
                                             display: 'grid',
@@ -322,11 +330,11 @@ export function HomeChatWorkspaceNav({
                                           <StatusDot status={session.status} />
                                           <Text
                                             ellipsis
-                                            strong={active || pinned}
+                                            strong={active}
                                             style={{
                                               minWidth: 0,
                                               fontSize: 12,
-                                              color: pinned ? 'inherit' : token.colorTextSecondary,
+                                              color: 'inherit',
                                             }}
                                           >
                                             {getSessionDisplayTitle(session, {
@@ -343,24 +351,14 @@ export function HomeChatWorkspaceNav({
                                         <Button
                                           type="text"
                                           size="small"
-                                          aria-label={
-                                            pinned
-                                              ? `Manage ${getSessionDisplayTitle(session, { includeAgentFallback: true })} in collection`
-                                              : `Add ${getSessionDisplayTitle(session, { includeAgentFallback: true })} to collection`
-                                          }
-                                          title={
-                                            pinned
-                                              ? 'Added — manage or remove'
-                                              : 'Add to collection'
-                                          }
-                                          icon={pinned ? <CheckOutlined /> : <PlusOutlined />}
+                                          aria-label={`Manage ${getSessionDisplayTitle(session, { includeAgentFallback: true })} in collection`}
+                                          title="Added — manage or remove"
+                                          icon={<CheckOutlined />}
                                           onClick={() => onManage(session.session_id)}
                                           style={{
                                             width: 28,
                                             minWidth: 28,
-                                            color: pinned
-                                              ? token.colorPrimary
-                                              : token.colorTextTertiary,
+                                            color: token.colorPrimary,
                                           }}
                                         />
                                       </div>
