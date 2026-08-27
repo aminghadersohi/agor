@@ -25,6 +25,7 @@ export * from './password-policy';
 export * from './repo-list';
 export * from './repo-reference';
 export * from './resolved-config-slice';
+export * from './restart-recovery';
 export * from './sandbox-policy';
 export * from './schedule-agentic-tool-config';
 export type {

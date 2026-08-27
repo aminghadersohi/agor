@@ -31,6 +31,7 @@ import {
 import { assertValidMultiTenancyConfig } from './multitenancy';
 import { AgorPasswordPolicyProfile } from './password-policy';
 import { isPlainConfigRecord } from './plain-record';
+import { resolveRestartRecoverySettings } from './restart-recovery';
 import {
   type AgorApmSettings,
   type AgorConfig,
@@ -797,6 +798,7 @@ function validateConfig(config: AgorConfig): void {
     ]);
   }
   only(config.execution, 'execution', [
+    'restart_recovery',
     'executor_heartbeat',
     'executor_response',
     'sdk_watchdog',
@@ -820,6 +822,13 @@ function validateConfig(config: AgorConfig): void {
     'branch_storage',
     'sandbox',
   ]);
+  only(config.execution?.restart_recovery, 'execution.restart_recovery', [
+    'enabled',
+    'delay_ms',
+    'max_tasks_per_start',
+    'resume_after_crash',
+  ]);
+  resolveRestartRecoverySettings(config.execution);
   only(config.execution?.executor_heartbeat, 'execution.executor_heartbeat', [
     'enabled',
     'interval_ms',

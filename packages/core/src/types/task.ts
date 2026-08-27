@@ -172,6 +172,19 @@ export interface TaskMetadata {
   widget_id?: MessageID;
   /** User who resolved the widget; Task execution remains session-owner attributed. */
   widget_resolved_by_user_id?: UserID;
+  /**
+   * Durable restart-continuation state. A terminal source Task stays pending
+   * until its deterministic continuation Task has been admitted. The
+   * continuation carries the same source ID for transcript/audit context.
+   */
+  restart_recovery?: {
+    source_task_id: TaskID;
+    state: 'pending' | 'admitted' | 'superseded';
+    requested_at: string;
+    admitted_task_id?: TaskID;
+    admitted_at?: string;
+    disposition_reason?: 'session_advanced' | 'session_archived';
+  };
   /** Provider-event occurrence that durably admitted this gateway prompt. */
   gateway_inbound_event_id?: GatewayInboundEventID;
   /** Provider reply target captured for this gateway Task (for example an editable ack ID). */

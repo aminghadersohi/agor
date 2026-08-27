@@ -74,6 +74,13 @@ in `Task.metadata.initial_message_id`; a later drainer therefore writes exactly
 the same transcript row. A losing admission that still observes `queued` writes
 no transcript row.
 
+Standalone restart continuation is a separate opt-in producer. Its durable
+pending marker lives on the terminal source Task, and its continuation Task ID
+is deterministic. The post-start worker admits at most the configured number
+of recoveries, one at a time with a configured delay, through the normal prompt
+service and queue claim. It never replays the old prompt, and it marks a pending
+recovery superseded if the session has advanced or been archived.
+
 Widget submit/dismiss uses a separate short Message-row claim before registry
 or connector work. Only `pending -> resolving` may perform that work; the
 opaque claim token alone may publish `submitted|dismissed`. An interrupted

@@ -571,6 +571,23 @@ export interface AgorSandboxSettings {
  */
 export interface AgorExecutionSettings {
   /**
+   * Opt-in recovery for Tasks interrupted by a standalone daemon restart.
+   * Recovery creates a new, system-authored continuation Task; it never
+   * replays the interrupted prompt. Abrupt-crash recovery is separately
+   * gated because executor containment cannot be verified after process loss.
+   */
+  restart_recovery?: {
+    /** Enable paced continuation admission after daemon restart. Default: false. */
+    enabled?: boolean;
+    /** Delay between continuation admissions. Default: 2000; minimum: 250. */
+    delay_ms?: number;
+    /** Maximum pending recoveries admitted during one daemon boot. Default: 50. */
+    max_tasks_per_start?: number;
+    /** Also recover after an unclean daemon exit. Default: false. */
+    resume_after_crash?: boolean;
+  };
+
+  /**
    * Lightweight heartbeat settings for long-running executor tasks.
    *
    * The executor reports `tasks.last_executor_heartbeat_at` immediately and

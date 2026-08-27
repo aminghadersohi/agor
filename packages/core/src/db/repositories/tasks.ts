@@ -48,6 +48,7 @@ import {
   insert,
   isPostgresDatabase,
   isSQLiteDatabase,
+  jsonExtract,
   lockRowForUpdate,
   runDatabaseTransaction,
   select,
@@ -168,6 +169,8 @@ export type TerminationSettlementInput =
   | (TerminationSettlementInputBase & {
       outcome: 'restart_unverified';
       coordinationToken?: never;
+      /** Atomically persist a pending continuation alongside restart settlement. */
+      restartRecovery?: TaskMetadata['restart_recovery'];
     });
 
 export interface TerminationSettlementResult {
@@ -1398,6 +1401,14 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         ...row.data,
         duration_ms: terminal.duration_ms,
         message_range: terminal.message_range ?? current.message_range,
+        ...(restartRelease && input.restartRecovery
+          ? {
+              metadata: {
+                ...(current.metadata ?? {}),
+                restart_recovery: input.restartRecovery,
+              },
+            }
+          : {}),
         ...(failure
           ? {
               sdk_failure: {
@@ -1465,6 +1476,29 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         }),
       };
     });
+  }
+
+  /** Oldest restart-interrupted terminal Tasks still awaiting continuation admission. */
+  async findPendingRestartRecoveries(limit = 50): Promise<Task[]> {
+    try {
+      const rows = await select(this.db)
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.status, TaskStatus.STOPPED),
+            eq(jsonExtract(this.db, tasks.data, 'metadata.restart_recovery.state'), 'pending')
+          )
+        )
+        .orderBy(asc(tasks.created_at), asc(tasks.task_id))
+        .limit(limit)
+        .all();
+      return rows.map((row: TaskRow) => this.rowToTask(row));
+    } catch (error) {
+      throw new RepositoryError(
+        `Failed to find pending restart recoveries: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
   }
 
   /**

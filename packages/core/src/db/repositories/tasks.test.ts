@@ -4,7 +4,7 @@
  * Tests for type-safe CRUD operations on tasks with short ID support.
  */
 
-import type { MessageID, Task, TaskPendingDispatchStatus, UUID } from '@agor/core/types';
+import type { MessageID, Task, TaskID, TaskPendingDispatchStatus, UUID } from '@agor/core/types';
 import { MessageRole, SessionStatus, TaskStatus } from '@agor/core/types';
 import { describe, expect, vi } from 'vitest';
 import { generateId, toShortId } from '../../lib/ids';
@@ -2100,6 +2100,11 @@ describe('TaskRepository.update', () => {
           tool: 'codex',
           termination: 'unverified',
         },
+        restartRecovery: {
+          source_task_id: task.task_id,
+          state: 'pending',
+          requested_at: '2026-07-10T20:03:00.000Z',
+        },
       });
 
       expect(result).toMatchObject({
@@ -2108,8 +2113,30 @@ describe('TaskRepository.update', () => {
           status: TaskStatus.STOPPED,
           error_message: 'Daemon restarted',
           sdk_failure: { termination: 'unverified' },
+          metadata: {
+            restart_recovery: {
+              source_task_id: task.task_id,
+              state: 'pending',
+            },
+          },
         },
       });
+      expect((await taskRepo.findPendingRestartRecoveries()).map((item) => item.task_id)).toEqual([
+        task.task_id,
+      ]);
+
+      await taskRepo.update(task.task_id, {
+        metadata: {
+          restart_recovery: {
+            source_task_id: task.task_id,
+            state: 'admitted',
+            requested_at: '2026-07-10T20:03:00.000Z',
+            admitted_task_id: 'recovery-task' as TaskID,
+            admitted_at: '2026-07-10T20:03:01.000Z',
+          },
+        },
+      });
+      expect(await taskRepo.findPendingRestartRecoveries()).toEqual([]);
     }
   );
 

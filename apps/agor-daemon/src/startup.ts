@@ -16,6 +16,7 @@ import {
   resolveDispatchConnectTimeoutMs,
   resolveExecutorHeartbeatConfig,
   resolveMultiTenancyConfig,
+  resolveRestartRecoverySettings,
 } from '@agor/core/config';
 import type { DistributedWorkIdentity } from '@agor/core/coordination';
 import {
@@ -27,7 +28,7 @@ import {
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
 import type { Id, Paginated, Session, SessionID, Task, TenantContext } from '@agor/core/types';
-import { isTerminalTaskStatus, SessionStatus } from '@agor/core/types';
+import { isTerminalTaskStatus, SessionStatus, TaskStatus } from '@agor/core/types';
 import type { Application, SessionsServiceImpl, TasksServiceImpl } from './declarations.js';
 import { beginExecutorResponseDrain } from './executor-response-channel.js';
 import { clearTrackedExecutorGauge, containAllTrackedExecutors } from './executor-tracking.js';
@@ -38,6 +39,7 @@ import { DistributedHealthMonitor } from './services/distributed-health-monitor.
 import type { GatewayService } from './services/gateway.js';
 import { HealthMonitor } from './services/health-monitor.js';
 import { KnowledgeEmbeddingIndexer } from './services/knowledge-embedding-indexer.js';
+import { drainRestartRecoveries } from './services/restart-recovery-worker.js';
 import { SchedulerService } from './services/scheduler.js';
 import { SessionQueueWorker } from './services/session-queue-worker.js';
 import { TaskRuntimeReconciler } from './services/task-runtime-reconciler.js';
@@ -271,6 +273,7 @@ async function cleanupOrphanStatusesInTenantScope(
 
   // Determine restart type before touching anything — sentinel is consumed here
   const wasGraceful = await readAndClearSentinel();
+  const restartRecovery = resolveRestartRecoverySettings(ctx.config.execution);
 
   // Find all orphaned executor-owned tasks (dispatching, running, stopping, awaiting_permission, awaiting_input)
   const orphanedTasks = await tasksService.getOrphaned(startupParams as never);
@@ -278,6 +281,11 @@ async function cleanupOrphanStatusesInTenantScope(
   if (orphanedTasks.length > 0) {
     for (const task of orphanedTasks) {
       const session = await sessionsService.get(task.session_id, startupParams as never);
+      const shouldQueueRecovery =
+        restartRecovery.enabled &&
+        (wasGraceful || restartRecovery.resumeAfterCrash) &&
+        (task.status === TaskStatus.DISPATCHING || task.status === TaskStatus.RUNNING);
+      const recoveryRequestedAt = new Date().toISOString();
       await tasksService.settleTermination(
         {
           taskId: task.task_id,
@@ -292,6 +300,15 @@ async function cleanupOrphanStatusesInTenantScope(
                 termination: 'unverified',
               },
           errorMessage: 'Daemon restart released this Task without verifying executor termination.',
+          ...(shouldQueueRecovery
+            ? {
+                restartRecovery: {
+                  source_task_id: task.task_id,
+                  state: 'pending' as const,
+                  requested_at: recoveryRequestedAt,
+                },
+              }
+            : {}),
         },
         { ...startupParams, suppressTerminalQueueProcessing: true } as never
       );
@@ -682,8 +699,11 @@ export async function startup(ctx: StartupContext): Promise<void> {
   initializeEnvironmentHealthMonitor(healthMonitor, metrics);
   if (orphanCleanupResult) {
     runPostStartJob(
-      'daemon-restart-notices',
-      () => injectRestartNotices(ctx, orphanCleanupResult),
+      'daemon-restart-recovery',
+      async () => {
+        await injectRestartNotices(ctx, orphanCleanupResult);
+        await drainRestartRecoveries(ctx);
+      },
       metrics
     );
   }
