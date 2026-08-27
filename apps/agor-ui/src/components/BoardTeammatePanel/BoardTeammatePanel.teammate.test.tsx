@@ -19,6 +19,15 @@ vi.mock('../BranchHeaderPill', () => ({
 }));
 
 vi.mock('../ProfileImage', () => ({
+  useProfileImageGallery: () => [],
+  useProfileImageUrl: () => undefined,
+  useProfileIdentityModel: () => ({
+    modelUrl: undefined,
+    identityModel: undefined,
+    generating: false,
+    error: null,
+    generate: vi.fn(),
+  }),
   TeammateBoardPortrait: ({
     primarySize,
     alternativeSize,
