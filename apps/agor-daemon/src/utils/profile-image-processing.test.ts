@@ -55,6 +55,36 @@ describe('processProfileImage', () => {
     expect(result.large.height).toBeLessThanOrEqual(PROFILE_IMAGE_LARGE_SIZE);
   });
 
+  it("anchors portrait crops to the top where a subject's head is expected", async () => {
+    const portrait = await sharp(
+      Buffer.from(`
+        <svg width="100" height="300" xmlns="http://www.w3.org/2000/svg">
+          <rect width="100" height="100" y="0" fill="#ff0000" />
+          <rect width="100" height="100" y="100" fill="#00ff00" />
+          <rect width="100" height="100" y="200" fill="#0000ff" />
+        </svg>
+      `)
+    )
+      .png()
+      .toBuffer();
+
+    const result = await processProfileImage(portrait);
+    const centerPixel = await sharp(result.small.data)
+      .removeAlpha()
+      .extract({
+        left: Math.floor(result.small.width / 2),
+        top: Math.floor(result.small.height / 2),
+        width: 1,
+        height: 1,
+      })
+      .raw()
+      .toBuffer();
+
+    expect(centerPixel[0]).toBeGreaterThan(200);
+    expect(centerPixel[1]).toBeLessThan(40);
+    expect(centerPixel[2]).toBeLessThan(40);
+  });
+
   it('rejects unsupported and empty input', async () => {
     await expect(processProfileImage(Buffer.alloc(0))).rejects.toThrow(/choose an image/i);
     await expect(processProfileImage(Buffer.from('<svg/>'))).rejects.toThrow();
