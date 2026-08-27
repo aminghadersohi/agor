@@ -1,4 +1,5 @@
 import type {
+  BoardID,
   BranchID,
   ProfileImage,
   ProfileImageID,
@@ -16,7 +17,7 @@ import { RepositoryError } from './base';
 
 export interface ProfileImageSubject {
   type: ProfileImageSubjectType;
-  id: UserID | BranchID;
+  id: UserID | BranchID | BoardID;
 }
 
 export interface ProcessedProfileImageInput {
@@ -30,15 +31,20 @@ export interface ProcessedProfileImageInput {
 }
 
 function subjectPredicate(subject: ProfileImageSubject) {
-  return subject.type === 'user'
-    ? eq(profileImages.user_id, subject.id)
-    : eq(profileImages.branch_id, subject.id);
+  if (subject.type === 'user') return eq(profileImages.user_id, subject.id);
+  if (subject.type === 'teammate') return eq(profileImages.branch_id, subject.id);
+  return eq(profileImages.board_id, subject.id);
 }
 
 function rowSubject(row: ProfileImageRow): ProfileImageSubject {
-  if (row.user_id && !row.branch_id) return { type: 'user', id: row.user_id as UserID };
-  if (row.branch_id && !row.user_id) {
+  if (row.user_id && !row.branch_id && !row.board_id) {
+    return { type: 'user', id: row.user_id as UserID };
+  }
+  if (row.branch_id && !row.user_id && !row.board_id) {
     return { type: 'teammate', id: row.branch_id as BranchID };
+  }
+  if (row.board_id && !row.user_id && !row.branch_id) {
+    return { type: 'board', id: row.board_id as BoardID };
   }
   throw new RepositoryError('Profile image has invalid subject ownership');
 }
@@ -101,8 +107,10 @@ export class ProfileImageRepository {
         .values({
           image_id: imageId,
           ...(input.subject.type === 'user'
-            ? { user_id: input.subject.id, branch_id: null }
-            : { user_id: null, branch_id: input.subject.id }),
+            ? { user_id: input.subject.id, branch_id: null, board_id: null }
+            : input.subject.type === 'teammate'
+              ? { user_id: null, branch_id: input.subject.id, board_id: null }
+              : { user_id: null, branch_id: null, board_id: input.subject.id }),
           created_by: input.createdBy,
           original_name: input.originalName,
           alt_text: input.altText ?? null,

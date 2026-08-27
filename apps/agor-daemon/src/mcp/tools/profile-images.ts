@@ -2,6 +2,7 @@ import { DEFAULT_STATIC_TENANT_ID } from '@agor/core/config';
 import { ProfileImageRepository } from '@agor/core/db';
 import { NotFound } from '@agor/core/feathers';
 import type {
+  BoardID,
   Branch,
   BranchID,
   ProfileImage,
@@ -25,11 +26,16 @@ function tenantIdFor(ctx: McpContext): TenantID {
 async function authorizeSubject(
   ctx: McpContext,
   subjectType: ProfileImageSubjectType,
-  subjectId: UserID | BranchID
+  subjectId: UserID | BranchID | BoardID
 ): Promise<void> {
   try {
     if (subjectType === 'user') {
       await ctx.app.service('users').get(subjectId as UserID, ctx.baseServiceParams);
+      return;
+    }
+
+    if (subjectType === 'board') {
+      await ctx.app.service('boards').get(subjectId as BoardID, ctx.baseServiceParams);
       return;
     }
 
@@ -47,7 +53,7 @@ async function authorizeImage(ctx: McpContext, image: ProfileImage): Promise<voi
   await authorizeSubject(ctx, image.subject_type, image.subject_id);
 }
 
-/** Read-only, permission-aware access to processed user and teammate profile galleries. */
+/** Read-only, permission-aware access to processed user, teammate, and board galleries. */
 export function registerProfileImageTools(server: McpServer, ctx: McpContext): void {
   const repository = new ProfileImageRepository(ctx.db);
 
@@ -55,23 +61,23 @@ export function registerProfileImageTools(server: McpServer, ctx: McpContext): v
     'agor_profile_images_list',
     {
       description:
-        'List processed profile-gallery image metadata for an accessible Agor user or teammate. Returns image IDs, primary ordering, alt text, and small/large dimensions; use agor_profile_images_get to load pixels for artifact work.',
+        'List processed image-gallery metadata for an accessible Agor user, teammate, or board. Returns image IDs, primary ordering, alt text, and small/large dimensions; use agor_profile_images_get to load pixels for artifact work.',
       annotations: { readOnlyHint: true },
       inputSchema: z.strictObject({
         subjectType: z
-          .enum(['user', 'teammate'])
-          .describe('Profile owner type: an Agor user or teammate branch'),
+          .enum(['user', 'teammate', 'board'])
+          .describe('Image owner type: an Agor user, teammate branch, or board'),
         subjectId: mcpRequiredId(
           'subjectId',
           'Profile subject',
-          'User or teammate branch ID (UUIDv7 or short ID)'
+          'User, teammate branch, or board ID (UUIDv7 or short ID)'
         ),
       }),
     },
     async (args) => {
       const subject = {
         type: args.subjectType,
-        id: args.subjectId as UserID | BranchID,
+        id: args.subjectId as UserID | BranchID | BoardID,
       } as const;
       await authorizeSubject(ctx, subject.type, subject.id);
       const images = await repository.listForSubject(tenantIdFor(ctx), subject);
@@ -83,7 +89,7 @@ export function registerProfileImageTools(server: McpServer, ctx: McpContext): v
     'agor_profile_images_get',
     {
       description:
-        'Load one processed profile image for an accessible Agor user or teammate as MCP image content. Choose small for avatars and compact artifacts, or large for galleries and visual/3D identity experiences. Original uploads and storage details are never exposed.',
+        'Load one processed image for an accessible Agor user, teammate, or board as MCP image content. Choose small for avatars and compact artifacts, or large for galleries and visual identity experiences. Original uploads and storage details are never exposed.',
       annotations: { readOnlyHint: true },
       inputSchema: z.strictObject({
         imageId: mcpRequiredId('imageId', 'Profile image'),

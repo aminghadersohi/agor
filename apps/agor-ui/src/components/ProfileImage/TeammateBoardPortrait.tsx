@@ -8,10 +8,18 @@ import { useProfileImageGallery } from './useProfileImageGallery';
 
 interface TeammateBoardPortraitProps {
   branch: Branch;
+  primarySize?: number;
+  alternativeSize?: number;
+  maxAlternatives?: number;
 }
 
 /** Large board portrait with a compact, non-circular glimpse of gallery alternatives. */
-export function TeammateBoardPortrait({ branch }: TeammateBoardPortraitProps) {
+export function TeammateBoardPortrait({
+  branch,
+  primarySize = 56,
+  alternativeSize = 22,
+  maxAlternatives = 3,
+}: TeammateBoardPortraitProps) {
   const { token } = theme.useToken();
   const config = getTeammateConfig(branch);
   const images = useProfileImageGallery({ type: 'teammate', id: branch.branch_id });
@@ -19,8 +27,8 @@ export function TeammateBoardPortrait({ branch }: TeammateBoardPortraitProps) {
     () =>
       images
         .filter((image) => image.image_id !== config?.profileImageId && !image.is_primary)
-        .slice(0, 3),
-    [config?.profileImageId, images]
+        .slice(0, maxAlternatives),
+    [config?.profileImageId, images, maxAlternatives]
   );
 
   return (
@@ -28,14 +36,14 @@ export function TeammateBoardPortrait({ branch }: TeammateBoardPortraitProps) {
       data-testid="teammate-board-portrait"
       style={{
         position: 'relative',
-        width: alternatives.length > 0 ? 72 : 56,
-        height: 56,
+        width: alternatives.length > 0 ? primarySize + alternativeSize * 0.7 : primarySize,
+        height: primarySize,
         flexShrink: 0,
       }}
     >
       <TeammateIdentityAvatar
         branch={branch}
-        size={56}
+        size={primarySize}
         shape="square"
         style={{ borderRadius: token.borderRadiusLG, boxShadow: token.boxShadowTertiary }}
       />
@@ -44,7 +52,7 @@ export function TeammateBoardPortrait({ branch }: TeammateBoardPortraitProps) {
           title={`${alternatives.length} alternate teammate photo${alternatives.length === 1 ? '' : 's'}`}
           style={{
             position: 'absolute',
-            insetInlineStart: 44,
+            insetInlineStart: primarySize - alternativeSize * 0.55,
             insetBlockEnd: -2,
             display: 'flex',
             flexDirection: 'column-reverse',
@@ -57,7 +65,7 @@ export function TeammateBoardPortrait({ branch }: TeammateBoardPortraitProps) {
               imageId={image.image_id}
               variant="small"
               shape="square"
-              size={22}
+              size={alternativeSize}
               alt={image.alt_text || image.original_name}
               style={{
                 borderRadius: index % 2 === 0 ? token.borderRadiusSM : 2,

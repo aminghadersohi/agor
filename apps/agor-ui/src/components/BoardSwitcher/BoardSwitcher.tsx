@@ -139,7 +139,7 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
         label: (
           <Flex align="center" gap={8} style={{ padding: '4px 0' }}>
             <Flex align="center" gap={8} style={{ flex: 1, minWidth: 0 }}>
-              <BoardTile emoji={getBoardEmoji(board, branchById)} size={24} />
+              <BoardTile board={board} emoji={getBoardEmoji(board, branchById)} size={24} />
               <Text
                 strong={isActive}
                 ellipsis={{
@@ -323,7 +323,11 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
           >
             <Flex align="center" gap={8} style={{ flex: 1, minWidth: 0 }}>
               {currentBoard ? (
-                <BoardTile emoji={getBoardEmoji(currentBoard, branchById)} size={24} />
+                <BoardTile
+                  board={currentBoard}
+                  emoji={getBoardEmoji(currentBoard, branchById)}
+                  size={24}
+                />
               ) : (
                 <HomeOutlined style={{ fontSize: 18 }} />
               )}

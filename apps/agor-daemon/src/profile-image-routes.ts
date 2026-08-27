@@ -1,4 +1,5 @@
 import {
+  BoardRepository,
   BranchRepository,
   ProfileImageRepository,
   runWithTenantDatabaseScope,
@@ -9,6 +10,8 @@ import type { Application } from '@agor/core/feathers';
 import { BadRequest, NotAuthenticated, NotFound } from '@agor/core/feathers';
 import type {
   AuthenticatedParams,
+  Board,
+  BoardID,
   Branch,
   BranchID,
   ProfileImage,
@@ -49,18 +52,19 @@ interface RegisterProfileImageRoutesOptions {
 
 interface AuthorizedSubject {
   type: ProfileImageSubjectType;
-  id: UserID | BranchID;
+  id: UserID | BranchID | BoardID;
   branch?: Branch;
+  board?: Board;
 }
 
 function parseSubjectType(value: unknown): ProfileImageSubjectType {
-  if (value === 'user' || value === 'teammate') return value;
-  throw new BadRequest('subjectType must be user or teammate');
+  if (value === 'user' || value === 'teammate' || value === 'board') return value;
+  throw new BadRequest('subjectType must be user, teammate, or board');
 }
 
-function parseSubjectId(value: unknown): UserID | BranchID {
+function parseSubjectId(value: unknown): UserID | BranchID | BoardID {
   if (typeof value !== 'string' || !value.trim()) throw new BadRequest('subjectId is required');
-  return value.trim() as UserID | BranchID;
+  return value.trim() as UserID | BranchID | BoardID;
 }
 
 function publicProfileImage(image: ProfileImage): ProfileImage {
@@ -77,6 +81,7 @@ export function registerProfileImageRoutes({
 }: RegisterProfileImageRoutesOptions): void {
   const repository = new ProfileImageRepository(db);
   const branches = new BranchRepository(db);
+  const boards = new BoardRepository(db);
   const users = new UsersRepository(db);
   const upload = multer({
     storage: multer.memoryStorage(),
@@ -94,7 +99,7 @@ export function registerProfileImageRoutes({
   const authorizeSubject = async (
     req: AuthenticatedProfileImageRequest,
     subjectType: ProfileImageSubjectType,
-    subjectId: UserID | BranchID,
+    subjectId: UserID | BranchID | BoardID,
     mode: 'view' | 'manage'
   ): Promise<AuthorizedSubject> => {
     const { params, tenantId, userId } = authContext(req);
@@ -111,6 +116,24 @@ export function registerProfileImageRoutes({
         throw new NotFound('Profile unavailable');
       }
       return { type: 'user', id: target.user_id as UserID };
+    }
+
+    if (subjectType === 'board') {
+      const board = await runWithTenantDatabaseScope(db, tenantId, () =>
+        boards.findById(subjectId as BoardID)
+      );
+      if (!board) throw new NotFound('Profile unavailable');
+      const bypassAccess =
+        params.user?._isServiceAccount || hasMinimumRole(params.user?.role, ROLES.ADMIN);
+      if (branchRbacEnabled && !bypassAccess) {
+        const allowed = await runWithTenantDatabaseScope(db, tenantId, () =>
+          mode === 'manage'
+            ? boards.canMutate(board.board_id, userId as UUID)
+            : boards.canView(board.board_id, userId as UUID)
+        ).catch(() => false);
+        if (!allowed) throw new NotFound('Profile unavailable');
+      }
+      return { type: 'board', id: board.board_id, board };
     }
 
     const branch = await runWithTenantDatabaseScope(db, tenantId, () =>
@@ -147,6 +170,14 @@ export function registerProfileImageRoutes({
       markTrustedUserMutation(mutationParams, 'profile-image-projection');
       await runWithTenantDatabaseScope(db, tenantId, () =>
         app.service('users').patch(subject.id, { profile_image_id: imageId }, mutationParams)
+      );
+      return;
+    }
+    if (subject.type === 'board') {
+      await runWithTenantDatabaseScope(db, tenantId, () =>
+        app
+          .service('boards')
+          .patch(subject.id as BoardID, { profile_image_id: imageId ?? undefined }, params)
       );
       return;
     }

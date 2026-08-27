@@ -92,6 +92,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
       custom_css?: string;
       objects?: Record<string, BoardObject>;
       custom_context?: Record<string, unknown>;
+      profile_image_id?: Board['profile_image_id'];
       access_mode?: BoardAccessMode;
       default_others_can?: BranchPermissionLevel;
       default_others_fs_access?: 'none' | 'read' | 'write';
@@ -116,6 +117,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
         primary_teammate_id:
           ((row.primary_teammate_id ?? row.primary_assistant_id) as Board['primary_teammate_id']) ??
           undefined,
+        profile_image_id: data.profile_image_id,
         created_at: new Date(row.created_at).toISOString(),
         last_updated: row.updated_at
           ? new Date(row.updated_at).toISOString()
@@ -172,6 +174,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
         custom_css: board.custom_css,
         objects: board.objects,
         custom_context: board.custom_context,
+        profile_image_id: board.profile_image_id,
       },
     };
   }

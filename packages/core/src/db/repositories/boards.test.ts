@@ -40,6 +40,7 @@ function createBoardData(overrides?: Partial<Board>): Partial<Board> {
     default_others_can: overrides?.default_others_can,
     default_others_fs_access: overrides?.default_others_fs_access,
     default_dangerously_allow_session_sharing: overrides?.default_dangerously_allow_session_sharing,
+    profile_image_id: overrides?.profile_image_id,
   };
   if (overrides && Object.hasOwn(overrides, 'primary_teammate_id')) {
     data.primary_teammate_id = overrides.primary_teammate_id;
@@ -130,6 +131,19 @@ describe('BoardRepository.create', () => {
     const created = await repo.create(createBoardData({ background_color: background }));
 
     expect(created.background_color).toBe(background);
+  });
+
+  dbTest('persists the main board-image projection in board data', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const imageId = generateId();
+
+    const created = await repo.create(
+      createBoardData({ profile_image_id: imageId as Board['profile_image_id'] })
+    );
+    expect(created.profile_image_id).toBe(imageId);
+
+    const cleared = await repo.update(created.board_id, { profile_image_id: undefined });
+    expect(cleared.profile_image_id).toBeUndefined();
   });
 
   dbTest('should create board with all required fields', async ({ db }) => {

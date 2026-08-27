@@ -12,6 +12,13 @@ vi.mock('../JSONEditor', () => ({
   JSONEditor: () => <textarea aria-label="Custom Context (JSON)" />,
   validateJSON: () => Promise.resolve(),
 }));
+vi.mock('../ProfileImage', () => ({
+  ProfileImageGalleryEditor: ({ subject, label }: { subject: unknown; label: string }) => (
+    <div data-testid="board-image-gallery" data-subject={JSON.stringify(subject)}>
+      {label}
+    </div>
+  ),
+}));
 vi.mock('../forms/BoardFormFields', () => ({
   BoardFormFields: () => (
     <Form.Item name="name" label="Name" rules={[{ required: true }]}>
@@ -67,6 +74,10 @@ describe('BoardEditModal', () => {
     );
 
     expect(await screen.findByDisplayValue('Fresh name')).toBeInTheDocument();
+    expect(screen.getByTestId('board-image-gallery')).toHaveAttribute(
+      'data-subject',
+      JSON.stringify({ type: 'board', id: 'board-1' })
+    );
     expect(get).toHaveBeenCalledWith(listedBoard.board_id);
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Renamed' } });
     fireEvent.click(await screen.findByRole('button', { name: 'Save' }));

@@ -248,7 +248,7 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
           value: b.board_id,
           label: (
             <Space size={8}>
-              <BoardTile emoji={getBoardEmoji(b, branchById)} size={20} />
+              <BoardTile board={b} emoji={getBoardEmoji(b, branchById)} size={20} />
               <span>{b.name}</span>
             </Space>
           ),

@@ -95,6 +95,7 @@ const RecentBoardPills: React.FC<{
             }}
           >
             <BoardTile
+              board={board}
               emoji={getBoardEmoji(board, branchById)}
               size={30}
               style={{

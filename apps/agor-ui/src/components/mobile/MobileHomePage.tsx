@@ -24,7 +24,7 @@ import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getSessionDisplayTitle } from '@/utils/sessionTitle';
 import { formatRelativeTime } from '@/utils/time';
-import { getBoardEmoji } from '../BoardTile';
+import { BoardTile, getBoardEmoji } from '../BoardTile';
 import { HomeSchedulesSection } from '../HomePage/HomeSchedulesSection';
 import { MobileHeader } from './MobileHeader';
 
@@ -209,9 +209,11 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
                         style={{ height: 'auto', padding: token.paddingSM, textAlign: 'start' }}
                       >
                         <Flex align="center" gap={token.marginSM}>
-                          <span aria-hidden style={{ fontSize: 28 }}>
-                            {getBoardEmoji(board, branchById)}
-                          </span>
+                          <BoardTile
+                            board={board}
+                            emoji={getBoardEmoji(board, branchById)}
+                            size={40}
+                          />
                           <div style={{ minWidth: 0, flex: 1 }}>
                             <Text strong ellipsis style={{ display: 'block' }}>
                               {board.name}

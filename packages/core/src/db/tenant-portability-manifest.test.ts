@@ -63,7 +63,7 @@ describe('buildTenantInsertOrder', () => {
 describe('tenantPortabilityForeignKeys', () => {
   it('freezes the exact schema-derived movable FK set', () => {
     const foreignKeys = tenantPortabilityForeignKeys();
-    expect(foreignKeys).toHaveLength(98);
+    expect(foreignKeys).toHaveLength(99);
     expect(Object.isFrozen(foreignKeys)).toBe(true);
     const structuralKeys = foreignKeys.map((foreignKey) =>
       [
@@ -146,6 +146,20 @@ describe('tenantPortabilityForeignKeys', () => {
           parentTable: 'boards',
           parentColumns: ['board_id'],
           onDelete: 'set null',
+        }),
+      ])
+    );
+  });
+
+  it('moves board gallery images with their board', () => {
+    expect(tenantPortabilityForeignKeys()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          childTable: 'profile_images',
+          childColumns: ['board_id'],
+          parentTable: 'boards',
+          parentColumns: ['board_id'],
+          onDelete: 'cascade',
         }),
       ])
     );
