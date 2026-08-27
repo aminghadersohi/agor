@@ -23,6 +23,11 @@ export function widgetAutoResumeTaskId(widgetId: MessageID): TaskID {
   return stableTaskId(widgetId, 'widget_auto_resume');
 }
 
+/** One durable continuation admission for one restart-interrupted source Task. */
+export function restartRecoveryTaskId(sourceTaskId: TaskID): TaskID {
+  return stableTaskId(sourceTaskId, 'restart_recovery');
+}
+
 /** One stable prompt Task for one durably admitted provider event. */
 export function gatewayInboundTaskId(eventId: GatewayInboundEventID): TaskID {
   return stableTaskId(eventId, 'gateway_inbound_prompt');
