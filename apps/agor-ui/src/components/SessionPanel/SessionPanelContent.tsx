@@ -17,7 +17,7 @@ import { BranchHeaderPill } from '../BranchHeaderPill';
 import { BranchMetadataRow } from '../BranchMetadataRow';
 import { ConversationView } from '../ConversationView';
 import { ForkSpawnModal } from '../ForkSpawnModal';
-import { useProfileImageUrl } from '../ProfileImage/useProfileImageUrl';
+import { useTeammateProfileImageUrl } from '../ProfileImage';
 
 export interface SessionPanelContentProps {
   client: AgorClient | null;
@@ -67,7 +67,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
   }) => {
     const { token } = theme.useToken();
     const teammateConfig = branch && isTeammate(branch) ? getTeammateConfig(branch) : undefined;
-    const teammateAvatarUrl = useProfileImageUrl(teammateConfig?.profileImageId, 'small');
+    const teammateAvatarUrl = useTeammateProfileImageUrl(branch, 'small');
     const { showSuccess, showError } = useThemedMessage();
     const [resumeQueueInFlight, setResumeQueueInFlight] = React.useState(false);
     const isQueueHeldByFailure = queuedTasks.length > 0 && session.status === 'failed';

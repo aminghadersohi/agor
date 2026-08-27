@@ -2,7 +2,7 @@ import type { Branch } from '@agor-live/client';
 import { getTeammateConfig } from '@agor-live/client';
 import { RobotOutlined } from '@ant-design/icons';
 import { Avatar, type AvatarProps, theme } from 'antd';
-import { useProfileImageUrl } from './ProfileImage/useProfileImageUrl';
+import { useTeammateProfileImageUrl } from './ProfileImage/useTeammateProfileImageUrl';
 
 interface TeammateIdentityAvatarProps extends Omit<AvatarProps, 'src'> {
   branch?: Branch | null;
@@ -13,18 +13,19 @@ interface TeammateIdentityAvatarProps extends Omit<AvatarProps, 'src'> {
 export function TeammateIdentityAvatar({
   branch,
   size = 32,
+  shape = 'circle',
   ...props
 }: TeammateIdentityAvatarProps) {
   const { token } = theme.useToken();
   const config = branch ? getTeammateConfig(branch) : undefined;
-  const imageUrl = useProfileImageUrl(config?.profileImageId, size > 96 ? 'large' : 'small');
+  const imageUrl = useTeammateProfileImageUrl(branch, size > 96 ? 'large' : 'small');
 
   return (
     <Avatar
       {...props}
       src={imageUrl}
       size={size}
-      shape="circle"
+      shape={shape}
       style={{
         backgroundColor: imageUrl ? token.colorBgContainer : token.colorInfoBg,
         color: token.colorInfo,
