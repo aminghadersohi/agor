@@ -1,6 +1,6 @@
 import type { ActiveUser, AgorClient, Board, BoardID, Branch, User } from '@agor-live/client';
 import { hasMinimumRole, ROLES } from '@agor-live/client';
-import { BulbOutlined, ShopOutlined } from '@ant-design/icons';
+import { BulbOutlined, PlayCircleOutlined, ShopOutlined } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import { Button, Divider, Layout, Popover, Space, Tag, Tooltip, theme } from 'antd';
 import { memo, useMemo } from 'react';
@@ -18,6 +18,7 @@ import { BrandLogo } from '../BrandLogo';
 import { BrandMark } from '../BrandMark';
 import { ConnectionStatus } from '../ConnectionStatus';
 import { GlobalUserMenu } from '../GlobalUserMenu';
+import { startIdleGlyphScreensaver } from '../IdleGlyphScreensaver';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 import { buildThemeMenuItems } from '../ThemeSwitcher';
 import { AppHeaderGlobalSearch } from './AppHeaderGlobalSearch';
@@ -196,6 +197,12 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
       key: 'theme',
       label: 'Theme',
       children: buildThemeMenuItems(themeMode, setThemeMode, onThemeEditorClick),
+    },
+    {
+      key: 'screensaver',
+      label: 'Start screensaver',
+      icon: <PlayCircleOutlined />,
+      onClick: startIdleGlyphScreensaver,
     },
     { type: 'divider' as const },
     {
