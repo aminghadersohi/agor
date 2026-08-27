@@ -3,7 +3,7 @@ import { getTeammateConfig } from '@agor-live/client';
 import { AppstoreOutlined } from '@ant-design/icons';
 import { theme } from 'antd';
 import type { CSSProperties } from 'react';
-import { useProfileImageUrl } from '../ProfileImage/useProfileImageUrl';
+import { useCyclingProfileImageUrl } from '../ProfileImage/useCyclingProfileImage';
 
 /** The neutral board glyph — shared so BoardTile, BoardPill, and dropdown
  * fallbacks all render the same icon and can't drift apart. */
@@ -42,7 +42,12 @@ export interface BoardTileProps {
  */
 export const BoardTile: React.FC<BoardTileProps> = ({ board, emoji, size = 36, style }) => {
   const { token } = theme.useToken();
-  const imageUrl = useProfileImageUrl(board?.profile_image_id, size > 96 ? 'large' : 'small');
+  const imageUrl = useCyclingProfileImageUrl(
+    board ? { type: 'board', id: board.board_id } : undefined,
+    board?.profile_image_id,
+    size > 96 ? 'large' : 'small',
+    Boolean(board)
+  );
   return (
     <div
       aria-hidden

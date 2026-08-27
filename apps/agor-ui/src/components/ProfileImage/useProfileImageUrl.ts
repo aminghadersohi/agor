@@ -61,29 +61,35 @@ function releaseImageUrl(imageId: string, variant: ProfileImageVariant): void {
 /** Authenticated object URL for a private profile-image variant. */
 export function useProfileImageUrl(
   imageId: string | null | undefined,
-  variant: ProfileImageVariant
+  variant: ProfileImageVariant,
+  continuityKey?: string
 ): string | undefined {
-  const [url, setUrl] = useState<string>();
+  const [loaded, setLoaded] = useState<{
+    imageId: string;
+    continuityKey?: string;
+    url: string;
+  }>();
 
   useEffect(() => {
     if (!imageId) {
-      setUrl(undefined);
+      setLoaded(undefined);
       return;
     }
     let active = true;
-    setUrl(undefined);
     void acquireImageUrl(imageId, variant)
       .then((nextUrl) => {
-        if (active) setUrl(nextUrl);
+        if (active) setLoaded({ imageId, continuityKey, url: nextUrl });
       })
       .catch(() => {
-        if (active) setUrl(undefined);
+        // A gallery cycle keeps its previous frame; a first load remains empty.
       });
     return () => {
       active = false;
       releaseImageUrl(imageId, variant);
     };
-  }, [imageId, variant]);
+  }, [continuityKey, imageId, variant]);
 
-  return url;
+  if (!imageId || !loaded) return undefined;
+  if (loaded.imageId === imageId) return loaded.url;
+  return continuityKey && loaded.continuityKey === continuityKey ? loaded.url : undefined;
 }
