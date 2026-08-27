@@ -1,5 +1,5 @@
 import type { Branch, Session, User } from '@agor-live/client';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_MAPS } from '../../store/agorMaps';
 import { agorStore } from '../../store/agorStore';
@@ -112,7 +112,7 @@ describe('HomeChatWorkspaceNav', () => {
     expect(onShowOnBoard).toHaveBeenCalledWith(session.session_id);
   });
 
-  it('shows recent unpinned sessions under a worktree and opens add/remove management', () => {
+  it('shows only selected sessions and keeps discovery in collection management', () => {
     const onManage = vi.fn();
     render(
       <HomeChatWorkspaceNav
@@ -125,13 +125,10 @@ describe('HomeChatWorkspaceNav', () => {
       />
     );
 
-    expect(screen.getByText('Unpinned incident review')).toBeVisible();
-    expect(screen.getByText('2/3')).toBeVisible();
-
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Add Unpinned incident review to collection' })
-    );
-    expect(onManage).toHaveBeenCalledWith(availableSession.session_id);
+    expect(screen.queryByText('Unpinned incident review')).not.toBeInTheDocument();
+    expect(
+      within(screen.getByText('support-worktree').closest('button')!).getByText('2')
+    ).toBeVisible();
 
     fireEvent.click(screen.getByRole('button', { name: 'Manage Support triage in collection' }));
     expect(onManage).toHaveBeenCalledWith(session.session_id);
