@@ -555,6 +555,17 @@ export const BranchAgorYmlImportPayloadSchema = BasePayloadSchema.extend({
 
 export type BranchAgorYmlImportPayload = z.infer<typeof BranchAgorYmlImportPayloadSchema>;
 
+/** Import branch-scoped .agor/launch.json or .vscode/launch.json. */
+export const BranchLaunchJsonImportPayloadSchema = BasePayloadSchema.extend({
+  command: z.literal('branch.launch-json.import'),
+  sessionToken: z.string(),
+  params: z.object({
+    repoId: z.string().uuid(),
+    branchId: z.string().uuid(),
+  }),
+});
+export type BranchLaunchJsonImportPayload = z.infer<typeof BranchLaunchJsonImportPayloadSchema>;
+
 /**
  * Export environment config into branch-scoped .agor.yml in a managed checkout.
  */
@@ -850,6 +861,7 @@ const ExecutorPayloadUnionSchema = z.discriminatedUnion('command', [
   BranchSlackFileUploadPayloadSchema,
   BranchUploadMaterializePayloadSchema,
   BranchAgorYmlImportPayloadSchema,
+  BranchLaunchJsonImportPayloadSchema,
   BranchAgorYmlExportPayloadSchema,
   EnvironmentLifecyclePayloadSchema,
   EnvironmentLogsPayloadSchema,
@@ -929,6 +941,7 @@ export function getSupportedCommands(): string[] {
     'branch.gateway.slack-file-upload',
     'branch.upload.materialize',
     'branch.agor-yml.import',
+    'branch.launch-json.import',
     'branch.agor-yml.export',
     'environment.lifecycle',
     'environment.logs',

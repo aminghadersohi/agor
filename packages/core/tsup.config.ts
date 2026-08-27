@@ -22,6 +22,7 @@ export default defineConfig({
     'codex/credential-file': 'src/codex/credential-file.ts', // Node-only race-safe Codex credential I/O
     'config/index': 'src/config/index.ts',
     'config/agor-yml': 'src/config/agor-yml.ts', // Node-only .agor.yml file I/O
+    'config/launch-json': 'src/config/launch-json.ts', // Browser-safe launch profile compiler
     'config/browser': 'src/config/browser.ts', // Browser-safe config utilities
     'permissions/index': 'src/permissions/index.ts',
     'feathers/index': 'src/feathers/index.ts', // FeathersJS runtime re-exports
