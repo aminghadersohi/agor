@@ -1,4 +1,4 @@
-import type { ProfileImage } from '@agor-live/client';
+import type { ProfileImage, ProfileImageID } from '@agor-live/client';
 import {
   CheckCircleFilled,
   DeleteOutlined,
@@ -36,7 +36,7 @@ interface ProfileImageGalleryEditorProps {
   subject: ProfileImageSubject;
   canEdit: boolean;
   label: string;
-  onPrimaryChange?: (imageId: string | null) => void;
+  onPrimaryChange?: (imageId: ProfileImageID | null) => void;
 }
 
 export function ProfileImageGalleryEditor({
@@ -82,7 +82,7 @@ export function ProfileImageGalleryEditor({
       const created = await uploadProfileImage(subject, file);
       await refresh();
       if (created.is_primary) onPrimaryChange?.(created.image_id);
-      message.success(created.is_primary ? 'Profile photo added' : 'Photo added to gallery');
+      message.success(created.is_primary ? 'Main image added' : 'Image added to gallery');
     } catch (nextError) {
       message.error(nextError instanceof Error ? nextError.message : 'Upload failed');
     } finally {
@@ -97,7 +97,7 @@ export function ProfileImageGalleryEditor({
       await patchProfileImage(image.image_id, { is_primary: true });
       await refresh();
       onPrimaryChange?.(image.image_id);
-      message.success('Main profile photo updated');
+      message.success('Main image updated');
     } catch (nextError) {
       message.error(nextError instanceof Error ? nextError.message : 'Photo could not be updated');
     } finally {
@@ -113,7 +113,7 @@ export function ProfileImageGalleryEditor({
       const nextPrimary = remaining.find((candidate) => candidate.is_primary) ?? remaining[0];
       await refresh();
       if (image.is_primary) onPrimaryChange?.(nextPrimary?.image_id ?? null);
-      message.success('Photo removed');
+      message.success('Image removed');
     } catch (nextError) {
       message.error(nextError instanceof Error ? nextError.message : 'Photo could not be removed');
     } finally {
@@ -127,7 +127,7 @@ export function ProfileImageGalleryEditor({
         <div style={{ minWidth: 0 }}>
           <Typography.Text strong>{label}</Typography.Text>
           <Typography.Text type="secondary" style={{ display: 'block' }}>
-            Pick one main photo and keep up to {maxImages} alternatives.
+            Pick one main image and keep up to {maxImages} alternatives.
           </Typography.Text>
         </div>
         {canEdit && (
@@ -138,7 +138,7 @@ export function ProfileImageGalleryEditor({
             disabled={uploading || images.length >= maxImages}
           >
             <Button icon={<UploadOutlined />} loading={uploading}>
-              Add photo
+              Add image
             </Button>
           </Upload>
         )}
@@ -159,7 +159,7 @@ export function ProfileImageGalleryEditor({
         <Card size="small">
           <Empty
             image={<PictureOutlined style={{ fontSize: 36, color: token.colorTextTertiary }} />}
-            description={canEdit ? 'Add a photo to personalize this profile' : 'No profile photo'}
+            description={canEdit ? 'Add an image to personalize this space' : 'No image'}
           />
         </Card>
       ) : (
@@ -211,10 +211,10 @@ export function ProfileImageGalleryEditor({
                 ) : null}
                 {canEdit && (
                   <Popconfirm
-                    title="Remove this photo?"
+                    title="Remove this image?"
                     description={
                       image.is_primary
-                        ? 'Another gallery photo will become the main photo.'
+                        ? 'Another gallery image will become the main image.'
                         : undefined
                     }
                     okText="Remove"

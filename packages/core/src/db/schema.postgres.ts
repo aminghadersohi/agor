@@ -707,6 +707,7 @@ export const boards = pgTable(
         custom_css?: string; // Custom CSS for animations, keyframes, etc. (rendered in scoped <style> tag)
         objects?: Record<string, import('@agor/core/types').BoardObject>; // Board objects (text, zone)
         custom_context?: Record<string, unknown>; // Custom context for Handlebars templates
+        profile_image_id?: import('@agor/core/types').ProfileImageID;
       }>()
       .notNull(),
 
@@ -2233,7 +2234,7 @@ export const uploads = pgTable(
 );
 
 /**
- * Durable, processed profile galleries for users and teammate branches.
+ * Durable, processed profile galleries for users, teammate branches, and boards.
  * Exactly one subject FK is populated; services enforce that invariant and
  * the partial unique indexes enforce at most one primary image per subject.
  */
@@ -2246,6 +2247,9 @@ export const profileImages = pgTable(
       onDelete: 'cascade',
     }),
     branch_id: varchar('branch_id', { length: 36 }).references(() => branches.branch_id, {
+      onDelete: 'cascade',
+    }),
+    board_id: varchar('board_id', { length: 36 }).references(() => boards.board_id, {
       onDelete: 'cascade',
     }),
     created_by: varchar('created_by', { length: 36 }).notNull(),
@@ -2276,7 +2280,7 @@ export const profileImages = pgTable(
   (table) => ({
     subjectXor: check(
       'profile_images_subject_xor_check',
-      sql`((${table.user_id} IS NOT NULL AND ${table.branch_id} IS NULL) OR (${table.user_id} IS NULL AND ${table.branch_id} IS NOT NULL))`
+      sql`((${table.user_id} IS NOT NULL AND ${table.branch_id} IS NULL AND ${table.board_id} IS NULL) OR (${table.user_id} IS NULL AND ${table.branch_id} IS NOT NULL AND ${table.board_id} IS NULL) OR (${table.user_id} IS NULL AND ${table.branch_id} IS NULL AND ${table.board_id} IS NOT NULL))`
     ),
     tenantUserPositionIdx: index('profile_images_tenant_user_position_idx').on(
       table.tenant_id,
@@ -2288,12 +2292,20 @@ export const profileImages = pgTable(
       table.branch_id,
       table.position
     ),
+    tenantBoardPositionIdx: index('profile_images_tenant_board_position_idx').on(
+      table.tenant_id,
+      table.board_id,
+      table.position
+    ),
     onePrimaryUser: uniqueIndex('profile_images_one_primary_user_idx')
       .on(table.tenant_id, table.user_id)
       .where(sql`${table.user_id} IS NOT NULL AND ${table.is_primary} = true`),
     onePrimaryBranch: uniqueIndex('profile_images_one_primary_branch_idx')
       .on(table.tenant_id, table.branch_id)
       .where(sql`${table.branch_id} IS NOT NULL AND ${table.is_primary} = true`),
+    onePrimaryBoard: uniqueIndex('profile_images_one_primary_board_idx')
+      .on(table.tenant_id, table.board_id)
+      .where(sql`${table.board_id} IS NOT NULL AND ${table.is_primary} = true`),
   })
 );
 

@@ -42,7 +42,7 @@ import { BranchMetadataRow } from '../BranchMetadataRow';
 import type { BranchModalTab } from '../BranchModal';
 import { CommentsPanel } from '../CommentsPanel';
 import { MarkdownRenderer } from '../MarkdownRenderer';
-import { TeammateIdentityAvatar } from '../TeammateIdentityAvatar';
+import { TeammateBoardPortrait } from '../ProfileImage';
 import { TeammateStageModal } from '../TeammateStage';
 
 export type BoardTeammatePanelTab = 'teammate' | 'all-sessions' | 'all-branches' | 'comments';
@@ -371,30 +371,47 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
               borderBottom: `1px solid ${token.colorBorderSecondary}`,
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14, minWidth: 0 }}>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 10,
+                minWidth: 0,
+                paddingBlock: 4,
+              }}
+            >
               <div
                 style={{
-                  width: 72,
-                  height: 72,
+                  minWidth: 112,
+                  minHeight: 112,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  flexShrink: 0,
-                  overflow: 'hidden',
-                  borderRadius: token.borderRadiusLG,
-                  border: `1px solid ${token.colorBorderSecondary}`,
                 }}
               >
                 {isCreating ? (
                   <Spin />
                 ) : (
-                  <TeammateIdentityAvatar branch={primaryTeammateBranch} size={72} shape="square" />
+                  <TeammateBoardPortrait
+                    branch={primaryTeammateBranch}
+                    primarySize={112}
+                    alternativeSize={30}
+                  />
                 )}
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
+              <div
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  minWidth: 0,
+                  width: '100%',
+                }}
+              >
                 <Typography.Title
                   level={4}
-                  style={{ margin: 0, fontWeight: 600 }}
+                  style={{ margin: 0, fontWeight: 600, maxWidth: '100%', textAlign: 'center' }}
                   ellipsis={{
                     tooltip: teammateConfig?.displayName ?? primaryTeammateBranch.name,
                   }}

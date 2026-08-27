@@ -1,7 +1,10 @@
 import type { Board, Branch } from '@agor-live/client';
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { useProfileImageUrl } from '../ProfileImage/useProfileImageUrl';
 import { BoardTile, boardSelectFilter, boardSelectOptions, getBoardEmoji } from './BoardTile';
+
+vi.mock('../ProfileImage/useProfileImageUrl', () => ({ useProfileImageUrl: vi.fn() }));
 
 const teammateBranch = (emoji: string): Branch =>
   ({ custom_context: { teammate: { kind: 'teammate', emoji } } }) as unknown as Branch;
@@ -32,6 +35,10 @@ describe('getBoardEmoji', () => {
 });
 
 describe('BoardTile', () => {
+  beforeEach(() => {
+    vi.mocked(useProfileImageUrl).mockReturnValue(undefined);
+  });
+
   it('renders the assistant emoji when one is provided', () => {
     render(<BoardTile emoji="🦊" />);
     expect(screen.getByText('🦊')).toBeInTheDocument();
@@ -41,10 +48,24 @@ describe('BoardTile', () => {
     const { container } = render(<BoardTile />);
     expect(container.querySelector('.anticon')).toBeInTheDocument();
   });
+
+  it('renders a board image ahead of its emoji fallback', () => {
+    vi.mocked(useProfileImageUrl).mockReturnValue('blob:board-image');
+    const { container } = render(
+      <BoardTile board={{ board_id: 'board-1', profile_image_id: 'image-1' } as Board} emoji="🦊" />
+    );
+
+    expect(container.querySelector('img')).toHaveAttribute('src', 'blob:board-image');
+    expect(screen.queryByText('🦊')).not.toBeInTheDocument();
+  });
 });
 
 describe('boardSelectOptions', () => {
   const branchById = new Map<string, Branch>([['b1', teammateBranch('🦊')]]);
+
+  beforeEach(() => {
+    vi.mocked(useProfileImageUrl).mockReturnValue(undefined);
+  });
 
   it('sorts by name and carries a plain-name field for filtering', () => {
     const opts = boardSelectOptions([board('2', 'Zebra'), board('1', 'Alpha')], branchById);

@@ -42,6 +42,7 @@ function captureHandler(
 function makeContext(options?: {
   userGet?: ReturnType<typeof vi.fn>;
   branchGet?: ReturnType<typeof vi.fn>;
+  boardGet?: ReturnType<typeof vi.fn>;
 }) {
   const userGet = options?.userGet ?? vi.fn(async () => ({ user_id: 'user-2' }));
   const branchGet =
@@ -50,6 +51,7 @@ function makeContext(options?: {
       branch_id: 'branch-1',
       custom_context: { teammate: { kind: 'teammate', displayName: 'Designer' } },
     }));
+  const boardGet = options?.boardGet ?? vi.fn(async () => ({ board_id: 'board-1' }));
   const baseServiceParams = {
     authenticated: true,
     provider: 'mcp',
@@ -61,6 +63,7 @@ function makeContext(options?: {
       service: (name: string) => {
         if (name === 'users') return { get: userGet };
         if (name === 'branches') return { get: branchGet };
+        if (name === 'boards') return { get: boardGet };
         throw new Error(`Unexpected service: ${name}`);
       },
     },
@@ -114,6 +117,29 @@ describe('profile-image MCP tools', () => {
     });
   });
 
+  it('lists a board gallery only after board authorization succeeds', async () => {
+    const boardImage = { ...image, subject_type: 'board', subject_id: 'board-1' };
+    repositoryMocks.listForSubject.mockResolvedValue([boardImage]);
+    const ctx = makeContext();
+
+    const result = (await captureHandler(
+      'agor_profile_images_list',
+      ctx
+    )({
+      subjectType: 'board',
+      subjectId: 'board-1',
+    })) as { content: Array<{ text: string }> };
+
+    expect(ctx.app.service('boards').get).toHaveBeenCalledWith('board-1', ctx.baseServiceParams);
+    expect(repositoryMocks.listForSubject).toHaveBeenCalledWith('tenant-a', {
+      type: 'board',
+      id: 'board-1',
+    });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      images: [{ subject_type: 'board', subject_id: 'board-1' }],
+    });
+  });
+
   it('returns a processed variant as MCP image content without storage details', async () => {
     repositoryMocks.findById.mockResolvedValue(image);
     repositoryMocks.readVariant.mockResolvedValue({
@@ -164,6 +190,24 @@ describe('profile-image MCP tools', () => {
     repositoryMocks.findById.mockResolvedValue(image);
     const ctx = makeContext({
       branchGet: vi.fn(async () => ({ branch_id: 'branch-1', custom_context: {} })),
+    });
+
+    await expect(
+      captureHandler('agor_profile_images_get', ctx)({ imageId: 'image-1' })
+    ).rejects.toThrow('Profile unavailable');
+    expect(repositoryMocks.readVariant).not.toHaveBeenCalled();
+  });
+
+  it('does not reveal board pixels when board authorization fails', async () => {
+    repositoryMocks.findById.mockResolvedValue({
+      ...image,
+      subject_type: 'board',
+      subject_id: 'board-1',
+    });
+    const ctx = makeContext({
+      boardGet: vi.fn(async () => {
+        throw new Error('forbidden');
+      }),
     });
 
     await expect(

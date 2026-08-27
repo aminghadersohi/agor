@@ -50,7 +50,7 @@ export const BoardCollapse: React.FC<BoardCollapseProps> = ({
         collapsible: 'icon',
         label: (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <BoardTile emoji={emoji} size={20} />
+            <BoardTile board={board} emoji={emoji} size={20} />
             <Text strong style={{ fontSize: 14 }}>
               {board.name}
             </Text>

@@ -65,4 +65,20 @@ describe('TeammateBoardPortrait', () => {
     expect(screen.getByAltText('image-four.webp')).toBeVisible();
     expect(screen.queryByAltText('image-five.webp')).not.toBeInTheDocument();
   });
+
+  it('supports a prominent teammate-panel hero size', () => {
+    vi.mocked(useProfileImageGallery).mockReturnValue([image('image-main', 0, true)]);
+    vi.mocked(useProfileImageUrl).mockReturnValue('blob:image-main');
+
+    render(
+      <ConfigProvider>
+        <TeammateBoardPortrait branch={branch} primarySize={112} alternativeSize={30} />
+      </ConfigProvider>
+    );
+
+    expect(screen.getByTestId('teammate-board-portrait')).toHaveStyle({
+      width: '112px',
+      height: '112px',
+    });
+  });
 });
