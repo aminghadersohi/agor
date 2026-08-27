@@ -1932,7 +1932,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           txDb,
           this.db,
           tasks,
-          and(eq(tasks.session_id, current.session_id), eq(tasks.status, TaskStatus.QUEUED))
+          and(eq(tasks.session_id, current.session_id), eq(tasks.status, TaskStatus.QUEUED))!
         );
         const maximum = resolvedMaxCoalescedUpdates(
           sessionRow.data.queue_config.max_coalesced_updates
@@ -1944,7 +1944,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           .limit(maximum)
           .all();
         const batch = compatibleCoalescedPrefix(
-          queuedRows.map((row) => this.rowToTask(row)),
+          queuedRows.map((row: TaskRow) => this.rowToTask(row)),
           maximum
         );
 
