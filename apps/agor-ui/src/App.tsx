@@ -83,6 +83,7 @@ import {
   ARTIFACT_FULLSCREEN_ROUTE_PATHS,
   KNOWLEDGE_ROUTE_PATHS,
   MARKETPLACE_ROUTE_PATHS,
+  RBAC_POLICY_PROTOTYPE_ROUTE_PATH,
   routeUsesDeviceRouter,
 } from './surfaces/surfaceRegistry';
 import { useWorkspaceSurfaceLifecycle } from './surfaces/useWorkspaceSurfaceLifecycle';
@@ -235,6 +236,13 @@ const MarketingVideoPage = lazy(() =>
     default: module.MarketingVideoPage,
   }))
 );
+const RbacPolicyPrototypePage = import.meta.env.DEV
+  ? lazy(() =>
+      import('./pages/RbacPolicyPrototypePage').then((module) => ({
+        default: module.RbacPolicyPrototypePage,
+      }))
+    )
+  : null;
 
 const AgorApp = lazy(loadAgorApp);
 const KnowledgePage = lazy(loadKnowledgePage);
@@ -1027,6 +1035,21 @@ function AppContent() {
       },
       { silent: true }
     );
+    if (!isCurrentUser()) return;
+
+    // `currentUser` deliberately keeps login gates from the authenticated
+    // principal rather than accepting a possibly-stale directory row. Refresh
+    // that principal after this self-update before closing the wizard;
+    // otherwise its login-time `onboarding_completed: false` can immediately
+    // satisfy the auto-open effect again even though the durable patch above
+    // succeeded.
+    const refreshedCurrentUser = await refreshCurrentUserForAuthorityCycle(isCurrentUser);
+    if (!refreshedCurrentUser) {
+      if (!isCurrentUser()) return;
+      throw new Error(
+        'Setup was saved, but your account could not be refreshed. Reload to continue.'
+      );
+    }
     if (!isCurrentUser()) return;
 
     // Always land the user on a board — never the homepage. Prefer the seeded
@@ -2360,6 +2383,8 @@ function AppWrapper() {
   const location = useLocation();
   const isMarketingScreenshotRoute = location.pathname === '/demo/marketing-screenshots';
   const isMarketingVideoRoute = location.pathname === '/demo/marketing-video';
+  const isRbacPolicyPrototypeRoute =
+    import.meta.env.DEV && location.pathname === RBAC_POLICY_PROTOTYPE_ROUTE_PATH;
 
   return (
     <ConfigProvider theme={getCurrentThemeConfig()}>
@@ -2377,6 +2402,10 @@ function AppWrapper() {
             ) : isMarketingVideoRoute ? (
               <Suspense fallback={<InitialLoadingScreen message="Loading demo fixture…" />}>
                 <MarketingVideoPage />
+              </Suspense>
+            ) : isRbacPolicyPrototypeRoute && RbacPolicyPrototypePage ? (
+              <Suspense fallback={<InitialLoadingScreen message="Loading RBAC prototype…" />}>
+                <RbacPolicyPrototypePage />
               </Suspense>
             ) : (
               <AppContent />

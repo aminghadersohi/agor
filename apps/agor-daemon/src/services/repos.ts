@@ -35,7 +35,13 @@ import {
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
 import { autoAssignBranchUniqueId } from '@agor/core/environment/variable-resolver';
-import { type Application, BadRequest, Conflict, NotAuthenticated } from '@agor/core/feathers';
+import {
+  type Application,
+  BadRequest,
+  Conflict,
+  Forbidden,
+  NotAuthenticated,
+} from '@agor/core/feathers';
 import { redactGitUrlCredentials, stripGitUrlCredentials } from '@agor/core/git/pure';
 import type {
   AuthenticatedParams,
@@ -47,6 +53,7 @@ import type {
   RepoEnvironment,
   RepoSlug,
   UserID,
+  UserRole,
   UUID,
 } from '@agor/core/types';
 import { hasMinimumRole, ROLES, TEAMMATE_FRAMEWORK_REPO_URL } from '@agor/core/types';
@@ -54,6 +61,7 @@ import { DrizzleService } from '../adapters/drizzle';
 import type { BranchesServiceImpl } from '../declarations.js';
 import { emitHaNativeSocketEvent, tenantChannelName } from '../realtime/routing.js';
 import { ensureCanControlBranchEnvironment } from '../utils/branch-authorization.js';
+import { ensureBranchWorkspaceAccess } from '../utils/branch-workspace-path.js';
 import { shouldUseCloneReferencePath } from '../utils/clone-reference.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
 import { resolveDelegatedExecutionHomeKey } from '../utils/executor-delegated-home.js';
@@ -905,13 +913,6 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       params
     )) as Branch;
 
-    // Add creating user as owner of the branch
-    {
-      const branchRepo = new BranchRepository(this.db);
-      await branchRepo.addOwner(branch.branch_id, userId);
-      console.log(`✓ Added user ${shortId(userId)} as owner of branch ${branch.name}`);
-    }
-
     if (data.boardId) {
       const boardObjectsService = this.app.service('board-objects');
 
@@ -1104,6 +1105,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
             // attempt's late ack can be discarded instead of overwriting a
             // newer one.
             ...(attemptId ? { provisioningAttemptId: attemptId } : {}),
+            principalBranchAccess: 'write',
             useReference:
               storageMode === 'clone' &&
               !!repo.local_path &&
@@ -1116,6 +1118,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
           templateVariables: {
             branch_id: branch.branch_id,
             user_id: userId,
+            branch_fs_access: 'write',
           },
           onExit: (code) => {
             if (code === 0) {
@@ -1474,6 +1477,17 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       | UserID
       | undefined;
     if (!userId) throw new NotAuthenticated('Authentication required');
+    const branchFsAccess = await ensureBranchWorkspaceAccess(
+      new BranchRepository(this.db),
+      branch,
+      userId,
+      (serviceParams as Partial<AuthenticatedParams> | undefined)?.user?.role as
+        | UserRole
+        | undefined,
+      command === 'branch.agor-yml.export' ? 'session' : 'view',
+      command === 'branch.agor-yml.export' ? 'write' : 'read',
+      this.app.get('config').execution?.allow_superadmin === true
+    );
     const sessionToken = await issueExecutorCommandToken(
       this.app,
       command,
@@ -1495,11 +1509,18 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
           repoId: repo.repo_id,
           branchId: branch.branch_id,
           ...params,
+          cwd: branch.path,
+          principalBranchAccess: branchFsAccess,
         },
       },
       {
         logPrefix: `[${command} ${repo.slug}/${branch.name}]`,
         delegatedHomeKey: delegatedHomeKey,
+        templateVariables: {
+          branch_id: branch.branch_id,
+          user_id: userId,
+          branch_fs_access: branchFsAccess,
+        },
       }
     );
   }
@@ -1517,6 +1538,11 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     data: { branch_id: string },
     params?: RepoParams
   ): Promise<Repo> {
+    if (
+      !hasMinimumRole((params as Partial<AuthenticatedParams> | undefined)?.user?.role, ROLES.ADMIN)
+    ) {
+      throw new Forbidden('Admin access is required to import repository environment settings');
+    }
     if (!data?.branch_id) {
       throw new Error('branch_id is required to import .agor.yml');
     }
@@ -1623,6 +1649,11 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     data: { branch_id: string },
     params?: RepoParams
   ): Promise<{ path: string }> {
+    if (
+      !hasMinimumRole((params as Partial<AuthenticatedParams> | undefined)?.user?.role, ROLES.ADMIN)
+    ) {
+      throw new Forbidden('Admin access is required to export repository environment settings');
+    }
     if (!data?.branch_id) {
       throw new Error('branch_id is required to export .agor.yml');
     }

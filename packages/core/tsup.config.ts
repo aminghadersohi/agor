@@ -6,6 +6,7 @@ export default defineConfig({
     index: 'src/index.ts',
     'analytics/index': 'src/analytics/index.ts', // Backend analytics logger and plugin resolution
     'telemetry/index': 'src/telemetry/index.ts', // Community install telemetry helpers
+    'tracing/datadog': 'src/tracing/datadog.ts', // Shared Datadog tracer type + optional-peer resolver
     'types/index': 'src/types/index.ts',
     'layout/rectangle-packing': 'src/layout/rectangle-packing.ts',
     'layout/zone-layout': 'src/layout/zone-layout.ts',

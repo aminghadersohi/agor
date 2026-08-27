@@ -687,6 +687,13 @@
       "when": 1787836400000,
       "tag": "0098_board_image_galleries",
       "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1787836400001,
+      "tag": "0099_board_branch_capability_policies",
+      "breakpoints": true
     }
   ]
 }
