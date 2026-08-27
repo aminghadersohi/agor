@@ -78,6 +78,12 @@ describe('SessionPage', () => {
     );
 
     expect(screen.getByTestId('conversation-session')).toHaveTextContent(sessionId);
+    expect(screen.getByTestId('conversation-session').parentElement).toHaveStyle({
+      display: 'flex',
+      flexDirection: 'column',
+      overflow: 'hidden',
+      minHeight: 0,
+    });
     expect(screen.getByTestId('composer-session')).toHaveTextContent(sessionId);
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     expect(onSendPrompt).toHaveBeenCalledWith(sessionId, 'hello');

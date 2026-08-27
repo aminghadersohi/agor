@@ -1851,7 +1851,13 @@ export const App: React.FC<AppProps> = ({
           onStartEnvironment={onStartEnvironment}
           onStopEnvironment={onStopEnvironment}
           onCreateUser={onCreateUser}
-          onUpdateUser={onUpdateUser}
+          onUpdateUser={
+            onUpdateUser
+              ? async (userId, updates) => {
+                  await onUpdateUser(userId, updates);
+                }
+              : undefined
+          }
           onDeleteUser={onDeleteUser}
           onCreateMCPServer={onCreateMCPServer}
           onDeleteMCPServer={onDeleteMCPServer}
