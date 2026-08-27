@@ -22,8 +22,10 @@ import {
 } from '@agor-live/client';
 import {
   AimOutlined,
+  CheckOutlined,
   CloseOutlined,
   CodeOutlined,
+  CommentOutlined,
   DownOutlined,
   EditOutlined,
   EllipsisOutlined,
@@ -34,6 +36,7 @@ import {
   SearchOutlined,
   SettingOutlined,
   UpOutlined,
+  UsergroupAddOutlined,
 } from '@ant-design/icons';
 import type { InputRef, MenuProps } from 'antd';
 import {
@@ -67,6 +70,11 @@ import {
 } from '../../store/selectors';
 import { getContextWindowGradient } from '../../utils/contextWindow';
 import {
+  readFocusChatPreference,
+  subscribeToFocusChatPreference,
+  writeFocusChatPreference,
+} from '../../utils/focusChatPreference';
+import {
   claimMarketplaceOAuthPrompt,
   consumeMarketplacePromptSuggestionState,
   discardMarketplaceOAuthAuthorityState,
@@ -87,6 +95,7 @@ import { ForkSpawnModal } from '../ForkSpawnModal/ForkSpawnModal';
 import type { ModelConfig } from '../ModelSelector';
 import { CreatedByTag } from '../metadata';
 import { getUrlDisplayLabel } from '../Pill/url-helpers';
+import { readTeammateChatPreferences } from '../TeammateChatCollections/preferences';
 import { ToolIcon } from '../ToolIcon';
 import {
   buildPromptWithAttachments,
@@ -295,8 +304,6 @@ PromptInput.displayName = 'PromptInput';
 // a fresh array — the memos deriving footer props from `tasks` (and through
 // them the memoized SessionFooter) key on its identity.
 const EMPTY_TASKS: Task[] = [];
-const SIMPLE_CHAT_STORAGE_KEY = 'agor.session.simple-chat';
-
 export interface SessionPanelProps {
   client: AgorClient | null;
   session: Session | null;
@@ -305,6 +312,10 @@ export interface SessionPanelProps {
   sessionMcpServerIds?: string[];
   open: boolean;
   onClose: () => void;
+  onPinToChatCollection?: (sessionId: string) => void;
+  onOpenChatWorkspace?: (sessionId: string) => void;
+  /** Start focused inside the dedicated chat workspace without changing the user's global choice. */
+  preferFocusChat?: boolean;
   uploadPolicy?: import('@agor/core/types').UploadIngressPolicy;
 }
 
@@ -316,6 +327,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   sessionMcpServerIds = [],
   open,
   onClose,
+  onPinToChatCollection,
+  onOpenChatWorkspace,
+  preferFocusChat = false,
   uploadPolicy,
 }) => {
   const { token } = theme.useToken();
@@ -324,24 +338,12 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   const connectionDisabled = useConnectionDisabled();
   const { connected, connecting, authGeneration } = useConnectionState();
   const recenterMap = useRecenterMap();
-  const [simpleChat, setSimpleChat] = React.useState(() => {
-    try {
-      return localStorage.getItem(SIMPLE_CHAT_STORAGE_KEY) === 'true';
-    } catch {
-      return false;
-    }
-  });
+  const [storedSimpleChat, setStoredSimpleChat] = React.useState(readFocusChatPreference);
+  const simpleChat = preferFocusChat || storedSimpleChat;
+  React.useEffect(() => subscribeToFocusChatPreference(setStoredSimpleChat), []);
   const toggleSimpleChat = React.useCallback(() => {
-    setSimpleChat((current) => {
-      const next = !current;
-      try {
-        localStorage.setItem(SIMPLE_CHAT_STORAGE_KEY, String(next));
-      } catch {
-        // Storage can be unavailable in privacy-restricted browser contexts.
-      }
-      return next;
-    });
-  }, []);
+    writeFocusChatPreference(!simpleChat);
+  }, [simpleChat]);
 
   // Subscribe only to the entity families this panel needs via narrow store
   // selectors. SessionPanel intentionally does NOT subscribe to live (sessions
@@ -1128,6 +1130,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   const activeSession = isAgenticToolName(session.agentic_tool)
     ? (session as Session & { agentic_tool: AgenticToolName })
     : null;
+  const sessionInChatCollection = readTeammateChatPreferences(
+    currentUserId ? userById.get(currentUserId)?.preferences : undefined
+  ).collections.some((collection) => collection.session_ids.includes(session.session_id));
 
   const handleArchive = () => {
     if (!client || connectionDisabled) {
@@ -1204,6 +1209,16 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             icon: <RobotOutlined />,
             label: 'Switch tool…',
             onClick: () => setSwitchToolOpen(true),
+          },
+        ]
+      : []),
+    ...(onPinToChatCollection
+      ? [
+          {
+            key: 'add-to-teammate-chats',
+            icon: sessionInChatCollection ? <CheckOutlined /> : <UsergroupAddOutlined />,
+            label: sessionInChatCollection ? 'Manage chat collections…' : 'Add to chat collection…',
+            onClick: () => onPinToChatCollection(session.session_id),
           },
         ]
       : []),
@@ -1632,6 +1647,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       onCodexPermissionChange={stableFooterHandlers.onCodexPermissionChange}
       promptInputSlot={promptInputSlot}
       simple={simpleChat}
+      showSessionActions={preferFocusChat}
     />
   ) : null;
 
@@ -1745,7 +1761,33 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             </div>
           </div>
           <Space size={4}>
-            {simpleChat && (
+            {onPinToChatCollection && (
+              <Tooltip
+                title={
+                  sessionInChatCollection ? 'Manage chat collections' : 'Add to chat collection'
+                }
+              >
+                <Button
+                  type="text"
+                  aria-label={
+                    sessionInChatCollection ? 'Manage chat collections' : 'Add to chat collection'
+                  }
+                  icon={sessionInChatCollection ? <CheckOutlined /> : <UsergroupAddOutlined />}
+                  onClick={() => onPinToChatCollection(session.session_id)}
+                />
+              </Tooltip>
+            )}
+            {onOpenChatWorkspace && !preferFocusChat && (
+              <Tooltip title="Open in chat workspace">
+                <Button
+                  type="text"
+                  aria-label="Open in chat workspace"
+                  icon={<CommentOutlined />}
+                  onClick={() => onOpenChatWorkspace(session.session_id)}
+                />
+              </Tooltip>
+            )}
+            {simpleChat && !preferFocusChat && (
               <Tooltip title="Show full session details">
                 <Button
                   type="text"
@@ -1755,15 +1797,17 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
                 />
               </Tooltip>
             )}
-            {!simpleChat && <SessionAttachmentsDropdown items={attachmentItems} />}
-            {!simpleChat && (
+            {(!simpleChat || preferFocusChat) && (
+              <SessionAttachmentsDropdown items={attachmentItems} />
+            )}
+            {(!simpleChat || preferFocusChat) && (
               <Dropdown menu={{ items: moreMenuItems }} trigger={['click']} placement="bottomRight">
                 <Tooltip title="More actions">
-                  <Button type="text" icon={<EllipsisOutlined />} />
+                  <Button type="text" aria-label="More actions" icon={<EllipsisOutlined />} />
                 </Tooltip>
               </Dropdown>
             )}
-            {!simpleChat && (
+            {(!simpleChat || preferFocusChat) && (
               <Tooltip title="Search session">
                 <Button
                   type="text"
@@ -1796,7 +1840,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
         {/* Row 2: search bar — always in DOM, animates in/out */}
         <div
           style={{
-            display: simpleChat ? 'none' : undefined,
+            display: simpleChat && !preferFocusChat ? 'none' : undefined,
             overflow: 'hidden',
             maxHeight: searchOpen ? '36px' : '0px',
             opacity: searchOpen ? 1 : 0,
@@ -1959,6 +2003,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             isOpen={open}
             forceExpandAll={searchOpen && query.trim().length > 0}
             simple={simpleChat}
+            rememberScrollPosition={preferFocusChat}
           />
         </div>
 

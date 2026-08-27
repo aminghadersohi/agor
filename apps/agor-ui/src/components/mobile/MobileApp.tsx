@@ -1,4 +1,10 @@
-import type { AgorClient, BranchArchiveOrDeleteOptions, Repo, User } from '@agor-live/client';
+import type {
+  AgorClient,
+  BranchArchiveOrDeleteOptions,
+  Repo,
+  UpdateUserInput,
+  User,
+} from '@agor-live/client';
 import { Drawer, Layout } from 'antd';
 import { useState } from 'react';
 import { Route, Routes, useNavigate } from 'react-router-dom';
@@ -17,6 +23,7 @@ import {
 } from '../../store/selectors';
 import { BranchModal, type BranchModalTab } from '../BranchModal';
 import type { BranchUpdate } from '../BranchModal/useBranchModalForm';
+import { TeammateChatCollectionsModal } from '../TeammateChatCollections';
 import { MobileBoardPage } from './MobileBoardPage';
 import { MobileCommentsPage } from './MobileCommentsPage';
 import { MobileHomePage } from './MobileHomePage';
@@ -45,6 +52,7 @@ interface MobileAppProps {
   onUpdateRepo?: (repoId: string, updates: Partial<Repo>) => void;
   onArchiveOrDeleteBranch?: (branchId: string, options: BranchArchiveOrDeleteOptions) => void;
   onExecuteScheduleNow?: (branchId: string) => Promise<void>;
+  onUpdateUser?: (userId: string, updates: UpdateUserInput) => Promise<void>;
 }
 
 export const MobileApp: React.FC<MobileAppProps> = ({
@@ -63,6 +71,7 @@ export const MobileApp: React.FC<MobileAppProps> = ({
   onUpdateRepo,
   onArchiveOrDeleteBranch,
   onExecuteScheduleNow,
+  onUpdateUser,
 }) => {
   const navigate = useNavigate();
   // Self-subscribe to the entity maps this surface drills into. The subscription
@@ -79,6 +88,16 @@ export const MobileApp: React.FC<MobileAppProps> = ({
   const branchById = useAgorStore(selectBranchById);
   const userById = useAgorStore(selectUserById);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [teammateChatsSessionId, setTeammateChatsSessionId] = useState<string>();
+  const [teammateChatsOpen, setTeammateChatsOpen] = useState(false);
+  const openTeammateChats = (sessionId?: string) => {
+    setTeammateChatsSessionId(sessionId);
+    setTeammateChatsOpen(true);
+  };
+  const closeTeammateChats = () => {
+    setTeammateChatsOpen(false);
+    setTeammateChatsSessionId(undefined);
+  };
   const [branchEditor, setBranchEditor] = useState<{
     branchId: string;
     tab: BranchModalTab;
@@ -125,6 +144,7 @@ export const MobileApp: React.FC<MobileAppProps> = ({
               sessionById={sessionById}
               onMenuClick={() => setDrawerOpen(true)}
               onOpenSettings={onOpenWorkspaceSettings}
+              onManageTeammateChats={() => openTeammateChats()}
             />
           }
         />
@@ -159,6 +179,7 @@ export const MobileApp: React.FC<MobileAppProps> = ({
               currentUser={user}
               onSendPrompt={onSendPrompt}
               onMenuClick={() => setDrawerOpen(true)}
+              onPinToChatCollection={openTeammateChats}
             />
           }
         />
@@ -211,6 +232,13 @@ export const MobileApp: React.FC<MobileAppProps> = ({
           setBranchEditor(null);
           onOpenWorkspaceSettings('repos');
         }}
+      />
+      <TeammateChatCollectionsModal
+        open={teammateChatsOpen}
+        currentUser={user}
+        preselectedSessionId={teammateChatsSessionId}
+        onClose={closeTeammateChats}
+        onUpdateUser={onUpdateUser}
       />
     </Layout>
   );

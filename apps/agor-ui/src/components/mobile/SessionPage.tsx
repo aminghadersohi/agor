@@ -8,12 +8,14 @@ import type {
   User,
 } from '@agor-live/client';
 import { getTeammateConfig, isTeammate, PermissionScope } from '@agor-live/client';
-import { Alert, Spin } from 'antd';
+import { CheckOutlined, UsergroupAddOutlined } from '@ant-design/icons';
+import { Alert, Button, Spin, Tooltip } from 'antd';
 import { useParams } from 'react-router-dom';
 import { getSessionDisplayTitle } from '../../utils/sessionTitle';
 import { resolveSessionFromShortIdPure } from '../../utils/urlResolution';
 import { ConversationView } from '../ConversationView';
 import { useTeammateProfileImageUrl } from '../ProfileImage';
+import { readTeammateChatPreferences } from '../TeammateChatCollections/preferences';
 import { MobileHeader } from './MobileHeader';
 import { MobilePromptInput } from './MobilePromptInput';
 
@@ -30,6 +32,7 @@ interface SessionPageProps {
     permissionMode?: PermissionMode
   ) => boolean | undefined | Promise<boolean | undefined>;
   onMenuClick?: () => void;
+  onPinToChatCollection?: (sessionId: string) => void;
 }
 
 export const SessionPage: React.FC<SessionPageProps> = ({
@@ -41,6 +44,7 @@ export const SessionPage: React.FC<SessionPageProps> = ({
   currentUser,
   onSendPrompt,
   onMenuClick,
+  onPinToChatCollection,
 }) => {
   const { sessionId } = useParams<{ sessionId: string }>();
 
@@ -81,6 +85,9 @@ export const SessionPage: React.FC<SessionPageProps> = ({
   // route until data arrives. Once resolved, all mutations and draft storage
   // must use the full durable ID rather than creating a second short-ID key.
   const canonicalSessionId = session.session_id;
+  const sessionInChatCollection = readTeammateChatPreferences(
+    currentUser?.preferences
+  ).collections.some((collection) => collection.session_ids.includes(canonicalSessionId));
   const handleSendPrompt = (prompt: string) => onSendPrompt?.(canonicalSessionId, prompt);
 
   const handlePermissionDecision = async (
@@ -116,11 +123,30 @@ export const SessionPage: React.FC<SessionPageProps> = ({
         showMenu
         user={currentUser}
         onMenuClick={onMenuClick}
+        actions={
+          onPinToChatCollection ? (
+            <Tooltip
+              title={sessionInChatCollection ? 'Manage chat collections' : 'Add to chat collection'}
+            >
+              <Button
+                type="text"
+                aria-label={
+                  sessionInChatCollection ? 'Manage chat collections' : 'Add to chat collection'
+                }
+                icon={sessionInChatCollection ? <CheckOutlined /> : <UsergroupAddOutlined />}
+                onClick={() => onPinToChatCollection(canonicalSessionId)}
+              />
+            </Tooltip>
+          ) : undefined
+        }
       />
       <div
         style={{
           flex: 1,
-          overflowY: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+          minHeight: 0,
           minWidth: 0,
           paddingInline: 8,
           paddingBottom: 80, // Space for fixed input

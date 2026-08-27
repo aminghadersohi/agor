@@ -4,6 +4,12 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import { MobileHomePage } from './MobileHomePage';
 
+// The shared collection surface has focused coverage of its own. Keeping it
+// inert here avoids jsdom's CSS-variable border parser bug during role queries.
+vi.mock('../HomePage/HomeTeammateChatsSection', () => ({
+  HomeTeammateChatsSection: () => <section aria-label="Teammate chats" />,
+}));
+
 function LocationProbe() {
   return <output data-testid="location">{useLocation().pathname}</output>;
 }
@@ -53,6 +59,7 @@ describe('MobileHomePage', () => {
           }
           onMenuClick={onMenuClick}
           onOpenSettings={onOpenSettings}
+          onManageTeammateChats={vi.fn()}
         />
         <LocationProbe />
       </MemoryRouter>
