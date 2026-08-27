@@ -60,10 +60,10 @@ async function loadSessionAndUser(
   const params = { tenant: { tenant_id: tenantId, source: 'static' as const } };
   return runWithTenantDatabaseScope(ctx.db, tenantId, async () => {
     const [session, user] = await Promise.all([
-      ctx.app.service('sessions').get(source.session_id, params),
-      ctx.app.service('users').get(source.created_by, params),
+      ctx.app.service('sessions').get(source.session_id, params as never),
+      ctx.app.service('users').get(source.created_by, params as never),
     ]);
-    return { session: session as Session, user: user as User };
+    return { session: session as unknown as Session, user: user as unknown as User };
   });
 }
 
