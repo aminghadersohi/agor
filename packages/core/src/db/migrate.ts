@@ -178,6 +178,22 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
       }),
     },
   ],
+  ...['0095_transitive_completion_subscriptions', '0098_transitive_completion_subscriptions'].map(
+    (name) =>
+      [
+        name,
+        {
+          requiresOfflineCutover: false,
+          impact: defineMigrationImpact({
+            classification: 'schema',
+            userAction: 'none',
+            rollbackCompatibility: 'compatible',
+            summary:
+              'Adds a dormant completion-subscription outbox; direct callbacks remain unchanged unless root propagation is requested.',
+          }),
+        },
+      ] as const
+  ),
 ]);
 
 const NO_OFFLINE_ACTION_SUMMARY =

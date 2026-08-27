@@ -2,7 +2,7 @@ import type { MCPMarketplaceOverview } from '@agor/core/types';
 import type { AgorClient } from '@agor-live/client';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { message } from 'antd';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MyServersTab } from './MyServersTab';
 
 const overview: MCPMarketplaceOverview = {
@@ -26,6 +26,13 @@ const overview: MCPMarketplaceOverview = {
 };
 
 describe('Marketplace server actions', () => {
+  beforeEach(() => {
+    // Ant's static message API schedules work outside this component tree.
+    // Stub it for the whole suite so a successful mutation cannot leave React
+    // scheduler work behind after jsdom has been torn down.
+    vi.spyOn(message, 'success').mockImplementation(() => undefined as never);
+    vi.spyOn(message, 'error').mockImplementation(() => undefined as never);
+  });
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
@@ -88,8 +95,8 @@ describe('Marketplace server actions', () => {
         : { create, on: vi.fn(), removeListener: vi.fn() }
     );
     const refresh = vi.fn(async () => undefined);
-    const success = vi.spyOn(message, 'success').mockImplementation(() => undefined as never);
-    const error = vi.spyOn(message, 'error').mockImplementation(() => undefined as never);
+    const success = vi.mocked(message.success);
+    const error = vi.mocked(message.error);
     render(
       <MyServersTab
         client={{ service } as unknown as AgorClient}
