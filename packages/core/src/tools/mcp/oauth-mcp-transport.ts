@@ -194,15 +194,21 @@ function parseWWWAuthenticate(header: string): string | null {
  * However, they DO serve the metadata at the well-known path.
  *
  * This function tries to discover it by probing:
- *   1. {origin}/.well-known/oauth-protected-resource  (root-level)
- *   2. {origin}/.well-known/oauth-protected-resource{path}  (path-aware per RFC)
+ *   1. {origin}/.well-known/oauth-protected-resource{path}  (path-aware per RFC)
+ *   2. {origin}/.well-known/oauth-protected-resource  (root fallback)
  *
  * @param mcpUrl - The MCP server URL
  * @returns The resource metadata URL if discoverable, null otherwise
  */
 export async function discoverResourceMetadataUrl(
   mcpUrl: string,
-  options: { allowLocalhostHttp?: boolean; assertCurrent?: () => void } = {}
+  options: {
+    allowLocalhostHttp?: boolean;
+    /** When set, only return metadata bound to this exact MCP resource policy. */
+    resourceUri?: string;
+    compatibilityMode?: MCPOAuthRuntimeCompatibilityMode;
+    assertCurrent?: () => void;
+  } = {}
 ): Promise<string | null> {
   options.assertCurrent?.();
   const url = new URL(mcpUrl);
@@ -246,7 +252,16 @@ export async function discoverResourceMetadataUrl(
         continue;
       }
       options.assertCurrent?.();
-      if (data.authorization_servers && Array.isArray(data.authorization_servers)) {
+      if (
+        data.authorization_servers &&
+        Array.isArray(data.authorization_servers) &&
+        resourceMetadataMatches(
+          candidate,
+          typeof data.resource === 'string' ? data.resource : undefined,
+          options.resourceUri,
+          options.compatibilityMode
+        )
+      ) {
         console.log('[MCP OAuth] Resource metadata discovered');
         return candidate;
       }
@@ -271,14 +286,51 @@ export async function discoverResourceMetadataUrl(
 export async function resolveResourceMetadataUrl(
   wwwAuthenticateHeader: string | null,
   mcpUrl: string,
-  options: { allowLocalhostHttp?: boolean; assertCurrent?: () => void } = {}
+  options: {
+    allowLocalhostHttp?: boolean;
+    /** When set, reject a header hint that is not bound to this MCP resource. */
+    resourceUri?: string;
+    compatibilityMode?: MCPOAuthRuntimeCompatibilityMode;
+    assertCurrent?: () => void;
+  } = {}
 ): Promise<{ metadataUrl: string; source: 'header' | 'well-known' } | null> {
   options.assertCurrent?.();
   // Strategy 1: Parse from WWW-Authenticate header
   if (wwwAuthenticateHeader) {
     const parsed = parseWWWAuthenticate(wwwAuthenticateHeader);
     if (parsed) {
-      return { metadataUrl: parsed, source: 'header' };
+      // A tool-level 401 can advertise metadata for a coarser resource than
+      // the configured MCP endpoint. Validate the binding before accepting
+      // the hint so discovery can safely continue to the endpoint-specific
+      // RFC 9728 location when the hint is not applicable.
+      if (!options.resourceUri) {
+        return { metadataUrl: parsed, source: 'header' };
+      }
+      try {
+        const response = await safeOutboundFetch(parsed, {
+          redirect: 'follow',
+          timeoutMs: 10_000,
+          allowLocalhostHttp: options.allowLocalhostHttp,
+          assertCurrent: options.assertCurrent,
+        });
+        if (response.ok) {
+          const data = (await response.json()) as OAuthMetadata;
+          if (
+            Array.isArray(data.authorization_servers) &&
+            resourceMetadataMatches(
+              parsed,
+              data.resource,
+              options.resourceUri,
+              options.compatibilityMode
+            )
+          ) {
+            return { metadataUrl: parsed, source: 'header' };
+          }
+        }
+      } catch {
+        // Continue to endpoint-specific well-known discovery below.
+      }
+      console.log('[MCP OAuth] Advertised resource metadata does not bind the MCP endpoint');
     }
   }
 
@@ -435,7 +487,10 @@ export async function resolveMCPOAuthDiscovery(
 ): Promise<MCPOAuthDiscoveryResult | null> {
   options.assertCurrent?.();
   // Strategies 1 + 2: RFC 9728 (header hint, then well-known fallback)
-  const rfc9728 = await resolveResourceMetadataUrl(wwwAuthenticateHeader, mcpUrl, options);
+  const rfc9728 = await resolveResourceMetadataUrl(wwwAuthenticateHeader, mcpUrl, {
+    ...options,
+    resourceUri: mcpUrl,
+  });
   options.assertCurrent?.();
   if (rfc9728) {
     return { kind: 'resource-metadata', ...rfc9728 };
@@ -568,9 +623,16 @@ function registrationFailure(
 function missingRegistrationEndpointFailure(): OAuthDCRFailure {
   const diagnostic: MCPOAuthDCRDiagnostic = { stage: 'dcr_endpoint_discovery' };
   return new OAuthDCRFailure(
-    'OAuth client_id is required because the authorization server does not advertise a Dynamic Client Registration endpoint (stage: dcr_endpoint_discovery). The provider may require a pre-registered OAuth app. Enter the Client ID and Client Secret in Advanced — OAuth settings, then retry.',
+    'OAuth client credentials required: this authorization server does not support Dynamic Client Registration (stage: dcr_endpoint_discovery). Create or select a pre-registered OAuth app, enter its Client ID and provider-required Client Secret in Advanced — OAuth settings, then retry.',
     diagnostic
   );
+}
+
+function oauthClientApplicationType(redirectUri: string): 'native' | 'web' {
+  const hostname = new URL(redirectUri).hostname.replace(/^\[(.*)\]$/, '$1').toLowerCase();
+  return hostname === 'localhost' || hostname === '::1' || hostname.startsWith('127.')
+    ? 'native'
+    : 'web';
 }
 
 /**
@@ -624,6 +686,7 @@ async function registerDynamicClient(
   const registrationRequest: any = {
     client_name: clientName,
     redirect_uris: [redirectUri],
+    application_type: oauthClientApplicationType(redirectUri),
     grant_types: ['authorization_code', 'refresh_token'],
     response_types: ['code'],
     token_endpoint_auth_method: 'none', // Public client (no client_secret)
@@ -850,10 +913,8 @@ export async function fetchAuthorizationServerMetadata(
     }
     options.assertCurrent?.();
     if (
-      compatibilityMode === 'strict'
-        ? metadata.issuer !== authServerUrl
-        : compatibilityMode === 'marketplace' &&
-          !oauthIssuerIdentifiersMatch(metadata.issuer, authServerUrl)
+      compatibilityMode !== 'legacy' &&
+      !oauthIssuerIdentifiersMatch(metadata.issuer, authServerUrl)
     ) {
       errors.push(`${label}: request failed`);
       continue;
@@ -1451,7 +1512,7 @@ export interface OAuthFlowContext {
   compatibilityMode: MCPOAuthRuntimeCompatibilityMode;
   /** Require `iss` when the AS advertised RFC 9207 support for this flow. */
   authorizationResponseIssuerParameterSupported: boolean;
-  /** Narrow standalone-development exception; durable daemon flows leave this false. */
+  /** Narrow outbound-endpoint exception; durable daemon flows leave this false. */
   allowLocalhostHttp: boolean;
 }
 
@@ -1504,6 +1565,23 @@ function marketplaceResourceMetadataMatches(
 }
 
 /**
+ * Apply the same resource-binding policy during discovery and flow startup.
+ * Legacy mode intentionally preserves its historical permissive behavior;
+ * strict and reviewed-marketplace modes must never select mismatched metadata.
+ */
+function resourceMetadataMatches(
+  metadataUrl: string,
+  statedResource: OAuthMetadata['resource'],
+  resourceUri: string | undefined,
+  compatibilityMode: MCPOAuthRuntimeCompatibilityMode = 'strict'
+): boolean {
+  if (!resourceUri || compatibilityMode === 'legacy') return true;
+  return compatibilityMode === 'strict'
+    ? statedResource === resourceUri
+    : marketplaceResourceMetadataMatches(metadataUrl, statedResource, resourceUri);
+}
+
+/**
  * Start the OAuth 2.1 Authorization Code flow with PKCE
  *
  * This is the first phase of a two-phase OAuth flow for remote daemon scenarios.
@@ -1549,6 +1627,8 @@ async function startMCPOAuthFlowWithAS(opts: {
   issuer: string;
   compatibilityMode: MCPOAuthRuntimeCompatibilityMode;
   dcrMode: MCPOAuthDCRMode;
+  /** Permit an exact HTTP loopback redirect without permitting loopback provider endpoints. */
+  allowLoopbackRedirectUri: boolean;
   allowLocalhostHttp: boolean;
   /** Daemon-owned authority/deadline assertion around provider side effects. */
   assertCurrent?: () => void;
@@ -1566,6 +1646,7 @@ async function startMCPOAuthFlowWithAS(opts: {
     issuer,
     compatibilityMode,
     dcrMode,
+    allowLoopbackRedirectUri,
     allowLocalhostHttp,
   } = opts;
 
@@ -1580,7 +1661,7 @@ async function startMCPOAuthFlowWithAS(opts: {
   // Validate before registration: DCR sends this value to an external service
   // and must not turn an unsafe configured callback into durable provider-side
   // client metadata.
-  assertSafeOAuthUrl(actualRedirectUri, { allowLocalhostHttp });
+  assertSafeOAuthUrl(actualRedirectUri, { allowLocalhostHttp: allowLoopbackRedirectUri });
 
   // Scope: explicit option > resource-metadata advertised scopes > none
   // (Skip auto-populating when client_id is pre-registered — see comment in
@@ -1623,10 +1704,7 @@ async function startMCPOAuthFlowWithAS(opts: {
       );
     }
     assertSafeOAuthUrl(authServerMetadata.issuer, { allowLocalhostHttp });
-    const issuerMatches =
-      compatibilityMode === 'strict'
-        ? authServerMetadata.issuer === issuer
-        : oauthIssuerIdentifiersMatch(authServerMetadata.issuer, issuer);
+    const issuerMatches = oauthIssuerIdentifiersMatch(authServerMetadata.issuer, issuer);
     if (!issuerMatches) {
       throw new OAuthConfigurationError('issuer_mismatch', 'Authorization server issuer mismatch');
     }
@@ -1639,15 +1717,6 @@ async function startMCPOAuthFlowWithAS(opts: {
       throw new OAuthConfigurationError(
         'pkce_required',
         'Authorization server does not advertise required PKCE S256 support'
-      );
-    }
-    if (
-      compatibilityMode === 'strict' &&
-      authServerMetadata.authorization_response_iss_parameter_supported !== true
-    ) {
-      throw new OAuthConfigurationError(
-        'metadata_incompatible',
-        'Authorization server does not advertise the required callback issuer parameter'
       );
     }
     if (
@@ -1770,7 +1839,7 @@ export async function startMCPOAuthFlow(
     tokenUrlOverride?: string;
     clientSecret?: string;
     scope?: string;
-    /** Pre-discovered resource metadata URL (used when WWW-Authenticate lacks resource_metadata) */
+    /** Pre-discovered resource metadata URL. Takes precedence over the raw challenge. */
     resourceMetadataUrl?: string;
     /**
      * Pre-discovered Authorization Server metadata. Used when the MCP server
@@ -1800,6 +1869,11 @@ export async function startMCPOAuthFlow(
     /** Exact loopback HTTP exception for standalone development only. */
     allowLocalhostHttp?: boolean;
     /**
+     * Permit an exact HTTP loopback callback without permitting private OAuth
+     * metadata, authorization, registration, or token endpoints.
+     */
+    allowLoopbackRedirectUri?: boolean;
+    /**
      * Optional daemon authority/deadline assertion. Called before and after
      * discovery and DCR boundaries; standalone/CLI callers omit it.
      */
@@ -1810,6 +1884,11 @@ export async function startMCPOAuthFlow(
   const compatibilityMode = options?.compatibilityMode ?? 'strict';
   const dcrMode = options?.dcrMode ?? 'advertised';
   const allowLocalhostHttp = options?.allowLocalhostHttp === true;
+  // Preserve the legacy standalone helper contract while allowing daemons to
+  // grant only the redirect exception. This distinction matters for local
+  // PostgreSQL: its browser callback is loopback, but provider egress must
+  // retain the durable/multi-tenant private-network denial.
+  const allowLoopbackRedirectUri = options?.allowLoopbackRedirectUri ?? allowLocalhostHttp;
   const resourceUri = options?.resourceUri;
   options?.assertCurrent?.();
   if (!resourceUri) {
@@ -1867,13 +1946,17 @@ export async function startMCPOAuthFlow(
       issuer: options.prefetchedAuthServerMetadata.issuer,
       compatibilityMode,
       dcrMode,
+      allowLoopbackRedirectUri,
       allowLocalhostHttp,
       assertCurrent: options.assertCurrent,
     });
   }
 
-  // Step 1: Parse WWW-Authenticate header, fall back to pre-discovered URL
-  const metadataUrl = parseWWWAuthenticate(wwwAuthenticateHeader) || options?.resourceMetadataUrl;
+  // Step 1: Prefer the resolver's validated choice over the raw challenge.
+  // Tool-level challenges can point at metadata for a different (coarser)
+  // resource; the daemon passes the endpoint-bound candidate selected by
+  // `resolveMCPOAuthDiscovery` here.
+  const metadataUrl = options?.resourceMetadataUrl || parseWWWAuthenticate(wwwAuthenticateHeader);
   if (!metadataUrl) {
     throw new OAuthConfigurationError(
       'metadata_unavailable',
@@ -1893,10 +1976,7 @@ export async function startMCPOAuthFlow(
   options?.assertCurrent?.();
 
   if (
-    compatibilityMode === 'strict'
-      ? resourceMetadata.resource !== resourceUri
-      : compatibilityMode === 'marketplace' &&
-        !marketplaceResourceMetadataMatches(metadataUrl, resourceMetadata.resource, resourceUri)
+    !resourceMetadataMatches(metadataUrl, resourceMetadata.resource, resourceUri, compatibilityMode)
   ) {
     throw new OAuthConfigurationError(
       'metadata_incompatible',
@@ -1976,6 +2056,7 @@ export async function startMCPOAuthFlow(
     issuer: authServerUrl,
     compatibilityMode,
     dcrMode,
+    allowLoopbackRedirectUri,
     allowLocalhostHttp,
     assertCurrent: options?.assertCurrent,
   });
@@ -2007,11 +2088,7 @@ export async function completeMCPOAuthFlow(
   if (context.authorizationResponseIssuerParameterSupported && options.issuer == null) {
     throw new OAuthCallbackValidationError('callback_issuer_missing');
   }
-  if (
-    context.compatibilityMode !== 'legacy' &&
-    options.issuer != null &&
-    options.issuer !== context.issuer
-  ) {
+  if (options.issuer != null && options.issuer !== context.issuer) {
     throw new OAuthCallbackValidationError('callback_issuer_mismatch');
   }
 
