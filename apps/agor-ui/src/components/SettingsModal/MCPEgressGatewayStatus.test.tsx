@@ -12,6 +12,43 @@ function clientFor(status: object) {
 }
 
 describe('MCPEgressGatewayStatus', () => {
+  it('keeps the Feathers service receiver when loading gateway status', async () => {
+    const gatewayStatusService = {
+      receiver: 'gateway-status-service',
+      find(this: { receiver: string }) {
+        if (this.receiver !== 'gateway-status-service') {
+          throw new Error('service receiver was lost');
+        }
+        return Promise.resolve({
+          mode: 'off',
+          supported_transports: [],
+          unsupported_transports: ['stdio'],
+          in_flight_requests: 0,
+          provider_in_flight_requests: 0,
+          reserved_requests: 0,
+          oldest_request_ms: 0,
+          excluded_servers: [],
+          excluded_servers_truncated: false,
+          admission_available: null,
+          operator: true,
+          guarantee: 'Direct mode has no gateway admission guarantee.',
+        });
+      },
+    };
+    const client = {
+      service: () => gatewayStatusService,
+    } as unknown as AgorClient;
+
+    render(
+      <AntdApp>
+        <MCPEgressGatewayStatus client={client} connectionReady />
+      </AntdApp>
+    );
+
+    expect(await screen.findByText('MCP gateway is off')).toBeInTheDocument();
+    expect(screen.queryByText('MCP gateway status unavailable')).not.toBeInTheDocument();
+  });
+
   it('renders the exact enforced guarantee and truthful transport lists', async () => {
     const client = clientFor({
       mode: 'enforced',
