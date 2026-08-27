@@ -563,12 +563,14 @@ describe('Board and branch capability-policy migration', () => {
         INSERT INTO branches VALUES
           ('inherited','private-board',1,2,'owner','board','session','write','{}'),
           ('removed-creator',NULL,1,2,'removed-creator','override','none','none','{}'),
-          ('nullable-owner-order',NULL,1,2,'removed-creator','override','none','none','{}');
+          ('nullable-owner-order',NULL,1,2,'removed-creator','override','none','none','{}'),
+          ('board-source-without-board',NULL,1,2,'owner','board','session','read','{}');
         INSERT INTO branch_owners VALUES
           ('inherited','owner',1),
           ('removed-creator','manager',3),
           ('nullable-owner-order','manager',NULL),
-          ('nullable-owner-order','owner',5);
+          ('nullable-owner-order','owner',5),
+          ('board-source-without-board','owner',1);
       `);
       const migration = await readFile(
         new URL('../../drizzle/sqlite/0102_board_branch_capability_policies.sql', import.meta.url),
@@ -607,6 +609,15 @@ describe('Board and branch capability-policy migration', () => {
         `SELECT permission_binding FROM branches WHERE branch_id='inherited'`
       );
       expect(binding.rows[0]).toMatchObject({ permission_binding: 'inherit' });
+      const boardlessLegacyConfig = await client.execute(
+        `SELECT sharing_mode,others_role,others_fs_access
+         FROM branch_permission_configs WHERE branch_id='board-source-without-board'`
+      );
+      expect(boardlessLegacyConfig.rows[0]).toMatchObject({
+        sharing_mode: 'shared',
+        others_role: 'collaborator',
+        others_fs_access: 'read',
+      });
       const ignoredGroup = await client.execute(
         `SELECT count(*) AS count FROM branch_permission_entries e
          JOIN branch_permission_configs c ON c.config_id=e.config_id
@@ -721,6 +732,9 @@ describe('Board and branch capability-policy migration', () => {
     expect(migration).toContain('ORDER BY bo.created_at NULLS LAST,bo.user_id');
     expect(migration).toContain('CONSTRAINT "boards_tenant_primary_owner_fk"');
     expect(migration).toContain('CONSTRAINT "branches_tenant_primary_owner_fk"');
+    expect(migration).toContain(
+      "br.permission_source='board' AND board_config.config_id IS NOT NULL"
+    );
     expect(migration).toContain("CHECK (\"permission_binding\" IN ('inherit','override'))");
     expect(migration).toContain("CHECK (\"sharing_mode\" IN ('private','shared'))");
     expect(migration).toContain("CHECK (\"others_fs_access\" IN ('none','read','write'))");
