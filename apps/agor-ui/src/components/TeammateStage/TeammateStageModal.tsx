@@ -1,6 +1,6 @@
 import type { Branch } from '@agor-live/client';
 import { getTeammateConfig } from '@agor-live/client';
-import { useProfileImageUrl } from '../ProfileImage/useProfileImageUrl';
+import { useTeammateProfileImageUrl } from '../ProfileImage';
 import { AdaptiveSettingsModal } from '../SettingsModal/AdaptiveSettingsModal';
 import { TeammateStage } from './TeammateStage';
 
@@ -12,7 +12,7 @@ interface TeammateStageModalProps {
 
 export function TeammateStageModal({ branch, open, onClose }: TeammateStageModalProps) {
   const config = getTeammateConfig(branch);
-  const imageUrl = useProfileImageUrl(config?.profileImageId, 'large');
+  const imageUrl = useTeammateProfileImageUrl(branch, 'large');
   const name = config?.displayName || branch.name;
 
   return (
