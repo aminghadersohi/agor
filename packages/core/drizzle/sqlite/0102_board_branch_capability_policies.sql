@@ -247,9 +247,9 @@ SELECT lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-7'||substr(l
          OR EXISTS (SELECT 1 FROM `branch_owners` bo WHERE bo.`branch_id`=br.`branch_id` AND bo.`user_id`<>br.`primary_owner_user_id`)
          OR EXISTS (SELECT 1 FROM `branch_group_grants` bg WHERE bg.`branch_id`=br.`branch_id` AND bg.`can`<>'none')
        THEN 'shared' ELSE 'private' END,
-  CASE WHEN br.`permission_source`='board' THEN board_config.`others_role`
+  CASE WHEN br.`permission_source`='board' AND board_config.`config_id` IS NOT NULL THEN board_config.`others_role`
        ELSE CASE COALESCE(br.`others_can`,'session') WHEN 'none' THEN 'none' WHEN 'view' THEN 'viewer' WHEN 'all' THEN 'manager' ELSE 'collaborator' END END,
-  CASE WHEN br.`permission_source`='board' THEN board_config.`others_fs_access`
+  CASE WHEN br.`permission_source`='board' AND board_config.`config_id` IS NOT NULL THEN board_config.`others_fs_access`
        WHEN COALESCE(br.`others_can`,'session')='none' THEN 'none' ELSE COALESCE(br.`others_fs_access`,'read') END,
   1, br.`primary_owner_user_id`, COALESCE(br.`created_at`, unixepoch()*1000), COALESCE(br.`updated_at`, br.`created_at`, unixepoch()*1000)
 FROM `branches` br
