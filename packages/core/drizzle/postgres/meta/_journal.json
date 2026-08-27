@@ -673,6 +673,13 @@
       "when": 1787750000000,
       "tag": "0096_profile_image_galleries",
       "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1787770800000,
+      "tag": "0097_profile_identity_models",
+      "breakpoints": true
     }
   ]
 }

@@ -71,9 +71,7 @@ export function buildStaticArtifactDocument({
     Object.entries(files).map(([path, content]) => [normalizeFilePath(path), content])
   );
   const html = normalizedFiles.get(normalizedEntry) ?? normalizedFiles.get('/index.html');
-  if (html === undefined) {
-    throw new Error(`Static artifact entry not found: ${normalizedEntry}`);
-  }
+  if (html === undefined) throw new Error(`Static artifact entry not found: ${normalizedEntry}`);
 
   const document = new DOMParser().parseFromString(html, 'text/html');
 

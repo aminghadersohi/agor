@@ -169,4 +169,37 @@ describe('SessionSettingsModal configuration', { timeout: 10_000 }, () => {
     await waitFor(() => expect(props.onClose).toHaveBeenCalledTimes(2));
     expect(persistUserDefaultFromForm).toHaveBeenCalledTimes(1);
   });
+
+  it('persists bounded opt-in queue coalescing settings', async () => {
+    const onUpdate = vi.fn();
+    render(
+      <SessionSettingsModal
+        open
+        onClose={vi.fn()}
+        session={claudeSession}
+        client={null}
+        currentUser={null}
+        onUpdate={onUpdate}
+      />
+    );
+
+    fireEvent.click(screen.getByText('Queued updates'));
+    fireEvent.click(screen.getByRole('switch', { name: 'Batch queued system updates' }));
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum updates per turn' }), {
+      target: { value: '12' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(onUpdate).toHaveBeenCalledWith(
+        's1',
+        expect.objectContaining({
+          queue_config: {
+            coalesce_system_updates: true,
+            max_coalesced_updates: 12,
+          },
+        })
+      )
+    );
+  });
 });

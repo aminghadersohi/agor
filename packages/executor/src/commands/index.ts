@@ -32,6 +32,7 @@ import {
   handleBranchAgorYmlExport,
   handleBranchAgorYmlImport,
   handleBranchFilesList,
+  handleBranchLaunchJsonImport,
   handleGitBranchAdd,
   handleGitBranchClean,
   handleGitBranchRemove,
@@ -257,6 +258,7 @@ registerCommand('branch.knowledge.read', handleBranchKnowledgeRead);
 registerCommand('branch.gateway.slack-file-upload', handleBranchSlackFileUpload);
 registerCommand('branch.upload.materialize', handleBranchUploadMaterialize);
 registerCommand('branch.agor-yml.import', handleBranchAgorYmlImport);
+registerCommand('branch.launch-json.import', handleBranchLaunchJsonImport);
 registerCommand('branch.agor-yml.export', handleBranchAgorYmlExport);
 registerCommand('environment.lifecycle', handleEnvironmentLifecycle);
 registerCommand('environment.logs', handleEnvironmentLogs);

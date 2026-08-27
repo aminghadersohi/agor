@@ -190,9 +190,11 @@ export function createPinnedFetch(
               if (Array.isArray(value)) for (const item of value) headers.append(key, item);
               else if (value !== undefined) headers.set(key, value);
             }
-            const text = Buffer.concat(chunks).toString('utf8');
+            const bodyBuffer = Buffer.concat(chunks);
             finish(() =>
-              resolve(new Response(isNullBodyStatus(status) ? null : text, { status, headers }))
+              resolve(
+                new Response(isNullBodyStatus(status) ? null : bodyBuffer, { status, headers })
+              )
             );
           };
 

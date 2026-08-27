@@ -83,7 +83,7 @@ describe('SessionFooter simple mode layout (real browser)', () => {
     expect(screen.getByRole('button', { name: /stop stop/i })).toBeVisible();
     expect(screen.getByRole('button', { name: /send queue/i })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Attach files' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'More options' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'More options' })).toBeVisible();
 
     const shell = screen.getByTestId('simple-chat-shell');
     expect(shell.scrollWidth).toBeLessThanOrEqual(shell.clientWidth + 1);

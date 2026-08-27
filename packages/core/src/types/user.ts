@@ -1,6 +1,6 @@
 import type { CodexApprovalPolicy, CodexNetworkAccess, CodexSandboxMode } from './agentic-tool';
 import { type AgenticToolName, DEFAULT_AGENTIC_TOOL_NAME, isAgenticToolName } from './agentic-tool';
-import type { BranchID, SessionID, UserID } from './id';
+import type { ArtifactID, BranchID, SessionID, UserID } from './id';
 import type { ProfileImageID } from './profile-image';
 import type { ScheduleID } from './schedule';
 import type { EffortLevel, PermissionMode } from './session';
@@ -463,12 +463,19 @@ export interface UserPreferences {
   mainBoardId?: string;
   /** Whether to render Slack-synced avatar_url when available. Undefined defaults to true. */
   use_slack_avatar?: boolean;
-  /** Lightweight, user-owned groupings of canonical sessions shown on Home. */
-  chat_collections?: ChatCollectionPreferences;
   /** User-owned choice of which canonical schedules appear in the Home overview. */
   home_schedules?: HomeSchedulePreferences;
+  /** Lightweight, user-owned groupings of canonical sessions shown on Home. */
+  chat_collections?: ChatCollectionPreferences;
+  /** Artifact shortcuts pinned to Home by this user. */
+  home_artifact_ids?: ArtifactID[];
   // Future preferences can be added here
   [key: string]: unknown;
+}
+
+export interface HomeSchedulePreferences {
+  mode: 'all' | 'selected';
+  schedule_ids: ScheduleID[];
 }
 
 /** A named Home collection of existing sessions, including teammate and gateway sessions. */
@@ -482,11 +489,6 @@ export interface ChatCollection {
 /** User preference envelope for Home chat collections. */
 export interface ChatCollectionPreferences {
   collections: ChatCollection[];
-}
-
-export interface HomeSchedulePreferences {
-  mode: 'all' | 'selected';
-  schedule_ids: ScheduleID[];
 }
 
 /** Stable external identity link stored with a local user. */

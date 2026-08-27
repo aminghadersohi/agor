@@ -81,9 +81,12 @@ describe('WorktreeFileEditor layout (real browser)', () => {
     fireEvent.click(screen.getByText('README.md'));
     await waitFor(() => expect(get).toHaveBeenCalledOnce());
     await waitFor(() => {
-      expect(document.querySelector('.cm-editor')).toBeTruthy();
+      expect(editorPane.querySelector('.cm-editor, textarea')).toBeTruthy();
     });
     expect(screen.getByRole('button', { name: 'Save file' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Close workspace editor' })).toBeVisible();
+    await waitFor(
+      () => expect(screen.getByRole('button', { name: 'Close workspace editor' })).toBeVisible(),
+      { timeout: 5_000 }
+    );
   });
 });

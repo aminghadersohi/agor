@@ -15,6 +15,33 @@
 
 import type { SandpackTemplate } from './board';
 import type { ArtifactID, BoardID, BranchID, SessionID, UserID, UUID } from './id';
+import type { ScheduleID } from './schedule';
+
+/** A user-triggered control exposed to an artifact through the Agor runtime. */
+export interface ArtifactActionBinding {
+  /** Stable, artifact-local identifier used by `window.agor.runAction(id)`. */
+  action_id: string;
+  /** Human-readable label used by management and confirmation UI. */
+  label: string;
+  /** Existing schedule that owns the prompt and agent/model configuration. */
+  schedule_id: ScheduleID;
+  description?: string;
+  /** Require a trusted parent-page confirmation before the schedule is run. */
+  confirm?: boolean;
+}
+
+/**
+ * Declarative, server-validated interactions available to an artifact.
+ *
+ * Artifact JavaScript never receives an API token and cannot choose an arbitrary
+ * schedule/session. The parent page accepts only identifiers declared here and
+ * then calls the normal authenticated service path.
+ */
+export interface ArtifactInteractionConfig {
+  actions?: ArtifactActionBinding[];
+  /** Optional canonical session opened by `window.agor.openChat()`. */
+  chat_session_id?: SessionID;
+}
 
 /**
  * Build status for artifacts
@@ -112,6 +139,9 @@ export interface AgorRuntimeConfig {
    * to `true`.
    */
   enabled?: boolean;
+
+  /** Declarative, parent-mediated controls available to the artifact. */
+  interactions?: ArtifactInteractionConfig;
 }
 
 /**
@@ -320,6 +350,8 @@ export interface ArtifactPayload {
   required_env_vars?: string[];
   /** Grants the artifact requested. */
   agor_grants?: AgorGrants;
+  /** Viewer-authorized subset of the artifact's configured interactions. */
+  interaction_config?: ArtifactInteractionConfig;
   /**
    * Whether the daemon injected secrets into this payload.
    *

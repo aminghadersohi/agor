@@ -258,6 +258,55 @@ describe('startup tenant database scope', () => {
     );
   });
 
+  it('atomically marks running crash-interrupted work for opt-in recovery', async () => {
+    const task = makeTask({ status: TaskStatus.RUNNING });
+    const session = makeSession({ tasks: [task.task_id] as Session['tasks'] });
+    const { ctx, tasksService } = makeStartupContextWithGuardedDb({
+      orphanedTasks: [task],
+      sessionsById: { [session.session_id]: session },
+    });
+    ctx.config.execution = {
+      restart_recovery: { enabled: true, resume_after_crash: true },
+    };
+
+    await cleanupOrphanStatuses(ctx);
+
+    expect(tasksService.settleTermination).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: task.task_id,
+        outcome: 'restart_unverified',
+        restartRecovery: expect.objectContaining({
+          source_task_id: task.task_id,
+          state: 'pending',
+          requested_at: expect.any(String),
+        }),
+      }),
+      expect.anything()
+    );
+  });
+
+  it.each([TaskStatus.STOPPING, TaskStatus.AWAITING_PERMISSION, TaskStatus.AWAITING_INPUT])(
+    'does not auto-resume intentional or interactive state %s',
+    async (status) => {
+      const task = makeTask({ status });
+      const session = makeSession({ tasks: [task.task_id] as Session['tasks'] });
+      const { ctx, tasksService } = makeStartupContextWithGuardedDb({
+        orphanedTasks: [task],
+        sessionsById: { [session.session_id]: session },
+      });
+      ctx.config.execution = {
+        restart_recovery: { enabled: true, resume_after_crash: true },
+      };
+
+      await cleanupOrphanStatuses(ctx);
+
+      expect(tasksService.settleTermination).toHaveBeenCalledWith(
+        expect.not.objectContaining({ restartRecovery: expect.anything() }),
+        expect.anything()
+      );
+    }
+  );
+
   it('demonstrates guarded startup DB access fails without scope', () => {
     const { baseDb, ctx } = makeStartupContextWithGuardedDb();
 
