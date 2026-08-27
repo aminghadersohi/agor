@@ -1,6 +1,5 @@
 import type { ProfileImageVariant, User } from '@agor-live/client';
-import { useProfileImageGallery } from './useProfileImageGallery';
-import { useProfileImageUrl } from './useProfileImageUrl';
+import { useCyclingProfileImageUrl } from './useCyclingProfileImage';
 
 type ProfileImageUser = Pick<User, 'user_id' | 'profile_image_id'>;
 
@@ -9,10 +8,10 @@ export function useUserProfileImageUrl(
   user: ProfileImageUser | null | undefined,
   variant: ProfileImageVariant
 ): string | undefined {
-  const gallery = useProfileImageGallery(
+  return useCyclingProfileImageUrl(
     user ? { type: 'user', id: user.user_id } : undefined,
-    Boolean(user && !user.profile_image_id)
+    user?.profile_image_id,
+    variant,
+    Boolean(user)
   );
-  const fallbackPrimary = gallery.find((image) => image.is_primary) ?? gallery[0];
-  return useProfileImageUrl(user?.profile_image_id ?? fallbackPrimary?.image_id, variant);
 }
