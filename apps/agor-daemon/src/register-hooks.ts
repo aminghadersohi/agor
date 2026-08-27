@@ -1848,6 +1848,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       create: [requireMinimumRole(ROLES.MEMBER, 'create artifacts'), injectCreatedBy()],
       publishFromExecutor: [requireMinimumRole(ROLES.MEMBER, 'publish artifacts')],
       validateFromExecutor: [requireMinimumRole(ROLES.MEMBER, 'validate artifacts')],
+      createChatArtifact: [requireMinimumRole(ROLES.MEMBER, 'create chat artifacts')],
       patch: [requireMinimumRole(ROLES.MEMBER, 'update artifacts'), ensureArtifactOwnerOrAdmin()],
       remove: [requireMinimumRole(ROLES.MEMBER, 'delete artifacts'), ensureArtifactOwnerOrAdmin()],
     },

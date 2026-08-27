@@ -15,6 +15,7 @@ import { BranchRepository } from '@agor/core/db';
 import type {
   AgorGrants,
   AgorRuntimeConfig,
+  ArtifactInteractionConfig,
   BoardID,
   BranchID,
   SandpackConfig,
@@ -28,7 +29,13 @@ import { z } from 'zod';
 import type { ArtifactParams, ArtifactsService } from '../../services/artifacts.js';
 import { hasBranchPermission } from '../../utils/branch-authorization.js';
 import { emitServiceEvent } from '../../utils/emit-service-event.js';
-import { resolveArtifactId, resolveBoardId, resolveBranchId } from '../resolve-ids.js';
+import {
+  resolveArtifactId,
+  resolveBoardId,
+  resolveBranchId,
+  resolveScheduleId,
+  resolveSessionId,
+} from '../resolve-ids.js';
 import {
   mcpLimit,
   mcpOffset,
@@ -101,6 +108,61 @@ const AgorRuntimeSchema = z
       ),
   })
   .optional();
+
+const ArtifactInteractionConfigSchema = z
+  .object({
+    actions: z
+      .array(
+        z.object({
+          actionId: mcpRequiredString(
+            'interactionConfig.actions[].actionId',
+            'Stable identifier used by window.agor.runAction(actionId)'
+          ),
+          label: mcpRequiredString('interactionConfig.actions[].label', 'Button label'),
+          scheduleId: mcpRequiredId(
+            'interactionConfig.actions[].scheduleId',
+            'Schedule',
+            'Schedule owning the prompt, model, tools, and execution configuration'
+          ),
+          description: mcpOptionalString(
+            'interactionConfig.actions[].description',
+            'Optional action help text'
+          ),
+          confirm: z.boolean().optional().describe('Ask for confirmation before running'),
+        })
+      )
+      .max(12)
+      .optional(),
+    chatSessionId: mcpOptionalId(
+      'interactionConfig.chatSessionId',
+      'Session',
+      'Canonical session opened by window.agor.openChat()'
+    ),
+  })
+  .optional();
+
+async function resolveInteractionConfig(
+  ctx: McpContext,
+  input: z.infer<NonNullable<typeof ArtifactInteractionConfigSchema>> | undefined
+): Promise<ArtifactInteractionConfig | undefined> {
+  if (!input) return undefined;
+  const actions = await Promise.all(
+    (input.actions ?? []).map(async (action) => ({
+      action_id: action.actionId,
+      label: action.label,
+      schedule_id: await resolveScheduleId(ctx, action.scheduleId),
+      ...(action.description ? { description: action.description } : {}),
+      ...(action.confirm ? { confirm: true } : {}),
+    }))
+  );
+  const chatSessionId = input.chatSessionId
+    ? await resolveSessionId(ctx, input.chatSessionId)
+    : undefined;
+  return {
+    ...(actions.length > 0 ? { actions } : {}),
+    ...(chatSessionId ? { chat_session_id: chatSessionId } : {}),
+  };
+}
 
 export function registerArtifactTools(server: McpServer, ctx: McpContext): void {
   // Tool 1: agor_artifacts_publish
@@ -185,6 +247,9 @@ IMPORTANT:
         agorRuntime: AgorRuntimeSchema.describe(
           'Controls injection of the daemon-side `agor-runtime.js` (which powers agent DOM introspection via agor_artifacts_query_dom). Default: enabled.'
         ),
+        interactionConfig: ArtifactInteractionConfigSchema.describe(
+          'Optional safe runtime bridge. Actions bind to existing schedules; chat opens one canonical session.'
+        ),
         x: mcpOptionalNumber('x', 'X position on board (default: 0, only used on create)'),
         y: mcpOptionalNumber('y', 'Y position on board (default: 0, only used on create)'),
         width: mcpOptionalNumber('width', 'Width in pixels (default: 600, only used on create)'),
@@ -229,6 +294,7 @@ IMPORTANT:
           required_env_vars: args.requiredEnvVars,
           agor_grants: args.agorGrants as AgorGrants | undefined,
           agor_runtime: args.agorRuntime as AgorRuntimeConfig | undefined,
+          interaction_config: await resolveInteractionConfig(ctx, args.interactionConfig),
           x: args.x,
           y: args.y,
           width: args.width,
@@ -274,6 +340,42 @@ IMPORTANT:
           ? { publish_validation: { ...publishValidation, diagnostic: publishDiagnostic } }
           : {}),
         instructions: `${baseInstructions}${validationInstructions}`,
+      });
+    }
+  );
+
+  server.registerTool(
+    'agor_artifacts_create_chat',
+    {
+      description:
+        'Create a private chat artifact on the canonical session’s board. The artifact stores the session UUID (not its mutable name) and opens the normal live session surface with full controls.',
+      inputSchema: z.object({
+        sessionId: mcpRequiredId('sessionId', 'Session', 'Session to expose as a chat artifact'),
+        x: mcpOptionalNumber('x', 'X position on the board'),
+        y: mcpOptionalNumber('y', 'Y position on the board'),
+        width: mcpOptionalNumber('width', 'Artifact width'),
+        height: mcpOptionalNumber('height', 'Artifact height'),
+      }),
+    },
+    async (args) => {
+      const service = ctx.app.service('artifacts') as unknown as ArtifactsService;
+      const sessionId = await resolveSessionId(ctx, args.sessionId);
+      const artifact = await runWithMcpTenantDatabaseScope(ctx, () =>
+        service.createChatArtifact(
+          {
+            session_id: sessionId,
+            x: args.x,
+            y: args.y,
+            width: args.width,
+            height: args.height,
+          },
+          ctx.baseServiceParams as ArtifactParams
+        )
+      );
+      const { files: _files, ...summary } = artifact;
+      return textResult({
+        artifact: summary,
+        instructions: 'Private chat artifact created on the session branch board.',
       });
     }
   );
@@ -509,6 +611,9 @@ Caller must own the artifact (or be an admin).`,
         agorRuntime: AgorRuntimeSchema.describe(
           "Replace the artifact's agor_runtime config (controls agor-runtime.js injection)."
         ),
+        interactionConfig: ArtifactInteractionConfigSchema.describe(
+          "Replace the artifact's declared action buttons and/or chat session binding."
+        ),
         waitForStatus: z
           .boolean()
           .optional()
@@ -527,6 +632,7 @@ Caller must own the artifact (or be an admin).`,
 
       const boardIdInput = coerceString(args.boardId);
       const resolvedBoardId = boardIdInput ? await resolveBoardId(ctx, boardIdInput) : undefined;
+      const interactionConfig = await resolveInteractionConfig(ctx, args.interactionConfig);
 
       const updated = await runWithMcpTenantDatabaseScope(ctx, () =>
         service.updateMetadata(
@@ -545,6 +651,7 @@ Caller must own the artifact (or be an admin).`,
             required_env_vars: args.requiredEnvVars,
             agor_grants: args.agorGrants as AgorGrants | undefined,
             agor_runtime: args.agorRuntime as AgorRuntimeConfig | undefined,
+            interaction_config: interactionConfig,
           },
           ctx.userId,
           ctx.authenticatedUser.role as UserRole

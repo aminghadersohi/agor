@@ -22,6 +22,7 @@ import {
 } from '@agor-live/client';
 import {
   AimOutlined,
+  AppstoreAddOutlined,
   CheckOutlined,
   CloseOutlined,
   CodeOutlined,
@@ -411,6 +412,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   // being switched *to* during the async request, not the session's current
   // (old) tool.
   const [switchingTool, setSwitchingTool] = React.useState<string | null>(null);
+  const [creatingChatArtifact, setCreatingChatArtifact] = React.useState(false);
 
   // App renders this panel without a session key, so a route/back-forward
   // change swaps `session` in place instead of remounting. Reset the transient
@@ -1170,6 +1172,21 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       setSwitchingTool(null);
     }
   };
+  const handleCreateChatArtifact = async () => {
+    if (!client || creatingChatArtifact || connectionDisabled) return;
+    setCreatingChatArtifact(true);
+    try {
+      const artifacts = client.service('artifacts') as unknown as {
+        createChatArtifact(data: { session_id: SessionID }): Promise<unknown>;
+      };
+      await artifacts.createChatArtifact({ session_id: session.session_id as SessionID });
+      showSuccess('Chat artifact added to the board');
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Could not create chat artifact');
+    } finally {
+      setCreatingChatArtifact(false);
+    }
+  };
   const moreMenuItems: MenuProps['items'] = [
     ...(branch
       ? [
@@ -1219,6 +1236,17 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             icon: sessionInChatCollection ? <CheckOutlined /> : <UsergroupAddOutlined />,
             label: sessionInChatCollection ? 'Manage chat collections…' : 'Add to chat collection…',
             onClick: () => onPinToChatCollection(session.session_id),
+          },
+        ]
+      : []),
+    ...(branch
+      ? [
+          {
+            key: 'create-chat-artifact',
+            icon: creatingChatArtifact ? <Spin size="small" /> : <AppstoreAddOutlined />,
+            label: creatingChatArtifact ? 'Adding chat artifact…' : 'Add chat artifact to board',
+            disabled: connectionDisabled || !client || creatingChatArtifact,
+            onClick: () => void handleCreateChatArtifact(),
           },
         ]
       : []),

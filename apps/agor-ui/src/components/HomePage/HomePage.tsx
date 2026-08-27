@@ -19,6 +19,7 @@ import { HomeBoardsSection } from './HomeBoardsSection';
 import { HomeChatWorkspaceNav } from './HomeChatWorkspaceNav';
 import { HomeKnowledgeSection } from './HomeKnowledgeSection';
 import { HomeSchedulesSection } from './HomeSchedulesSection';
+import { HomePinnedArtifactsSection } from './HomePinnedArtifactsSection';
 import { HomeSessionsSection } from './HomeSessionsSection';
 import { HomeStatsBar } from './HomeStatsBar';
 import { HomeTeammateChatsSection } from './HomeTeammateChatsSection';
@@ -373,6 +374,13 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
                 currentUserId={props.currentUserId}
                 onSessionClick={props.onChatWorkspaceSessionClick}
                 onManageTeammateChats={props.onManageTeammateChats}
+              />
+
+              <HomePinnedArtifactsSection
+                client={props.client}
+                currentUserId={props.currentUserId}
+                onBoardClick={props.onBoardClick}
+                onSessionClick={props.onChatWorkspaceSessionClick}
               />
 
               {/* My Sessions — flex: 1 fills remaining viewport height */}

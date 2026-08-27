@@ -278,6 +278,29 @@ describe('SessionPanel search control', () => {
     expect(screen.getByRole('button', { name: 'More options' })).toBeVisible();
     expect(localStorage.getItem('agor.session.focus-chat.v2')).toBeNull();
   });
+
+  it('creates a UUID-bound chat artifact from the session actions menu', async () => {
+    const createChatArtifact = vi.fn().mockResolvedValue({ artifact_id: 'artifact-1' });
+    const client = {
+      service: vi.fn((path: string) =>
+        path === 'artifacts'
+          ? { createChatArtifact }
+          : {
+              find: vi.fn().mockResolvedValue({ data: [] }),
+              on: vi.fn(),
+              off: vi.fn(),
+            }
+      ),
+    } as unknown as AgorClient;
+    renderPanel({ client, preferFocusChat: true });
+
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    fireEvent.click(await screen.findByText('Add chat artifact to board'));
+
+    await waitFor(() =>
+      expect(createChatArtifact).toHaveBeenCalledWith({ session_id: session.session_id })
+    );
+  });
 });
 
 describe('SessionPanel historical runtime handling and terminal actions', () => {

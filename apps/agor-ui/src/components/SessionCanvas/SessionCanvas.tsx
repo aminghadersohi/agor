@@ -814,6 +814,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       eraserMode: activeTool === 'eraser',
       activeUrlTargetArtifactId,
       onEditMarkdown: handleEditMarkdownNote,
+      onSessionClick,
+      currentUserId,
     });
 
     // Extract zone labels - memoized to only change when labels actually change
