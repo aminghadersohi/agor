@@ -1,9 +1,11 @@
-import { lstat, open, readdir, readFile, realpath } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { chmod, lstat, open, readdir, readFile, realpath, rename, unlink } from 'node:fs/promises';
 import { extname, join, relative, sep } from 'node:path';
 import type { FileDetail, FileListItem } from '@agor/core/types';
 import type {
   BranchFilesBrowsePayload,
   BranchFilesReadPayload,
+  BranchFilesWritePayload,
   BranchFilesystemStatusPayload,
   ExecutorResult,
 } from '../payload-types.js';
@@ -18,6 +20,7 @@ import type { CommandOptions } from './index.js';
 
 const MAX_FILES = 50000;
 const MAX_PREVIEW_SIZE = 1024 * 1024;
+const MAX_EDIT_SIZE = 1024 * 1024;
 const MAX_TITLE_READ_BYTES = 4096;
 const EXCLUDED_DIRECTORIES = new Set([
   'node_modules',
@@ -207,8 +210,55 @@ export async function readBranchFile(
   };
 }
 
+export async function writeBranchFile(
+  branchRoot: string,
+  relativeFilePath: string,
+  content: string,
+  expectedLastModified: string
+): Promise<FileDetail> {
+  const filePath = normalizedRelativePath(relativeFilePath);
+  if (Buffer.byteLength(content, 'utf-8') > MAX_EDIT_SIZE) {
+    throw new Error('File is too large to edit in Agor (1 MB maximum)');
+  }
+
+  const { absolute: requestedPath } = await resolvePathInsideBranch(branchRoot, filePath, {
+    mustExist: true,
+  });
+  const before = await lstat(requestedPath);
+  if (before.isSymbolicLink()) throw new Error('Access denied: symlinks not allowed');
+  if (!before.isFile()) throw new Error('Requested path is not a file');
+  if (!isTextFile(filePath, before.size)) throw new Error('Only text files can be edited');
+  if (before.mtime.toISOString() !== expectedLastModified) {
+    throw new Error('File changed since it was opened. Reload it before saving.');
+  }
+
+  const temporaryPath = `${requestedPath}.agor-save-${randomUUID()}`;
+  let temporaryCreated = false;
+  try {
+    const handle = await open(temporaryPath, 'wx', before.mode);
+    temporaryCreated = true;
+    try {
+      await handle.writeFile(content, 'utf-8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await chmod(temporaryPath, before.mode);
+
+    const current = await lstat(requestedPath);
+    if (current.isSymbolicLink() || current.mtime.toISOString() !== expectedLastModified) {
+      throw new Error('File changed since it was opened. Reload it before saving.');
+    }
+    await rename(temporaryPath, requestedPath);
+    temporaryCreated = false;
+    return await readBranchFile(branchRoot, filePath);
+  } finally {
+    if (temporaryCreated) await unlink(temporaryPath).catch(() => undefined);
+  }
+}
+
 async function withBranch<T>(
-  payload: BranchFilesBrowsePayload | BranchFilesReadPayload,
+  payload: BranchFilesBrowsePayload | BranchFilesReadPayload | BranchFilesWritePayload,
   callback: (branchRoot: string) => Promise<T>
 ): Promise<T> {
   let client: AgorClient | null = null;
@@ -293,5 +343,26 @@ export async function handleBranchFilesRead(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { success: false, error: { code: 'BRANCH_FILES_READ_FAILED', message } };
+  }
+}
+
+export async function handleBranchFilesWrite(
+  payload: BranchFilesWritePayload,
+  options: CommandOptions
+): Promise<ExecutorResult> {
+  if (options.dryRun) return { success: true, data: { dryRun: true, command: payload.command } };
+  try {
+    const file = await withBranch(payload, (root) =>
+      writeBranchFile(
+        root,
+        payload.params.filePath,
+        payload.params.content,
+        payload.params.expectedLastModified
+      )
+    );
+    return { success: true, data: { file } };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { success: false, error: { code: 'BRANCH_FILES_WRITE_FAILED', message } };
   }
 }

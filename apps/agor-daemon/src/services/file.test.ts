@@ -16,9 +16,9 @@ vi.mock('../utils/spawn-executor.js', () => ({
   requestExecutor: vi.fn(),
 }));
 
-function createApp() {
+function createApp(config: Record<string, unknown> = {}) {
   return {
-    get: () => ({}),
+    get: () => config,
     sessionTokenService: { generateCommandToken: vi.fn(async () => 'user-token') },
   } as never;
 }
@@ -76,6 +76,28 @@ describe('FileService executor failures', () => {
           isText: true,
           mimeType: 'text/markdown',
           content: '',
+          encoding: 'utf-8',
+        },
+      },
+    },
+    {
+      operation: 'editing',
+      invoke: (service: FileService, params: Parameters<FileService['patch']>[2]) =>
+        service.patch(
+          'README.md',
+          { content: '# Updated', expectedLastModified: '2026-07-30T00:00:00.000Z' },
+          params
+        ),
+      command: 'branch.files.write',
+      data: {
+        file: {
+          path: 'README.md',
+          title: 'Updated',
+          size: 9,
+          lastModified: '2026-07-30T00:01:00.000Z',
+          isText: true,
+          mimeType: 'text/markdown',
+          content: '# Updated',
           encoding: 'utf-8',
         },
       },
@@ -163,5 +185,32 @@ describe('FileService executor failures', () => {
 
     expect(findById).not.toHaveBeenCalled();
     expect(requestExecutor).toHaveBeenCalledOnce();
+  });
+
+  it('requires filesystem write access for browser edits when branch RBAC is enabled', async () => {
+    const resolveUserAccess = vi.fn().mockResolvedValue({ fs_access: 'read' });
+    const service = new FileService(
+      {
+        findById: vi.fn().mockResolvedValue({ branch_id: 'branch-1' }),
+        resolveUserAccess,
+      } as never,
+      { run: vi.fn() } as never,
+      createApp({ execution: { branch_rbac: true, allow_superadmin: false } })
+    );
+
+    await expect(
+      runWithTenantContext('tenant-a', () =>
+        service.patch(
+          'README.md',
+          { content: '# Updated', expectedLastModified: '2026-07-30T00:00:00.000Z' },
+          {
+            provider: 'rest',
+            query: { branch_id: 'branch-1' },
+            user: { user_id: 'user-1', email: 'member@example.com', role: 'member' },
+          }
+        )
+      )
+    ).rejects.toThrow(/write filesystem access/i);
+    expect(requestExecutor).not.toHaveBeenCalled();
   });
 });
