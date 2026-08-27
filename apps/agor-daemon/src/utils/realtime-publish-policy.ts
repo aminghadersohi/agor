@@ -427,6 +427,7 @@ export const REALTIME_PUBLISH_POLICY = {
   'repos/:id/branches/:name': { audience: 'none', why: NO_CONSUMER },
   'repos/:id/import-agor-yml': { audience: 'none', why: NO_CONSUMER },
   'repos/:id/export-agor-yml': { audience: 'none', why: NO_CONSUMER },
+  'repos/:id/import-launch-json': { audience: 'none', why: NO_CONSUMER },
   'artifacts/:id/payload': { audience: 'none', why: `${NO_CONSUMER} Lands as artifacts.patched.` },
   'artifacts/:id/console': {
     audience: 'none',
