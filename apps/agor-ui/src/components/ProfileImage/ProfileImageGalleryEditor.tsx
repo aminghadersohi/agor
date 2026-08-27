@@ -21,6 +21,7 @@ import {
   theme,
   Upload,
 } from 'antd';
+import type { RcFile } from 'antd/es/upload/interface';
 import { useCallback, useEffect, useState } from 'react';
 import { ProfileImagePreview } from './ProfileImagePreview';
 import {
@@ -31,6 +32,16 @@ import {
   uploadProfileImage,
 } from './profileImageApi';
 import { publishProfileImageGallery } from './useProfileImageGallery';
+
+const ACCEPTED_PROFILE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const MAX_PROFILE_IMAGE_UPLOAD_BYTES = 5 * 1024 * 1024;
+
+function validateProfileImageFile(file: File): string | undefined {
+  if (!ACCEPTED_PROFILE_IMAGE_TYPES.has(file.type)) return 'Use a JPEG, PNG, or WebP image';
+  if (file.size === 0) return 'Choose a non-empty image';
+  if (file.size > MAX_PROFILE_IMAGE_UPLOAD_BYTES) return 'Images must be 5 MB or smaller';
+  return undefined;
+}
 
 interface ProfileImageGalleryEditorProps {
   subject: ProfileImageSubject;
@@ -55,6 +66,7 @@ export function ProfileImageGalleryEditor({
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string>();
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState({ completed: 0, total: 0 });
   const [error, setError] = useState<string>();
 
   const refresh = useCallback(async () => {
@@ -76,18 +88,63 @@ export function ProfileImageGalleryEditor({
     void refresh();
   }, [refresh]);
 
-  const handleUpload = async (file: File) => {
+  const handleUploadBatch = async (selectedFiles: RcFile[]) => {
+    const availableSlots = Math.max(0, maxImages - images.length);
+    const files = selectedFiles.slice(0, availableSlots);
+    if (selectedFiles.length > availableSlots) {
+      message.warning(
+        availableSlots === 0
+          ? `This gallery already has ${maxImages} images`
+          : `Only the first ${availableSlots} selected image${availableSlots === 1 ? '' : 's'} can fit`
+      );
+    }
+
+    const validFiles: RcFile[] = [];
+    for (const file of files) {
+      const validationError = validateProfileImageFile(file);
+      if (validationError) message.error(`${file.name}: ${validationError}`);
+      else validFiles.push(file);
+    }
+    if (validFiles.length === 0) return;
+
     setUploading(true);
+    setUploadProgress({ completed: 0, total: validFiles.length });
+    let uploaded = 0;
+    let failed = 0;
+    let createdPrimary: ProfileImageID | undefined;
     try {
-      const created = await uploadProfileImage(subject, file);
-      await refresh();
-      if (created.is_primary) onPrimaryChange?.(created.image_id);
-      message.success(created.is_primary ? 'Main image added' : 'Image added to gallery');
-    } catch (nextError) {
-      message.error(nextError instanceof Error ? nextError.message : 'Upload failed');
+      // Keep uploads sequential: the server enforces the gallery cap atomically,
+      // and a batch should preserve the order the user selected.
+      for (const file of validFiles) {
+        try {
+          const created = await uploadProfileImage(subject, file);
+          uploaded += 1;
+          if (created.is_primary) createdPrimary = created.image_id;
+        } catch (nextError) {
+          failed += 1;
+          message.error(
+            `${file.name}: ${nextError instanceof Error ? nextError.message : 'Upload failed'}`
+          );
+        } finally {
+          setUploadProgress((current) => ({ ...current, completed: current.completed + 1 }));
+        }
+      }
+      if (uploaded > 0) {
+        await refresh();
+        if (createdPrimary) onPrimaryChange?.(createdPrimary);
+        message.success(`${uploaded} image${uploaded === 1 ? '' : 's'} added`);
+      }
+      if (failed > 0 && uploaded > 0) {
+        message.warning(`${failed} image${failed === 1 ? '' : 's'} could not be uploaded`);
+      }
     } finally {
       setUploading(false);
+      setUploadProgress({ completed: 0, total: 0 });
     }
+  };
+
+  const queueUploadBatch = (file: RcFile, fileList: RcFile[]) => {
+    if (file.uid === fileList[0]?.uid) void handleUploadBatch(fileList);
     return Upload.LIST_IGNORE;
   };
 
@@ -127,18 +184,21 @@ export function ProfileImageGalleryEditor({
         <div style={{ minWidth: 0 }}>
           <Typography.Text strong>{label}</Typography.Text>
           <Typography.Text type="secondary" style={{ display: 'block' }}>
-            Pick one main image and keep up to {maxImages} alternatives.
+            Pick one main image and keep up to {maxImages} total. You can add several at once.
           </Typography.Text>
         </div>
         {canEdit && (
           <Upload
             accept="image/jpeg,image/png,image/webp"
+            multiple
             showUploadList={false}
-            beforeUpload={handleUpload}
+            beforeUpload={queueUploadBatch}
             disabled={uploading || images.length >= maxImages}
           >
             <Button icon={<UploadOutlined />} loading={uploading}>
-              Add image
+              {uploading
+                ? `Uploading ${uploadProgress.completed}/${uploadProgress.total}`
+                : 'Add images'}
             </Button>
           </Upload>
         )}
