@@ -8,7 +8,7 @@ import type {
   User,
 } from '@agor-live/client';
 import { getTeammateConfig, isTeammate } from '@agor-live/client';
-import { LeftOutlined } from '@ant-design/icons';
+import { BgColorsOutlined, LeftOutlined } from '@ant-design/icons';
 import {
   Alert,
   Badge,
@@ -43,6 +43,7 @@ import type { BranchModalTab } from '../BranchModal';
 import { CommentsPanel } from '../CommentsPanel';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 import { TeammateIdentityAvatar } from '../TeammateIdentityAvatar';
+import { TeammateStageModal } from '../TeammateStage';
 
 export type BoardTeammatePanelTab = 'teammate' | 'all-sessions' | 'all-branches' | 'comments';
 
@@ -307,6 +308,7 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
   }, [branchById, primaryTeammateBranch, primaryTeammateInaccessible, repoById]);
   const [selectedTeammateId, setSelectedTeammateId] = useState<string | undefined>();
   const [assigningTeammate, setAssigningTeammate] = useState(false);
+  const [stageOpen, setStageOpen] = useState(false);
 
   useEffect(() => {
     if (
@@ -386,7 +388,7 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
                   <TeammateIdentityAvatar branch={primaryTeammateBranch} size={36} />
                 )}
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
                 <Typography.Title
                   level={4}
                   style={{ margin: 0, fontWeight: 600 }}
@@ -400,6 +402,14 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
                   Primary teammate
                 </Typography.Text>
               </div>
+              <Tooltip title="View 3D identity stage">
+                <Button
+                  type="text"
+                  icon={<BgColorsOutlined />}
+                  aria-label="View 3D identity stage"
+                  onClick={() => setStageOpen(true)}
+                />
+              </Tooltip>
             </div>
 
             <BranchMetadataRow
@@ -459,6 +469,11 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
               </Space>
             </div>
           )}
+          <TeammateStageModal
+            branch={primaryTeammateBranch}
+            open={stageOpen}
+            onClose={() => setStageOpen(false)}
+          />
         </div>
       );
     }
