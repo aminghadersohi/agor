@@ -81,7 +81,7 @@ describe('BoardTeammatePanel teammate tab', () => {
     );
   });
 
-  it('switches between small, medium, and large portraits and remembers the choice', () => {
+  it('cycles portrait sizes from one compact control and remembers the choice', () => {
     const { unmount } = render(
       <AntApp>
         <BoardTeammatePanel
@@ -98,10 +98,15 @@ describe('BoardTeammatePanel teammate tab', () => {
     );
 
     expect(screen.getByTestId('teammate-portrait')).toHaveAttribute('data-primary-size', '300');
-    fireEvent.click(screen.getByText('Medium'));
-    expect(screen.getByTestId('teammate-portrait')).toHaveAttribute('data-primary-size', '200');
-    fireEvent.click(screen.getByText('Small'));
+    const sizeControl = screen.getByRole('button', {
+      name: 'Portrait size: large. Click for small.',
+    });
+    fireEvent.click(sizeControl);
     expect(screen.getByTestId('teammate-portrait')).toHaveAttribute('data-primary-size', '112');
+    expect(sizeControl).toHaveAccessibleName('Portrait size: small. Click for medium.');
+    fireEvent.click(sizeControl);
+    expect(screen.getByTestId('teammate-portrait')).toHaveAttribute('data-primary-size', '200');
+    expect(sizeControl).toHaveAccessibleName('Portrait size: medium. Click for large.');
     unmount();
 
     render(
@@ -118,6 +123,7 @@ describe('BoardTeammatePanel teammate tab', () => {
         />
       </AntApp>
     );
-    expect(screen.getByTestId('teammate-portrait')).toHaveAttribute('data-primary-size', '112');
+    expect(screen.getByTestId('teammate-portrait')).toHaveAttribute('data-primary-size', '200');
+    expect(screen.getByRole('button', { name: /Portrait size: medium/ })).toBeInTheDocument();
   });
 });
