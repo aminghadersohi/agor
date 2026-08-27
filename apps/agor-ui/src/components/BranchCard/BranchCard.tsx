@@ -15,7 +15,6 @@ import {
   EditOutlined,
   PushpinFilled,
   ReloadOutlined,
-  RobotOutlined,
 } from '@ant-design/icons';
 import { App, Button, Card, Space, Spin, Tooltip, Typography, theme } from 'antd';
 import { AggregationColor } from 'antd/es/color-picker/color';
