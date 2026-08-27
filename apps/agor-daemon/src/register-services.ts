@@ -4441,7 +4441,7 @@ export async function registerMCPServices(
   // --------------------------------------------------------------------------
   app.use('/mcp-servers/oauth-auth-headers', {
     async create(
-      data: { mcp_server_ids: string[] },
+      data: { mcp_server_ids: string[]; force_refresh?: boolean },
       params?: AuthenticatedParams
     ): Promise<{
       headers: Record<string, { authorization?: string; error?: string }>;
@@ -4452,6 +4452,7 @@ export async function registerMCPServices(
       }
 
       const serverIds = Array.isArray(data?.mcp_server_ids) ? data.mcp_server_ids : [];
+      const forceRefresh = data?.force_refresh === true;
       const headers: Record<string, { authorization?: string; error?: string }> = {};
 
       if (serverIds.length === 0) {
@@ -4604,7 +4605,7 @@ export async function registerMCPServices(
               return;
             }
             if (row.refresh_status === 'ambiguous') {
-              headers[serverId] = { error: 'needs_reauth' };
+              headers[serverId] = { error: 'token_refresh_failed' };
               return;
             }
 
@@ -4629,7 +4630,8 @@ export async function registerMCPServices(
              */
             const refreshWouldRun =
               row.refresh_status === 'refreshing' ||
-              (needsRefresh(row.oauth_token_expires_at) && !!row.oauth_refresh_token);
+              ((forceRefresh || needsRefresh(row.oauth_token_expires_at)) &&
+                !!row.oauth_refresh_token);
             if (refreshWouldRun && mode === 'per_user' && !(await isPerUserGrantOwnerEntitled())) {
               console.warn('[OAuth AuthHeaders] refresh_refused category=grant_owner_role');
               headers[serverId] = { error: 'needs_reauth' };
@@ -4654,13 +4656,21 @@ export async function registerMCPServices(
                 headers[serverId] = { authorization: `Bearer ${observed}` };
               } catch (refreshErr) {
                 if (refreshErr instanceof OAuthRefreshAuthorityCancelledError) throw refreshErr;
-                headers[serverId] = { error: 'needs_reauth' };
+                headers[serverId] = {
+                  error:
+                    refreshErr instanceof InvalidGrantError
+                      ? 'needs_reauth'
+                      : 'token_refresh_failed',
+                };
               }
               return;
             }
 
             let accessToken = row.oauth_access_token;
-            if (needsRefresh(row.oauth_token_expires_at) && row.oauth_refresh_token) {
+            if (
+              (forceRefresh || needsRefresh(row.oauth_token_expires_at)) &&
+              row.oauth_refresh_token
+            ) {
               try {
                 accessToken = await refreshAndPersistToken({
                   db,
@@ -4683,10 +4693,13 @@ export async function registerMCPServices(
                 }
                 // A failed/ambiguous rotating-token exchange must not fall back
                 // to a stale token that may already be invalid.
-                console.warn('[OAuth AuthHeaders] refresh_failed category=reauth_or_retry');
-                headers[serverId] = { error: 'needs_reauth' };
+                console.warn('[OAuth AuthHeaders] refresh_failed category=retryable');
+                headers[serverId] = { error: 'token_refresh_failed' };
                 return;
               }
+            } else if (forceRefresh) {
+              headers[serverId] = { error: 'needs_reauth' };
+              return;
             } else if (
               !accessToken ||
               (row.oauth_token_expires_at && row.oauth_token_expires_at <= new Date())
