@@ -4,8 +4,8 @@ import type { ProfileImageSubject } from './profileImageApi';
 import { useProfileImageGallery } from './useProfileImageGallery';
 import { useProfileImageUrl } from './useProfileImageUrl';
 
-/** Long enough to feel like a changing portrait rather than an animated badge. */
-export const PROFILE_IMAGE_CYCLE_INTERVAL_MS = 8_000;
+/** Slow, ambient rotation so identity photos never feel like animated badges. */
+export const PROFILE_IMAGE_CYCLE_INTERVAL_MS = 30_000;
 
 export function orderedProfileImageIds(
   images: ProfileImage[],

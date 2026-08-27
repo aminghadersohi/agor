@@ -77,10 +77,13 @@ jobs:
       # build and smoke test useful without authenticating or publishing.
       - name: Log in to Docker Hub
         if: >-
-          github.event_name != 'pull_request' ||
+          github.repository_owner == 'preset-io' &&
           (
-            github.event.pull_request.head.repo.full_name == github.repository &&
-            github.event.pull_request.user.login != 'dependabot[bot]'
+            github.event_name != 'pull_request' ||
+            (
+              github.event.pull_request.head.repo.full_name == github.repository &&
+              github.event.pull_request.user.login != 'dependabot[bot]'
+            )
           )
         uses: docker/login-action@v4.6.0
         with:
@@ -149,10 +152,13 @@ jobs:
       # stop here after validating the same production image locally.
       - name: Push image
         if: >-
-          github.event_name != 'pull_request' ||
+          github.repository_owner == 'preset-io' &&
           (
-            github.event.pull_request.head.repo.full_name == github.repository &&
-            github.event.pull_request.user.login != 'dependabot[bot]'
+            github.event_name != 'pull_request' ||
+            (
+              github.event.pull_request.head.repo.full_name == github.repository &&
+              github.event.pull_request.user.login != 'dependabot[bot]'
+            )
           )
         uses: docker/build-push-action@v6
         with:
@@ -174,7 +180,10 @@ jobs:
   promote-main:
     name: Promote main image
     needs: build
-    if: github.event_name == 'workflow_run' && needs.build.result == 'success'
+    if: >-
+      github.repository_owner == 'preset-io' &&
+      github.event_name == 'workflow_run' &&
+      needs.build.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:
