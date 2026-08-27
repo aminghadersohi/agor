@@ -371,21 +371,24 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
               borderBottom: `1px solid ${token.colorBorderSecondary}`,
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, minWidth: 0 }}>
               <div
                 style={{
-                  width: 36,
-                  height: 36,
+                  width: 72,
+                  height: 72,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   flexShrink: 0,
+                  overflow: 'hidden',
+                  borderRadius: token.borderRadiusLG,
+                  border: `1px solid ${token.colorBorderSecondary}`,
                 }}
               >
                 {isCreating ? (
                   <Spin />
                 ) : (
-                  <TeammateIdentityAvatar branch={primaryTeammateBranch} size={36} />
+                  <TeammateIdentityAvatar branch={primaryTeammateBranch} size={72} shape="square" />
                 )}
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>

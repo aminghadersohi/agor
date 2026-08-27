@@ -184,6 +184,12 @@
       "import": "./dist/utils/safe-outbound-fetch.js",
       "require": "./dist/utils/safe-outbound-fetch.cjs"
     },
+    "./utils/pinned-fetch": {
+      "source": "./src/utils/pinned-fetch.ts",
+      "types": "./dist/utils/pinned-fetch.d.ts",
+      "import": "./dist/utils/pinned-fetch.js",
+      "require": "./dist/utils/pinned-fetch.cjs"
+    },
     "./utils/permission-mode-mapper": {
       "source": "./src/utils/permission-mode-mapper.ts",
       "types": "./dist/utils/permission-mode-mapper.d.ts",

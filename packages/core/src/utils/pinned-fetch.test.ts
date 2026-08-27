@@ -192,6 +192,25 @@ describe('createPinnedFetch', () => {
   const pinned = (overrides: Partial<Parameters<typeof createPinnedFetch>[0]> = {}) =>
     createPinnedFetch({ timeoutMs: 3_000, maxBytes: 1_000, lookup: loopbackLookup, ...overrides });
 
+  it('preserves binary response bytes', async () => {
+    const bytes = Buffer.from([0x67, 0x6c, 0x54, 0x46, 0x00, 0xff, 0x80]);
+    const server = http.createServer((_request, response) => {
+      response.setHeader('Content-Type', 'model/gltf-binary');
+      response.end(bytes);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('test server did not bind');
+    try {
+      const response = await pinned()(`http://public.test:${address.port}/model.glb`);
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      );
+    }
+  });
+
   it('sends the request and returns status, headers, and body', async () => {
     const response = await pinned()(`${origin}/`, {
       method: 'POST',

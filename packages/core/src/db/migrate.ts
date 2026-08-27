@@ -127,6 +127,16 @@ const PROFILE_IMAGE_GALLERIES_MIGRATION_POLICY: MigrationImpactPolicy = {
   }),
 };
 
+const PROFILE_IDENTITY_MODELS_MIGRATION_POLICY: MigrationImpactPolicy = {
+  requiresOfflineCutover: false,
+  impact: defineMigrationImpact({
+    classification: 'schema',
+    userAction: 'none',
+    rollbackCompatibility: 'compatible',
+    summary: 'Adds optional private 3D identity-model state and GLB storage to profile images.',
+  }),
+};
+
 export function createMigrationImpactRegistry(
   entries: ReadonlyArray<readonly [string, MigrationImpactPolicy]>
 ): {
@@ -145,6 +155,8 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
   ['0040_migrate_queued_messages', QUEUED_MESSAGES_MIGRATION_POLICY],
   ['0095_profile_image_galleries', PROFILE_IMAGE_GALLERIES_MIGRATION_POLICY],
   ['0098_profile_image_galleries', PROFILE_IMAGE_GALLERIES_MIGRATION_POLICY],
+  ['0096_profile_identity_models', PROFILE_IDENTITY_MODELS_MIGRATION_POLICY],
+  ['0099_profile_identity_models', PROFILE_IDENTITY_MODELS_MIGRATION_POLICY],
   ...[
     '0074_knowledge_embedding_claims',
     '0078_mcp_oauth_pending_flows',

@@ -42,6 +42,28 @@ export function publishProfileImageGallery(
   );
 }
 
+/** Update one cached image after a model-generation status transition. */
+export function publishProfileImageMetadata(image: ProfileImage): void {
+  for (const [key, result] of galleryCache) {
+    const index = result.images.findIndex((candidate) => candidate.image_id === image.image_id);
+    if (index < 0) continue;
+    const images = result.images.slice();
+    images[index] = image;
+    const next = { ...result, images };
+    galleryCache.set(key, next);
+    const separator = key.indexOf(':');
+    window.dispatchEvent(
+      new CustomEvent('agor:profile-images-changed', {
+        detail: {
+          type: key.slice(0, separator),
+          id: key.slice(separator + 1),
+          result: next,
+        },
+      })
+    );
+  }
+}
+
 /** Shared, authenticated profile-gallery metadata with cross-surface invalidation. */
 export function useProfileImageGallery(
   subject: ProfileImageSubject | null | undefined,

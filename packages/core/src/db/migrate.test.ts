@@ -107,6 +107,29 @@ describe('migration status introspection', () => {
     expect(sqliteMigration?.impact).toBe(postgresqlMigration?.impact);
   });
 
+  it('describes private identity-model columns as an online additive migration', () => {
+    const postgres = introspectMigrationStatus('postgresql', {
+      applied: ['0095_profile_image_galleries'],
+      pending: ['0096_profile_identity_models'],
+      dbAheadOfBinary: false,
+    }).pendingMigrations[0];
+    const sqlite = introspectMigrationStatus('sqlite', {
+      applied: ['0098_profile_image_galleries'],
+      pending: ['0099_profile_identity_models'],
+      dbAheadOfBinary: false,
+    }).pendingMigrations[0];
+
+    expect(postgres).toMatchObject({
+      requiresOfflineCutover: false,
+      impact: {
+        classification: 'schema',
+        userAction: 'none',
+        rollbackCompatibility: 'compatible',
+      },
+    });
+    expect(sqlite?.impact).toBe(postgres?.impact);
+  });
+
   it('never requires offline acknowledgement for an existing SQLite database', () => {
     const report = introspectMigrationStatus('sqlite', {
       applied: ['0000_init'],

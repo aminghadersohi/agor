@@ -1,73 +1,75 @@
-// biome-ignore-all lint/plugin/noHardcodedColorLiteral: bounded WebGL lighting and procedural-texture palette cannot consume AntD tokens at the Three.js boundary
+// biome-ignore-all lint/plugin/noHardcodedColorLiteral: WebGL lights require numeric colors at the Three.js boundary
+
+import type { ProfileIdentityModel } from '@agor-live/client';
 import {
   PauseCircleOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons';
-import { Avatar, Button, Flex, Grid, Result, Space, Tag, Typography, theme } from 'antd';
+import {
+  Alert,
+  App,
+  Avatar,
+  Button,
+  Flex,
+  Grid,
+  Progress,
+  Space,
+  Spin,
+  Tag,
+  Typography,
+  theme,
+} from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Material, Texture } from 'three';
 
 interface TeammateStageProps {
   name: string;
   imageUrl?: string;
+  modelUrl?: string;
+  identityModel?: ProfileIdentityModel;
   emoji?: string;
   active?: boolean;
+  generating?: boolean;
+  generationError?: string;
+  onGenerate?: () => Promise<void>;
 }
 
-type StageStatus = 'loading' | 'ready' | 'fallback';
+type StageStatus = 'idle' | 'loading' | 'ready' | 'fallback';
 
 interface StageControls {
   reset: () => void;
   setAutoRotate: (enabled: boolean) => void;
 }
 
-function makeEmojiTexture(THREE: typeof import('three'), emoji: string) {
-  const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
-  const context = canvas.getContext('2d');
-  if (!context) return null;
-  const gradient = context.createRadialGradient(196, 148, 24, 256, 256, 330);
-  gradient.addColorStop(0, '#f6fbff');
-  gradient.addColorStop(0.45, '#a9d8d3');
-  gradient.addColorStop(1, '#183b43');
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, 512, 512);
-  context.font = '260px system-ui, sans-serif';
-  context.textAlign = 'center';
-  context.textBaseline = 'middle';
-  context.fillText(emoji || '🤖', 256, 278);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  return texture;
-}
-
-function opaqueCssColor(value: string): string {
-  const rgba = value.match(/^rgba?\(\s*([^,]+),\s*([^,]+),\s*([^,)]+)/i);
-  return rgba ? `rgb(${rgba[1]}, ${rgba[2]}, ${rgba[3]})` : value;
-}
-
-async function loadPortraitTexture(
-  THREE: typeof import('three'),
-  imageUrl: string | undefined,
-  emoji: string
-) {
-  if (!imageUrl) return makeEmojiTexture(THREE, emoji);
-  try {
-    const texture = await new THREE.TextureLoader().loadAsync(imageUrl);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.minFilter = THREE.LinearMipmapLinearFilter;
-    texture.magFilter = THREE.LinearFilter;
-    return texture;
-  } catch {
-    return makeEmojiTexture(THREE, emoji);
-  }
-}
-
-function TeammateStageFallback({ name, imageUrl, emoji }: TeammateStageProps) {
+function EmptyIdentityStage({
+  name,
+  imageUrl,
+  emoji,
+  identityModel,
+  generating,
+  onGenerate,
+}: TeammateStageProps) {
   const { token } = theme.useToken();
+  const { modal } = App.useApp();
+  const activeGeneration =
+    generating ||
+    (identityModel && ['submitting', 'pending', 'in_progress'].includes(identityModel.status));
+
+  const confirmGeneration = () => {
+    if (!onGenerate || !imageUrl) return;
+    modal.confirm({
+      title: 'Generate a real 3D identity model?',
+      content:
+        'Agor will send this selected profile photo to Meshy for image-to-3D generation. This uses your configured Meshy account and may consume provider credits. The completed GLB is copied back into private Agor storage.',
+      okText: 'Send photo and generate',
+      cancelText: 'Cancel',
+      onOk: onGenerate,
+    });
+  };
+
   return (
     <Flex
       vertical
@@ -77,71 +79,81 @@ function TeammateStageFallback({ name, imageUrl, emoji }: TeammateStageProps) {
       style={{
         position: 'absolute',
         inset: 0,
-        overflow: 'hidden',
+        padding: token.paddingXL,
+        textAlign: 'center',
         background: `radial-gradient(circle at 50% 28%, ${token.colorPrimaryBg}, ${token.colorBgContainer} 58%, ${token.colorBgBase})`,
       }}
     >
-      <div
-        style={{
-          position: 'absolute',
-          width: '46%',
-          aspectRatio: '1',
-          borderRadius: '50%',
-          background: token.colorPrimaryBg,
-          filter: 'blur(44px)',
-          opacity: 0.72,
-        }}
-      />
       <Avatar
-        alt={`${name} profile`}
+        alt={`${name} source profile`}
         src={imageUrl}
-        size={144}
+        size={180}
+        shape="square"
         style={{
-          fontSize: 74,
-          border: `5px solid ${token.colorBorderSecondary}`,
-          boxShadow: `0 20px 60px ${token.colorBgMask}`,
-          zIndex: 1,
+          fontSize: 82,
+          border: `1px solid ${token.colorBorderSecondary}`,
+          boxShadow: token.boxShadowSecondary,
         }}
       >
         {emoji || '🤖'}
       </Avatar>
-      <div
-        style={{
-          width: 220,
-          height: 60,
-          borderRadius: '50%',
-          background: `linear-gradient(180deg, ${token.colorFillSecondary}, ${token.colorBgElevated})`,
-          border: `1px solid ${token.colorBorderSecondary}`,
-          boxShadow: `0 28px 50px ${token.colorBgMask}`,
-          transform: 'perspective(400px) rotateX(62deg)',
-          zIndex: 0,
-        }}
-      />
-      <Typography.Title level={4} style={{ margin: 0, zIndex: 1 }}>
-        {name}
-      </Typography.Title>
-      <Typography.Text type="secondary" style={{ zIndex: 1, textAlign: 'center' }}>
-        Interactive 3D is unavailable in this browser. The private avatar still renders locally.
+      <Flex vertical gap={2} align="center">
+        <Typography.Title level={3} style={{ margin: 0 }}>
+          {name}
+        </Typography.Title>
+        <Typography.Text type="secondary">
+          {activeGeneration
+            ? 'Building a textured GLB from the selected photo'
+            : identityModel?.status === 'failed' || identityModel?.status === 'canceled'
+              ? identityModel.error_message || 'The last generation did not complete'
+              : 'No generated 3D model yet'}
+        </Typography.Text>
+      </Flex>
+      {activeGeneration && (
+        <Progress
+          percent={identityModel?.progress ?? 0}
+          status="active"
+          style={{ width: 'min(320px, 100%)' }}
+        />
+      )}
+      <Button
+        type="primary"
+        icon={<ThunderboltOutlined />}
+        loading={Boolean(activeGeneration)}
+        disabled={!imageUrl || !onGenerate || Boolean(activeGeneration)}
+        onClick={confirmGeneration}
+      >
+        {identityModel?.model_available ? 'Regenerate 3D model' : 'Generate 3D model'}
+      </Button>
+      <Typography.Text type="secondary" style={{ maxWidth: 470, fontSize: token.fontSizeSM }}>
+        Nothing is uploaded until you confirm. Rendering happens locally after Agor stores the
+        generated model.
       </Typography.Text>
     </Flex>
   );
 }
 
-/**
- * Lazy, asset-free WebGL teammate presentation. The only image texture comes
- * from Agor's authenticated profile-image object URL; it is never uploaded to
- * a rendering or model-generation service.
- */
-export function TeammateStage({ name, imageUrl, emoji = '🤖', active = true }: TeammateStageProps) {
+/** Real GLB model viewer for generated user and teammate identities. */
+export function TeammateStage({
+  name,
+  imageUrl,
+  modelUrl,
+  identityModel,
+  emoji = '🤖',
+  active = true,
+  generating = false,
+  generationError,
+  onGenerate,
+}: TeammateStageProps) {
   const { token } = theme.useToken();
   const screens = Grid.useBreakpoint();
   const compact = !screens.md;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const controlsRef = useRef<StageControls | undefined>(undefined);
-  const [status, setStatus] = useState<StageStatus>('loading');
+  const [status, setStatus] = useState<StageStatus>(modelUrl ? 'loading' : 'idle');
   const [autoRotate, setAutoRotate] = useState(true);
-  const autoRotateRef = useRef(autoRotate);
+  const autoRotateRef = useRef(true);
 
   const resetCamera = useCallback(() => controlsRef.current?.reset(), []);
   const toggleAutoRotate = useCallback(() => {
@@ -154,16 +166,18 @@ export function TeammateStage({ name, imageUrl, emoji = '🤖', active = true }:
   }, []);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || !modelUrl) {
+      setStatus('idle');
+      return;
+    }
     const canvas = canvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
     let disposed = false;
     let frame = 0;
-    let observer: ResizeObserver | undefined;
+    let resizeObserver: ResizeObserver | undefined;
     let visibilityObserver: IntersectionObserver | undefined;
-    let stageVisible = true;
-    const cleanup: Array<() => void> = [];
+    let visible = true;
 
     const initialize = async () => {
       const contextOptions = {
@@ -174,54 +188,45 @@ export function TeammateStage({ name, imageUrl, emoji = '🤖', active = true }:
       const context = (canvas.getContext('webgl2', contextOptions) ??
         canvas.getContext('webgl', contextOptions)) as WebGLRenderingContext | null;
       if (!context) {
-        if (!disposed) setStatus('fallback');
-        return;
+        setStatus('fallback');
+        return undefined;
       }
-
-      const [THREE, { OrbitControls }] = await Promise.all([
+      const [THREE, { OrbitControls }, { GLTFLoader }] = await Promise.all([
         import('three'),
         import('three/examples/jsm/controls/OrbitControls.js'),
+        import('three/examples/jsm/loaders/GLTFLoader.js'),
       ]);
-      if (disposed) return;
+      if (disposed) return undefined;
 
-      const renderer = new THREE.WebGLRenderer({
-        canvas,
-        context,
-        alpha: true,
-        antialias: true,
-        powerPreference: 'high-performance',
-      });
+      const renderer = new THREE.WebGLRenderer({ canvas, context, alpha: true, antialias: true });
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.08;
       renderer.shadowMap.enabled = true;
-      renderer.shadowMap.type = THREE.PCFShadowMap;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(token.colorBgBase);
-      scene.fog = new THREE.FogExp2(token.colorBgBase, 0.055);
-
-      const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 60);
-      const homePosition = new THREE.Vector3(0, 2.35, 8.6);
+      scene.fog = new THREE.FogExp2(token.colorBgBase, 0.038);
+      const camera = new THREE.PerspectiveCamera(32, 1, 0.05, 80);
+      const homePosition = new THREE.Vector3(0, 2.45, 8.2);
       camera.position.copy(homePosition);
 
       const orbit = new OrbitControls(camera, canvas);
-      orbit.target.set(0, 2.1, 0);
+      orbit.target.set(0, 2, 0);
       orbit.enableDamping = true;
       orbit.dampingFactor = 0.06;
       orbit.enablePan = false;
-      orbit.minDistance = 5.8;
-      orbit.maxDistance = 11;
-      orbit.minPolarAngle = Math.PI * 0.25;
-      orbit.maxPolarAngle = Math.PI * 0.58;
+      orbit.minDistance = 3.6;
+      orbit.maxDistance = 13;
       orbit.autoRotate =
         autoRotateRef.current && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      orbit.autoRotateSpeed = 0.55;
+      orbit.autoRotateSpeed = 0.7;
       controlsRef.current = {
         reset: () => {
           camera.position.copy(homePosition);
-          orbit.target.set(0, 2.1, 0);
+          orbit.target.set(0, 2, 0);
           orbit.update();
         },
         setAutoRotate: (enabled) => {
@@ -230,227 +235,146 @@ export function TeammateStage({ name, imageUrl, emoji = '🤖', active = true }:
         },
       };
 
-      const world = new THREE.Group();
-      scene.add(world);
-
       const floor = new THREE.Mesh(
-        new THREE.CircleGeometry(7.5, 96),
+        new THREE.CircleGeometry(7.2, 96),
         new THREE.MeshStandardMaterial({
           color: new THREE.Color(token.colorBgContainer),
-          roughness: 0.72,
+          roughness: 0.76,
           metalness: 0.12,
         })
       );
       floor.rotation.x = -Math.PI / 2;
-      floor.position.y = -0.55;
       floor.receiveShadow = true;
-      world.add(floor);
+      scene.add(floor);
+      const podium = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.7, 1.92, 0.28, 96),
+        new THREE.MeshPhysicalMaterial({
+          color: new THREE.Color(token.colorBgElevated),
+          roughness: 0.24,
+          metalness: 0.72,
+          clearcoat: 0.6,
+        })
+      );
+      podium.position.y = 0.14;
+      podium.receiveShadow = true;
+      podium.castShadow = true;
+      scene.add(podium);
 
-      const metal = new THREE.MeshPhysicalMaterial({
-        color: new THREE.Color(opaqueCssColor(token.colorTextSecondary)),
-        roughness: 0.2,
-        metalness: 0.88,
-        clearcoat: 0.75,
-        clearcoatRoughness: 0.18,
+      const gltf = await new GLTFLoader().loadAsync(modelUrl);
+      if (disposed) return undefined;
+      const model = gltf.scene;
+      model.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return;
+        object.castShadow = true;
+        object.receiveShadow = true;
       });
-      const darkMetal = new THREE.MeshPhysicalMaterial({
-        color: new THREE.Color(opaqueCssColor(token.colorBgElevated)),
-        roughness: 0.28,
-        metalness: 0.72,
-        clearcoat: 0.55,
-      });
-      const accent = new THREE.MeshStandardMaterial({
-        color: new THREE.Color(token.colorPrimary),
-        emissive: new THREE.Color(token.colorPrimary),
-        emissiveIntensity: 1.2,
-        roughness: 0.3,
-        metalness: 0.35,
-      });
-
-      const base = new THREE.Mesh(new THREE.CylinderGeometry(1.82, 2.08, 0.34, 96), darkMetal);
-      base.position.y = -0.35;
-      base.castShadow = true;
-      base.receiveShadow = true;
-      world.add(base);
-      const plinth = new THREE.Mesh(new THREE.CylinderGeometry(1.56, 1.74, 0.55, 96), metal);
-      plinth.position.y = 0.06;
-      plinth.castShadow = true;
-      plinth.receiveShadow = true;
-      world.add(plinth);
-      const lightRing = new THREE.Mesh(new THREE.TorusGeometry(1.64, 0.035, 16, 96), accent);
-      lightRing.rotation.x = Math.PI / 2;
-      lightRing.position.y = 0.31;
-      world.add(lightRing);
-
-      const portrait = new THREE.Group();
-      portrait.position.y = 0.24;
-      world.add(portrait);
-
-      const sculpt = new THREE.MeshPhysicalMaterial({
-        color: new THREE.Color(opaqueCssColor(token.colorTextTertiary)),
-        roughness: 0.38,
-        metalness: 0.5,
-        clearcoat: 0.5,
-        clearcoatRoughness: 0.24,
-      });
-      const shoulders = new THREE.Mesh(new THREE.SphereGeometry(1.25, 64, 40), sculpt);
-      shoulders.scale.set(1.42, 0.75, 0.68);
-      shoulders.position.y = 1.18;
-      shoulders.castShadow = true;
-      portrait.add(shoulders);
-      const chestCut = new THREE.Mesh(new THREE.CylinderGeometry(1.16, 1.42, 0.66, 64), sculpt);
-      chestCut.position.y = 0.72;
-      chestCut.castShadow = true;
-      portrait.add(chestCut);
-      const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.48, 0.62, 48), sculpt);
-      neck.position.y = 1.96;
-      neck.castShadow = true;
-      portrait.add(neck);
-      const head = new THREE.Mesh(new THREE.SphereGeometry(0.78, 64, 48), sculpt);
-      head.scale.set(0.88, 1.08, 0.82);
-      head.position.y = 2.72;
-      head.castShadow = true;
-      portrait.add(head);
-
-      const portraitTexture = await loadPortraitTexture(THREE, imageUrl, emoji);
-      if (disposed) {
-        portraitTexture?.dispose();
-        renderer.dispose();
-        orbit.dispose();
-        return;
+      const sourceBounds = new THREE.Box3().setFromObject(model);
+      const sourceSize = sourceBounds.getSize(new THREE.Vector3());
+      if (!Number.isFinite(sourceSize.y) || sourceSize.y <= 0) {
+        throw new Error('Generated model has no renderable bounds');
       }
-      const faceMaterial = new THREE.MeshPhysicalMaterial({
-        map: portraitTexture,
-        transparent: true,
-        roughness: 0.5,
-        clearcoat: 0.2,
-        side: THREE.DoubleSide,
-      });
-      const face = new THREE.Mesh(new THREE.CircleGeometry(0.59, 96), faceMaterial);
-      face.position.set(0, 2.73, 0.69);
-      portrait.add(face);
-      const portraitRing = new THREE.Mesh(new THREE.TorusGeometry(0.63, 0.025, 14, 96), accent);
-      portraitRing.position.set(0, 2.73, 0.7);
-      portrait.add(portraitRing);
+      const scale = 4 / Math.max(sourceSize.y, sourceSize.x, sourceSize.z);
+      model.scale.setScalar(scale);
+      const bounds = new THREE.Box3().setFromObject(model);
+      const center = bounds.getCenter(new THREE.Vector3());
+      model.position.x -= center.x;
+      model.position.z -= center.z;
+      model.position.y += 0.3 - bounds.min.y;
+      scene.add(model);
 
-      scene.add(new THREE.HemisphereLight(0xbfe8ff, 0x12151f, 1.4));
-      const keyLight = new THREE.SpotLight(0xd9fbff, 92, 24, Math.PI / 7, 0.55, 1.35);
-      keyLight.position.set(-4.8, 8.5, 5.6);
-      keyLight.target.position.set(0, 1.7, 0);
-      keyLight.castShadow = true;
-      keyLight.shadow.mapSize.set(1024, 1024);
-      scene.add(keyLight, keyLight.target);
-      const rimLight = new THREE.SpotLight(0x8b7cff, 118, 20, Math.PI / 6, 0.62, 1.4);
-      rimLight.position.set(5.5, 5.6, -4.2);
-      rimLight.target.position.set(0, 2.2, 0);
-      scene.add(rimLight, rimLight.target);
-      const fillLight = new THREE.PointLight(0x55d8c8, 34, 12, 1.6);
-      fillLight.position.set(-3.2, 1.4, 3.2);
-      scene.add(fillLight);
-
-      const particles = new Float32Array(90 * 3);
-      for (let index = 0; index < 90; index += 1) {
-        const angle = index * 2.399963;
-        const radius = 2.7 + ((index * 37) % 100) / 32;
-        particles[index * 3] = Math.cos(angle) * radius;
-        particles[index * 3 + 1] = ((index * 53) % 100) / 14 - 0.5;
-        particles[index * 3 + 2] = Math.sin(angle) * radius;
-      }
-      const particleGeometry = new THREE.BufferGeometry();
-      particleGeometry.setAttribute('position', new THREE.BufferAttribute(particles, 3));
-      const particleMaterial = new THREE.PointsMaterial({
-        color: new THREE.Color(token.colorPrimary),
-        size: 0.025,
-        transparent: true,
-        opacity: 0.48,
-      });
-      const particleField = new THREE.Points(particleGeometry, particleMaterial);
-      scene.add(particleField);
+      scene.add(new THREE.HemisphereLight(0xccefff, 0x111522, 1.3));
+      const key = new THREE.SpotLight(0xe5fbff, 105, 25, Math.PI / 6, 0.48, 1.25);
+      key.position.set(-4.8, 8.5, 5.5);
+      key.target.position.set(0, 2, 0);
+      key.castShadow = true;
+      scene.add(key, key.target);
+      const rim = new THREE.SpotLight(0x8b7cff, 120, 22, Math.PI / 5, 0.58, 1.4);
+      rim.position.set(5.2, 5.8, -4.2);
+      rim.target.position.set(0, 2, 0);
+      scene.add(rim, rim.target);
+      const fill = new THREE.PointLight(0x55d8c8, 32, 14, 1.5);
+      fill.position.set(-3, 2, 3.5);
+      scene.add(fill);
 
       const resize = () => {
-        const width = Math.max(container.clientWidth, 1);
-        const height = Math.max(container.clientHeight, 1);
+        const width = Math.max(1, container.clientWidth);
+        const height = Math.max(1, container.clientHeight);
         camera.aspect = width / height;
         camera.updateProjectionMatrix();
         renderer.setSize(width, height, false);
       };
       resize();
-      observer = new ResizeObserver(resize);
-      observer.observe(container);
+      resizeObserver = new ResizeObserver(resize);
+      resizeObserver.observe(container);
       if ('IntersectionObserver' in window) {
         visibilityObserver = new IntersectionObserver(([entry]) => {
-          stageVisible = entry?.isIntersecting ?? true;
+          visible = entry?.isIntersecting ?? true;
         });
         visibilityObserver.observe(container);
       }
 
-      const render = (timestamp: number) => {
+      const render = () => {
         if (disposed) return;
         frame = requestAnimationFrame(render);
-        if (!stageVisible || document.hidden) return;
-        const elapsed = timestamp / 1_000;
-        if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-          portrait.position.y = 0.24 + Math.sin(elapsed * 0.72) * 0.025;
-          lightRing.rotation.z = elapsed * 0.055;
-          particleField.rotation.y = elapsed * 0.018;
-        }
+        if (!visible || document.hidden) return;
         orbit.update();
         renderer.render(scene, camera);
       };
       frame = requestAnimationFrame(render);
       setStatus('ready');
 
-      cleanup.push(() => {
+      return () => {
         cancelAnimationFrame(frame);
-        observer?.disconnect();
+        resizeObserver?.disconnect();
         visibilityObserver?.disconnect();
         controlsRef.current = undefined;
         orbit.dispose();
         scene.traverse((object) => {
-          if (!(object instanceof THREE.Mesh) && !(object instanceof THREE.Points)) return;
+          if (!(object instanceof THREE.Mesh)) return;
           object.geometry.dispose();
           const materials = Array.isArray(object.material) ? object.material : [object.material];
           for (const material of materials) {
-            const mappedMaterial = material as Material & { map?: Texture | null };
-            mappedMaterial.map?.dispose();
+            const maps = material as Material & Record<string, Texture | unknown>;
+            for (const key of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap']) {
+              const texture = maps[key];
+              if (texture && typeof (texture as Texture).dispose === 'function') {
+                (texture as Texture).dispose();
+              }
+            }
             material.dispose();
           }
         });
         renderer.dispose();
-      });
+      };
     };
 
     setStatus('loading');
-    void initialize().catch(() => {
-      if (!disposed) setStatus('fallback');
-    });
+    let cleanup: (() => void) | undefined;
+    void initialize()
+      .then((dispose) => {
+        cleanup = dispose;
+      })
+      .catch(() => {
+        if (!disposed) setStatus('fallback');
+      });
     return () => {
       disposed = true;
-      for (const dispose of cleanup) dispose();
+      cleanup?.();
     };
-  }, [
-    active,
-    emoji,
-    imageUrl,
-    token.colorBgBase,
-    token.colorBgContainer,
-    token.colorBgElevated,
-    token.colorPrimary,
-    token.colorTextSecondary,
-    token.colorTextTertiary,
-  ]);
+  }, [active, modelUrl, token.colorBgBase, token.colorBgContainer, token.colorBgElevated]);
 
   return (
     <Flex vertical gap={token.marginSM} style={{ width: '100%', minWidth: 0 }}>
+      {generationError && <Alert type="error" showIcon title={generationError} />}
       <div
         ref={containerRef}
         data-testid="teammate-stage-surface"
         style={{
           position: 'relative',
-          width: '100%',
           boxSizing: 'border-box',
-          minHeight: compact ? 410 : 500,
-          maxHeight: 620,
+          width: '100%',
+          minHeight: compact ? 430 : 520,
+          maxHeight: 650,
           aspectRatio: compact ? '4 / 5' : '16 / 10',
           overflow: 'hidden',
           borderRadius: token.borderRadiusLG,
@@ -461,37 +385,46 @@ export function TeammateStage({ name, imageUrl, emoji = '🤖', active = true }:
         <canvas
           ref={canvasRef}
           role="img"
-          aria-label={`Interactive 3D stage preview for ${name}`}
+          aria-label={`Interactive generated 3D model for ${name}`}
           style={{
-            display: status === 'fallback' ? 'none' : 'block',
+            display: modelUrl && status !== 'fallback' ? 'block' : 'none',
             width: '100%',
             height: '100%',
           }}
         />
-        {status === 'loading' && (
+        {modelUrl && status === 'loading' && (
           <Flex align="center" justify="center" style={{ position: 'absolute', inset: 0 }}>
-            <Result icon={<SafetyCertificateOutlined />} title="Preparing private 3D stage…" />
+            <Spin size="large" description="Loading generated model…" />
           </Flex>
         )}
-        {status === 'fallback' && (
-          <TeammateStageFallback name={name} imageUrl={imageUrl} emoji={emoji} />
+        {(!modelUrl || status === 'fallback') && (
+          <EmptyIdentityStage
+            name={name}
+            imageUrl={imageUrl}
+            emoji={emoji}
+            identityModel={identityModel}
+            generating={generating}
+            onGenerate={onGenerate}
+          />
         )}
-        <Flex
-          vertical
-          gap={2}
-          style={{
-            position: 'absolute',
-            insetInline: token.paddingLG,
-            bottom: token.paddingLG,
-            pointerEvents: 'none',
-            textShadow: `0 2px 14px ${token.colorBgBase}`,
-          }}
-        >
-          <Typography.Title level={compact ? 4 : 3} style={{ margin: 0 }}>
-            {name}
-          </Typography.Title>
-          <Typography.Text type="secondary">3D identity stage</Typography.Text>
-        </Flex>
+        {modelUrl && status === 'ready' && (
+          <Flex
+            vertical
+            gap={2}
+            style={{
+              position: 'absolute',
+              insetInline: token.paddingLG,
+              bottom: token.paddingLG,
+              pointerEvents: 'none',
+              textShadow: `0 2px 14px ${token.colorBgBase}`,
+            }}
+          >
+            <Typography.Title level={compact ? 4 : 3} style={{ margin: 0 }}>
+              {name}
+            </Typography.Title>
+            <Typography.Text type="secondary">Generated 3D identity</Typography.Text>
+          </Flex>
+        )}
       </div>
 
       <Flex justify="space-between" align="center" gap={token.marginSM} wrap>
@@ -508,12 +441,12 @@ export function TeammateStage({ name, imageUrl, emoji = '🤖', active = true }:
           </Button>
         </Space>
         <Tag icon={<SafetyCertificateOutlined />} color="success" style={{ marginInlineEnd: 0 }}>
-          Local rendering
+          Private Agor model
         </Tag>
       </Flex>
       <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-        Drag to orbit and scroll or pinch to zoom. The profile image stays inside this browser and
-        is used only as the portrait texture.
+        Drag to orbit and scroll or pinch to zoom. Agor renders the stored GLB locally in your
+        browser.
       </Typography.Text>
     </Flex>
   );
