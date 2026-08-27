@@ -30,7 +30,9 @@ async function renderVariant(input: Buffer, size: number): Promise<ProcessedImag
     .rotate()
     .resize(size, size, {
       fit: 'cover',
-      position: 'attention',
+      // Identity photos are commonly portrait-oriented; anchor square crops
+      // to the top so faces are preserved instead of trimming the head.
+      position: 'north',
       withoutEnlargement: true,
     })
     .webp({ quality: 84, effort: 4 })
