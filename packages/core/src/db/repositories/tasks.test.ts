@@ -15,7 +15,7 @@ import { BranchRepository } from './branches';
 import { MessagesRepository } from './messages';
 import { RepoRepository } from './repos';
 import { SessionRepository } from './sessions';
-import { TaskRepository } from './tasks';
+import { renderCoalescedSystemUpdatePrompt, TaskRepository } from './tasks';
 import { UsersRepository } from './users';
 
 /**
@@ -2771,6 +2771,148 @@ describe('TaskRepository.createPending', () => {
     expect(claim.outcome).toBe('claimed');
     expect(claim.task.queue_position).toBeUndefined();
     expect((await taskRepo.findById(queued.task_id))?.queue_position).toBeUndefined();
+  });
+
+  dbTest(
+    'coalesces only the compatible queued prefix and preserves durable lineage',
+    async ({ db }) => {
+      const taskRepo = new TaskRepository(db);
+      const sessionRepo = new SessionRepository(db);
+      const sessionId = await createSessionWithDeps(db);
+      await sessionRepo.update(sessionId, {
+        queue_config: { coalesce_system_updates: true, max_coalesced_updates: 8 },
+      });
+      const systemMetadata = {
+        queue_coalescing: { kind: 'callback' as const, group_key: 'session-system-updates' },
+      };
+      const first = await taskRepo.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          full_prompt: 'first callback',
+          metadata: systemMetadata,
+        })
+      );
+      const second = await taskRepo.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          full_prompt: 'second callback',
+          metadata: systemMetadata,
+        })
+      );
+      const human = await taskRepo.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          full_prompt: 'human prompt',
+        })
+      );
+      const later = await taskRepo.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          full_prompt: 'later callback',
+          metadata: systemMetadata,
+        })
+      );
+
+      const claim = await taskRepo.claimDispatchAndProjectSession(
+        first.task_id,
+        TaskStatus.QUEUED,
+        { status: TaskStatus.DISPATCHING }
+      );
+
+      expect(claim).toMatchObject({
+        outcome: 'claimed',
+        task: {
+          task_id: first.task_id,
+          status: TaskStatus.DISPATCHING,
+          metadata: {
+            queue_coalescing: {
+              item_count: 2,
+              coalesced_task_ids: [second.task_id],
+            },
+          },
+        },
+        coalesced_tasks: [
+          {
+            task_id: second.task_id,
+            status: TaskStatus.STOPPED,
+            metadata: {
+              queue_coalescing: { coalesced_into_task_id: first.task_id },
+            },
+          },
+        ],
+      });
+      expect(claim.task.full_prompt).toContain('first callback');
+      expect(claim.task.full_prompt).toContain('second callback');
+      await expect(taskRepo.findById(second.task_id)).resolves.toMatchObject({
+        status: TaskStatus.STOPPED,
+        metadata: { queue_coalescing: { coalesced_into_task_id: first.task_id } },
+      });
+      expect((await taskRepo.findQueued(sessionId)).map((task) => task.task_id)).toEqual([
+        human.task_id,
+        later.task_id,
+      ]);
+    }
+  );
+
+  dbTest('does not coalesce across task attribution boundaries', async ({ db }) => {
+    const taskRepo = new TaskRepository(db);
+    const sessionRepo = new SessionRepository(db);
+    const sessionId = await createSessionWithDeps(db);
+    await sessionRepo.update(sessionId, {
+      queue_config: { coalesce_system_updates: true, max_coalesced_updates: 8 },
+    });
+    const metadata = {
+      queue_coalescing: { kind: 'gateway' as const, group_key: 'session-system-updates' },
+    };
+    const first = await taskRepo.createPending({
+      ...createPendingInput({
+        session_id: sessionId,
+        status: TaskStatus.QUEUED,
+        full_prompt: 'first user update',
+        metadata,
+      }),
+      created_by: 'user-a',
+    });
+    const second = await taskRepo.createPending({
+      ...createPendingInput({
+        session_id: sessionId,
+        status: TaskStatus.QUEUED,
+        full_prompt: 'second user update',
+        metadata,
+      }),
+      created_by: 'user-b',
+    });
+
+    const claim = await taskRepo.claimDispatchAndProjectSession(first.task_id, TaskStatus.QUEUED, {
+      status: TaskStatus.DISPATCHING,
+    });
+
+    expect(claim.outcome).toBe('claimed');
+    expect(claim.coalesced_tasks).toBeUndefined();
+    await expect(taskRepo.findById(second.task_id)).resolves.toMatchObject({
+      status: TaskStatus.QUEUED,
+      queue_position: 2,
+    });
+  });
+
+  it('renders duplicate queued updates once with an explicit repetition count', () => {
+    const task = createTaskData({
+      task_id: generateId(),
+      full_prompt: 'same callback body',
+      status: TaskStatus.QUEUED,
+      metadata: {
+        queue_coalescing: { kind: 'callback', group_key: 'session-system-updates' },
+      },
+    }) as Task;
+    const rendered = renderCoalescedSystemUpdatePrompt([task, { ...task, task_id: generateId() }]);
+
+    expect(rendered.match(/same callback body/g)).toHaveLength(1);
+    expect(rendered).toContain('repeated 2 times');
+    expect(rendered).toContain('1 exact duplicate update(s) were collapsed');
   });
 
   dbTest(

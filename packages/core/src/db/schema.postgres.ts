@@ -180,6 +180,9 @@ export const sessions = pgTable(
         // Callback config (child/remote session completion notifications)
         callback_config?: Session['callback_config'];
 
+        // Busy-session queue behavior (opt-in system update coalescing)
+        queue_config?: Session['queue_config'];
+
         // Fork origin tracking (set to 'btw' for ephemeral btw forks)
         fork_origin?: 'btw';
 
