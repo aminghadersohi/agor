@@ -636,7 +636,13 @@ export const ArtifactNode = ({
               <ArtifactStaticPreview
                 files={sandpackInputs.files}
                 entry={payload.entry}
-                externalResources={sandpackOptions?.externalResources}
+                externalResources={
+                  Array.isArray(sandpackOptions?.externalResources)
+                    ? sandpackOptions.externalResources.filter(
+                        (resource): resource is string => typeof resource === 'string'
+                      )
+                    : undefined
+                }
                 title={`${payload.name} preview`}
                 onReady={() => setStaticReady(true)}
               />

@@ -354,7 +354,13 @@ export function ArtifactFullscreenPage({
               <ArtifactStaticPreview
                 files={sandpackInputs.files}
                 entry={payload.entry}
-                externalResources={sandpackOptions.externalResources}
+                externalResources={
+                  Array.isArray(sandpackOptions.externalResources)
+                    ? sandpackOptions.externalResources.filter(
+                        (resource): resource is string => typeof resource === 'string'
+                      )
+                    : undefined
+                }
                 title={`${title} preview`}
                 onReady={() => setStaticReady(true)}
               />
