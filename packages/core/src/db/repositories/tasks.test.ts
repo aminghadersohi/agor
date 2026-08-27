@@ -4,18 +4,29 @@
  * Tests for type-safe CRUD operations on tasks with short ID support.
  */
 
-import type { MessageID, Task, TaskID, TaskPendingDispatchStatus, UUID } from '@agor/core/types';
+import type {
+  MessageID,
+  Task,
+  TaskID,
+  TaskPendingDispatchStatus,
+  UserID,
+  UUID,
+} from '@agor/core/types';
 import { MessageRole, SessionStatus, TaskStatus } from '@agor/core/types';
 import { describe, expect, it, vi } from 'vitest';
 import { generateId, toShortId } from '../../lib/ids';
 import type { Database } from '../client';
-import { dbTest } from '../test-helpers';
+import { ownedDbTest as dbTest, setTestBranchUserRole } from '../test-helpers';
 import { AmbiguousIdError, EntityNotFoundError, RepositoryError } from './base';
 import { BranchRepository } from './branches';
 import { MessagesRepository } from './messages';
 import { RepoRepository } from './repos';
 import { SessionRepository } from './sessions';
-import { renderCoalescedSystemUpdatePrompt, TaskRepository } from './tasks';
+import {
+  MISSING_TASK_ACTOR_ERROR,
+  renderCoalescedSystemUpdatePrompt,
+  TaskRepository,
+} from './tasks';
 import { UsersRepository } from './users';
 
 /**
@@ -722,7 +733,7 @@ describe('TaskRepository.findAll', () => {
       permission_source: 'override',
       others_can: 'none',
     });
-    await branches.addOwner(visibleBranch.branch_id, viewerId);
+    await setTestBranchUserRole(db, visibleBranch.branch_id, viewerId as UserID, 'manager');
     const visibleSession = await sessions.create({
       session_id: generateId(),
       branch_id: visibleBranch.branch_id,
@@ -2575,6 +2586,7 @@ describe('TaskRepository edge cases', () => {
 function createPendingInput(overrides: {
   session_id: string;
   status: TaskPendingDispatchStatus;
+  created_by?: string;
   full_prompt?: string;
   metadata?: Parameters<TaskRepository['createPending']>[0]['metadata'];
 }): Parameters<TaskRepository['createPending']>[0] {
@@ -2583,7 +2595,7 @@ function createPendingInput(overrides: {
       TaskRepository['createPending']
     >[0]['session_id'],
     full_prompt: overrides.full_prompt ?? 'test prompt',
-    created_by: 'test-user',
+    created_by: overrides.created_by ?? 'test-user',
     status: overrides.status,
     metadata: overrides.metadata,
   };
@@ -2773,6 +2785,60 @@ describe('TaskRepository.createPending', () => {
     expect((await taskRepo.findById(queued.task_id))?.queue_position).toBeUndefined();
   });
 
+  dbTest('atomically fails a queued head whose immutable actor was deleted', async ({ db }) => {
+    const taskRepo = new TaskRepository(db);
+    const users = new UsersRepository(db);
+    const sessionId = await createSessionWithDeps(db);
+    const actor = await users.create({
+      email: `${generateId()}-queued-actor@example.com`,
+      role: 'member',
+    });
+    const queued = await taskRepo.createPending(
+      createPendingInput({
+        session_id: sessionId,
+        status: TaskStatus.QUEUED,
+        created_by: actor.user_id,
+      })
+    );
+    await users.delete(actor.user_id);
+
+    await expect(taskRepo.failQueuedTaskIfCreatorMissing(queued.task_id)).resolves.toMatchObject({
+      outcome: 'actor_missing',
+      task: {
+        status: TaskStatus.FAILED,
+        queue_position: undefined,
+        error_message: MISSING_TASK_ACTOR_ERROR,
+      },
+    });
+    await expect(
+      taskRepo.claimDispatchAndProjectSession(queued.task_id, TaskStatus.QUEUED, {
+        status: TaskStatus.DISPATCHING,
+      })
+    ).resolves.toMatchObject({ outcome: 'condition_changed', task: { status: TaskStatus.FAILED } });
+  });
+
+  dbTest('never overwrites a dispatch claim while checking a queue actor', async ({ db }) => {
+    const taskRepo = new TaskRepository(db);
+    const sessionId = await createSessionWithDeps(db);
+    const queued = await taskRepo.createPending(
+      createPendingInput({ session_id: sessionId, status: TaskStatus.QUEUED })
+    );
+    await expect(
+      taskRepo.claimDispatchAndProjectSession(queued.task_id, TaskStatus.QUEUED, {
+        status: TaskStatus.DISPATCHING,
+      })
+    ).resolves.toMatchObject({ outcome: 'claimed' });
+
+    await expect(taskRepo.failQueuedTaskIfCreatorMissing(queued.task_id)).resolves.toMatchObject({
+      outcome: 'condition_changed',
+      task: { status: TaskStatus.DISPATCHING },
+    });
+    await expect(taskRepo.findById(queued.task_id)).resolves.toMatchObject({
+      status: TaskStatus.DISPATCHING,
+      queue_position: undefined,
+    });
+  });
+
   dbTest(
     'coalesces only the compatible queued prefix and preserves durable lineage',
     async ({ db }) => {
@@ -2860,6 +2926,7 @@ describe('TaskRepository.createPending', () => {
 
   dbTest('does not coalesce across task attribution boundaries', async ({ db }) => {
     const taskRepo = new TaskRepository(db);
+    const users = new UsersRepository(db);
     const sessionRepo = new SessionRepository(db);
     const sessionId = await createSessionWithDeps(db);
     await sessionRepo.update(sessionId, {
@@ -2868,6 +2935,8 @@ describe('TaskRepository.createPending', () => {
     const metadata = {
       queue_coalescing: { kind: 'gateway' as const, group_key: 'session-system-updates' },
     };
+    await users.create({ user_id: 'user-a' as UserID, email: 'user-a@example.test' });
+    await users.create({ user_id: 'user-b' as UserID, email: 'user-b@example.test' });
     const first = await taskRepo.createPending({
       ...createPendingInput({
         session_id: sessionId,

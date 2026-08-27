@@ -85,28 +85,24 @@ describe('classifyRealtimeAuthorizationInvalidation', () => {
     expect(classify(path, 'create', data)).toBe('none');
   });
 
-  it.each(['branches/:id/owners', 'boards/:id/owners', 'group-memberships'])(
-    'distributes cache-only invalidation for additive grants through %s',
-    (path) => {
-      expect(classify(path, 'create')).toBe('cache');
-    }
-  );
+  it('evicts when group membership suppresses a potentially broader Others fallback', () => {
+    expect(classify('group-memberships', 'create')).toBe('evict');
+  });
 
   it.each([
-    ['branches', 'patch', { others_can: 'none' }],
-    ['branches', 'patch', { others_fs_access: 'none' }],
     ['branches', 'patch', { board_id: 'board-2' }],
+    ['branches', 'patch', { permission_binding: 'inherit' }],
     ['branches', 'remove', {}],
     ['boards', 'patch', { access_mode: 'private' }],
+    ['boards', 'patch', { archived: true }],
     ['boards', 'patch', { default_others_fs_access: 'read' }],
     ['boards', 'remove', {}],
     ['users', 'patch', { role: 'suspended' }],
     ['users', 'patch', { must_change_password: true }],
     ['users', 'update', { must_change_password: false }],
     ['users', 'remove', {}],
-    ['branches/:id/owners', 'remove', {}],
-    ['branches/:id/group-grants', 'create', { group_id: 'group-1', can: 'none' }],
-    ['boards/:id/group-grants', 'create', { group_id: 'group-1', can: 'none' }],
+    ['branches/:id/permissions', 'patch', {}],
+    ['boards/:id/permissions', 'patch', {}],
     ['group-memberships', 'remove', {}],
     ['groups', 'patch', { archived: true }],
   ] as const)('evicts stale sockets for revoking %s.%s', (path, method, data) => {
@@ -985,7 +981,7 @@ describe('registered external board-comment mutation boundary', () => {
 describe('registered board admin authority', () => {
   type RegisteredHook = (context: HookContext) => HookContext | Promise<HookContext>;
   type RegisteredHooks = {
-    before?: Partial<Record<'patch', RegisteredHook[]>>;
+    before?: Partial<Record<'find' | 'patch', RegisteredHook[]>>;
   };
 
   const captureBoardHooks = (allowSuperadmin: boolean): RegisteredHooks[] => {
@@ -1046,6 +1042,55 @@ describe('registered board admin authority', () => {
     }
 
     expect(context).toBeDefined();
+  });
+
+  it.each([
+    ['member', false],
+    ['admin', false],
+    ['superadmin', false],
+  ] as const)(
+    'scopes registered boards.find for %s when allowSuperadmin=%s',
+    async (role, allowSuperadmin) => {
+      const context = {
+        path: 'boards',
+        method: 'find',
+        params: {
+          provider: 'socketio',
+          user: { user_id: `${role}-1`, role },
+          query: { board_id: { $in: ['visible', 'private'] } },
+        },
+      } as HookContext;
+
+      for (const registration of captureBoardHooks(allowSuperadmin)) {
+        for (const hook of registration.before?.find ?? []) await hook(context);
+      }
+
+      expect(
+        (context.params as HookContext['params'] & { _agorSqlBoardAccessUserId?: string })
+          ._agorSqlBoardAccessUserId
+      ).toBe(`${role}-1`);
+    }
+  );
+
+  it('allows only the explicitly configured superadmin boards.find bypass', async () => {
+    const context = {
+      path: 'boards',
+      method: 'find',
+      params: {
+        provider: 'socketio',
+        user: { user_id: 'super-1', role: 'superadmin' },
+        query: {},
+      },
+    } as HookContext;
+
+    for (const registration of captureBoardHooks(true)) {
+      for (const hook of registration.before?.find ?? []) await hook(context);
+    }
+
+    expect(
+      (context.params as HookContext['params'] & { _agorSqlBoardAccessUserId?: string })
+        ._agorSqlBoardAccessUserId
+    ).toBeUndefined();
   });
 });
 
