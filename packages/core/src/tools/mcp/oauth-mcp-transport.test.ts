@@ -1093,6 +1093,50 @@ describe('startMCPOAuthFlow with prefetchedAuthServerMetadata', () => {
     expect(authUrl.searchParams.get('redirect_uri')).toBe('http://127.0.0.1:9999/oauth/callback');
   });
 
+  it.each(['https://gmailmcp.googleapis.com/mcp/v1', 'https://calendarmcp.googleapis.com/mcp/v1'])(
+    'requests a durable offline Google grant for %s',
+    async (resourceUri) => {
+      const ctx = await startMCPOAuthFlow('', 'configured-google-client', redirectUri, {
+        prefetchedAuthServerMetadata: {
+          issuer: 'https://accounts.google.com',
+          authorization_endpoint:
+            'https://accounts.google.com/o/oauth2/v2/auth?prompt=select_account',
+          token_endpoint: 'https://oauth2.googleapis.com/token',
+        },
+        cacheKey: resourceUri,
+        resourceUri,
+        compatibilityMode: 'legacy',
+        allowLocalhostHttp: true,
+      });
+
+      const authorizationUrl = new URL(ctx.authorizationUrl);
+      expect(authorizationUrl.searchParams.get('access_type')).toBe('offline');
+      expect(authorizationUrl.searchParams.get('prompt')?.split(/\s+/)).toEqual([
+        'select_account',
+        'consent',
+      ]);
+      expect(authorizationUrl.searchParams.get('client_id')).toBe('configured-google-client');
+    }
+  );
+
+  it('does not add Google-only offline parameters to another provider', async () => {
+    const ctx = await startMCPOAuthFlow('', 'configured-client', redirectUri, {
+      prefetchedAuthServerMetadata: {
+        issuer: 'https://auth.example.test',
+        authorization_endpoint: 'https://auth.example.test/authorize',
+        token_endpoint: 'https://auth.example.test/token',
+      },
+      cacheKey: 'https://mcp.example.test/mcp',
+      resourceUri: 'https://mcp.example.test/mcp',
+      compatibilityMode: 'legacy',
+      allowLocalhostHttp: true,
+    });
+
+    const authorizationUrl = new URL(ctx.authorizationUrl);
+    expect(authorizationUrl.searchParams.get('access_type')).toBeNull();
+    expect(authorizationUrl.searchParams.get('prompt')).toBeNull();
+  });
+
   it('accepts a confidential client when DCR returns a secret with auth method none/omitted, then uses HTTP Basic on token exchange', async () => {
     // Reproduces Atlassian's remote MCP: we request a public client
     // (token_endpoint_auth_method: 'none'), but the provider registers a *confidential* client —

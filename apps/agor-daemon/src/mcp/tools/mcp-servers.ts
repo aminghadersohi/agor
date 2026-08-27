@@ -20,6 +20,7 @@ import { hasMinimumRole, ROLES } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { isMCPOAuthGrantAuthorizedForServer } from '../../services/mcp-oauth-grant-authority.js';
+import { oauthGrantCanAuthenticate } from '../../services/mcp-oauth-status.js';
 import { isMcpServerUsableByCaller } from '../../utils/mcp-server-authorization.js';
 import { resolveMcpServerId, resolveSessionId } from '../resolve-ids.js';
 import {
@@ -94,16 +95,11 @@ async function getOAuthStatus(
       ? grant
       : null;
   });
-  if (tokenData) {
-    if (
-      tokenData.refresh_status === 'idle' &&
-      (!tokenData.oauth_token_expires_at || tokenData.oauth_token_expires_at > new Date())
-    ) {
-      return {
-        authenticated: true,
-        tokenExpiresAt: tokenData.oauth_token_expires_at?.getTime(),
-      };
-    }
+  if (tokenData && oauthGrantCanAuthenticate(tokenData)) {
+    return {
+      authenticated: true,
+      tokenExpiresAt: tokenData.oauth_token_expires_at?.getTime(),
+    };
   }
   return { authenticated: false };
 }
