@@ -3,8 +3,7 @@ import { Avatar, type AvatarProps, theme } from 'antd';
 import type { CSSProperties } from 'react';
 import { getUserAvatarColor } from '../utils/avatarPalette';
 import { getContrastingTextColor } from '../utils/theme';
-import { useProfileImageGallery } from './ProfileImage/useProfileImageGallery';
-import { useProfileImageUrl } from './ProfileImage/useProfileImageUrl';
+import { useUserProfileImageUrl } from './ProfileImage/useUserProfileImageUrl';
 
 // Re-exported so existing importers keep resolving the color util from here.
 export { getUserAvatarColor };
@@ -47,15 +46,7 @@ export const UserIdentityAvatar: React.FC<UserIdentityAvatarProps> = ({
 }) => {
   const { token } = theme.useToken();
   const prefersSlackAvatar = user?.preferences?.use_slack_avatar !== false;
-  const gallery = useProfileImageGallery(
-    user ? { type: 'user', id: user.user_id } : undefined,
-    Boolean(user && !user.profile_image_id)
-  );
-  const fallbackPrimary = gallery.find((image) => image.is_primary) ?? gallery[0];
-  const profileImageUrl = useProfileImageUrl(
-    user?.profile_image_id ?? fallbackPrimary?.image_id,
-    size > 96 ? 'large' : 'small'
-  );
+  const profileImageUrl = useUserProfileImageUrl(user, size > 96 ? 'large' : 'small');
   const rawAvatarUrl = getUserAvatarUrl(user);
   const avatarUrl =
     profileImageUrl ??
