@@ -39,6 +39,11 @@ const EMPTY_USER_MAP = new Map<string, User>();
 // would mint a fresh array on every render and thrash TaskBlock's React.memo.
 const EMPTY_MESSAGES: Message[] = [];
 const COMPACT_TASK_PAGE_SIZE = 50;
+// Focused chat expands every rendered task, which also hydrates that task's
+// messages. Keep its first paint deliberately smaller than mobile's compact
+// task-header page so long-running teammate chats do not launch dozens of
+// concurrent transcript renders and repeatedly resize the tail.
+const SIMPLE_CHAT_TASK_PAGE_SIZE = 20;
 const MAX_REMEMBERED_CONVERSATION_SCROLLS = 100;
 const rememberedConversationScrolls = new Map<
   SessionID,
@@ -275,10 +280,15 @@ export const ConversationView = React.memo<ConversationViewProps>(
     } | null>(null);
     const revealedOlderTaskCount =
       olderTaskReveal.sessionId === sessionId ? olderTaskReveal.count : 0;
-    const compactTaskStartIndex = compact
-      ? Math.max(0, tasks.length - COMPACT_TASK_PAGE_SIZE - revealedOlderTaskCount)
+    const taskPageSize = simple
+      ? SIMPLE_CHAT_TASK_PAGE_SIZE
+      : compact
+        ? COMPACT_TASK_PAGE_SIZE
+        : null;
+    const visibleTaskStartIndex = taskPageSize
+      ? Math.max(0, tasks.length - taskPageSize - revealedOlderTaskCount)
       : 0;
-    const visibleTasks = compact ? tasks.slice(compactTaskStartIndex) : tasks;
+    const visibleTasks = taskPageSize ? tasks.slice(visibleTaskStartIndex) : tasks;
 
     const revealEarlierTasks = useCallback(() => {
       const scroller = scrollRef.current;
@@ -288,9 +298,9 @@ export const ConversationView = React.memo<ConversationViewProps>(
       stopScroll();
       setOlderTaskReveal((current) => ({
         sessionId,
-        count: (current.sessionId === sessionId ? current.count : 0) + COMPACT_TASK_PAGE_SIZE,
+        count: (current.sessionId === sessionId ? current.count : 0) + (taskPageSize ?? 0),
       }));
-    }, [scrollRef, sessionId, stopScroll]);
+    }, [scrollRef, sessionId, stopScroll, taskPageSize]);
 
     useLayoutEffect(() => {
       const pending = pendingPrependScrollHeightRef.current;
@@ -579,18 +589,19 @@ export const ConversationView = React.memo<ConversationViewProps>(
           {/* Genealogy Banner */}
           {!simple && <GenealogyBanner />}
 
-          {compactTaskStartIndex > 0 && (
+          {visibleTaskStartIndex > 0 && taskPageSize && (
             <div style={{ display: 'flex', justifyContent: 'center', padding: token.sizeUnit * 2 }}>
               <Button size="small" onClick={revealEarlierTasks}>
-                Show {Math.min(COMPACT_TASK_PAGE_SIZE, compactTaskStartIndex)} earlier tasks
+                Show {Math.min(taskPageSize, visibleTaskStartIndex)} earlier tasks
               </Button>
             </div>
           )}
 
-          {/* Task-organized conversation. Compact/mobile views render the newest
-              page first so very long sessions do not create an enormous initial
-              DOM and paint surface. Older task headers remain available in
-              stable, scroll-preserving batches. */}
+          {/* Task-organized conversation. Compact/mobile and focused-chat views
+              render the newest page first so very long sessions do not create
+              an enormous initial DOM/paint surface or hydrate every expanded
+              task at once. Older tasks remain available in stable,
+              scroll-preserving batches. */}
           {visibleTasks.map((task, taskIndex) => (
             <TaskBlock
               key={task.task_id}
@@ -614,7 +625,7 @@ export const ConversationView = React.memo<ConversationViewProps>(
               onLoadTaskMessages={handleLoadTaskMessages}
               onUnloadTaskMessages={handleUnloadTaskMessages}
               teammateEmoji={teammateEmoji}
-              isLatestTask={compactTaskStartIndex + taskIndex === tasks.length - 1}
+              isLatestTask={visibleTaskStartIndex + taskIndex === tasks.length - 1}
               client={client}
               onOpenAgenticToolSettings={onOpenAgenticToolSettings}
               compact={compact}
