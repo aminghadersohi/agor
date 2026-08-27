@@ -5,8 +5,11 @@ import type {
   ProfileImageSubjectType,
   ProfileImageVariant,
 } from '@agor-live/client';
+import { createRestClient } from '@agor-live/client';
 import { getDaemonUrl } from '../../config/daemon';
 import { getAgorAccessToken, getAuthHeaders } from '../../utils/authHeaders';
+import { refreshTokensSingleFlight } from '../../utils/singleFlightRefresh';
+import { getStoredRefreshToken } from '../../utils/tokenRefresh';
 
 export interface ProfileImageSubject {
   type: ProfileImageSubjectType;
@@ -32,11 +35,32 @@ async function assertOk(response: Response): Promise<Response> {
   return response;
 }
 
+async function profileFetch(
+  url: string,
+  init: RequestInit = {},
+  content: 'json' | 'form' = 'json'
+): Promise<Response> {
+  const execute = () => {
+    const token = getAgorAccessToken();
+    const headers: HeadersInit =
+      content === 'json' ? getAuthHeaders() : token ? { Authorization: `Bearer ${token}` } : {};
+    return fetch(url, { ...init, headers });
+  };
+
+  const first = await execute();
+  if (first.status !== 401) return first;
+
+  const refreshToken = getStoredRefreshToken();
+  if (!refreshToken) return first;
+  await refreshTokensSingleFlight(await createRestClient(getDaemonUrl()), refreshToken);
+  return execute();
+}
+
 export async function listProfileImages(
   subject: ProfileImageSubject
 ): Promise<ProfileImageListResult> {
   const query = new URLSearchParams({ subjectType: subject.type, subjectId: subject.id });
-  const response = await fetch(`${endpoint()}?${query}`, { headers: getAuthHeaders() });
+  const response = await profileFetch(`${endpoint()}?${query}`);
   const result = (await (await assertOk(response)).json()) as Partial<ProfileImageListResult>;
   if (!Array.isArray(result.images) || typeof result.max_images !== 'number') {
     throw new Error('Profile image response was invalid');
@@ -52,12 +76,14 @@ export async function uploadProfileImage(
   form.append('subjectType', subject.type);
   form.append('subjectId', subject.id);
   form.append('image', file);
-  const token = getAgorAccessToken();
-  const response = await fetch(endpoint(), {
-    method: 'POST',
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-    body: form,
-  });
+  const response = await profileFetch(
+    endpoint(),
+    {
+      method: 'POST',
+      body: form,
+    },
+    'form'
+  );
   return (await (await assertOk(response)).json()) as ProfileImage;
 }
 
@@ -65,18 +91,16 @@ export async function patchProfileImage(
   imageId: string,
   patch: ProfileImagePatch
 ): Promise<ProfileImage> {
-  const response = await fetch(endpoint(`/${encodeURIComponent(imageId)}`), {
+  const response = await profileFetch(endpoint(`/${encodeURIComponent(imageId)}`), {
     method: 'PATCH',
-    headers: getAuthHeaders(),
     body: JSON.stringify(patch),
   });
   return (await (await assertOk(response)).json()) as ProfileImage;
 }
 
 export async function deleteProfileImage(imageId: string): Promise<void> {
-  const response = await fetch(endpoint(`/${encodeURIComponent(imageId)}`), {
+  const response = await profileFetch(endpoint(`/${encodeURIComponent(imageId)}`), {
     method: 'DELETE',
-    headers: getAuthHeaders(),
   });
   await assertOk(response);
 }
@@ -85,9 +109,8 @@ export async function fetchProfileImageBlob(
   imageId: string,
   variant: ProfileImageVariant
 ): Promise<Blob> {
-  const response = await fetch(
-    endpoint(`/${encodeURIComponent(imageId)}/${encodeURIComponent(variant)}`),
-    { headers: getAuthHeaders() }
+  const response = await profileFetch(
+    endpoint(`/${encodeURIComponent(imageId)}/${encodeURIComponent(variant)}`)
   );
   return (await assertOk(response)).blob();
 }

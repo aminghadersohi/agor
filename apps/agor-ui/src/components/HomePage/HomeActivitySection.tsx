@@ -171,6 +171,7 @@ const ActivityRow = memo(function ActivityRow({
         {teammate ? (
           <TeammatePill
             name={branchLabel}
+            branch={branch}
             emoji={teammateConfig?.emoji}
             compact
             title={branch.name}

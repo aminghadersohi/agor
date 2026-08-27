@@ -13,7 +13,7 @@ import { useParams } from 'react-router-dom';
 import { getSessionDisplayTitle } from '../../utils/sessionTitle';
 import { resolveSessionFromShortIdPure } from '../../utils/urlResolution';
 import { ConversationView } from '../ConversationView';
-import { useProfileImageUrl } from '../ProfileImage/useProfileImageUrl';
+import { useTeammateProfileImageUrl } from '../ProfileImage';
 import { MobileHeader } from './MobileHeader';
 import { MobilePromptInput } from './MobilePromptInput';
 
@@ -52,7 +52,7 @@ export const SessionPage: React.FC<SessionPageProps> = ({
   const session = resolvedSessionId ? sessionById.get(resolvedSessionId) : undefined;
   const branch = session?.branch_id ? branchById.get(session.branch_id) || null : null;
   const teammateConfig = branch && isTeammate(branch) ? getTeammateConfig(branch) : undefined;
-  const teammateAvatarUrl = useProfileImageUrl(teammateConfig?.profileImageId, 'small');
+  const teammateAvatarUrl = useTeammateProfileImageUrl(branch, 'small');
 
   if (!sessionId) {
     return (

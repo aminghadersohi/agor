@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useIdentityGuardedAsync } from '../../hooks/useIdentityGuardedAsync';
 import { useAgorStore } from '../../store/agorStore';
 import { selectBoardById, selectRepoById } from '../../store/selectors';
+import { TeammateIdentityAvatar } from '../TeammateIdentityAvatar';
 
 interface PrimaryTeammatePickerProps {
   client: AgorClient | null;
@@ -26,6 +27,7 @@ interface TeammateOption {
   label: string;
   context: string;
   searchText: string;
+  branch: Branch;
 }
 
 function teammateLabel(branch: Branch): string {
@@ -124,6 +126,7 @@ export const PrimaryTeammatePicker: React.FC<PrimaryTeammatePickerProps> = ({
           label,
           context,
           searchText: `${label} ${branch.name} ${context}`,
+          branch,
         };
       });
   }, [candidates, boardById, repoById, current]);
@@ -165,10 +168,13 @@ export const PrimaryTeammatePicker: React.FC<PrimaryTeammatePickerProps> = ({
           Couldn't load your primary assistant. Check the connection and try again.
         </Typography.Text>
       ) : current ? (
-        <Typography.Text>
-          Currently <Typography.Text strong>{teammateLabel(current)}</Typography.Text> on{' '}
-          {teammateContext(current, boardById, repoById)}.
-        </Typography.Text>
+        <Space size="small">
+          <TeammateIdentityAvatar branch={current} size={24} />
+          <Typography.Text>
+            Currently <Typography.Text strong>{teammateLabel(current)}</Typography.Text> on{' '}
+            {teammateContext(current, boardById, repoById)}.
+          </Typography.Text>
+        </Space>
       ) : compact ? null : (
         <Typography.Text type="secondary">
           No primary assistant set — pick one below to use as your default for personal work.
@@ -188,12 +194,15 @@ export const PrimaryTeammatePicker: React.FC<PrimaryTeammatePickerProps> = ({
         suffixIcon={<RobotOutlined />}
         style={{ width: '100%', maxWidth: 420 }}
         optionRender={(option) => (
-          <div style={{ lineHeight: 1.3 }}>
-            <div>{option.data.label}</div>
-            <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-              {option.data.context}
-            </Typography.Text>
-          </div>
+          <Space size="small">
+            <TeammateIdentityAvatar branch={option.data.branch} size={24} />
+            <div style={{ lineHeight: 1.3 }}>
+              <div>{option.data.label}</div>
+              <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                {option.data.context}
+              </Typography.Text>
+            </div>
+          </Space>
         )}
       />
     </Space>

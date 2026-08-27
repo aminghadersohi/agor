@@ -30,6 +30,7 @@ import {
   patchProfileImage,
   uploadProfileImage,
 } from './profileImageApi';
+import { publishProfileImageGallery } from './useProfileImageGallery';
 
 interface ProfileImageGalleryEditorProps {
   subject: ProfileImageSubject;
@@ -63,6 +64,7 @@ export function ProfileImageGalleryEditor({
       const result = await listProfileImages({ id: subjectId, type: subjectType });
       setImages(result.images);
       setMaxImages(result.max_images);
+      publishProfileImageGallery({ id: subjectId, type: subjectType }, result);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Profile images could not load');
     } finally {
@@ -185,7 +187,7 @@ export function ProfileImageGalleryEditor({
                   imageId={image.image_id}
                   variant="small"
                   size={compact ? 72 : 84}
-                  shape="circle"
+                  shape="square"
                   alt={image.alt_text || image.original_name}
                 />
                 {image.is_primary ? (
