@@ -14,6 +14,8 @@ import {
   Badge,
   Button,
   Empty,
+  Flex,
+  Segmented,
   Select,
   Skeleton,
   Space,
@@ -63,6 +65,28 @@ const OWNERS_UNRESOLVED: OwnersState = { status: 'unresolved' };
 const OWNERS_CREATOR_FALLBACK: OwnersState = { status: 'creator-fallback' };
 const OWNERS_FAILED: OwnersState = { status: 'failed' };
 const NO_OWNERS: User[] = [];
+
+type TeammatePortraitSize = 'small' | 'medium' | 'large';
+
+const TEAMMATE_PORTRAIT_SIZE_STORAGE_KEY = 'agor:teammate-panel-portrait-size';
+const TEAMMATE_PORTRAIT_SIZES: Record<
+  TeammatePortraitSize,
+  { primary: number; alternative: number }
+> = {
+  small: { primary: 112, alternative: 26 },
+  medium: { primary: 200, alternative: 32 },
+  large: { primary: 300, alternative: 40 },
+};
+
+function initialTeammatePortraitSize(): TeammatePortraitSize {
+  try {
+    const stored = localStorage.getItem(TEAMMATE_PORTRAIT_SIZE_STORAGE_KEY);
+    if (stored === 'small' || stored === 'medium' || stored === 'large') return stored;
+  } catch {
+    // Storage can be unavailable in embedded/private browsing contexts.
+  }
+  return 'large';
+}
 
 /**
  * The owners route is only registered when branch RBAC is enabled, so a 404 is
@@ -154,6 +178,10 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
     : 'teammate';
   const [uncontrolledActiveTab, setUncontrolledActiveTab] =
     useState<BoardTeammatePanelTab>(defaultTab);
+  const [teammatePortraitSize, setTeammatePortraitSize] = useState<TeammatePortraitSize>(
+    initialTeammatePortraitSize
+  );
+  const teammatePortraitDimensions = TEAMMATE_PORTRAIT_SIZES[teammatePortraitSize];
   const isControlled = controlledActiveTab !== undefined;
   const activeTab = controlledActiveTab ?? uncontrolledActiveTab;
   const [sessionDetailsHydrated, setSessionDetailsHydrated] = useState(() => !deferSessionDetails);
@@ -379,10 +407,39 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
                 paddingBlock: 4,
               }}
             >
+              <Flex
+                justify="space-between"
+                align="center"
+                gap={8}
+                style={{ width: '100%', minWidth: 0 }}
+              >
+                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                  Portrait size
+                </Typography.Text>
+                <Segmented
+                  size="small"
+                  aria-label="Teammate portrait size"
+                  value={teammatePortraitSize}
+                  options={[
+                    { label: 'Small', value: 'small' },
+                    { label: 'Medium', value: 'medium' },
+                    { label: 'Large', value: 'large' },
+                  ]}
+                  onChange={(value) => {
+                    const nextSize = value as TeammatePortraitSize;
+                    setTeammatePortraitSize(nextSize);
+                    try {
+                      localStorage.setItem(TEAMMATE_PORTRAIT_SIZE_STORAGE_KEY, nextSize);
+                    } catch {
+                      // The in-memory choice still works when storage is unavailable.
+                    }
+                  }}
+                />
+              </Flex>
               <div
                 style={{
-                  minWidth: 300,
-                  minHeight: 300,
+                  width: '100%',
+                  minHeight: teammatePortraitDimensions.primary,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -393,8 +450,8 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
                 ) : (
                   <TeammateBoardPortrait
                     branch={primaryTeammateBranch}
-                    primarySize={300}
-                    alternativeSize={40}
+                    primarySize={teammatePortraitDimensions.primary}
+                    alternativeSize={teammatePortraitDimensions.alternative}
                   />
                 )}
               </div>

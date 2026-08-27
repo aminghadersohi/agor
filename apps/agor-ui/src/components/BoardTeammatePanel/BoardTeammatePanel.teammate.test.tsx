@@ -1,5 +1,5 @@
 import type { Board, Branch, Repo } from '@agor-live/client';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_MAPS } from '../../store/agorMaps';
@@ -18,6 +18,22 @@ vi.mock('../BranchHeaderPill', () => ({
   ),
 }));
 
+vi.mock('../ProfileImage', () => ({
+  TeammateBoardPortrait: ({
+    primarySize,
+    alternativeSize,
+  }: {
+    primarySize: number;
+    alternativeSize: number;
+  }) => (
+    <div
+      data-testid="teammate-portrait"
+      data-primary-size={primarySize}
+      data-alternative-size={alternativeSize}
+    />
+  ),
+}));
+
 const board = { board_id: 'board-1', name: 'Board', slug: 'board' } as Board;
 const primaryTeammateBranch = {
   branch_id: 'branch-1',
@@ -29,6 +45,7 @@ const primaryTeammateRepo = { repo_id: 'repo-1', slug: 'preset-io/agor' } as Rep
 
 describe('BoardTeammatePanel teammate tab', () => {
   beforeEach(() => {
+    localStorage.clear();
     agorStore.setState({ ...EMPTY_MAPS });
   });
 
@@ -53,5 +70,45 @@ describe('BoardTeammatePanel teammate tab', () => {
       'data-truncate-to-fit',
       'true'
     );
+  });
+
+  it('switches between small, medium, and large portraits and remembers the choice', () => {
+    const { unmount } = render(
+      <AntApp>
+        <BoardTeammatePanel
+          board={board}
+          activeTab="teammate"
+          onTabChange={vi.fn()}
+          primaryTeammateBranch={primaryTeammateBranch}
+          primaryTeammateRepo={primaryTeammateRepo}
+          primaryTeammateInaccessible={false}
+          onSessionClick={vi.fn()}
+          client={null}
+        />
+      </AntApp>
+    );
+
+    expect(screen.getByTestId('teammate-portrait')).toHaveAttribute('data-primary-size', '300');
+    fireEvent.click(screen.getByText('Medium'));
+    expect(screen.getByTestId('teammate-portrait')).toHaveAttribute('data-primary-size', '200');
+    fireEvent.click(screen.getByText('Small'));
+    expect(screen.getByTestId('teammate-portrait')).toHaveAttribute('data-primary-size', '112');
+    unmount();
+
+    render(
+      <AntApp>
+        <BoardTeammatePanel
+          board={board}
+          activeTab="teammate"
+          onTabChange={vi.fn()}
+          primaryTeammateBranch={primaryTeammateBranch}
+          primaryTeammateRepo={primaryTeammateRepo}
+          primaryTeammateInaccessible={false}
+          onSessionClick={vi.fn()}
+          client={null}
+        />
+      </AntApp>
+    );
+    expect(screen.getByTestId('teammate-portrait')).toHaveAttribute('data-primary-size', '112');
   });
 });
