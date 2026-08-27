@@ -20,6 +20,13 @@ vi.mock('@agor/core/db', () => ({
   ) => work(),
 }));
 
+vi.mock('../tenant-scope.js', () => ({
+  runWithMcpTenantDatabaseScope: async (
+    ctx: { db: unknown },
+    work: (db: unknown) => Promise<unknown>
+  ) => work(ctx.db),
+}));
+
 const { registerProfileImageTools } = await import('./profile-images.js');
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<unknown>;
