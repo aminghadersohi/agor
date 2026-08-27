@@ -7,7 +7,7 @@ import {
   runWithTenantDatabaseScope,
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
-import type { Application } from '@agor/core/feathers';
+import { type Application, NotAuthenticated } from '@agor/core/feathers';
 import type {
   AuthenticatedParams,
   FileDetail,
@@ -19,12 +19,9 @@ import type {
 } from '@agor/core/types';
 import { ROLES } from '@agor/core/types';
 import { ensureMinimumRole } from '../utils/authorization';
-import { resolveExecutorReadAsUser } from '../utils/executor-read-impersonation.js';
-import {
-  generateScopedServiceToken,
-  getDaemonUrl,
-  runExecutorCommand,
-} from '../utils/spawn-executor.js';
+import { resolveDelegatedExecutionHomeKey } from '../utils/executor-delegated-home.js';
+import { getDaemonUrl, requestExecutor } from '../utils/spawn-executor.js';
+import { issueExecutorCommandToken } from './session-token-service.js';
 
 export type FileParams = QueryParams<{ branch_id?: string }> & Partial<AuthenticatedParams>;
 
@@ -55,7 +52,12 @@ export class FileService
     if (!branchId) throw new Error('branch_id query parameter is required');
     const resolved = await this.resolveBranchRead(branchId, params);
 
-    const result = await this.runCommand('branch.files.browse', resolved.branchId, resolved.asUser);
+    const result = await this.runCommand(
+      'branch.files.browse',
+      resolved.branchId,
+      resolved.userId,
+      resolved.delegatedHomeKey
+    );
     if (!result.success) {
       throw new Error(
         `Failed to browse files: ${result.error?.message ?? 'unknown executor error'}`
@@ -70,9 +72,15 @@ export class FileService
     if (!branchId) throw new Error('branch_id query parameter is required');
     const resolved = await this.resolveBranchRead(branchId, params);
 
-    const result = await this.runCommand('branch.files.read', resolved.branchId, resolved.asUser, {
-      filePath: id.toString(),
-    });
+    const result = await this.runCommand(
+      'branch.files.read',
+      resolved.branchId,
+      resolved.userId,
+      resolved.delegatedHomeKey,
+      {
+        filePath: id.toString(),
+      }
+    );
     if (!result.success) {
       throw new Error(`Failed to read file: ${result.error?.message ?? 'unknown executor error'}`);
     }
@@ -84,13 +92,12 @@ export class FileService
   private async runCommand(
     command: 'branch.files.browse' | 'branch.files.read',
     branchId: string,
-    asUser?: string,
+    userId: string,
+    delegatedHomeKey?: string,
     extraParams: Record<string, unknown> = {}
   ) {
-    const sessionToken = generateScopedServiceToken(
-      this.app as unknown as { settings: { authentication?: { secret?: string } } }
-    );
-    return runExecutorCommand(
+    const sessionToken = await issueExecutorCommandToken(this.app, command, userId, branchId);
+    return requestExecutor(
       {
         command,
         sessionToken,
@@ -99,7 +106,7 @@ export class FileService
       },
       {
         logPrefix: `[FileService ${branchId}]`,
-        asUser,
+        delegatedHomeKey: delegatedHomeKey,
       }
     );
   }
@@ -115,12 +122,14 @@ export class FileService
           ? cachedBranch
           : await this.branchRepo.findById(branchId);
       if (!branch) throw new Error(`Branch not found: ${branchId}`);
-      const asUser = await resolveExecutorReadAsUser(
+      const userId = params?.user?.user_id;
+      if (!userId) throw new NotAuthenticated('Authentication required');
+      const delegatedHomeKey = await resolveDelegatedExecutionHomeKey(
         this.db,
-        params?.user?.user_id,
+        userId,
         this.app.get('config')
       );
-      return { branchId: branch.branch_id, asUser };
+      return { branchId: branch.branch_id, delegatedHomeKey, userId };
     });
   }
 

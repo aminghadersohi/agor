@@ -13,6 +13,7 @@ import type {
   KnowledgeGraphNodeType,
   KnowledgeNamespace,
   KnowledgeVisibility,
+  KnowledgeWriteAttribution,
   TeammateKnowledgeGrantAccess,
   User,
   UserRole,
@@ -32,6 +33,7 @@ import {
   normalizeKnowledgeFolderPath,
   parseKnowledgeUri,
 } from '@agor/core/types';
+import { isNotFoundError } from '@agor/core/utils/errors';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { createTwoFilesPatch } from 'diff';
 import { z } from 'zod';
@@ -45,17 +47,14 @@ import {
   hasKnowledgeNamespacePermission,
   resolveKnowledgeNamespacePermission,
 } from '../../services/knowledge-access.js';
+import { issueExecutorCommandToken } from '../../services/session-token-service.js';
 import {
   TEAMMATE_MEMORY_PATH_TEMPLATE,
   TEAMMATE_NAMESPACE_MISSING_MESSAGE,
 } from '../../services/teammate-knowledge.js';
 import { ensureBranchWorkspaceAccess } from '../../utils/branch-workspace-path.js';
-import { resolveExecutorReadAsUser } from '../../utils/executor-read-impersonation.js';
-import {
-  generateScopedServiceToken,
-  getDaemonUrl,
-  runExecutorCommand,
-} from '../../utils/spawn-executor.js';
+import { resolveDelegatedExecutionHomeKey } from '../../utils/executor-delegated-home.js';
+import { getDaemonUrl, requestExecutor } from '../../utils/spawn-executor.js';
 import { resolveBranchId } from '../resolve-ids.js';
 import {
   mcpLimit,
@@ -292,7 +291,31 @@ function knowledgeNotImplementedResult(toolName: string, servicePaths: string[])
 }
 
 function mcpParams(ctx: McpContext, query?: Record<string, unknown>): Record<string, unknown> {
-  return query ? { ...ctx.baseServiceParams, query } : { ...ctx.baseServiceParams };
+  return {
+    ...ctx.baseServiceParams,
+    ...(query ? { query } : {}),
+  };
+}
+
+async function knowledgeWriteParams(ctx: McpContext): Promise<Record<string, unknown>> {
+  const session = ctx.authenticatedSession;
+  if (!session) return mcpParams(ctx);
+
+  let teammateName: string | undefined;
+  try {
+    const branch = await ctx.app.service('branches').get(session.branch_id, ctx.baseServiceParams);
+    teammateName = getTeammateConfig(branch)?.displayName.trim() || undefined;
+  } catch (error) {
+    // A deleted branch must not erase the already-authorized Session/tool forensic trail.
+    if (!(error instanceof NotFound)) throw error;
+  }
+
+  const knowledgeWriteAttribution: KnowledgeWriteAttribution = {
+    sessionId: session.session_id,
+    agenticTool: session.agentic_tool,
+    ...(teammateName ? { teammateName } : {}),
+  };
+  return { ...ctx.baseServiceParams, knowledgeWriteAttribution };
 }
 
 /**
@@ -620,16 +643,6 @@ function versionToken(version: KnowledgeDocumentVersion | null | undefined) {
   };
 }
 
-function isNotFoundError(error: unknown): boolean {
-  return (
-    error instanceof NotFound ||
-    (typeof error === 'object' &&
-      error !== null &&
-      ((error as { code?: unknown }).code === 404 ||
-        (error as { name?: unknown }).name === 'NotFound'))
-  );
-}
-
 function namespaceSlugForDocument(result: HydratedKnowledgeDocumentResult): string | undefined {
   const doc = result.document ?? result;
   const uri = typeof doc.uri === 'string' ? doc.uri : undefined;
@@ -719,19 +732,17 @@ async function runBranchKnowledgeCommand(
       'session'
     );
   });
-  const result = await runExecutorCommand(
+  const result = await requestExecutor(
     {
       command,
-      sessionToken: generateScopedServiceToken(
-        ctx.app as unknown as { settings: { authentication?: { secret?: string } } }
-      ),
+      sessionToken: await issueExecutorCommandToken(ctx.app, command, ctx.userId, branchId),
       daemonUrl: getDaemonUrl(),
       params,
     },
     {
       logPrefix: `[Knowledge ${command}]`,
-      asUser: await runWithMcpTenantDatabaseScope(ctx, (db) =>
-        resolveExecutorReadAsUser(db, ctx.authenticatedUser.user_id, ctx.app.get('config'))
+      delegatedHomeKey: await runWithMcpTenantDatabaseScope(ctx, (db) =>
+        resolveDelegatedExecutionHomeKey(db, ctx.authenticatedUser.user_id, ctx.app.get('config'))
       ),
     }
   );
@@ -1833,14 +1844,15 @@ export function registerKnowledgeTools(server: McpServer, ctx: McpContext): void
         );
       }
 
-      const customResult = await callCustomMethod(service, 'putDocument', data, mcpParams(ctx));
+      const writeParams = await knowledgeWriteParams(ctx);
+      const customResult = await callCustomMethod(service, 'putDocument', data, writeParams);
       if (customResult !== undefined) return textResult(customResult);
 
       if (documentId && service.patch) {
-        return textResult(await service.patch(documentId, data, mcpParams(ctx)));
+        return textResult(await service.patch(documentId, data, writeParams));
       }
 
-      if (service.create) return textResult(await service.create(data, mcpParams(ctx)));
+      if (service.create) return textResult(await service.create(data, writeParams));
       return knowledgeNotImplementedResult('agor_kb_put', [
         'kb/documents.putDocument',
         'kb/documents.patch',
@@ -1877,7 +1889,7 @@ export function registerKnowledgeTools(server: McpServer, ctx: McpContext): void
       } as Record<string, unknown>;
 
       if (service.create) {
-        return textResult(await service.create(data, mcpParams(ctx)));
+        return textResult(await service.create(data, await knowledgeWriteParams(ctx)));
       }
       return knowledgeNotImplementedResult('agor_kb_edit', ['kb/document-edits.create']);
     }
@@ -2087,7 +2099,7 @@ export function registerKnowledgeTools(server: McpServer, ctx: McpContext): void
             ],
             returnContent: dryRun ? 'full' : 'none',
           },
-          mcpParams(ctx)
+          await knowledgeWriteParams(ctx)
         )) as Record<string, unknown>;
         const newVersion = editResult.newVersion as Record<string, unknown> | undefined;
         const editedDocument = editResult.document as Record<string, unknown> | undefined;
@@ -2156,7 +2168,7 @@ export function registerKnowledgeTools(server: McpServer, ctx: McpContext): void
           edit_policy: args.editPolicy as KnowledgeEditPolicy | undefined,
           change_summary: coerceString(args.changeSummary) ?? `Publish from ${workspace.relative}`,
         },
-        mcpParams(ctx)
+        await knowledgeWriteParams(ctx)
       );
       if (customResult !== undefined) {
         const hydrated = await fetchKnowledgeDocument(ctx, {

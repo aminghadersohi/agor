@@ -28,19 +28,13 @@ RUN apt-get update && apt-get install -y \
   jq \
   less \
   tree \
-  openssh-server \
-  acl \
+  openssh-client \
   ripgrep \
+  bubblewrap \
+  util-linux \
   && rm -rf /var/lib/apt/lists/*
-
-# Configure SSH server for multi-user testing (used in postgres profile)
-RUN mkdir -p /run/sshd && \
-  # Enable password authentication
-  sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
-  # Disable root login
-  sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config && \
-  # Allow all users to login
-  echo 'AllowUsers agor alice bob' >> /etc/ssh/sshd_config
+# bubblewrap: filesystem-only executor sandbox. util-linux supplies the kernel
+# flock holder used by HA Codex credential mutations.
 
 # Install Zellij (terminal multiplexer)
 # Pinned to v0.43.1 for reproducibility
@@ -79,28 +73,18 @@ RUN set -eux; \
       groupmod -n agor -g "${GID}" node; \
     fi; \
     usermod -g agor agor; \
-    # Grant passwordless sudo for fixing volume permissions and executor spawning
+    # Development image only: allow the entrypoint to repair bind-mount ownership.
     echo "agor ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agor; \
     chmod 0440 /etc/sudoers.d/agor; \
     # Create .agor directory for database and config (will be mounted as volume)
-    mkdir -p /home/agor/.agor; \
+    mkdir -p -m 0700 /home/agor/.agor; \
     chown -R agor:agor /home/agor
 
-# Create 'agor_executor' user (unprivileged user for isolated SDK execution)
-# This user has no sudo privileges and limited permissions
-RUN useradd -m -s /bin/bash agor_executor && \
-    # Create home directory with restricted permissions
-    mkdir -p /home/agor_executor/.agor && \
-    chown -R agor_executor:agor_executor /home/agor_executor
-
-# Copy Zellij config for both users
+# Copy Zellij config for the daemon user.
 COPY docker/zellij-config.kdl /tmp/zellij-config.kdl
 RUN mkdir -p /home/agor/.config/zellij && \
-    mkdir -p /home/agor_executor/.config/zellij && \
     cp /tmp/zellij-config.kdl /home/agor/.config/zellij/config.kdl && \
-    cp /tmp/zellij-config.kdl /home/agor_executor/.config/zellij/config.kdl && \
     chown -R agor:agor /home/agor/.config && \
-    chown -R agor_executor:agor_executor /home/agor_executor/.config && \
     rm /tmp/zellij-config.kdl
 
 # Set working directory

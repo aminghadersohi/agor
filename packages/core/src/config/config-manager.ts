@@ -11,7 +11,10 @@ import os from 'node:os';
 import path from 'node:path';
 import * as yaml from 'js-yaml';
 import { type InstallableAgenticTool, isInstallableAgenticTool } from '../agentic-integrations';
+import { EXECUTOR_RESPONSE_PROTOCOL } from '../executor-protocol';
 import type { AgenticToolName } from '../types';
+import { normalizeHttpBaseUrl } from '../utils/url';
+import { ensureAgorHome, ensureAgorHomeSync, getAgorHome, getConfigPath } from './agor-home';
 import { getDefaultAnalyticsConfig } from './analytics-defaults.js';
 import { DAEMON, MCP_TOKEN } from './constants';
 import { validateRedisKeyPrefix, validateRedisUrl } from './deployment';
@@ -20,13 +23,29 @@ import {
   resolveExecutorHeartbeatConfig,
   resolveSdkWatchdogConfig,
 } from './executor-heartbeat';
-import { assertValidMultiTenancyConfig } from './multitenancy';
+import { resolveExecutorResponseConfig } from './executor-response';
 import {
+  assertValidRawExternalLaunchConfig,
+  resolveEffectiveExternalLaunchConfig,
+} from './external-launch';
+import { assertValidMultiTenancyConfig } from './multitenancy';
+import { AgorPasswordPolicyProfile } from './password-policy';
+import { isPlainConfigRecord } from './plain-record';
+import {
+  type AgorApmSettings,
   type AgorConfig,
+  AgorExternalIdentityProvider,
+  AgorExternalIdentityProvisioning,
+  AgorLocalAuthMode,
+  AgorRoleAuthority,
+  type AgorStatsDSettings,
+  AgorUserLifecycleAuthority,
+  APM_TRACE_SERVICE_DEPTHS,
   BRANCH_STORAGE_MODES,
   type BranchStorageMode,
   DEFAULT_BRANCH_STORAGE_MODE,
   type ResolvedBranchStorageConfig,
+  type UnixUserMode,
   type UnknownJson,
 } from './types';
 
@@ -37,6 +56,7 @@ export const RETIRED_CONFIG_KEYS = {
   execution: ['managed_envs_minimum_role'],
   branches: ['others_can_default', 'others_fs_access_default'],
   onboarding: ['teammatePending', 'assistantPending', 'persistedAgentPending'],
+  mcp_catalog: ['registry_sync_enabled', 'sync_interval_hours', 'probe_budget', 'registry_url'],
 } as const;
 
 export const RETIRED_CONFIG_PATHS = new Set<string>(
@@ -52,6 +72,7 @@ type LegacyConfig = AgorConfig & {
   execution?: AgorConfig['execution'] & Record<string, unknown>;
   branches?: Record<string, unknown>;
   onboarding?: Record<string, unknown>;
+  mcp_catalog?: Record<string, unknown>;
 };
 
 /** Resolve the renamed operator setting while keeping old YAML loadable. */
@@ -113,6 +134,34 @@ let cachedEntry: ConfigCacheEntry | null = null;
 
 function cacheKeyMatches(a: CacheKey, b: CacheKey): boolean {
   return a.mtimeMs === b.mtimeMs && a.size === b.size;
+}
+
+/**
+ * Wrap a config read/stat failure, explaining the sandbox when we're inside it.
+ *
+ * The executor sandbox masks the daemon config with a `/dev/null` bind mount,
+ * so reads from inside fail with EACCES rather than ENOENT. That is the mask
+ * working as designed. Code running in the sandbox is contractually forbidden
+ * from reading the daemon config (see `packages/executor/src/contract.test.ts`)
+ * and receives what it needs via `payload.resolvedConfig` and `DAEMON_URL`.
+ *
+ * Deliberately an error and not a fall back to `getDefaultConfig()`: the
+ * defaults carry no `paths` key and disable filesystem isolation, so
+ * fabricating them would silently resolve tenant data roots to the wrong
+ * directory instead of failing. A wrong answer here crosses a tenant boundary;
+ * a loud one does not.
+ */
+function configLoadError(configPath: string, error: unknown): Error {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (process.env.AGOR_OUTER_SANDBOX === '1') {
+    return new Error(
+      `${configPath} is masked by Agor's executor sandbox and is intentionally out of reach. ` +
+        'Code inside the sandbox must not read the daemon config — it receives configuration ' +
+        'via payload.resolvedConfig and DAEMON_URL. Run this on the daemon host instead. ' +
+        `See context/explorations/executor-sandboxing.md. (underlying error: ${detail})`
+    );
+  }
+  return new Error(`Failed to load config: ${detail}`);
 }
 
 function statCacheKey(configPath: string): CacheKey | null {
@@ -185,36 +234,201 @@ function parseAndValidateConfig(content: string): AgorConfig {
   return finalConfig;
 }
 
-/**
- * Get Agor home directory (~/.agor)
- */
-export function getAgorHome(): string {
-  return path.join(os.homedir(), '.agor');
-}
-
-/**
- * Get config file path (~/.agor/config.yaml)
- */
-export function getConfigPath(): string {
-  return path.join(getAgorHome(), 'config.yaml');
-}
-
-/**
- * Ensure ~/.agor directory exists
- */
-async function ensureAgorHome(): Promise<void> {
-  const agorHome = getAgorHome();
-  try {
-    await fs.access(agorHome);
-  } catch {
-    await fs.mkdir(agorHome, { recursive: true });
-  }
-}
+/** Shared state-home paths and creation policy. */
+export { ensureAgorHome, ensureAgorHomeSync, getAgorHome, getConfigPath };
 
 /**
  * Validate config and throw helpful errors for deprecated/invalid settings
  */
+function assertSupportedUnixUserMode(mode: unknown): asserts mode is UnixUserMode | undefined {
+  if (mode === undefined || mode === 'simple' || mode === 'sandbox' || mode === 'delegated') return;
+  if (mode === 'opportunistic' || mode === 'strict' || mode === 'insulated') {
+    throw new Error(
+      `Config error: execution.unix_user_mode '${String(mode)}' was removed in Agor 0.25.0.\n` +
+        `Migrate with the latest Agor 0.24.x release, then choose one of:\n` +
+        `  - 'sandbox': fail-closed local Linux filesystem isolation (recommended)\n` +
+        `  - 'simple': trusted local execution without Agor filesystem isolation\n` +
+        `  - 'delegated': identity and isolation supplied by an external execution substrate`
+    );
+  }
+  throw new Error(
+    `Config error: execution.unix_user_mode must be one of: simple, sandbox, delegated (received ${JSON.stringify(mode)})`
+  );
+}
+
+const FORBIDDEN_OPERATIONAL_METRIC_TAG_KEY =
+  /(^|[_.-])(tenant|user|session|task|branch|repo|repository|email|uuid|token|secret|prompt|path|url|title|slug|name|id|host|hostname|pod|container|boot)($|[_.-])/i;
+const RESERVED_OPERATIONAL_METRIC_TAG_KEYS = new Set([
+  'daemon_instance',
+  'deployment_id',
+  'deployment_mode',
+]);
+
+function containsControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 || code === 127;
+  });
+}
+
+function validateStatsDConfig(statsd: AgorStatsDSettings | undefined): void {
+  if (statsd === undefined) return;
+  if (!statsd || typeof statsd !== 'object' || Array.isArray(statsd)) {
+    throw new Error('Config error: metrics.statsd must be an object');
+  }
+  if (statsd.enabled !== undefined && typeof statsd.enabled !== 'boolean') {
+    throw new Error('Config error: metrics.statsd.enabled must be a boolean');
+  }
+  if (
+    statsd.host !== undefined &&
+    (typeof statsd.host !== 'string' ||
+      statsd.host.trim() === '' ||
+      statsd.host.length > 253 ||
+      /[\s/\\]/.test(statsd.host) ||
+      statsd.host.includes('://'))
+  ) {
+    throw new Error(
+      'Config error: metrics.statsd.host must be a non-empty hostname or IP address without a URL scheme'
+    );
+  }
+  if (
+    statsd.port !== undefined &&
+    (!Number.isSafeInteger(statsd.port) || statsd.port < 1 || statsd.port > 65_535)
+  ) {
+    throw new Error('Config error: metrics.statsd.port must be an integer from 1 to 65535');
+  }
+  if (
+    statsd.prefix !== undefined &&
+    (typeof statsd.prefix !== 'string' ||
+      statsd.prefix.length > 64 ||
+      !/^[a-zA-Z][a-zA-Z0-9_.-]*\.$/.test(statsd.prefix))
+  ) {
+    throw new Error(
+      'Config error: metrics.statsd.prefix must start with a letter, contain only letters, digits, dots, underscores, or hyphens, and end with a dot'
+    );
+  }
+  if (statsd.global_tags === undefined) return;
+  if (
+    !statsd.global_tags ||
+    typeof statsd.global_tags !== 'object' ||
+    Array.isArray(statsd.global_tags)
+  ) {
+    throw new Error('Config error: metrics.statsd.global_tags must be a string map');
+  }
+  const entries = Object.entries(statsd.global_tags as Record<string, unknown>);
+  if (entries.length > 20) {
+    throw new Error('Config error: metrics.statsd.global_tags supports at most 20 tags');
+  }
+  for (const [key, value] of entries) {
+    if (!/^[a-zA-Z][a-zA-Z0-9_.-]{0,62}$/.test(key)) {
+      throw new Error(`Config error: metrics.statsd.global_tags key '${key}' is invalid`);
+    }
+    if (
+      RESERVED_OPERATIONAL_METRIC_TAG_KEYS.has(key.toLowerCase()) ||
+      FORBIDDEN_OPERATIONAL_METRIC_TAG_KEY.test(key)
+    ) {
+      throw new Error(
+        `Config error: metrics.statsd.global_tags key '${key}' is reserved or violates the low-cardinality policy`
+      );
+    }
+    if (
+      typeof value !== 'string' ||
+      value.trim() === '' ||
+      value.length > 100 ||
+      containsControlCharacter(value) ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+    ) {
+      throw new Error(
+        `Config error: metrics.statsd.global_tags value for '${key}' must be a non-empty, low-cardinality string of at most 100 characters`
+      );
+    }
+  }
+}
+
+function validateApmConfig(apm: AgorApmSettings | undefined): void {
+  if (apm === undefined) return;
+  if (!apm || typeof apm !== 'object' || Array.isArray(apm)) {
+    throw new Error('Config error: metrics.apm must be an object');
+  }
+  if (apm.trace_services !== undefined && !APM_TRACE_SERVICE_DEPTHS.includes(apm.trace_services)) {
+    throw new Error(
+      `Config error: metrics.apm.trace_services must be one of: ${APM_TRACE_SERVICE_DEPTHS.join(', ')}`
+    );
+  }
+}
+
+function parseOptionalBooleanEnvironmentValue(
+  value: string | undefined,
+  name: string
+): boolean | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (value === '1' || value === 'true') return true;
+  if (value === '0' || value === 'false') return false;
+  throw new Error(`Config error: ${name} must be one of: true, false, 1, 0`);
+}
+
+function parseOptionalApmTraceDepthEnvironmentValue(
+  value: string | undefined
+): AgorApmSettings['trace_services'] | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (!APM_TRACE_SERVICE_DEPTHS.includes(value as never)) {
+    throw new Error(
+      `Config error: AGOR_APM_TRACE_SERVICES must be one of: ${APM_TRACE_SERVICE_DEPTHS.join(', ')}`
+    );
+  }
+  return value as AgorApmSettings['trace_services'];
+}
+
+function parseOptionalPortEnvironmentValue(
+  value: string | undefined,
+  name: string
+): number | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`Config error: ${name} must be an integer from 1 to 65535`);
+  }
+  const port = Number(value);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new Error(`Config error: ${name} must be an integer from 1 to 65535`);
+  }
+  return port;
+}
+
+/**
+ * Policy for config keys the daemon does not recognize.
+ *
+ * `error` (default) fails closed — the safe choice for humans editing config,
+ * because a typo like `unix_user_mdoe` is caught instead of silently ignored.
+ *
+ * `warn` tolerates unknown keys (logs each and continues). This exists for
+ * forward compatibility during rolling deploys and rollbacks: config written
+ * for a newer daemon can be read by an older one that predates a purely
+ * ADDITIVE key it can safely ignore (e.g. `execution.executor_response` — an
+ * older daemon just uses its old path). It is NOT safe for a key that changes a
+ * default or security posture the old binary must honor; those still require
+ * deploy ordering. Env-only (not a config key) to avoid the chicken-and-egg of
+ * a strictness switch that could itself be an unknown key, and because it is a
+ * deploy/ops decision that should persist across image rollbacks.
+ */
+type UnknownConfigKeyPolicy = 'error' | 'warn';
+
+function resolveUnknownConfigKeyPolicy(): UnknownConfigKeyPolicy {
+  const raw = process.env.AGOR_UNKNOWN_CONFIG_KEYS?.trim().toLowerCase();
+  if (raw === undefined || raw === '' || raw === 'error') return 'error';
+  if (raw === 'warn') return 'warn';
+  throw new Error(
+    `Config error: AGOR_UNKNOWN_CONFIG_KEYS must be 'error' or 'warn' (got '${process.env.AGOR_UNKNOWN_CONFIG_KEYS}')`
+  );
+}
+
+function requirePlainConfigRecord(value: unknown, path: string): void {
+  if (!isPlainConfigRecord(value)) {
+    throw new Error(`Config error: ${path} must be an object`);
+  }
+}
+
 function validateConfig(config: AgorConfig): void {
+  requirePlainConfigRecord(config, 'config');
   const configuredAnalyticsPlugins = (config.analytics as { plugins?: unknown[] } | undefined)
     ?.plugins;
   const removedModulePluginIndex = configuredAnalyticsPlugins?.findIndex(
@@ -274,6 +488,21 @@ function validateConfig(config: AgorConfig): void {
       "Config error: 'execution.cursor_sdk_enabled' has been removed. Configure Cursor availability in workspace agentic-tool settings."
     );
   }
+  const removedUnixExecution = config.execution as
+    | (NonNullable<AgorConfig['execution']> & {
+        executor_unix_user?: unknown;
+        sync_unix_passwords?: unknown;
+      })
+    | undefined;
+  const removedUnixKeys = ['executor_unix_user', 'sync_unix_passwords'].filter(
+    (key) => removedUnixExecution?.[key as keyof typeof removedUnixExecution] !== undefined
+  );
+  if (removedUnixKeys.length > 0) {
+    throw new Error(
+      `Config error: removed host Unix execution ${removedUnixKeys.length === 1 ? 'key' : 'keys'}: ${removedUnixKeys.map((key) => `execution.${key}`).join(', ')}. ` +
+        "Remove them and choose execution.unix_user_mode 'simple', 'sandbox', or 'delegated'."
+    );
+  }
 
   const knownTopLevelKeys = new Set([
     'agentic_tools',
@@ -284,6 +513,7 @@ function validateConfig(config: AgorConfig): void {
     'ui',
     'database',
     'external_launch',
+    'identity',
     'execution',
     'security',
     'branches',
@@ -291,6 +521,7 @@ function validateConfig(config: AgorConfig): void {
     'paths',
     'analytics',
     'telemetry',
+    'metrics',
     'onboarding',
     'multi_tenancy',
     'uploads',
@@ -305,8 +536,10 @@ function validateConfig(config: AgorConfig): void {
 
   const unknownPaths: string[] = [];
   const only = (value: unknown, path: string, allowed: readonly string[]) => {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
-    for (const key of Object.keys(value)) {
+    if (value === undefined) return;
+    requirePlainConfigRecord(value, path);
+    const record = value as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
       if (!allowed.includes(key)) unknownPaths.push(`${path}.${key}`);
     }
   };
@@ -418,6 +651,7 @@ function validateConfig(config: AgorConfig): void {
     }
   }
   only(config.daemon, 'daemon', [
+    'deployment_id',
     'port',
     'host',
     'host_ip_address',
@@ -427,7 +661,6 @@ function validateConfig(config: AgorConfig): void {
     'masterSecret',
     'mcpEnabled',
     'mcpToolSearch',
-    'unix_user',
     'instanceLabel',
     'instanceDescription',
     'impersonation_token_expiry_ms',
@@ -460,6 +693,51 @@ function validateConfig(config: AgorConfig): void {
     'trusted_host_header',
     'return_host_param',
   ]);
+  assertValidRawExternalLaunchConfig(config.external_launch);
+  only(config.identity, 'identity', [
+    'user_lifecycle',
+    'role_authority',
+    'local_auth',
+    'password_policy',
+    'external',
+  ]);
+  only(config.identity?.external, 'identity.external', ['provider', 'provisioning']);
+  if (
+    config.identity?.user_lifecycle !== undefined &&
+    !Object.values(AgorUserLifecycleAuthority).includes(config.identity.user_lifecycle)
+  ) {
+    throw new Error('Config error: identity.user_lifecycle must be internal or external');
+  }
+  if (
+    config.identity?.role_authority !== undefined &&
+    !Object.values(AgorRoleAuthority).includes(config.identity.role_authority)
+  ) {
+    throw new Error('Config error: identity.role_authority must be internal or claims');
+  }
+  if (
+    config.identity?.local_auth !== undefined &&
+    !Object.values(AgorLocalAuthMode).includes(config.identity.local_auth)
+  ) {
+    throw new Error('Config error: identity.local_auth must be enabled or disabled');
+  }
+  if (
+    config.identity?.password_policy !== undefined &&
+    config.identity.password_policy !== AgorPasswordPolicyProfile.SECURE
+  ) {
+    throw new Error("Config error: identity.password_policy must be 'secure'");
+  }
+  if (
+    config.identity?.external?.provider !== undefined &&
+    config.identity.external.provider !== AgorExternalIdentityProvider.EXTERNAL_LAUNCH
+  ) {
+    throw new Error('Config error: identity.external.provider must be external_launch');
+  }
+  if (
+    config.identity?.external?.provisioning !== undefined &&
+    config.identity.external.provisioning !== AgorExternalIdentityProvisioning.JIT
+  ) {
+    throw new Error('Config error: identity.external.provisioning must be jit');
+  }
   if (config.uploads !== undefined) {
     if (
       typeof config.uploads.location !== 'undefined' &&
@@ -512,9 +790,9 @@ function validateConfig(config: AgorConfig): void {
   }
   only(config.execution, 'execution', [
     'executor_heartbeat',
+    'executor_response',
     'sdk_watchdog',
     'dispatch_connect_timeout_ms',
-    'executor_unix_user',
     'unix_user_mode',
     'branch_rbac',
     'allow_web_terminal',
@@ -523,7 +801,6 @@ function validateConfig(config: AgorConfig): void {
     'session_token_expiration_ms',
     'session_token_max_uses',
     'mcp_token_expiration_ms',
-    'sync_unix_passwords',
     'daemon_writes_user_message',
     'permission_timeout_ms',
     'executor_command_template',
@@ -533,6 +810,7 @@ function validateConfig(config: AgorConfig): void {
     ...RETIRED_CONFIG_KEYS.execution,
     'managed_envs_execution_mode',
     'branch_storage',
+    'sandbox',
   ]);
   only(config.execution?.executor_heartbeat, 'execution.executor_heartbeat', [
     'enabled',
@@ -544,6 +822,18 @@ function validateConfig(config: AgorConfig): void {
     'command_template',
     'timeout_ms',
   ]);
+  only(config.execution?.executor_response, 'execution.executor_response', [
+    'max_response_bytes',
+    'max_active_requests',
+    'timeout_ms',
+    'origin_url',
+    'external_protocol',
+  ]);
+  only(config.execution?.executor_response?.timeout_ms, 'execution.executor_response.timeout_ms', [
+    'default',
+    'by_command',
+  ]);
+  resolveExecutorResponseConfig(config.execution?.executor_response);
   only(config.execution?.sdk_watchdog, 'execution.sdk_watchdog', [
     'mode',
     'first_progress_timeout_ms',
@@ -558,9 +848,36 @@ function validateConfig(config: AgorConfig): void {
     'default_mode',
     'allowed_modes',
     'allow_shallow_clones',
+    'borrow_base_objects',
   ]);
+  only(config.execution?.sandbox, 'execution.sandbox', [
+    'enabled',
+    'include',
+    'protect_secrets',
+    'isolate_branches',
+    'home_mode',
+    'preserve_canonical_home_alias',
+    'extra_allow_write',
+    'extra_deny_read',
+    'fail_if_unavailable',
+  ]);
+  only(config.execution?.sandbox?.include, 'execution.sandbox.include', [
+    'branch',
+    'base_repo',
+    'tmp',
+    'home',
+  ]);
+  if (
+    config.execution?.sandbox?.preserve_canonical_home_alias !== undefined &&
+    typeof config.execution.sandbox.preserve_canonical_home_alias !== 'boolean'
+  ) {
+    throw new Error(
+      'Config error: execution.sandbox.preserve_canonical_home_alias must be a boolean'
+    );
+  }
   only(config.execution?.executor_storage, 'execution.executor_storage', [
     'user_home',
+    'user_home_locking',
     'branch_workspace',
     'base_repository',
   ]);
@@ -572,6 +889,16 @@ function validateConfig(config: AgorConfig): void {
   ) {
     throw new Error(
       'Config error: execution.executor_storage.user_home must be replica-local, shared, or persistent-per-user'
+    );
+  }
+  if (
+    config.execution?.executor_storage?.user_home_locking !== undefined &&
+    !['local-only', 'cross-replica-flock'].includes(
+      config.execution.executor_storage.user_home_locking
+    )
+  ) {
+    throw new Error(
+      'Config error: execution.executor_storage.user_home_locking must be local-only or cross-replica-flock'
     );
   }
   if (
@@ -601,6 +928,12 @@ function validateConfig(config: AgorConfig): void {
     throw new Error(
       'Config error: execution.branch_storage.allow_shallow_clones must be a boolean'
     );
+  }
+  if (
+    config.execution?.branch_storage?.borrow_base_objects !== undefined &&
+    typeof config.execution.branch_storage.borrow_base_objects !== 'boolean'
+  ) {
+    throw new Error('Config error: execution.branch_storage.borrow_base_objects must be a boolean');
   }
   only(config.security, 'security', ['csp', 'cors', 'git_config_parameters']);
   only(config.security?.csp, 'security.csp', [
@@ -666,6 +999,23 @@ function validateConfig(config: AgorConfig): void {
     'last_usage_summary_day',
     'last_reported_version',
   ]);
+  if (
+    config.metrics !== undefined &&
+    (!config.metrics || typeof config.metrics !== 'object' || Array.isArray(config.metrics))
+  ) {
+    throw new Error('Config error: metrics must be an object');
+  }
+  only(config.metrics, 'metrics', ['statsd', 'apm']);
+  only(config.metrics?.statsd, 'metrics.statsd', [
+    'enabled',
+    'host',
+    'port',
+    'prefix',
+    'global_tags',
+  ]);
+  only(config.metrics?.apm, 'metrics.apm', ['trace_services']);
+  validateStatsDConfig(config.metrics?.statsd);
+  validateApmConfig(config.metrics?.apm);
   only(legacyConfig.onboarding, 'onboarding', [
     ...RETIRED_CONFIG_KEYS.onboarding,
     'frameworkRepoUrl',
@@ -678,30 +1028,23 @@ function validateConfig(config: AgorConfig): void {
     'auth_claim',
     'trusted_header',
   ]);
-  only(config.mcp_catalog, 'mcp_catalog', [
-    'registry_sync_enabled',
-    'sync_interval_hours',
-    'probe_budget',
-    'registry_url',
-  ]);
+  // The catalog is the file checked into this repository, so it has nothing to
+  // configure. The section stays loadable because a config file naming it must
+  // not stop a daemon from booting on upgrade; the keys are read and ignored.
+  only(legacyConfig.mcp_catalog, 'mcp_catalog', RETIRED_CONFIG_KEYS.mcp_catalog);
   if (unknownPaths.length > 0) {
-    throw new Error(
-      `Config error: unrecognized ${unknownPaths.length === 1 ? 'key' : 'keys'}: ${unknownPaths.join(', ')}`
-    );
+    const summary = `unrecognized ${unknownPaths.length === 1 ? 'key' : 'keys'}: ${unknownPaths.join(', ')}`;
+    if (resolveUnknownConfigKeyPolicy() === 'warn') {
+      console.warn(
+        `[config] Ignoring ${summary} (AGOR_UNKNOWN_CONFIG_KEYS=warn). This tolerates ` +
+          'config written for a newer daemon; use the default (error) in dev/CI to catch typos.'
+      );
+    } else {
+      throw new Error(`Config error: ${summary}`);
+    }
   }
 
-  // Check for deprecated 'opportunistic' unix_user_mode
-  const mode = config.execution?.unix_user_mode;
-  if (mode === ('opportunistic' as never)) {
-    throw new Error(
-      `Config error: 'opportunistic' unix_user_mode has been deprecated.\n` +
-        `Please update your config to use one of:\n` +
-        `  - 'insulated': Filesystem isolation via Unix groups (recommended)\n` +
-        `  - 'strict': Full process impersonation required\n` +
-        `\n` +
-        `Edit ~/.agor/config.yaml and set execution.unix_user_mode: insulated`
-    );
-  }
+  assertSupportedUnixUserMode(config.execution?.unix_user_mode);
 
   const managedEnvExecutionMode = config.execution?.managed_envs_execution_mode;
   if (
@@ -715,63 +1058,26 @@ function validateConfig(config: AgorConfig): void {
   }
 
   assertValidMultiTenancyConfig(config);
-
-  validateOptionalHttpUrl(
-    config.external_launch as Record<string, unknown> | undefined,
-    'login_redirect_url',
-    'external_launch.login_redirect_url'
-  );
-
-  validateExternalLaunchReturnHostParam(config);
 }
 
 /**
- * Query-parameter name the UI reserves for the relative deep-link it forwards
- * to the launch-init endpoint (see apps/agor-ui/src/utils/launchInitUrl.ts). The
- * host param must never reuse this name: the UI sets `return_to` first and then
- * the host param, so an equal name would overwrite the deep-link with the host.
+ * Validate a preloaded/programmatic config through the same raw boundary used
+ * for YAML. Daemon startup calls this before applying environment overrides.
  */
-const RESERVED_RETURN_TO_PARAM = 'return_to';
-
-function validateExternalLaunchReturnHostParam(config: AgorConfig): void {
-  const raw = config.external_launch?.return_host_param;
-  if (raw === undefined) return;
-  if (typeof raw !== 'string') {
-    throw new Error('Config error: external_launch.return_host_param must be a string');
-  }
-  // An empty value intentionally falls back to the default (`return_host`) at
-  // resolve time, so it is left untouched here.
-  if (raw === '') return;
-  if (raw === RESERVED_RETURN_TO_PARAM) {
-    throw new Error(
-      `Config error: external_launch.return_host_param must not be "${RESERVED_RETURN_TO_PARAM}" — ` +
-        'that name is reserved for the relative deep-link the UI forwards to the launch-init ' +
-        'endpoint, and reusing it would overwrite the deep-link with the return host.'
-    );
-  }
-  // Conservative query-parameter-name charset: the value becomes a URL query
-  // key, so restrict it to opaque identifier characters and reject separators.
-  if (!/^[A-Za-z0-9_.-]+$/.test(raw)) {
-    throw new Error(
-      'Config error: external_launch.return_host_param may only contain letters, digits, ' +
-        'underscore, hyphen, and dot'
-    );
-  }
+export function assertValidRawConfig(config: AgorConfig): void {
+  validateConfig(config);
 }
 
-function validateOptionalHttpUrl(
-  container: Record<string, unknown> | undefined,
-  key: string,
-  configPath: string
-): void {
-  if (!container || container[key] === undefined) return;
-
-  const raw = container[key];
-  if (typeof raw !== 'string') {
-    throw new Error(`Config error: ${configPath} must be an HTTP(S) URL string`);
+/** Return the deployment identity after enforcing the daemon startup invariant. */
+export function requireDeploymentId(config: AgorConfig): string {
+  const deploymentId = config.daemon?.deployment_id;
+  if (
+    typeof deploymentId !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deploymentId)
+  ) {
+    throw new Error("Config error: 'daemon.deployment_id' is required and must be a valid UUID");
   }
-
-  container[key] = validateHttpUrlString(raw, configPath);
+  return deploymentId;
 }
 
 function validateHttpUrlString(
@@ -837,9 +1143,7 @@ export async function loadConfig(): Promise<AgorConfig> {
       writeCachedConfig(configPath, defaults, NO_FILE_KEY);
       return defaults;
     }
-    throw new Error(
-      `Failed to load config: ${error instanceof Error ? error.message : String(error)}`
-    );
+    throw configLoadError(configPath, error);
   }
 
   let finalConfig: AgorConfig;
@@ -868,13 +1172,105 @@ export async function loadConfigFromFile(filePath: string): Promise<AgorConfig> 
 }
 
 /**
- * Save config to ~/.agor/config.yaml
+ * Explicit upgrade escape hatch for configs created before deployment identity
+ * became mandatory. This is deliberately not a relaxed config loader: the
+ * returned value is validated only after the generated identity is inserted.
+ */
+export async function migrateConfigDeploymentId(
+  filePath = getConfigPath(),
+  deploymentId = randomUUID()
+): Promise<{ config: AgorConfig; deploymentId: string; backupPath: string }> {
+  const content = await fs.readFile(filePath, 'utf-8');
+  const parsed = (yaml.load(content) ?? {}) as AgorConfig;
+  if (parsed.daemon?.deployment_id) {
+    validateConfig(parsed);
+    try {
+      requireDeploymentId(parsed);
+      return { config: parsed, deploymentId: parsed.daemon.deployment_id, backupPath: filePath };
+    } catch {
+      // The explicitly-confirmed migration also repairs malformed legacy IDs.
+    }
+  }
+  parsed.daemon = { ...parsed.daemon, deployment_id: deploymentId };
+  validateConfig(parsed);
+  requireDeploymentId(parsed);
+
+  const backupPath = `${filePath}.backup-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  await fs.copyFile(filePath, backupPath, fs.constants.COPYFILE_EXCL);
+  const stat = await fs.stat(filePath);
+  const tempPath = `${filePath}.rewrite-${process.pid}-${randomUUID()}`;
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await fs.open(tempPath, 'wx', 0o600);
+    await handle.writeFile(yaml.dump(parsed, { indent: 2, lineWidth: 120, noRefs: true }), 'utf-8');
+    // open(2)'s requested mode is filtered by the process umask. Apply the
+    // original operator-selected bits through the already-open inode before
+    // publishing the replacement.
+    await handle.chmod(stat.mode & 0o7777);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await fs.rename(tempPath, filePath);
+  } finally {
+    await handle?.close();
+    await fs.rm(tempPath, { force: true });
+  }
+  invalidateConfigCache();
+  return { config: parsed, deploymentId, backupPath };
+}
+
+/** Raised when immutable deployment config has already been published. */
+export class ConfigAlreadyExistsError extends Error {
+  constructor(public readonly configPath: string) {
+    super(`Refusing to overwrite existing config: ${configPath}`);
+    this.name = 'ConfigAlreadyExistsError';
+  }
+}
+
+/** Raised when a filesystem cannot provide atomic create-without-replace. */
+export class AtomicConfigPublicationUnsupportedError extends Error {
+  constructor(
+    public readonly configPath: string,
+    public readonly filesystemErrorCode: string
+  ) {
+    super(
+      `Cannot atomically create ${configPath}: the containing filesystem does not support same-directory hard links (${filesystemErrorCode}). Run Agor with a home directory on a filesystem with hard-link support, or provision config.yaml through configuration management before starting Agor.`
+    );
+    this.name = 'AtomicConfigPublicationUnsupportedError';
+  }
+}
+
+const HARD_LINK_UNSUPPORTED_ERROR_CODES = new Set([
+  'ENOSYS',
+  'ENOTSUP',
+  'EOPNOTSUPP',
+  'EPERM',
+  'EXDEV',
+]);
+
+async function syncContainingDirectory(filePath: string): Promise<void> {
+  // Node cannot open directories as files on Windows. link(2) still provides
+  // atomic publication there, but directory fsync is a POSIX durability step.
+  if (process.platform === 'win32') return;
+
+  const directoryHandle = await fs.open(path.dirname(filePath), 'r');
+  try {
+    await directoryHandle.sync();
+  } finally {
+    await directoryHandle.close();
+  }
+}
+
+/**
+ * Save config to ~/.agor/config.yaml without replacing an existing file.
  *
  * Invalidates the in-memory cache so the next load reflects the fresh value.
  */
 export async function createInitialConfig(config: AgorConfig = getDefaultConfig()): Promise<void> {
   validateConfig(config);
-  await ensureAgorHome();
+  // Create a missing state home privately, but preserve any pre-created
+  // operator-managed directory, bind mount, group/ACL policy, or symlink.
+  await ensureAgorHome(getAgorHome());
   const configPath = getConfigPath();
   const content = [
     '# Agor operator configuration',
@@ -887,21 +1283,36 @@ export async function createInitialConfig(config: AgorConfig = getDefaultConfig(
     yaml.dump(config, { indent: 2, lineWidth: 120, noRefs: true }),
   ].join('\n');
 
+  // Node has no portable rename-without-replace primitive. Publish a fully
+  // written same-directory inode with link(2): the hard-link creation is atomic
+  // and fails with EEXIST rather than replacing operator-owned configuration.
+  const tempPath = `${configPath}.create-${process.pid}-${randomUUID()}`;
   let handle: fs.FileHandle | undefined;
+  let published = false;
   try {
-    // `wx` is the important part of the config ownership contract: two initializers
-    // may race, but neither can replace a file created by the other (or by an
-    // operator/config-management system).
-    handle = await fs.open(configPath, 'wx', 0o600);
+    handle = await fs.open(tempPath, 'wx', 0o600);
     await handle.writeFile(content, 'utf-8');
+    // Guarantee the documented mode even when the process has an unusually
+    // restrictive umask. The descriptor pins the inode we are publishing.
+    await handle.chmod(0o600);
     await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await fs.link(tempPath, configPath);
+    published = true;
+    await syncContainingDirectory(configPath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-      throw new Error(`Refusing to overwrite existing config: ${configPath}`);
+    const errorCode = (error as NodeJS.ErrnoException).code;
+    if (!published && errorCode === 'EEXIST') {
+      throw new ConfigAlreadyExistsError(configPath);
+    }
+    if (!published && errorCode && HARD_LINK_UNSUPPORTED_ERROR_CODES.has(errorCode)) {
+      throw new AtomicConfigPublicationUnsupportedError(configPath, errorCode);
     }
     throw error;
   } finally {
     await handle?.close();
+    await fs.rm(tempPath, { force: true });
   }
   invalidateConfigCache();
 }
@@ -928,8 +1339,11 @@ async function rewriteConfigFile(
   const content = yaml.dump(config, { indent: 2, lineWidth: 120, noRefs: true });
   let handle: fs.FileHandle | undefined;
   try {
-    handle = await fs.open(tempPath, 'wx', stat.mode & 0o7777);
+    handle = await fs.open(tempPath, 'wx', 0o600);
     await handle.writeFile(content, 'utf-8');
+    // Preserve the existing operator-selected mode exactly; open(2) alone
+    // cannot do so because the ambient umask filters its mode argument.
+    await handle.chmod(stat.mode & 0o7777);
     await handle.sync();
     await handle.close();
     handle = undefined;
@@ -956,8 +1370,7 @@ export async function saveConfigForTests(config: AgorConfig): Promise<void> {
   try {
     await createInitialConfig(config);
   } catch (error) {
-    if (!(error instanceof Error) || !error.message.startsWith('Refusing to overwrite'))
-      throw error;
+    if (!(error instanceof ConfigAlreadyExistsError)) throw error;
     await rewriteConfigFile(config, { acknowledgedFormattingLoss: true });
   }
 }
@@ -976,15 +1389,29 @@ export function getDefaultConfig(): AgorConfig {
       port: 5173,
       host: 'localhost',
     },
+    identity: {
+      password_policy: AgorPasswordPolicyProfile.SECURE,
+    },
     execution: {
       session_token_expiration_ms: 86400000, // 24 hours
       session_token_max_uses: 1, // Single-use tokens
       mcp_token_expiration_ms: MCP_TOKEN.DEFAULT_EXPIRATION_MS,
-      sync_unix_passwords: true, // Default: sync passwords to Unix
       executor_heartbeat: resolveExecutorHeartbeatConfig(),
     },
     analytics: getDefaultAnalyticsConfig(),
     telemetry: {},
+    metrics: {
+      statsd: {
+        enabled: false,
+        host: '127.0.0.1',
+        port: 8125,
+        prefix: 'agor.daemon.',
+        global_tags: {},
+      },
+      apm: {
+        trace_services: 'off',
+      },
+    },
     multi_tenancy: {
       filesystem_isolation_enabled: false,
       tenants_base_folder: '~/.agor/tenants',
@@ -1010,7 +1437,71 @@ export function resolveEffectiveConfig(
 ): AgorConfig {
   const defaults = getDefaultConfig();
   const port = env.PORT ? Number.parseInt(env.PORT, 10) : undefined;
-  return {
+  const statsdEnabled = parseOptionalBooleanEnvironmentValue(
+    env.AGOR_STATSD_ENABLED,
+    'AGOR_STATSD_ENABLED'
+  );
+  const statsdPort = parseOptionalPortEnvironmentValue(env.AGOR_STATSD_PORT, 'AGOR_STATSD_PORT');
+  const apmTraceServices = parseOptionalApmTraceDepthEnvironmentValue(env.AGOR_APM_TRACE_SERVICES);
+  const externalLaunch = resolveEffectiveExternalLaunchConfig(config.external_launch, env);
+
+  // Resolve the effective Unix isolation mode (env override wins) so the
+  // `sandbox` mode can imply the rest of its machinery.
+  // Compose exports an empty string when AGOR_UNIX_USER_MODE is unset. Treat
+  // that as no override, matching the conditional merge below.
+  const configuredUnixMode = env.AGOR_UNIX_USER_MODE || config.execution?.unix_user_mode;
+  assertSupportedUnixUserMode(configuredUnixMode);
+  const effectiveUnixMode = configuredUnixMode ?? 'simple';
+  const sandboxIsolation = effectiveUnixMode === 'sandbox';
+
+  // Fold config file + env vars + `sandbox`-mode implications into ONE sandbox
+  // settings object (a single `sandbox:` key below).
+  //
+  // `unix_user_mode: sandbox` is a NAMED SECURITY MODE, so its core invariants
+  // are NON-NEGOTIABLE: the sandbox is on, the home is per-owner, and it fails
+  // closed. Operator config/env may NOT weaken these (a "sandbox" that silently
+  // runs with a shared daemon home or spawns unsandboxed would violate the
+  // contract). Other tunables (include/protect_secrets/extras) are still
+  // honored. If you want a tunable standalone sandbox, use `unix_user_mode` !=
+  // `sandbox` with `sandbox.enabled: true` and set home_mode/fail explicitly.
+  const envSandboxEnabled = env.AGOR_SANDBOX_ENABLED === 'true';
+  // env home_mode override applies ONLY outside sandbox mode (in sandbox mode it
+  // is forced to per_user). env wins over the config file, matching other
+  // AGOR_* overrides.
+  const envHomeMode =
+    env.AGOR_SANDBOX_HOME_MODE === 'per_user' || env.AGOR_SANDBOX_HOME_MODE === 'shared'
+      ? env.AGOR_SANDBOX_HOME_MODE
+      : undefined;
+  let resolvedSandbox = config.execution?.sandbox;
+  if (sandboxIsolation) {
+    resolvedSandbox = {
+      ...config.execution?.sandbox,
+      // forced — cannot be weakened by config or env in sandbox mode
+      enabled: true,
+      home_mode: 'per_user',
+      fail_if_unavailable: true,
+    };
+  } else if (envSandboxEnabled || envHomeMode) {
+    resolvedSandbox = {
+      ...config.execution?.sandbox,
+      ...(envSandboxEnabled ? { enabled: true } : {}),
+      ...(envHomeMode ? { home_mode: envHomeMode } : {}),
+    };
+  }
+  const resolvedExecutorResponse =
+    defaults.execution?.executor_response ||
+    config.execution?.executor_response ||
+    env.AGOR_EXECUTOR_RESPONSE_ORIGIN_URL
+      ? {
+          ...defaults.execution?.executor_response,
+          ...config.execution?.executor_response,
+          ...(env.AGOR_EXECUTOR_RESPONSE_ORIGIN_URL
+            ? { origin_url: env.AGOR_EXECUTOR_RESPONSE_ORIGIN_URL }
+            : {}),
+        }
+      : undefined;
+
+  const resolved: AgorConfig = {
     ...defaults,
     ...config,
     daemon: {
@@ -1018,16 +1509,17 @@ export function resolveEffectiveConfig(
       ...config.daemon,
       ...(Number.isSafeInteger(port) ? { port } : {}),
       ...(env.DAEMON_HOST ? { host: env.DAEMON_HOST } : {}),
-      ...(env.AGOR_DAEMON_UNIX_USER ? { unix_user: env.AGOR_DAEMON_UNIX_USER } : {}),
       ...(env.AGOR_JWT_SECRET ? { jwtSecret: env.AGOR_JWT_SECRET } : {}),
       ...(env.AGOR_MASTER_SECRET ? { masterSecret: env.AGOR_MASTER_SECRET } : {}),
       ...(env.INSTANCE_LABEL ? { instanceLabel: env.INSTANCE_LABEL } : {}),
     },
     ui: { ...defaults.ui, ...config.ui },
+    identity: { ...defaults.identity, ...config.identity },
+    ...(externalLaunch ? { external_launch: externalLaunch } : {}),
     execution: {
       ...defaults.execution,
       ...config.execution,
-      ...(env.AGOR_EXECUTOR_USERNAME ? { executor_unix_user: env.AGOR_EXECUTOR_USERNAME } : {}),
+      ...(resolvedExecutorResponse ? { executor_response: resolvedExecutorResponse } : {}),
       ...(env.AGOR_RBAC_ENABLED === 'true' ? { branch_rbac: true } : {}),
       ...(env.AGOR_UNIX_USER_MODE
         ? {
@@ -1036,11 +1528,22 @@ export function resolveEffectiveConfig(
             >['unix_user_mode'],
           }
         : {}),
-      ...(env.AGOR_USE_EXECUTOR === 'true' && !env.AGOR_EXECUTOR_USERNAME
-        ? { executor_unix_user: 'agor_executor' }
-        : {}),
+      // Folded sandbox settings (config file + AGOR_SANDBOX_* env + `sandbox`
+      // isolation-mode implications). Computed above. AGOR_SANDBOX_ENABLED /
+      // AGOR_SANDBOX_HOME_MODE are used by the `sandbox` .agor.yml env variants.
+      ...(resolvedSandbox ? { sandbox: resolvedSandbox } : {}),
+      // `sandbox` isolation mode requires RBAC to be active (branch authorization
+      // is what the mount policy enforces). Force it on last so it wins.
+      ...(sandboxIsolation ? { branch_rbac: true } : {}),
     },
-    paths: { ...defaults.paths, ...config.paths },
+    paths: {
+      ...defaults.paths,
+      ...config.paths,
+      // Project the deployment override into the immutable effective snapshot.
+      // Runtime services must consume this value instead of consulting the
+      // environment or re-reading config.yaml on each request.
+      ...(env.AGOR_DATA_HOME ? { data_home: expandHomePath(env.AGOR_DATA_HOME) } : {}),
+    },
     analytics: { ...defaults.analytics, ...config.analytics },
     telemetry: {
       ...defaults.telemetry,
@@ -1050,9 +1553,89 @@ export function resolveEffectiveConfig(
       ...(env.AGOR_TELEMETRY_ENDPOINT ? { endpoint: env.AGOR_TELEMETRY_ENDPOINT } : {}),
       ...(env.AGOR_TELEMETRY_WRITE_KEY ? { write_key: env.AGOR_TELEMETRY_WRITE_KEY } : {}),
     },
+    metrics: {
+      ...defaults.metrics,
+      ...config.metrics,
+      statsd: {
+        ...defaults.metrics?.statsd,
+        ...config.metrics?.statsd,
+        ...(statsdEnabled !== undefined ? { enabled: statsdEnabled } : {}),
+        ...(env.AGOR_STATSD_HOST ? { host: env.AGOR_STATSD_HOST } : {}),
+        ...(statsdPort !== undefined ? { port: statsdPort } : {}),
+        ...(env.AGOR_STATSD_PREFIX ? { prefix: env.AGOR_STATSD_PREFIX } : {}),
+      },
+      apm: {
+        ...defaults.metrics?.apm,
+        ...config.metrics?.apm,
+        ...(apmTraceServices !== undefined ? { trace_services: apmTraceServices } : {}),
+      },
+    },
     uploads: { ...defaults.uploads, ...config.uploads },
     multi_tenancy: { ...defaults.multi_tenancy, ...config.multi_tenancy },
   };
+  validateStatsDConfig(resolved.metrics?.statsd);
+  validateApmConfig(resolved.metrics?.apm);
+  return resolved;
+}
+
+/**
+ * Reject execution combinations that the local filesystem sandbox cannot
+ * enforce. Call this on the resolved effective config so environment-derived
+ * settings are covered as well as YAML settings.
+ */
+export function assertValidEffectiveExecutionConfig(config: AgorConfig): void {
+  const execution = config.execution;
+  if (!execution) return;
+
+  const response = resolveExecutorResponseConfig(execution.executor_response);
+
+  // Enforced here, NOT in the raw config.yaml parse: one shared config.yaml
+  // legitimately declares the protocol while each replica's exact origin
+  // arrives via AGOR_EXECUTOR_RESPONSE_ORIGIN_URL, so the pairing is only
+  // decidable after environment projection.
+  if (response.externalProtocol && !response.originUrl) {
+    throw new Error(
+      'execution.executor_response.external_protocol requires an exact origin_url: set ' +
+        'execution.executor_response.origin_url or the AGOR_EXECUTOR_RESPONSE_ORIGIN_URL ' +
+        'environment variable for this daemon replica.'
+    );
+  }
+
+  if (execution.unix_user_mode === 'delegated' && !execution.executor_command_template) {
+    throw new Error(
+      "execution.unix_user_mode 'delegated' requires execution.executor_command_template so execution is actually delegated to an external substrate."
+    );
+  }
+
+  const retiredPlaceholders = execution.executor_command_template?.match(
+    /\{(?:unix_user_uid|unix_user_gid)\}/g
+  );
+  if (retiredPlaceholders?.length) {
+    throw new Error(
+      `execution.executor_command_template uses removed placeholder(s): ${[...new Set(retiredPlaceholders)].join(', ')}. ` +
+        'Use {unix_user} as the opaque delegated execution-home key instead.'
+    );
+  }
+
+  if (
+    execution.executor_command_template &&
+    (response.externalProtocol !== EXECUTOR_RESPONSE_PROTOCOL || !response.originUrl)
+  ) {
+    throw new Error(
+      'execution.executor_command_template requires request-mode response support: set ' +
+        `execution.executor_response.external_protocol=${EXECUTOR_RESPONSE_PROTOCOL} and an exact ` +
+        'execution.executor_response.origin_url for this daemon replica.'
+    );
+  }
+
+  if (execution.sandbox?.enabled !== true) return;
+
+  if (execution.executor_command_template) {
+    throw new Error(
+      'execution.sandbox.enabled is incompatible with execution.executor_command_template because ' +
+        'templated executors run outside the daemon local sandbox. Enforce isolation in the external substrate instead.'
+    );
+  }
 }
 
 export function formatConfigYaml(config: AgorConfig): string {
@@ -1150,6 +1733,7 @@ export async function getConfigValue(key: string): Promise<string | boolean | nu
     ...activeConfig,
     daemon: { ...defaults.daemon, ...activeDaemon },
     ui: { ...defaults.ui, ...config.ui },
+    identity: { ...defaults.identity, ...config.identity },
     execution: { ...defaults.execution, ...activeExecution },
     paths: { ...defaults.paths, ...config.paths },
     analytics: { ...defaults.analytics, ...config.analytics },
@@ -1184,15 +1768,14 @@ export async function getConfigValue(key: string): Promise<string | boolean | nu
  * @returns Daemon URL (e.g., "http://localhost:3030")
  */
 export async function getDaemonUrl(): Promise<string> {
-  // 1. Check for explicit DAEMON_URL env var (highest priority)
-  if (process.env.DAEMON_URL) {
-    console.log('[getDaemonUrl] Using DAEMON_URL from env:', process.env.DAEMON_URL);
-    return process.env.DAEMON_URL;
-  }
+  return resolveDaemonUrl(await loadConfig());
+}
 
-  console.log('[getDaemonUrl] DAEMON_URL not in env, loading config...');
-  // 2. Construct from host:port (always localhost for internal communication)
-  return constructDaemonLocalUrl(await loadConfig());
+/** Resolve the internal daemon URL from an already processed config snapshot. */
+export function resolveDaemonUrl(config: AgorConfig): string {
+  return process.env.DAEMON_URL
+    ? normalizeHttpBaseUrl(process.env.DAEMON_URL, 'DAEMON_URL')
+    : constructDaemonLocalUrl(config);
 }
 
 /**
@@ -1372,9 +1955,7 @@ export function loadConfigSync(): AgorConfig {
       writeCachedConfig(configPath, defaults, NO_FILE_KEY);
       return defaults;
     }
-    throw new Error(
-      `Failed to load config: ${error instanceof Error ? error.message : String(error)}`
-    );
+    throw configLoadError(configPath, error);
   }
 
   let finalConfig: AgorConfig;
@@ -1391,104 +1972,16 @@ export function loadConfigSync(): AgorConfig {
   return finalConfig;
 }
 
-/**
- * Get the Unix user that the Agor daemon runs as
- *
- * Resolution order:
- * 1. daemon.unix_user from config (explicit configuration)
- * 2. Current process user (development mode fallback)
- *
- * Used for:
- * - Git operations with fresh group memberships (sudo su -)
- * - Unix integration service initialization
- * - Terminal impersonation decisions
- *
- * @returns Unix username, or undefined if not determinable
- *
- * @example
- * ```ts
- * const daemonUser = getDaemonUser();
- * if (daemonUser && isUnixGroupRefreshNeeded()) {
- *   runAsUser('git status', { asUser: daemonUser });
- * }
- * ```
- */
-export function getDaemonUser(): string | undefined {
-  try {
-    const config = loadConfigSync();
-    if (config.daemon?.unix_user) {
-      return config.daemon.unix_user;
-    }
-    // Fall back to current process user (dev mode)
-    return os.userInfo().username;
-  } catch {
-    // If config load fails or userInfo throws, return undefined
-    return undefined;
-  }
-}
-
-/**
- * Get daemon user, throwing if RBAC is enabled but user not configured
- *
- * Use this when initializing services that require Unix isolation.
- * For most operations, prefer getDaemonUser() which returns undefined on failure.
- *
- * @param config - Agor configuration (pass pre-loaded config to avoid re-loading)
- * @returns Unix username for the daemon
- * @throws Error if Unix isolation is enabled but daemon.unix_user is not configured
- */
-export function requireDaemonUser(config: AgorConfig): string {
-  // 1. If explicitly configured, always use it
-  if (config.daemon?.unix_user) {
-    return config.daemon.unix_user;
-  }
-
-  // 2. Check if Unix impersonation/isolation is enabled - if so, require explicit config.
-  // Branch RBAC alone is logical app-level authorization and does not require
-  // Unix users/groups in Cloud simple mode.
-  const unixIsolationEnabled = resolveExecutionSecurityMode(config).requiresDaemonUnixUser;
-
-  if (unixIsolationEnabled) {
-    throw new Error(
-      'Unix isolation is enabled (execution.unix_user_mode is insulated or strict) but daemon.unix_user is not configured.\n' +
-        'Please set daemon.unix_user in ~/.agor/config.yaml to the user running the daemon.\n' +
-        'Example:\n' +
-        '  daemon:\n' +
-        '    unix_user: agor'
-    );
-  }
-
-  // 3. Fall back to current process user (dev mode on Mac/Linux without isolation)
-  const user = process.env.USER || os.userInfo().username;
-  if (!user) {
-    throw new Error(
-      'Could not determine current user and daemon.unix_user is not configured.\n' +
-        'Please set daemon.unix_user in ~/.agor/config.yaml.'
-    );
-  }
-  return user;
-}
-
 export interface ResolvedExecutionSecurityMode {
   /** App-layer branch ownership/visibility/action enforcement. */
   appRbacEnabled: boolean;
   /** Configured Unix execution mode with default applied. */
   unixUserMode: import('./types').UnixUserMode;
-  /** Whether executors/terminals may run as non-daemon OS users. */
-  unixImpersonationEnabled: boolean;
-  /** Whether branch filesystem permissions/groups should be materialized. */
-  unixFsIsolationEnabled: boolean;
-  /** Whether git/executor spawns need fresh supplemental Unix groups. */
-  unixGroupRefreshNeeded: boolean;
-  /** Whether daemon.unix_user must be explicitly configured. */
-  requiresDaemonUnixUser: boolean;
-  /** Whether new repos/branches should initialize Unix groups. */
-  shouldInitUnixGroups: boolean;
   /**
-   * Whether every user must have a `unix_username` (strict and delegated).
+   * Whether every user must have a `unix_username` home key (delegated).
    * Session creation and executor/terminal launches fail loudly without one.
    */
-  requiresUserUnixUsername: boolean;
+  requiresExecutionHomeKey: boolean;
 }
 
 /**
@@ -1497,65 +1990,43 @@ export interface ResolvedExecutionSecurityMode {
  * Keep this as the single semantic boundary between app-layer RBAC and
  * OS/filesystem isolation:
  * - `branch_rbac` controls Agor app permissions only.
- * - `insulated`/`strict` `unix_user_mode` controls Unix impersonation/groups/FS ACLs.
  * - `delegated` requires per-user `unix_username` but performs no OS-level
- *   work on the daemon host (no sudo, no groups, no sudoers) — identity
+ *   work on the daemon host — identity
  *   enforcement is delegated to the execution substrate.
  */
 export function resolveExecutionSecurityMode(
   config: AgorConfig = loadConfigSync()
 ): ResolvedExecutionSecurityMode {
   const unixUserMode = config.execution?.unix_user_mode ?? 'simple';
-  const unixIsolationEnabled = unixUserMode === 'insulated' || unixUserMode === 'strict';
-
   return {
     appRbacEnabled: config.execution?.branch_rbac === true,
     unixUserMode,
-    unixImpersonationEnabled: unixIsolationEnabled,
-    unixFsIsolationEnabled: unixIsolationEnabled,
-    unixGroupRefreshNeeded: unixIsolationEnabled,
-    requiresDaemonUnixUser: unixIsolationEnabled,
-    shouldInitUnixGroups: unixIsolationEnabled,
-    requiresUserUnixUsername: unixUserModeRequiresUsername(unixUserMode),
+    requiresExecutionHomeKey: unixUserModeRequiresExecutionHomeKey(unixUserMode),
   };
 }
 
 /**
- * Whether a Unix user mode treats per-user `unix_username` as load-bearing
- * identity. Single predicate shared by `resolveExecutionSecurityMode()` and
- * call sites that only have the raw mode, so the strict/delegated pairing
- * cannot drift.
+ * Whether an execution mode requires the transitional `unix_username`
+ * execution-home key. Shared by config resolution and launch call sites.
  */
-export function unixUserModeRequiresUsername(mode: import('./types').UnixUserMode): boolean {
-  return mode === 'strict' || mode === 'delegated';
+export function unixUserModeRequiresExecutionHomeKey(
+  mode: import('./types').UnixUserMode
+): boolean {
+  return mode === 'delegated';
 }
 
 /**
  * Check if logical branch RBAC is enabled.
  *
  * This controls app-level branch ownership/visibility. It does not necessarily
- * imply Unix group/ACL setup; Cloud simple mode may enable branch RBAC while
- * running all filesystem work as the daemon user.
+ * imply local filesystem isolation; simple mode may enable branch RBAC while
+ * running filesystem work as the daemon user.
  *
  * @returns true if branch_rbac is enabled in config
  */
 export function isBranchRbacEnabled(): boolean {
   try {
     return resolveExecutionSecurityMode().appRbacEnabled;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Check if Unix user impersonation is enabled
- *
- * Returns true when unix_user_mode is 'insulated' or 'strict'. 'delegated'
- * does not impersonate — identity enforcement lives in the execution substrate.
- */
-export function isUnixImpersonationEnabled(): boolean {
-  try {
-    return resolveExecutionSecurityMode().unixImpersonationEnabled;
   } catch {
     return false;
   }
@@ -1577,14 +2048,19 @@ export function isUnixImpersonationEnabled(): boolean {
  * forgot to add `clone` to `allowed_modes`) — load-time normalisation
  * keeps service code from needing to defensively re-validate.
  */
-export function resolveBranchStorageConfig(): ResolvedBranchStorageConfig {
+export function resolveBranchStorageConfig(config?: AgorConfig): ResolvedBranchStorageConfig {
   let raw: import('./types').AgorBranchStorageSettings | undefined;
-  try {
-    raw = loadConfigSync().execution?.branch_storage;
-  } catch {
-    // Config unloadable (no file, parse error, etc.) — fall through to
-    // the safe legacy default.
-    raw = undefined;
+  if (config) {
+    raw = config.execution?.branch_storage;
+  } else {
+    try {
+      raw = loadConfigSync().execution?.branch_storage;
+    } catch {
+      // Preserve the standalone helper's safe legacy fallback when no
+      // effective config is supplied. Daemon boundaries pass app config
+      // explicitly so their policy never depends on an ambient config file.
+      raw = undefined;
+    }
   }
   const allowed: BranchStorageMode[] =
     raw?.allowed_modes && raw.allowed_modes.length > 0
@@ -1607,8 +2083,11 @@ export function resolveBranchStorageConfig(): ResolvedBranchStorageConfig {
  * Centralised so the same wording appears across the daemon service, the
  * REST route, and the MCP tool.
  */
-export function ensureBranchStorageModeAllowed(mode: import('./types').BranchStorageMode): void {
-  const { allowedModes } = resolveBranchStorageConfig();
+export function ensureBranchStorageModeAllowed(
+  mode: import('./types').BranchStorageMode,
+  config?: AgorConfig
+): void {
+  const { allowedModes } = resolveBranchStorageConfig(config);
   if (!allowedModes.includes(mode)) {
     throw new Error(
       `storage_mode='${mode}' is not enabled on this Agor instance. ` +
@@ -1619,26 +2098,16 @@ export function ensureBranchStorageModeAllowed(mode: import('./types').BranchSto
 }
 
 /** Reject shallow branch clones when the operator requires complete history. */
-export function ensureBranchCloneDepthAllowed(cloneDepth: number | undefined): void {
+export function ensureBranchCloneDepthAllowed(
+  cloneDepth: number | undefined,
+  config?: AgorConfig
+): void {
   if (cloneDepth === undefined) return;
-  if (!resolveBranchStorageConfig().allowShallowClones) {
+  if (!resolveBranchStorageConfig(config).allowShallowClones) {
     throw new Error(
       'clone_depth is unavailable on this Agor instance because execution.branch_storage.allow_shallow_clones is false. Omit clone_depth to create a full clone.'
     );
   }
-}
-
-/**
- * Whether the daemon needs to wrap git operations in `sudo -u` to pick up
- * supplemental Unix groups created after daemon startup.
- *
- * Cloud simple mode can enable logical `branch_rbac` without Unix groups. Only
- * non-simple Unix modes require group refresh / sudo wrapping.
- *
- * Returns true when `unix_user_mode` is `insulated` or `strict`.
- */
-export function isUnixGroupRefreshNeeded(): boolean {
-  return resolveExecutionSecurityMode().unixGroupRefreshNeeded;
 }
 
 // =============================================================================
@@ -1692,10 +2161,7 @@ export function getDataHome(): string {
 
   // 2. Check config file
   try {
-    const config = loadConfigSync();
-    if (config.paths?.data_home) {
-      return expandHomePath(config.paths.data_home);
-    }
+    return resolveDataHomeFromConfig(loadConfigSync());
   } catch {
     // Config load failed, fall through to default
   }
@@ -1704,11 +2170,24 @@ export function getDataHome(): string {
   return getAgorHome();
 }
 
+/** Resolve the data root from an already-loaded config snapshot. */
+export function resolveDataHomeFromConfig(
+  config: { readonly paths?: { readonly data_home?: string } },
+  agorHome = getAgorHome()
+): string {
+  return config.paths?.data_home ? expandHomePath(config.paths.data_home) : agorHome;
+}
+
 /**
  * Pure tenant-data-root policy shared by sync and async config loaders.
  */
-function resolveTenantDataRoot(
-  config: AgorConfig,
+export function resolveTenantDataRootFromConfig(
+  config: {
+    readonly multi_tenancy?: {
+      readonly filesystem_isolation_enabled?: boolean;
+      readonly tenants_base_folder?: string;
+    };
+  },
   dataHome: string,
   agorHome: string,
   tenantId?: string
@@ -1730,12 +2209,18 @@ function resolveTenantDataRoot(
     );
   }
 
-  const configuredBase = config.multi_tenancy.tenants_base_folder || '~/.agor/tenants';
-  const expandedBase = expandHomePath(configuredBase);
-  const tenantsBase = path.isAbsolute(expandedBase)
-    ? expandedBase
-    : path.resolve(agorHome, expandedBase);
+  const tenantsBase = resolveTenantsBaseFolderFromConfig(config, agorHome);
   return path.join(tenantsBase, normalizedTenantId);
+}
+
+/** Resolve the configured parent of all filesystem-isolated tenant roots. */
+export function resolveTenantsBaseFolderFromConfig(
+  config: { readonly multi_tenancy?: { readonly tenants_base_folder?: string } },
+  agorHome = getAgorHome()
+): string {
+  const configuredBase = config.multi_tenancy?.tenants_base_folder || '~/.agor/tenants';
+  const expandedBase = expandHomePath(configuredBase);
+  return path.isAbsolute(expandedBase) ? expandedBase : path.resolve(agorHome, expandedBase);
 }
 
 /**
@@ -1746,7 +2231,7 @@ function resolveTenantDataRoot(
  * `<tenants_base_folder>/<tenantId>`.
  */
 export function getTenantDataRoot(tenantId?: string): string {
-  return resolveTenantDataRoot(loadConfigSync(), getDataHome(), getAgorHome(), tenantId);
+  return resolveTenantDataRootFromConfig(loadConfigSync(), getDataHome(), getAgorHome(), tenantId);
 }
 
 /**
@@ -1823,7 +2308,7 @@ export async function getDataHomeAsync(): Promise<string> {
 /** Async counterpart to {@link getTenantDataRoot}. */
 export async function getTenantDataRootAsync(tenantId?: string): Promise<string> {
   const [config, dataHome] = await Promise.all([loadConfig(), getDataHomeAsync()]);
-  return resolveTenantDataRoot(config, dataHome, getAgorHome(), tenantId);
+  return resolveTenantDataRootFromConfig(config, dataHome, getAgorHome(), tenantId);
 }
 
 /**

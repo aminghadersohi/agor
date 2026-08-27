@@ -21,12 +21,13 @@ import {
   removeManagedAgorVersion,
   removeManagedInstallDebris,
   removeManagedIntegration,
+  repairManagedIntegrationPermissions,
+  validateInteractiveAgenticToolSelection,
   writeAgenticToolSelectionManifest,
 } from '../lib/agentic-tool-integrations.js';
 
 export default class Install extends Command {
-  static description =
-    'After init, select or reconcile agentic tool packages without recreating Agor';
+  static description = 'Select or reconcile agentic tool packages in the local installation';
   static examples = [
     '<%= config.bin %> <%= command.id %>',
     '<%= config.bin %> <%= command.id %> --sync',
@@ -72,6 +73,7 @@ export default class Install extends Command {
             value,
             checked: previouslySelected.has(value as InstallableAgenticTool),
           })),
+          validate: validateInteractiveAgenticToolSelection,
         },
       ]);
       await writeAgenticToolSelectionManifest(selected);
@@ -91,6 +93,7 @@ export default class Install extends Command {
 
     for (const tool of configured) {
       const definition = AGENTIC_TOOL_INTEGRATIONS[tool];
+      await repairManagedIntegrationPermissions(tool, agorVersion);
       if (await this.isAligned(tool, agorVersion)) {
         this.log(chalk.green(`✓ ${definition.displayName} is already aligned`));
         continue;

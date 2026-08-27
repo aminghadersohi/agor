@@ -6,6 +6,7 @@
 #   ./build.sh                    # Build only
 #   ./build.sh --bump patch       # Bump version and build release tarballs
 #   ./build.sh --bump minor       # Bump to next minor version
+#   ./build.sh --version 0.25.0-rc.1 # Set an explicit aligned release candidate
 #   ./build.sh --skip-install     # Skip pnpm install step
 #   ./build.sh --with-sandpack    # Include self-hosted Sandpack bundler in build
 
@@ -21,10 +22,16 @@ export NODE_OPTIONS="--max-old-space-size=4096 ${NODE_OPTIONS:-}"
 SKIP_INSTALL=false
 WITH_SANDPACK=false
 BUMP=""
+TARGET_VERSION=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --bump)      BUMP="$2"; shift 2 ;;
+    --bump)
+      [[ $# -ge 2 ]] || { echo "--bump requires patch, minor, or major"; exit 1; }
+      BUMP="$2"; shift 2 ;;
+    --version)
+      [[ $# -ge 2 ]] || { echo "--version requires an exact SemVer version"; exit 1; }
+      TARGET_VERSION="$2"; shift 2 ;;
     --skip-install) SKIP_INSTALL=true; shift ;;
     --with-sandpack) WITH_SANDPACK=true; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -35,12 +42,21 @@ if [[ -n "$BUMP" && "$BUMP" != "patch" && "$BUMP" != "minor" && "$BUMP" != "majo
   echo "Invalid bump type: $BUMP (must be patch, minor, or major)"
   exit 1
 fi
+if [[ -n "$BUMP" && -n "$TARGET_VERSION" ]]; then
+  echo "Use either --bump or --version, not both"
+  exit 1
+fi
+if [[ -n "$TARGET_VERSION" ]] && ! [[ "$TARGET_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+  echo "Invalid version: $TARGET_VERSION (must be an exact SemVer version)"
+  exit 1
+fi
 
 # ── Setup paths ──────────────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CLIENT_DIR="$REPO_ROOT/packages/client"
+CLI_DIR="$REPO_ROOT/apps/agor-cli"
 INTERNAL_STAGE="$SCRIPT_DIR/.internal.stage"
 RELEASE_DIR="$SCRIPT_DIR/release"
 INTEGRATION_IDS=(claude codex copilot gemini opencode cursor)
@@ -54,13 +70,14 @@ echo ""
 echo "📍 Repository root: $REPO_ROOT"
 echo "📦 agor-live:       $SCRIPT_DIR"
 echo "📦 @agor-live/client: $CLIENT_DIR"
+echo "📦 @agor/cli:         $CLI_DIR"
 echo "🧩 Agentic tools:   ${INTEGRATION_IDS[*]}"
 echo ""
 
 # ── Version bump ─────────────────────────────────────────────────────────────
 
+CURRENT_VERSION=$(node -p "require('$SCRIPT_DIR/package.json').version")
 if [[ -n "$BUMP" ]]; then
-  CURRENT_VERSION=$(node -p "require('$SCRIPT_DIR/package.json').version")
   IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
 
   case $BUMP in
@@ -71,12 +88,19 @@ if [[ -n "$BUMP" ]]; then
 
   NEW_VERSION="$MAJOR.$MINOR.$PATCH"
   echo "📌 Version bump: $CURRENT_VERSION → $NEW_VERSION ($BUMP)"
+elif [[ -n "$TARGET_VERSION" ]]; then
+  NEW_VERSION="$TARGET_VERSION"
+  echo "📌 Version set: $CURRENT_VERSION → $NEW_VERSION"
+else
+  NEW_VERSION="$CURRENT_VERSION"
+fi
 
-  # Update the base, client, and every version-aligned integration package.
-  node - "$NEW_VERSION" "$SCRIPT_DIR" "$CLIENT_DIR" "${INTEGRATION_DIRS[@]}" <<'NODE'
+if [[ -n "$BUMP" || -n "$TARGET_VERSION" ]]; then
+  # Update the base, CLI, client, and every version-aligned integration package.
+  node - "$NEW_VERSION" "$SCRIPT_DIR" "$CLI_DIR" "$CLIENT_DIR" "${INTEGRATION_DIRS[@]}" <<'NODE'
 const fs = require('fs');
-const [version, base, client, ...integrations] = process.argv.slice(2);
-for (const directory of [base, client, ...integrations]) {
+const [version, base, cli, client, ...integrations] = process.argv.slice(2);
+for (const directory of [base, cli, client, ...integrations]) {
   const packagePath = `${directory}/package.json`;
   const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
   pkg.version = version;
@@ -92,13 +116,23 @@ for (const directory of integrations) {
 }
 NODE
   echo "  ✓ Updated agor-live/package.json"
+  echo "  ✓ Updated @agor/cli/package.json"
   echo "  ✓ Updated @agor-live/client/package.json"
   echo "  ✓ Updated version-aligned agentic tool packages"
   echo ""
 else
-  NEW_VERSION=$(node -p "require('$SCRIPT_DIR/package.json').version")
-
-  # Sync client version to match agor-live (no bump, just align)
+  # Sync CLI/client versions to match agor-live (no bump, just align)
+  CLI_VERSION=$(node -p "require('$CLI_DIR/package.json').version")
+  if [[ "$CLI_VERSION" != "$NEW_VERSION" ]]; then
+    node -e "
+      const fs = require('fs');
+      const pkg = JSON.parse(fs.readFileSync('$CLI_DIR/package.json', 'utf8'));
+      pkg.version = '$NEW_VERSION';
+      fs.writeFileSync('$CLI_DIR/package.json', JSON.stringify(pkg, null, 2) + '\n');
+    "
+    echo "📌 Synced @agor/cli version: $CLI_VERSION → $NEW_VERSION"
+    echo ""
+  fi
   CLIENT_VERSION=$(node -p "require('$CLIENT_DIR/package.json').version")
   if [[ "$CLIENT_VERSION" != "$NEW_VERSION" ]]; then
     node -e "
@@ -391,8 +425,17 @@ mkdir -p "$RELEASE_DIR"
 for directory in "${INTEGRATION_DIRS[@]}" "$CLIENT_DIR"; do
   npm pack --ignore-scripts --pack-destination "$RELEASE_DIR" "$directory" >/dev/null
 done
+CLIENT_TARBALL="$RELEASE_DIR/agor-live-client-$NEW_VERSION.tgz"
+if [[ ! -f "$CLIENT_TARBALL" ]]; then
+  echo "  ✗ @agor-live/client pack did not produce the expected tarball: $CLIENT_TARBALL"
+  exit 1
+fi
 LIVE_TARBALL=$(node "$SCRIPT_DIR/scripts/pack-release.mjs" \
   --destination "$RELEASE_DIR" --internal-root "$INTERNAL_STAGE")
+if [[ -z "$LIVE_TARBALL" || ! -f "$LIVE_TARBALL" ]]; then
+  echo "  ✗ agor-live pack did not produce the expected tarball: ${LIVE_TARBALL:-<no path returned>}"
+  exit 1
+fi
 echo "  ✓ $(basename "$LIVE_TARBALL")"
 rm -rf "$INTERNAL_STAGE"
 
@@ -410,4 +453,6 @@ tree -L 2 -d "$SCRIPT_DIR/dist" 2>/dev/null || find "$SCRIPT_DIR/dist" -type d -
 echo ""
 echo "🚀 Next steps:"
 echo "  Review artifacts in $RELEASE_DIR"
+printf "  Install this exact build: sudo npm install -g %q %q\n" "$CLIENT_TARBALL" "$LIVE_TARBALL"
+echo "  Then run the deployment's operator-controlled stop → migrate → start sequence"
 echo "  Merge the version-bump PR, then push v$NEW_VERSION to run the protected release workflow"

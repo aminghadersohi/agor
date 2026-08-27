@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ArtifactID, BoardID, BranchID, SessionID } from '../types/id';
 import {
+  deriveLoopbackReachableOrigin,
   getArtifactFullscreenUrl,
   getArtifactUrl,
   getBoardUrl,
@@ -8,6 +9,7 @@ import {
   getKnowledgeUrl,
   getSessionUrl,
   isAllowedHealthCheckUrl,
+  normalizeHttpBaseUrl,
   normalizeOptionalHttpUrl,
 } from './url';
 
@@ -72,6 +74,23 @@ describe('entity URL builders — fullUrl double-prefix regression', () => {
   it('does not strip /ui from a path-prefixed base (e.g. https://host/myapp)', () => {
     const url = getSessionUrl(SESSION_ID, 'https://agor.example.com/myapp');
     expect(url).toMatch(/^https:\/\/agor\.example\.com\/myapp\/ui\/s\//);
+  });
+});
+
+describe('normalizeHttpBaseUrl', () => {
+  it('canonicalizes origins and preserves a path prefix without a trailing slash', () => {
+    expect(normalizeHttpBaseUrl(' HTTPS://Example.com:443/agor/// ', 'daemon URL')).toBe(
+      'https://example.com/agor'
+    );
+  });
+
+  it('rejects values that are unsafe to compose with daemon endpoint paths', () => {
+    expect(() => normalizeHttpBaseUrl('https://user:secret@example.com', 'daemon URL')).toThrow(
+      'must not include credentials'
+    );
+    expect(() => normalizeHttpBaseUrl('https://example.com/?target=other', 'daemon URL')).toThrow(
+      'must not include a query string or fragment'
+    );
   });
 });
 
@@ -178,5 +197,33 @@ describe('isAllowedHealthCheckUrl', () => {
   it('returns false for invalid URLs', () => {
     expect(isAllowedHealthCheckUrl('not-a-url')).toBe(false);
     expect(isAllowedHealthCheckUrl('')).toBe(false);
+  });
+});
+
+describe('deriveLoopbackReachableOrigin', () => {
+  it('maps wildcard bind addresses to the matching loopback', () => {
+    expect(deriveLoopbackReachableOrigin('0.0.0.0', 3030)).toBe('http://127.0.0.1:3030');
+    expect(deriveLoopbackReachableOrigin('::', 3030)).toBe('http://[::1]:3030');
+    expect(deriveLoopbackReachableOrigin('0:0:0:0:0:0:0:0', 3030)).toBe('http://[::1]:3030');
+    expect(deriveLoopbackReachableOrigin('[::]', 3030)).toBe('http://[::1]:3030');
+  });
+
+  it('maps an empty host to IPv4 loopback rather than producing an invalid URL', () => {
+    expect(deriveLoopbackReachableOrigin('', 3030)).toBe('http://127.0.0.1:3030');
+    expect(() => new URL(deriveLoopbackReachableOrigin('', 3030))).not.toThrow();
+  });
+
+  it('preserves concrete hosts and literals, bracketing IPv6', () => {
+    expect(deriveLoopbackReachableOrigin('localhost', 3030)).toBe('http://localhost:3030');
+    expect(deriveLoopbackReachableOrigin('daemon-0.internal', 8080)).toBe(
+      'http://daemon-0.internal:8080'
+    );
+    expect(deriveLoopbackReachableOrigin('127.0.0.1', 3030)).toBe('http://127.0.0.1:3030');
+    expect(deriveLoopbackReachableOrigin('fd00::1', 3030)).toBe('http://[fd00::1]:3030');
+    expect(deriveLoopbackReachableOrigin('[fd00::1]', 3030)).toBe('http://[fd00::1]:3030');
+  });
+
+  it('accepts a string port', () => {
+    expect(deriveLoopbackReachableOrigin('0.0.0.0', '3030')).toBe('http://127.0.0.1:3030');
   });
 });

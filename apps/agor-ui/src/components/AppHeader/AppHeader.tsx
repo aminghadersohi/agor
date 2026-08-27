@@ -1,5 +1,6 @@
 import type { ActiveUser, AgorClient, Board, BoardID, Branch, User } from '@agor-live/client';
-import { BulbOutlined } from '@ant-design/icons';
+import { hasMinimumRole, ROLES } from '@agor-live/client';
+import { BulbOutlined, ShopOutlined } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import { Button, Divider, Layout, Popover, Space, Tag, Tooltip, theme } from 'antd';
 import { memo, useMemo } from 'react';
@@ -7,6 +8,7 @@ import { useHref, useNavigate } from 'react-router-dom';
 import { mapToArray } from '@/utils/mapHelpers';
 import { useConnectionDisabled } from '../../contexts/ConnectionContext';
 import { useTheme } from '../../contexts/ThemeContext';
+import type { NewSessionConfig, SessionCreationResult } from '../../domain/sessionCreation';
 import { useRecentBoards } from '../../hooks/useRecentBoards';
 import { useAgorStore } from '../../store/agorStore';
 import { selectBoardById, selectBranchById, selectUserById } from '../../store/selectors';
@@ -20,12 +22,15 @@ import { MarkdownRenderer } from '../MarkdownRenderer';
 import { buildThemeMenuItems } from '../ThemeSwitcher';
 import { AppHeaderGlobalSearch } from './AppHeaderGlobalSearch';
 import { GlobalPresenceFacepile } from './GlobalPresenceFacepile';
+import { NavbarComposeButton } from './NavbarComposeButton';
 import { SettingsDropdown } from './SettingsDropdown';
 
 const { Header } = Layout;
 
 export interface AppHeaderProps {
   user?: User | null;
+  authenticationGeneration?: number;
+  isAuthenticationGenerationCurrent?: (generation: number) => boolean;
   presenceClient?: AgorClient | null;
   currentUserId?: string;
   /** Demo/screenshot-only fixture: render static presence while keeping AppHeader chrome. */
@@ -55,6 +60,11 @@ export interface AppHeaderProps {
   instanceLabel?: string;
   /** Instance description (markdown) shown in popover around the instance label */
   instanceDescription?: string;
+  /** Session-creation seam behind the navbar compose affordance. */
+  onCreateSession?: (
+    config: NewSessionConfig,
+    boardId: string
+  ) => Promise<SessionCreationResult | null>;
 }
 
 const RecentBoardPills: React.FC<{
@@ -111,6 +121,8 @@ function isPlainLeftClick(event: React.MouseEvent): boolean {
 
 const AppHeaderInner: React.FC<AppHeaderProps> = ({
   user,
+  authenticationGeneration = 0,
+  isAuthenticationGenerationCurrent,
   presenceClient = null,
   currentUserId,
   staticActiveUsers,
@@ -131,10 +143,12 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
   onUserClick,
   instanceLabel,
   instanceDescription,
+  onCreateSession,
 }) => {
   const { token } = theme.useToken();
   const navigate = useNavigate();
   const knowledgeHref = useHref('/knowledge');
+  const marketplaceHref = useHref('/marketplace');
   const { themeMode, setThemeMode } = useTheme();
 
   // Entity state via narrow store subscriptions rather than props. Each
@@ -251,7 +265,7 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
             RecentBoardPills, theme, external doc link, presence display)
             stays fully alive — those never depend on the daemon.
             See docs/disconnected-state-design.md. */}
-        <div style={{ minWidth: 200 }}>
+        <div style={{ width: 200 }}>
           <BoardSwitcher
             boards={boards}
             currentBoardId={currentBoardId}
@@ -289,15 +303,24 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
           staticActiveUsers={staticActiveUsers}
           maxVisible={presenceMaxVisible}
         />
+        {onCreateSession && hasMinimumRole(user?.role, ROLES.MEMBER) && (
+          <NavbarComposeButton
+            key={`${user?.user_id ?? 'anonymous'}:${authenticationGeneration}`}
+            client={presenceClient}
+            currentUser={user}
+            authenticationGeneration={authenticationGeneration}
+            isAuthenticationGenerationCurrent={isAuthenticationGenerationCurrent}
+            currentBoardId={currentBoardId}
+            onCreateSession={onCreateSession}
+            disabled={mutationDisabled}
+          />
+        )}
         <AppHeaderGlobalSearch
           currentUserId={currentUserId}
           branchById={branchById}
           boardById={boardById}
           onSettingsClick={onSettingsClick}
         />
-        {/* No Marketplace entry: the surface exists and answers at
-            /marketplace, but is not advertised while the feature is
-            incomplete. */}
         <Tooltip title="Knowledge Base">
           <Button
             type="text"
@@ -308,6 +331,29 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
               if (isPlainLeftClick(event)) {
                 event.preventDefault();
                 navigate('/knowledge');
+              }
+            }}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          />
+        </Tooltip>
+        {/* A marketplace is a surface people are meant to come back to, so it
+            gets promoted chrome next to the gear rather than a line inside the
+            gear's menu. Ungated by role: the catalog read is authenticated-only
+            (`mcp-catalog` takes `requireAuth` and nothing more), so everyone who
+            can see this header can browse it. Connecting is narrower, and
+            CatalogDetailDrawer asks the MCP member policy before offering it —
+            without that this entry would send a viewer to a Connect button that
+            403s, which is why the two changed together. */}
+        <Tooltip title="Marketplace">
+          <Button
+            type="text"
+            icon={<ShopOutlined style={{ fontSize: token.fontSizeLG }} />}
+            href={marketplaceHref}
+            aria-label="Marketplace"
+            onClick={(event) => {
+              if (isPlainLeftClick(event)) {
+                event.preventDefault();
+                navigate('/marketplace');
               }
             }}
             style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}

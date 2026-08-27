@@ -1,24 +1,42 @@
 import type { CreateLocalRepoRequest, CreateRepoRequest, Repo } from '@agor-live/client';
 import { DeleteOutlined, EditOutlined, FolderOutlined, PlusOutlined } from '@ant-design/icons';
 import type { RadioChangeEvent } from 'antd';
-import { Button, Card, Empty, Form, Input, Modal, Space, Typography } from 'antd';
-import { useMemo, useState } from 'react';
+import { Button, Card, Empty, Form, Input, Space, Typography } from 'antd';
+import { useLayoutEffect, useMemo, useState } from 'react';
+import { useAuthorityOperationGuard } from '@/hooks/useAuthorityOperationGuard';
 import { mapToArray } from '@/utils/mapHelpers';
 import { filterBySettingsSearch } from '@/utils/settingsSearch';
 import { RepoFormFields } from '../forms/RepoFormFields';
 import { HighlightMatch } from '../HighlightMatch';
 import { Tag } from '../Tag';
+import { AdaptiveSettingsModal } from './AdaptiveSettingsModal';
+import { ResponsiveSettingsHeader } from './ResponsiveSettingsHeader';
 
 interface ReposTableProps {
   repoById: Map<string, Repo>;
-  onCreate?: (data: CreateRepoRequest) => void;
-  onCreateLocal?: (data: CreateLocalRepoRequest) => void;
-  onUpdate?: (repoId: string, updates: Partial<Repo>) => void;
-  onDelete?: (repoId: string, cleanup: boolean) => void;
+  identityKey: string | null;
+  operationScope: readonly unknown[] | null;
+  onCreate?: (data: CreateRepoRequest, shouldApply?: () => boolean) => unknown;
+  onCreateLocal?: (
+    data: CreateLocalRepoRequest,
+    shouldApply?: () => boolean
+  ) => void | Promise<void>;
+  onUpdate?: (
+    repoId: string,
+    updates: Partial<Repo>,
+    shouldApply?: () => boolean
+  ) => void | Promise<void>;
+  onDelete?: (
+    repoId: string,
+    cleanup: boolean,
+    shouldApply?: () => boolean
+  ) => void | Promise<void>;
 }
 
 export const ReposTable: React.FC<ReposTableProps> = ({
   repoById,
+  identityKey,
+  operationScope,
   onCreate,
   onCreateLocal,
   onUpdate,
@@ -35,6 +53,17 @@ export const ReposTable: React.FC<ReposTableProps> = ({
   const [repoForm] = Form.useForm();
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [repoToDelete, setRepoToDelete] = useState<Repo | null>(null);
+  const operationGuard = useAuthorityOperationGuard(operationScope);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: authorityKey intentionally erases the selected caller-private row
+  useLayoutEffect(() => {
+    repoForm.resetFields();
+    setRepoModalOpen(false);
+    setEditingRepo(null);
+    setRepoMode('remote');
+    setDeleteModalOpen(false);
+    setRepoToDelete(null);
+  }, [identityKey, repoForm]);
 
   const isEditing = !!editingRepo;
   const filteredRepos = useMemo(
@@ -55,9 +84,11 @@ export const ReposTable: React.FC<ReposTableProps> = ({
     setDeleteModalOpen(true);
   };
 
-  const handleConfirmDelete = (cleanup: boolean) => {
-    if (repoToDelete) {
-      onDelete?.(repoToDelete.repo_id, cleanup);
+  const handleConfirmDelete = async (cleanup: boolean) => {
+    const operation = operationGuard.begin();
+    if (repoToDelete && operation.isCurrent()) {
+      await onDelete?.(repoToDelete.repo_id, cleanup, operation.isCurrent);
+      if (!operation.isCurrent()) return;
       setDeleteModalOpen(false);
       setRepoToDelete(null);
     }
@@ -83,8 +114,12 @@ export const ReposTable: React.FC<ReposTableProps> = ({
     setRepoModalOpen(true);
   };
 
-  const handleSaveRepo = () => {
-    repoForm.validateFields().then((values) => {
+  const handleSaveRepo = async () => {
+    const operation = operationGuard.begin();
+    if (!operation.isCurrent()) return;
+    try {
+      const values = await repoForm.validateFields();
+      if (!operation.isCurrent()) return;
       if (isEditing && editingRepo) {
         const updates: Partial<Repo> = {
           slug: values.slug,
@@ -92,25 +127,33 @@ export const ReposTable: React.FC<ReposTableProps> = ({
         if (values.default_branch) {
           updates.default_branch = values.default_branch;
         }
-        onUpdate?.(editingRepo.repo_id, updates);
+        await onUpdate?.(editingRepo.repo_id, updates, operation.isCurrent);
       } else {
         if (repoMode === 'local') {
-          onCreateLocal?.({
-            path: values.path,
-            slug: values.slug || undefined,
-          });
+          await onCreateLocal?.(
+            { path: values.path, slug: values.slug || undefined },
+            operation.isCurrent
+          );
         } else {
-          onCreate?.({
-            url: values.url,
-            slug: values.slug,
-            default_branch: values.default_branch,
-          });
+          await onCreate?.(
+            {
+              url: values.url,
+              slug: values.slug,
+              default_branch: values.default_branch,
+            },
+            operation.isCurrent
+          );
         }
       }
+      if (!operation.isCurrent()) return;
       repoForm.resetFields();
       setEditingRepo(null);
       setRepoModalOpen(false);
-    });
+    } catch {
+      // Ant Design displays validation errors. Parent mutation errors already
+      // own their user-facing message; either way stale continuations do not
+      // close or clear a reconnect-preserved draft.
+    }
   };
 
   const handleCancelModal = () => {
@@ -141,30 +184,23 @@ export const ReposTable: React.FC<ReposTableProps> = ({
 
   return (
     <div>
-      <div
-        style={{
-          marginBottom: 16,
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-        }}
-      >
-        <Typography.Text type="secondary">
-          Connect remote or local git repositories for your sessions.
-        </Typography.Text>
-        <Space>
-          <Input
-            allowClear
-            placeholder="Search name, slug, URL, path, type, or branch"
-            value={searchTerm}
-            onChange={(event) => setSearchTerm(event.target.value)}
-            style={{ width: 340 }}
-          />
-          <Button type="primary" icon={<PlusOutlined />} onClick={handleOpenCreateModal}>
-            New Repository
-          </Button>
-        </Space>
-      </div>
+      <ResponsiveSettingsHeader
+        description="Connect remote or local git repositories for your sessions."
+        actions={(compact) => (
+          <Space wrap style={{ width: compact ? '100%' : undefined }}>
+            <Input
+              allowClear
+              placeholder="Search name, slug, URL, path, type, or branch"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              style={{ width: compact ? '100%' : 340, flex: compact ? '1 1 100%' : undefined }}
+            />
+            <Button type="primary" icon={<PlusOutlined />} onClick={handleOpenCreateModal}>
+              New Repository
+            </Button>
+          </Space>
+        )}
+      />
 
       {repos.length === 0 && (
         <div
@@ -178,7 +214,7 @@ export const ReposTable: React.FC<ReposTableProps> = ({
           <Empty description="No repositories yet">
             <Typography.Text type="secondary">
               Click "New Repository" to clone a remote repo or switch to "Local" mode to link an
-              existing clone. You can also run <code>agor repo add-local &lt;path&gt;</code> from
+              existing clone. You can also run <code>agor local add-repo &lt;path&gt;</code> from
               the CLI.
             </Typography.Text>
           </Empty>
@@ -276,7 +312,7 @@ export const ReposTable: React.FC<ReposTableProps> = ({
       )}
 
       {/* Create/Edit Repository Modal */}
-      <Modal
+      <AdaptiveSettingsModal
         title={modalTitle}
         open={repoModalOpen}
         onOk={handleSaveRepo}
@@ -291,10 +327,10 @@ export const ReposTable: React.FC<ReposTableProps> = ({
             onRepoModeChange={handleModeChange}
           />
         </Form>
-      </Modal>
+      </AdaptiveSettingsModal>
 
       {/* Delete Repository Modal */}
-      <Modal
+      <AdaptiveSettingsModal
         title="Delete Repository"
         open={deleteModalOpen}
         onCancel={() => {
@@ -365,7 +401,7 @@ export const ReposTable: React.FC<ReposTableProps> = ({
             )}
           </Space>
         )}
-      </Modal>
+      </AdaptiveSettingsModal>
     </div>
   );
 };

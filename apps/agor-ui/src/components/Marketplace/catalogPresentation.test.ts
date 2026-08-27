@@ -1,7 +1,7 @@
-import type { MCPCatalogEntry, MCPCatalogEntryID } from '@agor/core/types';
+import type { MCPCatalogEntry } from '@agor/core/types';
 import { describe, expect, it } from 'vitest';
 import {
-  CONNECTABLE_PROBE_VERDICTS,
+  CONNECTABLE_AUTH_TYPES,
   capabilityLabel,
   connectBlockedReason,
   connectStatus,
@@ -12,17 +12,15 @@ import {
 
 function entry(overrides: Partial<MCPCatalogEntry> = {}): MCPCatalogEntry {
   return {
-    catalog_entry_id: 'id' as MCPCatalogEntryID,
-    created_at: new Date(0),
-    updated_at: new Date(0),
     name: 'com.example/mcp',
+    category: 'dev-tools',
+    capabilities: ['docs'],
+    benefit: 'Does a useful thing.',
+    starter_prompt: 'Show me what you can do.',
     has_remote: true,
-    has_package: false,
-    curated: true,
-    verified: false,
     remote_url: 'https://mcp.example.com/mcp',
     transport: 'streamable-http',
-    probed_auth_type: 'none',
+    auth_type: 'none',
     permission_disclosure: 'Reads public repository content only.',
     ...overrides,
   };
@@ -55,54 +53,51 @@ describe('capabilityLabel', () => {
 });
 
 describe('connectBlockedReason', () => {
-  it('allows a curated, remote, no-auth entry', () => {
+  it('allows a remote, no-auth entry', () => {
     expect(connectBlockedReason(entry())).toBeUndefined();
   });
 
-  it('treats an unprobed entry as connectable — connect probes on demand', () => {
-    expect(connectBlockedReason(entry({ probed_auth_type: 'unknown' }))).toBeUndefined();
+  it('treats an entry with no stated auth as connectable — connect checks it', () => {
+    expect(connectBlockedReason(entry({ auth_type: 'unknown' }))).toBeUndefined();
   });
 
-  it('refuses an entry that has not been reviewed', () => {
-    expect(connectBlockedReason(entry({ curated: false }))).toMatch(/reviewed by Preset/i);
-  });
-
-  it('refuses a locally-run server', () => {
+  it('refuses an entry with no endpoint to dial', () => {
+    // Unreachable for anything the loader served — it refuses such an entry
+    // outright now — but these arrive over the wire, so the UI still answers.
     expect(
       connectBlockedReason(entry({ transport: 'stdio', has_remote: false, remote_url: undefined }))
-    ).toMatch(/runs locally/i);
+    ).toMatch(/cannot be installed/i);
   });
 
-  it.each(['oauth', 'credentials'] as const)(
-    'refuses %s auth while only the no-auth branch exists',
-    (authType) => {
-      expect(connectBlockedReason(entry({ probed_auth_type: authType }))).toMatch(
-        /needs an account/i
-      );
+  it('allows oauth: connecting opens the provider popup automatically', () => {
+    expect(connectBlockedReason(entry({ auth_type: 'oauth' }))).toBeUndefined();
+  });
+
+  it('allows credentials auth: the drawer takes a key before connecting', () => {
+    // This used to be a refusal. It stopped being one when the drawer gained
+    // somewhere to paste a key — `blocked` removes the connect form entirely,
+    // which is the opposite of what an entry asking for a key needs.
+    expect(connectBlockedReason(entry({ auth_type: 'credentials' }))).toBeUndefined();
+  });
+
+  it('refuses nothing on the grounds of auth any more', () => {
+    // The claim behind "every catalog entry is installable": no stated auth
+    // type is a dead end, and the only remaining refusal is an entry with no
+    // endpoint at all.
+    for (const auth_type of ['none', 'oauth', 'credentials', 'unknown'] as const) {
+      expect(connectBlockedReason(entry({ auth_type }))).toBeUndefined();
     }
-  );
-
-  it('refuses an entry that discloses nothing, so no button can promise a connect', () => {
-    expect(connectBlockedReason(entry({ permission_disclosure: undefined }))).toMatch(
-      /has not stated what it can access/i
-    );
-  });
-
-  it('refuses an unreachable endpoint', () => {
-    expect(connectBlockedReason(entry({ probed_auth_type: 'unreachable' }))).toMatch(
-      /could not be reached/i
-    );
   });
 });
 
 describe('connectStatus', () => {
-  it('says an unprobed entry may still ask for an account, rather than promising either way', () => {
-    const status = connectStatus(entry({ probed_auth_type: 'unknown' }));
+  it('says an entry with no stated auth may still ask for one, rather than promising either way', () => {
+    const status = connectStatus(entry({ auth_type: 'unknown' }));
     expect(status.readiness).toBe('unchecked');
     expect(status.detail).toMatch(/may ask for an account/i);
-    // Still connectable — the endpoint probes on demand, and this is the only
-    // way to find out on an install that has never run a registry sync.
-    expect(connectBlockedReason(entry({ probed_auth_type: 'unknown' }))).toBeUndefined();
+    // Still connectable — connecting checks the endpoint, which is the only way
+    // to find out about an entry the file says nothing about.
+    expect(connectBlockedReason(entry({ auth_type: 'unknown' }))).toBeUndefined();
   });
 
   it('says outright when no account is needed', () => {
@@ -110,39 +105,81 @@ describe('connectStatus', () => {
   });
 
   it('carries a card-sized label for every blocked reason', () => {
-    expect(connectStatus(entry({ curated: false }))).toMatchObject({
+    expect(
+      connectStatus(entry({ transport: 'stdio', has_remote: false, remote_url: undefined }))
+    ).toMatchObject({
       readiness: 'blocked',
-      label: 'Not reviewed',
+      label: 'Not installable',
     });
-    expect(connectStatus(entry({ probed_auth_type: 'oauth' }))).toMatchObject({
-      readiness: 'blocked',
-      label: 'Needs an account',
+  });
+
+  it('separates "paste a key first" from both blocked and ready', () => {
+    // A third thing that is not a refusal: the entry connects, but it asks
+    // something of the user before it does rather than after. Sharing
+    // `blocked` with "no endpoint at all" is what used to hide the field.
+    const keyed = connectStatus(entry({ auth_type: 'credentials' }));
+    expect(keyed).toMatchObject({
+      readiness: 'api-key',
+      label: 'Needs a bearer access token',
     });
+    expect(keyed.detail).toMatch(/paste one when you connect/i);
+    // Says whose key it is and what becomes of it — the two things a user has
+    // to know before typing a credential into somebody else's software.
+    expect(keyed.detail).toMatch(/your own account/i);
+    expect(keyed.detail).toMatch(/never shows it again|never shown again|for you alone/i);
+  });
+
+  it('separates automatic account connection from "no account needed"', () => {
+    // Both connect, so both must not be `blocked` — but a card promising "no
+    // account needed" over a server that wants the user's Notion login is the
+    // thing this vocabulary exists to prevent.
+    const oauth = connectStatus(entry({ auth_type: 'oauth' }));
+    expect(oauth.readiness).toBe('sign-in');
+    expect(oauth.readiness).not.toBe(connectStatus(entry()).readiness);
+    expect(oauth.detail).toMatch(/your own account/i);
+    expect(oauth.detail).toMatch(/popup/i);
   });
 });
 
 describe('isConnectable', () => {
-  it('agrees with the card: an unprobed entry is connectable', () => {
-    expect(isConnectable(entry({ probed_auth_type: 'unknown' }))).toBe(true);
-    expect(connectStatus(entry({ probed_auth_type: 'unknown' })).readiness).not.toBe('blocked');
+  it('agrees with the card: an entry with no stated auth is connectable', () => {
+    expect(isConnectable(entry({ auth_type: 'unknown' }))).toBe(true);
+    expect(connectStatus(entry({ auth_type: 'unknown' })).readiness).not.toBe('blocked');
   });
 
   it('excludes what the card calls blocked', () => {
-    expect(isConnectable(entry({ probed_auth_type: 'oauth' }))).toBe(false);
-    expect(isConnectable(entry({ probed_auth_type: 'unreachable' }))).toBe(false);
-    expect(isConnectable(entry({ curated: false }))).toBe(false);
+    // Only one thing is blocked now: an entry naming no endpoint.
+    expect(
+      isConnectable(entry({ transport: 'stdio', has_remote: false, remote_url: undefined }))
+    ).toBe(false);
+  });
+
+  it('keeps credentials, which connects once a key is pasted', () => {
+    expect(isConnectable(entry({ auth_type: 'credentials' }))).toBe(true);
+  });
+
+  it('keeps oauth, which connects through the automatic popup', () => {
+    expect(isConnectable(entry({ auth_type: 'oauth' }))).toBe(true);
+  });
+
+  it('still excludes an endpoint-less oauth entry — nothing to sign into', () => {
+    expect(
+      isConnectable(
+        entry({ auth_type: 'oauth', transport: 'stdio', has_remote: false, remote_url: undefined })
+      )
+    ).toBe(false);
   });
 
   it('is the rule the query filter sends, so the two cannot drift', () => {
-    // Every verdict the filter keeps must be one the presentation also keeps.
-    for (const verdict of CONNECTABLE_PROBE_VERDICTS) {
-      expect(isConnectable(entry({ probed_auth_type: verdict }))).toBe(true);
+    // Every auth type the filter keeps must be one the presentation also keeps.
+    for (const authType of CONNECTABLE_AUTH_TYPES) {
+      expect(isConnectable(entry({ auth_type: authType }))).toBe(true);
     }
   });
 });
 
 describe('sort default', () => {
-  it("is curated rank, not the spec's install count — nothing counts installs", () => {
+  it("is hand-assigned rank, not the spec's install count — nothing counts installs", () => {
     expect(DEFAULT_SORT).toBe('popularity');
   });
 });

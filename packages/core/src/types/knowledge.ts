@@ -1,3 +1,4 @@
+import type { PersistedAgenticToolName } from './agentic-tool';
 import type {
   ArtifactID,
   BoardID,
@@ -10,6 +11,30 @@ import type {
   UserID,
   UUID,
 } from './id';
+
+/** Trusted assistant attribution derived at the authenticated Knowledge write boundary. */
+export interface KnowledgeWriteAttribution {
+  sessionId: SessionID;
+  agenticTool: PersistedAgenticToolName;
+  /** Teammate display name captured at write time when the Session belongs to one. */
+  teammateName?: string;
+}
+
+/**
+ * Document-authorized, transport-safe projection of the human behind a
+ * Knowledge write. It deliberately contains neither email nor profile data.
+ *
+ * `unattributed` covers system/legacy writes and authors whose hard-deleted
+ * user foreign key was cleared; those cases are indistinguishable in existing
+ * rows. `unavailable` means a non-null user ID did not resolve inside the
+ * active tenant scope (for example, malformed historical data); the response
+ * also clears that raw ID. Callers must not try a broader user lookup for
+ * either state.
+ */
+export interface KnowledgeUserAttribution {
+  status: 'resolved' | 'unattributed' | 'unavailable';
+  display_name: string;
+}
 
 export type KnowledgeNamespaceID = UUID;
 export type KnowledgeDocumentID = UUID;
@@ -610,6 +635,13 @@ export interface KnowledgeDocument {
   created_by?: UserID | null;
   created_at: Date;
   updated_by?: UserID | null;
+  /** Safe human attribution projected only after document read authorization. */
+  updated_by_user?: KnowledgeUserAttribution | null;
+  /** Trusted Session attribution for the most recent assistant-authored version. */
+  updated_by_session_id?: SessionID | null;
+  updated_by_agentic_tool?: PersistedAgenticToolName | null;
+  /** Teammate display name captured at write time, so attribution survives rename/deletion. */
+  updated_by_teammate_name?: string | null;
   updated_at?: Date | null;
   archived: boolean;
   archived_at?: Date | null;
@@ -635,6 +667,12 @@ export interface KnowledgeDocumentVersion {
   metadata?: Record<string, unknown> | null;
   change_summary?: string | null;
   created_by?: UserID | null;
+  /** Safe human attribution projected only after version/document read authorization. */
+  created_by_user?: KnowledgeUserAttribution | null;
+  /** Present only when this version was written through a Session-scoped agent request. */
+  created_by_session_id?: SessionID | null;
+  created_by_agentic_tool?: PersistedAgenticToolName | null;
+  created_by_teammate_name?: string | null;
   created_at: Date;
 }
 

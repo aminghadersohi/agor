@@ -13,6 +13,7 @@ import { type AgorConfig, createUserProcessEnvironment } from '@agor/core/config
 import {
   BranchRepository,
   getCurrentTenantId,
+  RepoRepository,
   runWithTenantDatabaseScope,
   shortId,
   type TenantScopeAwareDatabase,
@@ -20,7 +21,7 @@ import {
   UsersRepository,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
-import { BadRequest, Forbidden } from '@agor/core/feathers';
+import { BadRequest, Forbidden, NotFound } from '@agor/core/feathers';
 import type {
   AuthenticatedParams,
   Branch,
@@ -28,19 +29,23 @@ import type {
   TerminalAllocatedEvent,
   UserID,
 } from '@agor/core/types';
+import { resolveDelegatedHomeKey, type UnixUserMode } from '@agor/core/unix';
 import {
-  resolveUnixUserForImpersonation,
-  type UnixUserMode,
-  UnixUserNotFoundError,
-  validateResolvedUnixUser,
-} from '@agor/core/unix';
+  LOCAL_AUTHORIZATION_INVALIDATION_EVENT,
+  terminalChannelName,
+} from '../realtime/routing.js';
 import {
   TERMINAL_REQUEST_JOIN_CHANNEL,
   type TerminalRequestConnection,
 } from '../terminal-socket-connection.js';
 import { REMOVED_AGENTIC_TOOL_RUNTIME_MESSAGE } from '../utils/agentic-tool-runtime.js';
-import { hasBranchPermission } from '../utils/branch-authorization.js';
-import { generateScopedServiceToken, spawnExecutorFireAndForget } from '../utils/spawn-executor.js';
+import { isSuperAdmin } from '../utils/branch-authorization.js';
+import { resolveOwnerHomeStore, resolveSandboxStoragePaths } from '../utils/sandbox-context.js';
+import {
+  generateTerminalExecutorToken,
+  getDaemonUrl,
+  spawnExecutorFireAndForget,
+} from '../utils/spawn-executor.js';
 
 const TERMINAL_EXECUTOR_TOKEN_TTL = '30d';
 
@@ -103,9 +108,7 @@ export function buildBranchShellTabName(branch: Pick<Branch, 'branch_id' | 'name
   return `${branch.name} · ${shortId(branch.branch_id)}`;
 }
 
-export function terminalChannelName(tenantId: string, userId: string, terminalId: string): string {
-  return `tenant/${tenantId}/user/${userId}/terminal/${terminalId}`;
-}
+export { terminalChannelName };
 
 function terminalRequestAllocation(terminal: TerminalAttachment): TerminalAllocatedEvent {
   return {
@@ -147,6 +150,10 @@ export class TerminalsService {
     events.on('terminal:close-branch', (data: { tenantId?: string; branchId?: string }) => {
       if (data.tenantId && data.branchId) this.closeBranch(data.tenantId, data.branchId);
     });
+    events.on(LOCAL_AUTHORIZATION_INVALIDATION_EVENT, (data: { tenantId?: string }) => {
+      if (data.tenantId) this.closeTenant(data.tenantId);
+      else this.cleanup();
+    });
   }
 
   private withTenantDatabase<T>(work: (tenantDb: TenantScopedDatabase) => Promise<T>): Promise<T> {
@@ -179,34 +186,19 @@ export class TerminalsService {
     if (!data.branchId) throw new BadRequest('branchId is required to open a terminal');
 
     const config = this.app.get('config');
+    const enforceBranchAccess =
+      config.execution?.branch_rbac === true &&
+      !isSuperAdmin(userRole, config.execution?.allow_superadmin === true);
     const branch = await this.withTenantDatabase((tenantDb) =>
-      new BranchRepository(tenantDb).findById(data.branchId!)
+      new BranchRepository(tenantDb).findAccessibleById(data.branchId!, userId, {
+        minimumPermission: 'session',
+        enforceAccess: enforceBranchAccess,
+      })
     );
-    if (!branch) throw new BadRequest(`Branch not found: ${data.branchId}`);
+    // Missing and inaccessible branches deliberately share one response. The
+    // terminal acknowledgement must not be a branch-existence oracle.
+    if (!branch) throw new NotFound('Branch not found');
     if (branch.archived) throw new BadRequest(`Branch is archived: ${branch.name}`);
-
-    if (config.execution?.branch_rbac === true) {
-      await this.withTenantDatabase(async (tenantDb) => {
-        const branchRepo = new BranchRepository(tenantDb);
-        const isOwner = await branchRepo.isOwner(branch.branch_id, userId);
-        const permission = await branchRepo.resolveUserPermission(branch, userId);
-        if (
-          !hasBranchPermission(
-            branch,
-            userId,
-            isOwner,
-            'session',
-            userRole,
-            config.execution?.allow_superadmin === true,
-            permission
-          )
-        ) {
-          throw new Forbidden(
-            `You need 'session' permission on branch ${branch.name} to open a terminal there.`
-          );
-        }
-      });
-    }
 
     const scopeKey = `${tenantId}:${userId}:${branch.branch_id}`;
     const pending = this.starting.get(scopeKey);
@@ -260,21 +252,61 @@ export class TerminalsService {
     const user = await this.withTenantDatabase((tenantDb) =>
       new UsersRepository(tenantDb).findById(userId)
     );
-    const impersonation = resolveUnixUserForImpersonation({
+    const delegatedHome = resolveDelegatedHomeKey({
       mode: unixUserMode as UnixUserMode,
-      userUnixUsername: user?.unix_username ?? null,
-      executorUnixUser: config.execution?.executor_unix_user,
+      executionHomeKey: user?.unix_username ?? null,
     });
-    try {
-      validateResolvedUnixUser(unixUserMode as UnixUserMode, impersonation.unixUser);
-    } catch (error) {
-      if (error instanceof UnixUserNotFoundError) throw new Error(error.message);
-      throw error;
-    }
-
     const executorEnv = await this.withTenantDatabase((tenantDb) =>
-      createUserProcessEnvironment(userId, tenantDb, undefined, !!impersonation.unixUser)
+      createUserProcessEnvironment(userId, tenantDb)
     );
+
+    // Sandbox mount context for the terminal. The OWNER is the terminal user
+    // (they opened the shell), so the per-user home overlay + RBAC branch mount
+    // key off `userId` — unlike prompts, which key off session.created_by.
+    const sandboxCfg = config.execution?.sandbox;
+    const rbacOn = config.execution?.branch_rbac === true;
+    let sandboxHomeStore: string | undefined;
+    let sandboxBaseRepoPath: string | undefined;
+    const sandboxWorktreesRoot =
+      sandboxCfg?.enabled === true
+        ? resolveSandboxStoragePaths(config, tenantId).worktreesRoot
+        : undefined;
+    let principalBranchAccess: 'write' | 'read' | 'none' = 'write';
+    if (sandboxCfg?.enabled === true) {
+      // Only linked worktrees need the shared git dir bound in. A clone-mode
+      // branch carries its own `.git` — EXCEPT for its object store when it was
+      // created with `git clone --reference`, which leaves an alternates
+      // pointer into `<data_home>/repos/<slug>/.git/objects`. The daemon
+      // refuses to create that pointer when this sandbox would hide it (see
+      // `shouldUseCloneReferencePath`), so nothing extra is mounted here.
+      if (branch.storage_mode !== 'clone' && branch.repo_id) {
+        sandboxBaseRepoPath = await this.withTenantDatabase((tenantDb) =>
+          new RepoRepository(tenantDb)
+            .findById(branch.repo_id)
+            .then((r) => r?.local_path ?? undefined)
+        );
+      }
+      if (rbacOn) {
+        const access = await this.withTenantDatabase((tenantDb) =>
+          new BranchRepository(tenantDb).resolveUserAccess(branch, userId)
+        );
+        principalBranchAccess =
+          access.fs_access === 'write' ? 'write' : access.fs_access === 'read' ? 'read' : 'none';
+        if (principalBranchAccess === 'none') {
+          throw new Forbidden(
+            'You have no filesystem access to this branch; cannot open a sandboxed terminal on it.'
+          );
+        }
+      }
+      if (sandboxCfg.home_mode === 'per_user') {
+        sandboxHomeStore = resolveOwnerHomeStore({
+          config,
+          tenantId,
+          ownerUserId: userId,
+          filesystemHome: user?.filesystem_home,
+        });
+      }
+    }
     const identity = this.app.get('distributedWorkIdentity') ?? {
       instanceId: 'daemon',
       bootId: `process-${process.pid}`,
@@ -297,7 +329,7 @@ export class TerminalsService {
       startedAt: new Date(),
     };
 
-    const token = generateScopedServiceToken(
+    const token = generateTerminalExecutorToken(
       this.app,
       {
         terminal_user_id: userId,
@@ -307,7 +339,7 @@ export class TerminalsService {
       },
       TERMINAL_EXECUTOR_TOKEN_TTL
     );
-    const daemonUrl = `http://127.0.0.1:${config.daemon?.port || 3030}`;
+    const daemonUrl = getDaemonUrl();
 
     this.terminals.set(terminalId, terminal);
     this.terminalByScope.set(scopeKey, terminalId);
@@ -331,14 +363,20 @@ export class TerminalsService {
             cwd: branch.path,
             cols: data.cols || 160,
             rows: data.rows || 40,
+            // Sandbox mount context (consumed in spawn-executor → buildSandboxWrap).
+            // Undefined when the sandbox / per_user home is off.
+            sandboxHomeStore,
+            sandboxBaseRepoPath,
+            sandboxWorktreesRoot,
+            principalBranchAccess,
           },
         },
         {
           logPrefix: `[TerminalsService.executor ${shortId(userId)}/${shortId(terminalId)}]`,
-          asUser: impersonation.unixUser || undefined,
+          delegatedHomeKey: delegatedHome.delegatedHomeKey || undefined,
           env: executorEnv,
           templateVariables: {
-            unix_user: impersonation.reportedUnixUser || undefined,
+            unix_user: delegatedHome.delegatedHomeKey || undefined,
             executor_type: 'shell',
           },
           onExit: () => this.handleExecutorExit(terminalId, userId),
@@ -393,6 +431,13 @@ export class TerminalsService {
       if (terminal.tenantId === tenantId && terminal.branchId === branchId) {
         this.stopTerminal(terminal);
       }
+    }
+  }
+
+  /** Revoke every process-local terminal capability for an invalidated tenant. */
+  closeTenant(tenantId: string): void {
+    for (const terminal of [...this.terminals.values()]) {
+      if (terminal.tenantId === tenantId) this.stopTerminal(terminal);
     }
   }
 

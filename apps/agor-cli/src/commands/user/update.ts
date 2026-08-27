@@ -2,6 +2,7 @@
  * `agor user update` - Update a user
  */
 
+import { assertSecurePassword } from '@agor/core/config';
 import type { User } from '@agor-live/client';
 import { shortId } from '@agor-live/client';
 import { Args, Flags } from '@oclif/core';
@@ -15,7 +16,7 @@ export default class UserUpdate extends BaseCommand {
   static examples = [
     '<%= config.bin %> <%= command.id %> test@example.com --name "New Name"',
     '<%= config.bin %> <%= command.id %> 0199d1bd --role member',
-    '<%= config.bin %> <%= command.id %> test@example.com --password newpassword123',
+    '<%= config.bin %> <%= command.id %> test@example.com --password "a-new-unique-passphrase"',
     '<%= config.bin %> <%= command.id %> test@example.com --unix-username testuser',
     '<%= config.bin %> <%= command.id %> 0199d1bd --force-password-change',
   ];
@@ -42,7 +43,11 @@ export default class UserUpdate extends BaseCommand {
       options: ['superadmin', 'admin', 'member', 'viewer'],
     }),
     'unix-username': Flags.string({
-      description: 'New Unix username for shell access',
+      description: 'New Execution home key for shell access',
+    }),
+    'filesystem-home': Flags.string({
+      description:
+        'Absolute host home dir for the per-user sandbox overlay (unix_user_mode: sandbox). Admin-only.',
     }),
     'force-password-change': Flags.boolean({
       description: 'Force user to change password on next login (omit to leave unchanged)',
@@ -89,7 +94,7 @@ export default class UserUpdate extends BaseCommand {
               { name: 'Name', value: 'name' },
               { name: 'Password', value: 'password' },
               { name: 'Role', value: 'role' },
-              { name: 'Unix Username', value: 'unix_username' },
+              { name: 'Execution Home Key', value: 'unix_username' },
               { name: 'Force Password Change', value: 'force_password_change' },
             ],
           },
@@ -128,8 +133,11 @@ export default class UserUpdate extends BaseCommand {
             message: 'New password:',
             when: fields.includes('password'),
             validate: (input: string) => {
-              if (!input) return 'Password is required';
-              if (input.length < 8) return 'Password must be at least 8 characters';
+              try {
+                assertSecurePassword(input, { email: user.email });
+              } catch (error) {
+                return error instanceof Error ? error.message : String(error);
+              }
               return true;
             },
             mask: '*',
@@ -145,7 +153,7 @@ export default class UserUpdate extends BaseCommand {
           {
             type: 'input',
             name: 'unix_username',
-            message: 'New Unix username:',
+            message: 'New Execution home key:',
             when: fields.includes('unix_username'),
             default: user.unix_username,
           },
@@ -173,12 +181,17 @@ export default class UserUpdate extends BaseCommand {
         password?: string;
         must_change_password?: boolean;
         unix_username?: string;
+        filesystem_home?: string;
       } = {};
       if (flags.email) updates.email = flags.email;
       if (flags.name) updates.name = flags.name;
-      if (flags.password) updates.password = flags.password;
+      if (flags.password) {
+        assertSecurePassword(flags.password, { email: flags.email ?? user.email });
+        updates.password = flags.password;
+      }
       if (flags.role) updates.role = flags.role as 'superadmin' | 'admin' | 'member' | 'viewer';
       if (flags['unix-username']) updates.unix_username = flags['unix-username'];
+      if (flags['filesystem-home']) updates.filesystem_home = flags['filesystem-home'];
       if (flags['force-password-change'] !== undefined) {
         updates.must_change_password = flags['force-password-change'];
       }
@@ -199,7 +212,7 @@ export default class UserUpdate extends BaseCommand {
       this.log(`  Email:         ${chalk.cyan(updatedUser.email)}`);
       this.log(`  Name:          ${chalk.cyan(updatedUser.name || '(not set)')}`);
       this.log(`  Role:          ${chalk.cyan(updatedUser.role)}`);
-      this.log(`  Unix Username: ${chalk.cyan(updatedUser.unix_username || '(not set)')}`);
+      this.log(`  Execution Home Key: ${chalk.cyan(updatedUser.unix_username || '(not set)')}`);
       this.log(`  ID:            ${chalk.gray(shortId(updatedUser.user_id))}`);
       if (updatedUser.must_change_password) {
         this.log(`  ${chalk.yellow('⚠')} User must change password on next login`);

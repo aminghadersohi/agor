@@ -13,16 +13,19 @@ import type {
   InternalUser,
   StoredAgenticTools,
   User,
+  UserID,
   UUID,
 } from '@agor/core/types';
 import { toAgenticToolsStatus } from '@agor/core/types';
 import { eq, like, sql } from 'drizzle-orm';
 import { normalizeStoredEnvMap, type RawStoredEnvVar } from '../../config/env-vars';
 import { generateId, shortId } from '../../lib/ids';
+import { isValidExecutionHomeKey } from '../../types/user';
 import type { Database } from '../client';
-import { deleteFrom, insert, select, update } from '../database-wrapper';
+import { deleteFrom, insert, lockRowForUpdate, select, update } from '../database-wrapper';
 import { decryptApiKey, encryptApiKey } from '../encryption';
 import { type UserInsert as SchemaUserInsert, type UserRow, users } from '../schema';
+import { isExecutionHomeKeyAvailable } from '../user-execution-home';
 import {
   type BaseRepository,
   EntityNotFoundError,
@@ -33,9 +36,145 @@ import {
 
 /**
  * Users repository implementation
+ *
+ * Security boundary: this is a persistence primitive for trusted bootstrap,
+ * external-identity provisioning, and background jobs. It intentionally has
+ * no actor context. Request-driven REST, Socket.IO, MCP, and CLI mutations must
+ * go through the daemon UsersService, which enforces actor/target role
+ * authority before calling the database.
  */
-export class UsersRepository implements BaseRepository<InternalUser, Partial<InternalUser>> {
+const USER_DATA_UPDATE_FIELDS = [
+  'avatar_url',
+  'avatar',
+  'avatar_source',
+  'avatar_source_id',
+  'avatar_synced_at',
+  'preferences',
+  'agentic_auth_methods',
+  'default_agentic_config',
+  'primary_agentic_tool',
+  'primary_teammate_id',
+  'default_agentic_selection',
+  'default_mcp_server_ids',
+] as const satisfies ReadonlyArray<keyof User>;
+
+type UsersRepositoryMutableField =
+  | 'email'
+  | 'name'
+  | 'emoji'
+  | 'role'
+  | 'unix_username'
+  | 'filesystem_home'
+  | 'onboarding_completed'
+  | 'must_change_password'
+  | (typeof USER_DATA_UPDATE_FIELDS)[number];
+
+/** Explicit credential-free input accepted when creating a persistence projection. */
+export type UsersRepositoryCreate = Pick<User, 'email'> &
+  Partial<Pick<User, 'user_id' | 'created_at' | 'updated_at' | UsersRepositoryMutableField>>;
+
+/** Fields the generic persistence boundary can actually mutate. */
+export type UsersRepositoryUpdate = Partial<Pick<User, UsersRepositoryMutableField>>;
+
+export class UsersRepository
+  implements BaseRepository<InternalUser, UsersRepositoryCreate, UsersRepositoryUpdate>
+{
   constructor(private db: Database) {}
+
+  private async readDiscoveryAuthorityProjection(
+    userId: UserID | string,
+    lock: boolean
+  ): Promise<{ user_id: UserID; role: string; updated_at: Date } | null> {
+    const where = eq(users.user_id, userId);
+    if (lock) await lockRowForUpdate(this.db, this.db, users, where);
+    const row = await select(this.db, {
+      user_id: users.user_id,
+      role: users.role,
+      updated_at: users.updated_at,
+      created_at: users.created_at,
+    })
+      .from(users)
+      .where(where)
+      .one();
+    return row
+      ? {
+          user_id: row.user_id as UserID,
+          role: row.role,
+          updated_at: new Date(row.updated_at ?? row.created_at),
+        }
+      : null;
+  }
+
+  /** Nonsecret role/version snapshot captured before an outbound MCP probe. */
+  async getDiscoveryAuthorityProjection(
+    userId: UserID | string
+  ): Promise<{ user_id: UserID; role: string; updated_at: Date } | null> {
+    try {
+      return await this.readDiscoveryAuthorityProjection(userId, false);
+    } catch (error) {
+      throw new RepositoryError(
+        `Failed to read user discovery authority: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /** Transactional counterpart used immediately before capability persistence. */
+  async getDiscoveryAuthorityProjectionForUpdate(
+    userId: UserID | string
+  ): Promise<{ user_id: UserID; role: string; updated_at: Date } | null> {
+    try {
+      return await this.readDiscoveryAuthorityProjection(userId, true);
+    } catch (error) {
+      throw new RepositoryError(
+        `Failed to lock user discovery authority: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /**
+   * Explicit nonsecret principal projection for user-targeted invalidations.
+   * Tenant scoping is supplied by the repository's current database unit of
+   * work; callers never need to hydrate user preferences or credentials merely
+   * to name a realtime room.
+   */
+  async listUserIds(): Promise<UserID[]> {
+    try {
+      const rows = await select(this.db, { user_id: users.user_id }).from(users).all();
+      return rows.map((row: { user_id: string }) => row.user_id as UserID);
+    } catch (error) {
+      throw new RepositoryError(
+        `Failed to list user IDs: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /**
+   * Lock and reload only the caller identity fields used by a write
+   * authorizer. Role changes use the same users row, so a concurrent demotion
+   * is ordered either before this read (and is observed) or after the guarded
+   * mutation commits.
+   */
+  async getWriteAuthorityProjectionForUpdate(
+    userId: UserID | string
+  ): Promise<{ user_id: UserID; role: string } | null> {
+    try {
+      const where = eq(users.user_id, userId);
+      await lockRowForUpdate(this.db, this.db, users, where);
+      const row = await select(this.db, { user_id: users.user_id, role: users.role })
+        .from(users)
+        .where(where)
+        .one();
+      return row ? { user_id: row.user_id as UserID, role: row.role } : null;
+    } catch (error) {
+      throw new RepositoryError(
+        `Failed to read user write authority: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
 
   /**
    * Convert database row to User type.
@@ -59,8 +198,10 @@ export class UsersRepository implements BaseRepository<InternalUser, Partial<Int
       emoji: row.emoji ?? undefined,
       role: row.role,
       unix_username: row.unix_username ?? undefined,
+      filesystem_home: row.filesystem_home ?? undefined,
       onboarding_completed: row.onboarding_completed,
       must_change_password: row.must_change_password,
+      credential_generation: row.credential_generation,
       tokens_valid_after: row.tokens_valid_after ? new Date(row.tokens_valid_after) : undefined,
       avatar_url: row.data.avatar_url ?? row.data.avatar,
       avatar: row.data.avatar,
@@ -87,6 +228,8 @@ export class UsersRepository implements BaseRepository<InternalUser, Partial<Int
         return out;
       })(),
       default_agentic_config: row.data.default_agentic_config as User['default_agentic_config'],
+      primary_agentic_tool: row.data.primary_agentic_tool,
+      primary_teammate_id: row.data.primary_teammate_id,
       default_agentic_selection: row.data.default_agentic_selection,
       default_mcp_server_ids: row.data.default_mcp_server_ids ?? [
         ...new Set(legacyDefaultMcpServerIds),
@@ -100,7 +243,6 @@ export class UsersRepository implements BaseRepository<InternalUser, Partial<Int
    */
   private userToInsert(
     user: Partial<InternalUser> & {
-      password?: string;
       agentic_tools_raw?: StoredAgenticTools;
       env_vars_raw?: SchemaUserInsert['data']['env_vars'];
     }
@@ -117,13 +259,18 @@ export class UsersRepository implements BaseRepository<InternalUser, Partial<Int
       created_at: user.created_at ? new Date(user.created_at) : now,
       updated_at: user.updated_at ? new Date(user.updated_at) : now,
       email: user.email,
-      password: user.password ?? '', // Password required, but handled by services layer
+      // Repository-created projections/background fixtures intentionally have
+      // no usable local credential. Password assignment must go through
+      // createUser or the daemon UsersService.
+      password: '',
       name: user.name ?? null,
       emoji: user.emoji ?? null,
       role: user.role ?? 'member',
       unix_username: user.unix_username ?? null,
+      filesystem_home: user.filesystem_home ?? null,
       onboarding_completed: user.onboarding_completed ?? false,
       must_change_password: user.must_change_password ?? false,
+      credential_generation: user.credential_generation ?? 0,
       tokens_valid_after: user.tokens_valid_after ? new Date(user.tokens_valid_after) : null,
       data: {
         avatar_url: user.avatar_url,
@@ -145,6 +292,8 @@ export class UsersRepository implements BaseRepository<InternalUser, Partial<Int
         // from the existing row so a generic field update doesn't wipe them.
         env_vars: user.env_vars_raw,
         default_agentic_config: user.default_agentic_config,
+        primary_agentic_tool: user.primary_agentic_tool,
+        primary_teammate_id: user.primary_teammate_id,
         default_agentic_selection: user.default_agentic_selection,
         default_mcp_server_ids: user.default_mcp_server_ids,
       },
@@ -156,7 +305,7 @@ export class UsersRepository implements BaseRepository<InternalUser, Partial<Int
    */
   private async resolveId(id: string): Promise<string> {
     return resolveByShortIdPrefix(id, 'User', async (pattern) => {
-      const rows = await select(this.db)
+      const rows = await select(this.db, { user_id: users.user_id })
         .from(users)
         .where(like(users.user_id, pattern))
         .limit(RESOLVE_SHORT_ID_FETCH_LIMIT)
@@ -166,39 +315,28 @@ export class UsersRepository implements BaseRepository<InternalUser, Partial<Int
   }
 
   /**
-   * Check if unix_username is already taken by another user
-   */
-  private async isUnixUsernameTaken(
-    unixUsername: string,
-    excludeUserId?: string
-  ): Promise<boolean> {
-    const result = await select(this.db)
-      .from(users)
-      .where(eq(users.unix_username, unixUsername))
-      .one();
-
-    if (!result) {
-      return false;
-    }
-
-    // If excluding a user ID (for updates), check if it's a different user
-    if (excludeUserId && result.user_id === excludeUserId) {
-      return false;
-    }
-
-    return true;
-  }
-
-  /**
    * Create a new user
    */
-  async create(data: Partial<InternalUser>): Promise<InternalUser> {
+  async create(data: UsersRepositoryCreate): Promise<InternalUser> {
+    if (
+      Object.hasOwn(data as object, 'password') ||
+      Object.hasOwn(data as object, 'password_hash') ||
+      Object.hasOwn(data as object, 'passwordHash') ||
+      Object.hasOwn(data as object, 'credential_generation') ||
+      Object.hasOwn(data as object, 'tokens_valid_after')
+    ) {
+      throw new RepositoryError(
+        'UsersRepository does not accept password credential fields; use an authoritative password-write service'
+      );
+    }
+    if (data.unix_username !== undefined && !isValidExecutionHomeKey(data.unix_username)) {
+      throw new RepositoryError('Invalid execution home key format');
+    }
     // Validate unix_username uniqueness if provided
     if (data.unix_username) {
-      const isTaken = await this.isUnixUsernameTaken(data.unix_username);
-      if (isTaken) {
+      if (!(await isExecutionHomeKeyAvailable(this.db, data.unix_username))) {
         throw new RepositoryError(
-          `Unix username "${data.unix_username}" is already in use by another user`
+          `Execution home key "${data.unix_username}" is already in use by another user`
         );
       }
     }
@@ -305,7 +443,18 @@ export class UsersRepository implements BaseRepository<InternalUser, Partial<Int
   /**
    * Update user by ID
    */
-  async update(id: string, updates: Partial<InternalUser>): Promise<InternalUser> {
+  async update(id: string, updates: UsersRepositoryUpdate): Promise<InternalUser> {
+    if (
+      Object.hasOwn(updates as object, 'password') ||
+      Object.hasOwn(updates as object, 'password_hash') ||
+      Object.hasOwn(updates as object, 'passwordHash') ||
+      Object.hasOwn(updates as object, 'credential_generation') ||
+      Object.hasOwn(updates as object, 'tokens_valid_after')
+    ) {
+      throw new RepositoryError(
+        'UsersRepository cannot update password credential fields; use an authoritative password-write service'
+      );
+    }
     const fullId = await this.resolveId(id);
 
     // Get current user
@@ -314,37 +463,65 @@ export class UsersRepository implements BaseRepository<InternalUser, Partial<Int
       throw new EntityNotFoundError('User', id);
     }
 
+    if (updates.unix_username !== undefined && !isValidExecutionHomeKey(updates.unix_username)) {
+      throw new RepositoryError('Invalid execution home key format');
+    }
+
     // Validate unix_username uniqueness if being changed
     if (updates.unix_username && updates.unix_username !== current.unix_username) {
-      const isTaken = await this.isUnixUsernameTaken(updates.unix_username, fullId);
-      if (isTaken) {
+      if (!(await isExecutionHomeKeyAvailable(this.db, updates.unix_username, fullId))) {
         throw new RepositoryError(
-          `Unix username "${updates.unix_username}" is already in use by another user`
+          `Execution home key "${updates.unix_username}" is already in use by another user`
         );
       }
     }
 
-    // Merge updates. Preserve the encrypted agentic_tools and env_vars blobs
-    // from the raw row so a generic field update (name, preferences, etc.)
-    // doesn't nuke stored credentials — the boolean projection on `current`
-    // can't round-trip back to encrypted bytes.
     const rawRow = await this.getRawRow(fullId);
-    const merged = { ...current, ...updates } as Partial<InternalUser> & {
-      agentic_tools_raw?: StoredAgenticTools;
-      env_vars_raw?: SchemaUserInsert['data']['env_vars'];
-    };
-    if (rawRow?.data.agentic_tools) {
-      merged.agentic_tools_raw = rawRow.data.agentic_tools as StoredAgenticTools;
+    if (!rawRow) {
+      throw new EntityNotFoundError('User', id);
     }
-    if (rawRow?.data.env_vars) {
-      merged.env_vars_raw = rawRow.data.env_vars;
+    const insertData = this.userToInsert({ ...current, ...updates });
+
+    // This explicit allowlist is also a concurrency boundary. Generic profile
+    // updates write only fields the caller actually supplied. They must never
+    // round-trip password authority or unrelated profile fields from the stale
+    // snapshot above. JSON updates merge into the latest raw blob so opaque
+    // keys (external identities and forward-compatible data) also survive.
+    const mutableUserData: Partial<SchemaUserInsert> = {};
+    if (Object.hasOwn(updates, 'email')) mutableUserData.email = insertData.email;
+    if (Object.hasOwn(updates, 'name')) mutableUserData.name = insertData.name;
+    if (Object.hasOwn(updates, 'emoji')) mutableUserData.emoji = insertData.emoji;
+    if (Object.hasOwn(updates, 'role')) mutableUserData.role = insertData.role;
+    if (Object.hasOwn(updates, 'unix_username')) {
+      mutableUserData.unix_username = insertData.unix_username;
     }
-    const insertData = this.userToInsert(merged);
+    if (Object.hasOwn(updates, 'filesystem_home')) {
+      mutableUserData.filesystem_home = insertData.filesystem_home;
+    }
+    if (Object.hasOwn(updates, 'onboarding_completed')) {
+      mutableUserData.onboarding_completed = insertData.onboarding_completed;
+    }
+    if (Object.hasOwn(updates, 'must_change_password')) {
+      mutableUserData.must_change_password = insertData.must_change_password;
+    }
+
+    let dataChanged = false;
+    const nextData = { ...rawRow.data } as Record<string, unknown>;
+    for (const field of USER_DATA_UPDATE_FIELDS) {
+      if (!Object.hasOwn(updates, field)) continue;
+      dataChanged = true;
+      const value = updates[field];
+      if (value === undefined) delete nextData[field];
+      else nextData[field] = value;
+    }
+    if (dataChanged) {
+      mutableUserData.data = nextData as SchemaUserInsert['data'];
+    }
 
     // Update database
     await update(this.db, users)
       .set({
-        ...insertData,
+        ...mutableUserData,
         updated_at: new Date(),
       })
       .where(eq(users.user_id, fullId))

@@ -2,6 +2,7 @@
  * `agor user create` - Create a new user
  */
 
+import { assertSecurePassword } from '@agor/core/config';
 import type { CreateUserInput, UserRole } from '@agor-live/client';
 import { shortId } from '@agor-live/client';
 import { Flags } from '@oclif/core';
@@ -38,7 +39,13 @@ export default class UserCreate extends BaseCommand {
       default: 'admin',
     }),
     'unix-username': Flags.string({
-      description: 'Unix username for shell access (defaults to email prefix)',
+      description: 'Execution home key for shell access (defaults to email prefix)',
+      required: false,
+    }),
+    'filesystem-home': Flags.string({
+      description:
+        'Absolute host home dir for the per-user sandbox overlay (unix_user_mode: sandbox). ' +
+        'Null/omitted uses the canonical per-user store. Admin-only.',
       required: false,
     }),
     'force-password-change': Flags.boolean({
@@ -78,8 +85,11 @@ export default class UserCreate extends BaseCommand {
           message: 'Password:',
           when: !flags.password,
           validate: (input: string) => {
-            if (!input) return 'Password is required';
-            if (input.length < 8) return 'Password must be at least 8 characters';
+            try {
+              assertSecurePassword(input);
+            } catch (error) {
+              return error instanceof Error ? error.message : String(error);
+            }
             enteredPassword = input; // Store for confirmation validation
             return true;
           },
@@ -103,6 +113,7 @@ export default class UserCreate extends BaseCommand {
       const email = flags.email || answers.email;
       const name = flags.name || answers.name;
       const password = flags.password || answers.password;
+      assertSecurePassword(password, { email });
 
       // Create user
       this.log('');
@@ -113,6 +124,7 @@ export default class UserCreate extends BaseCommand {
         name: name || undefined,
         role: flags.role as UserRole,
         unix_username: flags['unix-username'],
+        filesystem_home: flags['filesystem-home'],
         must_change_password: flags['force-password-change'],
       };
       const user = await client.service('users').create(userData);
@@ -122,7 +134,7 @@ export default class UserCreate extends BaseCommand {
       this.log(`  Email:         ${chalk.cyan(user.email)}`);
       this.log(`  Name:          ${chalk.cyan(user.name || '(not set)')}`);
       this.log(`  Role:          ${chalk.cyan(user.role)}`);
-      this.log(`  Unix Username: ${chalk.cyan(user.unix_username || '(not set)')}`);
+      this.log(`  Execution Home Key: ${chalk.cyan(user.unix_username || '(not set)')}`);
       this.log(`  ID:            ${chalk.gray(shortId(user.user_id))}`);
       if (user.must_change_password) {
         this.log(`  ${chalk.yellow('⚠')} User must change password on first login`);

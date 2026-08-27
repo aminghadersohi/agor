@@ -31,8 +31,9 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
-import { Layout, Menu, Modal, theme } from 'antd';
-import { useMemo, useState } from 'react';
+import { Button, Drawer, Flex, Grid, Layout, Menu, Modal, Select, Typography, theme } from 'antd';
+import { useCallback, useMemo, useState } from 'react';
+import { useAuthenticatedAuthorityScope } from '@/hooks/useAuthorityOperationGuard';
 import type { BranchStorageConfig } from '@/utils/branchStorage';
 import { mapToArray } from '@/utils/mapHelpers';
 import { SETTINGS_SECTIONS, type SettingsSection } from '../../hooks/useSettingsRoute';
@@ -79,10 +80,13 @@ export interface SettingsModalProps {
   onDeleteBoard?: (boardId: string) => void;
   onArchiveBoard?: (boardId: string) => void;
   onUnarchiveBoard?: (boardId: string) => void;
-  onCreateRepo?: (data: CreateRepoRequest) => unknown;
-  onCreateLocalRepo?: (data: CreateLocalRepoRequest) => void | Promise<void>;
-  onUpdateRepo?: (repoId: string, updates: Partial<Repo>) => void;
-  onDeleteRepo?: (repoId: string, cleanup: boolean) => void;
+  onCreateRepo?: (data: CreateRepoRequest, shouldApply?: () => boolean) => unknown;
+  onCreateLocalRepo?: (
+    data: CreateLocalRepoRequest,
+    shouldApply?: () => boolean
+  ) => void | Promise<void>;
+  onUpdateRepo?: (repoId: string, updates: Partial<Repo>, shouldApply?: () => boolean) => void;
+  onDeleteRepo?: (repoId: string, cleanup: boolean, shouldApply?: () => boolean) => void;
   onArchiveOrDeleteBranch?: (branchId: string, options: BranchArchiveOrDeleteOptions) => void;
   onUnarchiveBranch?: (branchId: string, options?: { boardId?: string }) => void;
   onUpdateBranch?: (branchId: string, updates: BranchUpdate) => void;
@@ -102,14 +106,25 @@ export interface SettingsModalProps {
   ) => Promise<Branch | null>;
   onStartEnvironment?: (branchId: string) => void;
   onStopEnvironment?: (branchId: string) => void;
-  onCreateUser?: (data: CreateUserInput) => void;
-  onUpdateUser?: (userId: string, updates: UpdateUserInput) => void;
-  onDeleteUser?: (userId: string) => void;
-  onCreateMCPServer?: (data: CreateMCPServerInput) => void;
-  onDeleteMCPServer?: (serverId: string) => void;
+  onCreateUser?: (data: CreateUserInput, shouldApply?: () => boolean) => void | Promise<void>;
+  onUpdateUser?: (
+    userId: string,
+    updates: UpdateUserInput,
+    shouldApply?: () => boolean
+  ) => void | Promise<void>;
+  onDeleteUser?: (userId: string, shouldApply?: () => boolean) => void | Promise<void>;
+  onCreateMCPServer?: (
+    data: CreateMCPServerInput,
+    shouldApply?: () => boolean
+  ) => void | Promise<void>;
+  onDeleteMCPServer?: (serverId: string, shouldApply?: () => boolean) => void | Promise<void>;
   onCreateGatewayChannel?: (data: GatewayChannelCreateData) => void;
-  onUpdateGatewayChannel?: (channelId: string, updates: GatewayChannelPatchData) => void;
-  onDeleteGatewayChannel?: (channelId: string) => void;
+  onUpdateGatewayChannel?: (
+    channelId: string,
+    updates: GatewayChannelPatchData,
+    shouldApply?: () => boolean
+  ) => void;
+  onDeleteGatewayChannel?: (channelId: string, shouldApply?: () => boolean) => void;
   onUpdateArtifact?: (artifactId: string, updates: Partial<Artifact>) => void;
   onDeleteArtifact?: (artifactId: string) => void;
   onCreateTeammate?: () => void;
@@ -167,6 +182,10 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
   const gatewayChannelById = useAgorStore(selectGatewayChannelById);
   const artifactById = useAgorStore(selectArtifactById);
   const boardObjects = useMemo(() => mapToArray(boardObjectById), [boardObjectById]);
+  const settingsAuthority = useAuthenticatedAuthorityScope(
+    client,
+    currentUser ? `${currentUser.user_id}:${currentUser.role}` : null
+  );
 
   const [selectedBranch, setSelectedBranch] = useState<Branch | null>(null);
   const [selectedRepo, setSelectedRepo] = useState<Repo | null>(null);
@@ -199,6 +218,8 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
   };
 
   const { token } = theme.useToken();
+  const screens = Grid.useBreakpoint();
+  const compact = !screens.md;
   const settingsSectionKeys = useMemo(() => new Set<string>(SETTINGS_SECTIONS), []);
 
   // Role gate — Agentic Tools and Gateway Channels are global admin-managed
@@ -212,6 +233,38 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
   // refusal is legible to the person it refuses; the tab shows them that
   // policy and the servers they can already use.
   const isAdmin = hasMinimumRole(currentUser?.role, ROLES.ADMIN);
+
+  // The Users tab follows the MCP Servers pattern rather than the Agentic Tools
+  // one: the daemon deliberately serves the roster to members
+  // (`ensureMinimumRole(params, ROLES.MEMBER, 'list users')`), so seeing who is
+  // on the team is not something to take away. UsersTable separately exposes
+  // only the mutations the current role has authority to perform.
+  //
+  // Viewers rank below MEMBER, so the listing itself would 403 for them; they
+  // get no entry at all.
+  const canListUsers = hasMinimumRole(currentUser?.role, ROLES.MEMBER);
+
+  // One answer for "may this role open this section", read by both the menu and
+  // the content below. Every gated section is routable via useSettingsRoute, so
+  // gating only the menu leaves the pane reachable by URL with nothing selected
+  // in the sidebar — which is what `groups`, `gateway` and `agentic-tools`
+  // already did. Deriving both from this set is what stops the two from
+  // drifting apart again the next time a section is gated.
+  const canSeeSection = useCallback(
+    (section: string): boolean => {
+      switch (section) {
+        case 'agentic-tools':
+        case 'gateway':
+        case 'groups':
+          return isAdmin;
+        case 'users':
+          return canListUsers;
+        default:
+          return true;
+      }
+    },
+    [isAdmin, canListUsers]
+  );
 
   // Menu items for left sidebar navigation
   const menuItems: MenuProps['items'] = useMemo(
@@ -276,7 +329,7 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
         label: 'Integrations',
         type: 'group' as const,
         children: [
-          ...(isAdmin
+          ...(canSeeSection('agentic-tools')
             ? [
                 {
                   key: 'agentic-tools',
@@ -290,7 +343,7 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
             label: 'MCP Servers',
             icon: <ApiOutlined />,
           },
-          ...(isAdmin
+          ...(canSeeSection('gateway')
             ? [
                 {
                   key: 'gateway',
@@ -301,27 +354,37 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
             : []),
         ],
       },
-      {
-        key: 'admin',
-        label: 'Admin',
-        type: 'group' as const,
-        children: [
-          ...(isAdmin
-            ? [
-                {
-                  key: 'groups',
-                  label: 'Groups',
-                  icon: <TeamOutlined />,
-                },
-              ]
-            : []),
-          {
-            key: 'users',
-            label: 'Users',
-            icon: <TeamOutlined />,
-          },
-        ],
-      },
+      // Rendered only when it has something under it — an "Admin" heading with
+      // an empty body is what a viewer would otherwise get.
+      ...(canSeeSection('groups') || canSeeSection('users')
+        ? [
+            {
+              key: 'admin',
+              label: 'Admin',
+              type: 'group' as const,
+              children: [
+                ...(canSeeSection('groups')
+                  ? [
+                      {
+                        key: 'groups',
+                        label: 'Groups',
+                        icon: <TeamOutlined />,
+                      },
+                    ]
+                  : []),
+                ...(canSeeSection('users')
+                  ? [
+                      {
+                        key: 'users',
+                        label: 'Users',
+                        icon: <TeamOutlined />,
+                      },
+                    ]
+                  : []),
+              ],
+            },
+          ]
+        : []),
       {
         key: 'system',
         label: 'System',
@@ -335,11 +398,37 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
         ],
       },
     ],
-    [isAdmin, token]
+    [canSeeSection, token]
+  );
+
+  const mobileSectionOptions = useMemo(
+    () => [
+      { label: 'Workspace · Boards', value: 'boards' },
+      { label: 'Workspace · Repositories', value: 'repos' },
+      { label: 'Workspace · Branches', value: 'branches' },
+      { label: 'Workspace · Teammates', value: 'teammates' },
+      { label: 'Workspace · Cards (Beta)', value: 'cards' },
+      { label: 'Workspace · Artifacts', value: 'artifacts' },
+      { label: 'Integrations · MCP Servers', value: 'mcp' },
+      ...(canSeeSection('agentic-tools')
+        ? [{ label: 'Integrations · Agentic Tools', value: 'agentic-tools' }]
+        : []),
+      ...(canSeeSection('gateway')
+        ? [{ label: 'Integrations · Gateway Channels', value: 'gateway' }]
+        : []),
+      ...(canSeeSection('groups') ? [{ label: 'Admin · Groups', value: 'groups' }] : []),
+      ...(canSeeSection('users') ? [{ label: 'Admin · Users', value: 'users' }] : []),
+      { label: 'System · About', value: 'about' },
+    ],
+    [canSeeSection]
   );
 
   // Render content based on active section
   const renderContent = () => {
+    // A gated section is routable, so this is reachable by URL even with no
+    // menu entry to click. Same answer in both places.
+    if (!canSeeSection(activeTab)) return null;
+
     switch (activeTab) {
       case 'boards':
         return (
@@ -359,6 +448,8 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
         return (
           <ReposTable
             repoById={repoById}
+            identityKey={settingsAuthority.identityKey}
+            operationScope={settingsAuthority.operationScope}
             onCreate={onCreateRepo}
             onCreateLocal={onCreateLocalRepo}
             onUpdate={onUpdateRepo}
@@ -430,7 +521,13 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
           />
         );
       case 'agentic-tools':
-        return <AgenticToolsSection client={client} />;
+        return (
+          <AgenticToolsSection
+            client={client}
+            identityKey={settingsAuthority.identityKey}
+            operationScope={settingsAuthority.operationScope}
+          />
+        );
       case 'gateway':
         return (
           <GatewayChannelsTable
@@ -473,6 +570,85 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
     }
   };
 
+  if (compact) {
+    return (
+      <Drawer
+        title={null}
+        aria-label="Workspace settings"
+        closable={false}
+        placement="bottom"
+        size="94dvh"
+        open={open}
+        onClose={onClose}
+        styles={{ body: { padding: 0, overflow: 'hidden' } }}
+      >
+        <Layout style={{ height: '100%', background: token.colorBgContainer }}>
+          <Flex
+            vertical
+            gap={token.marginSM}
+            style={{
+              padding: `${token.paddingSM}px ${token.paddingMD}px`,
+              borderBottom: `1px solid ${token.colorBorderSecondary}`,
+              background: token.colorBgElevated,
+              flex: '0 0 auto',
+            }}
+          >
+            <Flex align="center" justify="space-between" gap={token.marginSM}>
+              <Typography.Title level={5} style={{ margin: 0, minWidth: 0 }}>
+                Workspace settings
+              </Typography.Title>
+              <Button
+                type="text"
+                icon={<CloseOutlined />}
+                aria-label="Close workspace settings"
+                onClick={onClose}
+              />
+            </Flex>
+            <Select
+              aria-label="Settings section"
+              value={activeTab}
+              options={mobileSectionOptions}
+              onChange={(key) => onTabChange?.(key as SettingsSection)}
+              style={{ width: '100%' }}
+              size="large"
+            />
+          </Flex>
+          <Content
+            style={{
+              padding: `${token.paddingLG}px ${token.paddingMD}px ${token.paddingXL}px`,
+              overflowY: 'auto',
+              overflowX: 'hidden',
+              minWidth: 0,
+              width: '100%',
+              maxWidth: '100%',
+              boxSizing: 'border-box',
+            }}
+          >
+            <div style={{ minWidth: 0, width: '100%', maxWidth: '100%' }}>{renderContent()}</div>
+          </Content>
+        </Layout>
+        <BranchModal
+          open={branchModalOpen}
+          onClose={handleBranchModalClose}
+          branch={selectedBranch}
+          repo={selectedRepo}
+          sessions={branchSessions}
+          boardObjects={boardObjects}
+          client={client}
+          currentUser={currentUser}
+          onUpdateBranch={onUpdateBranch}
+          onUpdateRepo={onUpdateRepo}
+          onArchiveOrDelete={handleArchiveOrDeleteBranchWithClose}
+          onOpenSettings={() => {
+            handleBranchModalClose();
+            onTabChange?.('repos');
+          }}
+          presentation="bottom-sheet"
+        />
+      </Drawer>
+    );
+  }
+
   return (
     <Modal
       title={null}
@@ -480,8 +656,8 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
       onCancel={onClose}
       footer={null}
       closable
-      width={1200}
-      style={{ top: 40 }}
+      width={compact ? 'calc(100vw - 16px)' : 1200}
+      style={{ top: compact ? 8 : 40 }}
       styles={{
         wrapper: {
           padding: 0,
@@ -489,7 +665,7 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
         },
         container: {
           padding: 0,
-          borderRadius: 8,
+          borderRadius: compact ? token.borderRadiusSM : token.borderRadiusLG,
           overflow: 'hidden',
         },
         header: {
@@ -497,28 +673,37 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
         },
         body: {
           padding: 0,
-          height: 'calc(100vh - 200px)',
-          minHeight: 500,
-          maxHeight: 800,
+          height: compact ? 'calc(100dvh - 16px)' : 'calc(100vh - 200px)',
+          minHeight: compact ? 0 : 500,
+          maxHeight: compact ? 'none' : 800,
         },
       }}
       closeIcon={<CloseOutlined />}
     >
-      <Layout style={{ height: '100%', background: token.colorBgContainer }}>
+      <Layout
+        style={{
+          height: '100%',
+          background: token.colorBgContainer,
+          flexDirection: compact ? 'column' : 'row',
+        }}
+      >
         <Sider
-          width={240}
+          width={compact ? '100%' : 240}
           style={{
             background: token.colorBgElevated,
-            borderRight: `1px solid ${token.colorBorderSecondary}`,
+            borderRight: compact ? 0 : `1px solid ${token.colorBorderSecondary}`,
+            borderBottom: compact ? `1px solid ${token.colorBorderSecondary}` : 0,
             overflow: 'auto',
-            padding: '20px 0',
+            maxHeight: compact ? 230 : undefined,
+            flex: compact ? '0 0 auto' : undefined,
+            padding: compact ? '12px 0' : '20px 0',
           }}
         >
           <div
             style={{
-              padding: '0 24px 16px',
+              padding: compact ? '0 12px 10px' : '0 24px 16px',
               fontWeight: 600,
-              fontSize: 18,
+              fontSize: compact ? 15 : 18,
               color: token.colorText,
             }}
           >
@@ -539,7 +724,11 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
             }}
           />
         </Sider>
-        <Content style={{ padding: '40px 32px 32px', overflow: 'auto' }}>{renderContent()}</Content>
+        <Content
+          style={{ padding: compact ? '40px 12px 20px' : '40px 32px 32px', overflow: 'auto' }}
+        >
+          {renderContent()}
+        </Content>
       </Layout>
       <BranchModal
         open={branchModalOpen}
@@ -553,7 +742,10 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
         onUpdateBranch={onUpdateBranch}
         onUpdateRepo={onUpdateRepo}
         onArchiveOrDelete={handleArchiveOrDeleteBranchWithClose}
-        onOpenSettings={onClose} // Close branch modal and keep settings modal open
+        onOpenSettings={() => {
+          handleBranchModalClose();
+          onTabChange?.('repos');
+        }}
       />
     </Modal>
   );
@@ -561,5 +753,14 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
 
 export const SettingsModal: React.FC<SettingsModalProps> = (props) => {
   if (!props.open) return null;
-  return <SettingsModalContent {...props} />;
+  // Settings contains other caller-private editors (gateway credentials,
+  // environment values, selected records) besides MCP. Destroy the whole
+  // modal state tree on an in-place identity replacement. Connection and
+  // token churn for the same user deliberately retain the tree.
+  return (
+    <SettingsModalContent
+      key={props.currentUser?.user_id ?? '__no-authenticated-user__'}
+      {...props}
+    />
+  );
 };

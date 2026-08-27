@@ -25,6 +25,7 @@ export type TenantDatabaseScope = TenantOwnedDatabaseScope | SystemDatabaseScope
 export type SystemDatabaseCapability =
   | 'environment_health_discovery'
   | 'gateway_listener_discovery'
+  | 'discord_message_delivery_discovery'
   | 'knowledge_embedding_discovery'
   | 'scheduler_discovery'
   | 'task_queue_discovery'
@@ -32,10 +33,10 @@ export type SystemDatabaseCapability =
   | 'executor_token_maintenance'
   | 'mcp_oauth_callback'
   | 'mcp_oauth_maintenance'
+  | 'codex_device_auth_maintenance'
   | 'github_install_state_callback'
   | 'github_install_state_maintenance'
-  | 'upload_maintenance'
-  | 'mcp_catalog_ingestion';
+  | 'upload_maintenance';
 
 export interface TenantContextScope {
   tenantId: TenantID | string;

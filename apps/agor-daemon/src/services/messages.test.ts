@@ -19,7 +19,7 @@ import { SessionRepository } from '../../../../packages/core/src/db/repositories
 import { TaskRepository } from '../../../../packages/core/src/db/repositories/tasks';
 import { dbTest } from '../../../../packages/core/src/db/test-helpers';
 import { generateId } from '../../../../packages/core/src/lib/ids';
-import { ServiceJWTStrategy } from '../auth/service-jwt-strategy';
+import { RuntimeJWTStrategy } from '../auth/runtime-jwt-strategy';
 import { validateMessageCreate } from '../hooks/validate-message-create';
 import {
   resolveSessionContext,
@@ -236,6 +236,33 @@ describe('MessagesService.find pagination', () => {
 });
 
 describe('MessagesService.create boundary', () => {
+  dbTest(
+    'runs the durable-delivery hook once and rolls back the Message on hook failure',
+    async ({ db }) => {
+      const sessionId = await createTestSession(db);
+      const createdMessage = message(sessionId, 0);
+      const onCreateInTransaction = vi.fn(async () => {
+        throw new Error('durable delivery insert failed');
+      });
+
+      await expect(
+        createMessagesService(db, onCreateInTransaction).create(createdMessage)
+      ).rejects.toThrow('durable delivery insert failed');
+
+      expect(onCreateInTransaction).toHaveBeenCalledOnce();
+      expect(await new MessagesRepository(db).findById(createdMessage.message_id)).toBeNull();
+    }
+  );
+
+  dbTest('does not duplicate the transaction hook through service create', async ({ db }) => {
+    const sessionId = await createTestSession(db);
+    const onCreateInTransaction = vi.fn(async () => undefined);
+
+    await createMessagesService(db, onCreateInTransaction).create(message(sessionId, 0));
+
+    expect(onCreateInTransaction).toHaveBeenCalledOnce();
+  });
+
   dbTest('accepts the canonical DTO and generates an omitted message_id', async ({ db }) => {
     const sessionId = await createTestSession(db);
     const { message_id: _messageId, ...input } = message(sessionId, 0);
@@ -360,7 +387,7 @@ dbTest(
     const usersService = createUsersService(db);
     const bearer = await usersService.create({
       email: 'messages-rest-bearer@example.test',
-      password: 'password-123',
+      password: 'test-password-1234',
       role: ROLES.MEMBER,
     });
     const ownerId = generateId() as UUID;
@@ -412,7 +439,7 @@ dbTest(
     });
     app.use('/users', usersService);
     const authentication = new AuthenticationService(app);
-    authentication.register('jwt', new ServiceJWTStrategy());
+    authentication.register('jwt', new RuntimeJWTStrategy());
     app.use('/authentication', authentication);
     app.use('/messages', createMessagesService(db), {
       methods: [...MESSAGES_SERVICE_TRANSPORT_METHODS],

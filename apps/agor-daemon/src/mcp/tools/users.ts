@@ -50,7 +50,7 @@ export function registerUserTools(server: McpServer, ctx: McpContext): void {
     'agor_users_list',
     {
       description:
-        'List users in the system with pagination and optional case-insensitive search across name, email, and unix_username. Returns compact rows by default; pass lean:false for detailed user payloads.',
+        'List users in the system with pagination and optional case-insensitive search across name, email, and execution home key. Returns compact rows by default; pass lean:false for detailed user payloads.',
       annotations: { readOnlyHint: true },
       inputSchema: z.strictObject({
         limit: z
@@ -69,7 +69,7 @@ export function registerUserTools(server: McpServer, ctx: McpContext): void {
           .describe('Number of results to skip'),
         search: mcpOptionalString(
           'search',
-          'Case-insensitive search across name, email, and unix_username'
+          'Case-insensitive search across name, email, and execution home key'
         ),
         lean: z
           .boolean()
@@ -107,13 +107,13 @@ export function registerUserTools(server: McpServer, ctx: McpContext): void {
       inputSchema: z.strictObject({
         search: mcpOptionalString(
           'search',
-          'Case-insensitive search across name, email, and unix_username'
+          'Case-insensitive search across name, email, and execution home key'
         ),
         email: mcpOptionalString('email', 'Email to search for (case-insensitive substring)'),
         name: mcpOptionalString('name', 'Name to search for (case-insensitive substring)'),
         unix_username: mcpOptionalString(
           'unix_username',
-          'Unix username to search for (case-insensitive substring)'
+          'Execution home key to search for (case-insensitive substring)'
         ),
         limit: z
           .number({ error: 'limit must be a positive integer when provided.' })
@@ -249,7 +249,10 @@ export function registerUserTools(server: McpServer, ctx: McpContext): void {
         userId: mcpRequiredId('userId', 'User', 'User ID to update (UUIDv7 or short ID)'),
         email: mcpOptionalString('email', 'New email address (optional)'),
         name: mcpOptionalString('name', 'New display name (optional)'),
-        password: mcpOptionalString('password', 'New password (optional, will be hashed)'),
+        password: mcpOptionalString(
+          'password',
+          'New password (optional; secure daemon policy is enforced before hashing)'
+        ),
         role: z
           .enum([ROLES.SUPERADMIN, ROLES.ADMIN, ROLES.MEMBER, ROLES.VIEWER])
           .optional()
@@ -258,7 +261,7 @@ export function registerUserTools(server: McpServer, ctx: McpContext): void {
           ),
         unix_username: mcpOptionalString(
           'unix_username',
-          'New Unix username for shell access (optional)'
+          'New opaque execution home key (optional)'
         ),
         must_change_password: z
           .boolean()
@@ -307,7 +310,10 @@ export function registerUserTools(server: McpServer, ctx: McpContext): void {
         'Create a new user account. Requires email and password. Optionally set name, emoji, avatar, unix_username, must_change_password, and role.',
       inputSchema: z.strictObject({
         email: mcpRequiredString('email', 'User email address (must be unique)'),
-        password: mcpRequiredString('password', 'User password (will be hashed)'),
+        password: mcpRequiredString(
+          'password',
+          'User password (secure daemon policy is enforced before hashing)'
+        ),
         name: mcpOptionalString('name', 'Display name (optional)'),
         emoji: mcpOptionalString(
           'emoji',
@@ -317,7 +323,7 @@ export function registerUserTools(server: McpServer, ctx: McpContext): void {
         avatar: mcpOptionalString('avatar', 'Legacy avatar URL alias (optional)'),
         unix_username: mcpOptionalString(
           'unix_username',
-          'Unix username for shell access (optional, defaults to email prefix if not specified)'
+          'Opaque execution home key (optional, defaults to email prefix)'
         ),
         must_change_password: z
           .boolean()

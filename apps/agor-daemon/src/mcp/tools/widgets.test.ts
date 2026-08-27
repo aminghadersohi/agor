@@ -40,6 +40,9 @@ function registerAndCapture(ctx: {
   db?: unknown;
   userId: string;
   sessionId: string;
+  /** Authenticated caller role — defaults to 'member'. Set 'admin' to exercise
+   * the gateway-token admin gate. */
+  role?: string;
   baseServiceParams?: Parameters<typeof registerWidgetTools>[1]['baseServiceParams'];
 }): Record<string, CapturedTool> {
   const captured: Record<string, CapturedTool> = {};
@@ -54,7 +57,7 @@ function registerAndCapture(ctx: {
     db: (ctx.db ?? {}) as Parameters<typeof registerWidgetTools>[1]['db'],
     userId: ctx.userId as unknown as Parameters<typeof registerWidgetTools>[1]['userId'],
     sessionId: ctx.sessionId as unknown as Parameters<typeof registerWidgetTools>[1]['sessionId'],
-    authenticatedUser: { user_id: ctx.userId, role: 'member' } as unknown as Parameters<
+    authenticatedUser: { user_id: ctx.userId, role: ctx.role ?? 'member' } as unknown as Parameters<
       typeof registerWidgetTools
     >[1]['authenticatedUser'],
     baseServiceParams: ctx.baseServiceParams ?? {},
@@ -78,6 +81,13 @@ interface FakeTask {
 
 function makeApp(opts: {
   sessionCreator: string;
+  gatewayChannel?: {
+    id: string;
+    name: string;
+    channel_type: string;
+    target_branch_id: string;
+    config: Record<string, unknown>;
+  };
   creatorEnvVars?: Record<string, { set: true; scope: 'global' | 'session' }>;
   /**
    * The session's tasks. The fake below applies the same exact status, sort,
@@ -166,6 +176,14 @@ function makeApp(opts: {
       },
     },
   };
+  if (opts.gatewayChannel) {
+    services['gateway-channels'] = {
+      get: async (...args: unknown[]) => {
+        calls.push({ service: 'gateway-channels', method: 'get', args });
+        return opts.gatewayChannel;
+      },
+    };
+  }
   return {
     app: {
       service(name: string) {
@@ -600,5 +618,145 @@ describe('agor_widgets_request_env_vars', () => {
     expect(desc.toLowerCase()).toContain('fire-and-forget');
     expect(desc.toLowerCase()).toContain('end your turn');
     expect(desc.toLowerCase()).toContain('never enter your context');
+  });
+
+  it('tool description steers the agent to PREFER the widget over Settings instructions', () => {
+    // Regression guard for the "prefer widget over manual Settings" guidance:
+    // the agent-facing contract must keep telling agents to call the widget
+    // rather than pointing users at Settings → Environment Variables.
+    const { app } = makeApp({ sessionCreator: 'u' });
+    const captured = registerAndCapture({
+      app,
+      userId: 'user-creator',
+      sessionId: 'sess-1',
+    });
+    const desc = (captured.agor_widgets_request_env_vars.cfg.description ?? '').toLowerCase();
+    expect(desc).toContain('prefer');
+    expect(desc).toContain('settings');
+  });
+
+  it('renders a grammatical singular/plural preview line for the widget row', async () => {
+    const captured = registerAndCapture({
+      app: makeApp({ sessionCreator: 'user-creator' }).app,
+      userId: 'user-creator',
+      sessionId: 'sess-1',
+    });
+    await captured.agor_widgets_request_env_vars.cb({
+      names: ['HUBSPOT_API_KEY'],
+      reason: 'call hubspot',
+      auto_resume: true,
+    });
+    expect(appendStub.mock.calls[0][0].content).toBe(
+      'Please provide variable HUBSPOT_API_KEY: call hubspot'
+    );
+
+    appendStub.mockClear();
+    const captured2 = registerAndCapture({
+      app: makeApp({ sessionCreator: 'user-creator' }).app,
+      userId: 'user-creator',
+      sessionId: 'sess-1',
+    });
+    await captured2.agor_widgets_request_env_vars.cb({
+      names: ['STRIPE_SECRET_KEY', 'HUBSPOT_API_KEY'],
+      reason: 'two integrations',
+      auto_resume: true,
+    });
+    expect(appendStub.mock.calls[0][0].content).toBe(
+      'Please provide variables HUBSPOT_API_KEY, STRIPE_SECRET_KEY: two integrations'
+    );
+  });
+});
+
+describe('agor_widgets_request_gateway_token', () => {
+  const appendStub = appendSystemMessage as unknown as ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    appendStub.mockReset();
+  });
+
+  it('preflights the session target branch before rendering a Discord secret widget', async () => {
+    const { app } = makeApp({
+      sessionCreator: 'user-creator',
+      gatewayChannel: {
+        id: 'channel-1',
+        name: 'Discord',
+        channel_type: 'discord',
+        target_branch_id: 'different-branch',
+        config: {},
+      },
+    });
+    const captured = registerAndCapture({
+      app,
+      userId: 'user-admin',
+      sessionId: 'sess-1',
+      role: 'admin',
+    });
+    await expect(
+      captured.agor_widgets_request_gateway_token.cb({ gatewayChannelId: 'channel-1' })
+    ).rejects.toThrow(/target branch/i);
+    expect(appendStub).not.toHaveBeenCalled();
+  });
+
+  it('renders a provider-aware Discord widget only after branch preflight', async () => {
+    const { app } = makeApp({
+      sessionCreator: 'user-creator',
+      gatewayChannel: {
+        id: 'channel-1',
+        name: 'Discord',
+        channel_type: 'discord',
+        target_branch_id: 'wt-1',
+        config: {},
+      },
+    });
+    appendStub.mockResolvedValue({ index: 5 });
+    const captured = registerAndCapture({
+      app,
+      userId: 'user-admin',
+      sessionId: 'sess-1',
+      role: 'admin',
+    });
+    const result = await captured.agor_widgets_request_gateway_token.cb({
+      gatewayChannelId: 'channel-1',
+    });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('requested');
+    const params = appendStub.mock.calls[0][0].metadata.widget.params;
+    expect(params.channelType).toBe('discord');
+    expect(params.fields).toEqual(['bot_token']);
+    expect(JSON.stringify(params)).not.toContain('xoxb');
+  });
+
+  it('rejects a non-admin caller before creating any widget (admin-only)', async () => {
+    // The gateway-token widget mints platform credentials, so a non-admin agent
+    // must NOT be able to render the form. requireAdmin runs before any service
+    // call, so no gateway-channels/messages plumbing is needed here.
+    const { app } = makeApp({ sessionCreator: 'user-creator' });
+    const captured = registerAndCapture({
+      app,
+      userId: 'user-member',
+      sessionId: 'sess-1',
+      role: 'member',
+    });
+
+    await expect(
+      captured.agor_widgets_request_gateway_token.cb({ gatewayChannelId: 'channel-1' })
+    ).rejects.toThrow(/admin role required/i);
+
+    // No widget message was created for the dead-end form.
+    expect(appendStub).not.toHaveBeenCalled();
+  });
+
+  it('tool description marks it admin-only and prefers the widget over manual setup', () => {
+    const { app } = makeApp({ sessionCreator: 'user-creator' });
+    const captured = registerAndCapture({
+      app,
+      userId: 'user-admin',
+      sessionId: 'sess-1',
+      role: 'admin',
+    });
+    const desc = (captured.agor_widgets_request_gateway_token.cfg.description ?? '').toLowerCase();
+    expect(desc).toContain('admin-only');
+    expect(desc).toContain('prefer');
+    expect(desc).toContain('fire-and-forget');
   });
 });

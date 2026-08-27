@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,27 @@ import { createPublishManifest, packRelease } from './pack-release.mjs';
 import { BUNDLED_INTERNAL_PACKAGES } from './package-contract.js';
 
 const execFileAsync = promisify(execFile);
+
+test('CLI runs when pack-release is reached through a symlink', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('creating symlinks requires additional privileges on Windows');
+    return;
+  }
+  const fixture = await mkdtemp(join(tmpdir(), 'agor-live-invocation-test-'));
+  const linkedScripts = join(fixture, 'scripts');
+  try {
+    await symlink(import.meta.dirname, linkedScripts, 'dir');
+    await assert.rejects(
+      execFileAsync(process.execPath, [join(linkedScripts, 'pack-release.mjs'), '--destination']),
+      (error) => {
+        assert.match(error.stderr, /--destination requires a directory/);
+        return true;
+      }
+    );
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
 
 test('publish manifest resolves the client workspace edge without install scripts', () => {
   const source = {
@@ -72,6 +93,8 @@ test('release tarball materializes internal packages without postinstall', async
         type: 'module',
         files: ['bin', 'dist', 'LICENSE', 'README.md'],
         dependencies,
+        peerDependencies: { 'hot-shots': '^17.1.0' },
+        peerDependenciesMeta: { 'hot-shots': { optional: true } },
         bundleDependencies,
       })}\n`
     );
@@ -81,6 +104,8 @@ test('release tarball materializes internal packages without postinstall', async
     await execFileAsync('tar', ['-xzf', tarball, '-C', extract]);
     const manifest = JSON.parse(await readFile(join(extract, 'package', 'package.json'), 'utf8'));
     assert.equal(manifest.dependencies['@agor-live/client'], '1.2.3');
+    assert.equal(manifest.peerDependencies['hot-shots'], '^17.1.0');
+    assert.equal(manifest.peerDependenciesMeta['hot-shots'].optional, true);
     assert.equal(manifest.scripts?.postinstall, undefined);
     for (const bundledPackage of BUNDLED_INTERNAL_PACKAGES) {
       const internalManifest = JSON.parse(

@@ -11,16 +11,41 @@ interface JournalEntry {
   when: number;
 }
 
+/** Both journals, Postgres first, as the migrator reads them off disk. */
+const readJournals = () =>
+  Promise.all(
+    [
+      new URL('../../drizzle/postgres/meta/_journal.json', import.meta.url),
+      new URL('../../drizzle/sqlite/meta/_journal.json', import.meta.url),
+    ].map(async (url) => JSON.parse(await readFile(url, 'utf8')) as { entries: JournalEntry[] })
+  );
+
 describe('Postgres migrations', () => {
+  it('starts the Discord hybrid migration with its transaction-local lock timeout', async () => {
+    const migration = await readFile(
+      new URL('../../drizzle/postgres/0094_discord_gateway_hybrid.sql', import.meta.url),
+      'utf8'
+    );
+    const statements = migration
+      .split('--> statement-breakpoint')
+      .map((statement) => statement.trim())
+      .filter(Boolean);
+    expect(statements[0]).toBe("SET LOCAL lock_timeout = '3s';");
+    expect(
+      statements.filter((statement) => /^ALTER TABLE /i.test(statement)).length
+    ).toBeGreaterThan(0);
+    expect(migration.match(/SET LOCAL lock_timeout = '3s'/g)).toHaveLength(1);
+  });
+
   it('requires the Knowledge claim protocol migration to be an offline existing-db cutover', () => {
     expect(
-      pendingOfflineCutoverMigrations({
+      pendingOfflineCutoverMigrations('postgresql', {
         applied: ['0073_task_runtime_reconciliation'],
         pending: ['0074_knowledge_embedding_claims'],
       })
     ).toEqual(['0074_knowledge_embedding_claims']);
     expect(
-      pendingOfflineCutoverMigrations({
+      pendingOfflineCutoverMigrations('postgresql', {
         applied: [],
         pending: ['0000_pretty_mac_gargan', '0074_knowledge_embedding_claims'],
       })
@@ -29,13 +54,13 @@ describe('Postgres migrations', () => {
 
   it('enforces the structurally incompatible MCP OAuth migration as an offline cutover', () => {
     expect(
-      pendingOfflineCutoverMigrations({
+      pendingOfflineCutoverMigrations('postgresql', {
         applied: ['0076_executor_session_token_session_binding'],
         pending: ['0078_mcp_oauth_pending_flows'],
       })
     ).toEqual(['0078_mcp_oauth_pending_flows']);
     expect(
-      pendingOfflineCutoverMigrations({
+      pendingOfflineCutoverMigrations('postgresql', {
         applied: [],
         pending: ['0000_pretty_mac_gargan', '0078_mcp_oauth_pending_flows'],
       })
@@ -44,13 +69,13 @@ describe('Postgres migrations', () => {
 
   it('enforces the GitHub callback authority migration as an offline cutover', () => {
     expect(
-      pendingOfflineCutoverMigrations({
+      pendingOfflineCutoverMigrations('postgresql', {
         applied: ['0078_mcp_oauth_pending_flows'],
         pending: ['0082_github_install_state'],
       })
     ).toEqual(['0082_github_install_state']);
     expect(
-      pendingOfflineCutoverMigrations({
+      pendingOfflineCutoverMigrations('postgresql', {
         applied: [],
         pending: ['0000_pretty_mac_gargan', '0082_github_install_state'],
       })
@@ -59,32 +84,48 @@ describe('Postgres migrations', () => {
 
   it('enforces PostgreSQL transcript indexes as an offline existing-db cutover', () => {
     expect(
-      pendingOfflineCutoverMigrations({
+      pendingOfflineCutoverMigrations('postgresql', {
         applied: ['0082_github_install_state'],
         pending: ['0083_transcript_hydration_keysets'],
       })
     ).toEqual(['0083_transcript_hydration_keysets']);
     expect(
-      pendingOfflineCutoverMigrations({
+      pendingOfflineCutoverMigrations('postgresql', {
         applied: ['0085_github_install_state'],
         pending: ['0086_transcript_hydration_keysets'],
       })
     ).toEqual([]);
     expect(
-      pendingOfflineCutoverMigrations({
+      pendingOfflineCutoverMigrations('postgresql', {
         applied: [],
         pending: ['0000_pretty_mac_gargan', '0083_transcript_hydration_keysets'],
       })
     ).toEqual([]);
   });
 
+  it('enforces credential-generation token claims as an offline existing-db cutover', () => {
+    expect(
+      pendingOfflineCutoverMigrations('postgresql', {
+        applied: ['0091_codex_device_auth_attempts'],
+        pending: ['0092_add_user_credential_generation'],
+      })
+    ).toEqual(['0092_add_user_credential_generation']);
+    expect(
+      pendingOfflineCutoverMigrations('sqlite', {
+        applied: ['0094_codex_device_auth_attempts'],
+        pending: ['0095_add_user_credential_generation'],
+      })
+    ).toEqual([]);
+    expect(
+      pendingOfflineCutoverMigrations('postgresql', {
+        applied: [],
+        pending: ['0000_cuddly_captain_america', '0092_add_user_credential_generation'],
+      })
+    ).toEqual([]);
+  });
+
   it('assigns GitHub install state unique post-HA migration watermarks', async () => {
-    const [postgresJournal, sqliteJournal] = await Promise.all(
-      [
-        new URL('../../drizzle/postgres/meta/_journal.json', import.meta.url),
-        new URL('../../drizzle/sqlite/meta/_journal.json', import.meta.url),
-      ].map(async (url) => JSON.parse(await readFile(url, 'utf8')) as { entries: JournalEntry[] })
-    );
+    const [postgresJournal, sqliteJournal] = await readJournals();
 
     for (const [journal, expectedTag, expectedIndex, hydrationTag, hydrationIndex] of [
       [postgresJournal, '0082_github_install_state', 82, '0083_transcript_hydration_keysets', 83],
@@ -95,9 +136,46 @@ describe('Postgres migrations', () => {
       expect(entry).toMatchObject({ idx: expectedIndex, tag: expectedTag });
       expect(entry?.when).toBeGreaterThan(predecessor?.when ?? 0);
 
-      const hydrationEntry = journal.entries.at(-1);
+      // Find by tag rather than assuming it is the newest entry — later
+      // migrations (e.g. add_user_filesystem_home) legitimately follow it.
+      const hydrationEntry = journal.entries.find(({ tag }) => tag === hydrationTag);
       expect(hydrationEntry).toMatchObject({ idx: hydrationIndex, tag: hydrationTag });
       expect(hydrationEntry?.when).toBeGreaterThan(entry?.when ?? 0);
+    }
+  });
+
+  it('gives the newest migration a unique watermark that sorts it last', async () => {
+    // Drizzle applies pending migrations in `when` order, so a new migration
+    // that does not sort after the one before it can run out of order against a
+    // database that has neither.
+    //
+    // Only the newest pair is checked. Early history predates the convention
+    // and is not monotonic — those migrations have all long since applied
+    // everywhere, and rewriting their watermarks now would change hashes that
+    // deployed databases already record. What must hold is that each new
+    // migration extends the sequence.
+    //
+    // Deliberately not pinned to a tag: naming the newest migration makes every
+    // migration an edit to this test, and that edit is the moment the property
+    // stops being checked.
+    for (const { entries } of await readJournals()) {
+      expect(entries.length).toBeGreaterThan(1);
+
+      // `idx` is not dense — the history has a gap where a generated migration
+      // was dropped before it shipped — but both keys still have to identify an
+      // entry, or the journal no longer describes the directory beside it.
+      expect(new Set(entries.map((entry) => entry.tag)).size).toBe(entries.length);
+      expect(new Set(entries.map((entry) => entry.idx)).size).toBe(entries.length);
+
+      const newest = entries.at(-1);
+      const highestWhenBefore = Math.max(...entries.slice(0, -1).map((entry) => entry.when));
+      const highestIdxBefore = Math.max(...entries.slice(0, -1).map((entry) => entry.idx));
+
+      expect(
+        newest?.when,
+        `${newest?.tag} does not sort after every earlier migration`
+      ).toBeGreaterThan(highestWhenBefore);
+      expect(newest?.idx).toBeGreaterThan(highestIdxBefore);
     }
   });
 
@@ -377,5 +455,100 @@ describe('SDK session storage retirement migrations', () => {
     expect(migration).toContain('DROP TABLE "serialized_sessions"');
     expect(migration).toContain('ALTER TABLE "tasks" DROP COLUMN "session_md5"');
     expect(migration).toContain('payloads are intentionally discarded');
+  });
+});
+
+describe('Session recent index migrations', () => {
+  it('keeps the PostgreSQL ordering index tenant-aware and bounds lock acquisition', async () => {
+    const migration = await readFile(
+      new URL('../../drizzle/postgres/0088_session_recent_index.sql', import.meta.url),
+      'utf8'
+    );
+
+    expect(migration).toContain("SET LOCAL lock_timeout = '3s'");
+    expect(migration).toContain(
+      '"sessions_tenant_archived_updated_idx" ON "sessions" ("tenant_id","archived","updated_at")'
+    );
+    expect(migration.trim().endsWith('SET LOCAL lock_timeout = DEFAULT;')).toBe(true);
+    expect(migration).not.toContain('"board_id"');
+  });
+
+  it('applies the equivalent standalone SQLite ordering index', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agor-session-recent-index-migration-'));
+    const client = createClient({ url: `file:${join(directory, 'migration.db')}` });
+
+    try {
+      await client.execute(`
+        CREATE TABLE sessions (
+          session_id text PRIMARY KEY NOT NULL,
+          archived integer NOT NULL,
+          updated_at integer
+        )
+      `);
+      const migration = await readFile(
+        new URL('../../drizzle/sqlite/0091_session_recent_index.sql', import.meta.url),
+        'utf8'
+      );
+      for (const statement of migration.split('--> statement-breakpoint')) {
+        if (statement.trim()) await client.execute(statement);
+      }
+
+      const columns = await client.execute('PRAGMA index_info(sessions_archived_updated_idx)');
+      expect(columns.rows.map((column) => column.name)).toEqual(['archived', 'updated_at']);
+    } finally {
+      client.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('MCP catalog install identity migration', () => {
+  it('consolidates ownerless SQLite duplicates, preserves overlapping attachments, and enforces identity', async () => {
+    const client = createClient({ url: ':memory:' });
+    await client.executeMultiple(`
+      CREATE TABLE mcp_servers (mcp_server_id text PRIMARY KEY, created_at integer NOT NULL, updated_at integer, name text NOT NULL, transport text NOT NULL, scope text NOT NULL, enabled integer NOT NULL, owner_user_id text, source text NOT NULL, data text NOT NULL);
+      CREATE TABLE session_mcp_servers (session_id text NOT NULL, mcp_server_id text NOT NULL, enabled integer NOT NULL, added_at integer NOT NULL, PRIMARY KEY(session_id,mcp_server_id));
+      INSERT INTO mcp_servers VALUES ('old',1,NULL,'x','http','session',1,NULL,'catalog','{"catalog_entry_name":"com.example/x"}');
+      INSERT INTO mcp_servers VALUES ('new',2,NULL,'x','http','session',1,NULL,'catalog','{"catalog_entry_name":"com.example/x"}');
+      INSERT INTO session_mcp_servers VALUES ('both','old',1,1),('both','new',1,2),('old-only','old',1,1);
+    `);
+    const migration = await readFile(
+      new URL('../../drizzle/sqlite/0092_mcp_catalog_install_identity.sql', import.meta.url),
+      'utf8'
+    );
+    await client.executeMultiple(migration.replaceAll('--> statement-breakpoint', ''));
+    const rows = await client.execute(
+      'SELECT mcp_server_id FROM mcp_servers ORDER BY mcp_server_id'
+    );
+    expect(rows.rows.map((row) => row.mcp_server_id)).toEqual(['new']);
+    const attachments = await client.execute(
+      'SELECT session_id,mcp_server_id FROM session_mcp_servers ORDER BY session_id'
+    );
+    expect(attachments.rows).toEqual([
+      { session_id: 'both', mcp_server_id: 'new' },
+      { session_id: 'old-only', mcp_server_id: 'new' },
+    ]);
+    await expect(
+      client.execute({
+        sql: `INSERT INTO mcp_servers (mcp_server_id,created_at,name,transport,scope,enabled,owner_user_id,source,catalog_entry_name,data) VALUES ('duplicate',3,'x','http','session',1,NULL,'catalog','com.example/x','{}')`,
+      })
+    ).rejects.toThrow(/UNIQUE/);
+    await client.close();
+  });
+
+  it('uses null-safe owner identity in both dialects', async () => {
+    const [sqlite, postgres] = await Promise.all([
+      readFile(
+        new URL('../../drizzle/sqlite/0092_mcp_catalog_install_identity.sql', import.meta.url),
+        'utf8'
+      ),
+      readFile(
+        new URL('../../drizzle/postgres/0089_mcp_catalog_install_identity.sql', import.meta.url),
+        'utf8'
+      ),
+    ]);
+    expect(sqlite).toContain('owner_user_id` IS loser.`owner_user_id');
+    expect(sqlite).toContain("coalesce(`owner_user_id`,'')");
+    expect(postgres).toContain('coalesce("owner_user_id",\'\')');
   });
 });
