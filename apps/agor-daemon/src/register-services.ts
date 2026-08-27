@@ -15,7 +15,6 @@ import {
   isDeploymentAgenticToolAvailable,
   MESSAGE_PAGINATION,
   type ResolvedDeploymentConfig,
-  requirePublicBaseUrl,
   resolveDeploymentAgenticToolPolicy,
   resolveExecutionSecurityMode,
   resolveMultiTenancyConfig,
@@ -224,6 +223,7 @@ import {
   shouldVerifyMCPOAuthGrantBinding,
 } from './services/mcp-oauth-grant-binding.js';
 import { MCPOAuthPendingFlowAuthority } from './services/mcp-oauth-pending-flow-authority.js';
+import { resolveMCPOAuthRedirectUri as resolveRedirectUri } from './services/mcp-oauth-redirect-uri.js';
 import { resolveAuthenticatedServerIds } from './services/mcp-oauth-status.js';
 import {
   createMCPServersService,
@@ -1758,8 +1758,10 @@ export async function registerMCPServices(
     '(4) /.well-known/openid-configuration at MCP origin (OIDC).';
 
   async function resolveMCPOAuthRedirectUri(): Promise<string> {
-    const baseUrl = await requirePublicBaseUrl();
-    return new URL('/mcp-servers/oauth-callback', baseUrl).toString();
+    return resolveRedirectUri({
+      daemonPort: ctx.DAEMON_PORT,
+      usePublicHttps: ctx.config.daemon?.mcp_oauth_callback_mode === 'public',
+    });
   }
 
   type OAuthBrowserReservationClaim = {
