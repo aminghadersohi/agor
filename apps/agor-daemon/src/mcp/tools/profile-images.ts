@@ -18,6 +18,7 @@ import { PROFILE_IMAGE_MAX_GALLERY_ITEMS } from '../../utils/profile-image-proce
 import { mcpRequiredId } from '../schema.js';
 import type { McpContext } from '../server.js';
 import { textResult } from '../server.js';
+import { runWithMcpTenantDatabaseScope } from '../tenant-scope.js';
 
 function tenantIdFor(ctx: McpContext): TenantID {
   return ctx.baseServiceParams.tenant?.tenant_id ?? DEFAULT_STATIC_TENANT_ID;
@@ -55,8 +56,6 @@ async function authorizeImage(ctx: McpContext, image: ProfileImage): Promise<voi
 
 /** Read-only, permission-aware access to processed user, teammate, and board galleries. */
 export function registerProfileImageTools(server: McpServer, ctx: McpContext): void {
-  const repository = new ProfileImageRepository(ctx.db);
-
   server.registerTool(
     'agor_profile_images_list',
     {
@@ -80,7 +79,9 @@ export function registerProfileImageTools(server: McpServer, ctx: McpContext): v
         id: args.subjectId as UserID | BranchID | BoardID,
       } as const;
       await authorizeSubject(ctx, subject.type, subject.id);
-      const images = await repository.listForSubject(tenantIdFor(ctx), subject);
+      const images = await runWithMcpTenantDatabaseScope(ctx, (db) =>
+        new ProfileImageRepository(db).listForSubject(tenantIdFor(ctx), subject)
+      );
       return textResult({ images, max_images: PROFILE_IMAGE_MAX_GALLERY_ITEMS });
     }
   );
@@ -102,11 +103,15 @@ export function registerProfileImageTools(server: McpServer, ctx: McpContext): v
     async (args) => {
       const imageId = args.imageId as ProfileImageID;
       const variant = args.variant ?? 'large';
-      const image = await repository.findById(tenantIdFor(ctx), imageId);
+      const image = await runWithMcpTenantDatabaseScope(ctx, (db) =>
+        new ProfileImageRepository(db).findById(tenantIdFor(ctx), imageId)
+      );
       if (!image) throw new NotFound('Profile image unavailable');
       await authorizeImage(ctx, image);
 
-      const result = await repository.readVariant(tenantIdFor(ctx), imageId, variant);
+      const result = await runWithMcpTenantDatabaseScope(ctx, (db) =>
+        new ProfileImageRepository(db).readVariant(tenantIdFor(ctx), imageId, variant)
+      );
       if (!result) throw new NotFound('Profile image unavailable');
 
       const width = variant === 'small' ? image.small_width : image.large_width;
