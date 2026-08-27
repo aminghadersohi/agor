@@ -236,7 +236,7 @@ export const BoardsTable: React.FC<BoardsTableProps> = ({
       key: 'tile',
       width: 80,
       render: (_: unknown, board: Board) => (
-        <BoardTile emoji={getBoardEmoji(board, branchById)} size={32} />
+        <BoardTile board={board} emoji={getBoardEmoji(board, branchById)} size={32} />
       ),
     },
     {

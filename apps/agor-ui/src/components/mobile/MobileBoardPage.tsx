@@ -40,7 +40,7 @@ import {
 import { useNavigate, useParams } from 'react-router-dom';
 import { getSessionDisplayTitle } from '@/utils/sessionTitle';
 import { resolveBoardFromUrlPure } from '@/utils/urlResolution';
-import { getBoardEmoji } from '../BoardTile';
+import { BoardTile, getBoardEmoji } from '../BoardTile';
 import { MarkdownRenderer } from '../MarkdownRenderer/MarkdownRenderer';
 import { MobileHeader } from './MobileHeader';
 
@@ -150,9 +150,7 @@ export const MobileBoardPage: React.FC<MobileBoardPageProps> = ({
           <Card size="small">
             <Flex justify="space-between" align="flex-start" gap={token.marginSM}>
               <Space align="start">
-                <span aria-hidden style={{ fontSize: 28, lineHeight: 1 }}>
-                  {getBoardEmoji(board, branchById)}
-                </span>
+                <BoardTile board={board} emoji={getBoardEmoji(board, branchById)} size={44} />
                 <div>
                   <Title level={4} style={{ margin: 0 }}>
                     {board.name}

@@ -1,9 +1,9 @@
-import type { BranchID, UserID, UUID } from './id';
+import type { BoardID, BranchID, UserID, UUID } from './id';
 
 /** Durable identifier for one processed profile-gallery image. */
 export type ProfileImageID = UUID;
 
-export type ProfileImageSubjectType = 'user' | 'teammate';
+export type ProfileImageSubjectType = 'user' | 'teammate' | 'board';
 export type ProfileImageVariant = 'small' | 'large';
 export type ProfileIdentityModelProvider = 'meshy';
 export type ProfileIdentityModelStatus =
@@ -29,7 +29,7 @@ export interface ProfileIdentityModel {
 export interface ProfileImage {
   image_id: ProfileImageID;
   subject_type: ProfileImageSubjectType;
-  subject_id: UserID | BranchID;
+  subject_id: UserID | BranchID | BoardID;
   created_by: UserID;
   original_name: string;
   alt_text?: string;

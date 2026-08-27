@@ -3,6 +3,7 @@ import { getTeammateConfig } from '@agor-live/client';
 import { AppstoreOutlined } from '@ant-design/icons';
 import { theme } from 'antd';
 import type { CSSProperties } from 'react';
+import { useProfileImageUrl } from '../ProfileImage/useProfileImageUrl';
 
 /** The neutral board glyph — shared so BoardTile, BoardPill, and dropdown
  * fallbacks all render the same icon and can't drift apart. */
@@ -28,6 +29,8 @@ export function getBoardEmoji(
 export interface BoardTileProps {
   /** Pre-resolved board emoji (see {@link getBoardEmoji}). */
   emoji?: string;
+  /** Board metadata used to render its primary gallery image when configured. */
+  board?: Pick<Board, 'board_id' | 'profile_image_id'>;
   size?: number;
   style?: CSSProperties;
 }
@@ -37,8 +40,9 @@ export interface BoardTileProps {
  * it keeps boards visually distinct from the circular user avatars so a board
  * is never mistaken for a person.
  */
-export const BoardTile: React.FC<BoardTileProps> = ({ emoji, size = 36, style }) => {
+export const BoardTile: React.FC<BoardTileProps> = ({ board, emoji, size = 36, style }) => {
   const { token } = theme.useToken();
+  const imageUrl = useProfileImageUrl(board?.profile_image_id, size > 96 ? 'large' : 'small');
   return (
     <div
       aria-hidden
@@ -56,7 +60,15 @@ export const BoardTile: React.FC<BoardTileProps> = ({ emoji, size = 36, style })
         ...style,
       }}
     >
-      {emoji ?? (
+      {imageUrl ? (
+        <img
+          src={imageUrl}
+          alt=""
+          style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit' }}
+        />
+      ) : emoji ? (
+        emoji
+      ) : (
         <NeutralBoardIcon
           style={{ fontSize: Math.round(size * 0.5), color: token.colorTextSecondary }}
         />
@@ -89,7 +101,7 @@ export function boardSelectOptions(
       value: board.board_id,
       label: (
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-          <BoardTile emoji={getBoardEmoji(board, branchById)} size={18} />
+          <BoardTile board={board} emoji={getBoardEmoji(board, branchById)} size={18} />
           {board.name}
         </span>
       ),

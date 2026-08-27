@@ -13,6 +13,7 @@ import { useEffect, useState } from 'react';
 import { useThemedMessage } from '@/utils/message';
 import { BoardFormFields, extractBoardFormValues } from '../forms/BoardFormFields';
 import { JSONEditor, validateJSON } from '../JSONEditor';
+import { ProfileImageGalleryEditor } from '../ProfileImage';
 
 export interface BoardEditModalProps {
   board: Board | null;
@@ -211,6 +212,16 @@ export function BoardEditModal({ board, client, open, onClose, onUpdate }: Board
               >
                 <JSONEditor placeholder='{"team": "Backend", "sprint": 42}' rows={4} />
               </Form.Item>
+            }
+          />
+          <ProfileImageGalleryEditor
+            subject={{ type: 'board', id: loadedBoard.board_id }}
+            canEdit
+            label="Board images"
+            onPrimaryChange={(imageId) =>
+              setLoadedBoard((current) =>
+                current ? { ...current, profile_image_id: imageId ?? undefined } : current
+              )
             }
           />
         </Form>

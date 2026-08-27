@@ -13,6 +13,7 @@ vi.mock('../JSONEditor', () => ({
   JSONEditor: () => <textarea aria-label="Custom Context (JSON)" />,
   validateJSON: () => Promise.resolve(),
 }));
+vi.mock('../ProfileImage', () => ({ ProfileImageGalleryEditor: () => null }));
 
 const CUSTOM_GRADIENT = 'linear-gradient(180deg, #101010, #202020)';
 

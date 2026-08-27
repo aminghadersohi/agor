@@ -142,7 +142,7 @@ const BoardHomeCard = memo(function BoardHomeCard({
         }}
       >
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-          <BoardTile emoji={emoji} size={36} />
+          <BoardTile board={board} emoji={emoji} size={36} />
 
           {/* Name + meta — all aligned under each other, to the right of the icon */}
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>

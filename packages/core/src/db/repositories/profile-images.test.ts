@@ -1,8 +1,9 @@
-import type { BranchID, TenantID, UserID, UUID } from '@agor/core/types';
+import type { BoardID, BranchID, TenantID, UserID, UUID } from '@agor/core/types';
 import { describe, expect } from 'vitest';
 import { generateId } from '../../lib/ids';
 import type { Database } from '../client';
 import { dbTest } from '../test-helpers';
+import { BoardRepository } from './boards';
 import { BranchRepository } from './branches';
 import { ProfileImageRepository, type ProfileImageSubject } from './profile-images';
 import { RepoRepository } from './repos';
@@ -31,6 +32,7 @@ async function makeSubjects(db: Database): Promise<{
   userId: UserID;
   user: ProfileImageSubject;
   teammate: ProfileImageSubject;
+  board: ProfileImageSubject;
 }> {
   const users = new UsersRepository(db);
   const user = await users.create({
@@ -63,10 +65,16 @@ async function makeSubjects(db: Database): Promise<{
       teammate: { displayName: 'Gallery Teammate', emoji: '🖼️', roleDescription: 'Test' },
     },
   });
+  const board = await new BoardRepository(db).create({
+    board_id: generateId() as BoardID,
+    name: 'Profile Gallery Board',
+    created_by: userId,
+  });
   return {
     userId,
     user: { type: 'user', id: userId },
     teammate: { type: 'teammate', id: branch.branch_id as BranchID },
+    board: { type: 'board', id: board.board_id as BoardID },
   };
 }
 
@@ -92,9 +100,17 @@ describe('ProfileImageRepository galleries', () => {
         originalName: 'teammate.webp',
         ...variants(22),
       });
+      const boardImage = await repository.create({
+        tenantId,
+        subject: subjects.board,
+        createdBy: subjects.userId,
+        originalName: 'board.webp',
+        ...variants(33),
+      });
 
       expect(await repository.listForSubject(tenantId, subjects.user)).toEqual([userImage]);
       expect(await repository.listForSubject(tenantId, subjects.teammate)).toEqual([teammateImage]);
+      expect(await repository.listForSubject(tenantId, subjects.board)).toEqual([boardImage]);
       expect(userImage).not.toHaveProperty('small_data');
       expect(userImage).not.toHaveProperty('large_data');
 
