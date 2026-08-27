@@ -112,6 +112,8 @@ export interface SessionFooterProps {
   onCodexPermissionChange: (sandbox: CodexSandboxMode, approval: CodexApprovalPolicy) => void;
   // Prompt textarea rendered between the two bars
   promptInputSlot: React.ReactNode;
+  /** Minimal composer presentation for conversation-first mode. */
+  simple?: boolean;
 }
 
 // Memoized: the panel re-renders once per animation frame while its session
@@ -159,6 +161,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   onPermissionModeChange,
   onCodexPermissionChange,
   promptInputSlot,
+  simple = false,
 }) => {
   const managedByPreset = Boolean(session.agentic_tool_preset_id);
   const supportsLiveEffort = Boolean(toolCaps?.reasoningEffortLevels?.length);
@@ -1325,13 +1328,13 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
         flexShrink: 0,
         background: token.colorBgContainer,
         borderTop: `1px solid ${token.colorBorder}`,
-        padding: `${token.sizeUnit * 2}px ${token.sizeUnit * 6}px ${token.sizeUnit * 3}px`,
-        marginLeft: -token.sizeUnit * 6,
-        marginRight: -token.sizeUnit * 6,
+        padding: `${token.sizeUnit * 2}px ${token.sizeUnit * (simple ? 4 : 6)}px ${token.sizeUnit * 3}px`,
+        marginLeft: -token.sizeUnit * (simple ? 4 : 6),
+        marginRight: -token.sizeUnit * (simple ? 4 : 6),
       }}
     >
       {/* Context window gradient overlay */}
-      {footerGradient && (
+      {!simple && footerGradient && (
         <div
           style={{
             position: 'absolute',
@@ -1358,7 +1361,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
           pinnedChips.includes('session-ids')) && (
           <div
             style={{
-              display: 'flex',
+              display: simple ? 'none' : 'flex',
               gap: token.sizeUnit,
               alignItems: 'center',
               marginBottom: token.sizeUnit * 2,
@@ -1600,7 +1603,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
         >
           {/* Left group */}
           <Space size={4}>
-            {pinnedItems.includes('upload') && (
+            {!simple && pinnedItems.includes('upload') && (
               <Tooltip
                 title={
                   composerAttachmentUploading
@@ -1622,7 +1625,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                 />
               </Tooltip>
             )}
-            {pinnedItems.includes('advanced-upload') && (
+            {!simple && pinnedItems.includes('advanced-upload') && (
               <Tooltip
                 title={
                   composerAttachmentUploading
@@ -1643,7 +1646,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                 />
               </Tooltip>
             )}
-            {pinnedItems.includes('fork') && toolCaps?.supportsSessionFork !== false && (
+            {!simple && pinnedItems.includes('fork') && toolCaps?.supportsSessionFork !== false && (
               <Tooltip title={connectionDisabled ? 'Disconnected from daemon' : 'Fork Session'}>
                 <Button
                   size="small"
@@ -1657,20 +1660,22 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
               </Tooltip>
             )}
             {/* Dynamically pinned items */}
-            {pinnedItems.includes('btw-fork') && toolCaps?.supportsSessionFork !== false && (
-              <Tooltip title="BTW fork">
-                <Button
-                  size="small"
-                  type="text"
-                  aria-label="Ask side question via BTW fork"
-                  icon={<QuestionCircleOutlined />}
-                  onClick={onBtwSend}
-                  disabled={btwForkDisabled}
-                  data-testid="btw-fork-bar-btn"
-                />
-              </Tooltip>
-            )}
-            {pinnedItems.includes('spawn') && toolCaps?.supportsChildSpawn !== false && (
+            {!simple &&
+              pinnedItems.includes('btw-fork') &&
+              toolCaps?.supportsSessionFork !== false && (
+                <Tooltip title="BTW fork">
+                  <Button
+                    size="small"
+                    type="text"
+                    aria-label="Ask side question via BTW fork"
+                    icon={<QuestionCircleOutlined />}
+                    onClick={onBtwSend}
+                    disabled={btwForkDisabled}
+                    data-testid="btw-fork-bar-btn"
+                  />
+                </Tooltip>
+              )}
+            {!simple && pinnedItems.includes('spawn') && toolCaps?.supportsChildSpawn !== false && (
               <Tooltip title="Spawn subsession">
                 <Button
                   size="small"
