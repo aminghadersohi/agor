@@ -767,3 +767,129 @@ describe('setZoneContentsCompact', () => {
     expect(showSuccess).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * `compact_list` collapses every item on the way in and nothing used to undo
+ * it, so a zone switched back to Grid stayed collapsed with no explanation.
+ * The expand is keyed to the preset transition, NOT to arranging in grid.
+ */
+describe('handleUpdateObject compact_list → grid expansion', () => {
+  const zoneId = 'zone-1';
+  const collapsed = [
+    { object_id: 'obj-branch', zone_id: zoneId, branch_id: 'branch-1', compact: true },
+    { object_id: 'obj-card', zone_id: zoneId, card_id: 'card-1', compact: true },
+  ];
+
+  function zone(preset: string) {
+    return {
+      type: 'zone',
+      x: 0,
+      y: 0,
+      width: 400,
+      height: 300,
+      label: 'Triage',
+      layout: { mode: 'manual', preset },
+    };
+  }
+
+  function renderUpdate(boardPreset: string, boardObjectsForBoard: unknown[], client: unknown) {
+    return renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({ [zoneId]: zone(boardPreset) }),
+          client: client as never,
+          boardObjectsForBoard: boardObjectsForBoard as never,
+          nodes: [],
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+  }
+
+  /** Patch calls the expansion made, keyed by placement id. */
+  function compactPatches(patch: ReturnType<typeof vi.fn>) {
+    return patch.mock.calls
+      .filter((call) => call[1] && typeof call[1] === 'object' && 'compact' in call[1])
+      .map((call) => [call[0], call[1].compact]);
+  }
+
+  it('expands the zone contents when the preset leaves compact_list for grid', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderUpdate('compact_list', collapsed, client);
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid') as never);
+    });
+
+    expect(compactPatches(patch)).toEqual([
+      ['obj-branch', false],
+      ['obj-card', false],
+    ]);
+  });
+
+  it('does not expand when a grid zone is merely updated again', async () => {
+    // The regression guard for automatic zones: a grid zone reflows and is
+    // re-saved constantly, and each of those must leave hand-collapsed cards
+    // alone.
+    const { client, patch } = makeClient();
+    const { result } = renderUpdate('grid', collapsed, client);
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid') as never);
+    });
+
+    expect(compactPatches(patch)).toEqual([]);
+  });
+
+  it('does not expand when the zone stays on compact_list', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderUpdate('compact_list', collapsed, client);
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, {
+        ...zone('compact_list'),
+        label: 'Renamed',
+      } as never);
+    });
+
+    expect(compactPatches(patch)).toEqual([]);
+  });
+
+  it('expands silently — the arrange that follows reports its own result', async () => {
+    const { client } = makeClient();
+    const { result } = renderUpdate('compact_list', collapsed, client);
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid') as never);
+    });
+
+    expect(showSuccess).not.toHaveBeenCalled();
+  });
+
+  it('leaves other zones alone when one zone exits compact_list', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderUpdate(
+      'compact_list',
+      [...collapsed, { object_id: 'obj-elsewhere', zone_id: 'zone-2', card_id: 'card-9' }],
+      client
+    );
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid') as never);
+    });
+
+    expect(compactPatches(patch).map(([id]) => id)).not.toContain('obj-elsewhere');
+  });
+
+  it('does not expand when the board patch itself fails', async () => {
+    const { client, patch } = makeRejectingClient();
+    const { result } = renderUpdate('compact_list', collapsed, client);
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid') as never);
+    });
+
+    expect(compactPatches(patch)).toEqual([]);
+  });
+});

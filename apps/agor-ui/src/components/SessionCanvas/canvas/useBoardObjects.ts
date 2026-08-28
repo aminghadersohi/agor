@@ -95,6 +95,42 @@ export const useBoardObjects = ({
   const boardObjects = board?.objects;
 
   /**
+   * Collapse or expand every card/worktree pinned to a zone. This is the UI
+   * half of `agor_boards_set_compact` with a `zoneId`: same targeting (pinned
+   * entity placements only), same idempotence (placements already at the
+   * requested density are skipped rather than re-patched).
+   */
+  const setZoneContentsCompact = useCallback(
+    async (zoneId: string, compact: boolean, options: { silent?: boolean } = {}) => {
+      if (!client) return;
+      const targets = boardObjectsForBoard.filter(
+        (placement) =>
+          placement.zone_id === zoneId &&
+          (placement.branch_id || placement.card_id) &&
+          (placement.compact === true) !== compact
+      );
+      if (targets.length === 0) return;
+
+      try {
+        await Promise.all(
+          targets.map((placement) =>
+            client.service('board-objects').patch(placement.object_id, { compact })
+          )
+        );
+        if (options.silent) return;
+        const noun = targets.length === 1 ? 'item' : 'items';
+        showSuccess(
+          compact ? `Collapsed ${targets.length} ${noun}.` : `Expanded ${targets.length} ${noun}.`
+        );
+      } catch (error) {
+        console.error('Failed to update zone density:', error);
+        showError('Failed to update zone density');
+      }
+    },
+    [boardObjectsForBoard, client, showError, showSuccess]
+  );
+
+  /**
    * Update an existing board object
    */
   const handleUpdateObject = useCallback(
@@ -102,17 +138,34 @@ export const useBoardObjects = ({
       const currentBoard = boardRef.current;
       if (!currentBoard || !client) return;
 
+      // Leaving `compact_list` is the one moment we can be certain a collapse
+      // was the preset's doing rather than the user's: the preset collapsed
+      // every item on the way in, so it owes them an expand on the way out.
+      // Deliberately keyed to the preset *transition* and not to arranging in
+      // grid — an automatic grid zone reflows on every session change, and
+      // expanding there would repeatedly stomp collapses the user made by hand
+      // with the per-card control.
+      const previous = currentBoard.objects?.[objectId];
+      const leftCompactList =
+        previous?.type === 'zone' &&
+        objectData.type === 'zone' &&
+        normalizeZoneLayoutPolicy(previous.layout).preset === 'compact_list' &&
+        normalizeZoneLayoutPolicy(objectData.layout).preset !== 'compact_list';
+
       try {
         await client.service('boards').patch(currentBoard.board_id, {
           _action: 'upsertObject',
           objectId,
           objectData,
         } as unknown as Partial<Board>);
+        // Silent: the arrange that follows a preset change reports its own
+        // result, and two toasts for one action reads as a bug.
+        if (leftCompactList) await setZoneContentsCompact(objectId, false, { silent: true });
       } catch (error) {
         console.error('Failed to update object:', error);
       }
     },
-    [client] // Only depend on client, not board
+    [client, setZoneContentsCompact] // Board is read through boardRef, not a dep
   );
 
   /**
@@ -397,16 +450,21 @@ export const useBoardObjects = ({
         ? Math.max(200, Math.ceil(layout.height + titleInset))
         : zone.height;
       const zoneHeightChanged = Math.abs(nextZoneHeight - zone.height) >= 0.5;
+
+      // One map for both the change check and the patch loop below. These used
+      // to be resolved differently — the check scanned every placement on the
+      // board while the patch loop filtered to this zone — so a placement in
+      // another zone could answer the "is anything still expanded?" question.
+      const placementByNodeId = new Map<string, BoardEntityObject>();
+      for (const placement of boardObjectsForBoard) {
+        if (placement.zone_id !== zoneId) continue;
+        if (placement.branch_id) placementByNodeId.set(placement.branch_id, placement);
+        if (placement.card_id) placementByNodeId.set(`card-${placement.card_id}`, placement);
+      }
+
       const compactChanged =
         policy.preset === 'compact_list' &&
-        children.some((node) => {
-          const placement = boardObjectsForBoard.find(
-            (candidate) =>
-              candidate.branch_id === node.id ||
-              (candidate.card_id !== undefined && `card-${candidate.card_id}` === node.id)
-          );
-          return placement?.compact !== true;
-        });
+        children.some((node) => placementByNodeId.get(node.id)?.compact !== true);
       if (!positionChanged && !zoneHeightChanged && !compactChanged) return;
       const changedById = new Map(changedNodes.map((node) => [node.id, node]));
       setNodes((currentNodes) =>
@@ -424,13 +482,6 @@ export const useBoardObjects = ({
       );
 
       if (changedNodes.length === 0) return;
-
-      const placementByNodeId = new Map<string, BoardEntityObject>();
-      for (const placement of boardObjectsForBoard) {
-        if (placement.zone_id !== zoneId) continue;
-        if (placement.branch_id) placementByNodeId.set(placement.branch_id, placement);
-        if (placement.card_id) placementByNodeId.set(`card-${placement.card_id}`, placement);
-      }
 
       try {
         if (zoneHeightChanged) {
@@ -481,41 +532,6 @@ export const useBoardObjects = ({
       }
     },
     [boardObjectsForBoard, client, setNodes, showError, showSuccess, showWarning]
-  );
-
-  /**
-   * Collapse or expand every card/worktree pinned to a zone. This is the UI
-   * half of `agor_boards_set_compact` with a `zoneId`: same targeting (pinned
-   * entity placements only), same idempotence (placements already at the
-   * requested density are skipped rather than re-patched).
-   */
-  const setZoneContentsCompact = useCallback(
-    async (zoneId: string, compact: boolean) => {
-      if (!client) return;
-      const targets = boardObjectsForBoard.filter(
-        (placement) =>
-          placement.zone_id === zoneId &&
-          (placement.branch_id || placement.card_id) &&
-          (placement.compact === true) !== compact
-      );
-      if (targets.length === 0) return;
-
-      try {
-        await Promise.all(
-          targets.map((placement) =>
-            client.service('board-objects').patch(placement.object_id, { compact })
-          )
-        );
-        const noun = targets.length === 1 ? 'item' : 'items';
-        showSuccess(
-          compact ? `Collapsed ${targets.length} ${noun}.` : `Expanded ${targets.length} ${noun}.`
-        );
-      } catch (error) {
-        console.error('Failed to update zone density:', error);
-        showError('Failed to update zone density');
-      }
-    },
-    [boardObjectsForBoard, client, showError, showSuccess]
   );
 
   useEffect(() => {
@@ -869,6 +885,7 @@ export const useBoardObjects = ({
 
   return {
     getBoardObjectNodes,
+    handleUpdateObject,
     addZoneNode,
     deleteObject,
     deleteZone,
