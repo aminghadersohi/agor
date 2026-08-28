@@ -91,22 +91,26 @@ function buildGrid(
 ): GridCandidate {
   const safeColumns = Math.max(1, Math.min(items.length || 1, Math.floor(columns)));
   const rows = Math.ceil(items.length / safeColumns);
-  const columnWidths = Array.from({ length: safeColumns }, (_, column) =>
-    Math.max(0, ...items.filter((_, index) => index % safeColumns === column).map((i) => i.width))
-  );
-  const rowHeights = Array.from({ length: rows }, (_, row) =>
-    Math.max(
-      0,
-      ...items.slice(row * safeColumns, (row + 1) * safeColumns).map((item) => item.height)
-    )
-  );
-  const columnOffsets = columnWidths.map(
-    (_, column) =>
-      padding + columnWidths.slice(0, column).reduce((sum, width) => sum + width + gapX, 0)
-  );
-  const rowOffsets = rowHeights.map(
-    (_, row) => padding + rowHeights.slice(0, row).reduce((sum, height) => sum + height + gapY, 0)
-  );
+  const columnWidths = Array.from({ length: safeColumns }, () => 0);
+  const rowHeights = Array.from({ length: rows }, () => 0);
+  for (const [index, item] of items.entries()) {
+    const column = index % safeColumns;
+    const row = Math.floor(index / safeColumns);
+    columnWidths[column] = Math.max(columnWidths[column] ?? 0, item.width);
+    rowHeights[row] = Math.max(rowHeights[row] ?? 0, item.height);
+  }
+  const columnOffsets: number[] = [];
+  let nextX = padding;
+  for (const width of columnWidths) {
+    columnOffsets.push(nextX);
+    nextX += width + gapX;
+  }
+  const rowOffsets: number[] = [];
+  let nextY = padding;
+  for (const height of rowHeights) {
+    rowOffsets.push(nextY);
+    nextY += height + gapY;
+  }
   const placements = items.map((item, index) => {
     const column = index % safeColumns;
     const row = Math.floor(index / safeColumns);
@@ -160,10 +164,35 @@ function chooseGrid(
   const exactColumns = options.exactColumns
     ? Math.max(1, Math.min(items.length, Math.floor(options.exactColumns)))
     : undefined;
+  const bounds = options.bounds;
+  const minimumItemWidth = items.reduce(
+    (minimum, item) => Math.min(minimum, item.width),
+    Number.POSITIVE_INFINITY
+  );
+  // A bounded grid cannot have more columns than its width can contain at the
+  // minimum allowed padding and gap. Capping the search here avoids trying all
+  // n column counts (and rebuilding an n-item grid each time) on large boards.
+  const maximumFittingColumns = bounds
+    ? Math.max(
+        0,
+        Math.floor(
+          (bounds.width - options.minPadding * 2 + options.minGapX) /
+            (minimumItemWidth + options.minGapX)
+        )
+      )
+    : items.length;
   const columnCounts = exactColumns
     ? [exactColumns]
-    : Array.from({ length: items.length }, (_, index) => index + 1);
-  const bounds = options.bounds;
+    : bounds
+      ? Array.from(
+          { length: Math.min(items.length, maximumFittingColumns) },
+          (_, index) => index + 1
+        )
+      : [
+          options.preferredColumns
+            ? Math.max(1, Math.min(items.length, Math.floor(options.preferredColumns)))
+            : items.length,
+        ];
   const candidates = columnCounts
     .flatMap((columns) => {
       if (!bounds) {
