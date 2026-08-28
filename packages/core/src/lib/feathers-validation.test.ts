@@ -94,6 +94,37 @@ describe('branchQueryValidator', () => {
     }
   });
 
+  it('names the offending field instead of Ajv bare "validation failed"', async () => {
+    // Ajv's ValidationError message is the literal string "validation failed"
+    // with every detail in `errors`. A caller that renders only the message —
+    // an MCP tool result, a CLI line — could otherwise only find the bad field
+    // by bisecting its own query.
+    await expect(
+      typedValidateQuery(branchQueryValidator)({
+        params: { query: { branch_id: { $ne: null } } },
+      })
+    ).rejects.toThrow(/branch_id/);
+
+    await expect(
+      typedValidateQuery(branchQueryValidator)({ params: { query: { $limit: 99999 } } })
+    ).rejects.toThrow(/\$limit must be <= 10000/);
+
+    await expect(
+      typedValidateQuery(branchQueryValidator)({ params: { query: { $limit: 99999 } } })
+    ).rejects.not.toThrow(/^validation failed$/);
+  });
+
+  it('keeps the structured Ajv errors on the rejection for programmatic callers', async () => {
+    const error = await typedValidateQuery(branchQueryValidator)({
+      params: { query: { $limit: 99999 } },
+    }).catch((thrown: { data?: unknown; code?: number }) => thrown);
+
+    expect(error.code).toBe(400);
+    expect(error.data).toEqual([
+      expect.objectContaining({ instancePath: '/$limit', keyword: 'maximum' }),
+    ]);
+  });
+
   it('strips unsupported operators sitting beside a branch_id batch', async () => {
     const context = {
       params: { query: { branch_id: { $in: ['019e8e1c'], $nin: ['019e8e1d'] } } },

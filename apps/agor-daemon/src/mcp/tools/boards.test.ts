@@ -1272,6 +1272,42 @@ describe('agor_boards_auto_arrange', () => {
   });
 });
 
+/**
+ * Assert real geometry, not flags.
+ *
+ * The layout regressions on this feature have all been "every test green, the
+ * screenshot shows cards on top of each other" — because the tests asserted
+ * `applied: true` and compact flags rather than where anything landed. These
+ * helpers reconstruct the placed rectangles and check them.
+ */
+function assertNoOverlap(rects: Array<{ id: string; x: number; y: number; w: number; h: number }>) {
+  for (let i = 0; i < rects.length; i += 1) {
+    for (let j = i + 1; j < rects.length; j += 1) {
+      const a = rects[i];
+      const b = rects[j];
+      const overlaps = a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+      if (overlaps) {
+        throw new Error(
+          `${a.id} (${a.x},${a.y} ${a.w}x${a.h}) overlaps ${b.id} (${b.x},${b.y} ${b.w}x${b.h})`
+        );
+      }
+    }
+  }
+}
+
+function assertInsideZone(
+  rects: Array<{ id: string; x: number; y: number; w: number; h: number }>,
+  zone: { width: number; height: number }
+) {
+  for (const rect of rects) {
+    if (rect.x < 0 || rect.y < 0 || rect.x + rect.w > zone.width || rect.y + rect.h > zone.height) {
+      throw new Error(
+        `${rect.id} (${rect.x},${rect.y} ${rect.w}x${rect.h}) escapes the ${zone.width}x${zone.height} zone`
+      );
+    }
+  }
+}
+
 describe('board layout tools with branch entities present', () => {
   const baseServiceParams = { authenticated: true, provider: 'mcp' };
   const branchId = '019e8e10';
@@ -1344,13 +1380,17 @@ describe('board layout tools with branch entities present', () => {
             };
           if (name === 'cards')
             return {
-              find: vi.fn(async () => ({ data: [{ card_id: cardId }] })),
-              get: vi.fn(async () => ({ card_id: cardId, title: 'Card' })),
+              // Echo back whatever card ids were asked for, so adding a card to
+              // a fixture doesn't silently make it look archived.
+              find: vi.fn(async (params?: { query?: { card_id?: { $in?: string[] } } }) => ({
+                data: (params?.query?.card_id?.$in ?? []).map((card_id) => ({ card_id })),
+              })),
+              get: vi.fn(async (id: string) => ({ card_id: id, title: 'Card' })),
             };
           if (name === 'branches')
             return {
               find: branchesFind,
-              get: vi.fn(async () => ({ branch_id: branchId, name: 'feature-branch' })),
+              get: vi.fn(async (id: string) => ({ branch_id: id, name: 'feature-branch' })),
             };
           throw new Error(`Unexpected service call: ${name}`);
         },
@@ -1471,6 +1511,106 @@ describe('board layout tools with branch entities present', () => {
       expect(parsed.updates).toContainEqual(
         expect.objectContaining({ objectId: 'obj-branch', entityType: 'branch' })
       );
+    }
+  );
+
+  it('lays out a mixed card+branch zone in one call without overlap', async () => {
+    // The case that bit in production: one zone, cards and worktrees together,
+    // one default-entityType call. Each item must be sized by its own kind —
+    // a 500x200 worktree beside 380-wide cards — and none may overlap.
+    const zone = { type: 'zone', x: 40, y: 40, width: 1200, height: 1400 };
+    const entities = [
+      branchEntity({ object_id: 'obj-branch', zone_id: 'zone-1' }),
+      branchEntity({ object_id: 'obj-branch-2', branch_id: '019e8e12', zone_id: 'zone-1' }),
+      cardEntity({ object_id: 'obj-card', zone_id: 'zone-1' }),
+      cardEntity({ object_id: 'obj-card-2', card_id: '019e8e13', zone_id: 'zone-1' }),
+    ];
+    const entityPatches: Array<{ objectId: string; data: Record<string, unknown> }> = [];
+    const { app } = makeApp({ entities, entityPatches, objects: { 'zone-1': zone } });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const result = await arrange({ boardId: 'board-1', zoneId: 'zone-1' });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({ applied: true, arranged: 4, fitsWithoutOverlap: true });
+    expect(parsed.layoutMode).not.toBe('deck');
+    expect(parsed.overflowingObjectIds).toEqual([]);
+
+    // Reconstruct what was actually written, at each item's own kind size.
+    const sizeOf = (objectId: string) =>
+      objectId.startsWith('obj-branch') ? { w: 500, h: 200 } : { w: 380, h: 56 };
+    const placed = parsed.updates.map(
+      (update: { objectId: string; position: { x: number; y: number } }) => ({
+        id: update.objectId,
+        x: update.position.x,
+        y: update.position.y,
+        ...sizeOf(update.objectId),
+      })
+    );
+    expect(placed).toHaveLength(4);
+    assertNoOverlap(placed);
+    assertInsideZone(placed, zone);
+    expect(entityPatches.map(({ objectId }) => objectId).sort()).toEqual(
+      ['obj-branch', 'obj-branch-2', 'obj-card', 'obj-card-2'].sort()
+    );
+  });
+
+  it('falls back to nominal size for an entity the browser never measured', async () => {
+    // A worktree created over MCP has never rendered, so it carries no `size`.
+    // It must lay out at the nominal size for its kind, not fail the arrange.
+    const { app } = makeApp({
+      entities: [branchEntity({ zone_id: 'zone-1' }), cardEntity({ zone_id: 'zone-1' })],
+      objects: { 'zone-1': { type: 'zone', x: 0, y: 0, width: 1200, height: 900 } },
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1' })).content[0].text
+    );
+
+    expect(parsed).toMatchObject({ applied: true, arranged: 2, unusableSizeObjectIds: [] });
+    // 500-wide branch + 380-wide card cannot both sit in one 1200 column pair
+    // unless each was sized by kind; requiredWidth proves the branch was not
+    // silently laid out at card width.
+    expect(parsed.requiredWidth).toBeGreaterThanOrEqual(500);
+  });
+
+  it.each([
+    ['zero', { width: 0, height: 0 }],
+    ['negative', { width: -10, height: 200 }],
+    ['non-finite', { width: Number.NaN, height: 200 }],
+  ])(
+    'does not fail the whole arrange over one %s persisted size, and names it',
+    async (_label, size) => {
+      const { app } = makeApp({
+        entities: [branchEntity({ zone_id: 'zone-1', size }), cardEntity({ zone_id: 'zone-1' })],
+        objects: { 'zone-1': { type: 'zone', x: 0, y: 0, width: 1200, height: 900 } },
+      });
+      const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+        app,
+        userId: 'user-1',
+        baseServiceParams,
+      });
+
+      const result = await arrange({ boardId: 'board-1', zoneId: 'zone-1' });
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(result.isError).toBeFalsy();
+      expect(parsed).toMatchObject({
+        applied: true,
+        arranged: 2,
+        unusableSizeObjectIds: ['obj-branch'],
+      });
+      expect(parsed.warning).toContain('obj-branch');
     }
   );
 
