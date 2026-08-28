@@ -13,6 +13,10 @@ import { useCallback, useEffect, useRef } from 'react';
 import type { Node } from 'reactflow';
 import { useThemedMessage } from '../../../utils/message';
 
+// Long enough for the expanded cards to paint before the re-pack measures
+// them; short enough that the board does not visibly sit in a broken state.
+const EXPANDED_REPACK_DELAY_MS = 400;
+
 function zoneContentTopInset(zone: { fontSize?: number; status?: string }): number {
   const labelFontSize =
     typeof zone.fontSize === 'number' && Number.isFinite(zone.fontSize)
@@ -86,6 +90,12 @@ export const useBoardObjects = ({
   nodesRef.current = nodes;
 
   const { showError, showSuccess, showWarning } = useThemedMessage();
+  // `handleUpdateObject` re-packs a zone after expanding it, but
+  // `arrangeZoneContents` is declared below it and its dependency array is
+  // evaluated during render. A ref keeps the call late-bound.
+  const arrangeZoneContentsRef = useRef<
+    ((zoneId: string, options?: { silent?: boolean }) => Promise<void>) | null
+  >(null);
   const autoArrangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAutoLayoutSignatureRef = useRef('');
 
@@ -158,9 +168,20 @@ export const useBoardObjects = ({
           objectId,
           objectData,
         } as unknown as Partial<Board>);
-        // Silent: the arrange that follows a preset change reports its own
-        // result, and two toasts for one action reads as a bug.
-        if (leftCompactList) await setZoneContentsCompact(objectId, false, { silent: true });
+        if (leftCompactList) {
+          // Silent: this is one user action, and a toast per internal step
+          // reads as a bug.
+          await setZoneContentsCompact(objectId, false, { silent: true });
+          // The positions still carry compact_list's one-row spacing, so the
+          // cards we just restored to full height would overlap. Re-pack once
+          // they have actually rendered — the layout measures the DOM, so
+          // arranging before the expanded cards paint would measure the
+          // collapsed heights and pack just as tightly. An automatic zone
+          // reflows on its own, but a manual one has nothing else to fix this.
+          setTimeout(() => {
+            void arrangeZoneContentsRef.current?.(objectId, { silent: true });
+          }, EXPANDED_REPACK_DELAY_MS);
+        }
       } catch (error) {
         console.error('Failed to update object:', error);
       }
@@ -533,6 +554,7 @@ export const useBoardObjects = ({
     },
     [boardObjectsForBoard, client, setNodes, showError, showSuccess, showWarning]
   );
+  arrangeZoneContentsRef.current = arrangeZoneContents;
 
   useEffect(() => {
     const autoZones = Object.entries(boardObjects ?? {}).flatMap(([objectId, object]) =>

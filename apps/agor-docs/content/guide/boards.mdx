@@ -135,7 +135,11 @@ Zone settings provide two opinionated presentations:
 - **Grid** chooses a contained row-and-column layout. You can supply a preferred column count or let Agor choose the nearest fitting grid. Grid respects whatever density each item is already at, so cards you collapsed by hand stay collapsed as the zone reflows.
 - **Compact list** collapses each item to a one-row summary and arranges a single readable column. This is useful for dense triage, ranking, and status queues.
 
-Switching a zone from **Compact list** back to **Grid** expands its contents again: the preset collapsed them on the way in, so it restores them on the way out. This happens only when you change the preset, not every time a grid zone reflows — an automatic zone rearranges constantly, and expanding there would undo collapses you made deliberately.
+Switching a zone from **Compact list** back to **Grid** expands its contents again and re-packs them: the preset collapsed them on the way in, so it restores them on the way out, and the rows it left behind are re-spaced for the taller cards. This happens only when you change the preset, not every time a grid zone reflows — an automatic zone rearranges constantly, and expanding there would undo collapses you made deliberately.
+
+![A zone in Compact list, each item collapsed to a single row with its expand button.](/screenshots/board-density-compact-list.png)
+
+![The same zone switched back to Grid: every item restored to full height and re-spaced.](/screenshots/board-density-grid-recovered.png)
 
 Both presentations can sort by current spatial order, priority/rank, workflow status, last updated, creation time, or title, in either direction. Switching a previously-unsorted zone to automatic maintenance defaults to **Last updated · Descending**, so active work appears first. Use **Columns** to request a fixed grid width or leave it on Auto. **Spacing** is an exact pixel input shared by UI and MCP. **Grow to fit** lets an automatic zone expand vertically to contain every row; when it is off, the zone keeps the size you chose.
 
