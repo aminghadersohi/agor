@@ -230,10 +230,10 @@ export async function discoverResourceMetadataUrl(
   mcpUrl: string,
   options: {
     allowLocalhostHttp?: boolean;
+    assertCurrent?: () => void;
     /** When set, only return metadata bound to this exact MCP resource policy. */
     resourceUri?: string;
     compatibilityMode?: MCPOAuthRuntimeCompatibilityMode;
-    assertCurrent?: () => void;
   } = {}
 ): Promise<string | null> {
   options.assertCurrent?.();
@@ -269,9 +269,9 @@ export async function discoverResourceMetadataUrl(
     }
     options.assertCurrent?.();
     if (response.ok) {
-      let data: Record<string, unknown>;
+      let data: OAuthMetadata;
       try {
-        data = (await response.json()) as Record<string, unknown>;
+        data = (await response.json()) as OAuthMetadata;
       } catch {
         options.assertCurrent?.();
         console.log('[MCP OAuth] Resource metadata discovery candidate failed');
@@ -283,7 +283,7 @@ export async function discoverResourceMetadataUrl(
         Array.isArray(data.authorization_servers) &&
         resourceMetadataMatches(
           candidate,
-          typeof data.resource === 'string' ? data.resource : undefined,
+          data.resource,
           options.resourceUri,
           options.compatibilityMode
         )
@@ -314,10 +314,10 @@ export async function resolveResourceMetadataUrl(
   mcpUrl: string,
   options: {
     allowLocalhostHttp?: boolean;
+    assertCurrent?: () => void;
     /** When set, reject a header hint that is not bound to this MCP resource. */
     resourceUri?: string;
     compatibilityMode?: MCPOAuthRuntimeCompatibilityMode;
-    assertCurrent?: () => void;
   } = {}
 ): Promise<{ metadataUrl: string; source: 'header' | 'well-known' } | null> {
   options.assertCurrent?.();
@@ -339,8 +339,10 @@ export async function resolveResourceMetadataUrl(
           allowLocalhostHttp: options.allowLocalhostHttp,
           assertCurrent: options.assertCurrent,
         });
+        options.assertCurrent?.();
         if (response.ok) {
           const data = (await response.json()) as OAuthMetadata;
+          options.assertCurrent?.();
           if (
             Array.isArray(data.authorization_servers) &&
             resourceMetadataMatches(
@@ -354,6 +356,10 @@ export async function resolveResourceMetadataUrl(
           }
         }
       } catch {
+        // Keep the authority/deadline check outside the provider-error catch:
+        // an expired daemon reservation is terminal, never another discovery
+        // candidate to try.
+        options.assertCurrent?.();
         // Continue to endpoint-specific well-known discovery below.
       }
       console.log('[MCP OAuth] Advertised resource metadata does not bind the MCP endpoint');
@@ -833,10 +839,12 @@ function buildWellKnownUrl(issuerUrl: string, wellKnownSuffix: string): string {
 }
 
 /**
- * A few reviewed providers disagree only about a trailing slash on an issuer.
- * Treat that spelling difference as equivalent in the marketplace profile,
- * while preserving strict RFC 8414 string comparison everywhere else. Host,
- * scheme, port, path, query, username and password must still agree.
+ * A few reviewed providers (e.g. Google) disagree only about a trailing slash
+ * between their protected-resource `authorization_servers` entry and their
+ * authorization-server metadata `issuer`. Treat that spelling difference as
+ * equivalent in every non-legacy compatibility mode, including `strict` — see
+ * the Gmail/Calendar fixtures in oauth-mcp-transport.test.ts. Host, scheme,
+ * port, path, query, username and password must still agree.
  */
 function oauthIssuerIdentifiersMatch(left: unknown, right: unknown): boolean {
   if (typeof left !== 'string' || typeof right !== 'string') return false;
@@ -1906,6 +1914,11 @@ export async function startMCPOAuthFlow(
      * discovery and DCR boundaries; standalone/CLI callers omit it.
      */
     assertCurrent?: () => void;
+    /**
+     * Permit an exact HTTP loopback callback without permitting private OAuth
+     * metadata, authorization, registration, or token endpoints.
+     */
+    allowLoopbackRedirectUri?: boolean;
   }
 ): Promise<OAuthFlowContext> {
   console.log('[MCP OAuth] Starting two-phase OAuth 2.1 flow');

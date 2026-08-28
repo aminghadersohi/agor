@@ -33,6 +33,7 @@ describe('Marketplace server actions', () => {
     vi.spyOn(message, 'success').mockImplementation(() => undefined as never);
     vi.spyOn(message, 'error').mockImplementation(() => undefined as never);
   });
+
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
