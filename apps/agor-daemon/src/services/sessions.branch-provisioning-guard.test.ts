@@ -12,7 +12,7 @@ import { BranchRepository, generateId, RepoRepository } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
 import type { Branch, UUID } from '@agor/core/types';
 import { describe, expect } from 'vitest';
-import { dbTest } from '../../../../packages/core/src/db/test-helpers';
+import { dbTest, ensureTestUser } from '../../../../packages/core/src/db/test-helpers';
 import { SessionsService } from './sessions';
 
 const STUB_APP = {} as unknown as Application;
@@ -29,6 +29,9 @@ function missingDir(): string {
 async function makeBranch(db: any, over: Partial<Branch>): Promise<UUID> {
   const repoRepo = new RepoRepository(db);
   const branchRepo = new BranchRepository(db);
+  // `BranchRepository.create` requires the primary owner to be a real user in
+  // this tenant, so the owner principal has to exist before the branch does.
+  const owner = await ensureTestUser(db);
   const repo = await repoRepo.create({
     repo_id: generateId(),
     slug: `repo-${generateId()}`,
@@ -47,7 +50,7 @@ async function makeBranch(db: any, over: Partial<Branch>): Promise<UUID> {
     path: '/tmp/test-repo',
     base_ref: 'main',
     new_branch: false,
-    created_by: 'test-user' as UUID,
+    created_by: owner as UUID,
     ...over,
   });
   return branch.branch_id as UUID;

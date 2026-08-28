@@ -30,7 +30,12 @@ import {
 } from '@agor/core/db';
 import type { Id, Paginated, Session, SessionID, Task, TenantContext } from '@agor/core/types';
 import { isTerminalTaskStatus, SessionStatus, TaskStatus } from '@agor/core/types';
-import type { Application, SessionsServiceImpl, TasksServiceImpl } from './declarations.js';
+import type {
+  Application,
+  ReposServiceImpl,
+  SessionsServiceImpl,
+  TasksServiceImpl,
+} from './declarations.js';
 import { beginExecutorResponseDrain } from './executor-response-channel.js';
 import { clearTrackedExecutorGauge, containAllTrackedExecutors } from './executor-tracking.js';
 import { type DaemonMetrics, getDaemonMetrics, NOOP_METRICS } from './metrics/index.js';
@@ -718,12 +723,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
   // worktrees.
   runPostStartJob('branch-provisioning-watchdog', () =>
     runStartupTenantDatabaseScope(ctx, async () => {
-      const reposService = app.service('repos') as unknown as {
-        reconcileStuckCreatingBranches: (params?: unknown) => Promise<{
-          scanned: number;
-          failed: number;
-        }>;
-      };
+      const reposService = app.service('repos') as unknown as ReposServiceImpl;
       await reposService.reconcileStuckCreatingBranches(startupTenantParams(config));
     })
   );
