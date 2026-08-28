@@ -148,6 +148,33 @@ function estimateCardHeight(
   return Math.max(ARRANGE_DIMENSIONS.card.height, header + description + note);
 }
 
+/**
+ * A persisted `size` the solver can actually lay out, or undefined.
+ *
+ * `size` is written by the browser once a node has been measured, so an entity
+ * created over MCP legitimately has none and falls back to the nominal size for
+ * its kind. A size that is present but zero, negative, or non-finite is a
+ * different thing: `layoutRectangles` refuses it, and refusing it there would
+ * fail the whole arrange over one bad rectangle. Discard it and fall back to
+ * nominal too, reporting the id so the anomaly is visible rather than silent.
+ */
+function measuredSize(
+  entity: Pick<BoardEntityObject, 'size'>
+): { width: number; height: number } | undefined {
+  const size = entity.size;
+  if (!size) return undefined;
+  const usable =
+    Number.isFinite(size.width) &&
+    Number.isFinite(size.height) &&
+    size.width > 0 &&
+    size.height > 0;
+  return usable ? size : undefined;
+}
+
+function hasUnusableSize(entity: Pick<BoardEntityObject, 'size'>): boolean {
+  return entity.size !== undefined && measuredSize(entity) === undefined;
+}
+
 type CanvasRectangle = { id: string; x: number; y: number; width: number; height: number };
 
 function rectanglesOverlap(
@@ -668,10 +695,13 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         width: number;
         height: number;
       }> = [];
+      const unusableSizeObjectIds: string[] = [];
       for (const entity of entities) {
+        if (hasUnusableSize(entity)) unusableSizeObjectIds.push(entity.object_id);
         let entityDimensions: { width: number; height: number };
-        if (entity.size) {
-          entityDimensions = entity.size;
+        const measured = measuredSize(entity);
+        if (measured) {
+          entityDimensions = measured;
         } else if (entity.entity_type === 'card' && entity.card_id) {
           const card = (await ctx.app
             .service('cards')
@@ -789,10 +819,18 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         appliedStartX: startX,
         appliedStartY: startY,
         avoidedZoneIds,
+        unusableSizeObjectIds,
         warning:
-          avoidedZoneIds.length > 0
-            ? `The default grid origin would have covered ${avoidedZoneIds.length} existing zone(s); the grid was placed below every zone at y=${startY}. Pass startY to override.`
-            : null,
+          [
+            avoidedZoneIds.length > 0
+              ? `The default grid origin would have covered ${avoidedZoneIds.length} existing zone(s); the grid was placed below every zone at y=${startY}. Pass startY to override.`
+              : null,
+            unusableSizeObjectIds.length > 0
+              ? `Ignored an unusable persisted size on ${unusableSizeObjectIds.join(', ')} and laid them out at the nominal size for their kind.`
+              : null,
+          ]
+            .filter(Boolean)
+            .join(' ') || null,
         updates,
       });
     }
@@ -901,7 +939,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           zonePolicy.sortBy !== 'position' ||
           (zonePolicy.preset === 'grid' &&
             entity.compact !== true &&
-            entity.size === undefined &&
+            measuredSize(entity) === undefined &&
             entity.card_id !== undefined)
       );
       const metadata = await loadEntityLayoutMetadata(ctx, metadataEntities);
@@ -916,11 +954,14 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         zonePolicy
       ).map(({ entity }) => entity);
       const dimensions = new Map<string, { width: number; height: number }>();
+      const unusableSizeObjectIds: string[] = [];
       for (const entity of entities) {
+        if (hasUnusableSize(entity)) unusableSizeObjectIds.push(entity.object_id);
+        const measured = measuredSize(entity);
         if (zonePolicy.preset === 'compact_list' || entity.compact === true) {
           dimensions.set(entity.object_id, COMPACT_ARRANGE_DIMENSIONS[entity.entity_type]);
-        } else if (entity.size) {
-          dimensions.set(entity.object_id, entity.size);
+        } else if (measured) {
+          dimensions.set(entity.object_id, measured);
         } else if (entity.entity_type === 'card' && entity.card_id) {
           const card = metadata.get(entity.object_id)?.card;
           dimensions.set(entity.object_id, {
@@ -1001,6 +1042,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           appliedGapY: layout.gapY,
           appliedPadding: layout.padding,
           overflowingObjectIds: layout.overflowingItemIds,
+          unusableSizeObjectIds,
           warning:
             `One or more rendered objects are larger than the available zone rectangle, or no non-overlapping ${requestedColumns === null ? 'automatic' : `${requestedColumns}-column`} layout can fit every rendered object inside ` +
             `the ${zone.width}×${zone.height} zone. No positions were changed. Increase the zone size, ` +
@@ -1088,14 +1130,22 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         appliedGapY: layout.gapY,
         appliedPadding: layout.padding,
         overflowingObjectIds: layout.overflowingItemIds,
+        unusableSizeObjectIds,
         warning:
-          layout.overflowingItemIds.length > 0
-            ? 'One or more rendered objects are larger than the available zone rectangle.'
-            : layout.mode === 'deck'
-              ? `The zone cannot fit every rendered object without overlap; a contained cascade deck was used with ${layout.deckOffsetX}px left-edge and ${layout.deckOffsetY}px header reveals.`
-              : requestedColumns !== null && layout.columns !== requestedColumns
-                ? `The requested ${requestedColumns}-column target could not fit without overlap; a contained ${layout.columns}-column grid was used.`
-                : null,
+          [
+            layout.overflowingItemIds.length > 0
+              ? `One or more rendered objects are larger than the available zone rectangle: ${layout.overflowingItemIds.join(', ')}.`
+              : layout.mode === 'deck'
+                ? `The zone cannot fit every rendered object without overlap; a contained cascade deck was used with ${layout.deckOffsetX}px left-edge and ${layout.deckOffsetY}px header reveals.`
+                : requestedColumns !== null && layout.columns !== requestedColumns
+                  ? `The requested ${requestedColumns}-column target could not fit without overlap; a contained ${layout.columns}-column grid was used.`
+                  : null,
+            unusableSizeObjectIds.length > 0
+              ? `Ignored an unusable persisted size on ${unusableSizeObjectIds.join(', ')} and laid them out at the nominal size for their kind.`
+              : null,
+          ]
+            .filter(Boolean)
+            .join(' ') || null,
         zone: { width: zone.width, height: appliedZoneHeight },
         updates,
       });
