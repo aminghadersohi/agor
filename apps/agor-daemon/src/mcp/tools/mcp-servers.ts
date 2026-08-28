@@ -8,6 +8,7 @@ import {
   MCP_HEADER_REDACTED_SENTINEL,
   redactMCPCustomHeaders,
 } from '@agor/core/tools/mcp/http-headers';
+import { oauthGrantCanAuthenticate } from '@agor/core/tools/mcp/oauth-refresh';
 import type {
   CreateMCPServerInput,
   MCPAuth,
@@ -20,7 +21,6 @@ import { hasMinimumRole, ROLES } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { isMCPOAuthGrantAuthorizedForServer } from '../../services/mcp-oauth-grant-authority.js';
-import { oauthGrantCanAuthenticate } from '../../services/mcp-oauth-status.js';
 import { isMcpServerUsableByCaller } from '../../utils/mcp-server-authorization.js';
 import { resolveMcpServerId, resolveSessionId } from '../resolve-ids.js';
 import {

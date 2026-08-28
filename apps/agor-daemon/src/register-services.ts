@@ -4452,7 +4452,6 @@ export async function registerMCPServices(
       }
 
       const serverIds = Array.isArray(data?.mcp_server_ids) ? data.mcp_server_ids : [];
-      const forceRefresh = data?.force_refresh === true;
       const headers: Record<string, { authorization?: string; error?: string }> = {};
 
       if (serverIds.length === 0) {
@@ -4467,6 +4466,13 @@ export async function registerMCPServices(
       if (!trustedInternalOrService && !trustedSessionExecutor) {
         throw new Forbidden('oauth-auth-headers is only available to trusted executor paths');
       }
+      // `force_refresh` is an internal accelerator for the egress gateway's
+      // post-401 retry, not a capability request data controls: only the
+      // trusted internal/service caller may set it. A session executor's own
+      // request data is otherwise agent-directed, and forcing a refresh has
+      // real side effects (provider rate limits, refresh-token rotation,
+      // fencing pressure on concurrent callers of the same grant).
+      const forceRefresh = trustedInternalOrService && data?.force_refresh === true;
       const tenantId = tenantIdFromParams(params);
       if (!tenantId) throw new NotAuthenticated('oauth-auth-headers requires tenant identity');
       const mcpEgressAssertCurrent = (
@@ -4831,15 +4837,16 @@ export async function registerMCPServices(
           if (
             err instanceof InvalidGrantError ||
             err instanceof MissingRefreshTokenError ||
-            err instanceof AmbiguousRefreshError ||
             err instanceof GrantConfigurationChangedError
           ) {
             return { success: false, error: 'needs_reauth' };
           }
-          // A peer observed a known, non-ambiguous owner failure. Match the
-          // owner's retryable response rather than forcing one daemon's caller
-          // to reconnect for the same refresh generation.
-          if (err instanceof FailedRefreshError) {
+          // A peer observed a known, non-ambiguous owner failure, or the
+          // outcome of a concurrent refresh could not be observed in time.
+          // Neither means the grant itself is invalid, so match the
+          // auth-headers path's retryable response rather than forcing the
+          // caller to reconnect for the same refresh generation.
+          if (err instanceof FailedRefreshError || err instanceof AmbiguousRefreshError) {
             return { success: false, error: 'token_refresh_failed' };
           }
           if (err instanceof MissingTokenEndpointError) {
