@@ -662,3 +662,347 @@ describe('arrangeZoneContents', () => {
     unmount();
   });
 });
+
+/**
+ * `setZoneContentsCompact` is the UI half of `agor_boards_set_compact` scoped
+ * to a zone, so these cover the same targeting and idempotence contract the
+ * MCP tool is tested against.
+ */
+describe('setZoneContentsCompact', () => {
+  const placements = [
+    { object_id: 'obj-branch', zone_id: 'zone-1', branch_id: 'branch-1' },
+    { object_id: 'obj-card', zone_id: 'zone-1', card_id: 'card-1' },
+    { object_id: 'obj-other-zone', zone_id: 'zone-2', card_id: 'card-2' },
+    // A nested zone placement carries neither branch_id nor card_id and is
+    // not an entity the density control applies to.
+    { object_id: 'obj-not-entity', zone_id: 'zone-1' },
+  ];
+
+  function renderCompact(client: unknown, boardObjectsForBoard: unknown[] = placements) {
+    return renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({
+            'zone-1': { type: 'zone', x: 0, y: 0, width: 400, height: 300, label: 'Z' },
+          }),
+          client: client as never,
+          boardObjectsForBoard: boardObjectsForBoard as never,
+          nodes: [],
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+  }
+
+  it('patches only the entity placements pinned to the requested zone', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderCompact(client);
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact('zone-1', true);
+    });
+
+    expect(client.service).toHaveBeenCalledWith('board-objects');
+    expect(patch.mock.calls.map((call) => call[0]).sort()).toEqual(['obj-branch', 'obj-card']);
+    for (const call of patch.mock.calls) {
+      expect(call[1]).toEqual({ compact: true });
+    }
+  });
+
+  it('expands a collapsed zone back to full density', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderCompact(
+      client,
+      placements.map((placement) => ({ ...placement, compact: true }))
+    );
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact('zone-1', false);
+    });
+
+    expect(patch.mock.calls.map((call) => call[0]).sort()).toEqual(['obj-branch', 'obj-card']);
+    expect(patch.mock.calls[0][1]).toEqual({ compact: false });
+  });
+
+  it('skips placements already at the requested density', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderCompact(client, [
+      { object_id: 'obj-branch', zone_id: 'zone-1', branch_id: 'branch-1', compact: true },
+      { object_id: 'obj-card', zone_id: 'zone-1', card_id: 'card-1' },
+    ]);
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact('zone-1', true);
+    });
+
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(patch.mock.calls[0][0]).toBe('obj-card');
+  });
+
+  it('is a no-op — no patch, no toast — when the zone is already uniform', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderCompact(
+      client,
+      placements.map((placement) => ({ ...placement, compact: true }))
+    );
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact('zone-1', true);
+    });
+
+    expect(patch).not.toHaveBeenCalled();
+    expect(showSuccess).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a themed error when the patch fails', async () => {
+    const { client } = makeRejectingClient();
+    const { result } = renderCompact(client);
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact('zone-1', true);
+    });
+
+    expect(showError).toHaveBeenCalledWith('Failed to update zone density');
+    expect(showSuccess).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `compact_list` collapses every item on the way in and nothing used to undo
+ * it, so a zone switched back to Grid stayed collapsed with no explanation.
+ * The expand is keyed to the preset transition, NOT to arranging in grid.
+ */
+describe('handleUpdateObject compact_list → grid expansion', () => {
+  const zoneId = 'zone-1';
+  const collapsed = [
+    { object_id: 'obj-branch', zone_id: zoneId, branch_id: 'branch-1', compact: true },
+    { object_id: 'obj-card', zone_id: zoneId, card_id: 'card-1', compact: true },
+  ];
+
+  function zone(preset: string) {
+    return {
+      type: 'zone',
+      x: 0,
+      y: 0,
+      width: 400,
+      height: 300,
+      label: 'Triage',
+      layout: { mode: 'manual', preset },
+    };
+  }
+
+  function renderUpdate(boardPreset: string, boardObjectsForBoard: unknown[], client: unknown) {
+    return renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({ [zoneId]: zone(boardPreset) }),
+          client: client as never,
+          boardObjectsForBoard: boardObjectsForBoard as never,
+          nodes: [],
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+  }
+
+  /** Patch calls the expansion made, keyed by placement id. */
+  function compactPatches(patch: ReturnType<typeof vi.fn>) {
+    return patch.mock.calls
+      .filter((call) => call[1] && typeof call[1] === 'object' && 'compact' in call[1])
+      .map((call) => [call[0], call[1].compact]);
+  }
+
+  it('expands the zone contents when the preset leaves compact_list for grid', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderUpdate('compact_list', collapsed, client);
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid') as never);
+    });
+
+    expect(compactPatches(patch)).toEqual([
+      ['obj-branch', false],
+      ['obj-card', false],
+    ]);
+  });
+
+  it('does not expand when a grid zone is merely updated again', async () => {
+    // The regression guard for automatic zones: a grid zone reflows and is
+    // re-saved constantly, and each of those must leave hand-collapsed cards
+    // alone.
+    const { client, patch } = makeClient();
+    const { result } = renderUpdate('grid', collapsed, client);
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid') as never);
+    });
+
+    expect(compactPatches(patch)).toEqual([]);
+  });
+
+  it('does not expand when the zone stays on compact_list', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderUpdate('compact_list', collapsed, client);
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, {
+        ...zone('compact_list'),
+        label: 'Renamed',
+      } as never);
+    });
+
+    expect(compactPatches(patch)).toEqual([]);
+  });
+
+  it('expands silently — the arrange that follows reports its own result', async () => {
+    const { client } = makeClient();
+    const { result } = renderUpdate('compact_list', collapsed, client);
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid') as never);
+    });
+
+    expect(showSuccess).not.toHaveBeenCalled();
+  });
+
+  it('leaves other zones alone when one zone exits compact_list', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderUpdate(
+      'compact_list',
+      [...collapsed, { object_id: 'obj-elsewhere', zone_id: 'zone-2', card_id: 'card-9' }],
+      client
+    );
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid') as never);
+    });
+
+    expect(compactPatches(patch).map(([id]) => id)).not.toContain('obj-elsewhere');
+  });
+
+  it('does not expand when the board patch itself fails', async () => {
+    const { client, patch } = makeRejectingClient();
+    const { result } = renderUpdate('compact_list', collapsed, client);
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid') as never);
+    });
+
+    expect(compactPatches(patch)).toEqual([]);
+  });
+});
+
+/**
+ * Expanding on the way out of compact_list is only half the job: the cards keep
+ * the one-row spacing the preset gave them, so restoring their full height
+ * makes them overlap until the zone is re-packed.
+ */
+describe('compact_list → grid re-packs the expanded zone', () => {
+  const zoneId = 'zone-1';
+
+  function zone(preset: string) {
+    return {
+      type: 'zone',
+      x: 0,
+      y: 0,
+      width: 420,
+      height: 900,
+      label: 'Triage',
+      layout: { mode: 'manual', preset },
+    };
+  }
+
+  const placements = [
+    { object_id: 'obj-a', zone_id: zoneId, card_id: 'card-a', compact: true },
+    { object_id: 'obj-b', zone_id: zoneId, card_id: 'card-b', compact: true },
+  ];
+
+  // Stacked at compact_list's row pitch: 56px apart, which is exactly the
+  // spacing that overlaps once each card is ~120px tall again.
+  const nodes = [
+    {
+      id: 'card-card-a',
+      type: 'cardNode',
+      parentId: zoneId,
+      position: { x: 24, y: 64 },
+      width: 380,
+      height: 120,
+      data: {},
+    },
+    {
+      id: 'card-card-b',
+      type: 'cardNode',
+      parentId: zoneId,
+      position: { x: 24, y: 120 },
+      width: 380,
+      height: 120,
+      data: {},
+    },
+  ];
+
+  it('schedules an arrange that moves the expanded cards apart', async () => {
+    vi.useFakeTimers();
+    const { client, patch } = makeClient();
+    const setNodes = vi.fn();
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({ [zoneId]: zone('compact_list') }),
+          client: client as never,
+          boardObjectsForBoard: placements as never,
+          nodes: nodes as never,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid') as never);
+    });
+
+    // The expand lands immediately; the re-pack is deferred so the cards can
+    // paint at full height before the layout measures them.
+    const compactPatches = patch.mock.calls.filter((c) => c[1] && 'compact' in c[1]);
+    expect(compactPatches.map((c) => c[1].compact)).toEqual([false, false]);
+    expect(patch.mock.calls.some((c) => c[1] && 'position' in c[1])).toBe(false);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    const positioned = patch.mock.calls.filter((c) => c[1] && 'position' in c[1]);
+    expect(positioned.length).toBeGreaterThan(0);
+    // Whatever the packer chooses, the two cards must no longer sit 56px apart.
+    const ys = positioned.map((c) => c[1].position.y).sort((a, b) => a - b);
+    if (ys.length === 2) expect(ys[1] - ys[0]).toBeGreaterThan(56);
+  });
+
+  it('does not schedule a re-pack when the preset did not leave compact_list', async () => {
+    vi.useFakeTimers();
+    const { client, patch } = makeClient();
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({ [zoneId]: zone('grid') }),
+          client: client as never,
+          boardObjectsForBoard: placements as never,
+          nodes: nodes as never,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid') as never);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    expect(patch.mock.calls.some((c) => c[1] && 'position' in c[1])).toBe(false);
+  });
+});

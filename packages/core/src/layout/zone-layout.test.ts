@@ -68,6 +68,27 @@ describe('sortZoneLayoutItems', () => {
     expect(result.map(({ id }) => id)).toEqual(['done', 'urgent', 'custom']);
   });
 
+  it('sorts every canonical branch filesystem status semantically', () => {
+    const result = sortZoneLayoutItems(
+      [
+        item('deleted', { status: 'deleted' }),
+        item('ready', { status: 'ready' }),
+        item('failed', { status: 'failed' }),
+        item('cleaned', { status: 'cleaned' }),
+        item('creating', { status: 'creating' }),
+        item('preserved', { status: 'preserved' }),
+      ],
+      { sortBy: 'status', sortDirection: 'asc' }
+    );
+    expect(result.map(({ id }) => id)).toEqual([
+      'failed',
+      'creating',
+      'ready',
+      'preserved',
+      'cleaned',
+      'deleted',
+    ]);
+  });
   it('uses spatial order for manual sorting and stable ids for ties', () => {
     const result = sortZoneLayoutItems(
       [item('c', { position: { x: 0, y: 10 } }), item('b'), item('a')],

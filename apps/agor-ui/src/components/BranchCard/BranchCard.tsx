@@ -13,6 +13,8 @@ import {
   CodeOutlined,
   DragOutlined,
   EditOutlined,
+  MinusSquareOutlined,
+  PlusSquareOutlined,
   PushpinFilled,
   ReloadOutlined,
 } from '@ant-design/icons';
@@ -70,6 +72,11 @@ interface BranchCardProps {
   zoneColor?: string;
   /** Shared board presentation state, controlled by board layout/MCP tools. */
   compact?: boolean;
+  /**
+   * Toggle this placement's shared compact state. Omitted when the viewer
+   * cannot mutate the board, so the control never renders a guaranteed 403.
+   */
+  onToggleCompact?: (branchId: string, compact: boolean) => void;
   inPopover?: boolean; // NEW: Enable popover-optimized mode (hides board-specific controls)
   panelMode?: boolean; // Render inside side panel instead of as a draggable canvas card
   progressiveMountKey?: string | number | null;
@@ -106,6 +113,7 @@ const BranchCardComponent = ({
   zoneName,
   zoneColor,
   compact = false,
+  onToggleCompact,
   inPopover = false,
   panelMode = false,
   progressiveMountKey,
@@ -487,6 +495,24 @@ const BranchCardComponent = ({
             />
           )}
           <div className={REACT_FLOW_NO_DRAG_CLASS}>
+            {/*
+              Density toggle for this placement's shared compact state. The
+              header survives collapsing, so this button is the way back out
+              of a card collapsed by MCP or by a compact_list zone layout.
+            */}
+            {!inPopover && !panelMode && onToggleCompact && (
+              <Button
+                type="text"
+                size="small"
+                aria-label={compact ? 'Expand card' : 'Collapse card'}
+                icon={compact ? <PlusSquareOutlined /> : <MinusSquareOutlined />}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleCompact(branch.branch_id, !compact);
+                }}
+                title={compact ? 'Expand card' : 'Collapse card'}
+              />
+            )}
             {onOpenTerminal && (
               <Button
                 type="text"
@@ -563,7 +589,6 @@ const BranchCardComponent = ({
           </Space>
         </div>
       )}
-
       {/* Provisioning failure banner + retry. The working directory did not
           materialize; surface the sanitized error and a one-click, idempotent
           retry that hits the shared retry-provisioning service. */}
