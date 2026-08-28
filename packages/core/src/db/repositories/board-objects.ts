@@ -530,7 +530,13 @@ export class BoardObjectRepository {
     }
   }
 
-  /** Update shared compact presentation state while preserving placement data. */
+  /**
+   * Update shared compact presentation state while preserving placement data.
+   *
+   * A measured size describes one presentation mode, so it becomes stale as
+   * soon as compactness changes. Drop it here and let the active renderer
+   * publish a measurement for the new mode before a later layout trusts it.
+   */
   async updateCompact(objectId: string, compact: boolean): Promise<BoardEntityObject> {
     const existing = await select(this.db)
       .from(boardObjects)
@@ -539,8 +545,9 @@ export class BoardObjectRepository {
     if (!existing) throw new EntityNotFoundError('BoardObject', objectId);
     const existingData =
       typeof existing.data === 'string' ? JSON.parse(existing.data) : existing.data;
+    const { size: _staleSize, ...placementData } = existingData;
     await update(this.db, boardObjects)
-      .set({ data: { ...existingData, compact } })
+      .set({ data: { ...placementData, compact } })
       .where(eq(boardObjects.object_id, objectId))
       .run();
     const row = await select(this.db)
