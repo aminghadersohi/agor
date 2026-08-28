@@ -1955,6 +1955,11 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         );
         id = session.session_id;
         const taskRepo = bindRepositoryToTenantUnitOfWork(db, new TaskRepository(db));
+        const completionSubscriptionRepo = bindRepositoryToTenantUnitOfWork(
+          db,
+          new CompletionSubscriptionRepository(db)
+        );
+
         // Branch RBAC — fail fast before admitting a Task. This route creates
         // its Task via `taskRepo.createPending` (repository admission), which
         // deliberately bypasses `TasksService.create` and therefore its
@@ -2136,6 +2141,10 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             if (completionSubscriptionId) {
               taskMetadata.completion_subscription_id = completionSubscriptionId;
             }
+            // The Task row, its re-authorization at admission time, and its
+            // root/continuation routing fact are one metadata commit. A crash
+            // or rejected continuation can never leave an executable Task that
+            // advertises a missing subscription.
             const task = await runWithTenantDatabaseTransaction(
               db,
               promptTenantId,
@@ -2151,6 +2160,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                 }
                 const admissionSession = (await sessionsService.get(id, params)) as Session;
                 await assertCurrentPromptAuthority(operationDb, admissionSession);
+
                 const admitted = await new TaskRepository(operationDb).createPending({
                   task_id: data.idempotencyTaskId,
                   session_id: id as SessionID,
@@ -2160,18 +2170,18 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                   metadata: Object.keys(taskMetadata).length > 0 ? taskMetadata : undefined,
                 });
                 if (completionRequest) {
-                  await new CompletionSubscriptionRepository(operationDb).createRoot({
+                  await completionSubscriptionRepo.createRoot({
                     ...completionRequest,
                     root_session_id: id as SessionID,
                     root_task_id: admitted.task_id,
-                    root_branch_id: admissionSession.branch_id,
+                    root_branch_id: lockedSession.branch_id,
                   });
                 } else if (continuation) {
-                  await new CompletionSubscriptionRepository(operationDb).designateContinuation({
+                  await completionSubscriptionRepo.designateContinuation({
                     ...continuation,
                     to_session_id: id as SessionID,
                     to_task_id: admitted.task_id,
-                    to_branch_id: admissionSession.branch_id,
+                    to_branch_id: lockedSession.branch_id,
                   });
                 }
                 return admitted;

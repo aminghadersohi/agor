@@ -205,6 +205,11 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
       }),
     },
   ],
+  // Local numbering retained: postgres 0095 / sqlite 0098. PR #2564 renumbered
+  // these to 0096/0099 when it rebased onto main, but those slots are already
+  // taken here by 0096_profile_image_galleries / 0099_profile_image_galleries,
+  // and the local numbers are already applied in existing databases. The SQL is
+  // byte-identical, so this is a numbering choice only.
   ...['0095_transitive_completion_subscriptions', '0098_transitive_completion_subscriptions'].map(
     (name) =>
       [
