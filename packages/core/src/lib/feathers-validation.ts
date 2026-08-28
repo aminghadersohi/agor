@@ -284,7 +284,24 @@ export const messageQuerySchema = Type.Object(
  */
 export const branchQuerySchema = createQuerySchema(
   Type.Object({
-    branch_id: Type.Optional(CommonSchemas.uuid),
+    // `{ $in: [...] }` is a first-class branch-id filter in BranchesService
+    // (see `fetchData` / `find` in services/branches.ts, and the `branch_id`
+    // member of BranchParams). Callers that hydrate a batch of branches — the
+    // board MCP tools resolving which pinned worktrees are still active, the
+    // schedule tools — send exactly that shape. Omitting it here did not make
+    // the service reject the filter, it made the query die one layer earlier
+    // in Ajv with its bare default "validation failed" message.
+    branch_id: Type.Optional(
+      Type.Union([
+        CommonSchemas.uuid,
+        Type.Object(
+          // Bounded like `$limit`: a batch hydrate is a page of ids, not an
+          // unbounded SQL `IN` list assembled by the caller.
+          { $in: Type.Array(CommonSchemas.uuid, { maxItems: 10_000 }) },
+          { additionalProperties: false }
+        ),
+      ])
+    ),
     repo_id: Type.Optional(CommonSchemas.uuid),
     board_id: Type.Optional(CommonSchemas.uuid),
     zone_id: Type.Optional(Type.String({ maxLength: 255 })),
