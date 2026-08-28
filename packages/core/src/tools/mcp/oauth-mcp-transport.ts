@@ -311,9 +311,12 @@ export async function resolveResourceMetadataUrl(
           redirect: 'follow',
           timeoutMs: 10_000,
           allowLocalhostHttp: options.allowLocalhostHttp,
+          assertCurrent: options.assertCurrent,
         });
+        options.assertCurrent?.();
         if (response.ok) {
           const data = (await response.json()) as OAuthMetadata;
+          options.assertCurrent?.();
           if (
             Array.isArray(data.authorization_servers) &&
             resourceMetadataMatches(
@@ -327,6 +330,10 @@ export async function resolveResourceMetadataUrl(
           }
         }
       } catch {
+        // Keep the authority/deadline check outside the provider-error catch:
+        // an expired daemon reservation is terminal, never another discovery
+        // candidate to try.
+        options.assertCurrent?.();
         // Continue to endpoint-specific well-known discovery below.
       }
       console.log('[MCP OAuth] Advertised resource metadata does not bind the MCP endpoint');
@@ -806,10 +813,12 @@ function buildWellKnownUrl(issuerUrl: string, wellKnownSuffix: string): string {
 }
 
 /**
- * A few reviewed providers disagree only about a trailing slash on an issuer.
- * Treat that spelling difference as equivalent in the marketplace profile,
- * while preserving strict RFC 8414 string comparison everywhere else. Host,
- * scheme, port, path, query, username and password must still agree.
+ * A few reviewed providers (e.g. Google) disagree only about a trailing slash
+ * between their protected-resource `authorization_servers` entry and their
+ * authorization-server metadata `issuer`. Treat that spelling difference as
+ * equivalent in every non-legacy compatibility mode, including `strict` — see
+ * the Gmail/Calendar fixtures in oauth-mcp-transport.test.ts. Host, scheme,
+ * port, path, query, username and password must still agree.
  */
 function oauthIssuerIdentifiersMatch(left: unknown, right: unknown): boolean {
   if (typeof left !== 'string' || typeof right !== 'string') return false;
