@@ -53,7 +53,7 @@ Each artifact is a stored file map plus a small set of declarative metadata colu
 - `required_env_vars`: Names of env vars the artifact needs (e.g. `["OPENAI_KEY"]`). The daemon synthesizes a per-viewer `.env` at render time.
 - `agor_grants`: Declarative daemon capabilities (`agor_api_url`, viewer email, and metadata grants).
 - `agor_runtime`: Controls injection of the daemon-side `agor-runtime.js` (which powers agent DOM introspection and declared actions). Enabled by default; opt out per-artifact with `{ enabled: false }`. The runtime ships as an iframe-level `<script>` tag via Sandpack's `externalResources`, so it works regardless of which user files exist (no entry-file detection, no file mutation, no template-specific gotchas).
-- `agor_runtime.interactions`: Server-validated action and chat bindings. Action bindings reference existing schedules, which remain the source of truth for prompts, models, tools, and execution policy. Chat bindings reference a canonical session ID rather than a mutable title.
+- `agor_runtime.interactions`: Server-validated data, action, and chat bindings. Data bindings are read-only projections; action bindings reference existing schedules, which remain the source of truth for prompts, models, tools, and execution policy; chat bindings reference canonical session IDs rather than mutable titles. Every binding target must live on the artifact's source branch.
 
 **On the board:**
 
@@ -163,9 +163,9 @@ Artifacts live on the React Flow canvas, which means mouse events need careful h
 
 This toggle prevents the iframe from capturing canvas navigation while still letting you use the running app when needed.
 
-### Schedule-backed actions and chat artifacts
+### Data, action, and chat bindings
 
-An artifact can expose buttons without receiving an API token or choosing an arbitrary prompt at runtime. Declare each action with an artifact-local ID and an existing schedule ID:
+An artifact can read Agor state and drive schedules without ever receiving an API token, naming a route, or choosing a prompt at runtime. Declare each binding with an artifact-local ID:
 
 ```ts
 agor_artifacts_publish({
@@ -174,20 +174,34 @@ agor_artifacts_publish({
   subpath: '.agor/artifacts/release-console',
   name: 'Release console',
   interactionConfig: {
+    // Reads. window.agor.fetchData('nightly')
+    data: [{ id: 'nightly', label: 'Nightly build', kind: 'schedule_status', scheduleId }],
+    // Writes. window.agor.runAction('review')
     actions: [
-      {
-        actionId: 'review',
-        label: 'Run release review',
-        scheduleId,
-        confirm: true,
-      },
+      { id: 'review', label: 'Run release review', scheduleId, confirm: true },
+      { id: 'arm', label: 'Arm nightly', scheduleId, effect: 'enable' },
+      { id: 'disarm', label: 'Disarm nightly', scheduleId, effect: 'disable' },
     ],
-    chatSessionId,
+    // Chats. window.agor.openChat('triage')
+    chats: [{ id: 'triage', label: 'Release triage', sessionId }],
   },
 });
 ```
 
-Artifact code calls `await window.agor.runAction('review')` or `await window.agor.openChat()`. The parent accepts only declared bindings and uses the normal authenticated schedule/session paths, so existing authorization and audit behavior still applies. Schedule and session bindings must belong to the artifact's source branch.
+Artifact code calls `await window.agor.fetchData('nightly')`, `await window.agor.runAction('review')`, or `await window.agor.openChat('triage')`.
+
+**Each call names a binding `id` and nothing else** — no tool name, no route, no arguments, no credentials. The daemon re-reads the persisted binding, re-checks that its target is still on the artifact's source branch, and then dispatches through the ordinary authenticated service path **as the viewer**. An artifact button is a shortcut, not a capability: if you could not run that schedule by hand, the button fails the same way.
+
+Consequences worth knowing when you author one:
+
+- **Arguments are pinned at publish time.** A toggle is two declared actions (`effect: 'enable'` and `effect: 'disable'`), not one action the artifact parameterizes. `effect` defaults to `'run'`, a one-off run.
+- **Reads cannot write.** Reads and writes are separate collections on separate transports, so a read id does not exist in the actions list at all — and a read is a `GET` with no body.
+- **Reads are projected.** `schedule_status` returns name, enabled, cron, and run timestamps; `session_status` returns title, status, and agent. The underlying `prompt` and agent configuration never reach the artifact.
+- **Everything stays on one branch.** Schedules and sessions referenced by any binding must belong to the artifact's source branch; cross-branch references are rejected at publish.
+- **Repoint a chat with metadata, not code.** `agor_artifacts_update` can swap a `chats` entry's `sessionId` to retire a conversation and replace it with another, without republishing the artifact.
+- **`openChat` opens the parent surface.** The real conversation renders in Agor's own session panel with its full controls; it is never embedded in the iframe, which would require giving the iframe a token.
+
+MCP servers are deliberately not bindable. An artifact that needs MCP data should point an action binding at a schedule whose agent has that server attached, and read the result the schedule writes back. The reasoning is in [`context/explorations/artifact-interaction-bindings.md`](https://github.com/preset-io/agor/blob/main/context/explorations/artifact-interaction-bindings.md).
 
 Use the pin control in an artifact header to add it to **Home**. Pinned action buttons run directly from Home, while chat pins open the normal live session surface with its full controls. Use the move control to place the artifact on another board; an artifact has one canonical board placement rather than duplicated mutable copies.
 

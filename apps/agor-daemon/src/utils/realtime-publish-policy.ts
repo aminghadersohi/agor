@@ -428,6 +428,14 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: 'Artifact console output is fetched by the viewing tab.',
   },
+  'artifacts/:id/actions/:actionId': {
+    audience: 'none',
+    why: `${NO_CONSUMER} The effect lands as schedules.patched / sessions.created.`,
+  },
+  'artifacts/:id/data/:dataId': {
+    audience: 'none',
+    why: 'A binding read answers the one viewing tab that asked; it is never broadcast.',
+  },
   'artifacts/:id/sandpack-error': { audience: 'none', why: NO_CONSUMER },
   'artifacts/:id/runtime-response/:requestId': {
     audience: 'none',

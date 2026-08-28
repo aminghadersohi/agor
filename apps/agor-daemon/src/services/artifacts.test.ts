@@ -25,7 +25,15 @@ import {
   update,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
-import type { Artifact, BoardID, BranchID, ScheduleID, SessionID, UUID } from '@agor/core/types';
+import type {
+  Artifact,
+  ArtifactActionEffect,
+  BoardID,
+  BranchID,
+  ScheduleID,
+  SessionID,
+  UUID,
+} from '@agor/core/types';
 import { describe, expect, vi } from 'vitest';
 import { dbTest } from '../../../../packages/core/src/db/test-helpers';
 import { ArtifactsService, sanitizeArtifactInteractionConfig } from './artifacts';
@@ -172,29 +180,143 @@ async function seedSchedule(db: Database, branchId: BranchID) {
 }
 
 describe('sanitizeArtifactInteractionConfig', () => {
-  it('keeps bounded unique valid actions and canonical chat IDs', () => {
+  it('trims, bounds, and de-duplicates bindings across every family', () => {
+    const scheduleId = generateId() as ScheduleID;
+    const sessionId = generateId() as SessionID;
+    const run: ArtifactActionEffect = { kind: 'schedule_run', schedule_id: scheduleId };
+    expect(
+      sanitizeArtifactInteractionConfig({
+        actions: [
+          { id: 'deploy-preview', label: ' Deploy preview ', effect: run },
+          { id: 'deploy-preview', label: 'Duplicate', effect: run },
+          { id: 'bad id', label: 'Invalid', effect: run },
+        ],
+        chats: [
+          { id: 'triage', label: 'Triage', session_id: sessionId },
+          { id: 'triage', label: 'Duplicate', session_id: sessionId },
+        ],
+      })
+    ).toEqual({
+      actions: [{ id: 'deploy-preview', label: 'Deploy preview', effect: run }],
+      chats: [{ id: 'triage', label: 'Triage', session_id: sessionId }],
+    });
+  });
+
+  it('is idempotent across re-saves', () => {
+    // The sanitizer runs on write and on every read, so the canonical form has
+    // to be a fixed point — otherwise repeated saves would drift.
+    const once = sanitizeArtifactInteractionConfig({
+      actions: [
+        {
+          id: 'run',
+          label: 'Run',
+          effect: { kind: 'schedule_run', schedule_id: generateId() as ScheduleID },
+        },
+      ],
+      chats: [{ id: 'main', label: 'Main', session_id: generateId() as SessionID }],
+    });
+    expect(sanitizeArtifactInteractionConfig(once)).toEqual(once);
+  });
+
+  it('keeps explicit effects and data bindings', () => {
     const scheduleId = generateId() as ScheduleID;
     const sessionId = generateId() as SessionID;
     expect(
       sanitizeArtifactInteractionConfig({
         actions: [
-          { action_id: 'deploy-preview', label: ' Deploy preview ', schedule_id: scheduleId },
-          { action_id: 'deploy-preview', label: 'Duplicate', schedule_id: scheduleId },
-          { action_id: 'bad id', label: 'Invalid', schedule_id: scheduleId },
+          {
+            id: 'disarm',
+            label: 'Disarm',
+            effect: { kind: 'schedule_set_enabled', schedule_id: scheduleId, enabled: false },
+          },
         ],
-        chat_session_id: sessionId,
+        data: [
+          {
+            id: 'nightly',
+            label: 'Nightly',
+            source: { kind: 'schedule_status', schedule_id: scheduleId },
+          },
+          {
+            id: 'convo',
+            label: 'Conversation',
+            source: { kind: 'session_status', session_id: sessionId },
+          },
+        ],
       })
     ).toEqual({
-      actions: [{ action_id: 'deploy-preview', label: 'Deploy preview', schedule_id: scheduleId }],
-      chat_session_id: sessionId,
+      actions: [
+        {
+          id: 'disarm',
+          label: 'Disarm',
+          effect: { kind: 'schedule_set_enabled', schedule_id: scheduleId, enabled: false },
+        },
+      ],
+      data: [
+        {
+          id: 'nightly',
+          label: 'Nightly',
+          source: { kind: 'schedule_status', schedule_id: scheduleId },
+        },
+        {
+          id: 'convo',
+          label: 'Conversation',
+          source: { kind: 'session_status', session_id: sessionId },
+        },
+      ],
     });
+  });
+
+  it('drops an effect whose pinned arguments are missing or not fully specified', () => {
+    const scheduleId = generateId() as ScheduleID;
+    // `enabled` is pinned at bind time. Coercing a missing value would silently
+    // pick a side, so the whole binding is dropped instead.
+    expect(
+      sanitizeArtifactInteractionConfig({
+        actions: [
+          {
+            id: 'toggle',
+            label: 'Toggle',
+            effect: { kind: 'schedule_set_enabled', schedule_id: scheduleId } as never,
+          },
+        ],
+      })
+    ).toBeUndefined();
+    expect(
+      sanitizeArtifactInteractionConfig({
+        actions: [
+          {
+            id: 'unknown',
+            label: 'Unknown kind',
+            effect: { kind: 'schedule_delete', schedule_id: scheduleId } as never,
+          },
+        ],
+      })
+    ).toBeUndefined();
+  });
+
+  it('drops data bindings that name an unknown source or no target', () => {
+    expect(
+      sanitizeArtifactInteractionConfig({
+        data: [
+          { id: 'a', label: 'Arbitrary tool', source: { kind: 'mcp_tool' } as never },
+          { id: 'b', label: 'No target', source: { kind: 'schedule_status' } as never },
+          { id: 'bad id', label: 'Bad id', source: { kind: 'session_status' } as never },
+        ],
+      })
+    ).toBeUndefined();
   });
 
   it('returns undefined for an empty or unusable config', () => {
     expect(sanitizeArtifactInteractionConfig({ actions: [] })).toBeUndefined();
     expect(
       sanitizeArtifactInteractionConfig({
-        actions: [{ action_id: 'bad id', label: '', schedule_id: '' as ScheduleID }],
+        actions: [
+          {
+            id: 'bad id',
+            label: '',
+            effect: { kind: 'schedule_run', schedule_id: '' as ScheduleID },
+          },
+        ],
       })
     ).toBeUndefined();
   });
@@ -220,13 +342,29 @@ describe('ArtifactsService interaction bindings', () => {
           interaction_config: {
             actions: [
               {
-                action_id: 'review',
+                id: 'review',
                 label: 'Run review',
-                schedule_id: schedule.schedule_id,
+                effect: { kind: 'schedule_run', schedule_id: schedule.schedule_id },
                 confirm: true,
               },
+              {
+                id: 'arm',
+                label: 'Arm',
+                effect: {
+                  kind: 'schedule_set_enabled',
+                  schedule_id: schedule.schedule_id,
+                  enabled: true,
+                },
+              },
             ],
-            chat_session_id: session.session_id,
+            data: [
+              {
+                id: 'status',
+                label: 'Schedule status',
+                source: { kind: 'schedule_status', schedule_id: schedule.schedule_id },
+              },
+            ],
+            chats: [{ id: 'main', label: 'Main', session_id: session.session_id }],
           },
         },
         'user-owner'
@@ -235,13 +373,29 @@ describe('ArtifactsService interaction bindings', () => {
       expect(updated.agor_runtime?.interactions).toEqual({
         actions: [
           {
-            action_id: 'review',
+            id: 'review',
             label: 'Run review',
-            schedule_id: schedule.schedule_id,
+            effect: { kind: 'schedule_run', schedule_id: schedule.schedule_id },
             confirm: true,
           },
+          {
+            id: 'arm',
+            label: 'Arm',
+            effect: {
+              kind: 'schedule_set_enabled',
+              schedule_id: schedule.schedule_id,
+              enabled: true,
+            },
+          },
         ],
-        chat_session_id: session.session_id,
+        data: [
+          {
+            id: 'status',
+            label: 'Schedule status',
+            source: { kind: 'schedule_status', schedule_id: schedule.schedule_id },
+          },
+        ],
+        chats: [{ id: 'main', label: 'Main', session_id: session.session_id }],
       });
       const disabled = await service.updateMetadata(
         artifact.artifact_id,
@@ -278,9 +432,9 @@ describe('ArtifactsService interaction bindings', () => {
             interaction_config: {
               actions: [
                 {
-                  action_id: 'cross-branch',
+                  id: 'cross-branch',
                   label: 'Must fail',
-                  schedule_id: schedule.schedule_id,
+                  effect: { kind: 'schedule_run', schedule_id: schedule.schedule_id },
                 },
               ],
             },
@@ -288,6 +442,44 @@ describe('ArtifactsService interaction bindings', () => {
           'user-owner'
         )
       ).rejects.toThrow('must reference a schedule on the artifact branch');
+      expect((await new ArtifactRepository(db).findById(artifact.artifact_id))?.agor_runtime).toBe(
+        undefined
+      );
+    } finally {
+      rmSync(rootA, { recursive: true, force: true });
+      rmSync(rootB, { recursive: true, force: true });
+    }
+  });
+
+  dbTest('rejects a cross-branch data binding just like an action', async ({ db }) => {
+    const rootA = mkdtempSync(path.join(tmpdir(), 'artifact-data-a-'));
+    const rootB = mkdtempSync(path.join(tmpdir(), 'artifact-data-b-'));
+    try {
+      const board = await seedBoard(db);
+      await seedUser(db, 'user-owner');
+      const branchA = await seedRepoAndBranch(db, rootA, { boardId: board.board_id });
+      const branchB = await seedRepoAndBranch(db, rootB, { boardId: board.board_id });
+      const foreignSession = await seedSession(db, branchB.branch_id);
+      const artifact = await seedArtifact(db, board.board_id, { branchId: branchA.branch_id });
+      const service = new ArtifactsService(db, makeFakeApp());
+
+      await expect(
+        service.updateMetadata(
+          artifact.artifact_id,
+          {
+            interaction_config: {
+              data: [
+                {
+                  id: 'peek',
+                  label: 'Peek at another branch',
+                  source: { kind: 'session_status', session_id: foreignSession.session_id },
+                },
+              ],
+            },
+          },
+          'user-owner'
+        )
+      ).rejects.toThrow('must reference a session on the artifact branch');
       expect((await new ArtifactRepository(db).findById(artifact.artifact_id))?.agor_runtime).toBe(
         undefined
       );
@@ -314,13 +506,258 @@ describe('ArtifactsService interaction bindings', () => {
         branch_id: branch.branch_id,
         source_session_id: session.session_id,
         public: false,
-        agor_runtime: { interactions: { chat_session_id: session.session_id } },
+        agor_runtime: {
+          interactions: {
+            chats: [{ id: 'default', label: 'Open chat', session_id: session.session_id }],
+          },
+        },
       });
       const placed = await new BoardRepository(db).findById(board.board_id);
       expect(placed?.objects?.[`artifact-${artifact.artifact_id}`]).toMatchObject({
         type: 'artifact',
         artifact_id: artifact.artifact_id,
       });
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('ArtifactsService binding execution', () => {
+  /**
+   * Records every delegated service call so the tests can assert *what* was
+   * dispatched and *with which params* — the params are the security-relevant
+   * half, since RBAC lives in the delegated service's hooks.
+   */
+  function makeRecordingApp(responses: Record<string, unknown> = {}) {
+    const calls: Array<{
+      path: string;
+      method: string;
+      id?: unknown;
+      data?: unknown;
+      params?: Record<string, unknown>;
+    }> = [];
+    const app = {
+      service: (path: string) => ({
+        emit: () => {},
+        create: async (data: unknown, params: Record<string, unknown>) => {
+          calls.push({ path, method: 'create', data, params });
+          return responses[`${path}:create`] ?? { ok: true };
+        },
+        patch: async (id: unknown, data: unknown, params: Record<string, unknown>) => {
+          calls.push({ path, method: 'patch', id, data, params });
+          return responses[`${path}:patch`] ?? (data as Record<string, unknown>);
+        },
+        get: async (id: unknown, params: Record<string, unknown>) => {
+          calls.push({ path, method: 'get', id, params });
+          const response = responses[`${path}:get`];
+          if (!response) throw new Error(`no stub for ${path}:get`);
+          return response;
+        },
+      }),
+      get: (key: string) =>
+        key === 'authentication' ? { secret: 'artifact-test-secret' } : undefined,
+    } as unknown as Application;
+    return { app, calls };
+  }
+
+  const viewer = {
+    user: { user_id: 'user-owner' as UUID, role: 'member' },
+    provider: 'rest',
+    authentication: { strategy: 'jwt' },
+    headers: { authorization: 'Bearer test' },
+  } as never;
+
+  async function seedBoundArtifact(db: Database, tmpRoot: string) {
+    const board = await seedBoard(db);
+    await seedUser(db, 'user-owner');
+    const branch = await seedRepoAndBranch(db, tmpRoot, { boardId: board.board_id });
+    const session = await seedSession(db, branch.branch_id);
+    const schedule = await seedSchedule(db, branch.branch_id);
+    const artifact = await seedArtifact(db, board.board_id, { branchId: branch.branch_id });
+    await new ArtifactsService(db, makeFakeApp()).updateMetadata(
+      artifact.artifact_id,
+      {
+        interaction_config: {
+          actions: [
+            {
+              id: 'run-once',
+              label: 'Run once',
+              effect: { kind: 'schedule_run', schedule_id: schedule.schedule_id },
+            },
+            {
+              id: 'disarm',
+              label: 'Disarm',
+              effect: {
+                kind: 'schedule_set_enabled',
+                schedule_id: schedule.schedule_id,
+                enabled: false,
+              },
+            },
+          ],
+          data: [
+            {
+              id: 'status',
+              label: 'Status',
+              source: { kind: 'schedule_status', schedule_id: schedule.schedule_id },
+            },
+          ],
+        },
+      },
+      'user-owner'
+    );
+    return { artifact, branch, schedule, session };
+  }
+
+  dbTest('dispatches a run action to the schedule route as the caller', async ({ db }) => {
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'artifact-invoke-run-'));
+    try {
+      const { artifact, schedule } = await seedBoundArtifact(db, tmpRoot);
+      const { app, calls } = makeRecordingApp({
+        '/schedules/:id/run-now:create': { session_id: 'session-1' },
+      });
+
+      const result = await new ArtifactsService(db, app).invokeActionBinding(
+        artifact.artifact_id,
+        'run-once',
+        viewer
+      );
+
+      expect(result).toMatchObject({ action_id: 'run-once', effect: 'schedule_run' });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        path: '/schedules/:id/run-now',
+        method: 'create',
+        params: { route: { id: schedule.schedule_id } },
+      });
+      // `provider` must survive the hop. Agor hooks — including
+      // ensureScheduleRunsAsCaller — treat a provider-less call as trusted
+      // internal, so dropping it here would turn every artifact button into a
+      // privilege escalation.
+      expect(calls[0].params?.provider).toBe('rest');
+      expect(calls[0].params?.user).toMatchObject({ user_id: 'user-owner' });
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  dbTest('uses the persisted enabled value, never a caller-supplied one', async ({ db }) => {
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'artifact-invoke-toggle-'));
+    try {
+      const { artifact, schedule } = await seedBoundArtifact(db, tmpRoot);
+      const { app, calls } = makeRecordingApp();
+
+      await new ArtifactsService(db, app).invokeActionBinding(
+        artifact.artifact_id,
+        'disarm',
+        viewer
+      );
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        path: 'schedules',
+        method: 'patch',
+        id: schedule.schedule_id,
+        data: { enabled: false },
+      });
+      expect(calls[0].params?.provider).toBe('rest');
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  dbTest('refuses an undeclared binding id', async ({ db }) => {
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'artifact-invoke-undeclared-'));
+    try {
+      const { artifact } = await seedBoundArtifact(db, tmpRoot);
+      const { app, calls } = makeRecordingApp();
+      const service = new ArtifactsService(db, app);
+
+      await expect(
+        service.invokeActionBinding(artifact.artifact_id, 'not-declared', viewer)
+      ).rejects.toThrow('does not declare action');
+      expect(calls).toHaveLength(0);
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  dbTest('keeps read and write id namespaces separate', async ({ db }) => {
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'artifact-invoke-namespace-'));
+    try {
+      const { artifact } = await seedBoundArtifact(db, tmpRoot);
+      const { app, calls } = makeRecordingApp();
+      const service = new ArtifactsService(db, app);
+
+      // A data binding cannot be driven through the mutating route...
+      await expect(
+        service.invokeActionBinding(artifact.artifact_id, 'status', viewer)
+      ).rejects.toThrow('does not declare action');
+      // ...and an action cannot be reached through the read route.
+      await expect(service.readDataBinding(artifact.artifact_id, 'disarm', viewer)).rejects.toThrow(
+        'does not declare data binding'
+      );
+      expect(calls).toHaveLength(0);
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  dbTest('projects a data read to non-secret fields only', async ({ db }) => {
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'artifact-read-projection-'));
+    try {
+      const { artifact, schedule } = await seedBoundArtifact(db, tmpRoot);
+      const { app, calls } = makeRecordingApp({
+        'schedules:get': {
+          ...schedule,
+          prompt: 'SECRET-PROMPT',
+          agentic_tool_config: { agentic_tool: 'codex', model_config: { model: 'secret-model' } },
+          created_by: 'user-owner',
+        },
+      });
+
+      const result = await new ArtifactsService(db, app).readDataBinding(
+        artifact.artifact_id,
+        'status',
+        viewer
+      );
+
+      expect(calls[0]).toMatchObject({
+        path: 'schedules',
+        method: 'get',
+        id: schedule.schedule_id,
+      });
+      expect(calls[0].params?.provider).toBe('rest');
+      expect(result).toMatchObject({
+        kind: 'schedule_status',
+        schedule_id: schedule.schedule_id,
+        enabled: false,
+        cron_expression: '0 9 * * *',
+      });
+      // The underlying row never leaves the service.
+      expect(Object.keys(result)).not.toContain('prompt');
+      expect(Object.keys(result)).not.toContain('agentic_tool_config');
+      expect(Object.keys(result)).not.toContain('created_by');
+      expect(JSON.stringify(result)).not.toContain('SECRET-PROMPT');
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  dbTest('refuses a binding whose target is gone after bind time', async ({ db }) => {
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'artifact-drift-'));
+    try {
+      const { artifact, schedule } = await seedBoundArtifact(db, tmpRoot);
+      // Bind-time validation passed. `ScheduleRepository.update` never
+      // reparents (schedules.ts: "never reparent"), so the drift a binding can
+      // actually suffer is deletion — which execute-time re-validation catches.
+      await new ScheduleRepository(db).delete(schedule.schedule_id);
+      const { app, calls } = makeRecordingApp();
+
+      await expect(
+        new ArtifactsService(db, app).invokeActionBinding(artifact.artifact_id, 'run-once', viewer)
+      ).rejects.toThrow('no longer on the artifact branch');
+      expect(calls).toHaveLength(0);
     } finally {
       rmSync(tmpRoot, { recursive: true, force: true });
     }

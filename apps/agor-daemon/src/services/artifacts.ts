@@ -32,14 +32,22 @@ import {
   BadRequest,
   Forbidden,
   NotAuthenticated,
+  NotFound,
   Unavailable,
 } from '@agor/core/feathers';
 import type {
   AgorGrants,
   AgorRuntimeConfig,
   Artifact,
+  ArtifactActionBinding,
+  ArtifactActionEffect,
+  ArtifactBindingBase,
   ArtifactBuildStatus,
   ArtifactConsoleEntry,
+  ArtifactDataBinding,
+  ArtifactDataResult,
+  ArtifactDataSource,
+  ArtifactID,
   ArtifactInteractionConfig,
   ArtifactPayload,
   ArtifactStatus,
@@ -51,7 +59,9 @@ import type {
   SandpackConfig,
   SandpackError,
   SandpackTemplate,
+  Schedule,
   ScheduleID,
+  Session,
   SessionID,
   UserID,
   UserRole,
@@ -140,50 +150,134 @@ interface ArtifactSidecar {
 }
 
 const MAX_ARTIFACT_ACTIONS = 12;
-const ACTION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+const MAX_ARTIFACT_DATA_BINDINGS = 12;
+const MAX_ARTIFACT_CHATS = 8;
+const BINDING_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 
-/** Treat persisted and agent-authored interaction metadata as untrusted input. */
+const trimmedString = (value: unknown, max: number): string =>
+  typeof value === 'string' ? value.trim().slice(0, max) : '';
+
+/** A binding target id must be a non-empty string; identity is checked later. */
+const bindingTargetId = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
+
+/**
+ * Validate one binding family against the shared envelope.
+ *
+ * `detail` returns the family-specific member, or null when the binding is not
+ * fully pinned — in which case the whole binding is dropped. A binding we
+ * cannot completely resolve from persisted metadata is not one we are willing
+ * to expose, because the missing piece would have to come from somewhere at
+ * call time, and the only "somewhere" available is the iframe.
+ */
+function sanitizeBindings<TDetail extends object>(
+  value: unknown,
+  max: number,
+  detail: (candidate: Record<string, unknown>) => TDetail | null
+): Array<ArtifactBindingBase & TDetail> {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  return value.slice(0, max).flatMap((raw) => {
+    if (!raw || typeof raw !== 'object') return [];
+    const candidate = raw as Record<string, unknown>;
+    const id = trimmedString(candidate.id, 64);
+    const label = trimmedString(candidate.label, 80);
+    if (!BINDING_ID_PATTERN.test(id) || !label || seen.has(id)) return [];
+    const resolved = detail(candidate);
+    if (!resolved) return [];
+    seen.add(id);
+    const description = trimmedString(candidate.description, 240);
+    return [{ id, label, ...(description ? { description } : {}), ...resolved }];
+  });
+}
+
+/** Normalize an action's effect. Returns null when it is not fully pinned. */
+function sanitizeActionEffect(value: unknown): ArtifactActionEffect | null {
+  if (!value || typeof value !== 'object') return null;
+  const kind = (value as { kind?: unknown }).kind;
+  const scheduleId = bindingTargetId((value as { schedule_id?: unknown }).schedule_id);
+  if (!scheduleId) return null;
+  if (kind === 'schedule_run') {
+    return { kind: 'schedule_run', schedule_id: scheduleId as ScheduleID };
+  }
+  if (kind === 'schedule_set_enabled') {
+    const enabled = (value as { enabled?: unknown }).enabled;
+    // `enabled` is pinned at bind time, so it must be an explicit boolean.
+    // Coercing a missing/garbage value would silently pick a side.
+    if (typeof enabled !== 'boolean') return null;
+    return { kind: 'schedule_set_enabled', schedule_id: scheduleId as ScheduleID, enabled };
+  }
+  return null;
+}
+
+/** Normalize a data binding's source. Returns null when it is not fully pinned. */
+function sanitizeDataSource(value: unknown): ArtifactDataSource | null {
+  if (!value || typeof value !== 'object') return null;
+  const kind = (value as { kind?: unknown }).kind;
+  if (kind === 'schedule_status') {
+    const scheduleId = bindingTargetId((value as { schedule_id?: unknown }).schedule_id);
+    return scheduleId ? { kind, schedule_id: scheduleId as ScheduleID } : null;
+  }
+  if (kind === 'session_status') {
+    const sessionId = bindingTargetId((value as { session_id?: unknown }).session_id);
+    return sessionId ? { kind, session_id: sessionId as SessionID } : null;
+  }
+  return null;
+}
+
+/**
+ * Treat persisted and agent-authored interaction metadata as untrusted input.
+ *
+ * Runs on write *and* on every read, so it is also the definition of the
+ * canonical shape: anything it drops is something no downstream consumer —
+ * payload, route, or UI — will ever see.
+ */
 export function sanitizeArtifactInteractionConfig(
   value: ArtifactInteractionConfig | null | undefined
 ): ArtifactInteractionConfig | undefined {
   if (!value || typeof value !== 'object') return undefined;
-  const seen = new Set<string>();
-  const actions = Array.isArray(value.actions)
-    ? value.actions.slice(0, MAX_ARTIFACT_ACTIONS).flatMap((candidate) => {
-        if (!candidate || typeof candidate !== 'object') return [];
-        const actionId = typeof candidate.action_id === 'string' ? candidate.action_id.trim() : '';
-        const label =
-          typeof candidate.label === 'string' ? candidate.label.trim().slice(0, 80) : '';
-        const scheduleId =
-          typeof candidate.schedule_id === 'string' ? candidate.schedule_id.trim() : '';
-        if (!ACTION_ID_PATTERN.test(actionId) || !label || !scheduleId || seen.has(actionId)) {
-          return [];
-        }
-        seen.add(actionId);
-        const description =
-          typeof candidate.description === 'string'
-            ? candidate.description.trim().slice(0, 240)
-            : '';
-        return [
-          {
-            action_id: actionId,
-            label,
-            schedule_id: scheduleId as ScheduleID,
-            ...(description ? { description } : {}),
-            ...(candidate.confirm === true ? { confirm: true } : {}),
-          },
-        ];
-      })
-    : [];
-  const chatSessionId =
-    typeof value.chat_session_id === 'string' && value.chat_session_id.trim()
-      ? (value.chat_session_id.trim() as SessionID)
-      : undefined;
-  if (actions.length === 0 && !chatSessionId) return undefined;
+
+  const actions = sanitizeBindings(value.actions, MAX_ARTIFACT_ACTIONS, (candidate) => {
+    const effect = sanitizeActionEffect(candidate.effect);
+    if (!effect) return null;
+    return { effect, ...(candidate.confirm === true ? { confirm: true as const } : {}) };
+  });
+
+  const data = sanitizeBindings(value.data, MAX_ARTIFACT_DATA_BINDINGS, (candidate) => {
+    const source = sanitizeDataSource(candidate.source);
+    return source ? { source } : null;
+  });
+
+  const chats = sanitizeBindings(value.chats, MAX_ARTIFACT_CHATS, (candidate) => {
+    const sessionId = bindingTargetId(candidate.session_id);
+    return sessionId ? { session_id: sessionId as SessionID } : null;
+  });
+
+  if (actions.length === 0 && data.length === 0 && chats.length === 0) return undefined;
   return {
     ...(actions.length > 0 ? { actions } : {}),
-    ...(chatSessionId ? { chat_session_id: chatSessionId } : {}),
+    ...(data.length > 0 ? { data } : {}),
+    ...(chats.length > 0 ? { chats } : {}),
   };
+}
+
+/** Every branch-scoped resource a config references, for bind/execute validation. */
+export function collectInteractionBindingTargets(config: ArtifactInteractionConfig): {
+  scheduleIds: ScheduleID[];
+  sessionIds: SessionID[];
+} {
+  const scheduleIds = new Set<ScheduleID>();
+  const sessionIds = new Set<SessionID>();
+  for (const action of config.actions ?? []) {
+    scheduleIds.add(action.effect.schedule_id);
+  }
+  for (const binding of config.data ?? []) {
+    if (binding.source.kind === 'schedule_status') scheduleIds.add(binding.source.schedule_id);
+    else sessionIds.add(binding.source.session_id);
+  }
+  for (const chat of config.chats ?? []) {
+    sessionIds.add(chat.session_id);
+  }
+  return { scheduleIds: [...scheduleIds], sessionIds: [...sessionIds] };
 }
 
 interface ArtifactValidationDiagnostic {
@@ -365,27 +459,204 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     }
   }
 
+  /**
+   * Bind-time validation: every referenced schedule/session must live on the
+   * artifact's own branch.
+   *
+   * This is what bounds a binding's blast radius — author and viewer are then
+   * reasoning about the same branch, so a read cannot carry data across a trust
+   * boundary the branch does not already span. Re-checked at execute time in
+   * `resolveBindingTarget`, because the referenced row can move or be deleted
+   * after publish.
+   */
   private async validateInteractionConfig(
     value: ArtifactInteractionConfig | null | undefined,
     branchId: BranchID
   ): Promise<ArtifactInteractionConfig | undefined> {
     const config = sanitizeArtifactInteractionConfig(value);
     if (!config) return undefined;
-    for (const action of config.actions ?? []) {
-      const schedule = await this.scheduleRepo.findById(action.schedule_id);
+    const { scheduleIds, sessionIds } = collectInteractionBindingTargets(config);
+    for (const scheduleId of scheduleIds) {
+      const schedule = await this.scheduleRepo.findById(scheduleId);
       if (!schedule || schedule.branch_id !== branchId) {
         throw new BadRequest(
-          `Artifact action ${action.action_id} must reference a schedule on the artifact branch`
+          `Artifact binding must reference a schedule on the artifact branch (${scheduleId})`
         );
       }
     }
-    if (config.chat_session_id) {
-      const session = await this.sessionRepo.findById(config.chat_session_id);
+    for (const sessionId of sessionIds) {
+      const session = await this.sessionRepo.findById(sessionId);
       if (!session || session.branch_id !== branchId) {
-        throw new BadRequest('Artifact chat must reference a session on the artifact branch');
+        throw new BadRequest(
+          `Artifact binding must reference a session on the artifact branch (${sessionId})`
+        );
       }
     }
     return config;
+  }
+
+  /**
+   * Execute-time resolution for a declared binding.
+   *
+   * Re-reads the persisted artifact rather than trusting anything the caller
+   * sent, then re-asserts that the target still lives on the artifact's source
+   * branch. The `interaction_config` in the payload is a rendering hint; this
+   * is the authority for what may execute.
+   */
+  async resolveBindingTarget(
+    artifactId: ArtifactID,
+    kind: 'action' | 'data',
+    bindingId: string
+  ): Promise<{
+    artifact: Artifact;
+    action?: ArtifactActionBinding;
+    data?: ArtifactDataBinding;
+  }> {
+    const artifact = await this.get(artifactId);
+    const config = sanitizeArtifactInteractionConfig(artifact.agor_runtime?.interactions);
+    if (!config) throw new NotFound(`Artifact ${artifactId} declares no bindings`);
+
+    // Reads and writes are separate collections, so an id handed to the wrong
+    // route resolves to nothing — no kind check to forget.
+    const action = kind === 'action' ? config.actions?.find((a) => a.id === bindingId) : undefined;
+    const data = kind === 'data' ? config.data?.find((d) => d.id === bindingId) : undefined;
+    if (!action && !data) {
+      throw new NotFound(`Artifact ${artifactId} does not declare ${kind} binding "${bindingId}"`);
+    }
+
+    const branchId = artifact.branch_id;
+    if (!branchId) {
+      throw new BadRequest('Artifact bindings require a source branch');
+    }
+    if (action) {
+      const schedule = await this.scheduleRepo.findById(action.effect.schedule_id);
+      if (!schedule || schedule.branch_id !== branchId) {
+        throw new BadRequest('Artifact binding target is no longer on the artifact branch');
+      }
+    } else if (data) {
+      if (data.source.kind === 'schedule_status') {
+        const schedule = await this.scheduleRepo.findById(data.source.schedule_id);
+        if (!schedule || schedule.branch_id !== branchId) {
+          throw new BadRequest('Artifact binding target is no longer on the artifact branch');
+        }
+      } else {
+        const session = await this.sessionRepo.findById(data.source.session_id);
+        if (!session || session.branch_id !== branchId) {
+          throw new BadRequest('Artifact binding target is no longer on the artifact branch');
+        }
+      }
+    }
+    return { artifact, action, data };
+  }
+
+  /**
+   * Forward the caller's identity to the delegated service.
+   *
+   * `provider` is deliberately preserved. Several Agor hooks short-circuit on
+   * `if (!context.params.provider) return context` — treating provider-less
+   * calls as trusted internal ones — including `ensureScheduleRunsAsCaller`
+   * (`utils/schedule-hooks.ts:140`), which is the check that stops one user
+   * running another user's schedule. Dropping `provider` here would silently
+   * turn every artifact button into a privilege escalation. Tenant context is
+   * forwarded too so the delegated service establishes its own scope.
+   */
+  private forwardCallerParams(params: AuthenticatedParams): AuthenticatedParams {
+    return {
+      user: params.user,
+      provider: params.provider,
+      authentication: params.authentication,
+      headers: params.headers,
+      ...(params.tenant ? { tenant: params.tenant } : {}),
+    } as AuthenticatedParams;
+  }
+
+  /**
+   * Apply a declared action binding as the *viewer*.
+   *
+   * Nothing here decides authorization: the effect is dispatched to the same
+   * route the viewer would hit from the UI, which enforces branch RBAC and the
+   * schedule run-as-creator rule. If the viewer could not do this by hand, this
+   * throws exactly as it would have.
+   */
+  async invokeActionBinding(
+    artifactId: ArtifactID,
+    actionId: string,
+    params: AuthenticatedParams
+  ): Promise<{
+    artifact_id: ArtifactID;
+    action_id: string;
+    effect: ArtifactActionEffect['kind'];
+    result: unknown;
+  }> {
+    const { action } = await this.resolveBindingTarget(artifactId, 'action', actionId);
+    if (!action) throw new NotFound(`Artifact ${artifactId} does not declare action "${actionId}"`);
+    const forwarded = this.forwardCallerParams(params);
+    const effect = action.effect;
+
+    let result: unknown;
+    if (effect.kind === 'schedule_run') {
+      result = await this.app
+        .service('/schedules/:id/run-now')
+        .create({}, { ...forwarded, route: { id: effect.schedule_id } });
+    } else {
+      // `enabled` comes from the persisted binding, never from the caller.
+      const updated = await this.app
+        .service('schedules')
+        .patch(effect.schedule_id, { enabled: effect.enabled }, forwarded);
+      result = { schedule_id: effect.schedule_id, enabled: updated?.enabled ?? effect.enabled };
+    }
+    return { artifact_id: artifactId, action_id: action.id, effect: effect.kind, result };
+  }
+
+  /**
+   * Read a declared data binding as the *viewer*, then project.
+   *
+   * The underlying resource never leaves this method — only the fixed field
+   * set below does. `prompt`, `agentic_tool_config`, and `created_by` are
+   * deliberately absent; widening this is an explicit edit.
+   */
+  async readDataBinding(
+    artifactId: ArtifactID,
+    dataId: string,
+    params: AuthenticatedParams
+  ): Promise<ArtifactDataResult> {
+    const { data } = await this.resolveBindingTarget(artifactId, 'data', dataId);
+    if (!data)
+      throw new NotFound(`Artifact ${artifactId} does not declare data binding "${dataId}"`);
+    const forwarded = this.forwardCallerParams(params);
+    const source = data.source;
+
+    if (source.kind === 'schedule_status') {
+      const schedule = (await this.app
+        .service('schedules')
+        .get(source.schedule_id, forwarded)) as Schedule;
+      return {
+        kind: 'schedule_status',
+        schedule_id: schedule.schedule_id,
+        name: schedule.name,
+        enabled: schedule.enabled,
+        cron_expression: schedule.cron_expression,
+        timezone: schedule.timezone,
+        timezone_mode: schedule.timezone_mode,
+        next_run_at: schedule.next_run_at ?? null,
+        last_run_at: schedule.last_run_at ?? null,
+        last_run_session_id: schedule.last_run_session_id ?? null,
+        allow_concurrent_runs: schedule.allow_concurrent_runs,
+      };
+    }
+
+    const session = (await this.app
+      .service('sessions')
+      .get(source.session_id, forwarded)) as Session;
+    return {
+      kind: 'session_status',
+      session_id: session.session_id,
+      title: session.title,
+      status: session.status,
+      agentic_tool: session.agentic_tool,
+      archived: session.archived,
+      last_updated: session.last_updated,
+    };
   }
 
   /**
@@ -497,7 +768,11 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       files,
       content_hash: this.computeHashFromFiles(files),
       build_status: 'success',
-      agor_runtime: { interactions: { chat_session_id: session.session_id } },
+      agor_runtime: {
+        interactions: {
+          chats: [{ id: 'default', label: 'Open chat', session_id: session.session_id }],
+        },
+      },
       public: false,
       created_by: userId,
     });
@@ -1356,18 +1631,21 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       '/.agor/sandpack-config.json': JSON.stringify(servedSandpackConfig ?? {}),
     });
     const legacy = detectLegacyFormat(artifact);
+    // Every binding target is validated onto the artifact's own branch, so one
+    // 'view' check covers all of them. Strip the whole set when the viewer
+    // can't see that branch: the widget then renders an unavailable state
+    // instead of discovering a 403 on first click. This is a UX affordance —
+    // the binding routes re-check authorization and are the actual authority.
     let interactionConfig = sanitizeArtifactInteractionConfig(artifact.agor_runtime?.interactions);
-    if (interactionConfig?.chat_session_id) {
+    if (interactionConfig) {
       try {
-        const linkedSession = await this.sessionRepo.findById(interactionConfig.chat_session_id);
-        const linkedBranch = linkedSession
-          ? await this.branchRepo.findById(linkedSession.branch_id)
+        const sourceBranch = artifact.branch_id
+          ? await this.branchRepo.findById(artifact.branch_id)
           : null;
-        if (!linkedSession || !linkedBranch) throw new Error('Linked chat is unavailable');
-        await ensureBranchWorkspaceAccess(this.branchRepo, linkedBranch, userId, undefined, 'view');
+        if (!sourceBranch) throw new Error('Artifact source branch is unavailable');
+        await ensureBranchWorkspaceAccess(this.branchRepo, sourceBranch, userId, undefined, 'view');
       } catch {
-        const { chat_session_id: _chatSessionId, ...safeConfig } = interactionConfig;
-        interactionConfig = safeConfig.actions?.length ? safeConfig : undefined;
+        interactionConfig = undefined;
       }
     }
 

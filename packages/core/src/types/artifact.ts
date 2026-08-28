@@ -17,31 +17,136 @@ import type { SandpackTemplate } from './board';
 import type { ArtifactID, BoardID, BranchID, SessionID, UserID, UUID } from './id';
 import type { ScheduleID } from './schedule';
 
-/** A user-triggered control exposed to an artifact through the Agor runtime. */
-export interface ArtifactActionBinding {
-  /** Stable, artifact-local identifier used by `window.agor.runAction(id)`. */
-  action_id: string;
+/**
+ * Common envelope for every declared artifact binding.
+ *
+ * The `id` is the *only* thing artifact JavaScript ever supplies. It is
+ * artifact-local and opaque: it names a binding the author persisted, never a
+ * tool, route, resource, field, or argument. Everything that decides what
+ * actually happens lives in the family-specific member below and was validated
+ * against the artifact's source branch at bind time.
+ */
+export interface ArtifactBindingBase {
+  /** Stable, artifact-local identifier named by the `window.agor` call. */
+  id: string;
   /** Human-readable label used by management and confirmation UI. */
   label: string;
-  /** Existing schedule that owns the prompt and agent/model configuration. */
-  schedule_id: ScheduleID;
   description?: string;
-  /** Require a trusted parent-page confirmation before the schedule is run. */
+}
+
+/**
+ * What a declared action binding does when invoked.
+ *
+ * Discriminated so a new action kind is an added variant rather than a schema
+ * migration. **Every field is pinned at bind time** — the iframe supplies only
+ * the binding's `id`, never an argument. A toggle is therefore two declared
+ * bindings (`enabled: true` and `enabled: false`), not one binding with a
+ * caller-supplied boolean. See
+ * `context/explorations/artifact-interaction-bindings.md`.
+ */
+export type ArtifactActionEffect =
+  | { kind: 'schedule_run'; schedule_id: ScheduleID }
+  | { kind: 'schedule_set_enabled'; schedule_id: ScheduleID; enabled: boolean };
+
+export const ARTIFACT_ACTION_EFFECT_KINDS = ['schedule_run', 'schedule_set_enabled'] as const;
+export type ArtifactActionEffectKind = ArtifactActionEffect['kind'];
+
+/**
+ * A user-triggered *write*. `window.agor.runAction(id)`.
+ *
+ * Executes through the ordinary authenticated service route with the viewer's
+ * own credentials, so an artifact button can never do something the viewer
+ * could not do by hand in the UI.
+ */
+export interface ArtifactActionBinding extends ArtifactBindingBase {
+  effect: ArtifactActionEffect;
+  /** Require a trusted parent-page confirmation before the effect is applied. */
   confirm?: boolean;
+}
+
+/**
+ * Where a declared data binding reads from.
+ *
+ * Each kind is implemented as a service `get` followed by a fixed field
+ * projection, which is what makes "a data binding cannot mutate anything" a
+ * structural property rather than a runtime check. All identifiers are pinned
+ * at bind time and validated against the artifact's source branch.
+ */
+export type ArtifactDataSource =
+  | { kind: 'schedule_status'; schedule_id: ScheduleID }
+  | { kind: 'session_status'; session_id: SessionID };
+
+export const ARTIFACT_DATA_SOURCE_KINDS = ['schedule_status', 'session_status'] as const;
+export type ArtifactDataSourceKind = ArtifactDataSource['kind'];
+
+/** A declared *read*. `window.agor.fetchData(id)`. */
+export interface ArtifactDataBinding extends ArtifactBindingBase {
+  source: ArtifactDataSource;
+}
+
+/**
+ * A session the artifact can surface. `window.agor.openChat(id)`.
+ *
+ * A named set rather than a single session, so a widget can offer more than one
+ * conversation and so an author can retire and replace a target session with a
+ * metadata patch instead of republishing the artifact's code.
+ */
+export interface ArtifactChatBinding extends ArtifactBindingBase {
+  session_id: SessionID;
 }
 
 /**
  * Declarative, server-validated interactions available to an artifact.
  *
  * Artifact JavaScript never receives an API token and cannot choose an arbitrary
- * schedule/session. The parent page accepts only identifiers declared here and
- * then calls the normal authenticated service path.
+ * schedule, session, or tool. The parent page accepts only identifiers declared
+ * here and then calls the normal authenticated service path with the viewer's
+ * own credentials.
+ *
+ * The three families are separate arrays rather than one list discriminated by
+ * `kind`. That separation is a security property, not organization: a read id
+ * simply does not exist in the actions collection, so "a data binding cannot
+ * reach a mutating dispatch" holds by construction instead of depending on a
+ * kind check that a future edit could forget.
  */
 export interface ArtifactInteractionConfig {
+  /** Writes. */
   actions?: ArtifactActionBinding[];
-  /** Optional canonical session opened by `window.agor.openChat()`. */
-  chat_session_id?: SessionID;
+  /** Reads. */
+  data?: ArtifactDataBinding[];
+  /** Sessions openable in the parent surface. */
+  chats?: ArtifactChatBinding[];
 }
+
+/**
+ * Projected, non-secret result of a data binding read.
+ *
+ * The daemon never returns the underlying resource — only these fixed field
+ * sets. Widening a projection is a deliberate edit here, which is the point.
+ */
+export type ArtifactDataResult =
+  | {
+      kind: 'schedule_status';
+      schedule_id: ScheduleID;
+      name: string;
+      enabled: boolean;
+      cron_expression: string;
+      timezone?: string;
+      timezone_mode?: string;
+      next_run_at?: number | null;
+      last_run_at?: number | null;
+      last_run_session_id?: SessionID | null;
+      allow_concurrent_runs?: boolean;
+    }
+  | {
+      kind: 'session_status';
+      session_id: SessionID;
+      title?: string;
+      status: string;
+      agentic_tool: string;
+      archived: boolean;
+      last_updated: string;
+    };
 
 /**
  * Build status for artifacts
