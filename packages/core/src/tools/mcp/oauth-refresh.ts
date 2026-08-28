@@ -23,6 +23,24 @@ const REFRESH_OBSERVE_TIMEOUT_MS = 20_000;
 const REFRESH_OBSERVE_INTERVAL_MS = 100;
 
 /**
+ * An expired access token is not the same thing as an expired OAuth grant.
+ * The daemon refreshes an idle/refreshing grant just-in-time before vending
+ * the next Authorization header, so status surfaces must keep it authenticated
+ * while a durable refresh token remains available.
+ */
+export function oauthGrantCanAuthenticate(
+  token: Pick<
+    UserMCPOAuthToken,
+    'oauth_token_expires_at' | 'oauth_refresh_token' | 'refresh_status'
+  >,
+  now = new Date()
+): boolean {
+  if (token.refresh_status === 'ambiguous') return false;
+  if (!token.oauth_token_expires_at || token.oauth_token_expires_at > now) return true;
+  return Boolean(token.oauth_refresh_token);
+}
+
+/**
  * Google's OAuth refresh tokens are reusable and are not rotated by a normal
  * access-token refresh. An ambiguous network failure can therefore be retried
  * later without risking replay of a single-use rotating refresh token.

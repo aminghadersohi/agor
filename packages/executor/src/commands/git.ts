@@ -20,6 +20,7 @@ import { parseAgorYml, parseLaunchJson, writeAgorYml } from '@agor/core/config/n
 import { shortId } from '@agor/core/db';
 import { TEAMMATE_FRAMEWORK_REPO_URL } from '@agor/core/types';
 import { diagnoseGit } from '@agor/git';
+import type { UserGitEnvironment } from '@agor/git/pure';
 import { appendGitConfigParameterPairs } from '../git/config-parameters.js';
 import {
   categorizeGitError,
@@ -168,12 +169,11 @@ export async function handleGitManagedCredentialsReconcile(
 }
 
 /**
- * Fetch the requesting user's git environment via Feathers RPC.
+ * Fetch the requesting executor token owner's bounded Git environment.
  *
- * Calls `users.getGitEnvironment` on the daemon, which decrypts the user's
- * stored env vars (GITHUB_TOKEN, etc.) and returns them. Returns an empty
- * object only when no userId is provided (e.g. local-path repos that skip
- * credentials entirely).
+ * The daemon derives the principal from the exact git.clone/git.branch.add
+ * command token. No caller-supplied user ID participates in credential
+ * selection, and ordinary user/admin transports cannot call the capability.
  *
  * RPC failures are intentionally NOT swallowed: this is the channel through
  * which per-user credentials reach git operations. If we returned `{}`
@@ -181,12 +181,8 @@ export async function handleGitManagedCredentialsReconcile(
  * credentials (e.g. `gh auth login`), which is exactly the cross-user leak
  * this whole flow is designed to prevent.
  */
-async function fetchUserGitEnvironment(
-  client: AgorClient,
-  userId: string | undefined
-): Promise<Record<string, string>> {
-  if (!userId) return {};
-  return client.service('users').getGitEnvironment({ userId });
+async function fetchUserGitEnvironment(client: AgorClient): Promise<UserGitEnvironment> {
+  return client.service('executor-git-environment').create({});
 }
 
 /**
@@ -625,7 +621,7 @@ export async function handleGitClone(
     console.log(`[git.clone] Git ${git.version} is executable (${git.binary})`);
 
     // Fetch per-user git credentials via Feathers RPC
-    const env = await fetchUserGitEnvironment(client, payload.params.userId);
+    const env = await fetchUserGitEnvironment(client);
     if (Object.keys(env).length > 0) {
       console.log('[git.clone] Resolved credentials:', Object.keys(env));
     }
@@ -911,7 +907,7 @@ export async function handleGitBranchAdd(
     }
 
     // Fetch per-user git credentials via Feathers RPC
-    const env = await fetchUserGitEnvironment(client, payload.params.userId);
+    const env = await fetchUserGitEnvironment(client);
 
     // Get parameters
     const repoId = payload.params.repoId;
@@ -1029,7 +1025,8 @@ export async function handleGitBranchAdd(
         sourceBranch,
         env,
         baseRemoteUrl,
-        refType || 'branch'
+        refType || 'branch',
+        remoteUrl
       );
       if (!result.success) {
         throw new Error(`restoreBranchFilesystem failed: ${result.error}`);
@@ -1045,7 +1042,8 @@ export async function handleGitBranchAdd(
         sourceBranch,
         env,
         refType,
-        baseRemoteUrl
+        baseRemoteUrl,
+        remoteUrl
       );
     }
 

@@ -709,7 +709,7 @@ export class MCPEgressGateway {
     claims: MCPEgressCapabilityClaims,
     server: MCPServer,
     assertCurrent: () => Promise<void>,
-    forceRefresh = false
+    { forceRefresh = false }: { forceRefresh?: boolean } = {}
   ): Promise<Headers> {
     let authHeaders: Record<string, string> | undefined;
     if (server.auth?.type === 'oauth') {
@@ -931,7 +931,9 @@ export class MCPEgressGateway {
       let response = await dispatch(headers);
       if (response.status === 401 && admitted.server.auth?.type === 'oauth') {
         await response.body?.cancel();
-        credentials = await this.credentialHeaders(claims, admitted.server, assertCurrent, true);
+        credentials = await this.credentialHeaders(claims, admitted.server, assertCurrent, {
+          forceRefresh: true,
+        });
         ({ requestHeaders: headers, secretHeaders: finalHeaders } =
           buildOutboundHeaders(credentials));
         response = await dispatch(headers);

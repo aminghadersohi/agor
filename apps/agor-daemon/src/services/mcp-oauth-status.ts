@@ -17,6 +17,7 @@
 
 import type { UserMCPOAuthToken } from '@agor/core/db';
 import { isMCPServerUsableBy } from '@agor/core/mcp';
+import { oauthGrantCanAuthenticate } from '@agor/core/tools/mcp/oauth-refresh';
 import type { MCPServer, MCPServerID, UserID } from '@agor/core/types';
 import { hasMinimumRole, ROLES } from '@agor/core/types';
 
@@ -51,24 +52,6 @@ export interface OAuthStatusDeps {
 function isVisibleTo(server: MCPServer, viewer: OAuthStatusViewer): boolean {
   if (hasMinimumRole(viewer.role, ROLES.ADMIN)) return true;
   return isMCPServerUsableBy(server, viewer.user_id);
-}
-
-/**
- * An expired access token is not the same thing as an expired OAuth grant.
- * The daemon refreshes an idle/refreshing grant just-in-time before vending
- * the next Authorization header, so status surfaces must keep it authenticated
- * while a durable refresh token remains available.
- */
-export function oauthGrantCanAuthenticate(
-  token: Pick<
-    UserMCPOAuthToken,
-    'oauth_token_expires_at' | 'oauth_refresh_token' | 'refresh_status'
-  >,
-  now = new Date()
-): boolean {
-  if (token.refresh_status === 'ambiguous') return false;
-  if (!token.oauth_token_expires_at || token.oauth_token_expires_at > now) return true;
-  return Boolean(token.oauth_refresh_token);
 }
 
 export async function resolveAuthenticatedServerIds(deps: OAuthStatusDeps): Promise<MCPServerID[]> {

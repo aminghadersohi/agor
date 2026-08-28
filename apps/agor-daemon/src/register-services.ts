@@ -157,6 +157,7 @@ import { createDurableCodexDeviceAuthService } from './services/codex-device-aut
 import { createConfigService } from './services/config.js';
 import { createCopilotModelsService } from './services/copilot-models.js';
 import { createCursorModelsService } from './services/cursor-models.js';
+import { createExecutorGitEnvironmentService } from './services/executor-git-environment.js';
 import { prepareSessionForExecutorStart } from './services/executor-startup.js';
 import { createFileService } from './services/file.js';
 import { createFilesService } from './services/files.js';
@@ -827,7 +828,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
 
   const sessionMCPServersService = createSessionMCPServersService(db);
   const sessionEnvSelectionsService = createSessionEnvSelectionsService(db);
-  // Top-level /session-env-selections — event channel ONLY.
+  // Top-level /session-env-selections — compatibility placeholder only.
   //
   // Unlike /session-mcp-servers, selection NAMES are a confidentiality
   // concern (they reveal which of the session creator's private env vars
@@ -837,11 +838,11 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   //
   // Reads go exclusively through `/sessions/:id/env-selections`, which
   // enforces session-creator / admin RBAC (see register-routes.ts). This
-  // service exists only so FeathersJS can emit `created` / `removed` /
-  // `patched` events to socket clients that need to refresh.
+  // service remains registered for API/client compatibility, but its
+  // realtime publisher audience is `none` until an owner-aware consumer and
+  // disclosure contract are added.
   app.use('/session-env-selections', {
-    // Empty find() — clients can still subscribe to events, but cannot
-    // query rows via this top-level service.
+    // Empty find() — clients cannot query rows via this top-level service.
     async find() {
       return [];
     },
@@ -933,10 +934,16 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
 
   const usersService = createUsersService(db, app);
   // UsersService implements find/get/create/patch/remove (no `update`), plus
-  // custom RPCs like `getGitEnvironment` and avatar sync helpers. Listing `update` here makes Feathers' hook
+  // avatar sync helpers. Listing `update` here makes Feathers' hook
   // wiring throw "Can not apply hooks. 'update' is not a function" at startup.
   app.use('/users', usersService, {
     methods: [...USERS_SERVICE_TRANSPORT_METHODS],
+  });
+
+  // Plaintext Git credentials are not a Users RPC. They are exposed only to
+  // the exact daemon-issued Git executor command acting as its token owner.
+  app.use('/executor-git-environment', createExecutorGitEnvironmentService(db), {
+    methods: ['create'],
   });
 
   // Bootstrap superadmin users
@@ -1187,17 +1194,18 @@ function createExecuteHandler(
           gatewaySource.channel_id
         );
         if (channel?.agentic_config?.envVars) {
-          gatewayEnv = channel.agentic_config.envVars.map((v) => ({
-            ...v,
-            value: (() => {
-              if (!v.value || !isEncrypted(v.value)) return v.value;
-              try {
-                return decryptApiKey(v.value);
-              } catch {
-                return v.value;
-              }
-            })(),
-          }));
+          gatewayEnv = channel.agentic_config.envVars.flatMap((v) => {
+            if (!v.value || !isEncrypted(v.value)) return [v];
+            try {
+              // Compatibility for rows created through the historical
+              // double-encryption hook. New rows are decrypted once by the
+              // repository and never enter this branch.
+              return [{ ...v, value: decryptApiKey(v.value) }];
+            } catch {
+              console.error(`[gateway] Dropping unreadable gateway env var ${v.key}`);
+              return [];
+            }
+          });
         }
         // Merge connector-provided session credentials (e.g. Shortcut's API
         // token, which the media-intake skill uses to fetch ticket
@@ -4491,7 +4499,6 @@ export async function registerMCPServices(
       }
 
       const serverIds = Array.isArray(data?.mcp_server_ids) ? data.mcp_server_ids : [];
-      const forceRefresh = data?.force_refresh === true;
       const headers: Record<string, { authorization?: string; error?: string }> = {};
 
       if (serverIds.length === 0) {
@@ -4506,6 +4513,13 @@ export async function registerMCPServices(
       if (!trustedInternalOrService && !trustedSessionExecutor) {
         throw new Forbidden('oauth-auth-headers is only available to trusted executor paths');
       }
+      // `force_refresh` is an internal accelerator for the egress gateway's
+      // post-401 retry, not a capability request data controls: only the
+      // trusted internal/service caller may set it. A session executor's own
+      // request data is otherwise agent-directed, and forcing a refresh has
+      // real side effects (provider rate limits, refresh-token rotation,
+      // fencing pressure on concurrent callers of the same grant).
+      const forceRefresh = trustedInternalOrService && data?.force_refresh === true;
       const tenantId = tenantIdFromParams(params);
       if (!tenantId) throw new NotAuthenticated('oauth-auth-headers requires tenant identity');
       const mcpEgressAssertCurrent = (
@@ -4870,15 +4884,16 @@ export async function registerMCPServices(
           if (
             err instanceof InvalidGrantError ||
             err instanceof MissingRefreshTokenError ||
-            err instanceof AmbiguousRefreshError ||
             err instanceof GrantConfigurationChangedError
           ) {
             return { success: false, error: 'needs_reauth' };
           }
-          // A peer observed a known, non-ambiguous owner failure. Match the
-          // owner's retryable response rather than forcing one daemon's caller
-          // to reconnect for the same refresh generation.
-          if (err instanceof FailedRefreshError) {
+          // A peer observed a known, non-ambiguous owner failure, or the
+          // outcome of a concurrent refresh could not be observed in time.
+          // Neither means the grant itself is invalid, so match the
+          // auth-headers path's retryable response rather than forcing the
+          // caller to reconnect for the same refresh generation.
+          if (err instanceof FailedRefreshError || err instanceof AmbiguousRefreshError) {
             return { success: false, error: 'token_refresh_failed' };
           }
           if (err instanceof MissingTokenEndpointError) {
