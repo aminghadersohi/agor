@@ -500,6 +500,27 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
+  server.registerTool(
+    'agor_boards_permissions_update',
+    {
+      description:
+        'Replace a board permission policy and its complete default branch configuration. ' +
+        'Read the current revision with agor_boards_get first. Primary ownership is immutable.',
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        boardId: mcpRequiredId('boardId', 'Board'),
+        permissions: boardCapabilityPoliciesSchema,
+      }),
+    },
+    async (args) => {
+      const boardId = coerceString(args.boardId)!;
+      const permissions = await ctx.app
+        .service('boards/:id/permissions')
+        .patch(null, args.permissions, { ...ctx.baseServiceParams, route: { id: boardId } });
+      return textResult(permissions);
+    }
+  );
+
   // Tool 4: agor_boards_auto_arrange
   server.registerTool(
     'agor_boards_auto_arrange',
@@ -833,8 +854,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         }
       }
       const padding = Math.max(0, args.padding ?? 24);
-      const gapX = Math.max(0, args.gapX ?? 24);
-      const gapY = Math.max(0, args.gapY ?? 24);
+      const gapX = Math.max(0, args.gapX ?? zonePolicy.gap ?? 24);
+      const gapY = Math.max(0, args.gapY ?? zonePolicy.gap ?? 24);
       const titleInset = zoneContentTopInset(zone);
       const autoResizeHeight = zonePolicy.autoResizeHeight === true;
       if (entities.length === 0) {
@@ -1023,6 +1044,13 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .nullable()
           .optional()
           .describe('Preferred grid columns. Use null to return to automatic column selection.'),
+        gap: z
+          .number()
+          .int()
+          .min(0)
+          .max(96)
+          .optional()
+          .describe('Spacing between arranged items in board pixels.'),
         autoResizeHeight: z
           .boolean()
           .optional()
@@ -1046,6 +1074,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         ...(args.sortBy === undefined ? {} : { sortBy: args.sortBy }),
         ...(args.sortDirection === undefined ? {} : { sortDirection: args.sortDirection }),
         ...(args.columns === undefined ? {} : { columns: args.columns ?? undefined }),
+        ...(args.gap === undefined ? {} : { gap: args.gap }),
         ...(args.autoResizeHeight === undefined ? {} : { autoResizeHeight: args.autoResizeHeight }),
       } satisfies Partial<ZoneLayoutPolicy>);
       const updatedZone = { ...zone, layout };
@@ -1121,28 +1150,6 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         })
       );
       return textResult({ boardId, compact: args.compact, updated: updates.length, updates });
-    }
-  );
-
-  // Board permissions
-  server.registerTool(
-    'agor_boards_permissions_update',
-    {
-      description:
-        'Replace a board permission policy and its complete default branch configuration. ' +
-        'Read the current revision with agor_boards_get first. Primary ownership is immutable.',
-      annotations: { idempotentHint: true },
-      inputSchema: z.object({
-        boardId: mcpRequiredId('boardId', 'Board'),
-        permissions: boardCapabilityPoliciesSchema,
-      }),
-    },
-    async (args) => {
-      const boardId = coerceString(args.boardId)!;
-      const permissions = await ctx.app
-        .service('boards/:id/permissions')
-        .patch(null, args.permissions, { ...ctx.baseServiceParams, route: { id: boardId } });
-      return textResult(permissions);
     }
   );
 
