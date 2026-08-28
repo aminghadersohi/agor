@@ -483,6 +483,41 @@ export const useBoardObjects = ({
     [boardObjectsForBoard, client, setNodes, showError, showSuccess, showWarning]
   );
 
+  /**
+   * Collapse or expand every card/worktree pinned to a zone. This is the UI
+   * half of `agor_boards_set_compact` with a `zoneId`: same targeting (pinned
+   * entity placements only), same idempotence (placements already at the
+   * requested density are skipped rather than re-patched).
+   */
+  const setZoneContentsCompact = useCallback(
+    async (zoneId: string, compact: boolean) => {
+      if (!client) return;
+      const targets = boardObjectsForBoard.filter(
+        (placement) =>
+          placement.zone_id === zoneId &&
+          (placement.branch_id || placement.card_id) &&
+          (placement.compact === true) !== compact
+      );
+      if (targets.length === 0) return;
+
+      try {
+        await Promise.all(
+          targets.map((placement) =>
+            client.service('board-objects').patch(placement.object_id, { compact })
+          )
+        );
+        const noun = targets.length === 1 ? 'item' : 'items';
+        showSuccess(
+          compact ? `Collapsed ${targets.length} ${noun}.` : `Expanded ${targets.length} ${noun}.`
+        );
+      } catch (error) {
+        console.error('Failed to update zone density:', error);
+        showError('Failed to update zone density');
+      }
+    },
+    [boardObjectsForBoard, client, showError, showSuccess]
+  );
+
   useEffect(() => {
     const autoZones = Object.entries(boardObjects ?? {}).flatMap(([objectId, object]) =>
       object.type === 'zone' && normalizeZoneLayoutPolicy(object.layout).mode === 'auto'
@@ -654,10 +689,14 @@ export const useBoardObjects = ({
         // the affected BranchCard's per-branch selector, not rebuild every
         // React Flow node on the board.
         let pinnedItemCount = 0;
+        // Tracked alongside the pinned count so the zone toolbar can derive
+        // whether its density button should collapse or expand.
+        let compactItemCount = 0;
         if (objectData.type === 'zone') {
           for (const boardObj of boardObjectsForBoard) {
             if (boardObj.zone_id === objectId && (boardObj.branch_id || boardObj.card_id)) {
               pinnedItemCount += 1;
+              if (boardObj.compact === true) compactItemCount += 1;
             }
           }
         }
@@ -701,10 +740,12 @@ export const useBoardObjects = ({
             trigger: objectData.type === 'zone' ? objectData.trigger : undefined,
             layout: objectData.type === 'zone' ? objectData.layout : undefined,
             pinnedItemCount,
+            compactItemCount,
             onUpdate: handleUpdateObject,
             onDelete: deleteZone,
             onReorder: reorderObject,
             onArrangeContents: arrangeZoneContents,
+            onSetContentsCompact: setZoneContentsCompact,
           },
         };
       });
@@ -717,6 +758,7 @@ export const useBoardObjects = ({
     deleteArtifact,
     reorderObject,
     arrangeZoneContents,
+    setZoneContentsCompact,
     eraserMode,
     activeUrlTargetArtifactId,
     onEditMarkdown,
@@ -831,6 +873,7 @@ export const useBoardObjects = ({
     deleteObject,
     deleteZone,
     reorderObject,
+    setZoneContentsCompact,
     batchUpdateObjectPositions,
   };
 };

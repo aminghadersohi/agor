@@ -11,6 +11,8 @@ import {
   DeleteOutlined,
   FontSizeOutlined,
   LockOutlined,
+  MinusSquareOutlined,
+  PlusSquareOutlined,
   SettingOutlined,
   UnlockOutlined,
   VerticalAlignBottomOutlined,
@@ -61,10 +63,13 @@ type ZoneBoardObject = Extract<BoardObject, { type: 'zone' }>;
 interface ZoneNodeData extends Omit<ZoneBoardObject, 'type'> {
   objectId: string;
   pinnedItemCount?: number;
+  /** How many of the pinned items are currently collapsed. */
+  compactItemCount?: number;
   onUpdate?: (objectId: string, objectData: BoardObject) => void;
   onDelete?: (objectId: string, deleteAssociatedSessions: boolean) => void;
   onReorder?: (objectId: string, op: LayerOp) => void;
   onArrangeContents?: (objectId: string) => void;
+  onSetContentsCompact?: (objectId: string, compact: boolean) => void;
 }
 
 // Local storage key for recent colors
@@ -112,6 +117,12 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
   // its controls visually dim and silently no-op on click.
   const mutationGate = useMutationGate();
   const mutationDisabled = !mutationGate.canMutate;
+
+  // A zone reads as collapsed only when every pinned item is. A partially
+  // collapsed zone still offers "Collapse contents", so one click makes the
+  // whole zone uniform instead of toggling it into a different mixed state.
+  const zoneContentsAllCompact =
+    (data.pinnedItemCount ?? 0) > 0 && (data.compactItemCount ?? 0) >= (data.pinnedItemCount ?? 0);
 
   // Inverse scale to keep toolbar at constant size regardless of zoom
   const scale = 1 / zoom;
@@ -650,6 +661,22 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
             <AppstoreOutlined style={layerIconStyle} />,
             () => data.onArrangeContents?.(data.objectId),
             (data.pinnedItemCount ?? 0) < 2
+          )}
+          {/*
+            One derived-state density button rather than a Collapse/Expand
+            pair: a zone whose items are all collapsed can only usefully be
+            expanded, and vice versa, so a second slot would always be a no-op.
+          */}
+          {renderActionButton(
+            'set-contents-compact',
+            zoneContentsAllCompact ? 'Expand contents' : 'Collapse contents',
+            zoneContentsAllCompact ? (
+              <PlusSquareOutlined style={layerIconStyle} />
+            ) : (
+              <MinusSquareOutlined style={layerIconStyle} />
+            ),
+            () => data.onSetContentsCompact?.(data.objectId, !zoneContentsAllCompact),
+            (data.pinnedItemCount ?? 0) < 1
           )}
           {verticalDivider}
           {/* Layer (z-order) controls */}

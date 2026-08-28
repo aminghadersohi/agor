@@ -662,3 +662,108 @@ describe('arrangeZoneContents', () => {
     unmount();
   });
 });
+
+/**
+ * `setZoneContentsCompact` is the UI half of `agor_boards_set_compact` scoped
+ * to a zone, so these cover the same targeting and idempotence contract the
+ * MCP tool is tested against.
+ */
+describe('setZoneContentsCompact', () => {
+  const placements = [
+    { object_id: 'obj-branch', zone_id: 'zone-1', branch_id: 'branch-1' },
+    { object_id: 'obj-card', zone_id: 'zone-1', card_id: 'card-1' },
+    { object_id: 'obj-other-zone', zone_id: 'zone-2', card_id: 'card-2' },
+    // A nested zone placement carries neither branch_id nor card_id and is
+    // not an entity the density control applies to.
+    { object_id: 'obj-not-entity', zone_id: 'zone-1' },
+  ];
+
+  function renderCompact(client: unknown, boardObjectsForBoard: unknown[] = placements) {
+    return renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({
+            'zone-1': { type: 'zone', x: 0, y: 0, width: 400, height: 300, label: 'Z' },
+          }),
+          client: client as never,
+          boardObjectsForBoard: boardObjectsForBoard as never,
+          nodes: [],
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+  }
+
+  it('patches only the entity placements pinned to the requested zone', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderCompact(client);
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact('zone-1', true);
+    });
+
+    expect(client.service).toHaveBeenCalledWith('board-objects');
+    expect(patch.mock.calls.map((call) => call[0]).sort()).toEqual(['obj-branch', 'obj-card']);
+    for (const call of patch.mock.calls) {
+      expect(call[1]).toEqual({ compact: true });
+    }
+  });
+
+  it('expands a collapsed zone back to full density', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderCompact(
+      client,
+      placements.map((placement) => ({ ...placement, compact: true }))
+    );
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact('zone-1', false);
+    });
+
+    expect(patch.mock.calls.map((call) => call[0]).sort()).toEqual(['obj-branch', 'obj-card']);
+    expect(patch.mock.calls[0][1]).toEqual({ compact: false });
+  });
+
+  it('skips placements already at the requested density', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderCompact(client, [
+      { object_id: 'obj-branch', zone_id: 'zone-1', branch_id: 'branch-1', compact: true },
+      { object_id: 'obj-card', zone_id: 'zone-1', card_id: 'card-1' },
+    ]);
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact('zone-1', true);
+    });
+
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(patch.mock.calls[0][0]).toBe('obj-card');
+  });
+
+  it('is a no-op — no patch, no toast — when the zone is already uniform', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderCompact(
+      client,
+      placements.map((placement) => ({ ...placement, compact: true }))
+    );
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact('zone-1', true);
+    });
+
+    expect(patch).not.toHaveBeenCalled();
+    expect(showSuccess).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a themed error when the patch fails', async () => {
+    const { client } = makeRejectingClient();
+    const { result } = renderCompact(client);
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact('zone-1', true);
+    });
+
+    expect(showError).toHaveBeenCalledWith('Failed to update zone density');
+    expect(showSuccess).not.toHaveBeenCalled();
+  });
+});
