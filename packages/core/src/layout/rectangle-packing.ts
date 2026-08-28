@@ -281,16 +281,22 @@ function buildDeck(
       ? Math.max(1, Math.min(items.length, Math.floor(options.exactColumns)))
       : undefined;
     if (exactColumns !== undefined && stackCount < exactColumns) continue;
-    const stacks = Array.from({ length: stackCount }, (_, stackIndex) => {
-      const members = items.filter((_, index) => index % stackCount === stackIndex);
-      return {
-        id: `stack-${stackIndex}`,
-        width: Math.max(...members.map((item, depth) => item.width + depth * options.deckOffsetX)),
-        height: Math.max(
-          ...members.map((item, depth) => item.height + depth * options.deckOffsetY)
-        ),
-      };
-    });
+    // Aggregate every stack in one pass. Filtering the complete item list once
+    // per stack made a single candidate quadratic before grid selection even
+    // began, which was especially costly for large layouts that cannot fit.
+    const stacks = Array.from({ length: stackCount }, (_, stackIndex) => ({
+      id: `stack-${stackIndex}`,
+      width: 0,
+      height: 0,
+    }));
+    for (const [index, item] of items.entries()) {
+      const stackIndex = index % stackCount;
+      const depth = Math.floor(index / stackCount);
+      const stack = stacks[stackIndex];
+      if (!stack) throw new Error(`Missing deck stack ${stackIndex}.`);
+      stack.width = Math.max(stack.width, item.width + depth * options.deckOffsetX);
+      stack.height = Math.max(stack.height, item.height + depth * options.deckOffsetY);
+    }
     const stackGrid = chooseGrid(stacks, options);
     if (!stackGrid) continue;
     const stackBaseByIndex = new Map(

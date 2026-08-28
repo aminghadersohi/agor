@@ -11,7 +11,13 @@
  */
 
 import type { CardWithType } from '@agor-live/client';
-import { DragOutlined, LinkOutlined, PushpinFilled } from '@ant-design/icons';
+import {
+  DragOutlined,
+  LinkOutlined,
+  MinusSquareOutlined,
+  PlusSquareOutlined,
+  PushpinFilled,
+} from '@ant-design/icons';
 import { Button, Tooltip, Typography, theme } from 'antd';
 
 function isSafeUrl(url: string): boolean {
@@ -40,13 +46,27 @@ export interface CardNodeData {
   zoneColor?: string;
   /** Shared board presentation state, controlled by board layout/MCP tools. */
   compact?: boolean;
+  /**
+   * Toggle this placement's shared compact state. Omitted when the viewer
+   * cannot mutate the board, so the control never renders a guaranteed 403.
+   */
+  onToggleCompact?: (cardId: string, compact: boolean) => void;
   onClick?: (cardId: string) => void;
   onUnpin?: (cardId: string) => void;
 }
 
 const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
   const { token } = theme.useToken();
-  const { card, isPinned, zoneName, zoneColor, compact = false, onClick, onUnpin } = data;
+  const {
+    card,
+    isPinned,
+    zoneName,
+    zoneColor,
+    compact = false,
+    onToggleCompact,
+    onClick,
+    onUnpin,
+  } = data;
   const [descExpanded, setDescExpanded] = useState(false);
 
   const borderColor = card.effective_color || token.colorBorder;
@@ -68,6 +88,14 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
   }, [card.description, descExpanded]);
 
   const needsTruncation = (card.description?.length ?? 0) > DESCRIPTION_MAX_CHARS;
+
+  // A title-only card already renders as a single header row, so offering to
+  // collapse it would add a control to every sparse card for no visible
+  // change. An already-collapsed card always keeps its toggle: the header is
+  // the only thing still rendered, so this is the sole way back out.
+  const showCompactToggle =
+    Boolean(onToggleCompact) && (compact || !!card.description || !!card.note);
+  const compactToggleLabel = compact ? 'Expand card' : 'Collapse card';
 
   return (
     <div
@@ -129,6 +157,22 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
           >
             <LinkOutlined style={{ fontSize: 12 }} />
           </a>
+        )}
+        {showCompactToggle && (
+          <Tooltip title={compactToggleLabel}>
+            <Button
+              type="text"
+              size="small"
+              aria-label={compactToggleLabel}
+              icon={compact ? <PlusSquareOutlined /> : <MinusSquareOutlined />}
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleCompact?.(card.card_id, !compact);
+              }}
+              className={REACT_FLOW_NO_DRAG_CLASS}
+              style={{ flexShrink: 0, width: 24, height: 24, padding: 0 }}
+            />
+          </Tooltip>
         )}
         {isPinned && (
           <Tooltip

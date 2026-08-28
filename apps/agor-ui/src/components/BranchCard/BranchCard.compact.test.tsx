@@ -1,0 +1,83 @@
+import type { Branch, Repo } from '@agor-live/client';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { ConnectionProvider } from '../../contexts/ConnectionContext';
+import BranchCard from './BranchCard';
+
+const connected = {
+  connected: true,
+  connecting: false,
+  outOfSync: false,
+  capturedSha: null,
+  currentSha: null,
+};
+
+const branch = {
+  branch_id: 'branch-1',
+  name: 'feature/canvas-density',
+  repo_id: 'repo-1',
+  path: '/tmp/feature-canvas-density',
+  filesystem_status: 'ready',
+  archived: false,
+} as unknown as Branch;
+
+const repo = { repo_id: 'repo-1', slug: 'preset-io/agor' } as unknown as Repo;
+
+function renderCard(props: Partial<React.ComponentProps<typeof BranchCard>> = {}) {
+  return render(
+    <ConnectionProvider value={connected}>
+      <BranchCard
+        branch={branch}
+        repo={repo}
+        sessions={[]}
+        userById={new Map()}
+        client={null}
+        {...props}
+      />
+    </ConnectionProvider>
+  );
+}
+
+describe('BranchCard compact toggle', () => {
+  it('asks for compact=true when collapsing an expanded worktree card', () => {
+    const onToggleCompact = vi.fn();
+    renderCard({ onToggleCompact });
+
+    fireEvent.click(screen.getByLabelText('Collapse card'));
+
+    expect(onToggleCompact).toHaveBeenCalledWith('branch-1', true);
+  });
+
+  it('asks for compact=false when expanding a collapsed worktree card', () => {
+    const onToggleCompact = vi.fn();
+    renderCard({ compact: true, onToggleCompact });
+
+    fireEvent.click(screen.getByLabelText('Expand card'));
+
+    expect(onToggleCompact).toHaveBeenCalledWith('branch-1', false);
+  });
+
+  it('keeps the toggle reachable while collapsed', () => {
+    // Collapsing hides the metadata, notes and session sections; the header
+    // action group survives, which is what makes the state recoverable.
+    renderCard({ compact: true, onToggleCompact: vi.fn() });
+
+    expect(screen.getByLabelText('Expand card')).toBeTruthy();
+    expect(screen.queryByLabelText('Collapse card')).toBeNull();
+  });
+
+  it('renders no toggle when the viewer cannot mutate the board', () => {
+    renderCard({ compact: true });
+
+    expect(screen.queryByLabelText('Expand card')).toBeNull();
+    expect(screen.queryByLabelText('Collapse card')).toBeNull();
+  });
+
+  it('omits the board-only density control on the panel and popover surfaces', () => {
+    renderCard({ panelMode: true, onToggleCompact: vi.fn() });
+    expect(screen.queryByLabelText('Collapse card')).toBeNull();
+
+    renderCard({ inPopover: true, onToggleCompact: vi.fn() });
+    expect(screen.queryByLabelText('Collapse card')).toBeNull();
+  });
+});

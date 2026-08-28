@@ -97,16 +97,23 @@ const STATUS_RANKS: Readonly<Record<string, number>> = {
   blocked: 1,
   failed: 1,
   error: 1,
+  // Branch filesystem lifecycle values. Keep these here alongside workflow
+  // statuses because branch and card placements share the public status sort.
+  creating: 2,
   running: 2,
   active: 2,
+  ready: 3,
   todo: 3,
   open: 3,
   pending: 3,
   review: 4,
+  preserved: 4,
   done: 5,
   completed: 5,
   closed: 5,
+  cleaned: 5,
   archived: 6,
+  deleted: 6,
 };
 
 function normalizedLabel(value: unknown): string {

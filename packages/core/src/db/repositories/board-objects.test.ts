@@ -889,7 +889,7 @@ describe('BoardObjectRepository.updateSize', () => {
 });
 
 describe('BoardObjectRepository.updateCompact', () => {
-  dbTest('persists compact presentation through position and size updates', async ({ db }) => {
+  dbTest('invalidates measurements when presentation mode changes', async ({ db }) => {
     const repoRepo = new RepoRepository(db);
     const branchRepo = new BranchRepository(db);
     const boardObjectRepo = new BoardObjectRepository(db);
@@ -906,10 +906,12 @@ describe('BoardObjectRepository.updateCompact', () => {
     const compacted = await boardObjectRepo.updateCompact(created.object_id, true);
     const moved = await boardObjectRepo.updatePosition(created.object_id, { x: 30, y: 40 });
     const resized = await boardObjectRepo.updateSize(created.object_id, { width: 500, height: 64 });
+    const expanded = await boardObjectRepo.updateCompact(created.object_id, false);
 
-    expect(compacted.compact).toBe(true);
+    expect(compacted).toMatchObject({ compact: true, size: undefined });
     expect(moved).toMatchObject({ compact: true, position: { x: 30, y: 40 } });
     expect(resized).toMatchObject({ compact: true, size: { width: 500, height: 64 } });
+    expect(expanded).toMatchObject({ compact: false, size: undefined });
   });
 });
 
