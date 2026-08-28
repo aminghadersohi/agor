@@ -535,7 +535,7 @@ export const NavbarComposeButton: React.FC<NavbarComposeButtonProps> = ({
       }}
       trigger="click"
       placement="bottomRight"
-      destroyTooltipOnHide
+      destroyOnHidden
       content={content}
     >
       <Tooltip title="Start quick session">
