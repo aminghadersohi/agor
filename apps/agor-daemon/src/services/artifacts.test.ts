@@ -26,9 +26,9 @@ import {
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
 import type { Artifact, BoardID, BranchID, ScheduleID, SessionID, UUID } from '@agor/core/types';
-import { describe, expect, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { dbTest } from '../../../../packages/core/src/db/test-helpers';
-import { ArtifactsService, sanitizeArtifactInteractionConfig } from './artifacts';
+import { ArtifactsService, escapeEnvValue, sanitizeArtifactInteractionConfig } from './artifacts';
 
 vi.mock('@agor/core/config', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agor/core/config')>();
@@ -36,6 +36,14 @@ vi.mock('@agor/core/config', async (importOriginal) => {
     ...actual,
     getDaemonBaseUrl: vi.fn(async () => 'http://localhost:3030'),
   };
+});
+
+it('quotes dotenv values without permitting CR/LF record injection', () => {
+  const escaped = escapeEnvValue('first\rINJECTED=value\nlast\\"');
+
+  expect(escaped).toBe('"first\\rINJECTED=value\\nlast\\\\\\""');
+  expect(escaped).not.toContain('\r');
+  expect(escaped).not.toContain('\n');
 });
 
 /**
