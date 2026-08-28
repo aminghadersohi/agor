@@ -19,11 +19,14 @@ describe('normalizeZoneLayoutPolicy', () => {
       sortBy: 'position',
       sortDirection: 'asc',
       autoResizeHeight: false,
+      gap: 24,
     });
     expect(normalizeZoneLayoutPolicy({ mode: 'auto', columns: 2.9 })).toMatchObject({
       mode: 'auto',
       columns: 2,
     });
+    expect(normalizeZoneLayoutPolicy({ gap: -4 })).toMatchObject({ gap: 0 });
+    expect(normalizeZoneLayoutPolicy({ gap: 200 })).toMatchObject({ gap: 96 });
   });
 });
 

@@ -2,7 +2,6 @@ import type { PersistedAgenticToolName } from './agentic-tool';
 import type { BranchPermissionLevel } from './branch';
 import type { CardID } from './card';
 import type { ArtifactID, BoardID, BranchID } from './id';
-import type { ProfileImageID } from './profile-image';
 
 /**
  * Canvas position (x/y coordinates in board space)
@@ -124,6 +123,8 @@ export interface ZoneLayoutPolicy {
   sortDirection: ZoneLayoutSortDirection;
   /** Preferred grid width. Compact lists always use one column. */
   columns?: number;
+  /** Exact spacing between arranged items in board pixels. */
+  gap?: number;
   /** Grow or shrink the zone vertically to contain the arranged rectangles. */
   autoResizeHeight?: boolean;
 }
@@ -286,9 +287,6 @@ export interface Board {
 
   description?: string;
   primary_teammate_id?: BranchID;
-
-  /** Main image from the board's private processed image gallery. */
-  profile_image_id?: ProfileImageID;
 
   /**
    * DEPRECATED: Sessions and layout are now tracked in board_objects table

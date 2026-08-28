@@ -3106,13 +3106,17 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           }}
         >
           {selectedLayoutNodes.length >= 2 && activeTool === 'select' && (
-            <div className="canvas-layout-toolbar" role="toolbar" aria-label="Align selected items">
+            <div
+              className="canvas-layout-toolbar"
+              role="toolbar"
+              aria-label="Arrange selected items"
+            >
               <Typography.Text type="secondary">
                 {selectedLayoutNodes.length} selected
               </Typography.Text>
               {(
                 [
-                  ['arrange', 'Auto arrange', <AppstoreOutlined key="arrange" />],
+                  ['arrange', 'Tidy up', <AppstoreOutlined key="arrange" />],
                   ['left', 'Align left', <AlignLeftOutlined key="left" />],
                   ['center', 'Align center', <AlignCenterOutlined key="center" />],
                   ['top', 'Align top', <VerticalAlignTopOutlined key="top" />],

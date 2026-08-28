@@ -103,7 +103,7 @@ describe('ZoneConfigModal historical tool migration', () => {
       </AntdApp>
     );
 
-    fireEvent.click(await screen.findByRole('radio', { name: 'Auto' }));
+    fireEvent.click(await screen.findByRole('switch', { name: 'Automatic' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
@@ -114,6 +114,7 @@ describe('ZoneConfigModal historical tool migration', () => {
         sortBy: 'updated',
         sortDirection: 'desc',
         autoResizeHeight: false,
+        gap: 24,
       },
     });
   });

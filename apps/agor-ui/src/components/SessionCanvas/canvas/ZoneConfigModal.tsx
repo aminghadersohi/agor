@@ -13,7 +13,18 @@ import type {
   ZoneTriggerBehavior,
 } from '@agor-live/client';
 import { isAgenticToolName } from '@agor-live/client';
-import { Alert, Divider, Flex, Form, Input, InputNumber, Modal, Radio, Select, Switch } from 'antd';
+import {
+  Alert,
+  Divider,
+  Flex,
+  Form,
+  Input,
+  InputNumber,
+  Modal,
+  Segmented,
+  Select,
+  Switch,
+} from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import { useMutationGate } from '../../../contexts/ConnectionContext';
 import { AgentSelectionGrid, AVAILABLE_AGENTS } from '../../AgentSelectionGrid';
@@ -37,6 +48,7 @@ interface ZoneFormValues {
   layoutSortBy: ZoneLayoutSortBy;
   layoutSortDirection: ZoneLayoutSortDirection;
   layoutColumns?: number;
+  layoutGap: number;
   layoutAutoResizeHeight: boolean;
 }
 
@@ -94,6 +106,7 @@ export const ZoneConfigModal = ({
           layoutSortBy: layout.sortBy,
           layoutSortDirection: layout.sortDirection,
           layoutColumns: layout.columns,
+          layoutGap: layout.gap,
           layoutAutoResizeHeight: layout.autoResizeHeight === true,
         });
         setTriggerAgent(
@@ -116,6 +129,7 @@ export const ZoneConfigModal = ({
           layoutSortBy: layout.sortBy,
           layoutSortDirection: layout.sortDirection,
           layoutColumns: layout.columns,
+          layoutGap: layout.gap,
           layoutAutoResizeHeight: layout.autoResizeHeight === true,
         });
         setTriggerAgent('claude-code');
@@ -186,6 +200,7 @@ export const ZoneConfigModal = ({
           sortBy: values.layoutSortBy,
           sortDirection: values.layoutSortDirection,
           columns: values.layoutPreset === 'grid' ? values.layoutColumns : 1,
+          gap: values.layoutGap,
           autoResizeHeight: values.layoutAutoResizeHeight,
         });
         const hasChanges =
@@ -219,7 +234,7 @@ export const ZoneConfigModal = ({
 
   return (
     <Modal
-      title="Configure Zone"
+      title="Configure zone"
       open={open}
       onCancel={onCancel}
       onOk={handleSave}
@@ -231,7 +246,7 @@ export const ZoneConfigModal = ({
       width={600}
     >
       <Form form={form} layout="vertical">
-        <Form.Item name="name" label="Zone Name">
+        <Form.Item name="name" label="Zone name">
           <Input placeholder="Enter zone name..." size="large" />
         </Form.Item>
 
@@ -239,24 +254,28 @@ export const ZoneConfigModal = ({
 
         <Form.Item
           name="layoutMode"
-          label="Maintenance"
-          help="Manual preserves spatial placement. Auto reflows after items or their measured sizes change."
+          label="Automatic"
+          valuePropName="checked"
+          getValueProps={(value: ZoneLayoutMode) => ({ checked: value === 'auto' })}
+          normalize={(checked: boolean) => (checked ? 'auto' : 'manual')}
+          help="Keeps this zone arranged as items are added, removed, or resized."
         >
-          <Radio.Group
-            optionType="button"
-            buttonStyle="solid"
-            onChange={(event) => handleLayoutModeChange(event.target.value as ZoneLayoutMode)}
-          >
-            <Radio.Button value="manual">Manual</Radio.Button>
-            <Radio.Button value="auto">Auto</Radio.Button>
-          </Radio.Group>
+          <Switch
+            onChange={(checked) => {
+              const mode: ZoneLayoutMode = checked ? 'auto' : 'manual';
+              handleLayoutModeChange(mode);
+            }}
+          />
         </Form.Item>
 
         <Form.Item name="layoutPreset" label="Presentation">
-          <Radio.Group optionType="button" buttonStyle="solid">
-            <Radio.Button value="grid">Grid</Radio.Button>
-            <Radio.Button value="compact_list">Compact list</Radio.Button>
-          </Radio.Group>
+          <Segmented
+            block
+            options={[
+              { label: 'Grid', value: 'grid' },
+              { label: 'List', value: 'compact_list' },
+            ]}
+          />
         </Form.Item>
 
         <Flex gap="middle" wrap>
@@ -282,21 +301,36 @@ export const ZoneConfigModal = ({
           {layoutPreset === 'grid' && (
             <Form.Item
               name="layoutColumns"
-              label="Preferred columns"
-              help="Leave blank to choose the nearest fitting grid."
+              label="Columns"
+              help="Leave blank to fit as many columns as the zone allows."
               style={{ flex: '1 1 200px' }}
             >
               <InputNumber min={1} precision={0} style={{ width: '100%' }} placeholder="Auto" />
             </Form.Item>
           )}
           <Form.Item
+            name="layoutGap"
+            label="Spacing"
+            help="Exact space between arranged items."
+            style={{ flex: '1 1 160px' }}
+          >
+            <InputNumber
+              min={0}
+              max={96}
+              precision={0}
+              step={4}
+              suffix="px"
+              style={{ width: '100%' }}
+            />
+          </Form.Item>
+          <Form.Item
             name="layoutAutoResizeHeight"
-            label="Fit zone height"
+            label="Grow to fit"
             valuePropName="checked"
-            help="Grow or shrink vertically so every arranged item remains visible."
+            help="On: the zone grows so nothing overlaps. Off: the zone keeps its size."
             style={{ flex: '1 1 200px' }}
           >
-            <Switch checkedChildren="Auto" unCheckedChildren="Fixed" />
+            <Switch />
           </Form.Item>
         </Flex>
 

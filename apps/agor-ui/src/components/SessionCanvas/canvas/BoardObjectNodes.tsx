@@ -531,7 +531,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
                 lineHeight: 1,
               }}
             >
-              Fill
+              Background
             </span>
             <ColorPicker
               value={backgroundColor}
@@ -646,7 +646,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
           {verticalDivider}
           {renderActionButton(
             'arrange-contents',
-            'Arrange contents',
+            'Tidy up contents',
             <AppstoreOutlined style={layerIconStyle} />,
             () => data.onArrangeContents?.(data.objectId),
             (data.pinnedItemCount ?? 0) < 2
