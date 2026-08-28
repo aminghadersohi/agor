@@ -355,8 +355,8 @@ export const useBoardObjects = ({
           },
           padding: 24,
           minPadding: 8,
-          gapX: 24,
-          gapY: 24,
+          gapX: policy.gap ?? 24,
+          gapY: policy.gap ?? 24,
           minGapX: 8,
           minGapY: 8,
           ...(policy.preset === 'compact_list'
