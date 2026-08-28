@@ -123,6 +123,8 @@ export interface ZoneLayoutPolicy {
   sortDirection: ZoneLayoutSortDirection;
   /** Preferred grid width. Compact lists always use one column. */
   columns?: number;
+  /** Exact spacing between arranged items in board pixels. */
+  gap?: number;
   /** Grow or shrink the zone vertically to contain the arranged rectangles. */
   autoResizeHeight?: boolean;
 }

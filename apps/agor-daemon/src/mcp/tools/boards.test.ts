@@ -1067,6 +1067,7 @@ describe('agor_boards_set_zone_layout', () => {
           sortBy: 'priority',
           sortDirection: 'asc',
           columns: 2,
+          gap: 16,
           autoResizeHeight: true,
         })
       ).content[0].text
@@ -1078,6 +1079,7 @@ describe('agor_boards_set_zone_layout', () => {
       sortBy: 'priority',
       sortDirection: 'asc',
       columns: 2,
+      gap: 16,
       autoResizeHeight: true,
     });
     expect(patch).toHaveBeenCalledWith(

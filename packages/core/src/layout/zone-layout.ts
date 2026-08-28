@@ -24,6 +24,7 @@ export const DEFAULT_ZONE_LAYOUT_POLICY: Readonly<ZoneLayoutPolicy> = {
   sortBy: 'position',
   sortDirection: 'asc',
   autoResizeHeight: false,
+  gap: 24,
 };
 
 export interface ZoneLayoutSortItem {
@@ -61,6 +62,9 @@ export function normalizeZoneLayoutPolicy(
     Number.isFinite(policy?.columns) && (policy?.columns ?? 0) > 0
       ? Math.max(1, Math.floor(policy?.columns ?? 1))
       : undefined;
+  const gap = Number.isFinite(policy?.gap)
+    ? Math.min(96, Math.max(0, Math.round(policy?.gap ?? 24)))
+    : DEFAULT_ZONE_LAYOUT_POLICY.gap;
 
   return {
     mode: isOneOf(policy?.mode, ZONE_LAYOUT_MODES) ? policy.mode : DEFAULT_ZONE_LAYOUT_POLICY.mode,
@@ -68,6 +72,7 @@ export function normalizeZoneLayoutPolicy(
     sortBy,
     sortDirection,
     ...(columns === undefined ? {} : { columns }),
+    gap,
     autoResizeHeight: policy?.autoResizeHeight === true,
   };
 }

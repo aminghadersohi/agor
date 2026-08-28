@@ -854,8 +854,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         }
       }
       const padding = Math.max(0, args.padding ?? 24);
-      const gapX = Math.max(0, args.gapX ?? 24);
-      const gapY = Math.max(0, args.gapY ?? 24);
+      const gapX = Math.max(0, args.gapX ?? zonePolicy.gap ?? 24);
+      const gapY = Math.max(0, args.gapY ?? zonePolicy.gap ?? 24);
       const titleInset = zoneContentTopInset(zone);
       const autoResizeHeight = zonePolicy.autoResizeHeight === true;
       if (entities.length === 0) {
@@ -1044,6 +1044,13 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .nullable()
           .optional()
           .describe('Preferred grid columns. Use null to return to automatic column selection.'),
+        gap: z
+          .number()
+          .int()
+          .min(0)
+          .max(96)
+          .optional()
+          .describe('Spacing between arranged items in board pixels.'),
         autoResizeHeight: z
           .boolean()
           .optional()
@@ -1067,6 +1074,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         ...(args.sortBy === undefined ? {} : { sortBy: args.sortBy }),
         ...(args.sortDirection === undefined ? {} : { sortDirection: args.sortDirection }),
         ...(args.columns === undefined ? {} : { columns: args.columns ?? undefined }),
+        ...(args.gap === undefined ? {} : { gap: args.gap }),
         ...(args.autoResizeHeight === undefined ? {} : { autoResizeHeight: args.autoResizeHeight }),
       } satisfies Partial<ZoneLayoutPolicy>);
       const updatedZone = { ...zone, layout };
