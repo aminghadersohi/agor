@@ -286,7 +286,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({
       open={open}
       onCancel={handleCancel}
       width={700}
-      maskClosable={false}
+      mask={{ closable: false }}
       footer={
         <Flex justify="flex-end" gap={token.marginXS}>
           <Button onClick={handleCancel}>Cancel</Button>

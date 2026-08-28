@@ -464,7 +464,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
               value={borderColor}
               onChange={handleBorderColorChange}
               trigger="click"
-              destroyTooltipOnHide
+              destroyOnHidden
               showText={false}
               format="hex"
               presets={[
@@ -537,7 +537,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
               value={backgroundColor}
               onChange={handleBackgroundColorChange}
               trigger="click"
-              destroyTooltipOnHide
+              destroyOnHidden
               showText={false}
               format="hex"
               presets={[

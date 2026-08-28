@@ -170,7 +170,10 @@ export function BoardEditModal({
       await form.validateFields();
       const updated = await onUpdate?.(
         board.board_id,
-        extractBoardFormValues(form, { includeLegacyPermissions: !branchRbacEnabled })
+        // Board permissions have their own policy service. Never include the
+        // legacy compatibility fields in a generic board patch: even an
+        // unchanged value is correctly rejected by the repository.
+        extractBoardFormValues(form, { includeLegacyPermissions: false })
       );
       if (updated === false) return;
       await syncPermissions();
@@ -194,63 +197,65 @@ export function BoardEditModal({
       okText="Save"
       destroyOnHidden
     >
-      {loadError ? (
-        <Alert type="error" showIcon title="Board settings unavailable" description={loadError} />
-      ) : !loadedBoard ? (
-        // Render the form only once the full board has loaded, so its fields —
-        // including the background editor's mode — initialize from real values
-        // rather than the empty pre-load state (the cause of the mode/checkbox
-        // resetting on reopen).
-        <Skeleton active paragraph={{ rows: 6 }} style={{ marginTop: 16 }} />
-      ) : (
-        <Form form={form} layout="vertical" preserve style={{ marginTop: 16 }}>
-          <BoardFormFields
-            key={loadedBoard.board_id}
-            form={form}
-            backgroundResetSignal={loadedBoard.board_id}
-            rbacEnabled={branchRbacEnabled}
-            allUsers={allUsers}
-            allGroups={allGroups}
-            capabilityPolicyEditor={
-              branchRbacEnabled ? (
-                policy ? (
-                  <BoardCapabilityPolicyModalEditor
-                    value={policy}
-                    onChange={setPolicy}
-                    client={client}
-                    users={permissionUsers}
-                    groups={allGroups}
-                    currentUser={currentUser}
-                    workspacePreferences={workspacePreferences}
-                  />
-                ) : (
-                  <Alert type="error" showIcon description="Permissions are unavailable." />
+      <Form form={form} layout="vertical" preserve style={{ marginTop: 16 }}>
+        {loadError ? (
+          <Alert type="error" showIcon title="Board settings unavailable" description={loadError} />
+        ) : !loadedBoard ? (
+          // Keep the Form mounted while the latest board is fetched. The load
+          // effect initializes this form instance before revealing its fields;
+          // conditionally mounting Form itself leaves useForm disconnected and
+          // triggers AntD's runtime warning.
+          <Skeleton active paragraph={{ rows: 6 }} />
+        ) : (
+          <>
+            <BoardFormFields
+              key={loadedBoard.board_id}
+              form={form}
+              backgroundResetSignal={loadedBoard.board_id}
+              rbacEnabled={branchRbacEnabled}
+              allUsers={allUsers}
+              allGroups={allGroups}
+              capabilityPolicyEditor={
+                branchRbacEnabled ? (
+                  policy ? (
+                    <BoardCapabilityPolicyModalEditor
+                      value={policy}
+                      onChange={setPolicy}
+                      client={client}
+                      users={permissionUsers}
+                      groups={allGroups}
+                      currentUser={currentUser}
+                      workspacePreferences={workspacePreferences}
+                    />
+                  ) : (
+                    <Alert type="error" showIcon description="Permissions are unavailable." />
+                  )
+                ) : undefined
+              }
+              extra={
+                <Form.Item
+                  label="Custom Context (JSON)"
+                  name="custom_context"
+                  help="Add custom fields for use in zone trigger templates (e.g., {{ board.context.yourField }})"
+                  rules={[{ validator: validateJSON }]}
+                >
+                  <JSONEditor placeholder='{"team": "Backend", "sprint": 42}' rows={4} />
+                </Form.Item>
+              }
+            />
+            <ProfileImageGalleryEditor
+              subject={{ type: 'board', id: loadedBoard.board_id }}
+              canEdit
+              label="Board images"
+              onPrimaryChange={(imageId) =>
+                setLoadedBoard((current) =>
+                  current ? { ...current, profile_image_id: imageId ?? undefined } : current
                 )
-              ) : undefined
-            }
-            extra={
-              <Form.Item
-                label="Custom Context (JSON)"
-                name="custom_context"
-                help="Add custom fields for use in zone trigger templates (e.g., {{ board.context.yourField }})"
-                rules={[{ validator: validateJSON }]}
-              >
-                <JSONEditor placeholder='{"team": "Backend", "sprint": 42}' rows={4} />
-              </Form.Item>
-            }
-          />
-          <ProfileImageGalleryEditor
-            subject={{ type: 'board', id: loadedBoard.board_id }}
-            canEdit
-            label="Board images"
-            onPrimaryChange={(imageId) =>
-              setLoadedBoard((current) =>
-                current ? { ...current, profile_image_id: imageId ?? undefined } : current
-              )
-            }
-          />
-        </Form>
-      )}
+              }
+            />
+          </>
+        )}
+      </Form>
     </Modal>
   );
 }

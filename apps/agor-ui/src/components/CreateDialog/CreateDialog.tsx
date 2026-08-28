@@ -334,7 +334,7 @@ export const CreateDialog: React.FC<CreateDialogProps> = ({
       destroyOnHidden
       width={720}
       closable={!isSubmitting}
-      maskClosable={false}
+      mask={{ closable: false }}
       keyboard={!isSubmitting}
       footer={[
         <Button key="cancel" onClick={handleCancel} disabled={isSubmitting}>

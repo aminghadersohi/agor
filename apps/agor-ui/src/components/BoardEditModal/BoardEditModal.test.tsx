@@ -43,8 +43,19 @@ vi.mock('../forms/BoardFormFields', () => ({
       )}
     </>
   ),
-  extractBoardFormValues: (form: { getFieldValue: (name: string) => unknown }) => ({
+  extractBoardFormValues: (
+    form: { getFieldValue: (name: string) => unknown },
+    options?: { includeLegacyPermissions?: boolean }
+  ) => ({
     name: form.getFieldValue('name'),
+    ...(options?.includeLegacyPermissions === false
+      ? {}
+      : {
+          access_mode: 'shared',
+          default_others_can: 'session',
+          default_others_fs_access: 'read',
+          default_dangerously_allow_session_sharing: false,
+        }),
   }),
   isCustomCSS: () => false,
 }));
@@ -116,9 +127,10 @@ describe('BoardEditModal', () => {
     __setAuthConfigForTests({ requireAuth: true }, { branchRbac: true });
   });
 
-  it('keeps the normalized editor and policy request hidden when RBAC is disabled', async () => {
+  it('keeps policy fields out of generic board updates when RBAC is disabled', async () => {
     __setAuthConfigForTests({ requireAuth: true }, { branchRbac: false });
     const { client, permissionsFind } = makeClient();
+    const onUpdate = vi.fn();
 
     render(
       <BoardEditModal
@@ -126,13 +138,19 @@ describe('BoardEditModal', () => {
         client={client}
         open
         onClose={vi.fn()}
-        onUpdate={vi.fn()}
+        onUpdate={onUpdate}
       />
     );
 
     expect(await screen.findByDisplayValue('Fresh name')).toBeInTheDocument();
     expect(screen.queryByTestId('board-modal-policy-editor')).not.toBeInTheDocument();
     expect(permissionsFind).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Renamed safely' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(onUpdate).toHaveBeenCalledWith(listedBoard.board_id, { name: 'Renamed safely' })
+    );
   });
 
   it('loads the latest board and normalized permission package before saving', async () => {
