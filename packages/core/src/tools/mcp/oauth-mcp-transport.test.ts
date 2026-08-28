@@ -671,6 +671,30 @@ describe('resolveResourceMetadataUrl', () => {
 
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
+
+  it('aborts a resource-bound header-hint validation fetch when authority expires mid-flight', async () => {
+    // With resourceUri set, the header hint is validated against a live GET
+    // before being trusted. That request must honor assertCurrent like every
+    // other provider-owned fetch in this file, or a stale reservation could
+    // ride an in-flight request past its deadline.
+    let current = true;
+    const fetchMock = vi.fn(async () => {
+      current = false;
+      return { ok: true, json: async () => ({ authorization_servers: ['https://example.com'] }) };
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const header =
+      'Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource"';
+    await expect(
+      resolveResourceMetadataUrl(header, 'https://example.com/mcp', {
+        resourceUri: 'https://example.com/mcp',
+        assertCurrent: () => {
+          if (!current) throw new Error('reservation expired');
+        },
+      })
+    ).rejects.toThrow('reservation expired');
+  });
 });
 
 // ---------------------------------------------------------------------------

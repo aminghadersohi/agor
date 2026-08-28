@@ -1884,8 +1884,9 @@ export async function registerMCPServices(
       () => import('@agor/core/tools/mcp/oauth-mcp-transport')
     );
 
-    // Resolve the configured loopback/public callback while the live browser
-    // reservation remains authoritative.
+    // Stable loopback by default; remote-browser deployments explicitly opt
+    // into the configured public HTTPS base. The live browser reservation
+    // remains authoritative while this resolves.
     const redirectUri = await runWithinOAuthAuthority(
       assertFlowAuthority,
       resolveMCPOAuthRedirectUri
@@ -2043,7 +2044,10 @@ export async function registerMCPServices(
         resourceUri: effectiveMcpUrl,
         compatibilityMode: effectiveCompatibilityMode,
         dcrMode: effectiveDcrMode,
-        // Callback transport is independent of provider egress policy.
+        // Callback transport is a deployment choice, independent of database
+        // durability. Local PostgreSQL still uses the native-app loopback flow,
+        // while `allowLocalhostHttp` below remains false so OAuth provider
+        // metadata/token egress cannot target daemon-local services.
         allowLoopbackRedirectUri: ctx.config.daemon?.mcp_oauth_callback_mode !== 'public',
         allowLocalhostHttp: !postgresOAuthDeployment,
         // The reservation is consumed before provider work starts, but its

@@ -15,6 +15,14 @@ For unsupported schemes, configure the server in **Settings → MCP Servers**. C
 
 For Google MCP servers, Agor requests offline access and explicit consent so Google can issue a refresh token. Once connected, an expired access token is renewed from that durable grant before use; an authenticated provider `401` receives one forced refresh and retry when the daemon egress gateway owns the request. Google commonly omits `refresh_token` from refresh responses, so Agor preserves the previously stored value. Reconnect only when Google permanently rejects or revokes the grant (for example, `invalid_grant`); a temporary provider or network failure does not discard it.
 
+### OAuth callbacks
+
+Standalone Agor uses `http://127.0.0.1:<daemon-port>/mcp-servers/oauth-callback`, the same loopback pattern used by native developer tools. It does not need public DNS, TLS, Caddy, or router port forwarding. The browser completing sign-in must be running on the daemon machine.
+
+A single daemon used from a browser on another machine can explicitly select a public callback with `daemon.mcp_oauth_callback_mode: public`. Then set `AGOR_BASE_URL` or `daemon.base_url`, register `<public-origin>/mcp-servers/oauth-callback` with the provider, and configure the reverse proxy to forward that path to the daemon. The public origin must use HTTPS. The Vite development server forwards the callback path automatically.
+
+Google Gmail and Calendar require a pre-registered OAuth client; Google does not advertise Dynamic Client Registration for these endpoints. For standalone Agor, create a Desktop OAuth client that permits the loopback redirect, then enter its Client ID and provider-required Client Secret in the MCP server's advanced OAuth settings. An API key is not a substitute unless the MCP provider explicitly supports API-key authentication.
+
 ## Safe edits, storage, and removal
 
 Bearer tokens and other MCP auth/header/env secrets are stored in MCP server JSON according to the deployment's storage security. Catalog installs are private to their owner, access controls restrict the row, and API, realtime, and UI projections redact secrets. Redaction is an output-boundary control, not application-level encryption; encryption at rest applies only when the deployment's documented database or storage configuration guarantees it. OAuth access and refresh tokens use Agor's durable per-user OAuth token store; PostgreSQL deployments envelope-encrypt those token fields. Token and client-secret values are not returned by status endpoints or written to operational logs.
