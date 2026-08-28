@@ -68,8 +68,6 @@ vi.mock('@agor/core/db', async (importOriginal) => {
       return {
         ...branchRepoMock,
         findAllByRepoId: repositoryMocks.findAllBranchesByRepoId,
-        getAllUsedUniqueIds: vi.fn(async () => []),
-        addOwner: vi.fn(async () => undefined),
         resolveUserAccess: repositoryMocks.resolveBranchUserAccess,
       };
     }),
@@ -769,6 +767,12 @@ describe('ReposService branch provisioning lifecycle', () => {
       // Provisioning reads deployment config off the app (impersonation
       // resolution, clone-reference hints, daemon unix user).
       get: () => ({}),
+      // Dispatch mints a scoped executor command token before spawning; without
+      // this daemon-private singleton the spawn fails closed and never reaches
+      // the executor mock.
+      sessionTokenService: {
+        generateCommandToken: vi.fn(async () => 'delegated-user-token'),
+      },
       settings: { authentication: { secret: 'test-secret' } },
       service: vi.fn((name: string) => {
         if (name === 'branches') return branches;

@@ -10,7 +10,7 @@
 import type { UUID } from '@agor/core/types';
 import { describe, expect } from 'vitest';
 import { generateId } from '../../lib/ids';
-import { dbTest } from '../test-helpers';
+import { dbTest, ensureTestUser } from '../test-helpers';
 import { BranchRepository } from './branches';
 import { RepoRepository } from './repos';
 
@@ -21,6 +21,9 @@ async function seedFailedBranch(
 ): Promise<{ branchRepo: BranchRepository; branchId: UUID }> {
   const repoRepo = new RepoRepository(db);
   const branchRepo = new BranchRepository(db);
+  // `BranchRepository.create` requires the primary owner to be a real user in
+  // this tenant, so the owner principal has to exist before the branch does.
+  const owner = await ensureTestUser(db);
   const repo = await repoRepo.create({
     repo_id: generateId(),
     slug: `repo-${generateId()}`,
@@ -38,7 +41,7 @@ async function seedFailedBranch(
     path: '/tmp/base/feature',
     base_ref: 'main',
     new_branch: true,
-    created_by: 'user-1' as UUID,
+    created_by: owner as UUID,
     filesystem_status: 'failed',
     error_message: 'boom',
     ...over,
