@@ -20,11 +20,17 @@ import {
 import { RepoRepository } from './repos';
 import { SessionRepository } from './sessions';
 import { TaskRepository } from './tasks';
+import { UsersRepository } from './users';
 
 let branchSequence = 60_000;
 
 async function seedSession(db: Database, title: string) {
   const userId = generateId() as UserID;
+  await new UsersRepository(db).create({
+    user_id: userId as UUID,
+    email: `${userId}@example.test`,
+    name: title,
+  });
   const repo = await new RepoRepository(db).create({
     repo_id: generateId(),
     slug: `completion-${generateId()}`,
