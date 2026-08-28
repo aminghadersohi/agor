@@ -61,6 +61,8 @@ const ARRANGE_DIMENSIONS = {
 } as const;
 const DECK_OFFSET_X = 12;
 const DECK_OFFSET_Y = 48;
+const DEFAULT_ARRANGE_START_X = 80;
+const DEFAULT_ARRANGE_START_Y = 80;
 const COMPACT_ARRANGE_DIMENSIONS = {
   branch: { width: 500, height: 88 },
   card: { width: 380, height: 56 },
@@ -144,6 +146,66 @@ function estimateCardHeight(
     : 0;
   const note = card?.note ? 16 + lineCount(card.note, 48) * 18 : 0;
   return Math.max(ARRANGE_DIMENSIONS.card.height, header + description + note);
+}
+
+type CanvasRectangle = { id: string; x: number; y: number; width: number; height: number };
+
+function rectanglesOverlap(
+  a: { x: number; y: number; width: number; height: number },
+  b: { x: number; y: number; width: number; height: number }
+): boolean {
+  return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+}
+
+/**
+ * Zone rectangles a whole-board arrange must not lay its grid on top of.
+ *
+ * A zone is a container, not an annotation: dropping free-floating entities
+ * into its rectangle reads as "these belong to this zone" even though the
+ * arrange never pinned them. Zones that the same call is arranging are
+ * excluded — they are layout items, so they move out of their own way.
+ */
+function zoneObstacles(board: Board, arrangingZones: boolean): CanvasRectangle[] {
+  if (arrangingZones) return [];
+  return Object.entries(board.objects ?? {}).flatMap(([objectId, object]) => {
+    if (object.type !== 'zone') return [];
+    const { x, y, width, height } = object;
+    return [{ id: objectId, x, y, width, height }];
+  });
+}
+
+/**
+ * Pick the grid origin for a whole-board arrange.
+ *
+ * An explicit `startY` is always honored — the caller asked for that row. A
+ * defaulted one drops past each zone it lands on until the grid is clear,
+ * which settles on the first free row rather than below the lowest zone on the
+ * board: a single zone parked far down the canvas should not exile the grid
+ * with it. Each pass clears every zone that was blocking, so no zone can block
+ * twice and the loop terminates in at most one pass per zone.
+ */
+function resolveArrangeOrigin(options: {
+  startX: number;
+  startY: number;
+  explicitStartY: boolean;
+  layout: { width: number; height: number };
+  gapY: number;
+  obstacles: readonly CanvasRectangle[];
+}): { startX: number; startY: number; avoidedZoneIds: string[] } {
+  const { startX, startY, explicitStartY, layout, gapY, obstacles } = options;
+  if (explicitStartY || obstacles.length === 0 || layout.width <= 0 || layout.height <= 0) {
+    return { startX, startY, avoidedZoneIds: [] };
+  }
+  const avoidedZoneIds: string[] = [];
+  let y = startY;
+  for (let pass = 0; pass <= obstacles.length; pass += 1) {
+    const grid = { x: startX, y, width: layout.width, height: layout.height };
+    const blocking = obstacles.filter((zone) => rectanglesOverlap(grid, zone));
+    if (blocking.length === 0) break;
+    avoidedZoneIds.push(...blocking.map((zone) => zone.id));
+    y = Math.max(...blocking.map((zone) => zone.y + zone.height)) + gapY;
+  }
+  return { startX, startY: y, avoidedZoneIds };
 }
 
 function getCanvasObjectDimensions(object: BoardObject): { width: number; height: number } {
@@ -529,6 +591,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         'Arrange worktrees/branches and cards on a board in a dimension-aware row-major grid. ' +
         'By default, only free-floating entities are moved; zone-pinned entities stay in their zones. ' +
         'Set includeCanvasObjects=true to include text, markdown, apps, and artifacts, and includeZones=true to arrange zones as movable containers. ' +
+        'Unless startY is given explicitly, the grid is placed clear of every existing zone rectangle instead of on top of one. ' +
         'Use this after creating or moving many board items so the canvas is tidy and collision-free.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
@@ -564,7 +627,10 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           'Number of columns in the grid (default: square-ish layout).'
         ),
         startX: mcpOptionalNumber('startX', 'Canvas X origin (default: 80).'),
-        startY: mcpOptionalNumber('startY', 'Canvas Y origin (default: 80).'),
+        startY: mcpOptionalNumber(
+          'startY',
+          'Canvas Y origin. When omitted, the grid starts at 80 unless that would place it over an existing zone, in which case it drops below every zone and reports avoidedZoneIds. Pass a value to place the grid exactly, including over a zone.'
+        ),
         gapX: mcpOptionalNumber('gapX', 'Horizontal gap between cards (default: 40).'),
         gapY: mcpOptionalNumber('gapY', 'Vertical gap between cards (default: 40).'),
       }),
@@ -588,8 +654,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const entities = visibleEntities
         .filter((entity) => args.includePinned === true || !entity.zone_id)
         .sort(compareBoardEntitiesSpatially);
-      const startX = args.startX ?? 80;
-      const startY = args.startY ?? 80;
+      const requestedStartX = args.startX ?? DEFAULT_ARRANGE_START_X;
+      const requestedStartY = args.startY ?? DEFAULT_ARRANGE_START_Y;
       const gapX = args.gapX ?? 40;
       const gapY = args.gapY ?? 40;
       const items: Array<{
@@ -629,24 +695,21 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           ...entityDimensions,
         });
       }
-      const boardsService =
-        args.includeCanvasObjects === true || args.includeZones === true
-          ? ctx.app.service('boards')
-          : null;
-      if (boardsService) {
-        const board = (await boardsService?.get(boardId, ctx.baseServiceParams)) as Board;
-        for (const [objectId, object] of Object.entries(board.objects ?? {})) {
-          if (object.type === 'zone' && args.includeZones !== true) continue;
-          if (object.type !== 'zone' && args.includeCanvasObjects !== true) continue;
-          items.push({
-            id: objectId,
-            kind: 'canvas',
-            object,
-            x: object.x,
-            y: object.y,
-            ...getCanvasObjectDimensions(object),
-          });
-        }
+      // The board is read even when no canvas object is being arranged: its
+      // zone rectangles are what the free-floating grid has to stay clear of.
+      const boardsService = ctx.app.service('boards');
+      const board = (await boardsService.get(boardId, ctx.baseServiceParams)) as Board;
+      for (const [objectId, object] of Object.entries(board.objects ?? {})) {
+        if (object.type === 'zone' && args.includeZones !== true) continue;
+        if (object.type !== 'zone' && args.includeCanvasObjects !== true) continue;
+        items.push({
+          id: objectId,
+          kind: 'canvas',
+          object,
+          x: object.x,
+          y: object.y,
+          ...getCanvasObjectDimensions(object),
+        });
       }
       items.sort((a, b) => a.y - b.y || a.x - b.x || a.id.localeCompare(b.id));
       const layout = layoutRectangles(
@@ -657,6 +720,14 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           gapY,
         }
       );
+      const { startX, startY, avoidedZoneIds } = resolveArrangeOrigin({
+        startX: requestedStartX,
+        startY: requestedStartY,
+        explicitStartY: args.startY !== undefined,
+        layout,
+        gapY,
+        obstacles: zoneObstacles(board, args.includeZones === true),
+      });
       const placementById = new Map(
         layout.placements.map((placement) => [placement.id, placement])
       );
@@ -682,7 +753,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
             entityType: item.entity.entity_type,
             position,
           });
-        } else if (item.object && boardsService) {
+        } else if (item.object) {
           await boardsService.patch(
             boardId,
             {
@@ -715,6 +786,13 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         height: layout.height,
         appliedGapX: layout.gapX,
         appliedGapY: layout.gapY,
+        appliedStartX: startX,
+        appliedStartY: startY,
+        avoidedZoneIds,
+        warning:
+          avoidedZoneIds.length > 0
+            ? `The default grid origin would have covered ${avoidedZoneIds.length} existing zone(s); the grid was placed below every zone at y=${startY}. Pass startY to override.`
+            : null,
         updates,
       });
     }

@@ -63,6 +63,46 @@ describe('branchQueryValidator', () => {
       archived: false,
     });
   });
+
+  it('passes a branch_id batch through to the service that reads it', async () => {
+    const context = {
+      params: {
+        query: {
+          branch_id: { $in: ['019e8e1c', '019e8e1c-0000-7000-8000-000000000001'] },
+          archived: 'false',
+        },
+      },
+    };
+
+    await typedValidateQuery(branchQueryValidator)(context);
+
+    expect(context.params.query).toEqual({
+      branch_id: { $in: ['019e8e1c', '019e8e1c-0000-7000-8000-000000000001'] },
+      archived: false,
+    });
+  });
+
+  it('still refuses branch_id operators and elements the service cannot read', async () => {
+    for (const branch_id of [
+      { $ne: null },
+      { $in: ['not-a-branch-id'] },
+      { $in: '019e8e1c' },
+    ] as const) {
+      await expect(
+        typedValidateQuery(branchQueryValidator)({ params: { query: { branch_id } } })
+      ).rejects.toThrow();
+    }
+  });
+
+  it('strips unsupported operators sitting beside a branch_id batch', async () => {
+    const context = {
+      params: { query: { branch_id: { $in: ['019e8e1c'], $nin: ['019e8e1d'] } } },
+    };
+
+    await typedValidateQuery(branchQueryValidator)(context);
+
+    expect(context.params.query).toEqual({ branch_id: { $in: ['019e8e1c'] } });
+  });
 });
 
 describe('userQueryValidator', () => {
