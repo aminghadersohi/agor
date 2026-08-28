@@ -1355,10 +1355,12 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     // impersonation config from the database, and it captures the ambient tenant
     // so the executor's async onExit safety net can re-enter the right scope.
     const userId = branch.created_by as UserID;
-    await this.withTenantDatabase(params, () =>
+    // Take the dispatch result rather than the claimed row: a synchronous spawn
+    // failure marks the branch `failed` in there, and returning the pre-dispatch
+    // `creating` object would report an in-flight retry that never started.
+    return await this.withTenantDatabase(params, () =>
       this.dispatchBranchProvisioning(claimedBranch, repo, userId, params, 'retry')
     );
-    return claimedBranch;
   }
 
   /**

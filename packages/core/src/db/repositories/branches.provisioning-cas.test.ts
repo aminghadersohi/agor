@@ -66,6 +66,10 @@ describe('BranchRepository provisioning CAS', () => {
 
       const reloaded = await branchRepo.findById(branchId);
       expect(reloaded?.filesystem_status).toBe('creating');
+      // Assert against the reloaded row, not just the returned object: clearing
+      // the error has to reach the column, or the stale failure text keeps
+      // showing in the UI while the branch is legitimately provisioning again.
+      expect(reloaded?.error_message ?? undefined).toBeUndefined();
     }
   );
 
