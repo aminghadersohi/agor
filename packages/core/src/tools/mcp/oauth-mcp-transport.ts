@@ -1914,11 +1914,6 @@ export async function startMCPOAuthFlow(
      * discovery and DCR boundaries; standalone/CLI callers omit it.
      */
     assertCurrent?: () => void;
-    /**
-     * Permit an exact HTTP loopback callback without permitting private OAuth
-     * metadata, authorization, registration, or token endpoints.
-     */
-    allowLoopbackRedirectUri?: boolean;
   }
 ): Promise<OAuthFlowContext> {
   console.log('[MCP OAuth] Starting two-phase OAuth 2.1 flow');
