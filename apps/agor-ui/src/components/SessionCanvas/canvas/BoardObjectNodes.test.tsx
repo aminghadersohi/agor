@@ -133,3 +133,98 @@ describe('ZoneNode config modal', () => {
     expect(screen.getByTestId('zone-config-modal')).toHaveTextContent('Configure Zone: My Zone');
   });
 });
+
+function renderZoneDensity(opts: {
+  pinnedItemCount: number;
+  compactItemCount: number;
+  onSetContentsCompact?: ReturnType<typeof vi.fn>;
+  connection?: typeof CONNECTED;
+}) {
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <ConnectionProvider value={opts.connection ?? CONNECTED}>
+      <AntApp>
+        <ReactFlowProvider>{children}</ReactFlowProvider>
+      </AntApp>
+    </ConnectionProvider>
+  );
+  return render(
+    <ZoneNode
+      selected={true}
+      data={{
+        objectId: 'zone-1',
+        label: 'Review',
+        width: 400,
+        height: 300,
+        x: 0,
+        y: 0,
+        zIndex: 100,
+        pinnedItemCount: opts.pinnedItemCount,
+        compactItemCount: opts.compactItemCount,
+        onSetContentsCompact: opts.onSetContentsCompact,
+      }}
+    />,
+    { wrapper }
+  );
+}
+
+describe('ZoneNode density toolbar', () => {
+  it('offers "Collapse contents" while any pinned item is still expanded', () => {
+    const onSetContentsCompact = vi.fn();
+    renderZoneDensity({ pinnedItemCount: 3, compactItemCount: 0, onSetContentsCompact });
+
+    const btn = screen.getByLabelText('Collapse contents');
+    fireEvent.pointerDown(btn);
+    fireEvent.pointerUp(btn);
+
+    expect(onSetContentsCompact).toHaveBeenCalledTimes(1);
+    expect(onSetContentsCompact).toHaveBeenCalledWith('zone-1', true);
+  });
+
+  it('flips to "Expand contents" only once every pinned item is collapsed', () => {
+    const onSetContentsCompact = vi.fn();
+    renderZoneDensity({ pinnedItemCount: 3, compactItemCount: 3, onSetContentsCompact });
+
+    const btn = screen.getByLabelText('Expand contents');
+    fireEvent.pointerDown(btn);
+    fireEvent.pointerUp(btn);
+
+    expect(onSetContentsCompact).toHaveBeenCalledWith('zone-1', false);
+  });
+
+  it('still collapses a partially collapsed zone, making it uniform in one click', () => {
+    const onSetContentsCompact = vi.fn();
+    renderZoneDensity({ pinnedItemCount: 3, compactItemCount: 2, onSetContentsCompact });
+
+    expect(screen.queryByLabelText('Expand contents')).toBeNull();
+    fireEvent.pointerUp(screen.getByLabelText('Collapse contents'));
+
+    expect(onSetContentsCompact).toHaveBeenCalledWith('zone-1', true);
+  });
+
+  it('disables the control on an empty zone', () => {
+    const onSetContentsCompact = vi.fn();
+    renderZoneDensity({ pinnedItemCount: 0, compactItemCount: 0, onSetContentsCompact });
+
+    const btn = screen.getByLabelText('Collapse contents');
+    expect(btn).toBeDisabled();
+    fireEvent.pointerUp(btn);
+    expect(onSetContentsCompact).not.toHaveBeenCalled();
+  });
+
+  it('does not fire when the mutation gate is closed (disconnected)', () => {
+    const onSetContentsCompact = vi.fn();
+    renderZoneDensity({
+      pinnedItemCount: 2,
+      compactItemCount: 0,
+      onSetContentsCompact,
+      connection: DISCONNECTED,
+    });
+
+    const btn = screen.getByLabelText('Collapse contents');
+    fireEvent.pointerDown(btn);
+    fireEvent.pointerUp(btn);
+    fireEvent.keyDown(btn, { key: 'Enter' });
+
+    expect(onSetContentsCompact).not.toHaveBeenCalled();
+  });
+});

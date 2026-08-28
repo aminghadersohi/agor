@@ -116,14 +116,18 @@ Agor can arrange mixed-size branches, cards, zones, notes, apps, and artifacts w
 - **Tidy a zone:** select a zone and choose **Tidy up contents** in its toolbar. Pinned branches and cards remain pinned and are laid out relative to that zone.
 - **Arrange through MCP:** use `agor_boards_auto_arrange` for top-level objects or `agor_boards_auto_arrange_zone` for one zone.
 - **Maintain a zone:** open the zone settings and switch **Automatic** on. The board reflows that zone when items appear, disappear, change ordering metadata, or resize as sessions are added.
+- **Collapse one card:** use the collapse button in a worktree or card header. Collapsing hides secondary content — metadata, notes, sessions, descriptions — and keeps the header, so the same button expands the card again. Cards with nothing to hide do not show the control.
+- **Collapse a zone:** select a zone and choose **Collapse contents** in its toolbar. Once every pinned item is collapsed the button becomes **Expand contents**; a partially collapsed zone still offers **Collapse contents**, so one click makes the whole zone uniform.
 - **Compact through MCP:** use `agor_boards_set_compact` to collapse or expand cards/worktrees by placement ID, zone, type, or across a board. This is shared board presentation state, so collaborators and agents see the same density.
+
+Density is a board mutation like any other: it needs Board Editor or Manager access, and viewers see no density controls.
 
 Layouts read the rendered width and height of each branch or card, then fill rows from the top-left with equal spacing. A non-overlapping grid is always preferred, compacting edge margins and gaps down to a small safe minimum before overlap is considered. The UI will not apply an overlapping layout. The MCP result reports whether a grid fit, the applied gaps and padding, required bounds, and any objects that could not be fully contained.
 
 Zone settings provide two opinionated presentations:
 
 - **Grid** keeps each card/worktree's current expanded or collapsed density and chooses a contained row-and-column layout. You can supply a preferred column count or let Agor choose the nearest fitting grid.
-- **Compact list** collapses each item to a one-row summary and arranges a single readable column. This is useful for dense triage, ranking, and status queues.
+- **Compact list** collapses each item to a one-row summary and arranges a single readable column. This is useful for dense triage, ranking, and status queues. Collapsing is a change to each item's own density, so switching the zone back to **Grid** keeps the items collapsed; use the zone's **Expand contents** button to restore them.
 
 Both presentations can sort by current spatial order, priority/rank, workflow status, last updated, creation time, or title, in either direction. Switching a previously-unsorted zone to automatic maintenance defaults to **Last updated · Descending**, so active work appears first. Use **Columns** to request a fixed grid width or leave it on Auto. **Spacing** is an exact pixel input shared by UI and MCP. **Grow to fit** lets an automatic zone expand vertically to contain every row; when it is off, the zone keeps the size you chose.
 
