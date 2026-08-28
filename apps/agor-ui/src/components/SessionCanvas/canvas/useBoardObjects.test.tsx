@@ -893,3 +893,116 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
     expect(compactPatches(patch)).toEqual([]);
   });
 });
+
+/**
+ * Expanding on the way out of compact_list is only half the job: the cards keep
+ * the one-row spacing the preset gave them, so restoring their full height
+ * makes them overlap until the zone is re-packed.
+ */
+describe('compact_list → grid re-packs the expanded zone', () => {
+  const zoneId = 'zone-1';
+
+  function zone(preset: string) {
+    return {
+      type: 'zone',
+      x: 0,
+      y: 0,
+      width: 420,
+      height: 900,
+      label: 'Triage',
+      layout: { mode: 'manual', preset },
+    };
+  }
+
+  const placements = [
+    { object_id: 'obj-a', zone_id: zoneId, card_id: 'card-a', compact: true },
+    { object_id: 'obj-b', zone_id: zoneId, card_id: 'card-b', compact: true },
+  ];
+
+  // Stacked at compact_list's row pitch: 56px apart, which is exactly the
+  // spacing that overlaps once each card is ~120px tall again.
+  const nodes = [
+    {
+      id: 'card-card-a',
+      type: 'cardNode',
+      parentId: zoneId,
+      position: { x: 24, y: 64 },
+      width: 380,
+      height: 120,
+      data: {},
+    },
+    {
+      id: 'card-card-b',
+      type: 'cardNode',
+      parentId: zoneId,
+      position: { x: 24, y: 120 },
+      width: 380,
+      height: 120,
+      data: {},
+    },
+  ];
+
+  it('schedules an arrange that moves the expanded cards apart', async () => {
+    vi.useFakeTimers();
+    const { client, patch } = makeClient();
+    const setNodes = vi.fn();
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({ [zoneId]: zone('compact_list') }),
+          client: client as never,
+          boardObjectsForBoard: placements as never,
+          nodes: nodes as never,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid') as never);
+    });
+
+    // The expand lands immediately; the re-pack is deferred so the cards can
+    // paint at full height before the layout measures them.
+    const compactPatches = patch.mock.calls.filter((c) => c[1] && 'compact' in c[1]);
+    expect(compactPatches.map((c) => c[1].compact)).toEqual([false, false]);
+    expect(patch.mock.calls.some((c) => c[1] && 'position' in c[1])).toBe(false);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    const positioned = patch.mock.calls.filter((c) => c[1] && 'position' in c[1]);
+    expect(positioned.length).toBeGreaterThan(0);
+    // Whatever the packer chooses, the two cards must no longer sit 56px apart.
+    const ys = positioned.map((c) => c[1].position.y).sort((a, b) => a - b);
+    if (ys.length === 2) expect(ys[1] - ys[0]).toBeGreaterThan(56);
+  });
+
+  it('does not schedule a re-pack when the preset did not leave compact_list', async () => {
+    vi.useFakeTimers();
+    const { client, patch } = makeClient();
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({ [zoneId]: zone('grid') }),
+          client: client as never,
+          boardObjectsForBoard: placements as never,
+          nodes: nodes as never,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid') as never);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    expect(patch.mock.calls.some((c) => c[1] && 'position' in c[1])).toBe(false);
+  });
+});
