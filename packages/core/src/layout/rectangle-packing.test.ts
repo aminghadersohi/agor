@@ -15,6 +15,18 @@ function expectNoOverlap(placements: RectanglePlacement[]): void {
 }
 
 describe('layoutRectangles', () => {
+  it('handles empty and single-item layouts without phantom rows or columns', () => {
+    const empty = layoutRectangles([], { bounds: { width: 0, height: 0 } });
+    expect(empty).toMatchObject({ placements: [], columns: 1, rows: 0 });
+
+    const single = layoutRectangles([{ id: 'only', width: 120, height: 80 }], {
+      bounds: { width: 160, height: 120 },
+      padding: 20,
+    });
+    expect(single).toMatchObject({ columns: 1, rows: 1, overflowingItemIds: [] });
+    expect(single.placements[0]).toMatchObject({ x: 20, y: 20, row: 0, column: 0 });
+  });
+
   it('packs different rendered sizes into complete row-major rows and columns', () => {
     const result = layoutRectangles(
       [
@@ -241,5 +253,36 @@ describe('layoutRectangles', () => {
 
     expect(result.overflowingItemIds).toEqual(['oversized']);
     expect(result.placements[0]).toMatchObject({ x: 24, y: 24 });
+  });
+
+  it('terminates for very large heterogeneous inputs without leaving grid holes', () => {
+    const items = Array.from({ length: 10_000 }, (_, index) => ({
+      id: `item-${index}`,
+      width: 80 + (index % 17),
+      height: 40 + (index % 29),
+    }));
+    const result = layoutRectangles(items, {
+      bounds: { width: 1_200, height: 1_000_000 },
+      preferredColumns: 10,
+      padding: 8,
+      minPadding: 8,
+      gapX: 8,
+      gapY: 8,
+      minGapX: 8,
+      minGapY: 8,
+    });
+
+    expect(result).toMatchObject({ mode: 'grid', columns: 10, rows: 1_000 });
+    expect(result.overflowingItemIds).toEqual([]);
+    expect(result.placements).toHaveLength(items.length);
+    expect(result.placements.every((item, index) => item.stackIndex === index)).toBe(true);
+    for (const [index, placement] of result.placements.entries()) {
+      expect(placement.row).toBe(Math.floor(index / result.columns));
+      expect(placement.column).toBe(index % result.columns);
+      const left = placement.column > 0 ? result.placements[index - 1] : undefined;
+      const above = placement.row > 0 ? result.placements[index - result.columns] : undefined;
+      if (left) expect(left.x + left.width).toBeLessThanOrEqual(placement.x);
+      if (above) expect(above.y + above.height).toBeLessThanOrEqual(placement.y);
+    }
   });
 });
