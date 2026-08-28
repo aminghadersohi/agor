@@ -1306,8 +1306,8 @@ export async function createBranch(
   if (directoryHasEntries(branchPath)) {
     throw new Error(
       `Target directory '${branchPath}' already exists on disk and is not empty. ` +
-        `This usually means an archived or partially-cleaned branch still occupies this path. ` +
-        `Please choose a different name or clean up the existing directory.`
+        'This usually means an archived or partially-cleaned branch still occupies this path. ' +
+        'Please choose a different name or clean up the existing directory.'
     );
   }
 
@@ -1744,7 +1744,7 @@ export async function createBranchAsClone(
   if (directoryHasEntries(targetPath)) {
     throw new Error(
       `Target directory '${targetPath}' already exists and is not empty. ` +
-        `Refusing to clone over existing contents — pick a different path or remove the directory first.`
+        'Refusing to clone over existing contents — pick a different path or remove the directory first.'
     );
   }
 

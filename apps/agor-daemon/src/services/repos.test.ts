@@ -1170,6 +1170,33 @@ describe('ReposService branch provisioning lifecycle', () => {
     );
   });
 
+  it('retry surfaces the failed row when the executor spawn fails synchronously', async () => {
+    // Fire-and-forget means a synchronous spawn failure produces no process and
+    // therefore no onExit. dispatchBranchProvisioning patches the branch to
+    // `failed` for exactly that case; retry has to return THAT row. Returning
+    // the pre-dispatch `creating` claim would tell a REST/MCP caller a retry is
+    // in flight when nothing is running.
+    const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
+    branchRepoMock.claimFailedForProvisioningRetry.mockResolvedValue({
+      claimed: true,
+      branch: branch({ filesystem_status: 'creating' }),
+    });
+    const patch = vi.fn(async () =>
+      branch({ filesystem_status: 'failed', error_message: 'Failed to spawn executor: boom' })
+    );
+    executorMocks.spawnExecutorFireAndForget.mockImplementation(() => {
+      throw new Error('boom');
+    });
+    const { service } = makeService({ get, patch });
+    (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
+      vi.fn(async () => repo);
+
+    const result = await service.retryBranchProvisioning('b1');
+
+    expect(result.filesystem_status).toBe('failed');
+    expect(result.error_message).toMatch(/failed to spawn executor/i);
+  });
+
   it("retry runs its CAS inside the caller's tenant database scope", async () => {
     // retryBranchProvisioning is a custom method: no Feathers hook opens a
     // tenant scope for it. In `required_from_auth` the daemon handle is a
