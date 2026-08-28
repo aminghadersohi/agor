@@ -203,6 +203,14 @@ services:
       # No pnpm install needed at runtime - deps are baked into the image!
       # pnpm workspace symlinks (packages/*/node_modules) point into this directory
       - /app/node_modules
+      # Shadow @agor/core's build output too. Its tsup `onSuccess` copies the
+      # drizzle migrations with `cpSync`, which preserves file modes; written
+      # through the bind mount on macOS a 0644 source lands as 0200, so the
+      # recursive copy then fails EACCES on its own output. That fails
+      # `@agor/core build`, the entrypoint exits before the daemon starts, and
+      # the environment sits in "starting" forever because only the health URL
+      # is polled. Keeping dist inside the container avoids the host mount.
+      - /app/packages/core/dist
       # Shadow package-level node_modules too (they contain symlinks into root)
       - /app/packages/core/node_modules
       - /app/packages/agentic-tool-opencode/node_modules
