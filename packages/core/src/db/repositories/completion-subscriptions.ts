@@ -280,9 +280,21 @@ export class CompletionSubscriptionRepository {
     return this.findByTerminalTask(taskId);
   }
 
-  async markMissingActive(id: CompletionSubscriptionID, completedAt = new Date()): Promise<void> {
+  /**
+   * `expectedActiveTaskId` must be the active Task ID (or `null`) the caller
+   * actually observed as missing. Guarding the write on it prevents a
+   * concurrent `designateContinuation` from moving the subscription onto a
+   * new Task between the caller's read and this write from being clobbered
+   * back to `terminal_pending` for the now-stale prior Task.
+   */
+  async markMissingActive(
+    id: CompletionSubscriptionID,
+    expectedActiveTaskId: TaskID | null,
+    completedAt = new Date()
+  ): Promise<void> {
     const current = await this.get(id);
     if (!ACTIVE_STATES.includes(current.state as (typeof ACTIVE_STATES)[number])) return;
+    if (current.active_task_id !== expectedActiveTaskId) return;
     const terminal = current.path.at(-1);
     if (!terminal) throw new RepositoryError('Completion subscription has no delegation path');
     const snapshot: CompletionTerminalSnapshot = {
@@ -305,7 +317,10 @@ export class CompletionSubscriptionRepository {
       .where(
         and(
           eq(completionSubscriptions.subscription_id, id),
-          inArray(completionSubscriptions.state, [...ACTIVE_STATES])
+          inArray(completionSubscriptions.state, [...ACTIVE_STATES]),
+          expectedActiveTaskId
+            ? eq(completionSubscriptions.active_task_id, expectedActiveTaskId)
+            : isNull(completionSubscriptions.active_task_id)
         )
       )
       .run();
@@ -438,15 +453,25 @@ export class CompletionSubscriptionRepository {
     const attempt = current.delivery_attempt_count + 1;
     const exhausted = attempt >= 8;
     const delayMs = Math.min(5 * 60_000, 1_000 * 2 ** Math.min(attempt - 1, 8));
+    // Gate on DELIVERY_STATES so a worker racing a concurrent `recordDelivered`
+    // (e.g. this call observed a stale pre-success read) can never clobber an
+    // already-delivered row back to `delivery_failed`. The attempt counter
+    // increments atomically in SQL so a concurrent double-failure can't lose
+    // a count even though the derived backoff window is best-effort.
     await update(this.db, completionSubscriptions)
       .set({
         state: 'delivery_failed',
-        delivery_attempt_count: attempt,
+        delivery_attempt_count: sql`${completionSubscriptions.delivery_attempt_count} + 1`,
         next_delivery_at: exhausted ? null : new Date(Date.now() + delayMs),
         last_delivery_error_code: errorCode.slice(0, 96),
         updated_at: new Date(),
       })
-      .where(eq(completionSubscriptions.subscription_id, id))
+      .where(
+        and(
+          eq(completionSubscriptions.subscription_id, id),
+          inArray(completionSubscriptions.state, [...DELIVERY_STATES])
+        )
+      )
       .run();
     return this.get(id);
   }

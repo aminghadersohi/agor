@@ -341,7 +341,7 @@ describe('CompletionSubscriptionRepository', () => {
         root_task_id: rootTask.task_id,
       });
       await new SessionRepository(db).delete(root.session.session_id);
-      await subscriptions.markMissingActive(created.subscription_id);
+      await subscriptions.markMissingActive(created.subscription_id, null);
       expect(await subscriptions.get(created.subscription_id)).toMatchObject({
         origin_session_id: origin.session.session_id,
         origin_task_id: originTask.task_id,

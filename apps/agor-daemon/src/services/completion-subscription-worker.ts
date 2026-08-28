@@ -6,6 +6,7 @@ import {
   runWithSystemDatabaseScope,
   runWithTenantContext,
   runWithTenantDatabaseScope,
+  runWithTenantDatabaseTransaction,
   shortId,
   TaskRepository,
   type TenantScopeAwareDatabase,
@@ -28,6 +29,7 @@ import { isTerminalTaskStatus, TaskStatus } from '@agor/core/types';
 import { ensureCanPromptTargetSession } from '../utils/branch-authorization.js';
 import { propagatedCompletionCallbackTaskId } from '../utils/durable-task-id.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
+import { lockTenantAuthorizationFence } from './tenant-authorization-fence.js';
 
 const SCAN_BATCH = 100;
 const SCAN_INTERVAL_MS = 5_000;
@@ -222,18 +224,35 @@ export class CompletionSubscriptionWorker {
     const activeRefs = await this.discover('active');
     for (const ref of activeRefs) {
       const tenantId = this.options.tenantId ?? ref.tenant_id;
-      await runWithTenantContext(tenantId, () =>
-        runWithTenantDatabaseScope(this.db, tenantId, () => this.reconcile(ref.subscription_id))
-      );
+      try {
+        await runWithTenantContext(tenantId, () =>
+          runWithTenantDatabaseScope(this.db, tenantId, () => this.reconcile(ref.subscription_id))
+        );
+      } catch (error) {
+        // One poisoned reference must not block reconciliation of the rest of
+        // the batch, or the due-delivery pass below, until the next scan.
+        console.warn(
+          `[completion-callback] event=reconcile_failed subscription_id=${shortId(ref.subscription_id)} code=${boundedErrorCode(error)}`
+        );
+      }
     }
     const dueRefs = await this.discover('due');
     for (const ref of dueRefs) {
       const tenantId = this.options.tenantId ?? ref.tenant_id;
-      await runWithTenantContext(tenantId, () =>
-        runWithTenantDatabaseScope(this.db, tenantId, () =>
-          this.deliver(ref.subscription_id, tenantId)
-        )
-      );
+      try {
+        await runWithTenantContext(tenantId, () =>
+          runWithTenantDatabaseScope(this.db, tenantId, () =>
+            this.deliver(ref.subscription_id, tenantId)
+          )
+        );
+      } catch (error) {
+        // deliver() already records failures durably via recordDeliveryFailure;
+        // this only guards against a failure so early it never reached that
+        // handler (e.g. discovery/tenant-scope setup).
+        console.warn(
+          `[completion-callback] event=deliver_failed subscription_id=${shortId(ref.subscription_id)} code=${boundedErrorCode(error)}`
+        );
+      }
     }
     return { reconciled: activeRefs.length, delivered: dueRefs.length };
   }
@@ -253,13 +272,13 @@ export class CompletionSubscriptionWorker {
     const { subscriptions, tasks } = this.repositories();
     const subscription = await subscriptions.get(id);
     if (!subscription.active_task_id) {
-      await subscriptions.markMissingActive(id);
+      await subscriptions.markMissingActive(id, null);
       console.warn(`[completion-callback] event=downstream_missing subscription_id=${shortId(id)}`);
       return;
     }
     const task = await tasks.findById(subscription.active_task_id);
     if (!task) {
-      await subscriptions.markMissingActive(id);
+      await subscriptions.markMissingActive(id, subscription.active_task_id);
       console.warn(`[completion-callback] event=downstream_missing subscription_id=${shortId(id)}`);
       return;
     }
@@ -284,10 +303,11 @@ export class CompletionSubscriptionWorker {
   }
 
   private async deliver(id: CompletionSubscriptionID, tenantId: string): Promise<void> {
-    const { subscriptions, tasks, branches } = this.repositories();
+    const { subscriptions, branches } = this.repositories();
     const subscription = await subscriptions.get(id);
     const terminal = subscription.terminal_snapshot;
-    if (!terminal || !subscription.callback_session_id) {
+    const callbackSessionId = subscription.callback_session_id;
+    if (!terminal || !callbackSessionId) {
       await subscriptions.recordDeliveryFailure(id, 'callback_target_missing');
       return;
     }
@@ -303,8 +323,13 @@ export class CompletionSubscriptionWorker {
         user,
         tenant,
       } as AuthenticatedParams;
+      // Low-latency rejection before any enrichment work. The authoritative
+      // check is repeated inside the admission transaction below, exactly
+      // like /sessions/:id/prompt: a durable delivery can be arbitrarily
+      // delayed, so authority must be re-verified at the moment of Task
+      // creation, not only at the start of this pass.
       const callbackSession = await ensureCanPromptTargetSession(
-        subscription.callback_session_id,
+        callbackSessionId,
         subscription.requested_by_user_id,
         this.app,
         branches
@@ -375,18 +400,37 @@ export class CompletionSubscriptionWorker {
         subscription.subscription_id,
         callbackSession.session_id
       );
-      let callbackTask = await tasks.findById(deliveryTaskId);
-      let created = false;
-      if (callbackTask) {
-        if (
-          callbackTask.session_id !== callbackSession.session_id ||
-          callbackTask.metadata?.completion_subscription_id !== subscription.subscription_id
-        ) {
-          throw new Error('Durable completion delivery key collision');
-        }
-      } else {
-        try {
-          callbackTask = await tasks.createPending({
+      // Re-authorize and admit the durable delivery Task in the same
+      // transaction, under the same tenant authorization fence used by
+      // /sessions/:id/prompt admission. This closes the gap where a branch
+      // capability revocation commits between the fast-path check above and
+      // Task creation. A deterministic-insert collision with another worker
+      // is left to abort this transaction and surface through the outer
+      // catch below; recordDeliveryFailure's retry will observe the winner's
+      // already-committed row as `existing` on the next attempt.
+      const { callbackTask, created } = await runWithTenantDatabaseTransaction(
+        this.db,
+        tenantId,
+        async (operationDb) => {
+          await lockTenantAuthorizationFence(operationDb, userParams);
+          await ensureCanPromptTargetSession(
+            callbackSessionId,
+            subscription.requested_by_user_id,
+            this.app,
+            new BranchRepository(operationDb)
+          );
+          const operationTasks = new TaskRepository(operationDb);
+          const existing = await operationTasks.findById(deliveryTaskId);
+          if (existing) {
+            if (
+              existing.session_id !== callbackSession.session_id ||
+              existing.metadata?.completion_subscription_id !== subscription.subscription_id
+            ) {
+              throw new Error('Durable completion delivery key collision');
+            }
+            return { callbackTask: existing, created: false };
+          }
+          const admitted = await operationTasks.createPending({
             task_id: deliveryTaskId,
             session_id: callbackSession.session_id,
             full_prompt: prompt,
@@ -399,20 +443,9 @@ export class CompletionSubscriptionWorker {
               authorized,
             }),
           });
-          created = true;
-        } catch (error) {
-          // Another worker may have won the deterministic insert. Re-read and
-          // verify ownership before acknowledging delivery.
-          callbackTask = await tasks.findById(deliveryTaskId);
-          if (
-            !callbackTask ||
-            callbackTask.session_id !== callbackSession.session_id ||
-            callbackTask.metadata?.completion_subscription_id !== subscription.subscription_id
-          ) {
-            throw error;
-          }
+          return { callbackTask: admitted, created: true };
         }
-      }
+      );
       await subscriptions.recordDelivered(id, callbackTask.task_id);
       if (created) {
         emitServiceEvent(this.app, {
