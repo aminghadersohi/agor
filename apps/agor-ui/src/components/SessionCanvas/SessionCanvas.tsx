@@ -71,6 +71,7 @@ import {
   useRegisterRecenter,
 } from '../../contexts/CanvasNavigationContext';
 import { useMutationGate } from '../../contexts/ConnectionContext';
+import { useCanManageBoard } from '../../hooks/useCanManageBoard';
 import { useCursorTracking } from '../../hooks/useCursorTracking';
 import { useStableCallback } from '../../hooks/useStableCallback';
 import { agorStore, useAgorStore } from '../../store/agorStore';
@@ -245,6 +246,7 @@ interface BranchNodeData {
   zoneName?: string;
   zoneColor?: string;
   compact?: boolean;
+  onToggleCompact?: (branchId: string, compact: boolean) => void;
   selectedSessionId?: string | null;
   isActiveUrlTarget?: boolean;
   client: AgorClient | null;
@@ -322,6 +324,7 @@ const BranchNode = React.memo(
           client={data.client}
           zoneColor={data.zoneColor}
           compact={data.compact}
+          onToggleCompact={data.onToggleCompact}
         />
       </div>
     );
@@ -344,6 +347,7 @@ const BranchNode = React.memo(
       p.zoneName === n.zoneName &&
       p.zoneColor === n.zoneColor &&
       p.compact === n.compact &&
+      p.onToggleCompact === n.onToggleCompact &&
       p.client === n.client &&
       p.onTaskClick === n.onTaskClick &&
       p.onSessionClick === n.onSessionClick &&
@@ -534,6 +538,34 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       }
       return map;
     }, [boardObjectsForBoard]);
+
+    // Density controls patch `board-objects`, which the daemon authorizes with
+    // `board.edit` — the same capability `agor_boards_set_compact` needs. Resolve
+    // it client-side so a viewer is never handed a control that is certain to
+    // 403. Connection loss is handled separately, inside the handler, so a brief
+    // reconnect dims behavior instead of making buttons appear and disappear.
+    const currentUser = currentUserId ? (userById.get(currentUserId) ?? null) : null;
+    const canManageBoard = useCanManageBoard(client, board ?? undefined, currentUser);
+
+    const patchPlacementCompact = useStableCallback(
+      async (objectId: string | undefined, compact: boolean) => {
+        if (!client || !objectId || !mutationGate.canMutate) return;
+        try {
+          await client.service('board-objects').patch(objectId, { compact });
+        } catch (error) {
+          console.error('Failed to update card density:', error);
+          showError('Failed to update card density');
+        }
+      }
+    );
+
+    const handleToggleBranchCompact = useStableCallback((branchId: string, compact: boolean) => {
+      void patchPlacementCompact(boardObjectByBranch.get(branchId)?.object_id, compact);
+    });
+
+    const handleToggleCardCompact = useStableCallback((cardId: string, compact: boolean) => {
+      void patchPlacementCompact(boardObjectByCard.get(cardId)?.object_id, compact);
+    });
 
     // Card modal state
     const [selectedCard, setSelectedCard] = useState<CardWithType | null>(null);
@@ -991,6 +1023,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             zoneName,
             zoneColor,
             compact: boardObject?.compact === true,
+            onToggleCompact: canManageBoard ? handleToggleBranchCompact : undefined,
             client,
           },
         });
@@ -1022,6 +1055,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       onNukeEnvironment,
       onExecuteScheduleNow,
       handleUnpinBranch,
+      handleToggleBranchCompact,
+      canManageBoard,
       zoneLabels,
       warnInvalidZoneRef,
       client,
@@ -1106,6 +1141,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             onClick: handleCardClick,
             onUnpin: handleUnpinCard,
             compact: boardObject.compact === true,
+            onToggleCompact: canManageBoard ? handleToggleCardCompact : undefined,
           } satisfies CardNodeData,
         });
       }
@@ -1118,6 +1154,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       zoneLabels,
       handleCardClick,
       handleUnpinCard,
+      handleToggleCardCompact,
+      canManageBoard,
       warnInvalidZoneRef,
     ]);
 
