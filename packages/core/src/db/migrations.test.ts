@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createClient } from '@libsql/client';
@@ -192,6 +192,38 @@ describe('Postgres migrations', () => {
         `${newest?.tag} does not sort after every earlier migration`
       ).toBeGreaterThan(highestWhenBefore);
       expect(newest?.idx).toBeGreaterThan(highestIdxBefore);
+    }
+  });
+
+  it('leaves the next generated migration a free number in both dialects', async () => {
+    // `idx` decides nothing when migrating: drizzle reads entries in array
+    // order and gates each one on `when` against the highest applied
+    // `created_at`. It decides everything when *authoring*, because
+    // `drizzle-kit generate` numbers the next migration `lastEntry.idx + 1`.
+    //
+    // So a journal whose last entry is not its highest hands the next generated
+    // migration a prefix that is already on disk. That is the shape a merge
+    // produces on its own: `_journal.json` is a JSON array, so an upstream
+    // entry appended beside a local one with the same `idx` merges clean and
+    // silently, with no conflict to review.
+    //
+    // Checked per dialect because the two journals are numbered independently.
+    for (const dialect of ['postgres', 'sqlite'] as const) {
+      const directory = new URL(`../../drizzle/${dialect}/`, import.meta.url);
+      const { entries } = JSON.parse(
+        await readFile(new URL('meta/_journal.json', directory), 'utf8')
+      ) as { entries: JournalEntry[] };
+
+      // The journal and the directory beside it must describe the same set, or
+      // a rename has updated one and not the other.
+      const onDisk = (await readdir(directory)).filter((name) => name.endsWith('.sql'));
+      expect(new Set(onDisk)).toEqual(new Set(entries.map((entry) => `${entry.tag}.sql`)));
+
+      const nextPrefix = String((entries.at(-1)?.idx ?? -1) + 1).padStart(4, '0');
+      expect(
+        onDisk.filter((name) => name.startsWith(`${nextPrefix}_`)),
+        `${dialect}: drizzle-kit generate would write ${nextPrefix}_* over an existing migration`
+      ).toEqual([]);
     }
   });
 
@@ -1079,7 +1111,7 @@ describe('MCP stdio transport repair migrations', () => {
     `);
 
     const migration = await readFile(
-      new URL('../../drizzle/sqlite/0099_strip_stdio_remote_fields.sql', import.meta.url),
+      new URL('../../drizzle/sqlite/0103_strip_stdio_remote_fields.sql', import.meta.url),
       'utf8'
     );
     await client.executeMultiple(migration.replaceAll('--> statement-breakpoint', ''));
@@ -1128,7 +1160,7 @@ describe('MCP stdio transport repair migrations', () => {
 
   it('bounds the PostgreSQL cross-tenant repair to a temporary exact capability', async () => {
     const migration = await readFile(
-      new URL('../../drizzle/postgres/0096_strip_stdio_remote_fields.sql', import.meta.url),
+      new URL('../../drizzle/postgres/0100_strip_stdio_remote_fields.sql', import.meta.url),
       'utf8'
     );
 
