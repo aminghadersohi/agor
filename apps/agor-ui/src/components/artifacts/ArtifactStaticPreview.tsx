@@ -1,3 +1,4 @@
+import type { RefObject } from 'react';
 import { useMemo } from 'react';
 
 interface ArtifactStaticPreviewProps {
@@ -6,6 +7,8 @@ interface ArtifactStaticPreviewProps {
   externalResources?: string[];
   title?: string;
   onReady?: () => void;
+  /** Exposes the preview iframe so `ArtifactRuntimeBridge` can post queries to it. */
+  iframeRef?: RefObject<HTMLIFrameElement | null>;
 }
 
 const MIME_BY_EXTENSION: Record<string, string> = {
@@ -140,6 +143,7 @@ export function ArtifactStaticPreview({
   externalResources,
   title = 'Static artifact preview',
   onReady,
+  iframeRef,
 }: ArtifactStaticPreviewProps) {
   const srcDoc = useMemo(
     () => buildStaticArtifactDocument({ files, entry, externalResources }),
@@ -148,6 +152,7 @@ export function ArtifactStaticPreview({
 
   return (
     <iframe
+      ref={iframeRef}
       title={title}
       srcDoc={srcDoc}
       sandbox="allow-downloads allow-forms allow-modals allow-pointer-lock allow-popups allow-presentation allow-scripts"

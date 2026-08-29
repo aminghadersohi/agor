@@ -212,6 +212,7 @@ export const ArtifactNode = ({
   const [error, setError] = useState<string | null>(null);
   const [consentOpen, setConsentOpen] = useState(false);
   const [staticReady, setStaticReady] = useState(false);
+  const staticIframeRef = useRef<HTMLIFrameElement | null>(null);
   const lastHashRef = useRef<string | null>(null);
   const sandpackConfig = payload?.sandpack_config;
   const sandpackOptions = sandpackConfig?.options;
@@ -768,6 +769,7 @@ export const ArtifactNode = ({
                 }
                 title={`${payload.name} preview`}
                 onReady={() => setStaticReady(true)}
+                iframeRef={staticIframeRef}
               />
             ) : (
               <SandpackPreview
@@ -791,7 +793,10 @@ export const ArtifactNode = ({
                 sandpackInputs.template === 'static' && staticReady ? 'idle' : undefined
               }
             />
-            <ArtifactRuntimeBridge artifactId={data.artifactId} />
+            <ArtifactRuntimeBridge
+              artifactId={data.artifactId}
+              fallbackIframe={staticIframeRef}
+            />
             <ArtifactInteractionBridge
               artifactId={data.artifactId}
               config={payload.interaction_config}

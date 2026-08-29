@@ -190,6 +190,7 @@ export function ArtifactFullscreenPage({
   const [error, setError] = useState<string | null>(null);
   const [consentOpen, setConsentOpen] = useState(false);
   const [staticReady, setStaticReady] = useState(false);
+  const staticIframeRef = useRef<HTMLIFrameElement | null>(null);
   const lastHashRef = useRef<string | null>(null);
 
   const artifactIdParam = artifactShortId ?? '';
@@ -363,6 +364,7 @@ export function ArtifactFullscreenPage({
                 }
                 title={`${title} preview`}
                 onReady={() => setStaticReady(true)}
+                iframeRef={staticIframeRef}
               />
             ) : (
               <SandpackPreview
@@ -383,7 +385,10 @@ export function ArtifactFullscreenPage({
                 sandpackInputs.template === 'static' && staticReady ? 'idle' : undefined
               }
             />
-            <ArtifactRuntimeBridge artifactId={payload.artifact_id} />
+            <ArtifactRuntimeBridge
+              artifactId={payload.artifact_id}
+              fallbackIframe={staticIframeRef}
+            />
           </SandpackProvider>
         </div>
       </div>
