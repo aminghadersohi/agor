@@ -127,6 +127,20 @@ export const useBoardObjects = ({
             client.service('board-objects').patch(placement.object_id, { compact })
           )
         );
+        // Expanding restores every item's full height while the positions still
+        // carry compact_list's one-row spacing, so the items overlap and spill
+        // out of the zone. `handleUpdateObject` already re-packs when a *preset*
+        // change leaves compact_list, but the zone toolbar calls this directly
+        // and never passes through there — so without the same repair here the
+        // button reliably produces the broken layout the preset path avoids.
+        // Deferred for the same reason as that one: the layout measures
+        // rendered nodes, and arranging before the expanded items paint would
+        // measure the collapsed heights and pack just as tightly.
+        if (!compact) {
+          setTimeout(() => {
+            void arrangeZoneContentsRef.current?.(zoneId, { silent: true });
+          }, EXPANDED_REPACK_DELAY_MS);
+        }
         if (options.silent) return;
         const noun = targets.length === 1 ? 'item' : 'items';
         showSuccess(
