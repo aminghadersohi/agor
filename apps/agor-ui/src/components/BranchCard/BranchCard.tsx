@@ -39,6 +39,7 @@ import { IssuePill, PullRequestPill } from '../Pill';
 import { BranchSessionPeekSection } from './BranchSessionPeekSection';
 import { BranchSessionSections } from './BranchSessionSections';
 import { estimateBranchSessionSectionsHeight } from './branchCardLayout';
+import { CompactSessionPicker } from './CompactSessionPicker';
 
 const _BRANCH_CARD_MAX_WIDTH = 600;
 const NOTES_MAX_LENGTH = 200; // Character limit for truncated notes
@@ -493,6 +494,20 @@ const BranchCardComponent = ({
                   onToggleCompact(branch.branch_id, !compact);
                 }}
                 title={compact ? 'Expand card' : 'Collapse card'}
+              />
+            )}
+            {/*
+              A collapsed card hides its session sections, so without this the
+              only route into a session is to expand the card — which re-flows
+              the zone and undoes the density the collapse was asked for.
+            */}
+            {compact && !inPopover && !panelMode && (
+              <CompactSessionPicker
+                sessions={sessions}
+                branchId={branch.branch_id}
+                selectedSessionId={selectedSessionId}
+                onSessionClick={onSessionClick}
+                onCreateSession={onCreateSession}
               />
             )}
             {onOpenTerminal && (
