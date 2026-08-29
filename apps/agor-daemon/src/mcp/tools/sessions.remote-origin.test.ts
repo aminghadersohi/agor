@@ -310,6 +310,26 @@ describe('remote origin discoverability after a one-shot completion callback', (
     expect(context.remote_origins[0].origin_session_id).not.toBe(context.parent_session_id);
   });
 
+  it('does not report the orchestrator itself as having a remote origin', async () => {
+    // The orchestrator is the SOURCE of the relationship, not its target.
+    // `remote_origins` answers "who created me" — being a creator must never
+    // make a session look created.
+    const { orchestrator, delegated } = await reproduceCompletedOneShotDelegation(harness);
+
+    const tools = await harness.tools(orchestrator.session_id);
+    const context = parse(
+      await tools.agor_sessions_get_current_context({ includeSiblings: false })
+    );
+
+    expect(context.remote_origins).toBeUndefined();
+    expect(JSON.stringify(context)).not.toContain(delegated.session_id);
+
+    const report = await tools.agor_session_relationships_report({ message: 'upward?' });
+    expect(harness.delivered).toHaveLength(0);
+    expect(report.isError).toBe(true);
+    expect(parse(report).error).toMatch(/no recorded remote origin/i);
+  });
+
   it('omits remote_origins entirely for a session nobody remote-created', async () => {
     const plain = await harness.makeSession(harness.branchB, 'Locally created');
 
@@ -422,10 +442,12 @@ describe('agor_session_relationships_report authorization', () => {
       relationshipId: strangerRelationship.relationship_id,
     });
 
+    // The breach this guards against, asserted first so a regression names it:
+    // nothing reached the stranger's orchestrator (nor anywhere else).
+    expect(harness.delivered.map((d) => d.sessionId)).toEqual([]);
+    expect(harness.delivered.map((d) => d.sessionId)).not.toContain(strangerOrigin.session_id);
     expect(result.isError).toBe(true);
     expect(parse(result).error).toMatch(/not a remote origin of this session/i);
-    // Nothing was delivered anywhere — in particular not to the stranger.
-    expect(harness.delivered).toHaveLength(0);
   });
 
   it('does not leak unrelated relationships when listing the caller-eligible ones', async () => {
@@ -494,10 +516,15 @@ describe('agor_session_relationships_report authorization', () => {
     // `ensureCanPromptTargetSession` here is the real helper resolving real
     // capability policy against the real database.
     const tools = await harness.tools(delegated.session_id, harness.strangerId);
-    await expect(
-      tools.agor_session_relationships_report({ message: 'should be forbidden' })
-    ).rejects.toThrow(/Cannot prompt session|Collaborator access/i);
-    expect(harness.delivered).toHaveLength(0);
+    const thrown = await tools
+      .agor_session_relationships_report({ message: 'should be forbidden' })
+      .then(() => null)
+      .catch((error: Error) => error);
+
+    // Assert the outcome that matters before the shape of the refusal.
+    expect(harness.delivered.map((d) => d.sessionId)).toEqual([]);
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown?.message).toMatch(/Cannot prompt session|Collaborator access/i);
   });
 });
 
@@ -518,9 +545,9 @@ describe('agor_session_relationships_report failure-closed cases', () => {
     const tools = await harness.tools(delegated.session_id);
     const result = await tools.agor_session_relationships_report({ message: 'too late' });
 
+    expect(harness.delivered.map((d) => d.sessionId)).toEqual([]);
     expect(result.isError).toBe(true);
     expect(parse(result).error).toMatch(/archived/i);
-    expect(harness.delivered).toHaveLength(0);
     // The origin stayed archived — the prompt route's auto-unarchive was never reached.
     const after = await harness.sessionRepo.findById(orchestrator.session_id);
     expect(after?.archived).toBe(true);
@@ -589,9 +616,10 @@ describe('agor_session_relationships_report failure-closed cases', () => {
 
     const tools = await harness.tools(delegated.session_id);
     const ambiguous = await tools.agor_session_relationships_report({ message: 'which one?' });
+    // Guessing an origin is the failure mode; assert nothing was guessed at.
+    expect(harness.delivered.map((d) => d.sessionId)).toEqual([]);
     expect(ambiguous.isError).toBe(true);
     expect(parse(ambiguous).error).toMatch(/more than one remote origin/i);
-    expect(harness.delivered).toHaveLength(0);
 
     const chosen = parse(
       await tools.agor_session_relationships_report({
