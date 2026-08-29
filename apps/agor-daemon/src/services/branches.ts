@@ -82,7 +82,10 @@ import { isAllowedHealthCheckUrl } from '@agor/core/utils/url';
 import { DrizzleService, type Query } from '../adapters/drizzle';
 import { buildBranchCreatedAnalyticsProperties } from '../utils/analytics-payloads.js';
 import { consumeBranchArchiveDeleteAuthorization } from '../utils/branch-archive-delete-authorization.js';
-import { ensureCanControlBranchEnvironment } from '../utils/branch-authorization.js';
+import {
+  ensureCanControlBranchEnvironment,
+  withoutPrefetchedRecord,
+} from '../utils/branch-authorization.js';
 import { captureBranchRemovalRealtimeVisibility } from '../utils/branch-removal-realtime.js';
 import { ensureBranchWorkspaceAccess } from '../utils/branch-workspace-path.js';
 import { shouldUseCloneReferencePath } from '../utils/clone-reference.js';
@@ -1144,16 +1147,27 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
    * Backward compatible: an ack with no generation (older executor, or a path
    * that never dispatched one) is left alone rather than rejected.
    */
-  private dropSupersededProvisioningAck(
-    currentBranch: Branch,
+  private async dropSupersededProvisioningAck(
     data: Partial<Branch>,
-    id: BranchID
-  ): Partial<Branch> {
+    id: BranchID,
+    params?: BranchParams
+  ): Promise<Partial<Branch>> {
     const ackAttemptId = data.provisioning_attempt_id;
     if (!ackAttemptId || data.filesystem_status === undefined) {
       return data;
     }
-    const currentAttemptId = currentBranch.provisioning_attempt_id;
+    // Read the generation authoritatively rather than reusing `patch`'s
+    // existence read. With `branch_rbac` on, `loadBranch` stores the row it
+    // authorized against as `_agorPrefetchedRecord`, and the adapter serves
+    // `super.get` from it — so that row predates this request's authorization
+    // work (`resolveUserPermission` et al). A retry's CAS can commit inside
+    // that window, leaving the cached generation equal to the ack's and
+    // admitting precisely the acknowledgement this fence exists to drop.
+    // Declining the cached row (same authorization and tenant path) is only
+    // paid when an ack actually carries a generation, so the point-read
+    // reduction in #2581 stays intact for every other patch.
+    const current = await super.get(id, withoutPrefetchedRecord(params));
+    const currentAttemptId = current.provisioning_attempt_id;
     if (!currentAttemptId || currentAttemptId === ackAttemptId) {
       return data;
     }
@@ -1188,7 +1202,7 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
     const currentBranch = await super.get(id, params);
     await this.assertCanMutateTeammateKnowledgeConfig(currentBranch, data, params);
     this.assertTeammateKindIsStable(currentBranch, data);
-    data = this.dropSupersededProvisioningAck(currentBranch, data, id);
+    data = await this.dropSupersededProvisioningAck(data, id, params);
 
     const oldBoardId = currentBranch.board_id;
     const boardIdProvided = Object.hasOwn(data, 'board_id');
