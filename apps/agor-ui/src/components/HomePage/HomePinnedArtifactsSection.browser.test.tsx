@@ -16,10 +16,18 @@ const artifact = {
   agor_runtime: {
     interactions: {
       actions: [
-        { action_id: 'review', label: 'Run detailed review', schedule_id: 'schedule-review' },
-        { action_id: 'summary', label: 'Prepare summary', schedule_id: 'schedule-summary' },
+        {
+          id: 'review',
+          label: 'Run detailed review',
+          effect: { kind: 'schedule_run', schedule_id: 'schedule-review' },
+        },
+        {
+          id: 'summary',
+          label: 'Prepare summary',
+          effect: { kind: 'schedule_run', schedule_id: 'schedule-summary' },
+        },
       ],
-      chat_session_id: 'session-layout',
+      chats: [{ id: 'default', label: 'Open chat', session_id: 'session-layout' }],
     },
   },
 } as unknown as Artifact;

@@ -15,6 +15,8 @@ import { BranchRepository } from '@agor/core/db';
 import type {
   AgorGrants,
   AgorRuntimeConfig,
+  ArtifactActionEffect,
+  ArtifactDataSource,
   ArtifactInteractionConfig,
   BoardID,
   BranchID,
@@ -114,9 +116,9 @@ const ArtifactInteractionConfigSchema = z
     actions: z
       .array(
         z.object({
-          actionId: mcpRequiredString(
-            'interactionConfig.actions[].actionId',
-            'Stable identifier used by window.agor.runAction(actionId)'
+          id: mcpRequiredString(
+            'interactionConfig.actions[].id',
+            'Stable identifier used by window.agor.runAction(id)'
           ),
           label: mcpRequiredString('interactionConfig.actions[].label', 'Button label'),
           scheduleId: mcpRequiredId(
@@ -124,6 +126,12 @@ const ArtifactInteractionConfigSchema = z
             'Schedule',
             'Schedule owning the prompt, model, tools, and execution configuration'
           ),
+          effect: z
+            .enum(['run', 'enable', 'disable'])
+            .optional()
+            .describe(
+              "What the button does to the schedule. 'run' (default) triggers a one-off run; 'enable'/'disable' arm or disarm it. Pinned at publish time — the artifact cannot choose at runtime, so a toggle is two declared actions."
+            ),
           description: mcpOptionalString(
             'interactionConfig.actions[].description',
             'Optional action help text'
@@ -133,11 +141,56 @@ const ArtifactInteractionConfigSchema = z
       )
       .max(12)
       .optional(),
-    chatSessionId: mcpOptionalId(
-      'interactionConfig.chatSessionId',
-      'Session',
-      'Canonical session opened by window.agor.openChat()'
-    ),
+    data: z
+      .array(
+        z.object({
+          id: mcpRequiredString(
+            'interactionConfig.data[].id',
+            'Stable identifier used by window.agor.fetchData(id)'
+          ),
+          label: mcpRequiredString('interactionConfig.data[].label', 'Human-readable label'),
+          kind: z
+            .enum(['schedule_status', 'session_status'])
+            .describe('Which read-only projection this binding returns'),
+          scheduleId: mcpOptionalId(
+            'interactionConfig.data[].scheduleId',
+            'Schedule',
+            "Schedule to read. Required when kind is 'schedule_status'"
+          ),
+          sessionId: mcpOptionalId(
+            'interactionConfig.data[].sessionId',
+            'Session',
+            "Session to read. Required when kind is 'session_status'"
+          ),
+          description: mcpOptionalString(
+            'interactionConfig.data[].description',
+            'Optional help text'
+          ),
+        })
+      )
+      .max(12)
+      .optional(),
+    chats: z
+      .array(
+        z.object({
+          id: mcpRequiredString(
+            'interactionConfig.chats[].id',
+            'Stable identifier used by window.agor.openChat(id)'
+          ),
+          label: mcpRequiredString('interactionConfig.chats[].label', 'Human-readable label'),
+          sessionId: mcpRequiredId(
+            'interactionConfig.chats[].sessionId',
+            'Session',
+            'Session this entry opens. Repoint it with agor_artifacts_update rather than republishing code.'
+          ),
+          description: mcpOptionalString(
+            'interactionConfig.chats[].description',
+            'Optional help text'
+          ),
+        })
+      )
+      .max(8)
+      .optional(),
   })
   .optional();
 
@@ -147,20 +200,72 @@ async function resolveInteractionConfig(
 ): Promise<ArtifactInteractionConfig | undefined> {
   if (!input) return undefined;
   const actions = await Promise.all(
-    (input.actions ?? []).map(async (action) => ({
-      action_id: action.actionId,
-      label: action.label,
-      schedule_id: await resolveScheduleId(ctx, action.scheduleId),
-      ...(action.description ? { description: action.description } : {}),
-      ...(action.confirm ? { confirm: true } : {}),
+    (input.actions ?? []).map(async (action) => {
+      const scheduleId = await resolveScheduleId(ctx, action.scheduleId);
+      // The wire form is a friendly enum; persistence is the pinned effect
+      // union. `enabled` is fixed here and never reaches the artifact.
+      const effect: ArtifactActionEffect =
+        action.effect === 'enable'
+          ? { kind: 'schedule_set_enabled', schedule_id: scheduleId, enabled: true }
+          : action.effect === 'disable'
+            ? { kind: 'schedule_set_enabled', schedule_id: scheduleId, enabled: false }
+            : { kind: 'schedule_run', schedule_id: scheduleId };
+      return {
+        id: action.id,
+        label: action.label,
+        effect,
+        ...(action.description ? { description: action.description } : {}),
+        ...(action.confirm ? { confirm: true } : {}),
+      };
+    })
+  );
+
+  const data = await Promise.all(
+    (input.data ?? []).map(async (binding) => {
+      let source: ArtifactDataSource;
+      if (binding.kind === 'schedule_status') {
+        if (!binding.scheduleId) {
+          throw new Error(
+            `interactionConfig.data[].scheduleId is required when kind is "schedule_status" (id: ${binding.id})`
+          );
+        }
+        source = {
+          kind: 'schedule_status',
+          schedule_id: await resolveScheduleId(ctx, binding.scheduleId),
+        };
+      } else {
+        if (!binding.sessionId) {
+          throw new Error(
+            `interactionConfig.data[].sessionId is required when kind is "session_status" (id: ${binding.id})`
+          );
+        }
+        source = {
+          kind: 'session_status',
+          session_id: await resolveSessionId(ctx, binding.sessionId),
+        };
+      }
+      return {
+        id: binding.id,
+        label: binding.label,
+        source,
+        ...(binding.description ? { description: binding.description } : {}),
+      };
+    })
+  );
+
+  const chats = await Promise.all(
+    (input.chats ?? []).map(async (chat) => ({
+      id: chat.id,
+      label: chat.label,
+      session_id: await resolveSessionId(ctx, chat.sessionId),
+      ...(chat.description ? { description: chat.description } : {}),
     }))
   );
-  const chatSessionId = input.chatSessionId
-    ? await resolveSessionId(ctx, input.chatSessionId)
-    : undefined;
+
   return {
     ...(actions.length > 0 ? { actions } : {}),
-    ...(chatSessionId ? { chat_session_id: chatSessionId } : {}),
+    ...(data.length > 0 ? { data } : {}),
+    ...(chats.length > 0 ? { chats } : {}),
   };
 }
 

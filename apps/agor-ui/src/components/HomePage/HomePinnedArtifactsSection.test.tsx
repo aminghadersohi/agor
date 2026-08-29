@@ -4,11 +4,11 @@ import { App as AntApp, ConfigProvider } from 'antd';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_MAPS } from '../../store/agorMaps';
 import { agorStore } from '../../store/agorStore';
-import { runArtifactScheduleAction } from '../../utils/artifactActions';
+import { runArtifactActionBinding } from '../../utils/artifactActions';
 import { HomePinnedArtifactsSection } from './HomePinnedArtifactsSection';
 
 vi.mock('../../utils/artifactActions', () => ({
-  runArtifactScheduleAction: vi.fn(),
+  runArtifactActionBinding: vi.fn(),
 }));
 
 vi.mock('../../utils/message', () => ({
@@ -24,12 +24,12 @@ const artifact = {
     interactions: {
       actions: [
         {
-          action_id: 'review',
+          id: 'review',
           label: 'Run review',
-          schedule_id: 'schedule-1',
+          effect: { kind: 'schedule_run', schedule_id: 'schedule-1' },
         },
       ],
-      chat_session_id: 'session-1',
+      chats: [{ id: 'default', label: 'Open chat', session_id: 'session-1' }],
     },
   },
 } as unknown as Artifact;
@@ -50,7 +50,7 @@ describe('HomePinnedArtifactsSection', () => {
   });
 
   it('renders declared actions and canonical chat/board controls', () => {
-    vi.mocked(runArtifactScheduleAction).mockResolvedValue({ session_id: 'new-session' });
+    vi.mocked(runArtifactActionBinding).mockResolvedValue({ action_id: 'review' });
     const onBoardClick = vi.fn();
     const onSessionClick = vi.fn();
     render(

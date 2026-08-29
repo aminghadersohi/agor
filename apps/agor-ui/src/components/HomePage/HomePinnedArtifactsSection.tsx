@@ -11,7 +11,7 @@ import { App, Button, Card, Empty, Space, Tag, Typography, theme } from 'antd';
 import { useMemo, useState } from 'react';
 import { useAgorStore } from '../../store/agorStore';
 import { selectArtifactById } from '../../store/selectors';
-import { runArtifactScheduleAction } from '../../utils/artifactActions';
+import { runArtifactActionBinding } from '../../utils/artifactActions';
 import { readHomeArtifactIds, withHomeArtifactPin } from '../../utils/homeArtifactPreferences';
 import { useThemedMessage } from '../../utils/message';
 import { uiRouteHref } from '../../utils/uiRoutes';
@@ -33,6 +33,19 @@ function PinnedArtifactCard({
   const [runningActionId, setRunningActionId] = useState<string>();
   const interactions = artifact.agor_runtime?.interactions;
   const actions = interactions?.actions ?? [];
+  const dataBindings = interactions?.data ?? [];
+  const chats = interactions?.chats ?? [];
+
+  // Only the confirmation copy needs the effect — execution names the binding
+  // id and the daemon resolves the pinned effect itself.
+  const describeAction = (action: ArtifactActionBinding): string => {
+    if (action.effect.kind === 'schedule_set_enabled') {
+      return action.effect.enabled
+        ? 'This enables the configured schedule so it runs on its cron.'
+        : 'This disables the configured schedule; it will stop running on its cron.';
+    }
+    return 'This starts a session using the configured action.';
+  };
 
   const runAction = async (action: ArtifactActionBinding) => {
     if (runningActionId) return;
@@ -40,7 +53,7 @@ function PinnedArtifactCard({
       const confirmed = await new Promise<boolean>((resolve) => {
         modal.confirm({
           title: `Run “${action.label}”?`,
-          content: action.description || 'This starts a session using the configured action.',
+          content: action.description || describeAction(action),
           okText: 'Run action',
           cancelText: 'Cancel',
           onOk: () => resolve(true),
@@ -49,9 +62,9 @@ function PinnedArtifactCard({
       });
       if (!confirmed) return;
     }
-    setRunningActionId(action.action_id);
+    setRunningActionId(action.id);
     try {
-      await runArtifactScheduleAction(action.schedule_id);
+      await runArtifactActionBinding(artifact.artifact_id, action.id);
       showSuccess(`Started “${action.label}”`);
     } catch (error) {
       showError(error instanceof Error ? error.message : 'Could not run action');
@@ -86,7 +99,8 @@ function PinnedArtifactCard({
       )}
       <Space wrap size={[4, 4]} style={{ marginBottom: token.marginSM }}>
         {actions.length > 0 && <Tag icon={<ThunderboltOutlined />}>{actions.length} actions</Tag>}
-        {interactions?.chat_session_id && <Tag icon={<CommentOutlined />}>Chat</Tag>}
+        {dataBindings.length > 0 && <Tag>{dataBindings.length} data</Tag>}
+        {chats.length > 0 && <Tag icon={<CommentOutlined />}>Chat</Tag>}
       </Space>
       {actions.length > 0 && (
         <div
@@ -99,12 +113,12 @@ function PinnedArtifactCard({
         >
           {actions.map((action) => (
             <Button
-              key={action.action_id}
+              key={action.id}
               block
               title={action.description}
               icon={<ThunderboltOutlined />}
-              loading={runningActionId === action.action_id}
-              disabled={!!runningActionId && runningActionId !== action.action_id}
+              loading={runningActionId === action.id}
+              disabled={!!runningActionId && runningActionId !== action.id}
               onClick={() => void runAction(action)}
             >
               {action.label}
@@ -113,16 +127,17 @@ function PinnedArtifactCard({
         </div>
       )}
       <div style={{ display: 'flex', gap: token.marginXS, flexWrap: 'wrap' }}>
-        {interactions?.chat_session_id && (
+        {chats.map((chat) => (
           <Button
+            key={chat.id}
             size="small"
             type="primary"
             icon={<CommentOutlined />}
-            onClick={() => onSessionClick(interactions.chat_session_id!)}
+            onClick={() => onSessionClick(chat.session_id)}
           >
-            Open chat
+            {chat.label}
           </Button>
-        )}
+        ))}
         <Button
           size="small"
           icon={<FullscreenOutlined />}
