@@ -3067,4 +3067,48 @@ describe('BranchesService.patch provisioning attempt fence', () => {
     const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
     expect(written.filesystem_status).toBe('ready');
   });
+
+  it('reads the generation authoritatively rather than trusting the RBAC prefetch', async () => {
+    // The tests above call `patch` bare, so the adapter always reads the row.
+    // Through the real hook chain it does not: with `branch_rbac` enabled,
+    // `loadBranch` stashes the row it authorized against as
+    // `_agorPrefetchedRecord`, and the adapter serves `patch`'s existence read
+    // from that instead of the database. The stashed row is as old as the
+    // *start* of the request, so a retry whose CAS commits during this
+    // request's authorization work is invisible to a fence that trusts it —
+    // the generations compare equal and the superseded ack lands on the newer
+    // attempt, which is precisely what the fence exists to stop.
+    //
+    // Here the committed row already owns attempt-B while the prefetch still
+    // reports attempt-A, matching the incoming ack. The fence must ignore the
+    // prefetch and drop the ack anyway.
+    const { service, repository } = harness('attempt-B');
+
+    await service.patch(
+      branchId,
+      {
+        filesystem_status: 'ready',
+        provisioning_attempt_id: 'attempt-A',
+        start_command: 'pnpm dev',
+      } as never,
+      {
+        _agorPrefetchedRecord: {
+          id: branchId,
+          idField: 'branch_id',
+          record: {
+            branch_id: branchId,
+            board_id: undefined,
+            filesystem_status: 'creating',
+            provisioning_attempt_id: 'attempt-A',
+          },
+        },
+      } as never
+    );
+
+    const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    expect(written).not.toHaveProperty('filesystem_status');
+    expect(written).not.toHaveProperty('provisioning_attempt_id');
+    // Attempt-independent work still rides along, as on any other dropped ack.
+    expect(written.start_command).toBe('pnpm dev');
+  });
 });
