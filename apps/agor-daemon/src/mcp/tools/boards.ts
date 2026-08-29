@@ -202,6 +202,30 @@ function zoneObstacles(board: Board, arrangingZones: boolean): CanvasRectangle[]
 }
 
 /**
+ * Zones that the given rectangle would sit on top of.
+ *
+ * Growing a zone to fit its contents is not free: a zone is a rectangle on a
+ * shared canvas, and autoResizeHeight moves its bottom edge without asking what
+ * is underneath it. A zone that silently swallows its neighbour is the same
+ * class of defect this tool refuses to create *inside* a zone, so it is
+ * reported rather than performed in silence. The resize still happens —
+ * contents overflowing their own zone is the worse outcome — but the caller is
+ * told which zones it now covers, and agor_boards_auto_arrange with
+ * includeZones:true is the repair.
+ */
+function zonesOverlappedBy(
+  board: Board,
+  zoneId: string,
+  rect: { x: number; y: number; width: number; height: number }
+): string[] {
+  return Object.entries(board.objects ?? {}).flatMap(([objectId, object]) => {
+    if (objectId === zoneId || object.type !== 'zone') return [];
+    const { x, y, width, height } = object;
+    return rectanglesOverlap(rect, { x, y, width, height }) ? [objectId] : [];
+  });
+}
+
+/**
  * Pick the grid origin for a whole-board arrange.
  *
  * An explicit `startY` is always honored — the caller asked for that row. A
@@ -1090,6 +1114,17 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const appliedZoneHeight = autoResizeHeight
         ? Math.max(200, Math.ceil(layout.height + titleInset))
         : zone.height;
+      // A grow moves the bottom edge onto whatever shares the canvas below it.
+      // Only a grow can newly cover a neighbour; a shrink or a no-op cannot.
+      const resizedOverZoneIds =
+        appliedZoneHeight > zone.height
+          ? zonesOverlappedBy(board, zoneId, {
+              x: zone.x,
+              y: zone.y,
+              width: zone.width,
+              height: appliedZoneHeight,
+            })
+          : [];
       if (appliedZoneHeight !== zone.height) {
         await ctx.app.service('boards').patch(
           boardId,
@@ -1131,8 +1166,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         appliedPadding: layout.padding,
         overflowingObjectIds: layout.overflowingItemIds,
         unusableSizeObjectIds,
+        resizedOverZoneIds,
         warning:
           [
+            resizedOverZoneIds.length > 0
+              ? `Growing this zone to ${appliedZoneHeight}px now covers ${resizedOverZoneIds.join(', ')}. Run agor_boards_auto_arrange with includeZones:true to separate the zones.`
+              : null,
             layout.overflowingItemIds.length > 0
               ? `One or more rendered objects are larger than the available zone rectangle: ${layout.overflowingItemIds.join(', ')}.`
               : layout.mode === 'deck'
