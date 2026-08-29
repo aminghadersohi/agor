@@ -2,7 +2,7 @@ import type { ArtifactPayload } from '@agor-live/client';
 import { SafetyOutlined, WarningOutlined } from '@ant-design/icons';
 import { useSandpack, useSandpackConsole } from '@codesandbox/sandpack-react';
 import { Tooltip, theme } from 'antd';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, RefObject } from 'react';
 import { useEffect, useRef } from 'react';
 import { getDaemonUrl } from '@/config/daemon';
 import { getAuthHeaders, getCurrentUserIdFromJwt } from '@/utils/authHeaders';
@@ -162,7 +162,18 @@ export function ArtifactSandpackErrorReporter({
  * Sandpack iframe via postMessage → daemon response endpoint.
  * Must be rendered inside a SandpackProvider.
  */
-export function ArtifactRuntimeBridge({ artifactId }: { artifactId: string }) {
+export function ArtifactRuntimeBridge({
+  artifactId,
+  fallbackIframe,
+}: {
+  artifactId: string;
+  /**
+   * Preview iframe to target when no Sandpack bundler client is registered.
+   * The static template renders its own iframe instead of a SandpackPreview,
+   * so `sandpack.clients` is empty and there is no client iframe to find.
+   */
+  fallbackIframe?: RefObject<HTMLIFrameElement | null>;
+}) {
   // CRITICAL: read existing clients rather than registering a new Sandpack client;
   // the sibling SandpackPreview owns the actual iframe ref.
   const { sandpack } = useSandpack();
@@ -192,7 +203,8 @@ export function ArtifactRuntimeBridge({ artifactId }: { artifactId: string }) {
       const currentSandpack = sandpackRef.current;
       const clientIds = Object.keys(currentSandpack.clients);
       const firstClient = clientIds.length > 0 ? currentSandpack.clients[clientIds[0]] : null;
-      const target = firstClient?.iframe?.contentWindow ?? null;
+      const target =
+        firstClient?.iframe?.contentWindow ?? fallbackIframe?.current?.contentWindow ?? null;
       if (!target) return;
 
       const postResult = async (body: { ok: boolean; result?: unknown; error?: string }) => {
@@ -238,7 +250,7 @@ export function ArtifactRuntimeBridge({ artifactId }: { artifactId: string }) {
 
     window.addEventListener('agor:artifact-runtime-query', handleQuery);
     return () => window.removeEventListener('agor:artifact-runtime-query', handleQuery);
-  }, [artifactId]);
+  }, [artifactId, fallbackIframe]);
 
   return null;
 }
