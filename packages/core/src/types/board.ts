@@ -111,6 +111,26 @@ export type ZoneLayoutSortBy = 'position' | 'priority' | 'status' | 'updated' | 
 export type ZoneLayoutSortDirection = 'asc' | 'desc';
 
 /**
+ * How far a zone may resize itself to hold its contents.
+ *
+ * `height` is the historical behaviour and cannot rescue a zone that is too
+ * *narrow*: an item wider than the zone overflows no matter how tall the zone
+ * grows, which is why a width-constrained arrange could only refuse. `both`
+ * widens to the contents' required width first, then grows the height.
+ */
+export type ZoneResizeMode = 'fixed' | 'height' | 'both';
+
+/**
+ * What to do when a zone that grew now covers its neighbours.
+ *
+ * A zone is a rectangle on a shared canvas, so growing one moves its edges
+ * onto whatever sits beside or below it. `report` names the covered zones and
+ * leaves the board alone; `reflow_board` re-runs the justified zone layout so
+ * the neighbours move out of the way.
+ */
+export type ZoneOverflowStrategy = 'report' | 'reflow_board';
+
+/**
  * Persisted zone layout policy.
  *
  * Missing policies intentionally mean manual spatial placement for backwards
@@ -125,8 +145,18 @@ export interface ZoneLayoutPolicy {
   columns?: number;
   /** Exact spacing between arranged items in board pixels. */
   gap?: number;
-  /** Grow or shrink the zone vertically to contain the arranged rectangles. */
+  /**
+   * Grow or shrink the zone vertically to contain the arranged rectangles.
+   *
+   * @deprecated Superseded by {@link ZoneLayoutPolicy.resize}, which can also
+   * widen a zone. `normalizeZoneLayoutPolicy` keeps writing it so readers that
+   * predate `resize` still behave; when both are present, `resize` wins.
+   */
   autoResizeHeight?: boolean;
+  /** How far the zone may resize itself to hold its contents. */
+  resize?: ZoneResizeMode;
+  /** What to do when a resize pushes this zone into its neighbours. */
+  onOverflow?: ZoneOverflowStrategy;
 }
 
 /**

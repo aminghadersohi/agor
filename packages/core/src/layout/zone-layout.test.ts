@@ -98,3 +98,53 @@ describe('sortZoneLayoutItems', () => {
     expect(result.map(({ id }) => id)).toEqual(['a', 'b', 'c']);
   });
 });
+
+describe('zone resize policy', () => {
+  it('reads a legacy autoResizeHeight boolean as the height mode', () => {
+    const policy = normalizeZoneLayoutPolicy({ mode: 'auto', autoResizeHeight: true });
+    expect(policy.resize).toBe('height');
+    expect(policy.autoResizeHeight).toBe(true);
+  });
+
+  it('defaults an absent policy to fixed', () => {
+    const policy = normalizeZoneLayoutPolicy(undefined);
+    expect(policy.resize).toBe('fixed');
+    expect(policy.autoResizeHeight).toBe(false);
+    expect(policy.onOverflow).toBe('report');
+  });
+
+  it('lets an explicit resize win over the legacy boolean', () => {
+    // A caller that knows about `resize` is not second-guessed by a stale
+    // boolean sitting beside it in the persisted policy.
+    const widened = normalizeZoneLayoutPolicy({ resize: 'both', autoResizeHeight: false });
+    expect(widened.resize).toBe('both');
+    const pinned = normalizeZoneLayoutPolicy({ resize: 'fixed', autoResizeHeight: true });
+    expect(pinned.resize).toBe('fixed');
+  });
+
+  it('keeps the legacy boolean in step so older readers still behave', () => {
+    // `autoResizeHeight` is what a reader predating `resize` looks at; it has
+    // to stay true for any mode that resizes, not just the height one.
+    expect(normalizeZoneLayoutPolicy({ resize: 'both' }).autoResizeHeight).toBe(true);
+    expect(normalizeZoneLayoutPolicy({ resize: 'height' }).autoResizeHeight).toBe(true);
+    expect(normalizeZoneLayoutPolicy({ resize: 'fixed' }).autoResizeHeight).toBe(false);
+  });
+
+  it('falls back on an unrecognised mode or strategy', () => {
+    const policy = normalizeZoneLayoutPolicy({
+      resize: 'enormous' as never,
+      onOverflow: 'panic' as never,
+    });
+    expect(policy.resize).toBe('fixed');
+    expect(policy.onOverflow).toBe('report');
+  });
+
+  it('round-trips a normalized policy unchanged', () => {
+    const once = normalizeZoneLayoutPolicy({
+      mode: 'auto',
+      resize: 'both',
+      onOverflow: 'reflow_board',
+    });
+    expect(normalizeZoneLayoutPolicy(once)).toEqual(once);
+  });
+});
