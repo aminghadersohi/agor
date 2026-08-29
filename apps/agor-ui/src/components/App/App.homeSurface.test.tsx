@@ -26,11 +26,11 @@
  * surface derivation. No single unit sees it.
  */
 import type { Board, Branch, Session, SessionID, User } from '@agor-live/client';
-import { sessionPath } from '@agor-live/client';
+import { chatWorkspacePath, sessionPath } from '@agor-live/client';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import { forwardRef } from 'react';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CanvasNavigationProvider, useRecenterMap } from '../../contexts/CanvasNavigationContext';
 import { ThemeProvider } from '../../contexts/ThemeContext';
@@ -77,6 +77,7 @@ vi.mock('../TerminalModal', () => ({
 }));
 vi.mock('../ThemeEditorModal', () => ({ ThemeEditorModal: () => null }));
 vi.mock('../EnvironmentLogsModal', () => ({ EnvironmentLogsModal: () => null }));
+vi.mock('../TeammateChatCollections', () => ({ TeammateChatCollectionsModal: () => null }));
 vi.mock('../../hooks/useTaskCompletionChime', () => ({ useTaskCompletionChime: () => {} }));
 // react-resizable-panels needs real layout measurements jsdom cannot provide,
 // and throws from the imperative handles App drives in effects.
@@ -100,6 +101,7 @@ const BOARD_B = '019e7777-0000-7000-8000-00000000000b';
 const BRANCH_A = '019e8888-0000-7000-8000-00000000000a';
 const BRANCH_B = '019e8888-0000-7000-8000-00000000000b';
 const SESSION_1 = '019e9999-0000-7000-8000-000000000001';
+const SESSION_1_SHORT = '019e99990000700080000000';
 const SESSION_2 = '019eaaaa-0000-7000-8000-000000000002';
 
 const boardA = { board_id: BOARD_A, name: 'Alpha', slug: 'alpha', archived: false } as Board;
@@ -110,6 +112,7 @@ const branchA = {
   board_id: BOARD_A,
   name: 'orbit',
   archived: false,
+  custom_context: { teammate: { kind: 'teammate', displayName: 'Orbit', emoji: '🛰️' } },
 } as unknown as Branch;
 const branchB = {
   branch_id: BRANCH_B,
@@ -117,6 +120,7 @@ const branchB = {
   board_id: BOARD_B,
   name: 'signal',
   archived: false,
+  custom_context: { teammate: { kind: 'teammate', displayName: 'Signal', emoji: '📡' } },
 } as unknown as Branch;
 const session1 = {
   session_id: SESSION_1,
@@ -145,6 +149,11 @@ const user = {
   name: 'Tester',
   email: 'tester@example.test',
   role: 'admin',
+  preferences: {
+    chat_collections: {
+      collections: [{ collection_id: 'crew', name: 'Crew', session_ids: [SESSION_1, SESSION_2] }],
+    },
+  },
 } as unknown as User;
 
 function seedStore() {
@@ -205,6 +214,16 @@ function CrossBoardRecenter() {
   );
 }
 
+/** Stands in for closing the session panel inside the chat workspace. */
+function ChatWorkspaceRootLink() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" data-testid="go-chats-root" onClick={() => navigate('/chats/')}>
+      chats root
+    </button>
+  );
+}
+
 /** Route table mirrors `apps/agor-ui/src/App.tsx` — the bugs live in how
  *  these paths resolve, so an approximation would not reproduce them. */
 function renderApp(initialPath: string) {
@@ -219,11 +238,14 @@ function renderApp(initialPath: string) {
             <PathSpy />
             <SettingsOpener />
             <CrossBoardRecenter />
+            <ChatWorkspaceRootLink />
             <Routes>
               <Route path="/b/:boardParam/" element={el} />
               <Route path="/s/:sessionShortId/" element={el} />
               <Route path="/w/:branchShortId/" element={el} />
               <Route path="/a/:artifactShortId/" element={el} />
+              <Route path="/chats/" element={el} />
+              <Route path="/chats/:sessionShortId/" element={el} />
               <Route path="/*" element={el} />
             </Routes>
           </CanvasNavigationProvider>
@@ -242,6 +264,7 @@ async function settle() {
 }
 
 const homeIsShowing = () => !!screen.queryByText(/Hi, Tester/);
+const chatRailIsShowing = () => !!document.querySelector('nav[aria-label="Chat collections"]');
 const canvasBoardName = () =>
   screen.queryByTestId('session-canvas')?.getAttribute('data-board') ?? null;
 const openSessionId = () =>
@@ -249,6 +272,11 @@ const openSessionId = () =>
 
 function clickHomeButton() {
   fireEvent.click(document.querySelector('[aria-label="Go to Home"]') as HTMLElement);
+}
+
+async function clickSessionByTitle(title: string) {
+  const [label] = await screen.findAllByText(title);
+  fireEvent.click((label.closest('button') as HTMLElement | null) ?? label);
 }
 
 /** Open the navbar board switcher and choose a board by name. */
@@ -302,6 +330,22 @@ describe('Settings opens as an overlay, not a navigation', () => {
     expect(homeIsShowing()).toBe(false);
   });
 
+  it('keeps the chat workspace rendered behind the settings modal', async () => {
+    renderApp('/');
+    await settle();
+    await clickSessionByTitle('Orbit standup');
+    await settle();
+    expect(chatRailIsShowing()).toBe(true);
+
+    fireEvent.click(screen.getByTestId('open-settings'));
+    await settle();
+
+    expect(screen.getByTestId('settings-modal')).toBeTruthy();
+    expect(chatRailIsShowing()).toBe(true);
+    expect(openSessionId()).toBe(SESSION_1);
+    expect(screen.queryByTestId('session-canvas')).toBeNull();
+  });
+
   it('falls back to the pathname for a cold-loaded settings URL', async () => {
     // Shared link / hard refresh: no recorded origin in history state, so
     // there is no prior surface to preserve.
@@ -311,6 +355,54 @@ describe('Settings opens as an overlay, not a navigation', () => {
     expect(screen.getByTestId('settings-modal')).toBeTruthy();
     expect(screen.queryByTestId('session-canvas')).toBeTruthy();
     expect(homeIsShowing()).toBe(false);
+  });
+});
+
+describe('Chat workspace URL is sticky', () => {
+  it('survives an unrelated board patch', async () => {
+    renderApp('/');
+    await settle();
+    await clickSessionByTitle('Orbit standup');
+    await settle();
+    expect(currentPath).toBe(`/chats/${SESSION_1_SHORT}/`);
+
+    act(() => {
+      const next = new Map(agorStore.getState().boardById);
+      next.set(BOARD_A, { ...boardA, name: 'Alpha renamed' } as Board);
+      agorStore.setState({ boardById: next });
+    });
+    await settle();
+
+    expect(currentPath).toBe(`/chats/${SESSION_1_SHORT}/`);
+    expect(chatRailIsShowing()).toBe(true);
+    expect(openSessionId()).toBe(SESSION_1);
+  });
+
+  it('keeps the workspace root when the session panel closes', async () => {
+    renderApp('/');
+    await settle();
+    await clickSessionByTitle('Orbit standup');
+    await settle();
+
+    fireEvent.click(screen.getByTestId('go-chats-root'));
+    await settle();
+
+    expect(currentPath).toBe('/chats/');
+    expect(chatRailIsShowing()).toBe(true);
+    expect(openSessionId()).toBeNull();
+  });
+
+  it('still lets the board switcher leave the workspace', async () => {
+    renderApp('/');
+    await settle();
+    await clickSessionByTitle('Orbit standup');
+    await settle();
+
+    await pickBoardFromSwitcher('Beta');
+
+    expect(currentPath).toBe('/b/beta/');
+    expect(canvasBoardName()).toBe('Beta');
+    expect(chatRailIsShowing()).toBe(false);
   });
 });
 
@@ -350,13 +442,13 @@ describe('Home navigation with a session open', () => {
     clickHomeButton();
     await settle();
 
-    fireEvent.click(await screen.findByText('Signal triage'));
+    await clickSessionByTitle('Signal triage');
     await settle();
 
     // Reported symptom: the row click resolved and the URL changed, but
     // nothing selected, because the wedged flag nulled the effective
     // selection.
-    expect(currentPath).toBe(sessionPath(SESSION_2 as SessionID));
+    expect(currentPath).toBe(chatWorkspacePath(SESSION_2 as SessionID));
     expect(openSessionId()).toBe(SESSION_2);
   });
 

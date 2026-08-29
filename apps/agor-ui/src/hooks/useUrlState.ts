@@ -25,7 +25,7 @@
  */
 
 import type { BoardID, SessionID } from '@agor-live/client';
-import { boardPath, ENTITY_PATH_SEGMENTS, sessionPath } from '@agor-live/client';
+import { boardPath, chatWorkspacePath, ENTITY_PATH_SEGMENTS, sessionPath } from '@agor-live/client';
 import { useCallback, useEffect, useRef } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useRecenterMap } from '../contexts/CanvasNavigationContext';
@@ -81,6 +81,12 @@ export interface UseUrlStateOptions {
    *  cancelling the navigation that was already on its way. The consumer
    *  owns that knowledge, so it hands it down rather than us guessing. */
   suspendStateToUrlSync?: boolean;
+}
+
+/** Normalize a path to its trailing-slash form so comparisons ignore the
+ *  optional trailing slash. Mirrors `useAppNavigation`'s `canonical`. */
+function withTrailingSlash(path: string): string {
+  return `${path.replace(/\/$/, '')}/`;
 }
 
 /** Slug lookup helper — the core `boardPath` builder takes a slug
@@ -197,6 +203,20 @@ export function useUrlState(options: UseUrlStateOptions) {
   const updateUrlFromState = useCallback(() => {
     if (syncingRef.current) return;
 
+    // Sticky surface: `/chats/<short>/` is the chat workspace's own
+    // spelling of the open session — same (board, session) pair as
+    // `/s/<short>/`, different chrome — and `/chats/` with no session is
+    // a surface in its own right, the way `/` is. `buildUrl` can express
+    // neither, so without this the self-heal rewrites the workspace URL
+    // the first time anything nudges this effect (a board patch is
+    // enough) and ejects the user from the chat rail mid-conversation.
+    if (
+      withTrailingSlash(location.pathname) ===
+      withTrailingSlash(chatWorkspacePath(currentSessionId as SessionID | null))
+    ) {
+      return;
+    }
+
     // Sticky deep links: don't overwrite `/w/<…>/` or `/a/<…>/` when
     // no session is open. State (boardId, sessionId=null) can't
     // represent these URLs, so the rewrite would erase them. The
@@ -300,7 +320,14 @@ export function useUrlState(options: UseUrlStateOptions) {
     // paths also have no params, but should canonicalize to Home instead of
     // clearing board state and rendering a no-board canvas at that path.
     if (!urlBoardParam && !urlSessionShortId && !urlBranchShortId && !urlArtifactShortId) {
-      const isHomePath = location.pathname === '/' || location.pathname === '';
+      // `/chats/` is a real parameterless surface (the chat rail with no
+      // conversation open), not an unknown path — closing the session
+      // panel inside the workspace lands here deliberately. Canonicalizing
+      // it to `/` would bounce the user out to Home every time.
+      const isHomePath =
+        location.pathname === '/' ||
+        location.pathname === '' ||
+        withTrailingSlash(location.pathname) === chatWorkspacePath();
       if (!isSettingsRoute && !isHomePath) {
         syncingRef.current = true;
         navigate('/', { replace: true });
