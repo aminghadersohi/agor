@@ -3,6 +3,7 @@ import type {
   Board,
   BoardCapabilityPolicies,
   CapabilityPolicyWorkspacePreferences,
+  EffectiveCapabilityPolicyAccess,
   Group,
   User,
 } from '@agor-live/client';
@@ -49,6 +50,9 @@ export function BoardEditModal({
   const [policy, setPolicy] = useState<BoardCapabilityPolicies | null>(null);
   const [workspacePreferences, setWorkspacePreferences] =
     useState<CapabilityPolicyWorkspacePreferences>({ personal_session_sharing_enabled: false });
+  const [effectiveAccess, setEffectiveAccess] = useState<EffectiveCapabilityPolicyAccess | null>(
+    null
+  );
   const [loadedBoard, setLoadedBoard] = useState<Board | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -65,6 +69,7 @@ export function BoardEditModal({
     setLoadError(null);
     setLoadedBoard(null);
     setPolicy(null);
+    setEffectiveAccess(null);
 
     // Re-read the board as the modal opens. The selector uses a lean board list,
     // while this form must always start from the full, latest representation.
@@ -95,9 +100,10 @@ export function BoardEditModal({
         }
 
         if (branchRbacEnabled) {
-          const [policyResult, preferencesResult] = await Promise.allSettled([
+          const [policyResult, preferencesResult, accessResult] = await Promise.allSettled([
             client.service('boards/:id/permissions').find({ route: { id: board.board_id } }),
             client.service('workspace-preferences').find(),
+            client.service('boards/:id/effective-access').find({ route: { id: board.board_id } }),
           ]);
           if (cancelled) return;
           if (policyResult.status === 'fulfilled') {
@@ -108,9 +114,18 @@ export function BoardEditModal({
           if (preferencesResult.status === 'fulfilled') {
             setWorkspacePreferences(preferencesResult.value);
           }
+          // A failed fetch here fails closed: canEditGeneral (below) treats a
+          // null effectiveAccess as "no board.edit capability", same as an
+          // explicit denial.
+          setEffectiveAccess(
+            accessResult.status === 'fulfilled'
+              ? (accessResult.value as unknown as EffectiveCapabilityPolicyAccess)
+              : null
+          );
         } else {
           setPolicy(null);
           setWorkspacePreferences({ personal_session_sharing_enabled: false });
+          setEffectiveAccess(null);
         }
         if (cancelled) return;
         // Populate the form BEFORE exposing loadedBoard so the background
@@ -149,6 +164,16 @@ export function BoardEditModal({
       cancelled = true;
     };
   }, [board, branchRbacEnabled, client, form, open]);
+
+  // Preserve the legacy open-RBAC behavior while the normalized policy
+  // feature is disabled: every board mutator has always been allowed to
+  // save general settings there, and the daemon-side authorization hook
+  // is a no-op in that mode too. The server remains authoritative for
+  // every write either way — this only prevents typing into fields that
+  // are certain to 403.
+  const canEditGeneral = branchRbacEnabled
+    ? Boolean(effectiveAccess?.capabilities.includes('board.edit'))
+    : true;
 
   const syncPermissions = async () => {
     if (!branchRbacEnabled || !client || !board || !policy) return;
@@ -197,16 +222,16 @@ export function BoardEditModal({
       okText="Save"
       destroyOnHidden
     >
-      <Form form={form} layout="vertical" preserve style={{ marginTop: 16 }}>
-        {loadError ? (
-          <Alert type="error" showIcon title="Board settings unavailable" description={loadError} />
-        ) : !loadedBoard ? (
-          // Keep the Form mounted while the latest board is fetched. The load
-          // effect initializes this form instance before revealing its fields;
-          // conditionally mounting Form itself leaves useForm disconnected and
-          // triggers AntD's runtime warning.
-          <Skeleton active paragraph={{ rows: 6 }} />
-        ) : (
+      {loadError ? (
+        <Alert type="error" showIcon title="Board settings unavailable" description={loadError} />
+      ) : !loadedBoard ? (
+        // Render the form only once the full board has loaded, so its fields —
+        // including the background editor's mode — initialize from real values
+        // rather than the empty pre-load state (the cause of the mode/checkbox
+        // resetting on reopen).
+        <Skeleton active paragraph={{ rows: 6 }} style={{ marginTop: 16 }} />
+      ) : (
+        <Form form={form} layout="vertical" preserve style={{ marginTop: 16 }}>
           <>
             <BoardFormFields
               key={loadedBoard.board_id}
@@ -215,6 +240,7 @@ export function BoardEditModal({
               rbacEnabled={branchRbacEnabled}
               allUsers={allUsers}
               allGroups={allGroups}
+              canEditGeneral={canEditGeneral}
               capabilityPolicyEditor={
                 branchRbacEnabled ? (
                   policy ? (
@@ -239,13 +265,17 @@ export function BoardEditModal({
                   help="Add custom fields for use in zone trigger templates (e.g., {{ board.context.yourField }})"
                   rules={[{ validator: validateJSON }]}
                 >
-                  <JSONEditor placeholder='{"team": "Backend", "sprint": 42}' rows={4} />
+                  <JSONEditor
+                    placeholder='{"team": "Backend", "sprint": 42}'
+                    rows={4}
+                    disabled={!canEditGeneral}
+                  />
                 </Form.Item>
               }
             />
             <ProfileImageGalleryEditor
               subject={{ type: 'board', id: loadedBoard.board_id }}
-              canEdit
+              canEdit={canEditGeneral}
               label="Board images"
               onPrimaryChange={(imageId) =>
                 setLoadedBoard((current) =>
@@ -254,8 +284,8 @@ export function BoardEditModal({
               }
             />
           </>
-        )}
-      </Form>
+        </Form>
+      )}
     </Modal>
   );
 }
