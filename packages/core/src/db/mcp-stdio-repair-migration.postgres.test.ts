@@ -182,10 +182,10 @@ async function seedFixture(db: Database, fixture: Fixture): Promise<void> {
 }
 
 describe.skipIf(!postgresUrl || !usesPostgresSchema)(
-  'MCP stdio 0095 -> 0096 repair migration (PostgreSQL)',
+  'MCP stdio remote-field repair migration (PostgreSQL)',
   () => {
     let db: Database | null = null;
-    let pre0096Folder: string | null = null;
+    let preRepairFolder: string | null = null;
 
     beforeAll(async () => {
       db = createDatabase({ dialect: 'postgresql', url: postgresUrl! });
@@ -200,23 +200,31 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       expect(role.rolsuper).toBe(false);
       expect(role.rolbypassrls).toBe(false);
 
-      pre0096Folder = await mkdtemp(join(tmpdir(), 'agor-pg-migrations-through-0095-'));
-      await cp(migrationsFolder, pre0096Folder, { recursive: true });
-      await unlink(join(pre0096Folder, '0096_strip_stdio_remote_fields.sql'));
-      const journalPath = join(pre0096Folder, 'meta', '_journal.json');
+      preRepairFolder = await mkdtemp(join(tmpdir(), 'agor-pg-migrations-pre-stdio-repair-'));
+      await cp(migrationsFolder, preRepairFolder, { recursive: true });
+      const journalPath = join(preRepairFolder, 'meta', '_journal.json');
       const journal = JSON.parse(await readFile(journalPath, 'utf8')) as {
-        entries: Array<{ idx: number }>;
+        entries: Array<{ idx: number; tag: string }>;
       };
-      journal.entries = journal.entries.filter((entry) => entry.idx <= 95);
+      // Cut the journal at the repair migration by tag rather than by index.
+      // `idx` is only a label: this branch carries local migrations in the same
+      // numbering range upstream uses, so any fixed cutoff silently drops the
+      // wrong entries the next time either side renumbers.
+      const repairPosition = journal.entries.findIndex((entry) =>
+        entry.tag.endsWith('_strip_stdio_remote_fields')
+      );
+      expect(repairPosition).toBeGreaterThan(-1);
+      await unlink(join(preRepairFolder, `${journal.entries[repairPosition].tag}.sql`));
+      journal.entries = journal.entries.slice(0, repairPosition);
       await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
 
-      await migratePostgres(db as never, { migrationsFolder: pre0096Folder });
+      await migratePostgres(db as never, { migrationsFolder: preRepairFolder });
       for (const fixture of FIXTURES) await seedFixture(db, fixture);
     });
 
     afterAll(async () => {
       if (db) await (db as Database & { $client: { end: () => Promise<void> } }).$client.end();
-      if (pre0096Folder) await rm(pre0096Folder, { recursive: true, force: true });
+      if (preRepairFolder) await rm(preRepairFolder, { recursive: true, force: true });
     });
 
     it('repairs every tenant, removes stdio OAuth state, and preserves remote state', async () => {
