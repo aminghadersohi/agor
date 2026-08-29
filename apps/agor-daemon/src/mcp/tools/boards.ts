@@ -373,18 +373,43 @@ async function arrangeBoardZones(
   })) as { data: Array<BoardEntityObject> };
   const visible = await filterVisibleBoardEntities(ctx, entityResult.data, false);
 
-  // Size each zone's contents exactly the way the zone arrange does, so the
-  // shapes chosen between are ones the zone can genuinely hold.
+  // Size each zone's contents exactly the way the zone arrange will, because a
+  // shape is only useful if the zone can genuinely hold its contents at it.
+  //
+  // "Exactly" includes the item *order*. The packer fills row-major, so order
+  // decides which items share a row and therefore how tall the zone must be:
+  // three short cards followed by two worktrees packs 136px shorter than the
+  // same five sorted by position, which interleaves them. Computing shapes in
+  // arbitrary order sizes the zone too short, the zone is written at that
+  // height, and the follow-up arrange then refuses to place anything into it.
   const zones = await Promise.all(
     zoneEntries.map(async ([zoneId, zone]) => {
+      const zonePolicy = normalizeZoneLayoutPolicy(zone.layout);
       const contents = visible.filter((entity) => entity.zone_id === zoneId);
+      // Sorting by anything other than position needs the card/branch records;
+      // an unmeasured card needs them too, to estimate its rendered height.
       const metadata = await loadEntityLayoutMetadata(
         ctx,
-        contents.filter((entity) => entity.card_id !== undefined && !measuredSize(entity))
+        contents.filter(
+          (entity) =>
+            zonePolicy.sortBy !== 'position' ||
+            (entity.card_id !== undefined && !measuredSize(entity))
+        )
       );
-      const items = contents.map((entity) => {
+      const ordered = sortZoneLayoutItems(
+        contents.map((entity) => ({
+          entity,
+          ...(metadata.get(entity.object_id) ?? {
+            id: entity.object_id,
+            position: entity.position,
+          }),
+        })),
+        zonePolicy
+      ).map(({ entity }) => entity);
+
+      const items = ordered.map((entity) => {
         const measured = measuredSize(entity);
-        if (entity.compact === true) {
+        if (zonePolicy.preset === 'compact_list' || entity.compact === true) {
           return { id: entity.object_id, ...COMPACT_ARRANGE_DIMENSIONS[entity.entity_type] };
         }
         if (measured) return { id: entity.object_id, ...measured };
@@ -397,15 +422,22 @@ async function arrangeBoardZones(
         }
         return { id: entity.object_id, ...ARRANGE_DIMENSIONS[entity.entity_type] };
       });
+
+      // The zone arrange spaces items by the zone's own gap, so the shapes have
+      // to be measured with that gap and not a board-level one.
+      const itemGap = zonePolicy.gap ?? 24;
       return {
         id: zoneId,
         zone,
         itemCount: items.length,
         shapes: zoneShapesForItems(items, {
           titleInset: zoneContentTopInset(zone),
-          padding: Math.max(0, options.gap ?? 24),
-          gapX: 24,
-          gapY: 24,
+          padding: itemGap,
+          gapX: itemGap,
+          gapY: itemGap,
+          // compact_list is always one column; offering wider shapes would
+          // promise a landscape form the zone arrange will never produce.
+          ...(zonePolicy.preset === 'compact_list' ? { maxColumns: 1 } : {}),
         }),
       };
     })

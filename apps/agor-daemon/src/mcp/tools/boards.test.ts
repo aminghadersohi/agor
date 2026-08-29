@@ -1724,6 +1724,89 @@ describe('board layout tools with branch entities present', () => {
     expect(parsed.requiredWidth).toBeGreaterThan(300);
   });
 
+  it('sizes a zone from the order the arrange will actually use', async () => {
+    // The packer fills row-major, so order decides which items share a row and
+    // therefore how tall the zone must be. Sorted by position these interleave:
+    // the tall worktree lands beside short cards in row 0 and the second tall
+    // one starts row 1, which is materially taller than grouping them. Sizing
+    // the zone from an arbitrary order writes a height the follow-up arrange
+    // then refuses to place anything into.
+    // Ids must satisfy the shortid pattern the branch query validator enforces.
+    const tall = (suffix: string, y: number) =>
+      branchEntity({
+        object_id: `obj-b-${suffix}`,
+        branch_id: `019e8e${suffix}`,
+        zone_id: 'zone-1',
+        position: { x: 0, y },
+        size: { width: 500, height: 240 },
+      });
+    const short = (suffix: string, y: number) =>
+      cardEntity({
+        object_id: `obj-c-${suffix}`,
+        card_id: `019e8f${suffix}`,
+        zone_id: 'zone-1',
+        position: { x: 0, y },
+        size: { width: 380, height: 40 },
+      });
+
+    // Supplied grouped (both tall first) but positioned interleaved, so the
+    // stored order and the sorted order pack to genuinely different heights.
+    // Grouped at two columns the talls share row 0; sorted they straddle rows
+    // 0 and 2, which is ~200px taller. A zone sized from the stored order is
+    // therefore too short for the layout the arrange will actually produce.
+    const { app } = makeApp({
+      entities: [tall('11', 0), tall('12', 40), short('21', 10), short('22', 20), short('23', 30)],
+      objects: { 'zone-1': { type: 'zone', x: 0, y: 0, width: 400, height: 400 } },
+    });
+    const arrangeZones = registerAndCaptureHandler('agor_boards_arrange_zones', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrangeZones({ boardId: 'board-1', targetWidth: 1600, dryRun: true })).content[0].text
+    );
+
+    const placed = parsed.updates[0];
+    // The two 240px items end up in different rows once sorted, so the zone
+    // must be tall enough for both. Sizing from the stored order puts them in
+    // one row and yields a zone ~200px shorter than the contents need.
+    expect(placed.size.height).toBeGreaterThanOrEqual(240 * 2);
+  });
+
+  it('never offers a compact_list zone a multi-column shape', async () => {
+    // compact_list is one column by definition; a landscape shape would promise
+    // a layout the zone arrange will never produce.
+    const { app } = makeApp({
+      entities: [
+        branchEntity({ zone_id: 'zone-1', size: { width: 500, height: 88 } }),
+        cardEntity({ zone_id: 'zone-1', size: { width: 380, height: 56 } }),
+      ],
+      objects: {
+        'zone-1': {
+          type: 'zone',
+          x: 0,
+          y: 0,
+          width: 400,
+          height: 400,
+          layout: { mode: 'auto', preset: 'compact_list' },
+        },
+      },
+    });
+    const arrangeZones = registerAndCaptureHandler('agor_boards_arrange_zones', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrangeZones({ boardId: 'board-1', targetWidth: 1600, dryRun: true })).content[0].text
+    );
+
+    expect(parsed.updates[0].contentColumns).toBe(1);
+  });
+
   it('widens a too-narrow zone when resize is both', async () => {
     const { app } = makeApp({
       entities: [branchEntity({ zone_id: 'zone-1', size: { width: 500, height: 200 } })],
