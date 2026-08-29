@@ -64,18 +64,49 @@ const OWNERS_CREATOR_FALLBACK: OwnersState = { status: 'creator-fallback' };
 const OWNERS_FAILED: OwnersState = { status: 'failed' };
 const NO_OWNERS: User[] = [];
 
-type TeammatePortraitSize = 'small' | 'medium' | 'large';
+type TeammatePortraitSize = 'tiny' | 'small' | 'medium' | 'large' | 'fill';
 
 const TEAMMATE_PORTRAIT_SIZE_STORAGE_KEY = 'agor:teammate-panel-portrait-size';
-const TEAMMATE_PORTRAIT_SIZES: Record<
-  TeammatePortraitSize,
-  { primary: number; alternative: number }
-> = {
+const TEAMMATE_PORTRAIT_DEFAULT_SIZE: TeammatePortraitSize = 'large';
+/**
+ * The server stores gallery images at two fixed widths and the larger is 768px
+ * (`PROFILE_IMAGE_LARGE_SIZE` in the daemon, which the UI cannot import), so a
+ * portrait wider than that is upscaling a variant that has no more detail.
+ */
+const TEAMMATE_PORTRAIT_FILL_MAX_PX = 768;
+
+interface TeammatePortraitDimensions {
+  primary: number;
+  alternative: number;
+  maxAlternatives?: number;
+  /** Track the panel's width, with `primary` acting as the upper bound. */
+  fill?: boolean;
+}
+
+const TEAMMATE_PORTRAIT_SIZES: Record<TeammatePortraitSize, TeammatePortraitDimensions> = {
+  // The 36px identity box the panel header carried before the portrait became a
+  // hero element. It also drops the alternates strip, which at this scale would
+  // be an 18px thumbnail overlapping a 36px avatar.
+  tiny: { primary: 36, alternative: 18, maxAlternatives: 0 },
   small: { primary: 112, alternative: 26 },
   medium: { primary: 200, alternative: 32 },
   large: { primary: 300, alternative: 40 },
+  fill: { primary: TEAMMATE_PORTRAIT_FILL_MAX_PX, alternative: 44, fill: true },
 };
-const TEAMMATE_PORTRAIT_SIZE_ORDER: TeammatePortraitSize[] = ['small', 'medium', 'large'];
+const TEAMMATE_PORTRAIT_SIZE_ORDER: TeammatePortraitSize[] = [
+  'tiny',
+  'small',
+  'medium',
+  'large',
+  'fill',
+];
+const TEAMMATE_PORTRAIT_SIZE_LABELS: Record<TeammatePortraitSize, string> = {
+  tiny: 'tiny',
+  small: 'small',
+  medium: 'medium',
+  large: 'large',
+  fill: 'panel width',
+};
 
 function nextTeammatePortraitSize(current: TeammatePortraitSize): TeammatePortraitSize {
   const currentIndex = TEAMMATE_PORTRAIT_SIZE_ORDER.indexOf(current);
@@ -85,11 +116,16 @@ function nextTeammatePortraitSize(current: TeammatePortraitSize): TeammatePortra
 function initialTeammatePortraitSize(): TeammatePortraitSize {
   try {
     const stored = localStorage.getItem(TEAMMATE_PORTRAIT_SIZE_STORAGE_KEY);
-    if (stored === 'small' || stored === 'medium' || stored === 'large') return stored;
+    // Membership in the size table rather than a literal list, so a name that
+    // was valid when it was written keeps working and only a name this build
+    // cannot render falls back.
+    if (stored !== null && Object.hasOwn(TEAMMATE_PORTRAIT_SIZES, stored)) {
+      return stored as TeammatePortraitSize;
+    }
   } catch {
     // Storage can be unavailable in embedded/private browsing contexts.
   }
-  return 'large';
+  return TEAMMATE_PORTRAIT_DEFAULT_SIZE;
 }
 
 /**
@@ -187,6 +223,7 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
   );
   const teammatePortraitDimensions = TEAMMATE_PORTRAIT_SIZES[teammatePortraitSize];
   const nextPortraitSize = nextTeammatePortraitSize(teammatePortraitSize);
+  const portraitSizeControlLabel = `Portrait size: ${TEAMMATE_PORTRAIT_SIZE_LABELS[teammatePortraitSize]}. Click for ${TEAMMATE_PORTRAIT_SIZE_LABELS[nextPortraitSize]}.`;
   const cycleTeammatePortraitSize = useCallback(() => {
     setTeammatePortraitSize((currentSize) => {
       const nextSize = nextTeammatePortraitSize(currentSize);
@@ -426,21 +463,23 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
               <div
                 style={{
                   width: '100%',
-                  minHeight: teammatePortraitDimensions.primary,
+                  // At the fill step `primary` is only a cap, so reserving it
+                  // as a minimum would hold open 768px of empty header.
+                  minHeight: teammatePortraitDimensions.fill
+                    ? undefined
+                    : teammatePortraitDimensions.primary,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   position: 'relative',
                 }}
               >
-                <Tooltip
-                  title={`Portrait size: ${teammatePortraitSize}. Click for ${nextPortraitSize}.`}
-                >
+                <Tooltip title={portraitSizeControlLabel}>
                   <Button
                     type="text"
                     shape="circle"
                     icon={<ExpandAltOutlined />}
-                    aria-label={`Portrait size: ${teammatePortraitSize}. Click for ${nextPortraitSize}.`}
+                    aria-label={portraitSizeControlLabel}
                     onClick={cycleTeammatePortraitSize}
                     style={{ position: 'absolute', insetInlineEnd: 0, top: 0, zIndex: 1 }}
                   />
@@ -452,6 +491,8 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
                     branch={primaryTeammateBranch}
                     primarySize={teammatePortraitDimensions.primary}
                     alternativeSize={teammatePortraitDimensions.alternative}
+                    maxAlternatives={teammatePortraitDimensions.maxAlternatives}
+                    fill={teammatePortraitDimensions.fill}
                   />
                 )}
               </div>

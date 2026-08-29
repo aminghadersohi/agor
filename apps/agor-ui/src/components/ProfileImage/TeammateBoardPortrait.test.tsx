@@ -81,4 +81,45 @@ describe('TeammateBoardPortrait', () => {
       height: '300px',
     });
   });
+
+  it('tracks the container in fill mode, capping at the size it is given', () => {
+    vi.mocked(useProfileImageGallery).mockReturnValue([image('image-main', 0, true)]);
+    vi.mocked(useProfileImageUrl).mockReturnValue('blob:image-main');
+
+    render(
+      <ConfigProvider>
+        <TeammateBoardPortrait branch={branch} primarySize={768} alternativeSize={44} fill />
+      </ConfigProvider>
+    );
+
+    const root = screen.getByTestId('teammate-board-portrait');
+    // Width follows the container and 768 becomes a ceiling, so no measurement
+    // is needed to survive a dragged panel.
+    expect(root).toHaveStyle({ width: '100%', maxWidth: '768px' });
+    expect(root.style.height).toBe('');
+    expect(root.style.containerType).toBe('inline-size');
+  });
+
+  it('keeps the alternates strip on the portrait edge in fill mode', () => {
+    vi.mocked(useProfileImageGallery).mockReturnValue([
+      image('image-main', 0, true),
+      image('image-two', 1),
+    ]);
+    vi.mocked(useProfileImageUrl).mockImplementation((imageId) =>
+      imageId ? `blob:${imageId}` : undefined
+    );
+
+    render(
+      <ConfigProvider>
+        <TeammateBoardPortrait branch={branch} primarySize={768} alternativeSize={40} fill />
+      </ConfigProvider>
+    );
+
+    // The portrait gives up 0.7 alternatives of the container and the strip
+    // straddles its edge by a further 0.55, so both are container-relative.
+    const strip = screen.getByTitle('1 alternate teammate photo');
+    expect(strip).toHaveStyle({ insetInlineStart: 'calc(100% - 50px)' });
+    const avatar = document.querySelector('.ant-avatar') as HTMLElement;
+    expect(avatar).toHaveStyle({ width: 'calc(100% - 28px)', aspectRatio: '1' });
+  });
 });
