@@ -30,6 +30,7 @@ import {
   getSessionType,
   isTaskExecuting,
   type Session,
+  type SessionRelationship,
   type SessionType,
   type ZoneBoardObject,
 } from '@agor/core/types';
@@ -241,6 +242,69 @@ function redactSessionFindResult<T extends { mcp_token?: unknown }>(
 
   return { ...result, data: result.data.map(redactSessionForMcp) };
 }
+
+/**
+ * A session created cross-branch by another session carries a durable
+ * `remote_create` edge naming its creator. That edge is NOT genealogy: a
+ * remote-created session is genuinely `root` in its own branch and has no
+ * `genealogy.parent_session_id`. Both facts are true at once, and orientation
+ * has to report both without collapsing them — see the block in
+ * `agor_sessions_get_current_context` that emits `genealogy` /
+ * `parent_session_id` untouched alongside `remote_origins`.
+ *
+ * Selecting the edges where the current session is the TARGET is what makes
+ * this safe to hand back: it answers "who created me", never "who may I
+ * reach". `agor_session_relationships_report` re-derives the same set from the
+ * caller's own session id rather than trusting a caller-supplied target.
+ */
+function selectRemoteOriginRelationships(
+  relationships: SessionRelationship[] | undefined,
+  sessionId: string
+): SessionRelationship[] {
+  return (relationships ?? []).filter(
+    (relationship) =>
+      relationship.relationship_type === 'remote_create' &&
+      relationship.target_session_id === sessionId
+  );
+}
+
+/**
+ * The session an explicit follow-up is delivered to. `callback_session_id` is
+ * the endpoint the orchestrator registered (it may be a third session it
+ * self-targeted); the creator is the fallback when no endpoint was recorded.
+ * Mirrors `TasksService.resolveCompletionCallbackTarget` so the explicit route
+ * and the automatic one cannot drift onto different sessions.
+ */
+function resolveRemoteOriginReportTarget(relationship: SessionRelationship): string {
+  return relationship.callback_session_id ?? relationship.source_session_id;
+}
+
+function projectRemoteOriginForMcp(relationship: SessionRelationship) {
+  const data = relationship.data ?? {};
+  return {
+    relationship_id: relationship.relationship_id,
+    /** The session that called agor_sessions_create to make this one. */
+    origin_session_id: relationship.source_session_id,
+    origin_branch_id: typeof data.source_branch_id === 'string' ? data.source_branch_id : null,
+    /** Where agor_session_relationships_report delivers. */
+    report_to_session_id: resolveRemoteOriginReportTarget(relationship),
+    /**
+     * Governs the AUTOMATIC on-completion callback only. A one-shot callback
+     * that has already fired leaves this false; that is correct and expected,
+     * and it does not gate an explicit report.
+     */
+    automatic_completion_callback_enabled: relationship.callback_enabled,
+    created_at: relationship.created_at,
+  };
+}
+
+const REMOTE_ORIGIN_ORIENTATION_NOTE =
+  'This session was created remotely by the session(s) listed in remote_origins. That is a durable ' +
+  'relationship, not genealogy — genealogy/parent_session_id above stay branch-local and correctly ' +
+  'report this session as a root. You are NOT an orphan: to send an explicit follow-up to your ' +
+  'origin, call agor_session_relationships_report. automatic_completion_callback_enabled reflects ' +
+  'only the automatic on-completion channel; an already-fired one-shot callback leaves it false and ' +
+  'does not block an explicit report.';
 
 export function registerSessionTools(server: McpServer, ctx: McpContext): void {
   // Tool 1: agor_sessions_list
@@ -492,7 +556,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_get_current_context',
     {
       description:
-        'Get a lean orientation snapshot for the current session in ONE call. Returns deduplicated context: session identity, user, latest task Git boundaries, branch (zone, issue/PR, notes, environment), board (with zones), repo (slug, default branch), genealogy, and sibling sessions. Every field appears exactly once. Use get_current or entity-specific tools for full details. The returned session_id is what a remote orchestrator passes as callbackSessionId (agor_sessions_create) to self-target cross-branch completion callbacks.',
+        'Get a lean orientation snapshot for the current session in ONE call. Returns deduplicated context: session identity, user, latest task Git boundaries, branch (zone, issue/PR, notes, environment), board (with zones), repo (slug, default branch), genealogy, remote origins, and sibling sessions. Every field appears exactly once. Use get_current or entity-specific tools for full details. The returned session_id is what a remote orchestrator passes as callbackSessionId (agor_sessions_create) to self-target cross-branch completion callbacks. IMPORTANT: `genealogy`/`parent_session_id` describe BRANCH-LOCAL ancestry only. A session another session created cross-branch is legitimately `genealogy: "root"` with `parent_session_id: null` AND still has a durable origin — that origin is reported in `remote_origins`, so check it before concluding you have nobody to report to. Use agor_session_relationships_report to send it an explicit follow-up.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         includeSiblings: z
@@ -576,6 +640,30 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           : 'root';
       result.parent_session_id = gen?.parent_session_id || gen?.forked_from_session_id || null;
       result.children_count = gen?.children?.length || 0;
+
+      // Remote origin — reported SEPARATELY from and IN ADDITION TO genealogy
+      // above, never merged into it. A cross-branch remote-created session is a
+      // genuine `root` with a null `parent_session_id`; it also has a durable
+      // creator. Folding the creator into parent_session_id would make the
+      // branch-local session tree, recursive delete, and fork/spawn semantics
+      // lie about branch boundaries — a worse bug than the orphan reading this
+      // field exists to prevent.
+      //
+      // Derived from the same repository call agor_session_relationships_report
+      // uses, deliberately rather than from the `remote_relationships`
+      // enrichment on the session: an origin this tool advertises must be one
+      // that tool will actually accept. Two derivations could drift into
+      // showing a route that then gets rejected.
+      const remoteOrigins = selectRemoteOriginRelationships(
+        await runWithMcpTenantDatabaseScope(ctx, (db) =>
+          new SessionRelationshipRepository(db).findRemoteParents(currentSessionId)
+        ),
+        currentSessionId
+      );
+      if (remoteOrigins.length > 0) {
+        result.remote_origins = remoteOrigins.map(projectRemoteOriginForMcp);
+        result.remote_origin_note = REMOTE_ORIGIN_ORIENTATION_NOTE;
+      }
 
       if (session.branch_id) {
         try {
@@ -1198,6 +1286,148 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           : downstreamSessionId
             ? { downstream_details_redacted: true }
             : {}),
+      });
+    }
+  );
+
+  // Tool 5d: agor_session_relationships_report
+  //
+  // The explicit counterpart to the automatic completion callback. It accepts
+  // no target: the durable remote_create edge determines who this session may
+  // reach, and normal branch authorization still applies on top.
+  server.registerTool(
+    'agor_session_relationships_report',
+    {
+      description:
+        'Send ONE explicit follow-up message from the current session to the session that remotely created it (see `remote_origins` in agor_sessions_get_current_context). Use this when a delegated cross-branch session has something to report AFTER its completion callback already fired, or when no automatic callback was configured. The destination is derived from the durable remote_create relationship — you cannot address an arbitrary session with this tool, and there is no target parameter. Each call delivers exactly one message; it opens no persistent channel and never enables the automatic completion callback (use agor_session_relationships_set_callback for that). Fails closed with a reason when there is no recorded origin, the origin is archived or gone, or the caller lacks prompt access to it.',
+      inputSchema: z.object({
+        message: mcpRequiredString(
+          'message',
+          'The follow-up to deliver to the origin session. Write it as a standalone report: the origin receives it as a prompt and may have moved on to other work since it created you.'
+        ),
+        relationshipId: mcpOptionalString(
+          'relationshipId',
+          "Only needed when remote_origins lists more than one origin. Must be a relationship_id from THIS session's remote_origins; any other id is rejected."
+        ),
+      }),
+    },
+    async (args) => {
+      if (!ctx.sessionId) return sessionContextRequiredResult();
+      const currentSessionId = ctx.sessionId;
+
+      const originRelationships = selectRemoteOriginRelationships(
+        await runWithMcpTenantDatabaseScope(ctx, (db) =>
+          new SessionRelationshipRepository(db).findRemoteParents(currentSessionId)
+        ),
+        currentSessionId
+      );
+
+      if (originRelationships.length === 0) {
+        return {
+          ...textResult({
+            error:
+              'This session has no recorded remote origin, so there is nowhere to report to. ' +
+              'Only a session created by another session via agor_sessions_create (cross-branch) ' +
+              'carries a remote_create relationship.',
+            how_to_check:
+              'Call agor_sessions_get_current_context and look at remote_origins, or agor_session_relationships_list.',
+          }),
+          isError: true,
+        };
+      }
+
+      let relationship: SessionRelationship;
+      if (args.relationshipId) {
+        const requested = originRelationships.find(
+          (candidate) => candidate.relationship_id === args.relationshipId
+        );
+        if (!requested) {
+          return {
+            ...textResult({
+              error: `relationshipId ${args.relationshipId} is not a remote origin of this session. You can only report to a session that created this one.`,
+              available_relationship_ids: originRelationships.map((r) => r.relationship_id),
+            }),
+            isError: true,
+          };
+        }
+        relationship = requested;
+      } else if (originRelationships.length > 1) {
+        return {
+          ...textResult({
+            error:
+              'This session has more than one remote origin. Pass relationshipId to choose which one to report to.',
+            remote_origins: originRelationships.map(projectRemoteOriginForMcp),
+          }),
+          isError: true,
+        };
+      } else {
+        relationship = originRelationships[0];
+      }
+
+      const reportTargetSessionId = resolveRemoteOriginReportTarget(relationship);
+      let targetSession: Session;
+      try {
+        targetSession = (await ctx.app
+          .service('sessions')
+          .get(reportTargetSessionId, ctx.baseServiceParams)) as Session;
+      } catch {
+        return {
+          ...textResult({
+            error: `Origin session ${shortId(reportTargetSessionId)} could not be loaded — it may have been deleted, or it may be outside your access. Nothing was delivered.`,
+            relationship_id: relationship.relationship_id,
+          }),
+          isError: true,
+        };
+      }
+
+      if (targetSession.archived) {
+        return {
+          ...textResult({
+            error: `Origin session ${shortId(reportTargetSessionId)} is archived and was not unarchived to receive this report. Nothing was delivered.`,
+            relationship_id: relationship.relationship_id,
+            archived_reason: targetSession.archived_reason ?? null,
+            how_to_fix:
+              'A user can unarchive the origin session; then retry. Do not retry in a loop.',
+          }),
+          isError: true,
+        };
+      }
+
+      await runWithMcpTenantDatabaseScope(ctx, (db) =>
+        ensureCanPromptTargetSession(
+          reportTargetSessionId,
+          ctx.userId,
+          ctx.app,
+          new BranchRepository(db)
+        )
+      );
+
+      const reporterBranchId = relationship.data?.target_branch_id;
+      const provenance =
+        `📨 Follow-up from remote-created session ${shortId(currentSessionId)}` +
+        (typeof reporterBranchId === 'string' ? ` (branch ${shortId(reporterBranchId)})` : '') +
+        ', which you created via agor_sessions_create.';
+
+      const task = await ctx.app.service('/sessions/:id/prompt').create(
+        {
+          prompt: `${provenance}\n\n${args.message}`,
+          stream: true,
+        },
+        { ...ctx.baseServiceParams, route: { id: reportTargetSessionId } }
+      );
+
+      return textResult({
+        success: true,
+        relationship_id: relationship.relationship_id,
+        delivered_to_session_id: reportTargetSessionId,
+        taskId: task.task_id,
+        status: task.status,
+        ...(task.status === 'queued' && { queued: true, queue_position: task.queue_position }),
+        automatic_completion_callback_enabled: relationship.callback_enabled,
+        note:
+          task.status === 'queued'
+            ? 'Origin session is busy. The report is queued and will be delivered when it becomes idle. This was a one-time send — call this tool again for another report.'
+            : 'Report delivered as a one-time message. This opened no persistent channel; call this tool again for another report.',
       });
     }
   );

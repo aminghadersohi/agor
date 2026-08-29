@@ -55,6 +55,11 @@ vi.mock('@agor/core/db', () => ({
       ...data,
       created_at: new Date(0).toISOString(),
     }));
+    // Orientation asks for the current session's remote origins. These
+    // fixtures are all locally-created sessions, so there are none — the
+    // populated case is covered end-to-end against a real database in
+    // sessions.remote-origin.test.ts.
+    findRemoteParents = vi.fn(async () => []);
     get = vi.fn(async (relationshipId: string) => ({
       relationship_id: relationshipId,
       source_session_id: 'sess-source',
