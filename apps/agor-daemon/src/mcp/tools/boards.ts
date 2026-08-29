@@ -1,3 +1,4 @@
+import { layoutJustifiedZones, zoneShapesForItems } from '@agor/core/layout/justified-zones';
 import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
 import {
   normalizeZoneLayoutPolicy,
@@ -1422,6 +1423,165 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         success: true,
         board: result,
         message: 'Board unarchived successfully.',
+      });
+    }
+  );
+
+  // agor_boards_arrange_zones
+  server.registerTool(
+    'agor_boards_arrange_zones',
+    {
+      description:
+        "Arrange a board's zones themselves into justified rows, photo-grid style: zones flow left-to-right and top-to-bottom, every zone in a row shares that row's height, and each full row is stretched flush to targetWidth. Zone widths and heights are both rewritten, so a zone becomes portrait or landscape depending on which shape lets its own contents fit the row. Pinned contents move with their zone; call agor_boards_auto_arrange_zone afterwards to re-pack the items inside each zone at its new width. Use targetRowHeight to stop one tall zone from dictating a row.",
+      inputSchema: z.object({
+        boardId: mcpRequiredId('boardId', 'Board'),
+        targetWidth: mcpOptionalPositiveInt(
+          'targetWidth',
+          'Width each full row is stretched to (default: 1600).'
+        ),
+        targetRowHeight: mcpOptionalPositiveInt(
+          'targetRowHeight',
+          'Preferred row height. Without it, a tall zone can be packed beside a short one and leave the short one mostly blank.'
+        ),
+        gap: mcpOptionalNonNegativeInt('gap', 'Space between zones (default: 40).'),
+        startX: mcpOptionalNumber('startX', 'Canvas X origin (default: 80).'),
+        startY: mcpOptionalNumber('startY', 'Canvas Y origin (default: 80).'),
+        maxPerRow: mcpOptionalPositiveInt('maxPerRow', 'Upper bound on zones per row.'),
+        justifyLastRow: z
+          .boolean()
+          .optional()
+          .describe(
+            'Stretch the final row even when it is underfull (default: false, matching a photo grid).'
+          ),
+        dryRun: z
+          .boolean()
+          .optional()
+          .describe('Compute and return the layout without writing any zone.'),
+      }),
+    },
+    async (args) => {
+      const boardId = coerceString(args.boardId);
+      if (!boardId) throw new Error('boardId is required');
+      const board = (await ctx.app.service('boards').get(boardId, ctx.baseServiceParams)) as Board;
+
+      const zoneEntries = Object.entries(board.objects ?? {}).filter(
+        ([, object]) => object.type === 'zone'
+      ) as [string, BoardObject & { type: 'zone'; width: number; height: number }][];
+
+      if (zoneEntries.length === 0) {
+        return textResult({
+          boardId,
+          arranged: 0,
+          rows: 0,
+          updates: [],
+          note: 'No zones present.',
+        });
+      }
+
+      const boardObjectsService = ctx.app.service('board-objects');
+      const entityResult = (await boardObjectsService.find({
+        query: { board_id: boardId },
+        ...ctx.baseServiceParams,
+      })) as { data: Array<BoardEntityObject> };
+      const visible = await filterVisibleBoardEntities(ctx, entityResult.data, false);
+
+      // Size each zone's contents the way the zone arrange does, so the shapes
+      // we choose between are ones the zone can genuinely hold.
+      const zones = await Promise.all(
+        zoneEntries.map(async ([zoneId, zone]) => {
+          const contents = visible.filter((entity) => entity.zone_id === zoneId);
+          const metadata = await loadEntityLayoutMetadata(
+            ctx,
+            contents.filter((entity) => entity.card_id !== undefined && !measuredSize(entity))
+          );
+          const items = contents.map((entity) => {
+            const measured = measuredSize(entity);
+            if (entity.compact === true) {
+              return { id: entity.object_id, ...COMPACT_ARRANGE_DIMENSIONS[entity.entity_type] };
+            }
+            if (measured) return { id: entity.object_id, ...measured };
+            if (entity.entity_type === 'card' && entity.card_id) {
+              return {
+                id: entity.object_id,
+                width: ARRANGE_DIMENSIONS.card.width,
+                height: estimateCardHeight(metadata.get(entity.object_id)?.card),
+              };
+            }
+            return { id: entity.object_id, ...ARRANGE_DIMENSIONS[entity.entity_type] };
+          });
+          return {
+            id: zoneId,
+            zone,
+            itemCount: items.length,
+            shapes: zoneShapesForItems(items, {
+              titleInset: zoneContentTopInset(zone),
+              padding: Math.max(0, args.gap ?? 24),
+              gapX: 24,
+              gapY: 24,
+            }),
+          };
+        })
+      );
+
+      const layout = layoutJustifiedZones(zones, {
+        targetWidth: args.targetWidth ?? 1600,
+        targetRowHeight: args.targetRowHeight,
+        gap: args.gap ?? 40,
+        startX: args.startX ?? 80,
+        startY: args.startY ?? 80,
+        maxPerRow: args.maxPerRow,
+        justifyLastRow: args.justifyLastRow === true,
+      });
+
+      const byId = new Map(zones.map((entry) => [entry.id, entry]));
+      if (args.dryRun !== true) {
+        for (const placement of layout.placements) {
+          const entry = byId.get(placement.id);
+          if (!entry) continue;
+          await ctx.app.service('boards').patch(
+            boardId,
+            {
+              _action: 'upsertObject',
+              objectId: placement.id,
+              objectData: {
+                ...entry.zone,
+                x: placement.x,
+                y: placement.y,
+                width: placement.width,
+                height: placement.height,
+              },
+            } as unknown as Partial<Board>,
+            ctx.baseServiceParams
+          );
+        }
+      }
+
+      return textResult({
+        boardId,
+        arranged: layout.placements.length,
+        rows: layout.rows,
+        width: layout.width,
+        height: layout.height,
+        gap: layout.gap,
+        rowHeights: layout.rowHeights,
+        dryRun: args.dryRun === true,
+        overflowingRows: layout.overflowingRows,
+        warning:
+          layout.overflowingRows.length > 0
+            ? `Row(s) ${layout.overflowingRows.join(', ')} hold a zone wider than targetWidth even at its narrowest shape; they were left at their natural width. Raise targetWidth or move a zone.`
+            : null,
+        note: 'Zone contents keep their zone-relative positions. Run agor_boards_auto_arrange_zone on each zone to re-pack items at the new width.',
+        updates: layout.placements.map((placement) => ({
+          objectId: placement.id,
+          label: byId.get(placement.id)?.zone.label ?? null,
+          itemCount: byId.get(placement.id)?.itemCount ?? 0,
+          position: { x: placement.x, y: placement.y },
+          size: { width: placement.width, height: placement.height },
+          row: placement.row,
+          column: placement.column,
+          contentColumns: placement.columns,
+          slackY: placement.slackY,
+        })),
       });
     }
   );
