@@ -1,3 +1,4 @@
+import { branchQueryValidator, typedValidateQuery } from '@agor/core/lib/feathers-validation';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { describe, expect, it, vi } from 'vitest';
 import { registerBoardTools } from './boards.js';
@@ -80,6 +81,25 @@ function registerAndCaptureConfig(
 
   if (!config) throw new Error(`${toolName} was not registered`);
   return config;
+}
+
+/**
+ * Put a `branches.find` mock behind the same query-validation hook the daemon
+ * registers for the branches service (see register-hooks.ts).
+ *
+ * Every board layout tool asks the branches service which pinned worktrees are
+ * still active, and that query — not the service beneath it — is where the
+ * branch path used to die. A mock wired straight to `find` cannot observe
+ * that, which is how these tools shipped broken for boards holding a branch.
+ */
+function validatedBranchesFind<T>(
+  find: (query: Record<string, unknown>) => T
+): ReturnType<typeof vi.fn> {
+  return vi.fn(async (params: { query?: Record<string, unknown> }) => {
+    const context = { params: { ...params } };
+    await typedValidateQuery(branchQueryValidator)(context);
+    return find(context.params.query ?? {});
+  });
 }
 
 describe('agor_boards_list pagination', () => {
@@ -1140,6 +1160,9 @@ describe('agor_boards_auto_arrange', () => {
           };
         if (name === 'branches')
           return { find: vi.fn(async () => ({ data: [{ branch_id: 'branch-1' }] })) };
+        // Read unconditionally so the grid can be placed clear of any zone.
+        if (name === 'boards')
+          return { get: vi.fn(async () => ({ board_id: 'board-1', objects: {} })), patch: vi.fn() };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -1159,7 +1182,7 @@ describe('agor_boards_auto_arrange', () => {
     ]);
   });
 
-  it('can include canvas annotations and leaves zones fixed', async () => {
+  it('can include canvas annotations, leaving zones fixed and uncovered', async () => {
     const boardPatches: Array<Record<string, unknown>> = [];
     const app = {
       service(name: string) {
@@ -1194,12 +1217,20 @@ describe('agor_boards_auto_arrange', () => {
         .text
     );
 
-    expect(parsed).toMatchObject({ arranged: 2, arrangedEntities: 0, arrangedCanvasObjects: 2 });
+    expect(parsed).toMatchObject({
+      arranged: 2,
+      arrangedEntities: 0,
+      arrangedCanvasObjects: 2,
+      // zone-1 occupies y 0..800, so the default y=80 grid origin moved below it
+      // rather than laying the annotations over a zone it is not arranging.
+      avoidedZoneIds: ['zone-1'],
+      appliedStartY: 840,
+    });
     expect(boardPatches).toHaveLength(2);
     expect(boardPatches.map((patch) => patch.objectId)).toEqual(['text-1', 'note-1']);
     expect(boardPatches.map((patch) => patch.objectData)).toEqual([
-      expect.objectContaining({ x: 80, y: 80 }),
-      expect.objectContaining({ x: 320, y: 80 }),
+      expect.objectContaining({ x: 80, y: 840 }),
+      expect.objectContaining({ x: 320, y: 840 }),
     ]);
   });
 
@@ -1238,6 +1269,570 @@ describe('agor_boards_auto_arrange', () => {
 
     expect(parsed).toMatchObject({ arranged: 2, arrangedEntities: 0, arrangedCanvasObjects: 2 });
     expect(boardPatches.map((patch) => patch.objectId)).toEqual(['zone-2', 'zone-1']);
+  });
+});
+
+/**
+ * Assert real geometry, not flags.
+ *
+ * The layout regressions on this feature have all been "every test green, the
+ * screenshot shows cards on top of each other" — because the tests asserted
+ * `applied: true` and compact flags rather than where anything landed. These
+ * helpers reconstruct the placed rectangles and check them.
+ */
+function assertNoOverlap(rects: Array<{ id: string; x: number; y: number; w: number; h: number }>) {
+  for (let i = 0; i < rects.length; i += 1) {
+    for (let j = i + 1; j < rects.length; j += 1) {
+      const a = rects[i];
+      const b = rects[j];
+      const overlaps = a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+      if (overlaps) {
+        throw new Error(
+          `${a.id} (${a.x},${a.y} ${a.w}x${a.h}) overlaps ${b.id} (${b.x},${b.y} ${b.w}x${b.h})`
+        );
+      }
+    }
+  }
+}
+
+function assertInsideZone(
+  rects: Array<{ id: string; x: number; y: number; w: number; h: number }>,
+  zone: { width: number; height: number }
+) {
+  for (const rect of rects) {
+    if (rect.x < 0 || rect.y < 0 || rect.x + rect.w > zone.width || rect.y + rect.h > zone.height) {
+      throw new Error(
+        `${rect.id} (${rect.x},${rect.y} ${rect.w}x${rect.h}) escapes the ${zone.width}x${zone.height} zone`
+      );
+    }
+  }
+}
+
+describe('board layout tools with branch entities present', () => {
+  const baseServiceParams = { authenticated: true, provider: 'mcp' };
+  const branchId = '019e8e10';
+  const cardId = '019e8e11';
+
+  function branchEntity(overrides: Record<string, unknown> = {}) {
+    return {
+      object_id: 'obj-branch',
+      board_id: 'board-1',
+      branch_id: branchId,
+      entity_type: 'branch' as const,
+      position: { x: 0, y: 0 },
+      created_at: '2026-06-01T00:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  function cardEntity(overrides: Record<string, unknown> = {}) {
+    return {
+      object_id: 'obj-card',
+      board_id: 'board-1',
+      card_id: cardId,
+      entity_type: 'card' as const,
+      position: { x: 900, y: 0 },
+      created_at: '2026-06-01T00:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  function makeApp(options: {
+    entities: Array<Record<string, unknown>>;
+    objects?: Record<string, unknown>;
+    entityPatches?: Array<{ objectId: string; data: Record<string, unknown> }>;
+  }) {
+    const branchesFind = validatedBranchesFind((query) => ({
+      data: (((query.branch_id as { $in?: string[] } | undefined)?.$in ?? []) as string[]).map(
+        (id) => ({ branch_id: id, archived: false })
+      ),
+    }));
+    const boardObjectsFind = vi.fn(async () => ({
+      data: options.entities,
+      total: options.entities.length,
+      limit: 100,
+      skip: 0,
+    }));
+
+    return {
+      branchesFind,
+      boardObjectsFind,
+      app: {
+        service(name: string) {
+          if (name === 'boards')
+            return {
+              get: vi.fn(async () => ({
+                board_id: 'board-1',
+                name: 'Board',
+                objects: options.objects ?? {},
+              })),
+              patch: vi.fn(async (_id: string, data: Record<string, unknown>) => data),
+            };
+          if (name === 'boards/:id/permissions')
+            return { find: vi.fn(async () => ({ board_access_revision: 1 })) };
+          if (name === 'board-objects')
+            return {
+              find: boardObjectsFind,
+              patch: vi.fn(async (objectId: string, data: Record<string, unknown>) => {
+                options.entityPatches?.push({ objectId, data });
+                return data;
+              }),
+            };
+          if (name === 'cards')
+            return {
+              // Echo back whatever card ids were asked for, so adding a card to
+              // a fixture doesn't silently make it look archived.
+              find: vi.fn(async (params?: { query?: { card_id?: { $in?: string[] } } }) => ({
+                data: (params?.query?.card_id?.$in ?? []).map((card_id) => ({ card_id })),
+              })),
+              get: vi.fn(async (id: string) => ({ card_id: id, title: 'Card' })),
+            };
+          if (name === 'branches')
+            return {
+              find: branchesFind,
+              get: vi.fn(async (id: string) => ({ branch_id: id, name: 'feature-branch' })),
+            };
+          throw new Error(`Unexpected service call: ${name}`);
+        },
+      },
+    };
+  }
+
+  it.each([
+    ['mixed with a card', [branchEntity({ zone_id: 'zone-1' }), cardEntity({ zone_id: 'zone-1' })]],
+    ['branch only', [branchEntity({ zone_id: 'zone-1' })]],
+  ])('agor_boards_get returns positioned branch entities (%s)', async (_label, entities) => {
+    const { app, branchesFind } = makeApp({ entities });
+    const getBoard = registerAndCaptureHandler('agor_boards_get', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const result = await getBoard({ boardId: 'board-1', includeEntities: true });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeFalsy();
+    expect(branchesFind).toHaveBeenCalled();
+    expect(parsed.entities).toHaveLength(entities.length);
+    expect(parsed.entities).toContainEqual(expect.objectContaining({ branch_id: branchId }));
+  });
+
+  it('agor_boards_get returns branch entities under entityType="branch"', async () => {
+    const { app, boardObjectsFind } = makeApp({ entities: [branchEntity()] });
+    const getBoard = registerAndCaptureHandler('agor_boards_get', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const result = await getBoard({
+      boardId: 'board-1',
+      includeEntities: true,
+      entityType: 'branch',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(boardObjectsFind).toHaveBeenCalledWith(
+      expect.objectContaining({ query: expect.objectContaining({ entity_type: 'branch' }) })
+    );
+    expect(JSON.parse(result.content[0].text).entities).toEqual([
+      expect.objectContaining({ branch_id: branchId }),
+    ]);
+  });
+
+  it.each([
+    ['mixed with a card', [branchEntity(), cardEntity()], 2],
+    ['branch only', [branchEntity()], 1],
+  ])('agor_boards_auto_arrange moves branch entities (%s)', async (_label, entities, arranged) => {
+    const entityPatches: Array<{ objectId: string; data: Record<string, unknown> }> = [];
+    const { app } = makeApp({ entities, entityPatches });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const result = await arrange({ boardId: 'board-1' });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({ arranged, arrangedEntities: arranged });
+    expect(entityPatches.map(({ objectId }) => objectId)).toContain('obj-branch');
+    expect(parsed.updates).toContainEqual(
+      expect.objectContaining({ objectId: 'obj-branch', entityType: 'branch' })
+    );
+  });
+
+  it('agor_boards_auto_arrange moves branch entities under entityType="branch"', async () => {
+    const entityPatches: Array<{ objectId: string; data: Record<string, unknown> }> = [];
+    const { app, boardObjectsFind } = makeApp({ entities: [branchEntity()], entityPatches });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const result = await arrange({ boardId: 'board-1', entityType: 'branch' });
+
+    expect(result.isError).toBeFalsy();
+    expect(boardObjectsFind).toHaveBeenCalledWith(
+      expect.objectContaining({ query: expect.objectContaining({ entity_type: 'branch' }) })
+    );
+    expect(entityPatches).toEqual([
+      { objectId: 'obj-branch', data: { position: { x: 80, y: 80 } } },
+    ]);
+  });
+
+  it.each([
+    ['mixed with a card', [branchEntity({ zone_id: 'zone-1' }), cardEntity({ zone_id: 'zone-1' })]],
+    ['branch only', [branchEntity({ zone_id: 'zone-1' })]],
+  ])(
+    'agor_boards_auto_arrange_zone arranges a zone holding a branch (%s)',
+    async (_l, entities) => {
+      const entityPatches: Array<{ objectId: string; data: Record<string, unknown> }> = [];
+      const { app, branchesFind } = makeApp({
+        entities,
+        entityPatches,
+        objects: { 'zone-1': { type: 'zone', x: 40, y: 40, width: 1200, height: 900 } },
+      });
+      const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+        app,
+        userId: 'user-1',
+        baseServiceParams,
+      });
+
+      const result = await arrange({ boardId: 'board-1', zoneId: 'zone-1' });
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(result.isError).toBeFalsy();
+      expect(branchesFind).toHaveBeenCalled();
+      expect(parsed).toMatchObject({ applied: true, arranged: entities.length });
+      expect(parsed.updates).toContainEqual(
+        expect.objectContaining({ objectId: 'obj-branch', entityType: 'branch' })
+      );
+    }
+  );
+
+  it('lays out a mixed card+branch zone in one call without overlap', async () => {
+    // The case that bit in production: one zone, cards and worktrees together,
+    // one default-entityType call. Each item must be sized by its own kind —
+    // a 500x200 worktree beside 380-wide cards — and none may overlap.
+    const zone = { type: 'zone', x: 40, y: 40, width: 1200, height: 1400 };
+    const entities = [
+      branchEntity({ object_id: 'obj-branch', zone_id: 'zone-1' }),
+      branchEntity({ object_id: 'obj-branch-2', branch_id: '019e8e12', zone_id: 'zone-1' }),
+      cardEntity({ object_id: 'obj-card', zone_id: 'zone-1' }),
+      cardEntity({ object_id: 'obj-card-2', card_id: '019e8e13', zone_id: 'zone-1' }),
+    ];
+    const entityPatches: Array<{ objectId: string; data: Record<string, unknown> }> = [];
+    const { app } = makeApp({ entities, entityPatches, objects: { 'zone-1': zone } });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const result = await arrange({ boardId: 'board-1', zoneId: 'zone-1' });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({ applied: true, arranged: 4, fitsWithoutOverlap: true });
+    expect(parsed.layoutMode).not.toBe('deck');
+    expect(parsed.overflowingObjectIds).toEqual([]);
+
+    // Reconstruct what was actually written, at each item's own kind size.
+    const sizeOf = (objectId: string) =>
+      objectId.startsWith('obj-branch') ? { w: 500, h: 200 } : { w: 380, h: 56 };
+    const placed = parsed.updates.map(
+      (update: { objectId: string; position: { x: number; y: number } }) => ({
+        id: update.objectId,
+        x: update.position.x,
+        y: update.position.y,
+        ...sizeOf(update.objectId),
+      })
+    );
+    expect(placed).toHaveLength(4);
+    assertNoOverlap(placed);
+    assertInsideZone(placed, zone);
+    expect(entityPatches.map(({ objectId }) => objectId).sort()).toEqual(
+      ['obj-branch', 'obj-branch-2', 'obj-card', 'obj-card-2'].sort()
+    );
+  });
+
+  it('falls back to nominal size for an entity the browser never measured', async () => {
+    // A worktree created over MCP has never rendered, so it carries no `size`.
+    // It must lay out at the nominal size for its kind, not fail the arrange.
+    const { app } = makeApp({
+      entities: [branchEntity({ zone_id: 'zone-1' }), cardEntity({ zone_id: 'zone-1' })],
+      objects: { 'zone-1': { type: 'zone', x: 0, y: 0, width: 1200, height: 900 } },
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1' })).content[0].text
+    );
+
+    expect(parsed).toMatchObject({ applied: true, arranged: 2, unusableSizeObjectIds: [] });
+    // 500-wide branch + 380-wide card cannot both sit in one 1200 column pair
+    // unless each was sized by kind; requiredWidth proves the branch was not
+    // silently laid out at card width.
+    expect(parsed.requiredWidth).toBeGreaterThanOrEqual(500);
+  });
+
+  it.each([
+    ['zero', { width: 0, height: 0 }],
+    ['negative', { width: -10, height: 200 }],
+    ['non-finite', { width: Number.NaN, height: 200 }],
+  ])(
+    'does not fail the whole arrange over one %s persisted size, and names it',
+    async (_label, size) => {
+      const { app } = makeApp({
+        entities: [branchEntity({ zone_id: 'zone-1', size }), cardEntity({ zone_id: 'zone-1' })],
+        objects: { 'zone-1': { type: 'zone', x: 0, y: 0, width: 1200, height: 900 } },
+      });
+      const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+        app,
+        userId: 'user-1',
+        baseServiceParams,
+      });
+
+      const result = await arrange({ boardId: 'board-1', zoneId: 'zone-1' });
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(result.isError).toBeFalsy();
+      expect(parsed).toMatchObject({
+        applied: true,
+        arranged: 2,
+        unusableSizeObjectIds: ['obj-branch'],
+      });
+      expect(parsed.warning).toContain('obj-branch');
+    }
+  );
+
+  it('agor_boards_auto_arrange_zone arranges a branch-only zone under entityType="branch"', async () => {
+    const { app, boardObjectsFind } = makeApp({
+      entities: [branchEntity({ zone_id: 'zone-1' })],
+      objects: { 'zone-1': { type: 'zone', x: 40, y: 40, width: 1200, height: 900 } },
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const result = await arrange({ boardId: 'board-1', zoneId: 'zone-1', entityType: 'branch' });
+
+    expect(result.isError).toBeFalsy();
+    expect(boardObjectsFind).toHaveBeenCalledWith(
+      expect.objectContaining({ query: expect.objectContaining({ entity_type: 'branch' }) })
+    );
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ applied: true, arranged: 1 });
+  });
+
+  it('reports the zones an autoResizeHeight grow now covers', async () => {
+    // zone-1 is short enough that fitting a 500x200 worktree must grow it past
+    // y=250, where zone-below starts. Growing in silence is how a tidy zone
+    // ends up swallowing its neighbour on a real board.
+    const { app } = makeApp({
+      entities: [branchEntity({ zone_id: 'zone-1', size: { width: 500, height: 200 } })],
+      objects: {
+        'zone-1': {
+          type: 'zone',
+          x: 0,
+          y: 0,
+          width: 620,
+          height: 120,
+          layout: { mode: 'auto', preset: 'grid', autoResizeHeight: true },
+        },
+        'zone-below': { type: 'zone', x: 0, y: 250, width: 620, height: 300 },
+        'zone-clear': { type: 'zone', x: 5000, y: 5000, width: 200, height: 200 },
+      },
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1' })).content[0].text
+    );
+
+    expect(parsed.zone.height).toBeGreaterThan(250);
+    // Only the zone actually underneath, never the zone itself or a distant one.
+    expect(parsed.resizedOverZoneIds).toEqual(['zone-below']);
+    expect(parsed.warning).toContain('zone-below');
+    expect(parsed.warning).toContain('includeZones');
+  });
+
+  it('reports no covered zones when the grow stays clear of them', async () => {
+    const { app } = makeApp({
+      entities: [branchEntity({ zone_id: 'zone-1', size: { width: 500, height: 200 } })],
+      objects: {
+        'zone-1': {
+          type: 'zone',
+          x: 0,
+          y: 0,
+          width: 620,
+          height: 120,
+          layout: { mode: 'auto', preset: 'grid', autoResizeHeight: true },
+        },
+        'zone-far': { type: 'zone', x: 5000, y: 5000, width: 200, height: 200 },
+      },
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1' })).content[0].text
+    );
+
+    expect(parsed.resizedOverZoneIds).toEqual([]);
+    expect(parsed.warning ?? '').not.toContain('zone-far');
+  });
+});
+
+describe('agor_boards_auto_arrange zone avoidance', () => {
+  const baseServiceParams = { authenticated: true, provider: 'mcp' };
+
+  function makeApp(objects: Record<string, unknown>) {
+    const patches: Array<{ objectId: string; position: { x: number; y: number } }> = [];
+    const entities = ['card-a', 'card-b'].map((objectId, index) => ({
+      object_id: objectId,
+      board_id: 'board-1',
+      card_id: objectId,
+      entity_type: 'card' as const,
+      position: { x: 1400, y: index * 200 },
+      created_at: '2026-06-01T00:00:00.000Z',
+    }));
+
+    return {
+      patches,
+      app: {
+        service(name: string) {
+          if (name === 'boards')
+            return {
+              get: vi.fn(async () => ({ board_id: 'board-1', objects })),
+              patch: vi.fn(async (_id: string, data: Record<string, unknown>) => data),
+            };
+          if (name === 'board-objects')
+            return {
+              find: vi.fn(async () => ({ data: entities })),
+              patch: vi.fn(
+                async (objectId: string, data: { position: { x: number; y: number } }) => {
+                  patches.push({ objectId, position: data.position });
+                  return data;
+                }
+              ),
+            };
+          if (name === 'cards')
+            return {
+              find: vi.fn(async () => ({ data: entities.map(({ card_id }) => ({ card_id })) })),
+              get: vi.fn(async () => ({ title: 'Card' })),
+            };
+          throw new Error(`Unexpected service call: ${name}`);
+        },
+      },
+    };
+  }
+
+  const zoneBoard = { 'zone-1': { type: 'zone', x: 40, y: 40, width: 640, height: 420 } };
+
+  it('drops the default grid below every zone instead of stacking cards on one', async () => {
+    const { app, patches } = makeApp(zoneBoard);
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse((await arrange({ boardId: 'board-1', columns: 1 })).content[0].text);
+
+    // Zone spans y 40..460, so the default y=80 origin was inside it.
+    expect(parsed).toMatchObject({
+      appliedStartX: 80,
+      appliedStartY: 500,
+      avoidedZoneIds: ['zone-1'],
+    });
+    expect(patches.every(({ position }) => position.y >= 460)).toBe(true);
+  });
+
+  it('settles on the first clear row instead of below a distant zone', async () => {
+    const { app, patches } = makeApp({
+      'zone-1': { type: 'zone', x: 40, y: 40, width: 640, height: 420 },
+      'zone-2': { type: 'zone', x: 40, y: 480, width: 640, height: 200 },
+      'zone-parked': { type: 'zone', x: 40, y: 40000, width: 640, height: 420 },
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse((await arrange({ boardId: 'board-1', columns: 1 })).content[0].text);
+
+    // Clears zone-1 (ends 460) then zone-2 (ends 680) and stops — the zone
+    // parked at y=40000 never blocked, so it must not drag the grid down.
+    expect(parsed).toMatchObject({
+      appliedStartY: 720,
+      avoidedZoneIds: ['zone-1', 'zone-2'],
+    });
+    expect(patches[0].position).toEqual({ x: 80, y: 720 });
+  });
+
+  it('leaves the default origin alone when no zone is in the way', async () => {
+    const { app, patches } = makeApp({
+      'zone-far': { type: 'zone', x: 2000, y: 2000, width: 640, height: 420 },
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse((await arrange({ boardId: 'board-1', columns: 1 })).content[0].text);
+
+    expect(parsed).toMatchObject({ appliedStartY: 80, avoidedZoneIds: [] });
+    expect(patches[0].position).toEqual({ x: 80, y: 80 });
+  });
+
+  it('honors an explicit startY even when it lands on a zone', async () => {
+    const { app, patches } = makeApp(zoneBoard);
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', columns: 1, startY: 100 })).content[0].text
+    );
+
+    expect(parsed).toMatchObject({ appliedStartY: 100, avoidedZoneIds: [] });
+    expect(patches[0].position).toEqual({ x: 80, y: 100 });
+  });
+
+  it('does not dodge zones it is arranging as containers', async () => {
+    const { app } = makeApp(zoneBoard);
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', includeZones: true })).content[0].text
+    );
+
+    expect(parsed).toMatchObject({ appliedStartY: 80, avoidedZoneIds: [] });
   });
 });
 
