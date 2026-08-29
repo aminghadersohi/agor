@@ -115,9 +115,17 @@ describe('branchQueryValidator', () => {
   });
 
   it('keeps the structured Ajv errors on the rejection for programmatic callers', async () => {
+    // Resolving is a failure, not a pass: `.catch` alone widens the result to
+    // `void | error`, which both breaks the typecheck and would report a
+    // reading-`code`-of-undefined TypeError instead of the real problem.
     const error = await typedValidateQuery(branchQueryValidator)({
       params: { query: { $limit: 99999 } },
-    }).catch((thrown: { data?: unknown; code?: number }) => thrown);
+    }).then(
+      () => {
+        throw new Error('Expected an over-limit $limit query to be rejected.');
+      },
+      (thrown: { data?: unknown; code?: number }) => thrown
+    );
 
     expect(error.code).toBe(400);
     expect(error.data).toEqual([
