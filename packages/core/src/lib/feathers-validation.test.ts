@@ -115,14 +115,14 @@ describe('branchQueryValidator', () => {
   });
 
   it('keeps the structured Ajv errors on the rejection for programmatic callers', async () => {
-    const error = await typedValidateQuery(branchQueryValidator)({
-      params: { query: { $limit: 99999 } },
-    }).catch((thrown: { data?: unknown; code?: number }) => thrown);
-
-    expect(error.code).toBe(400);
-    expect(error.data).toEqual([
-      expect.objectContaining({ instancePath: '/$limit', keyword: 'maximum' }),
-    ]);
+    await expect(
+      typedValidateQuery(branchQueryValidator)({
+        params: { query: { $limit: 99999 } },
+      })
+    ).rejects.toMatchObject({
+      code: 400,
+      data: [expect.objectContaining({ instancePath: '/$limit', keyword: 'maximum' })],
+    });
   });
 
   it('strips unsupported operators sitting beside a branch_id batch', async () => {
