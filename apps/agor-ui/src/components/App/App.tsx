@@ -15,11 +15,17 @@ import type {
   PermissionMode,
   Repo,
   Session,
+  SessionID,
   SpawnConfig,
   UpdateUserInput,
   User,
 } from '@agor-live/client';
-import { hasMinimumRole, PermissionScope, shortId } from '@agor-live/client';
+import {
+  CHAT_WORKSPACE_PATH_SEGMENT,
+  chatWorkspacePath,
+  hasMinimumRole,
+  PermissionScope,
+} from '@agor-live/client';
 import { Flex, Layout, theme, Upload } from 'antd';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -69,7 +75,7 @@ import { initializeAudioOnInteraction } from '../../utils/audio';
 import { useThemedMessage } from '../../utils/message';
 import type { OnboardingReopenMode } from '../../utils/onboardingLifecycle';
 import { resolveQuickStartMcpServerIds } from '../../utils/resolveQuickStartMcpServerIds';
-import { getShellSurfacePath, hasExplicitEntityRouteTarget } from '../../utils/routeTargets';
+import { getSurfacePath, hasExplicitEntityRouteTarget } from '../../utils/routeTargets';
 import { startTeammateBootstrapSession } from '../../utils/startTeammateBootstrapSession';
 import {
   buildTeammateBootstrapPrompt,
@@ -403,10 +409,11 @@ export const App: React.FC<AppProps> = ({
   // bar but is supposed to leave whatever it was opened over rendered
   // behind it. `useSettingsRoute` stashes that origin in history state, so
   // read the surface from there — deriving it from `location.pathname`
-  // instead makes opening settings unmount Home and swap in the board
-  // canvas first, which is visible as a flash of the "normal" view before
-  // the modal appears.
-  const isRootHomePath = getShellSurfacePath(location) === '/';
+  // instead makes opening settings unmount Home (or the chat workspace)
+  // and swap in the board canvas first, which is visible as a flash of the
+  // "normal" view before the modal appears.
+  const surfacePath = getSurfacePath(location);
+  const isRootHomePath = surfacePath === '/';
   const hasExplicitEntityTarget = hasExplicitEntityRouteTarget(routeParams);
   const [pendingHomeNavigation, setPendingHomeNavigation] = useState(false);
   const sessionCanvasRef = useRef<SessionCanvasRef>(null);
@@ -544,7 +551,9 @@ export const App: React.FC<AppProps> = ({
     useMemo(() => makeBoardSelector(currentBoardId), [currentBoardId])
   );
   const isHomeSurface = (isRootHomePath || pendingHomeNavigation) && !hasExplicitEntityTarget;
-  const isChatWorkspaceSurface = location.pathname.startsWith('/chats');
+  const isChatWorkspaceSurface =
+    surfacePath === `/${CHAT_WORKSPACE_PATH_SEGMENT}` ||
+    surfacePath.startsWith(`/${CHAT_WORKSPACE_PATH_SEGMENT}/`);
   const isHomeLikeSurface = isHomeSurface || isChatWorkspaceSurface;
   const headerBoardId = isHomeLikeSurface ? '' : currentBoardId;
   const wasHomeSurfaceRef = useRef(isHomeLikeSurface);
@@ -773,7 +782,7 @@ export const App: React.FC<AppProps> = ({
 
   const handleChatWorkspaceSessionClick = useCallback(
     (sessionId: string) => {
-      routeNavigate(`/chats/${shortId(sessionId)}/`);
+      routeNavigate(chatWorkspacePath(sessionId as SessionID));
     },
     [routeNavigate]
   );
@@ -896,7 +905,7 @@ export const App: React.FC<AppProps> = ({
   // the panel is the same as navigating to the board we're already on.
   const handleCloseSessionPanel = useCallback(() => {
     setPendingToolChoiceBranchId(null);
-    if (isChatWorkspaceSurface) routeNavigate('/chats/');
+    if (isChatWorkspaceSurface) routeNavigate(chatWorkspacePath());
     else if (currentBoardId) navigation.goToBoard(currentBoardId);
   }, [currentBoardId, isChatWorkspaceSurface, navigation, routeNavigate]);
 
