@@ -1,11 +1,15 @@
-import type { ArtifactInteractionConfig, ArtifactPayload } from '@agor-live/client';
+import type {
+  ArtifactActionEffect,
+  ArtifactInteractionConfig,
+  ArtifactPayload,
+} from '@agor-live/client';
 import { SafetyOutlined, WarningOutlined } from '@ant-design/icons';
 import { useSandpack, useSandpackConsole } from '@codesandbox/sandpack-react';
 import { App, Tooltip, theme } from 'antd';
 import type { CSSProperties, RefObject } from 'react';
 import { useEffect, useRef } from 'react';
 import { getDaemonUrl } from '@/config/daemon';
-import { runArtifactScheduleAction } from '@/utils/artifactActions';
+import { fetchArtifactDataBinding, runArtifactActionBinding } from '@/utils/artifactActions';
 import { getAuthHeaders, getCurrentUserIdFromJwt } from '@/utils/authHeaders';
 
 /** Max console entries to send per batch, and minimum interval between sends. */
@@ -285,11 +289,24 @@ export function ArtifactInteractionBridge({
       target.postMessage({ type: 'agor:interaction-result', requestId, ...body }, '*');
     };
 
-    const confirmRun = (label: string, description?: string) =>
+    const describeEffect = (effect: ArtifactActionEffect): string => {
+      if (effect.kind === 'schedule_run') {
+        return 'This starts a new agent session using the configured schedule.';
+      }
+      return effect.enabled
+        ? 'This enables the configured schedule so it runs on its cron.'
+        : 'This disables the configured schedule; it will stop running on its cron.';
+    };
+
+    const confirmRun = (
+      label: string,
+      description: string | undefined,
+      effect: ArtifactActionEffect
+    ) =>
       new Promise<boolean>((resolve) => {
         modal.confirm({
           title: `Run “${label}”?`,
-          content: description || 'This starts a new agent session using the configured action.',
+          content: description || describeEffect(effect),
           okText: 'Run action',
           cancelText: 'Cancel',
           onOk: () => resolve(true),
@@ -303,41 +320,71 @@ export function ArtifactInteractionBridge({
       const target = firstClientId ? current.clients[firstClientId]?.iframe?.contentWindow : null;
       if (!target || event.source !== target) return;
       const message = event.data as
-        | { type?: unknown; requestId?: unknown; actionId?: unknown }
+        | {
+            type?: unknown;
+            requestId?: unknown;
+            actionId?: unknown;
+            dataId?: unknown;
+            chatId?: unknown;
+          }
         | undefined;
       if (!message || typeof message.requestId !== 'string') return;
 
       if (message.type === 'agor:open-chat') {
-        const sessionId = config?.chat_session_id;
-        if (!sessionId || !onOpenSession) {
+        // A chat is opened in the parent surface, never inside the iframe —
+        // rendering the real conversation in the artifact would require
+        // handing it a token.
+        const chats = config?.chats ?? [];
+        const chat =
+          typeof message.chatId === 'string'
+            ? chats.find((item) => item.id === message.chatId)
+            : chats[0];
+        if (!chat || !onOpenSession) {
           reply(target, message.requestId, { ok: false, error: 'No chat is configured' });
           return;
         }
-        onOpenSession(sessionId);
-        reply(target, message.requestId, { ok: true, result: { session_id: sessionId } });
+        onOpenSession(chat.session_id);
+        reply(target, message.requestId, {
+          ok: true,
+          result: { chat_id: chat.id, session_id: chat.session_id },
+        });
+        return;
+      }
+
+      if (message.type === 'agor:fetch-data') {
+        if (typeof message.dataId !== 'string') return;
+        // Presence in the payload is only a fast local reject; the daemon
+        // re-resolves the binding and is the authority for what may be read.
+        const binding = config?.data?.find((item) => item.id === message.dataId);
+        if (!binding) {
+          reply(target, message.requestId, { ok: false, error: 'Data binding is not configured' });
+          return;
+        }
+        try {
+          const result = await fetchArtifactDataBinding(artifactId, binding.id);
+          reply(target, message.requestId, { ok: true, result });
+        } catch (error) {
+          reply(target, message.requestId, {
+            ok: false,
+            error: error instanceof Error ? error.message : 'Data binding failed',
+          });
+        }
         return;
       }
 
       if (message.type !== 'agor:run-action' || typeof message.actionId !== 'string') return;
-      const action = config?.actions?.find((item) => item.action_id === message.actionId);
+      const action = config?.actions?.find((item) => item.id === message.actionId);
       if (!action) {
         reply(target, message.requestId, { ok: false, error: 'Action is not configured' });
         return;
       }
-      if (action.confirm && !(await confirmRun(action.label, action.description))) {
+      if (action.confirm && !(await confirmRun(action.label, action.description, action.effect))) {
         reply(target, message.requestId, { ok: false, error: 'Action cancelled' });
         return;
       }
       try {
-        const result = await runArtifactScheduleAction(action.schedule_id);
-        reply(target, message.requestId, {
-          ok: true,
-          result: {
-            artifact_id: artifactId,
-            action_id: action.action_id,
-            session_id: result.session_id,
-          },
-        });
+        const result = await runArtifactActionBinding(artifactId, action.id);
+        reply(target, message.requestId, { ok: true, result });
       } catch (error) {
         reply(target, message.requestId, {
           ok: false,
