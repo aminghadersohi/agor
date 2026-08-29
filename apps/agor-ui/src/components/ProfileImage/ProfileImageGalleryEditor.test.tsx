@@ -188,4 +188,54 @@ describe('ProfileImageGalleryEditor', () => {
       expect.objectContaining({ name: 'first.png' })
     );
   });
+
+  // Reached through its label rather than by role: this file mocks
+  // getComputedStyle globally, which defeats accessible-name computation.
+  const uploadButton = () => screen.getByText('Add images').closest('button');
+
+  // The cap the user sees has to be the one the server enforces, so these drive
+  // it from the response rather than from the component's pre-fetch placeholder.
+  it('states the cap the server reports rather than its own default', async () => {
+    vi.mocked(listProfileImages).mockResolvedValue({ images, max_images: 30 });
+    renderEditor(
+      <ProfileImageGalleryEditor
+        subject={{ type: 'user', id: 'user-1' }}
+        canEdit
+        label="Profile photos"
+      />
+    );
+
+    expect(await screen.findByText(/keep up to 30 total/)).toBeVisible();
+    expect(uploadButton()).toBeEnabled();
+  });
+
+  it('disables uploading and names the cap once a raised gallery is full', async () => {
+    const full = Array.from({ length: 30 }, (_, index) => ({
+      ...images[0],
+      image_id: `image-${index}`,
+      original_name: `photo-${index}.webp`,
+      position: index,
+      is_primary: index === 0,
+    }));
+    vi.mocked(listProfileImages).mockResolvedValue({ images: full, max_images: 30 });
+    renderEditor(
+      <ProfileImageGalleryEditor
+        subject={{ type: 'user', id: 'user-1' }}
+        canEdit
+        label="Profile photos"
+      />
+    );
+
+    expect(await screen.findByText('Main')).toBeVisible();
+    expect(document.querySelectorAll('[aria-label^="Remove photo-"]')).toHaveLength(30);
+    expect(uploadButton()).toBeDisabled();
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File(['x'], 'extra.png', { type: 'image/png' })] },
+    });
+
+    expect(await screen.findByText('This gallery already has 30 images')).toBeVisible();
+    expect(uploadProfileImage).not.toHaveBeenCalled();
+  });
 });

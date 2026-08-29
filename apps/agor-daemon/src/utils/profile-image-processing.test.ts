@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   PROFILE_IMAGE_CONTENT_TYPE,
   PROFILE_IMAGE_LARGE_SIZE,
+  PROFILE_IMAGE_MAX_GALLERY_ITEMS,
   PROFILE_IMAGE_SMALL_SIZE,
   processProfileImage,
   sanitizeProfileImageAlt,
@@ -88,6 +89,43 @@ describe('processProfileImage', () => {
   it('rejects unsupported and empty input', async () => {
     await expect(processProfileImage(Buffer.alloc(0))).rejects.toThrow(/choose an image/i);
     await expect(processProfileImage(Buffer.from('<svg/>'))).rejects.toThrow();
+  });
+});
+
+describe('gallery cap storage budget', () => {
+  // The cap is chosen from what a full gallery costs to store, so both halves of
+  // that arithmetic are pinned here: raising PROFILE_IMAGE_LARGE_SIZE breaks the
+  // per-image half, and raising the cap breaks the per-gallery half.
+  const PER_IMAGE_STORAGE_BUDGET_BYTES = 450 * 1024;
+  const PER_GALLERY_STORAGE_BUDGET_BYTES = 12 * 1024 * 1024;
+
+  it('keeps an incompressible source inside the per-image budget', async () => {
+    // Deterministic noise, not a flat fill: WebP crushes flat colour to nothing
+    // and would make this budget impossible to breach. Generated at exactly
+    // PROFILE_IMAGE_LARGE_SIZE, which is the worst case — a larger source is
+    // cheaper to store because downscaling averages the noise away.
+    const side = PROFILE_IMAGE_LARGE_SIZE;
+    const raw = Buffer.alloc(side * side * 3);
+    let seed = 12345;
+    for (let index = 0; index < raw.length; index += 1) {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      raw[index] = (seed >>> 16) & 255;
+    }
+    const noisy = await sharp(raw, { raw: { width: side, height: side, channels: 3 } })
+      .jpeg({ quality: 92 })
+      .toBuffer();
+
+    const result = await processProfileImage(noisy);
+    const storedBytes = result.small.data.byteLength + result.large.data.byteLength;
+
+    expect(result.large.width).toBe(PROFILE_IMAGE_LARGE_SIZE);
+    expect(storedBytes).toBeLessThan(PER_IMAGE_STORAGE_BUDGET_BYTES);
+  });
+
+  it('keeps a full gallery inside the per-gallery budget', () => {
+    expect(PROFILE_IMAGE_MAX_GALLERY_ITEMS * PER_IMAGE_STORAGE_BUDGET_BYTES).toBeLessThan(
+      PER_GALLERY_STORAGE_BUDGET_BYTES
+    );
   });
 });
 

@@ -35,6 +35,12 @@ import { publishProfileImageGallery } from './useProfileImageGallery';
 
 const ACCEPTED_PROFILE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MAX_PROFILE_IMAGE_UPLOAD_BYTES = 5 * 1024 * 1024;
+/**
+ * Placeholder only, shown for the one frame before the list route answers with
+ * the authoritative `max_images`. Mirrors the server's cap so the copy does not
+ * flash a smaller number, but the server remains the one that enforces it.
+ */
+const ASSUMED_MAX_GALLERY_IMAGES = 24;
 
 function validateProfileImageFile(file: File): string | undefined {
   if (!ACCEPTED_PROFILE_IMAGE_TYPES.has(file.type)) return 'Use a JPEG, PNG, or WebP image';
@@ -62,7 +68,7 @@ export function ProfileImageGalleryEditor({
   const compact = !screens.sm;
   const { message } = App.useApp();
   const [images, setImages] = useState<ProfileImage[]>([]);
-  const [maxImages, setMaxImages] = useState(8);
+  const [maxImages, setMaxImages] = useState(ASSUMED_MAX_GALLERY_IMAGES);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string>();
   const [uploading, setUploading] = useState(false);
@@ -143,6 +149,8 @@ export function ProfileImageGalleryEditor({
     }
   };
 
+  const galleryFull = images.length >= maxImages;
+
   const queueUploadBatch = (file: RcFile, fileList: RcFile[]) => {
     if (file.uid === fileList[0]?.uid) void handleUploadBatch(fileList);
     return Upload.LIST_IGNORE;
@@ -193,9 +201,12 @@ export function ProfileImageGalleryEditor({
             multiple
             showUploadList={false}
             beforeUpload={queueUploadBatch}
-            disabled={uploading || images.length >= maxImages}
+            disabled={galleryFull || uploading}
           >
-            <Button icon={<UploadOutlined />} loading={uploading}>
+            {/* Upload's own `disabled` stops the picker but does not reach a
+                custom child, so the button needs it too or a full gallery
+                still offers a live-looking control. */}
+            <Button icon={<UploadOutlined />} loading={uploading} disabled={galleryFull}>
               {uploading
                 ? `Uploading ${uploadProgress.completed}/${uploadProgress.total}`
                 : 'Add images'}
