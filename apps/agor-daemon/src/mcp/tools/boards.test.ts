@@ -1100,6 +1100,10 @@ describe('agor_boards_set_zone_layout', () => {
       sortDirection: 'asc',
       columns: 2,
       gap: 16,
+      // The legacy boolean normalizes into `resize` and is echoed back beside
+      // it, so a policy written by an older client reads correctly to both.
+      resize: 'height',
+      onOverflow: 'report',
       autoResizeHeight: true,
     });
     expect(patch).toHaveBeenCalledWith(
@@ -1667,7 +1671,7 @@ describe('board layout tools with branch entities present', () => {
     // Only the zone actually underneath, never the zone itself or a distant one.
     expect(parsed.resizedOverZoneIds).toEqual(['zone-below']);
     expect(parsed.warning).toContain('zone-below');
-    expect(parsed.warning).toContain('includeZones');
+    expect(parsed.warning).toContain('agor_boards_arrange_zones');
   });
 
   it('reports no covered zones when the grow stays clear of them', async () => {
@@ -1697,6 +1701,48 @@ describe('board layout tools with branch entities present', () => {
 
     expect(parsed.resizedOverZoneIds).toEqual([]);
     expect(parsed.warning ?? '').not.toContain('zone-far');
+  });
+
+  it('refuses a zone narrower than its contents while resize is fixed', async () => {
+    // Height cannot rescue a too-narrow zone: the 500px worktree overflows a
+    // 300px zone at any height, so the arrange has nothing safe to do.
+    const { app } = makeApp({
+      entities: [branchEntity({ zone_id: 'zone-1', size: { width: 500, height: 200 } })],
+      objects: { 'zone-1': { type: 'zone', x: 0, y: 0, width: 300, height: 900 } },
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1' })).content[0].text
+    );
+
+    expect(parsed.applied).toBe(false);
+    expect(parsed.requiredWidth).toBeGreaterThan(300);
+  });
+
+  it('widens a too-narrow zone when resize is both', async () => {
+    const { app } = makeApp({
+      entities: [branchEntity({ zone_id: 'zone-1', size: { width: 500, height: 200 } })],
+      objects: { 'zone-1': { type: 'zone', x: 0, y: 0, width: 300, height: 900 } },
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1', resize: 'both' })).content[0].text
+    );
+
+    expect(parsed.applied).toBe(true);
+    expect(parsed.resize).toBe('both');
+    expect(parsed.zone.width).toBeGreaterThanOrEqual(500);
+    expect(parsed.overflowingObjectIds).toEqual([]);
   });
 });
 
