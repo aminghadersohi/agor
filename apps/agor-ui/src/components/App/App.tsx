@@ -15,11 +15,17 @@ import type {
   PermissionMode,
   Repo,
   Session,
+  SessionID,
   SpawnConfig,
   UpdateUserInput,
   User,
 } from '@agor-live/client';
-import { hasMinimumRole, PermissionScope, shortId } from '@agor-live/client';
+import {
+  CHAT_WORKSPACE_PATH_SEGMENT,
+  chatWorkspacePath,
+  hasMinimumRole,
+  PermissionScope,
+} from '@agor-live/client';
 import { Flex, Layout, theme, Upload } from 'antd';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -541,7 +547,9 @@ export const App: React.FC<AppProps> = ({
     useMemo(() => makeBoardSelector(currentBoardId), [currentBoardId])
   );
   const isHomeSurface = (isRootHomePath || pendingHomeNavigation) && !hasExplicitEntityTarget;
-  const isChatWorkspaceSurface = surfacePath.startsWith('/chats');
+  const isChatWorkspaceSurface =
+    surfacePath === `/${CHAT_WORKSPACE_PATH_SEGMENT}` ||
+    surfacePath.startsWith(`/${CHAT_WORKSPACE_PATH_SEGMENT}/`);
   const isHomeLikeSurface = isHomeSurface || isChatWorkspaceSurface;
   const headerBoardId = isHomeLikeSurface ? '' : currentBoardId;
   const wasHomeSurfaceRef = useRef(isHomeLikeSurface);
@@ -770,7 +778,7 @@ export const App: React.FC<AppProps> = ({
 
   const handleChatWorkspaceSessionClick = useCallback(
     (sessionId: string) => {
-      routeNavigate(`/chats/${shortId(sessionId)}/`);
+      routeNavigate(chatWorkspacePath(sessionId as SessionID));
     },
     [routeNavigate]
   );
@@ -893,7 +901,7 @@ export const App: React.FC<AppProps> = ({
   // the panel is the same as navigating to the board we're already on.
   const handleCloseSessionPanel = useCallback(() => {
     setPendingToolChoiceBranchId(null);
-    if (isChatWorkspaceSurface) routeNavigate('/chats/');
+    if (isChatWorkspaceSurface) routeNavigate(chatWorkspacePath());
     else if (currentBoardId) navigation.goToBoard(currentBoardId);
   }, [currentBoardId, isChatWorkspaceSurface, navigation, routeNavigate]);
 

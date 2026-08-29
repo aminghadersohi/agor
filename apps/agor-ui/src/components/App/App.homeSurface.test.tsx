@@ -382,3 +382,60 @@ describe('Home navigation with a session open', () => {
     expect(openSessionId()).toBe(SESSION_2);
   });
 });
+
+describe('Chat workspace URL is sticky', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    seedStore();
+  });
+
+  it('survives an unrelated board patch', async () => {
+    renderApp('/');
+    await settle();
+    fireEvent.click(await screen.findByText('Orbit standup'));
+    await settle();
+    expect(currentPath).toBe(`/chats/${SESSION_1_SHORT}/`);
+
+    // Any board patch re-runs the state→URL self-heal. Before the fix this
+    // rewrote the URL to `/s/<short>/` and unmounted the chat rail.
+    act(() => {
+      const next = new Map(agorStore.getState().boardById);
+      next.set(BOARD_A, { ...boardA, name: 'Alpha renamed' } as Board);
+      agorStore.setState({ boardById: next });
+    });
+    await settle();
+
+    expect(currentPath).toBe(`/chats/${SESSION_1_SHORT}/`);
+    expect(chatRailIsShowing()).toBe(true);
+    expect(openSessionId()).toBe(SESSION_1);
+  });
+
+  it('keeps the workspace root when the session panel closes', async () => {
+    renderApp('/');
+    await settle();
+    fireEvent.click(await screen.findByText('Orbit standup'));
+    await settle();
+
+    fireEvent.click(screen.getByTestId('go-chats-root'));
+    await settle();
+
+    // `/chats/` is a real parameterless surface; canonicalizing it to `/`
+    // bounced the user out to Home every time they closed a conversation.
+    expect(currentPath).toBe('/chats/');
+    expect(chatRailIsShowing()).toBe(true);
+    expect(openSessionId()).toBeNull();
+  });
+
+  it('still lets the board switcher leave the workspace', async () => {
+    renderApp('/');
+    await settle();
+    fireEvent.click(await screen.findByText('Orbit standup'));
+    await settle();
+
+    await pickBoardFromSwitcher('Beta');
+
+    expect(currentPath).toBe('/b/beta/');
+    expect(canvasBoardName()).toBe('Beta');
+    expect(chatRailIsShowing()).toBe(false);
+  });
+});
