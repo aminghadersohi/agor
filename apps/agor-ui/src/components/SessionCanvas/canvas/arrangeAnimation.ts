@@ -105,4 +105,11 @@ export function dealStyle(delayMs: number, timing: DealTiming): Record<string, s
   };
 }
 
+/**
+ * Class held for the duration of one arrange.
+ *
+ * Belongs on the element that already carries `.react-flow`: the stylesheet
+ * qualifies the rules with it so their specificity matches the tool-mode rules
+ * they sit beside. On any other element the selectors simply never match.
+ */
 export const ARRANGE_DEAL_CLASS = 'agor-dealing';

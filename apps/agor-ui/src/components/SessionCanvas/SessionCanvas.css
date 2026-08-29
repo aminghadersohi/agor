@@ -210,25 +210,29 @@
  * `.react-flow__node` at large: a permanent transform transition would also
  * animate dragging, so every card would lag a half-beat behind the cursor.
  *
+ * Qualified with `.react-flow` so the specificity matches the tool-mode rules
+ * above rather than descending below them — an unqualified `.agor-dealing`
+ * would lose to them and silently not apply.
+ *
  * The easing overshoots slightly and settles back, which is what makes a card
- * look like it was dealt onto a surface rather than moved by a spreadsheet.
- * Per-node delay and duration arrive as custom properties from
- * `arrangeAnimation.ts`, which owns the timing.
+ * look dealt onto a surface rather than moved by a spreadsheet. Per-node delay
+ * and duration arrive as custom properties from `arrangeAnimation.ts`, which
+ * owns the timing.
  */
-.agor-dealing .react-flow__node {
+.react-flow.agor-dealing .react-flow__node {
   transition:
     transform var(--agor-deal-duration, 380ms) cubic-bezier(0.22, 1.4, 0.36, 1)
-      var(--agor-deal-delay, 0ms),
+    var(--agor-deal-delay, 0ms),
     width var(--agor-deal-duration, 380ms) ease-out var(--agor-deal-delay, 0ms),
     height var(--agor-deal-duration, 380ms) ease-out var(--agor-deal-delay, 0ms);
   will-change: transform;
 }
 
 /*
- * A zone resizes rather than travels, and overshooting a container's edges
- * looks like a rendering fault instead of a flourish, so zones ease flat.
+ * A zone resizes rather than travels, and a container overshooting its own
+ * edges reads as a rendering fault instead of a flourish, so zones ease flat.
  */
-.agor-dealing .react-flow__node-zone {
+.react-flow.agor-dealing .react-flow__node-zone {
   transition:
     transform var(--agor-deal-duration, 380ms) ease-out var(--agor-deal-delay, 0ms),
     width var(--agor-deal-duration, 380ms) ease-out var(--agor-deal-delay, 0ms),
@@ -236,13 +240,13 @@
 }
 
 /* A node the viewer is dragging must never lag behind the cursor. */
-.agor-dealing .react-flow__node.dragging {
+.react-flow.agor-dealing .react-flow__node.dragging {
   transition: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .agor-dealing .react-flow__node,
-  .agor-dealing .react-flow__node-zone {
+  .react-flow.agor-dealing .react-flow__node,
+  .react-flow.agor-dealing .react-flow__node-zone {
     transition: none;
   }
 }
