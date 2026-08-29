@@ -68,7 +68,7 @@ import type { AgenticToolOption, CreateRepoOptions } from '../../types';
 import { initializeAudioOnInteraction } from '../../utils/audio';
 import { useThemedMessage } from '../../utils/message';
 import { resolveQuickStartMcpServerIds } from '../../utils/resolveQuickStartMcpServerIds';
-import { hasExplicitEntityRouteTarget } from '../../utils/routeTargets';
+import { getSurfacePath, hasExplicitEntityRouteTarget } from '../../utils/routeTargets';
 import { startTeammateBootstrapSession } from '../../utils/startTeammateBootstrapSession';
 import {
   buildTeammateBootstrapPrompt,
@@ -130,12 +130,14 @@ const BoardSwitcherBridge: React.FC<{ setCurrentBoardId: (id: string) => void }>
 const UrlStateBridge: React.FC<{
   currentBoardId: string;
   currentSessionId: string | null;
+  suspendStateToUrlSync?: boolean;
   onBoardChange: (boardId: string) => void;
   onSessionChange: (sessionId: string | null) => void;
   onActiveUrlTargetChange: (target: ActiveUrlTarget | null) => void;
 }> = ({
   currentBoardId,
   currentSessionId,
+  suspendStateToUrlSync,
   onBoardChange,
   onSessionChange,
   onActiveUrlTargetChange,
@@ -150,6 +152,7 @@ const UrlStateBridge: React.FC<{
     onBoardChange,
     onSessionChange,
     onActiveUrlTargetChange,
+    suspendStateToUrlSync,
   });
   return null;
 };
@@ -392,7 +395,15 @@ export const App: React.FC<AppProps> = ({
     branchShortId?: string;
     artifactShortId?: string;
   }>();
-  const isRootHomePath = location.pathname === '/';
+  // Settings is a routed *overlay*: `/settings/...` takes over the address
+  // bar but is supposed to leave whatever it was opened over rendered
+  // behind it. `useSettingsRoute` stashes that origin in history state, so
+  // read the surface from there — deriving it from `location.pathname`
+  // instead makes opening settings unmount Home (or the chat workspace)
+  // and swap in the board canvas first, which is visible as a flash of the
+  // "normal" view before the modal appears.
+  const surfacePath = getSurfacePath(location);
+  const isRootHomePath = surfacePath === '/';
   const hasExplicitEntityTarget = hasExplicitEntityRouteTarget(routeParams);
   const [pendingHomeNavigation, setPendingHomeNavigation] = useState(false);
   const sessionCanvasRef = useRef<SessionCanvasRef>(null);
@@ -530,7 +541,7 @@ export const App: React.FC<AppProps> = ({
     useMemo(() => makeBoardSelector(currentBoardId), [currentBoardId])
   );
   const isHomeSurface = (isRootHomePath || pendingHomeNavigation) && !hasExplicitEntityTarget;
-  const isChatWorkspaceSurface = location.pathname.startsWith('/chats');
+  const isChatWorkspaceSurface = surfacePath.startsWith('/chats');
   const isHomeLikeSurface = isHomeSurface || isChatWorkspaceSurface;
   const headerBoardId = isHomeLikeSurface ? '' : currentBoardId;
   const wasHomeSurfaceRef = useRef(isHomeLikeSurface);
@@ -1479,6 +1490,10 @@ export const App: React.FC<AppProps> = ({
       <UrlStateBridge
         currentBoardId={currentBoardId}
         currentSessionId={effectiveSelectedSessionId}
+        // While a Home navigation is in flight the pair above is
+        // transitional (the session is already suppressed, the `/` route
+        // has not committed) — see `suspendStateToUrlSync`.
+        suspendStateToUrlSync={pendingHomeNavigation}
         onBoardChange={handleUrlBoardChange}
         onSessionChange={setSelectedSessionId}
         onActiveUrlTargetChange={setActiveUrlTarget}
