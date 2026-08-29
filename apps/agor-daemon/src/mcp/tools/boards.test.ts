@@ -1633,6 +1633,71 @@ describe('board layout tools with branch entities present', () => {
     );
     expect(JSON.parse(result.content[0].text)).toMatchObject({ applied: true, arranged: 1 });
   });
+
+  it('reports the zones an autoResizeHeight grow now covers', async () => {
+    // zone-1 is short enough that fitting a 500x200 worktree must grow it past
+    // y=250, where zone-below starts. Growing in silence is how a tidy zone
+    // ends up swallowing its neighbour on a real board.
+    const { app } = makeApp({
+      entities: [branchEntity({ zone_id: 'zone-1', size: { width: 500, height: 200 } })],
+      objects: {
+        'zone-1': {
+          type: 'zone',
+          x: 0,
+          y: 0,
+          width: 620,
+          height: 120,
+          layout: { mode: 'auto', preset: 'grid', autoResizeHeight: true },
+        },
+        'zone-below': { type: 'zone', x: 0, y: 250, width: 620, height: 300 },
+        'zone-clear': { type: 'zone', x: 5000, y: 5000, width: 200, height: 200 },
+      },
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1' })).content[0].text
+    );
+
+    expect(parsed.zone.height).toBeGreaterThan(250);
+    // Only the zone actually underneath, never the zone itself or a distant one.
+    expect(parsed.resizedOverZoneIds).toEqual(['zone-below']);
+    expect(parsed.warning).toContain('zone-below');
+    expect(parsed.warning).toContain('includeZones');
+  });
+
+  it('reports no covered zones when the grow stays clear of them', async () => {
+    const { app } = makeApp({
+      entities: [branchEntity({ zone_id: 'zone-1', size: { width: 500, height: 200 } })],
+      objects: {
+        'zone-1': {
+          type: 'zone',
+          x: 0,
+          y: 0,
+          width: 620,
+          height: 120,
+          layout: { mode: 'auto', preset: 'grid', autoResizeHeight: true },
+        },
+        'zone-far': { type: 'zone', x: 5000, y: 5000, width: 200, height: 200 },
+      },
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1' })).content[0].text
+    );
+
+    expect(parsed.resizedOverZoneIds).toEqual([]);
+    expect(parsed.warning ?? '').not.toContain('zone-far');
+  });
 });
 
 describe('agor_boards_auto_arrange zone avoidance', () => {
