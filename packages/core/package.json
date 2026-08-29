@@ -40,6 +40,12 @@
       "import": "./dist/design/board-backgrounds.js",
       "require": "./dist/design/board-backgrounds.cjs"
     },
+    "./layout/justified-zones": {
+      "source": "./src/layout/justified-zones.ts",
+      "types": "./dist/layout/justified-zones.d.ts",
+      "import": "./dist/layout/justified-zones.js",
+      "require": "./dist/layout/justified-zones.cjs"
+    },
     "./layout/rectangle-packing": {
       "source": "./src/layout/rectangle-packing.ts",
       "types": "./dist/layout/rectangle-packing.d.ts",

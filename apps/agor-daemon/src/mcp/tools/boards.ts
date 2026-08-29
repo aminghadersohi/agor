@@ -1,3 +1,4 @@
+import { layoutJustifiedZones, zoneShapesForItems } from '@agor/core/layout/justified-zones';
 import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
 import {
   normalizeZoneLayoutPolicy,
@@ -6,6 +7,8 @@ import {
   ZONE_LAYOUT_PRESETS,
   ZONE_LAYOUT_SORT_DIRECTIONS,
   ZONE_LAYOUT_SORT_FIELDS,
+  ZONE_OVERFLOW_STRATEGIES,
+  ZONE_RESIZE_MODES,
   type ZoneLayoutSortItem,
 } from '@agor/core/layout/zone-layout';
 import type {
@@ -324,6 +327,156 @@ function filterBoardCanvasObjects(board: Board, objectTypes?: BoardObjectType[])
   );
 
   return { ...board, objects };
+}
+
+interface ArrangeBoardZonesOptions {
+  targetWidth?: number;
+  targetRowHeight?: number;
+  gap?: number;
+  startX?: number;
+  startY?: number;
+  maxPerRow?: number;
+  justifyLastRow?: boolean;
+  dryRun?: boolean;
+}
+
+type ZoneObject = BoardObject & { type: 'zone'; width: number; height: number };
+
+interface ArrangedBoardZones {
+  layout: ReturnType<typeof layoutJustifiedZones>;
+  byId: Map<string, { id: string; zone: ZoneObject; itemCount: number }>;
+}
+
+/**
+ * Lay a board's zones out in justified rows.
+ *
+ * Shared by `agor_boards_arrange_zones` and by the `reflow_board` overflow
+ * strategy, so a zone that grows into its neighbours is repaired by exactly
+ * the layout the explicit tool would have produced. Returns null when the
+ * board has no zones. Contents keep their zone-relative positions; re-packing
+ * items at the new widths is the caller's next step.
+ */
+async function arrangeBoardZones(
+  ctx: McpContext,
+  boardId: string,
+  options: ArrangeBoardZonesOptions = {}
+): Promise<ArrangedBoardZones | null> {
+  const board = (await ctx.app.service('boards').get(boardId, ctx.baseServiceParams)) as Board;
+  const zoneEntries = Object.entries(board.objects ?? {}).filter(
+    ([, object]) => object.type === 'zone'
+  ) as [string, ZoneObject][];
+  if (zoneEntries.length === 0) return null;
+
+  const entityResult = (await ctx.app.service('board-objects').find({
+    query: { board_id: boardId },
+    ...ctx.baseServiceParams,
+  })) as { data: Array<BoardEntityObject> };
+  const visible = await filterVisibleBoardEntities(ctx, entityResult.data, false);
+
+  // Size each zone's contents exactly the way the zone arrange will, because a
+  // shape is only useful if the zone can genuinely hold its contents at it.
+  //
+  // "Exactly" includes the item *order*. The packer fills row-major, so order
+  // decides which items share a row and therefore how tall the zone must be:
+  // three short cards followed by two worktrees packs 136px shorter than the
+  // same five sorted by position, which interleaves them. Computing shapes in
+  // arbitrary order sizes the zone too short, the zone is written at that
+  // height, and the follow-up arrange then refuses to place anything into it.
+  const zones = await Promise.all(
+    zoneEntries.map(async ([zoneId, zone]) => {
+      const zonePolicy = normalizeZoneLayoutPolicy(zone.layout);
+      const contents = visible.filter((entity) => entity.zone_id === zoneId);
+      // Sorting by anything other than position needs the card/branch records;
+      // an unmeasured card needs them too, to estimate its rendered height.
+      const metadata = await loadEntityLayoutMetadata(
+        ctx,
+        contents.filter(
+          (entity) =>
+            zonePolicy.sortBy !== 'position' ||
+            (entity.card_id !== undefined && !measuredSize(entity))
+        )
+      );
+      const ordered = sortZoneLayoutItems(
+        contents.map((entity) => ({
+          entity,
+          ...(metadata.get(entity.object_id) ?? {
+            id: entity.object_id,
+            position: entity.position,
+          }),
+        })),
+        zonePolicy
+      ).map(({ entity }) => entity);
+
+      const items = ordered.map((entity) => {
+        const measured = measuredSize(entity);
+        if (zonePolicy.preset === 'compact_list' || entity.compact === true) {
+          return { id: entity.object_id, ...COMPACT_ARRANGE_DIMENSIONS[entity.entity_type] };
+        }
+        if (measured) return { id: entity.object_id, ...measured };
+        if (entity.entity_type === 'card' && entity.card_id) {
+          return {
+            id: entity.object_id,
+            width: ARRANGE_DIMENSIONS.card.width,
+            height: estimateCardHeight(metadata.get(entity.object_id)?.card),
+          };
+        }
+        return { id: entity.object_id, ...ARRANGE_DIMENSIONS[entity.entity_type] };
+      });
+
+      // The zone arrange spaces items by the zone's own gap, so the shapes have
+      // to be measured with that gap and not a board-level one.
+      const itemGap = zonePolicy.gap ?? 24;
+      return {
+        id: zoneId,
+        zone,
+        itemCount: items.length,
+        shapes: zoneShapesForItems(items, {
+          titleInset: zoneContentTopInset(zone),
+          padding: itemGap,
+          gapX: itemGap,
+          gapY: itemGap,
+          // compact_list is always one column; offering wider shapes would
+          // promise a landscape form the zone arrange will never produce.
+          ...(zonePolicy.preset === 'compact_list' ? { maxColumns: 1 } : {}),
+        }),
+      };
+    })
+  );
+
+  const layout = layoutJustifiedZones(zones, {
+    targetWidth: options.targetWidth ?? 1600,
+    targetRowHeight: options.targetRowHeight,
+    gap: options.gap ?? 40,
+    startX: options.startX ?? DEFAULT_ARRANGE_START_X,
+    startY: options.startY ?? DEFAULT_ARRANGE_START_Y,
+    maxPerRow: options.maxPerRow,
+    justifyLastRow: options.justifyLastRow === true,
+  });
+
+  const byId = new Map(zones.map((entry) => [entry.id, entry]));
+  if (options.dryRun !== true) {
+    for (const placement of layout.placements) {
+      const entry = byId.get(placement.id);
+      if (!entry) continue;
+      await ctx.app.service('boards').patch(
+        boardId,
+        {
+          _action: 'upsertObject',
+          objectId: placement.id,
+          objectData: {
+            ...entry.zone,
+            x: placement.x,
+            y: placement.y,
+            width: placement.width,
+            height: placement.height,
+          },
+        } as unknown as Partial<Board>,
+        ctx.baseServiceParams
+      );
+    }
+  }
+
+  return { layout, byId };
 }
 
 export function registerBoardTools(server: McpServer, ctx: McpContext): void {
@@ -916,7 +1069,19 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .boolean()
           .optional()
           .describe(
-            'Resize the zone vertically to contain the layout. Defaults to the zone policy, then false.'
+            'Deprecated alias for resize:"height". Resize the zone vertically to contain the layout. Defaults to the zone policy, then false.'
+          ),
+        resize: z
+          .enum(ZONE_RESIZE_MODES)
+          .optional()
+          .describe(
+            'How far the zone may resize to fit its contents: "fixed" never resizes, "height" grows vertically, "both" also widens. Height alone cannot rescue a zone narrower than its widest item. Defaults to the zone policy.'
+          ),
+        onOverflow: z
+          .enum(ZONE_OVERFLOW_STRATEGIES)
+          .optional()
+          .describe(
+            'What to do when a resize covers neighbouring zones: "report" names them, "reflow_board" re-justifies the board zones into rows so they move out of the way. Defaults to the zone policy, then report.'
           ),
         padding: mcpOptionalNumber('padding', 'Padding from the zone edges (default: 24).'),
         gapX: mcpOptionalNumber('gapX', 'Horizontal gap between items (default: 24).'),
@@ -942,6 +1107,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         ...(args.sortDirection === undefined ? {} : { sortDirection: args.sortDirection }),
         ...(args.columns === undefined ? {} : { columns: args.columns }),
         ...(args.autoResizeHeight === undefined ? {} : { autoResizeHeight: args.autoResizeHeight }),
+        ...(args.resize === undefined ? {} : { resize: args.resize }),
+        ...(args.onOverflow === undefined ? {} : { onOverflow: args.onOverflow }),
       });
 
       const boardObjectsService = ctx.app.service('board-objects');
@@ -1000,7 +1167,22 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const gapX = Math.max(0, args.gapX ?? zonePolicy.gap ?? 24);
       const gapY = Math.max(0, args.gapY ?? zonePolicy.gap ?? 24);
       const titleInset = zoneContentTopInset(zone);
-      const autoResizeHeight = zonePolicy.autoResizeHeight === true;
+      const resizeMode = zonePolicy.resize ?? 'fixed';
+      const autoResizeHeight = resizeMode !== 'fixed';
+      // `both` also lets the zone widen. Height alone cannot rescue a zone that
+      // is too narrow — an item wider than the zone overflows at any height —
+      // so a width-constrained arrange could previously only refuse. Laying out
+      // against an unbounded width lets the packer report the width the
+      // contents actually need, which the zone then adopts.
+      const layoutWidth =
+        resizeMode === 'both'
+          ? Math.max(
+              zone.width,
+              ...entities.map(
+                (entity) => (dimensions.get(entity.object_id)?.width ?? 0) + padding * 2
+              )
+            )
+          : zone.width;
       if (entities.length === 0) {
         return textResult({
           boardId,
@@ -1024,7 +1206,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           // against the remaining rectangle, then translate placements below
           // that reserved header so cards can never cover the title.
           bounds: {
-            width: zone.width,
+            width: layoutWidth,
             height: autoResizeHeight
               ? Number.MAX_SAFE_INTEGER
               : Math.max(0, zone.height - titleInset),
@@ -1114,27 +1296,38 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const appliedZoneHeight = autoResizeHeight
         ? Math.max(200, Math.ceil(layout.height + titleInset))
         : zone.height;
-      // A grow moves the bottom edge onto whatever shares the canvas below it.
-      // Only a grow can newly cover a neighbour; a shrink or a no-op cannot.
+      const appliedZoneWidth =
+        resizeMode === 'both' ? Math.max(zone.width, Math.ceil(layout.width)) : zone.width;
+      // A grow moves an edge onto whatever shares the canvas beside or below
+      // it. Only a grow can newly cover a neighbour; a shrink or a no-op cannot.
       const resizedOverZoneIds =
-        appliedZoneHeight > zone.height
+        appliedZoneHeight > zone.height || appliedZoneWidth > zone.width
           ? zonesOverlappedBy(board, zoneId, {
               x: zone.x,
               y: zone.y,
-              width: zone.width,
+              width: appliedZoneWidth,
               height: appliedZoneHeight,
             })
           : [];
-      if (appliedZoneHeight !== zone.height) {
+      if (appliedZoneHeight !== zone.height || appliedZoneWidth !== zone.width) {
         await ctx.app.service('boards').patch(
           boardId,
           {
             _action: 'upsertObject',
             objectId: zoneId,
-            objectData: { ...zone, height: appliedZoneHeight },
+            objectData: { ...zone, width: appliedZoneWidth, height: appliedZoneHeight },
           } as unknown as Partial<Board>,
           ctx.baseServiceParams
         );
+      }
+
+      // A grow that covered a neighbour is a board-level problem, so repair it
+      // with the board-level layout rather than a bespoke nudge: the zones are
+      // re-justified into rows, which moves the covered zones out of the way.
+      // Only worth doing when something was actually covered.
+      let reflowedBoard = false;
+      if (zonePolicy.onOverflow === 'reflow_board' && resizedOverZoneIds.length > 0) {
+        reflowedBoard = (await arrangeBoardZones(ctx, boardId, { gap: zonePolicy.gap })) !== null;
       }
 
       return textResult({
@@ -1166,11 +1359,16 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         appliedPadding: layout.padding,
         overflowingObjectIds: layout.overflowingItemIds,
         unusableSizeObjectIds,
+        resize: resizeMode,
+        onOverflow: zonePolicy.onOverflow,
         resizedOverZoneIds,
+        reflowedBoard,
         warning:
           [
             resizedOverZoneIds.length > 0
-              ? `Growing this zone to ${appliedZoneHeight}px now covers ${resizedOverZoneIds.join(', ')}. Run agor_boards_auto_arrange with includeZones:true to separate the zones.`
+              ? reflowedBoard
+                ? `Growing this zone covered ${resizedOverZoneIds.join(', ')}; the board's zones were re-justified into rows to separate them.`
+                : `Growing this zone to ${appliedZoneWidth}x${appliedZoneHeight} now covers ${resizedOverZoneIds.join(', ')}. Run agor_boards_arrange_zones to separate them, or set the zone's onOverflow to "reflow_board" to have it done automatically.`
               : null,
             layout.overflowingItemIds.length > 0
               ? `One or more rendered objects are larger than the available zone rectangle: ${layout.overflowingItemIds.join(', ')}.`
@@ -1185,7 +1383,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           ]
             .filter(Boolean)
             .join(' ') || null,
-        zone: { width: zone.width, height: appliedZoneHeight },
+        zone: { width: appliedZoneWidth, height: appliedZoneHeight },
         updates,
       });
     }
@@ -1204,6 +1402,18 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         preset: z.enum(ZONE_LAYOUT_PRESETS).optional(),
         sortBy: z.enum(ZONE_LAYOUT_SORT_FIELDS).optional(),
         sortDirection: z.enum(ZONE_LAYOUT_SORT_DIRECTIONS).optional(),
+        resize: z
+          .enum(ZONE_RESIZE_MODES)
+          .optional()
+          .describe(
+            'How far the zone may resize to fit its contents: "fixed" never resizes, "height" grows vertically, "both" also widens. Height alone cannot rescue a zone narrower than its widest item. Defaults to the zone policy.'
+          ),
+        onOverflow: z
+          .enum(ZONE_OVERFLOW_STRATEGIES)
+          .optional()
+          .describe(
+            'What to do when a resize covers neighbouring zones: "report" names them, "reflow_board" re-justifies the board zones into rows so they move out of the way. Defaults to the zone policy, then report.'
+          ),
         columns: z
           .number()
           .int()
@@ -1243,6 +1453,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         ...(args.columns === undefined ? {} : { columns: args.columns ?? undefined }),
         ...(args.gap === undefined ? {} : { gap: args.gap }),
         ...(args.autoResizeHeight === undefined ? {} : { autoResizeHeight: args.autoResizeHeight }),
+        ...(args.resize === undefined ? {} : { resize: args.resize }),
+        ...(args.onOverflow === undefined ? {} : { onOverflow: args.onOverflow }),
       } satisfies Partial<ZoneLayoutPolicy>);
       const updatedZone = { ...zone, layout };
       await boardsService.patch(
@@ -1413,6 +1625,94 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         success: true,
         board: result,
         message: 'Board unarchived successfully.',
+      });
+    }
+  );
+
+  // agor_boards_arrange_zones
+  server.registerTool(
+    'agor_boards_arrange_zones',
+    {
+      description:
+        "Arrange a board's zones themselves into justified rows, photo-grid style: zones flow left-to-right and top-to-bottom, every zone in a row shares that row's height, and each full row is stretched flush to targetWidth. Zone widths and heights are both rewritten, so a zone becomes portrait or landscape depending on which shape lets its own contents fit the row. Pinned contents move with their zone; call agor_boards_auto_arrange_zone afterwards to re-pack the items inside each zone at its new width. Use targetRowHeight to stop one tall zone from dictating a row.",
+      inputSchema: z.object({
+        boardId: mcpRequiredId('boardId', 'Board'),
+        targetWidth: mcpOptionalPositiveInt(
+          'targetWidth',
+          'Width each full row is stretched to (default: 1600).'
+        ),
+        targetRowHeight: mcpOptionalPositiveInt(
+          'targetRowHeight',
+          'Preferred row height. Without it, a tall zone can be packed beside a short one and leave the short one mostly blank.'
+        ),
+        gap: mcpOptionalNonNegativeInt('gap', 'Space between zones (default: 40).'),
+        startX: mcpOptionalNumber('startX', 'Canvas X origin (default: 80).'),
+        startY: mcpOptionalNumber('startY', 'Canvas Y origin (default: 80).'),
+        maxPerRow: mcpOptionalPositiveInt('maxPerRow', 'Upper bound on zones per row.'),
+        justifyLastRow: z
+          .boolean()
+          .optional()
+          .describe(
+            'Stretch the final row even when it is underfull (default: false, matching a photo grid).'
+          ),
+        dryRun: z
+          .boolean()
+          .optional()
+          .describe('Compute and return the layout without writing any zone.'),
+      }),
+    },
+    async (args) => {
+      const boardId = coerceString(args.boardId);
+      if (!boardId) throw new Error('boardId is required');
+
+      const arranged = await arrangeBoardZones(ctx, boardId, {
+        targetWidth: args.targetWidth,
+        targetRowHeight: args.targetRowHeight,
+        gap: args.gap,
+        startX: args.startX,
+        startY: args.startY,
+        maxPerRow: args.maxPerRow,
+        justifyLastRow: args.justifyLastRow === true,
+        dryRun: args.dryRun === true,
+      });
+
+      if (!arranged) {
+        return textResult({
+          boardId,
+          arranged: 0,
+          rows: 0,
+          updates: [],
+          note: 'No zones present.',
+        });
+      }
+      const { layout, byId } = arranged;
+
+      return textResult({
+        boardId,
+        arranged: layout.placements.length,
+        rows: layout.rows,
+        width: layout.width,
+        height: layout.height,
+        gap: layout.gap,
+        rowHeights: layout.rowHeights,
+        dryRun: args.dryRun === true,
+        overflowingRows: layout.overflowingRows,
+        warning:
+          layout.overflowingRows.length > 0
+            ? `Row(s) ${layout.overflowingRows.join(', ')} hold a zone wider than targetWidth even at its narrowest shape; they were left at their natural width. Raise targetWidth or move a zone.`
+            : null,
+        note: 'Zone contents keep their zone-relative positions. Run agor_boards_auto_arrange_zone on each zone to re-pack items at the new width.',
+        updates: layout.placements.map((placement) => ({
+          objectId: placement.id,
+          label: byId.get(placement.id)?.zone.label ?? null,
+          itemCount: byId.get(placement.id)?.itemCount ?? 0,
+          position: { x: placement.x, y: placement.y },
+          size: { width: placement.width, height: placement.height },
+          row: placement.row,
+          column: placement.column,
+          contentColumns: placement.columns,
+          slackY: placement.slackY,
+        })),
       });
     }
   );
