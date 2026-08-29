@@ -4,6 +4,8 @@ import type {
   ZoneLayoutPreset,
   ZoneLayoutSortBy,
   ZoneLayoutSortDirection,
+  ZoneOverflowStrategy,
+  ZoneResizeMode,
 } from '../types/board';
 
 export const ZONE_LAYOUT_MODES = ['manual', 'auto'] as const;
@@ -17,6 +19,8 @@ export const ZONE_LAYOUT_SORT_FIELDS = [
   'title',
 ] as const;
 export const ZONE_LAYOUT_SORT_DIRECTIONS = ['asc', 'desc'] as const;
+export const ZONE_RESIZE_MODES = ['fixed', 'height', 'both'] as const;
+export const ZONE_OVERFLOW_STRATEGIES = ['report', 'reflow_board'] as const;
 
 export const DEFAULT_ZONE_LAYOUT_POLICY: Readonly<ZoneLayoutPolicy> = {
   mode: 'manual',
@@ -24,6 +28,8 @@ export const DEFAULT_ZONE_LAYOUT_POLICY: Readonly<ZoneLayoutPolicy> = {
   sortBy: 'position',
   sortDirection: 'asc',
   autoResizeHeight: false,
+  resize: 'fixed',
+  onOverflow: 'report',
   gap: 24,
 };
 
@@ -66,6 +72,19 @@ export function normalizeZoneLayoutPolicy(
     ? Math.min(96, Math.max(0, Math.round(policy?.gap ?? 24)))
     : DEFAULT_ZONE_LAYOUT_POLICY.gap;
 
+  // `resize` supersedes the `autoResizeHeight` boolean. Reconciling them here,
+  // once, is what keeps every caller from having to know both spellings: an
+  // explicit `resize` wins, an old policy is read through its boolean, and both
+  // are always written back so a reader predating `resize` still behaves.
+  const resize: ZoneResizeMode = isOneOf(policy?.resize, ZONE_RESIZE_MODES)
+    ? policy.resize
+    : policy?.autoResizeHeight === true
+      ? 'height'
+      : 'fixed';
+  const onOverflow: ZoneOverflowStrategy = isOneOf(policy?.onOverflow, ZONE_OVERFLOW_STRATEGIES)
+    ? policy.onOverflow
+    : 'report';
+
   return {
     mode: isOneOf(policy?.mode, ZONE_LAYOUT_MODES) ? policy.mode : DEFAULT_ZONE_LAYOUT_POLICY.mode,
     preset,
@@ -73,7 +92,9 @@ export function normalizeZoneLayoutPolicy(
     sortDirection,
     ...(columns === undefined ? {} : { columns }),
     gap,
-    autoResizeHeight: policy?.autoResizeHeight === true,
+    resize,
+    onOverflow,
+    autoResizeHeight: resize !== 'fixed',
   };
 }
 

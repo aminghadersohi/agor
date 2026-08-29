@@ -980,6 +980,73 @@ describe('compact_list → grid re-packs the expanded zone', () => {
     if (ys.length === 2) expect(ys[1] - ys[0]).toBeGreaterThan(56);
   });
 
+  it('re-packs when the zone toolbar expands the contents directly', async () => {
+    // The toolbar calls setZoneContentsCompact, which never passes through
+    // handleUpdateObject, so the preset-change re-pack does not cover it. Left
+    // unrepaired the button reliably produces the overlap the preset path
+    // avoids -- and the compact flags all flip correctly while it does.
+    vi.useFakeTimers();
+    const { client, patch } = makeClient();
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({ [zoneId]: zone('grid') }),
+          client: client as never,
+          boardObjectsForBoard: placements as never,
+          nodes: nodes as never,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact(zoneId, false);
+    });
+
+    expect(patch.mock.calls.some((c) => c[1] && 'position' in c[1])).toBe(false);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    const positioned = patch.mock.calls.filter((c) => c[1] && 'position' in c[1]);
+    expect(positioned.length).toBeGreaterThan(0);
+    const ys = positioned.map((c) => c[1].position.y).sort((a, b) => a - b);
+    if (ys.length === 2) expect(ys[1] - ys[0]).toBeGreaterThan(56);
+  });
+
+  it('does not re-pack when the toolbar collapses the contents', async () => {
+    // Collapsing shrinks every item, which cannot create an overlap; a re-pack
+    // there would move cards the user did not ask to move.
+    vi.useFakeTimers();
+    const { client, patch } = makeClient();
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({ [zoneId]: zone('grid') }),
+          client: client as never,
+          boardObjectsForBoard: [
+            { object_id: 'obj-a', zone_id: zoneId, card_id: 'card-a', compact: false },
+            { object_id: 'obj-b', zone_id: zoneId, card_id: 'card-b', compact: false },
+          ] as never,
+          nodes: nodes as never,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact(zoneId, true);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    expect(patch.mock.calls.some((c) => c[1] && 'position' in c[1])).toBe(false);
+  });
+
   it('does not schedule a re-pack when the preset did not leave compact_list', async () => {
     vi.useFakeTimers();
     const { client, patch } = makeClient();

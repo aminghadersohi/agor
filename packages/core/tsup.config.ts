@@ -8,6 +8,7 @@ export default defineConfig({
     'telemetry/index': 'src/telemetry/index.ts', // Community install telemetry helpers
     'tracing/datadog': 'src/tracing/datadog.ts', // Shared Datadog tracer type + optional-peer resolver
     'types/index': 'src/types/index.ts',
+    'layout/justified-zones': 'src/layout/justified-zones.ts',
     'layout/rectangle-packing': 'src/layout/rectangle-packing.ts',
     'layout/zone-layout': 'src/layout/zone-layout.ts',
     'realtime/index': 'src/realtime/index.ts',
