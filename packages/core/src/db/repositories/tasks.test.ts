@@ -99,6 +99,22 @@ async function createSessionWithDeps(db: Database): Promise<UUID> {
   return session.session_id;
 }
 
+async function bindTestRuntimeAuthority(db: Database, taskRepo: TaskRepository, task: Task) {
+  const session = await new SessionRepository(db).findById(task.session_id);
+  if (!session?.branch_id) throw new Error('Test runtime Session Branch is unavailable');
+  await taskRepo.bindExecutorLaunchAuthority(task.task_id, {
+    branchRbacEnabled: true,
+  });
+  return {
+    token_fingerprint: 'a'.repeat(64),
+    principal_user_id: task.created_by,
+    session_id: task.session_id,
+    branch_id: session.branch_id,
+    branchRbacEnabled: true,
+    standalone_token_current: true,
+  };
+}
+
 // ============================================================================
 // Create
 // ============================================================================
@@ -1301,31 +1317,41 @@ describe('TaskRepository.reportRuntimeTelemetry', () => {
     const task = await taskRepo.create(
       createTaskData({ session_id: sessionId, status: TaskStatus.DISPATCHING })
     );
+    const authority = await bindTestRuntimeAuthority(db, taskRepo, task);
     await taskRepo.connectExecutor(task.task_id);
 
     const first = await taskRepo.reportRuntimeTelemetry(
       task.task_id,
+      authority,
       { sequence: 2, kind: 'progress', detail: 'tool.start' },
       new Date('2026-01-01T00:00:02.000Z')
     );
     const retry = await taskRepo.reportRuntimeTelemetry(
       task.task_id,
+      authority,
       { sequence: 2, kind: 'waiting' },
       new Date('2026-01-01T00:00:03.000Z')
     );
 
     expect(first).toMatchObject({
-      last_executor_heartbeat_at: '2026-01-01T00:00:02.000Z',
-      latest_executor_pulse: {
-        sequence: 2,
-        kind: 'progress',
-        detail: 'tool.start',
-        observed_at: '2026-01-01T00:00:02.000Z',
+      outcome: 'continued',
+      task: {
+        last_executor_heartbeat_at: '2026-01-01T00:00:02.000Z',
+        latest_executor_pulse: {
+          sequence: 2,
+          kind: 'progress',
+          detail: 'tool.start',
+          observed_at: '2026-01-01T00:00:02.000Z',
+        },
       },
     });
     expect(retry).toMatchObject({
-      last_executor_heartbeat_at: '2026-01-01T00:00:03.000Z',
-      latest_executor_pulse: first?.latest_executor_pulse,
+      outcome: 'continued',
+      task: {
+        last_executor_heartbeat_at: '2026-01-01T00:00:03.000Z',
+        latest_executor_pulse:
+          first.outcome === 'continued' ? first.task.latest_executor_pulse : {},
+      },
     });
   });
 
@@ -1337,6 +1363,7 @@ describe('TaskRepository.reportRuntimeTelemetry', () => {
       const task = await taskRepo.create(
         createTaskData({ session_id: sessionId, status: TaskStatus.DISPATCHING })
       );
+      const authority = await bindTestRuntimeAuthority(db, taskRepo, task);
       await taskRepo.connectExecutor(task.task_id);
       await taskRepo.claimTermination({
         taskId: task.task_id,
@@ -1348,16 +1375,20 @@ describe('TaskRepository.reportRuntimeTelemetry', () => {
       await expect(
         taskRepo.reportRuntimeTelemetry(
           task.task_id,
+          authority,
           { sequence: 3, kind: 'progress', detail: 'provider.cancel.pending' },
           new Date('2026-01-01T00:00:03.000Z')
         )
       ).resolves.toMatchObject({
-        status: TaskStatus.STOPPING,
-        last_executor_heartbeat_at: '2026-01-01T00:00:03.000Z',
-        latest_executor_pulse: {
-          sequence: 3,
-          kind: 'progress',
-          detail: 'provider.cancel.pending',
+        outcome: 'continued',
+        task: {
+          status: TaskStatus.STOPPING,
+          last_executor_heartbeat_at: '2026-01-01T00:00:03.000Z',
+          latest_executor_pulse: {
+            sequence: 3,
+            kind: 'progress',
+            detail: 'provider.cancel.pending',
+          },
         },
       });
     }
@@ -1369,6 +1400,7 @@ describe('TaskRepository.reportRuntimeTelemetry', () => {
     const task = await taskRepo.create(
       createTaskData({ session_id: sessionId, status: TaskStatus.DISPATCHING })
     );
+    const authority = await bindTestRuntimeAuthority(db, taskRepo, task);
     await taskRepo.connectExecutor(task.task_id);
     const claim = await taskRepo.claimTermination({
       taskId: task.task_id,
@@ -1384,7 +1416,10 @@ describe('TaskRepository.reportRuntimeTelemetry', () => {
       new Date('2026-01-01T00:00:03.000Z')
     );
 
-    await expect(taskRepo.reportRuntimeTelemetry(task.task_id)).resolves.toBeNull();
+    await expect(taskRepo.reportRuntimeTelemetry(task.task_id, authority)).resolves.toMatchObject({
+      outcome: 'control',
+      task: { status: TaskStatus.STOPPING },
+    });
   });
 
   dbTest(
@@ -1395,6 +1430,7 @@ describe('TaskRepository.reportRuntimeTelemetry', () => {
       const task = await taskRepo.create(
         createTaskData({ session_id: sessionId, status: TaskStatus.DISPATCHING })
       );
+      const authority = await bindTestRuntimeAuthority(db, taskRepo, task);
       await taskRepo.connectExecutor(task.task_id);
       await taskRepo.claimTermination({
         taskId: task.task_id,
@@ -1424,14 +1460,18 @@ describe('TaskRepository.reportRuntimeTelemetry', () => {
       await expect(
         taskRepo.reportRuntimeTelemetry(
           task.task_id,
+          authority,
           { sequence: 4, kind: 'progress', detail: 'provider.cancel.still_pending' },
           new Date('2026-01-01T00:00:04.000Z')
         )
       ).resolves.toMatchObject({
-        status: TaskStatus.STOPPING,
-        sdk_failure: { termination: 'unverified' },
-        last_executor_heartbeat_at: '2026-01-01T00:00:04.000Z',
-        latest_executor_pulse: { sequence: 4, detail: 'provider.cancel.still_pending' },
+        outcome: 'continued',
+        task: {
+          status: TaskStatus.STOPPING,
+          sdk_failure: { termination: 'unverified' },
+          last_executor_heartbeat_at: '2026-01-01T00:00:04.000Z',
+          latest_executor_pulse: { sequence: 4, detail: 'provider.cancel.still_pending' },
+        },
       });
     }
   );
@@ -1442,11 +1482,16 @@ describe('TaskRepository.reportRuntimeTelemetry', () => {
     const task = await taskRepo.create(
       createTaskData({ session_id: sessionId, status: TaskStatus.DISPATCHING })
     );
+    const authority = await bindTestRuntimeAuthority(db, taskRepo, task);
 
-    expect(await taskRepo.reportRuntimeTelemetry(task.task_id)).toBeNull();
+    expect(await taskRepo.reportRuntimeTelemetry(task.task_id, authority)).toMatchObject({
+      outcome: 'control',
+    });
     await taskRepo.connectExecutor(task.task_id);
     await taskRepo.update(task.task_id, { status: TaskStatus.COMPLETED });
-    expect(await taskRepo.reportRuntimeTelemetry(task.task_id)).toBeNull();
+    expect(await taskRepo.reportRuntimeTelemetry(task.task_id, authority)).toMatchObject({
+      outcome: 'control',
+    });
   });
 });
 
@@ -1714,13 +1759,14 @@ describe('TaskRepository.update', () => {
     const task = await taskRepo.create(
       createTaskData({
         session_id: sessionId,
-        status: TaskStatus.RUNNING,
-        executor_connected_at: '2026-07-10T20:00:00.000Z',
-        last_executor_heartbeat_at: '2026-07-10T20:00:01.000Z',
+        status: TaskStatus.DISPATCHING,
       })
     );
+    const authority = await bindTestRuntimeAuthority(db, taskRepo, task);
+    await taskRepo.connectExecutor(task.task_id, new Date('2026-07-10T20:00:01.000Z'));
     await taskRepo.reportRuntimeTelemetry(
       task.task_id,
+      authority,
       undefined,
       new Date('2026-07-10T20:00:05Z')
     );
@@ -2638,6 +2684,8 @@ function createPendingInput(overrides: {
   created_by?: string;
   full_prompt?: string;
   metadata?: Parameters<TaskRepository['createPending']>[0]['metadata'];
+  task_id?: Parameters<TaskRepository['createPending']>[0]['task_id'];
+  compaction?: Parameters<TaskRepository['createPending']>[0]['compaction'];
 }): Parameters<TaskRepository['createPending']>[0] {
   return {
     session_id: overrides.session_id as Parameters<
@@ -2647,6 +2695,8 @@ function createPendingInput(overrides: {
     created_by: overrides.created_by ?? 'test-user',
     status: overrides.status,
     metadata: overrides.metadata,
+    task_id: overrides.task_id,
+    compaction: overrides.compaction,
   };
 }
 
@@ -3263,6 +3313,283 @@ describe('TaskRepository.createPending', () => {
       ]);
 
       expect(admitted.map((task) => task.queue_position).sort()).toEqual([1, 2, 3]);
+    }
+  );
+
+  dbTest(
+    'compacts and normalized-dedupes concurrent ordinary prompt admissions',
+    async ({ db }) => {
+      const taskRepo = new TaskRepository(db);
+      const sessionId = await createSessionWithDeps(db);
+      const requestIds = [generateId(), generateId(), generateId()];
+      const prompts = ['Inspect queue safety', '  Inspect\tqueue safety  ', 'Then add tests'];
+
+      const admitted = await Promise.all(
+        prompts.map((full_prompt, index) =>
+          taskRepo.createPending(
+            createPendingInput({
+              session_id: sessionId,
+              status: TaskStatus.QUEUED,
+              task_id: requestIds[index],
+              full_prompt,
+              compaction: {
+                request_id: requestIds[index]!,
+                eligible: true,
+                stream: true,
+              },
+            })
+          )
+        )
+      );
+
+      expect(new Set(admitted.map((task) => task.task_id)).size).toBe(1);
+      const [queued] = await taskRepo.findQueued(sessionId);
+      expect(queued?.metadata?.prompt_compaction).toMatchObject({
+        unique_prompt_count: 2,
+        duplicate_request_count: 1,
+      });
+      expect(
+        new Set(queued?.metadata?.prompt_compaction?.requests.map((entry) => entry.request_id))
+      ).toEqual(new Set(requestIds));
+      const requests = queued?.metadata?.prompt_compaction?.requests ?? [];
+      expect(requests).toEqual(
+        [...requests].sort(
+          (left, right) =>
+            left.submitted_at.localeCompare(right.submitted_at) ||
+            left.request_id.localeCompare(right.request_id)
+        )
+      );
+      expect(queued?.full_prompt).toContain('Instruction 1');
+      expect(queued?.full_prompt).toContain('Instruction 2');
+    }
+  );
+
+  dbTest('chunks deterministically at the compacted prompt byte bound', async ({ db }) => {
+    const taskRepo = new TaskRepository(db);
+    const sessionId = await createSessionWithDeps(db);
+    const firstId = generateId();
+    const secondId = generateId();
+    const prompt = (marker: string) => `${marker}${'x'.repeat(20_000)}`;
+
+    await taskRepo.createPending(
+      createPendingInput({
+        session_id: sessionId,
+        status: TaskStatus.QUEUED,
+        task_id: firstId,
+        full_prompt: prompt('a'),
+        compaction: { request_id: firstId, eligible: true, stream: true },
+      })
+    );
+    await taskRepo.createPending(
+      createPendingInput({
+        session_id: sessionId,
+        status: TaskStatus.QUEUED,
+        task_id: secondId,
+        full_prompt: prompt('b'),
+        compaction: { request_id: secondId, eligible: true, stream: true },
+      })
+    );
+
+    const queued = await taskRepo.findQueued(sessionId);
+    expect(queued.map((task) => task.task_id)).toEqual([firstId, secondId]);
+    expect(queued.every((task) => task.full_prompt.length === 20_001)).toBe(true);
+  });
+
+  dbTest('preserves an oversized single prompt without truncation', async ({ db }) => {
+    const taskRepo = new TaskRepository(db);
+    const sessionId = await createSessionWithDeps(db);
+    const requestId = generateId();
+    const fullPrompt = `oversized:${'🙂'.repeat(9_000)}`;
+
+    const admitted = await taskRepo.createPending(
+      createPendingInput({
+        session_id: sessionId,
+        status: TaskStatus.QUEUED,
+        task_id: requestId,
+        full_prompt: fullPrompt,
+        compaction: { request_id: requestId, eligible: true, stream: true },
+      })
+    );
+
+    expect(new TextEncoder().encode(fullPrompt).byteLength).toBeGreaterThan(32 * 1024);
+    expect(admitted.full_prompt).toBe(fullPrompt);
+    expect(admitted.metadata?.prompt_compaction).toBeUndefined();
+  });
+
+  dbTest('keeps standing callback continuation prompts as separate Tasks', async ({ db }) => {
+    const taskRepo = new TaskRepository(db);
+    const sessionId = await createSessionWithDeps(db);
+    await new SessionRepository(db).update(sessionId, {
+      callback_config: { enabled: true, callback_session_id: generateId() },
+    });
+    const requestIds = [generateId(), generateId()];
+
+    for (const [index, requestId] of requestIds.entries()) {
+      await taskRepo.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          task_id: requestId,
+          full_prompt: `callback-sensitive ${index}`,
+          compaction: { request_id: requestId, eligible: true, stream: true },
+        })
+      );
+    }
+
+    expect((await taskRepo.findQueued(sessionId)).map((task) => task.task_id)).toEqual(requestIds);
+  });
+
+  dbTest('keeps exact-Task completion callback requests separate', async ({ db }) => {
+    const taskRepo = new TaskRepository(db);
+    const sessionId = await createSessionWithDeps(db);
+    const callbackSessionId = await createSessionWithDeps(db);
+    const requestIds = [generateId(), generateId()];
+
+    for (const requestId of requestIds) {
+      await taskRepo.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          task_id: requestId,
+          metadata: {
+            completion_callback: {
+              target_session_id: callbackSessionId,
+              requested_from_session_id: callbackSessionId,
+              requested_by_user_id: 'test-user',
+            },
+          },
+          // Defense in depth: repository safety must win even if an admission
+          // caller accidentally marks a callback-bearing prompt eligible.
+          compaction: { request_id: requestId, eligible: true, stream: true },
+        })
+      );
+    }
+
+    expect((await taskRepo.findQueued(sessionId)).map((task) => task.task_id)).toEqual(requestIds);
+  });
+
+  dbTest('never folds a new request into a Task after the dispatch claim', async ({ db }) => {
+    const taskRepo = new TaskRepository(db);
+    const sessionId = await createSessionWithDeps(db);
+    const sessionRepo = new SessionRepository(db);
+    await sessionRepo.update(sessionId, { status: SessionStatus.IDLE, ready_for_prompt: true });
+    const firstId = generateId();
+    const first = await taskRepo.createPending(
+      createPendingInput({
+        session_id: sessionId,
+        status: TaskStatus.QUEUED,
+        task_id: firstId,
+        compaction: { request_id: firstId, eligible: true, stream: true },
+      })
+    );
+    const beforeClaimId = generateId();
+    const folded = await taskRepo.createPending(
+      createPendingInput({
+        session_id: sessionId,
+        status: TaskStatus.QUEUED,
+        task_id: beforeClaimId,
+        full_prompt: 'fold before claim',
+        compaction: { request_id: beforeClaimId, eligible: true, stream: true },
+      })
+    );
+    expect(folded.task_id).toBe(first.task_id);
+    const claim = await taskRepo.claimDispatchAndProjectSession(first.task_id, TaskStatus.QUEUED, {
+      status: TaskStatus.DISPATCHING,
+    });
+    expect(claim.outcome).toBe('claimed');
+    expect(claim.task.full_prompt).toContain('fold before claim');
+    const nextId = generateId();
+    const next = await taskRepo.createPending(
+      createPendingInput({
+        session_id: sessionId,
+        status: TaskStatus.QUEUED,
+        task_id: nextId,
+        full_prompt: 'later',
+        compaction: { request_id: nextId, eligible: true, stream: true },
+      })
+    );
+    expect(next.task_id).toBe(nextId);
+    expect((await taskRepo.findById(first.task_id))?.full_prompt).toBe(claim.task.full_prompt);
+    expect(claim.task.full_prompt).not.toContain('later');
+  });
+});
+
+describe('TaskRepository.admitInterruptCorrection', () => {
+  dbTest(
+    'stops before a highest-priority correction and converges retries exactly once',
+    async ({ db }) => {
+      const taskRepo = new TaskRepository(db);
+      const sessionRepo = new SessionRepository(db);
+      const sessionId = await createSessionWithDeps(db);
+      const coordinatorId = await createSessionWithDeps(db);
+      await sessionRepo.update(sessionId, {
+        status: SessionStatus.RUNNING,
+        ready_for_prompt: false,
+        callback_config: { enabled: true, callback_session_id: coordinatorId },
+      });
+      const running = await taskRepo.create(
+        createTaskData({ session_id: sessionId, status: TaskStatus.RUNNING })
+      );
+      const ordinary = await taskRepo.createPending(
+        createPendingInput({ session_id: sessionId, status: TaskStatus.QUEUED })
+      );
+      const correctionId = generateId();
+      const input = {
+        session_id: sessionId,
+        corrective_task_id: correctionId,
+        corrective_prompt: 'Stop and verify the race first',
+        created_by: 'test-user',
+        requested_by_session_id: coordinatorId,
+        relationship: 'coordinator' as const,
+        idempotency_key: 'retry-1',
+      };
+
+      const first = await taskRepo.admitInterruptCorrection(input);
+      const retry = await taskRepo.admitInterruptCorrection(input);
+      const queued = await taskRepo.findQueued(sessionId);
+
+      expect(first.outcome).toBe('stop_requested');
+      if (first.outcome !== 'stop_requested') throw new Error('interrupt was not admitted');
+      expect(first.target_task).toMatchObject({
+        task_id: running.task_id,
+        status: TaskStatus.STOPPING,
+      });
+      expect(retry.outcome).toBe('already_requested');
+      expect(queued.map((task) => task.task_id)).toEqual([correctionId, ordinary.task_id]);
+      expect(queued[0]!.queue_position).toBeLessThan(ordinary.queue_position!);
+      expect(queued.filter((task) => task.task_id === correctionId)).toHaveLength(1);
+      expect((await taskRepo.findById(running.task_id))?.metadata?.interruptions).toHaveLength(1);
+
+      // A very late transport retry must not interrupt unrelated work that
+      // started after the original target and correction both terminated.
+      await taskRepo.claimTerminationCoordination({
+        taskId: running.task_id,
+        claimToken: 'late-retry-settlement',
+        leaseDurationMs: 30_000,
+        instanceId: 'daemon-a',
+        bootId: 'boot-a',
+      });
+      await taskRepo.settleTermination({
+        taskId: running.task_id,
+        outcome: 'verified_absent',
+        coordinationToken: 'late-retry-settlement',
+      });
+      await taskRepo.update(correctionId, { status: TaskStatus.COMPLETED });
+      const later = await taskRepo.create(
+        createTaskData({ session_id: sessionId, status: TaskStatus.RUNNING })
+      );
+      const lateRetry = await taskRepo.admitInterruptCorrection(input);
+      expect(lateRetry).toMatchObject({ outcome: 'already_requested' });
+      if (lateRetry.outcome !== 'already_requested') throw new Error('retry did not converge');
+      expect(lateRetry.target_task).toBeUndefined();
+      expect((await taskRepo.findById(later.task_id))?.status).toBe(TaskStatus.RUNNING);
+
+      await sessionRepo.update(sessionId, {
+        callback_config: { enabled: true, callback_session_id: generateId() },
+      });
+      await expect(taskRepo.admitInterruptCorrection(input)).resolves.toEqual({
+        outcome: 'relationship_changed',
+      });
     }
   );
 });

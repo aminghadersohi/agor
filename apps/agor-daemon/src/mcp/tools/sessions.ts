@@ -4,6 +4,8 @@ import {
   type BranchWithZoneAndSessions,
   CompletionSubscriptionRepository,
   generateId,
+  getCurrentTenantId,
+  runWithTenantDatabaseTransaction,
   SessionRelationshipRepository,
   shortId,
   TaskRepository,
@@ -27,6 +29,7 @@ import {
   type Board,
   type CompletionSubscription,
   type CompletionSubscriptionID,
+  getEffectiveDirectCallbackCoordinatorSessionId,
   getSessionType,
   isTaskExecuting,
   type Session,
@@ -38,8 +41,14 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { SessionsServiceImpl } from '../../declarations.js';
 import type { SessionParams } from '../../services/sessions.js';
+import {
+  lockTenantAuthorizationFence,
+  resolveCurrentTenantAuthorityActor,
+} from '../../services/tenant-authorization-fence.js';
+import { requestExecutorTermination } from '../../termination-coordinator.js';
 import { requireActiveAgenticTool } from '../../utils/agentic-tool-runtime.js';
 import { ensureCanPromptTargetSession } from '../../utils/branch-authorization.js';
+import { interruptCorrectionTaskId } from '../../utils/durable-task-id.js';
 import { emitServiceEvent } from '../../utils/emit-service-event.js';
 import {
   resolveBoardId,
@@ -59,7 +68,7 @@ import {
   mcpRequiredString,
 } from '../schema.js';
 import type { McpContext } from '../server.js';
-import { sessionContextRequiredResult, textResult } from '../server.js';
+import { sessionContextRequiredResult, structuredResult, textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
 import { listAttachedMcpServers } from './mcp-servers.js';
 
@@ -169,6 +178,60 @@ const modelConfigInputSchema = z
   .describe(
     "Model override for this session. Pass either a model ID string (e.g. 'claude-opus-4-6') or a full { mode, model, effort, advisorModel, provider } object. Overrides the user default model_config and is threaded through to the spawned agent process. Call agor_models_list to discover valid model IDs per agenticTool."
   );
+
+const callbackRetargetOutputSchema = z.object({
+  session_id: z.string().describe('Fully resolved callback source Session ID.'),
+  previous_callback_session_id: z
+    .string()
+    .describe('Fully resolved callback destination before the transfer.'),
+  callback_session_id: z
+    .string()
+    .describe('Fully resolved callback destination after the transfer.'),
+  relationship_ids: z
+    .array(z.string())
+    .describe('Remote-create relationship IDs updated atomically with the direct route.'),
+  task_callback_subscriptions_retargeted: z
+    .literal(false)
+    .describe('Exact-Task callback subscriptions are separate and remain unchanged.'),
+});
+
+const sessionReparentOutputSchema = z.object({
+  session_id: z.string().describe('Fully resolved Session ID whose genealogy changed.'),
+  branch_id: z.string().describe('Fully resolved branch shared by source and new parent.'),
+  previous_parent_session_id: z
+    .string()
+    .nullable()
+    .describe('Fully resolved previous parent Session ID, or null for a root.'),
+  parent_session_id: z
+    .string()
+    .nullable()
+    .describe('Fully resolved new parent Session ID, or null when detached to a root.'),
+});
+
+const sessionRelayOutputSchema = z.object({
+  session_id: z.string().describe('Session that relayed from its own MCP context.'),
+  destination: z
+    .enum(['parent', 'coordinator'])
+    .describe('The explicitly selected durable relationship.'),
+  destination_session_id: z
+    .string()
+    .describe('Current parent or effective direct callback coordinator resolved by Agor.'),
+  task_id: z.string().describe('Task admitted on the resolved destination Session.'),
+  status: z.string().describe('Admitted relay Task status.'),
+});
+
+const sessionInterruptOutputSchema = z.object({
+  success: z.literal(true),
+  target_session_id: z.string().describe('Fully resolved interrupted Session ID.'),
+  relationship: z.enum(['parent', 'coordinator']),
+  outcome: z.enum(['stop_requested', 'already_requested', 'idle_queued']),
+  target_task_id: z.string().nullable().describe('Original active Task, or null when idle.'),
+  corrective_task_id: z.string().describe('Stable exactly-once corrective Task ID.'),
+  corrective_task_status: z.string(),
+  termination_status: z.enum(['idle', 'terminal', 'condition_changed', 'pending', 'unverified']),
+  pending_code: z.string().optional(),
+  note: z.string().optional(),
+});
 
 /**
  * Normalize the two input shapes (string shorthand or full object) into the
@@ -556,7 +619,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_get_current_context',
     {
       description:
-        'Get a lean orientation snapshot for the current session in ONE call. Returns deduplicated context: session identity, user, latest task Git boundaries, branch (zone, issue/PR, notes, environment), board (with zones), repo (slug, default branch), genealogy, remote origins, and sibling sessions. Every field appears exactly once. Use get_current or entity-specific tools for full details. The returned session_id is what a remote orchestrator passes as callbackSessionId (agor_sessions_create) to self-target cross-branch completion callbacks. IMPORTANT: `genealogy`/`parent_session_id` describe BRANCH-LOCAL ancestry only. A session another session created cross-branch is legitimately `genealogy: "root"` with `parent_session_id: null` AND still has a durable origin — that origin is reported in `remote_origins`, so check it before concluding you have nobody to report to. Use agor_session_relationships_report to send it an explicit follow-up.',
+        'Get a lean orientation snapshot for the current session in ONE call. Returns deduplicated context: session identity, user, latest task Git boundaries, branch (zone, issue/PR, notes, environment), board (with zones), repo (slug, default branch), branch-local genealogy, immutable remote origins, the effective direct callback coordinator, and sibling sessions. Provenance and current routing are deliberately separate: remote_origins records who originally remote-created this Session, while effective_direct_callback_coordinator_session_id records the currently enabled report destination after any retarget. A remote-created root can use agor_session_relationships_report for an explicit follow-up.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         includeSiblings: z
@@ -638,8 +701,19 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         : gen?.forked_from_session_id
           ? 'forked'
           : 'root';
-      result.parent_session_id = gen?.parent_session_id || gen?.forked_from_session_id || null;
+      result.parent_session_id = gen?.parent_session_id ?? null;
+      result.forked_from_session_id = gen?.forked_from_session_id ?? null;
       result.children_count = gen?.children?.length || 0;
+      result.remote_origins = (session.remote_relationships?.as_target ?? [])
+        .filter(
+          (relationship: SessionRelationship) => relationship.relationship_type === 'remote_create'
+        )
+        .map((relationship: SessionRelationship) => ({
+          relationship_id: relationship.relationship_id,
+          source_session_id: relationship.source_session_id,
+        }));
+      result.effective_direct_callback_coordinator_session_id =
+        getEffectiveDirectCallbackCoordinatorSessionId(session);
 
       // Remote origin — reported SEPARATELY from and IN ADDITION TO genealogy
       // above, never merged into it. A cross-branch remote-created session is a
@@ -1017,13 +1091,32 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           );
 
         if (task.status === 'queued') {
+          const compaction = task.metadata?.prompt_compaction;
           return textResult({
             success: true,
             queued: true,
             taskId: task.task_id,
             ...(completionSubscriptionId && { completionSubscriptionId }),
             queue_position: task.queue_position,
-            note: 'Session is busy. Prompt has been queued and will execute automatically when the session becomes idle.',
+            ...(compaction
+              ? {
+                  admissionRequestId: compaction.last_admitted_request_id,
+                  coalescedRequestIds: compaction.requests.map(
+                    (
+                      request: NonNullable<
+                        import('@agor/core/types').TaskMetadata['prompt_compaction']
+                      >['requests'][number]
+                    ) => request.request_id
+                  ),
+                  coalescedRequestCount: compaction.requests.length,
+                  uniquePromptCount: compaction.unique_prompt_count,
+                  duplicateRequestCount: compaction.duplicate_request_count,
+                }
+              : {}),
+            note:
+              compaction && compaction.requests.length > 1
+                ? 'Session is busy. This ordinary prompt was coalesced into a queued execution; provenance and duplicate counts are attached to the Task.'
+                : 'Session is busy. Prompt has been queued and will execute automatically when the session becomes idle.',
           });
         }
         return textResult({
@@ -1171,7 +1264,177 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 5c: agor_session_relationships_set_callback
+  // Tool 5c: agor_session_relationships_report
+  server.registerTool(
+    'agor_session_relationships_report',
+    {
+      description:
+        "Relay a message from the current Session to either its branch-local parent or its currently enabled direct callback coordinator. The destination enum is required when both exist, so routing is never ambiguous. This tool accepts no Session ID: Agor resolves the destination from the Session's current durable parent/callback state, so reparenting or callback retargeting takes effect on the next call. Immutable remote_origins are provenance only and never override the current coordinator.",
+      inputSchema: z.object({
+        destination: z
+          .enum(['parent', 'coordinator'])
+          .describe(
+            'Choose the branch-local genealogy parent or effective direct callback coordinator explicitly.'
+          ),
+        message: mcpRequiredString('message', 'Message to relay to the resolved destination'),
+      }),
+      outputSchema: sessionRelayOutputSchema,
+    },
+    async (args) => {
+      if (!ctx.sessionId) return sessionContextRequiredResult();
+      const resolution = await runWithMcpTenantDatabaseScope(ctx, () =>
+        (ctx.app.service('sessions') as unknown as SessionsServiceImpl).resolveRelayDestination(
+          ctx.sessionId!,
+          { destination: args.destination },
+          ctx.baseServiceParams
+        )
+      );
+      const task = await ctx.app
+        .service('/sessions/:id/prompt')
+        .create(
+          { prompt: args.message, stream: true },
+          { ...ctx.baseServiceParams, route: { id: resolution.destination_session_id } }
+        );
+      return structuredResult({
+        ...resolution,
+        task_id: task.task_id,
+        status: task.status,
+      });
+    }
+  );
+
+  // Tool 5d: coordinator-authorized interrupt with a corrective message.
+  server.registerTool(
+    'agor_sessions_interrupt_with_message',
+    {
+      description:
+        "Stop a child Session and put one corrective message ahead of its ordinary queue. Authority derives from the calling MCP Session being the target's current branch-local parent or enabled direct callback coordinator; naming a target never grants authority. The correction cannot dispatch until executor quiescence/absence is verified. Retries with the same idempotencyKey converge on the same corrective Task.",
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        targetSessionId: mcpRequiredId('targetSessionId', 'Session', 'Child Session to interrupt'),
+        relationship: z
+          .enum(['parent', 'coordinator'])
+          .describe(
+            'Current relationship through which the calling Session coordinates the child.'
+          ),
+        message: mcpRequiredString('message', 'Corrective prompt to execute next'),
+        idempotencyKey: z
+          .string()
+          .min(1)
+          .max(128)
+          .describe('Caller-stable retry key. Reuse it only for retries of this exact correction.'),
+      }),
+      outputSchema: sessionInterruptOutputSchema,
+    },
+    async (args) => {
+      if (!ctx.sessionId) return sessionContextRequiredResult();
+      const targetSessionId = await resolveSessionId(ctx, args.targetSessionId);
+      const correctiveTaskId = interruptCorrectionTaskId(
+        targetSessionId,
+        ctx.sessionId,
+        args.idempotencyKey
+      );
+      const tenantId = ctx.baseServiceParams.tenant?.tenant_id ?? getCurrentTenantId();
+
+      const admission = await runWithMcpTenantDatabaseWrite(ctx, (db) =>
+        runWithTenantDatabaseTransaction(db, tenantId, async (operationDb) => {
+          await lockTenantAuthorizationFence(operationDb, ctx.baseServiceParams);
+          const actor = await resolveCurrentTenantAuthorityActor(
+            operationDb,
+            ctx.baseServiceParams
+          );
+          if (actor.service || actor.user_id !== ctx.userId) {
+            throw new Error('Interrupt requires the current authenticated human actor.');
+          }
+          const authority = await (
+            ctx.app.service('sessions') as unknown as SessionsServiceImpl
+          ).resolveInterruptAuthority(
+            targetSessionId,
+            { callerSessionId: ctx.sessionId!, relationship: args.relationship },
+            ctx.baseServiceParams
+          );
+          const result = await new TaskRepository(operationDb).admitInterruptCorrection({
+            session_id: authority.target_session_id,
+            corrective_task_id: correctiveTaskId,
+            corrective_prompt: args.message,
+            created_by: ctx.userId,
+            requested_by_session_id: authority.caller_session_id,
+            relationship: authority.relationship,
+            idempotency_key: args.idempotencyKey,
+          });
+          if (result.outcome === 'relationship_changed') {
+            throw new Error('Interrupt relationship changed before the request could be admitted.');
+          }
+          return result;
+        })
+      );
+
+      if (admission.outcome !== 'already_requested') {
+        emitServiceEvent(ctx.app, {
+          path: 'tasks',
+          event: 'created',
+          data: admission.corrective_task,
+          params: ctx.baseServiceParams,
+          id: admission.corrective_task.task_id,
+        });
+        emitServiceEvent(ctx.app, {
+          path: 'tasks',
+          event: 'queued',
+          method: 'create',
+          data: admission.corrective_task,
+          params: ctx.baseServiceParams,
+          id: admission.corrective_task.task_id,
+        });
+      }
+      if (admission.target_task && admission.outcome === 'stop_requested') {
+        emitServiceEvent(ctx.app, {
+          path: 'tasks',
+          event: 'patched',
+          data: admission.target_task,
+          params: ctx.baseServiceParams,
+          id: admission.target_task.task_id,
+        });
+      }
+
+      let termination:
+        | Awaited<ReturnType<typeof requestExecutorTermination>>
+        | { status: 'idle'; task?: undefined } = { status: 'idle' };
+      if (admission.target_task) {
+        termination = await requestExecutorTermination({
+          app: ctx.app,
+          taskId: admission.target_task.task_id,
+          cause: 'user_stop',
+          errorMessage: `Interrupted by authorized ${args.relationship} with corrective Task ${correctiveTaskId}.`,
+          params: ctx.baseServiceParams,
+          runInFreshTenantWriteDatabase: (work) => runWithMcpTenantDatabaseWrite(ctx, () => work()),
+        });
+      }
+
+      if (termination.status === 'terminal' || termination.status === 'idle') {
+        await (
+          ctx.app.service('sessions') as unknown as SessionsServiceImpl
+        ).triggerQueueProcessing(targetSessionId, ctx.baseServiceParams);
+      }
+
+      return structuredResult({
+        success: true,
+        target_session_id: targetSessionId,
+        relationship: args.relationship,
+        outcome: admission.outcome,
+        target_task_id: admission.target_task?.task_id ?? null,
+        corrective_task_id: admission.corrective_task.task_id,
+        corrective_task_status: admission.corrective_task.status,
+        termination_status: termination.status,
+        ...(termination.status === 'pending'
+          ? { pending_code: termination.pendingCode, note: termination.reason }
+          : termination.status === 'unverified'
+            ? { note: termination.reason }
+            : {}),
+      });
+    }
+  );
+
+  // Tool 5e: agor_session_relationships_set_callback
   server.registerTool(
     'agor_session_relationships_set_callback',
     {
@@ -1429,6 +1692,80 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             ? 'Origin session is busy. The report is queued and will be delivered when it becomes idle. This was a one-time send — call this tool again for another report.'
             : 'Report delivered as a one-time message. This opened no persistent channel; call this tool again for another report.',
       });
+    }
+  );
+
+  // Tool 5e: agor_sessions_retarget_callback
+  server.registerTool(
+    'agor_sessions_retarget_callback',
+    {
+      description:
+        "Move an existing Session's standing/direct completion callback to another Session. This is routing, not genealogy: it does not change parent_session_id. For cross-branch remote_create links, the Session route and matching durable relationship rows change atomically while enabled/once/persistent/include flags are preserved. A running Task that completes after this transfer commits resolves the standing route to the new destination only. Exact-Task callbacks requested with agor_sessions_prompt callback:true (the durable caller/root-propagated subscription mechanism) remain unchanged and may independently report to their original destination.",
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        sessionId: mcpRequiredId(
+          'sessionId',
+          'Session',
+          'Session whose existing direct completion callback should move'
+        ),
+        callbackSessionId: mcpRequiredId(
+          'callbackSessionId',
+          'Session',
+          'New completion destination Session; may be in another branch but must be in the same tenant and prompt-authorized'
+        ),
+      }),
+      outputSchema: callbackRetargetOutputSchema,
+    },
+    async (args) => {
+      const sessionId = await resolveSessionId(ctx, args.sessionId);
+      const callbackSessionId = await resolveSessionId(ctx, args.callbackSessionId);
+      const result = await runWithMcpTenantDatabaseWrite(ctx, () =>
+        (ctx.app.service('sessions') as unknown as SessionsServiceImpl).retargetCallback(
+          sessionId,
+          { callbackSessionId },
+          ctx.baseServiceParams
+        )
+      );
+      return structuredResult(result as unknown as Record<string, unknown>);
+    }
+  );
+
+  // Tool 5f: agor_sessions_reparent
+  server.registerTool(
+    'agor_sessions_reparent',
+    {
+      description:
+        "Change only a Session's branch-local genealogy parent. This is genealogy, not callback routing: it never changes callbackSessionId, remote_create relationships, or exact-Task callback subscriptions. The new parent must be active, prompt-authorized, in the same tenant and same branch; direct and indirect cycles are rejected. Pass parentSessionId:null to detach the Session into a branch-local root.",
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        sessionId: mcpRequiredId(
+          'sessionId',
+          'Session',
+          'Session whose branch-local genealogy parent should change'
+        ),
+        parentSessionId: z
+          .string()
+          .min(1, 'parentSessionId cannot be empty when provided.')
+          .nullable()
+          .describe(
+            'New branch-local parent Session ID, or null to detach into a root. Short IDs are accepted and the response returns the resolved ID.'
+          ),
+      }),
+      outputSchema: sessionReparentOutputSchema,
+    },
+    async (args) => {
+      const sessionId = await resolveSessionId(ctx, args.sessionId);
+      const parentSessionId = args.parentSessionId
+        ? await resolveSessionId(ctx, args.parentSessionId)
+        : null;
+      const result = await runWithMcpTenantDatabaseWrite(ctx, () =>
+        (ctx.app.service('sessions') as unknown as SessionsServiceImpl).reparent(
+          sessionId,
+          { parentSessionId },
+          ctx.baseServiceParams
+        )
+      );
+      return structuredResult(result as unknown as Record<string, unknown>);
     }
   );
 

@@ -124,6 +124,14 @@ export function textResult(data: unknown) {
   };
 }
 
+/** Format one JSON value as both human-readable text and typed MCP output. */
+export function structuredResult<T extends Record<string, unknown>>(data: T) {
+  return {
+    ...textResult(data),
+    structuredContent: data,
+  };
+}
+
 export const SESSION_CONTEXT_REQUIRED_MESSAGE =
   'This MCP tool requires current Agor session context. Reconnect or call /mcp with X-Agor-Session-Id: <session-id> (or ?sessionId=<session-id>) when using a personal API key.';
 
@@ -289,10 +297,22 @@ export function buildRegistry(): ToolRegistry {
       }
     }
 
+    let outputSchema: import('@modelcontextprotocol/server').Tool['outputSchema'] | undefined;
+    if (config.outputSchema) {
+      try {
+        outputSchema = toJSONSchema(
+          config.outputSchema as Parameters<typeof toJSONSchema>[0]
+        ) as unknown as import('@modelcontextprotocol/server').Tool['outputSchema'];
+      } catch {
+        outputSchema = undefined;
+      }
+    }
+
     registry.register({
       name,
       description: (config.description as string) ?? '',
       inputSchema: jsonSchema,
+      outputSchema,
       annotations: config.annotations as import('@modelcontextprotocol/server').ToolAnnotations,
     });
 
@@ -327,6 +347,7 @@ function getRegistry(): {
         name: entry.name,
         description: entry.description,
         inputSchema: entry.inputSchema,
+        ...(entry.outputSchema ? { outputSchema: entry.outputSchema } : {}),
         annotations: entry.annotations,
       })),
     };

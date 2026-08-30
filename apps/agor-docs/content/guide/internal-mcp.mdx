@@ -271,6 +271,60 @@ Tenant identity is ambient for the MCP operation, but it does not hold a
 database transaction open. Individual service and repository calls use short
 tenant-scoped units of work.
 
+## Session transfer operations
+
+Two intentionally separate tools move existing Session relationships:
+
+- `agor_sessions_retarget_callback(sessionId, callbackSessionId)` changes a
+  standing/direct completion destination. Matching cross-branch
+  `remote_create` rows change in the same transaction, and the response returns
+  the resolved source, previous destination, new destination, and relationship
+  IDs. Callback enablement, mode, template, and include flags are preserved.
+- `agor_sessions_reparent(sessionId, parentSessionId)` changes branch-local
+  genealogy only. The nullable parent remains in the same branch, both parent
+  child lists are updated atomically, and direct or indirect cycles fail.
+
+Both require Manager authority over the source, prompt authority over a new
+destination, and a same-tenant active destination. Archived or missing Sessions
+and archived or missing destination branches fail closed.
+
+Completion dispatch re-reads the worker Session after a terminal Task commits.
+If a direct retarget committed while that Task was running, its standing report
+goes only to the new direct destination. Exact-Task callbacks created by
+`agor_sessions_prompt(..., callback: true)` are separate immutable Task
+subscriptions—including requests propagated from a root orchestrator—and are
+not rewritten by direct retargeting.
+
+`agor_sessions_get_current_context` exposes three intentionally distinct
+relationships: current branch-local `parent_session_id`, immutable
+`remote_origins`, and the currently enabled
+`effective_direct_callback_coordinator_session_id`. A retarget updates the last
+field but never rewrites provenance; a reparent updates the first.
+
+`agor_session_relationships_report(destination, message)` is the safe manual
+relay path. `destination` must be `parent` or `coordinator`; no arbitrary target
+ID is accepted. If both exist, the enum makes the choice explicit. The daemon
+resolves current durable state on every call and fails closed when the selected
+relationship is missing or disabled, the destination is archived/deleted, the
+tenant differs, or the caller cannot prompt the destination.
+
+`agor_sessions_interrupt_with_message(targetSessionId, relationship, message,
+idempotencyKey)` is the narrow controlling-direction operation. The calling MCP
+Session must be the target's current branch-local parent or enabled direct
+callback coordinator; the supplied target ID grants no authority. Agor also
+rechecks source visibility, target prompt authority, tenant, active Session and
+branch state, and the authenticated human actor at durable admission.
+
+For an active target, Agor atomically requests Stop and inserts one corrective
+Task ahead of ordinary queued prompts. That Task cannot start until the normal
+termination coordinator verifies executor quiescence/process absence and
+settles the stopped Task. Awaiting-permission and legacy awaiting-input work use
+the same Stop path. Pending or unverified containment leaves the correction
+durably queued; an idle target simply queues it without a fake Stop. Reusing an
+`idempotencyKey` for the same caller, target, and exact message returns the same
+corrective Task. Stopped turns do not fire natural-completion callbacks; the
+correction's eventual completion follows normal callback routing.
+
 ## Best Practices
 
 - **Keep permission policies tight.** MCP calls respect Agor’s permission system. Configure approvals so agents only do what the team expects.

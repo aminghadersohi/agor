@@ -63,13 +63,38 @@ describe('TasksService executor heartbeat helpers', () => {
     };
     const service = Object.create(TasksService.prototype) as TasksService;
     Reflect.set(service, 'taskRepo', {
-      reportRuntimeTelemetry: vi.fn().mockResolvedValue(null),
-      findById: vi.fn().mockResolvedValue(stoppingTask),
+      reportRuntimeTelemetry: vi.fn().mockResolvedValue({
+        outcome: 'control',
+        task: stoppingTask,
+      }),
+    });
+    Reflect.set(service, 'db', { run() {} });
+    Reflect.set(service, 'runtimeAuthorityOptions', {
+      branchRbacEnabled: true,
+    });
+    Reflect.set(service, 'executorCredentialRevoker', {
+      isTaskTokenAuthorityCurrent: vi.fn().mockResolvedValue(true),
     });
 
-    await expect(service.reportRuntimeTelemetry({ task_id: stoppingTask.task_id })).resolves.toBe(
-      stoppingTask
-    );
+    await expect(
+      service.reportRuntimeTelemetry({ task_id: stoppingTask.task_id }, {
+        provider: 'rest',
+        tenant: { tenant_id: 'tenant-a', source: 'auth_claim' },
+        authentication: {
+          strategy: 'jwt',
+          accessToken: 'verified-runtime-bearer',
+          payload: {
+            type: 'executor-session',
+            purpose: 'executor-task',
+            sub: 'user-a',
+            tenant_id: 'tenant-a',
+            session_id: stoppingTask.session_id,
+            task_id: stoppingTask.task_id,
+            branch_id: 'branch-a',
+          },
+        },
+      } as never)
+    ).resolves.toBe(stoppingTask);
   });
 
   it('does not let an executor terminal patch bypass coordinator-owned stopping', async () => {
@@ -258,6 +283,53 @@ describe('TasksService executor heartbeat helpers', () => {
       undefined
     );
     expect(triggerQueueProcessing).toHaveBeenCalledWith(sessionId, undefined);
+  });
+
+  it('releases an interrupt correction after verified settlement despite stop suppression', async () => {
+    const taskId = '018f0000-0000-7000-8000-000000000040';
+    const sessionId = '018f0000-0000-7000-8000-000000000041';
+    const stoppedTask = {
+      task_id: taskId,
+      session_id: sessionId,
+      status: TaskStatus.STOPPED,
+      created_at: '2026-01-01T00:00:00.000Z',
+      completed_at: '2026-01-01T00:00:05.000Z',
+      termination_request: {
+        cause: 'user_stop',
+        requested_at: '2026-01-01T00:00:04.000Z',
+      },
+      metadata: {
+        interruptions: [
+          {
+            requested_by_session_id: '018f0000-0000-7000-8000-000000000042',
+            requested_by_user_id: '018f0000-0000-7000-8000-000000000043',
+            relationship: 'parent',
+            target_task_id: taskId,
+            corrective_task_id: '018f0000-0000-7000-8000-000000000044',
+            idempotency_key: 'fix-1',
+            requested_at: '2026-01-01T00:00:04.000Z',
+          },
+        ],
+      },
+    };
+    const { service, triggerQueueProcessing } = completionHarness({
+      currentTask: stoppedTask,
+      resultTask: stoppedTask,
+    });
+
+    await service.settleTermination(
+      {
+        taskId,
+        outcome: 'verified_absent',
+        coordinationToken: 'completion-test',
+      },
+      { suppressTerminalQueueProcessing: true }
+    );
+
+    expect(triggerQueueProcessing).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({ suppressTerminalQueueProcessing: false })
+    );
   });
 
   it('ignores late executor attempts to revive a stopped task as awaiting permission', async () => {

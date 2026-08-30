@@ -22,6 +22,11 @@ const completionMocks = vi.hoisted(() => ({
   subscription: null as Record<string, unknown> | null,
 }));
 
+const interruptMocks = vi.hoisted(() => ({
+  admit: vi.fn(),
+  terminate: vi.fn(),
+}));
+
 vi.mock('../resolve-ids.js', () => ({
   resolveBoardId: async (_ctx: unknown, id: string) => id,
   resolveSessionId: async (_ctx: unknown, id: string) => id,
@@ -36,9 +41,15 @@ vi.mock('../../utils/branch-authorization.js', () => ({
 vi.mock('@agor/core/db', () => ({
   enqueueAfterTenantDatabaseCommit: () => false,
   getCurrentTenantId: () => undefined,
+  runWithTenantDatabaseTransaction: async (
+    _db: unknown,
+    _tenantId: unknown,
+    work: (db: unknown) => Promise<unknown>
+  ) => work({}),
   BranchRepository: class FakeBranchRepository {},
   TaskRepository: class FakeTaskRepository {
     findBySession = vi.fn(async () => completionMocks.tasks);
+    admitInterruptCorrection = interruptMocks.admit;
   },
   CompletionSubscriptionRepository: class FakeCompletionSubscriptionRepository {
     resolveId = vi.fn(async (id: string) => id);
@@ -89,6 +100,19 @@ vi.mock('@agor/core/db', () => ({
   shortId: (id: string) => id,
 }));
 
+vi.mock('../../services/tenant-authorization-fence.js', () => ({
+  lockTenantAuthorizationFence: vi.fn(async () => undefined),
+  resolveCurrentTenantAuthorityActor: vi.fn(async () => ({
+    service: false,
+    user_id: 'user-1',
+    role: 'member',
+  })),
+}));
+
+vi.mock('../../termination-coordinator.js', () => ({
+  requestExecutorTermination: interruptMocks.terminate,
+}));
+
 // Helper to build a minimal fake Feathers app. Each test supplies spies for
 // the services it exercises; unknown services throw so we don't silently drop
 // side-effects the assertion cares about.
@@ -107,6 +131,7 @@ function makeFakeApp(services: Record<string, ServiceStub>) {
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{
   content: Array<{ type: string; text: string }>;
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 }>;
 
@@ -211,6 +236,284 @@ describe('sessionless MCP context', () => {
   });
 });
 
+describe('session transfer MCP tools', () => {
+  it('interrupts through current coordinator authority before releasing the corrective queue', async () => {
+    const order: string[] = [];
+    interruptMocks.admit.mockImplementationOnce(async () => {
+      order.push('admit-stop-and-correction');
+      return {
+        outcome: 'stop_requested',
+        target_task: {
+          task_id: 'task-running',
+          session_id: 'sess-child',
+          status: 'stopping',
+        },
+        corrective_task: {
+          task_id: 'task-correction',
+          session_id: 'sess-child',
+          status: 'queued',
+          metadata: {
+            interrupt_correction: { idempotency_key: 'fix-1' },
+          },
+        },
+      };
+    });
+    interruptMocks.terminate.mockImplementationOnce(async () => {
+      order.push('quiescence-verified');
+      return {
+        status: 'terminal',
+        task: { task_id: 'task-running', session_id: 'sess-child', status: 'stopped' },
+      };
+    });
+    const resolveInterruptAuthority = vi.fn(async () => ({
+      caller_session_id: 'sess-caller',
+      target_session_id: 'sess-child',
+      relationship: 'coordinator',
+    }));
+    const triggerQueueProcessing = vi.fn(async () => {
+      order.push('correction-released');
+    });
+    const app = makeFakeApp({
+      sessions: { resolveInterruptAuthority, triggerQueueProcessing },
+      tasks: { emit: vi.fn() },
+    });
+    const { agor_sessions_interrupt_with_message } = await registerAndCaptureHandlers(
+      {
+        app,
+        userId: 'user-1',
+        sessionId: 'sess-caller',
+        baseServiceParams: { provider: 'mcp', user: { user_id: 'user-1' } },
+      },
+      ['agor_sessions_interrupt_with_message']
+    );
+
+    const response = await agor_sessions_interrupt_with_message({
+      targetSessionId: 'sess-child',
+      relationship: 'coordinator',
+      message: 'Stop and verify the failing test first.',
+      idempotencyKey: 'fix-1',
+    });
+
+    expect(order).toEqual([
+      'admit-stop-and-correction',
+      'quiescence-verified',
+      'correction-released',
+    ]);
+    expect(resolveInterruptAuthority).toHaveBeenCalledWith(
+      'sess-child',
+      { callerSessionId: 'sess-caller', relationship: 'coordinator' },
+      expect.objectContaining({ provider: 'mcp' })
+    );
+    expect(response.structuredContent).toMatchObject({
+      corrective_task_id: 'task-correction',
+      target_task_id: 'task-running',
+      termination_status: 'terminal',
+    });
+  });
+
+  it('returns resolved direct-callback route IDs and the unchanged task-subscription contract', async () => {
+    const retargetCallback = vi.fn(async () => ({
+      session_id: 'sess-source',
+      previous_callback_session_id: 'sess-old',
+      callback_session_id: 'sess-new',
+      relationship_ids: ['rel-1'],
+      task_callback_subscriptions_retargeted: false as const,
+    }));
+    const app = makeFakeApp({
+      sessions: {
+        get: async (id: string) => ({ session_id: id }),
+        retargetCallback,
+      },
+    });
+    const { agor_sessions_retarget_callback } = await registerAndCaptureHandlers(
+      { app, userId: 'user-1', sessionId: 'sess-caller' },
+      ['agor_sessions_retarget_callback']
+    );
+
+    const response = await agor_sessions_retarget_callback({
+      sessionId: 'sess-source',
+      callbackSessionId: 'sess-new',
+    });
+
+    expect(retargetCallback).toHaveBeenCalledWith(
+      'sess-source',
+      { callbackSessionId: 'sess-new' },
+      expect.any(Object)
+    );
+    expect(response.structuredContent).toEqual({
+      session_id: 'sess-source',
+      previous_callback_session_id: 'sess-old',
+      callback_session_id: 'sess-new',
+      relationship_ids: ['rel-1'],
+      task_callback_subscriptions_retargeted: false,
+    });
+  });
+
+  it('keeps genealogy reparenting a separate nullable-parent operation', async () => {
+    const reparent = vi.fn(async () => ({
+      session_id: 'sess-source',
+      branch_id: 'branch-1',
+      previous_parent_session_id: 'sess-old-parent',
+      parent_session_id: null,
+    }));
+    const app = makeFakeApp({
+      sessions: {
+        get: async (id: string) => ({ session_id: id }),
+        reparent,
+      },
+    });
+    const tools = await registerAndCaptureTools(
+      { app, userId: 'user-1', sessionId: 'sess-caller' },
+      ['agor_sessions_reparent']
+    );
+    const parsed = tools.agor_sessions_reparent.cfg.inputSchema?.safeParse({
+      sessionId: 'sess-source',
+      parentSessionId: null,
+    });
+    expect(parsed?.success).toBe(true);
+
+    const response = await tools.agor_sessions_reparent.cb({
+      sessionId: 'sess-source',
+      parentSessionId: null,
+    });
+
+    expect(reparent).toHaveBeenCalledWith(
+      'sess-source',
+      { parentSessionId: null },
+      expect.any(Object)
+    );
+    expect(response.structuredContent).toMatchObject({
+      session_id: 'sess-source',
+      previous_parent_session_id: 'sess-old-parent',
+      parent_session_id: null,
+    });
+  });
+
+  it('relays only to the explicitly selected destination resolved from current Session state', async () => {
+    const resolveRelayDestination = vi.fn(async () => ({
+      session_id: 'sess-current',
+      destination: 'coordinator' as const,
+      destination_session_id: 'sess-current-coordinator',
+    }));
+    const createPrompt = vi.fn(async () => ({ task_id: 'task-relay', status: 'queued' }));
+    const app = makeFakeApp({
+      sessions: { resolveRelayDestination },
+      '/sessions/:id/prompt': { create: createPrompt },
+    });
+    const tools = await registerAndCaptureTools(
+      { app, userId: 'user-1', sessionId: 'sess-current' },
+      ['agor_session_relationships_report']
+    );
+    const schema = tools.agor_session_relationships_report.cfg.inputSchema;
+    expect(
+      schema?.safeParse({ destination: 'coordinator', message: 'status update' }).success
+    ).toBe(true);
+    expect(schema?.safeParse({ message: 'ambiguous' }).success).toBe(false);
+    expect(Object.keys((schema as { shape: Record<string, unknown> }).shape)).toEqual([
+      'destination',
+      'message',
+    ]);
+
+    const response = await tools.agor_session_relationships_report.cb({
+      destination: 'coordinator',
+      message: 'status update',
+    });
+
+    expect(resolveRelayDestination).toHaveBeenCalledWith(
+      'sess-current',
+      { destination: 'coordinator' },
+      expect.any(Object)
+    );
+    expect(createPrompt).toHaveBeenCalledWith(
+      { prompt: 'status update', stream: true },
+      expect.objectContaining({ route: { id: 'sess-current-coordinator' } })
+    );
+    expect(response.structuredContent).toEqual({
+      session_id: 'sess-current',
+      destination: 'coordinator',
+      destination_session_id: 'sess-current-coordinator',
+      task_id: 'task-relay',
+      status: 'queued',
+    });
+  });
+
+  it('reflects reparenting and retargeting immediately without rewriting remote provenance', async () => {
+    const currentSession = {
+      session_id: 'sess-current',
+      status: 'idle',
+      agentic_tool: 'codex',
+      tasks: [],
+      genealogy: { parent_session_id: 'sess-old-parent', children: [] },
+      callback_config: {
+        enabled: true,
+        callback_session_id: 'sess-old-coordinator',
+      },
+      remote_relationships: {
+        as_target: [
+          {
+            relationship_id: 'rel-origin',
+            relationship_type: 'remote_create',
+            source_session_id: 'sess-original-creator',
+          },
+        ],
+      },
+    };
+    const app = makeFakeApp({
+      sessions: {
+        get: async () => currentSession,
+        retargetCallback: async () => {
+          currentSession.callback_config.callback_session_id = 'sess-new-coordinator';
+          return {
+            session_id: 'sess-current',
+            previous_callback_session_id: 'sess-old-coordinator',
+            callback_session_id: 'sess-new-coordinator',
+            relationship_ids: ['rel-origin'],
+            task_callback_subscriptions_retargeted: false,
+          };
+        },
+        reparent: async () => {
+          currentSession.genealogy.parent_session_id = 'sess-new-parent';
+          return {
+            session_id: 'sess-current',
+            branch_id: 'branch-1',
+            previous_parent_session_id: 'sess-old-parent',
+            parent_session_id: 'sess-new-parent',
+          };
+        },
+      },
+      users: {
+        get: async () => ({ name: 'Alice', email: 'alice@example.com', role: 'member' }),
+      },
+    });
+    const tools = await registerAndCaptureHandlers(
+      { app, userId: 'user-1', sessionId: 'sess-current' },
+      [
+        'agor_sessions_retarget_callback',
+        'agor_sessions_reparent',
+        'agor_sessions_get_current_context',
+      ]
+    );
+
+    await tools.agor_sessions_retarget_callback({
+      sessionId: 'sess-current',
+      callbackSessionId: 'sess-new-coordinator',
+    });
+    await tools.agor_sessions_reparent({
+      sessionId: 'sess-current',
+      parentSessionId: 'sess-new-parent',
+    });
+    const context = JSON.parse(
+      (await tools.agor_sessions_get_current_context({ includeSiblings: false })).content[0].text
+    );
+
+    expect(context.parent_session_id).toBe('sess-new-parent');
+    expect(context.effective_direct_callback_coordinator_session_id).toBe('sess-new-coordinator');
+    expect(context.remote_origins).toEqual([
+      { relationship_id: 'rel-origin', source_session_id: 'sess-original-creator' },
+    ]);
+  });
+});
+
 describe('agor_sessions_get_current_context', () => {
   it('returns coherent latest-task Git boundary snapshots', async () => {
     const app = makeFakeApp({
@@ -220,7 +523,24 @@ describe('agor_sessions_get_current_context', () => {
           status: 'idle',
           agentic_tool: 'codex',
           tasks: ['task-1'],
-          genealogy: { children: [] },
+          genealogy: {
+            parent_session_id: 'sess-parent',
+            forked_from_session_id: 'sess-fork-origin',
+            children: [],
+          },
+          callback_config: {
+            enabled: true,
+            callback_session_id: 'sess-current-coordinator',
+          },
+          remote_relationships: {
+            as_target: [
+              {
+                relationship_id: 'rel-origin',
+                relationship_type: 'remote_create',
+                source_session_id: 'sess-original-creator',
+              },
+            ],
+          },
         }),
       },
       users: {
@@ -249,6 +569,14 @@ describe('agor_sessions_get_current_context', () => {
 
     expect(result.latest_task_git_start).toEqual({ ref: 'main', sha: 'start-sha' });
     expect(result.latest_task_git_end).toEqual({ ref: 'feature', sha: 'end-sha' });
+    expect(result.parent_session_id).toBe('sess-parent');
+    expect(result.forked_from_session_id).toBe('sess-fork-origin');
+    expect(result.remote_origins).toEqual([
+      { relationship_id: 'rel-origin', source_session_id: 'sess-original-creator' },
+    ]);
+    expect(result.effective_direct_callback_coordinator_session_id).toBe(
+      'sess-current-coordinator'
+    );
   });
 });
 
@@ -1498,6 +1826,45 @@ describe('agor_sessions_prompt task callback', () => {
     completionMocks.subscription = null;
     vi.resetModules();
     vi.clearAllMocks();
+  });
+
+  it('reports shared execution and per-request compaction counts', async () => {
+    const app = makeFakeApp({
+      '/sessions/:id/prompt': {
+        create: vi.fn(async () => ({
+          task_id: 'task-shared',
+          status: 'queued',
+          queue_position: 3,
+          metadata: {
+            prompt_compaction: {
+              last_admitted_request_id: 'request-2',
+              requests: [{ request_id: 'request-1' }, { request_id: 'request-2' }],
+              unique_prompt_count: 1,
+              duplicate_request_count: 1,
+            },
+          },
+        })),
+      },
+    });
+    const { agor_sessions_prompt } = await registerAndCaptureHandlers(
+      { app, userId: 'user-1', sessionId: 'sess-caller' },
+      ['agor_sessions_prompt']
+    );
+
+    const response = await agor_sessions_prompt({
+      sessionId: 'sess-target',
+      prompt: 'duplicate instruction',
+      mode: 'continue',
+    });
+
+    expect(JSON.parse(response.content[0]!.text)).toMatchObject({
+      taskId: 'task-shared',
+      admissionRequestId: 'request-2',
+      coalescedRequestIds: ['request-1', 'request-2'],
+      coalescedRequestCount: 2,
+      uniquePromptCount: 1,
+      duplicateRequestCount: 1,
+    });
   });
 
   it('binds callback:true to trusted calling session context', async () => {
