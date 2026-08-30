@@ -729,6 +729,40 @@ export interface SessionReparentResult {
   parent_session_id: SessionID | null;
 }
 
+/** Destination selectors for a self-context relay. No arbitrary Session ID is accepted. */
+export type SessionRelayDestination = 'parent' | 'coordinator';
+
+/** Durable destination resolved from the relaying Session's current state. */
+export interface SessionRelayResolution {
+  /** Session whose own MCP context initiated the relay. */
+  session_id: SessionID;
+  /** Relationship selected explicitly by the caller. */
+  destination: SessionRelayDestination;
+  /** Current resolved parent or direct callback coordinator. */
+  destination_session_id: SessionID;
+}
+
+/** Result of admitting a derived-destination relay prompt. */
+export interface SessionRelayResult extends SessionRelayResolution {
+  task_id: TaskID;
+  status: TaskStatus;
+}
+
+/**
+ * Resolve the currently enabled direct completion coordinator.
+ *
+ * A disabled callback retains its configured destination as durable state, but
+ * it is not an effective report route and must not be exposed as one.
+ */
+export function getEffectiveDirectCallbackCoordinatorSessionId(
+  session: Pick<Session, 'callback_config'>
+): SessionID | null {
+  const callback = session.callback_config;
+  return callback?.callback_session_id && callback.enabled !== false
+    ? callback.callback_session_id
+    : null;
+}
+
 /**
  * Gateway source metadata denormalized into session.custom_context.gateway_source
  *

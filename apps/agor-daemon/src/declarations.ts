@@ -38,6 +38,7 @@ import type {
   SdkHealthFailureInput,
   Session,
   SessionCallbackRetargetResult,
+  SessionRelayResolution,
   SessionReparentResult,
   SessionUpdate,
   Task,
@@ -49,6 +50,7 @@ import type {
   ExecuteTaskData,
   SessionArchiveOptions,
   SessionArchiveResult,
+  SessionRelayDestinationInput,
   SessionReparentInput,
   SessionRetargetCallbackInput,
 } from './services/sessions.js';
@@ -106,6 +108,11 @@ export interface SessionsServiceImpl
     data: SessionReparentInput,
     params?: FeathersParams
   ): Promise<SessionReparentResult>;
+  resolveRelayDestination(
+    id: string,
+    data: SessionRelayDestinationInput,
+    params?: FeathersParams
+  ): Promise<SessionRelayResolution>;
   getGenealogy(
     id: string,
     params?: FeathersParams

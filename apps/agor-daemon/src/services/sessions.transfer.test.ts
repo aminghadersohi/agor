@@ -112,6 +112,17 @@ describe('SessionsService transfer authorization', () => {
       session_id: source.session_id,
       callback_session_id: allowedDestination.session_id,
     });
+    await expect(
+      service.resolveRelayDestination(
+        source.session_id,
+        { destination: 'coordinator' },
+        params(caller)
+      )
+    ).resolves.toEqual({
+      session_id: source.session_id,
+      destination: 'coordinator',
+      destination_session_id: allowedDestination.session_id,
+    });
 
     const secondSource = await session(db, sourceBranch, sourceOwner, {
       callback_config: {
@@ -138,6 +149,20 @@ describe('SessionsService transfer authorization', () => {
         params(caller)
       )
     ).rejects.toThrow(/Cannot use destination session/);
+
+    const relaySource = await session(db, sourceBranch, sourceOwner, {
+      callback_config: {
+        enabled: true,
+        callback_session_id: forbiddenDestination.session_id,
+      },
+    });
+    await expect(
+      service.resolveRelayDestination(
+        relaySource.session_id,
+        { destination: 'coordinator' },
+        params(caller)
+      )
+    ).rejects.toThrow(/Cannot use destination session/);
   });
 
   dbTest('requires authority over a new genealogy parent owned by another user', async ({ db }) => {
@@ -157,6 +182,13 @@ describe('SessionsService transfer authorization', () => {
         params(caller)
       )
     ).resolves.toMatchObject({ parent_session_id: callerOwnedParent.session_id });
+    await expect(
+      service.resolveRelayDestination(source.session_id, { destination: 'parent' }, params(caller))
+    ).resolves.toEqual({
+      session_id: source.session_id,
+      destination: 'parent',
+      destination_session_id: callerOwnedParent.session_id,
+    });
 
     await expect(
       service.reparent(
@@ -167,6 +199,39 @@ describe('SessionsService transfer authorization', () => {
     ).rejects.toThrow(/Cannot use destination session/);
   });
 
+  dbTest(
+    'relay requires independent source-view and destination-prompt authority',
+    async ({ db }) => {
+      const caller = await user(db, 'relay-auth-caller');
+      const sourceOwner = await user(db, 'relay-source-owner');
+      const destinationOwner = await user(db, 'relay-destination-owner');
+      const sourceBranch = await branch(db, sourceOwner, 'relay-auth-source');
+      const destinationBranch = await branch(db, destinationOwner, 'relay-auth-destination');
+      const destination = await session(db, destinationBranch, destinationOwner);
+      const source = await session(db, sourceBranch, sourceOwner, {
+        callback_config: { enabled: true, callback_session_id: destination.session_id },
+      });
+      const service = new SessionsService(db, app());
+
+      await expect(
+        service.resolveRelayDestination(
+          source.session_id,
+          { destination: 'coordinator' },
+          params(caller)
+        )
+      ).rejects.toThrow(/Viewer permission on source session/);
+
+      await setTestBranchUserRole(db, sourceBranch.branch_id, caller, 'viewer');
+      await expect(
+        service.resolveRelayDestination(
+          source.session_id,
+          { destination: 'coordinator' },
+          params(caller)
+        )
+      ).rejects.toThrow(/Cannot use destination session/);
+    }
+  );
+
   dbTest('rejects a cross-tenant destination before repository mutation', async ({ db }) => {
     const service = new SessionsService(db, app());
     const sourceId = generateId();
@@ -176,6 +241,7 @@ describe('SessionsService transfer authorization', () => {
         session_id: sourceId,
         branch_id: generateId(),
         archived: false,
+        callback_config: { enabled: true, callback_session_id: destinationId },
       } as Session,
       { tenant_id: 'tenant-a' }
     );
@@ -210,5 +276,62 @@ describe('SessionsService transfer authorization', () => {
       )
     ).rejects.toThrow(/same tenant/);
     expect(mutate).not.toHaveBeenCalled();
+
+    await expect(
+      service.resolveRelayDestination(
+        sourceId,
+        { destination: 'coordinator' },
+        params(generateId() as UserID)
+      )
+    ).rejects.toThrow(/same tenant/);
   });
+
+  dbTest(
+    'relay resolution fails closed for disabled, archived, and deleted destinations',
+    async ({ db }) => {
+      const caller = await user(db, 'relay-state-caller');
+      const targetBranch = await branch(db, caller, 'relay-state');
+      const archivedDestination = await session(db, targetBranch, caller, { archived: true });
+      const disabledSource = await session(db, targetBranch, caller, {
+        callback_config: {
+          enabled: false,
+          callback_session_id: archivedDestination.session_id,
+        },
+      });
+      const service = new SessionsService(db, app());
+
+      await expect(
+        service.resolveRelayDestination(
+          disabledSource.session_id,
+          { destination: 'coordinator' },
+          params(caller)
+        )
+      ).rejects.toThrow(/no enabled direct callback coordinator/);
+
+      const archivedSource = await session(db, targetBranch, caller, {
+        callback_config: {
+          enabled: true,
+          callback_session_id: archivedDestination.session_id,
+        },
+      });
+      await expect(
+        service.resolveRelayDestination(
+          archivedSource.session_id,
+          { destination: 'coordinator' },
+          params(caller)
+        )
+      ).rejects.toThrow(/Destination session .* archived/);
+
+      const deletedSource = await session(db, targetBranch, caller, {
+        callback_config: { enabled: true, callback_session_id: generateId() },
+      });
+      await expect(
+        service.resolveRelayDestination(
+          deletedSource.session_id,
+          { destination: 'coordinator' },
+          params(caller)
+        )
+      ).rejects.toThrow(/Destination session .* unavailable or deleted/);
+    }
+  );
 });

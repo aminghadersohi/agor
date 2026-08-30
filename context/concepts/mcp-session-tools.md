@@ -46,6 +46,9 @@ into SDK-private registration state.
 5. **`agor_sessions_reparent`** — change only branch-local
    `parent_session_id`, including detaching to a root. It does not touch
    callback routing or remote relationships.
+6. **`agor_session_relationships_report`** — relay from the current MCP Session
+   to an explicitly selected `parent` or current `coordinator`. It accepts no
+   target Session ID.
 
 All enforce the branch-centric model (every session references a branch). Permission modes map to each agent's native settings.
 
@@ -76,6 +79,16 @@ Genealogy reparenting requires an active same-branch destination and rejects a
 Session itself or any of its descendants. Both operations require Manager
 authority over the source, normal prompt authority over a non-null destination,
 and one tenant throughout.
+
+Current-context introspection calls provenance and control different things on
+purpose. `remote_origins` is the immutable set of `remote_create` sources;
+`parent_session_id` is the current branch-local parent; and
+`effective_direct_callback_coordinator_session_id` is the enabled standing
+route. Retargeting changes the coordinator field and coordinator relay target,
+while reparenting changes the parent field and parent relay target. The relay
+tool resolves these durable values on each call, requires an explicit selector
+when both exist, rechecks destination prompt authority/tenant/state, and never
+uses a caller-supplied Session ID.
 
 ## Overrides at create/spawn/subsession time
 
