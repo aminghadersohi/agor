@@ -704,14 +704,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       result.parent_session_id = gen?.parent_session_id ?? null;
       result.forked_from_session_id = gen?.forked_from_session_id ?? null;
       result.children_count = gen?.children?.length || 0;
-      result.remote_origins = (session.remote_relationships?.as_target ?? [])
-        .filter(
-          (relationship: SessionRelationship) => relationship.relationship_type === 'remote_create'
-        )
-        .map((relationship: SessionRelationship) => ({
-          relationship_id: relationship.relationship_id,
-          source_session_id: relationship.source_session_id,
-        }));
       result.effective_direct_callback_coordinator_session_id =
         getEffectiveDirectCallbackCoordinatorSessionId(session);
 
@@ -737,6 +729,20 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       if (remoteOrigins.length > 0) {
         result.remote_origins = remoteOrigins.map(projectRemoteOriginForMcp);
         result.remote_origin_note = REMOTE_ORIGIN_ORIENTATION_NOTE;
+      } else {
+        // Older service fixtures and API enrichments can already carry the
+        // relationship. Keep that lean compatibility projection only as a
+        // fallback; authoritative runtime routing always uses the scoped
+        // repository query above.
+        const enrichedOrigins = (session.remote_relationships?.as_target ?? []).filter(
+          (relationship: SessionRelationship) => relationship.relationship_type === 'remote_create'
+        );
+        if (enrichedOrigins.length > 0) {
+          result.remote_origins = enrichedOrigins.map((relationship: SessionRelationship) => ({
+            relationship_id: relationship.relationship_id,
+            source_session_id: relationship.source_session_id,
+          }));
+        }
       }
 
       if (session.branch_id) {
@@ -1264,9 +1270,9 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 5c: agor_session_relationships_report
+  // Tool 5c: agor_session_relationships_relay
   server.registerTool(
-    'agor_session_relationships_report',
+    'agor_session_relationships_relay',
     {
       description:
         "Relay a message from the current Session to either its branch-local parent or its currently enabled direct callback coordinator. The destination enum is required when both exist, so routing is never ambiguous. This tool accepts no Session ID: Agor resolves the destination from the Session's current durable parent/callback state, so reparenting or callback retargeting takes effect on the next call. Immutable remote_origins are provenance only and never override the current coordinator.",

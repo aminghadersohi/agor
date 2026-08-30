@@ -296,7 +296,7 @@ separate:
   direct report destination. Retargeting changes this value immediately; a
   disabled direct callback produces `null`.
 
-Use `agor_session_relationships_report` to relay a message without supplying a
+Use `agor_session_relationships_relay` to relay a message without supplying a
 Session ID. Choose `destination: "parent"` or `destination: "coordinator"`
 explicitly—even when both exist—and Agor resolves the current durable route,
 rechecks prompt authority, tenant and destination availability, then admits the

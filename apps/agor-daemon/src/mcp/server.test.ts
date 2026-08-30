@@ -164,7 +164,7 @@ describe('MCP tool registry', () => {
         'parent_session_id',
       ]),
     });
-    expect(registry.get('agor_session_relationships_report')?.outputSchema).toMatchObject({
+    expect(registry.get('agor_session_relationships_relay')?.outputSchema).toMatchObject({
       type: 'object',
       required: expect.arrayContaining([
         'session_id',
@@ -809,7 +809,7 @@ describe('POST /mcp with personal API keys', () => {
             params: {
               name: 'agor_execute_tool',
               arguments: {
-                tool_name: 'agor_session_relationships_report',
+                tool_name: 'agor_session_relationships_relay',
                 arguments: { destination: 'coordinator', message: 'status update' },
               },
             },
