@@ -12,13 +12,20 @@ interface JournalEntry {
   when: number;
 }
 
-/** Both journals, Postgres first, as the migrator reads them off disk. */
+/** Both migration folders, Postgres first, as the migrator reads them off disk. */
+const migrationFolders = [
+  new URL('../../drizzle/postgres/', import.meta.url),
+  new URL('../../drizzle/sqlite/', import.meta.url),
+] as const;
+
 const readJournals = () =>
   Promise.all(
-    [
-      new URL('../../drizzle/postgres/meta/_journal.json', import.meta.url),
-      new URL('../../drizzle/sqlite/meta/_journal.json', import.meta.url),
-    ].map(async (url) => JSON.parse(await readFile(url, 'utf8')) as { entries: JournalEntry[] })
+    migrationFolders.map(
+      async (folder) =>
+        JSON.parse(await readFile(new URL('meta/_journal.json', folder), 'utf8')) as {
+          entries: JournalEntry[];
+        }
+    )
   );
 
 describe('Postgres migrations', () => {
@@ -195,34 +202,80 @@ describe('Postgres migrations', () => {
     }
   });
 
-  it('leaves the next generated migration a free number in both dialects', async () => {
-    // `idx` decides nothing when migrating: drizzle reads entries in array
-    // order and gates each one on `when` against the highest applied
-    // `created_at`. It decides everything when *authoring*, because
-    // `drizzle-kit generate` numbers the next migration `lastEntry.idx + 1`.
-    //
-    // So a journal whose last entry is not its highest hands the next generated
-    // migration a prefix that is already on disk. That is the shape a merge
-    // produces on its own: `_journal.json` is a JSON array, so an upstream
-    // entry appended beside a local one with the same `idx` merges clean and
-    // silently, with no conflict to review.
-    //
-    // Checked per dialect because the two journals are numbered independently.
-    for (const dialect of ['postgres', 'sqlite'] as const) {
-      const directory = new URL(`../../drizzle/${dialect}/`, import.meta.url);
-      const { entries } = JSON.parse(
-        await readFile(new URL('meta/_journal.json', directory), 'utf8')
-      ) as { entries: JournalEntry[] };
+  it('preserves the applied fork watermarks before appending main-only migrations', async () => {
+    const [postgresJournal, sqliteJournal] = await readJournals();
+    const expectedTails = [
+      [
+        postgresJournal,
+        [
+          [95, 1787730262000, '0095_transitive_completion_subscriptions'],
+          [96, 1787750000000, '0096_profile_image_galleries'],
+          [97, 1787770800000, '0097_profile_identity_models'],
+          [98, 1787836400000, '0098_board_image_galleries'],
+          [99, 1787836400001, '0099_board_branch_capability_policies'],
+          [100, 1787947200000, '0100_strip_stdio_remote_fields'],
+          [101, 1788033600000, '0101_branch_sdk_home'],
+          [102, 1788120000000, '0102_session_sdk_home_scope'],
+          [103, 1788206400000, '0103_shared_session_prompting'],
+        ],
+      ],
+      [
+        sqliteJournal,
+        [
+          [98, 1787730262000, '0098_transitive_completion_subscriptions'],
+          [99, 1787750000000, '0099_profile_image_galleries'],
+          [100, 1787770800000, '0100_profile_identity_models'],
+          [101, 1787836400000, '0101_board_image_galleries'],
+          [102, 1787836400001, '0102_board_branch_capability_policies'],
+          [103, 1787947200000, '0103_strip_stdio_remote_fields'],
+          [104, 1788033600000, '0104_branch_sdk_home'],
+          [105, 1788120000000, '0105_session_sdk_home_scope'],
+          [106, 1788206400000, '0106_shared_session_prompting'],
+        ],
+      ],
+    ] as const;
 
-      // The journal and the directory beside it must describe the same set, or
-      // a rename has updated one and not the other.
-      const onDisk = (await readdir(directory)).filter((name) => name.endsWith('.sql'));
-      expect(new Set(onDisk)).toEqual(new Set(entries.map((entry) => `${entry.tag}.sql`)));
-
-      const nextPrefix = String((entries.at(-1)?.idx ?? -1) + 1).padStart(4, '0');
+    for (const [journal, expected] of expectedTails) {
       expect(
-        onDisk.filter((name) => name.startsWith(`${nextPrefix}_`)),
-        `${dialect}: drizzle-kit generate would write ${nextPrefix}_* over an existing migration`
+        expected.map(([, , tag]) => {
+          const position = journal.entries.findIndex((entry) => entry.tag === tag);
+          const entry = journal.entries[position];
+          return { idx: entry?.idx, when: entry?.when, tag: entry?.tag, position };
+        })
+      ).toEqual(
+        expected.map(([idx, when, tag], offset) => ({
+          idx,
+          when,
+          tag,
+          position: journal.entries.length - expected.length + offset,
+        }))
+      );
+    }
+  });
+
+  it('maps journals one-to-one to SQL files and leaves the next generator prefix free', async () => {
+    for (const folder of migrationFolders) {
+      const journal = JSON.parse(await readFile(new URL('meta/_journal.json', folder), 'utf8')) as {
+        entries: JournalEntry[];
+      };
+      const sqlFiles = (await readdir(folder)).filter((file) => file.endsWith('.sql')).sort();
+      const journalFiles = journal.entries.map(({ tag }) => `${tag}.sql`).sort();
+
+      expect(sqlFiles).toEqual(journalFiles);
+
+      const prefixes = sqlFiles.map((file) => file.match(/^(\d+)_/)?.[1]);
+      expect(prefixes.every(Boolean)).toBe(true);
+      expect(new Set(prefixes).size).toBe(sqlFiles.length);
+
+      // drizzle-kit 0.31 derives an index prefix from the final journal idx,
+      // not the greatest idx elsewhere in the file. Keeping that prefix free
+      // prevents generate from silently replacing an existing migration.
+      const newest = journal.entries.at(-1);
+      expect(newest).toBeDefined();
+      const nextPrefix = String((newest?.idx ?? -1) + 1).padStart(4, '0');
+      expect(
+        sqlFiles.filter((file) => file.startsWith(`${nextPrefix}_`)),
+        `next generated prefix ${nextPrefix} is already occupied`
       ).toEqual([]);
     }
   });
