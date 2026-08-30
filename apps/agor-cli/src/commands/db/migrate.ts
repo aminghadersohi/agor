@@ -6,9 +6,9 @@ import {
   checkMigrationStatus,
   createDatabase,
   getDatabaseInstanceDialect,
+  getDatabaseUrl,
   pendingOfflineCutoverMigrations,
 } from '@agor/core/db';
-import { expandPath } from '@agor/core/utils/path';
 import { Command, Flags } from '@oclif/core';
 import chalk from 'chalk';
 import {
@@ -44,10 +44,10 @@ export default class DbMigrate extends Command {
     const { flags } = await this.parse(DbMigrate);
 
     try {
-      // Determine database URL (same logic as daemon)
-      // Priority: DATABASE_URL > AGOR_DB_PATH > default SQLite path
-      const dbUrl =
-        process.env.DATABASE_URL || expandPath(process.env.AGOR_DB_PATH || 'file:~/.agor/agor.db');
+      // Use the same config-aware resolution as the daemon and `db status`.
+      // In particular, local PostgreSQL deployments commonly configure the URL
+      // in config.yaml rather than exporting DATABASE_URL in every shell.
+      const dbUrl = getDatabaseUrl();
       this.log(chalk.bold('🔍 Checking database migration status...'));
       this.log('');
 
