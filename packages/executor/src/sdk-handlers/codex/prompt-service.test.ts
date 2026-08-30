@@ -760,8 +760,14 @@ describe('CodexPromptService - prompt flow client initialization', () => {
 });
 
 describe('CodexPromptService - Git writable roots', () => {
-  const branchPath = path.join(os.tmpdir(), 'agor-codex-git-roots', 'branch');
-  const repoPath = path.join(os.tmpdir(), 'agor-codex-git-roots', 'repo');
+  const fixtureRoot = path.join(path.parse(process.cwd()).root, 'fictional', 'agor-codex-roots');
+  const repoACloneRoot = path.join(fixtureRoot, 'worktrees', 'repo-alpha');
+  const branchPath = path.join(repoACloneRoot, 'branch-a');
+  const siblingBranchPath = path.join(repoACloneRoot, 'branch-b');
+  const otherRepoBranchPath = path.join(fixtureRoot, 'worktrees', 'repo-beta', 'branch-a');
+  const repoPath = path.join(fixtureRoot, 'repos', 'repo-alpha');
+  const fictionalHomePath = path.join(fixtureRoot, 'home', 'agent');
+  const fictionalTempPath = path.join(fixtureRoot, 'tmp');
 
   beforeEach(() => {
     mockInstanceCount = 0;
@@ -843,16 +849,16 @@ describe('CodexPromptService - Git writable roots', () => {
     return mockInstanceConfigs.at(-1) as Record<string, unknown>;
   }
 
-  function getWritableRoot(config: Record<string, unknown>): string {
+  function getWritableRoots(config: Record<string, unknown>): string[] {
     const workspaceConfig = config.sandbox_workspace_write;
     if (!workspaceConfig || typeof workspaceConfig !== 'object') {
       throw new Error('Missing sandbox_workspace_write config');
     }
     const roots = Reflect.get(workspaceConfig, 'writable_roots');
-    if (!Array.isArray(roots) || typeof roots[0] !== 'string') {
+    if (!Array.isArray(roots) || roots.some((root) => typeof root !== 'string')) {
       throw new Error('Missing sandbox_workspace_write.writable_roots config');
     }
-    return roots[0];
+    return roots;
   }
 
   function writableRootCovers(root: string, target: string): boolean {
@@ -890,15 +896,41 @@ describe('CodexPromptService - Git writable roots', () => {
     async ({ permissionMode, storageMode, expectedRoot }) => {
       const config = await captureConfig({ permissionMode, storageMode });
 
-      expect(config).toMatchObject({
-        sandbox_workspace_write: { writable_roots: [expectedRoot] },
-      });
+      expect(getWritableRoots(config)).toEqual([expectedRoot]);
     }
   );
 
+  it('isolates a clone grant from sibling branches, other repos, and broader filesystem roots', async () => {
+    const config = await captureConfig({ permissionMode: 'allow-all', storageMode: 'clone' });
+    const roots = getWritableRoots(config);
+
+    expect({
+      siblingCloneGit: roots.some((root) =>
+        writableRootCovers(root, path.join(siblingBranchPath, '.git'))
+      ),
+      otherRepositoryGit: roots.some((root) =>
+        writableRootCovers(root, path.join(otherRepoBranchPath, '.git'))
+      ),
+      branchWorkingTree: roots.some((root) => writableRootCovers(root, branchPath)),
+      repositoryRoot: roots.some((root) => writableRootCovers(root, repoACloneRoot)),
+      homePath: roots.some((root) => writableRootCovers(root, fictionalHomePath)),
+      tempPath: roots.some((root) => writableRootCovers(root, fictionalTempPath)),
+    }).toEqual({
+      siblingCloneGit: false,
+      otherRepositoryGit: false,
+      branchWorkingTree: false,
+      repositoryRoot: false,
+      homePath: false,
+      tempPath: false,
+    });
+    // Exact equality is load-bearing: a contains check would not catch a
+    // second root that silently grants a sibling clone or a broader directory.
+    expect(roots).toEqual([path.join(branchPath, '.git')]);
+  });
+
   it('covers clone index, object, and ref metadata writes', async () => {
     const config = await captureConfig({ permissionMode: 'allow-all', storageMode: 'clone' });
-    const writableRoot = getWritableRoot(config);
+    const [writableRoot] = getWritableRoots(config);
 
     expect({
       indexLock: writableRootCovers(writableRoot, path.join(branchPath, '.git', 'index.lock')),
@@ -913,7 +945,7 @@ describe('CodexPromptService - Git writable roots', () => {
     }).toEqual({ indexLock: true, objectWrite: true, refLock: true });
   });
 
-  it('covers the resolved worktree gitdir plus shared object and ref writes', async () => {
+  it('pins a worktree grant to the shared repository .git and nothing wider', async () => {
     const fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agor-codex-worktree-git-'));
     const fixtureBranchPath = path.join(fixtureRoot, 'branch');
     const fixtureRepoPath = path.join(fixtureRoot, 'repo');
@@ -935,8 +967,12 @@ describe('CodexPromptService - Git writable roots', () => {
         branchRoot: fixtureBranchPath,
         repoRoot: fixtureRepoPath,
       });
-      const writableRoot = getWritableRoot(config);
+      const roots = getWritableRoots(config);
+      const [writableRoot] = roots;
 
+      // Unlike a clone, a linked worktree cannot be given an isolated commit-
+      // capable Git directory: objects, refs, and reflogs live in this shared
+      // root. Pin the necessary exception exactly so it cannot grow wider.
       expect({
         indexLock: writableRootCovers(writableRoot, path.join(resolvedGitDir, 'index.lock')),
         objectWrite: writableRootCovers(
@@ -947,7 +983,20 @@ describe('CodexPromptService - Git writable roots', () => {
           writableRoot,
           path.join(fixtureRepoPath, '.git', 'refs', 'heads', 'topic.lock')
         ),
-      }).toEqual({ indexLock: true, objectWrite: true, refLock: true });
+        worktreeGitPointer: writableRootCovers(writableRoot, path.join(fixtureBranchPath, '.git')),
+        branchWorkingTree: writableRootCovers(writableRoot, fixtureBranchPath),
+        baseRepositoryWorkingTree: writableRootCovers(writableRoot, fixtureRepoPath),
+        repositoryParent: writableRootCovers(writableRoot, fixtureRoot),
+      }).toEqual({
+        indexLock: true,
+        objectWrite: true,
+        refLock: true,
+        worktreeGitPointer: false,
+        branchWorkingTree: false,
+        baseRepositoryWorkingTree: false,
+        repositoryParent: false,
+      });
+      expect(roots).toEqual([path.join(fixtureRepoPath, '.git')]);
     } finally {
       await fs.rm(fixtureRoot, { recursive: true, force: true });
     }
