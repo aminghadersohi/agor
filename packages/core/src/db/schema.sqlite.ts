@@ -132,6 +132,7 @@ export const sessions = sqliteTable(
 
     // UI state (materialized for efficient highlighting queries)
     ready_for_prompt: t.bool('ready_for_prompt').notNull().default(false),
+    attention_generation: integer('attention_generation').notNull().default(0),
 
     // Archive state (cascaded from branch archive)
     archived: t.bool('archived').notNull().default(false),
@@ -1256,6 +1257,25 @@ export const users = sqliteTable(
   (table) => ({
     emailIdx: index('users_email_idx').on(table.email),
     executionHomeUnique: uniqueIndex('users_unix_username_unique').on(table.unix_username),
+  })
+);
+
+/** Per-user acknowledgement of a session's latest attention-producing result. */
+export const sessionAttentionStates = sqliteTable(
+  'session_attention_states',
+  {
+    user_id: text('user_id', { length: 36 })
+      .notNull()
+      .references(() => users.user_id, { onDelete: 'cascade' }),
+    session_id: text('session_id', { length: 36 })
+      .notNull()
+      .references(() => sessions.session_id, { onDelete: 'cascade' }),
+    seen_attention_generation: integer('seen_attention_generation').notNull().default(0),
+    seen_at: t.timestamp('seen_at').notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.user_id, table.session_id] }),
+    sessionIdx: index('session_attention_states_session_idx').on(table.session_id),
   })
 );
 
@@ -3103,6 +3123,8 @@ export const kbGraphEdges = sqliteTable(
  */
 export type SessionRow = typeof sessions.$inferSelect;
 export type SessionInsert = typeof sessions.$inferInsert;
+export type SessionAttentionStateRow = typeof sessionAttentionStates.$inferSelect;
+export type SessionAttentionStateInsert = typeof sessionAttentionStates.$inferInsert;
 export type SessionRelationshipRow = typeof sessionRelationships.$inferSelect;
 export type SessionRelationshipInsert = typeof sessionRelationships.$inferInsert;
 export type TaskRow = typeof tasks.$inferSelect;
