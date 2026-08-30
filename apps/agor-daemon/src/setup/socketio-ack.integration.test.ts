@@ -340,8 +340,13 @@ describe('executor acknowledgement failure convergence', () => {
     expect(task.error_message).toBe((rejection as Error).message);
     expect(task.error_message).toMatch(/disconnected|timed out/i);
     expect(session).toMatchObject({ status: SessionStatus.FAILED, ready_for_prompt: true });
+    // The first read consumes the repository-owned terminal Session
+    // projection. The second is intentional: completion delivery re-reads
+    // after commit so a callback retargeted while the task was running is
+    // delivered to the current coordinator rather than a stale one.
     expect(terminalBoundaryOrder).toEqual([
       'repository-terminal-commit',
+      'service-terminal-session-read',
       'service-terminal-session-read',
     ]);
   });
