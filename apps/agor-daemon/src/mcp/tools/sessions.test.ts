@@ -268,6 +268,130 @@ describe('session transfer MCP tools', () => {
       parent_session_id: null,
     });
   });
+
+  it('relays only to the explicitly selected destination resolved from current Session state', async () => {
+    const resolveRelayDestination = vi.fn(async () => ({
+      session_id: 'sess-current',
+      destination: 'coordinator' as const,
+      destination_session_id: 'sess-current-coordinator',
+    }));
+    const createPrompt = vi.fn(async () => ({ task_id: 'task-relay', status: 'queued' }));
+    const app = makeFakeApp({
+      sessions: { resolveRelayDestination },
+      '/sessions/:id/prompt': { create: createPrompt },
+    });
+    const tools = await registerAndCaptureTools(
+      { app, userId: 'user-1', sessionId: 'sess-current' },
+      ['agor_session_relationships_report']
+    );
+    const schema = tools.agor_session_relationships_report.cfg.inputSchema;
+    expect(
+      schema?.safeParse({ destination: 'coordinator', message: 'status update' }).success
+    ).toBe(true);
+    expect(schema?.safeParse({ message: 'ambiguous' }).success).toBe(false);
+    expect(Object.keys((schema as { shape: Record<string, unknown> }).shape)).toEqual([
+      'destination',
+      'message',
+    ]);
+
+    const response = await tools.agor_session_relationships_report.cb({
+      destination: 'coordinator',
+      message: 'status update',
+    });
+
+    expect(resolveRelayDestination).toHaveBeenCalledWith(
+      'sess-current',
+      { destination: 'coordinator' },
+      expect.any(Object)
+    );
+    expect(createPrompt).toHaveBeenCalledWith(
+      { prompt: 'status update', stream: true },
+      expect.objectContaining({ route: { id: 'sess-current-coordinator' } })
+    );
+    expect(response.structuredContent).toEqual({
+      session_id: 'sess-current',
+      destination: 'coordinator',
+      destination_session_id: 'sess-current-coordinator',
+      task_id: 'task-relay',
+      status: 'queued',
+    });
+  });
+
+  it('reflects reparenting and retargeting immediately without rewriting remote provenance', async () => {
+    const currentSession = {
+      session_id: 'sess-current',
+      status: 'idle',
+      agentic_tool: 'codex',
+      tasks: [],
+      genealogy: { parent_session_id: 'sess-old-parent', children: [] },
+      callback_config: {
+        enabled: true,
+        callback_session_id: 'sess-old-coordinator',
+      },
+      remote_relationships: {
+        as_target: [
+          {
+            relationship_id: 'rel-origin',
+            relationship_type: 'remote_create',
+            source_session_id: 'sess-original-creator',
+          },
+        ],
+      },
+    };
+    const app = makeFakeApp({
+      sessions: {
+        get: async () => currentSession,
+        retargetCallback: async () => {
+          currentSession.callback_config.callback_session_id = 'sess-new-coordinator';
+          return {
+            session_id: 'sess-current',
+            previous_callback_session_id: 'sess-old-coordinator',
+            callback_session_id: 'sess-new-coordinator',
+            relationship_ids: ['rel-origin'],
+            task_callback_subscriptions_retargeted: false,
+          };
+        },
+        reparent: async () => {
+          currentSession.genealogy.parent_session_id = 'sess-new-parent';
+          return {
+            session_id: 'sess-current',
+            branch_id: 'branch-1',
+            previous_parent_session_id: 'sess-old-parent',
+            parent_session_id: 'sess-new-parent',
+          };
+        },
+      },
+      users: {
+        get: async () => ({ name: 'Alice', email: 'alice@example.com', role: 'member' }),
+      },
+    });
+    const tools = await registerAndCaptureHandlers(
+      { app, userId: 'user-1', sessionId: 'sess-current' },
+      [
+        'agor_sessions_retarget_callback',
+        'agor_sessions_reparent',
+        'agor_sessions_get_current_context',
+      ]
+    );
+
+    await tools.agor_sessions_retarget_callback({
+      sessionId: 'sess-current',
+      callbackSessionId: 'sess-new-coordinator',
+    });
+    await tools.agor_sessions_reparent({
+      sessionId: 'sess-current',
+      parentSessionId: 'sess-new-parent',
+    });
+    const context = JSON.parse(
+      (await tools.agor_sessions_get_current_context({ includeSiblings: false })).content[0].text
+    );
+
+    expect(context.parent_session_id).toBe('sess-new-parent');
+    expect(context.effective_direct_callback_coordinator_session_id).toBe('sess-new-coordinator');
+    expect(context.remote_origins).toEqual([
+      { relationship_id: 'rel-origin', source_session_id: 'sess-original-creator' },
+    ]);
+  });
 });
 
 describe('agor_sessions_get_current_context', () => {
@@ -279,7 +403,24 @@ describe('agor_sessions_get_current_context', () => {
           status: 'idle',
           agentic_tool: 'codex',
           tasks: ['task-1'],
-          genealogy: { children: [] },
+          genealogy: {
+            parent_session_id: 'sess-parent',
+            forked_from_session_id: 'sess-fork-origin',
+            children: [],
+          },
+          callback_config: {
+            enabled: true,
+            callback_session_id: 'sess-current-coordinator',
+          },
+          remote_relationships: {
+            as_target: [
+              {
+                relationship_id: 'rel-origin',
+                relationship_type: 'remote_create',
+                source_session_id: 'sess-original-creator',
+              },
+            ],
+          },
         }),
       },
       users: {
@@ -308,6 +449,14 @@ describe('agor_sessions_get_current_context', () => {
 
     expect(result.latest_task_git_start).toEqual({ ref: 'main', sha: 'start-sha' });
     expect(result.latest_task_git_end).toEqual({ ref: 'feature', sha: 'end-sha' });
+    expect(result.parent_session_id).toBe('sess-parent');
+    expect(result.forked_from_session_id).toBe('sess-fork-origin');
+    expect(result.remote_origins).toEqual([
+      { relationship_id: 'rel-origin', source_session_id: 'sess-original-creator' },
+    ]);
+    expect(result.effective_direct_callback_coordinator_session_id).toBe(
+      'sess-current-coordinator'
+    );
   });
 });
 

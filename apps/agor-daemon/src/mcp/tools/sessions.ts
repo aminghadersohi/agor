@@ -22,8 +22,10 @@ import {
   AGENTIC_TOOL_NAMES,
   type AgenticToolName,
   type Board,
+  getEffectiveDirectCallbackCoordinatorSessionId,
   getSessionType,
   type Session,
+  type SessionRelationship,
   type SessionType,
   type ZoneBoardObject,
 } from '@agor/core/types';
@@ -147,6 +149,18 @@ const sessionReparentOutputSchema = z.object({
     .string()
     .nullable()
     .describe('Fully resolved new parent Session ID, or null when detached to a root.'),
+});
+
+const sessionRelayOutputSchema = z.object({
+  session_id: z.string().describe('Session that relayed from its own MCP context.'),
+  destination: z
+    .enum(['parent', 'coordinator'])
+    .describe('The explicitly selected durable relationship.'),
+  destination_session_id: z
+    .string()
+    .describe('Current parent or effective direct callback coordinator resolved by Agor.'),
+  task_id: z.string().describe('Task admitted on the resolved destination Session.'),
+  status: z.string().describe('Admitted relay Task status.'),
 });
 
 /**
@@ -472,7 +486,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_get_current_context',
     {
       description:
-        'Get a lean orientation snapshot for the current session in ONE call. Returns deduplicated context: session identity, user, latest task Git boundaries, branch (zone, issue/PR, notes, environment), board (with zones), repo (slug, default branch), genealogy, and sibling sessions. Every field appears exactly once. Use get_current or entity-specific tools for full details. The returned session_id is what a remote orchestrator passes as callbackSessionId (agor_sessions_create) to self-target cross-branch completion callbacks.',
+        'Get a lean orientation snapshot for the current session in ONE call. Returns deduplicated context: session identity, user, latest task Git boundaries, branch (zone, issue/PR, notes, environment), board (with zones), repo (slug, default branch), branch-local genealogy, immutable remote origins, the effective direct callback coordinator, and sibling sessions. Provenance and current routing are deliberately separate: remote_origins records who originally remote-created this Session, while effective_direct_callback_coordinator_session_id records the currently enabled report destination after any retarget. Use get_current or entity-specific tools for full details.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         includeSiblings: z
@@ -554,8 +568,19 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         : gen?.forked_from_session_id
           ? 'forked'
           : 'root';
-      result.parent_session_id = gen?.parent_session_id || gen?.forked_from_session_id || null;
+      result.parent_session_id = gen?.parent_session_id ?? null;
+      result.forked_from_session_id = gen?.forked_from_session_id ?? null;
       result.children_count = gen?.children?.length || 0;
+      result.remote_origins = (session.remote_relationships?.as_target ?? [])
+        .filter(
+          (relationship: SessionRelationship) => relationship.relationship_type === 'remote_create'
+        )
+        .map((relationship: SessionRelationship) => ({
+          relationship_id: relationship.relationship_id,
+          source_session_id: relationship.source_session_id,
+        }));
+      result.effective_direct_callback_coordinator_session_id =
+        getEffectiveDirectCallbackCoordinatorSessionId(session);
 
       if (session.branch_id) {
         try {
@@ -975,7 +1000,46 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 5c: agor_session_relationships_set_callback
+  // Tool 5c: agor_session_relationships_report
+  server.registerTool(
+    'agor_session_relationships_report',
+    {
+      description:
+        "Relay a message from the current Session to either its branch-local parent or its currently enabled direct callback coordinator. The destination enum is required when both exist, so routing is never ambiguous. This tool accepts no Session ID: Agor resolves the destination from the Session's current durable parent/callback state, so reparenting or callback retargeting takes effect on the next call. Immutable remote_origins are provenance only and never override the current coordinator.",
+      inputSchema: z.object({
+        destination: z
+          .enum(['parent', 'coordinator'])
+          .describe(
+            'Choose the branch-local genealogy parent or effective direct callback coordinator explicitly.'
+          ),
+        message: mcpRequiredString('message', 'Message to relay to the resolved destination'),
+      }),
+      outputSchema: sessionRelayOutputSchema,
+    },
+    async (args) => {
+      if (!ctx.sessionId) return sessionContextRequiredResult();
+      const resolution = await runWithMcpTenantDatabaseScope(ctx, () =>
+        (ctx.app.service('sessions') as unknown as SessionsServiceImpl).resolveRelayDestination(
+          ctx.sessionId!,
+          { destination: args.destination },
+          ctx.baseServiceParams
+        )
+      );
+      const task = await ctx.app
+        .service('/sessions/:id/prompt')
+        .create(
+          { prompt: args.message, stream: true },
+          { ...ctx.baseServiceParams, route: { id: resolution.destination_session_id } }
+        );
+      return structuredResult({
+        ...resolution,
+        task_id: task.task_id,
+        status: task.status,
+      });
+    }
+  );
+
+  // Tool 5d: agor_session_relationships_set_callback
   server.registerTool(
     'agor_session_relationships_set_callback',
     {
@@ -1033,7 +1097,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 5d: agor_sessions_retarget_callback
+  // Tool 5e: agor_sessions_retarget_callback
   server.registerTool(
     'agor_sessions_retarget_callback',
     {
@@ -1068,7 +1132,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 5e: agor_sessions_reparent
+  // Tool 5f: agor_sessions_reparent
   server.registerTool(
     'agor_sessions_reparent',
     {

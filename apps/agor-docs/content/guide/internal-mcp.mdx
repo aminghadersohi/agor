@@ -294,6 +294,19 @@ goes only to the new direct destination. Exact-Task callbacks created by
 subscriptions—including requests propagated from a root orchestrator—and are
 not rewritten by direct retargeting.
 
+`agor_sessions_get_current_context` exposes three intentionally distinct
+relationships: current branch-local `parent_session_id`, immutable
+`remote_origins`, and the currently enabled
+`effective_direct_callback_coordinator_session_id`. A retarget updates the last
+field but never rewrites provenance; a reparent updates the first.
+
+`agor_session_relationships_report(destination, message)` is the safe manual
+relay path. `destination` must be `parent` or `coordinator`; no arbitrary target
+ID is accepted. If both exist, the enum makes the choice explicit. The daemon
+resolves current durable state on every call and fails closed when the selected
+relationship is missing or disabled, the destination is archived/deleted, the
+tenant differs, or the caller cannot prompt the destination.
+
 ## Best Practices
 
 - **Keep permission policies tight.** MCP calls respect Agor’s permission system. Configure approvals so agents only do what the team expects.

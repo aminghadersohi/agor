@@ -60,6 +60,8 @@ import type {
   Session,
   SessionCallbackRetargetResult,
   SessionID,
+  SessionRelayDestination,
+  SessionRelayResolution,
   SessionReparentResult,
   SessionSdkHomeScope,
   SessionUpdate,
@@ -68,6 +70,7 @@ import type {
   UUID,
 } from '@agor/core/types';
 import {
+  getEffectiveDirectCallbackCoordinatorSessionId,
   isAgenticToolDefaultConfigurationReference,
   SessionStatus,
   USER_DEFAULT_AGENTIC_CONFIGURATION,
@@ -269,6 +272,10 @@ export type SessionReparentInput = {
   parentSessionId: SessionID | null;
 };
 
+export type SessionRelayDestinationInput = {
+  destination: SessionRelayDestination;
+};
+
 /**
  * Extended sessions service with custom methods
  */
@@ -307,12 +314,13 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
   private async requireSessionTransferAuthority(
     sessionId: SessionID,
     params: SessionParams | undefined,
-    role: 'source' | 'destination'
+    role: 'source' | 'destination' | 'relay-source'
   ): Promise<Session> {
+    const isDestination = role === 'destination';
     const session = await this.sessionRepo.findById(sessionId);
     if (!session) {
       throw new NotFound(
-        `${role === 'source' ? 'Source' : 'Destination'} session ${sessionId} is unavailable or deleted.`
+        `${isDestination ? 'Destination' : 'Source'} session ${sessionId} is unavailable or deleted.`
       );
     }
 
@@ -320,19 +328,19 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     const sessionTenantId = getHiddenTenantId(session);
     if (requestedTenantId && sessionTenantId && requestedTenantId !== sessionTenantId) {
       throw new Forbidden(
-        `${role === 'source' ? 'Source' : 'Destination'} session is not in the authenticated tenant.`
+        `${isDestination ? 'Destination' : 'Source'} session is not in the authenticated tenant.`
       );
     }
     if (session.archived) {
       throw new Conflict(
-        `${role === 'source' ? 'Source' : 'Destination'} session ${sessionId} is archived and unavailable for transfer.`
+        `${isDestination ? 'Destination' : 'Source'} session ${sessionId} is archived and unavailable.`
       );
     }
 
     const branch = await this.branchRepo.findById(session.branch_id);
     if (!branch || branch.archived) {
       throw new Conflict(
-        `${role === 'source' ? 'Source' : 'Destination'} branch for session ${sessionId} is archived or unavailable.`
+        `${isDestination ? 'Destination' : 'Source'} branch for session ${sessionId} is archived or unavailable.`
       );
     }
 
@@ -347,24 +355,27 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         ? (this.app.get('config')?.execution?.allow_superadmin ?? false)
         : false;
     const userId = user.user_id as UUID;
-    if (role === 'source') {
+    if (role === 'source' || role === 'relay-source') {
       const [isOwner, effectivePermission] = await Promise.all([
         this.branchRepo.isOwner(branch.branch_id, userId),
         this.branchRepo.resolveUserPermission(branch, userId),
       ]);
+      const requiredPermission = role === 'source' ? 'all' : 'view';
       if (
         !hasBranchPermission(
           branch,
           userId,
           isOwner,
-          'all',
+          requiredPermission,
           user.role,
           allowSuperadmin,
           effectivePermission
         )
       ) {
         throw new Forbidden(
-          `You need Manager permission on source session ${sessionId} to transfer its routing or genealogy.`
+          role === 'source'
+            ? `You need Manager permission on source session ${sessionId} to transfer its routing or genealogy.`
+            : `You need Viewer permission on source session ${sessionId} to relay from its MCP context.`
         );
       }
       return session;
@@ -436,6 +447,52 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       if (error instanceof SessionTransferValidationError) throw new Conflict(error.message);
       throw error;
     }
+  }
+
+  /** Resolve a safe relay target from the source Session's durable current state. */
+  async resolveRelayDestination(
+    id: string,
+    data: SessionRelayDestinationInput,
+    params?: SessionParams
+  ): Promise<SessionRelayResolution> {
+    const source = await this.requireSessionTransferAuthority(
+      id as SessionID,
+      params,
+      'relay-source'
+    );
+    let destinationSessionId: SessionID | undefined;
+    if (data.destination === 'parent') {
+      destinationSessionId = source.genealogy?.parent_session_id;
+      if (!destinationSessionId) {
+        throw new Conflict(`Session ${source.session_id} has no branch-local parent to relay to.`);
+      }
+    } else {
+      destinationSessionId = getEffectiveDirectCallbackCoordinatorSessionId(source) ?? undefined;
+      if (!destinationSessionId) {
+        throw new Conflict(
+          `Session ${source.session_id} has no enabled direct callback coordinator to relay to.`
+        );
+      }
+    }
+
+    const destination = await this.requireSessionTransferAuthority(
+      destinationSessionId,
+      params,
+      'destination'
+    );
+    if (getHiddenTenantId(source) !== getHiddenTenantId(destination)) {
+      throw new Forbidden('Relay source and destination must belong to the same tenant.');
+    }
+    if (data.destination === 'parent' && source.branch_id !== destination.branch_id) {
+      throw new Conflict(
+        'A branch-local parent relay destination must remain in the source branch.'
+      );
+    }
+    return {
+      session_id: source.session_id,
+      destination: data.destination,
+      destination_session_id: destination.session_id,
+    };
   }
 
   private async resolveDirectCreateModelFallback(

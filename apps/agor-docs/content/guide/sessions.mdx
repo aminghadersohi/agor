@@ -230,6 +230,27 @@ one-off request. Retargeting a Session's standing callback does not silently
 rewrite the Task request, so it may still send its independently requested
 report to the original destination.
 
+### Discovering and contacting the current coordinator
+
+`agor_sessions_get_current_context` keeps provenance and current control
+separate:
+
+- `parent_session_id` is only the current branch-local genealogy parent;
+  `forked_from_session_id` is reported separately.
+- `remote_origins` records immutable cross-branch creation provenance. It does
+  not change when callback routing is retargeted.
+- `effective_direct_callback_coordinator_session_id` is the currently enabled
+  direct report destination. Retargeting changes this value immediately; a
+  disabled direct callback produces `null`.
+
+Use `agor_session_relationships_report` to relay a message without supplying a
+Session ID. Choose `destination: "parent"` or `destination: "coordinator"`
+explicitly—even when both exist—and Agor resolves the current durable route,
+rechecks prompt authority, tenant and destination availability, then admits the
+message on that Session. Reparenting and retargeting therefore affect the next
+relay call, while an original remote creator never silently overrides the
+current coordinator.
+
 ---
 
 ## Configuration on a session
