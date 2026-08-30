@@ -481,6 +481,68 @@ describe('authoritative MCP gateway real transport', () => {
     ]);
   });
 
+  it('returns the second OAuth 401 without refreshing or dispatching a third time', async () => {
+    const authorizationHeaders: Array<string | undefined> = [];
+    const url = await listen((request, response) => {
+      authorizationHeaders.push(request.headers.authorization);
+      response.writeHead(401, { 'content-type': 'application/json' });
+      response.end('{"error":"still-unauthorized"}');
+    });
+    const authHeaderRequests: Array<{ force_refresh?: boolean }> = [];
+    const h = await harness({
+      server: {
+        transport: 'http',
+        url: `${url}/mcp`,
+        auth: { type: 'oauth', oauth_client_id: 'configured-client' },
+      },
+      oauthAccessToken: 'access-before-refresh',
+      oauthRefreshToken: 'refresh-token-never-exposed',
+      oauthAuthHeadersCreate: async (data) => {
+        authHeaderRequests.push(data);
+        return {
+          headers: {
+            [h.server.mcp_server_id]: {
+              authorization: data.force_refresh
+                ? 'Bearer access-after-refresh'
+                : 'Bearer access-before-refresh',
+            },
+          },
+        };
+      },
+    });
+
+    const forwarded = await h.request('POST', initialize);
+    expect(forwarded.response.status).toBe(401);
+    expect(authorizationHeaders).toEqual([
+      'Bearer access-before-refresh',
+      'Bearer access-after-refresh',
+    ]);
+    expect(authHeaderRequests).toEqual([
+      { mcp_server_ids: [h.server.mcp_server_id] },
+      { mcp_server_ids: [h.server.mcp_server_id], force_refresh: true },
+    ]);
+  });
+
+  it('does not retry a non-OAuth request after a provider 401', async () => {
+    let providerRequests = 0;
+    const url = await listen((_request, response) => {
+      providerRequests += 1;
+      response.writeHead(401, { 'content-type': 'application/json' });
+      response.end('{"error":"invalid-bearer"}');
+    });
+    const h = await harness({
+      server: {
+        transport: 'http',
+        url: `${url}/mcp`,
+        auth: { type: 'bearer', token: 'configured-static-bearer' },
+      },
+    });
+
+    const forwarded = await h.request('POST', initialize);
+    expect(forwarded.response.status).toBe(401);
+    expect(providerRequests).toBe(1);
+  });
+
   it('rejects GET before provider dispatch', async () => {
     let providerRequests = 0;
     const url = await listen((_request, response) => {

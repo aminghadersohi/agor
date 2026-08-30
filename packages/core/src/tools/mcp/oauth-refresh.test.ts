@@ -49,6 +49,7 @@ import type { MCPServerID, UserID } from '../../types';
 import {
   __refreshMutexSizeForTests,
   __resetRefreshMutexForTests,
+  classifyFailedRefreshClaimStatus,
   GrantConfigurationChangedError,
   InvalidGrantError,
   isReplaySafeRefreshTokenEndpoint,
@@ -77,6 +78,16 @@ describe('refresh-token replay safety', () => {
     'not a URL',
   ])('does not broaden retry safety to %s', (endpoint) => {
     expect(isReplaySafeRefreshTokenEndpoint(endpoint)).toBe(false);
+  });
+
+  it('keeps ambiguous rotating-token failures fenced while releasing Google and known failures', () => {
+    expect(classifyFailedRefreshClaimStatus(true, 'https://auth.example.test/token')).toBe(
+      'ambiguous'
+    );
+    expect(classifyFailedRefreshClaimStatus(true, 'https://oauth2.googleapis.com/token')).toBe(
+      'idle'
+    );
+    expect(classifyFailedRefreshClaimStatus(false, 'https://auth.example.test/token')).toBe('idle');
   });
 });
 

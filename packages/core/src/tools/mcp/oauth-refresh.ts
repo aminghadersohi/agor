@@ -57,6 +57,13 @@ export function isReplaySafeRefreshTokenEndpoint(tokenEndpoint: string): boolean
   }
 }
 
+export function classifyFailedRefreshClaimStatus(
+  ambiguous: boolean,
+  tokenEndpoint: string
+): 'idle' | 'ambiguous' {
+  return ambiguous && !isReplaySafeRefreshTokenEndpoint(tokenEndpoint) ? 'ambiguous' : 'idle';
+}
+
 export class InvalidGrantError extends Error {
   readonly code = 'invalid_grant';
   constructor(message = 'OAuth refresh grant is no longer valid') {
@@ -420,7 +427,8 @@ async function refreshPostgres(deps: RefreshAndPersistDeps): Promise<string> {
     return releaseUnstartedClaim(new MissingRefreshTokenError());
   }
   if (!row.oauth_client_id) return releaseUnstartedClaim(new MissingClientIdError());
-  if (!row.oauth_token_endpoint) {
+  const tokenEndpoint = row.oauth_token_endpoint;
+  if (!tokenEndpoint) {
     return releaseUnstartedClaim(new MissingTokenEndpointError());
   }
   try {
@@ -432,7 +440,7 @@ async function refreshPostgres(deps: RefreshAndPersistDeps): Promise<string> {
   }
   try {
     const result = await refreshMCPToken({
-      tokenEndpoint: row.oauth_token_endpoint,
+      tokenEndpoint,
       refreshToken: row.oauth_refresh_token,
       clientId: row.oauth_client_id,
       clientSecret: row.oauth_client_secret,
@@ -490,15 +498,12 @@ async function refreshPostgres(deps: RefreshAndPersistDeps): Promise<string> {
       throw error;
     }
     const ambiguous = !(error instanceof OAuthRefreshExchangeError) || error.ambiguous;
-    const retryableWithoutRefreshReplayRisk = isReplaySafeRefreshTokenEndpoint(
-      row.oauth_token_endpoint
-    );
     await tenantWork(deps, (db) =>
       new UserMCPOAuthTokenRepository(db).finishRefreshClaim(
         deps.userId,
         deps.mcpServerId,
         fence,
-        ambiguous && !retryableWithoutRefreshReplayRisk ? 'ambiguous' : 'idle'
+        classifyFailedRefreshClaimStatus(ambiguous, tokenEndpoint)
       )
     );
     console.warn(

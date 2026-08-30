@@ -89,10 +89,12 @@ interface OAuthRawTokenResponse {
  * them scoped to Google's exact authorization host. Other providers can give
  * `prompt` different semantics or reject unknown parameters entirely.
  */
+export function isGoogleAuthorizationEndpoint(authUrl: URL): boolean {
+  return authUrl.protocol === 'https:' && authUrl.hostname.toLowerCase() === 'accounts.google.com';
+}
+
 function applyProviderAuthorizationParameters(authUrl: URL): void {
-  if (authUrl.protocol !== 'https:' || authUrl.hostname.toLowerCase() !== 'accounts.google.com') {
-    return;
-  }
+  if (!isGoogleAuthorizationEndpoint(authUrl)) return;
 
   authUrl.searchParams.set('access_type', 'offline');
   const prompts = new Set(

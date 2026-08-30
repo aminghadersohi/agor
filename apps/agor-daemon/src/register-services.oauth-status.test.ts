@@ -56,7 +56,10 @@ describe('register-services durable OAuth status authority', () => {
   it('supports a daemon-only forced refresh without treating transient failures as revocation', () => {
     expect(authHeadersBlock).toContain('force_refresh?: boolean');
     expect(authHeadersBlock).toContain('data?.force_refresh === true');
-    expect(authHeadersBlock).toContain('forceRefresh || needsRefresh');
+    expect(authHeadersBlock.match(/forceRefresh \|\| needsRefresh/g)).toHaveLength(2);
+    expect(authHeadersBlock).toMatch(
+      /row\.refresh_status === 'ambiguous'[\s\S]{0,100}error: 'token_refresh_failed'/
+    );
     expect(authHeadersBlock).toContain("error: 'token_refresh_failed'");
     expect(authHeadersBlock).toMatch(
       /refreshErr instanceof InvalidGrantError[\s\S]{0,100}'needs_reauth'/
