@@ -1,3 +1,4 @@
+import { BOARD_GRID_SIZE, snapBoardGridPoint } from '@agor/core/layout/rectangle-packing';
 import type { Board } from '@agor-live/client';
 import { act, renderHook } from '@testing-library/react';
 import { App as AntApp } from 'antd';
@@ -239,8 +240,8 @@ describe('arrangeZoneContents', () => {
         parentId: 'zone',
         position: { x: 200, y: 200 },
         data: {},
-        width: 400,
-        height: 180,
+        width: 399,
+        height: 179,
       },
       {
         id: 'card-card-1',
@@ -248,8 +249,8 @@ describe('arrangeZoneContents', () => {
         parentId: 'zone',
         position: { x: 220, y: 210 },
         data: {},
-        width: 300,
-        height: 100,
+        width: 299,
+        height: 99,
       },
     ];
     let renderedNodes = initialNodes;
@@ -295,29 +296,37 @@ describe('arrangeZoneContents', () => {
     });
 
     expect(renderedNodes.find((node) => node.id === 'branch-1')?.position).toEqual({
-      x: 24,
-      y: 88,
+      x: 20,
+      y: 100,
     });
     expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual({
-      x: 448,
-      y: 88,
+      x: 440,
+      y: 100,
     });
     expect(onArrangeNodes).toHaveBeenCalledTimes(1);
     expect(onArrangeNodes.mock.calls[0]?.[0].map((node: Node) => node.position)).toEqual([
-      { x: 24, y: 88 },
-      { x: 448, y: 88 },
+      { x: 20, y: 100 },
+      { x: 440, y: 100 },
     ]);
     expect(onArrangeNodes.mock.calls[0]?.[1]).toBeGreaterThan(0);
     expect(patch).toHaveBeenCalledTimes(2);
     expect(patch).toHaveBeenCalledWith('placement-branch', {
-      position: { x: 24, y: 88 },
+      position: { x: 20, y: 100 },
       size: { width: 400, height: 180 },
     });
     expect(patch).toHaveBeenCalledWith('placement-card', {
-      position: { x: 448, y: 88 },
+      position: { x: 440, y: 100 },
       size: { width: 300, height: 100 },
     });
     expect(showSuccess).toHaveBeenCalledWith('Arranged 2 items in a non-overlapping grid.');
+    for (const [, update] of patch.mock.calls) {
+      if (!('position' in update) || !('size' in update)) continue;
+      expect(update.position.x % BOARD_GRID_SIZE).toBe(0);
+      expect(update.position.y % BOARD_GRID_SIZE).toBe(0);
+      expect(update.size.width % BOARD_GRID_SIZE).toBe(0);
+      expect(update.size.height % BOARD_GRID_SIZE).toBe(0);
+      expect(snapBoardGridPoint(update.position)).toEqual(update.position);
+    }
   });
 
   it('uses the live rendered height when dynamic branch content exceeds React Flow dimensions', async () => {
@@ -404,20 +413,20 @@ describe('arrangeZoneContents', () => {
     });
 
     expect(renderedNodes.find((node) => node.id === 'branch-1')?.position).toEqual({
-      x: 24,
-      y: 88,
+      x: 20,
+      y: 100,
     });
     expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual({
-      x: 24,
-      y: 348,
+      x: 20,
+      y: 360,
     });
     expect(patch).toHaveBeenCalledWith('placement-branch', {
-      position: { x: 24, y: 88 },
-      size: { width: 500, height: 236 },
+      position: { x: 20, y: 100 },
+      size: { width: 500, height: 240 },
     });
     expect(patch).toHaveBeenCalledWith('placement-card', {
-      position: { x: 24, y: 348 },
-      size: { width: 380, height: 85 },
+      position: { x: 20, y: 360 },
+      size: { width: 380, height: 100 },
     });
 
     renderedBranch.remove();
@@ -579,16 +588,16 @@ describe('arrangeZoneContents', () => {
       await (zoneNode.data.onArrangeContents as (id: string) => Promise<void>)('zone');
     });
 
-    expect(renderedNodes.find((node) => node.id === 'card-newer')?.position.y).toBe(88);
-    expect(renderedNodes.find((node) => node.id === 'card-older')?.position.y).toBe(168);
+    expect(renderedNodes.find((node) => node.id === 'card-newer')?.position.y).toBe(100);
+    expect(renderedNodes.find((node) => node.id === 'card-older')?.position.y).toBe(180);
     expect(patch).toHaveBeenCalledWith('placement-newer', {
-      position: { x: 24, y: 88 },
-      size: { width: 380, height: 56 },
+      position: { x: 20, y: 100 },
+      size: { width: 380, height: 60 },
       compact: true,
     });
     expect(patch).toHaveBeenCalledWith('placement-older', {
-      position: { x: 24, y: 168 },
-      size: { width: 380, height: 56 },
+      position: { x: 20, y: 180 },
+      size: { width: 380, height: 60 },
       compact: true,
     });
     expect(patch).toHaveBeenCalledWith(
@@ -596,7 +605,7 @@ describe('arrangeZoneContents', () => {
       expect.objectContaining({
         _action: 'upsertObject',
         objectId: 'zone',
-        objectData: expect.objectContaining({ height: 248 }),
+        objectData: expect.objectContaining({ height: 260 }),
       })
     );
   });
@@ -679,18 +688,18 @@ describe('arrangeZoneContents', () => {
     });
 
     expect(patch).toHaveBeenCalledWith('placement-newer', {
-      position: { x: 24, y: 88 },
+      position: { x: 20, y: 100 },
       size: { width: 300, height: 100 },
     });
     expect(patch).toHaveBeenCalledWith('placement-older', {
-      position: { x: 348, y: 88 },
+      position: { x: 340, y: 100 },
       size: { width: 300, height: 100 },
     });
 
     const patchCountAfterFirstPass = patch.mock.calls.length;
     nodes = nodes.map((node) =>
       node.id === 'card-newer'
-        ? { ...node, position: { x: 24, y: 88 } }
+        ? { ...node, position: { x: 20, y: 100 } }
         : node.id === 'card-older'
           ? { ...node, position: { x: 348, y: 88 } }
           : node
@@ -911,7 +920,7 @@ describe('direct manipulation of automatic zones', () => {
 
     expect(boardObjectsPatch).toHaveBeenCalledWith(
       'placement-card',
-      expect.objectContaining({ position: { x: 24, y: 88 } })
+      expect.objectContaining({ position: { x: 20, y: 100 } })
     );
   });
 });

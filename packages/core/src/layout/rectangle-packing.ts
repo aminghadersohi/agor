@@ -36,6 +36,35 @@ export interface RectangleLayoutOptions {
   deckOffsetX?: number;
   /** Visible header reveal between deck layers. */
   deckOffsetY?: number;
+  /** Quantize item sizes, spacing, and placements to this grid. */
+  gridSize?: number;
+}
+
+/** The board grid used by React Flow manual drag/resize and every automatic layout path. */
+export const BOARD_GRID_SIZE = 20;
+export const BOARD_SNAP_GRID: [number, number] = [BOARD_GRID_SIZE, BOARD_GRID_SIZE];
+
+export function snapBoardGridValue(value: number): number {
+  return Math.round(value / BOARD_GRID_SIZE) * BOARD_GRID_SIZE;
+}
+
+export function ceilBoardGridValue(value: number): number {
+  if (value === 0) return 0;
+  return Math.ceil(value / BOARD_GRID_SIZE) * BOARD_GRID_SIZE;
+}
+
+export function snapBoardGridPoint(point: { x: number; y: number }): { x: number; y: number } {
+  return { x: snapBoardGridValue(point.x), y: snapBoardGridValue(point.y) };
+}
+
+export function ceilBoardGridSize(size: { width: number; height: number }): {
+  width: number;
+  height: number;
+} {
+  return {
+    width: ceilBoardGridValue(size.width),
+    height: ceilBoardGridValue(size.height),
+  };
 }
 
 export interface RectangleLayoutResult {
@@ -70,7 +99,16 @@ interface GridCandidate {
 const finiteNonNegative = (value: number | undefined, fallback: number): number =>
   Number.isFinite(value) && (value ?? -1) >= 0 ? (value as number) : fallback;
 
-function normalizedItems(items: readonly RectangleLayoutItem[]): RectangleLayoutItem[] {
+const ceilToGrid = (value: number, gridSize: number): number =>
+  gridSize > 0 && value !== 0 ? Math.ceil(value / gridSize) * gridSize : value;
+
+const floorToGrid = (value: number, gridSize: number): number =>
+  gridSize > 0 ? Math.floor(value / gridSize) * gridSize : value;
+
+function normalizedItems(
+  items: readonly RectangleLayoutItem[],
+  gridSize: number
+): RectangleLayoutItem[] {
   return items.map((item) => {
     if (!Number.isFinite(item.width) || !Number.isFinite(item.height)) {
       throw new Error(`Rectangle '${item.id}' has a non-finite size.`);
@@ -78,7 +116,11 @@ function normalizedItems(items: readonly RectangleLayoutItem[]): RectangleLayout
     if (item.width <= 0 || item.height <= 0) {
       throw new Error(`Rectangle '${item.id}' must have a positive width and height.`);
     }
-    return { ...item };
+    return {
+      ...item,
+      width: ceilToGrid(item.width, gridSize),
+      height: ceilToGrid(item.height, gridSize),
+    };
   });
 }
 
@@ -158,6 +200,7 @@ function chooseGrid(
     minPadding: number;
     preferredColumns?: number;
     exactColumns?: number;
+    gridSize: number;
   }
 ): GridCandidate | undefined {
   if (items.length === 0) return buildGrid(items, 1, options.padding, options.gapX, options.gapY);
@@ -213,8 +256,8 @@ function chooseGrid(
           verticalDivisors === 0
             ? options.gapY
             : Math.floor((bounds.height - compact.height) / verticalDivisors);
-        const effectiveGapX = Math.min(options.gapX, fittingGapX);
-        const effectiveGapY = Math.min(options.gapY, fittingGapY);
+        const effectiveGapX = floorToGrid(Math.min(options.gapX, fittingGapX), options.gridSize);
+        const effectiveGapY = floorToGrid(Math.min(options.gapY, fittingGapY), options.gridSize);
         if (effectiveGapX < options.minGapX || effectiveGapY < options.minGapY) return [];
         return [buildGrid(items, columns, padding, effectiveGapX, effectiveGapY)];
       });
@@ -272,6 +315,7 @@ function buildDeck(
     exactColumns?: number;
     deckOffsetX: number;
     deckOffsetY: number;
+    gridSize: number;
   }
 ): RectangleLayoutResult | undefined {
   // Try the maximum possible number of stacks first. Overlap grows only when
@@ -353,23 +397,39 @@ export function layoutRectangles(
   if (options.preferredColumns !== undefined && options.exactColumns !== undefined) {
     throw new Error('Specify either preferredColumns or exactColumns, not both.');
   }
-  const items = normalizedItems(sourceItems);
-  const padding = finiteNonNegative(options.padding, 0);
-  const minPadding = Math.min(padding, finiteNonNegative(options.minPadding, Math.min(8, padding)));
-  const gapX = finiteNonNegative(options.gapX, 24);
-  const gapY = finiteNonNegative(options.gapY, 24);
-  const minGapX = Math.min(gapX, finiteNonNegative(options.minGapX, Math.min(12, gapX)));
-  const minGapY = Math.min(gapY, finiteNonNegative(options.minGapY, Math.min(12, gapY)));
+  const gridSize = finiteNonNegative(options.gridSize, 0);
+  const items = normalizedItems(sourceItems, gridSize);
+  const padding = ceilToGrid(finiteNonNegative(options.padding, 0), gridSize);
+  const minPadding = Math.min(
+    padding,
+    ceilToGrid(finiteNonNegative(options.minPadding, Math.min(8, padding)), gridSize)
+  );
+  const gapX = ceilToGrid(finiteNonNegative(options.gapX, 24), gridSize);
+  const gapY = ceilToGrid(finiteNonNegative(options.gapY, 24), gridSize);
+  const minGapX = Math.min(
+    gapX,
+    ceilToGrid(finiteNonNegative(options.minGapX, Math.min(12, gapX)), gridSize)
+  );
+  const minGapY = Math.min(
+    gapY,
+    ceilToGrid(finiteNonNegative(options.minGapY, Math.min(12, gapY)), gridSize)
+  );
   const legacyDeckOffset = finiteNonNegative(options.deckOffset, 12);
-  const deckOffsetX = finiteNonNegative(options.deckOffsetX, legacyDeckOffset);
-  const deckOffsetY = finiteNonNegative(
-    options.deckOffsetY,
-    options.deckOffset === undefined ? 48 : legacyDeckOffset
+  const deckOffsetX = ceilToGrid(
+    finiteNonNegative(options.deckOffsetX, legacyDeckOffset),
+    gridSize
+  );
+  const deckOffsetY = ceilToGrid(
+    finiteNonNegative(
+      options.deckOffsetY,
+      options.deckOffset === undefined ? 48 : legacyDeckOffset
+    ),
+    gridSize
   );
   const bounds = options.bounds
     ? {
-        width: finiteNonNegative(options.bounds.width, 0),
-        height: finiteNonNegative(options.bounds.height, 0),
+        width: floorToGrid(finiteNonNegative(options.bounds.width, 0), gridSize),
+        height: floorToGrid(finiteNonNegative(options.bounds.height, 0), gridSize),
       }
     : undefined;
   const grid = chooseGrid(items, {
@@ -382,6 +442,7 @@ export function layoutRectangles(
     minPadding,
     preferredColumns: options.preferredColumns,
     exactColumns: options.exactColumns,
+    gridSize,
   });
   if (grid) {
     return {
@@ -409,6 +470,7 @@ export function layoutRectangles(
           exactColumns: options.exactColumns,
           deckOffsetX,
           deckOffsetY,
+          gridSize,
         })
       : undefined;
   if (deck) return deck;

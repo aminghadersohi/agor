@@ -1,5 +1,10 @@
 import { layoutJustifiedZones, zoneShapesForItems } from '@agor/core/layout/justified-zones';
-import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
+import {
+  BOARD_GRID_SIZE,
+  ceilBoardGridValue,
+  layoutRectangles,
+  snapBoardGridValue,
+} from '@agor/core/layout/rectangle-packing';
 import {
   normalizeZoneLayoutPolicy,
   sortZoneLayoutItems,
@@ -79,7 +84,11 @@ function zoneContentTopInset(zone: { fontSize?: number; status?: string }): numb
   const labelHeight = Math.ceil(labelFontSize * 1.2);
   const statusHeight = zone.status ? 8 + Math.ceil(labelFontSize * 1.05) : 0;
 
-  return Math.max(64, 32 + labelHeight + statusHeight);
+  return ceilBoardGridValue(Math.max(64, 32 + labelHeight + statusHeight));
+}
+
+function boardGridSpacing(value: number): number {
+  return value === 0 ? 0 : Math.max(BOARD_GRID_SIZE, snapBoardGridValue(value));
 }
 
 function compareBoardEntitiesSpatially(a: BoardEntityObject, b: BoardEntityObject): number {
@@ -257,7 +266,7 @@ function resolveArrangeOrigin(options: {
     const blocking = obstacles.filter((zone) => rectanglesOverlap(grid, zone));
     if (blocking.length === 0) break;
     avoidedZoneIds.push(...blocking.map((zone) => zone.id));
-    y = Math.max(...blocking.map((zone) => zone.y + zone.height)) + gapY;
+    y = ceilBoardGridValue(Math.max(...blocking.map((zone) => zone.y + zone.height))) + gapY;
   }
   return { startX, startY: y, avoidedZoneIds };
 }
@@ -438,6 +447,7 @@ async function arrangeBoardZones(
           // compact_list is always one column; offering wider shapes would
           // promise a landscape form the zone arrange will never produce.
           ...(zonePolicy.preset === 'compact_list' ? { maxColumns: 1 } : {}),
+          gridSize: BOARD_GRID_SIZE,
         }),
       };
     })
@@ -451,6 +461,7 @@ async function arrangeBoardZones(
     startY: options.startY ?? DEFAULT_ARRANGE_START_Y,
     maxPerRow: options.maxPerRow,
     justifyLastRow: options.justifyLastRow === true,
+    gridSize: BOARD_GRID_SIZE,
   });
 
   const byId = new Map(zones.map((entry) => [entry.id, entry]));
@@ -858,10 +869,10 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const entities = visibleEntities
         .filter((entity) => args.includePinned === true || !entity.zone_id)
         .sort(compareBoardEntitiesSpatially);
-      const requestedStartX = args.startX ?? DEFAULT_ARRANGE_START_X;
-      const requestedStartY = args.startY ?? DEFAULT_ARRANGE_START_Y;
-      const gapX = args.gapX ?? 40;
-      const gapY = args.gapY ?? 40;
+      const requestedStartX = snapBoardGridValue(args.startX ?? DEFAULT_ARRANGE_START_X);
+      const requestedStartY = snapBoardGridValue(args.startY ?? DEFAULT_ARRANGE_START_Y);
+      const gapX = boardGridSpacing(args.gapX ?? 40);
+      const gapY = boardGridSpacing(args.gapY ?? 40);
       const items: Array<{
         id: string;
         kind: 'entity' | 'canvas';
@@ -925,6 +936,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           preferredColumns: args.columns ?? Math.ceil(Math.sqrt(Math.max(1, items.length))),
           gapX,
           gapY,
+          gridSize: BOARD_GRID_SIZE,
         }
       );
       const { startX, startY, avoidedZoneIds } = resolveArrangeOrigin({
@@ -953,7 +965,11 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           y: startY + placement.y,
         };
         if (item.kind === 'entity' && item.entity) {
-          await boardObjectsService.patch(item.id, { position }, ctx.baseServiceParams);
+          await boardObjectsService.patch(
+            item.id,
+            { position, size: { width: placement.width, height: placement.height } },
+            ctx.baseServiceParams
+          );
           updates.push({
             objectId: item.id,
             objectType: item.entity.entity_type,
@@ -966,7 +982,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
             {
               _action: 'upsertObject',
               objectId: item.id,
-              objectData: { ...item.object, ...position },
+              objectData: {
+                ...item.object,
+                ...position,
+                ...('width' in item.object ? { width: placement.width } : {}),
+                ...('height' in item.object ? { height: placement.height } : {}),
+              },
             },
             ctx.baseServiceParams
           );
@@ -1163,9 +1184,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           dimensions.set(entity.object_id, ARRANGE_DIMENSIONS[entity.entity_type]);
         }
       }
-      const padding = Math.max(0, args.padding ?? 24);
-      const gapX = Math.max(0, args.gapX ?? zonePolicy.gap ?? 24);
-      const gapY = Math.max(0, args.gapY ?? zonePolicy.gap ?? 24);
+      const padding = boardGridSpacing(Math.max(0, args.padding ?? 24));
+      const gapX = boardGridSpacing(Math.max(0, args.gapX ?? zonePolicy.gap ?? 24));
+      const gapY = boardGridSpacing(Math.max(0, args.gapY ?? zonePolicy.gap ?? 24));
       const titleInset = zoneContentTopInset(zone);
       const resizeMode = zonePolicy.resize ?? 'fixed';
       const autoResizeHeight = resizeMode !== 'fixed';
@@ -1177,12 +1198,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const layoutWidth =
         resizeMode === 'both'
           ? Math.max(
-              zone.width,
+              ceilBoardGridValue(zone.width),
               ...entities.map(
                 (entity) => (dimensions.get(entity.object_id)?.width ?? 0) + padding * 2
               )
             )
-          : zone.width;
+          : ceilBoardGridValue(zone.width);
       if (entities.length === 0) {
         return textResult({
           boardId,
@@ -1212,11 +1233,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
               : Math.max(0, zone.height - titleInset),
           },
           padding,
-          minPadding: 8,
+          minPadding: padding,
           gapX,
           gapY,
-          minGapX: 8,
-          minGapY: 8,
+          minGapX: gapX,
+          minGapY: gapY,
+          gridSize: BOARD_GRID_SIZE,
           ...(zonePolicy.preset === 'compact_list'
             ? { exactColumns: 1 }
             : args.strictColumns === true
@@ -1274,14 +1296,17 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         const placement = placementById.get(entity.object_id);
         if (!placement) throw new Error(`Layout did not place board object '${entity.object_id}'.`);
         const position = { x: placement.x, y: placement.y + titleInset };
-        if (zonePolicy.preset === 'compact_list' && entity.compact !== true) {
-          await boardObjectsService.patch(
-            entity.object_id,
-            { compact: true },
-            ctx.baseServiceParams
-          );
-        }
-        await boardObjectsService.patch(entity.object_id, { position }, ctx.baseServiceParams);
+        await boardObjectsService.patch(
+          entity.object_id,
+          {
+            position,
+            size: { width: placement.width, height: placement.height },
+            ...(zonePolicy.preset === 'compact_list' && entity.compact !== true
+              ? { compact: true }
+              : {}),
+          },
+          ctx.baseServiceParams
+        );
         updates.push({
           objectId: entity.object_id,
           entityType: entity.entity_type,
@@ -1294,10 +1319,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       }
 
       const appliedZoneHeight = autoResizeHeight
-        ? Math.max(200, Math.ceil(layout.height + titleInset))
-        : zone.height;
+        ? Math.max(200, ceilBoardGridValue(layout.height + titleInset))
+        : ceilBoardGridValue(zone.height);
       const appliedZoneWidth =
-        resizeMode === 'both' ? Math.max(zone.width, Math.ceil(layout.width)) : zone.width;
+        resizeMode === 'both'
+          ? Math.max(ceilBoardGridValue(zone.width), ceilBoardGridValue(layout.width))
+          : ceilBoardGridValue(zone.width);
       // A grow moves an edge onto whatever shares the canvas beside or below
       // it. Only a grow can newly cover a neighbour; a shrink or a no-op cannot.
       const resizedOverZoneIds =

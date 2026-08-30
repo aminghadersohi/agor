@@ -2,7 +2,13 @@
  * Hook for managing board objects (text labels, zones, etc.)
  */
 
-import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
+import {
+  BOARD_GRID_SIZE,
+  ceilBoardGridSize,
+  ceilBoardGridValue,
+  layoutRectangles,
+  snapBoardGridValue,
+} from '@agor/core/layout/rectangle-packing';
 import {
   normalizeZoneLayoutPolicy,
   sortZoneLayoutItems,
@@ -27,7 +33,7 @@ function zoneContentTopInset(zone: { fontSize?: number; status?: string }): numb
   const labelHeight = Math.ceil(labelFontSize * 1.2);
   const statusHeight = zone.status ? 8 + Math.ceil(labelFontSize * 1.05) : 0;
 
-  return Math.max(64, 32 + labelHeight + statusHeight);
+  return ceilBoardGridValue(Math.max(64, 32 + labelHeight + statusHeight));
 }
 
 import type { ReactFlowNode } from './utils/reactFlowTypes';
@@ -508,14 +514,19 @@ export const useBoardObjects = ({
         return;
       }
 
-      const itemSize = renderedNodeSize;
+      const itemSize = (node: Node) => ceilBoardGridSize(renderedNodeSize(node));
+      const requestedGap = policy.gap ?? 24;
+      const gridGap =
+        requestedGap === 0 ? 0 : Math.max(BOARD_GRID_SIZE, snapBoardGridValue(requestedGap));
       const layout = layoutRectangles(
         children.map((node) => ({
           id: node.id,
           ...(policy.preset === 'compact_list'
             ? {
-                width: node.type === 'branchNode' ? 500 : 380,
-                height: node.type === 'branchNode' ? 88 : 56,
+                ...ceilBoardGridSize({
+                  width: node.type === 'branchNode' ? 500 : 380,
+                  height: node.type === 'branchNode' ? 88 : 56,
+                }),
               }
             : itemSize(node)),
         })),
@@ -529,12 +540,13 @@ export const useBoardObjects = ({
               ? Number.MAX_SAFE_INTEGER
               : Math.max(0, zone.height - zoneContentTopInset(zone)),
           },
-          padding: 24,
-          minPadding: 8,
-          gapX: policy.gap ?? 24,
-          gapY: policy.gap ?? 24,
-          minGapX: 8,
-          minGapY: 8,
+          padding: BOARD_GRID_SIZE,
+          minPadding: BOARD_GRID_SIZE,
+          gapX: gridGap,
+          gapY: gridGap,
+          minGapX: gridGap,
+          minGapY: gridGap,
+          gridSize: BOARD_GRID_SIZE,
           ...(policy.preset === 'compact_list'
             ? { exactColumns: 1 }
             : { preferredColumns: policy.columns ?? Math.ceil(Math.sqrt(children.length)) }),
@@ -586,7 +598,7 @@ export const useBoardObjects = ({
         );
       });
       const nextZoneHeight = policy.autoResizeHeight
-        ? Math.max(200, Math.ceil(layout.height + titleInset))
+        ? Math.max(200, ceilBoardGridValue(layout.height + titleInset))
         : zone.height;
       const zoneHeightChanged = Math.abs(nextZoneHeight - zone.height) >= 0.5;
 
@@ -643,8 +655,10 @@ export const useBoardObjects = ({
             const { width, height } =
               policy.preset === 'compact_list'
                 ? {
-                    width: node.type === 'branchNode' ? 500 : 380,
-                    height: node.type === 'branchNode' ? 88 : 56,
+                    ...ceilBoardGridSize({
+                      width: node.type === 'branchNode' ? 500 : 380,
+                      height: node.type === 'branchNode' ? 88 : 56,
+                    }),
                   }
                 : itemSize(node);
             const currentNode = children.find((child) => child.id === node.id);

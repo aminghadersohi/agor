@@ -1,4 +1,6 @@
 // biome-ignore-all lint/plugin/noHardcodedColorLiteral: persisted zone palette fixtures verify canvas creation behavior
+
+import { BOARD_SNAP_GRID } from '@agor/core/layout/rectangle-packing';
 import type { AgorClient, Board } from '@agor-live/client';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ButtonHTMLAttributes, MouseEventHandler, ReactNode } from 'react';
@@ -77,6 +79,7 @@ describe('SessionCanvas zoom shortcuts', () => {
     expect(reactFlowProps?.panOnScroll).toBe(true);
     expect(reactFlowProps?.zoomActivationKeyCode).toEqual(['Meta', 'Control']);
     expect(reactFlowProps?.selectionOnDrag).toBe(false);
+    expect(reactFlowProps?.snapGrid).toBe(BOARD_SNAP_GRID);
   });
 
   it('marquee-selects partially intersected nested items through a non-1 zoom transform', () => {

@@ -1,4 +1,11 @@
-import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
+import {
+  BOARD_GRID_SIZE,
+  BOARD_SNAP_GRID,
+  ceilBoardGridSize,
+  layoutRectangles,
+  snapBoardGridPoint,
+  snapBoardGridValue,
+} from '@agor/core/layout/rectangle-packing';
 import type {
   AgenticToolName,
   AgorClient,
@@ -2451,10 +2458,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const handleLayoutAction = useCallback(
       async (action: 'arrange' | 'left' | 'center' | 'top' | 'middle' | 'width' | 'height') => {
         if (!board || !client || selectedLayoutNodes.length < 2) return;
-        const size = (node: Node) => ({
-          width: Number(node.width ?? node.style?.width ?? 240),
-          height: Number(node.height ?? node.style?.height ?? 120),
-        });
+        const size = (node: Node) =>
+          ceilBoardGridSize({
+            width: Number(node.width ?? node.style?.width ?? 240),
+            height: Number(node.height ?? node.style?.height ?? 120),
+          });
         const rects = selectedLayoutNodes
           .map((node) => {
             const position = getNodeAbsolutePosition(node, nodes);
@@ -2466,9 +2474,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               a.position.x - b.position.x ||
               a.node.id.localeCompare(b.node.id)
           );
-        const left = Math.min(...rects.map((item) => item.position.x));
+        const left = snapBoardGridValue(Math.min(...rects.map((item) => item.position.x)));
         const right = Math.max(...rects.map((item) => item.position.x + item.width));
-        const top = Math.min(...rects.map((item) => item.position.y));
+        const top = snapBoardGridValue(Math.min(...rects.map((item) => item.position.y)));
         const bottom = Math.max(...rects.map((item) => item.position.y + item.height));
         const center = (left + right) / 2;
         const middle = (top + bottom) / 2;
@@ -2480,8 +2488,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 rects.map(({ node, width, height }) => ({ id: node.id, width, height })),
                 {
                   preferredColumns: Math.ceil(Math.sqrt(rects.length)),
-                  gapX: 32,
-                  gapY: 32,
+                  gapX: BOARD_GRID_SIZE * 2,
+                  gapY: BOARD_GRID_SIZE * 2,
+                  gridSize: BOARD_GRID_SIZE,
                 }
               )
             : null;
@@ -2502,7 +2511,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           if (action === 'center') x = center - width / 2;
           if (action === 'top') y = top;
           if (action === 'middle') y = middle - height / 2;
-          return { node, x, y, width: nextWidth, height: nextHeight };
+          const snapped = action === 'arrange' ? snapBoardGridPoint({ x, y }) : { x, y };
+          return {
+            node,
+            x: snapped.x,
+            y: snapped.y,
+            width: nextWidth,
+            height: nextHeight,
+          };
         });
 
         const updateById = new Map(updates.map((update) => [update.node.id, update]));
@@ -2522,7 +2538,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             return {
               ...node,
               position,
-              ...(action === 'width' || action === 'height'
+              ...(action === 'arrange' || action === 'width' || action === 'height'
                 ? { style: { ...node.style, width: update.width, height: update.height } }
                 : {}),
             };
@@ -2540,7 +2556,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 ...objectData,
                 x: update.x,
                 y: update.y,
-                ...(action === 'width' || action === 'height'
+                ...(action === 'arrange' || action === 'width' || action === 'height'
                   ? { width: update.width, height: update.height }
                   : {}),
               },
@@ -2562,7 +2578,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               : { x: update.x, y: update.y };
             await client.service('board-objects').patch(placement.object_id, {
               position,
-              ...(action === 'width' || action === 'height'
+              ...(action === 'arrange' || action === 'width' || action === 'height'
                 ? { size: { width: update.width, height: update.height } }
                 : {}),
             });
@@ -3317,7 +3333,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             }}
             nodeTypes={nodeTypes}
             snapToGrid={true}
-            snapGrid={[20, 20]}
+            snapGrid={BOARD_SNAP_GRID}
             minZoom={0.1}
             maxZoom={1.5}
             // Disconnected: gate node dragging only. Drag is the only
