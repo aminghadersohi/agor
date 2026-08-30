@@ -35,11 +35,20 @@ catalog. With `mcp_tool_search` enabled, Agor therefore still exposes only
 facade. This preserves domain filtering and concise schemas without reaching
 into SDK-private registration state.
 
-## Three workflow tools
+## Workflow and transfer tools
 
 1. **`agor_sessions_prompt`** — continue, fork, or spawn from an existing session. `mode: 'continue' | 'fork' | 'subsession'`.
 2. **`agor_sessions_create`** — new session in a specified branch. Optional `initialPrompt`, agent override, permission mode.
 3. **`agor_sessions_update`** — rename, change status, refresh description.
+4. **`agor_sessions_retarget_callback`** — move one existing standing/direct
+   completion route. It atomically updates matching `remote_create`
+   relationship rows but does not touch genealogy.
+5. **`agor_sessions_reparent`** — change only branch-local
+   `parent_session_id`, including detaching to a root. It does not touch
+   callback routing or remote relationships.
+6. **`agor_session_relationships_report`** — relay from the current MCP Session
+   to an explicitly selected `parent` or current `coordinator`. It accepts no
+   target Session ID.
 
 All enforce the branch-centric model (every session references a branch). Permission modes map to each agent's native settings.
 
@@ -56,6 +65,30 @@ Callbacks enabled by `agor_sessions_create` default to `persistent`; use
 `callbackMode: "once"` for a single report. Durable remote relationships can
 be muted or resumed with `agor_session_relationships_set_callback` without
 deleting the relationship. Spawned child and `btw` callbacks remain one-shot.
+
+Standing callback retargeting preserves the callback's enabled state, mode,
+template, and include flags. Completion dispatch reloads the Session after the
+terminal Task commit, so a Task that was already running when the transfer
+committed follows only the new standing destination. The immutable
+`Task.metadata.completion_callback` written by `agor_sessions_prompt` with
+`callback:true` is a separate exact-Task subscription (including subscriptions
+originating from a root orchestrator). Retargeting never rewrites it; if it
+names another destination, that independently requested report is still sent.
+
+Genealogy reparenting requires an active same-branch destination and rejects a
+Session itself or any of its descendants. Both operations require Manager
+authority over the source, normal prompt authority over a non-null destination,
+and one tenant throughout.
+
+Current-context introspection calls provenance and control different things on
+purpose. `remote_origins` is the immutable set of `remote_create` sources;
+`parent_session_id` is the current branch-local parent; and
+`effective_direct_callback_coordinator_session_id` is the enabled standing
+route. Retargeting changes the coordinator field and coordinator relay target,
+while reparenting changes the parent field and parent relay target. The relay
+tool resolves these durable values on each call, requires an explicit selector
+when both exist, rechecks destination prompt authority/tenant/state, and never
+uses a caller-supplied Session ID.
 
 ## Overrides at create/spawn/subsession time
 
