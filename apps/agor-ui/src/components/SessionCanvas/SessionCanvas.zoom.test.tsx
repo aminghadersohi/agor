@@ -78,7 +78,7 @@ describe('SessionCanvas zoom shortcuts', () => {
     expect(reactFlowProps?.selectionOnDrag).toBe(false);
   });
 
-  it('marquee-selects nested items when dragging from an empty zone surface', () => {
+  it('marquee-selects partially intersected nested items through a non-1 zoom transform', () => {
     render(<SessionCanvas board={null} client={null} branches={[]} />);
     const flowNodes: Node[] = [
       {
@@ -111,14 +111,18 @@ describe('SessionCanvas zoom shortcuts', () => {
     act(() => {
       (reactFlowProps?.onInit as (instance: unknown) => void)?.({
         getNodes: () => flowNodes,
-        screenToFlowPosition: ({ x, y }: { x: number; y: number }) => ({ x, y }),
+        getViewport: () => ({ x: 0, y: 0, zoom: 0.5 }),
+        screenToFlowPosition: ({ x, y }: { x: number; y: number }) => ({
+          x: x / 0.5,
+          y: y / 0.5,
+        }),
       });
     });
     setNodesUnsafeSpy.mockClear();
 
     const surface = screen.getByTestId('zone-selection-surface');
-    fireEvent.pointerDown(surface, { button: 0, pointerId: 7, clientX: 120, clientY: 160 });
-    fireEvent.pointerMove(surface, { pointerId: 7, clientX: 650, clientY: 400, buttons: 1 });
+    fireEvent.pointerDown(surface, { button: 0, pointerId: 7, clientX: 65, clientY: 80 });
+    fireEvent.pointerMove(surface, { pointerId: 7, clientX: 245, clientY: 120, buttons: 1 });
 
     expect(document.querySelector('.canvas-marquee-selection')).toBeInTheDocument();
     const updater = setNodesUnsafeSpy.mock.calls.at(-1)?.[0] as
@@ -130,8 +134,64 @@ describe('SessionCanvas zoom shortcuts', () => {
       'card-1',
     ]);
 
-    fireEvent.pointerUp(surface, { button: 0, pointerId: 7, clientX: 650, clientY: 400 });
+    fireEvent.pointerUp(surface, { button: 0, pointerId: 7, clientX: 245, clientY: 120 });
     expect(document.querySelector('.canvas-marquee-selection')).not.toBeInTheDocument();
+  });
+
+  it('runs nested worktree snapping through heterogeneous production peers', () => {
+    render(<SessionCanvas board={null} client={null} branches={[]} />);
+    const flowNodes: Node[] = [
+      {
+        id: 'zone-1',
+        type: 'zone',
+        position: { x: 100, y: 100 },
+        width: 600,
+        height: 500,
+        data: {},
+      },
+      {
+        id: 'branch-1',
+        type: 'branchNode',
+        parentId: 'zone-1',
+        position: { x: 41, y: 80 },
+        positionAbsolute: { x: 141, y: 180 },
+        width: 200,
+        height: 120,
+        data: {},
+      },
+      {
+        id: 'artifact-1',
+        type: 'artifactNode',
+        position: { x: 140, y: 400 },
+        width: 300,
+        height: 180,
+        data: {},
+      },
+    ];
+    act(() => {
+      (reactFlowProps?.onInit as (instance: unknown) => void)?.({
+        getNodes: () => flowNodes,
+        getViewport: () => ({ x: 10, y: 20, zoom: 0.5 }),
+        getZoom: () => 0.5,
+        screenToFlowPosition: ({ x, y }: { x: number; y: number }) => ({ x, y }),
+      });
+    });
+    setNodesUnsafeSpy.mockClear();
+
+    act(() => {
+      (reactFlowProps?.onNodeDrag as (event: unknown, node: Node) => void)?.({}, flowNodes[1]);
+    });
+
+    const guide = document.querySelector<HTMLElement>(
+      '.canvas-alignment-guide.vertical[data-guide-kind="alignment"]'
+    );
+    expect(guide).not.toBeNull();
+    expect(guide).toHaveStyle({ left: '80px' });
+    expect(guide?.style.height).not.toBe('100%');
+    const updater = setNodesUnsafeSpy.mock.calls.at(-1)?.[0] as
+      | ((current: Node[]) => Node[])
+      | undefined;
+    expect(updater?.(flowNodes).find((node) => node.id === 'branch-1')?.position.x).toBe(40);
   });
 
   it('opens the markdown note modal when the markdown tool clicks a board node', async () => {
