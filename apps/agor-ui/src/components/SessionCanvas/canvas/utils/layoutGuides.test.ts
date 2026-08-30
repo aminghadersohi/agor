@@ -5,7 +5,9 @@ import {
   flowSnapDistanceForZoom,
   getGuideLayoutRects,
   type LayoutGuide,
+  type LayoutRect,
   layoutGuideScreenStyle,
+  layoutSizeReadoutScreenStyle,
   snapRectToPeers,
 } from './layoutGuides';
 
@@ -29,8 +31,15 @@ describe('snapRectToPeers', () => {
     ]);
     expect(result).toMatchObject({ x: 300, y: 300 });
     expect(result.guides).toContainEqual(
-      expect.objectContaining({ kind: 'size', label: '100px wide', start: 300, end: 400 })
+      expect.objectContaining({
+        kind: 'size',
+        label: '100 × 50',
+        offset: 350,
+        start: 300,
+        end: 400,
+      })
     );
+    expect(result.guides.filter((guide) => guide.kind === 'size')).toHaveLength(1);
   });
 
   it('draws both compared horizontal gaps with ticks metadata and one comparison id', () => {
@@ -141,6 +150,60 @@ describe('layout guide dedupe and transforms', () => {
       top: 90,
       width: 40,
     });
+  });
+});
+
+describe('compact size readout placement', () => {
+  const makeGuide = (target: LayoutRect, avoid: LayoutRect[] = []): LayoutGuide => ({
+    id: 'size-moving',
+    orientation: 'horizontal',
+    offset: target.y + target.height,
+    start: target.x,
+    end: target.x + target.width,
+    kind: 'size',
+    label: `${target.width} × ${target.height}`,
+    readout: { target, avoid },
+  });
+  const bounds = { left: 0, top: 0, right: 500, bottom: 300 };
+
+  it('keeps the badge below and fully outside an ordinary moving object', () => {
+    const target = { id: 'moving', x: 100, y: 100, width: 100, height: 50 };
+    const style = layoutSizeReadoutScreenStyle(makeGuide(target), { x: 0, y: 0, zoom: 1 }, bounds);
+
+    expect(style).toMatchObject({ left: 120, top: 156, width: 60, height: 20 });
+    expect(Number(style?.top)).toBeGreaterThan(target.y + target.height);
+  });
+
+  it('flips above instead of clipping or moving into content at the viewport bottom', () => {
+    const target = { id: 'moving', x: 100, y: 270, width: 100, height: 20 };
+    const style = layoutSizeReadoutScreenStyle(makeGuide(target), { x: 0, y: 0, zoom: 1 }, bounds);
+
+    expect(Number(style?.top) + Number(style?.height)).toBeLessThan(target.y);
+    expect(Number(style?.top)).toBeGreaterThanOrEqual(bounds.top + 4);
+  });
+
+  it('chooses another outside edge when a neighbour occupies the preferred side', () => {
+    const target = { id: 'moving', x: 100, y: 100, width: 100, height: 50 };
+    const below = { id: 'below', x: 100, y: 154, width: 100, height: 60 };
+    const style = layoutSizeReadoutScreenStyle(
+      makeGuide(target, [below]),
+      { x: 0, y: 0, zoom: 1 },
+      bounds
+    );
+
+    expect(Number(style?.top) + Number(style?.height)).toBeLessThan(target.y);
+  });
+
+  it('keeps a badge wider than a tiny zoomed-out object legible and on-canvas', () => {
+    const target = { id: 'moving', x: 10, y: 10, width: 10, height: 10 };
+    const style = layoutSizeReadoutScreenStyle(
+      makeGuide(target),
+      { x: 0, y: 0, zoom: 0.1 },
+      { left: 0, top: 0, right: 100, bottom: 100 }
+    );
+
+    expect(style).toMatchObject({ left: 4, top: 8, width: 54, height: 20 });
+    expect(Number(style?.top)).toBeGreaterThan((target.y + target.height) * 0.1);
   });
 });
 

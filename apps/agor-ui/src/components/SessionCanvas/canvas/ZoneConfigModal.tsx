@@ -254,11 +254,11 @@ export const ZoneConfigModal = ({
 
         <Form.Item
           name="layoutMode"
-          label="Automatic"
+          label="Auto Zone"
           valuePropName="checked"
           getValueProps={(value: ZoneLayoutMode) => ({ checked: value === 'auto' })}
           normalize={(checked: boolean) => (checked ? 'auto' : 'manual')}
-          help="Keeps this zone arranged as items are added, removed, or resized."
+          help="Auto Zone keeps items arranged, but pauses for one minute while you use a stacked item."
         >
           <Switch
             onChange={(checked) => {

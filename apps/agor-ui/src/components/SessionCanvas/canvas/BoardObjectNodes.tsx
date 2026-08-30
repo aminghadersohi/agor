@@ -62,6 +62,8 @@ type ZoneBoardObject = Extract<BoardObject, { type: 'zone' }>;
  */
 interface ZoneNodeData extends Omit<ZoneBoardObject, 'type'> {
   objectId: string;
+  /** The shared multi-selection toolbar replaces this zone's individual controls. */
+  suppressToolbar?: boolean;
   pinnedItemCount?: number;
   /** How many of the pinned items are currently collapsed. */
   compactItemCount?: number;
@@ -413,6 +415,8 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
         {/* Toolbar - ALWAYS rendered, visibility controlled by CSS only */}
         <div
           className="nodrag nopan"
+          role="toolbar"
+          aria-label="Zone actions"
           onPointerDown={(e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -431,7 +435,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
             left: '50%',
             transform: `translateX(-50%) scale(${scale})`,
             transformOrigin: 'center bottom',
-            display: 'flex',
+            display: data.suppressToolbar ? 'none' : 'flex',
             alignItems: 'center',
             gap: '8px',
             padding: '6px',

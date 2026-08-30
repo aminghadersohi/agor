@@ -888,6 +888,34 @@ describe('BoardObjectRepository.updateSize', () => {
   });
 });
 
+describe('BoardObjectRepository.updateLayout', () => {
+  dbTest('commits position, size, and density in one row update', async ({ db }) => {
+    const repoRepo = new RepoRepository(db);
+    const branchRepo = new BranchRepository(db);
+    const boardObjectRepo = new BoardObjectRepository(db);
+    const repo = await repoRepo.create(createRepoData());
+    const branch = await branchRepo.create(createBranchData({ repo_id: repo.repo_id }));
+    const boardId = await createBoard(db);
+    const created = await boardObjectRepo.create({
+      board_id: boardId,
+      branch_id: branch.branch_id,
+      position: { x: 10, y: 20 },
+    });
+
+    const updated = await boardObjectRepo.updateLayout(created.object_id, {
+      position: { x: 30, y: 40 },
+      size: { width: 500, height: 88 },
+      compact: true,
+    });
+
+    expect(updated).toMatchObject({
+      position: { x: 30, y: 40 },
+      size: { width: 500, height: 88 },
+      compact: true,
+    });
+  });
+});
+
 describe('BoardObjectRepository.updateCompact', () => {
   dbTest('invalidates measurements when presentation mode changes', async ({ db }) => {
     const repoRepo = new RepoRepository(db);
