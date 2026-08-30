@@ -52,7 +52,7 @@ import {
   mcpRequiredString,
 } from '../schema.js';
 import type { McpContext } from '../server.js';
-import { sessionContextRequiredResult, textResult } from '../server.js';
+import { sessionContextRequiredResult, structuredResult, textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
 import { listAttachedMcpServers } from './mcp-servers.js';
 
@@ -119,6 +119,35 @@ const modelConfigInputSchema = z
   .describe(
     "Model override for this session. Pass either a model ID string (e.g. 'claude-opus-4-6') or a full { mode, model, effort, advisorModel, provider } object. Overrides the user default model_config and is threaded through to the spawned agent process. Call agor_models_list to discover valid model IDs per agenticTool."
   );
+
+const callbackRetargetOutputSchema = z.object({
+  session_id: z.string().describe('Fully resolved callback source Session ID.'),
+  previous_callback_session_id: z
+    .string()
+    .describe('Fully resolved callback destination before the transfer.'),
+  callback_session_id: z
+    .string()
+    .describe('Fully resolved callback destination after the transfer.'),
+  relationship_ids: z
+    .array(z.string())
+    .describe('Remote-create relationship IDs updated atomically with the direct route.'),
+  task_callback_subscriptions_retargeted: z
+    .literal(false)
+    .describe('Exact-Task callback subscriptions are separate and remain unchanged.'),
+});
+
+const sessionReparentOutputSchema = z.object({
+  session_id: z.string().describe('Fully resolved Session ID whose genealogy changed.'),
+  branch_id: z.string().describe('Fully resolved branch shared by source and new parent.'),
+  previous_parent_session_id: z
+    .string()
+    .nullable()
+    .describe('Fully resolved previous parent Session ID, or null for a root.'),
+  parent_session_id: z
+    .string()
+    .nullable()
+    .describe('Fully resolved new parent Session ID, or null when detached to a root.'),
+});
 
 /**
  * Normalize the two input shapes (string shorthand or full object) into the
@@ -1001,6 +1030,80 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       );
 
       return textResult({ relationship });
+    }
+  );
+
+  // Tool 5d: agor_sessions_retarget_callback
+  server.registerTool(
+    'agor_sessions_retarget_callback',
+    {
+      description:
+        "Move an existing Session's standing/direct completion callback to another Session. This is routing, not genealogy: it does not change parent_session_id. For cross-branch remote_create links, the Session route and matching durable relationship rows change atomically while enabled/once/persistent/include flags are preserved. A running Task that completes after this transfer commits resolves the standing route to the new destination only. Exact-Task callbacks requested with agor_sessions_prompt callback:true (the durable caller/root-propagated subscription mechanism) remain unchanged and may independently report to their original destination.",
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        sessionId: mcpRequiredId(
+          'sessionId',
+          'Session',
+          'Session whose existing direct completion callback should move'
+        ),
+        callbackSessionId: mcpRequiredId(
+          'callbackSessionId',
+          'Session',
+          'New completion destination Session; may be in another branch but must be in the same tenant and prompt-authorized'
+        ),
+      }),
+      outputSchema: callbackRetargetOutputSchema,
+    },
+    async (args) => {
+      const sessionId = await resolveSessionId(ctx, args.sessionId);
+      const callbackSessionId = await resolveSessionId(ctx, args.callbackSessionId);
+      const result = await runWithMcpTenantDatabaseWrite(ctx, () =>
+        (ctx.app.service('sessions') as unknown as SessionsServiceImpl).retargetCallback(
+          sessionId,
+          { callbackSessionId },
+          ctx.baseServiceParams
+        )
+      );
+      return structuredResult(result as unknown as Record<string, unknown>);
+    }
+  );
+
+  // Tool 5e: agor_sessions_reparent
+  server.registerTool(
+    'agor_sessions_reparent',
+    {
+      description:
+        "Change only a Session's branch-local genealogy parent. This is genealogy, not callback routing: it never changes callbackSessionId, remote_create relationships, or exact-Task callback subscriptions. The new parent must be active, prompt-authorized, in the same tenant and same branch; direct and indirect cycles are rejected. Pass parentSessionId:null to detach the Session into a branch-local root.",
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        sessionId: mcpRequiredId(
+          'sessionId',
+          'Session',
+          'Session whose branch-local genealogy parent should change'
+        ),
+        parentSessionId: z
+          .string()
+          .min(1, 'parentSessionId cannot be empty when provided.')
+          .nullable()
+          .describe(
+            'New branch-local parent Session ID, or null to detach into a root. Short IDs are accepted and the response returns the resolved ID.'
+          ),
+      }),
+      outputSchema: sessionReparentOutputSchema,
+    },
+    async (args) => {
+      const sessionId = await resolveSessionId(ctx, args.sessionId);
+      const parentSessionId = args.parentSessionId
+        ? await resolveSessionId(ctx, args.parentSessionId)
+        : null;
+      const result = await runWithMcpTenantDatabaseWrite(ctx, () =>
+        (ctx.app.service('sessions') as unknown as SessionsServiceImpl).reparent(
+          sessionId,
+          { parentSessionId },
+          ctx.baseServiceParams
+        )
+      );
+      return structuredResult(result as unknown as Record<string, unknown>);
     }
   );
 

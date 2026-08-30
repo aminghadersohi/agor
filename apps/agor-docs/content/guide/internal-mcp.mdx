@@ -270,6 +270,30 @@ Tenant identity is ambient for the MCP operation, but it does not hold a
 database transaction open. Individual service and repository calls use short
 tenant-scoped units of work.
 
+## Session transfer operations
+
+Two intentionally separate tools move existing Session relationships:
+
+- `agor_sessions_retarget_callback(sessionId, callbackSessionId)` changes a
+  standing/direct completion destination. Matching cross-branch
+  `remote_create` rows change in the same transaction, and the response returns
+  the resolved source, previous destination, new destination, and relationship
+  IDs. Callback enablement, mode, template, and include flags are preserved.
+- `agor_sessions_reparent(sessionId, parentSessionId)` changes branch-local
+  genealogy only. The nullable parent remains in the same branch, both parent
+  child lists are updated atomically, and direct or indirect cycles fail.
+
+Both require Manager authority over the source, prompt authority over a new
+destination, and a same-tenant active destination. Archived or missing Sessions
+and archived or missing destination branches fail closed.
+
+Completion dispatch re-reads the worker Session after a terminal Task commits.
+If a direct retarget committed while that Task was running, its standing report
+goes only to the new direct destination. Exact-Task callbacks created by
+`agor_sessions_prompt(..., callback: true)` are separate immutable Task
+subscriptions—including requests propagated from a root orchestrator—and are
+not rewritten by direct retargeting.
+
 ## Best Practices
 
 - **Keep permission policies tight.** MCP calls respect Agor’s permission system. Configure approvals so agents only do what the team expects.
