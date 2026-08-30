@@ -19,6 +19,19 @@ function stableTaskId(sourceId: string, domain: string, discriminator = ''): Tas
   return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}` as TaskID;
 }
 
+/** One corrective Task for one caller-selected interrupt idempotency key. */
+export function interruptCorrectionTaskId(
+  targetSessionId: SessionID,
+  callerSessionId: SessionID,
+  idempotencyKey: string
+): TaskID {
+  return stableTaskId(
+    targetSessionId,
+    'session_interrupt_correction',
+    `${callerSessionId}\0${idempotencyKey}`
+  );
+}
+
 /** One durable Task per source completion event and callback target. */
 export function completionCallbackTaskId(sourceTaskId: TaskID, targetSessionId: SessionID): TaskID {
   return stableTaskId(sourceTaskId, 'session_completion', targetSessionId);

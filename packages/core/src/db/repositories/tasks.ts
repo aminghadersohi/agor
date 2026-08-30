@@ -5,6 +5,7 @@
  */
 
 import type {
+  CapabilityPolicyFsAccess,
   ExecutorPulse,
   ExecutorTerminationCompleteInput,
   SdkFailure,
@@ -55,6 +56,7 @@ import {
   update,
 } from '../database-wrapper';
 import { type SessionRow, sessions, type TaskInsert, type TaskRow, tasks, users } from '../schema';
+import { getCurrentTenantId } from '../tenant-context';
 import {
   AmbiguousIdError,
   type BaseRepository,
@@ -63,8 +65,67 @@ import {
   RepositoryError,
   resolveByShortIdPrefix,
 } from './base';
-import { visibleSessionReferenceAccessExists } from './branch-access';
+import {
+  resolveSessionRuntimeBranchAccess,
+  visibleSessionReferenceAccessExists,
+} from './branch-access';
+import { ExecutorSessionTokenAuthorityRepository } from './executor-session-token-authorities';
 import { deepMerge } from './merge-utils';
+
+export const MAX_COMPACTED_PROMPT_BYTES = 32 * 1024;
+const COMPACTED_PROMPT_HEADER =
+  'Several queued requests were compacted into this turn. Follow each distinct instruction in first-occurrence order.';
+
+export function normalizePromptForDeduplication(text: string): string {
+  return text
+    .normalize('NFKC')
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.trim().replace(/[\t ]+/g, ' '))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function compactedPrompt(
+  entries: NonNullable<TaskMetadata['prompt_compaction']>['requests']
+): string {
+  const unique = entries.filter((entry) => !entry.duplicate_of_request_id);
+  if (unique.length === 1) return unique[0]!.text;
+  return [
+    COMPACTED_PROMPT_HEADER,
+    ...unique.map(
+      (entry, index) =>
+        `\n--- Instruction ${index + 1} (request ${entry.request_id}) ---\n${entry.text}`
+    ),
+  ].join('\n');
+}
+
+function canonicalizeCompactionEntries(
+  entries: NonNullable<TaskMetadata['prompt_compaction']>['requests']
+): NonNullable<TaskMetadata['prompt_compaction']>['requests'] {
+  const ordered = [...entries].sort(
+    (left, right) =>
+      left.submitted_at.localeCompare(right.submitted_at) ||
+      left.request_id.localeCompare(right.request_id)
+  );
+  const firstByNormalizedText = new Map<string, TaskID>();
+  return ordered.map((entry) => {
+    const firstRequestId = firstByNormalizedText.get(entry.normalized_text);
+    const { duplicate_of_request_id: _previousDuplicate, ...base } = entry;
+    if (firstRequestId) return { ...base, duplicate_of_request_id: firstRequestId };
+    firstByNormalizedText.set(entry.normalized_text, entry.request_id);
+    return base;
+  });
+}
+
+function utf8Bytes(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
+}
+
+function hasOnlyOrdinaryPromptMetadata(metadata: TaskMetadata | undefined): boolean {
+  return Object.keys(metadata ?? {}).every((key) => key === 'queued_by_user_id');
+}
 
 function executorOwnsTask(row: Pick<TaskRow, 'status' | 'executor_connected_at'>): boolean {
   return (
@@ -179,6 +240,16 @@ function isSQLiteBusyError(error: unknown): boolean {
   return 'cause' in error && isSQLiteBusyError(error.cause);
 }
 
+function fsAccessRank(access: CapabilityPolicyFsAccess): number {
+  return access === 'write' ? 2 : access === 'read' ? 1 : 0;
+}
+
+function requireRuntimeTenantId(): string {
+  const tenantId = getCurrentTenantId();
+  if (!tenantId) throw new RepositoryError('Runtime authority tenant scope is unavailable');
+  return tenantId;
+}
+
 function withTerminalTiming(
   current: Task,
   updates: Partial<Task>,
@@ -218,6 +289,44 @@ export interface TerminationClaimInput {
   requireExecutorDisconnected?: boolean;
   now?: Date;
 }
+
+export interface ExecutorLaunchAuthorityOptions {
+  branchRbacEnabled: boolean;
+}
+
+export interface ExecutorLaunchAuthority {
+  principal_user_id: string;
+  session_id: string;
+  branch_id: string;
+  fs_access: CapabilityPolicyFsAccess;
+}
+
+/** Server-authenticated Task-token scope supplied to the repository hot path. */
+export interface TaskRuntimeAuthorityScope extends ExecutorLaunchAuthorityOptions {
+  token_fingerprint: string;
+  principal_user_id: string;
+  session_id: string;
+  branch_id: string;
+  /** O(1) standalone authority decision; PostgreSQL validates its durable row in-transaction. */
+  standalone_token_current?: boolean;
+}
+
+export type RuntimeTelemetryAuthorityDenialReason =
+  | 'token_revoked'
+  | 'principal_unavailable'
+  | 'branch_capability_revoked'
+  | 'filesystem_access_revoked'
+  | 'launch_authority_missing';
+
+export type RuntimeTelemetryReportResult =
+  | { outcome: 'continued'; task: Task }
+  | { outcome: 'control'; task: Task }
+  | { outcome: 'scope_mismatch'; task: Task }
+  | {
+      outcome: 'authorization_revoked';
+      task: Task;
+      reason: RuntimeTelemetryAuthorityDenialReason;
+    };
 
 export interface TerminationClaimResult {
   outcome: 'claimed' | 'unchanged' | 'condition_changed' | 'terminal';
@@ -261,6 +370,24 @@ export interface TaskDispatchClaimResult {
   /** Queued system updates durably folded into `task` by this claim. */
   coalesced_tasks?: Task[];
 }
+
+export interface InterruptCorrectionAdmissionInput {
+  session_id: SessionID;
+  corrective_task_id: TaskID;
+  corrective_prompt: string;
+  created_by: string;
+  requested_by_session_id: SessionID;
+  relationship: 'parent' | 'coordinator';
+  idempotency_key: string;
+}
+
+export type InterruptCorrectionAdmissionResult =
+  | { outcome: 'relationship_changed' }
+  | {
+      outcome: 'stop_requested' | 'already_requested' | 'idle_queued';
+      corrective_task: Task;
+      target_task?: Task;
+    };
 
 export interface QueuedTaskActorCheckResult {
   outcome: 'actor_available' | 'actor_missing' | 'condition_changed';
@@ -448,6 +575,8 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
    */
   private rowToTask(row: TaskRow): Task {
     const storedTerminationRequest = row.data.termination_request;
+    const { executor_launch_fs_access_floor: _executorLaunchFsAccessFloor, ...publicData } =
+      row.data;
     const coordination: TerminationCoordinationClaim | undefined =
       row.termination_coordination_token &&
       row.termination_coordination_claimed_at &&
@@ -477,7 +606,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         ? new Date(row.last_executor_heartbeat_at).toISOString()
         : undefined,
       created_by: row.created_by,
-      ...row.data,
+      ...publicData,
       ...(storedTerminationRequest
         ? {
             termination_request: {
@@ -1165,20 +1294,141 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
     });
   }
 
-  /** Atomically stamp heartbeat time and advance the latest pulse fact. */
+  /**
+   * Resolve and immutably bind the filesystem floor used for one Task launch.
+   *
+   * Task.created_by and Task -> Session -> Branch are the only principal and
+   * resource sources. A retry may observe the same floor, but it can never
+   * replace a write projection with read/none (or read with none).
+   */
+  async bindExecutorLaunchAuthority(
+    id: string,
+    options: ExecutorLaunchAuthorityOptions
+  ): Promise<ExecutorLaunchAuthority> {
+    return this.mutateLockedTask(id, async (txDb, row, fullId) => {
+      if (
+        row.status !== TaskStatus.DISPATCHING ||
+        row.executor_connected_at ||
+        row.data.termination_request
+      ) {
+        throw new RepositoryError('Task is not awaiting executor launch authority');
+      }
+      const access = await resolveSessionRuntimeBranchAccess(txDb, {
+        sessionId: row.session_id,
+        principalUserId: row.created_by,
+        ...options,
+      });
+      if (!access?.can_prompt_session) {
+        throw new RepositoryError('Authorization to launch this task is unavailable');
+      }
+
+      const existingFloor = row.data.executor_launch_fs_access_floor;
+      const requestedFloor = access.fs_access;
+      if (existingFloor && fsAccessRank(access.fs_access) < fsAccessRank(existingFloor)) {
+        throw new RepositoryError('Authorization to launch this task is unavailable');
+      }
+      const floor = existingFloor ?? requestedFloor;
+      const data = existingFloor
+        ? row.data
+        : { ...row.data, executor_launch_fs_access_floor: floor };
+      if (!existingFloor) {
+        await update(txDb, tasks).set({ data }).where(eq(tasks.task_id, fullId)).run();
+      }
+      return {
+        principal_user_id: row.created_by,
+        session_id: row.session_id,
+        branch_id: access.branch_id,
+        fs_access: floor,
+      };
+    });
+  }
+
+  /**
+   * Revalidate exact runtime authority, then atomically stamp heartbeat/pulse.
+   * Explicit denial returns the unchanged Task so the service can claim the
+   * existing fenced termination path. Store/query errors throw and roll back,
+   * leaving the stale-heartbeat supervisor as the existing bounded backstop.
+   */
   async reportRuntimeTelemetry(
     id: string,
+    authority: TaskRuntimeAuthorityScope,
     pulse?: Omit<ExecutorPulse, 'observed_at'>,
     observedAt?: Date
-  ): Promise<Task | null> {
+  ): Promise<RuntimeTelemetryReportResult> {
     return this.mutateLockedTask(id, async (txDb, row, fullId) => {
+      const current = this.rowToTask(row);
       // STOPPING remains executor-owned until the scoped executor reports
       // quiescence. An unverified containment guard is not proof of absence,
       // so a still-live executor may continue publishing useful evidence and
       // eventually recover the request with a late task/request-fenced ack.
-      if (!executorMayReportTelemetry(row)) return null;
+      if (!executorMayReportTelemetry(row)) return { outcome: 'control', task: current };
 
-      const heartbeatAt = await this.mutationNow(txDb, fullId, observedAt);
+      const access = await resolveSessionRuntimeBranchAccess(txDb, {
+        sessionId: row.session_id,
+        principalUserId: row.created_by,
+        branchRbacEnabled: authority.branchRbacEnabled,
+      });
+      if (
+        authority.principal_user_id !== row.created_by ||
+        authority.session_id !== row.session_id ||
+        !access ||
+        authority.branch_id !== access.branch_id
+      ) {
+        return { outcome: 'scope_mismatch', task: current };
+      }
+
+      const floor = row.data.executor_launch_fs_access_floor;
+      if (!floor) {
+        return {
+          outcome: 'authorization_revoked',
+          task: current,
+          reason: 'launch_authority_missing',
+        };
+      }
+      if (!access.principal_available) {
+        return {
+          outcome: 'authorization_revoked',
+          task: current,
+          reason: 'principal_unavailable',
+        };
+      }
+      if (!access.can_prompt_session) {
+        return {
+          outcome: 'authorization_revoked',
+          task: current,
+          reason: 'branch_capability_revoked',
+        };
+      }
+      if (fsAccessRank(access.fs_access) < fsAccessRank(floor)) {
+        return {
+          outcome: 'authorization_revoked',
+          task: current,
+          reason: 'filesystem_access_revoked',
+        };
+      }
+
+      const tokenCurrent = isPostgresDatabase(this.db)
+        ? await new ExecutorSessionTokenAuthorityRepository(txDb).isCurrent({
+            tenantId: requireRuntimeTenantId(),
+            tokenFingerprint: authority.token_fingerprint,
+            sessionId: authority.session_id,
+            taskId: fullId,
+            branchId: authority.branch_id,
+            userId: authority.principal_user_id,
+          })
+        : authority.standalone_token_current === true;
+      if (!tokenCurrent) {
+        return {
+          outcome: 'authorization_revoked',
+          task: current,
+          reason: 'token_revoked',
+        };
+      }
+
+      const heartbeatAt = observedAt ?? access.observed_at;
+      if (!Number.isFinite(heartbeatAt.getTime())) {
+        throw new RepositoryError('Runtime authority observation time is invalid');
+      }
 
       const previous = row.data.latest_executor_pulse;
       const latest =
@@ -1190,7 +1440,10 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         .set({ last_executor_heartbeat_at: heartbeatAt, data })
         .where(eq(tasks.task_id, fullId))
         .run();
-      return this.rowToTask({ ...row, last_executor_heartbeat_at: heartbeatAt, data });
+      return {
+        outcome: 'continued',
+        task: this.rowToTask({ ...row, last_executor_heartbeat_at: heartbeatAt, data }),
+      };
     });
   }
 
@@ -1699,7 +1952,15 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
             termination_coordination_instance_id: insertData.termination_coordination_instance_id,
             termination_coordination_boot_id: insertData.termination_coordination_boot_id,
             termination_unverified_at: insertData.termination_unverified_at,
-            data: insertData.data,
+            data: {
+              ...insertData.data,
+              ...(currentRow.data.executor_launch_fs_access_floor
+                ? {
+                    executor_launch_fs_access_floor:
+                      currentRow.data.executor_launch_fs_access_floor,
+                  }
+                : {}),
+            },
           })
           .where(eq(tasks.task_id, fullId))
           .run();
@@ -1751,6 +2012,215 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
   }
 
   /**
+   * Atomically request interruption and put its correction ahead of ordinary
+   * queued work. The locked target Session is the relationship and dispatch
+   * fence. A correction can never become claimable until the active Task's
+   * ordinary STOPPING -> terminal settlement makes the Session promptable.
+   */
+  async admitInterruptCorrection(
+    input: InterruptCorrectionAdmissionInput
+  ): Promise<InterruptCorrectionAdmissionResult> {
+    return this.runTaskMutation(() =>
+      runDatabaseTransaction(
+        this.db,
+        async (txDb) => {
+          await lockRowForUpdate(
+            txDb,
+            this.db,
+            sessions,
+            eq(sessions.session_id, input.session_id)
+          );
+          const sessionRow = await select(txDb)
+            .from(sessions)
+            .where(eq(sessions.session_id, input.session_id))
+            .one();
+          if (!sessionRow) throw new EntityNotFoundError('Session', input.session_id);
+          if (sessionRow.archived) throw new RepositoryError('Target Session is archived');
+
+          const callback = (
+            sessionRow.data as {
+              callback_config?: { enabled?: boolean; callback_session_id?: SessionID };
+            }
+          ).callback_config;
+          const callerRow = await select(txDb)
+            .from(sessions)
+            .where(eq(sessions.session_id, input.requested_by_session_id))
+            .one();
+          const relationshipMatches =
+            input.relationship === 'parent'
+              ? sessionRow.parent_session_id === input.requested_by_session_id &&
+                callerRow?.branch_id === sessionRow.branch_id &&
+                !callerRow.archived
+              : callback?.enabled !== false &&
+                callback?.callback_session_id === input.requested_by_session_id &&
+                !!callerRow &&
+                !callerRow.archived;
+          if (!relationshipMatches) {
+            return { outcome: 'relationship_changed' };
+          }
+
+          await lockRowForUpdate(txDb, this.db, tasks, eq(tasks.task_id, input.corrective_task_id));
+          const existingCorrectionRow = await select(txDb)
+            .from(tasks)
+            .where(eq(tasks.task_id, input.corrective_task_id))
+            .one();
+          if (existingCorrectionRow) {
+            const correctiveTask = this.rowToTask(existingCorrectionRow);
+            const audit = correctiveTask.metadata?.interrupt_correction;
+            if (
+              correctiveTask.session_id !== input.session_id ||
+              correctiveTask.created_by !== input.created_by ||
+              correctiveTask.full_prompt !== input.corrective_prompt ||
+              audit?.requested_by_session_id !== input.requested_by_session_id ||
+              audit?.relationship !== input.relationship ||
+              audit?.idempotency_key !== input.idempotency_key
+            ) {
+              throw new RepositoryError(
+                `Task identity ${input.corrective_task_id} is already in use`
+              );
+            }
+            // A retry may arrive long after the correction completed. It may
+            // only resume termination of the Task recorded by the original
+            // admission; never mistake unrelated later work for its target.
+            const activeRow = audit?.target_task_id
+              ? await select(txDb)
+                  .from(tasks)
+                  .where(
+                    and(
+                      eq(tasks.task_id, audit.target_task_id),
+                      eq(tasks.session_id, input.session_id),
+                      inArray(tasks.status, [...EXECUTING_TASK_STATUSES])
+                    )
+                  )
+                  .one()
+              : undefined;
+            return {
+              outcome: 'already_requested',
+              corrective_task: correctiveTask,
+              ...(activeRow ? { target_task: this.rowToTask(activeRow) } : {}),
+            };
+          }
+
+          const activeRow = await select(txDb)
+            .from(tasks)
+            .where(
+              and(
+                eq(tasks.session_id, input.session_id),
+                inArray(tasks.status, [...EXECUTING_TASK_STATUSES])
+              )
+            )
+            .orderBy(desc(tasks.created_at), desc(tasks.task_id))
+            .limit(1)
+            .one();
+          if (activeRow?.status === TaskStatus.STOPPING) {
+            throw new RepositoryError(
+              'Target Session is already stopping for a different interruption or stop request'
+            );
+          }
+
+          const position = await select(txDb, {
+            minPos: sql<number | null>`min(${tasks.queue_position})`,
+          })
+            .from(tasks)
+            .where(and(eq(tasks.session_id, input.session_id), eq(tasks.status, TaskStatus.QUEUED)))
+            .one();
+          const queuePosition = (position?.minPos ?? 2) - 1;
+          const requestedAt = new Date().toISOString();
+          const targetTask = activeRow ? this.rowToTask(activeRow) : undefined;
+          const audit = {
+            requested_by_session_id: input.requested_by_session_id,
+            requested_by_user_id: input.created_by as import('@agor/core/types').UserID,
+            relationship: input.relationship,
+            ...(targetTask ? { target_task_id: targetTask.task_id } : {}),
+            corrective_task_id: input.corrective_task_id,
+            idempotency_key: input.idempotency_key,
+            requested_at: requestedAt,
+          };
+          const correctiveInsert = this.taskToInsert({
+            task_id: input.corrective_task_id,
+            session_id: input.session_id,
+            full_prompt: input.corrective_prompt,
+            created_by: input.created_by,
+            status: TaskStatus.QUEUED,
+            queue_position: queuePosition,
+            metadata: {
+              queued_by_user_id: input.created_by,
+              source: 'agor',
+              initial_message_id:
+                input.corrective_task_id as unknown as import('@agor/core/types').MessageID,
+              interrupt_correction: audit,
+              prompt_control: { stream: true },
+            },
+            message_range: {
+              start_index: -1,
+              end_index: -1,
+              start_timestamp: requestedAt,
+            },
+            git_state: { ref_at_start: '', sha_at_start: '' },
+            tool_use_count: 0,
+          });
+          await insert(txDb, tasks).values(correctiveInsert).run();
+          const correctiveRow = await select(txDb)
+            .from(tasks)
+            .where(eq(tasks.task_id, input.corrective_task_id))
+            .one();
+          if (!correctiveRow) throw new RepositoryError('Failed to persist corrective Task');
+          const correctiveTask = this.rowToTask(correctiveRow);
+
+          if (!targetTask || !activeRow) {
+            if (!sessionCanStartTask(sessionRow.status, sessionRow.ready_for_prompt)) {
+              throw new RepositoryError(
+                `Target Session is not active or promptable (${sessionRow.status})`
+              );
+            }
+            return { outcome: 'idle_queued', corrective_task: correctiveTask };
+          }
+
+          const targetMetadata: TaskMetadata = {
+            ...(targetTask.metadata ?? {}),
+            interruptions: [
+              ...(targetTask.metadata?.interruptions ?? []),
+              { ...audit, target_task_id: targetTask.task_id },
+            ],
+          };
+          const request = {
+            cause: 'user_stop' as const,
+            requested_at: requestedAt,
+            error_message: `Interrupted by authorized ${input.relationship} Session ${input.requested_by_session_id}.`,
+          };
+          const targetData = {
+            ...activeRow.data,
+            metadata: targetMetadata,
+            termination_request: request,
+          };
+          await update(txDb, tasks)
+            .set({ status: TaskStatus.STOPPING, data: targetData })
+            .where(and(eq(tasks.task_id, targetTask.task_id), eq(tasks.status, targetTask.status)))
+            .run();
+          await update(txDb, sessions)
+            .set({
+              status: SessionStatus.STOPPING,
+              ready_for_prompt: false,
+              updated_at: new Date(requestedAt),
+            })
+            .where(eq(sessions.session_id, input.session_id))
+            .run();
+          return {
+            outcome: 'stop_requested',
+            corrective_task: correctiveTask,
+            target_task: this.rowToTask({
+              ...activeRow,
+              status: TaskStatus.STOPPING,
+              data: targetData,
+            }),
+          };
+        },
+        { sqliteImmediate: true }
+      )
+    );
+  }
+
+  /**
    * Create a pending task — either CREATED (will spawn immediately) or
    * QUEUED (will drain later) — owning the sentinel defaults that the
    * caller would otherwise have to assemble by hand.
@@ -1774,14 +2244,66 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
     created_by: string;
     status: TaskPendingDispatchStatus;
     metadata?: TaskMetadata;
+    /** Ordinary prompt-only compaction. Stable/internal producers omit this. */
+    compaction?: {
+      request_id: TaskID;
+      eligible: boolean;
+      permission_mode?: import('@agor/core/types').PermissionMode;
+      stream: boolean;
+    };
   }): Promise<Task> {
+    const submittedAt = new Date().toISOString();
+    const normalizedPrompt = normalizePromptForDeduplication(input.full_prompt);
+    const compactionEligible =
+      input.status === TaskStatus.QUEUED &&
+      input.compaction?.eligible === true &&
+      hasOnlyOrdinaryPromptMetadata(input.metadata) &&
+      !input.full_prompt.trimStart().startsWith('/') &&
+      !input.full_prompt.includes('Attachments — use `agor_upload_materialize` to access:') &&
+      !input.full_prompt.includes('/_uploads/') &&
+      utf8Bytes(input.full_prompt) <= MAX_COMPACTED_PROMPT_BYTES;
+    const initialCompaction: TaskMetadata['prompt_compaction'] | undefined = compactionEligible
+      ? {
+          version: 1,
+          max_combined_prompt_bytes: MAX_COMPACTED_PROMPT_BYTES,
+          requests: [
+            {
+              request_id: input.compaction!.request_id,
+              submitted_at: submittedAt,
+              created_by: input.created_by as import('@agor/core/types').UserID,
+              text: input.full_prompt,
+              normalized_text: normalizedPrompt,
+            },
+          ],
+          unique_prompt_count: 1,
+          duplicate_request_count: 0,
+          last_admitted_request_id: input.compaction!.request_id,
+        }
+      : undefined;
+    const taskMetadata: TaskMetadata | undefined =
+      input.metadata || initialCompaction || input.compaction
+        ? {
+            ...(input.metadata ?? {}),
+            ...(initialCompaction ? { prompt_compaction: initialCompaction } : {}),
+            ...(input.compaction
+              ? {
+                  prompt_control: {
+                    ...(input.compaction.permission_mode
+                      ? { permission_mode: input.compaction.permission_mode }
+                      : {}),
+                    stream: input.compaction.stream,
+                  },
+                }
+              : {}),
+          }
+        : undefined;
     const taskBase: Partial<Task> = {
       task_id: input.task_id,
       session_id: input.session_id,
       full_prompt: input.full_prompt,
       created_by: input.created_by,
       status: input.status,
-      metadata: input.metadata,
+      metadata: taskMetadata,
       // Sentinels — overwritten by spawnTaskExecutor at the status → RUNNING
       // transition. While `start_index === -1` / `sha_at_start === ''`, the
       // task is intentionally unpinned.
@@ -1867,6 +2389,89 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
               // that same Task into the durable queue rather than letting it
               // jump an already-admitted prompt or remain undiscoverable.
               existingCreated = existing;
+            }
+          }
+
+          // Only ordinary human prompts opt into compaction. The current
+          // Session row is locked, so callback/genealogy changes and competing
+          // admissions cannot race this eligibility decision. We fold only
+          // into the contiguous queue tail: an internal/callback/control Task
+          // is a hard ordering barrier.
+          const sessionData = sessionRow.data as SessionRow['data'] & {
+            callback_config?: { enabled?: boolean; callback_session_id?: string };
+            genealogy?: { parent_session_id?: string };
+          };
+          const hasCompletionContinuation =
+            !!sessionRow.parent_session_id ||
+            (!!sessionData.callback_config?.callback_session_id &&
+              sessionData.callback_config.enabled !== false);
+          if (compactionEligible && !hasCompletionContinuation && !existingCreated) {
+            const tailRow = await select(txDb)
+              .from(tasks)
+              .where(
+                and(eq(tasks.session_id, input.session_id), eq(tasks.status, TaskStatus.QUEUED))
+              )
+              .orderBy(desc(tasks.queue_position), desc(tasks.created_at), desc(tasks.task_id))
+              .limit(1)
+              .one();
+            if (tailRow) {
+              const tail = this.rowToTask(tailRow);
+              const currentCompaction = tail.metadata?.prompt_compaction;
+              const sameControl =
+                tail.metadata?.prompt_control?.permission_mode ===
+                  input.compaction!.permission_mode &&
+                tail.metadata?.prompt_control?.stream === input.compaction!.stream;
+              const ordinaryTailMetadata = Object.keys(tail.metadata ?? {}).every((key) =>
+                ['queued_by_user_id', 'prompt_compaction', 'prompt_control'].includes(key)
+              );
+              const safeTail =
+                tail.created_by === input.created_by &&
+                !!currentCompaction &&
+                currentCompaction.version === 1 &&
+                ordinaryTailMetadata &&
+                !tail.metadata?.completion_callback &&
+                !tail.metadata?.is_agor_callback &&
+                !tail.metadata?.widget_id &&
+                !tail.metadata?.gateway_inbound_event_id &&
+                !tail.metadata?.interrupt_correction &&
+                sameControl;
+              if (safeTail) {
+                const nextEntry = {
+                  request_id: input.compaction!.request_id,
+                  submitted_at: submittedAt,
+                  created_by: input.created_by as import('@agor/core/types').UserID,
+                  text: input.full_prompt,
+                  normalized_text: normalizedPrompt,
+                };
+                const requests = canonicalizeCompactionEntries([
+                  ...currentCompaction.requests,
+                  nextEntry,
+                ]);
+                const prompt = compactedPrompt(requests);
+                if (utf8Bytes(prompt) <= MAX_COMPACTED_PROMPT_BYTES) {
+                  const duplicateCount = requests.filter(
+                    (entry) => !!entry.duplicate_of_request_id
+                  ).length;
+                  const metadata: TaskMetadata = {
+                    ...(tail.metadata ?? {}),
+                    prompt_compaction: {
+                      ...currentCompaction,
+                      requests,
+                      unique_prompt_count: requests.length - duplicateCount,
+                      duplicate_request_count: duplicateCount,
+                      last_admitted_request_id: input.compaction!.request_id,
+                    },
+                  };
+                  const data = { ...tailRow.data, full_prompt: prompt, metadata };
+                  await update(txDb, tasks)
+                    .set({ data })
+                    .where(
+                      and(eq(tasks.task_id, tail.task_id), eq(tasks.status, TaskStatus.QUEUED))
+                    )
+                    .run();
+                  return this.rowToTask({ ...tailRow, data });
+                }
+              }
             }
           }
 

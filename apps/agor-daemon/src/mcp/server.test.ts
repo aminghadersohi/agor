@@ -2,13 +2,21 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { promisify } from 'node:util';
 import { resolveMultiTenancyConfig } from '@agor/core/config';
-import { getCurrentTenantId, SessionRepository } from '@agor/core/db';
+import {
+  BranchRepository,
+  generateId,
+  getCurrentTenantId,
+  RepoRepository,
+  SessionRepository,
+  TaskRepository,
+} from '@agor/core/db';
+import { SessionStatus } from '@agor/core/types';
 import { Server as SdkServer } from '@modelcontextprotocol/server';
 import type { Request, Response } from 'express';
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { dbTest } from '../../../../packages/core/src/db/test-helpers';
+import { dbTest, ensureTestUser } from '../../../../packages/core/src/db/test-helpers';
 import { createUsersService } from '../services/users.js';
 import { buildRegistry, coerceJsonRecord, setupMCPRoutes } from './server.js';
 import { initMcpTokens, MCP_TOKEN_AUDIENCE, MCP_TOKEN_ISSUER } from './tokens.js';
@@ -84,6 +92,12 @@ describe('MCP tool registry', () => {
     const registry = buildRegistry();
     const expectedPropertiesByTool: Record<string, string[]> = {
       agor_sessions_prompt: ['sessionId', 'prompt', 'mode'],
+      agor_sessions_interrupt_with_message: [
+        'targetSessionId',
+        'relationship',
+        'message',
+        'idempotencyKey',
+      ],
       agor_boards_get: ['boardId'],
       agor_branches_create: ['repoId', 'branchName', 'boardId', 'waitForReady', 'waitTimeoutMs'],
       agor_branches_wait_for_ready: ['branchId', 'waitTimeoutMs'],
@@ -126,6 +140,50 @@ describe('MCP tool registry', () => {
     )?.agorGrants;
     expect(agorGrants?.properties).not.toHaveProperty('agor_proxies');
     expect(agorGrants?.properties).not.toHaveProperty('agor_token');
+  });
+
+  it('publishes explicit transfer output schemas through tool details', () => {
+    const registry = buildRegistry();
+
+    expect(registry.get('agor_sessions_retarget_callback')?.outputSchema).toMatchObject({
+      type: 'object',
+      required: expect.arrayContaining([
+        'session_id',
+        'previous_callback_session_id',
+        'callback_session_id',
+        'relationship_ids',
+        'task_callback_subscriptions_retargeted',
+      ]),
+    });
+    expect(registry.get('agor_sessions_reparent')?.outputSchema).toMatchObject({
+      type: 'object',
+      required: expect.arrayContaining([
+        'session_id',
+        'branch_id',
+        'previous_parent_session_id',
+        'parent_session_id',
+      ]),
+    });
+    expect(registry.get('agor_session_relationships_report')?.outputSchema).toMatchObject({
+      type: 'object',
+      required: expect.arrayContaining([
+        'session_id',
+        'destination',
+        'destination_session_id',
+        'task_id',
+        'status',
+      ]),
+    });
+    expect(registry.get('agor_sessions_interrupt_with_message')?.outputSchema).toMatchObject({
+      type: 'object',
+      required: expect.arrayContaining([
+        'target_session_id',
+        'relationship',
+        'outcome',
+        'corrective_task_id',
+        'termination_status',
+      ]),
+    });
   });
 });
 
@@ -389,7 +447,8 @@ describe('POST /mcp with personal API keys', () => {
     fn: (baseUrl: string) => Promise<void>,
     config: Parameters<typeof setupMCPRoutes>[3] = { multi_tenancy: undefined },
     toolSearchEnabled = false,
-    serverVersion = 'test-product-version'
+    serverVersion = 'test-product-version',
+    database: Parameters<typeof setupMCPRoutes>[1] = testSqliteDb()
   ) {
     const webApp = express();
     webApp.use(express.json());
@@ -400,7 +459,7 @@ describe('POST /mcp with personal API keys', () => {
       return svc;
     };
 
-    setupMCPRoutes(webApp as never, testSqliteDb(), toolSearchEnabled, config, { serverVersion });
+    setupMCPRoutes(webApp as never, database, toolSearchEnabled, config, { serverVersion });
 
     const httpServer = webApp.listen(0);
     try {
@@ -493,6 +552,295 @@ describe('POST /mcp with personal API keys', () => {
         httpServer.close((err) => (err ? reject(err) : resolve()));
       });
     }
+  });
+
+  it('executes the real callback-retarget MCP operation through progressive discovery', async () => {
+    await mockPersonalApiKeyUser();
+    const retargetCallback = vi.fn(async () => ({
+      session_id: 'sess-source',
+      previous_callback_session_id: 'sess-old',
+      callback_session_id: 'sess-new',
+      relationship_ids: ['rel-1'],
+      task_callback_subscriptions_retargeted: false,
+    }));
+    const sessions = {
+      get: vi.fn(async (id: string) => ({
+        session_id: id,
+        branch_id: 'branch-1',
+        agentic_tool: 'codex',
+      })),
+      retargetCallback,
+    };
+
+    await withMcpServer(
+      {
+        users: {
+          get: vi.fn(async () => ({
+            user_id: 'user-1',
+            email: 'alice@example.com',
+            role: 'member',
+          })),
+        },
+        sessions,
+      },
+      async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/mcp`, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json, text/event-stream',
+            'Content-Type': 'application/json',
+            'X-API-Key': 'agor_sk_valid',
+            'X-Agor-Session-Id': 'sess-caller',
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: {
+              name: 'agor_execute_tool',
+              arguments: {
+                tool_name: 'agor_sessions_retarget_callback',
+                arguments: {
+                  sessionId: 'sess-source',
+                  callbackSessionId: 'sess-new',
+                },
+              },
+            },
+          }),
+        });
+        const envelope = parseMcpResponse(await response.text()) as {
+          result?: {
+            structuredContent?: Record<string, unknown>;
+            content?: Array<{ text: string }>;
+          };
+          error?: { message: string };
+        };
+
+        expect(envelope.error).toBeUndefined();
+        expect(envelope.result?.structuredContent).toEqual({
+          session_id: 'sess-source',
+          previous_callback_session_id: 'sess-old',
+          callback_session_id: 'sess-new',
+          relationship_ids: ['rel-1'],
+          task_callback_subscriptions_retargeted: false,
+        });
+        expect(retargetCallback).toHaveBeenCalledWith(
+          'sess-source',
+          { callbackSessionId: 'sess-new' },
+          expect.objectContaining({ provider: 'mcp' })
+        );
+      },
+      { multi_tenancy: undefined },
+      /* toolSearchEnabled */ true
+    );
+  });
+
+  dbTest(
+    'executes real idempotent idle interrupt admission through progressive /mcp',
+    async ({ db }) => {
+      const userId = await ensureTestUser(db);
+      await mockPersonalApiKeyUser(userId);
+      const repo = await new RepoRepository(db).create({
+        repo_id: generateId(),
+        slug: `interrupt-mcp-${generateId()}`,
+        name: 'Interrupt MCP test',
+        repo_type: 'remote',
+        remote_url: 'https://example.invalid/agor-test.git',
+        local_path: '/tmp/agor-interrupt-mcp-test',
+        default_branch: 'main',
+      });
+      const branch = await new BranchRepository(db).create({
+        branch_id: generateId(),
+        repo_id: repo.repo_id,
+        name: 'interrupt-test',
+        ref: 'main',
+        branch_unique_id: 991_001,
+        path: '/tmp/agor-interrupt-mcp-test/branch',
+        created_by: userId,
+      });
+      const sessionRepository = new SessionRepository(db);
+      const callerSession = await sessionRepository.create({
+        session_id: generateId(),
+        branch_id: branch.branch_id,
+        agentic_tool: 'codex',
+        created_by: userId,
+      });
+      const callerSessionId = callerSession.session_id;
+      const target = await sessionRepository.create({
+        session_id: generateId(),
+        branch_id: branch.branch_id,
+        agentic_tool: 'codex',
+        created_by: userId,
+      });
+      await sessionRepository.update(target.session_id, {
+        status: SessionStatus.IDLE,
+        ready_for_prompt: true,
+        callback_config: { enabled: true, callback_session_id: callerSessionId },
+      });
+
+      const resolveInterruptAuthority = vi.fn(async () => ({
+        caller_session_id: callerSessionId,
+        target_session_id: target.session_id,
+        relationship: 'coordinator' as const,
+      }));
+      const triggerQueueProcessing = vi.fn(async () => undefined);
+      const emit = vi.fn();
+      const services = {
+        users: createUsersService(db),
+        sessions: {
+          get: vi.fn(async (id: string) => ({
+            session_id: id,
+            branch_id: branch.branch_id,
+            agentic_tool: 'codex',
+          })),
+          resolveInterruptAuthority,
+          triggerQueueProcessing,
+        },
+        tasks: { emit },
+      };
+
+      await withMcpServer(
+        services,
+        async (baseUrl) => {
+          const call = async (id: number) => {
+            const response = await fetch(`${baseUrl}/mcp`, {
+              method: 'POST',
+              headers: {
+                Accept: 'application/json, text/event-stream',
+                'Content-Type': 'application/json',
+                'X-API-Key': 'agor_sk_valid',
+                'X-Agor-Session-Id': callerSessionId,
+              },
+              body: JSON.stringify({
+                jsonrpc: '2.0',
+                id,
+                method: 'tools/call',
+                params: {
+                  name: 'agor_execute_tool',
+                  arguments: {
+                    tool_name: 'agor_sessions_interrupt_with_message',
+                    arguments: {
+                      targetSessionId: target.session_id,
+                      relationship: 'coordinator',
+                      message: 'Check the invariant before continuing.',
+                      idempotencyKey: 'progressive-retry-1',
+                    },
+                  },
+                },
+              }),
+            });
+            const envelope = parseMcpResponse(await response.text()) as {
+              result?: { structuredContent?: Record<string, unknown> };
+              error?: { message: string };
+            };
+            expect(envelope.error).toBeUndefined();
+            return envelope.result?.structuredContent;
+          };
+
+          const first = await call(201);
+          const retry = await call(202);
+          expect(first).toMatchObject({
+            outcome: 'idle_queued',
+            termination_status: 'idle',
+            target_task_id: null,
+          });
+          expect(retry).toMatchObject({
+            outcome: 'already_requested',
+            corrective_task_id: first?.corrective_task_id,
+          });
+          const queued = await new TaskRepository(db).findQueued(target.session_id);
+          expect(queued).toHaveLength(1);
+          expect(queued[0]?.metadata?.interrupt_correction).toMatchObject({
+            requested_by_session_id: callerSessionId,
+            relationship: 'coordinator',
+            idempotency_key: 'progressive-retry-1',
+          });
+          expect(resolveInterruptAuthority).toHaveBeenCalledTimes(2);
+        },
+        { multi_tenancy: undefined },
+        /* toolSearchEnabled */ true,
+        'test-product-version',
+        db
+      );
+    }
+  );
+
+  it('relays through the real MCP operation using only a destination derived from session context', async () => {
+    await mockPersonalApiKeyUser();
+    const resolveRelayDestination = vi.fn(async () => ({
+      session_id: 'sess-caller',
+      destination: 'coordinator',
+      destination_session_id: 'sess-current-coordinator',
+    }));
+    const createPrompt = vi.fn(async () => ({ task_id: 'task-relay', status: 'queued' }));
+
+    await withMcpServer(
+      {
+        users: {
+          get: vi.fn(async () => ({
+            user_id: 'user-1',
+            email: 'alice@example.com',
+            role: 'member',
+          })),
+        },
+        sessions: {
+          get: vi.fn(async (id: string) => ({
+            session_id: id,
+            branch_id: 'branch-1',
+            agentic_tool: 'codex',
+          })),
+          resolveRelayDestination,
+        },
+        '/sessions/:id/prompt': { create: createPrompt },
+      },
+      async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/mcp`, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json, text/event-stream',
+            'Content-Type': 'application/json',
+            'X-API-Key': 'agor_sk_valid',
+            'X-Agor-Session-Id': 'sess-caller',
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: {
+              name: 'agor_execute_tool',
+              arguments: {
+                tool_name: 'agor_session_relationships_report',
+                arguments: { destination: 'coordinator', message: 'status update' },
+              },
+            },
+          }),
+        });
+        const envelope = parseMcpResponse(await response.text()) as {
+          result?: { structuredContent?: Record<string, unknown> };
+          error?: { message: string };
+        };
+
+        expect(envelope.error).toBeUndefined();
+        expect(envelope.result?.structuredContent).toEqual({
+          session_id: 'sess-caller',
+          destination: 'coordinator',
+          destination_session_id: 'sess-current-coordinator',
+          task_id: 'task-relay',
+          status: 'queued',
+        });
+        expect(resolveRelayDestination).toHaveBeenCalledWith(
+          'sess-caller',
+          { destination: 'coordinator' },
+          expect.objectContaining({ provider: 'mcp' })
+        );
+        expect(createPrompt).toHaveBeenCalledWith(
+          { prompt: 'status update', stream: true },
+          expect.objectContaining({ route: { id: 'sess-current-coordinator' } })
+        );
+      },
+      { multi_tenancy: undefined },
+      /* toolSearchEnabled */ true
+    );
   });
 
   dbTest('rejects an API key whose user was deleted after key verification', async ({ db }) => {
