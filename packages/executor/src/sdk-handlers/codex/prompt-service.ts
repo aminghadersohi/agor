@@ -41,7 +41,7 @@ import {
 import type { CodexOptions, Thread, ThreadItem, TurnCompletedEvent } from '@agor/core/sdk';
 import { renderAgorSystemPrompt } from '@agor/core/templates/session-context';
 import { mergeMCPRemoteHeaders } from '@agor/core/tools/mcp/http-headers';
-import type { CodexSandboxMode, ContextUsageSnapshot, MCPServer } from '@agor/core/types';
+import type { Branch, CodexSandboxMode, ContextUsageSnapshot, MCPServer } from '@agor/core/types';
 import { getDefaultPermissionMode, isGatewaySession } from '@agor/core/types';
 import { mapToCodexPermissionConfig } from '@agor/core/utils/permission-mode-mapper';
 import type * as CodexSdk from '@openai/codex-sdk';
@@ -371,7 +371,7 @@ export class CodexPromptService {
     private sessionsRepo: SessionRepository,
     private sessionMCPServerRepo?: SessionMCPServerRepository,
     private branchesRepo?: BranchRepository,
-    _reposRepo?: RepoRepository,
+    private reposRepo?: RepoRepository,
     apiKey?: string,
     private mcpServerRepo?: MCPServerRepository,
     _usersRepo?: UsersRepository,
@@ -633,6 +633,37 @@ export class CodexPromptService {
       throw new Error('Codex SDK client was not initialized before use');
     }
     return this.codex;
+  }
+
+  /**
+   * Resolve the narrow Git metadata root that workspace-write must be allowed
+   * to mutate. Codex intentionally excludes `.git` from the workspace itself,
+   * so without this override all Git metadata writes fail: index locks, object
+   * writes, ref locks/updates, fetches, and commits.
+   *
+   * Clone branches own `<branch>/.git`. Linked worktrees instead share the
+   * base repository's `.git`, which contains both their per-worktree index and
+   * the common object/ref stores a commit must update. Use Agor's authoritative
+   * repo record rather than trusting the worktree's on-disk `gitdir:` pointer
+   * to choose an external writable path.
+   */
+  private async resolveGitWritableRoot(branch: Branch): Promise<string> {
+    if (branch.storage_mode === 'clone') {
+      return path.join(branch.path, '.git');
+    }
+
+    if (!this.reposRepo) {
+      throw new Error(
+        `Cannot configure Codex workspace-write Git metadata access for worktree branch ${branch.branch_id}: repository service unavailable`
+      );
+    }
+    const repo = await this.reposRepo.findById(branch.repo_id);
+    if (!repo?.local_path) {
+      throw new Error(
+        `Cannot configure Codex workspace-write Git metadata access for worktree branch ${branch.branch_id}: repository ${branch.repo_id} is unavailable`
+      );
+    }
+    return path.join(repo.local_path, '.git');
   }
 
   /**
@@ -1116,9 +1147,12 @@ export class CodexPromptService {
 
     // Codex permission settings split across two surfaces:
     // - sandboxMode, approvalPolicy, networkAccessEnabled: per-thread via ThreadOptions
-    // - MCP servers + model_instructions_file: per-Codex-instance via CodexOptions.config
+    // - writable_roots, MCP servers + model_instructions_file: per-Codex-instance
+    //   via CodexOptions.config
     // ThreadOptions are emitted AFTER `--config` flags, so for keys that overlap
     // (approval_policy, sandbox_workspace_write.network_access) ThreadOptions win.
+    // The later network_access override is a separate dotted key in the same
+    // table, so it does not replace sandbox_workspace_write.writable_roots.
     //
     // The daemon resolver (`resolvePermissionConfig`) always emits a full
     // codex sub-config for new sessions, so this fallback only fires for
@@ -1158,6 +1192,15 @@ export class CodexPromptService {
       `   Using Codex permissions: sandboxMode=${sandboxMode}, approvalPolicy=${approvalPolicy}, networkAccess=${networkAccess}`
     );
 
+    // Fetch the branch before building CodexOptions because workspace-write's
+    // Git exception is branch/storage-mode specific.
+    const branch = this.branchesRepo ? await this.branchesRepo.findById(session.branch_id) : null;
+    if (!branch) {
+      throw new Error(`Branch ${session.branch_id} not found for session ${sessionId}`);
+    }
+    const gitWritableRoot =
+      sandboxMode === 'workspace-write' ? await this.resolveGitWritableRoot(branch) : undefined;
+
     // Write per-session Agor instructions file (single .md, not a directory).
     // CODEX_HOME is intentionally NOT overridden — Codex CLI uses the
     // executor user's $HOME/.codex which already contains auth.json plus any
@@ -1193,6 +1236,9 @@ export class CodexPromptService {
       // continue after an internal answer without completing the SDK turn.
       features: { goals: false },
       model_instructions_file: instructionsFile,
+      ...(gitWritableRoot
+        ? { sandbox_workspace_write: { writable_roots: [gitWritableRoot] } }
+        : {}),
       ...(Object.keys(mcpServersConfig).length > 0 ? { mcp_servers: mcpServersConfig } : {}),
       // Codex Apps (for example the GitHub connector supplied by a plugin)
       // use the separate `apps` policy namespace rather than `mcp_servers`.
@@ -1211,12 +1257,6 @@ export class CodexPromptService {
     codexDebug(
       `   Configured: sandboxMode=${sandboxMode}, approvalPolicy=${approvalPolicy}, networkAccess=${networkAccess}, ${mcpServerCount} MCP server(s)`
     );
-
-    // Fetch branch to get working directory
-    const branch = this.branchesRepo ? await this.branchesRepo.findById(session.branch_id) : null;
-    if (!branch) {
-      throw new Error(`Branch ${session.branch_id} not found for session ${sessionId}`);
-    }
 
     codexDebug(`   Working directory: ${branch.path}`);
 
