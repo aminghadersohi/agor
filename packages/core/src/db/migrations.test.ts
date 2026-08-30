@@ -848,7 +848,7 @@ describe('Board and branch capability-policy migration', () => {
         INSERT INTO boards VALUES ('board-1','{"default_dangerously_allow_session_sharing":true,"keep":1}');
       `);
       const migration = await readFile(
-        new URL('../../drizzle/sqlite/0102_shared_session_prompting.sql', import.meta.url),
+        new URL('../../drizzle/sqlite/9008_shared_session_prompting.sql', import.meta.url),
         'utf8'
       );
       for (const statement of migration.split('--> statement-breakpoint')) {
