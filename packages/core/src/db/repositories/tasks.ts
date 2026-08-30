@@ -232,6 +232,20 @@ export function renderCoalescedSystemUpdatePrompt(batch: Task[]): string {
   return `${heading}${dedupeNote}\n\n${sections.join('\n\n---\n\n')}`;
 }
 
+function projectTerminalTaskStatusToSession(status: Task['status']): SessionStatus {
+  switch (status) {
+    case TaskStatus.COMPLETED:
+    case TaskStatus.STOPPED:
+      return SessionStatus.IDLE;
+    case TaskStatus.FAILED:
+      return SessionStatus.FAILED;
+    case TaskStatus.TIMED_OUT:
+      return SessionStatus.TIMED_OUT;
+    default:
+      throw new RepositoryError(`Cannot project nonterminal task status ${status} onto Session`);
+  }
+}
+
 function isSQLiteBusyError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   if (error.message.includes('SQLITE_BUSY') || error.message.includes('database is locked')) {
@@ -1873,7 +1887,12 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
     executorUpdate: boolean
   ): Promise<Task> {
     try {
-      return await this.mutateLockedTask(id, async (txDb, currentRow, fullId) => {
+      const applyUpdate = async (
+        txDb: Database,
+        currentRow: TaskRow,
+        fullId: string,
+        sessionRow?: SessionRow
+      ): Promise<Task> => {
         console.debug(
           `🔄 [TaskRepo] Updating task ${shortId(fullId)}${updates.status ? ` (status: ${updates.status})` : ''}`
         );
@@ -1966,8 +1985,49 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           .where(eq(tasks.task_id, fullId))
           .run();
 
+        const becameTerminal =
+          !isTerminalTaskStatus(current.status) && isTerminalTaskStatus(merged.status);
+        if (becameTerminal) {
+          if (!sessionRow) {
+            throw new RepositoryError('Terminal task transition requires the owning Session lock');
+          }
+          const latestTaskId = sessionRow.data.tasks.at(-1);
+          const shouldProjectSession =
+            latestTaskId === undefined ||
+            latestTaskId === current.task_id ||
+            current.termination_request !== undefined;
+          if (shouldProjectSession) {
+            const projectionAt = await this.mutationNow(txDb, fullId);
+            const sessionProjection = await update(txDb, sessions)
+              .set({
+                status: projectTerminalTaskStatusToSession(merged.status),
+                ready_for_prompt: true,
+                // This generic terminal transition shares the same persisted
+                // attention contract as termination settlement.  Keep the
+                // projection and generation increment in this transaction so
+                // every authorized observer sees one coherent revision.
+                attention_generation: sql`${sessions.attention_generation} + 1`,
+                updated_at: projectionAt,
+              })
+              .where(eq(sessions.session_id, sessionRow.session_id))
+              .run();
+            if (sessionProjection.rowsAffected === 0) {
+              throw new EntityNotFoundError('Session', current.session_id);
+            }
+          }
+        }
+
         return merged;
-      });
+      };
+
+      if (isTerminalTaskStatus(updates.status)) {
+        return await this.mutateLockedSessionTask(id, (txDb, currentRow, sessionRow, fullId) =>
+          applyUpdate(txDb, currentRow, fullId, sessionRow)
+        );
+      }
+      return await this.mutateLockedTask(id, (txDb, currentRow, fullId) =>
+        applyUpdate(txDb, currentRow, fullId)
+      );
     } catch (error) {
       if (error instanceof RepositoryError) throw error;
       throw new RepositoryError(
