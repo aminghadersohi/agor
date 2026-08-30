@@ -80,4 +80,23 @@ describe('BranchCard compact toggle', () => {
     renderCard({ inPopover: true, onToggleCompact: vi.fn() });
     expect(screen.queryByLabelText('Collapse card')).toBeNull();
   });
+
+  it('keeps the exposed worktree header actions interactive in a stack', () => {
+    const onToggleCompact = vi.fn();
+    const onAutoZoneInteraction = vi.fn();
+    const { container } = renderCard({
+      compact: true,
+      onToggleCompact,
+      onAutoZoneInteraction,
+    });
+
+    const header = container.querySelector('[data-zone-stack-header]');
+    const expand = screen.getByLabelText('Expand card');
+    expect(header).toContainElement(expand);
+    expect(expand).not.toBeDisabled();
+    fireEvent.pointerDown(expand);
+    fireEvent.click(expand);
+    expect(onAutoZoneInteraction).toHaveBeenCalledWith('branch-1');
+    expect(onToggleCompact).toHaveBeenCalledWith('branch-1', false);
+  });
 });

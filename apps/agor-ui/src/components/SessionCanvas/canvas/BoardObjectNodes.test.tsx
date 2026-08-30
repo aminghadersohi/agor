@@ -27,7 +27,7 @@ const DISCONNECTED = { ...CONNECTED, connected: false };
 function renderZone(
   onReorder: ReturnType<typeof vi.fn>,
   connection: typeof CONNECTED,
-  extra?: { selected?: boolean }
+  extra?: { selected?: boolean; suppressToolbar?: boolean }
 ) {
   const wrapper = ({ children }: { children: ReactNode }) => (
     <ConnectionProvider value={connection}>
@@ -47,6 +47,7 @@ function renderZone(
         x: 0,
         y: 0,
         zIndex: 100,
+        suppressToolbar: extra?.suppressToolbar,
         onReorder,
       }}
     />,
@@ -61,6 +62,11 @@ describe('ZoneNode layer toolbar', () => {
     expect(screen.getByLabelText('Send backward')).toBeTruthy();
     expect(screen.getByLabelText('Bring forward')).toBeTruthy();
     expect(screen.getByLabelText('Bring to front')).toBeTruthy();
+  });
+
+  it('does not render single-zone actions when the shared selection toolbar replaces them', () => {
+    renderZone(vi.fn(), CONNECTED, { suppressToolbar: true });
+    expect(screen.getByLabelText('Zone actions')).toHaveStyle({ display: 'none' });
   });
 
   it('fires onReorder exactly once for a mouse gesture (pointerUp only, never click)', () => {

@@ -1,9 +1,32 @@
 import { describe, expect, it } from 'vitest';
 import {
+  compactZoneItemSize,
+  getZoneLayoutFrame,
   normalizeZoneLayoutPolicy,
   sortZoneLayoutItems,
   type ZoneLayoutSortItem,
 } from './zone-layout';
+
+describe('zone layout frame', () => {
+  it('gives cards and worktrees the same inset, header reserve, and usable width', () => {
+    const frame = getZoneLayoutFrame({ width: 620 });
+    const card = compactZoneItemSize('card', frame.usableWidth);
+    const branch = compactZoneItemSize('branch', frame.usableWidth);
+
+    expect(frame).toEqual({ width: 620, padding: 20, headerInset: 80, usableWidth: 580 });
+    expect(card.width).toBe(frame.usableWidth);
+    expect(branch.width).toBe(frame.usableWidth);
+    expect(frame.width - frame.padding - card.width).toBe(frame.padding);
+    expect(frame.width - frame.padding - branch.width).toBe(frame.padding);
+  });
+
+  it('keeps custom header reserves and the full frame on the board grid', () => {
+    const frame = getZoneLayoutFrame({ width: 613, fontSize: 31, status: 'Active' });
+
+    for (const value of Object.values(frame)) expect(value % 20).toBe(0);
+    expect(frame.headerInset).toBeGreaterThan(80);
+  });
+});
 
 const item = (id: string, overrides: Partial<ZoneLayoutSortItem> = {}) => ({
   id,
@@ -89,6 +112,7 @@ describe('sortZoneLayoutItems', () => {
       'deleted',
     ]);
   });
+
   it('uses spatial order for manual sorting and stable ids for ties', () => {
     const result = sortZoneLayoutItems(
       [item('c', { position: { x: 0, y: 10 } }), item('b'), item('a')],

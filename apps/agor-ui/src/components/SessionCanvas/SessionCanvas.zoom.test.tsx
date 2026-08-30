@@ -1,4 +1,6 @@
 // biome-ignore-all lint/plugin/noHardcodedColorLiteral: persisted zone palette fixtures verify canvas creation behavior
+
+import { BOARD_SNAP_GRID } from '@agor/core/layout/rectangle-packing';
 import type { AgorClient, Board } from '@agor-live/client';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ButtonHTMLAttributes, MouseEventHandler, ReactNode } from 'react';
@@ -17,6 +19,7 @@ const setNodesUnsafeSpy = vi.fn();
 
 vi.mock('reactflow', () => ({
   Background: () => <div data-testid="react-flow-background" />,
+  BackgroundVariant: { Dots: 'dots' },
   ControlButton: ({
     children,
     onClick,
@@ -76,6 +79,7 @@ describe('SessionCanvas zoom shortcuts', () => {
     expect(reactFlowProps?.panOnScroll).toBe(true);
     expect(reactFlowProps?.zoomActivationKeyCode).toEqual(['Meta', 'Control']);
     expect(reactFlowProps?.selectionOnDrag).toBe(false);
+    expect(reactFlowProps?.snapGrid).toBe(BOARD_SNAP_GRID);
   });
 
   it('marquee-selects partially intersected nested items through a non-1 zoom transform', () => {
@@ -192,6 +196,143 @@ describe('SessionCanvas zoom shortcuts', () => {
       | ((current: Node[]) => Node[])
       | undefined;
     expect(updater?.(flowNodes).find((node) => node.id === 'branch-1')?.position.x).toBe(40);
+  });
+
+  it.each([
+    ['worktree', 'branchNode', 'branch-1'],
+    ['card', 'cardNode', 'card-1'],
+  ])('keeps one compact %s size readout outside while dragging', (_label, type, id) => {
+    render(<SessionCanvas board={null} client={null} branches={[]} />);
+    const moving: Node = {
+      id,
+      type,
+      position: { x: 300, y: 100 },
+      width: 200,
+      height: 120,
+      data: {},
+    };
+    const flowNodes: Node[] = [
+      moving,
+      {
+        id: 'peer',
+        type: 'artifactNode',
+        position: { x: 0, y: 0 },
+        width: 200,
+        height: 120,
+        data: {},
+      },
+    ];
+    act(() => {
+      (reactFlowProps?.onInit as (instance: unknown) => void)?.({
+        getNodes: () => flowNodes,
+        getViewport: () => ({ x: 0, y: 0, zoom: 1 }),
+        getZoom: () => 1,
+        screenToFlowPosition: ({ x, y }: { x: number; y: number }) => ({ x, y }),
+      });
+      (reactFlowProps?.onNodeDrag as (event: unknown, node: Node) => void)?.({}, moving);
+    });
+
+    const readout = document.querySelector<HTMLElement>('[data-guide-kind="size-readout"]');
+    const sizeLines = document.querySelectorAll('.canvas-alignment-guide[data-guide-kind="size"]');
+    expect(readout).toHaveTextContent('200 × 120');
+    expect(sizeLines).toHaveLength(1);
+    expect(Number.parseFloat(readout?.style.top ?? '')).toBeGreaterThan(220);
+  });
+
+  describe('automatic zone direct manipulation', () => {
+    const autoBoard = {
+      board_id: 'board-1',
+      objects: {
+        'zone-1': {
+          type: 'zone',
+          x: 0,
+          y: 0,
+          width: 620,
+          height: 900,
+          label: 'Automatic',
+          layout: { mode: 'auto', preset: 'grid' },
+        },
+      },
+    } as unknown as Board;
+
+    function renderAutoBoard() {
+      const patch = vi.fn().mockResolvedValue({});
+      const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+      render(
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas
+            board={autoBoard}
+            client={client}
+            branches={[]}
+            sessionById={new Map()}
+            sessionsByBranch={new Map()}
+            userById={new Map()}
+            repoById={new Map()}
+            branchById={new Map()}
+            boardObjectById={new Map()}
+            boardObjectsByBoardId={new Map()}
+            commentById={new Map()}
+            cardById={new Map()}
+          />
+        </ConnectionProvider>
+      );
+      return { client, patch };
+    }
+
+    it('demotes before dragging a card already managed by the automatic zone', async () => {
+      const { client, patch } = renderAutoBoard();
+
+      act(() => {
+        (reactFlowProps?.onNodeDragStart as (event: unknown, node: Node) => void)?.(
+          {},
+          {
+            id: 'card-1',
+            type: 'cardNode',
+            parentId: 'zone-1',
+            position: { x: 140, y: 160 },
+            data: {},
+          }
+        );
+      });
+
+      await waitFor(() =>
+        expect(patch).toHaveBeenCalledWith('board-1', {
+          _action: 'upsertObject',
+          objectId: 'zone-1',
+          objectData: expect.objectContaining({
+            type: 'zone',
+            layout: expect.objectContaining({ mode: 'manual', preset: 'grid' }),
+          }),
+        })
+      );
+      expect(client.service).toHaveBeenCalledWith('boards');
+    });
+
+    it.each([
+      ['the zone container', { id: 'zone-1', type: 'zone', parentId: undefined }],
+      ['a card entering from outside', { id: 'card-new', type: 'cardNode', parentId: undefined }],
+    ])('does not demote for dragging %s', async (_label, partialNode) => {
+      const { patch } = renderAutoBoard();
+
+      act(() => {
+        (reactFlowProps?.onNodeDragStart as (event: unknown, node: Node) => void)?.({}, {
+          ...partialNode,
+          position: { x: 140, y: 160 },
+          data: {},
+        } as Node);
+      });
+      await Promise.resolve();
+
+      expect(patch).not.toHaveBeenCalled();
+    });
   });
 
   it('opens the markdown note modal when the markdown tool clicks a board node', async () => {
@@ -353,7 +494,12 @@ describe('SessionCanvas zoom shortcuts', () => {
       // Incoming dims sit within 1px of the node's current 1200x900 → no-op.
       act(() =>
         onNodesChange([
-          { type: 'dimensions', id: 'zone-1', dimensions: { width: 1200.4, height: 899.6 } },
+          {
+            type: 'dimensions',
+            id: 'zone-1',
+            resizing: true,
+            dimensions: { width: 1200.4, height: 899.6 },
+          },
         ])
       );
       await act(async () => {
@@ -373,7 +519,12 @@ describe('SessionCanvas zoom shortcuts', () => {
       vi.useFakeTimers();
       act(() =>
         onNodesChange([
-          { type: 'dimensions', id: 'zone-1', dimensions: { width: 1000, height: 700 } },
+          {
+            type: 'dimensions',
+            id: 'zone-1',
+            resizing: true,
+            dimensions: { width: 1000, height: 700 },
+          },
         ])
       );
 
@@ -396,6 +547,43 @@ describe('SessionCanvas zoom shortcuts', () => {
       );
     });
 
+    it('persists the paired origin from a top-left resize in the same zone patch', async () => {
+      const { client, patch } = makeClient();
+      const { onNodesChange } = renderCanvas(client);
+
+      vi.useFakeTimers();
+      act(() =>
+        onNodesChange([
+          { type: 'position', id: 'zone-1', position: { x: 200, y: 100 } },
+          {
+            type: 'dimensions',
+            id: 'zone-1',
+            resizing: true,
+            dimensions: { width: 1000, height: 800 },
+          },
+        ])
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+      });
+      vi.useRealTimers();
+
+      expect(patch).toHaveBeenCalledTimes(1);
+      expect(patch).toHaveBeenCalledWith(
+        'board-1',
+        expect.objectContaining({
+          _action: 'upsertObject',
+          objectId: 'zone-1',
+          objectData: expect.objectContaining({
+            x: 200,
+            y: 100,
+            width: 1000,
+            height: 800,
+          }),
+        })
+      );
+    });
+
     it('treats a dimensions change for an unknown id as a safe no-op miss', () => {
       const { client, patch } = makeClient();
       const { getNode, onNodesChange } = renderCanvas(client);
@@ -403,7 +591,12 @@ describe('SessionCanvas zoom shortcuts', () => {
       expect(() =>
         act(() =>
           onNodesChange([
-            { type: 'dimensions', id: 'missing-node', dimensions: { width: 10, height: 10 } },
+            {
+              type: 'dimensions',
+              id: 'missing-node',
+              resizing: true,
+              dimensions: { width: 10, height: 10 },
+            },
           ])
         )
       ).not.toThrow();

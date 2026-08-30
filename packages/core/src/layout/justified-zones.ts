@@ -59,6 +59,8 @@ export interface JustifiedZoneOptions {
    * a row it does not tower over. Omit to score on wasted area alone.
    */
   targetRowHeight?: number;
+  /** Quantize zone origins and dimensions to this grid. */
+  gridSize?: number;
 }
 
 export interface JustifiedZonePlacement {
@@ -232,14 +234,18 @@ function solveRow(
  * relative weight of a wide zone against a narrow one survives justification.
  * The last zone absorbs the rounding remainder so the row sums exactly.
  */
-function justify(widths: number[], leftover: number): number[] {
+function justify(widths: number[], leftover: number, gridSize: number): number[] {
   if (leftover <= 0 || widths.length === 0) return widths;
   const widthSum = widths.reduce((sum, width) => sum + width, 0);
   if (widthSum <= 0) return widths;
   const stretched = [...widths];
   let handed = 0;
   for (let i = 0; i < stretched.length - 1; i += 1) {
-    const share = Math.round((leftover * widths[i]) / widthSum);
+    const proportional = (leftover * widths[i]) / widthSum;
+    const share = Math.min(
+      leftover - handed,
+      gridSize > 0 ? Math.round(proportional / gridSize) * gridSize : Math.round(proportional)
+    );
     stretched[i] += share;
     handed += share;
   }
@@ -258,15 +264,29 @@ export function layoutJustifiedZones(
   zones: readonly JustifiedZoneInput[],
   options: JustifiedZoneOptions
 ): JustifiedZoneResult {
-  const gap = nonNegative(options.gap, 40);
-  const startX = Number.isFinite(options.startX) ? (options.startX as number) : 80;
-  const startY = Number.isFinite(options.startY) ? (options.startY as number) : 80;
-  const targetWidth = positive(options.targetWidth, 1600);
+  const gridSize = nonNegative(options.gridSize, 0);
+  const snap = (value: number): number =>
+    gridSize > 0 ? Math.round(value / gridSize) * gridSize : value;
+  const ceil = (value: number): number =>
+    gridSize > 0 && value !== 0 ? Math.ceil(value / gridSize) * gridSize : value;
+  const floor = (value: number): number =>
+    gridSize > 0 ? Math.floor(value / gridSize) * gridSize : value;
+  const gap = ceil(nonNegative(options.gap, 40));
+  const startX = snap(Number.isFinite(options.startX) ? (options.startX as number) : 80);
+  const startY = snap(Number.isFinite(options.startY) ? (options.startY as number) : 80);
+  const targetWidth = Math.max(gridSize, floor(positive(options.targetWidth, 1600)));
   const maxPerRow = Math.max(1, Math.floor(positive(options.maxPerRow, Number.MAX_SAFE_INTEGER)));
 
   const prepared = zones.map((zone) => ({
     id: zone.id,
-    shapes: usefulShapes(zone.shapes, zone.id),
+    shapes: usefulShapes(
+      zone.shapes.map((shape) => ({
+        ...shape,
+        width: ceil(shape.width),
+        height: ceil(shape.height),
+      })),
+      zone.id
+    ),
   }));
 
   if (prepared.length === 0) {
@@ -336,7 +356,7 @@ export function layoutJustifiedZones(
     if (solved.totalWidth > targetWidth) {
       overflowingRows.push(rowIndex);
     } else if (shouldJustify) {
-      widths = justify(widths, targetWidth - solved.totalWidth);
+      widths = justify(widths, targetWidth - solved.totalWidth, gridSize);
     }
 
     let x = startX;
@@ -378,6 +398,7 @@ export interface ZoneShapeOptions {
   padding?: number;
   gapX?: number;
   gapY?: number;
+  gridSize?: number;
   /** Cap on the column counts tried. */
   maxColumns?: number;
 }
@@ -396,10 +417,13 @@ export function zoneShapesForItems(
   items: readonly RectangleLayoutItem[],
   options: ZoneShapeOptions = {}
 ): ZoneShape[] {
-  const titleInset = nonNegative(options.titleInset, 64);
-  const padding = nonNegative(options.padding, 24);
-  const gapX = nonNegative(options.gapX, 24);
-  const gapY = nonNegative(options.gapY, 24);
+  const gridSize = nonNegative(options.gridSize, 0);
+  const ceil = (value: number): number =>
+    gridSize > 0 && value !== 0 ? Math.ceil(value / gridSize) * gridSize : value;
+  const titleInset = ceil(nonNegative(options.titleInset, 64));
+  const padding = ceil(nonNegative(options.padding, 24));
+  const gapX = ceil(nonNegative(options.gapX, 24));
+  const gapY = ceil(nonNegative(options.gapY, 24));
 
   if (items.length === 0) {
     return [{ columns: 1, width: padding * 2 + 200, height: titleInset + padding * 2 }];
@@ -412,12 +436,18 @@ export function zoneShapesForItems(
 
   const shapes: ZoneShape[] = [];
   for (let columns = 1; columns <= maxColumns; columns += 1) {
-    const layout = layoutRectangles(items, { exactColumns: columns, gapX, gapY, padding: 0 });
+    const layout = layoutRectangles(items, {
+      exactColumns: columns,
+      gapX,
+      gapY,
+      padding: 0,
+      gridSize,
+    });
     // `layoutRectangles` reports the content box; the zone adds its own frame.
     shapes.push({
       columns,
-      width: Math.ceil(layout.width + padding * 2),
-      height: Math.ceil(layout.height + titleInset + padding * 2),
+      width: ceil(layout.width + padding * 2),
+      height: ceil(layout.height + titleInset + padding * 2),
     });
   }
   return shapes;

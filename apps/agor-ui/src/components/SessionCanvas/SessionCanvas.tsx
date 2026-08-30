@@ -1,4 +1,11 @@
-import { layoutRectangles } from '@agor/core/layout/rectangle-packing';
+import {
+  BOARD_GRID_SIZE,
+  BOARD_SNAP_GRID,
+  ceilBoardGridSize,
+  layoutRectangles,
+  snapBoardGridPoint,
+  snapBoardGridValue,
+} from '@agor/core/layout/rectangle-packing';
 import type {
   AgenticToolName,
   AgorClient,
@@ -99,6 +106,7 @@ import { MarkdownRenderer } from '../MarkdownRenderer/MarkdownRenderer';
 import SessionCard from '../SessionCard';
 import { AppNode } from './canvas/AppNodeLazy';
 import { ArtifactNode } from './canvas/ArtifactNodeLazy';
+import { ARRANGE_DEAL_CLASS } from './canvas/arrangeAnimation';
 import { CommentNode, ZoneNode } from './canvas/BoardObjectNodes';
 import { MarkdownNode } from './canvas/MarkdownNode';
 import { RemoteCursorLayer, type StaticRemoteCursor } from './canvas/RemoteCursorLayer';
@@ -121,14 +129,17 @@ import {
   getGuideLayoutRects,
   type LayoutGuide,
   layoutGuideScreenStyle,
+  layoutSizeReadoutScreenStyle,
   snapRectToPeers,
 } from './canvas/utils/layoutGuides';
 import {
   getMarqueeSelection,
   getSelectedLayoutNodes,
   removeSelectedDescendants,
+  suppressIndividualZoneToolbarsForMultiSelect,
 } from './canvas/utils/marqueeSelection';
 import { getValidZoneParentId, sanitizeOrphanedNodeParents } from './canvas/utils/nodeParentUtils';
+import { persistedResizeRect, type ResizeRect } from './canvas/utils/resizeGeometry';
 import { ZoneTriggerModal } from './canvas/ZoneTriggerModal';
 import { DEFAULT_BOARD_OBJECT_Z_INDEX, selectedZIndex } from './canvas/zOrder';
 
@@ -253,6 +264,7 @@ interface BranchNodeData {
   zoneColor?: string;
   compact?: boolean;
   onToggleCompact?: (branchId: string, compact: boolean) => void;
+  onAutoZoneInteraction?: (branchId: string) => void;
   selectedSessionId?: string | null;
   isActiveUrlTarget?: boolean;
   client: AgorClient | null;
@@ -331,6 +343,7 @@ const BranchNode = React.memo(
           zoneColor={data.zoneColor}
           compact={data.compact}
           onToggleCompact={data.onToggleCompact}
+          onAutoZoneInteraction={data.onAutoZoneInteraction}
         />
       </div>
     );
@@ -354,6 +367,7 @@ const BranchNode = React.memo(
       p.zoneColor === n.zoneColor &&
       p.compact === n.compact &&
       p.onToggleCompact === n.onToggleCompact &&
+      p.onAutoZoneInteraction === n.onAutoZoneInteraction &&
       p.client === n.client &&
       p.onTaskClick === n.onTaskClick &&
       p.onSessionClick === n.onSessionClick &&
@@ -552,26 +566,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // reconnect dims behavior instead of making buttons appear and disappear.
     const currentUser = currentUserId ? (userById.get(currentUserId) ?? null) : null;
     const canManageBoard = useCanManageBoard(client, board ?? undefined, currentUser);
-
-    const patchPlacementCompact = useStableCallback(
-      async (objectId: string | undefined, compact: boolean) => {
-        if (!client || !objectId || !mutationGate.canMutate) return;
-        try {
-          await client.service('board-objects').patch(objectId, { compact });
-        } catch (error) {
-          console.error('Failed to update card density:', error);
-          showError('Failed to update card density');
-        }
-      }
-    );
-
-    const handleToggleBranchCompact = useStableCallback((branchId: string, compact: boolean) => {
-      void patchPlacementCompact(boardObjectByBranch.get(branchId)?.object_id, compact);
-    });
-
-    const handleToggleCardCompact = useStableCallback((cardId: string, compact: boolean) => {
-      void patchPlacementCompact(boardObjectByCard.get(cardId)?.object_id, compact);
-    });
 
     // Card modal state
     const [selectedCard, setSelectedCard] = useState<CardWithType | null>(null);
@@ -823,7 +817,32 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
     // Track resize state
     const resizeTimerRef = useRef<NodeJS.Timeout | null>(null);
-    const pendingResizeUpdatesRef = useRef<Record<string, { width: number; height: number }>>({});
+    const pendingResizeUpdatesRef = useRef<Record<string, ResizeRect>>({});
+    const arrangeMotionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const [isArranging, setIsArranging] = useState(false);
+
+    const handleArrangeNodes = useStableCallback((arrangedNodes: Node[], totalMs: number) => {
+      const currentNodes = reactFlowInstanceRef.current?.getNodes() ?? nodes;
+      for (const arranged of arrangedNodes) {
+        const parent = arranged.parentId
+          ? currentNodes.find((candidate) => candidate.id === arranged.parentId)
+          : undefined;
+        localPositionsRef.current[arranged.id] = parent
+          ? relativeToAbsolute(arranged.position, getNodeAbsolutePosition(parent, currentNodes))
+          : arranged.position;
+      }
+
+      if (arrangeMotionTimerRef.current) clearTimeout(arrangeMotionTimerRef.current);
+      if (totalMs <= 0) {
+        setIsArranging(false);
+        return;
+      }
+      setIsArranging(true);
+      arrangeMotionTimerRef.current = setTimeout(() => {
+        arrangeMotionTimerRef.current = null;
+        setIsArranging(false);
+      }, totalMs);
+    });
 
     // Handler to open edit modal for existing markdown note
     const handleEditMarkdownNote = useCallback(
@@ -843,7 +862,17 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     );
 
     // Board objects hook
-    const { getBoardObjectNodes, batchUpdateObjectPositions, deleteObject } = useBoardObjects({
+    const {
+      getBoardObjectNodes,
+      batchUpdateObjectPositions,
+      deleteObject,
+      demoteAutoZone,
+      deferAutoZone,
+      setPlacementCompact,
+      zoneStackByNodeId,
+      calledOutNodeIds,
+      calledOutZoneStackZIndex,
+    } = useBoardObjects({
       board,
       client,
       boardObjectsForBoard,
@@ -853,8 +882,25 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       eraserMode: activeTool === 'eraser',
       activeUrlTargetArtifactId,
       onEditMarkdown: handleEditMarkdownNote,
-      onSessionClick,
-      currentUserId,
+      onArrangeNodes: handleArrangeNodes,
+    });
+
+    const handleToggleBranchCompact = useStableCallback((branchId: string, compact: boolean) => {
+      if (!mutationGate.canMutate) return;
+      void setPlacementCompact(boardObjectByBranch.get(branchId), compact);
+    });
+
+    const handleToggleCardCompact = useStableCallback((cardId: string, compact: boolean) => {
+      if (!mutationGate.canMutate) return;
+      void setPlacementCompact(boardObjectByCard.get(cardId), compact);
+    });
+
+    const handleBranchAutoZoneInteraction = useStableCallback((branchId: string) => {
+      deferAutoZone(boardObjectByBranch.get(branchId)?.zone_id);
+    });
+
+    const handleCardAutoZoneInteraction = useStableCallback((cardId: string) => {
+      deferAutoZone(boardObjectByCard.get(cardId)?.zone_id);
     });
 
     // Extract zone labels - memoized to only change when labels actually change
@@ -984,6 +1030,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           zoneObj && zoneObj.type === 'zone'
             ? zoneObj.borderColor || zoneObj.color // Backwards compat: borderColor first, then fall back to deprecated color
             : undefined;
+        const stackPresentation = zoneStackByNodeId.get(branch.branch_id);
+        const calledOut = calledOutNodeIds.has(branch.branch_id);
 
         // Get repo for this branch
         const repo = repoById.get(branch.repo_id);
@@ -998,7 +1046,17 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           dragHandle: REACT_FLOW_DRAG_HANDLE_SELECTOR,
           position, // When pinned (parentId set), this is relative to zone; otherwise absolute
           // draggable inherits from canvas-level nodesDraggable (mutationGate.canMutate)
-          zIndex: 500, // Above zones, below comments
+          zIndex: calledOut
+            ? calledOutZoneStackZIndex
+            : stackPresentation
+              ? 500 + stackPresentation.deckDepth
+              : 500, // Above zones, below comments
+          className: stackPresentation
+            ? calledOut
+              ? 'auto-zone-stack-item auto-zone-stack-called-out'
+              : 'auto-zone-stack-item'
+            : undefined,
+          style: stackPresentation ? { pointerEvents: 'auto' } : undefined,
           // Set dimensions for collision detection (matches BranchCard size)
           width: 500,
           height: 200, // Approximate height, will be measured by React Flow
@@ -1031,8 +1089,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             isPinned: !!validZoneParentId,
             zoneName,
             zoneColor,
-            compact: boardObject?.compact === true,
+            compact: calledOut ? false : boardObject?.compact === true,
             onToggleCompact: canManageBoard ? handleToggleBranchCompact : undefined,
+            onAutoZoneInteraction: stackPresentation ? handleBranchAutoZoneInteraction : undefined,
             client,
           },
         });
@@ -1065,7 +1124,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       onExecuteScheduleNow,
       handleUnpinBranch,
       handleToggleBranchCompact,
+      handleBranchAutoZoneInteraction,
       canManageBoard,
+      zoneStackByNodeId,
+      calledOutNodeIds,
+      calledOutZoneStackZIndex,
       zoneLabels,
       warnInvalidZoneRef,
       client,
@@ -1130,14 +1193,27 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         const zoneObj = validZoneParentId ? board?.objects?.[validZoneParentId] : undefined;
         const zoneColor =
           zoneObj && zoneObj.type === 'zone' ? zoneObj.borderColor || zoneObj.color : undefined;
+        const nodeId = `card-${cardId}`;
+        const stackPresentation = zoneStackByNodeId.get(nodeId);
+        const calledOut = calledOutNodeIds.has(nodeId);
 
         nodes.push({
-          id: `card-${cardId}`,
+          id: nodeId,
           type: 'cardNode',
           dragHandle: REACT_FLOW_DRAG_HANDLE_SELECTOR,
           position,
           // draggable inherits from canvas-level nodesDraggable (mutationGate.canMutate)
-          zIndex: 500, // Same level as branches
+          zIndex: calledOut
+            ? calledOutZoneStackZIndex
+            : stackPresentation
+              ? 500 + stackPresentation.deckDepth
+              : 500, // Same level as branches
+          className: stackPresentation
+            ? calledOut
+              ? 'auto-zone-stack-item auto-zone-stack-called-out'
+              : 'auto-zone-stack-item'
+            : undefined,
+          style: stackPresentation ? { pointerEvents: 'auto' } : undefined,
           width: 380,
           height: 120,
           parentId: validZoneParentId,
@@ -1149,8 +1225,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             zoneColor,
             onClick: handleCardClick,
             onUnpin: handleUnpinCard,
-            compact: boardObject.compact === true,
+            compact: calledOut ? false : boardObject.compact === true,
             onToggleCompact: canManageBoard ? handleToggleCardCompact : undefined,
+            onAutoZoneInteraction: stackPresentation ? handleCardAutoZoneInteraction : undefined,
           } satisfies CardNodeData,
         });
       }
@@ -1164,7 +1241,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       handleCardClick,
       handleUnpinCard,
       handleToggleCardCompact,
+      handleCardAutoZoneInteraction,
       canManageBoard,
+      zoneStackByNodeId,
+      calledOutNodeIds,
+      calledOutZoneStackZIndex,
       warnInvalidZoneRef,
     ]);
 
@@ -1864,9 +1945,19 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           });
         }
 
-        // Detect resize by checking for dimensions changes
+        // React Flow emits the origin adjustment for left/top resize handles
+        // beside the dimensions change. Pair them before persistence; dropping
+        // this position is what used to snap the resized edge back to old x/y.
+        const resizePositionById = new Map<string, { x: number; y: number }>();
+        for (const change of effectiveChanges) {
+          if (change.type === 'position' && change.position) {
+            resizePositionById.set(change.id, change.position);
+          }
+        }
+
+        // Detect interactive resize by checking for dimensions changes
         effectiveChanges.forEach((change) => {
-          if (change.type === 'dimensions' && change.dimensions) {
+          if (change.type === 'dimensions' && change.resizing === true && change.dimensions) {
             // O(1) lookup against React Flow's internal node map. Avoids both the
             // old per-event `nodes.find()` scan AND a per-nodes-change Map rebuild:
             // `getNode` is a stable reference and only runs inside this dimensions
@@ -1897,11 +1988,22 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 return;
               }
 
-              // Accumulate resize updates
-              pendingResizeUpdatesRef.current[change.id] = {
-                width: newWidth,
-                height: newHeight,
-              };
+              const currentPosition =
+                node.type === 'zone' ? board?.objects?.[node.id] : entityBoardObject?.position;
+              if (!currentPosition) return;
+
+              // Accumulate the complete rect so a left/top handle persists
+              // origin and dimensions together in the zone's one board patch.
+              pendingResizeUpdatesRef.current[change.id] = persistedResizeRect(
+                {
+                  x: currentPosition.x,
+                  y: currentPosition.y,
+                  width: Number(currentWidth ?? newWidth),
+                  height: Number(currentHeight ?? newHeight),
+                },
+                resizePositionById.get(change.id),
+                { width: newWidth, height: newHeight }
+              );
 
               // Clear existing timer
               if (resizeTimerRef.current) {
@@ -1916,13 +2018,15 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 if (!board || !client) return;
 
                 // Persist all resize changes
-                for (const [nodeId, dimensions] of Object.entries(updates)) {
+                for (const [nodeId, rect] of Object.entries(updates)) {
                   const objectData = board.objects?.[nodeId];
                   if (objectData && objectData.type === 'zone') {
                     const updatedObject = {
                       ...objectData,
-                      width: dimensions.width,
-                      height: dimensions.height,
+                      x: rect.x,
+                      y: rect.y,
+                      width: rect.width,
+                      height: rect.height,
                     };
 
                     try {
@@ -1943,7 +2047,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   if (entityBoardObject) {
                     try {
                       await client.service('board-objects').patch(entityBoardObject.object_id, {
-                        size: dimensions,
+                        ...(rect.x !== entityBoardObject.position.x ||
+                        rect.y !== entityBoardObject.position.y
+                          ? { position: { x: rect.x, y: rect.y } }
+                          : {}),
+                        size: { width: rect.width, height: rect.height },
                       });
                     } catch (error) {
                       console.error('Failed to persist board entity dimensions:', error);
@@ -1970,13 +2078,22 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     );
 
     // Handle node drag start
-    const handleNodeDragStart: NodeDragHandler = useCallback(() => {
-      isDraggingRef.current = true;
-      setIsDraggingCanvas(true);
-      setAlignmentGuides([]);
-      const viewport = reactFlowInstanceRef.current?.getViewport();
-      if (viewport) setGuideViewport(viewport);
-    }, []);
+    const handleNodeDragStart: NodeDragHandler = useCallback(
+      (_event, node) => {
+        // Auto-layout manages only cards/worktrees. Taking hold of one that is
+        // already inside a zone is direct control of that zone's layout, so
+        // demote immediately — before a pending auto pass can snap it back.
+        if ((node.type === 'branchNode' || node.type === 'cardNode') && node.parentId) {
+          void demoteAutoZone(node.parentId);
+        }
+        isDraggingRef.current = true;
+        setIsDraggingCanvas(true);
+        setAlignmentGuides([]);
+        const viewport = reactFlowInstanceRef.current?.getViewport();
+        if (viewport) setGuideViewport(viewport);
+      },
+      [demoteAutoZone]
+    );
 
     // Handle node drag - track local position changes
     const handleNodeDrag: NodeDragHandler = useCallback(
@@ -2389,13 +2506,18 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     );
 
     const selectedLayoutNodes = useMemo(() => getSelectedLayoutNodes(nodes), [nodes]);
+    const reactFlowNodes = useMemo(
+      () => suppressIndividualZoneToolbarsForMultiSelect(nodes),
+      [nodes]
+    );
     const handleLayoutAction = useCallback(
       async (action: 'arrange' | 'left' | 'center' | 'top' | 'middle' | 'width' | 'height') => {
         if (!board || !client || selectedLayoutNodes.length < 2) return;
-        const size = (node: Node) => ({
-          width: Number(node.width ?? node.style?.width ?? 240),
-          height: Number(node.height ?? node.style?.height ?? 120),
-        });
+        const size = (node: Node) =>
+          ceilBoardGridSize({
+            width: Number(node.width ?? node.style?.width ?? 240),
+            height: Number(node.height ?? node.style?.height ?? 120),
+          });
         const rects = selectedLayoutNodes
           .map((node) => {
             const position = getNodeAbsolutePosition(node, nodes);
@@ -2407,9 +2529,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               a.position.x - b.position.x ||
               a.node.id.localeCompare(b.node.id)
           );
-        const left = Math.min(...rects.map((item) => item.position.x));
+        const left = snapBoardGridValue(Math.min(...rects.map((item) => item.position.x)));
         const right = Math.max(...rects.map((item) => item.position.x + item.width));
-        const top = Math.min(...rects.map((item) => item.position.y));
+        const top = snapBoardGridValue(Math.min(...rects.map((item) => item.position.y)));
         const bottom = Math.max(...rects.map((item) => item.position.y + item.height));
         const center = (left + right) / 2;
         const middle = (top + bottom) / 2;
@@ -2421,8 +2543,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 rects.map(({ node, width, height }) => ({ id: node.id, width, height })),
                 {
                   preferredColumns: Math.ceil(Math.sqrt(rects.length)),
-                  gapX: 32,
-                  gapY: 32,
+                  gapX: BOARD_GRID_SIZE * 2,
+                  gapY: BOARD_GRID_SIZE * 2,
+                  gridSize: BOARD_GRID_SIZE,
                 }
               )
             : null;
@@ -2443,7 +2566,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           if (action === 'center') x = center - width / 2;
           if (action === 'top') y = top;
           if (action === 'middle') y = middle - height / 2;
-          return { node, x, y, width: nextWidth, height: nextHeight };
+          const snapped = action === 'arrange' ? snapBoardGridPoint({ x, y }) : { x, y };
+          return {
+            node,
+            x: snapped.x,
+            y: snapped.y,
+            width: nextWidth,
+            height: nextHeight,
+          };
         });
 
         const updateById = new Map(updates.map((update) => [update.node.id, update]));
@@ -2463,7 +2593,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             return {
               ...node,
               position,
-              ...(action === 'width' || action === 'height'
+              ...(action === 'arrange' || action === 'width' || action === 'height'
                 ? { style: { ...node.style, width: update.width, height: update.height } }
                 : {}),
             };
@@ -2481,7 +2611,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 ...objectData,
                 x: update.x,
                 y: update.y,
-                ...(action === 'width' || action === 'height'
+                ...(action === 'arrange' || action === 'width' || action === 'height'
                   ? { width: update.width, height: update.height }
                   : {}),
               },
@@ -2503,7 +2633,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               : { x: update.x, y: update.y };
             await client.service('board-objects').patch(placement.object_id, {
               position,
-              ...(action === 'width' || action === 'height'
+              ...(action === 'arrange' || action === 'width' || action === 'height'
                 ? { size: { width: update.width, height: update.height } }
                 : {}),
             });
@@ -2521,6 +2651,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         }
         if (resizeTimerRef.current) {
           clearTimeout(resizeTimerRef.current);
+        }
+        if (arrangeMotionTimerRef.current) {
+          clearTimeout(arrangeMotionTimerRef.current);
         }
       };
     }, []);
@@ -3098,6 +3231,22 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       return () => window.removeEventListener('keydown', handleEscape);
     }, [applySelectedNodeIds]);
 
+    const guideWrapperRect = reactFlowWrapperRef.current?.getBoundingClientRect();
+    const documentWidth = document.documentElement.clientWidth || window.innerWidth || 1024;
+    const documentHeight = document.documentElement.clientHeight || window.innerHeight || 768;
+    const hasMeasuredGuideWidth = !!guideWrapperRect && guideWrapperRect.width > 0;
+    const hasMeasuredGuideHeight = !!guideWrapperRect && guideWrapperRect.height > 0;
+    const guideViewportBounds = {
+      left: hasMeasuredGuideWidth ? Math.max(0, -guideWrapperRect.left) : 0,
+      top: hasMeasuredGuideHeight ? Math.max(0, -guideWrapperRect.top) : 0,
+      right: hasMeasuredGuideWidth
+        ? Math.min(guideWrapperRect.width, documentWidth - guideWrapperRect.left)
+        : documentWidth,
+      bottom: hasMeasuredGuideHeight
+        ? Math.min(guideWrapperRect.height, documentHeight - guideWrapperRect.top)
+        : documentHeight,
+    };
+
     return (
       <div
         style={{
@@ -3194,15 +3343,33 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   data-comparison-id={guide.comparisonId}
                   style={layoutGuideScreenStyle(guide, guideViewport)}
                 >
-                  {guide.label && (
+                  {guide.label && guide.kind !== 'size' && (
                     <span className="canvas-alignment-guide-label">{guide.label}</span>
                   )}
                 </span>
               ))}
+              {alignmentGuides.map((guide) => {
+                const style = layoutSizeReadoutScreenStyle(
+                  guide,
+                  guideViewport,
+                  guideViewportBounds
+                );
+                if (!style || !guide.label || !guide.readout) return null;
+                return (
+                  <span
+                    key={`${guide.id}-readout`}
+                    className="canvas-size-readout"
+                    data-guide-kind="size-readout"
+                    style={style}
+                  >
+                    {guide.label}
+                  </span>
+                );
+              })}
             </div>
           )}
           <ReactFlow
-            nodes={nodes}
+            nodes={reactFlowNodes}
             edges={edges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
@@ -3221,7 +3388,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             }}
             nodeTypes={nodeTypes}
             snapToGrid={true}
-            snapGrid={[20, 20]}
+            snapGrid={BOARD_SNAP_GRID}
             minZoom={0.1}
             maxZoom={1.5}
             // Disconnected: gate node dragging only. Drag is the only
@@ -3241,7 +3408,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // zone bodies as well as the bare pane and can normalize selected
             // container hierarchies before group drag.
             selectionOnDrag={false}
-            className={`tool-mode-${activeTool}`}
+            className={[`tool-mode-${activeTool}`, isArranging && ARRANGE_DEAL_CLASS]
+              .filter(Boolean)
+              .join(' ')}
             // Disable React Flow's keyboard shortcuts that conflict with typing/spatial messages.
             // Keep modifier-scroll zoom enabled so Command/Control + scroll behaves like Figma.
             deleteKeyCode={null}
