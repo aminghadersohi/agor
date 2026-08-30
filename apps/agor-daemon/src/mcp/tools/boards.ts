@@ -208,7 +208,8 @@ function zoneObstacles(board: Board, arrangingZones: boolean): CanvasRectangle[]
   if (arrangingZones) return [];
   return Object.entries(board.objects ?? {}).flatMap(([objectId, object]) => {
     if (object.type !== 'zone') return [];
-    const { x, y, width, height } = object;
+    const { x, y } = object;
+    const { width, height } = getCanvasObjectDimensions(object);
     return [{ id: objectId, x, y, width, height }];
   });
 }
@@ -271,17 +272,28 @@ function resolveArrangeOrigin(options: {
   return { startX, startY: y, avoidedZoneIds };
 }
 
+function usableCanvasDimension(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && (value ?? 0) > 0 ? (value as number) : fallback;
+}
+
 function getCanvasObjectDimensions(object: BoardObject): { width: number; height: number } {
   if (object.type === 'text') {
-    return { width: object.width ?? 240, height: object.height ?? 120 };
+    return {
+      width: usableCanvasDimension(object.width, 240),
+      height: usableCanvasDimension(object.height, 120),
+    };
   }
   if (object.type === 'markdown') {
-    const charsPerLine = Math.max(20, Math.floor(object.width / 8));
+    const width = usableCanvasDimension(object.width, 400);
+    const charsPerLine = Math.max(20, Math.floor(width / 8));
     const lines = Math.max(3, Math.ceil(object.content.length / charsPerLine));
-    return { width: object.width, height: Math.max(140, 48 + lines * 20) };
+    return { width, height: Math.max(140, 48 + lines * 20) };
   }
   if (object.type === 'app' || object.type === 'artifact' || object.type === 'zone') {
-    return { width: object.width, height: object.height };
+    return {
+      width: usableCanvasDimension(object.width, 600),
+      height: usableCanvasDimension(object.height, 400),
+    };
   }
   return { width: 240, height: 120 };
 }
@@ -803,9 +815,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_auto_arrange',
     {
       description:
-        'Arrange worktrees/branches and cards on a board in a dimension-aware row-major grid. ' +
+        'Arrange worktrees/branches, cards, and artifacts on a board in a dimension-aware row-major grid. ' +
         'By default, only free-floating entities are moved; zone-pinned entities stay in their zones. ' +
-        'Set includeCanvasObjects=true to include text, markdown, apps, and artifacts, and includeZones=true to arrange zones as movable containers. ' +
+        'Artifacts are always included; set includeCanvasObjects=true to also include text, markdown, and apps, and includeZones=true to arrange zones as movable containers. ' +
         'Unless startY is given explicitly, the grid is placed clear of every existing zone rectangle instead of on top of one. ' +
         'Use this after creating or moving many board items so the canvas is tidy and collision-free.',
       annotations: { idempotentHint: true },
@@ -828,9 +840,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         includeCanvasObjects: z
           .boolean()
           .optional()
-          .describe(
-            'Also arrange text, markdown, app, and artifact canvas objects (default: false).'
-          ),
+          .describe('Also arrange text, markdown, and app canvas objects (default: false).'),
         includeZones: z
           .boolean()
           .optional()
@@ -919,7 +929,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const board = (await boardsService.get(boardId, ctx.baseServiceParams)) as Board;
       for (const [objectId, object] of Object.entries(board.objects ?? {})) {
         if (object.type === 'zone' && args.includeZones !== true) continue;
-        if (object.type !== 'zone' && args.includeCanvasObjects !== true) continue;
+        if (
+          object.type !== 'zone' &&
+          object.type !== 'artifact' &&
+          args.includeCanvasObjects !== true
+        )
+          continue;
         items.push({
           id: objectId,
           kind: 'canvas',

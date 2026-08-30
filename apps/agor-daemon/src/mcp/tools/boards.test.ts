@@ -1224,6 +1224,122 @@ describe('agor_boards_auto_arrange', () => {
     for (const patch of patches) expectBoardGridRect(patch);
   });
 
+  it('includes artifacts by default and falls back for unmeasured rectangles', async () => {
+    const entityPatches: Array<{
+      position: { x: number; y: number };
+      size: { width: number; height: number };
+    }> = [];
+    const boardPatches: Array<Record<string, unknown>> = [];
+    const entities = [
+      {
+        object_id: 'branch-1',
+        board_id: 'board-1',
+        branch_id: 'branch-1',
+        entity_type: 'branch' as const,
+        position: { x: 0, y: 0 },
+        created_at: '2026-06-01T00:00:00.000Z',
+      },
+    ];
+    const app = {
+      service(name: string) {
+        if (name === 'board-objects')
+          return {
+            find: vi.fn(async () => ({ data: entities })),
+            patch: vi.fn(async (_id: string, data: (typeof entityPatches)[number]) => {
+              entityPatches.push(data);
+              return data;
+            }),
+          };
+        if (name === 'branches')
+          return { find: vi.fn(async () => ({ data: [{ branch_id: 'branch-1' }] })) };
+        if (name === 'boards')
+          return {
+            get: vi.fn(async () => ({
+              board_id: 'board-1',
+              objects: {
+                'artifact-1': {
+                  type: 'artifact',
+                  artifact_id: 'artifact-1',
+                  x: 300,
+                  y: 0,
+                  // Imported and MCP-created objects can predate measurement.
+                  width: undefined,
+                  height: 0,
+                },
+              },
+            })),
+            patch: vi.fn(async (_id: string, data: Record<string, unknown>) => {
+              boardPatches.push(data);
+              return data;
+            }),
+          };
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange', {
+      app,
+      userId: 'user-1',
+      baseServiceParams: {},
+    });
+
+    const result = await arrange({ boardId: 'board-1' });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({ arranged: 2, arrangedEntities: 1, arrangedCanvasObjects: 1 });
+    expect(entityPatches).toEqual([
+      { position: { x: 80, y: 80 }, size: { width: 500, height: 200 } },
+    ]);
+    expect(boardPatches).toHaveLength(1);
+    expect(boardPatches[0]).toMatchObject({
+      objectId: 'artifact-1',
+      objectData: { x: 620, y: 80, width: 600, height: 400 },
+    });
+  });
+
+  it('lays out an artifact from its persisted measured rectangle', async () => {
+    const boardPatches: Array<Record<string, unknown>> = [];
+    const app = {
+      service(name: string) {
+        if (name === 'board-objects')
+          return { find: vi.fn(async () => ({ data: [] })), patch: vi.fn() };
+        if (name === 'boards')
+          return {
+            get: vi.fn(async () => ({
+              board_id: 'board-1',
+              objects: {
+                'artifact-1': {
+                  type: 'artifact',
+                  artifact_id: 'artifact-1',
+                  x: 0,
+                  y: 0,
+                  width: 723,
+                  height: 411,
+                },
+              },
+            })),
+            patch: vi.fn(async (_id: string, data: Record<string, unknown>) => {
+              boardPatches.push(data);
+              return data;
+            }),
+          };
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange', {
+      app,
+      userId: 'user-1',
+    });
+
+    await arrange({ boardId: 'board-1' });
+
+    expect(boardPatches).toHaveLength(1);
+    expect(boardPatches[0]).toMatchObject({
+      objectId: 'artifact-1',
+      objectData: { width: 740, height: 420 },
+    });
+  });
+
   it('can include canvas annotations, leaving zones fixed and uncovered', async () => {
     const boardPatches: Array<Record<string, unknown>> = [];
     const app = {
