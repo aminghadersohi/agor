@@ -103,6 +103,7 @@ function createPostgresStyleSessionRow(overrides?: Partial<SessionRow> & { tenan
     scheduler_init_attempt_count: 0,
     scheduler_init_retry_at: null,
     ready_for_prompt: false,
+    attention_generation: 0,
     archived: false,
     archived_reason: null,
     data: {
@@ -186,6 +187,21 @@ describe('SessionRepository.create', () => {
     );
 
     expect(created.sdk_home_scope).toBe('branch');
+  });
+
+  dbTest('starts attention generation for a session created in a settled state', async ({ db }) => {
+    const repo = new SessionRepository(db);
+    const branch = await createTestBranch(db);
+
+    const created = await repo.create(
+      createSessionData({
+        branch_id: branch.branch_id,
+        status: SessionStatus.FAILED,
+        ready_for_prompt: true,
+      })
+    );
+
+    expect(created.attention_generation).toBe(1);
   });
 
   dbTest('should generate session_id if not provided', async ({ db }) => {
@@ -1155,25 +1171,6 @@ describe('SessionRepository.update', () => {
     expect(new Date(updated.last_updated).getTime()).toBeGreaterThan(
       new Date(created.last_updated).getTime()
     );
-  });
-
-  dbTest('should not update last_updated when only clearing ready_for_prompt', async ({ db }) => {
-    const repo = new SessionRepository(db);
-    const branch = await createTestBranch(db);
-    const lastUpdated = '2026-01-01T00:00:00.000Z';
-    const data = createSessionData({
-      branch_id: branch.branch_id,
-      last_updated: lastUpdated,
-      ready_for_prompt: true,
-    });
-    const created = await repo.create(data);
-
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    const updated = await repo.update(data.session_id!, { ready_for_prompt: false });
-
-    expect(updated.ready_for_prompt).toBe(false);
-    expect(updated.last_updated).toBe(created.last_updated);
   });
 
   dbTest(

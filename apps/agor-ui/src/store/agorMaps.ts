@@ -587,10 +587,16 @@ export function preserveSessionRelationshipFields(session: Session, existing?: S
 
   const remoteRelationships = session.remote_relationships ?? existing.remote_relationships;
   const remoteSurrogate = session.remote_surrogate ?? existing.remote_surrogate;
+  // Shared `sessions.patched` events contain the global generation but cannot
+  // carry caller-private read state. Preserve the authenticated viewer's value
+  // until their targeted acknowledgement event (or a refetch) replaces it.
+  const viewerSeenAttentionGeneration =
+    session.viewer_seen_attention_generation ?? existing.viewer_seen_attention_generation;
 
   if (
     remoteRelationships === session.remote_relationships &&
-    remoteSurrogate === session.remote_surrogate
+    remoteSurrogate === session.remote_surrogate &&
+    viewerSeenAttentionGeneration === session.viewer_seen_attention_generation
   ) {
     return session;
   }
@@ -599,6 +605,9 @@ export function preserveSessionRelationshipFields(session: Session, existing?: S
     ...session,
     ...(remoteRelationships !== undefined && { remote_relationships: remoteRelationships }),
     ...(remoteSurrogate !== undefined && { remote_surrogate: remoteSurrogate }),
+    ...(viewerSeenAttentionGeneration !== undefined && {
+      viewer_seen_attention_generation: viewerSeenAttentionGeneration,
+    }),
   };
 }
 

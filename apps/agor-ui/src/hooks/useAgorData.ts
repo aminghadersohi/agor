@@ -1409,6 +1409,7 @@ export function useAgorData(
     sessionsService.on('patched', sessionPatchedBatched);
     sessionsService.on('updated', sessionPatchedBatched);
     sessionsService.on('removed', sessionRemovedSync);
+    client.io.on('session-attention:acknowledged', scopedRealtime.sessionAttentionAcknowledged);
 
     // Subscribe to board events
     const boardsService = client.service('boards');
@@ -1644,6 +1645,7 @@ export function useAgorData(
       flushRealtimeNow(subscriptionAuthorityScope);
       client.io.off('oauth:completed', handleOAuthCompleted);
       client.io.off('oauth:disconnected', handleOAuthDisconnected);
+      client.io.off('session-attention:acknowledged', scopedRealtime.sessionAttentionAcknowledged);
       client.io.off('connect', refetchSilently);
       window.removeEventListener(TOKENS_REFRESHED_EVENT, handleTokensRefreshed);
       sessionsService.removeListener('created', sessionCreatedSync);

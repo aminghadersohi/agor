@@ -33,6 +33,7 @@ import type { BranchStorageConfig } from '@/utils/branchStorage';
 import { AppActionsProvider } from '../../contexts/AppActionsContext';
 import { useRegisterBoardSwitcher } from '../../contexts/CanvasNavigationContext';
 import type { NewSessionConfig, SessionCreationResult } from '../../domain/sessionCreation';
+import { useAcknowledgeOpenSessionAttention } from '../../hooks/useAcknowledgeOpenSessionAttention';
 import { useAppNavigation } from '../../hooks/useAppNavigation';
 import { useBoardTitle } from '../../hooks/useBoardTitle';
 import { useEventStream } from '../../hooks/useEventStream';
@@ -1129,16 +1130,6 @@ export const App: React.FC<AppProps> = ({
       const { sessionById, branchById } = agorStore.getState();
       const session = sessionById.get(sessionId);
 
-      // Best-effort: clear highlight flags when opening the conversation.
-      // These updates may fail silently if the user lacks write permission (e.g. read-only
-      // access via RBAC). We suppress errors to avoid spurious toasts for read-only users.
-      if (client && session?.ready_for_prompt) {
-        client
-          .service('sessions')
-          .patch(sessionId, { ready_for_prompt: false })
-          .catch(() => {});
-      }
-
       const branch = session?.branch_id ? branchById.get(session.branch_id) : undefined;
       if (client && branch?.needs_attention) {
         client
@@ -1190,6 +1181,7 @@ export const App: React.FC<AppProps> = ({
     useAgorStore(
       useMemo(() => makeSessionSelector(effectiveSelectedSessionId), [effectiveSelectedSessionId])
     ) ?? null;
+  useAcknowledgeOpenSessionAttention(client, selectedSession);
   const selectedSessionBranchId = selectedSession?.branch_id;
   const selectedSessionBranch =
     useAgorStore(

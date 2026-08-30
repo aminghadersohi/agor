@@ -292,14 +292,13 @@ export interface Branch {
   // ===== UI State =====
 
   /**
-   * Whether this branch needs attention (highlighted state)
+   * Legacy/manual branch-level attention marker.
    *
    * Set to true when:
    * - Branch is newly created
-   * - Any session in the branch has ready_for_prompt=true
-   *
    * Cleared when user interacts with the branch card.
-   * Used to draw attention to new or ready branches on the board.
+   * Session-output badges and glow use caller-scoped session attention
+   * generations instead of this shared flag.
    */
   needs_attention: boolean;
 
