@@ -136,6 +136,7 @@ import {
   getMarqueeSelection,
   getSelectedLayoutNodes,
   removeSelectedDescendants,
+  suppressIndividualZoneToolbarsForMultiSelect,
 } from './canvas/utils/marqueeSelection';
 import { getValidZoneParentId, sanitizeOrphanedNodeParents } from './canvas/utils/nodeParentUtils';
 import { persistedResizeRect, type ResizeRect } from './canvas/utils/resizeGeometry';
@@ -2455,6 +2456,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     );
 
     const selectedLayoutNodes = useMemo(() => getSelectedLayoutNodes(nodes), [nodes]);
+    const reactFlowNodes = useMemo(
+      () => suppressIndividualZoneToolbarsForMultiSelect(nodes),
+      [nodes]
+    );
     const handleLayoutAction = useCallback(
       async (action: 'arrange' | 'left' | 'center' | 'top' | 'middle' | 'width' | 'height') => {
         if (!board || !client || selectedLayoutNodes.length < 2) return;
@@ -3314,7 +3319,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             </div>
           )}
           <ReactFlow
-            nodes={nodes}
+            nodes={reactFlowNodes}
             edges={edges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
