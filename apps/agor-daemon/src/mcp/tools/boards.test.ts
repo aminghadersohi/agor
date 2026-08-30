@@ -1995,6 +1995,57 @@ describe('board layout tools with branch entities present', () => {
     expect(parsed.updates[0].contentColumns).toBe(1);
   });
 
+  it('uses the same compact-list frame for card and branch zone shapes', async () => {
+    const compactLayout = { mode: 'auto', preset: 'compact_list', gap: 8 };
+    const { app } = makeApp({
+      entities: [
+        cardEntity({ zone_id: 'cards-zone', compact: true }),
+        branchEntity({ zone_id: 'branches-zone', compact: true }),
+      ],
+      objects: {
+        'cards-zone': {
+          type: 'zone',
+          x: 0,
+          y: 0,
+          width: 620,
+          height: 400,
+          layout: compactLayout,
+        },
+        'branches-zone': {
+          type: 'zone',
+          x: 700,
+          y: 0,
+          width: 620,
+          height: 400,
+          layout: compactLayout,
+        },
+      },
+    });
+    const arrangeZones = registerAndCaptureHandler('agor_boards_arrange_zones', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (
+        await arrangeZones({
+          boardId: 'board-1',
+          targetWidth: 1280,
+          dryRun: true,
+        })
+      ).content[0].text
+    );
+
+    expect(parsed.updates).toHaveLength(2);
+    expect(parsed.updates.map((update: { size: { width: number } }) => update.size.width)).toEqual([
+      620, 620,
+    ]);
+    expect(
+      parsed.updates.map((update: { contentColumns: number }) => update.contentColumns)
+    ).toEqual([1, 1]);
+  });
+
   it('widens a too-narrow zone when resize is both', async () => {
     const { app } = makeApp({
       entities: [branchEntity({ zone_id: 'zone-1', size: { width: 500, height: 200 } })],

@@ -592,12 +592,12 @@ describe('arrangeZoneContents', () => {
     expect(renderedNodes.find((node) => node.id === 'card-older')?.position.y).toBe(180);
     expect(patch).toHaveBeenCalledWith('placement-newer', {
       position: { x: 20, y: 100 },
-      size: { width: 380, height: 60 },
+      size: { width: 580, height: 60 },
       compact: true,
     });
     expect(patch).toHaveBeenCalledWith('placement-older', {
       position: { x: 20, y: 180 },
-      size: { width: 380, height: 60 },
+      size: { width: 580, height: 60 },
       compact: true,
     });
     expect(patch).toHaveBeenCalledWith(
@@ -607,6 +607,137 @@ describe('arrangeZoneContents', () => {
         objectId: 'zone',
         objectData: expect.objectContaining({ height: 260 }),
       })
+    );
+  });
+
+  it('uses one compact-list frame for card and worktree zones with the same policy', async () => {
+    const { client, patch } = makeClient();
+    const compactLayout = {
+      mode: 'auto',
+      preset: 'compact_list',
+      sortBy: 'position',
+      sortDirection: 'asc',
+      gap: 8,
+      autoResizeHeight: false,
+    } as const;
+    const board = makeBoard({
+      'cards-zone': {
+        type: 'zone',
+        x: 0,
+        y: 0,
+        width: 620,
+        height: 400,
+        label: 'Cards',
+        layout: compactLayout,
+      },
+      'branches-zone': {
+        type: 'zone',
+        x: 700,
+        y: 0,
+        width: 1600,
+        height: 400,
+        label: 'Worktrees',
+        layout: compactLayout,
+      },
+    });
+    const initialNodes: Node[] = [
+      {
+        id: 'cards-zone',
+        type: 'zone',
+        position: { x: 0, y: 0 },
+        data: {},
+        width: 620,
+        height: 400,
+      },
+      {
+        id: 'branches-zone',
+        type: 'zone',
+        position: { x: 700, y: 0 },
+        data: {},
+        width: 1600,
+        height: 400,
+      },
+      {
+        id: 'card-card-1',
+        type: 'cardNode',
+        parentId: 'cards-zone',
+        position: { x: 31, y: 72 },
+        data: {},
+        width: 304,
+        height: 60,
+      },
+      {
+        id: 'branch-1',
+        type: 'branchNode',
+        parentId: 'branches-zone',
+        position: { x: 11, y: 47 },
+        data: {},
+        width: 580,
+        height: 100,
+      },
+    ];
+    let renderedNodes = initialNodes;
+    const setNodes: React.Dispatch<React.SetStateAction<Node[]>> = (value) => {
+      renderedNodes = typeof value === 'function' ? value(renderedNodes) : value;
+    };
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'placement-card',
+              board_id: 'board-1',
+              entity_type: 'card',
+              card_id: 'card-1',
+              position: { x: 31, y: 72 },
+              zone_id: 'cards-zone',
+              compact: true,
+              created_at: '2026-01-01T00:00:00.000Z',
+            },
+            {
+              object_id: 'placement-branch',
+              board_id: 'board-1',
+              entity_type: 'branch',
+              branch_id: 'branch-1',
+              position: { x: 11, y: 47 },
+              zone_id: 'branches-zone',
+              compact: true,
+              created_at: '2026-01-01T00:00:00.000Z',
+            },
+          ] as never,
+          nodes: initialNodes,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    for (const zoneNode of result.current.getBoardObjectNodes()) {
+      await act(async () => {
+        await (zoneNode.data.onArrangeContents as (id: string) => Promise<void>)(zoneNode.id);
+      });
+    }
+
+    const card = renderedNodes.find((node) => node.id === 'card-card-1');
+    const branch = renderedNodes.find((node) => node.id === 'branch-1');
+    for (const [child, zoneWidth] of [
+      [card, 620],
+      [branch, 1600],
+    ] as const) {
+      expect(child?.position).toEqual({ x: 20, y: 100 });
+      expect(child?.width).toBe(zoneWidth - 40);
+      expect(zoneWidth - ((child?.position.x ?? 0) + (child?.width ?? 0))).toBe(20);
+      expect((child?.position.y ?? 0) - 20).toBe(80);
+    }
+    expect(patch).toHaveBeenCalledWith(
+      'placement-card',
+      expect.objectContaining({ size: { width: 580, height: 60 } })
+    );
+    expect(patch).toHaveBeenCalledWith(
+      'placement-branch',
+      expect.objectContaining({ size: { width: 1560, height: 100 } })
     );
   });
 

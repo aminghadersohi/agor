@@ -6,6 +6,8 @@ import {
   snapBoardGridValue,
 } from '@agor/core/layout/rectangle-packing';
 import {
+  compactZoneItemSize,
+  getZoneLayoutFrame,
   normalizeZoneLayoutPolicy,
   sortZoneLayoutItems,
   ZONE_LAYOUT_MODES,
@@ -71,22 +73,6 @@ const DECK_OFFSET_X = 12;
 const DECK_OFFSET_Y = 48;
 const DEFAULT_ARRANGE_START_X = 80;
 const DEFAULT_ARRANGE_START_Y = 80;
-const COMPACT_ARRANGE_DIMENSIONS = {
-  branch: { width: 500, height: 88 },
-  card: { width: 380, height: 56 },
-} as const;
-
-function zoneContentTopInset(zone: { fontSize?: number; status?: string }): number {
-  const labelFontSize =
-    typeof zone.fontSize === 'number' && Number.isFinite(zone.fontSize)
-      ? Math.min(48, Math.max(10, zone.fontSize))
-      : 14;
-  const labelHeight = Math.ceil(labelFontSize * 1.2);
-  const statusHeight = zone.status ? 8 + Math.ceil(labelFontSize * 1.05) : 0;
-
-  return ceilBoardGridValue(Math.max(64, 32 + labelHeight + statusHeight));
-}
-
 function boardGridSpacing(value: number): number {
   return value === 0 ? 0 : Math.max(BOARD_GRID_SIZE, snapBoardGridValue(value));
 }
@@ -406,6 +392,7 @@ async function arrangeBoardZones(
   const zones = await Promise.all(
     zoneEntries.map(async ([zoneId, zone]) => {
       const zonePolicy = normalizeZoneLayoutPolicy(zone.layout);
+      const frame = getZoneLayoutFrame(zone);
       const contents = visible.filter((entity) => entity.zone_id === zoneId);
       // Sorting by anything other than position needs the card/branch records;
       // an unmeasured card needs them too, to estimate its rendered height.
@@ -430,8 +417,20 @@ async function arrangeBoardZones(
 
       const items = ordered.map((entity) => {
         const measured = measuredSize(entity);
-        if (zonePolicy.preset === 'compact_list' || entity.compact === true) {
-          return { id: entity.object_id, ...COMPACT_ARRANGE_DIMENSIONS[entity.entity_type] };
+        if (zonePolicy.preset === 'compact_list') {
+          return {
+            id: entity.object_id,
+            ...compactZoneItemSize(entity.entity_type, frame.usableWidth),
+          };
+        }
+        if (entity.compact === true) {
+          return {
+            id: entity.object_id,
+            ...compactZoneItemSize(
+              entity.entity_type,
+              ARRANGE_DIMENSIONS[entity.entity_type].width
+            ),
+          };
         }
         if (measured) return { id: entity.object_id, ...measured };
         if (entity.entity_type === 'card' && entity.card_id) {
@@ -452,8 +451,8 @@ async function arrangeBoardZones(
         zone,
         itemCount: items.length,
         shapes: zoneShapesForItems(items, {
-          titleInset: zoneContentTopInset(zone),
-          padding: itemGap,
+          titleInset: frame.headerInset,
+          padding: frame.padding,
           gapX: itemGap,
           gapY: itemGap,
           // compact_list is always one column; offering wider shapes would
@@ -1180,29 +1179,31 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         })),
         zonePolicy
       ).map(({ entity }) => entity);
-      const dimensions = new Map<string, { width: number; height: number }>();
+      const naturalDimensions = new Map<string, { width: number; height: number }>();
       const unusableSizeObjectIds: string[] = [];
       for (const entity of entities) {
         if (hasUnusableSize(entity)) unusableSizeObjectIds.push(entity.object_id);
         const measured = measuredSize(entity);
-        if (zonePolicy.preset === 'compact_list' || entity.compact === true) {
-          dimensions.set(entity.object_id, COMPACT_ARRANGE_DIMENSIONS[entity.entity_type]);
+        if (entity.compact === true) {
+          naturalDimensions.set(
+            entity.object_id,
+            compactZoneItemSize(entity.entity_type, ARRANGE_DIMENSIONS[entity.entity_type].width)
+          );
         } else if (measured) {
-          dimensions.set(entity.object_id, measured);
+          naturalDimensions.set(entity.object_id, measured);
         } else if (entity.entity_type === 'card' && entity.card_id) {
           const card = metadata.get(entity.object_id)?.card;
-          dimensions.set(entity.object_id, {
+          naturalDimensions.set(entity.object_id, {
             width: ARRANGE_DIMENSIONS.card.width,
             height: estimateCardHeight(card),
           });
         } else {
-          dimensions.set(entity.object_id, ARRANGE_DIMENSIONS[entity.entity_type]);
+          naturalDimensions.set(entity.object_id, ARRANGE_DIMENSIONS[entity.entity_type]);
         }
       }
-      const padding = boardGridSpacing(Math.max(0, args.padding ?? 24));
+      const requestedPadding = boardGridSpacing(Math.max(0, args.padding ?? BOARD_GRID_SIZE));
       const gapX = boardGridSpacing(Math.max(0, args.gapX ?? zonePolicy.gap ?? 24));
       const gapY = boardGridSpacing(Math.max(0, args.gapY ?? zonePolicy.gap ?? 24));
-      const titleInset = zoneContentTopInset(zone);
       const resizeMode = zonePolicy.resize ?? 'fixed';
       const autoResizeHeight = resizeMode !== 'fixed';
       // `both` also lets the zone widen. Height alone cannot rescue a zone that
@@ -1215,10 +1216,25 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           ? Math.max(
               ceilBoardGridValue(zone.width),
               ...entities.map(
-                (entity) => (dimensions.get(entity.object_id)?.width ?? 0) + padding * 2
+                (entity) =>
+                  (naturalDimensions.get(entity.object_id)?.width ?? 0) + requestedPadding * 2
               )
             )
           : ceilBoardGridValue(zone.width);
+      const frame = getZoneLayoutFrame(
+        { ...zone, width: layoutWidth },
+        { padding: requestedPadding }
+      );
+      const dimensions = new Map(
+        entities.map((entity) => [
+          entity.object_id,
+          zonePolicy.preset === 'compact_list'
+            ? compactZoneItemSize(entity.entity_type, frame.usableWidth)
+            : (naturalDimensions.get(entity.object_id) ?? ARRANGE_DIMENSIONS[entity.entity_type]),
+        ])
+      );
+      const padding = frame.padding;
+      const titleInset = frame.headerInset;
       if (entities.length === 0) {
         return textResult({
           boardId,
@@ -1338,8 +1354,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         : ceilBoardGridValue(zone.height);
       const appliedZoneWidth =
         resizeMode === 'both'
-          ? Math.max(ceilBoardGridValue(zone.width), ceilBoardGridValue(layout.width))
-          : ceilBoardGridValue(zone.width);
+          ? Math.max(frame.width, ceilBoardGridValue(layout.width))
+          : frame.width;
       // A grow moves an edge onto whatever shares the canvas beside or below
       // it. Only a grow can newly cover a neighbour; a shrink or a no-op cannot.
       const resizedOverZoneIds =

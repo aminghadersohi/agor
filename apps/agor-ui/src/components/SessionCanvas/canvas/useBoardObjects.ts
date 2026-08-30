@@ -10,6 +10,8 @@ import {
   snapBoardGridValue,
 } from '@agor/core/layout/rectangle-packing';
 import {
+  compactZoneItemSize,
+  getZoneLayoutFrame,
   normalizeZoneLayoutPolicy,
   sortZoneLayoutItems,
   type ZoneLayoutSortItem,
@@ -24,17 +26,6 @@ import { zonesNeedingAutoArrange } from './utils/autoArrangeGuard';
 // Long enough for the expanded cards to paint before the re-pack measures
 // them; short enough that the board does not visibly sit in a broken state.
 const EXPANDED_REPACK_DELAY_MS = 400;
-
-function zoneContentTopInset(zone: { fontSize?: number; status?: string }): number {
-  const labelFontSize =
-    typeof zone.fontSize === 'number' && Number.isFinite(zone.fontSize)
-      ? Math.min(48, Math.max(10, zone.fontSize))
-      : 14;
-  const labelHeight = Math.ceil(labelFontSize * 1.2);
-  const statusHeight = zone.status ? 8 + Math.ceil(labelFontSize * 1.05) : 0;
-
-  return ceilBoardGridValue(Math.max(64, 32 + labelHeight + statusHeight));
-}
 
 import type { ReactFlowNode } from './utils/reactFlowTypes';
 import {
@@ -515,6 +506,7 @@ export const useBoardObjects = ({
       }
 
       const itemSize = (node: Node) => ceilBoardGridSize(renderedNodeSize(node));
+      const frame = getZoneLayoutFrame(zone);
       const requestedGap = policy.gap ?? 24;
       const gridGap =
         requestedGap === 0 ? 0 : Math.max(BOARD_GRID_SIZE, snapBoardGridValue(requestedGap));
@@ -522,12 +514,7 @@ export const useBoardObjects = ({
         children.map((node) => ({
           id: node.id,
           ...(policy.preset === 'compact_list'
-            ? {
-                ...ceilBoardGridSize({
-                  width: node.type === 'branchNode' ? 500 : 380,
-                  height: node.type === 'branchNode' ? 88 : 56,
-                }),
-              }
+            ? compactZoneItemSize(node.type === 'branchNode' ? 'branch' : 'card', frame.usableWidth)
             : itemSize(node)),
         })),
         {
@@ -535,13 +522,13 @@ export const useBoardObjects = ({
           // Reserve that header before packing so an arranged card never
           // obscures the zone title.
           bounds: {
-            width: zone.width,
+            width: frame.width,
             height: policy.autoResizeHeight
               ? Number.MAX_SAFE_INTEGER
-              : Math.max(0, zone.height - zoneContentTopInset(zone)),
+              : Math.max(0, zone.height - frame.headerInset),
           },
-          padding: BOARD_GRID_SIZE,
-          minPadding: BOARD_GRID_SIZE,
+          padding: frame.padding,
+          minPadding: frame.padding,
           gapX: gridGap,
           gapY: gridGap,
           minGapX: gridGap,
@@ -566,7 +553,7 @@ export const useBoardObjects = ({
       const placementById = new Map(
         layout.placements.map((placement) => [placement.id, placement])
       );
-      const titleInset = zoneContentTopInset(zone);
+      const titleInset = frame.headerInset;
       const timing = dealTiming({
         count: children.length,
         reducedMotion:
@@ -578,9 +565,13 @@ export const useBoardObjects = ({
         return placement
           ? {
               ...node,
+              width: placement.width,
+              height: placement.height,
               position: { x: placement.x, y: placement.y + titleInset },
               style: {
                 ...node.style,
+                width: placement.width,
+                height: placement.height,
                 ...dealStyle(
                   dealDelayMs(dealOrderIndex(placement, layout.columns), timing),
                   timing
@@ -597,10 +588,23 @@ export const useBoardObjects = ({
           Math.abs(current.position.y - node.position.y) >= 0.5
         );
       });
+      const renderedSizeChanged = changedNodes.some((node) => {
+        const current = children.find((child) => child.id === node.id);
+        return (
+          !current ||
+          Math.abs(Number(current.width ?? current.style?.width ?? 0) - Number(node.width ?? 0)) >=
+            0.5 ||
+          Math.abs(
+            Number(current.height ?? current.style?.height ?? 0) - Number(node.height ?? 0)
+          ) >= 0.5
+        );
+      });
       const nextZoneHeight = policy.autoResizeHeight
         ? Math.max(200, ceilBoardGridValue(layout.height + titleInset))
         : zone.height;
+      const nextZoneWidth = frame.width;
       const zoneHeightChanged = Math.abs(nextZoneHeight - zone.height) >= 0.5;
+      const zoneWidthChanged = Math.abs(nextZoneWidth - zone.width) >= 0.5;
 
       // One map for both the change check and the patch loop below. These used
       // to be resolved differently — the check scanned every placement on the
@@ -616,9 +620,16 @@ export const useBoardObjects = ({
       const compactChanged =
         policy.preset === 'compact_list' &&
         children.some((node) => placementByNodeId.get(node.id)?.compact !== true);
-      if (!positionChanged && !zoneHeightChanged && !compactChanged) return;
+      if (
+        !positionChanged &&
+        !renderedSizeChanged &&
+        !zoneHeightChanged &&
+        !zoneWidthChanged &&
+        !compactChanged
+      )
+        return;
       const changedById = new Map(changedNodes.map((node) => [node.id, node]));
-      if (positionChanged) onArrangeNodes?.(changedNodes, timing.totalMs);
+      if (positionChanged || renderedSizeChanged) onArrangeNodes?.(changedNodes, timing.totalMs);
       // Positions are an auto-layout output but are also part of the observer
       // signature (so a user's manual move can reflow an automatic zone).
       // Consume exactly the next signature change produced by our own write;
@@ -626,12 +637,13 @@ export const useBoardObjects = ({
       if (policy.mode === 'auto') skipNextAutoArrangeRef.current.add(zoneId);
       setNodes((currentNodes) =>
         currentNodes.map((node) => {
-          if (node.id === zoneId && zoneHeightChanged) {
+          if (node.id === zoneId && (zoneHeightChanged || zoneWidthChanged)) {
             return {
               ...node,
+              width: nextZoneWidth,
               height: nextZoneHeight,
-              style: { ...node.style, height: nextZoneHeight },
-              data: { ...node.data, height: nextZoneHeight },
+              style: { ...node.style, width: nextZoneWidth, height: nextZoneHeight },
+              data: { ...node.data, width: nextZoneWidth, height: nextZoneHeight },
             };
           }
           return changedById.get(node.id) ?? node;
@@ -641,26 +653,20 @@ export const useBoardObjects = ({
       if (changedNodes.length === 0) return;
 
       try {
-        if (zoneHeightChanged) {
+        if (zoneHeightChanged || zoneWidthChanged) {
           await client.service('boards').patch(currentBoard.board_id, {
             _action: 'upsertObject',
             objectId: zoneId,
-            objectData: { ...zone, height: nextZoneHeight },
+            objectData: { ...zone, width: nextZoneWidth, height: nextZoneHeight },
           } as unknown as Partial<Board>);
         }
         await Promise.all(
           changedNodes.map(async (node) => {
             const placement = placementByNodeId.get(node.id);
             if (!placement) return;
-            const { width, height } =
-              policy.preset === 'compact_list'
-                ? {
-                    ...ceilBoardGridSize({
-                      width: node.type === 'branchNode' ? 500 : 380,
-                      height: node.type === 'branchNode' ? 88 : 56,
-                    }),
-                  }
-                : itemSize(node);
+            const arranged = placementById.get(node.id);
+            if (!arranged) return;
+            const { width, height } = arranged;
             const currentNode = children.find((child) => child.id === node.id);
             const nodePositionChanged =
               !currentNode ||
