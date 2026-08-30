@@ -7,7 +7,13 @@ import type {
   SpawnConfig,
   User,
 } from '@agor-live/client';
-import { getTeammateConfig, isSessionExecuting, isTeammate } from '@agor-live/client';
+import {
+  getTeammateConfig,
+  isSessionExecuting,
+  isTeammate,
+  SessionStatus,
+  sessionHasUnseenAttention,
+} from '@agor-live/client';
 import {
   BranchesOutlined,
   CodeOutlined,
@@ -231,23 +237,32 @@ const BranchCardComponent = ({
   const isAgent = isTeammate(branch);
 
   // True when one of this branch's sessions is the currently opened
-  // conversation. Drives the "focused" highlight on the canvas card and
-  // also suppresses the louder ready-for-prompt/needs-attention glow —
-  // there's no point screaming for attention at the branch you're
-  // already looking at.
+  // conversation. Drives the focused selection outline.
   const isFocused = useMemo(
     () => activeSessions.some((s) => s.session_id === selectedSessionId),
     [activeSessions, selectedSessionId]
   );
 
-  // Check if branch needs attention (newly created OR has ready sessions)
-  // Don't highlight if a session from this branch is currently open in the drawer
-  const needsAttention = useMemo(() => {
-    const hasReadySession = activeSessions.some((s) => s.ready_for_prompt === true);
-    const shouldHighlight = (branch.needs_attention || hasReadySession) && !isFocused;
-
-    return shouldHighlight;
-  }, [activeSessions, branch.needs_attention, isFocused]);
+  // Opening one session clears only that session for this viewer; unread output
+  // in another session keeps the worktree highlighted.
+  const unseenSessionCount = useMemo(
+    () => activeSessions.filter(sessionHasUnseenAttention).length,
+    [activeSessions]
+  );
+  // Unseen results and unresolved terminal failures are distinct. Reading a
+  // failed/timed-out result clears its badge, but the worktree halo remains
+  // until follow-up work starts and shared promptability resets. The atomic
+  // terminal projection owns this ready/status pair; it is not read state.
+  const hasUnresolvedTerminalAttention = useMemo(
+    () =>
+      activeSessions.some(
+        (session) =>
+          session.ready_for_prompt === true &&
+          (session.status === SessionStatus.FAILED || session.status === SessionStatus.TIMED_OUT)
+      ),
+    [activeSessions]
+  );
+  const needsAttention = unseenSessionCount > 0 || hasUnresolvedTerminalAttention;
 
   const isDarkMode = isDarkTheme(token);
   // AntD exposes `colorPrimaryBg` as the subtle primary surface token.
@@ -306,7 +321,7 @@ const BranchCardComponent = ({
 
   // Compose card chrome from independent visual channels so multiple
   // states can stack cleanly:
-  //   • `boxShadow` — attention halo for needs_attention / awaiting prompt
+  //   • `boxShadow` — unseen results or unresolved terminal attention
   //   • `outline`   — dashed selected state (focused OR active URL target)
   //   • `borderLeft` — thick accent stripe for teammate branches
   //   • `borderColor` — zone color when pinned (no other states use it)

@@ -224,6 +224,7 @@ import {
   type InternalPromptTaskMetadataInput,
 } from './utils/prompt-task-metadata.js';
 import { ensureScheduleRunsAsCaller } from './utils/schedule-hooks.js';
+import { emitSessionAttentionAcknowledged } from './utils/session-attention-realtime.js';
 import {
   deferWithSessionQueueTenantScope,
   runWithSessionQueueTenantScope,
@@ -312,7 +313,7 @@ export class AgorLocalStrategy extends LocalStrategy {
 /**
  * Extended Params with route ID parameter.
  */
-export interface RouteParams extends Params {
+export interface RouteParams extends AuthenticatedParams {
   route?: {
     id?: string;
     messageId?: string;
@@ -1296,6 +1297,27 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   // ============================================================================
   // Sessions custom routes (fork, spawn, genealogy, prompt, stop, queue)
   // ============================================================================
+
+  registerAuthenticatedRoute(
+    app,
+    '/sessions/:id/acknowledge-attention',
+    {
+      async create(_data: Record<string, never>, params: RouteParams) {
+        const id = params.route?.id;
+        if (!id) throw new BadRequest('Session ID required');
+        const userId = params.user?.user_id;
+        if (!userId) throw new NotAuthenticated('Authentication required');
+
+        const acknowledgement = await sessionsService.acknowledgeAttention(id, params);
+        emitSessionAttentionAcknowledged(app, params.tenant?.tenant_id, userId, acknowledgement);
+        return acknowledgement;
+      },
+    },
+    {
+      create: { role: ROLES.VIEWER, action: 'acknowledge viewed session output' },
+    },
+    requireAuth
+  );
 
   registerAuthenticatedRoute(
     app,

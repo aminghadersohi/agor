@@ -38,6 +38,7 @@ import type {
   MCPServer,
   Repo,
   Session,
+  SessionAttentionAcknowledgement,
   User,
 } from '@agor-live/client';
 import { removeCollapsedBranchNode } from '../utils/collapsedBranchNodes';
@@ -97,6 +98,24 @@ export function sessionPatched(session: Session) {
   // reducer returns `prev` untouched on a no-op patch so references stay stable.
   bumpRevision('sessions');
   applyMaps((prev) => applySessionPatchToMaps(prev, session));
+}
+
+/** Apply a caller-private acknowledgement without disturbing shared session state. */
+export function sessionAttentionAcknowledged(acknowledgement: SessionAttentionAcknowledgement) {
+  const existing = agorStore.getState().sessionById.get(acknowledgement.session_id);
+  if (!existing) return;
+
+  const currentSeen = existing.viewer_seen_attention_generation ?? 0;
+  const nextSeen = Math.max(currentSeen, acknowledgement.seen_attention_generation);
+  if (nextSeen === currentSeen) return;
+
+  bumpRevision('sessions');
+  applyMaps((prev) =>
+    applySessionPatchToMaps(prev, {
+      ...existing,
+      viewer_seen_attention_generation: nextSeen,
+    })
+  );
 }
 
 export function sessionRemoved(session: Session) {

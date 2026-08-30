@@ -20,6 +20,7 @@ import {
   isSessionExecuting,
   isSessionPromptable,
   sessionCanStartTask,
+  sessionHasUnseenAttention,
 } from './session';
 
 describe('session promptability helpers', () => {
@@ -43,7 +44,7 @@ describe('session promptability helpers', () => {
     expect(isSessionPromptable({ status: 'timed_out', ready_for_prompt: false })).toBe(false);
   });
 
-  it('does not confuse ready_for_prompt attention state with promptability', () => {
+  it('does not confuse a settled-task flag with promptability', () => {
     expect(sessionCanStartTask('running', true)).toBe(false);
     expect(isSessionPromptable({ status: 'running', ready_for_prompt: true })).toBe(false);
   });
@@ -54,6 +55,23 @@ describe('session promptability helpers', () => {
     expect(isSessionExecuting({ status: 'awaiting_permission' })).toBe(true);
     expect(isSessionExecuting({ status: 'idle' })).toBe(false);
     expect(isSessionExecuting({ status: 'failed' })).toBe(false);
+  });
+});
+
+describe('session attention helpers', () => {
+  it('requires a generation newer than this viewer acknowledged', () => {
+    expect(
+      sessionHasUnseenAttention({
+        attention_generation: 3,
+        viewer_seen_attention_generation: 2,
+      })
+    ).toBe(true);
+    expect(
+      sessionHasUnseenAttention({
+        attention_generation: 3,
+        viewer_seen_attention_generation: 3,
+      })
+    ).toBe(false);
   });
 });
 

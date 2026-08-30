@@ -63,7 +63,7 @@ describe('buildTenantInsertOrder', () => {
 describe('tenantPortabilityForeignKeys', () => {
   it('freezes the exact schema-derived movable FK set', () => {
     const foreignKeys = tenantPortabilityForeignKeys();
-    expect(foreignKeys).toHaveLength(114);
+    expect(foreignKeys).toHaveLength(116);
     expect(Object.isFrozen(foreignKeys)).toBe(true);
     const structuralKeys = foreignKeys.map((foreignKey) =>
       [
@@ -123,6 +123,27 @@ describe('tenantPortabilityForeignKeys', () => {
           childColumns: ['tenant_id', 'user_id'],
           parentTable: 'users',
           parentColumns: ['tenant_id', 'user_id'],
+          onDelete: 'cascade',
+        }),
+      ])
+    );
+  });
+
+  it('moves per-user session attention with both of its tenant-bound parents', () => {
+    expect(tenantPortabilityForeignKeys()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          childTable: 'session_attention_states',
+          childColumns: ['tenant_id', 'user_id'],
+          parentTable: 'users',
+          parentColumns: ['tenant_id', 'user_id'],
+          onDelete: 'cascade',
+        }),
+        expect.objectContaining({
+          childTable: 'session_attention_states',
+          childColumns: ['tenant_id', 'session_id'],
+          parentTable: 'sessions',
+          parentColumns: ['tenant_id', 'session_id'],
           onDelete: 'cascade',
         }),
       ])
