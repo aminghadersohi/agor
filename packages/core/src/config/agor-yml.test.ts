@@ -309,6 +309,11 @@ describe('parseAgorYml — repo .agor.yml demo variants', () => {
     expect(compose).toMatch(/- CREATE_RBAC_TEST_USERS=\$\{CREATE_RBAC_TEST_USERS:-\}/);
   });
 
+  it('shadows @agor/core dist inside the development container', () => {
+    const compose = fs.readFileSync(path.join(REPO_ROOT, 'docker-compose.yml'), 'utf8');
+    expect(compose).toMatch(/^ {6}- \/app\/packages\/core\/dist$/m);
+  });
+
   it('makes branch SDK homes the rich/full RBAC fixture default', () => {
     const baseCompose = fs.readFileSync(path.join(REPO_ROOT, 'docker-compose.yml'), 'utf8');
     const richOverlay = fs.readFileSync(
