@@ -352,6 +352,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: `${NO_CONSUMER} The new session arrives as sessions.created.`,
   },
+  'sessions/:id/acknowledge-attention': {
+    audience: 'none',
+    why: 'The caller-private acknowledgement is emitted only to that tenant user room.',
+  },
   'sessions/:id/prompt': {
     audience: 'none',
     why: `${NO_CONSUMER} The task arrives as tasks.created/queued.`,

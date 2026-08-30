@@ -1714,6 +1714,7 @@ describe('TaskRepository.update', () => {
       await expect(new SessionRepository(db).findById(sessionId)).resolves.toMatchObject({
         status: SessionStatus.IDLE,
         ready_for_prompt: true,
+        attention_generation: 1,
       });
     }
   );

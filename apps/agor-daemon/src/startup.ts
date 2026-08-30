@@ -402,12 +402,11 @@ async function cleanupOrphanStatusesInTenantScope(
   // Fix sessions that are IDLE but not promptable *because a kill interrupted
   // them* — the daemon died during the stop path after writing status=idle but
   // before writing ready_for_prompt=true, or the executor exit raced the stop
-  // endpoint. IDLE + ready_for_prompt=false is NOT inherently orphaned state:
-  // the UI also uses ready_for_prompt as the unread/attention flag (opening a
-  // conversation patches it false, branch cards highlight while it's true —
-  // see SessionPromptState in @agor/core/types), so it is the normal resting
-  // state of every read session. Discriminate by the session's most recent
-  // task: only sessions whose latest task was non-terminal at boot (just
+  // endpoint. IDLE + ready_for_prompt=false is not inherently orphaned state:
+  // newly initialized sessions can be idle before their first settled turn.
+  // Per-user read acknowledgement is stored separately and never mutates this
+  // flag. Discriminate by the session's most recent task: only sessions whose
+  // latest task was non-terminal at boot (just
   // orphan-stopped above, or still in an executing state) were
   // actually interrupted; read sessions have a terminal latest task from a
   // previous run and must be left untouched.

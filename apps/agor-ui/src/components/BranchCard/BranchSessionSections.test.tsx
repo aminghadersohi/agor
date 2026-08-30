@@ -201,16 +201,20 @@ describe('BranchSessionSections', () => {
     expect(screen.queryByLabelText('Latest task failed')).not.toBeInTheDocument();
   });
 
-  it('counts and renders only visible manual sessions when archived ancestors are filtered out', () => {
+  it('counts only unseen visible manual sessions when archived ancestors are filtered out', () => {
     const archivedParent = makeManualSession({
       session_id: 'session-archived-parent',
       title: 'Archived parent',
       archived: true,
+      attention_generation: 1,
+      viewer_seen_attention_generation: 0,
       genealogy: { children: ['session-visible-child'] },
     });
     const visibleChild = makeManualSession({
       session_id: 'session-visible-child',
       title: 'Visible child',
+      attention_generation: 1,
+      viewer_seen_attention_generation: 0,
       genealogy: { parent_session_id: 'session-archived-parent', children: [] },
     });
 

@@ -1,6 +1,12 @@
 import type { Board, Session } from '@agor-live/client';
 import { describe, expect, it } from 'vitest';
-import { buildById, buildSessionMaps, reconcileByIdMap } from './agorMaps';
+import {
+  applySessionPatchToMaps,
+  buildById,
+  buildSessionMaps,
+  EMPTY_MAPS,
+  reconcileByIdMap,
+} from './agorMaps';
 
 // These guard the "reference-stable rebuild" contract: a wholesale rebuild of
 // already-loaded data (the background "load whole store" hydration, reconnect
@@ -117,5 +123,28 @@ describe('buildSessionMaps reference stability', () => {
     expect(surrogate?.genealogy?.parent_session_id).toBe('source');
     expect(surrogate?.remote_surrogate?.source_session_id).toBe('source');
     expect(surrogate?.remote_surrogate?.target_branch_id).toBe('B');
+  });
+});
+
+describe('caller-private session attention state', () => {
+  it('preserves the viewer acknowledgement across shared session patches', () => {
+    const existing = {
+      ...makeSession('s1', 'A'),
+      attention_generation: 2,
+      viewer_seen_attention_generation: 2,
+    } as Session;
+    const maps = buildSessionMaps([existing]);
+
+    const result = applySessionPatchToMaps({ ...EMPTY_MAPS, ...maps }, {
+      ...makeSession('s1', 'A', 'idle'),
+      attention_generation: 3,
+      // Shared realtime session events intentionally omit this per-user field.
+      viewer_seen_attention_generation: undefined,
+    } as Session);
+
+    expect(result.sessionById.get('s1')).toMatchObject({
+      attention_generation: 3,
+      viewer_seen_attention_generation: 2,
+    });
   });
 });

@@ -122,6 +122,27 @@ describe('tenantPortabilityForeignKeys', () => {
     );
   });
 
+  it('moves per-user session attention with both of its tenant-bound parents', () => {
+    expect(tenantPortabilityForeignKeys()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          childTable: 'session_attention_states',
+          childColumns: ['tenant_id', 'user_id'],
+          parentTable: 'users',
+          parentColumns: ['tenant_id', 'user_id'],
+          onDelete: 'cascade',
+        }),
+        expect.objectContaining({
+          childTable: 'session_attention_states',
+          childColumns: ['tenant_id', 'session_id'],
+          parentTable: 'sessions',
+          parentColumns: ['tenant_id', 'session_id'],
+          onDelete: 'cascade',
+        }),
+      ])
+    );
+  });
+
   it('moves inbound event relations with their channel, Session, and Task', () => {
     expect(tenantPortabilityForeignKeys()).toEqual(
       expect.arrayContaining([
