@@ -203,6 +203,60 @@ export interface TaskMetadata {
     requested_from_session_id: SessionID;
     requested_by_user_id: string;
   };
+
+  /**
+   * Durable audit for ordinary prompt requests that intentionally share this
+   * one future executor turn. `requests` is append-only while the Task remains
+   * QUEUED. Duplicate requests retain their own identity/provenance but do not
+   * repeat text in `Task.full_prompt`.
+   */
+  prompt_compaction?: {
+    version: 1;
+    max_combined_prompt_bytes: number;
+    requests: Array<{
+      request_id: TaskID;
+      submitted_at: string;
+      created_by: UserID;
+      text: string;
+      normalized_text: string;
+      duplicate_of_request_id?: TaskID;
+    }>;
+    unique_prompt_count: number;
+    duplicate_request_count: number;
+    /** The request represented by the admission response that returned this snapshot. */
+    last_admitted_request_id: TaskID;
+  };
+
+  /** Execution-affecting prompt controls. Compaction requires an exact match. */
+  prompt_control?: {
+    permission_mode?: import('./session').PermissionMode;
+    stream: boolean;
+  };
+
+  /**
+   * Audit written to an active Task when a parent/coordinator interrupts it.
+   * Cleanup authority remains task-scoped until normal termination settlement.
+   */
+  interruptions?: Array<{
+    requested_by_session_id: SessionID;
+    requested_by_user_id: UserID;
+    relationship: 'parent' | 'coordinator';
+    target_task_id: TaskID;
+    corrective_task_id: TaskID;
+    idempotency_key: string;
+    requested_at: string;
+  }>;
+
+  /** Audit and dispatch classification for a corrective interrupt prompt. */
+  interrupt_correction?: {
+    requested_by_session_id: SessionID;
+    requested_by_user_id: UserID;
+    relationship: 'parent' | 'coordinator';
+    target_task_id?: TaskID;
+    corrective_task_id: TaskID;
+    idempotency_key: string;
+    requested_at: string;
+  };
 }
 
 /**

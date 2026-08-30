@@ -87,6 +87,35 @@ cannot be replayed. Widget creation and lifecycle metadata are daemon-owned:
 generic external Message create/update/patch cannot mint or alter a widget,
 and pending/resolving widgets cannot be externally removed.
 
+## Ordinary prompt compaction
+
+Busy Sessions compact only the contiguous queue tail made entirely of safe,
+ordinary prompts from the same execution actor with identical permission and
+stream controls. Admission holds the same Session row lock as queue numbering,
+so a dispatcher and another daemon cannot fold into a Task after its
+`queued -> dispatching` claim. Every originating request remains visible in
+`Task.metadata.prompt_compaction.requests`; normalized duplicates retain their
+request ID, author, time, and original text but do not repeat bytes sent to the
+agent. Normalization is deterministic (Unicode NFKC, LF line endings, trimmed
+lines, collapsed horizontal whitespace and excess blank lines), never semantic
+or LLM-based.
+
+Combined executor prompts are capped at 32 KiB UTF-8. The next distinct prompt
+that would exceed the cap starts the next queue chunk; a single oversized
+prompt remains intact as its own Task. There is no truncation. Internal stable
+producers, exact-Task callbacks, standing/genealogy continuations, callbacks,
+widgets, gateways, interrupt corrections, attachment-bearing prompts, slash
+controls, different actors, and different execution controls are barriers.
+These exclusions preserve stable Task/message identity, one-result-per-request
+callback contracts, attachment lifecycle, credential attribution, and control
+ordering. Queue/status responses expose the admission request ID, shared
+execution Task ID, request IDs/count, unique count, and duplicate count.
+
+An authorized interrupt correction is a separate non-compactable Task. It is
+inserted ahead of ordinary queued work while the active Task and Session are
+atomically moved to STOPPING. It cannot dispatch until the existing termination
+coordinator verifies quiescence/absence and settles the stopped Task.
+
 ## Invariants
 
 1. At most one Task is in an executing state for a Session.

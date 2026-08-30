@@ -542,6 +542,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       this.trackTaskCompleted(result.task);
       const internalParams = { ...(params ?? {}), provider: undefined } as TaskParams;
       const isStop = result.task.status === TaskStatus.STOPPED;
+      const isInterruptStop = isStop && (result.task.metadata?.interruptions?.length ?? 0) > 0;
       const completionParams = {
         ...internalParams,
         // Avoid a second eager hand-off from the settlement path. The durable
@@ -549,7 +550,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         // Task outcome and Session projection; user Stop may still delegate
         // an immediate hand-off to its caller while the Session lock is held.
         suppressTerminalQueueProcessing:
-          !isStop || params?.suppressTerminalQueueProcessing === true,
+          !isStop || (params?.suppressTerminalQueueProcessing === true && !isInterruptStop),
       };
       // The repository committed the authoritative Task settlement and
       // minimal Session projection atomically. Post-commit work must never

@@ -113,6 +113,11 @@ export interface SessionsServiceImpl
     data: SessionRelayDestinationInput,
     params?: FeathersParams
   ): Promise<SessionRelayResolution>;
+  resolveInterruptAuthority(
+    id: string,
+    data: import('./services/sessions.js').SessionInterruptAuthorityInput,
+    params?: FeathersParams
+  ): Promise<import('@agor/core/types').SessionInterruptAuthority>;
   getGenealogy(
     id: string,
     params?: FeathersParams
