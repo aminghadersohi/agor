@@ -138,6 +138,12 @@ const mockSessionMCPServerRepo = {
 const mockBranchesRepo = {
   findById: vi.fn(),
 } as any;
+const mockReposRepo = {
+  findById: vi.fn().mockResolvedValue({
+    repo_id: 'repo-1',
+    local_path: path.join(os.tmpdir(), 'agor-codex-test-repo'),
+  }),
+} as any;
 const mockDb = {} as any;
 
 describe('CodexPromptService - SDK Instance Caching (issue #133)', () => {
@@ -163,7 +169,7 @@ describe('CodexPromptService - SDK Instance Caching (issue #133)', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined, // reposRepo
+      mockReposRepo, // reposRepo
       'test-api-key',
       mockDb
     );
@@ -177,7 +183,7 @@ describe('CodexPromptService - SDK Instance Caching (issue #133)', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined, // reposRepo
+      mockReposRepo, // reposRepo
       'test-api-key',
       mockDb
     );
@@ -204,7 +210,7 @@ describe('CodexPromptService - SDK Instance Caching (issue #133)', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined, // reposRepo
+      mockReposRepo, // reposRepo
       'initial-key',
       mockDb
     );
@@ -238,7 +244,7 @@ describe('CodexPromptService - SDK Instance Caching (issue #133)', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined, // reposRepo
+      mockReposRepo, // reposRepo
       undefined,
       mockDb
     );
@@ -281,7 +287,7 @@ describe('CodexPromptService - OPENAI_BASE_URL handling', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       apiKey,
       mockDb
     );
@@ -482,7 +488,7 @@ describe('CodexPromptService - prompt flow client initialization', () => {
         mockSessionsRepo,
         mockSessionMCPServerRepo,
         mockBranchesRepo,
-        undefined,
+        mockReposRepo,
         'test-api-key',
         mockDb
       );
@@ -517,6 +523,7 @@ describe('CodexPromptService - prompt flow client initialization', () => {
       mockBranchesRepo.findById.mockResolvedValue({
         branch_id: 'branch-1',
         path: process.cwd(),
+        storage_mode: 'clone',
       });
 
       mockStreamEvents = [
@@ -537,10 +544,19 @@ describe('CodexPromptService - prompt flow client initialization', () => {
       }
 
       expect(mockInstanceCount).toBe(1);
+      const expectedSandboxMode =
+        sandboxModeEnvOverride ?? codexPermissions.sandboxMode ?? 'workspace-write';
       expect(mockInstanceConfigs).toEqual([
         {
           features: { goals: false, multi_agent: false },
           model_instructions_file: '/tmp/agor-codex-instructions-flow.md',
+          ...(expectedSandboxMode === 'workspace-write'
+            ? {
+                sandbox_workspace_write: {
+                  writable_roots: [path.join(process.cwd(), '.git')],
+                },
+              }
+            : {}),
           mcp_servers: {
             agor: {
               url: 'http://localhost:3030/mcp',
@@ -566,7 +582,7 @@ describe('CodexPromptService - prompt flow client initialization', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -674,7 +690,7 @@ describe('CodexPromptService - prompt flow client initialization', () => {
       sessionsRepo as unknown as SessionRepository,
       sessionMCPServerRepo as unknown as SessionMCPServerRepository,
       branchesRepo as unknown as BranchRepository,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       messagesService
     );
@@ -743,6 +759,214 @@ describe('CodexPromptService - prompt flow client initialization', () => {
   });
 });
 
+describe('CodexPromptService - Git writable roots', () => {
+  const branchPath = path.join(os.tmpdir(), 'agor-codex-git-roots', 'branch');
+  const repoPath = path.join(os.tmpdir(), 'agor-codex-git-roots', 'repo');
+
+  beforeEach(() => {
+    mockInstanceCount = 0;
+    mockInstanceConfigs = [];
+    mockStreamEvents = [];
+    mockStartThreadId = 'mock-thread-id';
+    mockStartThreadOptions = [];
+    mockResumeThreadOptions = [];
+    delete process.env.AGOR_CODEX_SANDBOX_MODE;
+    vi.clearAllMocks();
+  });
+
+  async function captureConfig({
+    storageMode,
+    permissionMode,
+    sandboxMode,
+    branchRoot = branchPath,
+    repoRoot = repoPath,
+  }: {
+    storageMode: 'clone' | 'worktree';
+    permissionMode: PermissionMode;
+    sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
+    branchRoot?: string;
+    repoRoot?: string;
+  }): Promise<Record<string, unknown>> {
+    const reposRepo = {
+      findById: vi.fn().mockResolvedValue({ repo_id: 'repo-1', local_path: repoRoot }),
+    };
+    const service = new CodexPromptService(
+      mockMessagesRepo,
+      mockSessionsRepo,
+      mockSessionMCPServerRepo,
+      mockBranchesRepo,
+      reposRepo as any,
+      'test-api-key',
+      mockDb
+    );
+    const serviceWithPrivates = service as any;
+    serviceWithPrivates.ensureCodexInstructionsFile = vi
+      .fn()
+      .mockResolvedValue('/tmp/agor-codex-instructions-git-roots.md');
+    serviceWithPrivates.buildMcpServersConfig = vi
+      .fn()
+      .mockResolvedValue({ servers: {}, total: 0 });
+
+    mockSessionsRepo.findById.mockResolvedValue({
+      session_id: 'session-git-roots',
+      branch_id: 'branch-1',
+      created_at: new Date().toISOString(),
+      sdk_session_id: null,
+      permission_config: {
+        mode: permissionMode,
+        codex: sandboxMode ? { sandboxMode } : {},
+      },
+      model_config: {},
+      mcp_token: 'test-token',
+    });
+    mockSessionsRepo.update.mockResolvedValue(undefined);
+    mockBranchesRepo.findById.mockResolvedValue({
+      branch_id: 'branch-1',
+      repo_id: 'repo-1',
+      path: branchRoot,
+      storage_mode: storageMode,
+    });
+    mockStreamEvents = [
+      {
+        type: 'turn.completed',
+        usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
+      },
+    ];
+
+    for await (const _event of service.promptSessionStreaming(
+      'session-git-roots' as SessionID,
+      'commit the change'
+    )) {
+      // Consume the stream so the SDK configuration path completes.
+    }
+
+    return mockInstanceConfigs.at(-1) as Record<string, unknown>;
+  }
+
+  function getWritableRoot(config: Record<string, unknown>): string {
+    const workspaceConfig = config.sandbox_workspace_write;
+    if (!workspaceConfig || typeof workspaceConfig !== 'object') {
+      throw new Error('Missing sandbox_workspace_write config');
+    }
+    const roots = Reflect.get(workspaceConfig, 'writable_roots');
+    if (!Array.isArray(roots) || typeof roots[0] !== 'string') {
+      throw new Error('Missing sandbox_workspace_write.writable_roots config');
+    }
+    return roots[0];
+  }
+
+  function writableRootCovers(root: string, target: string): boolean {
+    const relative = path.relative(root, target);
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  }
+
+  it.each<{
+    permissionMode: PermissionMode;
+    storageMode: 'clone' | 'worktree';
+    expectedRoot: string;
+  }>([
+    {
+      permissionMode: 'allow-all',
+      storageMode: 'clone',
+      expectedRoot: path.join(branchPath, '.git'),
+    },
+    {
+      permissionMode: 'auto',
+      storageMode: 'clone',
+      expectedRoot: path.join(branchPath, '.git'),
+    },
+    {
+      permissionMode: 'on-failure',
+      storageMode: 'clone',
+      expectedRoot: path.join(branchPath, '.git'),
+    },
+    {
+      permissionMode: 'allow-all',
+      storageMode: 'worktree',
+      expectedRoot: path.join(repoPath, '.git'),
+    },
+  ])(
+    'grants only Git metadata for $permissionMode in $storageMode storage',
+    async ({ permissionMode, storageMode, expectedRoot }) => {
+      const config = await captureConfig({ permissionMode, storageMode });
+
+      expect(config).toMatchObject({
+        sandbox_workspace_write: { writable_roots: [expectedRoot] },
+      });
+    }
+  );
+
+  it('covers clone index, object, and ref metadata writes', async () => {
+    const config = await captureConfig({ permissionMode: 'allow-all', storageMode: 'clone' });
+    const writableRoot = getWritableRoot(config);
+
+    expect({
+      indexLock: writableRootCovers(writableRoot, path.join(branchPath, '.git', 'index.lock')),
+      objectWrite: writableRootCovers(
+        writableRoot,
+        path.join(branchPath, '.git', 'objects', 'ab', 'tmp_obj')
+      ),
+      refLock: writableRootCovers(
+        writableRoot,
+        path.join(branchPath, '.git', 'refs', 'heads', 'topic.lock')
+      ),
+    }).toEqual({ indexLock: true, objectWrite: true, refLock: true });
+  });
+
+  it('covers the resolved worktree gitdir plus shared object and ref writes', async () => {
+    const fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'agor-codex-worktree-git-'));
+    const fixtureBranchPath = path.join(fixtureRoot, 'branch');
+    const fixtureRepoPath = path.join(fixtureRoot, 'repo');
+    const worktreeGitDir = path.join(fixtureRepoPath, '.git', 'worktrees', 'topic');
+
+    try {
+      await fs.mkdir(fixtureBranchPath, { recursive: true });
+      await fs.mkdir(worktreeGitDir, { recursive: true });
+      await fs.writeFile(path.join(fixtureBranchPath, '.git'), `gitdir: ${worktreeGitDir}\n`);
+
+      const pointer = await fs.readFile(path.join(fixtureBranchPath, '.git'), 'utf8');
+      const gitdirMatch = /^gitdir:\s*(.+)$/m.exec(pointer);
+      if (!gitdirMatch) throw new Error('Invalid worktree .git pointer fixture');
+      const resolvedGitDir = path.resolve(fixtureBranchPath, gitdirMatch[1].trim());
+
+      const config = await captureConfig({
+        permissionMode: 'allow-all',
+        storageMode: 'worktree',
+        branchRoot: fixtureBranchPath,
+        repoRoot: fixtureRepoPath,
+      });
+      const writableRoot = getWritableRoot(config);
+
+      expect({
+        indexLock: writableRootCovers(writableRoot, path.join(resolvedGitDir, 'index.lock')),
+        objectWrite: writableRootCovers(
+          writableRoot,
+          path.join(fixtureRepoPath, '.git', 'objects', 'ab', 'tmp_obj')
+        ),
+        refLock: writableRootCovers(
+          writableRoot,
+          path.join(fixtureRepoPath, '.git', 'refs', 'heads', 'topic.lock')
+        ),
+      }).toEqual({ indexLock: true, objectWrite: true, refLock: true });
+    } finally {
+      await fs.rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { permissionMode: 'ask' as const, sandboxMode: 'read-only' as const },
+    { permissionMode: 'allow-all' as const, sandboxMode: 'danger-full-access' as const },
+  ])('does not add writable roots to $sandboxMode', async ({ permissionMode, sandboxMode }) => {
+    const config = await captureConfig({
+      permissionMode,
+      sandboxMode,
+      storageMode: 'clone',
+    });
+
+    expect(config).not.toHaveProperty('sandbox_workspace_write.writable_roots');
+  });
+});
+
 describe('CodexPromptService - forked sessions', () => {
   beforeEach(() => {
     mockInstanceCount = 0;
@@ -763,7 +987,7 @@ describe('CodexPromptService - forked sessions', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -848,7 +1072,7 @@ describe('CodexPromptService - Todo normalization', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -897,7 +1121,7 @@ describe('CodexPromptService - Todo normalization', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -920,7 +1144,7 @@ describe('CodexPromptService - Todo normalization', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -1000,7 +1224,7 @@ describe('CodexPromptService - tool payload mapping', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -1083,7 +1307,7 @@ describe('CodexPromptService - tool payload mapping', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -1180,7 +1404,7 @@ describe('CodexPromptService - tool payload mapping', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -1273,7 +1497,7 @@ describe('CodexPromptService - tool payload mapping', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -1309,7 +1533,7 @@ describe('CodexPromptService - tool payload mapping', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -1345,7 +1569,7 @@ describe('CodexPromptService - tool payload mapping', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -1387,7 +1611,7 @@ describe('CodexPromptService - tool payload mapping', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -1423,7 +1647,7 @@ describe('CodexPromptService - tool payload mapping', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -1451,7 +1675,7 @@ describe('CodexPromptService - tool payload mapping', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -1525,7 +1749,7 @@ describe('CodexPromptService - event_msg terminal handling (issue #1749)', () =>
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockDb
     );
@@ -2212,7 +2436,7 @@ describe('CodexPromptService - buildMcpServersConfig', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockMcpServerRepo
     );
@@ -2605,7 +2829,7 @@ describe('CodexPromptService - MCP tool_permissions', () => {
       mockSessionsRepo,
       mockSessionMCPServerRepo,
       mockBranchesRepo,
-      undefined,
+      mockReposRepo,
       'test-api-key',
       mockMcpServerRepo
     );
