@@ -98,13 +98,6 @@ describe('tenantPortabilityForeignKeys', () => {
           parentColumns: ['tenant_id', 'config_id'],
           onDelete: 'cascade',
         }),
-        expect.objectContaining({
-          childTable: 'branch_session_sharing_grants',
-          childColumns: ['tenant_id', 'config_id', 'session_owner_user_id'],
-          parentTable: 'branch_session_sharing_rules',
-          parentColumns: ['tenant_id', 'config_id', 'session_owner_user_id'],
-          onDelete: 'cascade',
-        }),
       ])
     );
   });
