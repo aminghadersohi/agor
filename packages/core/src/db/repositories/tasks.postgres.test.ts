@@ -122,10 +122,11 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)('TaskRepository PostgreSQL'
     expect(first?.task.last_executor_heartbeat_at).toBe(first?.task.executor_connected_at);
     const connectedAt = Date.parse(first!.task.executor_connected_at!);
     // PostgreSQL retains microseconds while the driver exposes JavaScript
-    // milliseconds; flooring that round-trip can land one millisecond before
-    // the client-side wall-clock sample taken immediately before the claim.
-    expect(connectedAt).toBeGreaterThanOrEqual(beforeClaim - 1);
-    expect(connectedAt).toBeLessThanOrEqual(afterClaim);
+    // milliseconds. The database may also run on a separate container clock,
+    // so this is deliberately a bounded skew sanity check rather than an
+    // assertion that the database clock is identical to the test host clock.
+    expect(connectedAt).toBeGreaterThanOrEqual(beforeClaim - 1_000);
+    expect(connectedAt).toBeLessThanOrEqual(afterClaim + 1_000);
 
     await Promise.allSettled([
       tasks.claimTermination({
