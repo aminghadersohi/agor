@@ -390,6 +390,7 @@ const UPDATE_NOT_ROUTED: Record<string, string | readonly string[]> = {
   'agentic-tool-settings':
     'no update method — TenantAgenticToolSettingsService is not a DrizzleService',
   artifacts: ARTIFACTS_SERVICE_TRANSPORT_METHODS,
+  'artifacts/:id/actions/:actionId': 'no update method — custom route exposes create only',
   'artifacts/:id/console': 'no update method — custom route exposes create only',
   'artifacts/:id/runtime-response/:requestId':
     'no update method — custom route exposes create only',

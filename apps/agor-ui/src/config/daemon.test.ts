@@ -71,3 +71,65 @@ describe('getDaemonUrl', () => {
     expect(getDaemonUrl()).toBe('http://10.33.92.175:12069');
   });
 });
+
+/**
+ * The one daemon-URL misconfiguration that cannot work: a loopback address
+ * served to a browser on some other machine. It looks perfectly healthy from
+ * the host that started the daemon and fails only for everyone else, so the
+ * generic "make sure the daemon is running" advice sends people the wrong way.
+ */
+describe('describeUnreachableDaemonOrigin', () => {
+  async function load() {
+    vi.resetModules();
+    return (await import('./daemon')).describeUnreachableDaemonOrigin;
+  }
+
+  it('explains a loopback daemon URL served to a remote browser', async () => {
+    const describe_ = await load();
+    const message = describe_({
+      daemonUrl: 'http://localhost:3235',
+      pageOrigin: 'http://192.168.1.10:5235',
+    });
+    expect(message).toContain('192.168.1.10');
+    expect(message).toContain('http://localhost:3235');
+    expect(message).toContain('VITE_DAEMON_URL');
+  });
+
+  it.each(['127.0.0.1', '0.0.0.0', '[::1]'])('treats %s as loopback too', async (host) => {
+    const describe_ = await load();
+    expect(
+      describe_({
+        daemonUrl: `http://${host}:3235`,
+        pageOrigin: 'http://agor.internal:5235',
+      })
+    ).not.toBeNull();
+  });
+
+  it('stays silent when the page itself is on localhost', async () => {
+    // Developer on the host machine: loopback is exactly right.
+    const describe_ = await load();
+    expect(
+      describe_({
+        daemonUrl: 'http://localhost:3235',
+        pageOrigin: 'http://localhost:5235',
+      })
+    ).toBeNull();
+  });
+
+  it('stays silent when the daemon URL is already routable', async () => {
+    const describe_ = await load();
+    expect(
+      describe_({
+        daemonUrl: 'http://192.168.1.10:3235',
+        pageOrigin: 'http://192.168.1.10:5235',
+      })
+    ).toBeNull();
+  });
+
+  it('stays silent rather than guessing at an unparseable URL', async () => {
+    const describe_ = await load();
+    expect(
+      describe_({ daemonUrl: 'not a url', pageOrigin: 'http://192.168.1.10:5235' })
+    ).toBeNull();
+  });
+});
