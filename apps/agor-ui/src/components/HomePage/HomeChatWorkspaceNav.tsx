@@ -10,12 +10,18 @@ import {
   RightOutlined,
   SettingOutlined,
 } from '@ant-design/icons';
-import { Button, Empty, Flex, Typography, theme } from 'antd';
+import { Button, Empty, Flex, Tooltip, Typography, theme } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAgorStore } from '../../store/agorStore';
-import { selectBranchById, selectSessionById, selectUserById } from '../../store/selectors';
+import {
+  selectBoardById,
+  selectBranchById,
+  selectSessionById,
+  selectUserById,
+} from '../../store/selectors';
 import { getSessionDisplayTitle } from '../../utils/sessionTitle';
 import { formatRelativeTimeSafe } from '../../utils/time';
+import { BoardTile } from '../BoardTile';
 import { readTeammateChatPreferences } from '../TeammateChatCollections/preferences';
 import { StatusDot } from './StatusDot';
 
@@ -42,6 +48,7 @@ export interface HomeChatWorkspaceNavProps {
   onManage: (sessionId?: string) => void;
   onExit: () => void;
   onShowOnBoard: (sessionId: string) => void;
+  onBoardClick: (boardId: string) => void;
 }
 
 export function HomeChatWorkspaceNav({
@@ -51,11 +58,13 @@ export function HomeChatWorkspaceNav({
   onManage,
   onExit,
   onShowOnBoard,
+  onBoardClick,
 }: HomeChatWorkspaceNavProps) {
   const { token } = theme.useToken();
   const userById = useAgorStore(selectUserById);
   const sessionById = useAgorStore(selectSessionById);
   const branchById = useAgorStore(selectBranchById);
+  const boardById = useAgorStore(selectBoardById);
   const currentUserPreferences = currentUserId
     ? userById.get(currentUserId)?.preferences
     : undefined;
@@ -244,12 +253,32 @@ export function HomeChatWorkspaceNav({
                         {collection.branches.map(({ key, branch, sessions }) => {
                           const branchExpanded = expandedKeys.has(key);
                           const teammate = getTeammateConfig(branch);
+                          const branchLabel = teammate?.displayName || branch.name;
+                          const destinationBoard = branch.board_id
+                            ? boardById.get(branch.board_id)
+                            : undefined;
+                          const canOpenBoard = destinationBoard && !destinationBoard.archived;
+                          const branchIdentity = teammate ? (
+                            <span
+                              aria-hidden
+                              style={{
+                                width: 32,
+                                height: 32,
+                                display: 'grid',
+                                placeItems: 'center',
+                                borderRadius: '50%',
+                                background: token.colorFillSecondary,
+                                fontSize: 18,
+                              }}
+                            >
+                              {teammate.emoji || '💬'}
+                            </span>
+                          ) : (
+                            <BoardTile size={32} />
+                          );
                           return (
                             <div key={key}>
-                              <button
-                                type="button"
-                                aria-expanded={branchExpanded}
-                                onClick={() => toggleExpanded(key)}
+                              <div
                                 style={{
                                   width: '100%',
                                   minHeight: 40,
@@ -257,37 +286,72 @@ export function HomeChatWorkspaceNav({
                                   gridTemplateColumns: '14px 34px minmax(0, 1fr) auto',
                                   alignItems: 'center',
                                   gap: 6,
-                                  padding: '4px 8px',
-                                  border: 0,
-                                  borderRadius: token.borderRadius,
-                                  background: 'transparent',
-                                  color: token.colorText,
-                                  cursor: 'pointer',
-                                  textAlign: 'left',
                                 }}
                               >
-                                {disclosureIcon(branchExpanded)}
-                                <span
-                                  aria-hidden
+                                <button
+                                  type="button"
+                                  aria-expanded={branchExpanded}
+                                  aria-label={`${branchExpanded ? 'Collapse' : 'Expand'} sessions for ${branchLabel}`}
+                                  onClick={() => toggleExpanded(key)}
                                   style={{
-                                    width: 32,
-                                    height: 32,
+                                    gridArea: '1 / 1 / 2 / -1',
+                                    width: '100%',
+                                    minHeight: 30,
                                     display: 'grid',
-                                    placeItems: 'center',
-                                    borderRadius: '50%',
-                                    background: token.colorFillSecondary,
-                                    fontSize: 18,
+                                    gridTemplateColumns: '14px 34px minmax(0, 1fr) auto',
+                                    alignItems: 'center',
+                                    gap: 6,
+                                    padding: '4px 8px',
+                                    border: 0,
+                                    borderRadius: token.borderRadius,
+                                    background: 'transparent',
+                                    color: token.colorText,
+                                    cursor: 'pointer',
+                                    textAlign: 'left',
                                   }}
                                 >
-                                  {teammate?.emoji || '💬'}
-                                </span>
-                                <Text ellipsis style={{ minWidth: 0, fontSize: 12 }}>
-                                  {teammate?.displayName || branch.name}
-                                </Text>
-                                <Text type="secondary" style={{ fontSize: 10 }}>
-                                  {sessions.length}
-                                </Text>
-                              </button>
+                                  {disclosureIcon(branchExpanded)}
+                                  <span aria-hidden />
+                                  <Text ellipsis style={{ minWidth: 0, fontSize: 12 }}>
+                                    {branchLabel}
+                                  </Text>
+                                  <Text type="secondary" style={{ fontSize: 10 }}>
+                                    {sessions.length}
+                                  </Text>
+                                </button>
+
+                                {canOpenBoard ? (
+                                  <Tooltip title={`Open ${destinationBoard.name} board`}>
+                                    <Button
+                                      type="text"
+                                      aria-label={`Open ${destinationBoard.name} board`}
+                                      onClick={() => onBoardClick(destinationBoard.board_id)}
+                                      style={{
+                                        gridArea: '1 / 2',
+                                        width: 34,
+                                        minWidth: 34,
+                                        height: 36,
+                                        padding: 1,
+                                      }}
+                                    >
+                                      {branchIdentity}
+                                    </Button>
+                                  </Tooltip>
+                                ) : (
+                                  <span
+                                    aria-hidden
+                                    style={{
+                                      gridArea: '1 / 2',
+                                      width: 34,
+                                      height: 36,
+                                      display: 'grid',
+                                      placeItems: 'center',
+                                    }}
+                                  >
+                                    {branchIdentity}
+                                  </span>
+                                )}
+                              </div>
 
                               {branchExpanded && (
                                 <Flex vertical gap={2} style={{ padding: '2px 0 2px 20px' }}>

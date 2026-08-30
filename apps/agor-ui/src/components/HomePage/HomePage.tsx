@@ -284,6 +284,7 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
         onManage={props.onManageTeammateChats}
         onExit={props.onExitChatWorkspace ?? (() => {})}
         onShowOnBoard={props.onShowChatSessionOnBoard ?? props.onSessionClick}
+        onBoardClick={props.onBoardClick}
       />
     );
   }
