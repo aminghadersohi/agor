@@ -194,6 +194,47 @@ describe('SessionCanvas zoom shortcuts', () => {
     expect(updater?.(flowNodes).find((node) => node.id === 'branch-1')?.position.x).toBe(40);
   });
 
+  it.each([
+    ['worktree', 'branchNode', 'branch-1'],
+    ['card', 'cardNode', 'card-1'],
+  ])('keeps one compact %s size readout outside while dragging', (_label, type, id) => {
+    render(<SessionCanvas board={null} client={null} branches={[]} />);
+    const moving: Node = {
+      id,
+      type,
+      position: { x: 300, y: 100 },
+      width: 200,
+      height: 120,
+      data: {},
+    };
+    const flowNodes: Node[] = [
+      moving,
+      {
+        id: 'peer',
+        type: 'artifactNode',
+        position: { x: 0, y: 0 },
+        width: 200,
+        height: 120,
+        data: {},
+      },
+    ];
+    act(() => {
+      (reactFlowProps?.onInit as (instance: unknown) => void)?.({
+        getNodes: () => flowNodes,
+        getViewport: () => ({ x: 0, y: 0, zoom: 1 }),
+        getZoom: () => 1,
+        screenToFlowPosition: ({ x, y }: { x: number; y: number }) => ({ x, y }),
+      });
+      (reactFlowProps?.onNodeDrag as (event: unknown, node: Node) => void)?.({}, moving);
+    });
+
+    const readout = document.querySelector<HTMLElement>('[data-guide-kind="size-readout"]');
+    const sizeLines = document.querySelectorAll('.canvas-alignment-guide[data-guide-kind="size"]');
+    expect(readout).toHaveTextContent('200 × 120');
+    expect(sizeLines).toHaveLength(1);
+    expect(Number.parseFloat(readout?.style.top ?? '')).toBeGreaterThan(220);
+  });
+
   it('opens the markdown note modal when the markdown tool clicks a board node', async () => {
     render(
       <ConnectionProvider

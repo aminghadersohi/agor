@@ -121,6 +121,7 @@ import {
   getGuideLayoutRects,
   type LayoutGuide,
   layoutGuideScreenStyle,
+  layoutSizeReadoutScreenStyle,
   snapRectToPeers,
 } from './canvas/utils/layoutGuides';
 import {
@@ -3096,6 +3097,22 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       return () => window.removeEventListener('keydown', handleEscape);
     }, [applySelectedNodeIds]);
 
+    const guideWrapperRect = reactFlowWrapperRef.current?.getBoundingClientRect();
+    const documentWidth = document.documentElement.clientWidth || window.innerWidth || 1024;
+    const documentHeight = document.documentElement.clientHeight || window.innerHeight || 768;
+    const hasMeasuredGuideWidth = !!guideWrapperRect && guideWrapperRect.width > 0;
+    const hasMeasuredGuideHeight = !!guideWrapperRect && guideWrapperRect.height > 0;
+    const guideViewportBounds = {
+      left: hasMeasuredGuideWidth ? Math.max(0, -guideWrapperRect.left) : 0,
+      top: hasMeasuredGuideHeight ? Math.max(0, -guideWrapperRect.top) : 0,
+      right: hasMeasuredGuideWidth
+        ? Math.min(guideWrapperRect.width, documentWidth - guideWrapperRect.left)
+        : documentWidth,
+      bottom: hasMeasuredGuideHeight
+        ? Math.min(guideWrapperRect.height, documentHeight - guideWrapperRect.top)
+        : documentHeight,
+    };
+
     return (
       <div
         style={{
@@ -3192,11 +3209,29 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   data-comparison-id={guide.comparisonId}
                   style={layoutGuideScreenStyle(guide, guideViewport)}
                 >
-                  {guide.label && (
+                  {guide.label && guide.kind !== 'size' && (
                     <span className="canvas-alignment-guide-label">{guide.label}</span>
                   )}
                 </span>
               ))}
+              {alignmentGuides.map((guide) => {
+                const style = layoutSizeReadoutScreenStyle(
+                  guide,
+                  guideViewport,
+                  guideViewportBounds
+                );
+                if (!style || !guide.label || !guide.readout) return null;
+                return (
+                  <span
+                    key={`${guide.id}-readout`}
+                    className="canvas-size-readout"
+                    data-guide-kind="size-readout"
+                    style={style}
+                  >
+                    {guide.label}
+                  </span>
+                );
+              })}
             </div>
           )}
           <ReactFlow

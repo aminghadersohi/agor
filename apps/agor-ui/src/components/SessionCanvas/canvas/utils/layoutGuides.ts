@@ -21,6 +21,11 @@ export interface LayoutGuide {
   kind: 'alignment' | 'size' | 'gap';
   label?: string;
   comparisonId?: string;
+  /** Geometry used to keep the compact size readout outside the moving node. */
+  readout?: {
+    target: NodeRect;
+    avoid: NodeRect[];
+  };
 }
 
 export interface SnapResult {
@@ -44,6 +49,18 @@ interface GapNeighbor {
 
 export const GUIDE_SNAP_DISTANCE_PX = 8;
 const GUIDE_DEDUPE_TOLERANCE = 0.5;
+const SIZE_READOUT_GAP_PX = 6;
+const SIZE_READOUT_HEIGHT_PX = 20;
+const SIZE_READOUT_CHAR_WIDTH_PX = 6;
+const SIZE_READOUT_HORIZONTAL_CHROME_PX = 12;
+const SIZE_READOUT_VIEWPORT_INSET_PX = 4;
+
+export interface GuideViewportBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
 
 export function flowSnapDistanceForZoom(zoom: number): number {
   return GUIDE_SNAP_DISTANCE_PX / Math.max(zoom, 0.01);
@@ -128,6 +145,111 @@ export function layoutGuideScreenStyle(guide: LayoutGuide, viewport: Viewport): 
     left: start * viewport.zoom + viewport.x,
     top: guide.offset * viewport.zoom + viewport.y,
     width: length,
+  };
+}
+
+interface ReadoutCandidate {
+  left: number;
+  top: number;
+  preference: number;
+}
+
+function intersectionArea(
+  a: { left: number; top: number; right: number; bottom: number },
+  b: { left: number; top: number; right: number; bottom: number }
+): number {
+  return (
+    Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) *
+    Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top))
+  );
+}
+
+/**
+ * Place a size badge beside its target in screen space. The badge keeps a
+ * fixed screen-pixel footprint at every zoom, tries bottom/top/right/left in
+ * that order, and prefers the first viewport-contained position that does not
+ * cover a peer. Returning absolute screen coordinates also keeps a badge wider
+ * than a tiny node from being positioned relative to (and clipped by) it.
+ */
+export function layoutSizeReadoutScreenStyle(
+  guide: LayoutGuide,
+  viewport: Viewport,
+  bounds: GuideViewportBounds
+): CSSProperties | undefined {
+  if (guide.kind !== 'size' || !guide.label || !guide.readout) return undefined;
+
+  const { target, avoid } = guide.readout;
+  const targetScreen = {
+    left: target.x * viewport.zoom + viewport.x,
+    top: target.y * viewport.zoom + viewport.y,
+    right: (target.x + target.width) * viewport.zoom + viewport.x,
+    bottom: (target.y + target.height) * viewport.zoom + viewport.y,
+  };
+  const width = Math.min(
+    Math.max(0, bounds.right - bounds.left - SIZE_READOUT_VIEWPORT_INSET_PX * 2),
+    guide.label.length * SIZE_READOUT_CHAR_WIDTH_PX + SIZE_READOUT_HORIZONTAL_CHROME_PX
+  );
+  if (width <= 0 || bounds.bottom <= bounds.top) return undefined;
+
+  const minLeft = bounds.left + SIZE_READOUT_VIEWPORT_INSET_PX;
+  const maxLeft = bounds.right - SIZE_READOUT_VIEWPORT_INSET_PX - width;
+  const minTop = bounds.top + SIZE_READOUT_VIEWPORT_INSET_PX;
+  const maxTop = bounds.bottom - SIZE_READOUT_VIEWPORT_INSET_PX - SIZE_READOUT_HEIGHT_PX;
+  const centerLeft = Math.min(
+    maxLeft,
+    Math.max(minLeft, (targetScreen.left + targetScreen.right - width) / 2)
+  );
+  const centerTop = Math.min(
+    maxTop,
+    Math.max(minTop, (targetScreen.top + targetScreen.bottom - SIZE_READOUT_HEIGHT_PX) / 2)
+  );
+  const candidates: ReadoutCandidate[] = [
+    { left: centerLeft, top: targetScreen.bottom + SIZE_READOUT_GAP_PX, preference: 0 },
+    {
+      left: centerLeft,
+      top: targetScreen.top - SIZE_READOUT_GAP_PX - SIZE_READOUT_HEIGHT_PX,
+      preference: 1,
+    },
+    { left: targetScreen.right + SIZE_READOUT_GAP_PX, top: centerTop, preference: 2 },
+    { left: targetScreen.left - SIZE_READOUT_GAP_PX - width, top: centerTop, preference: 3 },
+  ];
+  const peerScreens = avoid.map((peer) => ({
+    left: peer.x * viewport.zoom + viewport.x,
+    top: peer.y * viewport.zoom + viewport.y,
+    right: (peer.x + peer.width) * viewport.zoom + viewport.x,
+    bottom: (peer.y + peer.height) * viewport.zoom + viewport.y,
+  }));
+  const contained = candidates.filter(
+    (candidate) =>
+      candidate.left >= minLeft &&
+      candidate.left + width <= bounds.right - SIZE_READOUT_VIEWPORT_INSET_PX &&
+      candidate.top >= minTop &&
+      candidate.top + SIZE_READOUT_HEIGHT_PX <= bounds.bottom - SIZE_READOUT_VIEWPORT_INSET_PX
+  );
+  const candidate = contained.sort((a, b) => {
+    const rectFor = (value: ReadoutCandidate) => ({
+      left: value.left,
+      top: value.top,
+      right: value.left + width,
+      bottom: value.top + SIZE_READOUT_HEIGHT_PX,
+    });
+    const aOverlap = peerScreens.reduce(
+      (total, peer) => total + intersectionArea(rectFor(a), peer),
+      0
+    );
+    const bOverlap = peerScreens.reduce(
+      (total, peer) => total + intersectionArea(rectFor(b), peer),
+      0
+    );
+    return aOverlap - bOverlap || a.preference - b.preference;
+  })[0];
+  if (!candidate) return undefined;
+
+  return {
+    left: candidate.left,
+    top: candidate.top,
+    width,
+    height: SIZE_READOUT_HEIGHT_PX,
   };
 }
 
@@ -238,26 +360,23 @@ export function snapRectToPeers(
       Math.abs(a.height - snapped.height) - Math.abs(b.height - snapped.height) ||
       a.id.localeCompare(b.id)
   );
-  if (byWidth[0] && Math.abs(byWidth[0].width - snapped.width) <= threshold) {
+  const widthMatches = !!byWidth[0] && Math.abs(byWidth[0].width - snapped.width) <= threshold;
+  const heightMatches = !!byHeight[0] && Math.abs(byHeight[0].height - snapped.height) <= threshold;
+  if (widthMatches || heightMatches) {
     guides.push({
-      id: `size-width-${snapped.id}`,
+      id: `size-${snapped.id}`,
       orientation: 'horizontal',
-      offset: snapped.y + snapped.height / 2,
+      // The single measurement line rides the lower edge rather than crossing
+      // the node body. Its badge is rendered separately, outside this rect.
+      offset: snapped.y + snapped.height,
       start: snapped.x,
       end: snapped.x + snapped.width,
       kind: 'size',
-      label: `${Math.round(snapped.width)}px wide`,
-    });
-  }
-  if (byHeight[0] && Math.abs(byHeight[0].height - snapped.height) <= threshold) {
-    guides.push({
-      id: `size-height-${snapped.id}`,
-      orientation: 'vertical',
-      offset: snapped.x + snapped.width / 2,
-      start: snapped.y,
-      end: snapped.y + snapped.height,
-      kind: 'size',
-      label: `${Math.round(snapped.height)}px high`,
+      label: `${Math.round(snapped.width)} × ${Math.round(snapped.height)}`,
+      readout: {
+        target: snapped,
+        avoid: peers,
+      },
     });
   }
 

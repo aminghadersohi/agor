@@ -125,9 +125,11 @@
   bottom: 0;
 }
 
-.canvas-alignment-guide-label {
+.canvas-alignment-guide-label,
+.canvas-size-readout {
   position: absolute;
   z-index: 1;
+  box-sizing: border-box;
   padding: 2px 5px;
   border: 1px solid var(--ant-color-border-secondary);
   border-radius: 4px;
@@ -137,6 +139,13 @@
   font-weight: 600;
   line-height: 14px;
   white-space: nowrap;
+}
+
+.canvas-size-readout {
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
 }
 
 .canvas-alignment-guide.vertical .canvas-alignment-guide-label {
