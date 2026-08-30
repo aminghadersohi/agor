@@ -50,10 +50,10 @@ function migrationTenantTables(): string[] {
     'packages/core/drizzle/postgres/0094_discord_gateway_hybrid.sql'
   );
   const completionSubscriptionsMigration = readRepoFile(
-    'packages/core/drizzle/postgres/0095_transitive_completion_subscriptions.sql'
+    'packages/core/drizzle/postgres/9000_transitive_completion_subscriptions.sql'
   );
   const profileImageMigration = readRepoFile(
-    'packages/core/drizzle/postgres/0096_profile_image_galleries.sql'
+    'packages/core/drizzle/postgres/9001_profile_image_galleries.sql'
   );
   const externalIdentitiesMigration = readRepoFile(
     'packages/core/drizzle/postgres/0090_external_user_identities.sql'
@@ -62,7 +62,7 @@ function migrationTenantTables(): string[] {
     'packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'
   );
   const capabilityPoliciesMigration = readRepoFile(
-    'packages/core/drizzle/postgres/0099_board_branch_capability_policies.sql'
+    'packages/core/drizzle/postgres/9004_board_branch_capability_policies.sql'
   );
   const retiredTables = retiredTenantTables();
   return [
@@ -100,11 +100,11 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0078_mcp_oauth_pending_flows.sql'),
     readRepoFile('packages/core/drizzle/postgres/0082_github_install_state.sql'),
     readRepoFile('packages/core/drizzle/postgres/0094_discord_gateway_hybrid.sql'),
-    readRepoFile('packages/core/drizzle/postgres/0095_transitive_completion_subscriptions.sql'),
-    readRepoFile('packages/core/drizzle/postgres/0096_profile_image_galleries.sql'),
+    readRepoFile('packages/core/drizzle/postgres/9000_transitive_completion_subscriptions.sql'),
+    readRepoFile('packages/core/drizzle/postgres/9001_profile_image_galleries.sql'),
     readRepoFile('packages/core/drizzle/postgres/0090_external_user_identities.sql'),
     readRepoFile('packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'),
-    readRepoFile('packages/core/drizzle/postgres/0099_board_branch_capability_policies.sql'),
+    readRepoFile('packages/core/drizzle/postgres/9004_board_branch_capability_policies.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
   return [
@@ -202,7 +202,7 @@ describe('Postgres multitenancy schema coverage', () => {
 
   it('limits completion recovery to active subscription routing Tasks', () => {
     const migration = readRepoFile(
-      'packages/core/drizzle/postgres/0095_transitive_completion_subscriptions.sql'
+      'packages/core/drizzle/postgres/9000_transitive_completion_subscriptions.sql'
     );
 
     expect(migration).toContain('CREATE POLICY "completion_callback_discovery"');

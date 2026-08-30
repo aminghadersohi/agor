@@ -87,12 +87,12 @@ describe('migration status introspection', () => {
   it('describes profile-image galleries as an online schema migration for both dialects', () => {
     const postgresqlMigration = introspectMigrationStatus('postgresql', {
       applied: ['0000_init'],
-      pending: ['0096_profile_image_galleries'],
+      pending: ['9001_profile_image_galleries'],
       dbAheadOfBinary: false,
     }).pendingMigrations[0];
     const sqliteMigration = introspectMigrationStatus('sqlite', {
       applied: ['0000_init'],
-      pending: ['0099_profile_image_galleries'],
+      pending: ['9001_profile_image_galleries'],
       dbAheadOfBinary: false,
     }).pendingMigrations[0];
 
@@ -109,13 +109,13 @@ describe('migration status introspection', () => {
 
   it('describes private identity-model columns as an online additive migration', () => {
     const postgres = introspectMigrationStatus('postgresql', {
-      applied: ['0096_profile_image_galleries'],
-      pending: ['0097_profile_identity_models'],
+      applied: ['9001_profile_image_galleries'],
+      pending: ['9002_profile_identity_models'],
       dbAheadOfBinary: false,
     }).pendingMigrations[0];
     const sqlite = introspectMigrationStatus('sqlite', {
-      applied: ['0099_profile_image_galleries'],
-      pending: ['0100_profile_identity_models'],
+      applied: ['9001_profile_image_galleries'],
+      pending: ['9002_profile_identity_models'],
       dbAheadOfBinary: false,
     }).pendingMigrations[0];
 
@@ -133,7 +133,7 @@ describe('migration status introspection', () => {
   it('requires offline acknowledgement for the SQLite RBAC cutover on an existing database', () => {
     const report = introspectMigrationStatus('sqlite', {
       applied: ['0000_init'],
-      pending: ['0102_board_branch_capability_policies'],
+      pending: ['9004_board_branch_capability_policies'],
       dbAheadOfBinary: false,
     });
     expect(report.dialect).toBe('sqlite');
