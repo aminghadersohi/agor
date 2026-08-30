@@ -43,6 +43,15 @@ function makeClient() {
   return { client: client as never, patch };
 }
 
+function makeRoutedClient() {
+  const boardsPatch = vi.fn().mockResolvedValue({});
+  const boardObjectsPatch = vi.fn().mockResolvedValue({});
+  const service = vi.fn((path: string) => ({
+    patch: path === 'boards' ? boardsPatch : boardObjectsPatch,
+  }));
+  return { client: { service } as never, service, boardsPatch, boardObjectsPatch };
+}
+
 /** Like makeClient but `patch` rejects, to exercise the error path. */
 function makeRejectingClient() {
   const patch = vi.fn().mockRejectedValue(new Error('network down'));
@@ -695,6 +704,218 @@ describe('arrangeZoneContents', () => {
   });
 });
 
+describe('direct manipulation of automatic zones', () => {
+  const zoneId = 'zone-1';
+  const autoZone = {
+    type: 'zone',
+    x: 0,
+    y: 0,
+    width: 620,
+    height: 500,
+    label: 'Automatic',
+    layout: {
+      mode: 'auto',
+      preset: 'compact_list',
+      sortBy: 'position',
+      sortDirection: 'asc',
+      gap: 24,
+      autoResizeHeight: false,
+    },
+  };
+  const placement = {
+    object_id: 'placement-card',
+    board_id: 'board-1',
+    entity_type: 'card',
+    card_id: 'card-1',
+    position: { x: 200, y: 200 },
+    zone_id: zoneId,
+    compact: true,
+    created_at: '2026-01-01T00:00:00.000Z',
+  };
+  const child: Node = {
+    id: 'card-card-1',
+    type: 'cardNode',
+    parentId: zoneId,
+    position: { x: 200, y: 200 },
+    width: 380,
+    height: 120,
+    data: {},
+  };
+
+  function renderInteraction(
+    board: Board,
+    client: unknown,
+    nodes: Node[] = [
+      { id: zoneId, type: 'zone', position: { x: 0, y: 0 }, width: 620, height: 500, data: {} },
+      child,
+    ]
+  ) {
+    return renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client: client as never,
+          boardObjectsForBoard: [placement] as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+  }
+
+  it('persists manual mode before expanding a card and blocks the pending compact-list pass', async () => {
+    vi.useFakeTimers();
+    const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
+    const { result } = renderInteraction(makeBoard({ [zoneId]: autoZone }), client);
+
+    await act(async () => {
+      await result.current.setPlacementCompact(placement as never, false);
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    expect(boardsPatch).toHaveBeenCalledWith('board-1', {
+      _action: 'mergeObjectFields',
+      objects: {
+        [zoneId]: {
+          layout: expect.objectContaining({ mode: 'manual', preset: 'compact_list' }),
+        },
+      },
+    });
+    expect(boardObjectsPatch).toHaveBeenCalledTimes(1);
+    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-card', { compact: false });
+    expect(boardsPatch.mock.invocationCallOrder[0]).toBeLessThan(
+      boardObjectsPatch.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('also demotes before the zone-wide density control changes its contents', async () => {
+    vi.useFakeTimers();
+    const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
+    const { result } = renderInteraction(makeBoard({ [zoneId]: autoZone }), client);
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact(zoneId, false);
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    expect(boardsPatch).toHaveBeenCalledWith(
+      'board-1',
+      expect.objectContaining({
+        objects: { [zoneId]: { layout: expect.objectContaining({ mode: 'manual' }) } },
+      })
+    );
+    expect(boardObjectsPatch).toHaveBeenCalledTimes(1);
+    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-card', { compact: false });
+  });
+
+  it('cancels a queued auto pass so a directly moved child stays at its dropped position', async () => {
+    vi.useFakeTimers();
+    const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
+    const droppedChild = { ...child, position: { x: 333, y: 222 } };
+    const setNodes = vi.fn();
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({
+            [zoneId]: { ...autoZone, layout: { ...autoZone.layout, preset: 'grid' } },
+          }),
+          client,
+          boardObjectsForBoard: [placement] as never,
+          nodes: [droppedChild],
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await result.current.demoteAutoZone(zoneId);
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    expect(boardsPatch).toHaveBeenCalledWith(
+      'board-1',
+      expect.objectContaining({
+        objects: { [zoneId]: { layout: expect.objectContaining({ mode: 'manual' }) } },
+      })
+    );
+    expect(boardObjectsPatch).not.toHaveBeenCalled();
+    expect(setNodes).not.toHaveBeenCalled();
+    expect(droppedChild.position).toEqual({ x: 333, y: 222 });
+  });
+
+  it('leaves an already-manual zone manual while applying the requested density', async () => {
+    const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
+    const manual = makeBoard({
+      [zoneId]: { ...autoZone, layout: { ...autoZone.layout, mode: 'manual' } },
+    });
+    const { result } = renderInteraction(manual, client);
+
+    await act(async () => {
+      await result.current.setPlacementCompact(placement as never, false);
+    });
+
+    expect(boardsPatch).not.toHaveBeenCalled();
+    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-card', { compact: false });
+  });
+
+  it('re-arming auto mode schedules a fresh tidy', async () => {
+    vi.useFakeTimers();
+    const { client, boardObjectsPatch } = makeRoutedClient();
+    let board = makeBoard({
+      [zoneId]: { ...autoZone, layout: { ...autoZone.layout, mode: 'auto', preset: 'grid' } },
+    });
+    const { result, rerender } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [placement] as never,
+          nodes: [
+            {
+              ...child,
+              width: 300,
+              height: 100,
+            },
+          ],
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    expect(boardObjectsPatch).toHaveBeenCalled();
+    boardObjectsPatch.mockClear();
+
+    await act(async () => {
+      await result.current.demoteAutoZone(zoneId);
+    });
+    board = makeBoard({
+      [zoneId]: { ...autoZone, layout: { ...autoZone.layout, mode: 'manual', preset: 'grid' } },
+    });
+    rerender();
+    expect(boardObjectsPatch).not.toHaveBeenCalled();
+
+    board = makeBoard({
+      [zoneId]: { ...autoZone, layout: { ...autoZone.layout, mode: 'auto', preset: 'grid' } },
+    });
+    rerender();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(boardObjectsPatch).toHaveBeenCalledWith(
+      'placement-card',
+      expect.objectContaining({ position: { x: 24, y: 88 } })
+    );
+  });
+});
+
 /**
  * `setZoneContentsCompact` is the UI half of `agor_boards_set_compact` scoped
  * to a zone, so these cover the same targeting and idempotence contract the
@@ -812,7 +1033,7 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
     { object_id: 'obj-card', zone_id: zoneId, card_id: 'card-1', compact: true },
   ];
 
-  function zone(preset: string) {
+  function zone(preset: string, mode: 'auto' | 'manual' = 'manual') {
     return {
       type: 'zone',
       x: 0,
@@ -820,7 +1041,7 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
       width: 400,
       height: 300,
       label: 'Triage',
-      layout: { mode: 'manual', preset },
+      layout: { mode, preset },
     };
   }
 
@@ -858,6 +1079,36 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
       ['obj-branch', false],
       ['obj-card', false],
     ]);
+  });
+
+  it('keeps auto mode armed while its compact-list to grid transition expands contents', async () => {
+    const { client, patch } = makeClient();
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({ [zoneId]: zone('compact_list', 'auto') }),
+          client,
+          boardObjectsForBoard: collapsed as never,
+          nodes: [],
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await result.current.handleUpdateObject(zoneId, zone('grid', 'auto') as never);
+    });
+
+    expect(compactPatches(patch)).toEqual([
+      ['obj-branch', false],
+      ['obj-card', false],
+    ]);
+    expect(
+      patch.mock.calls.some(
+        (call) => call[1]?._action === 'mergeObjectFields' && call[1].objects?.[zoneId]?.layout
+      )
+    ).toBe(false);
   });
 
   it('does not expand when a grid zone is merely updated again', async () => {

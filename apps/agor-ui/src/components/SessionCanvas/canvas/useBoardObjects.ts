@@ -104,11 +104,76 @@ export const useBoardObjects = ({
   const autoArrangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAutoLayoutSignatureRef = useRef('');
   const skipNextAutoArrangeRef = useRef(new Set<string>());
+  // Direct manipulation wins immediately, before the persisted board patch
+  // returns over realtime. This also blocks an already-scheduled auto pass
+  // from snapping the item back during the interaction.
+  const manuallyControlledZoneIdsRef = useRef(new Set<string>());
+  const zoneDemotionPromisesRef = useRef(new Map<string, Promise<boolean>>());
 
   // Use the board object's reference directly. The store already preserves
   // unchanged board references, and serializing every object on every canvas
   // render is prohibitively expensive on large boards.
   const boardObjects = board?.objects;
+
+  useEffect(() => {
+    for (const zoneId of manuallyControlledZoneIdsRef.current) {
+      const object = boardObjects?.[zoneId];
+      if (object?.type === 'zone' && normalizeZoneLayoutPolicy(object.layout).mode === 'manual') {
+        manuallyControlledZoneIdsRef.current.delete(zoneId);
+        zoneDemotionPromisesRef.current.delete(zoneId);
+      }
+    }
+  }, [boardObjects]);
+
+  /** Persist the user's decision to take control of an automatically laid-out zone. */
+  const demoteAutoZone = useCallback(
+    async (zoneId: string | null | undefined): Promise<boolean> => {
+      if (!zoneId || !client) return false;
+      const currentBoard = boardRef.current;
+      const zone = currentBoard?.objects?.[zoneId];
+      if (!currentBoard || zone?.type !== 'zone') return false;
+      const layout = normalizeZoneLayoutPolicy(zone.layout);
+      if (layout.mode === 'manual') return true;
+
+      const pending = zoneDemotionPromisesRef.current.get(zoneId);
+      if (pending) return pending;
+
+      manuallyControlledZoneIdsRef.current.add(zoneId);
+      skipNextAutoArrangeRef.current.delete(zoneId);
+      const demotion = client
+        .service('boards')
+        .patch(currentBoard.board_id, {
+          _action: 'mergeObjectFields',
+          objects: { [zoneId]: { layout: { ...layout, mode: 'manual' } } },
+        } as unknown as Partial<Board>)
+        .then(() => true)
+        .catch((error) => {
+          manuallyControlledZoneIdsRef.current.delete(zoneId);
+          zoneDemotionPromisesRef.current.delete(zoneId);
+          console.error('Failed to disable automatic zone layout:', error);
+          showError('Failed to disable automatic zone layout');
+          return false;
+        });
+      zoneDemotionPromisesRef.current.set(zoneId, demotion);
+      return demotion;
+    },
+    [client, showError]
+  );
+
+  /** Change one card/worktree's density without allowing auto-layout to undo it. */
+  const setPlacementCompact = useCallback(
+    async (placement: BoardEntityObject | undefined, compact: boolean) => {
+      if (!client || !placement) return;
+      if (placement.zone_id && !(await demoteAutoZone(placement.zone_id))) return;
+      try {
+        await client.service('board-objects').patch(placement.object_id, { compact });
+      } catch (error) {
+        console.error('Failed to update card density:', error);
+        showError('Failed to update card density');
+      }
+    },
+    [client, demoteAutoZone, showError]
+  );
 
   /**
    * Collapse or expand every card/worktree pinned to a zone. This is the UI
@@ -117,7 +182,11 @@ export const useBoardObjects = ({
    * requested density are skipped rather than re-patched).
    */
   const setZoneContentsCompact = useCallback(
-    async (zoneId: string, compact: boolean, options: { silent?: boolean } = {}) => {
+    async (
+      zoneId: string,
+      compact: boolean,
+      options: { silent?: boolean; manualInteraction?: boolean } = {}
+    ) => {
       if (!client) return;
       const targets = boardObjectsForBoard.filter(
         (placement) =>
@@ -126,6 +195,7 @@ export const useBoardObjects = ({
           (placement.compact === true) !== compact
       );
       if (targets.length === 0) return;
+      if (options.manualInteraction !== false && !(await demoteAutoZone(zoneId))) return;
 
       try {
         await Promise.all(
@@ -142,7 +212,16 @@ export const useBoardObjects = ({
         // Deferred for the same reason as that one: the layout measures
         // rendered nodes, and arranging before the expanded items paint would
         // measure the collapsed heights and pack just as tightly.
-        if (!compact) {
+        // In compact-list presentation, an arrange deliberately collapses the
+        // items again. A manual expand has just demoted the zone specifically
+        // so that choice wins, so do not immediately undo it with an explicit
+        // compact-list arrange. Grid still needs the measured-height re-pack.
+        const zone = boardRef.current?.objects?.[zoneId];
+        const shouldRepackExpandedGrid =
+          !compact &&
+          zone?.type === 'zone' &&
+          normalizeZoneLayoutPolicy(zone.layout).preset !== 'compact_list';
+        if (shouldRepackExpandedGrid) {
           setTimeout(() => {
             void arrangeZoneContentsRef.current?.(zoneId, { silent: true });
           }, EXPANDED_REPACK_DELAY_MS);
@@ -157,7 +236,7 @@ export const useBoardObjects = ({
         showError('Failed to update zone density');
       }
     },
-    [boardObjectsForBoard, client, showError, showSuccess]
+    [boardObjectsForBoard, client, demoteAutoZone, showError, showSuccess]
   );
 
   /**
@@ -191,7 +270,10 @@ export const useBoardObjects = ({
         if (leftCompactList) {
           // Silent: this is one user action, and a toast per internal step
           // reads as a bug.
-          await setZoneContentsCompact(objectId, false, { silent: true });
+          await setZoneContentsCompact(objectId, false, {
+            silent: true,
+            manualInteraction: false,
+          });
           // The positions still carry compact_list's one-row spacing, so the
           // cards we just restored to full height would overlap. Re-pack once
           // they have actually rendered — the layout measures the DOM, so
@@ -605,11 +687,19 @@ export const useBoardObjects = ({
 
   useEffect(() => {
     const autoZones = Object.entries(boardObjects ?? {}).flatMap(([objectId, object]) =>
-      object.type === 'zone' && normalizeZoneLayoutPolicy(object.layout).mode === 'auto'
+      object.type === 'zone' &&
+      normalizeZoneLayoutPolicy(object.layout).mode === 'auto' &&
+      !manuallyControlledZoneIdsRef.current.has(objectId)
         ? ([[objectId, object]] as const)
         : []
     );
-    if (!client || autoZones.length === 0) return;
+    if (!client) return;
+    if (autoZones.length === 0) {
+      // Re-arming a zone must tidy even when its contents have not changed
+      // since the last time auto mode ran.
+      lastAutoLayoutSignatureRef.current = '';
+      return;
+    }
 
     const signature = autoZones
       .map(([zoneId, zone]) => {
@@ -663,7 +753,9 @@ export const useBoardObjects = ({
     if (autoArrangeTimerRef.current) clearTimeout(autoArrangeTimerRef.current);
     autoArrangeTimerRef.current = setTimeout(() => {
       void Promise.all(
-        zonesToArrange.map(([zoneId]) => arrangeZoneContents(zoneId, { silent: true }))
+        zonesToArrange
+          .filter(([zoneId]) => !manuallyControlledZoneIdsRef.current.has(zoneId))
+          .map(([zoneId]) => arrangeZoneContents(zoneId, { silent: true }))
       );
     }, 400);
     return () => {
@@ -963,6 +1055,8 @@ export const useBoardObjects = ({
     deleteObject,
     deleteZone,
     reorderObject,
+    demoteAutoZone,
+    setPlacementCompact,
     setZoneContentsCompact,
     batchUpdateObjectPositions,
   };

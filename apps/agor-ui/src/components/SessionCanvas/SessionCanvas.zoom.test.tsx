@@ -17,6 +17,7 @@ const setNodesUnsafeSpy = vi.fn();
 
 vi.mock('reactflow', () => ({
   Background: () => <div data-testid="react-flow-background" />,
+  BackgroundVariant: { Dots: 'dots' },
   ControlButton: ({
     children,
     onClick,
@@ -233,6 +234,102 @@ describe('SessionCanvas zoom shortcuts', () => {
     expect(readout).toHaveTextContent('200 × 120');
     expect(sizeLines).toHaveLength(1);
     expect(Number.parseFloat(readout?.style.top ?? '')).toBeGreaterThan(220);
+  });
+
+  describe('automatic zone direct manipulation', () => {
+    const autoBoard = {
+      board_id: 'board-1',
+      objects: {
+        'zone-1': {
+          type: 'zone',
+          x: 0,
+          y: 0,
+          width: 620,
+          height: 900,
+          label: 'Automatic',
+          layout: { mode: 'auto', preset: 'grid' },
+        },
+      },
+    } as unknown as Board;
+
+    function renderAutoBoard() {
+      const patch = vi.fn().mockResolvedValue({});
+      const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+      render(
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas
+            board={autoBoard}
+            client={client}
+            branches={[]}
+            sessionById={new Map()}
+            sessionsByBranch={new Map()}
+            userById={new Map()}
+            repoById={new Map()}
+            branchById={new Map()}
+            boardObjectById={new Map()}
+            boardObjectsByBoardId={new Map()}
+            commentById={new Map()}
+            cardById={new Map()}
+          />
+        </ConnectionProvider>
+      );
+      return { client, patch };
+    }
+
+    it('demotes before dragging a card already managed by the automatic zone', async () => {
+      const { client, patch } = renderAutoBoard();
+
+      act(() => {
+        (reactFlowProps?.onNodeDragStart as (event: unknown, node: Node) => void)?.(
+          {},
+          {
+            id: 'card-1',
+            type: 'cardNode',
+            parentId: 'zone-1',
+            position: { x: 140, y: 160 },
+            data: {},
+          }
+        );
+      });
+
+      await waitFor(() =>
+        expect(patch).toHaveBeenCalledWith('board-1', {
+          _action: 'mergeObjectFields',
+          objects: {
+            'zone-1': {
+              layout: expect.objectContaining({ mode: 'manual', preset: 'grid' }),
+            },
+          },
+        })
+      );
+      expect(client.service).toHaveBeenCalledWith('boards');
+    });
+
+    it.each([
+      ['the zone container', { id: 'zone-1', type: 'zone', parentId: undefined }],
+      ['a card entering from outside', { id: 'card-new', type: 'cardNode', parentId: undefined }],
+    ])('does not demote for dragging %s', async (_label, partialNode) => {
+      const { patch } = renderAutoBoard();
+
+      act(() => {
+        (reactFlowProps?.onNodeDragStart as (event: unknown, node: Node) => void)?.({}, {
+          ...partialNode,
+          position: { x: 140, y: 160 },
+          data: {},
+        } as Node);
+      });
+      await Promise.resolve();
+
+      expect(patch).not.toHaveBeenCalled();
+    });
   });
 
   it('opens the markdown note modal when the markdown tool clicks a board node', async () => {

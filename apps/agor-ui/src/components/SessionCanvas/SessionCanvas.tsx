@@ -556,26 +556,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const currentUser = currentUserId ? (userById.get(currentUserId) ?? null) : null;
     const canManageBoard = useCanManageBoard(client, board ?? undefined, currentUser);
 
-    const patchPlacementCompact = useStableCallback(
-      async (objectId: string | undefined, compact: boolean) => {
-        if (!client || !objectId || !mutationGate.canMutate) return;
-        try {
-          await client.service('board-objects').patch(objectId, { compact });
-        } catch (error) {
-          console.error('Failed to update card density:', error);
-          showError('Failed to update card density');
-        }
-      }
-    );
-
-    const handleToggleBranchCompact = useStableCallback((branchId: string, compact: boolean) => {
-      void patchPlacementCompact(boardObjectByBranch.get(branchId)?.object_id, compact);
-    });
-
-    const handleToggleCardCompact = useStableCallback((cardId: string, compact: boolean) => {
-      void patchPlacementCompact(boardObjectByCard.get(cardId)?.object_id, compact);
-    });
-
     // Card modal state
     const [selectedCard, setSelectedCard] = useState<CardWithType | null>(null);
     const [cardModalOpen, setCardModalOpen] = useState(false);
@@ -871,7 +851,13 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     );
 
     // Board objects hook
-    const { getBoardObjectNodes, batchUpdateObjectPositions, deleteObject } = useBoardObjects({
+    const {
+      getBoardObjectNodes,
+      batchUpdateObjectPositions,
+      deleteObject,
+      demoteAutoZone,
+      setPlacementCompact,
+    } = useBoardObjects({
       board,
       client,
       boardObjectsForBoard,
@@ -882,6 +868,16 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       activeUrlTargetArtifactId,
       onEditMarkdown: handleEditMarkdownNote,
       onArrangeNodes: handleArrangeNodes,
+    });
+
+    const handleToggleBranchCompact = useStableCallback((branchId: string, compact: boolean) => {
+      if (!mutationGate.canMutate) return;
+      void setPlacementCompact(boardObjectByBranch.get(branchId), compact);
+    });
+
+    const handleToggleCardCompact = useStableCallback((cardId: string, compact: boolean) => {
+      if (!mutationGate.canMutate) return;
+      void setPlacementCompact(boardObjectByCard.get(cardId), compact);
     });
 
     // Extract zone labels - memoized to only change when labels actually change
@@ -2024,13 +2020,22 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     );
 
     // Handle node drag start
-    const handleNodeDragStart: NodeDragHandler = useCallback(() => {
-      isDraggingRef.current = true;
-      setIsDraggingCanvas(true);
-      setAlignmentGuides([]);
-      const viewport = reactFlowInstanceRef.current?.getViewport();
-      if (viewport) setGuideViewport(viewport);
-    }, []);
+    const handleNodeDragStart: NodeDragHandler = useCallback(
+      (_event, node) => {
+        // Auto-layout manages only cards/worktrees. Taking hold of one that is
+        // already inside a zone is direct control of that zone's layout, so
+        // demote immediately — before a pending auto pass can snap it back.
+        if ((node.type === 'branchNode' || node.type === 'cardNode') && node.parentId) {
+          void demoteAutoZone(node.parentId);
+        }
+        isDraggingRef.current = true;
+        setIsDraggingCanvas(true);
+        setAlignmentGuides([]);
+        const viewport = reactFlowInstanceRef.current?.getViewport();
+        if (viewport) setGuideViewport(viewport);
+      },
+      [demoteAutoZone]
+    );
 
     // Handle node drag - track local position changes
     const handleNodeDrag: NodeDragHandler = useCallback(
