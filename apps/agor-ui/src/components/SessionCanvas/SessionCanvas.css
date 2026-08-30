@@ -62,51 +62,93 @@
 .canvas-alignment-guide {
   position: absolute;
   display: block;
-  background: var(--ant-color-primary);
-  opacity: 0.9;
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ant-color-primary) 28%, transparent);
+  background: color-mix(in srgb, var(--ant-color-primary) 58%, transparent);
 }
 
 .canvas-alignment-guide.vertical {
-  top: 0;
-  bottom: 0;
   width: 1px;
 }
 
 .canvas-alignment-guide.horizontal {
-  left: 0;
-  right: 0;
   height: 1px;
 }
 
-.canvas-alignment-guide[data-guide-kind="size"],
+.canvas-alignment-guide[data-guide-kind="size"] {
+  background: color-mix(in srgb, var(--ant-color-primary) 68%, transparent);
+}
+
 .canvas-alignment-guide[data-guide-kind="gap"] {
-  background: var(--ant-color-success);
+  background: color-mix(in srgb, var(--ant-color-success) 72%, transparent);
+}
+
+.canvas-alignment-guide[data-guide-kind="size"]::before,
+.canvas-alignment-guide[data-guide-kind="size"]::after,
+.canvas-alignment-guide[data-guide-kind="gap"]::before,
+.canvas-alignment-guide[data-guide-kind="gap"]::after {
+  position: absolute;
+  display: block;
+  background: inherit;
+  content: "";
+}
+
+.canvas-alignment-guide.horizontal[data-guide-kind="size"]::before,
+.canvas-alignment-guide.horizontal[data-guide-kind="size"]::after,
+.canvas-alignment-guide.horizontal[data-guide-kind="gap"]::before,
+.canvas-alignment-guide.horizontal[data-guide-kind="gap"]::after {
+  top: -3px;
+  width: 1px;
+  height: 7px;
+}
+
+.canvas-alignment-guide.horizontal::before {
+  left: 0;
+}
+
+.canvas-alignment-guide.horizontal::after {
+  right: 0;
+}
+
+.canvas-alignment-guide.vertical[data-guide-kind="size"]::before,
+.canvas-alignment-guide.vertical[data-guide-kind="size"]::after,
+.canvas-alignment-guide.vertical[data-guide-kind="gap"]::before,
+.canvas-alignment-guide.vertical[data-guide-kind="gap"]::after {
+  left: -3px;
+  width: 7px;
+  height: 1px;
+}
+
+.canvas-alignment-guide.vertical::before {
+  top: 0;
+}
+
+.canvas-alignment-guide.vertical::after {
+  bottom: 0;
 }
 
 .canvas-alignment-guide-label {
   position: absolute;
   z-index: 1;
   padding: 2px 5px;
-  border: 1px solid var(--ant-color-success-border);
+  border: 1px solid var(--ant-color-border-secondary);
   border-radius: 4px;
   background: var(--ant-color-bg-elevated);
-  color: var(--ant-color-success);
+  color: var(--ant-color-text-secondary);
   font-size: 10px;
   font-weight: 600;
   line-height: 14px;
   white-space: nowrap;
-  transform: translate(-50%, -100%);
 }
 
 .canvas-alignment-guide.vertical .canvas-alignment-guide-label {
   top: 50%;
   left: 0;
+  transform: translate(5px, -50%);
 }
 
 .canvas-alignment-guide.horizontal .canvas-alignment-guide-label {
   top: 0;
   left: 50%;
+  transform: translate(-50%, calc(-100% - 4px));
 }
 
 /* Tool mode cursors - override React Flow defaults */
