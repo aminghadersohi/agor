@@ -183,14 +183,31 @@ describe('BoardObjectsService.patch', () => {
     );
   });
 
-  it('rejects mixing size and position so placement updates stay atomic', async () => {
+  it('persists position, size, and compact state as one layout update', async () => {
     const service = new BoardObjectsService({} as Database);
+    const updateLayout = vi.fn(async (_id, layout) => ({ object_id: 'object-1', ...layout }));
+    (
+      service as unknown as {
+        boardObjectRepo: { updateLayout: typeof updateLayout };
+      }
+    ).boardObjectRepo = { updateLayout };
 
     await expect(
       service.patch('object-1', {
         size: { width: 486, height: 237 },
         position: { x: 20, y: 30 },
+        compact: true,
       })
-    ).rejects.toThrow('size must be patched separately');
+    ).resolves.toMatchObject({
+      position: { x: 20, y: 30 },
+      size: { width: 486, height: 237 },
+      compact: true,
+    });
+    expect(updateLayout).toHaveBeenCalledTimes(1);
+    expect(updateLayout).toHaveBeenCalledWith('object-1', {
+      position: { x: 20, y: 30 },
+      size: { width: 486, height: 237 },
+      compact: true,
+    });
   });
 });

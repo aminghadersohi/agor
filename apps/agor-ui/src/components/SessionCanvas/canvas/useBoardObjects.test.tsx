@@ -209,8 +209,9 @@ describe('reorderObject', () => {
 });
 
 describe('arrangeZoneContents', () => {
-  it('packs measured children row-major and persists position and size as separate patches', async () => {
+  it('packs once, starts one motion, and persists one complete patch per child', async () => {
     const { client, patch } = makeClient();
+    const onArrangeNodes = vi.fn();
     const board = makeBoard({
       zone: { type: 'zone', x: 0, y: 0, width: 900, height: 500, label: 'Zone' },
     });
@@ -274,6 +275,7 @@ describe('arrangeZoneContents', () => {
           nodes: initialNodes,
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          onArrangeNodes,
         }),
       { wrapper }
     );
@@ -291,13 +293,19 @@ describe('arrangeZoneContents', () => {
       x: 448,
       y: 88,
     });
-    expect(patch).toHaveBeenCalledTimes(4);
-    expect(patch).toHaveBeenCalledWith('placement-branch', { position: { x: 24, y: 88 } });
+    expect(onArrangeNodes).toHaveBeenCalledTimes(1);
+    expect(onArrangeNodes.mock.calls[0]?.[0].map((node: Node) => node.position)).toEqual([
+      { x: 24, y: 88 },
+      { x: 448, y: 88 },
+    ]);
+    expect(onArrangeNodes.mock.calls[0]?.[1]).toBeGreaterThan(0);
+    expect(patch).toHaveBeenCalledTimes(2);
     expect(patch).toHaveBeenCalledWith('placement-branch', {
+      position: { x: 24, y: 88 },
       size: { width: 400, height: 180 },
     });
-    expect(patch).toHaveBeenCalledWith('placement-card', { position: { x: 448, y: 88 } });
     expect(patch).toHaveBeenCalledWith('placement-card', {
+      position: { x: 448, y: 88 },
       size: { width: 300, height: 100 },
     });
     expect(showSuccess).toHaveBeenCalledWith('Arranged 2 items in a non-overlapping grid.');
@@ -395,9 +403,11 @@ describe('arrangeZoneContents', () => {
       y: 348,
     });
     expect(patch).toHaveBeenCalledWith('placement-branch', {
+      position: { x: 24, y: 88 },
       size: { width: 500, height: 236 },
     });
     expect(patch).toHaveBeenCalledWith('placement-card', {
+      position: { x: 24, y: 348 },
       size: { width: 380, height: 85 },
     });
 
@@ -562,13 +572,15 @@ describe('arrangeZoneContents', () => {
 
     expect(renderedNodes.find((node) => node.id === 'card-newer')?.position.y).toBe(88);
     expect(renderedNodes.find((node) => node.id === 'card-older')?.position.y).toBe(168);
-    expect(patch).toHaveBeenCalledWith('placement-newer', { compact: true });
-    expect(patch).toHaveBeenCalledWith('placement-older', { compact: true });
     expect(patch).toHaveBeenCalledWith('placement-newer', {
+      position: { x: 24, y: 88 },
       size: { width: 380, height: 56 },
+      compact: true,
     });
     expect(patch).toHaveBeenCalledWith('placement-older', {
+      position: { x: 24, y: 168 },
       size: { width: 380, height: 56 },
+      compact: true,
     });
     expect(patch).toHaveBeenCalledWith(
       'board-1',
@@ -600,7 +612,7 @@ describe('arrangeZoneContents', () => {
         },
       },
     });
-    const nodes: Node[] = [
+    let nodes: Node[] = [
       { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, data: {}, width: 900, height: 500 },
       {
         id: 'card-older',
@@ -621,7 +633,7 @@ describe('arrangeZoneContents', () => {
         height: 100,
       },
     ];
-    const { unmount } = renderHook(
+    const { rerender, unmount } = renderHook(
       () =>
         useBoardObjects({
           board,
@@ -657,8 +669,28 @@ describe('arrangeZoneContents', () => {
       await vi.advanceTimersByTimeAsync(400);
     });
 
-    expect(patch).toHaveBeenCalledWith('placement-newer', { position: { x: 24, y: 88 } });
-    expect(patch).toHaveBeenCalledWith('placement-older', { position: { x: 348, y: 88 } });
+    expect(patch).toHaveBeenCalledWith('placement-newer', {
+      position: { x: 24, y: 88 },
+      size: { width: 300, height: 100 },
+    });
+    expect(patch).toHaveBeenCalledWith('placement-older', {
+      position: { x: 348, y: 88 },
+      size: { width: 300, height: 100 },
+    });
+
+    const patchCountAfterFirstPass = patch.mock.calls.length;
+    nodes = nodes.map((node) =>
+      node.id === 'card-newer'
+        ? { ...node, position: { x: 24, y: 88 } }
+        : node.id === 'card-older'
+          ? { ...node, position: { x: 348, y: 88 } }
+          : node
+    );
+    rerender();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    expect(patch).toHaveBeenCalledTimes(patchCountAfterFirstPass);
     unmount();
   });
 });

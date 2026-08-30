@@ -394,7 +394,12 @@ describe('SessionCanvas zoom shortcuts', () => {
       // Incoming dims sit within 1px of the node's current 1200x900 → no-op.
       act(() =>
         onNodesChange([
-          { type: 'dimensions', id: 'zone-1', dimensions: { width: 1200.4, height: 899.6 } },
+          {
+            type: 'dimensions',
+            id: 'zone-1',
+            resizing: true,
+            dimensions: { width: 1200.4, height: 899.6 },
+          },
         ])
       );
       await act(async () => {
@@ -414,7 +419,12 @@ describe('SessionCanvas zoom shortcuts', () => {
       vi.useFakeTimers();
       act(() =>
         onNodesChange([
-          { type: 'dimensions', id: 'zone-1', dimensions: { width: 1000, height: 700 } },
+          {
+            type: 'dimensions',
+            id: 'zone-1',
+            resizing: true,
+            dimensions: { width: 1000, height: 700 },
+          },
         ])
       );
 
@@ -437,6 +447,43 @@ describe('SessionCanvas zoom shortcuts', () => {
       );
     });
 
+    it('persists the paired origin from a top-left resize in the same zone patch', async () => {
+      const { client, patch } = makeClient();
+      const { onNodesChange } = renderCanvas(client);
+
+      vi.useFakeTimers();
+      act(() =>
+        onNodesChange([
+          { type: 'position', id: 'zone-1', position: { x: 200, y: 100 } },
+          {
+            type: 'dimensions',
+            id: 'zone-1',
+            resizing: true,
+            dimensions: { width: 1000, height: 800 },
+          },
+        ])
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+      });
+      vi.useRealTimers();
+
+      expect(patch).toHaveBeenCalledTimes(1);
+      expect(patch).toHaveBeenCalledWith(
+        'board-1',
+        expect.objectContaining({
+          _action: 'upsertObject',
+          objectId: 'zone-1',
+          objectData: expect.objectContaining({
+            x: 200,
+            y: 100,
+            width: 1000,
+            height: 800,
+          }),
+        })
+      );
+    });
+
     it('treats a dimensions change for an unknown id as a safe no-op miss', () => {
       const { client, patch } = makeClient();
       const { getNode, onNodesChange } = renderCanvas(client);
@@ -444,7 +491,12 @@ describe('SessionCanvas zoom shortcuts', () => {
       expect(() =>
         act(() =>
           onNodesChange([
-            { type: 'dimensions', id: 'missing-node', dimensions: { width: 10, height: 10 } },
+            {
+              type: 'dimensions',
+              id: 'missing-node',
+              resizing: true,
+              dimensions: { width: 10, height: 10 },
+            },
           ])
         )
       ).not.toThrow();

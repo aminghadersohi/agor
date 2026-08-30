@@ -99,6 +99,7 @@ import { MarkdownRenderer } from '../MarkdownRenderer/MarkdownRenderer';
 import SessionCard from '../SessionCard';
 import { AppNode } from './canvas/AppNodeLazy';
 import { ArtifactNode } from './canvas/ArtifactNodeLazy';
+import { ARRANGE_DEAL_CLASS } from './canvas/arrangeAnimation';
 import { CommentNode, ZoneNode } from './canvas/BoardObjectNodes';
 import { MarkdownNode } from './canvas/MarkdownNode';
 import { RemoteCursorLayer, type StaticRemoteCursor } from './canvas/RemoteCursorLayer';
@@ -130,6 +131,7 @@ import {
   removeSelectedDescendants,
 } from './canvas/utils/marqueeSelection';
 import { getValidZoneParentId, sanitizeOrphanedNodeParents } from './canvas/utils/nodeParentUtils';
+import { persistedResizeRect, type ResizeRect } from './canvas/utils/resizeGeometry';
 import { ZoneTriggerModal } from './canvas/ZoneTriggerModal';
 import { DEFAULT_BOARD_OBJECT_Z_INDEX, selectedZIndex } from './canvas/zOrder';
 
@@ -824,7 +826,32 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
     // Track resize state
     const resizeTimerRef = useRef<NodeJS.Timeout | null>(null);
-    const pendingResizeUpdatesRef = useRef<Record<string, { width: number; height: number }>>({});
+    const pendingResizeUpdatesRef = useRef<Record<string, ResizeRect>>({});
+    const arrangeMotionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const [isArranging, setIsArranging] = useState(false);
+
+    const handleArrangeNodes = useStableCallback((arrangedNodes: Node[], totalMs: number) => {
+      const currentNodes = reactFlowInstanceRef.current?.getNodes() ?? nodes;
+      for (const arranged of arrangedNodes) {
+        const parent = arranged.parentId
+          ? currentNodes.find((candidate) => candidate.id === arranged.parentId)
+          : undefined;
+        localPositionsRef.current[arranged.id] = parent
+          ? relativeToAbsolute(arranged.position, getNodeAbsolutePosition(parent, currentNodes))
+          : arranged.position;
+      }
+
+      if (arrangeMotionTimerRef.current) clearTimeout(arrangeMotionTimerRef.current);
+      if (totalMs <= 0) {
+        setIsArranging(false);
+        return;
+      }
+      setIsArranging(true);
+      arrangeMotionTimerRef.current = setTimeout(() => {
+        arrangeMotionTimerRef.current = null;
+        setIsArranging(false);
+      }, totalMs);
+    });
 
     // Handler to open edit modal for existing markdown note
     const handleEditMarkdownNote = useCallback(
@@ -854,6 +881,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       eraserMode: activeTool === 'eraser',
       activeUrlTargetArtifactId,
       onEditMarkdown: handleEditMarkdownNote,
+      onArrangeNodes: handleArrangeNodes,
     });
 
     // Extract zone labels - memoized to only change when labels actually change
@@ -1863,9 +1891,19 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           });
         }
 
-        // Detect resize by checking for dimensions changes
+        // React Flow emits the origin adjustment for left/top resize handles
+        // beside the dimensions change. Pair them before persistence; dropping
+        // this position is what used to snap the resized edge back to old x/y.
+        const resizePositionById = new Map<string, { x: number; y: number }>();
+        for (const change of effectiveChanges) {
+          if (change.type === 'position' && change.position) {
+            resizePositionById.set(change.id, change.position);
+          }
+        }
+
+        // Detect interactive resize by checking for dimensions changes
         effectiveChanges.forEach((change) => {
-          if (change.type === 'dimensions' && change.dimensions) {
+          if (change.type === 'dimensions' && change.resizing === true && change.dimensions) {
             // O(1) lookup against React Flow's internal node map. Avoids both the
             // old per-event `nodes.find()` scan AND a per-nodes-change Map rebuild:
             // `getNode` is a stable reference and only runs inside this dimensions
@@ -1896,11 +1934,22 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 return;
               }
 
-              // Accumulate resize updates
-              pendingResizeUpdatesRef.current[change.id] = {
-                width: newWidth,
-                height: newHeight,
-              };
+              const currentPosition =
+                node.type === 'zone' ? board?.objects?.[node.id] : entityBoardObject?.position;
+              if (!currentPosition) return;
+
+              // Accumulate the complete rect so a left/top handle persists
+              // origin and dimensions together in the zone's one board patch.
+              pendingResizeUpdatesRef.current[change.id] = persistedResizeRect(
+                {
+                  x: currentPosition.x,
+                  y: currentPosition.y,
+                  width: Number(currentWidth ?? newWidth),
+                  height: Number(currentHeight ?? newHeight),
+                },
+                resizePositionById.get(change.id),
+                { width: newWidth, height: newHeight }
+              );
 
               // Clear existing timer
               if (resizeTimerRef.current) {
@@ -1915,13 +1964,15 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 if (!board || !client) return;
 
                 // Persist all resize changes
-                for (const [nodeId, dimensions] of Object.entries(updates)) {
+                for (const [nodeId, rect] of Object.entries(updates)) {
                   const objectData = board.objects?.[nodeId];
                   if (objectData && objectData.type === 'zone') {
                     const updatedObject = {
                       ...objectData,
-                      width: dimensions.width,
-                      height: dimensions.height,
+                      x: rect.x,
+                      y: rect.y,
+                      width: rect.width,
+                      height: rect.height,
                     };
 
                     try {
@@ -1942,7 +1993,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   if (entityBoardObject) {
                     try {
                       await client.service('board-objects').patch(entityBoardObject.object_id, {
-                        size: dimensions,
+                        ...(rect.x !== entityBoardObject.position.x ||
+                        rect.y !== entityBoardObject.position.y
+                          ? { position: { x: rect.x, y: rect.y } }
+                          : {}),
+                        size: { width: rect.width, height: rect.height },
                       });
                     } catch (error) {
                       console.error('Failed to persist board entity dimensions:', error);
@@ -2520,6 +2575,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         }
         if (resizeTimerRef.current) {
           clearTimeout(resizeTimerRef.current);
+        }
+        if (arrangeMotionTimerRef.current) {
+          clearTimeout(arrangeMotionTimerRef.current);
         }
       };
     }, []);
@@ -3274,7 +3332,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // zone bodies as well as the bare pane and can normalize selected
             // container hierarchies before group drag.
             selectionOnDrag={false}
-            className={`tool-mode-${activeTool}`}
+            className={[`tool-mode-${activeTool}`, isArranging && ARRANGE_DEAL_CLASS]
+              .filter(Boolean)
+              .join(' ')}
             // Disable React Flow's keyboard shortcuts that conflict with typing/spatial messages.
             // Keep modifier-scroll zoom enabled so Command/Control + scroll behaves like Figma.
             deleteKeyCode={null}

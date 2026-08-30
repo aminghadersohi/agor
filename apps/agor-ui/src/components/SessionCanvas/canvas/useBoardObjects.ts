@@ -12,6 +12,8 @@ import type { AgorClient, Board, BoardEntityObject, BoardObject } from '@agor-li
 import { useCallback, useEffect, useRef } from 'react';
 import type { Node } from 'reactflow';
 import { useThemedMessage } from '../../../utils/message';
+import { dealDelayMs, dealOrderIndex, dealStyle, dealTiming } from './arrangeAnimation';
+import { zonesNeedingAutoArrange } from './utils/autoArrangeGuard';
 
 // Long enough for the expanded cards to paint before the re-pack measures
 // them; short enough that the board does not visibly sit in a broken state.
@@ -70,6 +72,8 @@ interface UseBoardObjectsProps {
    *  "selected" outline. */
   activeUrlTargetArtifactId?: string | null;
   onEditMarkdown?: (objectId: string, content: string, width: number) => void;
+  /** Hold optimistic placements and enable motion before realtime echoes arrive. */
+  onArrangeNodes?: (nodes: Node[], totalMs: number) => void;
 }
 
 export const useBoardObjects = ({
@@ -82,6 +86,7 @@ export const useBoardObjects = ({
   eraserMode = false,
   activeUrlTargetArtifactId,
   onEditMarkdown,
+  onArrangeNodes,
 }: UseBoardObjectsProps) => {
   // Use ref to avoid recreating callbacks when board changes
   const boardRef = useRef(board);
@@ -98,6 +103,7 @@ export const useBoardObjects = ({
   >(null);
   const autoArrangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAutoLayoutSignatureRef = useRef('');
+  const skipNextAutoArrangeRef = useRef(new Set<string>());
 
   // Use the board object's reference directly. The store already preserves
   // unchanged board references, and serializing every object on every canvas
@@ -467,10 +473,26 @@ export const useBoardObjects = ({
         layout.placements.map((placement) => [placement.id, placement])
       );
       const titleInset = zoneContentTopInset(zone);
+      const timing = dealTiming({
+        count: children.length,
+        reducedMotion:
+          typeof window !== 'undefined' &&
+          window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
+      });
       changedNodes = children.map((node) => {
         const placement = placementById.get(node.id);
         return placement
-          ? { ...node, position: { x: placement.x, y: placement.y + titleInset } }
+          ? {
+              ...node,
+              position: { x: placement.x, y: placement.y + titleInset },
+              style: {
+                ...node.style,
+                ...dealStyle(
+                  dealDelayMs(dealOrderIndex(placement, layout.columns), timing),
+                  timing
+                ),
+              },
+            }
           : node;
       });
       const positionChanged = changedNodes.some((node) => {
@@ -502,6 +524,12 @@ export const useBoardObjects = ({
         children.some((node) => placementByNodeId.get(node.id)?.compact !== true);
       if (!positionChanged && !zoneHeightChanged && !compactChanged) return;
       const changedById = new Map(changedNodes.map((node) => [node.id, node]));
+      if (positionChanged) onArrangeNodes?.(changedNodes, timing.totalMs);
+      // Positions are an auto-layout output but are also part of the observer
+      // signature (so a user's manual move can reflow an automatic zone).
+      // Consume exactly the next signature change produced by our own write;
+      // otherwise every arrange schedules a redundant second pass 400ms later.
+      if (policy.mode === 'auto') skipNextAutoArrangeRef.current.add(zoneId);
       setNodes((currentNodes) =>
         currentNodes.map((node) => {
           if (node.id === zoneId && zoneHeightChanged) {
@@ -537,16 +565,21 @@ export const useBoardObjects = ({
                     height: node.type === 'branchNode' ? 88 : 56,
                   }
                 : itemSize(node);
-            if (policy.preset === 'compact_list' && placement.compact !== true) {
-              await client.service('board-objects').patch(placement.object_id, { compact: true });
-            }
-            if (positionChanged) {
-              await client.service('board-objects').patch(placement.object_id, {
-                position: node.position,
-              });
-            }
+            const currentNode = children.find((child) => child.id === node.id);
+            const nodePositionChanged =
+              !currentNode ||
+              Math.abs(currentNode.position.x - node.position.x) >= 0.5 ||
+              Math.abs(currentNode.position.y - node.position.y) >= 0.5;
+            const sizeChanged =
+              !placement.size ||
+              Math.abs(placement.size.width - width) >= 0.5 ||
+              Math.abs(placement.size.height - height) >= 0.5;
+            const shouldCompact = policy.preset === 'compact_list' && placement.compact !== true;
+            if (!nodePositionChanged && !sizeChanged && !shouldCompact) return;
             await client.service('board-objects').patch(placement.object_id, {
-              size: { width, height },
+              ...(nodePositionChanged ? { position: node.position } : {}),
+              ...(sizeChanged ? { size: { width, height } } : {}),
+              ...(shouldCompact ? { compact: true } : {}),
             });
           })
         );
@@ -566,7 +599,7 @@ export const useBoardObjects = ({
         showError('Failed to arrange zone contents');
       }
     },
-    [boardObjectsForBoard, client, setNodes, showError, showSuccess, showWarning]
+    [boardObjectsForBoard, client, onArrangeNodes, setNodes, showError, showSuccess, showWarning]
   );
   arrangeZoneContentsRef.current = arrangeZoneContents;
 
@@ -625,9 +658,13 @@ export const useBoardObjects = ({
       .join('|');
     if (signature === lastAutoLayoutSignatureRef.current) return;
     lastAutoLayoutSignatureRef.current = signature;
+    const zonesToArrange = zonesNeedingAutoArrange(autoZones, skipNextAutoArrangeRef.current);
+    if (zonesToArrange.length === 0) return;
     if (autoArrangeTimerRef.current) clearTimeout(autoArrangeTimerRef.current);
     autoArrangeTimerRef.current = setTimeout(() => {
-      void Promise.all(autoZones.map(([zoneId]) => arrangeZoneContents(zoneId, { silent: true })));
+      void Promise.all(
+        zonesToArrange.map(([zoneId]) => arrangeZoneContents(zoneId, { silent: true }))
+      );
     }, 400);
     return () => {
       if (autoArrangeTimerRef.current) clearTimeout(autoArrangeTimerRef.current);
