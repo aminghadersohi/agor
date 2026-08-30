@@ -13,6 +13,7 @@ import {
   UsersRepository,
   update,
   users,
+  userMcpOauthTokens,
 } from '@agor/core/db';
 import {
   type Application,
@@ -1269,6 +1270,34 @@ describe('SQLite saved-row OAuth authority', () => {
     expect(provider.requests.find((request) => request.path === '/token')?.authorization).toBe(
       `Basic ${Buffer.from('resolved-google-client:resolved-google-secret').toString('base64')}`
     );
+  });
+
+  it('requires reauthorization when a daemon-owned forced refresh has no refresh token', async () => {
+    const provider = await createTestProvider();
+    providers.push(provider);
+    const harness = await createHarness(provider, 'per_user');
+    databases.push(harness.rawDb);
+    await authorizeSavedServer(harness);
+    await update(harness.rawDb, userMcpOauthTokens)
+      .set({ oauth_refresh_token: null })
+      .where(eq(userMcpOauthTokens.mcp_server_id, harness.server.mcp_server_id))
+      .run();
+
+    const result = (await harness.app.service('mcp-servers/oauth-auth-headers').create(
+      {
+        mcp_server_ids: [harness.server.mcp_server_id],
+        force_refresh: true,
+      },
+      {
+        provider: undefined,
+        user: harness.user,
+        tenant: { tenant_id: 'default', source: 'static' },
+        authentication: { _isServiceAccount: true },
+      } as unknown as AuthenticatedParams
+    )) as { headers: Record<string, { authorization?: string; error?: string }> };
+
+    expect(result.headers[harness.server.mcp_server_id]).toEqual({ error: 'needs_reauth' });
+    expect(provider.requests.filter((entry) => entry.path === '/token')).toHaveLength(1);
   });
 
   it('authenticates REST mutations before the MCP OAuth around hook can read or write', async () => {
