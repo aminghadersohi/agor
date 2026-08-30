@@ -717,24 +717,24 @@
       "breakpoints": true
     },
     {
-      "idx": 100,
+      "idx": 9006,
       "version": "6",
       "when": 1788033600000,
-      "tag": "0100_branch_sdk_home",
+      "tag": "9006_branch_sdk_home",
       "breakpoints": true
     },
     {
-      "idx": 101,
+      "idx": 9007,
       "version": "6",
       "when": 1788120000000,
-      "tag": "0101_session_sdk_home_scope",
+      "tag": "9007_session_sdk_home_scope",
       "breakpoints": true
     },
     {
-      "idx": 102,
+      "idx": 9008,
       "version": "6",
       "when": 1788206400000,
-      "tag": "0102_shared_session_prompting",
+      "tag": "9008_shared_session_prompting",
       "breakpoints": true
     }
   ]
