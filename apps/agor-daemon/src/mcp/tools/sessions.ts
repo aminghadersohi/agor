@@ -2,8 +2,11 @@ import { AGENTIC_TOOL_CAPABILITIES } from '@agor/agentic-tools';
 import {
   BranchRepository,
   type BranchWithZoneAndSessions,
+  getCurrentTenantId,
+  runWithTenantDatabaseTransaction,
   SessionRelationshipRepository,
   shortId,
+  TaskRepository,
 } from '@agor/core/db';
 import {
   AVAILABLE_CLAUDE_MODEL_ALIASES,
@@ -33,8 +36,14 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { SessionsServiceImpl } from '../../declarations.js';
 import type { SessionParams } from '../../services/sessions.js';
+import {
+  lockTenantAuthorizationFence,
+  resolveCurrentTenantAuthorityActor,
+} from '../../services/tenant-authorization-fence.js';
+import { requestExecutorTermination } from '../../termination-coordinator.js';
 import { requireActiveAgenticTool } from '../../utils/agentic-tool-runtime.js';
 import { ensureCanPromptTargetSession } from '../../utils/branch-authorization.js';
+import { interruptCorrectionTaskId } from '../../utils/durable-task-id.js';
 import { emitServiceEvent } from '../../utils/emit-service-event.js';
 import {
   resolveBoardId,
@@ -161,6 +170,19 @@ const sessionRelayOutputSchema = z.object({
     .describe('Current parent or effective direct callback coordinator resolved by Agor.'),
   task_id: z.string().describe('Task admitted on the resolved destination Session.'),
   status: z.string().describe('Admitted relay Task status.'),
+});
+
+const sessionInterruptOutputSchema = z.object({
+  success: z.literal(true),
+  target_session_id: z.string().describe('Fully resolved interrupted Session ID.'),
+  relationship: z.enum(['parent', 'coordinator']),
+  outcome: z.enum(['stop_requested', 'already_requested', 'idle_queued']),
+  target_task_id: z.string().nullable().describe('Original active Task, or null when idle.'),
+  corrective_task_id: z.string().describe('Stable exactly-once corrective Task ID.'),
+  corrective_task_status: z.string(),
+  termination_status: z.enum(['idle', 'terminal', 'condition_changed', 'pending', 'unverified']),
+  pending_code: z.string().optional(),
+  note: z.string().optional(),
 });
 
 /**
@@ -850,12 +872,31 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           );
 
         if (task.status === 'queued') {
+          const compaction = task.metadata?.prompt_compaction;
           return textResult({
             success: true,
             queued: true,
             taskId: task.task_id,
             queue_position: task.queue_position,
-            note: 'Session is busy. Prompt has been queued and will execute automatically when the session becomes idle.',
+            ...(compaction
+              ? {
+                  admissionRequestId: compaction.last_admitted_request_id,
+                  coalescedRequestIds: compaction.requests.map(
+                    (
+                      request: NonNullable<
+                        import('@agor/core/types').TaskMetadata['prompt_compaction']
+                      >['requests'][number]
+                    ) => request.request_id
+                  ),
+                  coalescedRequestCount: compaction.requests.length,
+                  uniquePromptCount: compaction.unique_prompt_count,
+                  duplicateRequestCount: compaction.duplicate_request_count,
+                }
+              : {}),
+            note:
+              compaction && compaction.requests.length > 1
+                ? 'Session is busy. This ordinary prompt was coalesced into a queued execution; provenance and duplicate counts are attached to the Task.'
+                : 'Session is busy. Prompt has been queued and will execute automatically when the session becomes idle.',
           });
         }
         return textResult({
@@ -1039,7 +1080,138 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 5d: agor_session_relationships_set_callback
+  // Tool 5d: coordinator-authorized interrupt with a corrective message.
+  server.registerTool(
+    'agor_sessions_interrupt_with_message',
+    {
+      description:
+        "Stop a child Session and put one corrective message ahead of its ordinary queue. Authority derives from the calling MCP Session being the target's current branch-local parent or enabled direct callback coordinator; naming a target never grants authority. The correction cannot dispatch until executor quiescence/absence is verified. Retries with the same idempotencyKey converge on the same corrective Task.",
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        targetSessionId: mcpRequiredId('targetSessionId', 'Session', 'Child Session to interrupt'),
+        relationship: z
+          .enum(['parent', 'coordinator'])
+          .describe(
+            'Current relationship through which the calling Session coordinates the child.'
+          ),
+        message: mcpRequiredString('message', 'Corrective prompt to execute next'),
+        idempotencyKey: z
+          .string()
+          .min(1)
+          .max(128)
+          .describe('Caller-stable retry key. Reuse it only for retries of this exact correction.'),
+      }),
+      outputSchema: sessionInterruptOutputSchema,
+    },
+    async (args) => {
+      if (!ctx.sessionId) return sessionContextRequiredResult();
+      const targetSessionId = await resolveSessionId(ctx, args.targetSessionId);
+      const correctiveTaskId = interruptCorrectionTaskId(
+        targetSessionId,
+        ctx.sessionId,
+        args.idempotencyKey
+      );
+      const tenantId = ctx.baseServiceParams.tenant?.tenant_id ?? getCurrentTenantId();
+
+      const admission = await runWithMcpTenantDatabaseWrite(ctx, (db) =>
+        runWithTenantDatabaseTransaction(db, tenantId, async (operationDb) => {
+          await lockTenantAuthorizationFence(operationDb, ctx.baseServiceParams);
+          const actor = await resolveCurrentTenantAuthorityActor(
+            operationDb,
+            ctx.baseServiceParams
+          );
+          if (actor.service || actor.user_id !== ctx.userId) {
+            throw new Error('Interrupt requires the current authenticated human actor.');
+          }
+          const authority = await (
+            ctx.app.service('sessions') as unknown as SessionsServiceImpl
+          ).resolveInterruptAuthority(
+            targetSessionId,
+            { callerSessionId: ctx.sessionId!, relationship: args.relationship },
+            ctx.baseServiceParams
+          );
+          const result = await new TaskRepository(operationDb).admitInterruptCorrection({
+            session_id: authority.target_session_id,
+            corrective_task_id: correctiveTaskId,
+            corrective_prompt: args.message,
+            created_by: ctx.userId,
+            requested_by_session_id: authority.caller_session_id,
+            relationship: authority.relationship,
+            idempotency_key: args.idempotencyKey,
+          });
+          if (result.outcome === 'relationship_changed') {
+            throw new Error('Interrupt relationship changed before the request could be admitted.');
+          }
+          return result;
+        })
+      );
+
+      if (admission.outcome !== 'already_requested') {
+        emitServiceEvent(ctx.app, {
+          path: 'tasks',
+          event: 'created',
+          data: admission.corrective_task,
+          params: ctx.baseServiceParams,
+          id: admission.corrective_task.task_id,
+        });
+        emitServiceEvent(ctx.app, {
+          path: 'tasks',
+          event: 'queued',
+          method: 'create',
+          data: admission.corrective_task,
+          params: ctx.baseServiceParams,
+          id: admission.corrective_task.task_id,
+        });
+      }
+      if (admission.target_task && admission.outcome === 'stop_requested') {
+        emitServiceEvent(ctx.app, {
+          path: 'tasks',
+          event: 'patched',
+          data: admission.target_task,
+          params: ctx.baseServiceParams,
+          id: admission.target_task.task_id,
+        });
+      }
+
+      let termination:
+        | Awaited<ReturnType<typeof requestExecutorTermination>>
+        | { status: 'idle'; task?: undefined } = { status: 'idle' };
+      if (admission.target_task) {
+        termination = await requestExecutorTermination({
+          app: ctx.app,
+          taskId: admission.target_task.task_id,
+          cause: 'user_stop',
+          errorMessage: `Interrupted by authorized ${args.relationship} with corrective Task ${correctiveTaskId}.`,
+          params: ctx.baseServiceParams,
+          runInFreshTenantWriteDatabase: (work) => runWithMcpTenantDatabaseWrite(ctx, () => work()),
+        });
+      }
+
+      if (termination.status === 'terminal' || termination.status === 'idle') {
+        await (
+          ctx.app.service('sessions') as unknown as SessionsServiceImpl
+        ).triggerQueueProcessing(targetSessionId, ctx.baseServiceParams);
+      }
+
+      return structuredResult({
+        success: true,
+        target_session_id: targetSessionId,
+        relationship: args.relationship,
+        outcome: admission.outcome,
+        target_task_id: admission.target_task?.task_id ?? null,
+        corrective_task_id: admission.corrective_task.task_id,
+        corrective_task_status: admission.corrective_task.status,
+        termination_status: termination.status,
+        ...(termination.status === 'pending'
+          ? { pending_code: termination.pendingCode, note: termination.reason }
+          : termination.status === 'unverified'
+            ? { note: termination.reason }
+            : {}),
+      });
+    }
+  );
+
+  // Tool 5e: agor_session_relationships_set_callback
   server.registerTool(
     'agor_session_relationships_set_callback',
     {

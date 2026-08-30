@@ -748,6 +748,15 @@ export interface SessionRelayResult extends SessionRelayResolution {
   status: TaskStatus;
 }
 
+export type SessionInterruptRelationship = 'parent' | 'coordinator';
+
+/** Current relationship-derived authority for interrupt-with-message. */
+export interface SessionInterruptAuthority {
+  caller_session_id: SessionID;
+  target_session_id: SessionID;
+  relationship: SessionInterruptRelationship;
+}
+
 /**
  * Resolve the currently enabled direct completion coordinator.
  *

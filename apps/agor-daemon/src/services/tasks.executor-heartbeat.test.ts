@@ -260,6 +260,53 @@ describe('TasksService executor heartbeat helpers', () => {
     expect(triggerQueueProcessing).toHaveBeenCalledWith(sessionId, undefined);
   });
 
+  it('releases an interrupt correction after verified settlement despite stop suppression', async () => {
+    const taskId = '018f0000-0000-7000-8000-000000000040';
+    const sessionId = '018f0000-0000-7000-8000-000000000041';
+    const stoppedTask = {
+      task_id: taskId,
+      session_id: sessionId,
+      status: TaskStatus.STOPPED,
+      created_at: '2026-01-01T00:00:00.000Z',
+      completed_at: '2026-01-01T00:00:05.000Z',
+      termination_request: {
+        cause: 'user_stop',
+        requested_at: '2026-01-01T00:00:04.000Z',
+      },
+      metadata: {
+        interruptions: [
+          {
+            requested_by_session_id: '018f0000-0000-7000-8000-000000000042',
+            requested_by_user_id: '018f0000-0000-7000-8000-000000000043',
+            relationship: 'parent',
+            target_task_id: taskId,
+            corrective_task_id: '018f0000-0000-7000-8000-000000000044',
+            idempotency_key: 'fix-1',
+            requested_at: '2026-01-01T00:00:04.000Z',
+          },
+        ],
+      },
+    };
+    const { service, triggerQueueProcessing } = completionHarness({
+      currentTask: stoppedTask,
+      resultTask: stoppedTask,
+    });
+
+    await service.settleTermination(
+      {
+        taskId,
+        outcome: 'verified_absent',
+        coordinationToken: 'completion-test',
+      },
+      { suppressTerminalQueueProcessing: true }
+    );
+
+    expect(triggerQueueProcessing).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({ suppressTerminalQueueProcessing: false })
+    );
+  });
+
   it('ignores late executor attempts to revive a stopped task as awaiting permission', async () => {
     const taskId = '018f0000-0000-7000-8000-000000000022';
     const sessionId = '018f0000-0000-7000-8000-000000000023';

@@ -49,6 +49,11 @@ into SDK-private registration state.
 6. **`agor_session_relationships_report`** — relay from the current MCP Session
    to an explicitly selected `parent` or current `coordinator`. It accepts no
    target Session ID.
+7. **`agor_sessions_interrupt_with_message`** — a current branch-local parent
+   or enabled direct callback coordinator stops its child and queues one
+   correction at highest priority. The target is supplied, but authority is
+   derived from the target's current durable relationship and rechecked at the
+   admission fence. A caller-stable `idempotencyKey` converges retries.
 
 All enforce the branch-centric model (every session references a branch). Permission modes map to each agent's native settings.
 
@@ -89,6 +94,18 @@ while reparenting changes the parent field and parent relay target. The relay
 tool resolves these durable values on each call, requires an explicit selector
 when both exist, rechecks destination prompt authority/tenant/state, and never
 uses a caller-supplied Session ID.
+
+Interrupt-with-message requires source visibility, current relationship
+membership, normal prompt authority on the active target, an active same-tenant
+Session/branch, and the current authenticated human actor. Archived/deleted
+targets fail closed. Idle targets receive the correction without a synthetic
+Stop. Running, dispatching, awaiting-permission, and legacy awaiting-input Tasks
+enter the existing safe Stop lifecycle; the correction stays queued through
+pending/unverified containment and starts only after verified settlement. A
+stopped Task does not emit natural-completion callbacks; later successful
+completion of the corrective Task follows its normal standing/root callback
+rules. Task-scoped executor authority is retired only by normal terminal
+settlement, never by interrupt admission.
 
 ## Overrides at create/spawn/subsession time
 

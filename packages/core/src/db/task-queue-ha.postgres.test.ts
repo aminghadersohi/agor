@@ -230,6 +230,42 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)('Session Task queue HA (Pos
     expect(queued.map((task) => task.queue_position).sort()).toEqual([1, 2, 3, 4, 5]);
   });
 
+  it('coalesces concurrent replica admissions under the Session lock', async () => {
+    const seed = await seedTenant(db, `queue-compact-${generateId()}`);
+    const sessionId = await createSession(db, seed);
+    const requestIds = Array.from({ length: 5 }, () => generateId() as TaskID);
+
+    const admissions = await Promise.all(
+      requestIds.map((requestId, index) =>
+        runWithTenantDatabaseScope(db, seed.tenantId, (scoped) =>
+          new TaskRepository(scoped).createPending({
+            task_id: requestId,
+            session_id: sessionId,
+            created_by: seed.userId,
+            full_prompt: index === 4 ? 'prompt  0' : `prompt ${index}`,
+            status: TaskStatus.QUEUED,
+            compaction: {
+              request_id: requestId,
+              eligible: true,
+              stream: true,
+            },
+          })
+        )
+      )
+    );
+
+    expect(new Set(admissions.map((task) => task.task_id)).size).toBe(1);
+    await runWithTenantDatabaseScope(db, seed.tenantId, async (scoped) => {
+      const queued = await new TaskRepository(scoped).findQueued(sessionId);
+      expect(queued).toHaveLength(1);
+      expect(queued[0]?.metadata?.prompt_compaction).toMatchObject({
+        unique_prompt_count: 4,
+        duplicate_request_count: 1,
+      });
+      expect(queued[0]?.metadata?.prompt_compaction?.requests).toHaveLength(5);
+    });
+  });
+
   it('keeps discovery routing-only and refuses cross-tenant claim/inference', async () => {
     const a = await seedTenant(db, `queue-tenant-a-${generateId()}`);
     const b = await seedTenant(db, `queue-tenant-b-${generateId()}`);
