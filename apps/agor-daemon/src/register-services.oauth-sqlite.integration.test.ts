@@ -12,8 +12,8 @@ import {
   UserMCPOAuthTokenRepository,
   UsersRepository,
   update,
-  users,
   userMcpOauthTokens,
+  users,
 } from '@agor/core/db';
 import {
   type Application,

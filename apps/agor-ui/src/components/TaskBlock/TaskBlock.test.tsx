@@ -16,8 +16,8 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   type Block,
   groupMessagesIntoBlocks,
-  isBlockVisibleInSimpleChat,
   isAuthorizationRevokedFailure,
+  isBlockVisibleInSimpleChat,
   isVerifiedRuntimeInterruption,
   shouldRenderLiveTaskProgress,
   TaskBlock,
