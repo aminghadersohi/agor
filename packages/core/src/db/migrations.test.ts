@@ -12,6 +12,14 @@ interface JournalEntry {
   when: number;
 }
 
+const INTEGRATION_MIGRATION_BAND_START = 9000;
+const LOCAL_MIGRATION_SUFFIXES = [
+  'transitive_completion_subscriptions',
+  'profile_image_galleries',
+  'profile_identity_models',
+  'board_image_galleries',
+] as const;
+
 /** Both journals, Postgres first, as the migrator reads them off disk. */
 const readJournals = () =>
   Promise.all(
@@ -42,15 +50,15 @@ describe('Postgres migrations', () => {
     expect(
       pendingOfflineCutoverMigrations('postgresql', {
         applied: ['0094_discord_gateway_hybrid'],
-        pending: ['0099_board_branch_capability_policies'],
+        pending: ['9004_board_branch_capability_policies'],
       })
-    ).toEqual(['0099_board_branch_capability_policies']);
+    ).toEqual(['9004_board_branch_capability_policies']);
     expect(
       pendingOfflineCutoverMigrations('sqlite', {
         applied: ['0097_discord_gateway_hybrid'],
-        pending: ['0102_board_branch_capability_policies'],
+        pending: ['9004_board_branch_capability_policies'],
       })
-    ).toEqual(['0102_board_branch_capability_policies']);
+    ).toEqual(['9004_board_branch_capability_policies']);
   });
 
   it('requires the Knowledge claim protocol migration to be an offline existing-db cutover', () => {
@@ -192,6 +200,36 @@ describe('Postgres migrations', () => {
         `${newest?.tag} does not sort after every earlier migration`
       ).toBeGreaterThan(highestWhenBefore);
       expect(newest?.idx).toBeGreaterThan(highestIdxBefore);
+    }
+  });
+
+  it('keeps integration-only migrations and their successors in the reserved band', async () => {
+    for (const { entries } of await readJournals()) {
+      const localEntries = entries.filter((entry) =>
+        LOCAL_MIGRATION_SUFFIXES.some((suffix) => entry.tag.endsWith(`_${suffix}`))
+      );
+
+      expect(localEntries.map((entry) => entry.tag.replace(/^\d+_/, ''))).toEqual(
+        LOCAL_MIGRATION_SUFFIXES
+      );
+      expect(localEntries.map((entry) => entry.idx)).toEqual([9000, 9001, 9002, 9003]);
+
+      const bandStart = entries.findIndex((entry) => entry.idx >= INTEGRATION_MIGRATION_BAND_START);
+      expect(bandStart).toBeGreaterThan(-1);
+
+      // Once this integration lineage enters its private band, every later
+      // entry stays there. An upstream journal append with a low idx must fail
+      // here and be renumbered during the merge instead of colliding silently.
+      expect(entries.slice(bandStart).map((entry) => entry.idx)).toEqual(
+        entries.slice(bandStart).map((_, offset) => INTEGRATION_MIGRATION_BAND_START + offset)
+      );
+
+      for (const [position, entry] of entries.entries()) {
+        if (position >= bandStart) {
+          expect(entry.tag.startsWith(`${String(entry.idx).padStart(4, '0')}_`)).toBe(true);
+        }
+        if (position > 0) expect(entry.idx).toBeGreaterThan(entries[position - 1]?.idx ?? -1);
+      }
     }
   });
 
@@ -395,7 +433,7 @@ describe('Board and branch capability-policy migration', () => {
         INSERT INTO branch_owners VALUES ('branch-3','owner',1);
       `);
       const migration = await readFile(
-        new URL('../../drizzle/sqlite/0102_board_branch_capability_policies.sql', import.meta.url),
+        new URL('../../drizzle/sqlite/9004_board_branch_capability_policies.sql', import.meta.url),
         'utf8'
       );
       for (const statement of migration.split('--> statement-breakpoint')) {
@@ -605,7 +643,7 @@ describe('Board and branch capability-policy migration', () => {
           ('board-source-without-board','owner',1);
       `);
       const migration = await readFile(
-        new URL('../../drizzle/sqlite/0102_board_branch_capability_policies.sql', import.meta.url),
+        new URL('../../drizzle/sqlite/9004_board_branch_capability_policies.sql', import.meta.url),
         'utf8'
       );
       for (const statement of migration.split('--> statement-breakpoint')) {
@@ -720,7 +758,7 @@ describe('Board and branch capability-policy migration', () => {
       await expect(preflightSQLiteCapabilityPolicyOwners(db)).rejects.toThrow(/branch:orphan/);
       await (db as unknown as { $client: { close(): Promise<void> } }).$client.close();
       const migration = await readFile(
-        new URL('../../drizzle/sqlite/0102_board_branch_capability_policies.sql', import.meta.url),
+        new URL('../../drizzle/sqlite/9004_board_branch_capability_policies.sql', import.meta.url),
         'utf8'
       );
       let failed = false;
@@ -743,7 +781,7 @@ describe('Board and branch capability-policy migration', () => {
 
   it('forces tenant RLS and reports unattributed object IDs in PostgreSQL', async () => {
     const migration = await readFile(
-      new URL('../../drizzle/postgres/0099_board_branch_capability_policies.sql', import.meta.url),
+      new URL('../../drizzle/postgres/9004_board_branch_capability_policies.sql', import.meta.url),
       'utf8'
     );
     for (const table of [
@@ -1111,7 +1149,7 @@ describe('MCP stdio transport repair migrations', () => {
     `);
 
     const migration = await readFile(
-      new URL('../../drizzle/sqlite/0103_strip_stdio_remote_fields.sql', import.meta.url),
+      new URL('../../drizzle/sqlite/9005_strip_stdio_remote_fields.sql', import.meta.url),
       'utf8'
     );
     await client.executeMultiple(migration.replaceAll('--> statement-breakpoint', ''));
@@ -1160,7 +1198,7 @@ describe('MCP stdio transport repair migrations', () => {
 
   it('bounds the PostgreSQL cross-tenant repair to a temporary exact capability', async () => {
     const migration = await readFile(
-      new URL('../../drizzle/postgres/0100_strip_stdio_remote_fields.sql', import.meta.url),
+      new URL('../../drizzle/postgres/9005_strip_stdio_remote_fields.sql', import.meta.url),
       'utf8'
     );
 

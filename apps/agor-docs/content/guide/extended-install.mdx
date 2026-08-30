@@ -265,7 +265,7 @@ Some migrations change authorization, distributed ownership, or callback protoco
 - `0082_github_install_state` moves GitHub App install callback state from a per-daemon Map to PostgreSQL. Old daemons cannot consume state issued by new daemons, and new daemons cannot consume state issued by old daemons.
 - `0091_codex_device_auth_attempts` moves Codex device authorization polling and exchange ownership into a fenced PostgreSQL protocol.
 - `0092_add_user_credential_generation` makes password-change revocation use generation-bearing tokens. Old daemons do not understand the claim and must not share a cohort once a password changes.
-- `0099_board_branch_capability_policies` (PostgreSQL) / `0102_board_branch_capability_policies` (SQLite) replaces board and branch RBAC with normalized capability policies. Its best-effort conversion is intentionally equal-or-less privilege: legacy prompt sharing is reduced to independent collaboration, and rules that cannot be represented safely may lose access rather than gain it.
+- `9004_board_branch_capability_policies` (both dialects) replaces board and branch RBAC with normalized capability policies. Its best-effort conversion is intentionally equal-or-less privilege: legacy prompt sharing is reduced to independent collaboration, and rules that cannot be represented safely may lose access rather than gain it.
 
 Rolling old and new daemons against the same database across any cutover is not supported.
 
