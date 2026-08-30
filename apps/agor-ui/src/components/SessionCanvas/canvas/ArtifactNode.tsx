@@ -793,10 +793,7 @@ export const ArtifactNode = ({
                 sandpackInputs.template === 'static' && staticReady ? 'idle' : undefined
               }
             />
-            <ArtifactRuntimeBridge
-              artifactId={data.artifactId}
-              fallbackIframe={staticIframeRef}
-            />
+            <ArtifactRuntimeBridge artifactId={data.artifactId} fallbackIframe={staticIframeRef} />
             <ArtifactInteractionBridge
               artifactId={data.artifactId}
               config={payload.interaction_config}

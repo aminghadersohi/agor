@@ -311,7 +311,7 @@ describe('parseAgorYml — repo .agor.yml demo variants', () => {
 
   it('shadows @agor/core dist inside the development container', () => {
     const compose = fs.readFileSync(path.join(REPO_ROOT, 'docker-compose.yml'), 'utf8');
-    expect(compose).toMatch(/^      - \/app\/packages\/core\/dist$/m);
+    expect(compose).toMatch(/^ {6}- \/app\/packages\/core\/dist$/m);
   });
 
   it('makes branch SDK homes the rich/full RBAC fixture default', () => {
