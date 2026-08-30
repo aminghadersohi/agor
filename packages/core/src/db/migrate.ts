@@ -154,17 +154,14 @@ export function createMigrationImpactRegistry(
 const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
   ['0030_migrate_queued_messages', QUEUED_MESSAGES_MIGRATION_POLICY],
   ['0040_migrate_queued_messages', QUEUED_MESSAGES_MIGRATION_POLICY],
-  ['0096_profile_image_galleries', PROFILE_IMAGE_GALLERIES_MIGRATION_POLICY],
-  ['0099_profile_image_galleries', PROFILE_IMAGE_GALLERIES_MIGRATION_POLICY],
-  ['0097_profile_identity_models', PROFILE_IDENTITY_MODELS_MIGRATION_POLICY],
-  ['0100_profile_identity_models', PROFILE_IDENTITY_MODELS_MIGRATION_POLICY],
+  ['9001_profile_image_galleries', PROFILE_IMAGE_GALLERIES_MIGRATION_POLICY],
+  ['9002_profile_identity_models', PROFILE_IDENTITY_MODELS_MIGRATION_POLICY],
   ...[
     '0074_knowledge_embedding_claims',
     '0078_mcp_oauth_pending_flows',
     '0082_github_install_state',
     '0091_codex_device_auth_attempts',
-    '0099_board_branch_capability_policies',
-    '0102_board_branch_capability_policies',
+    '9004_board_branch_capability_policies',
   ].map(
     (name) =>
       [
@@ -205,27 +202,19 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
       }),
     },
   ],
-  // Local numbering retained: postgres 0095 / sqlite 0098. PR #2564 renumbered
-  // these to 0096/0099 when it rebased onto main, but those slots are already
-  // taken here by 0096_profile_image_galleries / 0099_profile_image_galleries,
-  // and the local numbers are already applied in existing databases. The SQL is
-  // byte-identical, so this is a numbering choice only.
-  ...['0095_transitive_completion_subscriptions', '0098_transitive_completion_subscriptions'].map(
-    (name) =>
-      [
-        name,
-        {
-          requiresOfflineCutover: false,
-          impact: defineMigrationImpact({
-            classification: 'schema',
-            userAction: 'none',
-            rollbackCompatibility: 'compatible',
-            summary:
-              'Adds a dormant completion-subscription outbox; direct callbacks remain unchanged unless root propagation is requested.',
-          }),
-        },
-      ] as const
-  ),
+  [
+    '9000_transitive_completion_subscriptions',
+    {
+      requiresOfflineCutover: false,
+      impact: defineMigrationImpact({
+        classification: 'schema',
+        userAction: 'none',
+        rollbackCompatibility: 'compatible',
+        summary:
+          'Adds a dormant completion-subscription outbox; direct callbacks remain unchanged unless root propagation is requested.',
+      }),
+    },
+  ],
 ]);
 
 const NO_OFFLINE_ACTION_SUMMARY =
@@ -580,7 +569,7 @@ export async function runMigrations(
     if (
       dialect === 'sqlite' &&
       status.applied.length > 0 &&
-      status.pending.includes('0102_board_branch_capability_policies')
+      status.pending.includes('9004_board_branch_capability_policies')
     ) {
       await preflightSQLiteCapabilityPolicyOwners(db);
     }
