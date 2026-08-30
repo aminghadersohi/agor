@@ -5,6 +5,7 @@ import {
   getNodesInsideMarquee,
   getSelectedLayoutNodes,
   removeSelectedDescendants,
+  suppressIndividualZoneToolbarsForMultiSelect,
 } from './marqueeSelection';
 
 const nodes: Node[] = [
@@ -97,6 +98,31 @@ describe('marquee selection', () => {
       'branch-1',
       'card-1',
     ]);
+  });
+
+  it('replaces two selected zone toolbars with the shared selection toolbar', () => {
+    const selectedZones: Node[] = [
+      { id: 'zone-a', type: 'zone', position: { x: 0, y: 0 }, data: {}, selected: true },
+      { id: 'zone-b', type: 'zone', position: { x: 400, y: 0 }, data: {}, selected: true },
+      { id: 'card', type: 'cardNode', position: { x: 0, y: 400 }, data: {}, selected: true },
+    ];
+
+    const rendered = suppressIndividualZoneToolbarsForMultiSelect(selectedZones);
+
+    expect(getSelectedLayoutNodes(rendered)).toHaveLength(3);
+    expect(rendered.filter((node) => node.type === 'zone').map((node) => node.data)).toEqual([
+      { suppressToolbar: true },
+      { suppressToolbar: true },
+    ]);
+    expect(rendered.find((node) => node.id === 'card')?.data).toEqual({});
+  });
+
+  it('leaves a single selected zone toolbar unchanged', () => {
+    const selectedZone: Node[] = [
+      { id: 'zone-a', type: 'zone', position: { x: 0, y: 0 }, data: {}, selected: true },
+    ];
+
+    expect(suppressIndividualZoneToolbarsForMultiSelect(selectedZone)).toBe(selectedZone);
   });
 
   it.each(['branchNode', 'cardNode', 'zone', 'markdown', 'appNode', 'artifactNode'])(

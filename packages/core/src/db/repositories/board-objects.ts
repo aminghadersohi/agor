@@ -479,6 +479,49 @@ export class BoardObjectRepository {
     }
   }
 
+  /** Update layout fields in one row write so realtime never sees half a placement. */
+  async updateLayout(
+    objectId: string,
+    layout: {
+      position?: { x: number; y: number };
+      size?: { width: number; height: number };
+      compact?: boolean;
+    }
+  ): Promise<BoardEntityObject> {
+    try {
+      const existing = await select(this.db)
+        .from(boardObjects)
+        .where(eq(boardObjects.object_id, objectId))
+        .one();
+      if (!existing) throw new EntityNotFoundError('BoardObject', objectId);
+      const existingData =
+        typeof existing.data === 'string' ? JSON.parse(existing.data) : existing.data;
+      await update(this.db, boardObjects)
+        .set({
+          data: {
+            ...existingData,
+            ...(layout.position ? { position: layout.position } : {}),
+            ...(layout.size ? { size: layout.size } : {}),
+            ...(layout.compact !== undefined ? { compact: layout.compact } : {}),
+          },
+        })
+        .where(eq(boardObjects.object_id, objectId))
+        .run();
+      const row = await select(this.db)
+        .from(boardObjects)
+        .where(eq(boardObjects.object_id, objectId))
+        .one();
+      if (!row) throw new RepositoryError('Failed to retrieve updated board object layout');
+      return this.rowToEntity(row);
+    } catch (error) {
+      if (error instanceof EntityNotFoundError) throw error;
+      throw new RepositoryError(
+        `Failed to update board object layout: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
   /**
    * Update zone pinning for board object
    */

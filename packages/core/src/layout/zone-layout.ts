@@ -1,4 +1,5 @@
 import type {
+  BoardEntityType,
   BoardPosition,
   ZoneLayoutPolicy,
   ZoneLayoutPreset,
@@ -7,6 +8,7 @@ import type {
   ZoneOverflowStrategy,
   ZoneResizeMode,
 } from '../types/board';
+import { BOARD_GRID_SIZE, ceilBoardGridValue } from './rectangle-packing';
 
 export const ZONE_LAYOUT_MODES = ['manual', 'auto'] as const;
 export const ZONE_LAYOUT_PRESETS = ['grid', 'compact_list'] as const;
@@ -32,6 +34,70 @@ export const DEFAULT_ZONE_LAYOUT_POLICY: Readonly<ZoneLayoutPolicy> = {
   onOverflow: 'report',
   gap: 24,
 };
+
+export const ZONE_LAYOUT_FRAME_PADDING = BOARD_GRID_SIZE;
+
+export interface ZoneLayoutFrameInput {
+  width: number;
+  fontSize?: number;
+  status?: string;
+}
+
+export interface ZoneLayoutFrame {
+  /** Grid-aligned outer width used by the layout solver. */
+  width: number;
+  /** Equal left/right and bottom inset for every child entity type. */
+  padding: number;
+  /** Reserved title/status area before the first child. */
+  headerInset: number;
+  /** Width available to a full-width compact-list child. */
+  usableWidth: number;
+}
+
+/**
+ * One frame contract for every zone layout path and child entity type.
+ *
+ * The frame is intentionally independent of the card/worktree inside it:
+ * layout configuration and zone metadata own its margins and title reserve.
+ */
+export function getZoneLayoutFrame(
+  zone: ZoneLayoutFrameInput,
+  options: { padding?: number } = {}
+): ZoneLayoutFrame {
+  const requestedPadding = options.padding ?? ZONE_LAYOUT_FRAME_PADDING;
+  const padding =
+    requestedPadding === 0
+      ? 0
+      : Math.max(BOARD_GRID_SIZE, ceilBoardGridValue(Math.max(0, requestedPadding)));
+  const requestedWidth =
+    Number.isFinite(zone.width) && zone.width > 0 ? zone.width : padding * 2 + BOARD_GRID_SIZE;
+  const width = Math.max(padding * 2 + BOARD_GRID_SIZE, ceilBoardGridValue(requestedWidth));
+  const labelFontSize =
+    typeof zone.fontSize === 'number' && Number.isFinite(zone.fontSize)
+      ? Math.min(48, Math.max(10, zone.fontSize))
+      : 14;
+  const labelHeight = Math.ceil(labelFontSize * 1.2);
+  const statusHeight = zone.status ? 8 + Math.ceil(labelFontSize * 1.05) : 0;
+  const headerInset = ceilBoardGridValue(Math.max(64, 32 + labelHeight + statusHeight));
+
+  return {
+    width,
+    padding,
+    headerInset,
+    usableWidth: width - padding * 2,
+  };
+}
+
+/** Compact-list children share the frame width; only their content height differs. */
+export function compactZoneItemSize(
+  entityType: BoardEntityType,
+  usableWidth: number
+): { width: number; height: number } {
+  return {
+    width: usableWidth,
+    height: entityType === 'branch' ? BOARD_GRID_SIZE * 5 : BOARD_GRID_SIZE * 3,
+  };
+}
 
 export interface ZoneLayoutSortItem {
   id: string;

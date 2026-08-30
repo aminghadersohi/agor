@@ -16,9 +16,9 @@ import {
   MinusSquareOutlined,
   PlusSquareOutlined,
   PushpinFilled,
-  ReloadOutlined,
+  RobotOutlined,
 } from '@ant-design/icons';
-import { App, Button, Card, Space, Spin, Tooltip, Typography, theme } from 'antd';
+import { Button, Card, Space, Spin, Tooltip, Typography, theme } from 'antd';
 import { AggregationColor } from 'antd/es/color-picker/color';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useConnectionDisabled } from '../../contexts/ConnectionContext';
@@ -36,7 +36,6 @@ import { EnvironmentPill } from '../EnvironmentPill';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 import { CreatedByTag } from '../metadata';
 import { IssuePill, PullRequestPill } from '../Pill';
-import { TeammateBoardPortrait } from '../ProfileImage';
 import { BranchSessionPeekSection } from './BranchSessionPeekSection';
 import { BranchSessionSections } from './BranchSessionSections';
 import { estimateBranchSessionSectionsHeight } from './branchCardLayout';
@@ -78,6 +77,8 @@ interface BranchCardProps {
    * cannot mutate the board, so the control never renders a guaranteed 403.
    */
   onToggleCompact?: (branchId: string, compact: boolean) => void;
+  /** Keep a called-out worktree's rolling Auto Zone deferral alive. */
+  onAutoZoneInteraction?: (branchId: string) => void;
   inPopover?: boolean; // NEW: Enable popover-optimized mode (hides board-specific controls)
   panelMode?: boolean; // Render inside side panel instead of as a draggable canvas card
   progressiveMountKey?: string | number | null;
@@ -115,6 +116,7 @@ const BranchCardComponent = ({
   zoneColor,
   compact = false,
   onToggleCompact,
+  onAutoZoneInteraction,
   inPopover = false,
   panelMode = false,
   progressiveMountKey,
@@ -226,30 +228,6 @@ const BranchCardComponent = ({
   // Check if branch is still being created on filesystem
   const isCreating = branch.filesystem_status === 'creating';
   const isFailed = branch.filesystem_status === 'failed';
-
-  // Retry provisioning for a branch whose working directory failed to
-  // materialize. Hits POST /branches/:id/retry-provisioning, which runs the
-  // exact same non-destructive `retryBranchProvisioning` service the MCP tool
-  // uses. Only offered while `isFailed` — the server accepts `failed` alone and
-  // conflicts on an in-flight `creating`. Feedback is surfaced explicitly so a
-  // failed request never looks like a no-op.
-  const { message } = App.useApp();
-  const [isRetryingProvisioning, setIsRetryingProvisioning] = useState(false);
-  const handleRetryProvisioning = useCallback(async () => {
-    if (!client) {
-      message.error('Not connected — cannot retry provisioning right now.');
-      return;
-    }
-    setIsRetryingProvisioning(true);
-    try {
-      await client.service(`branches/${branch.branch_id}/retry-provisioning`).create({});
-      message.success('Provisioning retry requested');
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : 'Failed to retry branch provisioning');
-    } finally {
-      setIsRetryingProvisioning(false);
-    }
-  }, [client, branch.branch_id, message]);
 
   // Check if this branch is a persisted agent
   const teammateConfig = useMemo(() => getTeammateConfig(branch), [branch]);
@@ -367,6 +345,9 @@ const BranchCardComponent = ({
 
   return (
     <Card
+      onClickCapture={() => onAutoZoneInteraction?.(branch.branch_id)}
+      onPointerDownCapture={() => onAutoZoneInteraction?.(branch.branch_id)}
+      onFocusCapture={() => onAutoZoneInteraction?.(branch.branch_id)}
       style={{
         width: panelMode ? '100%' : peekedSessions.length > 0 ? 880 : 500,
         cursor: 'default', // Override React Flow's drag cursor - only drag handles should show grab cursor
@@ -389,6 +370,7 @@ const BranchCardComponent = ({
     >
       {/* Branch header */}
       <div
+        data-zone-stack-header
         className={!inPopover && !panelMode ? REACT_FLOW_DRAG_HANDLE_CLASS : undefined}
         style={{
           display: 'flex',
@@ -415,16 +397,23 @@ const BranchCardComponent = ({
                 display: 'flex',
                 alignItems: 'center',
                 cursor: panelMode ? 'default' : 'grab',
-                width: isAgent ? 72 : 32,
-                height: isAgent ? 56 : 32,
+                width: 32,
+                height: 32,
                 justifyContent: 'center',
                 flexShrink: 0,
               }}
             >
               {isCreating || hasRunningSession ? (
                 <Spin size="large" />
+              ) : isAgent && teammateConfig?.emoji ? (
+                <span style={{ fontSize: 32 }}>{teammateConfig.emoji}</span>
               ) : isAgent ? (
-                <TeammateBoardPortrait branch={branch} />
+                <RobotOutlined
+                  style={{
+                    fontSize: 32,
+                    color: isFailed ? token.colorError : token.colorInfo,
+                  }}
+                />
               ) : (
                 <BranchesOutlined
                   style={{
@@ -602,54 +591,6 @@ const BranchCardComponent = ({
               showNukeEnvironment={false}
             />
           </Space>
-        </div>
-      )}
-      {/* Provisioning failure banner + retry. The working directory did not
-          materialize; surface the sanitized error and a one-click, idempotent
-          retry that hits the shared retry-provisioning service. */}
-      {isFailed && (
-        <div
-          className={REACT_FLOW_NO_DRAG_CLASS}
-          style={{
-            marginBottom: 8,
-            padding: '8px 10px',
-            borderRadius: 6,
-            border: `1px solid ${token.colorErrorBorder}`,
-            background: token.colorErrorBg,
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: 8,
-          }}
-        >
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <Typography.Text type="danger" strong style={{ fontSize: 12 }}>
-              Provisioning failed
-            </Typography.Text>
-            {branch.error_message && (
-              <Tooltip title={branch.error_message}>
-                <Typography.Paragraph
-                  type="secondary"
-                  ellipsis={{ rows: 2 }}
-                  style={{ fontSize: 11, margin: '2px 0 0' }}
-                >
-                  {branch.error_message}
-                </Typography.Paragraph>
-              </Tooltip>
-            )}
-          </div>
-          <Button
-            size="small"
-            danger
-            icon={<ReloadOutlined />}
-            loading={isRetryingProvisioning}
-            disabled={connectionDisabled}
-            onClick={(e) => {
-              e.stopPropagation();
-              void handleRetryProvisioning();
-            }}
-          >
-            Retry
-          </Button>
         </div>
       )}
 

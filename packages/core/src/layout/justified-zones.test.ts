@@ -4,6 +4,7 @@ import {
   layoutJustifiedZones,
   zoneShapesForItems,
 } from './justified-zones';
+import { BOARD_GRID_SIZE, snapBoardGridPoint } from './rectangle-packing';
 
 const shape = (columns: number, width: number, height: number) => ({ columns, width, height });
 
@@ -22,6 +23,24 @@ function expectNoOverlaps(placements: JustifiedZonePlacement[]) {
     }
   }
 }
+
+it('quantizes arranged zone origins and dimensions to the board grid', () => {
+  const result = layoutJustifiedZones(
+    [
+      { id: 'zone-a', shapes: [shape(1, 413, 307)] },
+      { id: 'zone-b', shapes: [shape(1, 517, 283)] },
+    ],
+    { targetWidth: 1003, startX: 73, startY: 87, gap: 33, gridSize: BOARD_GRID_SIZE }
+  );
+
+  for (const placement of result.placements) {
+    for (const value of [placement.x, placement.y, placement.width, placement.height]) {
+      expect(value % BOARD_GRID_SIZE).toBe(0);
+    }
+    expect(snapBoardGridPoint(placement)).toEqual({ x: placement.x, y: placement.y });
+  }
+  expectNoOverlaps(result.placements);
+});
 
 describe('layoutJustifiedZones', () => {
   it('fills a row flush to the target width', () => {

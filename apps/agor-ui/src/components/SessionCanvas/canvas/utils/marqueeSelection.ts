@@ -96,3 +96,21 @@ export function getSelectedLayoutNodes(nodes: Node[]): Node[] {
   const rootIds = removeSelectedDescendants(nodes, eligibleIds);
   return nodes.filter((node) => rootIds.has(node.id));
 }
+
+/**
+ * A multi-zone selection uses the shared canvas layout toolbar. Mark each
+ * selected zone so its single-object toolbar does not render underneath it.
+ * Locked zones do not trigger suppression on their own because the shared
+ * layout actions intentionally exclude them.
+ */
+export function suppressIndividualZoneToolbarsForMultiSelect(nodes: Node[]): Node[] {
+  const selectedLayoutNodes = getSelectedLayoutNodes(nodes);
+  const selectedZoneCount = selectedLayoutNodes.filter((node) => node.type === 'zone').length;
+  if (selectedZoneCount < 2) return nodes;
+
+  return nodes.map((node) =>
+    node.type === 'zone' && node.selected
+      ? { ...node, data: { ...node.data, suppressToolbar: true } }
+      : node
+  );
+}

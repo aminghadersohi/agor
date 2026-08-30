@@ -85,4 +85,28 @@ describe('CardNode compact toggle', () => {
     expect(onToggleCompact).toHaveBeenCalledTimes(1);
     expect(onClick).not.toHaveBeenCalled();
   });
+
+  it('keeps the exposed stack header and its action button interactive', () => {
+    const onToggleCompact = vi.fn();
+    const onAutoZoneInteraction = vi.fn();
+    const { container } = render(
+      <CardNode
+        data={{
+          card: makeCard(),
+          compact: true,
+          onToggleCompact,
+          onAutoZoneInteraction,
+        }}
+      />
+    );
+
+    const header = container.querySelector('[data-zone-stack-header]');
+    const expand = screen.getByLabelText('Expand card');
+    expect(header).toContainElement(expand);
+    expect(expand).not.toBeDisabled();
+    fireEvent.pointerDown(expand);
+    fireEvent.click(expand);
+    expect(onAutoZoneInteraction).toHaveBeenCalledWith('card-1');
+    expect(onToggleCompact).toHaveBeenCalledWith('card-1', false);
+  });
 });

@@ -47,6 +47,31 @@ function historicalZone(): BoardObject {
 }
 
 describe('ZoneConfigModal historical tool migration', () => {
+  it('shows a persisted manual demotion by turning the Auto Zone control off', async () => {
+    render(
+      <AntdApp>
+        <ZoneConfigModal
+          open
+          onCancel={vi.fn()}
+          zoneName="Review"
+          objectId="zone-1"
+          onUpdate={vi.fn()}
+          zoneData={{
+            type: 'zone',
+            x: 0,
+            y: 0,
+            width: 620,
+            height: 900,
+            label: 'Review',
+            layout: { mode: 'manual', preset: 'grid' },
+          }}
+        />
+      </AntdApp>
+    );
+
+    expect(await screen.findByRole('switch', { name: 'Auto Zone' })).not.toBeChecked();
+  });
+
   it('preserves the removed tool until the operator explicitly selects a supported one', async () => {
     const onUpdate = vi.fn();
     render(
@@ -103,7 +128,7 @@ describe('ZoneConfigModal historical tool migration', () => {
       </AntdApp>
     );
 
-    fireEvent.click(await screen.findByRole('switch', { name: 'Automatic' }));
+    fireEvent.click(await screen.findByRole('switch', { name: 'Auto Zone' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));

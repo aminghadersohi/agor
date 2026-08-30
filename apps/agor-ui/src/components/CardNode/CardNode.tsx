@@ -53,6 +53,8 @@ export interface CardNodeData {
   onToggleCompact?: (cardId: string, compact: boolean) => void;
   onClick?: (cardId: string) => void;
   onUnpin?: (cardId: string) => void;
+  /** Keep a called-out card's rolling Auto Zone deferral alive. */
+  onAutoZoneInteraction?: (cardId: string) => void;
 }
 
 const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
@@ -66,6 +68,7 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
     onToggleCompact,
     onClick,
     onUnpin,
+    onAutoZoneInteraction,
   } = data;
   const [descExpanded, setDescExpanded] = useState(false);
 
@@ -100,6 +103,9 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
   return (
     <div
       onClick={() => onClick?.(card.card_id)}
+      onClickCapture={() => onAutoZoneInteraction?.(card.card_id)}
+      onPointerDownCapture={() => onAutoZoneInteraction?.(card.card_id)}
+      onFocusCapture={() => onAutoZoneInteraction?.(card.card_id)}
       style={{
         width: CARD_WIDTH,
         background: token.colorBgContainer,
@@ -117,6 +123,7 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
     >
       {/* Header: emoji + title + link + pin + drag */}
       <div
+        data-zone-stack-header
         className={REACT_FLOW_DRAG_HANDLE_CLASS}
         style={{
           display: 'flex',

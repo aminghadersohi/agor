@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { layoutRectangles, type RectanglePlacement } from './rectangle-packing';
+import {
+  BOARD_GRID_SIZE,
+  layoutRectangles,
+  type RectanglePlacement,
+  snapBoardGridPoint,
+} from './rectangle-packing';
 
 function expectNoOverlap(placements: RectanglePlacement[]): void {
   for (const [index, a] of placements.entries()) {
@@ -15,6 +20,23 @@ function expectNoOverlap(placements: RectanglePlacement[]): void {
 }
 
 describe('layoutRectangles', () => {
+  it('quantizes every automatic rectangle edge to the manual board grid', () => {
+    const result = layoutRectangles(
+      [
+        { id: 'zone', width: 613, height: 397 },
+        { id: 'card', width: 381, height: 117 },
+      ],
+      { preferredColumns: 2, padding: 24, gapX: 27, gapY: 31, gridSize: BOARD_GRID_SIZE }
+    );
+
+    for (const placement of result.placements) {
+      for (const value of [placement.x, placement.y, placement.width, placement.height]) {
+        expect(value % BOARD_GRID_SIZE).toBe(0);
+      }
+      expect(snapBoardGridPoint(placement)).toEqual({ x: placement.x, y: placement.y });
+    }
+  });
+
   it('handles empty and single-item layouts without phantom rows or columns', () => {
     const empty = layoutRectangles([], { bounds: { width: 0, height: 0 } });
     expect(empty).toMatchObject({ placements: [], columns: 1, rows: 0 });

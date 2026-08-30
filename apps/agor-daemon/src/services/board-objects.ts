@@ -190,10 +190,22 @@ export class BoardObjectsService {
       ) {
         throw new Error('size width and height must be positive finite numbers');
       }
-      if (data.position || 'zone_id' in data) {
-        throw new Error('size must be patched separately from position or zone_id');
+      if ('zone_id' in data) {
+        throw new Error('size must be patched separately from zone_id');
       }
-      return this.boardObjectRepo.updateSize(id, data.size);
+      if (!data.position && typeof data.compact !== 'boolean') {
+        return this.boardObjectRepo.updateSize(id, data.size);
+      }
+    }
+
+    // Auto-layout changes these fields as one visual operation. Persist them
+    // together so realtime subscribers never observe a half-applied layout.
+    if (data.size || (data.position && typeof data.compact === 'boolean')) {
+      return this.boardObjectRepo.updateLayout(id, {
+        ...(data.position ? { position: data.position } : {}),
+        ...(data.size ? { size: data.size } : {}),
+        ...(typeof data.compact === 'boolean' ? { compact: data.compact } : {}),
+      });
     }
 
     // Handle simultaneous position + zone_id update

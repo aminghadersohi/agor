@@ -125,9 +125,11 @@
   bottom: 0;
 }
 
-.canvas-alignment-guide-label {
+.canvas-alignment-guide-label,
+.canvas-size-readout {
   position: absolute;
   z-index: 1;
+  box-sizing: border-box;
   padding: 2px 5px;
   border: 1px solid var(--ant-color-border-secondary);
   border-radius: 4px;
@@ -137,6 +139,28 @@
   font-weight: 600;
   line-height: 14px;
   white-space: nowrap;
+}
+
+/*
+ * Auto Zone overflow shingles are real React Flow nodes rather than a painted
+ * preview. Their exposed header strips therefore retain normal pointer/focus
+ * handling, including every title-row action. A called-out item floats above
+ * its stack without moving, so collapsing it restores the exact prior slot.
+ */
+.react-flow__node.auto-zone-stack-item {
+  pointer-events: auto;
+  overflow: visible;
+}
+
+.react-flow__node.auto-zone-stack-called-out {
+  filter: drop-shadow(0 8px 18px color-mix(in srgb, var(--ant-color-text) 24%, transparent));
+}
+
+.canvas-size-readout {
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
 }
 
 .canvas-alignment-guide.vertical .canvas-alignment-guide-label {
@@ -256,14 +280,14 @@
  * above rather than descending below them — an unqualified `.agor-dealing`
  * would lose to them and silently not apply.
  *
- * The easing overshoots slightly and settles back, which is what makes a card
- * look dealt onto a surface rather than moved by a spreadsheet. Per-node delay
- * and duration arrive as custom properties from `arrangeAnimation.ts`, which
- * owns the timing.
+ * Motion is monotonic: the earlier overshooting curve visibly reversed each
+ * item's direction just before it landed, which read as a layout correction.
+ * Per-node delay and duration arrive as custom properties from
+ * `arrangeAnimation.ts`, which owns the timing.
  */
 .react-flow.agor-dealing .react-flow__node {
   transition:
-    transform var(--agor-deal-duration, 380ms) cubic-bezier(0.22, 1.4, 0.36, 1)
+    transform var(--agor-deal-duration, 380ms) cubic-bezier(0.22, 1, 0.36, 1)
     var(--agor-deal-delay, 0ms),
     width var(--agor-deal-duration, 380ms) ease-out var(--agor-deal-delay, 0ms),
     height var(--agor-deal-duration, 380ms) ease-out var(--agor-deal-delay, 0ms);
