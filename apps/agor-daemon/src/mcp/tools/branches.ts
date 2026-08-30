@@ -1741,7 +1741,9 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     async (args) => {
       const branchId = await resolveBranchId(ctx, args.branchId);
       const reposService = ctx.app.service('repos') as unknown as ReposServiceImpl;
-      const branch = await reposService.retryBranchProvisioning(branchId, ctx.baseServiceParams);
+      const branch = await runWithMcpTenantDatabaseWrite(ctx, () =>
+        reposService.retryBranchProvisioning(branchId, ctx.baseServiceParams)
+      );
       return textResult({
         branch_id: branch.branch_id,
         filesystem_status: branch.filesystem_status,
