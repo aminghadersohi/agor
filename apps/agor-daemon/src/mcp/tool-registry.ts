@@ -15,6 +15,7 @@ export interface ToolEntry {
   name: string;
   description: string;
   inputSchema: Tool['inputSchema'];
+  outputSchema?: Tool['outputSchema'];
   annotations?: ToolAnnotations;
   domain: string;
 }

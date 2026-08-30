@@ -700,6 +700,36 @@ export interface SessionRelationship {
 }
 
 /**
+ * Result of moving one Session's standing completion callback to another
+ * Session. Task-specific completion callback requests are immutable Task
+ * metadata and are intentionally outside this operation.
+ */
+export interface SessionCallbackRetargetResult {
+  /** Session whose standing completion route changed. */
+  session_id: SessionID;
+  /** Fully resolved destination before the change. */
+  previous_callback_session_id: SessionID;
+  /** Fully resolved destination after the change. */
+  callback_session_id: SessionID;
+  /** Cross-branch provenance rows kept in sync with the standing route. */
+  relationship_ids: SessionRelationshipID[];
+  /** Explicit contract: exact-Task callback requests are never rewritten. */
+  task_callback_subscriptions_retargeted: false;
+}
+
+/** Result of changing only branch-local parent/child genealogy. */
+export interface SessionReparentResult {
+  /** Session whose branch-local parent changed. */
+  session_id: SessionID;
+  /** Session's immutable branch, shared by every non-null parent. */
+  branch_id: BranchID;
+  /** Fully resolved prior parent, or null when the Session was a root. */
+  previous_parent_session_id: SessionID | null;
+  /** Fully resolved new parent, or null when detached to a root. */
+  parent_session_id: SessionID | null;
+}
+
+/**
  * Gateway source metadata denormalized into session.custom_context.gateway_source
  *
  * Present on sessions created via messaging platform integrations (Slack, Discord, GitHub).

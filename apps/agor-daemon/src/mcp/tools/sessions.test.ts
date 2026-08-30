@@ -85,6 +85,7 @@ function makeFakeApp(services: Record<string, ServiceStub>) {
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{
   content: Array<{ type: string; text: string }>;
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 }>;
 
@@ -186,6 +187,86 @@ describe('sessionless MCP context', () => {
     expect(parsed.error).toMatch(/requires current Agor session context/i);
     expect(parsed.error).toMatch(/X-Agor-Session-Id/);
     expect(spawn).not.toHaveBeenCalled();
+  });
+});
+
+describe('session transfer MCP tools', () => {
+  it('returns resolved direct-callback route IDs and the unchanged task-subscription contract', async () => {
+    const retargetCallback = vi.fn(async () => ({
+      session_id: 'sess-source',
+      previous_callback_session_id: 'sess-old',
+      callback_session_id: 'sess-new',
+      relationship_ids: ['rel-1'],
+      task_callback_subscriptions_retargeted: false as const,
+    }));
+    const app = makeFakeApp({
+      sessions: {
+        get: async (id: string) => ({ session_id: id }),
+        retargetCallback,
+      },
+    });
+    const { agor_sessions_retarget_callback } = await registerAndCaptureHandlers(
+      { app, userId: 'user-1', sessionId: 'sess-caller' },
+      ['agor_sessions_retarget_callback']
+    );
+
+    const response = await agor_sessions_retarget_callback({
+      sessionId: 'sess-source',
+      callbackSessionId: 'sess-new',
+    });
+
+    expect(retargetCallback).toHaveBeenCalledWith(
+      'sess-source',
+      { callbackSessionId: 'sess-new' },
+      expect.any(Object)
+    );
+    expect(response.structuredContent).toEqual({
+      session_id: 'sess-source',
+      previous_callback_session_id: 'sess-old',
+      callback_session_id: 'sess-new',
+      relationship_ids: ['rel-1'],
+      task_callback_subscriptions_retargeted: false,
+    });
+  });
+
+  it('keeps genealogy reparenting a separate nullable-parent operation', async () => {
+    const reparent = vi.fn(async () => ({
+      session_id: 'sess-source',
+      branch_id: 'branch-1',
+      previous_parent_session_id: 'sess-old-parent',
+      parent_session_id: null,
+    }));
+    const app = makeFakeApp({
+      sessions: {
+        get: async (id: string) => ({ session_id: id }),
+        reparent,
+      },
+    });
+    const tools = await registerAndCaptureTools(
+      { app, userId: 'user-1', sessionId: 'sess-caller' },
+      ['agor_sessions_reparent']
+    );
+    const parsed = tools.agor_sessions_reparent.cfg.inputSchema?.safeParse({
+      sessionId: 'sess-source',
+      parentSessionId: null,
+    });
+    expect(parsed?.success).toBe(true);
+
+    const response = await tools.agor_sessions_reparent.cb({
+      sessionId: 'sess-source',
+      parentSessionId: null,
+    });
+
+    expect(reparent).toHaveBeenCalledWith(
+      'sess-source',
+      { parentSessionId: null },
+      expect.any(Object)
+    );
+    expect(response.structuredContent).toMatchObject({
+      session_id: 'sess-source',
+      previous_parent_session_id: 'sess-old-parent',
+      parent_session_id: null,
+    });
   });
 });
 

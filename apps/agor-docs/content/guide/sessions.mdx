@@ -203,6 +203,35 @@ Each level delegates to specialized agents. Each session has a focused context w
 
 ---
 
+## Moving an existing Session
+
+Callback routing and genealogy answer different questions and move separately:
+
+- **Retarget a callback** with `agor_sessions_retarget_callback` when an existing
+  worker should report to a different orchestrator. The worker's direct route
+  and any matching cross-branch `remote_create` relationship change atomically.
+  Enabled/off state, `once`/`persistent` mode, template, and included-content
+  flags are preserved. A Task already running when the change commits reads the
+  new standing route when it completes; it does not also notify the old direct
+  destination.
+- **Reparent genealogy** with `agor_sessions_reparent` when a Session should
+  appear under another parent in the same branch tree. This changes only
+  branch-local ancestry and parent child lists. Cross-branch relationships and
+  callback routing stay unchanged. Pass `parentSessionId: null` to make it a
+  root; a Session cannot be placed under itself or one of its descendants.
+
+Both operations require Manager permission over the Session being moved,
+prompt authority over the new destination, and one tenant throughout. Archived,
+deleted, or archived-branch destinations are refused.
+
+An exact-Task callback requested by `agor_sessions_prompt` with `callback: true`
+is a separate durable subscription. That includes a root orchestrator's
+one-off request. Retargeting a Session's standing callback does not silently
+rewrite the Task request, so it may still send its independently requested
+report to the original destination.
+
+---
+
 ## Configuration on a session
 
 A session has more knobs than a CLI invocation:

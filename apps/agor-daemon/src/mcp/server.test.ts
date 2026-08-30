@@ -127,6 +127,30 @@ describe('MCP tool registry', () => {
     expect(agorGrants?.properties).not.toHaveProperty('agor_proxies');
     expect(agorGrants?.properties).not.toHaveProperty('agor_token');
   });
+
+  it('publishes explicit transfer output schemas through tool details', () => {
+    const registry = buildRegistry();
+
+    expect(registry.get('agor_sessions_retarget_callback')?.outputSchema).toMatchObject({
+      type: 'object',
+      required: expect.arrayContaining([
+        'session_id',
+        'previous_callback_session_id',
+        'callback_session_id',
+        'relationship_ids',
+        'task_callback_subscriptions_retargeted',
+      ]),
+    });
+    expect(registry.get('agor_sessions_reparent')?.outputSchema).toMatchObject({
+      type: 'object',
+      required: expect.arrayContaining([
+        'session_id',
+        'branch_id',
+        'previous_parent_session_id',
+        'parent_session_id',
+      ]),
+    });
+  });
 });
 
 /**
@@ -493,6 +517,87 @@ describe('POST /mcp with personal API keys', () => {
         httpServer.close((err) => (err ? reject(err) : resolve()));
       });
     }
+  });
+
+  it('executes the real callback-retarget MCP operation through progressive discovery', async () => {
+    await mockPersonalApiKeyUser();
+    const retargetCallback = vi.fn(async () => ({
+      session_id: 'sess-source',
+      previous_callback_session_id: 'sess-old',
+      callback_session_id: 'sess-new',
+      relationship_ids: ['rel-1'],
+      task_callback_subscriptions_retargeted: false,
+    }));
+    const sessions = {
+      get: vi.fn(async (id: string) => ({
+        session_id: id,
+        branch_id: 'branch-1',
+        agentic_tool: 'codex',
+      })),
+      retargetCallback,
+    };
+
+    await withMcpServer(
+      {
+        users: {
+          get: vi.fn(async () => ({
+            user_id: 'user-1',
+            email: 'alice@example.com',
+            role: 'member',
+          })),
+        },
+        sessions,
+      },
+      async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/mcp`, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json, text/event-stream',
+            'Content-Type': 'application/json',
+            'X-API-Key': 'agor_sk_valid',
+            'X-Agor-Session-Id': 'sess-caller',
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: {
+              name: 'agor_execute_tool',
+              arguments: {
+                tool_name: 'agor_sessions_retarget_callback',
+                arguments: {
+                  sessionId: 'sess-source',
+                  callbackSessionId: 'sess-new',
+                },
+              },
+            },
+          }),
+        });
+        const envelope = parseMcpResponse(await response.text()) as {
+          result?: {
+            structuredContent?: Record<string, unknown>;
+            content?: Array<{ text: string }>;
+          };
+          error?: { message: string };
+        };
+
+        expect(envelope.error).toBeUndefined();
+        expect(envelope.result?.structuredContent).toEqual({
+          session_id: 'sess-source',
+          previous_callback_session_id: 'sess-old',
+          callback_session_id: 'sess-new',
+          relationship_ids: ['rel-1'],
+          task_callback_subscriptions_retargeted: false,
+        });
+        expect(retargetCallback).toHaveBeenCalledWith(
+          'sess-source',
+          { callbackSessionId: 'sess-new' },
+          expect.objectContaining({ provider: 'mcp' })
+        );
+      },
+      { multi_tenancy: undefined },
+      /* toolSearchEnabled */ true
+    );
   });
 
   dbTest('rejects an API key whose user was deleted after key verification', async ({ db }) => {
