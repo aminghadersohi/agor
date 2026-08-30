@@ -17,6 +17,11 @@ import { AGENTIC_TOOL_NAMES } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const interruptMocks = vi.hoisted(() => ({
+  admit: vi.fn(),
+  terminate: vi.fn(),
+}));
+
 vi.mock('../resolve-ids.js', () => ({
   resolveBoardId: async (_ctx: unknown, id: string) => id,
   resolveSessionId: async (_ctx: unknown, id: string) => id,
@@ -31,6 +36,11 @@ vi.mock('../../utils/branch-authorization.js', () => ({
 vi.mock('@agor/core/db', () => ({
   enqueueAfterTenantDatabaseCommit: () => false,
   getCurrentTenantId: () => undefined,
+  runWithTenantDatabaseTransaction: async (
+    _db: unknown,
+    _tenantId: unknown,
+    work: (db: unknown) => Promise<unknown>
+  ) => work({}),
   BranchRepository: class FakeBranchRepository {},
   SessionRelationshipRepository: class FakeSessionRelationshipRepository {
     create = vi.fn(async (data: Record<string, unknown>) => ({
@@ -64,7 +74,23 @@ vi.mock('@agor/core/db', () => ({
     }));
   },
   UserApiKeysRepository: class FakeUserApiKeysRepository {},
+  TaskRepository: class FakeTaskRepository {
+    admitInterruptCorrection = interruptMocks.admit;
+  },
   shortId: (id: string) => id,
+}));
+
+vi.mock('../../services/tenant-authorization-fence.js', () => ({
+  lockTenantAuthorizationFence: vi.fn(async () => undefined),
+  resolveCurrentTenantAuthorityActor: vi.fn(async () => ({
+    service: false,
+    user_id: 'user-1',
+    role: 'member',
+  })),
+}));
+
+vi.mock('../../termination-coordinator.js', () => ({
+  requestExecutorTermination: interruptMocks.terminate,
 }));
 
 // Helper to build a minimal fake Feathers app. Each test supplies spies for
@@ -191,6 +217,80 @@ describe('sessionless MCP context', () => {
 });
 
 describe('session transfer MCP tools', () => {
+  it('interrupts through current coordinator authority before releasing the corrective queue', async () => {
+    const order: string[] = [];
+    interruptMocks.admit.mockImplementationOnce(async () => {
+      order.push('admit-stop-and-correction');
+      return {
+        outcome: 'stop_requested',
+        target_task: {
+          task_id: 'task-running',
+          session_id: 'sess-child',
+          status: 'stopping',
+        },
+        corrective_task: {
+          task_id: 'task-correction',
+          session_id: 'sess-child',
+          status: 'queued',
+          metadata: {
+            interrupt_correction: { idempotency_key: 'fix-1' },
+          },
+        },
+      };
+    });
+    interruptMocks.terminate.mockImplementationOnce(async () => {
+      order.push('quiescence-verified');
+      return {
+        status: 'terminal',
+        task: { task_id: 'task-running', session_id: 'sess-child', status: 'stopped' },
+      };
+    });
+    const resolveInterruptAuthority = vi.fn(async () => ({
+      caller_session_id: 'sess-caller',
+      target_session_id: 'sess-child',
+      relationship: 'coordinator',
+    }));
+    const triggerQueueProcessing = vi.fn(async () => {
+      order.push('correction-released');
+    });
+    const app = makeFakeApp({
+      sessions: { resolveInterruptAuthority, triggerQueueProcessing },
+      tasks: { emit: vi.fn() },
+    });
+    const { agor_sessions_interrupt_with_message } = await registerAndCaptureHandlers(
+      {
+        app,
+        userId: 'user-1',
+        sessionId: 'sess-caller',
+        baseServiceParams: { provider: 'mcp', user: { user_id: 'user-1' } },
+      },
+      ['agor_sessions_interrupt_with_message']
+    );
+
+    const response = await agor_sessions_interrupt_with_message({
+      targetSessionId: 'sess-child',
+      relationship: 'coordinator',
+      message: 'Stop and verify the failing test first.',
+      idempotencyKey: 'fix-1',
+    });
+
+    expect(order).toEqual([
+      'admit-stop-and-correction',
+      'quiescence-verified',
+      'correction-released',
+    ]);
+    expect(resolveInterruptAuthority).toHaveBeenCalledWith(
+      'sess-child',
+      { callerSessionId: 'sess-caller', relationship: 'coordinator' },
+      expect.objectContaining({ provider: 'mcp' })
+    );
+    expect(response.structuredContent).toMatchObject({
+      corrective_task_id: 'task-correction',
+      target_task_id: 'task-running',
+      termination_status: 'terminal',
+    });
+  });
+
   it('returns resolved direct-callback route IDs and the unchanged task-subscription contract', async () => {
     const retargetCallback = vi.fn(async () => ({
       session_id: 'sess-source',
@@ -1704,6 +1804,45 @@ describe('agor_sessions_prompt task callback', () => {
   afterEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+  });
+
+  it('reports shared execution and per-request compaction counts', async () => {
+    const app = makeFakeApp({
+      '/sessions/:id/prompt': {
+        create: vi.fn(async () => ({
+          task_id: 'task-shared',
+          status: 'queued',
+          queue_position: 3,
+          metadata: {
+            prompt_compaction: {
+              last_admitted_request_id: 'request-2',
+              requests: [{ request_id: 'request-1' }, { request_id: 'request-2' }],
+              unique_prompt_count: 1,
+              duplicate_request_count: 1,
+            },
+          },
+        })),
+      },
+    });
+    const { agor_sessions_prompt } = await registerAndCaptureHandlers(
+      { app, userId: 'user-1', sessionId: 'sess-caller' },
+      ['agor_sessions_prompt']
+    );
+
+    const response = await agor_sessions_prompt({
+      sessionId: 'sess-target',
+      prompt: 'duplicate instruction',
+      mode: 'continue',
+    });
+
+    expect(JSON.parse(response.content[0]!.text)).toMatchObject({
+      taskId: 'task-shared',
+      admissionRequestId: 'request-2',
+      coalescedRequestIds: ['request-1', 'request-2'],
+      coalescedRequestCount: 2,
+      uniquePromptCount: 1,
+      duplicateRequestCount: 1,
+    });
   });
 
   it('binds callback:true to trusted calling session context', async () => {

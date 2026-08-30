@@ -1,6 +1,7 @@
 import {
   attachHiddenTenant,
   BranchRepository,
+  CapabilityPolicyRepository,
   generateId,
   RepoRepository,
   SessionRepository,
@@ -284,6 +285,14 @@ describe('SessionsService transfer authorization', () => {
         params(generateId() as UserID)
       )
     ).rejects.toThrow(/same tenant/);
+
+    await expect(
+      service.resolveInterruptAuthority(
+        destinationId,
+        { callerSessionId: sourceId, relationship: 'coordinator' },
+        params(generateId() as UserID)
+      )
+    ).rejects.toThrow(/same tenant/);
   });
 
   dbTest(
@@ -332,6 +341,58 @@ describe('SessionsService transfer authorization', () => {
           params(caller)
         )
       ).rejects.toThrow(/Destination session .* unavailable or deleted/);
+    }
+  );
+
+  dbTest(
+    'interrupt authority requires the current relationship and independent prompt access',
+    async ({ db }) => {
+      const caller = await user(db, 'interrupt-caller');
+      const targetOwner = await user(db, 'interrupt-target-owner');
+      const callerBranch = await branch(db, caller, 'interrupt-caller-branch');
+      const targetBranch = await branch(db, targetOwner, 'interrupt-target-branch');
+      const callerSession = await session(db, callerBranch, caller);
+      const target = await session(db, targetBranch, targetOwner, {
+        sdk_home_scope: 'branch',
+        callback_config: { enabled: true, callback_session_id: callerSession.session_id },
+      });
+      const unrelated = await session(db, callerBranch, caller);
+      const service = new SessionsService(db, app());
+
+      await setTestBranchUserRole(db, targetBranch.branch_id, caller, 'collaborator');
+      const policies = new CapabilityPolicyRepository(db);
+      const branchPolicy = await policies.getBranchPolicy(targetBranch.branch_id);
+      branchPolicy.override_config!.allow_shared_session_prompts = true;
+      await policies.replaceBranchPolicy(targetBranch.branch_id, branchPolicy, targetOwner);
+      await policies.setWorkspacePreferences({ session_sharing_enabled: true }, targetOwner);
+      await expect(
+        service.resolveInterruptAuthority(
+          target.session_id,
+          { callerSessionId: callerSession.session_id, relationship: 'coordinator' },
+          params(caller)
+        )
+      ).resolves.toEqual({
+        caller_session_id: callerSession.session_id,
+        target_session_id: target.session_id,
+        relationship: 'coordinator',
+      });
+
+      await expect(
+        service.resolveInterruptAuthority(
+          target.session_id,
+          { callerSessionId: unrelated.session_id, relationship: 'coordinator' },
+          params(caller)
+        )
+      ).rejects.toThrow(/does not authorize/);
+
+      await setTestBranchUserRole(db, targetBranch.branch_id, caller, 'viewer');
+      await expect(
+        service.resolveInterruptAuthority(
+          target.session_id,
+          { callerSessionId: callerSession.session_id, relationship: 'coordinator' },
+          params(caller)
+        )
+      ).rejects.toThrow(/Cannot use destination session/);
     }
   );
 });

@@ -60,6 +60,8 @@ import type {
   Session,
   SessionCallbackRetargetResult,
   SessionID,
+  SessionInterruptAuthority,
+  SessionInterruptRelationship,
   SessionRelayDestination,
   SessionRelayResolution,
   SessionReparentResult,
@@ -274,6 +276,11 @@ export type SessionReparentInput = {
 
 export type SessionRelayDestinationInput = {
   destination: SessionRelayDestination;
+};
+
+export type SessionInterruptAuthorityInput = {
+  callerSessionId: SessionID;
+  relationship: SessionInterruptRelationship;
 };
 
 /**
@@ -492,6 +499,42 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       session_id: source.session_id,
       destination: data.destination,
       destination_session_id: destination.session_id,
+    };
+  }
+
+  /** Resolve parent/coordinator authority in the controlling direction. */
+  async resolveInterruptAuthority(
+    targetId: string,
+    data: SessionInterruptAuthorityInput,
+    params?: SessionParams
+  ): Promise<SessionInterruptAuthority> {
+    const caller = await this.requireSessionTransferAuthority(
+      data.callerSessionId,
+      params,
+      'relay-source'
+    );
+    const target = await this.requireSessionTransferAuthority(
+      targetId as SessionID,
+      params,
+      'destination'
+    );
+    if (getHiddenTenantId(caller) !== getHiddenTenantId(target)) {
+      throw new Forbidden('Interrupt caller and target must belong to the same tenant.');
+    }
+    const authorized =
+      data.relationship === 'parent'
+        ? target.genealogy?.parent_session_id === caller.session_id &&
+          target.branch_id === caller.branch_id
+        : getEffectiveDirectCallbackCoordinatorSessionId(target) === caller.session_id;
+    if (!authorized) {
+      throw new Forbidden(
+        `Current ${data.relationship} relationship does not authorize this Session to interrupt the target.`
+      );
+    }
+    return {
+      caller_session_id: caller.session_id,
+      target_session_id: target.session_id,
+      relationship: data.relationship,
     };
   }
 

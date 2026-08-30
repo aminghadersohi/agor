@@ -201,6 +201,15 @@ Each level delegates to specialized agents. Each session has a focused context w
 
 **Post-prompt anytime.** Subsessions persist after completion. "Can you add error handling to the code you wrote?" is a valid follow-up at any point.
 
+**Busy queues compact safe ordinary prompts.** Consecutive prompts from the same
+actor with the same execution controls may share one future turn. Agor preserves
+each request ID, author, timestamp, original text, and first-occurrence order,
+while normalized duplicates are sent only once. Combined prompts are capped at
+32 KiB and deterministically continue in a new Task rather than truncating.
+Callbacks, continuations, attachments, slash controls, gateways, widgets,
+different actors, and interrupt corrections remain separate because they have
+distinct identity, lifecycle, permission, or completion contracts.
+
 ---
 
 ## Moving an existing Session

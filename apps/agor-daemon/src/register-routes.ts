@@ -1772,7 +1772,10 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         messageSource: runtimeMessageSource,
       });
     } else {
-      await ensureInitialUserMessage(task, params, {
+      // The Session-row dispatch fence may have serialized behind a final
+      // compaction admission. Always persist and launch the claimed snapshot,
+      // not the pre-claim Task object held by this request handler.
+      await ensureInitialUserMessage(updatedTask, params, {
         messageStartIndex,
         startTimestamp,
         messageSource: runtimeMessageSource,
@@ -1813,9 +1816,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     // that don't carry `queued_by_user_id` and is therefore not authoritative.
     // See `./utils/build-prompter-prefix.ts` for the helper + tests.
     const { prompt: promptForExecutor } = await buildPrompterPrefixedPrompt({
-      rawPrompt: task.full_prompt,
+      rawPrompt: updatedTask.full_prompt,
       sessionCreatedBy: session.created_by,
-      prompterUserId: task.created_by,
+      prompterUserId: updatedTask.created_by,
       usersRepo: bindRepositoryToTenantUnitOfWork(db, new UsersRepository(db)),
     });
 
@@ -2136,6 +2139,17 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             if (params._taskCompletionCallback) {
               taskMetadata.completion_callback = params._taskCompletionCallback;
             }
+            const compactionRequestId = (data.idempotencyTaskId ?? generateId()) as TaskID;
+            const hasAttachmentSemantics =
+              data.prompt.includes('Attachments — use `agor_upload_materialize` to access:') ||
+              data.prompt.includes('/_uploads/');
+            const compactionEligible =
+              !data.idempotencyTaskId &&
+              !params._taskCompletionCallback &&
+              data.metadata === undefined &&
+              messageSource === undefined &&
+              !hasAttachmentSemantics &&
+              !data.prompt.trimStart().startsWith('/');
             const task = await runWithTenantDatabaseTransaction(
               db,
               promptTenantId,
@@ -2152,24 +2166,40 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                 const admissionSession = (await sessionsService.get(id, params)) as Session;
                 await assertCurrentPromptAuthority(operationDb, admissionSession);
                 return new TaskRepository(operationDb).createPending({
-                  task_id: data.idempotencyTaskId,
+                  task_id: compactionRequestId,
                   session_id: id as SessionID,
                   full_prompt: data.prompt,
                   created_by: createdBy,
                   status: TaskStatus.QUEUED,
                   metadata: Object.keys(taskMetadata).length > 0 ? taskMetadata : undefined,
+                  compaction: {
+                    request_id: compactionRequestId,
+                    eligible: compactionEligible,
+                    permission_mode: data.permissionMode,
+                    stream: data.stream !== false,
+                  },
                 });
               }
             );
             await tasksService.autoTitleSession(task, params);
 
-            if (!prior) {
+            if (!prior && task.task_id === compactionRequestId) {
               // Repository admission bypasses TasksService.create. Publish the
               // entity before its possible patched/dispatch event so reactive
               // clients observe a coherent lifecycle.
               emitServiceEvent(app, {
                 path: 'tasks',
                 event: 'created',
+                data: task,
+                params,
+                id: task.task_id,
+              });
+            } else if (!prior) {
+              // This request joined a still-QUEUED ordinary Task. Publish the
+              // updated audit/count snapshot without inventing another Task.
+              emitServiceEvent(app, {
+                path: 'tasks',
+                event: 'patched',
                 data: task,
                 params,
                 id: task.task_id,
@@ -3495,7 +3525,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     const admitted = await spawnTaskExecutor(
       stillQueued,
       {
-        stream: true,
+        permissionMode: stillQueued.metadata?.prompt_control?.permission_mode,
+        stream: stillQueued.metadata?.prompt_control?.stream ?? true,
         messageSource: source,
         ...(stableInitialMessageId ? { stableInitialMessageId } : {}),
       },
