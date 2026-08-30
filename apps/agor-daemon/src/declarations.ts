@@ -37,6 +37,9 @@ import type {
   RuntimeTelemetryInput,
   SdkHealthFailureInput,
   Session,
+  SessionCallbackRetargetResult,
+  SessionRelayResolution,
+  SessionReparentResult,
   SessionUpdate,
   Task,
   TaskPendingDispatchStatus,
@@ -47,6 +50,9 @@ import type {
   ExecuteTaskData,
   SessionArchiveOptions,
   SessionArchiveResult,
+  SessionRelayDestinationInput,
+  SessionReparentInput,
+  SessionRetargetCallbackInput,
 } from './services/sessions.js';
 
 // Re-export core types for convenience
@@ -92,6 +98,21 @@ export interface SessionsServiceImpl
     data: Partial<import('@agor/core/types').SpawnConfig>,
     params?: FeathersParams
   ): Promise<Session>;
+  retargetCallback(
+    id: string,
+    data: SessionRetargetCallbackInput,
+    params?: FeathersParams
+  ): Promise<SessionCallbackRetargetResult>;
+  reparent(
+    id: string,
+    data: SessionReparentInput,
+    params?: FeathersParams
+  ): Promise<SessionReparentResult>;
+  resolveRelayDestination(
+    id: string,
+    data: SessionRelayDestinationInput,
+    params?: FeathersParams
+  ): Promise<SessionRelayResolution>;
   getGenealogy(
     id: string,
     params?: FeathersParams

@@ -245,6 +245,69 @@ describe('TasksService completion callbacks', () => {
     expect(createPending).toHaveBeenCalledTimes(1);
   });
 
+  it('routes an already-running Task only to a direct destination retargeted before completion', async () => {
+    const newDestinationId = '018f0000-0000-7000-8000-000000000888' as Session['session_id'];
+    const { service, createPending, childSession, sessionsPatch, triggerQueueProcessing } =
+      makeService({
+        childSession: {
+          callback_config: {
+            enabled: true,
+            callback_session_id: parentSessionId,
+            callback_created_by: userId,
+            callback_mode: 'persistent',
+          },
+        },
+      });
+    const latestChild = makeSession({
+      ...childSession,
+      callback_config: {
+        ...childSession.callback_config,
+        callback_session_id: newDestinationId,
+      },
+    });
+    let childReads = 0;
+    service.app.service.mockImplementation((name: string) => {
+      if (name === 'sessions') {
+        return {
+          // The first read models the snapshot taken while terminalizing the
+          // Task. The post-commit dispatch read must observe the committed
+          // retarget instead of carrying that stale route forward.
+          get: vi.fn(async (id: string) => {
+            if (id === childSessionId) {
+              childReads += 1;
+              return childReads === 1 ? childSession : latestChild;
+            }
+            return makeSession({
+              session_id: id as Session['session_id'],
+              status: 'idle',
+              tasks: [],
+              callback_config: undefined,
+            });
+          }),
+          patch: sessionsPatch,
+          triggerQueueProcessing,
+        };
+      }
+      if (name === 'messages') return { find: vi.fn(async () => []) };
+      if (name === 'branches') return { get: vi.fn() };
+      throw new Error(`unexpected service ${name}`);
+    });
+
+    await service.patch(taskId, {
+      status: TaskStatus.COMPLETED,
+      completed_at: '2026-01-01T00:00:05.000Z',
+    });
+
+    await vi.waitFor(() => expect(createPending).toHaveBeenCalledTimes(1));
+    expect(childReads).toBeGreaterThanOrEqual(2);
+    expect(createPending).toHaveBeenCalledWith(
+      expect.objectContaining({ session_id: newDestinationId })
+    );
+    expect(createPending).not.toHaveBeenCalledWith(
+      expect.objectContaining({ session_id: parentSessionId })
+    );
+  });
+
   it('queues exactly one templated callback with last-message metadata for a completed subsession task', async () => {
     const {
       service,

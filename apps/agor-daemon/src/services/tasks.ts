@@ -644,9 +644,17 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     session: Session,
     params?: TaskParams
   ): Promise<void> {
-    await this.runAfterTenantDatabaseCommit('dispatchCompletionCallbacks', () =>
-      this.dispatchCompletionCallbacks(task, session, params)
-    );
+    await this.runAfterTenantDatabaseCommit('dispatchCompletionCallbacks', async () => {
+      // Resolve the standing route after the terminal Task commit. A callback
+      // retarget that committed while this Task was running must therefore be
+      // observed here; carrying the pre-commit Session snapshot would weld the
+      // in-flight result to the old orchestrator. Exact-Task callback metadata
+      // stays on the Task and is intentionally unaffected.
+      const latestSession = await this.app
+        .service('sessions')
+        .get(session.session_id, { ...params, provider: undefined });
+      await this.dispatchCompletionCallbacks(task, latestSession, params);
+    });
   }
 
   private projectTerminalSession(

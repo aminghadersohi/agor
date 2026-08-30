@@ -9,7 +9,10 @@ import type {
   SchedulerInitializationFailureCode,
   SchedulerInitializationStage,
   Session,
+  SessionCallbackRetargetResult,
   SessionID,
+  SessionRelationshipID,
+  SessionReparentResult,
   SessionUpdate,
   UUID,
 } from '@agor/core/types';
@@ -48,6 +51,7 @@ import {
   messages,
   type SessionInsert,
   type SessionRow,
+  sessionRelationships,
   sessions,
   tasks,
 } from '../schema';
@@ -95,6 +99,14 @@ export type IncompleteScheduledSessionCursor = Pick<
 >;
 
 type SessionArchiveReason = NonNullable<Session['archived_reason']>;
+
+/** Domain validation failure for an atomic callback/genealogy transfer. */
+export class SessionTransferValidationError extends RepositoryError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionTransferValidationError';
+  }
+}
 
 export type SessionArchiveStateUpdate = {
   id: string;
@@ -889,6 +901,342 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
       if (error instanceof EntityNotFoundError) throw error;
       throw new RepositoryError(
         `Failed to update session: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /**
+   * Atomically move a Session's standing completion callback destination.
+   *
+   * The Session JSON is the execution-time routing source. Any remote-create
+   * provenance row carrying the same standing route is updated in the same
+   * transaction so relationship controls cannot drift from delivery. Exact
+   * Task callback requests live in tasks.metadata and are deliberately not
+   * touched.
+   */
+  async retargetCompletionCallback(
+    sessionId: SessionID,
+    callbackSessionId: SessionID
+  ): Promise<SessionCallbackRetargetResult> {
+    try {
+      return await runDatabaseTransaction(this.db, async (txDb) => {
+        await lockRowForUpdate(txDb, this.db, sessions, eq(sessions.session_id, sessionId));
+        if (callbackSessionId !== sessionId) {
+          await lockRowForUpdate(
+            txDb,
+            this.db,
+            sessions,
+            eq(sessions.session_id, callbackSessionId)
+          );
+        }
+
+        const source = await select(txDb)
+          .from(sessions)
+          .where(eq(sessions.session_id, sessionId))
+          .one();
+        if (!source) {
+          throw new SessionTransferValidationError(
+            `Callback source session ${shortId(sessionId)} is unavailable or deleted.`
+          );
+        }
+        if (source.archived) {
+          throw new SessionTransferValidationError(
+            `Callback source session ${shortId(sessionId)} is archived.`
+          );
+        }
+
+        const destination = await select(txDb)
+          .from(sessions)
+          .leftJoin(branches, eq(sessions.branch_id, branches.branch_id))
+          .where(eq(sessions.session_id, callbackSessionId))
+          .one();
+        if (!destination?.sessions) {
+          throw new SessionTransferValidationError(
+            `Callback destination session ${shortId(callbackSessionId)} is unavailable or deleted.`
+          );
+        }
+        if (destination.sessions.archived) {
+          throw new SessionTransferValidationError(
+            `Callback destination session ${shortId(callbackSessionId)} is archived.`
+          );
+        }
+        if (!destination.branches || destination.branches.archived) {
+          throw new SessionTransferValidationError(
+            `Callback destination branch for session ${shortId(callbackSessionId)} is archived or unavailable.`
+          );
+        }
+
+        const callbackConfig = source.data.callback_config;
+        const previousCallbackSessionId = callbackConfig?.callback_session_id as
+          | SessionID
+          | undefined;
+        if (!previousCallbackSessionId) {
+          throw new SessionTransferValidationError(
+            `Session ${shortId(sessionId)} has no direct completion callback destination to retarget.`
+          );
+        }
+
+        await lockRowForUpdate(
+          txDb,
+          this.db,
+          sessionRelationships,
+          and(
+            eq(sessionRelationships.target_session_id, sessionId),
+            eq(sessionRelationships.relationship_type, 'remote_create'),
+            eq(sessionRelationships.callback_session_id, previousCallbackSessionId)
+          )!
+        );
+        const relationshipRows = (await select(txDb, {
+          relationship_id: sessionRelationships.relationship_id,
+        })
+          .from(sessionRelationships)
+          .where(
+            and(
+              eq(sessionRelationships.target_session_id, sessionId),
+              eq(sessionRelationships.relationship_type, 'remote_create'),
+              eq(sessionRelationships.callback_session_id, previousCallbackSessionId)
+            )
+          )
+          .all()) as Array<{ relationship_id: string }>;
+
+        const now = new Date();
+        await update(txDb, sessions)
+          .set({
+            data: {
+              ...source.data,
+              callback_config: {
+                ...callbackConfig,
+                callback_session_id: callbackSessionId,
+              },
+            },
+            updated_at: now,
+          })
+          .where(eq(sessions.session_id, sessionId))
+          .run();
+
+        if (relationshipRows.length > 0) {
+          await update(txDb, sessionRelationships)
+            .set({ callback_session_id: callbackSessionId, updated_at: now })
+            .where(
+              inArray(
+                sessionRelationships.relationship_id,
+                relationshipRows.map((row: { relationship_id: string }) => row.relationship_id)
+              )
+            )
+            .run();
+        }
+
+        return {
+          session_id: sessionId,
+          previous_callback_session_id: previousCallbackSessionId,
+          callback_session_id: callbackSessionId,
+          relationship_ids: relationshipRows.map(
+            (row: { relationship_id: string }) => row.relationship_id as SessionRelationshipID
+          ),
+          task_callback_subscriptions_retargeted: false,
+        };
+      });
+    } catch (error) {
+      if (error instanceof SessionTransferValidationError) throw error;
+      throw new RepositoryError(
+        `Failed to retarget session completion callback: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /**
+   * Atomically change branch-local parent genealogy and both materialized
+   * parent children arrays. Fork ancestry is intentionally unaffected.
+   */
+  async reparentBranchLocalGenealogy(
+    sessionId: SessionID,
+    parentSessionId: SessionID | null
+  ): Promise<SessionReparentResult> {
+    try {
+      return await runDatabaseTransaction(this.db, async (txDb) => {
+        await lockRowForUpdate(txDb, this.db, sessions, eq(sessions.session_id, sessionId));
+        if (parentSessionId && parentSessionId !== sessionId) {
+          await lockRowForUpdate(txDb, this.db, sessions, eq(sessions.session_id, parentSessionId));
+        }
+
+        const source = await select(txDb)
+          .from(sessions)
+          .where(eq(sessions.session_id, sessionId))
+          .one();
+        if (!source) {
+          throw new SessionTransferValidationError(
+            `Genealogy source session ${shortId(sessionId)} is unavailable or deleted.`
+          );
+        }
+        if (source.archived) {
+          throw new SessionTransferValidationError(
+            `Genealogy source session ${shortId(sessionId)} is archived.`
+          );
+        }
+
+        const sourceBranch = await select(txDb)
+          .from(branches)
+          .where(eq(branches.branch_id, source.branch_id))
+          .one();
+        if (!sourceBranch || sourceBranch.archived) {
+          throw new SessionTransferValidationError(
+            `Genealogy source branch for session ${shortId(sessionId)} is archived or unavailable.`
+          );
+        }
+
+        if (parentSessionId === sessionId) {
+          throw new SessionTransferValidationError(
+            `Cannot reparent session ${shortId(sessionId)} to itself: genealogy cycles are not allowed.`
+          );
+        }
+
+        let newParent: SessionRow | undefined;
+        if (parentSessionId) {
+          const destination = await select(txDb)
+            .from(sessions)
+            .leftJoin(branches, eq(sessions.branch_id, branches.branch_id))
+            .where(eq(sessions.session_id, parentSessionId))
+            .one();
+          if (!destination?.sessions) {
+            throw new SessionTransferValidationError(
+              `Genealogy destination session ${shortId(parentSessionId)} is unavailable or deleted.`
+            );
+          }
+          if (destination.sessions.archived) {
+            throw new SessionTransferValidationError(
+              `Genealogy destination session ${shortId(parentSessionId)} is archived.`
+            );
+          }
+          if (!destination.branches || destination.branches.archived) {
+            throw new SessionTransferValidationError(
+              `Genealogy destination branch for session ${shortId(parentSessionId)} is archived or unavailable.`
+            );
+          }
+          if (destination.sessions.branch_id !== source.branch_id) {
+            throw new SessionTransferValidationError(
+              `Genealogy reparenting is branch-local: session ${shortId(parentSessionId)} is in a different branch.`
+            );
+          }
+          newParent = destination.sessions;
+
+          const visited = new Set<string>();
+          let ancestorId: string | null = parentSessionId;
+          for (let depth = 0; ancestorId; depth += 1) {
+            if (ancestorId === sessionId) {
+              throw new SessionTransferValidationError(
+                `Cannot reparent session ${shortId(sessionId)} below its descendant ${shortId(parentSessionId)}: genealogy cycles are not allowed.`
+              );
+            }
+            if (visited.has(ancestorId) || depth >= 1_000) {
+              throw new SessionTransferValidationError(
+                `Cannot reparent session ${shortId(sessionId)} because the destination ancestry is cyclic or too deep.`
+              );
+            }
+            visited.add(ancestorId);
+            const ancestor: { parent_session_id: string | null; branch_id: string } | undefined =
+              await select(txDb, {
+                parent_session_id: sessions.parent_session_id,
+                branch_id: sessions.branch_id,
+              })
+                .from(sessions)
+                .where(eq(sessions.session_id, ancestorId))
+                .one();
+            if (!ancestor || ancestor.branch_id !== source.branch_id) {
+              throw new SessionTransferValidationError(
+                `Cannot validate branch-local ancestry for destination session ${shortId(parentSessionId)}.`
+              );
+            }
+            ancestorId = ancestor.parent_session_id;
+          }
+        }
+
+        const previousParentSessionId = (source.parent_session_id as SessionID | null) ?? null;
+        if (previousParentSessionId === parentSessionId) {
+          return {
+            session_id: sessionId,
+            branch_id: source.branch_id as BranchID,
+            previous_parent_session_id: previousParentSessionId,
+            parent_session_id: parentSessionId,
+          };
+        }
+
+        const now = new Date();
+        if (previousParentSessionId) {
+          await lockRowForUpdate(
+            txDb,
+            this.db,
+            sessions,
+            eq(sessions.session_id, previousParentSessionId)
+          );
+          const previousParent = await select(txDb)
+            .from(sessions)
+            .where(eq(sessions.session_id, previousParentSessionId))
+            .one();
+          if (!previousParent) {
+            throw new SessionTransferValidationError(
+              `Cannot detach session ${shortId(sessionId)} because its current parent is unavailable.`
+            );
+          }
+          await update(txDb, sessions)
+            .set({
+              data: {
+                ...previousParent.data,
+                genealogy: {
+                  ...(previousParent.data.genealogy ?? { children: [] }),
+                  children: (previousParent.data.genealogy?.children ?? []).filter(
+                    (childId: string) => childId !== sessionId
+                  ),
+                },
+              },
+              updated_at: now,
+            })
+            .where(eq(sessions.session_id, previousParentSessionId))
+            .run();
+        }
+
+        if (newParent && parentSessionId) {
+          await update(txDb, sessions)
+            .set({
+              data: {
+                ...newParent.data,
+                genealogy: {
+                  ...(newParent.data.genealogy ?? { children: [] }),
+                  children: [
+                    ...new Set([...(newParent.data.genealogy?.children ?? []), sessionId]),
+                  ],
+                },
+              },
+              updated_at: now,
+            })
+            .where(eq(sessions.session_id, parentSessionId))
+            .run();
+        }
+
+        const sourceGenealogy = { ...(source.data.genealogy ?? { children: [] }) };
+        if (parentSessionId) sourceGenealogy.parent_session_id = parentSessionId;
+        else delete sourceGenealogy.parent_session_id;
+        await update(txDb, sessions)
+          .set({
+            parent_session_id: parentSessionId,
+            data: { ...source.data, genealogy: sourceGenealogy },
+            updated_at: now,
+          })
+          .where(eq(sessions.session_id, sessionId))
+          .run();
+
+        return {
+          session_id: sessionId,
+          branch_id: source.branch_id as BranchID,
+          previous_parent_session_id: previousParentSessionId,
+          parent_session_id: parentSessionId,
+        };
+      });
+    } catch (error) {
+      if (error instanceof SessionTransferValidationError) throw error;
+      throw new RepositoryError(
+        `Failed to reparent session genealogy: ${error instanceof Error ? error.message : String(error)}`,
         error
       );
     }
