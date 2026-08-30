@@ -116,7 +116,13 @@ import {
   type ParentInfo,
   relativeToAbsolute,
 } from './canvas/utils/coordinateTransforms';
-import { type LayoutGuide, snapRectToPeers } from './canvas/utils/layoutGuides';
+import {
+  flowSnapDistanceForZoom,
+  getGuideLayoutRects,
+  type LayoutGuide,
+  layoutGuideScreenStyle,
+  snapRectToPeers,
+} from './canvas/utils/layoutGuides';
 import {
   getMarqueeSelection,
   getSelectedLayoutNodes,
@@ -730,6 +736,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const isDraggingRef = useRef(false);
     const [isDraggingCanvas, setIsDraggingCanvas] = useState(false);
     const [alignmentGuides, setAlignmentGuides] = useState<LayoutGuide[]>([]);
+    const [guideViewport, setGuideViewport] = useState({ x: 0, y: 0, zoom: 1 });
 
     // Helper: Check if a node intersects with a zone
     const _findIntersectingZone = useCallback(
@@ -1967,36 +1974,37 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       isDraggingRef.current = true;
       setIsDraggingCanvas(true);
       setAlignmentGuides([]);
+      const viewport = reactFlowInstanceRef.current?.getViewport();
+      if (viewport) setGuideViewport(viewport);
     }, []);
 
     // Handle node drag - track local position changes
     const handleNodeDrag: NodeDragHandler = useCallback(
       (_event, node) => {
-        // Alignment is intentionally limited to top-level objects. Child nodes
-        // already inherit a zone's coordinate system, so snapping them against
-        // unrelated world-space objects would feel unpredictable.
         const absolutePos = node.positionAbsolute || node.position;
-        if (!node.parentId) {
-          const size = (item: Node) => ({
-            width: Number(item.width ?? item.style?.width ?? 240),
-            height: Number(item.height ?? item.style?.height ?? 120),
-          });
-          const currentSize = size(node);
-          const peers = nodes
-            .filter((peer) => peer.id !== node.id && !peer.parentId)
-            .map((peer) => {
-              const peerSize = size(peer);
-              const peerPosition = peer.positionAbsolute || peer.position;
-              return { id: peer.id, ...peerPosition, ...peerSize };
-            });
-          const snapped = snapRectToPeers({ id: node.id, ...absolutePos, ...currentSize }, peers);
+        const currentNodes = reactFlowInstanceRef.current?.getNodes() ?? nodes;
+        const layoutRects = getGuideLayoutRects(node, currentNodes);
+        if (layoutRects) {
+          const zoom = reactFlowInstanceRef.current?.getZoom() ?? guideViewport.zoom;
+          const snapped = snapRectToPeers(
+            layoutRects.moving,
+            layoutRects.peers,
+            flowSnapDistanceForZoom(zoom)
+          );
           setAlignmentGuides(snapped.guides);
           if (snapped.x !== absolutePos.x || snapped.y !== absolutePos.y) {
+            const parent = node.parentId
+              ? currentNodes.find((candidate) => candidate.id === node.parentId)
+              : undefined;
+            const position = parent
+              ? absoluteToRelative(
+                  { x: snapped.x, y: snapped.y },
+                  getNodeAbsolutePosition(parent, currentNodes)
+                )
+              : { x: snapped.x, y: snapped.y };
             setNodes((currentNodes) =>
               currentNodes.map((current) =>
-                current.id === node.id
-                  ? { ...current, position: { x: snapped.x, y: snapped.y } }
-                  : current
+                current.id === node.id ? { ...current, position } : current
               )
             );
             localPositionsRef.current[node.id] = { x: snapped.x, y: snapped.y };
@@ -2011,7 +2019,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           y: absolutePos.y,
         };
       },
-      [nodes, setNodes]
+      [guideViewport.zoom, nodes, setNodes]
     );
 
     // Handle node drag end - persist layout to board (debounced)
@@ -2624,7 +2632,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   height: Math.abs(maxFlow.y - minFlow.y),
                 },
                 gesture.initialSelectedIds,
-                gesture.additive
+                gesture.additive,
+                gesture.startedOnZoneId ? new Set([gesture.startedOnZoneId]) : undefined
               )
             );
             event.preventDefault();
@@ -3177,29 +3186,19 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           )}
           {alignmentGuides.length > 0 && (
             <div className="canvas-alignment-guides" aria-hidden="true">
-              {(() => {
-                const viewport = reactFlowInstanceRef.current?.getViewport() ?? {
-                  x: 0,
-                  y: 0,
-                  zoom: 1,
-                };
-                return alignmentGuides.map((guide) => (
-                  <span
-                    key={`${guide.orientation}-${guide.offset}`}
-                    className={`canvas-alignment-guide ${guide.orientation}`}
-                    data-guide-kind={guide.kind ?? 'alignment'}
-                    style={
-                      guide.orientation === 'vertical'
-                        ? { left: guide.offset * viewport.zoom + viewport.x }
-                        : { top: guide.offset * viewport.zoom + viewport.y }
-                    }
-                  >
-                    {guide.label && (
-                      <span className="canvas-alignment-guide-label">{guide.label}</span>
-                    )}
-                  </span>
-                ));
-              })()}
+              {alignmentGuides.map((guide) => (
+                <span
+                  key={guide.id}
+                  className={`canvas-alignment-guide ${guide.orientation}`}
+                  data-guide-kind={guide.kind}
+                  data-comparison-id={guide.comparisonId}
+                  style={layoutGuideScreenStyle(guide, guideViewport)}
+                >
+                  {guide.label && (
+                    <span className="canvas-alignment-guide-label">{guide.label}</span>
+                  )}
+                </span>
+              ))}
             </div>
           )}
           <ReactFlow
@@ -3214,7 +3213,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             onPaneClick={handlePaneClick}
             onInit={(instance) => {
               reactFlowInstanceRef.current = instance;
+              setGuideViewport(instance.getViewport?.() ?? { x: 0, y: 0, zoom: 1 });
               setIsReactFlowReady(true);
+            }}
+            onMove={(_event, viewport) => {
+              if (alignmentGuides.length > 0) setGuideViewport(viewport);
             }}
             nodeTypes={nodeTypes}
             snapToGrid={true}

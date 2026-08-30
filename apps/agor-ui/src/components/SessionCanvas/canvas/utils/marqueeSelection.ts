@@ -1,5 +1,5 @@
 import type { Node } from 'reactflow';
-import { getNodeAbsolutePosition } from './coordinateTransforms';
+import { getVisibleSelectableNodeRect } from './boardNodeGeometry';
 
 export interface SelectionRect {
   x: number;
@@ -17,32 +17,26 @@ const LAYOUT_NODE_TYPES = new Set([
   'artifactNode',
 ]);
 
-function nodeSize(node: Node): { width: number; height: number } {
-  return {
-    width: Number(node.width ?? node.style?.width ?? 0),
-    height: Number(node.height ?? node.style?.height ?? 0),
-  };
-}
-
 /**
- * Return nodes wholly enclosed by a marquee. Full containment keeps a marquee
- * drawn inside a zone from selecting the zone itself while still selecting its
- * children. This is the container behavior users expect from design tools.
+ * Return every eligible node with a positive-area overlap with the marquee.
+ * Strict inequalities intentionally exclude an edge/corner touch. Selecting a
+ * container still suppresses its descendants in `getMarqueeSelection`.
  */
 export function getNodesInsideMarquee(nodes: Node[], rect: SelectionRect): Node[] {
-  const right = rect.x + rect.width;
-  const bottom = rect.y + rect.height;
+  const left = Math.min(rect.x, rect.x + rect.width);
+  const right = Math.max(rect.x, rect.x + rect.width);
+  const top = Math.min(rect.y, rect.y + rect.height);
+  const bottom = Math.max(rect.y, rect.y + rect.height);
+  if (right <= left || bottom <= top) return [];
 
   return nodes.filter((node) => {
-    if (node.hidden || node.selectable === false) return false;
-    const { width, height } = nodeSize(node);
-    if (width <= 0 || height <= 0) return false;
-    const position = getNodeAbsolutePosition(node, nodes);
+    const nodeRect = getVisibleSelectableNodeRect(node, nodes);
+    if (!nodeRect) return false;
     return (
-      position.x >= rect.x &&
-      position.y >= rect.y &&
-      position.x + width <= right &&
-      position.y + height <= bottom
+      nodeRect.x < right &&
+      nodeRect.x + nodeRect.width > left &&
+      nodeRect.y < bottom &&
+      nodeRect.y + nodeRect.height > top
     );
   });
 }
@@ -75,10 +69,13 @@ export function getMarqueeSelection(
   nodes: Node[],
   rect: SelectionRect,
   initialSelectedIds: ReadonlySet<string>,
-  additive: boolean
+  additive: boolean,
+  excludedIds: ReadonlySet<string> = new Set()
 ): Set<string> {
   const selected = additive ? new Set(initialSelectedIds) : new Set<string>();
-  for (const node of getNodesInsideMarquee(nodes, rect)) selected.add(node.id);
+  for (const node of getNodesInsideMarquee(nodes, rect)) {
+    if (!excludedIds.has(node.id)) selected.add(node.id);
+  }
   return removeSelectedDescendants(nodes, selected);
 }
 
