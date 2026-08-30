@@ -46,7 +46,7 @@ into SDK-private registration state.
 5. **`agor_sessions_reparent`** — change only branch-local
    `parent_session_id`, including detaching to a root. It does not touch
    callback routing or remote relationships.
-6. **`agor_session_relationships_report`** — relay from the current MCP Session
+6. **`agor_session_relationships_relay`** — relay from the current MCP Session
    to an explicitly selected `parent` or current `coordinator`. It accepts no
    target Session ID.
 7. **`agor_sessions_interrupt_with_message`** — a current branch-local parent

@@ -402,9 +402,9 @@ describe('session transfer MCP tools', () => {
     });
     const tools = await registerAndCaptureTools(
       { app, userId: 'user-1', sessionId: 'sess-current' },
-      ['agor_session_relationships_report']
+      ['agor_session_relationships_relay']
     );
-    const schema = tools.agor_session_relationships_report.cfg.inputSchema;
+    const schema = tools.agor_session_relationships_relay.cfg.inputSchema;
     expect(
       schema?.safeParse({ destination: 'coordinator', message: 'status update' }).success
     ).toBe(true);
@@ -414,7 +414,7 @@ describe('session transfer MCP tools', () => {
       'message',
     ]);
 
-    const response = await tools.agor_session_relationships_report.cb({
+    const response = await tools.agor_session_relationships_relay.cb({
       destination: 'coordinator',
       message: 'status update',
     });

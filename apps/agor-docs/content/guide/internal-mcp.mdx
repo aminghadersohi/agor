@@ -301,7 +301,7 @@ relationships: current branch-local `parent_session_id`, immutable
 `effective_direct_callback_coordinator_session_id`. A retarget updates the last
 field but never rewrites provenance; a reparent updates the first.
 
-`agor_session_relationships_report(destination, message)` is the safe manual
+`agor_session_relationships_relay(destination, message)` is the safe manual
 relay path. `destination` must be `parent` or `coordinator`; no arbitrary target
 ID is accepted. If both exist, the enum makes the choice explicit. The daemon
 resolves current durable state on every call and fails closed when the selected
