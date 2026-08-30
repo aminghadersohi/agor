@@ -17,15 +17,27 @@ import {
   type ZoneLayoutSortItem,
 } from '@agor/core/layout/zone-layout';
 import type { AgorClient, Board, BoardEntityObject, BoardObject } from '@agor-live/client';
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Node } from 'reactflow';
 import { useThemedMessage } from '../../../utils/message';
 import { dealDelayMs, dealOrderIndex, dealStyle, dealTiming } from './arrangeAnimation';
+import { AutoZoneDeferral } from './autoZoneDeferral';
 import { zonesNeedingAutoArrange } from './utils/autoArrangeGuard';
+import {
+  renderedZoneStackHeaderHeight,
+  stackExposesHeaders,
+  type ZoneStackPresentation,
+  zoneStackRevealHeight,
+} from './zoneStack';
 
 // Long enough for the expanded cards to paint before the re-pack measures
 // them; short enough that the board does not visibly sit in a broken state.
 const EXPANDED_REPACK_DELAY_MS = 400;
+const AUTO_ZONE_BASE_DELAY_MS = 400;
+const CALLED_OUT_ZONE_STACK_Z_INDEX = 900;
+
+const placementNodeId = (placement: BoardEntityObject): string | undefined =>
+  placement.branch_id ?? (placement.card_id ? `card-${placement.card_id}` : undefined);
 
 import type { ReactFlowNode } from './utils/reactFlowTypes';
 import {
@@ -98,7 +110,9 @@ export const useBoardObjects = ({
   const arrangeZoneContentsRef = useRef<
     ((zoneId: string, options?: { silent?: boolean }) => Promise<void>) | null
   >(null);
-  const autoArrangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoZoneDeferralRef = useRef<AutoZoneDeferral | null>(null);
+  autoZoneDeferralRef.current ??= new AutoZoneDeferral();
+  const runAutoZoneArrangeRef = useRef<(zoneId: string) => void>(() => undefined);
   const lastAutoLayoutSignatureRef = useRef('');
   const skipNextAutoArrangeRef = useRef(new Set<string>());
   // Direct manipulation wins immediately, before the persisted board patch
@@ -106,6 +120,14 @@ export const useBoardObjects = ({
   // from snapping the item back during the interaction.
   const manuallyControlledZoneIdsRef = useRef(new Set<string>());
   const zoneDemotionPromisesRef = useRef(new Map<string, Promise<boolean>>());
+  const [zoneStackByNodeId, setZoneStackByNodeId] = useState<
+    ReadonlyMap<string, ZoneStackPresentation>
+  >(new Map());
+  const zoneStackByNodeIdRef = useRef(zoneStackByNodeId);
+  zoneStackByNodeIdRef.current = zoneStackByNodeId;
+  const [calledOutNodeIds, setCalledOutNodeIds] = useState<ReadonlySet<string>>(new Set());
+  const calledOutNodeIdsRef = useRef(calledOutNodeIds);
+  calledOutNodeIdsRef.current = calledOutNodeIds;
 
   // Use the board object's reference directly. The store already preserves
   // unchanged board references, and serializing every object on every canvas
@@ -122,6 +144,29 @@ export const useBoardObjects = ({
     }
   }, [boardObjects]);
 
+  useEffect(() => () => autoZoneDeferralRef.current?.dispose(), []);
+
+  const restoreZoneCallouts = useCallback((zoneId: string) => {
+    setCalledOutNodeIds((current) => {
+      const next = new Set(current);
+      let changed = false;
+      for (const nodeId of current) {
+        if (zoneStackByNodeIdRef.current.get(nodeId)?.zoneId !== zoneId) continue;
+        next.delete(nodeId);
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, []);
+
+  /** Transient stack interaction keeps Auto Zone armed but postpones its next tidy. */
+  const deferAutoZone = useCallback((zoneId: string | null | undefined) => {
+    if (!zoneId) return;
+    const zone = boardRef.current?.objects?.[zoneId];
+    if (zone?.type !== 'zone' || normalizeZoneLayoutPolicy(zone.layout).mode !== 'auto') return;
+    autoZoneDeferralRef.current?.defer(zoneId, () => runAutoZoneArrangeRef.current(zoneId));
+  }, []);
+
   /** Persist the user's decision to take control of an automatically laid-out zone. */
   const demoteAutoZone = useCallback(
     async (zoneId: string | null | undefined): Promise<boolean> => {
@@ -136,19 +181,24 @@ export const useBoardObjects = ({
       if (pending) return pending;
 
       manuallyControlledZoneIdsRef.current.add(zoneId);
+      autoZoneDeferralRef.current?.cancel(zoneId);
       skipNextAutoArrangeRef.current.delete(zoneId);
       const demotion = client
         .service('boards')
         .patch(currentBoard.board_id, {
-          _action: 'mergeObjectFields',
-          objects: { [zoneId]: { layout: { ...layout, mode: 'manual' } } },
+          // mergeObjectFields intentionally accepts zIndex only. Replacing the
+          // existing zone through the normal upsert path is what makes this
+          // layout-policy transition durable rather than a successful no-op.
+          _action: 'upsertObject',
+          objectId: zoneId,
+          objectData: { ...zone, layout: { ...layout, mode: 'manual' } },
         } as unknown as Partial<Board>)
         .then(() => true)
         .catch((error) => {
           manuallyControlledZoneIdsRef.current.delete(zoneId);
           zoneDemotionPromisesRef.current.delete(zoneId);
-          console.error('Failed to disable automatic zone layout:', error);
-          showError('Failed to disable automatic zone layout');
+          console.error('Failed to disable Auto Zone:', error);
+          showError('Failed to disable Auto Zone');
           return false;
         });
       zoneDemotionPromisesRef.current.set(zoneId, demotion);
@@ -161,6 +211,28 @@ export const useBoardObjects = ({
   const setPlacementCompact = useCallback(
     async (placement: BoardEntityObject | undefined, compact: boolean) => {
       if (!client || !placement) return;
+      const nodeId = placementNodeId(placement);
+      const stack = nodeId ? zoneStackByNodeIdRef.current.get(nodeId) : undefined;
+      if (nodeId && stack && compact && calledOutNodeIdsRef.current.has(nodeId)) {
+        setCalledOutNodeIds((current) => {
+          const next = new Set(current);
+          next.delete(nodeId);
+          return next;
+        });
+        deferAutoZone(stack.zoneId);
+        return;
+      }
+      const transientStackInteraction = !!nodeId && !!stack;
+      if (transientStackInteraction) {
+        setCalledOutNodeIds((current) => {
+          const next = new Set(current);
+          if (compact) next.delete(nodeId);
+          else next.add(nodeId);
+          return next;
+        });
+        deferAutoZone(stack.zoneId);
+        return;
+      }
       if (placement.zone_id && !(await demoteAutoZone(placement.zone_id))) return;
       try {
         await client.service('board-objects').patch(placement.object_id, { compact });
@@ -169,7 +241,7 @@ export const useBoardObjects = ({
         showError('Failed to update card density');
       }
     },
-    [client, demoteAutoZone, showError]
+    [client, deferAutoZone, demoteAutoZone, showError]
   );
 
   /**
@@ -510,36 +582,91 @@ export const useBoardObjects = ({
       const requestedGap = policy.gap ?? 24;
       const gridGap =
         requestedGap === 0 ? 0 : Math.max(BOARD_GRID_SIZE, snapBoardGridValue(requestedGap));
-      const layout = layoutRectangles(
-        children.map((node) => ({
-          id: node.id,
-          ...(policy.preset === 'compact_list'
-            ? compactZoneItemSize(node.type === 'branchNode' ? 'branch' : 'card', frame.usableWidth)
-            : itemSize(node)),
-        })),
-        {
-          // Zone labels/status render within the zone above their children.
-          // Reserve that header before packing so an arranged card never
-          // obscures the zone title.
-          bounds: {
-            width: frame.width,
-            height: policy.autoResizeHeight
-              ? Number.MAX_SAFE_INTEGER
-              : Math.max(0, zone.height - frame.headerInset),
-          },
-          padding: frame.padding,
-          minPadding: frame.padding,
-          gapX: gridGap,
-          gapY: gridGap,
-          minGapX: gridGap,
-          minGapY: gridGap,
-          gridSize: BOARD_GRID_SIZE,
-          ...(policy.preset === 'compact_list'
-            ? { exactColumns: 1 }
-            : { preferredColumns: policy.columns ?? Math.ceil(Math.sqrt(children.length)) }),
-          allowDeck: false,
-        }
+      let layoutItems = children.map((node) => ({
+        id: node.id,
+        ...(policy.preset === 'compact_list'
+          ? compactZoneItemSize(node.type === 'branchNode' ? 'branch' : 'card', frame.usableWidth)
+          : itemSize(node)),
+      }));
+      const contentBounds = {
+        width: frame.width,
+        height: policy.autoResizeHeight
+          ? Number.MAX_SAFE_INTEGER
+          : Math.max(0, zone.height - frame.headerInset),
+      };
+      const columnPreference =
+        policy.preset === 'compact_list'
+          ? ({ exactColumns: 1 } as const)
+          : ({
+              preferredColumns: policy.columns ?? Math.ceil(Math.sqrt(children.length)),
+            } as const);
+      const layoutOptions = {
+        padding: frame.padding,
+        minPadding: frame.padding,
+        gapX: gridGap,
+        gapY: gridGap,
+        minGapX: gridGap,
+        minGapY: gridGap,
+        gridSize: BOARD_GRID_SIZE,
+        ...columnPreference,
+      };
+      let layout = layoutRectangles(layoutItems, {
+        ...layoutOptions,
+        bounds: contentBounds,
+        allowDeck: false,
+      });
+
+      const renderedHeaderHeightById = new Map(
+        children.map((node) => {
+          const fallback = compactZoneItemSize(
+            node.type === 'branchNode' ? 'branch' : 'card',
+            frame.usableWidth
+          ).height;
+          return [node.id, renderedZoneStackHeaderHeight(node, fallback)] as const;
+        })
       );
+      const stackRevealHeight = zoneStackRevealHeight([...renderedHeaderHeightById.values()]);
+      if (layout.overflowingItemIds.length > 0) {
+        // The stack renders every member collapsed. Lay it out at those same
+        // compact dimensions before deciding how tall the zone must grow. If
+        // we use the pre-collapse body height here, the persisted zone becomes
+        // tall enough for an ordinary grid on the next load and the stack
+        // silently disappears.
+        layoutItems = children.map((node) => ({
+          id: node.id,
+          ...compactZoneItemSize(node.type === 'branchNode' ? 'branch' : 'card', frame.usableWidth),
+        }));
+        layout = layoutRectangles(layoutItems, {
+          ...layoutOptions,
+          bounds: contentBounds,
+          allowDeck: true,
+          deckOffsetX: 0,
+          deckOffsetY: stackRevealHeight,
+        });
+      }
+      if (layout.overflowingItemIds.length > 0) {
+        // Even a stack cannot expose more headers than the zone has vertical
+        // room for. Grow only to the minimum shingle height rather than
+        // clipping a title/action row or falling back to refusal.
+        const minimumStackHeight =
+          frame.padding * 2 +
+          Math.max(...layoutItems.map((item, index) => item.height + index * stackRevealHeight));
+        layout = layoutRectangles(layoutItems, {
+          ...layoutOptions,
+          bounds: { width: contentBounds.width, height: minimumStackHeight },
+          exactColumns: 1,
+          preferredColumns: undefined,
+          allowDeck: true,
+          deckOffsetX: 0,
+          deckOffsetY: stackRevealHeight,
+        });
+      }
+      if (
+        layout.mode === 'deck' &&
+        !stackExposesHeaders(layout.placements, renderedHeaderHeightById)
+      ) {
+        throw new Error('Auto Zone stack would clip a rendered title or action row.');
+      }
       layoutMode = layout.mode;
       overflowCount = layout.overflowingItemIds.length;
       if (overflowCount > 0) {
@@ -553,6 +680,36 @@ export const useBoardObjects = ({
       const placementById = new Map(
         layout.placements.map((placement) => [placement.id, placement])
       );
+      setZoneStackByNodeId((current) => {
+        const next = new Map(current);
+        for (const [nodeId, presentation] of current) {
+          if (presentation.zoneId === zoneId) next.delete(nodeId);
+        }
+        if (layout.mode === 'deck') {
+          for (const placement of layout.placements) {
+            next.set(placement.id, {
+              zoneId,
+              stackIndex: placement.stackIndex,
+              deckDepth: placement.deckDepth,
+              revealHeight: stackRevealHeight,
+            });
+          }
+        }
+        if (next.size !== current.size) return next;
+        for (const [nodeId, presentation] of next) {
+          const previous = current.get(nodeId);
+          if (
+            !previous ||
+            previous.zoneId !== presentation.zoneId ||
+            previous.stackIndex !== presentation.stackIndex ||
+            previous.deckDepth !== presentation.deckDepth ||
+            previous.revealHeight !== presentation.revealHeight
+          )
+            return next;
+        }
+        return current;
+      });
+      if (layout.mode !== 'deck') restoreZoneCallouts(zoneId);
       const titleInset = frame.headerInset;
       const timing = dealTiming({
         count: children.length,
@@ -565,11 +722,23 @@ export const useBoardObjects = ({
         return placement
           ? {
               ...node,
+              className:
+                layout.mode === 'deck'
+                  ? [node.className, 'auto-zone-stack-item'].filter(Boolean).join(' ')
+                  : node.className,
+              zIndex: layout.mode === 'deck' ? 500 + placement.deckDepth : node.zIndex,
               width: placement.width,
               height: placement.height,
               position: { x: placement.x, y: placement.y + titleInset },
+              data: {
+                ...node.data,
+                ...(layout.mode === 'deck' || policy.preset === 'compact_list'
+                  ? { compact: true }
+                  : {}),
+              },
               style: {
                 ...node.style,
+                ...(layout.mode === 'deck' ? { pointerEvents: 'auto' as const } : {}),
                 width: placement.width,
                 height: placement.height,
                 ...dealStyle(
@@ -601,7 +770,9 @@ export const useBoardObjects = ({
       });
       const nextZoneHeight = policy.autoResizeHeight
         ? Math.max(200, ceilBoardGridValue(layout.height + titleInset))
-        : zone.height;
+        : layout.mode === 'deck'
+          ? Math.max(zone.height, 200, ceilBoardGridValue(layout.height + titleInset))
+          : zone.height;
       const nextZoneWidth = frame.width;
       const zoneHeightChanged = Math.abs(nextZoneHeight - zone.height) >= 0.5;
       const zoneWidthChanged = Math.abs(nextZoneWidth - zone.width) >= 0.5;
@@ -676,7 +847,9 @@ export const useBoardObjects = ({
               !placement.size ||
               Math.abs(placement.size.width - width) >= 0.5 ||
               Math.abs(placement.size.height - height) >= 0.5;
-            const shouldCompact = policy.preset === 'compact_list' && placement.compact !== true;
+            const shouldCompact =
+              (policy.preset === 'compact_list' || layout.mode === 'deck') &&
+              placement.compact !== true;
             if (!nodePositionChanged && !sizeChanged && !shouldCompact) return;
             await client.service('board-objects').patch(placement.object_id, {
               ...(nodePositionChanged ? { position: node.position } : {}),
@@ -685,13 +858,13 @@ export const useBoardObjects = ({
             });
           })
         );
-        if (overflowCount > 0) {
+        if (overflowCount > 0 && !options.silent) {
           showWarning(
             `Arranged ${changedNodes.length} items, but ${overflowCount} cannot fit inside this zone.`
           );
-        } else if (layoutMode === 'deck') {
+        } else if (layoutMode === 'deck' && !options.silent) {
           showWarning(
-            `The zone is too small for a non-overlapping grid. Arranged ${changedNodes.length} items in compact decks.`
+            `The Auto Zone is full. Stacked ${changedNodes.length} collapsed items with every title and action row exposed.`
           );
         } else if (!options.silent) {
           showSuccess(`Arranged ${changedNodes.length} items in a non-overlapping grid.`);
@@ -701,9 +874,29 @@ export const useBoardObjects = ({
         showError('Failed to arrange zone contents');
       }
     },
-    [boardObjectsForBoard, client, onArrangeNodes, setNodes, showError, showSuccess, showWarning]
+    [
+      boardObjectsForBoard,
+      client,
+      onArrangeNodes,
+      restoreZoneCallouts,
+      setNodes,
+      showError,
+      showSuccess,
+      showWarning,
+    ]
   );
   arrangeZoneContentsRef.current = arrangeZoneContents;
+  runAutoZoneArrangeRef.current = (zoneId: string) => {
+    const zone = boardRef.current?.objects?.[zoneId];
+    if (
+      zone?.type !== 'zone' ||
+      normalizeZoneLayoutPolicy(zone.layout).mode !== 'auto' ||
+      manuallyControlledZoneIdsRef.current.has(zoneId)
+    )
+      return;
+    restoreZoneCallouts(zoneId);
+    void arrangeZoneContentsRef.current?.(zoneId, { silent: true });
+  };
 
   useEffect(() => {
     const autoZones = Object.entries(boardObjects ?? {}).flatMap(([objectId, object]) =>
@@ -770,18 +963,14 @@ export const useBoardObjects = ({
     lastAutoLayoutSignatureRef.current = signature;
     const zonesToArrange = zonesNeedingAutoArrange(autoZones, skipNextAutoArrangeRef.current);
     if (zonesToArrange.length === 0) return;
-    if (autoArrangeTimerRef.current) clearTimeout(autoArrangeTimerRef.current);
-    autoArrangeTimerRef.current = setTimeout(() => {
-      void Promise.all(
-        zonesToArrange
-          .filter(([zoneId]) => !manuallyControlledZoneIdsRef.current.has(zoneId))
-          .map(([zoneId]) => arrangeZoneContents(zoneId, { silent: true }))
+    for (const [zoneId] of zonesToArrange) {
+      autoZoneDeferralRef.current?.schedule(
+        zoneId,
+        () => runAutoZoneArrangeRef.current(zoneId),
+        AUTO_ZONE_BASE_DELAY_MS
       );
-    }, 400);
-    return () => {
-      if (autoArrangeTimerRef.current) clearTimeout(autoArrangeTimerRef.current);
-    };
-  }, [arrangeZoneContents, boardObjects, client, nodes]);
+    }
+  }, [boardObjects, client, nodes]);
 
   /**
    * Convert board.objects to React Flow nodes
@@ -1076,8 +1265,12 @@ export const useBoardObjects = ({
     deleteZone,
     reorderObject,
     demoteAutoZone,
+    deferAutoZone,
     setPlacementCompact,
     setZoneContentsCompact,
     batchUpdateObjectPositions,
+    zoneStackByNodeId,
+    calledOutNodeIds,
+    calledOutZoneStackZIndex: CALLED_OUT_ZONE_STACK_Z_INDEX,
   };
 };

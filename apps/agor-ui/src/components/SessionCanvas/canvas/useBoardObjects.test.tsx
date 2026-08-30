@@ -433,7 +433,29 @@ describe('arrangeZoneContents', () => {
     renderedCard.remove();
   });
 
-  it('does not persist an overlapping fallback when the zone cannot contain its children', async () => {
+  it('uses rendered headers for an interactive stack instead of refusing overflow', async () => {
+    const renderedBranch = document.createElement('div');
+    renderedBranch.className = 'react-flow__node';
+    renderedBranch.dataset.id = 'branch-1';
+    const branchHeader = document.createElement('div');
+    branchHeader.dataset.zoneStackHeader = '';
+    Object.defineProperties(branchHeader, {
+      offsetHeight: { configurable: true, value: 61 },
+      scrollHeight: { configurable: true, value: 61 },
+    });
+    renderedBranch.append(branchHeader);
+    const renderedCard = document.createElement('div');
+    renderedCard.className = 'react-flow__node';
+    renderedCard.dataset.id = 'card-card-1';
+    const cardHeader = document.createElement('div');
+    cardHeader.dataset.zoneStackHeader = '';
+    Object.defineProperties(cardHeader, {
+      offsetHeight: { configurable: true, value: 41 },
+      scrollHeight: { configurable: true, value: 41 },
+    });
+    renderedCard.append(cardHeader);
+    document.body.append(renderedBranch, renderedCard);
+
     const { client, patch } = makeClient();
     const board = makeBoard({
       zone: { type: 'zone', x: 0, y: 0, width: 500, height: 200, label: 'Zone' },
@@ -500,9 +522,122 @@ describe('arrangeZoneContents', () => {
       await (zoneNode.data.onArrangeContents as (id: string) => Promise<void>)('zone');
     });
 
-    expect(renderedNodes).toEqual(initialNodes);
-    expect(patch).not.toHaveBeenCalled();
-    expect(showWarning).toHaveBeenCalledWith(expect.stringContaining('No positions were changed'));
+    const stackedBranch = renderedNodes.find((node) => node.id === 'branch-1');
+    const stackedCard = renderedNodes.find((node) => node.id === 'card-card-1');
+    expect(stackedBranch?.position).toEqual({ x: 20, y: 100 });
+    expect(stackedCard?.position).toEqual({ x: 20, y: 180 });
+    expect((stackedCard?.position.y ?? 0) - (stackedBranch?.position.y ?? 0)).toBe(80);
+    expect(stackedBranch?.className).toContain('auto-zone-stack-item');
+    expect(stackedBranch?.style?.pointerEvents).toBe('auto');
+    expect(stackedCard?.style?.pointerEvents).toBe('auto');
+    expect(stackedCard?.zIndex).toBeGreaterThan(stackedBranch?.zIndex ?? 0);
+    expect(result.current.zoneStackByNodeId.get('branch-1')).toMatchObject({
+      zoneId: 'zone',
+      deckDepth: 0,
+      revealHeight: 80,
+    });
+    expect(result.current.zoneStackByNodeId.get('card-card-1')).toMatchObject({
+      zoneId: 'zone',
+      deckDepth: 1,
+      revealHeight: 80,
+    });
+    expect(patch).toHaveBeenCalledWith(
+      'placement-branch',
+      expect.objectContaining({ position: { x: 20, y: 100 }, compact: true })
+    );
+    expect(patch).toHaveBeenCalledWith(
+      'placement-card',
+      expect.objectContaining({ position: { x: 20, y: 180 }, compact: true })
+    );
+    expect(patch).toHaveBeenCalledWith(
+      'board-1',
+      expect.objectContaining({
+        _action: 'upsertObject',
+        objectId: 'zone',
+        objectData: expect.objectContaining({ height: 260 }),
+      })
+    );
+    expect(showWarning).toHaveBeenCalledWith(expect.stringContaining('every title and action row'));
+
+    renderedBranch.remove();
+    renderedCard.remove();
+  });
+
+  it('keeps automatic stack maintenance silent and sizes it for a durable compact deck', async () => {
+    vi.useFakeTimers();
+    const cardNodeIds = ['card-card-1', 'card-card-2', 'card-card-3'];
+    const renderedCards = cardNodeIds.map((id) => {
+      const renderedCard = document.createElement('div');
+      renderedCard.className = 'react-flow__node';
+      renderedCard.dataset.id = id;
+      const header = document.createElement('div');
+      header.dataset.zoneStackHeader = '';
+      Object.defineProperties(header, {
+        offsetHeight: { configurable: true, value: 41 },
+        scrollHeight: { configurable: true, value: 41 },
+      });
+      renderedCard.append(header);
+      document.body.append(renderedCard);
+      return renderedCard;
+    });
+    const { client, patch } = makeClient();
+    const nodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, data: {}, width: 500, height: 200 },
+      ...cardNodeIds.map((id, index) => ({
+        id,
+        type: 'cardNode',
+        parentId: 'zone',
+        position: { x: 20, y: 20 + index * 60 },
+        data: {},
+        width: 380,
+        height: 120,
+      })),
+    ];
+
+    renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({
+            zone: {
+              type: 'zone',
+              x: 0,
+              y: 0,
+              width: 500,
+              height: 200,
+              label: 'Zone',
+              layout: { mode: 'auto', preset: 'grid', autoResizeHeight: false },
+            },
+          }),
+          client,
+          boardObjectsForBoard: cardNodeIds.map((_, index) => ({
+            object_id: `placement-card-${index + 1}`,
+            board_id: 'board-1',
+            entity_type: 'card',
+            card_id: `card-${index + 1}`,
+            position: { x: 20, y: 20 + index * 60 },
+            zone_id: 'zone',
+            created_at: `2026-01-0${index + 1}T00:00:00.000Z`,
+          })) as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    expect(showWarning).not.toHaveBeenCalled();
+    expect(patch).toHaveBeenCalledWith(
+      'board-1',
+      expect.objectContaining({
+        _action: 'upsertObject',
+        objectData: expect.objectContaining({ height: 300 }),
+      })
+    );
+    for (const renderedCard of renderedCards) renderedCard.remove();
   });
 
   it('uses persisted latest-first ordering and compact dimensions for the list preset', async () => {
@@ -916,12 +1051,12 @@ describe('direct manipulation of automatic zones', () => {
 
     expect(boardsPatch).toHaveBeenCalledTimes(1);
     expect(boardsPatch).toHaveBeenCalledWith('board-1', {
-      _action: 'mergeObjectFields',
-      objects: {
-        [zoneId]: {
-          layout: expect.objectContaining({ mode: 'manual', preset: 'compact_list' }),
-        },
-      },
+      _action: 'upsertObject',
+      objectId: zoneId,
+      objectData: expect.objectContaining({
+        type: 'zone',
+        layout: expect.objectContaining({ mode: 'manual', preset: 'compact_list' }),
+      }),
     });
     expect(boardObjectsPatch).toHaveBeenCalledTimes(1);
     expect(boardObjectsPatch).toHaveBeenCalledWith('placement-card', { compact: false });
@@ -943,11 +1078,90 @@ describe('direct manipulation of automatic zones', () => {
     expect(boardsPatch).toHaveBeenCalledWith(
       'board-1',
       expect.objectContaining({
-        objects: { [zoneId]: { layout: expect.objectContaining({ mode: 'manual' }) } },
+        _action: 'upsertObject',
+        objectId: zoneId,
+        objectData: expect.objectContaining({
+          layout: expect.objectContaining({ mode: 'manual' }),
+        }),
       })
     );
     expect(boardObjectsPatch).toHaveBeenCalledTimes(1);
     expect(boardObjectsPatch).toHaveBeenCalledWith('placement-card', { compact: false });
+  });
+
+  it('calls a stacked card out above its exact slot and restores it without demoting', async () => {
+    vi.useFakeTimers();
+    const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
+    const secondPlacement = {
+      ...placement,
+      object_id: 'placement-card-2',
+      card_id: 'card-2',
+      position: { x: 220, y: 220 },
+    };
+    const initialNodes: Node[] = [
+      { id: zoneId, type: 'zone', position: { x: 0, y: 0 }, width: 620, height: 200, data: {} },
+      child,
+      {
+        ...child,
+        id: 'card-card-2',
+        position: { x: 220, y: 220 },
+      },
+    ];
+    let renderedNodes = initialNodes;
+    const setNodes: React.Dispatch<React.SetStateAction<Node[]>> = (value) => {
+      renderedNodes = typeof value === 'function' ? value(renderedNodes) : value;
+    };
+    const board = makeBoard({
+      [zoneId]: {
+        ...autoZone,
+        height: 200,
+        layout: { ...autoZone.layout, preset: 'grid' },
+      },
+    });
+    const { result, unmount } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [placement, secondPlacement] as never,
+          nodes: initialNodes,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      const zoneNode = result.current.getBoardObjectNodes()[0];
+      await (zoneNode.data.onArrangeContents as (id: string) => Promise<void>)(zoneId);
+    });
+    expect(result.current.zoneStackByNodeId.has('card-card-1')).toBe(true);
+    const stackedPosition = renderedNodes.find((node) => node.id === 'card-card-1')?.position;
+    boardsPatch.mockClear();
+    boardObjectsPatch.mockClear();
+
+    await act(async () => {
+      await result.current.setPlacementCompact(placement as never, false);
+    });
+
+    expect(result.current.calledOutNodeIds.has('card-card-1')).toBe(true);
+    expect(boardsPatch).not.toHaveBeenCalled();
+    expect(boardObjectsPatch).not.toHaveBeenCalled();
+    expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual(
+      stackedPosition
+    );
+
+    await act(async () => {
+      await result.current.setPlacementCompact(placement as never, true);
+    });
+
+    expect(result.current.calledOutNodeIds.has('card-card-1')).toBe(false);
+    expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual(
+      stackedPosition
+    );
+    expect(boardsPatch).not.toHaveBeenCalled();
+    expect(boardObjectsPatch).not.toHaveBeenCalled();
+    unmount();
   });
 
   it('cancels a queued auto pass so a directly moved child stays at its dropped position', async () => {
@@ -978,7 +1192,11 @@ describe('direct manipulation of automatic zones', () => {
     expect(boardsPatch).toHaveBeenCalledWith(
       'board-1',
       expect.objectContaining({
-        objects: { [zoneId]: { layout: expect.objectContaining({ mode: 'manual' }) } },
+        _action: 'upsertObject',
+        objectId: zoneId,
+        objectData: expect.objectContaining({
+          layout: expect.objectContaining({ mode: 'manual' }),
+        }),
       })
     );
     expect(boardObjectsPatch).not.toHaveBeenCalled();

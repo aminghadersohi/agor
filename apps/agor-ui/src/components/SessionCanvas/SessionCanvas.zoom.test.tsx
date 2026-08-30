@@ -305,12 +305,12 @@ describe('SessionCanvas zoom shortcuts', () => {
 
       await waitFor(() =>
         expect(patch).toHaveBeenCalledWith('board-1', {
-          _action: 'mergeObjectFields',
-          objects: {
-            'zone-1': {
-              layout: expect.objectContaining({ mode: 'manual', preset: 'grid' }),
-            },
-          },
+          _action: 'upsertObject',
+          objectId: 'zone-1',
+          objectData: expect.objectContaining({
+            type: 'zone',
+            layout: expect.objectContaining({ mode: 'manual', preset: 'grid' }),
+          }),
         })
       );
       expect(client.service).toHaveBeenCalledWith('boards');

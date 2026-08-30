@@ -1451,7 +1451,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_set_zone_layout',
     {
       description:
-        'Configure a zone layout policy. Manual mode preserves spatial memory until Arrange contents is requested. Auto mode maintains the selected ordering and preset as items or measured sizes change. Use grid for cards or compact_list for a collapsible one-row-per-item list.',
+        'Configure a zone layout policy. Manual mode preserves spatial memory until Arrange contents is requested. Auto Zone mode maintains the selected ordering and preset as items or measured sizes change. Use grid for cards or compact_list for a collapsible one-row-per-item list.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),

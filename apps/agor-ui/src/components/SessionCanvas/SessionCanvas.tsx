@@ -264,6 +264,7 @@ interface BranchNodeData {
   zoneColor?: string;
   compact?: boolean;
   onToggleCompact?: (branchId: string, compact: boolean) => void;
+  onAutoZoneInteraction?: (branchId: string) => void;
   selectedSessionId?: string | null;
   isActiveUrlTarget?: boolean;
   client: AgorClient | null;
@@ -342,6 +343,7 @@ const BranchNode = React.memo(
           zoneColor={data.zoneColor}
           compact={data.compact}
           onToggleCompact={data.onToggleCompact}
+          onAutoZoneInteraction={data.onAutoZoneInteraction}
         />
       </div>
     );
@@ -365,6 +367,7 @@ const BranchNode = React.memo(
       p.zoneColor === n.zoneColor &&
       p.compact === n.compact &&
       p.onToggleCompact === n.onToggleCompact &&
+      p.onAutoZoneInteraction === n.onAutoZoneInteraction &&
       p.client === n.client &&
       p.onTaskClick === n.onTaskClick &&
       p.onSessionClick === n.onSessionClick &&
@@ -864,7 +867,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       batchUpdateObjectPositions,
       deleteObject,
       demoteAutoZone,
+      deferAutoZone,
       setPlacementCompact,
+      zoneStackByNodeId,
+      calledOutNodeIds,
+      calledOutZoneStackZIndex,
     } = useBoardObjects({
       board,
       client,
@@ -886,6 +893,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const handleToggleCardCompact = useStableCallback((cardId: string, compact: boolean) => {
       if (!mutationGate.canMutate) return;
       void setPlacementCompact(boardObjectByCard.get(cardId), compact);
+    });
+
+    const handleBranchAutoZoneInteraction = useStableCallback((branchId: string) => {
+      deferAutoZone(boardObjectByBranch.get(branchId)?.zone_id);
+    });
+
+    const handleCardAutoZoneInteraction = useStableCallback((cardId: string) => {
+      deferAutoZone(boardObjectByCard.get(cardId)?.zone_id);
     });
 
     // Extract zone labels - memoized to only change when labels actually change
@@ -1015,6 +1030,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           zoneObj && zoneObj.type === 'zone'
             ? zoneObj.borderColor || zoneObj.color // Backwards compat: borderColor first, then fall back to deprecated color
             : undefined;
+        const stackPresentation = zoneStackByNodeId.get(branch.branch_id);
+        const calledOut = calledOutNodeIds.has(branch.branch_id);
 
         // Get repo for this branch
         const repo = repoById.get(branch.repo_id);
@@ -1029,7 +1046,17 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           dragHandle: REACT_FLOW_DRAG_HANDLE_SELECTOR,
           position, // When pinned (parentId set), this is relative to zone; otherwise absolute
           // draggable inherits from canvas-level nodesDraggable (mutationGate.canMutate)
-          zIndex: 500, // Above zones, below comments
+          zIndex: calledOut
+            ? calledOutZoneStackZIndex
+            : stackPresentation
+              ? 500 + stackPresentation.deckDepth
+              : 500, // Above zones, below comments
+          className: stackPresentation
+            ? calledOut
+              ? 'auto-zone-stack-item auto-zone-stack-called-out'
+              : 'auto-zone-stack-item'
+            : undefined,
+          style: stackPresentation ? { pointerEvents: 'auto' } : undefined,
           // Set dimensions for collision detection (matches BranchCard size)
           width: 500,
           height: 200, // Approximate height, will be measured by React Flow
@@ -1062,8 +1089,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             isPinned: !!validZoneParentId,
             zoneName,
             zoneColor,
-            compact: boardObject?.compact === true,
+            compact: calledOut ? false : boardObject?.compact === true,
             onToggleCompact: canManageBoard ? handleToggleBranchCompact : undefined,
+            onAutoZoneInteraction: stackPresentation ? handleBranchAutoZoneInteraction : undefined,
             client,
           },
         });
@@ -1096,7 +1124,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       onExecuteScheduleNow,
       handleUnpinBranch,
       handleToggleBranchCompact,
+      handleBranchAutoZoneInteraction,
       canManageBoard,
+      zoneStackByNodeId,
+      calledOutNodeIds,
+      calledOutZoneStackZIndex,
       zoneLabels,
       warnInvalidZoneRef,
       client,
@@ -1161,14 +1193,27 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         const zoneObj = validZoneParentId ? board?.objects?.[validZoneParentId] : undefined;
         const zoneColor =
           zoneObj && zoneObj.type === 'zone' ? zoneObj.borderColor || zoneObj.color : undefined;
+        const nodeId = `card-${cardId}`;
+        const stackPresentation = zoneStackByNodeId.get(nodeId);
+        const calledOut = calledOutNodeIds.has(nodeId);
 
         nodes.push({
-          id: `card-${cardId}`,
+          id: nodeId,
           type: 'cardNode',
           dragHandle: REACT_FLOW_DRAG_HANDLE_SELECTOR,
           position,
           // draggable inherits from canvas-level nodesDraggable (mutationGate.canMutate)
-          zIndex: 500, // Same level as branches
+          zIndex: calledOut
+            ? calledOutZoneStackZIndex
+            : stackPresentation
+              ? 500 + stackPresentation.deckDepth
+              : 500, // Same level as branches
+          className: stackPresentation
+            ? calledOut
+              ? 'auto-zone-stack-item auto-zone-stack-called-out'
+              : 'auto-zone-stack-item'
+            : undefined,
+          style: stackPresentation ? { pointerEvents: 'auto' } : undefined,
           width: 380,
           height: 120,
           parentId: validZoneParentId,
@@ -1180,8 +1225,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             zoneColor,
             onClick: handleCardClick,
             onUnpin: handleUnpinCard,
-            compact: boardObject.compact === true,
+            compact: calledOut ? false : boardObject.compact === true,
             onToggleCompact: canManageBoard ? handleToggleCardCompact : undefined,
+            onAutoZoneInteraction: stackPresentation ? handleCardAutoZoneInteraction : undefined,
           } satisfies CardNodeData,
         });
       }
@@ -1195,7 +1241,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       handleCardClick,
       handleUnpinCard,
       handleToggleCardCompact,
+      handleCardAutoZoneInteraction,
       canManageBoard,
+      zoneStackByNodeId,
+      calledOutNodeIds,
+      calledOutZoneStackZIndex,
       warnInvalidZoneRef,
     ]);
 

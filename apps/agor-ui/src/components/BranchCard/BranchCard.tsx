@@ -77,6 +77,8 @@ interface BranchCardProps {
    * cannot mutate the board, so the control never renders a guaranteed 403.
    */
   onToggleCompact?: (branchId: string, compact: boolean) => void;
+  /** Keep a called-out worktree's rolling Auto Zone deferral alive. */
+  onAutoZoneInteraction?: (branchId: string) => void;
   inPopover?: boolean; // NEW: Enable popover-optimized mode (hides board-specific controls)
   panelMode?: boolean; // Render inside side panel instead of as a draggable canvas card
   progressiveMountKey?: string | number | null;
@@ -114,6 +116,7 @@ const BranchCardComponent = ({
   zoneColor,
   compact = false,
   onToggleCompact,
+  onAutoZoneInteraction,
   inPopover = false,
   panelMode = false,
   progressiveMountKey,
@@ -342,6 +345,9 @@ const BranchCardComponent = ({
 
   return (
     <Card
+      onClickCapture={() => onAutoZoneInteraction?.(branch.branch_id)}
+      onPointerDownCapture={() => onAutoZoneInteraction?.(branch.branch_id)}
+      onFocusCapture={() => onAutoZoneInteraction?.(branch.branch_id)}
       style={{
         width: panelMode ? '100%' : peekedSessions.length > 0 ? 880 : 500,
         cursor: 'default', // Override React Flow's drag cursor - only drag handles should show grab cursor
@@ -364,6 +370,7 @@ const BranchCardComponent = ({
     >
       {/* Branch header */}
       <div
+        data-zone-stack-header
         className={!inPopover && !panelMode ? REACT_FLOW_DRAG_HANDLE_CLASS : undefined}
         style={{
           display: 'flex',

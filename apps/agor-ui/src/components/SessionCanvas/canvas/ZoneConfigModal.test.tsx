@@ -47,7 +47,7 @@ function historicalZone(): BoardObject {
 }
 
 describe('ZoneConfigModal historical tool migration', () => {
-  it('shows a persisted manual demotion by turning the Automatic control off', async () => {
+  it('shows a persisted manual demotion by turning the Auto Zone control off', async () => {
     render(
       <AntdApp>
         <ZoneConfigModal
@@ -69,7 +69,7 @@ describe('ZoneConfigModal historical tool migration', () => {
       </AntdApp>
     );
 
-    expect(await screen.findByRole('switch', { name: 'Automatic' })).not.toBeChecked();
+    expect(await screen.findByRole('switch', { name: 'Auto Zone' })).not.toBeChecked();
   });
 
   it('preserves the removed tool until the operator explicitly selects a supported one', async () => {
@@ -128,7 +128,7 @@ describe('ZoneConfigModal historical tool migration', () => {
       </AntdApp>
     );
 
-    fireEvent.click(await screen.findByRole('switch', { name: 'Automatic' }));
+    fireEvent.click(await screen.findByRole('switch', { name: 'Auto Zone' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
