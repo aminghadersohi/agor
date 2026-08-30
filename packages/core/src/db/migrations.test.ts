@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createClient } from '@libsql/client';
@@ -12,13 +12,20 @@ interface JournalEntry {
   when: number;
 }
 
-/** Both journals, Postgres first, as the migrator reads them off disk. */
+/** Both migration folders, Postgres first, as the migrator reads them off disk. */
+const migrationFolders = [
+  new URL('../../drizzle/postgres/', import.meta.url),
+  new URL('../../drizzle/sqlite/', import.meta.url),
+] as const;
+
 const readJournals = () =>
   Promise.all(
-    [
-      new URL('../../drizzle/postgres/meta/_journal.json', import.meta.url),
-      new URL('../../drizzle/sqlite/meta/_journal.json', import.meta.url),
-    ].map(async (url) => JSON.parse(await readFile(url, 'utf8')) as { entries: JournalEntry[] })
+    migrationFolders.map(
+      async (folder) =>
+        JSON.parse(await readFile(new URL('meta/_journal.json', folder), 'utf8')) as {
+          entries: JournalEntry[];
+        }
+    )
   );
 
 describe('Postgres migrations', () => {
@@ -192,6 +199,33 @@ describe('Postgres migrations', () => {
         `${newest?.tag} does not sort after every earlier migration`
       ).toBeGreaterThan(highestWhenBefore);
       expect(newest?.idx).toBeGreaterThan(highestIdxBefore);
+    }
+  });
+
+  it('maps journals one-to-one to SQL files and leaves the next generator prefix free', async () => {
+    for (const folder of migrationFolders) {
+      const journal = JSON.parse(await readFile(new URL('meta/_journal.json', folder), 'utf8')) as {
+        entries: JournalEntry[];
+      };
+      const sqlFiles = (await readdir(folder)).filter((file) => file.endsWith('.sql')).sort();
+      const journalFiles = journal.entries.map(({ tag }) => `${tag}.sql`).sort();
+
+      expect(sqlFiles).toEqual(journalFiles);
+
+      const prefixes = sqlFiles.map((file) => file.match(/^(\d+)_/)?.[1]);
+      expect(prefixes.every(Boolean)).toBe(true);
+      expect(new Set(prefixes).size).toBe(sqlFiles.length);
+
+      // drizzle-kit 0.31 derives an index prefix from the final journal idx,
+      // not the greatest idx elsewhere in the file. Keeping that prefix free
+      // prevents generate from silently replacing an existing migration.
+      const newest = journal.entries.at(-1);
+      expect(newest).toBeDefined();
+      const nextPrefix = String((newest?.idx ?? -1) + 1).padStart(4, '0');
+      expect(
+        sqlFiles.filter((file) => file.startsWith(`${nextPrefix}_`)),
+        `next generated prefix ${nextPrefix} is already occupied`
+      ).toEqual([]);
     }
   });
 
@@ -1118,7 +1152,7 @@ describe('MCP stdio transport repair migrations', () => {
     `);
 
     const migration = await readFile(
-      new URL('../../drizzle/sqlite/0099_strip_stdio_remote_fields.sql', import.meta.url),
+      new URL('../../drizzle/sqlite/0103_strip_stdio_remote_fields.sql', import.meta.url),
       'utf8'
     );
     await client.executeMultiple(migration.replaceAll('--> statement-breakpoint', ''));
@@ -1167,7 +1201,7 @@ describe('MCP stdio transport repair migrations', () => {
 
   it('bounds the PostgreSQL cross-tenant repair to a temporary exact capability', async () => {
     const migration = await readFile(
-      new URL('../../drizzle/postgres/0096_strip_stdio_remote_fields.sql', import.meta.url),
+      new URL('../../drizzle/postgres/0100_strip_stdio_remote_fields.sql', import.meta.url),
       'utf8'
     );
 
@@ -1175,9 +1209,9 @@ describe('MCP stdio transport repair migrations', () => {
     expect(migration).toContain(`WHERE "transport" = 'stdio'`);
     expect(migration).toContain('DELETE FROM "user_mcp_oauth_tokens"');
     expect(migration).toContain('DELETE FROM "mcp_oauth_pending_flows"');
-    expect(migration).toContain("= 'stdio_remote_repair_0096'");
-    expect(migration.match(/CREATE POLICY "stdio_repair_0096_/g)).toHaveLength(6);
-    expect(migration.match(/DROP POLICY "stdio_repair_0096_/g)).toHaveLength(6);
+    expect(migration).toContain("= 'stdio_remote_repair_0100'");
+    expect(migration.match(/CREATE POLICY "stdio_repair_0100_/g)).toHaveLength(6);
+    expect(migration.match(/DROP POLICY "stdio_repair_0100_/g)).toHaveLength(6);
     expect(migration).toContain("SELECT set_config('agor.system_scope', '', true)");
   });
 });

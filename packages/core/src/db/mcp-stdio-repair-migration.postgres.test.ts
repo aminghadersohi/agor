@@ -1,5 +1,5 @@
 /**
- * Real 0095 -> 0096 upgrade proof under the same non-superuser/NOBYPASSRLS
+ * Real 0099 -> 0100 upgrade proof under the same non-superuser/NOBYPASSRLS
  * contract as the PostgreSQL integration runner.
  *
  * Run through the root PostgreSQL integration lane; the canonical runner gives
@@ -182,10 +182,10 @@ async function seedFixture(db: Database, fixture: Fixture): Promise<void> {
 }
 
 describe.skipIf(!postgresUrl || !usesPostgresSchema)(
-  'MCP stdio 0095 -> 0096 repair migration (PostgreSQL)',
+  'MCP stdio 0099 -> 0100 repair migration (PostgreSQL)',
   () => {
     let db: Database | null = null;
-    let pre0096Folder: string | null = null;
+    let pre0100Folder: string | null = null;
 
     beforeAll(async () => {
       db = createDatabase({ dialect: 'postgresql', url: postgresUrl! });
@@ -200,31 +200,31 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       expect(role.rolsuper).toBe(false);
       expect(role.rolbypassrls).toBe(false);
 
-      pre0096Folder = await mkdtemp(join(tmpdir(), 'agor-pg-migrations-through-0095-'));
-      await cp(migrationsFolder, pre0096Folder, { recursive: true });
-      await unlink(join(pre0096Folder, '0096_strip_stdio_remote_fields.sql'));
-      const journalPath = join(pre0096Folder, 'meta', '_journal.json');
+      pre0100Folder = await mkdtemp(join(tmpdir(), 'agor-pg-migrations-through-0099-'));
+      await cp(migrationsFolder, pre0100Folder, { recursive: true });
+      await unlink(join(pre0100Folder, '0100_strip_stdio_remote_fields.sql'));
+      const journalPath = join(pre0100Folder, 'meta', '_journal.json');
       const journal = JSON.parse(await readFile(journalPath, 'utf8')) as {
         entries: Array<{ idx: number }>;
       };
-      journal.entries = journal.entries.filter((entry) => entry.idx <= 95);
+      journal.entries = journal.entries.filter((entry) => entry.idx <= 99);
       await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
 
-      await migratePostgres(db as never, { migrationsFolder: pre0096Folder });
+      await migratePostgres(db as never, { migrationsFolder: pre0100Folder });
       for (const fixture of FIXTURES) await seedFixture(db, fixture);
     });
 
     afterAll(async () => {
       if (db) await (db as Database & { $client: { end: () => Promise<void> } }).$client.end();
-      if (pre0096Folder) await rm(pre0096Folder, { recursive: true, force: true });
+      if (pre0100Folder) await rm(pre0100Folder, { recursive: true, force: true });
     });
 
     it('repairs every tenant, removes stdio OAuth state, and preserves remote state', async () => {
       if (!db) throw new Error('PostgreSQL test database was not initialized');
 
-      // This upgrade proof deliberately advances from 0095 through the full
-      // current journal, which now includes the coordinated sharing-model
-      // cutover. The test database is isolated and has no concurrent daemon.
+      // This upgrade proof deliberately advances from the prior journal tip to
+      // the re-watermarked repair. The test database is isolated and has no
+      // concurrent daemon.
       await runMigrations(db, { allowOfflineCutover: true });
 
       for (const fixture of FIXTURES) {
@@ -287,7 +287,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           db,
           sql`SELECT tablename, policyname
               FROM pg_policies
-              WHERE policyname LIKE 'stdio_repair_0096_%'`
+              WHERE policyname LIKE 'stdio_repair_0100_%'`
         )
       );
       expect(temporaryPolicies).toEqual([]);

@@ -682,13 +682,6 @@
       "breakpoints": true
     },
     {
-      "idx": 99,
-      "version": "6",
-      "when": 1787947200000,
-      "tag": "0099_strip_stdio_remote_fields",
-      "breakpoints": true
-    },
-    {
       "idx": 100,
       "version": "6",
       "when": 1788033600000,
@@ -707,6 +700,13 @@
       "version": "6",
       "when": 1788206400000,
       "tag": "0102_shared_session_prompting",
+      "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "6",
+      "when": 1788292800000,
+      "tag": "0103_strip_stdio_remote_fields",
       "breakpoints": true
     }
   ]

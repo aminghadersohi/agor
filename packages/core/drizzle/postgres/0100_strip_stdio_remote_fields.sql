@@ -10,58 +10,58 @@
 -- non-superuser/NOBYPASSRLS migration role without creating a runtime bypass.
 SET LOCAL lock_timeout = '3s';
 --> statement-breakpoint
-DROP POLICY IF EXISTS "stdio_repair_0096_select" ON "mcp_servers";
+DROP POLICY IF EXISTS "stdio_repair_0100_select" ON "mcp_servers";
 --> statement-breakpoint
-CREATE POLICY "stdio_repair_0096_select" ON "mcp_servers"
+CREATE POLICY "stdio_repair_0100_select" ON "mcp_servers"
   FOR SELECT
   USING (
-    current_setting('agor.system_scope', true) = 'stdio_remote_repair_0096'
+    current_setting('agor.system_scope', true) = 'stdio_remote_repair_0100'
   );
 --> statement-breakpoint
-DROP POLICY IF EXISTS "stdio_repair_0096_update" ON "mcp_servers";
+DROP POLICY IF EXISTS "stdio_repair_0100_update" ON "mcp_servers";
 --> statement-breakpoint
-CREATE POLICY "stdio_repair_0096_update" ON "mcp_servers"
+CREATE POLICY "stdio_repair_0100_update" ON "mcp_servers"
   FOR UPDATE
   USING (
-    current_setting('agor.system_scope', true) = 'stdio_remote_repair_0096'
+    current_setting('agor.system_scope', true) = 'stdio_remote_repair_0100'
   )
   WITH CHECK (
-    current_setting('agor.system_scope', true) = 'stdio_remote_repair_0096'
+    current_setting('agor.system_scope', true) = 'stdio_remote_repair_0100'
   );
 --> statement-breakpoint
-DROP POLICY IF EXISTS "stdio_repair_0096_delete" ON "user_mcp_oauth_tokens";
+DROP POLICY IF EXISTS "stdio_repair_0100_delete" ON "user_mcp_oauth_tokens";
 --> statement-breakpoint
-DROP POLICY IF EXISTS "stdio_repair_0096_select" ON "user_mcp_oauth_tokens";
+DROP POLICY IF EXISTS "stdio_repair_0100_select" ON "user_mcp_oauth_tokens";
 --> statement-breakpoint
-CREATE POLICY "stdio_repair_0096_select" ON "user_mcp_oauth_tokens"
+CREATE POLICY "stdio_repair_0100_select" ON "user_mcp_oauth_tokens"
   FOR SELECT
   USING (
-    current_setting('agor.system_scope', true) = 'stdio_remote_repair_0096'
+    current_setting('agor.system_scope', true) = 'stdio_remote_repair_0100'
   );
 --> statement-breakpoint
-CREATE POLICY "stdio_repair_0096_delete" ON "user_mcp_oauth_tokens"
+CREATE POLICY "stdio_repair_0100_delete" ON "user_mcp_oauth_tokens"
   FOR DELETE
   USING (
-    current_setting('agor.system_scope', true) = 'stdio_remote_repair_0096'
+    current_setting('agor.system_scope', true) = 'stdio_remote_repair_0100'
   );
 --> statement-breakpoint
-DROP POLICY IF EXISTS "stdio_repair_0096_delete" ON "mcp_oauth_pending_flows";
+DROP POLICY IF EXISTS "stdio_repair_0100_delete" ON "mcp_oauth_pending_flows";
 --> statement-breakpoint
-DROP POLICY IF EXISTS "stdio_repair_0096_select" ON "mcp_oauth_pending_flows";
+DROP POLICY IF EXISTS "stdio_repair_0100_select" ON "mcp_oauth_pending_flows";
 --> statement-breakpoint
-CREATE POLICY "stdio_repair_0096_select" ON "mcp_oauth_pending_flows"
+CREATE POLICY "stdio_repair_0100_select" ON "mcp_oauth_pending_flows"
   FOR SELECT
   USING (
-    current_setting('agor.system_scope', true) = 'stdio_remote_repair_0096'
+    current_setting('agor.system_scope', true) = 'stdio_remote_repair_0100'
   );
 --> statement-breakpoint
-CREATE POLICY "stdio_repair_0096_delete" ON "mcp_oauth_pending_flows"
+CREATE POLICY "stdio_repair_0100_delete" ON "mcp_oauth_pending_flows"
   FOR DELETE
   USING (
-    current_setting('agor.system_scope', true) = 'stdio_remote_repair_0096'
+    current_setting('agor.system_scope', true) = 'stdio_remote_repair_0100'
   );
 --> statement-breakpoint
-SELECT set_config('agor.system_scope', 'stdio_remote_repair_0096', true);
+SELECT set_config('agor.system_scope', 'stdio_remote_repair_0100', true);
 --> statement-breakpoint
 WITH stdio_servers AS MATERIALIZED (
   SELECT
@@ -91,17 +91,17 @@ WHERE server."tenant_id" = repaired."tenant_id"
 --> statement-breakpoint
 SELECT set_config('agor.system_scope', '', true);
 --> statement-breakpoint
-DROP POLICY "stdio_repair_0096_delete" ON "mcp_oauth_pending_flows";
+DROP POLICY "stdio_repair_0100_delete" ON "mcp_oauth_pending_flows";
 --> statement-breakpoint
-DROP POLICY "stdio_repair_0096_select" ON "mcp_oauth_pending_flows";
+DROP POLICY "stdio_repair_0100_select" ON "mcp_oauth_pending_flows";
 --> statement-breakpoint
-DROP POLICY "stdio_repair_0096_delete" ON "user_mcp_oauth_tokens";
+DROP POLICY "stdio_repair_0100_delete" ON "user_mcp_oauth_tokens";
 --> statement-breakpoint
-DROP POLICY "stdio_repair_0096_select" ON "user_mcp_oauth_tokens";
+DROP POLICY "stdio_repair_0100_select" ON "user_mcp_oauth_tokens";
 --> statement-breakpoint
-DROP POLICY "stdio_repair_0096_update" ON "mcp_servers";
+DROP POLICY "stdio_repair_0100_update" ON "mcp_servers";
 --> statement-breakpoint
-DROP POLICY "stdio_repair_0096_select" ON "mcp_servers";
+DROP POLICY "stdio_repair_0100_select" ON "mcp_servers";
 --> statement-breakpoint
 -- Migrations share one transaction, so do not leak this DDL safety timeout into
 -- later migrations in the same upgrade run.
