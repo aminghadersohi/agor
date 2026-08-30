@@ -15,30 +15,30 @@ import { buildWorktreeAddArgs, directoryHasEntries } from './index';
 const PATH = '/worktrees/sample-app/feature-x';
 
 describe('buildWorktreeAddArgs', () => {
-  it('creates a NEW branch from the fetched remote base (fresh worktree)', () => {
-    // createBranch=true + fetch succeeded → branch off origin/<base>, never a
-    // second `git branch` first (which would make `-b` collide and exit 1).
+  it('creates a NEW branch from the resolved base ref (fresh worktree)', () => {
+    // createBranch=true branches directly from the already-resolved source
+    // ref, never a second `git branch` first (which would make `-b` collide
+    // and exit 1). Resolution owns remote selection; this argv builder must
+    // not silently reinterpret `main` as `origin/main`.
     const args = buildWorktreeAddArgs({
       branchPath: PATH,
       ref: 'feature-x',
       createBranch: true,
       sourceBranch: 'main',
       refType: 'branch',
-      fetchSucceeded: true,
-    });
-    expect(args).toEqual(['worktree', 'add', '-b', 'feature-x', '--', PATH, 'origin/main']);
-  });
-
-  it('falls back to the LOCAL base ref when the fetch failed', () => {
-    const args = buildWorktreeAddArgs({
-      branchPath: PATH,
-      ref: 'feature-x',
-      createBranch: true,
-      sourceBranch: 'main',
-      refType: 'branch',
-      fetchSucceeded: false,
     });
     expect(args).toEqual(['worktree', 'add', '-b', 'feature-x', '--', PATH, 'main']);
+  });
+
+  it('preserves a concrete remote base ref selected by the resolver', () => {
+    const args = buildWorktreeAddArgs({
+      branchPath: PATH,
+      ref: 'feature-x',
+      createBranch: true,
+      sourceBranch: 'upstream/release',
+      refType: 'branch',
+    });
+    expect(args).toEqual(['worktree', 'add', '-b', 'feature-x', '--', PATH, 'upstream/release']);
   });
 
   it('checks out an EXISTING ref without -b (no double-create)', () => {
@@ -48,7 +48,6 @@ describe('buildWorktreeAddArgs', () => {
       branchPath: PATH,
       ref: 'existing-feature',
       createBranch: false,
-      fetchSucceeded: true,
     });
     expect(args).toEqual(['worktree', 'add', '--', PATH, 'existing-feature']);
     expect(args).not.toContain('-b');
@@ -61,7 +60,6 @@ describe('buildWorktreeAddArgs', () => {
       createBranch: true,
       sourceBranch: 'v1.2.3',
       refType: 'tag',
-      fetchSucceeded: true,
     });
     expect(args).toEqual(['worktree', 'add', '-b', 'release-branch', '--', PATH, 'v1.2.3']);
   });
@@ -72,12 +70,11 @@ describe('buildWorktreeAddArgs', () => {
       ref: 'feature-x',
       createBranch: true,
       sourceBranch: 'main',
-      fetchSucceeded: true,
     });
     const dashDash = args.indexOf('--');
     expect(dashDash).toBeGreaterThan(-1);
     // Every positional (path + base ref) comes after the `--` terminator.
-    expect(args.slice(dashDash + 1)).toEqual([PATH, 'origin/main']);
+    expect(args.slice(dashDash + 1)).toEqual([PATH, 'main']);
   });
 });
 
