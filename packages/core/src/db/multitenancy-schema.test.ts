@@ -66,7 +66,7 @@ function migrationTenantTables(): string[] {
     'packages/core/drizzle/postgres/9004_board_branch_capability_policies.sql'
   );
   const sessionAttentionMigration = readRepoFile(
-    'packages/core/drizzle/postgres/0100_session_attention_states.sql'
+    'packages/core/drizzle/postgres/9009_session_attention_states.sql'
   );
   const retiredTables = retiredTenantTables();
   return [
@@ -110,7 +110,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0090_external_user_identities.sql'),
     readRepoFile('packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'),
     readRepoFile('packages/core/drizzle/postgres/9004_board_branch_capability_policies.sql'),
-    readRepoFile('packages/core/drizzle/postgres/0100_session_attention_states.sql'),
+    readRepoFile('packages/core/drizzle/postgres/9009_session_attention_states.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
   return [
@@ -140,7 +140,7 @@ describe('Postgres multitenancy schema coverage', () => {
 
   it('binds session attention acknowledgements to the same tenant as user and session', () => {
     const migration = readRepoFile(
-      'packages/core/drizzle/postgres/0100_session_attention_states.sql'
+      'packages/core/drizzle/postgres/9009_session_attention_states.sql'
     );
 
     expect(migration).toContain('PRIMARY KEY("tenant_id", "user_id", "session_id")');
