@@ -31,7 +31,11 @@ describe('resolveGitRef', () => {
     secondSha = (await repo.revparse(['HEAD'])).trim();
     await repo.checkout('main');
 
-    for (const remote of ['origin', 'personal', 'origin/fork']) {
+    // A slash is valid in a remote name, but Git 2.55 rejects configured
+    // remote names when one is a prefix of another (for example, `origin`
+    // plus `origin/fork`). Keep the slash coverage without constructing that
+    // now-invalid overlapping configuration.
+    for (const remote of ['origin', 'personal', 'company/fork']) {
       const remotePath = join(root, `${remote.replace('/', '-')}.git`);
       await mkdir(remotePath);
       await simpleGit(remotePath).init(['--bare', '--initial-branch=main']);
@@ -143,15 +147,15 @@ describe('resolveGitRef', () => {
     });
   });
 
-  it('matches the longest configured remote name when a remote contains a slash', async () => {
+  it('recognizes a configured remote name containing a slash', async () => {
     const git = simpleGit(repoPath);
-    await git.raw(['update-ref', 'refs/remotes/origin/fork/main', secondSha]);
+    await git.raw(['update-ref', 'refs/remotes/company/fork/main', secondSha]);
 
-    await expect(resolveGitRef(repoPath, 'origin/fork/main')).resolves.toMatchObject({
-      ref: 'origin/fork/main',
+    await expect(resolveGitRef(repoPath, 'company/fork/main')).resolves.toMatchObject({
+      ref: 'company/fork/main',
       name: 'main',
       sha: secondSha,
-      remoteName: 'origin/fork',
+      remoteName: 'company/fork',
     });
   });
 
