@@ -25,6 +25,7 @@ import {
 import { resolveSessionDefaults } from '@agor/core/sessions';
 import {
   AGENTIC_TOOL_NAMES,
+  CALLBACK_DELIVERIES,
   type AgenticToolName,
   type Board,
   type CompletionSubscription,
@@ -177,6 +178,13 @@ const modelConfigInputSchema = z
   .optional()
   .describe(
     "Model override for this session. Pass either a model ID string (e.g. 'claude-opus-4-6') or a full { mode, model, effort, advisorModel, provider } object. Overrides the user default model_config and is threaded through to the spawned agent process. Call agor_models_list to discover valid model IDs per agenticTool."
+  );
+
+const callbackDeliverySchema = z
+  .enum(CALLBACK_DELIVERIES)
+  .optional()
+  .describe(
+    'Standing callback delivery: direct preserves the existing queued callback; btw uses an ephemeral destination fork when available and falls back direct; auto uses BTW only when the destination is busy or the rendered callback is at least 8 KiB. Exact-task prompt callbacks remain direct.'
   );
 
 const callbackRetargetOutputSchema = z.object({
@@ -706,6 +714,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       result.children_count = gen?.children?.length || 0;
       result.effective_direct_callback_coordinator_session_id =
         getEffectiveDirectCallbackCoordinatorSessionId(session);
+      result.effective_callback_delivery = session.callback_config?.delivery ?? 'direct';
 
       // Remote origin — reported SEPARATELY from and IN ADDITION TO genealogy
       // above, never merged into it. A cross-branch remote-created session is a
@@ -878,6 +887,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .describe(
             'Designate this child as the sole continuation of the current root-propagated completion request. Requires the current task to own one.'
           ),
+        callbackDelivery: callbackDeliverySchema,
         includeLastMessage: z
           .boolean()
           .optional()
@@ -911,6 +921,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         title: args.title,
         agent: args.agenticTool as AgenticToolName | undefined,
         enableCallback: args.enableCallback,
+        callbackDelivery: args.callbackDelivery,
         includeLastMessage: args.includeLastMessage,
         includeOriginalPrompt: args.includeOriginalPrompt,
         extraInstructions: args.extraInstructions,
@@ -988,11 +999,14 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             'MCP server IDs for subsession mode. Overrides parent inheritance. Omit to inherit from parent. Pass empty array for no MCPs.'
           ),
         modelConfig: modelConfigInputSchema,
+        callbackDelivery: callbackDeliverySchema.describe(
+          'Standing callback delivery for subsession mode. Ignored by continue/fork/btw; the separate callback:true exact-task subscription always stays direct.'
+        ),
         callback: z
           .boolean()
           .optional()
           .describe(
-            'Send a one-shot completion report for the exact prompted task back to the current calling Agor session.'
+            'Send a one-shot direct completion report for the exact prompted task back to the current calling Agor session. Exact-task subscriptions are deliberately separate from standing callbackDelivery policy.'
           ),
         callbackPropagation: z
           .enum(['direct', 'root'])
@@ -1208,6 +1222,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           prompt: args.prompt,
           mcpServerIds: args.mcpServerIds,
           modelConfig: coerceModelConfig(args.modelConfig),
+          callbackDelivery: args.callbackDelivery,
         };
         if (args.title) spawnData.title = args.title;
         if (args.agenticTool) spawnData.agent = args.agenticTool as AgenticToolName;
@@ -1847,6 +1862,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .max(32)
           .optional()
           .describe('Maximum designated delegation hops for a new root request (default: 8).'),
+        callbackDelivery: callbackDeliverySchema,
         parentSessionId: z
           .string()
           .min(1, 'parentSessionId cannot be empty when provided.')
@@ -1958,6 +1974,12 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       }
       if (wantsCallback) {
         callbackConfig.callback_mode = args.callbackMode ?? 'persistent';
+      }
+      if (args.callbackDelivery !== undefined) {
+        if (!wantsCallback) {
+          throw new Error('callbackDelivery requires enableCallback or callbackSessionId');
+        }
+        callbackConfig.delivery = args.callbackDelivery;
       }
 
       // Determine the parent session to link to in the genealogy, and — for a
@@ -2178,7 +2200,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       }
 
       const callbackNote = callbackConfig.callback_session_id
-        ? ` Callback will be sent to session ${shortId(callbackConfig.callback_session_id as string)} on completion.`
+        ? ` Callback will be sent to session ${shortId(callbackConfig.callback_session_id as string)} on completion using ${String(callbackConfig.delivery ?? 'direct')} delivery.`
         : '';
 
       const parentNote = resolvedParentSessionId
@@ -2238,6 +2260,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .describe(
             'Callback mode: "once" fires once then auto-disables, "persistent" fires every time (optional)'
           ),
+        callbackDelivery: callbackDeliverySchema,
       }),
     },
     async (args) => {
@@ -2251,7 +2274,11 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       }
 
       // Handle callback config updates
-      if (args.enableCallback !== undefined || args.callbackMode !== undefined) {
+      if (
+        args.enableCallback !== undefined ||
+        args.callbackMode !== undefined ||
+        args.callbackDelivery !== undefined
+      ) {
         const sessionId = await resolveSessionId(ctx, args.sessionId);
         const existingSession = await ctx.app
           .service('sessions')
@@ -2261,12 +2288,13 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           ...existingCallback,
           ...(args.enableCallback !== undefined ? { enabled: args.enableCallback } : {}),
           ...(args.callbackMode !== undefined ? { callback_mode: args.callbackMode } : {}),
+          ...(args.callbackDelivery !== undefined ? { delivery: args.callbackDelivery } : {}),
         };
       }
 
       if (Object.keys(updates).length === 0) {
         throw new Error(
-          'At least one field (title, description, status, archived, enableCallback, callbackMode) must be provided'
+          'At least one field (title, description, status, archived, enableCallback, callbackMode, callbackDelivery) must be provided'
         );
       }
 
