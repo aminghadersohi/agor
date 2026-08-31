@@ -85,6 +85,25 @@ export interface RectangleLayoutResult {
   overflowingItemIds: string[];
 }
 
+export interface CompactRectangleLayoutResult extends Omit<RectangleLayoutResult, 'mode'> {
+  mode: 'cluster';
+}
+
+export interface CompactRectangleLayoutItem extends RectangleLayoutItem {
+  /** Optional prior canvas position, used only as a final movement tie-break. */
+  sourceX?: number;
+  sourceY?: number;
+}
+
+export interface CompactRectangleLayoutOptions {
+  /** Optional outer container. Placements stay inside it after padding. */
+  bounds?: { width: number; height: number };
+  padding?: number;
+  gapX?: number;
+  gapY?: number;
+  gridSize?: number;
+}
+
 interface GridCandidate {
   placements: RectanglePlacement[];
   columns: number;
@@ -495,4 +514,359 @@ export function layoutRectangles(
     deckOffsetY: 0,
     overflowingItemIds: bounds ? overflowingIds(fallback.placements, bounds) : [],
   };
+}
+
+type ClusterPlacement = RectanglePlacement & { sourceX?: number; sourceY?: number };
+
+const clusterSeparated = (
+  left: ClusterPlacement,
+  right: { x: number; y: number; width: number; height: number },
+  gapX: number,
+  gapY: number
+): boolean =>
+  left.x + left.width + gapX <= right.x ||
+  right.x + right.width + gapX <= left.x ||
+  left.y + left.height + gapY <= right.y ||
+  right.y + right.height + gapY <= left.y;
+
+/**
+ * Pack heterogeneous canvas rectangles into a compact deterministic cluster.
+ *
+ * Unlike `layoutRectangles`, this is intentionally not a fixed row/column
+ * grid. Every item is placed on the corner frontier created by prior items.
+ * The larger enclosing dimension wins first, then area, perimeter, and
+ * movement from the supplied source geometry. Input order remains stable in
+ * the returned array, and source geometry resolves equally compact
+ * alternatives with less motion.
+ */
+export function layoutCompactRectangles(
+  sourceItems: readonly CompactRectangleLayoutItem[],
+  options: CompactRectangleLayoutOptions = {}
+): CompactRectangleLayoutResult {
+  const gridSize = finiteNonNegative(options.gridSize, 0);
+  const padding = ceilToGrid(finiteNonNegative(options.padding, 0), gridSize);
+  const gapX = ceilToGrid(finiteNonNegative(options.gapX, 24), gridSize);
+  const gapY = ceilToGrid(finiteNonNegative(options.gapY, 24), gridSize);
+  const bounds = options.bounds;
+  const usableWidth = bounds
+    ? Math.max(0, floorToGrid(finiteNonNegative(bounds.width, 0) - padding * 2, gridSize))
+    : Number.POSITIVE_INFINITY;
+  const usableHeight = bounds
+    ? Math.max(0, floorToGrid(finiteNonNegative(bounds.height, 0) - padding * 2, gridSize))
+    : Number.POSITIVE_INFINITY;
+  const items = normalizedItems(sourceItems, gridSize).map((item, index) => ({
+    ...item,
+    sourceX: sourceItems[index]?.sourceX,
+    sourceY: sourceItems[index]?.sourceY,
+  }));
+  if (items.length === 0) {
+    return {
+      mode: 'cluster',
+      placements: [],
+      columns: 1,
+      rows: 0,
+      width: padding * 2,
+      height: padding * 2,
+      gapX,
+      gapY,
+      padding,
+      fitsWithoutOverlap: true,
+      stackCount: 0,
+      maxDeckDepth: 1,
+      deckOffsetX: 0,
+      deckOffsetY: 0,
+      overflowingItemIds: [],
+    };
+  }
+
+  const finiteSourceXs = items
+    .map((item) => item.sourceX)
+    .filter((value): value is number => Number.isFinite(value));
+  const finiteSourceYs = items
+    .map((item) => item.sourceY)
+    .filter((value): value is number => Number.isFinite(value));
+  const sourceLeft = finiteSourceXs.length > 0 ? Math.min(...finiteSourceXs) : 0;
+  const sourceTop = finiteSourceYs.length > 0 ? Math.min(...finiteSourceYs) : 0;
+  const placed: ClusterPlacement[] = [];
+
+  for (const [index, item] of items.entries()) {
+    const candidateByKey = new Map<string, { x: number; y: number }>();
+    const addCandidate = (x: number, y: number) => {
+      if (x < 0 || y < 0) return;
+      candidateByKey.set(`${x}:${y}`, { x, y });
+    };
+    addCandidate(0, 0);
+    for (const existing of placed) {
+      addCandidate(existing.x + existing.width + gapX, existing.y);
+      addCandidate(existing.x - item.width - gapX, existing.y);
+      addCandidate(existing.x, existing.y + existing.height + gapY);
+      addCandidate(existing.x, existing.y - item.height - gapY);
+      // Aligning opposite edges as well as top/left edges lets a short item
+      // fill the corner below or beside a larger heterogeneous neighbour.
+      addCandidate(existing.x + existing.width - item.width, existing.y + existing.height + gapY);
+      addCandidate(existing.x + existing.width + gapX, existing.y + existing.height - item.height);
+    }
+    const candidates = [...candidateByKey.values()].filter(
+      ({ x, y }) =>
+        x + item.width <= usableWidth &&
+        y + item.height <= usableHeight &&
+        placed.every((existing) =>
+          clusterSeparated(existing, { x, y, width: item.width, height: item.height }, gapX, gapY)
+        )
+    );
+    if (candidates.length === 0) {
+      // Preserve the all-or-nothing contract used by bounded zone layout: an
+      // unsuccessful solve still returns deterministic collision-free
+      // geometry, but names every rectangle outside the requested frame so
+      // callers can refuse the write without partially moving anything.
+      const fallback = layoutCompactRectangles(sourceItems, { ...options, bounds: undefined });
+      return {
+        ...fallback,
+        overflowingItemIds: bounds ? overflowingIds(fallback.placements, bounds) : [],
+      };
+    }
+
+    const sourceX = Number.isFinite(item.sourceX) ? (item.sourceX as number) - sourceLeft : 0;
+    const sourceY = Number.isFinite(item.sourceY) ? (item.sourceY as number) - sourceTop : 0;
+    const best = candidates.sort((a, b) => {
+      const score = (candidate: { x: number; y: number }) => {
+        const width = Math.max(
+          candidate.x + item.width,
+          ...placed.map((entry) => entry.x + entry.width)
+        );
+        const height = Math.max(
+          candidate.y + item.height,
+          ...placed.map((entry) => entry.y + entry.height)
+        );
+        return [
+          Math.max(width, height),
+          width * height,
+          width + height,
+          (candidate.x - sourceX) ** 2 + (candidate.y - sourceY) ** 2,
+          candidate.y,
+          candidate.x,
+        ] as const;
+      };
+      const left = score(a);
+      const right = score(b);
+      for (let scoreIndex = 0; scoreIndex < left.length; scoreIndex += 1) {
+        const delta = (left[scoreIndex] ?? 0) - (right[scoreIndex] ?? 0);
+        if (delta !== 0) return delta;
+      }
+      return 0;
+    })[0];
+    if (!best) throw new Error(`Unable to select a placement for rectangle '${item.id}'.`);
+    placed.push({
+      ...item,
+      x: best.x,
+      y: best.y,
+      row: 0,
+      column: 0,
+      stackIndex: index,
+      deckDepth: 0,
+    });
+  }
+
+  const rowYs = [...new Set(placed.map((item) => item.y))].sort((a, b) => a - b);
+  const rowByY = new Map(rowYs.map((y, row) => [y, row]));
+  const placements = placed.map(({ sourceX: _sourceX, sourceY: _sourceY, ...item }) => ({
+    ...item,
+    x: item.x + padding,
+    y: item.y + padding,
+    row: rowByY.get(item.y) ?? 0,
+    column: placed.filter((peer) => peer.y === item.y && peer.x < item.x).length,
+  }));
+  const contentWidth = Math.max(...placed.map((item) => item.x + item.width));
+  const contentHeight = Math.max(...placed.map((item) => item.y + item.height));
+  const columns = Math.max(1, ...rowYs.map((y) => placed.filter((item) => item.y === y).length));
+  return {
+    mode: 'cluster',
+    placements,
+    columns,
+    rows: rowYs.length,
+    width: contentWidth + padding * 2,
+    height: contentHeight + padding * 2,
+    gapX,
+    gapY,
+    padding,
+    fitsWithoutOverlap: true,
+    stackCount: items.length,
+    maxDeckDepth: 1,
+    deckOffsetX: 0,
+    deckOffsetY: 0,
+    overflowingItemIds: bounds ? overflowingIds(placements, bounds) : [],
+  };
+}
+
+export type SelectionRowDistribution = 'packed' | 'justify';
+
+export type SelectionAlignment = 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom';
+
+export interface SelectionAlignmentOptions {
+  gap?: number;
+  gridSize?: number;
+}
+
+/**
+ * Align heterogeneous free-canvas rectangles without collapsing them onto one
+ * another. The requested edge/center is shared, while the perpendicular axis
+ * keeps its spatial order and only moves later rectangles far enough to clear
+ * the preceding rectangle. This makes the first spatial item an intuitive
+ * anchor and gives the smallest deterministic forward shift for every peer.
+ */
+export function layoutAlignedRectangles(
+  sourceItems: readonly CompactRectangleLayoutItem[],
+  alignment: SelectionAlignment,
+  options: SelectionAlignmentOptions = {}
+): RectanglePlacement[] {
+  if (sourceItems.length === 0) return [];
+  const gridSize = finiteNonNegative(options.gridSize, 0);
+  const snap = (value: number) =>
+    gridSize > 0 ? Math.round((Number.isFinite(value) ? value : 0) / gridSize) * gridSize : value;
+  const gap = ceilToGrid(finiteNonNegative(options.gap, 0), gridSize);
+  const items = sourceItems.map((item) => ({
+    ...item,
+    width: ceilToGrid(Math.max(1, finiteNonNegative(item.width, BOARD_GRID_SIZE)), gridSize),
+    height: ceilToGrid(Math.max(1, finiteNonNegative(item.height, BOARD_GRID_SIZE)), gridSize),
+    sourceX: snap(item.sourceX ?? 0),
+    sourceY: snap(item.sourceY ?? 0),
+  }));
+  const horizontal = alignment === 'left' || alignment === 'center' || alignment === 'right';
+  const left = Math.min(...items.map((item) => item.sourceX));
+  const right = Math.max(...items.map((item) => item.sourceX + item.width));
+  const top = Math.min(...items.map((item) => item.sourceY));
+  const bottom = Math.max(...items.map((item) => item.sourceY + item.height));
+  const ordered = [...items].sort((a, b) =>
+    horizontal
+      ? a.sourceY - b.sourceY || a.sourceX - b.sourceX || a.id.localeCompare(b.id)
+      : a.sourceX - b.sourceX || a.sourceY - b.sourceY || a.id.localeCompare(b.id)
+  );
+  const placements: RectanglePlacement[] = [];
+  let nextPerpendicular = Number.NEGATIVE_INFINITY;
+
+  for (const [index, item] of ordered.entries()) {
+    const x =
+      alignment === 'left'
+        ? left
+        : alignment === 'center'
+          ? snap((left + right - item.width) / 2)
+          : alignment === 'right'
+            ? right - item.width
+            : Math.max(item.sourceX, nextPerpendicular);
+    const y =
+      alignment === 'top'
+        ? top
+        : alignment === 'middle'
+          ? snap((top + bottom - item.height) / 2)
+          : alignment === 'bottom'
+            ? bottom - item.height
+            : Math.max(item.sourceY, nextPerpendicular);
+    placements.push({
+      id: item.id,
+      width: item.width,
+      height: item.height,
+      x,
+      y,
+      row: horizontal ? index : 0,
+      column: horizontal ? 0 : index,
+      stackIndex: index,
+      deckDepth: 0,
+    });
+    nextPerpendicular = (horizontal ? y + item.height : x + item.width) + gap;
+  }
+
+  const byId = new Map(placements.map((placement) => [placement.id, placement]));
+  return sourceItems.flatMap((item) => {
+    const placement = byId.get(item.id);
+    return placement ? [placement] : [];
+  });
+}
+
+export interface SelectionGridLayoutOptions {
+  /** Fix one grid axis. When both are omitted, a balanced grid is chosen. */
+  columns?: number;
+  rows?: number;
+  gapX?: number;
+  gapY?: number;
+  gridSize?: number;
+  /** Stretch each item to the tallest measured rectangle in its own row. */
+  matchRowHeights?: boolean;
+  /** Spread complete rows across targetWidth while keeping the outer edges fixed. */
+  rowDistribution?: SelectionRowDistribution;
+  /** Existing selection width used by justified rows. */
+  targetWidth?: number;
+}
+
+/**
+ * Deterministic row-major grid for heterogeneous free-canvas selections.
+ * Spatial order is preserved, either axis can drive the track count, and the
+ * optional row treatments operate on the same measured rectangles rather than
+ * replacing them with generic card sizes.
+ */
+export function layoutSelectionGrid(
+  sourceItems: readonly CompactRectangleLayoutItem[],
+  options: SelectionGridLayoutOptions = {}
+): RectangleLayoutResult {
+  const gridSize = finiteNonNegative(options.gridSize, 0);
+  if (sourceItems.length === 0) return layoutRectangles([], { gridSize });
+  const items = [...sourceItems].sort(
+    (a, b) =>
+      finiteNonNegative(a.sourceY, 0) - finiteNonNegative(b.sourceY, 0) ||
+      finiteNonNegative(a.sourceX, 0) - finiteNonNegative(b.sourceX, 0) ||
+      a.id.localeCompare(b.id)
+  );
+  const requestedRows = options.rows
+    ? Math.max(1, Math.min(items.length, Math.floor(options.rows)))
+    : undefined;
+  const requestedColumns = options.columns
+    ? Math.max(1, Math.min(items.length, Math.floor(options.columns)))
+    : undefined;
+  const columns =
+    requestedColumns ??
+    (requestedRows
+      ? Math.ceil(items.length / requestedRows)
+      : Math.max(1, Math.ceil(Math.sqrt(items.length))));
+  const base = layoutRectangles(
+    items.map(({ id, width, height }) => ({ id, width, height })),
+    {
+      exactColumns: columns,
+      gapX: options.gapX,
+      gapY: options.gapY,
+      gridSize,
+      allowDeck: false,
+    }
+  );
+  const targetWidth = Math.max(
+    base.width,
+    ceilToGrid(finiteNonNegative(options.targetWidth, base.width), gridSize)
+  );
+  const placements = base.placements.map((placement) => ({ ...placement }));
+  const rows = new Map<number, RectanglePlacement[]>();
+  for (const placement of placements) {
+    const row = rows.get(placement.row) ?? [];
+    row.push(placement);
+    rows.set(placement.row, row);
+  }
+  for (const row of rows.values()) {
+    row.sort((a, b) => a.column - b.column || a.id.localeCompare(b.id));
+    if (options.matchRowHeights) {
+      const height = Math.max(...row.map((item) => item.height));
+      for (const item of row) item.height = height;
+    }
+    if (options.rowDistribution !== 'justify' || row.length < 2) continue;
+    const occupiedWidth = row.reduce((total, item) => total + item.width, 0);
+    const freeUnits = Math.max(0, Math.round((targetWidth - occupiedWidth) / (gridSize || 1)));
+    const slots = row.length - 1;
+    const baseGapUnits = Math.floor(freeUnits / slots);
+    let remainder = freeUnits % slots;
+    let x = 0;
+    for (const [index, item] of row.entries()) {
+      item.x = x;
+      if (index === row.length - 1) continue;
+      const gapUnits = baseGapUnits + (remainder > 0 ? 1 : 0);
+      if (remainder > 0) remainder -= 1;
+      x += item.width + gapUnits * (gridSize || 1);
+    }
+  }
+  return { ...base, placements, width: targetWidth };
 }

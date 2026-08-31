@@ -66,6 +66,25 @@ describe('BranchCard compact toggle', () => {
     expect(screen.queryByLabelText('Collapse card')).toBeNull();
   });
 
+  it('keeps Sessions and density together before Pin and the remaining header actions', () => {
+    renderCard({
+      compact: true,
+      isPinned: true,
+      onUnpin: vi.fn(),
+      onToggleCompact: vi.fn(),
+      onOpenTerminal: vi.fn(),
+    });
+
+    const sessions = screen.getByLabelText('Sessions (0)');
+    const expand = screen.getByLabelText('Expand card');
+    const actions = sessions.closest('.ant-space');
+    const buttons = actions?.querySelectorAll('button');
+
+    expect(buttons?.[0]).toBe(sessions);
+    expect(buttons?.[1]).toBe(expand);
+    expect(sessions.compareDocumentPosition(expand) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  });
+
   it('renders no toggle when the viewer cannot mutate the board', () => {
     renderCard({ compact: true });
 

@@ -8,7 +8,7 @@ import type {
   ZoneOverflowStrategy,
   ZoneResizeMode,
 } from '../types/board';
-import { BOARD_GRID_SIZE, ceilBoardGridValue } from './rectangle-packing';
+import { BOARD_GRID_SIZE, ceilBoardGridValue, snapBoardGridValue } from './rectangle-packing';
 
 export const ZONE_LAYOUT_MODES = ['manual', 'auto'] as const;
 export const ZONE_LAYOUT_PRESETS = ['grid', 'compact_list'] as const;
@@ -23,6 +23,15 @@ export const ZONE_LAYOUT_SORT_FIELDS = [
 export const ZONE_LAYOUT_SORT_DIRECTIONS = ['asc', 'desc'] as const;
 export const ZONE_RESIZE_MODES = ['fixed', 'height', 'both'] as const;
 export const ZONE_OVERFLOW_STRATEGIES = ['report', 'reflow_board'] as const;
+export const ZONE_CONTENT_JUSTIFICATIONS = [
+  'left',
+  'middle',
+  'right',
+  'top',
+  'vertical_middle',
+  'bottom',
+] as const;
+export type ZoneContentJustification = (typeof ZONE_CONTENT_JUSTIFICATIONS)[number];
 
 export const DEFAULT_ZONE_LAYOUT_POLICY: Readonly<ZoneLayoutPolicy> = {
   mode: 'manual',
@@ -37,10 +46,27 @@ export const DEFAULT_ZONE_LAYOUT_POLICY: Readonly<ZoneLayoutPolicy> = {
 
 export const ZONE_LAYOUT_FRAME_PADDING = BOARD_GRID_SIZE;
 
+/**
+ * Auto-resize is deliberately grow-only. A direct zone resize establishes the
+ * user's new minimum frame while leaving future content growth armed.
+ */
+export function growZoneLayoutHeight(currentHeight: number, requiredHeight: number): number {
+  return Math.max(currentHeight, 200, ceilBoardGridValue(requiredHeight));
+}
+
 export interface ZoneLayoutFrameInput {
   width: number;
   fontSize?: number;
   status?: string;
+}
+
+export interface ZoneLayoutFrameOptions {
+  padding?: number;
+  /**
+   * Converts screen-stable title text into board-space geometry. Browsers pass
+   * the inverse canvas zoom; non-visual callers use the stable default of 1.
+   */
+  fontScale?: number;
 }
 
 export interface ZoneLayoutFrame {
@@ -54,6 +80,122 @@ export interface ZoneLayoutFrame {
   usableWidth: number;
 }
 
+export interface ZoneContentRect extends BoardPosition {
+  id: string;
+  width: number;
+  height: number;
+}
+
+export interface JustifiedZoneContents {
+  fits: boolean;
+  placements: ZoneContentRect[];
+}
+
+const JUSTIFY_OVERLAP_TOLERANCE = 0.5;
+
+function connectedSpanComponents(
+  items: readonly ZoneContentRect[],
+  span: 'horizontal' | 'vertical'
+): number[][] {
+  const start = (item: ZoneContentRect) => (span === 'horizontal' ? item.x : item.y);
+  const end = (item: ZoneContentRect) =>
+    start(item) + (span === 'horizontal' ? item.width : item.height);
+  const overlaps = (left: ZoneContentRect, right: ZoneContentRect) =>
+    Math.min(end(left), end(right)) - Math.max(start(left), start(right)) >
+    JUSTIFY_OVERLAP_TOLERANCE;
+  const ordered = items
+    .map((item, index) => ({ item, index }))
+    .sort(
+      (left, right) =>
+        start(left.item) - start(right.item) ||
+        end(left.item) - end(right.item) ||
+        left.item.id.localeCompare(right.item.id)
+    );
+  const remaining = new Set(ordered.map(({ index }) => index));
+  const components: number[][] = [];
+
+  for (const { index: seed } of ordered) {
+    if (!remaining.delete(seed)) continue;
+    const component = [seed];
+    for (let cursor = 0; cursor < component.length; cursor += 1) {
+      const current = component[cursor];
+      for (const { index: candidate } of ordered) {
+        if (!remaining.has(candidate) || !overlaps(items[current], items[candidate])) continue;
+        remaining.delete(candidate);
+        component.push(candidate);
+      }
+    }
+    components.push(component);
+  }
+  return components;
+}
+
+/**
+ * Align collision-independent rows or columns inside a zone frame. Horizontal
+ * actions translate connected components whose vertical spans overlap; top
+ * and vertical actions translate components whose horizontal spans overlap. Each
+ * component remains a rigid body, so collision-free geometry stays
+ * collision-free while separate rows/columns can align independently.
+ * `middle` retains its public horizontal-centering meaning;
+ * `vertical_middle` is the matching vertical-centering action.
+ */
+export function justifyZoneContentCluster(
+  items: readonly ZoneContentRect[],
+  frame: ZoneLayoutFrame,
+  zoneHeight: number,
+  justification: ZoneContentJustification
+): JustifiedZoneContents {
+  if (items.length === 0) return { fits: true, placements: [] };
+
+  const contentLeft = frame.padding;
+  const contentRight = frame.width - frame.padding;
+  const contentTop = frame.headerInset + frame.padding;
+  const contentBottom = zoneHeight - frame.padding;
+  const horizontal =
+    justification === 'left' || justification === 'middle' || justification === 'right';
+  const components = connectedSpanComponents(items, horizontal ? 'vertical' : 'horizontal');
+  const placements = items.map((item) => ({ ...item }));
+
+  for (const component of components) {
+    const componentItems = component.map((index) => items[index]);
+    const start = horizontal
+      ? Math.min(...componentItems.map((item) => item.x))
+      : Math.min(...componentItems.map((item) => item.y));
+    const end = horizontal
+      ? Math.max(...componentItems.map((item) => item.x + item.width))
+      : Math.max(...componentItems.map((item) => item.y + item.height));
+    // Top alignment and automatic packing reserve the title/status header.
+    // Explicit vertical centering, however, targets the geometric center of
+    // the zone itself; a taller title must never bias the contents downward.
+    const contentStart = horizontal
+      ? contentLeft
+      : justification === 'vertical_middle'
+        ? frame.padding
+        : contentTop;
+    const contentEnd = horizontal ? contentRight : contentBottom;
+    if (end - start > contentEnd - contentStart + JUSTIFY_OVERLAP_TOLERANCE) {
+      return { fits: false, placements: [...items] };
+    }
+
+    const targetStart =
+      justification === 'right' || justification === 'bottom'
+        ? contentEnd - (end - start)
+        : justification === 'middle' || justification === 'vertical_middle'
+          ? (contentStart + contentEnd - (end - start)) / 2
+          : contentStart;
+    const delta = snapBoardGridValue(targetStart - start);
+    for (const index of component) {
+      if (horizontal) placements[index].x += delta;
+      else placements[index].y += delta;
+    }
+  }
+
+  return {
+    fits: true,
+    placements,
+  };
+}
+
 /**
  * One frame contract for every zone layout path and child entity type.
  *
@@ -62,7 +204,7 @@ export interface ZoneLayoutFrame {
  */
 export function getZoneLayoutFrame(
   zone: ZoneLayoutFrameInput,
-  options: { padding?: number } = {}
+  options: ZoneLayoutFrameOptions = {}
 ): ZoneLayoutFrame {
   const requestedPadding = options.padding ?? ZONE_LAYOUT_FRAME_PADDING;
   const padding =
@@ -76,8 +218,14 @@ export function getZoneLayoutFrame(
     typeof zone.fontSize === 'number' && Number.isFinite(zone.fontSize)
       ? Math.min(48, Math.max(10, zone.fontSize))
       : 14;
-  const labelHeight = Math.ceil(labelFontSize * 1.2);
-  const statusHeight = zone.status ? 8 + Math.ceil(labelFontSize * 1.05) : 0;
+  const fontScale =
+    typeof options.fontScale === 'number' && Number.isFinite(options.fontScale)
+      ? Math.min(10, Math.max(0.1, options.fontScale))
+      : 1;
+  const labelHeight = Math.ceil(labelFontSize * fontScale * 1.2);
+  const statusHeight = zone.status
+    ? Math.ceil(8 * fontScale) + Math.ceil(labelFontSize * fontScale * 1.05)
+    : 0;
   const headerInset = ceilBoardGridValue(Math.max(64, 32 + labelHeight + statusHeight));
 
   return {

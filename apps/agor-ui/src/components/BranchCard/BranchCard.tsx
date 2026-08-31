@@ -470,6 +470,38 @@ const BranchCardComponent = ({
         </div>
 
         <Space size={4} style={{ flexShrink: 0 }}>
+          {/*
+            A collapsed card hides its session sections, so keep their picker
+            in the surviving header. It is the leftmost header action: adding
+            it on collapse cannot shift any persistent action to its right.
+          */}
+          {compact && !inPopover && !panelMode && (
+            <CompactSessionPicker
+              sessions={sessions}
+              branchId={branch.branch_id}
+              selectedSessionId={selectedSessionId}
+              onSessionClick={onSessionClick}
+              onCreateSession={onCreateSession}
+            />
+          )}
+          {/*
+            Keep the two density-related actions together at the left edge of
+            the header controls: Sessions, Collapse/Expand, then Pin.
+          */}
+          {!inPopover && !panelMode && onToggleCompact && (
+            <Button
+              type="text"
+              size="small"
+              className={REACT_FLOW_NO_DRAG_CLASS}
+              aria-label={compact ? 'Expand card' : 'Collapse card'}
+              icon={compact ? <PlusSquareOutlined /> : <MinusSquareOutlined />}
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleCompact(branch.branch_id, !compact);
+              }}
+              title={compact ? 'Expand card' : 'Collapse card'}
+            />
+          )}
           {!inPopover && !panelMode && isPinned && (
             <Tooltip
               title={
@@ -500,38 +532,6 @@ const BranchCardComponent = ({
             />
           )}
           <div className={REACT_FLOW_NO_DRAG_CLASS}>
-            {/*
-              Density toggle for this placement's shared compact state. The
-              header survives collapsing, so this button is the way back out
-              of a card collapsed by MCP or by a compact_list zone layout.
-            */}
-            {!inPopover && !panelMode && onToggleCompact && (
-              <Button
-                type="text"
-                size="small"
-                aria-label={compact ? 'Expand card' : 'Collapse card'}
-                icon={compact ? <PlusSquareOutlined /> : <MinusSquareOutlined />}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onToggleCompact(branch.branch_id, !compact);
-                }}
-                title={compact ? 'Expand card' : 'Collapse card'}
-              />
-            )}
-            {/*
-              A collapsed card hides its session sections, so without this the
-              only route into a session is to expand the card — which re-flows
-              the zone and undoes the density the collapse was asked for.
-            */}
-            {compact && !inPopover && !panelMode && (
-              <CompactSessionPicker
-                sessions={sessions}
-                branchId={branch.branch_id}
-                selectedSessionId={selectedSessionId}
-                onSessionClick={onSessionClick}
-                onCreateSession={onCreateSession}
-              />
-            )}
             {onOpenTerminal && (
               <Button
                 type="text"

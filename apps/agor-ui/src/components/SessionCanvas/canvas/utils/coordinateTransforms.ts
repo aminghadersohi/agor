@@ -89,6 +89,34 @@ export function relativeToAbsolute(relativePos: Position, parentPos: Position): 
 }
 
 /**
+ * Rebase optimistic absolute child positions when their parent container
+ * moves. React Flow keeps each child's relative position unchanged, so its
+ * realtime guard must travel by the same delta or it will briefly pull the
+ * child back toward the parent's old location during the persistence echo.
+ */
+export function translateTrackedChildPositions(
+  nodes: readonly Pick<Node, 'id' | 'parentId'>[],
+  parentId: string,
+  previousParentPosition: Position,
+  nextParentPosition: Position,
+  trackedPositions: Record<string, Position>
+): number {
+  const deltaX = nextParentPosition.x - previousParentPosition.x;
+  const deltaY = nextParentPosition.y - previousParentPosition.y;
+  if (deltaX === 0 && deltaY === 0) return 0;
+
+  let translated = 0;
+  for (const node of nodes) {
+    if (node.parentId !== parentId) continue;
+    const tracked = trackedPositions[node.id];
+    if (!tracked) continue;
+    trackedPositions[node.id] = { x: tracked.x + deltaX, y: tracked.y + deltaY };
+    translated += 1;
+  }
+  return translated;
+}
+
+/**
  * Convert position from one parent's coordinate space to another's
  *
  * Used when moving objects between containers (e.g., Zone A to Zone B)

@@ -7,7 +7,7 @@ import type { ButtonHTMLAttributes, MouseEventHandler, ReactNode } from 'react';
 import type { Node } from 'reactflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
-import SessionCanvas from './SessionCanvas';
+import SessionCanvas, { isCanvasSelectionControlTarget } from './SessionCanvas';
 
 let reactFlowProps: Record<string, unknown> | null = null;
 // Stable spy for the `useNodesState` setter (onNodesChangeInternal). Lets tests
@@ -73,6 +73,25 @@ beforeEach(() => {
 });
 
 describe('SessionCanvas zoom shortcuts', () => {
+  it('does not start a canvas selection gesture from portaled layout controls', () => {
+    const popover = document.createElement('div');
+    popover.className = 'canvas-layout-controls';
+    const gridControl = document.createElement('span');
+    popover.append(gridControl);
+
+    expect(isCanvasSelectionControlTarget(gridControl)).toBe(true);
+  });
+
+  it('does not capture a portaled modal segmented option as a canvas gesture', () => {
+    const modal = document.createElement('div');
+    modal.className = 'ant-modal-root';
+    const segmentedOption = document.createElement('span');
+    segmentedOption.className = 'ant-segmented-item-label';
+    modal.append(segmentedOption);
+
+    expect(isCanvasSelectionControlTarget(segmentedOption)).toBe(true);
+  });
+
   it('uses Command or Control plus scroll to zoom while preserving scroll panning', () => {
     render(<SessionCanvas board={null} client={null} branches={[]} />);
 
@@ -411,6 +430,7 @@ describe('SessionCanvas zoom shortcuts', () => {
           label: 'Large Zone',
           borderColor: '#d9d9d9',
           backgroundColor: '#d9d9d91a',
+          layout: { mode: 'auto', resize: 'height', autoResizeHeight: true },
         },
       },
       created_at: '2026-06-18T00:00:00.000Z',
@@ -421,10 +441,13 @@ describe('SessionCanvas zoom shortcuts', () => {
     } as unknown as Board;
 
     // Render the canvas, then wire up React Flow's instance via onInit with a
-    // controlled `getNode`. In controlled mode React Flow returns the exact node
-    // objects we pass, so dims live on `node.style` — same source the handler
-    // reads. The zone node carries 1200x900 to drive the no-op-resize check.
-    function renderCanvas(client: AgorClient | null) {
+    // controlled `getNode`. During a real resize React Flow mutates the live
+    // node style before emitting onNodesChange, so tests can supply that live
+    // geometry independently from the persisted board snapshot.
+    function renderCanvas(
+      client: AgorClient | null,
+      liveStyle: { width: number; height: number } = { width: 1200, height: 900 }
+    ) {
       render(
         <ConnectionProvider
           value={{
@@ -456,7 +479,7 @@ describe('SessionCanvas zoom shortcuts', () => {
         id: 'zone-1',
         type: 'zone',
         position: { x: 0, y: 0 },
-        style: { width: 1200, height: 900 },
+        style: liveStyle,
       };
       const getNode = vi.fn((id: string) => (id === 'zone-1' ? zoneNode : undefined));
       act(() => {
@@ -514,7 +537,7 @@ describe('SessionCanvas zoom shortcuts', () => {
 
     it('debounce-persists a real resize via a boards patch after 500ms', async () => {
       const { client, patch } = makeClient();
-      const { onNodesChange } = renderCanvas(client);
+      const { onNodesChange } = renderCanvas(client, { width: 1000, height: 700 });
 
       vi.useFakeTimers();
       act(() =>
@@ -542,7 +565,16 @@ describe('SessionCanvas zoom shortcuts', () => {
         expect.objectContaining({
           _action: 'upsertObject',
           objectId: 'zone-1',
-          objectData: expect.objectContaining({ type: 'zone', width: 1000, height: 700 }),
+          objectData: expect.objectContaining({
+            type: 'zone',
+            width: 1000,
+            height: 700,
+            layout: expect.objectContaining({
+              mode: 'auto',
+              resize: 'height',
+              autoResizeHeight: true,
+            }),
+          }),
         })
       );
     });

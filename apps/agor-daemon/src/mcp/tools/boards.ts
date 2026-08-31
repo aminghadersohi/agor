@@ -1,13 +1,19 @@
-import { layoutJustifiedZones, zoneShapesForItems } from '@agor/core/layout/justified-zones';
+import {
+  type BoardZoneArrangementPlan,
+  planBoardZoneArrangement,
+} from '@agor/core/layout/board-zone-arrangement';
 import {
   BOARD_GRID_SIZE,
   ceilBoardGridValue,
+  layoutCompactRectangles,
   layoutRectangles,
   snapBoardGridValue,
 } from '@agor/core/layout/rectangle-packing';
+import { planZoneGrowthReflow } from '@agor/core/layout/zone-growth-reflow';
 import {
   compactZoneItemSize,
   getZoneLayoutFrame,
+  growZoneLayoutHeight,
   normalizeZoneLayoutPolicy,
   sortZoneLayoutItems,
   ZONE_LAYOUT_MODES,
@@ -75,14 +81,6 @@ const DEFAULT_ARRANGE_START_X = 80;
 const DEFAULT_ARRANGE_START_Y = 80;
 function boardGridSpacing(value: number): number {
   return value === 0 ? 0 : Math.max(BOARD_GRID_SIZE, snapBoardGridValue(value));
-}
-
-function compareBoardEntitiesSpatially(a: BoardEntityObject, b: BoardEntityObject): number {
-  return (
-    a.position.y - b.position.y ||
-    a.position.x - b.position.x ||
-    a.object_id.localeCompare(b.object_id)
-  );
 }
 
 type EntityLayoutMetadata = ZoneLayoutSortItem & {
@@ -345,13 +343,23 @@ interface ArrangeBoardZonesOptions {
   maxPerRow?: number;
   justifyLastRow?: boolean;
   dryRun?: boolean;
+  includeLooseItems?: boolean;
 }
 
 type ZoneObject = BoardObject & { type: 'zone'; width: number; height: number };
 
 interface ArrangedBoardZones {
-  layout: ReturnType<typeof layoutJustifiedZones>;
-  byId: Map<string, { id: string; zone: ZoneObject; itemCount: number }>;
+  plan: BoardZoneArrangementPlan;
+  byId: Map<
+    string,
+    {
+      id: string;
+      zone: ZoneObject;
+      itemCount: number;
+      entitiesById: Map<string, BoardEntityObject>;
+      canvasById: Map<string, BoardObject>;
+    }
+  >;
 }
 
 /**
@@ -360,8 +368,8 @@ interface ArrangedBoardZones {
  * Shared by `agor_boards_arrange_zones` and by the `reflow_board` overflow
  * strategy, so a zone that grows into its neighbours is repaired by exactly
  * the layout the explicit tool would have produced. Returns null when the
- * board has no zones. Contents keep their zone-relative positions; re-packing
- * items at the new widths is the caller's next step.
+ * board has no zones. Container and child geometry are planned together, then
+ * the containers are written in one board patch before child placements.
  */
 async function arrangeBoardZones(
   ctx: McpContext,
@@ -379,6 +387,25 @@ async function arrangeBoardZones(
     ...ctx.baseServiceParams,
   })) as { data: Array<BoardEntityObject> };
   const visible = await filterVisibleBoardEntities(ctx, entityResult.data, false);
+  const zoneForCanvasId = new Map<string, string>();
+  for (const [objectId, object] of Object.entries(board.objects ?? {})) {
+    if (object.type === 'zone' || (object.type === 'artifact' && object.locked === true)) continue;
+    const size = getCanvasObjectDimensions(object);
+    const center = { x: object.x + size.width / 2, y: object.y + size.height / 2 };
+    const containing = zoneEntries
+      .filter(
+        ([, zone]) =>
+          center.x >= zone.x &&
+          center.x <= zone.x + zone.width &&
+          center.y >= zone.y &&
+          center.y <= zone.y + zone.height
+      )
+      .sort(
+        ([leftId, left], [rightId, right]) =>
+          left.width * left.height - right.width * right.height || leftId.localeCompare(rightId)
+      )[0];
+    if (containing) zoneForCanvasId.set(objectId, containing[0]);
+  }
 
   // Size each zone's contents exactly the way the zone arrange will, because a
   // shape is only useful if the zone can genuinely hold its contents at it.
@@ -404,101 +431,259 @@ async function arrangeBoardZones(
             (entity.card_id !== undefined && !measuredSize(entity))
         )
       );
-      const ordered = sortZoneLayoutItems(
-        contents.map((entity) => ({
-          entity,
-          ...(metadata.get(entity.object_id) ?? {
-            id: entity.object_id,
-            position: entity.position,
-          }),
-        })),
-        zonePolicy
-      ).map(({ entity }) => entity);
+      const ordered =
+        zonePolicy.preset === 'grid' &&
+        zonePolicy.columns === undefined &&
+        zonePolicy.sortBy === 'position'
+          ? contents
+          : sortZoneLayoutItems(
+              contents.map((entity) => ({
+                entity,
+                ...(metadata.get(entity.object_id) ?? {
+                  id: entity.object_id,
+                  position: entity.position,
+                }),
+              })),
+              zonePolicy
+            ).map(({ entity }) => entity);
 
       const items = ordered.map((entity) => {
         const measured = measuredSize(entity);
         if (zonePolicy.preset === 'compact_list') {
           return {
             id: entity.object_id,
+            entityType: entity.entity_type,
+            position: entity.position,
+            compact: true,
             ...compactZoneItemSize(entity.entity_type, frame.usableWidth),
           };
         }
         if (entity.compact === true) {
           return {
             id: entity.object_id,
+            entityType: entity.entity_type,
+            position: entity.position,
+            compact: true,
             ...compactZoneItemSize(
               entity.entity_type,
               ARRANGE_DIMENSIONS[entity.entity_type].width
             ),
           };
         }
-        if (measured) return { id: entity.object_id, ...measured };
+        if (measured)
+          return {
+            id: entity.object_id,
+            entityType: entity.entity_type,
+            position: entity.position,
+            compact: entity.compact,
+            ...measured,
+          };
         if (entity.entity_type === 'card' && entity.card_id) {
           return {
             id: entity.object_id,
+            entityType: entity.entity_type,
+            position: entity.position,
             width: ARRANGE_DIMENSIONS.card.width,
             height: estimateCardHeight(metadata.get(entity.object_id)?.card),
           };
         }
-        return { id: entity.object_id, ...ARRANGE_DIMENSIONS[entity.entity_type] };
+        return {
+          id: entity.object_id,
+          entityType: entity.entity_type,
+          position: entity.position,
+          ...ARRANGE_DIMENSIONS[entity.entity_type],
+        };
       });
+      const canvasById = new Map(
+        Object.entries(board.objects ?? {}).filter(
+          ([objectId]) => zoneForCanvasId.get(objectId) === zoneId
+        )
+      );
+      const canvasItems = [...canvasById]
+        .map(([id, object]) => ({
+          id,
+          position: { x: object.x - zone.x, y: object.y - zone.y },
+          ...getCanvasObjectDimensions(object),
+        }))
+        .sort(
+          (a, b) =>
+            a.position.y - b.position.y || a.position.x - b.position.x || a.id.localeCompare(b.id)
+        );
 
-      // The zone arrange spaces items by the zone's own gap, so the shapes have
-      // to be measured with that gap and not a board-level one.
-      const itemGap = zonePolicy.gap ?? 24;
       return {
         id: zoneId,
         zone,
-        itemCount: items.length,
-        shapes: zoneShapesForItems(items, {
-          titleInset: frame.headerInset,
-          padding: frame.padding,
-          gapX: itemGap,
-          gapY: itemGap,
-          // compact_list is always one column; offering wider shapes would
-          // promise a landscape form the zone arrange will never produce.
-          ...(zonePolicy.preset === 'compact_list' ? { maxColumns: 1 } : {}),
-          gridSize: BOARD_GRID_SIZE,
-        }),
+        itemCount: items.length + canvasItems.length,
+        entitiesById: new Map(ordered.map((entity) => [entity.object_id, entity])),
+        canvasById,
+        x: zone.x,
+        y: zone.y,
+        width: zone.width,
+        height: zone.height,
+        fontSize: zone.fontSize,
+        status: zone.status,
+        layout: zonePolicy,
+        items: [...items, ...canvasItems],
       };
     })
   );
 
-  const layout = layoutJustifiedZones(zones, {
-    targetWidth: options.targetWidth ?? 1600,
+  const looseEntities =
+    options.includeLooseItems === false ? [] : visible.filter((entity) => !entity.zone_id);
+  const looseMetadata = await loadEntityLayoutMetadata(
+    ctx,
+    looseEntities.filter((entity) => entity.entity_type === 'card' && !measuredSize(entity))
+  );
+  const looseEntitiesById = new Map(looseEntities.map((entity) => [entity.object_id, entity]));
+  const looseCanvasById = new Map(
+    options.includeLooseItems === false
+      ? []
+      : Object.entries(board.objects ?? {}).filter(
+          ([objectId, object]) =>
+            object.type !== 'zone' &&
+            !(object.type === 'artifact' && object.locked) &&
+            !zoneForCanvasId.has(objectId)
+        )
+  );
+  const looseItems = [
+    ...looseEntities.map((entity) => {
+      const measured = measuredSize(entity);
+      if (measured) return { id: entity.object_id, ...entity.position, ...measured };
+      if (entity.entity_type === 'card') {
+        return {
+          id: entity.object_id,
+          ...entity.position,
+          width: ARRANGE_DIMENSIONS.card.width,
+          height: estimateCardHeight(looseMetadata.get(entity.object_id)?.card),
+        };
+      }
+      return { id: entity.object_id, ...entity.position, ...ARRANGE_DIMENSIONS.branch };
+    }),
+    ...[...looseCanvasById].map(([id, object]) => ({
+      id,
+      x: object.x,
+      y: object.y,
+      ...getCanvasObjectDimensions(object),
+    })),
+  ];
+
+  const plan = planBoardZoneArrangement(zones, {
+    targetWidth: options.targetWidth,
     targetRowHeight: options.targetRowHeight,
-    gap: options.gap ?? 40,
-    startX: options.startX ?? DEFAULT_ARRANGE_START_X,
-    startY: options.startY ?? DEFAULT_ARRANGE_START_Y,
+    gap: options.gap,
+    startX: options.startX,
+    startY: options.startY,
     maxPerRow: options.maxPerRow,
-    justifyLastRow: options.justifyLastRow === true,
-    gridSize: BOARD_GRID_SIZE,
+    justifyLastRow: options.justifyLastRow,
+    looseItems,
   });
 
   const byId = new Map(zones.map((entry) => [entry.id, entry]));
   if (options.dryRun !== true) {
-    for (const placement of layout.placements) {
-      const entry = byId.get(placement.id);
-      if (!entry) continue;
-      await ctx.app.service('boards').patch(
-        boardId,
-        {
-          _action: 'upsertObject',
-          objectId: placement.id,
-          objectData: {
+    const objects = Object.fromEntries([
+      ...plan.zones.map((arranged) => {
+        const entry = byId.get(arranged.id);
+        if (!entry) throw new Error(`Missing board zone '${arranged.id}'.`);
+        return [
+          arranged.id,
+          {
             ...entry.zone,
-            x: placement.x,
-            y: placement.y,
-            width: placement.width,
-            height: placement.height,
+            x: arranged.position.x,
+            y: arranged.position.y,
+            width: arranged.width,
+            height: arranged.height,
           },
-        } as unknown as Partial<Board>,
+        ];
+      }),
+      ...plan.looseItems.flatMap((item) => {
+        const object = looseCanvasById.get(item.id);
+        if (!object) return [];
+        return [
+          [
+            item.id,
+            {
+              ...object,
+              x: item.x,
+              y: item.y,
+              ...('width' in object ? { width: item.width } : {}),
+              ...('height' in object ? { height: item.height } : {}),
+            },
+          ] as const,
+        ];
+      }),
+      ...plan.zones.flatMap((arranged) => {
+        const entry = byId.get(arranged.id);
+        if (!entry) throw new Error(`Missing board zone '${arranged.id}'.`);
+        return arranged.items.flatMap((item) => {
+          const object = entry.canvasById.get(item.id);
+          if (!object) return [];
+          return [
+            [
+              item.id,
+              {
+                ...object,
+                x: arranged.position.x + item.x,
+                y: arranged.position.y + item.y,
+                ...('width' in object ? { width: item.width } : {}),
+                ...('height' in object ? { height: item.height } : {}),
+              },
+            ] as const,
+          ];
+        });
+      }),
+    ]);
+    await ctx.app
+      .service('boards')
+      .patch(
+        boardId,
+        { _action: 'batchUpsertObjects', objects } as unknown as Partial<Board>,
         ctx.baseServiceParams
       );
-    }
+    await Promise.all(
+      [
+        ...plan.zones.flatMap((arranged) => {
+          const entry = byId.get(arranged.id);
+          if (!entry) throw new Error(`Missing board zone '${arranged.id}'.`);
+          return arranged.items.flatMap((item) =>
+            entry.entitiesById.has(item.id) ? [{ item, entry }] : []
+          );
+        }),
+        ...plan.looseItems.flatMap((item) => {
+          const entity = looseEntitiesById.get(item.id);
+          return entity ? [{ item, entity }] : [];
+        }),
+      ].map(async (planned) => {
+        if ('entity' in planned) {
+          await ctx.app.service('board-objects').patch(
+            planned.entity.object_id,
+            {
+              position: { x: planned.item.x, y: planned.item.y },
+              size: { width: planned.item.width, height: planned.item.height },
+            },
+            ctx.baseServiceParams
+          );
+          return;
+        }
+        const { item, entry } = planned;
+        const entity = entry.entitiesById.get(item.id);
+        if (!entity) throw new Error(`Missing board entity '${item.id}'.`);
+        await ctx.app.service('board-objects').patch(
+          entity.object_id,
+          {
+            position: { x: item.x, y: item.y },
+            size: { width: item.width, height: item.height },
+            ...(normalizeZoneLayoutPolicy(entry.zone.layout).preset === 'compact_list' &&
+            entity.compact !== true
+              ? { compact: true }
+              : {}),
+          },
+          ctx.baseServiceParams
+        );
+      })
+    );
   }
 
-  return { layout, byId };
+  return { plan, byId };
 }
 
 export function registerBoardTools(server: McpServer, ctx: McpContext): void {
@@ -814,10 +999,11 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_auto_arrange',
     {
       description:
-        'Arrange worktrees/branches, cards, and artifacts on a board in a dimension-aware row-major grid. ' +
+        'Arrange worktrees/branches, cards, and artifacts on a board in a measured compact cluster. ' +
         'By default, only free-floating entities are moved; zone-pinned entities stay in their zones. ' +
         'Artifacts are always included; set includeCanvasObjects=true to also include text, markdown, and apps, and includeZones=true to arrange zones as movable containers. ' +
-        'Unless startY is given explicitly, the grid is placed clear of every existing zone rectangle instead of on top of one. ' +
+        'Unless startY is given explicitly, the cluster is placed clear of every existing zone rectangle instead of on top of one. ' +
+        'Pass columns to request an explicit row-major grid instead. ' +
         'Use this after creating or moving many board items so the canvas is tidy and collision-free.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
@@ -848,7 +1034,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           ),
         columns: mcpOptionalPositiveInt(
           'columns',
-          'Number of columns in the grid (default: square-ish layout).'
+          'Use an explicit row-major grid with exactly this many columns (default: compact cluster).'
         ),
         startX: mcpOptionalNumber('startX', 'Canvas X origin (default: 80).'),
         startY: mcpOptionalNumber(
@@ -877,7 +1063,10 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       );
       const entities = visibleEntities
         .filter((entity) => args.includePinned === true || !entity.zone_id)
-        .sort(compareBoardEntitiesSpatially);
+        .sort(
+          (a, b) =>
+            a.created_at.localeCompare(b.created_at) || a.object_id.localeCompare(b.object_id)
+        );
       const requestedStartX = snapBoardGridValue(args.startX ?? DEFAULT_ARRANGE_START_X);
       const requestedStartY = snapBoardGridValue(args.startY ?? DEFAULT_ARRANGE_START_Y);
       const gapX = boardGridSpacing(args.gapX ?? 40);
@@ -943,16 +1132,25 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           ...getCanvasObjectDimensions(object),
         });
       }
-      items.sort((a, b) => a.y - b.y || a.x - b.x || a.id.localeCompare(b.id));
-      const layout = layoutRectangles(
-        items.map(({ id, width, height }) => ({ id, width, height })),
-        {
-          preferredColumns: args.columns ?? Math.ceil(Math.sqrt(Math.max(1, items.length))),
-          gapX,
-          gapY,
-          gridSize: BOARD_GRID_SIZE,
-        }
-      );
+      const layoutItems = items.map(({ id, x, y, width, height }) => ({
+        id,
+        width,
+        height,
+        sourceX: x,
+        sourceY: y,
+      }));
+      const layout = args.columns
+        ? layoutRectangles(layoutItems, {
+            exactColumns: args.columns,
+            gapX,
+            gapY,
+            gridSize: BOARD_GRID_SIZE,
+          })
+        : layoutCompactRectangles(layoutItems, {
+            gapX,
+            gapY,
+            gridSize: BOARD_GRID_SIZE,
+          });
       const { startX, startY, avoidedZoneIds } = resolveArrangeOrigin({
         startX: requestedStartX,
         startY: requestedStartY,
@@ -970,6 +1168,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         entityType?: string;
         position: { x: number; y: number };
       }> = [];
+      const canvasObjectUpdates: Record<string, BoardObject> = {};
 
       for (const item of items) {
         const placement = placementById.get(item.id);
@@ -991,22 +1190,21 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
             position,
           });
         } else if (item.object) {
-          await boardsService.patch(
-            boardId,
-            {
-              _action: 'upsertObject',
-              objectId: item.id,
-              objectData: {
-                ...item.object,
-                ...position,
-                ...('width' in item.object ? { width: placement.width } : {}),
-                ...('height' in item.object ? { height: placement.height } : {}),
-              },
-            },
-            ctx.baseServiceParams
-          );
+          canvasObjectUpdates[item.id] = {
+            ...item.object,
+            ...position,
+            ...('width' in item.object ? { width: placement.width } : {}),
+            ...('height' in item.object ? { height: placement.height } : {}),
+          } as BoardObject;
           updates.push({ objectId: item.id, objectType: item.object.type, position });
         }
+      }
+      if (Object.keys(canvasObjectUpdates).length > 0) {
+        await boardsService.patch(
+          boardId,
+          { _action: 'batchUpsertObjects', objects: canvasObjectUpdates },
+          ctx.baseServiceParams
+        );
       }
 
       return textResult({
@@ -1035,7 +1233,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         warning:
           [
             avoidedZoneIds.length > 0
-              ? `The default grid origin would have covered ${avoidedZoneIds.length} existing zone(s); the grid was placed below every zone at y=${startY}. Pass startY to override.`
+              ? `The default layout origin would have covered ${avoidedZoneIds.length} existing zone(s); the layout was placed below every zone at y=${startY}. Pass startY to override.`
               : null,
             unusableSizeObjectIds.length > 0
               ? `Ignored an unusable persisted size on ${unusableSizeObjectIds.join(', ')} and laid them out at the nominal size for their kind.`
@@ -1053,7 +1251,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_auto_arrange_zone',
     {
       description:
-        'Arrange worktrees/branches and cards inside one board zone using their measured rendered rectangles. Positions are relative to the zone and ordered top-left, left-to-right, then row-by-row. A fully separated grid is always preferred, including compact edge margins and gaps when needed. columns is a target by default: when it cannot fit, the nearest contained non-overlapping grid is used and reported. Set strictColumns for a hard column count. If no grid can fit, the default is no position changes. An accessible cascade deck is available only through explicit overflowStrategy:"deck". The result reports exact containment and overflow.',
+        'Arrange every positionable item inside one board zone: pinned worktrees/branches and cards plus geometrically contained artifacts, notes, apps, and other canvas objects. Measured heterogeneous rectangles use a deterministic compact cluster by default; persisted sizes and documented per-kind fallbacks are used when browser measurements are unavailable. Pass columns for an explicit grid. If no collision-free contained layout fits, no positions change unless the caller explicitly requests overflowStrategy:"deck" for entity-only contents.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
@@ -1169,16 +1367,25 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
             entity.card_id !== undefined)
       );
       const metadata = await loadEntityLayoutMetadata(ctx, metadataEntities);
-      entities = sortZoneLayoutItems(
-        entities.map((entity) => ({
-          entity,
-          ...(metadata.get(entity.object_id) ?? {
-            id: entity.object_id,
-            position: entity.position,
-          }),
-        })),
-        zonePolicy
-      ).map(({ entity }) => entity);
+      if (
+        !(
+          zonePolicy.preset === 'grid' &&
+          zonePolicy.columns === undefined &&
+          zonePolicy.sortBy === 'position' &&
+          args.columns === undefined
+        )
+      ) {
+        entities = sortZoneLayoutItems(
+          entities.map((entity) => ({
+            entity,
+            ...(metadata.get(entity.object_id) ?? {
+              id: entity.object_id,
+              position: entity.position,
+            }),
+          })),
+          zonePolicy
+        ).map(({ entity }) => entity);
+      }
       const naturalDimensions = new Map<string, { width: number; height: number }>();
       const unusableSizeObjectIds: string[] = [];
       for (const entity of entities) {
@@ -1235,7 +1442,48 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       );
       const padding = frame.padding;
       const titleInset = frame.headerInset;
-      if (entities.length === 0) {
+      const canvasItems = Object.entries(board.objects ?? {})
+        .flatMap(([objectId, object]) => {
+          if (object.type === 'zone' || (object.type === 'artifact' && object.locked === true))
+            return [];
+          const size = getCanvasObjectDimensions(object);
+          const centerX = object.x + size.width / 2;
+          const centerY = object.y + size.height / 2;
+          if (
+            centerX < zone.x ||
+            centerX > zone.x + zone.width ||
+            centerY < zone.y ||
+            centerY > zone.y + zone.height
+          )
+            return [];
+          return [
+            {
+              id: objectId,
+              object,
+              position: { x: object.x - zone.x, y: object.y - zone.y },
+              ...size,
+            },
+          ];
+        })
+        .sort(
+          (a, b) =>
+            a.position.y - b.position.y || a.position.x - b.position.x || a.id.localeCompare(b.id)
+        );
+      const layoutSources = [
+        ...entities.map((entity) => {
+          const size = dimensions.get(entity.object_id);
+          if (!size) throw new Error(`Missing dimensions for board object '${entity.object_id}'.`);
+          return {
+            id: entity.object_id,
+            kind: 'entity' as const,
+            entity,
+            position: entity.position,
+            ...size,
+          };
+        }),
+        ...canvasItems.map((item) => ({ ...item, kind: 'canvas' as const })),
+      ];
+      if (layoutSources.length === 0) {
         return textResult({
           boardId,
           zoneId,
@@ -1247,41 +1495,70 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           updates: [],
         });
       }
-      const layout = layoutRectangles(
-        entities.map((entity) => {
-          const size = dimensions.get(entity.object_id);
-          if (!size) throw new Error(`Missing dimensions for board object '${entity.object_id}'.`);
-          return { id: entity.object_id, ...size };
-        }),
-        {
-          // The title/status sits inside the zone, above child nodes. Layout
-          // against the remaining rectangle, then translate placements below
-          // that reserved header so cards can never cover the title.
-          bounds: {
-            width: layoutWidth,
-            height: autoResizeHeight
-              ? Number.MAX_SAFE_INTEGER
-              : Math.max(0, zone.height - titleInset),
-          },
-          padding,
-          minPadding: padding,
-          gapX,
-          gapY,
-          minGapX: gapX,
-          minGapY: gapY,
-          gridSize: BOARD_GRID_SIZE,
-          ...(zonePolicy.preset === 'compact_list'
-            ? { exactColumns: 1 }
-            : args.strictColumns === true
-              ? { exactColumns: args.columns ?? zonePolicy.columns }
-              : { preferredColumns: args.columns ?? zonePolicy.columns }),
-          allowDeck: args.overflowStrategy === 'deck',
-          deckOffsetX: DECK_OFFSET_X,
-          deckOffsetY: DECK_OFFSET_Y,
-        }
-      );
+      const useExplicitGrid =
+        args.columns !== undefined ||
+        zonePolicy.columns !== undefined ||
+        zonePolicy.preset === 'compact_list' ||
+        args.overflowStrategy === 'deck';
+      const commonLayoutOptions = {
+        // The title/status sits inside the zone, above child nodes. Layout
+        // against the remaining rectangle, then translate placements below
+        // that reserved header so cards can never cover the title.
+        bounds: {
+          width: layoutWidth,
+          height: autoResizeHeight
+            ? Number.MAX_SAFE_INTEGER
+            : Math.max(0, zone.height - titleInset),
+        },
+        padding,
+        minPadding: padding,
+        gapX,
+        gapY,
+        minGapX: gapX,
+        minGapY: gapY,
+        gridSize: BOARD_GRID_SIZE,
+      };
+      const layout = useExplicitGrid
+        ? layoutRectangles(
+            layoutSources.map(({ id, width, height }) => ({ id, width, height })),
+            {
+              ...commonLayoutOptions,
+              ...(zonePolicy.preset === 'compact_list'
+                ? { exactColumns: 1 }
+                : args.strictColumns === true
+                  ? { exactColumns: args.columns ?? zonePolicy.columns }
+                  : { preferredColumns: args.columns ?? zonePolicy.columns }),
+              allowDeck: args.overflowStrategy === 'deck' && canvasItems.length === 0,
+              deckOffsetX: DECK_OFFSET_X,
+              deckOffsetY: DECK_OFFSET_Y,
+            }
+          )
+        : layoutCompactRectangles(
+            layoutSources.map(({ id, width, height, position }) => ({
+              id,
+              width,
+              height,
+              sourceX: position.x,
+              sourceY: position.y - titleInset,
+            })),
+            {
+              bounds:
+                resizeMode === 'both'
+                  ? undefined
+                  : {
+                      width: layoutWidth,
+                      height: autoResizeHeight
+                        ? Number.MAX_SAFE_INTEGER
+                        : Math.max(0, zone.height - titleInset),
+                    },
+              padding,
+              gapX,
+              gapY,
+              gridSize: BOARD_GRID_SIZE,
+            }
+          );
       const requestedColumns =
-        args.columns === undefined ? null : Math.min(args.columns, entities.length);
+        args.columns === undefined ? null : Math.min(args.columns, layoutSources.length);
       if (layout.overflowingItemIds.length > 0) {
         return textResult({
           boardId,
@@ -1322,25 +1599,40 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         stackIndex: number;
         deckDepth: number;
       }> = [];
+      const canvasObjectUpdates: Record<string, BoardObject> = {};
 
-      for (const entity of entities) {
-        const placement = placementById.get(entity.object_id);
-        if (!placement) throw new Error(`Layout did not place board object '${entity.object_id}'.`);
-        const position = { x: placement.x, y: placement.y + titleInset };
-        await boardObjectsService.patch(
-          entity.object_id,
-          {
-            position,
-            size: { width: placement.width, height: placement.height },
-            ...(zonePolicy.preset === 'compact_list' && entity.compact !== true
-              ? { compact: true }
-              : {}),
-          },
-          ctx.baseServiceParams
-        );
+      for (const source of layoutSources) {
+        const placement = placementById.get(source.id);
+        if (!placement) throw new Error(`Layout did not place board object '${source.id}'.`);
+        const relativePosition = { x: placement.x, y: placement.y + titleInset };
+        const position =
+          source.kind === 'canvas'
+            ? { x: zone.x + relativePosition.x, y: zone.y + relativePosition.y }
+            : relativePosition;
+        if (source.kind === 'entity') {
+          await boardObjectsService.patch(
+            source.entity.object_id,
+            {
+              position,
+              size: { width: placement.width, height: placement.height },
+              ...(zonePolicy.preset === 'compact_list' && source.entity.compact !== true
+                ? { compact: true }
+                : {}),
+            },
+            ctx.baseServiceParams
+          );
+        } else {
+          canvasObjectUpdates[source.id] = {
+            ...source.object,
+            x: position.x,
+            y: position.y,
+            ...('width' in source.object ? { width: placement.width } : {}),
+            ...('height' in source.object ? { height: placement.height } : {}),
+          } as BoardObject;
+        }
         updates.push({
-          objectId: entity.object_id,
-          entityType: entity.entity_type,
+          objectId: source.id,
+          entityType: source.kind === 'entity' ? source.entity.entity_type : source.object.type,
           position,
           row: placement.row,
           column: placement.column,
@@ -1350,7 +1642,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       }
 
       const appliedZoneHeight = autoResizeHeight
-        ? Math.max(200, ceilBoardGridValue(layout.height + titleInset))
+        ? growZoneLayoutHeight(zone.height, layout.height + titleInset)
         : ceilBoardGridValue(zone.height);
       const appliedZoneWidth =
         resizeMode === 'both'
@@ -1367,26 +1659,95 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
               height: appliedZoneHeight,
             })
           : [];
-      if (appliedZoneHeight !== zone.height || appliedZoneWidth !== zone.width) {
+      const reflowPlan =
+        zonePolicy.onOverflow === 'reflow_board' && resizedOverZoneIds.length > 0
+          ? planZoneGrowthReflow(
+              Object.entries(board.objects ?? {}).flatMap(([id, object]) =>
+                object.type === 'zone' ? [{ id, ...object }] : []
+              ),
+              zoneId,
+              {
+                id: zoneId,
+                x: zone.x,
+                y: zone.y,
+                width: appliedZoneWidth,
+                height: appliedZoneHeight,
+              },
+              { gap: zonePolicy.gap }
+            )
+          : null;
+      const movedZoneIds = reflowPlan?.movedZoneIds ?? [];
+      const reflowedZoneUpdates = Object.fromEntries(
+        movedZoneIds.flatMap((movedZoneId) => {
+          const source = board.objects?.[movedZoneId];
+          const placement = reflowPlan?.placements.find((item) => item.id === movedZoneId);
+          return source?.type === 'zone' && placement
+            ? [[movedZoneId, { ...source, x: placement.x, y: placement.y }] as const]
+            : [];
+        })
+      );
+      const translatedCanvasUpdates = Object.fromEntries(
+        Object.entries(board.objects ?? {}).flatMap(([objectId, object]) => {
+          if (object.type === 'zone' || (object.type === 'artifact' && object.locked === true)) {
+            return [];
+          }
+          const size = getCanvasObjectDimensions(object);
+          const center = { x: object.x + size.width / 2, y: object.y + size.height / 2 };
+          const sourceZone = movedZoneIds
+            .flatMap((movedZoneId) => {
+              const candidate = board.objects?.[movedZoneId];
+              return candidate?.type === 'zone' ? [[movedZoneId, candidate] as const] : [];
+            })
+            .filter(
+              ([, candidate]) =>
+                center.x >= candidate.x &&
+                center.x <= candidate.x + candidate.width &&
+                center.y >= candidate.y &&
+                center.y <= candidate.y + candidate.height
+            )
+            .sort(
+              ([leftId, left], [rightId, right]) =>
+                left.width * left.height - right.width * right.height ||
+                leftId.localeCompare(rightId)
+            )[0];
+          if (!sourceZone) return [];
+          const placement = reflowPlan?.placements.find((item) => item.id === sourceZone[0]);
+          if (!placement) return [];
+          const deltaX = placement.x - sourceZone[1].x;
+          const deltaY = placement.y - sourceZone[1].y;
+          return [[objectId, { ...object, x: object.x + deltaX, y: object.y + deltaY }] as const];
+        })
+      );
+      if (
+        appliedZoneHeight !== zone.height ||
+        appliedZoneWidth !== zone.width ||
+        Object.keys(canvasObjectUpdates).length > 0 ||
+        movedZoneIds.length > 0
+      ) {
         await ctx.app.service('boards').patch(
           boardId,
           {
-            _action: 'upsertObject',
-            objectId: zoneId,
-            objectData: { ...zone, width: appliedZoneWidth, height: appliedZoneHeight },
+            _action: 'batchUpsertObjects',
+            objects: {
+              ...(appliedZoneHeight !== zone.height || appliedZoneWidth !== zone.width
+                ? {
+                    [zoneId]: {
+                      ...zone,
+                      width: appliedZoneWidth,
+                      height: appliedZoneHeight,
+                    },
+                  }
+                : {}),
+              ...reflowedZoneUpdates,
+              ...translatedCanvasUpdates,
+              ...canvasObjectUpdates,
+            },
           } as unknown as Partial<Board>,
           ctx.baseServiceParams
         );
       }
 
-      // A grow that covered a neighbour is a board-level problem, so repair it
-      // with the board-level layout rather than a bespoke nudge: the zones are
-      // re-justified into rows, which moves the covered zones out of the way.
-      // Only worth doing when something was actually covered.
-      let reflowedBoard = false;
-      if (zonePolicy.onOverflow === 'reflow_board' && resizedOverZoneIds.length > 0) {
-        reflowedBoard = (await arrangeBoardZones(ctx, boardId, { gap: zonePolicy.gap })) !== null;
-      }
+      const reflowedBoard = movedZoneIds.length > 0;
 
       return textResult({
         boardId,
@@ -1420,12 +1781,13 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         resize: resizeMode,
         onOverflow: zonePolicy.onOverflow,
         resizedOverZoneIds,
+        movedZoneIds,
         reflowedBoard,
         warning:
           [
             resizedOverZoneIds.length > 0
               ? reflowedBoard
-                ? `Growing this zone covered ${resizedOverZoneIds.join(', ')}; the board's zones were re-justified into rows to separate them.`
+                ? `Growing this zone covered ${resizedOverZoneIds.join(', ')}; moved ${movedZoneIds.join(', ')} by the minimum collision-free shift.`
                 : `Growing this zone to ${appliedZoneWidth}x${appliedZoneHeight} now covers ${resizedOverZoneIds.join(', ')}. Run agor_boards_arrange_zones to separate them, or set the zone's onOverflow to "reflow_board" to have it done automatically.`
               : null,
             layout.overflowingItemIds.length > 0
@@ -1701,7 +2063,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_arrange_zones',
     {
       description:
-        "Arrange a board's zones themselves into justified rows, photo-grid style: zones flow left-to-right and top-to-bottom, every zone in a row shares that row's height, and each full row is stretched flush to targetWidth. Zone widths and heights are both rewritten, so a zone becomes portrait or landscape depending on which shape lets its own contents fit the row. Pinned contents move with their zone; call agor_boards_auto_arrange_zone afterwards to re-pack the items inside each zone at its new width. Use targetRowHeight to stop one tall zone from dictating a row.",
+        "Arrange a board's zones, free worktrees/cards, and canvas objects as one operation. Zones use measured child sizes to choose legal frames; those frames and every visible free item (including artifacts) form one compact, collision-free board cluster. All canvas containers are written in one batch, then every zone's children are re-packed for its final frame. targetRowHeight defaults to 600.",
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
         targetWidth: mcpOptionalPositiveInt(
@@ -1710,7 +2072,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         ),
         targetRowHeight: mcpOptionalPositiveInt(
           'targetRowHeight',
-          'Preferred row height. Without it, a tall zone can be packed beside a short one and leave the short one mostly blank.'
+          'Preferred row height (default: 600).'
         ),
         gap: mcpOptionalNonNegativeInt('gap', 'Space between zones (default: 40).'),
         startX: mcpOptionalNumber('startX', 'Canvas X origin (default: 80).'),
@@ -1752,7 +2114,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           note: 'No zones present.',
         });
       }
-      const { layout, byId } = arranged;
+      const { plan, byId } = arranged;
+      const { layout } = plan;
 
       return textResult({
         boardId,
@@ -1768,17 +2131,24 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           layout.overflowingRows.length > 0
             ? `Row(s) ${layout.overflowingRows.join(', ')} hold a zone wider than targetWidth even at its narrowest shape; they were left at their natural width. Raise targetWidth or move a zone.`
             : null,
-        note: 'Zone contents keep their zone-relative positions. Run agor_boards_auto_arrange_zone on each zone to re-pack items at the new width.',
-        updates: layout.placements.map((placement) => ({
-          objectId: placement.id,
-          label: byId.get(placement.id)?.zone.label ?? null,
-          itemCount: byId.get(placement.id)?.itemCount ?? 0,
-          position: { x: placement.x, y: placement.y },
-          size: { width: placement.width, height: placement.height },
-          row: placement.row,
-          column: placement.column,
-          contentColumns: placement.columns,
-          slackY: placement.slackY,
+        note: 'Zone containers and child placements were planned together.',
+        arrangedLooseItems: plan.looseItems.length,
+        looseUpdates: plan.looseItems.map((item) => ({
+          objectId: item.id,
+          position: { x: item.x, y: item.y },
+          size: { width: item.width, height: item.height },
+        })),
+        updates: plan.zones.map((zone) => ({
+          objectId: zone.id,
+          label: byId.get(zone.id)?.zone.label ?? null,
+          itemCount: byId.get(zone.id)?.itemCount ?? 0,
+          arrangedItems: zone.items.length,
+          position: zone.position,
+          size: { width: zone.width, height: zone.height },
+          row: zone.row,
+          column: zone.column,
+          contentColumns: zone.contentColumns,
+          slackY: zone.slackY,
         })),
       });
     }

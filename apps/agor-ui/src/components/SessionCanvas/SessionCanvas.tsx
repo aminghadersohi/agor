@@ -2,7 +2,9 @@ import {
   BOARD_GRID_SIZE,
   BOARD_SNAP_GRID,
   ceilBoardGridSize,
-  layoutRectangles,
+  layoutAlignedRectangles,
+  layoutCompactRectangles,
+  layoutSelectionGrid,
   snapBoardGridPoint,
   snapBoardGridValue,
 } from '@agor/core/layout/rectangle-packing';
@@ -110,6 +112,11 @@ import { ARRANGE_DEAL_CLASS } from './canvas/arrangeAnimation';
 import { CommentNode, ZoneNode } from './canvas/BoardObjectNodes';
 import { MarkdownNode } from './canvas/MarkdownNode';
 import { RemoteCursorLayer, type StaticRemoteCursor } from './canvas/RemoteCursorLayer';
+import {
+  CANVAS_LAYOUT_CONTROLS_CLASS,
+  SelectionLayoutPopover,
+  type SelectionLayoutSettings,
+} from './canvas/SelectionLayoutPopover';
 import { useBoardObjects } from './canvas/useBoardObjects';
 import { findIntersectingObjects, findZoneAtPosition } from './canvas/utils/collisionDetection';
 import {
@@ -123,8 +130,10 @@ import {
   getNodeAbsolutePosition,
   type ParentInfo,
   relativeToAbsolute,
+  translateTrackedChildPositions,
 } from './canvas/utils/coordinateTransforms';
 import {
+  consumeTrackedDragPosition,
   flowSnapDistanceForZoom,
   getGuideLayoutRects,
   type LayoutGuide,
@@ -134,14 +143,24 @@ import {
 } from './canvas/utils/layoutGuides';
 import {
   getMarqueeSelection,
+  getOnlySelectedZoneIds,
   getSelectedLayoutNodes,
   removeSelectedDescendants,
   suppressIndividualZoneToolbarsForMultiSelect,
 } from './canvas/utils/marqueeSelection';
 import { getValidZoneParentId, sanitizeOrphanedNodeParents } from './canvas/utils/nodeParentUtils';
+import { mergePendingZoneGeometry, type ZoneGeometry } from './canvas/utils/pendingZoneGeometry';
 import { persistedResizeRect, type ResizeRect } from './canvas/utils/resizeGeometry';
 import { ZoneTriggerModal } from './canvas/ZoneTriggerModal';
 import { DEFAULT_BOARD_OBJECT_Z_INDEX, selectedZIndex } from './canvas/zOrder';
+
+export function isCanvasSelectionControlTarget(target: Element): boolean {
+  return Boolean(
+    target.closest(
+      `.canvas-layout-toolbar, .${CANVAS_LAYOUT_CONTROLS_CLASS}, .ant-modal-root, .react-flow__controls, .react-flow__minimap, button, input, textarea, select, a, [role="button"]`
+    )
+  );
+}
 
 interface SessionCanvasProps {
   board: Board | null;
@@ -727,6 +746,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Debounce timer ref for position updates
     const layoutUpdateTimerRef = useRef<NodeJS.Timeout | null>(null);
     const pendingLayoutUpdatesRef = useRef<Record<string, { x: number; y: number }>>({});
+    // React Flow's drag-stop node can lag behind a position that our alignment
+    // guide handler applied through setNodes. Keep the last position actually
+    // accepted during this drag so the displayed and persisted geometry cannot
+    // diverge after the debounce/realtime echo.
+    const activeDragPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
     const isDraggingRef = useRef(false);
     const [isDraggingCanvas, setIsDraggingCanvas] = useState(false);
     const [alignmentGuides, setAlignmentGuides] = useState<LayoutGuide[]>([]);
@@ -761,6 +785,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     );
     // Track positions we've explicitly set (to avoid being overwritten by other clients)
     const localPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
+    const localZoneGeometryRef = useRef<Record<string, ZoneGeometry>>({});
     // Track objects we've deleted locally (to prevent them from reappearing during WebSocket updates)
     const deletedObjectsRef = useRef<Set<string>>(new Set());
 
@@ -823,9 +848,20 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
     const handleArrangeNodes = useStableCallback((arrangedNodes: Node[], totalMs: number) => {
       const currentNodes = reactFlowInstanceRef.current?.getNodes() ?? nodes;
+      const arrangedById = new Map(arrangedNodes.map((node) => [node.id, node]));
       for (const arranged of arrangedNodes) {
+        if (arranged.type === 'zone') {
+          localZoneGeometryRef.current[arranged.id] = {
+            x: arranged.position.x,
+            y: arranged.position.y,
+            width: Number(arranged.width ?? arranged.style?.width ?? 0),
+            height: Number(arranged.height ?? arranged.style?.height ?? 0),
+          };
+          continue;
+        }
         const parent = arranged.parentId
-          ? currentNodes.find((candidate) => candidate.id === arranged.parentId)
+          ? (arrangedById.get(arranged.parentId) ??
+            currentNodes.find((candidate) => candidate.id === arranged.parentId))
           : undefined;
         localPositionsRef.current[arranged.id] = parent
           ? relativeToAbsolute(arranged.position, getNodeAbsolutePosition(parent, currentNodes))
@@ -868,6 +904,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       deleteObject,
       demoteAutoZone,
       deferAutoZone,
+      arrangeBoardZones,
+      preserveAutoZoneFrameOnce,
       setPlacementCompact,
       zoneStackByNodeId,
       calledOutNodeIds,
@@ -1726,6 +1764,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           .filter((n) => n.type === 'zone' && !deletedObjectsRef.current.has(n.id))
           .map((newZone) => {
             const existingZone = currentNodesById.get(newZone.id);
+            const pendingGeometry = localZoneGeometryRef.current[newZone.id];
+            const merged = pendingGeometry
+              ? mergePendingZoneGeometry(newZone, pendingGeometry)
+              : { node: newZone, confirmed: false };
+            if (merged.confirmed) {
+              delete localZoneGeometryRef.current[newZone.id];
+              delete localPositionsRef.current[newZone.id];
+            }
             // Honor the persisted/default base order from board data (`newZone`),
             // and re-apply the +1 selection bump if the zone is currently
             // selected. Reading the base from `newZone` (not the stale runtime
@@ -1733,7 +1779,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // effect immediately instead of being clobbered.
             const base = (newZone.zIndex as number) ?? DEFAULT_BOARD_OBJECT_Z_INDEX.zone;
             return {
-              ...newZone,
+              ...merged.node,
               selected: existingZone?.selected,
               zIndex: selectedZIndex(base, !!existingZone?.selected),
             };
@@ -1973,10 +2019,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   : node.type === 'cardNode'
                     ? boardObjectByCard.get(node.id.replace('card-', ''))
                     : undefined;
+              const boardObject = node.type === 'zone' ? board?.objects?.[node.id] : undefined;
+              const persistedZone = boardObject?.type === 'zone' ? boardObject : undefined;
               const currentWidth =
-                node.type === 'zone' ? node.style?.width : entityBoardObject?.size?.width;
+                node.type === 'zone' ? persistedZone?.width : entityBoardObject?.size?.width;
               const currentHeight =
-                node.type === 'zone' ? node.style?.height : entityBoardObject?.size?.height;
+                node.type === 'zone' ? persistedZone?.height : entityBoardObject?.size?.height;
 
               // Skip if dimensions haven't changed (tolerance of 1px for floating point)
               if (
@@ -1989,12 +2037,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               }
 
               const currentPosition =
-                node.type === 'zone' ? board?.objects?.[node.id] : entityBoardObject?.position;
+                node.type === 'zone' ? persistedZone : entityBoardObject?.position;
               if (!currentPosition) return;
 
               // Accumulate the complete rect so a left/top handle persists
               // origin and dimensions together in the zone's one board patch.
-              pendingResizeUpdatesRef.current[change.id] = persistedResizeRect(
+              const pendingRect = persistedResizeRect(
                 {
                   x: currentPosition.x,
                   y: currentPosition.y,
@@ -2004,6 +2052,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 resizePositionById.get(change.id),
                 { width: newWidth, height: newHeight }
               );
+              pendingResizeUpdatesRef.current[change.id] = pendingRect;
+              if (node.type === 'zone') {
+                localZoneGeometryRef.current[change.id] = pendingRect;
+                preserveAutoZoneFrameOnce(change.id);
+              }
 
               // Clear existing timer
               if (resizeTimerRef.current) {
@@ -2073,6 +2126,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         client,
         nodes,
         onNodesChangeInternal,
+        preserveAutoZoneFrameOnce,
         setNodes,
       ]
     );
@@ -2087,6 +2141,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           void demoteAutoZone(node.parentId);
         }
         isDraggingRef.current = true;
+        const absolutePos = node.positionAbsolute || node.position;
+        activeDragPositionsRef.current[node.id] = {
+          x: absolutePos.x,
+          y: absolutePos.y,
+        };
         setIsDraggingCanvas(true);
         setAlignmentGuides([]);
         const viewport = reactFlowInstanceRef.current?.getViewport();
@@ -2100,6 +2159,19 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       (_event, node) => {
         const absolutePos = node.positionAbsolute || node.position;
         const currentNodes = reactFlowInstanceRef.current?.getNodes() ?? nodes;
+        const trackAcceptedPosition = (position: { x: number; y: number }) => {
+          const previous = activeDragPositionsRef.current[node.id];
+          if (node.type === 'zone' && previous) {
+            translateTrackedChildPositions(
+              currentNodes,
+              node.id,
+              previous,
+              position,
+              localPositionsRef.current
+            );
+          }
+          activeDragPositionsRef.current[node.id] = position;
+        };
         const layoutRects = getGuideLayoutRects(node, currentNodes);
         if (layoutRects) {
           const zoom = reactFlowInstanceRef.current?.getZoom() ?? guideViewport.zoom;
@@ -2125,6 +2197,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               )
             );
             localPositionsRef.current[node.id] = { x: snapped.x, y: snapped.y };
+            trackAcceptedPosition({ x: snapped.x, y: snapped.y });
             return;
           }
         }
@@ -2135,6 +2208,15 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           x: absolutePos.x,
           y: absolutePos.y,
         };
+        trackAcceptedPosition({ x: absolutePos.x, y: absolutePos.y });
+        if (node.type === 'zone') {
+          localZoneGeometryRef.current[node.id] = {
+            x: absolutePos.x,
+            y: absolutePos.y,
+            width: Number(node.width ?? node.style?.width ?? 0),
+            height: Number(node.height ?? node.style?.height ?? 0),
+          };
+        }
       },
       [guideViewport.zoom, nodes, setNodes]
     );
@@ -2151,11 +2233,25 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
         // Track final position locally
         // IMPORTANT: Store ABSOLUTE position, not relative!
-        const absolutePos = node.positionAbsolute || node.position;
+        const eventAbsolutePos = node.positionAbsolute || node.position;
+        const absolutePos = consumeTrackedDragPosition(
+          node.id,
+          eventAbsolutePos,
+          activeDragPositionsRef.current
+        );
         localPositionsRef.current[node.id] = {
           x: absolutePos.x,
           y: absolutePos.y,
         };
+
+        if (node.type === 'zone') {
+          localZoneGeometryRef.current[node.id] = {
+            x: absolutePos.x,
+            y: absolutePos.y,
+            width: Number(node.width ?? node.style?.width ?? 0),
+            height: Number(node.height ?? node.style?.height ?? 0),
+          };
+        }
 
         // Accumulate position updates
         // IMPORTANT: Store ABSOLUTE position for consistency!
@@ -2511,61 +2607,95 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       [nodes]
     );
     const handleLayoutAction = useCallback(
-      async (action: 'arrange' | 'left' | 'center' | 'top' | 'middle' | 'width' | 'height') => {
+      async (
+        action: 'arrange' | 'left' | 'center' | 'top' | 'middle' | 'width' | 'height',
+        layoutSettings?: SelectionLayoutSettings
+      ) => {
         if (!board || !client || selectedLayoutNodes.length < 2) return;
+        const selectedZoneIds = getOnlySelectedZoneIds(selectedLayoutNodes);
+        if (action === 'arrange' && layoutSettings?.mode !== 'grid' && selectedZoneIds) {
+          await arrangeBoardZones(selectedZoneIds);
+          return;
+        }
         const size = (node: Node) =>
           ceilBoardGridSize({
             width: Number(node.width ?? node.style?.width ?? 240),
             height: Number(node.height ?? node.style?.height ?? 120),
           });
-        const rects = selectedLayoutNodes
-          .map((node) => {
-            const position = getNodeAbsolutePosition(node, nodes);
-            return { node, position, ...size(node) };
-          })
-          .sort(
-            (a, b) =>
-              a.position.y - b.position.y ||
-              a.position.x - b.position.x ||
-              a.node.id.localeCompare(b.node.id)
-          );
+        const rects = selectedLayoutNodes.map((node) => {
+          const position = getNodeAbsolutePosition(node, nodes);
+          return { node, position, ...size(node) };
+        });
         const left = snapBoardGridValue(Math.min(...rects.map((item) => item.position.x)));
         const right = Math.max(...rects.map((item) => item.position.x + item.width));
         const top = snapBoardGridValue(Math.min(...rects.map((item) => item.position.y)));
-        const bottom = Math.max(...rects.map((item) => item.position.y + item.height));
-        const center = (left + right) / 2;
-        const middle = (top + bottom) / 2;
         const targetWidth = rects[0]?.width ?? 240;
         const targetHeight = rects[0]?.height ?? 120;
+        const layoutItems = rects.map(({ node, position, width, height }) => ({
+          id: node.id,
+          width,
+          height,
+          sourceX: position.x,
+          sourceY: position.y,
+        }));
         const autoLayout =
-          action === 'arrange'
-            ? layoutRectangles(
-                rects.map(({ node, width, height }) => ({ id: node.id, width, height })),
-                {
-                  preferredColumns: Math.ceil(Math.sqrt(rects.length)),
+          action !== 'arrange'
+            ? null
+            : layoutSettings?.mode === 'grid'
+              ? layoutSelectionGrid(layoutItems, {
+                  ...(layoutSettings.trackAxis === 'columns'
+                    ? { columns: layoutSettings.trackCount }
+                    : { rows: layoutSettings.trackCount }),
                   gapX: BOARD_GRID_SIZE * 2,
                   gapY: BOARD_GRID_SIZE * 2,
                   gridSize: BOARD_GRID_SIZE,
-                }
-              )
-            : null;
+                  matchRowHeights: layoutSettings.matchRowHeights,
+                  rowDistribution: layoutSettings.rowDistribution,
+                  targetWidth: right - left,
+                })
+              : layoutCompactRectangles(layoutItems, {
+                  gapX: BOARD_GRID_SIZE * 2,
+                  gapY: BOARD_GRID_SIZE * 2,
+                  gridSize: BOARD_GRID_SIZE,
+                });
+        const alignedPlacements =
+          action === 'left' || action === 'center' || action === 'top' || action === 'middle'
+            ? layoutAlignedRectangles(layoutItems, action, {
+                gap: BOARD_GRID_SIZE * 2,
+                gridSize: BOARD_GRID_SIZE,
+              })
+            : [];
         const autoPlacementById = new Map(
           autoLayout?.placements.map((placement) => [placement.id, placement]) ?? []
         );
+        const alignedPlacementById = new Map(
+          alignedPlacements.map((placement) => [placement.id, placement])
+        );
         const updates = rects.map(({ node, position, width, height }) => {
-          const nextWidth = action === 'width' ? targetWidth : width;
-          const nextHeight = action === 'height' ? targetHeight : height;
+          const autoPlacement = autoPlacementById.get(node.id);
+          const alignedPlacement = alignedPlacementById.get(node.id);
+          const nextWidth =
+            action === 'width'
+              ? targetWidth
+              : action === 'arrange' && autoPlacement
+                ? autoPlacement.width
+                : width;
+          const nextHeight =
+            action === 'height'
+              ? targetHeight
+              : action === 'arrange' && autoPlacement
+                ? autoPlacement.height
+                : height;
           let x = position.x;
           let y = position.y;
-          const autoPlacement = autoPlacementById.get(node.id);
           if (autoPlacement) {
             x = left + autoPlacement.x;
             y = top + autoPlacement.y;
           }
-          if (action === 'left') x = left;
-          if (action === 'center') x = center - width / 2;
-          if (action === 'top') y = top;
-          if (action === 'middle') y = middle - height / 2;
+          if (alignedPlacement) {
+            x = alignedPlacement.x;
+            y = alignedPlacement.y;
+          }
           const snapped = action === 'arrange' ? snapBoardGridPoint({ x, y }) : { x, y };
           return {
             node,
@@ -2577,45 +2707,75 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         });
 
         const updateById = new Map(updates.map((update) => [update.node.id, update]));
-        setNodes((currentNodes) =>
-          currentNodes.map((node) => {
-            const update = updateById.get(node.id);
-            if (!update) return node;
-            const parent = node.parentId
-              ? currentNodes.find((candidate) => candidate.id === node.parentId)
-              : undefined;
-            const position = parent
-              ? absoluteToRelative(
-                  { x: update.x, y: update.y },
-                  getNodeAbsolutePosition(parent, currentNodes)
-                )
-              : { x: update.x, y: update.y };
-            return {
+        const arrangedNodes = nodes.flatMap((node) => {
+          const update = updateById.get(node.id);
+          if (!update) return [];
+          const parent = node.parentId
+            ? nodes.find((candidate) => candidate.id === node.parentId)
+            : undefined;
+          const position = parent
+            ? absoluteToRelative(
+                { x: update.x, y: update.y },
+                getNodeAbsolutePosition(parent, nodes)
+              )
+            : { x: update.x, y: update.y };
+          return [
+            {
               ...node,
               position,
               ...(action === 'arrange' || action === 'width' || action === 'height'
-                ? { style: { ...node.style, width: update.width, height: update.height } }
+                ? {
+                    width: update.width,
+                    height: update.height,
+                    style: { ...node.style, width: update.width, height: update.height },
+                  }
                 : {}),
-            };
-          })
+            },
+          ];
+        });
+        const arrangedNodeById = new Map(arrangedNodes.map((node) => [node.id, node]));
+        setNodes((currentNodes) =>
+          currentNodes.map((node) => arrangedNodeById.get(node.id) ?? node)
         );
+        handleArrangeNodes(arrangedNodes, 0);
 
+        const canvasObjectUpdates: Record<
+          string,
+          { x: number; y: number; width?: number; height?: number }
+        > = {};
+        const entityUpdates: Array<{
+          placement: BoardEntityObject;
+          position: { x: number; y: number };
+          width: number;
+          height: number;
+        }> = [];
         for (const update of updates) {
+          if (update.node.type === 'zone') {
+            const previous = getNodeAbsolutePosition(update.node, nodes);
+            translateTrackedChildPositions(
+              nodes,
+              update.node.id,
+              previous,
+              { x: update.x, y: update.y },
+              localPositionsRef.current
+            );
+            localZoneGeometryRef.current[update.node.id] = {
+              x: update.x,
+              y: update.y,
+              width: update.width,
+              height: update.height,
+            };
+          }
           localPositionsRef.current[update.node.id] = { x: update.x, y: update.y };
           const objectData = board.objects?.[update.node.id];
           if (objectData) {
-            await client.service('boards').patch(board.board_id, {
-              _action: 'upsertObject',
-              objectId: update.node.id,
-              objectData: {
-                ...objectData,
-                x: update.x,
-                y: update.y,
-                ...(action === 'arrange' || action === 'width' || action === 'height'
-                  ? { width: update.width, height: update.height }
-                  : {}),
-              },
-            } as unknown as Partial<Board>);
+            canvasObjectUpdates[update.node.id] = {
+              x: update.x,
+              y: update.y,
+              ...(action === 'arrange' || action === 'width' || action === 'height'
+                ? { width: update.width, height: update.height }
+                : {}),
+            };
             continue;
           }
           const branchObject = boardObjectByBranch.get(update.node.id);
@@ -2631,16 +2791,38 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   getNodeAbsolutePosition(parent, nodes)
                 )
               : { x: update.x, y: update.y };
-            await client.service('board-objects').patch(placement.object_id, {
+            entityUpdates.push({
+              placement,
               position,
-              ...(action === 'arrange' || action === 'width' || action === 'height'
-                ? { size: { width: update.width, height: update.height } }
-                : {}),
+              width: update.width,
+              height: update.height,
             });
           }
         }
+        await batchUpdateObjectPositions(canvasObjectUpdates);
+        await Promise.all(
+          entityUpdates.map(({ placement, position, width, height }) =>
+            client.service('board-objects').patch(placement.object_id, {
+              position,
+              ...(action === 'arrange' || action === 'width' || action === 'height'
+                ? { size: { width, height } }
+                : {}),
+            })
+          )
+        );
       },
-      [board, boardObjectByBranch, boardObjectByCard, client, nodes, selectedLayoutNodes, setNodes]
+      [
+        arrangeBoardZones,
+        board,
+        boardObjectByBranch,
+        boardObjectByCard,
+        batchUpdateObjectPositions,
+        client,
+        handleArrangeNodes,
+        nodes,
+        selectedLayoutNodes,
+        setNodes,
+      ]
     );
 
     // Cleanup debounce timers on unmount
@@ -2664,11 +2846,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         const target = event.target;
         if (!(target instanceof Element)) return;
 
-        if (
-          target.closest(
-            '.canvas-layout-toolbar, .react-flow__controls, .react-flow__minimap, button, input, textarea, select, a, [role="button"]'
-          )
-        ) {
+        if (isCanvasSelectionControlTarget(target)) {
           return;
         }
 
@@ -3320,17 +3498,27 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   ['width', 'Match width', <ColumnWidthOutlined key="width" />],
                   ['height', 'Match height', <ColumnHeightOutlined key="height" />],
                 ] as const
-              ).map(([action, label, icon]) => (
-                <Tooltip key={action} title={label}>
-                  <Button
-                    size="small"
-                    icon={icon}
-                    aria-label={label}
-                    onMouseDown={(event) => event.stopPropagation()}
-                    onClick={() => void handleLayoutAction(action)}
-                  />
-                </Tooltip>
-              ))}
+              ).map(([action, label, icon]) => {
+                const actionLabel =
+                  action === 'arrange' && selectedLayoutNodes.every((node) => node.type === 'zone')
+                    ? 'Arrange zones'
+                    : label;
+                return (
+                  <Tooltip key={action} title={actionLabel}>
+                    <Button
+                      size="small"
+                      icon={icon}
+                      aria-label={actionLabel}
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onClick={() => void handleLayoutAction(action)}
+                    />
+                  </Tooltip>
+                );
+              })}
+              <SelectionLayoutPopover
+                selectionCount={selectedLayoutNodes.length}
+                onApply={(settings) => handleLayoutAction('arrange', settings)}
+              />
             </div>
           )}
           {alignmentGuides.length > 0 && (

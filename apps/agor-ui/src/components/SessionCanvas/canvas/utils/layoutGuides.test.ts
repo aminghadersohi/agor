@@ -1,6 +1,7 @@
 import type { Node } from 'reactflow';
 import { describe, expect, it } from 'vitest';
 import {
+  consumeTrackedDragPosition,
   dedupeLayoutGuides,
   flowSnapDistanceForZoom,
   getGuideLayoutRects,
@@ -10,6 +11,22 @@ import {
   layoutSizeReadoutScreenStyle,
   snapRectToPeers,
 } from './layoutGuides';
+
+describe('drag position handoff', () => {
+  it('persists the accepted guide snap once, then cannot leak it into the next drag', () => {
+    const tracked = { moving: { x: -120, y: 992 } };
+
+    expect(consumeTrackedDragPosition('moving', { x: -120, y: 1000 }, tracked)).toEqual({
+      x: -120,
+      y: 992,
+    });
+    expect(tracked).toEqual({});
+    expect(consumeTrackedDragPosition('moving', { x: 100, y: 1040 }, tracked)).toEqual({
+      x: 100,
+      y: 1040,
+    });
+  });
+});
 
 describe('snapRectToPeers', () => {
   it('snaps edges and centers with one deterministic local guide per axis', () => {
