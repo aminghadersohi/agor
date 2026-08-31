@@ -245,16 +245,16 @@ describe('BoardObjectsService.patch', () => {
     const visibleBranch = { object_id: 'branch-placement', entity_type: 'branch' as const };
     const findVisibleByObjectId = vi.fn(async () => visibleBranch);
     const findByObjectId = vi.fn();
-    const updateLayout = vi.fn(async () => ({ ...visibleBranch, compact: true }));
+    const updateCompact = vi.fn(async () => ({ ...visibleBranch, compact: true }));
     (
       service as unknown as {
         boardObjectRepo: {
           findVisibleByObjectId: typeof findVisibleByObjectId;
           findByObjectId: typeof findByObjectId;
-          updateLayout: typeof updateLayout;
+          updateCompact: typeof updateCompact;
         };
       }
-    ).boardObjectRepo = { findVisibleByObjectId, findByObjectId, updateLayout };
+    ).boardObjectRepo = { findVisibleByObjectId, findByObjectId, updateCompact };
 
     await expect(
       service.patch('branch-placement', { compact: true }, {
@@ -263,5 +263,6 @@ describe('BoardObjectsService.patch', () => {
     ).resolves.toMatchObject({ compact: true });
     expect(findVisibleByObjectId).toHaveBeenCalledWith('user-a', 'branch-placement');
     expect(findByObjectId).not.toHaveBeenCalled();
+    expect(updateCompact).toHaveBeenCalledWith('branch-placement', true);
   });
 });
