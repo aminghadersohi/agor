@@ -11,6 +11,7 @@ import {
   BoardRepository,
   mapBoardExportBlobToCreateData,
   type TenantScopeAwareDatabase,
+  ZoneWorkflowRepository,
 } from '@agor/core/db';
 import { BadRequest } from '@agor/core/feathers';
 import { isValidUUID } from '@agor/core/ids';
@@ -27,6 +28,7 @@ import type {
   QueryParams,
   TeammateWelcomeNoteRequest,
   UUID,
+  ZoneWorkflowTransition,
 } from '@agor/core/types';
 import { NotFoundError } from '@agor/core/utils/errors';
 import { DrizzleService, type Query } from '../adapters/drizzle';
@@ -90,11 +92,16 @@ function shouldSqlPageBoardQuery(query?: Record<string, unknown>): boolean {
 export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardParams> {
   private boardRepo: BoardRepository;
   private boardObjectRepo: BoardObjectRepository;
+  private zoneWorkflowRepo: ZoneWorkflowRepository;
   private emitBoardObjectPatched?: (
     boardObject: BoardObjectPatchedEventPayload,
     params?: BoardParams
   ) => void;
   private emitBoardEvent?: (event: Omit<ManualServiceEvent, 'path'>) => void;
+  private emitZoneWorkflowRemoved?: (
+    transition: ZoneWorkflowTransition,
+    params?: BoardParams
+  ) => void;
 
   constructor(
     db: TenantScopeAwareDatabase,
@@ -102,7 +109,8 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
       boardObject: BoardObjectPatchedEventPayload,
       params?: BoardParams
     ) => void,
-    emitBoardEvent?: (event: Omit<ManualServiceEvent, 'path'>) => void
+    emitBoardEvent?: (event: Omit<ManualServiceEvent, 'path'>) => void,
+    emitZoneWorkflowRemoved?: (transition: ZoneWorkflowTransition, params?: BoardParams) => void
   ) {
     const boardRepo = new BoardRepository(db);
     super(boardRepo, {
@@ -116,8 +124,10 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
 
     this.boardRepo = boardRepo;
     this.boardObjectRepo = new BoardObjectRepository(db);
+    this.zoneWorkflowRepo = new ZoneWorkflowRepository(db);
     this.emitBoardObjectPatched = emitBoardObjectPatched;
     this.emitBoardEvent = emitBoardEvent;
+    this.emitZoneWorkflowRemoved = emitZoneWorkflowRemoved;
   }
 
   /**
@@ -291,6 +301,13 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
     // parent. Convert zone-relative positions to absolute while the zone origin
     // is still available.
     if (board && object?.type === 'zone') {
+      const removedTransitions = await this.zoneWorkflowRepo.removeTransitionsForZone(
+        board.board_id,
+        objectId
+      );
+      for (const transition of removedTransitions) {
+        this.emitZoneWorkflowRemoved?.(transition, _params);
+      }
       const cleared = await this.boardObjectRepo.clearZoneReferences(board.board_id, objectId, {
         x: object.x,
         y: object.y,
@@ -597,7 +614,8 @@ export function createBoardsService(
     boardObject: BoardObjectPatchedEventPayload,
     params?: BoardParams
   ) => void,
-  emitBoardEvent?: (event: Omit<ManualServiceEvent, 'path'>) => void
+  emitBoardEvent?: (event: Omit<ManualServiceEvent, 'path'>) => void,
+  emitZoneWorkflowRemoved?: (transition: ZoneWorkflowTransition, params?: BoardParams) => void
 ): BoardsService {
-  return new BoardsService(db, emitBoardObjectPatched, emitBoardEvent);
+  return new BoardsService(db, emitBoardObjectPatched, emitBoardEvent, emitZoneWorkflowRemoved);
 }

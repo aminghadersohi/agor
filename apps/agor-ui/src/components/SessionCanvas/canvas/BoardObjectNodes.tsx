@@ -28,7 +28,8 @@ import type { Color } from 'antd/es/color-picker';
 import { AggregationColor } from 'antd/es/color-picker/color';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { NodeResizer, useStore, useViewport } from 'reactflow';
+import { Handle, NodeResizer, Position, useViewport } from 'reactflow';
+import { useStore } from 'reactflow';
 import { useMutationGate } from '../../../contexts/ConnectionContext';
 import { getContrastingTextColor } from '../../../utils/theme';
 import { UserIdentityAvatar } from '../../UserIdentityAvatar';
@@ -405,6 +406,38 @@ const ZoneNodeComponent = ({
 
   return (
     <>
+      <Handle
+        id="workflow-left"
+        type="target"
+        position={Position.Left}
+        className="zone-workflow-handle"
+        aria-label={`Connect a transition into ${data.label}`}
+        style={
+          {
+            top: 28,
+            color: token.colorPrimary,
+            background: 'transparent',
+            borderColor: 'transparent',
+            '--zone-workflow-handle-border': token.colorBgContainer,
+          } as React.CSSProperties
+        }
+      />
+      <Handle
+        id="workflow-right"
+        type="source"
+        position={Position.Right}
+        className="zone-workflow-handle"
+        aria-label={`Connect a transition from ${data.label}`}
+        style={
+          {
+            top: 28,
+            color: token.colorPrimary,
+            background: 'transparent',
+            borderColor: 'transparent',
+            '--zone-workflow-handle-border': token.colorBgContainer,
+          } as React.CSSProperties
+        }
+      />
       <NodeResizer
         isVisible={selected && !data.locked && !mutationDisabled}
         minWidth={200}

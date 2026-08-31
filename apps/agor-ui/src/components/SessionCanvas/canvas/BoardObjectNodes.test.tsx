@@ -119,6 +119,16 @@ describe('ZoneNode layer toolbar', () => {
     });
   });
 
+  it('gives workflow connectors a zoom-tolerant pointer target', () => {
+    renderZone(vi.fn(), CONNECTED);
+    const source = screen.getByLabelText('Connect a transition from My Zone');
+    const target = screen.getByLabelText('Connect a transition into My Zone');
+    expect(source).toHaveClass('zone-workflow-handle');
+    expect(target).toHaveClass('zone-workflow-handle');
+    expect(source).toHaveStyle({ background: 'transparent' });
+    expect(target).toHaveStyle({ background: 'transparent' });
+  });
+
   it('exposes the layer buttons with accessible labels', () => {
     renderZone(vi.fn(), CONNECTED);
     expect(screen.getByLabelText('Send to back')).toBeTruthy();
