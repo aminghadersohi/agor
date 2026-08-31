@@ -1,5 +1,5 @@
 import type { AgorClient } from '@agor-live/client';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { App as AntdApp } from 'antd';
 import { describe, expect, it, vi } from 'vitest';
 import { MCPEgressGatewayStatus } from './MCPEgressGatewayStatus';
@@ -12,31 +12,32 @@ function clientFor(status: object) {
 }
 
 describe('MCPEgressGatewayStatus', () => {
-  it('keeps the Feathers service receiver when loading gateway status', async () => {
-    const gatewayStatusService = {
-      receiver: 'gateway-status-service',
-      find(this: { receiver: string }) {
-        if (this.receiver !== 'gateway-status-service') {
-          throw new Error('service receiver was lost');
-        }
-        return Promise.resolve({
-          mode: 'off',
-          supported_transports: [],
-          unsupported_transports: ['stdio'],
-          in_flight_requests: 0,
-          provider_in_flight_requests: 0,
-          reserved_requests: 0,
-          oldest_request_ms: 0,
-          excluded_servers: [],
-          excluded_servers_truncated: false,
-          admission_available: null,
-          operator: true,
-          guarantee: 'Direct mode has no gateway admission guarantee.',
-        });
+  it('keeps the Feathers service receiver when it reads and changes status', async () => {
+    const gatewayService = {
+      status: {
+        mode: 'off',
+        supported_transports: [],
+        unsupported_transports: ['stdio'],
+        in_flight_requests: 0,
+        provider_in_flight_requests: 0,
+        reserved_requests: 0,
+        oldest_request_ms: 0,
+        excluded_servers: [],
+        excluded_servers_truncated: false,
+        admission_available: null,
+        operator: true,
+        guarantee: 'Direct mode has no gateway admission guarantee.',
+      },
+      find(this: { status: object }) {
+        return Promise.resolve(this.status);
+      },
+      patch(this: { status: Record<string, unknown> }, _id: null, data: { mode: string }) {
+        this.status = { ...this.status, mode: data.mode };
+        return Promise.resolve({ mode: data.mode });
       },
     };
     const client = {
-      service: () => gatewayStatusService,
+      service: (path: string) => (path === 'mcp-egress/status' ? gatewayService : {}),
     } as unknown as AgorClient;
 
     render(
@@ -47,6 +48,11 @@ describe('MCPEgressGatewayStatus', () => {
 
     expect(await screen.findByText('MCP gateway is off')).toBeInTheDocument();
     expect(screen.queryByText('MCP gateway status unavailable')).not.toBeInTheDocument();
+
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'MCP gateway rollout mode' }));
+    fireEvent.click(await screen.findByTitle('observe'));
+
+    expect(await screen.findByText('MCP gateway is observing')).toBeInTheDocument();
   });
 
   it('renders the exact enforced guarantee and truthful transport lists', async () => {
