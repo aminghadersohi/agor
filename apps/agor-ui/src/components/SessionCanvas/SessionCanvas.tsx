@@ -1,3 +1,4 @@
+import { generateId } from '@agor/core/ids/browser';
 import {
   BOARD_GRID_SIZE,
   BOARD_SNAP_GRID,
@@ -8,7 +9,6 @@ import {
   snapBoardGridPoint,
   snapBoardGridValue,
 } from '@agor/core/layout/rectangle-packing';
-import { generateId } from '@agor/core/ids/browser';
 import type {
   AgenticToolName,
   AgorClient,
@@ -33,8 +33,8 @@ import type {
 import {
   AlignCenterOutlined,
   AlignLeftOutlined,
-  AppstoreOutlined,
   ApartmentOutlined,
+  AppstoreOutlined,
   ArrowRightOutlined,
   BorderOutlined,
   ColumnHeightOutlined,

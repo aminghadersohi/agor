@@ -25,9 +25,9 @@ import {
 import { resolveSessionDefaults } from '@agor/core/sessions';
 import {
   AGENTIC_TOOL_NAMES,
-  CALLBACK_DELIVERIES,
   type AgenticToolName,
   type Board,
+  CALLBACK_DELIVERIES,
   type CompletionSubscription,
   type CompletionSubscriptionID,
   getEffectiveDirectCallbackCoordinatorSessionId,
