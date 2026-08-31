@@ -121,6 +121,7 @@ import {
   type ZoneWorkflowTransitionValues,
 } from './canvas/ZoneWorkflowTransitionModal';
 import { DEFAULT_BOARD_OBJECT_Z_INDEX, selectedZIndex } from './canvas/zOrder';
+import { getZoneWorkflowAdvanceNotice } from './canvas/zoneWorkflowAdvanceNotice';
 
 interface SessionCanvasProps {
   board: Board | null;
@@ -471,7 +472,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
   ) => {
     const { token } = theme.useToken();
     const mutationGate = useMutationGate();
-    const { showError, showSuccess } = useThemedMessage();
+    const { showError, showSuccess, showWarning } = useThemedMessage();
 
     // Entity state via narrow store subscriptions. Each whole-map selector is a
     // stable module-level reference, so a slice only re-renders the canvas when
@@ -2827,9 +2828,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             idempotency_key: generateId(),
             entities,
           });
-          showSuccess(
-            `Advanced ${audit.entities.length} ${audit.entities.length === 1 ? 'item' : 'items'}.`
-          );
+          const notice = getZoneWorkflowAdvanceNotice(audit);
+          if (notice.kind === 'error') showError(notice.message);
+          else if (notice.kind === 'warning') showWarning(notice.message);
+          else showSuccess(notice.message);
         },
       });
     }, [
@@ -2841,6 +2843,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       zoneWorkflow,
       showError,
       showSuccess,
+      showWarning,
     ]);
 
     return (
