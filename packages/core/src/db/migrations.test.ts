@@ -195,6 +195,34 @@ describe('Postgres migrations', () => {
     }
   });
 
+  it('journals the matching zone-workflow migration and tenant-safe audit constraints', async () => {
+    const [postgresJournal, sqliteJournal] = await readJournals();
+    expect(postgresJournal.entries.at(-1)).toMatchObject({
+      idx: 100,
+      tag: '0101_zone_workflow_transitions',
+    });
+    expect(sqliteJournal.entries.at(-1)).toMatchObject({
+      idx: 103,
+      tag: '0104_zone_workflow_transitions',
+    });
+
+    const [postgres, sqlite] = await Promise.all([
+      readFile(
+        new URL('../../drizzle/postgres/0101_zone_workflow_transitions.sql', import.meta.url),
+        'utf8'
+      ),
+      readFile(
+        new URL('../../drizzle/sqlite/0104_zone_workflow_transitions.sql', import.meta.url),
+        'utf8'
+      ),
+    ]);
+    expect(postgres).toContain('FORCE ROW LEVEL SECURITY');
+    expect(postgres).toContain('"zone_workflow_advances_tenant_board_fk"');
+    expect(postgres).toContain('"zone_workflow_advances_tenant_idempotency_uq"');
+    expect(sqlite).toContain('REFERENCES `boards`(`board_id`) ON DELETE CASCADE');
+    expect(sqlite).toContain('`zone_workflow_advances_idempotency_uq`');
+  });
+
   it('keeps Knowledge pgvector storage out of required base migrations', async () => {
     const migration = await readFile(
       new URL('../../drizzle/postgres/0043_kb_embeddings.sql', import.meta.url),

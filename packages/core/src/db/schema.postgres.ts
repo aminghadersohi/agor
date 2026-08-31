@@ -2040,6 +2040,76 @@ export const boardObjects = pgTable(
   })
 );
 
+/** Directed workflow edges between zones on one board. */
+export const zoneWorkflowTransitions = pgTable(
+  'zone_workflow_transitions',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    transition_id: varchar('transition_id', { length: 36 }).primaryKey(),
+    board_id: varchar('board_id', { length: 36 }).notNull(),
+    source_zone_id: text('source_zone_id').notNull(),
+    target_zone_id: text('target_zone_id').notNull(),
+    label: text('label').notNull(),
+    reason: text('reason'),
+    enabled: t.bool('enabled').notNull().default(true),
+    behavior: text('behavior').notNull().default('guidance_only'),
+    created_by: varchar('created_by', { length: 36 }).notNull(),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+  },
+  (table) => ({
+    tenantIdx: index('zone_workflow_transitions_tenant_id_idx').on(table.tenant_id),
+    boardIdx: index('zone_workflow_transitions_board_idx').on(table.board_id),
+    directedPairUnique: uniqueIndex('zone_workflow_transitions_tenant_board_pair_uq').on(
+      table.tenant_id,
+      table.board_id,
+      table.source_zone_id,
+      table.target_zone_id
+    ),
+    tenantBoardFk: foreignKey({
+      columns: [table.tenant_id, table.board_id],
+      foreignColumns: [boards.tenant_id, boards.board_id],
+      name: 'zone_workflow_transitions_tenant_board_fk',
+    }).onDelete('cascade'),
+  })
+);
+
+/** Durable audit records for explicit, atomic workflow advances. */
+export const zoneWorkflowAdvances = pgTable(
+  'zone_workflow_advances',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    advance_id: varchar('advance_id', { length: 36 }).primaryKey(),
+    transition_id: varchar('transition_id', { length: 36 }).notNull(),
+    board_id: varchar('board_id', { length: 36 }).notNull(),
+    idempotency_key: varchar('idempotency_key', { length: 36 }).notNull(),
+    source_zone_id: text('source_zone_id').notNull(),
+    target_zone_id: text('target_zone_id').notNull(),
+    transition_label: text('transition_label').notNull(),
+    transition_reason: text('transition_reason'),
+    behavior: text('behavior').notNull(),
+    entities: t.json<import('@agor/core/types').ZoneWorkflowAdvancedEntity[]>('entities').notNull(),
+    requested_by: varchar('requested_by', { length: 36 }).notNull(),
+    requested_at: t.timestamp('requested_at').notNull(),
+    prompt_outcome: text('prompt_outcome').notNull().default('not_requested'),
+    prompt_error: text('prompt_error'),
+  },
+  (table) => ({
+    tenantIdx: index('zone_workflow_advances_tenant_id_idx').on(table.tenant_id),
+    boardIdx: index('zone_workflow_advances_board_idx').on(table.board_id),
+    transitionIdx: index('zone_workflow_advances_transition_idx').on(table.transition_id),
+    idempotencyUnique: uniqueIndex('zone_workflow_advances_tenant_idempotency_uq').on(
+      table.tenant_id,
+      table.idempotency_key
+    ),
+    tenantBoardFk: foreignKey({
+      columns: [table.tenant_id, table.board_id],
+      foreignColumns: [boards.tenant_id, boards.board_id],
+      name: 'zone_workflow_advances_tenant_board_fk',
+    }).onDelete('cascade'),
+  })
+);
+
 /**
  * Session-MCP Servers relationship table
  *
@@ -3290,6 +3360,10 @@ export type CardRow = typeof cards.$inferSelect;
 export type CardInsert = typeof cards.$inferInsert;
 export type BoardObjectRow = typeof boardObjects.$inferSelect;
 export type BoardObjectInsert = typeof boardObjects.$inferInsert;
+export type ZoneWorkflowTransitionRow = typeof zoneWorkflowTransitions.$inferSelect;
+export type ZoneWorkflowTransitionInsert = typeof zoneWorkflowTransitions.$inferInsert;
+export type ZoneWorkflowAdvanceRow = typeof zoneWorkflowAdvances.$inferSelect;
+export type ZoneWorkflowAdvanceInsert = typeof zoneWorkflowAdvances.$inferInsert;
 export type BoardCommentRow = typeof boardComments.$inferSelect;
 export type BoardCommentInsert = typeof boardComments.$inferInsert;
 export type GatewayChannelRow = typeof gatewayChannels.$inferSelect;
