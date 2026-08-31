@@ -1021,16 +1021,17 @@ export const useBoardObjects = ({
             ];
           })
         );
-        const reflowedObjects = Object.fromEntries(
-          reflowedNodes.flatMap((node) => {
-            const existing = currentBoard.objects?.[node.id];
-            if (!existing) return [];
-            if (existing.type === 'zone') {
-              return [[node.id, { ...existing, x: node.position.x, y: node.position.y }] as const];
-            }
-            return [[node.id, { ...existing, x: node.position.x, y: node.position.y }] as const];
-          })
-        );
+        const reflowedEntries: Array<readonly [string, BoardObject]> = [];
+        for (const node of reflowedNodes) {
+          const existing = currentBoard.objects?.[node.id];
+          if (existing) {
+            reflowedEntries.push([
+              node.id,
+              { ...existing, x: node.position.x, y: node.position.y } as BoardObject,
+            ]);
+          }
+        }
+        const reflowedObjects = Object.fromEntries(reflowedEntries);
         if (
           zoneHeightChanged ||
           zoneWidthChanged ||
