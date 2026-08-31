@@ -64,6 +64,7 @@ import {
   ExecutorPulseKind,
   isTerminalTaskStatus,
   SDK_WATCHDOG_FAILURE_REASONS,
+  SessionStatus,
   type TaskMetadata,
   TaskStatus,
 } from '@agor/core/types';
