@@ -1,5 +1,5 @@
 import type { Board, Branch, Session } from '@agor-live/client';
-import { act, render, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_MAPS } from '../../store/agorMaps';
 import { agorStore } from '../../store/agorStore';
@@ -144,12 +144,14 @@ describe('HomeBoardsSection card re-render isolation', () => {
       name: 'Alpha',
       archived: false,
       last_updated: '2026-06-01T00:00:00.000Z',
+      running_session_count: 2,
     } as unknown as Board;
     const boardB = {
       board_id: 'b-B',
       name: 'Beta',
       archived: false,
       last_updated: '2026-06-01T00:00:00.000Z',
+      running_session_count: 0,
     } as unknown as Board;
     const branchA = {
       branch_id: 'br-A',
@@ -187,6 +189,11 @@ describe('HomeBoardsSection card re-render isolation', () => {
     });
 
     render(<HomeBoardsSection onBoardClick={noop} onOpenCreateDialog={noop} />);
+
+    // The board list aggregate is authoritative even though Home currently has
+    // only one (completed) Session hydrated for Alpha.
+    expect(screen.getByLabelText('2 running sessions')).toBeInTheDocument();
+    expect(screen.queryByLabelText('0 running sessions')).not.toBeInTheDocument();
 
     await waitFor(() => {
       expect(timeRendersWith(timeB)).toBeGreaterThanOrEqual(1);
