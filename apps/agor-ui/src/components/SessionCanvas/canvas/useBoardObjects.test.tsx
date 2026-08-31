@@ -1714,3 +1714,149 @@ describe('compact_list → grid re-packs the expanded zone', () => {
     expect(patch.mock.calls.some((c) => c[1] && 'position' in c[1])).toBe(false);
   });
 });
+
+describe('arrangeBoardZones production path', () => {
+  it('writes one zone batch, re-packs measured children, and cancels pending Auto Zone passes', async () => {
+    vi.useFakeTimers();
+    const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
+    const board = makeBoard({
+      'zone-b': {
+        type: 'zone',
+        x: 800,
+        y: 0,
+        width: 620,
+        height: 600,
+        label: 'B',
+        layout: { mode: 'auto' },
+      },
+      'zone-a': {
+        type: 'zone',
+        x: 0,
+        y: 0,
+        width: 620,
+        height: 600,
+        label: 'A',
+        layout: { mode: 'auto' },
+      },
+    });
+    const nodes: Node[] = [
+      { id: 'zone-b', type: 'zone', position: { x: 800, y: 0 }, width: 620, height: 600, data: {} },
+      { id: 'zone-a', type: 'zone', position: { x: 0, y: 0 }, width: 620, height: 600, data: {} },
+      {
+        id: 'branch-a',
+        type: 'branchNode',
+        parentId: 'zone-a',
+        position: { x: 200, y: 240 },
+        width: 500,
+        height: 200,
+        data: { branch: { name: 'Branch A' } },
+      },
+      {
+        id: 'card-b',
+        type: 'cardNode',
+        parentId: 'zone-b',
+        position: { x: 180, y: 220 },
+        width: 380,
+        height: 100,
+        data: { card: { title: 'Card B', data: {} } },
+      },
+    ];
+    const onArrangeNodes = vi.fn();
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'placement-a',
+              branch_id: 'branch-a',
+              zone_id: 'zone-a',
+              position: { x: 200, y: 240 },
+            },
+            {
+              object_id: 'placement-b',
+              card_id: 'b',
+              zone_id: 'zone-b',
+              position: { x: 180, y: 220 },
+            },
+          ] as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+          onArrangeNodes,
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await result.current.arrangeBoardZones(['zone-b', 'zone-a']);
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    expect(boardsPatch).toHaveBeenCalledWith(
+      'board-1',
+      expect.objectContaining({
+        _action: 'batchUpsertObjects',
+        objects: {
+          'zone-a': expect.objectContaining({ type: 'zone' }),
+          'zone-b': expect.objectContaining({ type: 'zone' }),
+        },
+      })
+    );
+    expect(boardObjectsPatch).toHaveBeenCalledTimes(2);
+    expect(onArrangeNodes).toHaveBeenCalledTimes(1);
+    expect(showSuccess).toHaveBeenCalledTimes(1);
+    expect(showWarning).not.toHaveBeenCalled();
+  });
+
+  it('re-packs an explicitly resized Auto Zone without writing its container again', async () => {
+    vi.useFakeTimers();
+    const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
+    const zoneId = 'zone-auto';
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({
+            [zoneId]: {
+              type: 'zone',
+              x: 0,
+              y: 0,
+              width: 800,
+              height: 1000,
+              label: 'Automatic',
+              layout: { mode: 'auto', resize: 'height' },
+            },
+          }),
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'placement-a',
+              branch_id: 'branch-a',
+              zone_id: zoneId,
+              position: { x: 200, y: 240 },
+              size: { width: 500, height: 200 },
+            },
+          ] as never,
+          nodes: [
+            {
+              id: 'branch-a',
+              type: 'branchNode',
+              parentId: zoneId,
+              position: { x: 200, y: 240 },
+              width: 500,
+              height: 200,
+              data: { branch: { name: 'Branch A' } },
+            },
+          ],
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    act(() => result.current.preserveAutoZoneFrameOnce(zoneId));
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    expect(boardsPatch).not.toHaveBeenCalled();
+    expect(boardObjectsPatch).toHaveBeenCalledTimes(1);
+  });
+});

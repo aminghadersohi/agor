@@ -2,6 +2,7 @@
  * Hook for managing board objects (text labels, zones, etc.)
  */
 
+import { planBoardZoneArrangement } from '@agor/core/layout/board-zone-arrangement';
 import {
   BOARD_GRID_SIZE,
   ceilBoardGridSize,
@@ -108,13 +109,18 @@ export const useBoardObjects = ({
   // `arrangeZoneContents` is declared below it and its dependency array is
   // evaluated during render. A ref keeps the call late-bound.
   const arrangeZoneContentsRef = useRef<
-    ((zoneId: string, options?: { silent?: boolean }) => Promise<void>) | null
+    | ((
+        zoneId: string,
+        options?: { silent?: boolean; preserveZoneFrame?: boolean }
+      ) => Promise<void>)
+    | null
   >(null);
   const autoZoneDeferralRef = useRef<AutoZoneDeferral | null>(null);
   autoZoneDeferralRef.current ??= new AutoZoneDeferral();
   const runAutoZoneArrangeRef = useRef<(zoneId: string) => void>(() => undefined);
   const lastAutoLayoutSignatureRef = useRef('');
   const skipNextAutoArrangeRef = useRef(new Set<string>());
+  const preserveNextAutoZoneFrameRef = useRef(new Set<string>());
   // Direct manipulation wins immediately, before the persisted board patch
   // returns over realtime. This also blocks an already-scheduled auto pass
   // from snapping the item back during the interaction.
@@ -525,7 +531,7 @@ export const useBoardObjects = ({
    * placements can be applied without translating through canvas coordinates.
    */
   const arrangeZoneContents = useCallback(
-    async (zoneId: string, options: { silent?: boolean } = {}) => {
+    async (zoneId: string, options: { silent?: boolean; preserveZoneFrame?: boolean } = {}) => {
       const currentBoard = boardRef.current;
       const zone = currentBoard?.objects?.[zoneId];
       if (!currentBoard || !client || zone?.type !== 'zone') return;
@@ -768,11 +774,13 @@ export const useBoardObjects = ({
           ) >= 0.5
         );
       });
-      const nextZoneHeight = policy.autoResizeHeight
-        ? Math.max(200, ceilBoardGridValue(layout.height + titleInset))
-        : layout.mode === 'deck'
-          ? Math.max(zone.height, 200, ceilBoardGridValue(layout.height + titleInset))
-          : zone.height;
+      const nextZoneHeight = options.preserveZoneFrame
+        ? zone.height
+        : policy.autoResizeHeight
+          ? Math.max(200, ceilBoardGridValue(layout.height + titleInset))
+          : layout.mode === 'deck'
+            ? Math.max(zone.height, 200, ceilBoardGridValue(layout.height + titleInset))
+            : zone.height;
       const nextZoneWidth = frame.width;
       const zoneHeightChanged = Math.abs(nextZoneHeight - zone.height) >= 0.5;
       const zoneWidthChanged = Math.abs(nextZoneWidth - zone.width) >= 0.5;
@@ -886,6 +894,210 @@ export const useBoardObjects = ({
     ]
   );
   arrangeZoneContentsRef.current = arrangeZoneContents;
+
+  /** Keep an explicitly dragged/resized Auto Zone frame while its children re-pack. */
+  const preserveAutoZoneFrameOnce = useCallback((zoneId: string) => {
+    const zone = boardRef.current?.objects?.[zoneId];
+    if (zone?.type !== 'zone' || normalizeZoneLayoutPolicy(zone.layout).mode !== 'auto') return;
+    preserveNextAutoZoneFrameRef.current.add(zoneId);
+  }, []);
+
+  /**
+   * Arrange selected zone containers and their measured children using the
+   * same pure planner as agor_boards_arrange_zones. Zone containers are one
+   * board mutation, so realtime cannot echo intermediate board snapshots.
+   */
+  const arrangeBoardZones = useCallback(
+    async (zoneIds: readonly string[]) => {
+      const currentBoard = boardRef.current;
+      if (!currentBoard || !client || zoneIds.length === 0) return;
+      const selected = new Set(zoneIds);
+      const currentNodes = nodesRef.current;
+      const placementByNodeId = new Map<string, BoardEntityObject>();
+      for (const placement of boardObjectsForBoard) {
+        if (placement.branch_id) placementByNodeId.set(placement.branch_id, placement);
+        if (placement.card_id) placementByNodeId.set(`card-${placement.card_id}`, placement);
+      }
+
+      try {
+        const plan = planBoardZoneArrangement(
+          Object.entries(currentBoard.objects ?? {}).flatMap(([zoneId, object]) => {
+            if (!selected.has(zoneId) || object.type !== 'zone') return [];
+            const children = currentNodes.filter(
+              (node) =>
+                node.parentId === zoneId && (node.type === 'branchNode' || node.type === 'cardNode')
+            );
+            return [
+              {
+                id: zoneId,
+                x: object.x,
+                y: object.y,
+                width: object.width,
+                height: object.height,
+                fontSize: object.fontSize,
+                status: object.status,
+                layout: object.layout,
+                items: children.map((node) => {
+                  const data = node.data as {
+                    branch?: {
+                      name?: string;
+                      created_at?: string;
+                      updated_at?: string;
+                      filesystem_status?: string;
+                    };
+                    card?: {
+                      title?: string;
+                      created_at?: string;
+                      updated_at?: string;
+                      data?: Record<string, unknown>;
+                    };
+                  };
+                  const cardData = data.card?.data ?? {};
+                  const placement = placementByNodeId.get(node.id);
+                  return {
+                    id: node.id,
+                    entityType:
+                      node.type === 'branchNode' ? ('branch' as const) : ('card' as const),
+                    position: node.position,
+                    compact: placement?.compact,
+                    ...ceilBoardGridSize(renderedNodeSize(node)),
+                    title: data.card?.title ?? data.branch?.name,
+                    createdAt: data.card?.created_at ?? data.branch?.created_at,
+                    updatedAt: data.card?.updated_at ?? data.branch?.updated_at,
+                    rank: typeof cardData.rank === 'number' ? cardData.rank : undefined,
+                    priority: cardData.priority,
+                    status: cardData.status ?? data.branch?.filesystem_status,
+                  };
+                }),
+              },
+            ];
+          })
+        );
+        const arrangedZoneById = new Map(plan.zones.map((zone) => [zone.id, zone]));
+        const arrangedItemById = new Map(
+          plan.zones.flatMap((zone) => zone.items.map((item) => [item.id, item] as const))
+        );
+        const autoSignatureChangesByZoneId = new Map(
+          plan.zones.map((zone) => {
+            const sourceZone = currentNodes.find((node) => node.id === zone.id);
+            const zoneChanged =
+              !sourceZone ||
+              Math.abs(Number(sourceZone.width ?? sourceZone.style?.width ?? 0) - zone.width) >=
+                0.5 ||
+              Math.abs(Number(sourceZone.height ?? sourceZone.style?.height ?? 0) - zone.height) >=
+                0.5;
+            const childChanged = zone.items.some((item) => {
+              const source = currentNodes.find((node) => node.id === item.id);
+              return (
+                !source ||
+                Math.abs(source.position.x - item.x) >= 0.5 ||
+                Math.abs(source.position.y - item.y) >= 0.5 ||
+                Math.abs(Number(source.width ?? source.style?.width ?? 0) - item.width) >= 0.5 ||
+                Math.abs(Number(source.height ?? source.style?.height ?? 0) - item.height) >= 0.5
+              );
+            });
+            return [zone.id, zoneChanged || childChanged] as const;
+          })
+        );
+        const arrangedNodes = currentNodes.flatMap((node) => {
+          const zone = arrangedZoneById.get(node.id);
+          if (zone) {
+            autoZoneDeferralRef.current?.cancel(node.id);
+            if (autoSignatureChangesByZoneId.get(node.id)) {
+              skipNextAutoArrangeRef.current.add(node.id);
+            }
+            restoreZoneCallouts(node.id);
+            return [
+              {
+                ...node,
+                position: zone.position,
+                width: zone.width,
+                height: zone.height,
+                style: { ...node.style, width: zone.width, height: zone.height },
+                data: { ...node.data, width: zone.width, height: zone.height },
+              },
+            ];
+          }
+          const item = arrangedItemById.get(node.id);
+          if (!item) return [];
+          return [
+            {
+              ...node,
+              className: node.className
+                ?.split(' ')
+                .filter((name) => name !== 'auto-zone-stack-item')
+                .join(' '),
+              position: { x: item.x, y: item.y },
+              width: item.width,
+              height: item.height,
+              style: { ...node.style, width: item.width, height: item.height },
+            },
+          ];
+        });
+        const arrangedNodeById = new Map(arrangedNodes.map((node) => [node.id, node]));
+        setNodes((nodes) => nodes.map((node) => arrangedNodeById.get(node.id) ?? node));
+        onArrangeNodes?.(arrangedNodes, dealTiming({ count: arrangedNodes.length }).totalMs);
+
+        const objects = Object.fromEntries(
+          plan.zones.map((zone) => {
+            const existing = currentBoard.objects?.[zone.id];
+            if (existing?.type !== 'zone') {
+              throw new Error(`Missing board zone '${zone.id}'.`);
+            }
+            return [
+              zone.id,
+              {
+                ...existing,
+                x: zone.position.x,
+                y: zone.position.y,
+                width: zone.width,
+                height: zone.height,
+              },
+            ];
+          })
+        );
+        await client.service('boards').patch(currentBoard.board_id, {
+          _action: 'batchUpsertObjects',
+          objects,
+        } as unknown as Partial<Board>);
+        await Promise.all(
+          plan.zones.flatMap((zone) =>
+            zone.items.map(async (item) => {
+              const placement = placementByNodeId.get(item.id);
+              if (!placement) return;
+              const zoneObject = currentBoard.objects?.[zone.id];
+              const policy = normalizeZoneLayoutPolicy(
+                zoneObject?.type === 'zone' ? zoneObject.layout : undefined
+              );
+              await client.service('board-objects').patch(placement.object_id, {
+                position: { x: item.x, y: item.y },
+                size: { width: item.width, height: item.height },
+                ...(policy.preset === 'compact_list' && placement.compact !== true
+                  ? { compact: true }
+                  : {}),
+              });
+            })
+          )
+        );
+        showSuccess(
+          `Arranged ${plan.zones.length} zone${plan.zones.length === 1 ? '' : 's'} and their contents.`
+        );
+      } catch (error) {
+        console.error('Failed to arrange board zones:', error);
+        showError('Failed to arrange zones');
+      }
+    },
+    [
+      boardObjectsForBoard,
+      client,
+      onArrangeNodes,
+      restoreZoneCallouts,
+      setNodes,
+      showError,
+      showSuccess,
+    ]
+  );
+
   runAutoZoneArrangeRef.current = (zoneId: string) => {
     const zone = boardRef.current?.objects?.[zoneId];
     if (
@@ -895,7 +1107,8 @@ export const useBoardObjects = ({
     )
       return;
     restoreZoneCallouts(zoneId);
-    void arrangeZoneContentsRef.current?.(zoneId, { silent: true });
+    const preserveZoneFrame = preserveNextAutoZoneFrameRef.current.delete(zoneId);
+    void arrangeZoneContentsRef.current?.(zoneId, { silent: true, preserveZoneFrame });
   };
 
   useEffect(() => {
@@ -1268,6 +1481,8 @@ export const useBoardObjects = ({
     deferAutoZone,
     setPlacementCompact,
     setZoneContentsCompact,
+    arrangeBoardZones,
+    preserveAutoZoneFrameOnce,
     batchUpdateObjectPositions,
     zoneStackByNodeId,
     calledOutNodeIds,
