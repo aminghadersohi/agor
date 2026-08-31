@@ -806,6 +806,146 @@ describe('agor_boards_auto_arrange_zone', () => {
     ]);
   });
 
+  it('uses one compact cluster for measured entities and contained canvas objects', async () => {
+    const entities = [
+      {
+        object_id: 'branch-placement',
+        board_id: 'board-1',
+        branch_id: 'branch-1',
+        entity_type: 'branch' as const,
+        position: { x: 40, y: 120 },
+        size: { width: 520, height: 140 },
+        zone_id: 'zone-1',
+        created_at: '2026-06-01T00:00:00.000Z',
+      },
+      {
+        object_id: 'card-placement',
+        board_id: 'board-1',
+        card_id: 'card-1',
+        entity_type: 'card' as const,
+        position: { x: 40, y: 300 },
+        size: { width: 280, height: 180 },
+        zone_id: 'zone-1',
+        created_at: '2026-06-02T00:00:00.000Z',
+      },
+    ];
+    const boardPatch = vi.fn(async () => undefined);
+    const entityPatch = vi.fn(async () => undefined);
+    const app = {
+      service(name: string) {
+        if (name === 'boards')
+          return {
+            get: vi.fn(async () => ({
+              board_id: 'board-1',
+              objects: {
+                'zone-1': { type: 'zone', x: 100, y: 100, width: 1400, height: 1100 },
+                artifact: {
+                  type: 'artifact',
+                  artifact_id: 'artifact-1',
+                  x: 700,
+                  y: 300,
+                  width: 260,
+                  height: 440,
+                },
+                note: { type: 'markdown', x: 980, y: 300, width: 320, content: 'A note' },
+                app: {
+                  type: 'app',
+                  x: 700,
+                  y: 760,
+                  width: 360,
+                  height: 220,
+                  title: 'App',
+                  template: 'react',
+                  files: {},
+                },
+                locked: {
+                  type: 'artifact',
+                  artifact_id: 'locked',
+                  x: 1100,
+                  y: 760,
+                  width: 260,
+                  height: 220,
+                  locked: true,
+                },
+              },
+            })),
+            patch: boardPatch,
+          };
+        if (name === 'board-objects')
+          return { find: vi.fn(async () => ({ data: entities })), patch: entityPatch };
+        if (name === 'branches')
+          return { find: vi.fn(async () => ({ data: [{ branch_id: 'branch-1' }] })) };
+        if (name === 'cards')
+          return { find: vi.fn(async () => ({ data: [{ card_id: 'card-1' }] })) };
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1' })).content[0].text
+    );
+
+    expect(parsed).toMatchObject({
+      applied: true,
+      arranged: 5,
+      layoutMode: 'cluster',
+      fitsWithoutOverlap: true,
+      overflowingObjectIds: [],
+    });
+    expect(entityPatch).toHaveBeenCalledTimes(2);
+    expect(boardPatch).toHaveBeenCalledTimes(1);
+    expect(boardPatch).toHaveBeenCalledWith(
+      'board-1',
+      expect.objectContaining({
+        _action: 'batchUpsertObjects',
+        objects: {
+          artifact: expect.objectContaining({ type: 'artifact' }),
+          note: expect.objectContaining({ type: 'markdown' }),
+          app: expect.objectContaining({ type: 'app' }),
+        },
+      }),
+      baseServiceParams
+    );
+    expect(parsed.updates.map((update: { objectId: string }) => update.objectId)).not.toContain(
+      'locked'
+    );
+    for (const [index, left] of parsed.updates.entries()) {
+      const leftSize =
+        left.objectId === 'branch-placement'
+          ? { width: 520, height: 140 }
+          : left.objectId === 'card-placement'
+            ? { width: 280, height: 180 }
+            : left.objectId === 'artifact'
+              ? { width: 260, height: 440 }
+              : left.objectId === 'note'
+                ? { width: 320, height: 140 }
+                : { width: 360, height: 220 };
+      for (const right of parsed.updates.slice(index + 1)) {
+        const rightSize =
+          right.objectId === 'branch-placement'
+            ? { width: 520, height: 140 }
+            : right.objectId === 'card-placement'
+              ? { width: 280, height: 180 }
+              : right.objectId === 'artifact'
+                ? { width: 260, height: 440 }
+                : right.objectId === 'note'
+                  ? { width: 320, height: 140 }
+                  : { width: 360, height: 220 };
+        expect(
+          left.position.x + leftSize.width + 20 <= right.position.x ||
+            right.position.x + rightSize.width + 20 <= left.position.x ||
+            left.position.y + leftSize.height + 20 <= right.position.y ||
+            right.position.y + rightSize.height + 20 <= left.position.y
+        ).toBe(true);
+      }
+    }
+  });
+
   it('uses persisted rendered sizes instead of guessing from card content', async () => {
     const patches: Array<{ position: { x: number; y: number } }> = [];
     const entities = Array.from({ length: 20 }, (_, index) => ({
@@ -857,7 +997,7 @@ describe('agor_boards_auto_arrange_zone', () => {
     );
 
     expect(parsed).toMatchObject({
-      layoutMode: 'grid',
+      layoutMode: 'cluster',
       columns: 1,
       rows: 20,
       fitsWithoutOverlap: true,
@@ -1065,9 +1205,8 @@ describe('agor_boards_auto_arrange_zone', () => {
     expect(boardPatch).toHaveBeenCalledWith(
       'board-1',
       expect.objectContaining({
-        _action: 'upsertObject',
-        objectId: 'zone-1',
-        objectData: expect.objectContaining({ height: parsed.zone.height }),
+        _action: 'batchUpsertObjects',
+        objects: { 'zone-1': expect.objectContaining({ height: parsed.zone.height }) },
       }),
       baseServiceParams
     );

@@ -7,6 +7,7 @@ import {
   BOARD_GRID_SIZE,
   ceilBoardGridSize,
   ceilBoardGridValue,
+  layoutCompactRectangles,
   layoutRectangles,
   snapBoardGridValue,
 } from '@agor/core/layout/rectangle-packing';
@@ -67,6 +68,32 @@ function renderedNodeSize(node: Node): { width: number; height: number } {
     width: Number.isFinite(width) && width > 0 ? Math.ceil(width) : fallback.width,
     height: Number.isFinite(height) && height > 0 ? Math.ceil(height) : fallback.height,
   };
+}
+
+const ZONE_CANVAS_NODE_TYPES = new Set(['markdown', 'appNode', 'artifactNode']);
+
+function isPositionableZoneCanvasNode(node: Node): boolean {
+  return (
+    !node.hidden &&
+    !node.parentId &&
+    ZONE_CANVAS_NODE_TYPES.has(node.type ?? '') &&
+    node.data?.locked !== true
+  );
+}
+
+function nodeCenterInsideZone(
+  node: Node,
+  zone: { x: number; y: number; width: number; height: number }
+): boolean {
+  const size = renderedNodeSize(node);
+  const centerX = node.position.x + size.width / 2;
+  const centerY = node.position.y + size.height / 2;
+  return (
+    centerX >= zone.x &&
+    centerX <= zone.x + zone.width &&
+    centerY >= zone.y &&
+    centerY <= zone.y + zone.height
+  );
 }
 
 interface UseBoardObjectsProps {
@@ -533,15 +560,35 @@ export const useBoardObjects = ({
   const arrangeZoneContents = useCallback(
     async (zoneId: string, options: { silent?: boolean; preserveZoneFrame?: boolean } = {}) => {
       const currentBoard = boardRef.current;
-      const zone = currentBoard?.objects?.[zoneId];
-      if (!currentBoard || !client || zone?.type !== 'zone') return;
+      const persistedZone = currentBoard?.objects?.[zoneId];
+      if (!currentBoard || !client || persistedZone?.type !== 'zone') return;
+      const liveZoneNode = nodesRef.current.find((node) => node.id === zoneId);
+      // A toolbar click can race the debounced persistence of a drag/resize.
+      // Plan and write from the visible frame so arranging children can never
+      // reintroduce the older container geometry from the board snapshot.
+      const visibleWidth = Number(liveZoneNode?.width ?? liveZoneNode?.style?.width);
+      const visibleHeight = Number(liveZoneNode?.height ?? liveZoneNode?.style?.height);
+      const zone = {
+        ...persistedZone,
+        x: liveZoneNode?.position.x ?? persistedZone.x,
+        y: liveZoneNode?.position.y ?? persistedZone.y,
+        width:
+          Number.isFinite(visibleWidth) && visibleWidth > 0 ? visibleWidth : persistedZone.width,
+        height:
+          Number.isFinite(visibleHeight) && visibleHeight > 0
+            ? visibleHeight
+            : persistedZone.height,
+      };
 
       let changedNodes: Node[] = [];
-      let layoutMode: 'grid' | 'deck' = 'grid';
+      let layoutMode: 'cluster' | 'grid' | 'deck' = 'cluster';
       let overflowCount = 0;
 
       const policy = normalizeZoneLayoutPolicy(zone.layout);
-      const sortItem = (node: Node): ZoneLayoutSortItem & { node: Node } => {
+      const sortItem = (
+        node: Node,
+        position = node.position
+      ): ZoneLayoutSortItem & { node: Node; isCanvasObject: boolean } => {
         const data = node.data as {
           branch?: {
             name?: string;
@@ -559,9 +606,13 @@ export const useBoardObjects = ({
         const cardData = data.card?.data ?? {};
         return {
           node,
+          isCanvasObject: isPositionableZoneCanvasNode(node),
           id: node.id,
-          position: node.position,
-          title: data.card?.title ?? data.branch?.name,
+          position,
+          title:
+            data.card?.title ??
+            data.branch?.name ??
+            (typeof node.data?.title === 'string' ? node.data.title : undefined),
           createdAt: data.card?.created_at ?? data.branch?.created_at,
           updatedAt: data.card?.updated_at ?? data.branch?.updated_at,
           rank: typeof cardData.rank === 'number' ? cardData.rank : undefined,
@@ -569,15 +620,24 @@ export const useBoardObjects = ({
           status: cardData.status ?? data.branch?.filesystem_status,
         };
       };
-      const children = sortZoneLayoutItems(
-        nodesRef.current
-          .filter(
-            (node) =>
-              node.parentId === zoneId && (node.type === 'branchNode' || node.type === 'cardNode')
-          )
-          .map(sortItem),
-        policy
-      ).map(({ node }) => node);
+      const unsortedChildren = nodesRef.current.flatMap((node) => {
+        if (node.parentId === zoneId && (node.type === 'branchNode' || node.type === 'cardNode')) {
+          return [sortItem(node)];
+        }
+        if (isPositionableZoneCanvasNode(node) && nodeCenterInsideZone(node, zone)) {
+          return [
+            sortItem(node, {
+              x: node.position.x - zone.x,
+              y: node.position.y - zone.y,
+            }),
+          ];
+        }
+        return [];
+      });
+      const children =
+        policy.preset === 'grid' && policy.columns === undefined && policy.sortBy === 'position'
+          ? unsortedChildren
+          : sortZoneLayoutItems(unsortedChildren, policy);
       if (children.length === 0) {
         if (!options.silent) showWarning('This zone has no pinned items to arrange.');
         return;
@@ -588,11 +648,13 @@ export const useBoardObjects = ({
       const requestedGap = policy.gap ?? 24;
       const gridGap =
         requestedGap === 0 ? 0 : Math.max(BOARD_GRID_SIZE, snapBoardGridValue(requestedGap));
-      let layoutItems = children.map((node) => ({
+      let layoutItems = children.map(({ node, isCanvasObject }) => ({
         id: node.id,
-        ...(policy.preset === 'compact_list'
+        ...(policy.preset === 'compact_list' && !isCanvasObject
           ? compactZoneItemSize(node.type === 'branchNode' ? 'branch' : 'card', frame.usableWidth)
           : itemSize(node)),
+        sourceX: isCanvasObject ? node.position.x - zone.x : node.position.x,
+        sourceY: isCanvasObject ? node.position.y - zone.y : node.position.y - frame.headerInset,
       }));
       const contentBounds = {
         width: frame.width,
@@ -616,31 +678,50 @@ export const useBoardObjects = ({
         gridSize: BOARD_GRID_SIZE,
         ...columnPreference,
       };
-      let layout = layoutRectangles(layoutItems, {
-        ...layoutOptions,
-        bounds: contentBounds,
-        allowDeck: false,
-      });
+      const useExplicitGrid = policy.preset === 'compact_list' || policy.columns !== undefined;
+      let layout = useExplicitGrid
+        ? layoutRectangles(layoutItems, {
+            ...layoutOptions,
+            bounds: contentBounds,
+            allowDeck: false,
+          })
+        : layoutCompactRectangles(layoutItems, {
+            bounds:
+              !options.preserveZoneFrame && policy.resize === 'both' ? undefined : contentBounds,
+            padding: frame.padding,
+            gapX: gridGap,
+            gapY: gridGap,
+            gridSize: BOARD_GRID_SIZE,
+          });
 
       const renderedHeaderHeightById = new Map(
-        children.map((node) => {
+        children.flatMap(({ node, isCanvasObject }) => {
+          if (isCanvasObject) return [];
           const fallback = compactZoneItemSize(
             node.type === 'branchNode' ? 'branch' : 'card',
             frame.usableWidth
           ).height;
-          return [node.id, renderedZoneStackHeaderHeight(node, fallback)] as const;
+          return [[node.id, renderedZoneStackHeaderHeight(node, fallback)] as const];
         })
       );
       const stackRevealHeight = zoneStackRevealHeight([...renderedHeaderHeightById.values()]);
-      if (layout.overflowingItemIds.length > 0) {
+      const canDeck = children.every(({ isCanvasObject }) => !isCanvasObject);
+      if (canDeck && layout.overflowingItemIds.length > 0) {
         // The stack renders every member collapsed. Lay it out at those same
         // compact dimensions before deciding how tall the zone must grow. If
         // we use the pre-collapse body height here, the persisted zone becomes
         // tall enough for an ordinary grid on the next load and the stack
         // silently disappears.
-        layoutItems = children.map((node) => ({
+        layoutItems = children.map(({ node, isCanvasObject }) => ({
           id: node.id,
-          ...compactZoneItemSize(node.type === 'branchNode' ? 'branch' : 'card', frame.usableWidth),
+          ...(isCanvasObject
+            ? itemSize(node)
+            : compactZoneItemSize(
+                node.type === 'branchNode' ? 'branch' : 'card',
+                frame.usableWidth
+              )),
+          sourceX: isCanvasObject ? node.position.x - zone.x : node.position.x,
+          sourceY: isCanvasObject ? node.position.y - zone.y : node.position.y - frame.headerInset,
         }));
         layout = layoutRectangles(layoutItems, {
           ...layoutOptions,
@@ -650,7 +731,7 @@ export const useBoardObjects = ({
           deckOffsetY: stackRevealHeight,
         });
       }
-      if (layout.overflowingItemIds.length > 0) {
+      if (canDeck && layout.overflowingItemIds.length > 0) {
         // Even a stack cannot expose more headers than the zone has vertical
         // room for. Grow only to the minimum shingle height rather than
         // clipping a title/action row or falling back to refusal.
@@ -723,7 +804,7 @@ export const useBoardObjects = ({
           typeof window !== 'undefined' &&
           window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
       });
-      changedNodes = children.map((node) => {
+      changedNodes = children.map(({ node, isCanvasObject }) => {
         const placement = placementById.get(node.id);
         return placement
           ? {
@@ -731,14 +812,19 @@ export const useBoardObjects = ({
               className:
                 layout.mode === 'deck'
                   ? [node.className, 'auto-zone-stack-item'].filter(Boolean).join(' ')
-                  : node.className,
+                  : node.className
+                      ?.split(' ')
+                      .filter((name) => name !== 'auto-zone-stack-item')
+                      .join(' '),
               zIndex: layout.mode === 'deck' ? 500 + placement.deckDepth : node.zIndex,
               width: placement.width,
               height: placement.height,
-              position: { x: placement.x, y: placement.y + titleInset },
+              position: isCanvasObject
+                ? { x: zone.x + placement.x, y: zone.y + placement.y + titleInset }
+                : { x: placement.x, y: placement.y + titleInset },
               data: {
                 ...node.data,
-                ...(layout.mode === 'deck' || policy.preset === 'compact_list'
+                ...(!isCanvasObject && (layout.mode === 'deck' || policy.preset === 'compact_list')
                   ? { compact: true }
                   : {}),
               },
@@ -756,7 +842,7 @@ export const useBoardObjects = ({
           : node;
       });
       const positionChanged = changedNodes.some((node) => {
-        const current = children.find((child) => child.id === node.id);
+        const current = children.find((child) => child.id === node.id)?.node;
         return (
           !current ||
           Math.abs(current.position.x - node.position.x) >= 0.5 ||
@@ -764,7 +850,7 @@ export const useBoardObjects = ({
         );
       });
       const renderedSizeChanged = changedNodes.some((node) => {
-        const current = children.find((child) => child.id === node.id);
+        const current = children.find((child) => child.id === node.id)?.node;
         return (
           !current ||
           Math.abs(Number(current.width ?? current.style?.width ?? 0) - Number(node.width ?? 0)) >=
@@ -781,7 +867,10 @@ export const useBoardObjects = ({
           : layout.mode === 'deck'
             ? Math.max(zone.height, 200, ceilBoardGridValue(layout.height + titleInset))
             : zone.height;
-      const nextZoneWidth = frame.width;
+      const nextZoneWidth =
+        !options.preserveZoneFrame && policy.resize === 'both'
+          ? Math.max(frame.width, ceilBoardGridValue(layout.width))
+          : frame.width;
       const zoneHeightChanged = Math.abs(nextZoneHeight - zone.height) >= 0.5;
       const zoneWidthChanged = Math.abs(nextZoneWidth - zone.width) >= 0.5;
 
@@ -798,7 +887,10 @@ export const useBoardObjects = ({
 
       const compactChanged =
         policy.preset === 'compact_list' &&
-        children.some((node) => placementByNodeId.get(node.id)?.compact !== true);
+        children.some(
+          ({ node, isCanvasObject }) =>
+            !isCanvasObject && placementByNodeId.get(node.id)?.compact !== true
+        );
       if (
         !positionChanged &&
         !renderedSizeChanged &&
@@ -829,14 +921,37 @@ export const useBoardObjects = ({
         })
       );
 
-      if (changedNodes.length === 0) return;
-
       try {
-        if (zoneHeightChanged || zoneWidthChanged) {
+        const canvasObjects = Object.fromEntries(
+          children.flatMap(({ node, isCanvasObject }) => {
+            if (!isCanvasObject) return [];
+            const arrangedNode = changedById.get(node.id);
+            const arranged = placementById.get(node.id);
+            const existing = currentBoard.objects?.[node.id];
+            if (!arrangedNode || !arranged || !existing) return [];
+            return [
+              [
+                node.id,
+                {
+                  ...existing,
+                  x: arrangedNode.position.x,
+                  y: arrangedNode.position.y,
+                  ...('width' in existing ? { width: arranged.width } : {}),
+                  ...('height' in existing ? { height: arranged.height } : {}),
+                },
+              ] as const,
+            ];
+          })
+        );
+        if (zoneHeightChanged || zoneWidthChanged || Object.keys(canvasObjects).length > 0) {
           await client.service('boards').patch(currentBoard.board_id, {
-            _action: 'upsertObject',
-            objectId: zoneId,
-            objectData: { ...zone, width: nextZoneWidth, height: nextZoneHeight },
+            _action: 'batchUpsertObjects',
+            objects: {
+              ...(zoneHeightChanged || zoneWidthChanged
+                ? { [zoneId]: { ...zone, width: nextZoneWidth, height: nextZoneHeight } }
+                : {}),
+              ...canvasObjects,
+            },
           } as unknown as Partial<Board>);
         }
         await Promise.all(
@@ -846,7 +961,7 @@ export const useBoardObjects = ({
             const arranged = placementById.get(node.id);
             if (!arranged) return;
             const { width, height } = arranged;
-            const currentNode = children.find((child) => child.id === node.id);
+            const currentNode = children.find((child) => child.id === node.id)?.node;
             const nodePositionChanged =
               !currentNode ||
               Math.abs(currentNode.position.x - node.position.x) >= 0.5 ||
@@ -875,7 +990,9 @@ export const useBoardObjects = ({
             `The Auto Zone is full. Stacked ${changedNodes.length} collapsed items with every title and action row exposed.`
           );
         } else if (!options.silent) {
-          showSuccess(`Arranged ${changedNodes.length} items in a non-overlapping grid.`);
+          showSuccess(
+            `Arranged ${changedNodes.length} items in a non-overlapping ${layoutMode === 'cluster' ? 'compact cluster' : 'grid'}.`
+          );
         }
       } catch (error) {
         console.error('Failed to arrange zone contents:', error);
@@ -920,6 +1037,38 @@ export const useBoardObjects = ({
       }
 
       try {
+        const selectedZones = Object.entries(currentBoard.objects ?? {}).flatMap(
+          ([zoneId, object]) => {
+            if (!selected.has(zoneId) || object.type !== 'zone') return [];
+            const live = currentNodes.find((node) => node.id === zoneId);
+            const width = Number(live?.width ?? live?.style?.width);
+            const height = Number(live?.height ?? live?.style?.height);
+            return [
+              [
+                zoneId,
+                {
+                  ...object,
+                  x: live?.position.x ?? object.x,
+                  y: live?.position.y ?? object.y,
+                  width: Number.isFinite(width) && width > 0 ? width : object.width,
+                  height: Number.isFinite(height) && height > 0 ? height : object.height,
+                },
+              ] as const,
+            ];
+          }
+        );
+        const zoneForCanvasNode = new Map<string, string>();
+        for (const node of currentNodes) {
+          if (!isPositionableZoneCanvasNode(node)) continue;
+          const containing = selectedZones
+            .filter(([, zone]) => nodeCenterInsideZone(node, zone))
+            .sort(
+              ([leftId, left], [rightId, right]) =>
+                left.width * left.height - right.width * right.height ||
+                leftId.localeCompare(rightId)
+            )[0];
+          if (containing) zoneForCanvasNode.set(node.id, containing[0]);
+        }
         const looseNodes = currentNodes.filter(
           (node) =>
             !node.hidden &&
@@ -927,59 +1076,68 @@ export const useBoardObjects = ({
             ['branchNode', 'cardNode', 'markdown', 'appNode', 'artifactNode'].includes(
               node.type ?? ''
             ) &&
-            node.data?.locked !== true
+            node.data?.locked !== true &&
+            !zoneForCanvasNode.has(node.id)
         );
         const plan = planBoardZoneArrangement(
-          Object.entries(currentBoard.objects ?? {}).flatMap(([zoneId, object]) => {
-            if (!selected.has(zoneId) || object.type !== 'zone') return [];
-            const children = currentNodes.filter(
-              (node) =>
-                node.parentId === zoneId && (node.type === 'branchNode' || node.type === 'cardNode')
-            );
-            return [
-              {
-                id: zoneId,
-                x: object.x,
-                y: object.y,
-                width: object.width,
-                height: object.height,
-                fontSize: object.fontSize,
-                status: object.status,
-                layout: object.layout,
-                items: children.map((node) => {
-                  const data = node.data as {
-                    branch?: {
-                      name?: string;
-                      created_at?: string;
-                      updated_at?: string;
-                      filesystem_status?: string;
-                    };
-                    card?: {
-                      title?: string;
-                      created_at?: string;
-                      updated_at?: string;
-                      data?: Record<string, unknown>;
-                    };
+          selectedZones.map(([zoneId, object]) => {
+            const children = currentNodes.filter((node) => {
+              if (
+                node.parentId === zoneId &&
+                (node.type === 'branchNode' || node.type === 'cardNode')
+              )
+                return true;
+              return zoneForCanvasNode.get(node.id) === zoneId;
+            });
+            return {
+              id: zoneId,
+              x: object.x,
+              y: object.y,
+              width: object.width,
+              height: object.height,
+              fontSize: object.fontSize,
+              status: object.status,
+              layout: object.layout,
+              items: children.map((node) => {
+                const isCanvasObject = isPositionableZoneCanvasNode(node);
+                const data = node.data as {
+                  branch?: {
+                    name?: string;
+                    created_at?: string;
+                    updated_at?: string;
+                    filesystem_status?: string;
                   };
-                  const cardData = data.card?.data ?? {};
-                  const placement = placementByNodeId.get(node.id);
-                  return {
-                    id: node.id,
-                    entityType:
-                      node.type === 'branchNode' ? ('branch' as const) : ('card' as const),
-                    position: node.position,
-                    compact: placement?.compact,
-                    ...ceilBoardGridSize(renderedNodeSize(node)),
-                    title: data.card?.title ?? data.branch?.name,
-                    createdAt: data.card?.created_at ?? data.branch?.created_at,
-                    updatedAt: data.card?.updated_at ?? data.branch?.updated_at,
-                    rank: typeof cardData.rank === 'number' ? cardData.rank : undefined,
-                    priority: cardData.priority,
-                    status: cardData.status ?? data.branch?.filesystem_status,
+                  card?: {
+                    title?: string;
+                    created_at?: string;
+                    updated_at?: string;
+                    data?: Record<string, unknown>;
                   };
-                }),
-              },
-            ];
+                };
+                const cardData = data.card?.data ?? {};
+                const placement = placementByNodeId.get(node.id);
+                return {
+                  id: node.id,
+                  ...(isCanvasObject
+                    ? {}
+                    : {
+                        entityType:
+                          node.type === 'branchNode' ? ('branch' as const) : ('card' as const),
+                      }),
+                  position: isCanvasObject
+                    ? { x: node.position.x - object.x, y: node.position.y - object.y }
+                    : node.position,
+                  compact: placement?.compact,
+                  ...ceilBoardGridSize(renderedNodeSize(node)),
+                  title: data.card?.title ?? data.branch?.name,
+                  createdAt: data.card?.created_at ?? data.branch?.created_at,
+                  updatedAt: data.card?.updated_at ?? data.branch?.updated_at,
+                  rank: typeof cardData.rank === 'number' ? cardData.rank : undefined,
+                  priority: cardData.priority,
+                  status: cardData.status ?? data.branch?.filesystem_status,
+                };
+              }),
+            };
           }),
           {
             looseItems: looseNodes.map((node) => ({
@@ -990,10 +1148,27 @@ export const useBoardObjects = ({
           }
         );
         const arrangedZoneById = new Map(plan.zones.map((zone) => [zone.id, zone]));
-        const arrangedItemById = new Map(
-          [...plan.zones.flatMap((zone) => zone.items), ...plan.looseItems].map(
-            (item) => [item.id, item] as const
+        const arrangedCanvasChildren = plan.zones.flatMap((zone) =>
+          zone.items.flatMap((item) =>
+            currentBoard.objects?.[item.id]
+              ? [
+                  {
+                    ...item,
+                    x: zone.position.x + item.x,
+                    y: zone.position.y + item.y,
+                  },
+                ]
+              : []
           )
+        );
+        const arrangedItemById = new Map(
+          [
+            ...plan.zones.flatMap((zone) =>
+              zone.items.filter((item) => !currentBoard.objects?.[item.id])
+            ),
+            ...arrangedCanvasChildren,
+            ...plan.looseItems,
+          ].map((item) => [item.id, item] as const)
         );
         const autoSignatureChangesByZoneId = new Map(
           plan.zones.map((zone) => {
@@ -1089,6 +1264,22 @@ export const useBoardObjects = ({
               ] as const,
             ];
           }),
+          ...arrangedCanvasChildren.flatMap((item) => {
+            const existing = currentBoard.objects?.[item.id];
+            if (!existing) return [];
+            return [
+              [
+                item.id,
+                {
+                  ...existing,
+                  x: item.x,
+                  y: item.y,
+                  ...('width' in existing ? { width: item.width } : {}),
+                  ...('height' in existing ? { height: item.height } : {}),
+                },
+              ] as const,
+            ];
+          }),
         ]);
         await client.service('boards').patch(currentBoard.board_id, {
           _action: 'batchUpsertObjects',
@@ -1168,15 +1359,31 @@ export const useBoardObjects = ({
       return;
     }
 
+    const autoZoneForCanvasNode = new Map<string, string>();
+    for (const node of nodes) {
+      if (!isPositionableZoneCanvasNode(node)) continue;
+      const containing = autoZones
+        .filter(([, zone]) => nodeCenterInsideZone(node, zone))
+        .sort(
+          ([leftId, left], [rightId, right]) =>
+            left.width * left.height - right.width * right.height || leftId.localeCompare(rightId)
+        )[0];
+      if (containing) autoZoneForCanvasNode.set(node.id, containing[0]);
+    }
+
     const signature = autoZones
       .map(([zoneId, zone]) => {
         const children = nodes
-          .filter(
-            (node) =>
-              node.parentId === zoneId && (node.type === 'branchNode' || node.type === 'cardNode')
-          )
+          .filter((node) => {
+            if (
+              node.parentId === zoneId &&
+              (node.type === 'branchNode' || node.type === 'cardNode')
+            )
+              return true;
+            return autoZoneForCanvasNode.get(node.id) === zoneId;
+          })
           .map((node) => {
-            const measured = (node as ReactFlowNode).measured;
+            const size = ceilBoardGridSize(renderedNodeSize(node));
             const data = node.data as {
               branch?: {
                 name?: string;
@@ -1193,10 +1400,10 @@ export const useBoardObjects = ({
             };
             return [
               node.id,
-              node.position.x,
-              node.position.y,
-              measured?.width ?? node.width,
-              measured?.height ?? node.height,
+              snapBoardGridValue(node.position.x),
+              snapBoardGridValue(node.position.y),
+              size.width,
+              size.height,
               data.branch?.name,
               data.branch?.created_at,
               data.branch?.updated_at,
