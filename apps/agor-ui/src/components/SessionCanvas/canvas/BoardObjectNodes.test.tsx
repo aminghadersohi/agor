@@ -27,7 +27,12 @@ const DISCONNECTED = { ...CONNECTED, connected: false };
 function renderZone(
   onReorder: ReturnType<typeof vi.fn>,
   connection: typeof CONNECTED,
-  extra?: { selected?: boolean; suppressToolbar?: boolean }
+  extra?: {
+    selected?: boolean;
+    suppressToolbar?: boolean;
+    positionableItemCount?: number;
+    onJustifyContents?: ReturnType<typeof vi.fn>;
+  }
 ) {
   const wrapper = ({ children }: { children: ReactNode }) => (
     <ConnectionProvider value={connection}>
@@ -48,7 +53,9 @@ function renderZone(
         y: 0,
         zIndex: 100,
         suppressToolbar: extra?.suppressToolbar,
+        positionableItemCount: extra?.positionableItemCount,
         onReorder,
+        onJustifyContents: extra?.onJustifyContents,
       }}
     />,
     { wrapper }
@@ -56,6 +63,30 @@ function renderZone(
 }
 
 describe('ZoneNode layer toolbar', () => {
+  it('dispatches Center in zone once through the direct toolbar production callback', () => {
+    const onJustifyContents = vi.fn();
+    renderZone(vi.fn(), CONNECTED, { positionableItemCount: 2, onJustifyContents });
+
+    const button = screen.getByRole('button', { name: 'Center in zone' });
+    fireEvent.pointerDown(button);
+    fireEvent.pointerUp(button);
+    fireEvent.click(button);
+
+    expect(onJustifyContents).toHaveBeenCalledTimes(1);
+    expect(onJustifyContents).toHaveBeenCalledWith('zone-1', 'middle');
+  });
+
+  it('bounds a growing toolbar and wraps extra actions upward away from zone contents', () => {
+    renderZone(vi.fn(), CONNECTED);
+
+    expect(screen.getByRole('toolbar', { name: 'Zone actions' })).toHaveStyle({
+      bottom: 'calc(100% + 8px)',
+      flexWrap: 'wrap',
+      width: 'max-content',
+      maxWidth: 'min(460px, calc(100vw - 32px))',
+    });
+  });
+
   it('exposes the layer buttons with accessible labels', () => {
     renderZone(vi.fn(), CONNECTED);
     expect(screen.getByLabelText('Send to back')).toBeTruthy();

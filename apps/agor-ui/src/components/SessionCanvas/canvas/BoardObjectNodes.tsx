@@ -2,8 +2,12 @@
  * Custom React Flow node components for board objects (text labels, zones, etc.)
  */
 
+import type { ZoneContentJustification } from '@agor/core/layout/zone-layout';
 import type { BoardComment, BoardObject, User } from '@agor-live/client';
 import {
+  AlignCenterOutlined,
+  AlignLeftOutlined,
+  AlignRightOutlined,
   AppstoreOutlined,
   CaretDownOutlined,
   CaretUpOutlined,
@@ -65,12 +69,15 @@ interface ZoneNodeData extends Omit<ZoneBoardObject, 'type'> {
   /** The shared multi-selection toolbar replaces this zone's individual controls. */
   suppressToolbar?: boolean;
   pinnedItemCount?: number;
+  /** Every measured board node currently contained by this zone. */
+  positionableItemCount?: number;
   /** How many of the pinned items are currently collapsed. */
   compactItemCount?: number;
   onUpdate?: (objectId: string, objectData: BoardObject) => void;
   onDelete?: (objectId: string, deleteAssociatedSessions: boolean) => void;
   onReorder?: (objectId: string, op: LayerOp) => void;
   onArrangeContents?: (objectId: string) => void;
+  onJustifyContents?: (objectId: string, justification: ZoneContentJustification) => void;
   onSetContentsCompact?: (objectId: string, compact: boolean) => void;
 }
 
@@ -431,13 +438,22 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
           }}
           style={{
             position: 'absolute',
-            top: '-44px',
+            // Stay attached to the zone edge while growing upward, so a
+            // second row never covers the zone label or its contents.
+            bottom: 'calc(100% + 8px)',
             left: '50%',
             transform: `translateX(-50%) scale(${scale})`,
             transformOrigin: 'center bottom',
             display: data.suppressToolbar ? 'none' : 'flex',
             alignItems: 'center',
+            justifyContent: 'center',
+            flexWrap: 'wrap',
             gap: '8px',
+            rowGap: '6px',
+            width: 'max-content',
+            // Preserve every direct action without letting the toolbar turn
+            // into a screen-wide strip as more controls are added.
+            maxWidth: 'min(460px, calc(100vw - 32px))',
             padding: '6px',
             background: token.colorBgElevated,
             border: `1px solid ${token.colorBorder}`,
@@ -664,8 +680,57 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
             'Tidy up contents',
             <AppstoreOutlined style={layerIconStyle} />,
             () => data.onArrangeContents?.(data.objectId),
-            (data.pinnedItemCount ?? 0) < 2
+            (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 2
           )}
+          <fieldset
+            className="nodrag nopan"
+            aria-label="Justify contents"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              minWidth: 0,
+              margin: 0,
+              padding: 0,
+              border: 0,
+            }}
+          >
+            {renderActionButton(
+              'justify-left',
+              'Justify contents left',
+              <AlignLeftOutlined style={layerIconStyle} />,
+              () => data.onJustifyContents?.(data.objectId, 'left'),
+              (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
+            )}
+            {renderActionButton(
+              'justify-middle',
+              'Center in zone',
+              <AlignCenterOutlined style={layerIconStyle} />,
+              () => data.onJustifyContents?.(data.objectId, 'middle'),
+              (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
+            )}
+            {renderActionButton(
+              'justify-right',
+              'Justify contents right',
+              <AlignRightOutlined style={layerIconStyle} />,
+              () => data.onJustifyContents?.(data.objectId, 'right'),
+              (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
+            )}
+            {renderActionButton(
+              'justify-top',
+              'Justify contents top',
+              <VerticalAlignTopOutlined style={layerIconStyle} />,
+              () => data.onJustifyContents?.(data.objectId, 'top'),
+              (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
+            )}
+            {renderActionButton(
+              'justify-bottom',
+              'Justify contents bottom',
+              <VerticalAlignBottomOutlined style={layerIconStyle} />,
+              () => data.onJustifyContents?.(data.objectId, 'bottom'),
+              (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
+            )}
+          </fieldset>
           {/*
             One derived-state density button rather than a Collapse/Expand
             pair: a zone whose items are all collapsed can only usefully be

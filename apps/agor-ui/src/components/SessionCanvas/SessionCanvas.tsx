@@ -3,6 +3,7 @@ import {
   BOARD_SNAP_GRID,
   ceilBoardGridSize,
   layoutCompactRectangles,
+  layoutSelectionGrid,
   snapBoardGridPoint,
   snapBoardGridValue,
 } from '@agor/core/layout/rectangle-packing';
@@ -110,6 +111,10 @@ import { ARRANGE_DEAL_CLASS } from './canvas/arrangeAnimation';
 import { CommentNode, ZoneNode } from './canvas/BoardObjectNodes';
 import { MarkdownNode } from './canvas/MarkdownNode';
 import { RemoteCursorLayer, type StaticRemoteCursor } from './canvas/RemoteCursorLayer';
+import {
+  SelectionLayoutPopover,
+  type SelectionLayoutSettings,
+} from './canvas/SelectionLayoutPopover';
 import { useBoardObjects } from './canvas/useBoardObjects';
 import { findIntersectingObjects, findZoneAtPosition } from './canvas/utils/collisionDetection';
 import {
@@ -135,6 +140,7 @@ import {
 } from './canvas/utils/layoutGuides';
 import {
   getMarqueeSelection,
+  getOnlySelectedZoneIds,
   getSelectedLayoutNodes,
   removeSelectedDescendants,
   suppressIndividualZoneToolbarsForMultiSelect,
@@ -2580,14 +2586,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       [nodes]
     );
     const handleLayoutAction = useCallback(
-      async (action: 'arrange' | 'left' | 'center' | 'top' | 'middle' | 'width' | 'height') => {
+      async (
+        action: 'arrange' | 'left' | 'center' | 'top' | 'middle' | 'width' | 'height',
+        layoutSettings?: SelectionLayoutSettings
+      ) => {
         if (!board || !client || selectedLayoutNodes.length < 2) return;
-        if (action === 'arrange' && selectedLayoutNodes.every((node) => node.type === 'zone')) {
-          await arrangeBoardZones(
-            Object.entries(board.objects ?? {}).flatMap(([objectId, object]) =>
-              object.type === 'zone' ? [objectId] : []
-            )
-          );
+        const selectedZoneIds = getOnlySelectedZoneIds(selectedLayoutNodes);
+        if (action === 'arrange' && layoutSettings?.mode !== 'grid' && selectedZoneIds) {
+          await arrangeBoardZones(selectedZoneIds);
           return;
         }
         const size = (node: Node) =>
@@ -2607,32 +2613,52 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         const middle = (top + bottom) / 2;
         const targetWidth = rects[0]?.width ?? 240;
         const targetHeight = rects[0]?.height ?? 120;
+        const layoutItems = rects.map(({ node, position, width, height }) => ({
+          id: node.id,
+          width,
+          height,
+          sourceX: position.x,
+          sourceY: position.y,
+        }));
         const autoLayout =
-          action === 'arrange'
-            ? layoutCompactRectangles(
-                rects.map(({ node, position, width, height }) => ({
-                  id: node.id,
-                  width,
-                  height,
-                  sourceX: position.x,
-                  sourceY: position.y,
-                })),
-                {
+          action !== 'arrange'
+            ? null
+            : layoutSettings?.mode === 'grid'
+              ? layoutSelectionGrid(layoutItems, {
+                  ...(layoutSettings.trackAxis === 'columns'
+                    ? { columns: layoutSettings.trackCount }
+                    : { rows: layoutSettings.trackCount }),
                   gapX: BOARD_GRID_SIZE * 2,
                   gapY: BOARD_GRID_SIZE * 2,
                   gridSize: BOARD_GRID_SIZE,
-                }
-              )
-            : null;
+                  matchRowHeights: layoutSettings.matchRowHeights,
+                  rowDistribution: layoutSettings.rowDistribution,
+                  targetWidth: right - left,
+                })
+              : layoutCompactRectangles(layoutItems, {
+                  gapX: BOARD_GRID_SIZE * 2,
+                  gapY: BOARD_GRID_SIZE * 2,
+                  gridSize: BOARD_GRID_SIZE,
+                });
         const autoPlacementById = new Map(
           autoLayout?.placements.map((placement) => [placement.id, placement]) ?? []
         );
         const updates = rects.map(({ node, position, width, height }) => {
-          const nextWidth = action === 'width' ? targetWidth : width;
-          const nextHeight = action === 'height' ? targetHeight : height;
+          const autoPlacement = autoPlacementById.get(node.id);
+          const nextWidth =
+            action === 'width'
+              ? targetWidth
+              : action === 'arrange' && autoPlacement
+                ? autoPlacement.width
+                : width;
+          const nextHeight =
+            action === 'height'
+              ? targetHeight
+              : action === 'arrange' && autoPlacement
+                ? autoPlacement.height
+                : height;
           let x = position.x;
           let y = position.y;
-          const autoPlacement = autoPlacementById.get(node.id);
           if (autoPlacement) {
             x = left + autoPlacement.x;
             y = top + autoPlacement.y;
@@ -3448,6 +3474,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   </Tooltip>
                 );
               })}
+              <SelectionLayoutPopover
+                selectionCount={selectedLayoutNodes.length}
+                onApply={(settings) => handleLayoutAction('arrange', settings)}
+              />
             </div>
           )}
           {alignmentGuides.length > 0 && (

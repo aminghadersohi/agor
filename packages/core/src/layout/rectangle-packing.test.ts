@@ -3,9 +3,84 @@ import {
   BOARD_GRID_SIZE,
   layoutCompactRectangles,
   layoutRectangles,
+  layoutSelectionGrid,
   type RectanglePlacement,
   snapBoardGridPoint,
 } from './rectangle-packing';
+
+describe('layoutSelectionGrid', () => {
+  const mixed = [
+    { id: 'wide', width: 360, height: 100, sourceX: 0, sourceY: 0 },
+    { id: 'tall', width: 120, height: 280, sourceX: 500, sourceY: 0 },
+    { id: 'small', width: 160, height: 80, sourceX: 0, sourceY: 400 },
+    { id: 'large', width: 280, height: 180, sourceX: 500, sourceY: 400 },
+    { id: 'note', width: 200, height: 120, sourceX: 900, sourceY: 400 },
+  ];
+
+  it('lets rows drive the derived column count while preserving spatial order', () => {
+    const result = layoutSelectionGrid([...mixed].reverse(), {
+      rows: 2,
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+
+    expect(result.columns).toBe(3);
+    expect(result.rows).toBe(2);
+    expect(result.placements.map((item) => item.id)).toEqual([
+      'wide',
+      'tall',
+      'small',
+      'large',
+      'note',
+    ]);
+    expectNoOverlap(result.placements);
+  });
+
+  it('matches heights within each row and justifies multi-item rows to stable outer edges', () => {
+    const result = layoutSelectionGrid(mixed, {
+      columns: 3,
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+      matchRowHeights: true,
+      rowDistribution: 'justify',
+      targetWidth: 1000,
+    });
+    const firstRow = result.placements.filter((item) => item.row === 0);
+    const secondRow = result.placements.filter((item) => item.row === 1);
+
+    expect(new Set(firstRow.map((item) => item.height))).toEqual(new Set([280]));
+    expect(new Set(secondRow.map((item) => item.height))).toEqual(new Set([180]));
+    expect(firstRow[0]?.x).toBe(0);
+    expect((firstRow.at(-1)?.x ?? 0) + (firstRow.at(-1)?.width ?? 0)).toBe(1000);
+    expect(secondRow[0]?.x).toBe(0);
+    expect((secondRow.at(-1)?.x ?? 0) + (secondRow.at(-1)?.width ?? 0)).toBe(1000);
+    expectNoOverlap(result.placements);
+  });
+
+  it('is idempotent and absorbs sub-grid source measurement noise', () => {
+    const options = {
+      columns: 2,
+      rowDistribution: 'justify' as const,
+      targetWidth: 900,
+      gridSize: BOARD_GRID_SIZE,
+    };
+    const first = layoutSelectionGrid(mixed, options);
+    const repeated = layoutSelectionGrid(
+      first.placements.map((item) => ({
+        id: item.id,
+        width: item.width,
+        height: item.height,
+        sourceX: item.x + 0.4,
+        sourceY: item.y + 0.4,
+      })),
+      options
+    );
+
+    expect(repeated).toEqual(first);
+  });
+});
 
 function expectNoOverlap(placements: RectanglePlacement[]): void {
   for (const [index, a] of placements.entries()) {
