@@ -700,6 +700,88 @@ export function layoutCompactRectangles(
 
 export type SelectionRowDistribution = 'packed' | 'justify';
 
+export type SelectionAlignment = 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom';
+
+export interface SelectionAlignmentOptions {
+  gap?: number;
+  gridSize?: number;
+}
+
+/**
+ * Align heterogeneous free-canvas rectangles without collapsing them onto one
+ * another. The requested edge/center is shared, while the perpendicular axis
+ * keeps its spatial order and only moves later rectangles far enough to clear
+ * the preceding rectangle. This makes the first spatial item an intuitive
+ * anchor and gives the smallest deterministic forward shift for every peer.
+ */
+export function layoutAlignedRectangles(
+  sourceItems: readonly CompactRectangleLayoutItem[],
+  alignment: SelectionAlignment,
+  options: SelectionAlignmentOptions = {}
+): RectanglePlacement[] {
+  if (sourceItems.length === 0) return [];
+  const gridSize = finiteNonNegative(options.gridSize, 0);
+  const snap = (value: number) =>
+    gridSize > 0 ? Math.round((Number.isFinite(value) ? value : 0) / gridSize) * gridSize : value;
+  const gap = ceilToGrid(finiteNonNegative(options.gap, 0), gridSize);
+  const items = sourceItems.map((item) => ({
+    ...item,
+    width: ceilToGrid(Math.max(1, finiteNonNegative(item.width, BOARD_GRID_SIZE)), gridSize),
+    height: ceilToGrid(Math.max(1, finiteNonNegative(item.height, BOARD_GRID_SIZE)), gridSize),
+    sourceX: snap(item.sourceX ?? 0),
+    sourceY: snap(item.sourceY ?? 0),
+  }));
+  const horizontal = alignment === 'left' || alignment === 'center' || alignment === 'right';
+  const left = Math.min(...items.map((item) => item.sourceX));
+  const right = Math.max(...items.map((item) => item.sourceX + item.width));
+  const top = Math.min(...items.map((item) => item.sourceY));
+  const bottom = Math.max(...items.map((item) => item.sourceY + item.height));
+  const ordered = [...items].sort((a, b) =>
+    horizontal
+      ? a.sourceY - b.sourceY || a.sourceX - b.sourceX || a.id.localeCompare(b.id)
+      : a.sourceX - b.sourceX || a.sourceY - b.sourceY || a.id.localeCompare(b.id)
+  );
+  const placements: RectanglePlacement[] = [];
+  let nextPerpendicular = Number.NEGATIVE_INFINITY;
+
+  for (const [index, item] of ordered.entries()) {
+    const x =
+      alignment === 'left'
+        ? left
+        : alignment === 'center'
+          ? snap((left + right - item.width) / 2)
+          : alignment === 'right'
+            ? right - item.width
+            : Math.max(item.sourceX, nextPerpendicular);
+    const y =
+      alignment === 'top'
+        ? top
+        : alignment === 'middle'
+          ? snap((top + bottom - item.height) / 2)
+          : alignment === 'bottom'
+            ? bottom - item.height
+            : Math.max(item.sourceY, nextPerpendicular);
+    placements.push({
+      id: item.id,
+      width: item.width,
+      height: item.height,
+      x,
+      y,
+      row: horizontal ? index : 0,
+      column: horizontal ? 0 : index,
+      stackIndex: index,
+      deckDepth: 0,
+    });
+    nextPerpendicular = (horizontal ? y + item.height : x + item.width) + gap;
+  }
+
+  const byId = new Map(placements.map((placement) => [placement.id, placement]));
+  return sourceItems.flatMap((item) => {
+    const placement = byId.get(item.id);
+    return placement ? [placement] : [];
+  });
+}
+
 export interface SelectionGridLayoutOptions {
   /** Fix one grid axis. When both are omitted, a balanced grid is chosen. */
   columns?: number;

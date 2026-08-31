@@ -2,6 +2,7 @@ import {
   BOARD_GRID_SIZE,
   BOARD_SNAP_GRID,
   ceilBoardGridSize,
+  layoutAlignedRectangles,
   layoutCompactRectangles,
   layoutSelectionGrid,
   snapBoardGridPoint,
@@ -128,6 +129,7 @@ import {
   getNodeAbsolutePosition,
   type ParentInfo,
   relativeToAbsolute,
+  translateTrackedChildPositions,
 } from './canvas/utils/coordinateTransforms';
 import {
   consumeTrackedDragPosition,
@@ -2148,6 +2150,19 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       (_event, node) => {
         const absolutePos = node.positionAbsolute || node.position;
         const currentNodes = reactFlowInstanceRef.current?.getNodes() ?? nodes;
+        const trackAcceptedPosition = (position: { x: number; y: number }) => {
+          const previous = activeDragPositionsRef.current[node.id];
+          if (node.type === 'zone' && previous) {
+            translateTrackedChildPositions(
+              currentNodes,
+              node.id,
+              previous,
+              position,
+              localPositionsRef.current
+            );
+          }
+          activeDragPositionsRef.current[node.id] = position;
+        };
         const layoutRects = getGuideLayoutRects(node, currentNodes);
         if (layoutRects) {
           const zoom = reactFlowInstanceRef.current?.getZoom() ?? guideViewport.zoom;
@@ -2173,7 +2188,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               )
             );
             localPositionsRef.current[node.id] = { x: snapped.x, y: snapped.y };
-            activeDragPositionsRef.current[node.id] = { x: snapped.x, y: snapped.y };
+            trackAcceptedPosition({ x: snapped.x, y: snapped.y });
             return;
           }
         }
@@ -2184,10 +2199,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           x: absolutePos.x,
           y: absolutePos.y,
         };
-        activeDragPositionsRef.current[node.id] = {
-          x: absolutePos.x,
-          y: absolutePos.y,
-        };
+        trackAcceptedPosition({ x: absolutePos.x, y: absolutePos.y });
         if (node.type === 'zone') {
           localZoneGeometryRef.current[node.id] = {
             x: absolutePos.x,
@@ -2608,9 +2620,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         const left = snapBoardGridValue(Math.min(...rects.map((item) => item.position.x)));
         const right = Math.max(...rects.map((item) => item.position.x + item.width));
         const top = snapBoardGridValue(Math.min(...rects.map((item) => item.position.y)));
-        const bottom = Math.max(...rects.map((item) => item.position.y + item.height));
-        const center = (left + right) / 2;
-        const middle = (top + bottom) / 2;
         const targetWidth = rects[0]?.width ?? 240;
         const targetHeight = rects[0]?.height ?? 120;
         const layoutItems = rects.map(({ node, position, width, height }) => ({
@@ -2640,11 +2649,22 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   gapY: BOARD_GRID_SIZE * 2,
                   gridSize: BOARD_GRID_SIZE,
                 });
+        const alignedPlacements =
+          action === 'left' || action === 'center' || action === 'top' || action === 'middle'
+            ? layoutAlignedRectangles(layoutItems, action, {
+                gap: BOARD_GRID_SIZE * 2,
+                gridSize: BOARD_GRID_SIZE,
+              })
+            : [];
         const autoPlacementById = new Map(
           autoLayout?.placements.map((placement) => [placement.id, placement]) ?? []
         );
+        const alignedPlacementById = new Map(
+          alignedPlacements.map((placement) => [placement.id, placement])
+        );
         const updates = rects.map(({ node, position, width, height }) => {
           const autoPlacement = autoPlacementById.get(node.id);
+          const alignedPlacement = alignedPlacementById.get(node.id);
           const nextWidth =
             action === 'width'
               ? targetWidth
@@ -2663,10 +2683,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             x = left + autoPlacement.x;
             y = top + autoPlacement.y;
           }
-          if (action === 'left') x = left;
-          if (action === 'center') x = center - width / 2;
-          if (action === 'top') y = top;
-          if (action === 'middle') y = middle - height / 2;
+          if (alignedPlacement) {
+            x = alignedPlacement.x;
+            y = alignedPlacement.y;
+          }
           const snapped = action === 'arrange' ? snapBoardGridPoint({ x, y }) : { x, y };
           return {
             node,
@@ -2721,6 +2741,22 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           height: number;
         }> = [];
         for (const update of updates) {
+          if (update.node.type === 'zone') {
+            const previous = getNodeAbsolutePosition(update.node, nodes);
+            translateTrackedChildPositions(
+              nodes,
+              update.node.id,
+              previous,
+              { x: update.x, y: update.y },
+              localPositionsRef.current
+            );
+            localZoneGeometryRef.current[update.node.id] = {
+              x: update.x,
+              y: update.y,
+              width: update.width,
+              height: update.height,
+            };
+          }
           localPositionsRef.current[update.node.id] = { x: update.x, y: update.y };
           const objectData = board.objects?.[update.node.id];
           if (objectData) {

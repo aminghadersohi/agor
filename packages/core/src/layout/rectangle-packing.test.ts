@@ -1,12 +1,92 @@
 import { describe, expect, it } from 'vitest';
 import {
   BOARD_GRID_SIZE,
+  layoutAlignedRectangles,
   layoutCompactRectangles,
   layoutRectangles,
   layoutSelectionGrid,
   type RectanglePlacement,
   snapBoardGridPoint,
 } from './rectangle-packing';
+
+describe('layoutAlignedRectangles', () => {
+  const sideBySide = [
+    { id: 'a', width: 300, height: 200, sourceX: 0, sourceY: 100 },
+    { id: 'b', width: 400, height: 160, sourceX: 400, sourceY: 100 },
+    { id: 'c', width: 240, height: 240, sourceX: 900, sourceY: 100 },
+  ];
+
+  it('aligns a horizontal row on the left without stacking zones on one another', () => {
+    const result = layoutAlignedRectangles(sideBySide, 'left', {
+      gap: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+
+    expect(result.map(({ id, x, y }) => ({ id, x, y }))).toEqual([
+      { id: 'a', x: 0, y: 100 },
+      { id: 'b', x: 0, y: 340 },
+      { id: 'c', x: 0, y: 540 },
+    ]);
+    expectNoOverlap(result);
+  });
+
+  it('keeps already separated perpendicular positions and is permutation-stable', () => {
+    const separated = [
+      { ...sideBySide[0], sourceY: 0 },
+      { ...sideBySide[1], sourceY: 400 },
+      { ...sideBySide[2], sourceY: 900 },
+    ];
+    const first = layoutAlignedRectangles(separated, 'center', {
+      gap: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+    const permuted = layoutAlignedRectangles([...separated].reverse(), 'center', {
+      gap: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+
+    expect(first.map((item) => item.y)).toEqual([0, 400, 900]);
+    expect(new Map(permuted.map((item) => [item.id, item]))).toEqual(
+      new Map(first.map((item) => [item.id, item]))
+    );
+    expectNoOverlap(first);
+  });
+
+  it('aligns a vertical column on top and minimally shifts later peers to the right', () => {
+    const result = layoutAlignedRectangles(
+      [
+        { id: 'a', width: 300, height: 200, sourceX: 100, sourceY: 0 },
+        { id: 'b', width: 200, height: 300, sourceX: 100, sourceY: 400 },
+      ],
+      'top',
+      { gap: 40, gridSize: BOARD_GRID_SIZE }
+    );
+
+    expect(result.map(({ id, x, y }) => ({ id, x, y }))).toEqual([
+      { id: 'a', x: 100, y: 0 },
+      { id: 'b', x: 440, y: 0 },
+    ]);
+    expectNoOverlap(result);
+  });
+
+  it('is idempotent and absorbs sub-grid position noise', () => {
+    const options = { gap: 40, gridSize: BOARD_GRID_SIZE };
+    const first = layoutAlignedRectangles(sideBySide, 'right', options);
+    const repeated = layoutAlignedRectangles(
+      first.map((item) => ({
+        id: item.id,
+        width: item.width,
+        height: item.height,
+        sourceX: item.x + 0.4,
+        sourceY: item.y + 0.4,
+      })),
+      'right',
+      options
+    );
+
+    expect(repeated).toEqual(first);
+  });
+});
 
 describe('layoutSelectionGrid', () => {
   const mixed = [
