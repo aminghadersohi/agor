@@ -76,9 +76,11 @@ import type {
 } from '@agor/core/types';
 import {
   CALLBACK_DELIVERIES,
+  BTW_AUTO_ARCHIVE_AFTER_SECONDS,
   getEffectiveDirectCallbackCoordinatorSessionId,
   isAgenticToolDefaultConfigurationReference,
   SessionStatus,
+  SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS,
   USER_DEFAULT_AGENTIC_CONFIGURATION,
 } from '@agor/core/types';
 import { assertExecutionHomeKeySatisfiesMode } from '@agor/core/unix';
@@ -131,6 +133,20 @@ function assertCallbackDelivery(value: unknown): void {
 
 const MANUAL_ARCHIVED_REASON = 'manual' satisfies SessionArchiveReason;
 const PARENT_ARCHIVED_REASON = 'parent_archived' satisfies SessionArchiveReason;
+
+function assertAutoArchivePolicy(value: unknown): void {
+  if (value === undefined || value === 'never' || value === 'after_completion') return;
+  throw new BadRequest('auto_archive must be never or after_completion');
+}
+
+function assertAutoArchiveTtl(value: number | undefined): void {
+  if (value === undefined) return;
+  if (!Number.isInteger(value) || value <= 0 || value > 365 * 24 * 60 * 60) {
+    throw new BadRequest(
+      'auto_archive_after_seconds must be a positive integer no greater than one year'
+    );
+  }
+}
 
 function sessionConfigurationSource(
   data: Pick<CreateSessionInput, 'model_config' | 'permission_config'>
@@ -700,6 +716,34 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       ...sessionData
     } = data;
     let createData: Partial<Session> = { ...sessionData };
+    assertAutoArchivePolicy(createData.auto_archive);
+    const isSpawnedChild = Boolean(createData.genealogy?.parent_session_id);
+    const isBtw = createData.fork_origin === 'btw';
+    const defaultTtl = isBtw
+      ? BTW_AUTO_ARCHIVE_AFTER_SECONDS
+      : isSpawnedChild
+        ? SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS
+        : undefined;
+    if (createData.auto_archive_after_seconds !== undefined && !isSpawnedChild && !isBtw) {
+      throw new BadRequest(
+        'Automatic archival is available only for spawned child and BTW sessions'
+      );
+    }
+    if (createData.auto_archive === undefined) {
+      createData.auto_archive = defaultTtl ? 'after_completion' : 'never';
+    }
+    if (createData.auto_archive === 'after_completion') {
+      if (!isSpawnedChild && !isBtw) {
+        throw new BadRequest(
+          'Automatic archival is available only for spawned child and BTW sessions'
+        );
+      }
+      createData.auto_archive_after_seconds ??= defaultTtl;
+      assertAutoArchiveTtl(createData.auto_archive_after_seconds);
+    } else {
+      createData.auto_archive_after_seconds = undefined;
+      createData.auto_archive_at = undefined;
+    }
     if (params?._agenticConfigResolved) {
       createData = {
         ...createData,
@@ -1313,6 +1357,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       throw new Error('Spawn requires a prompt');
     }
     assertCallbackDelivery(data.callbackDelivery);
+    assertAutoArchivePolicy(data.autoArchive);
+    assertAutoArchiveTtl(data.autoArchiveAfterSeconds);
     const parent = await this.get(id, params);
     requireActiveAgenticTool(parent.agentic_tool);
     const targetTool = requireActiveAgenticTool(data.agent || parent.agentic_tool);
@@ -1438,6 +1484,11 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         permission_config: permissionConfig,
         model_config: modelConfig,
         callback_config: callbackConfig,
+        auto_archive: data.autoArchive ?? 'after_completion',
+        auto_archive_after_seconds:
+          data.autoArchive === 'never'
+            ? undefined
+            : (data.autoArchiveAfterSeconds ?? SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS),
         // Don't copy sdk_session_id - spawn will get its own via forkSession:true
       },
       { ...params, _agenticConfigResolved: true, _sdkHomeScope: parent.sdk_home_scope }
@@ -1876,6 +1927,67 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     assertCallbackDelivery(data.callback_config?.delivery);
     if (params?.provider && data.callback_config?.digest !== undefined) {
       throw new BadRequest('callback digest provenance is server-managed');
+    }
+    assertAutoArchivePolicy(data.auto_archive);
+    assertAutoArchiveTtl(data.auto_archive_after_seconds);
+    if (id && !Array.isArray(id)) {
+      const currentForArchivePolicy = await this.get(String(id), params);
+      const becomesBtw =
+        data.fork_origin === 'btw' || currentForArchivePolicy.fork_origin === 'btw';
+      const isChild = Boolean(currentForArchivePolicy.genealogy?.parent_session_id);
+      if (data.auto_archive_after_seconds !== undefined && !becomesBtw && !isChild) {
+        throw new BadRequest(
+          'Automatic archival is available only for spawned child and BTW sessions'
+        );
+      }
+      if (data.fork_origin === 'btw' && data.auto_archive === undefined) {
+        data = {
+          ...data,
+          auto_archive: 'after_completion',
+          auto_archive_after_seconds: BTW_AUTO_ARCHIVE_AFTER_SECONDS,
+        };
+      }
+      if (data.auto_archive === 'after_completion') {
+        if (!becomesBtw && !isChild) {
+          throw new BadRequest(
+            'Automatic archival is available only for spawned child and BTW sessions'
+          );
+        }
+        data = {
+          ...data,
+          auto_archive_after_seconds:
+            data.auto_archive_after_seconds ??
+            currentForArchivePolicy.auto_archive_after_seconds ??
+            (becomesBtw ? BTW_AUTO_ARCHIVE_AFTER_SECONDS : SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS),
+        };
+      }
+      const editsActivePolicy =
+        data.auto_archive === 'after_completion' ||
+        (data.auto_archive_after_seconds !== undefined &&
+          currentForArchivePolicy.auto_archive === 'after_completion');
+      if (
+        editsActivePolicy &&
+        currentForArchivePolicy.auto_archive_at &&
+        currentForArchivePolicy.auto_archive_after_seconds
+      ) {
+        const nextTtl =
+          data.auto_archive_after_seconds ?? currentForArchivePolicy.auto_archive_after_seconds;
+        const completedAt =
+          Date.parse(currentForArchivePolicy.auto_archive_at) -
+          currentForArchivePolicy.auto_archive_after_seconds * 1_000;
+        data = {
+          ...data,
+          auto_archive_at: new Date(completedAt + nextTtl * 1_000).toISOString(),
+        };
+      }
+      if (data.auto_archive === 'never') {
+        data = { ...data, auto_archive_after_seconds: undefined, auto_archive_at: undefined };
+      }
+      // Manual archive/unarchive is authoritative. Retain the policy, but a
+      // restore is not rescheduled until a later Task reaches terminal state.
+      if (data.archived !== undefined) {
+        data = { ...data, auto_archive_at: undefined };
+      }
     }
     let replaceAgenticConfig = false;
     if (

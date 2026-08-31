@@ -137,8 +137,13 @@ export const sessions = sqliteTable(
     // Archive state (cascaded from branch archive)
     archived: t.bool('archived').notNull().default(false),
     archived_reason: text('archived_reason', {
-      enum: ['branch_archived', 'manual', 'parent_archived', 'btw_completed'],
+      enum: ['branch_archived', 'manual', 'parent_archived', 'btw_completed', 'auto_completed'],
     }),
+    auto_archive: text('auto_archive', { enum: ['never', 'after_completion'] })
+      .notNull()
+      .default('never'),
+    auto_archive_after_seconds: integer('auto_archive_after_seconds'),
+    auto_archive_at: t.timestamp('auto_archive_at'),
 
     // JSON blob for everything else (cross-DB via json() type)
     data: t
@@ -228,6 +233,12 @@ export const sessions = sqliteTable(
     branchIdx: index('sessions_branch_idx').on(table.branch_id),
     createdIdx: index('sessions_created_idx').on(table.created_at),
     archivedUpdatedIdx: index('sessions_archived_updated_idx').on(table.archived, table.updated_at),
+    autoArchiveDueIdx: index('sessions_auto_archive_due_idx').on(
+      table.archived,
+      table.auto_archive,
+      table.auto_archive_at,
+      table.session_id
+    ),
     parentIdx: index('sessions_parent_idx').on(table.parent_session_id),
     forkedIdx: index('sessions_forked_idx').on(table.forked_from_session_id),
     // Scheduler indexes — including the partial unique index below.

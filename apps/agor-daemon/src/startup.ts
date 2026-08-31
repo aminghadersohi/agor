@@ -48,6 +48,7 @@ import { HealthMonitor } from './services/health-monitor.js';
 import { KnowledgeEmbeddingIndexer } from './services/knowledge-embedding-indexer.js';
 import { drainRestartRecoveries } from './services/restart-recovery-worker.js';
 import { SchedulerService } from './services/scheduler.js';
+import { SessionAutoArchiveWorker } from './services/session-auto-archive-worker.js';
 import { SessionQueueWorker } from './services/session-queue-worker.js';
 import { TaskRuntimeReconciler } from './services/task-runtime-reconciler.js';
 import type { TerminalsService } from './services/terminals.js';
@@ -852,6 +853,15 @@ export async function startup(ctx: StartupContext): Promise<void> {
   });
   sessionQueueWorker.start();
 
+  // Completed child Sessions retain their transcripts but leave active trees
+  // after a durable grace. Every replica may scan; the deadline-fenced update
+  // elects the one realtime publisher.
+  const sessionAutoArchiveWorker = new SessionAutoArchiveWorker(db, {
+    app,
+    tenantId: queueMultiTenancy.mode === 'static' ? queueMultiTenancy.static_tenant_id : undefined,
+  });
+  sessionAutoArchiveWorker.start();
+
   // 7. Start scheduler service (background worker)
   const schedulerMultiTenancy = resolveMultiTenancyConfig(config);
   const schedulerService = new SchedulerService(db, app, {
@@ -954,6 +964,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
       // Stop durable Session queue discovery. Any in-flight database claim is
       // still safe; stop only prevents the next local scan.
       sessionQueueWorker?.stop();
+      sessionAutoArchiveWorker?.stop();
 
       if (shouldContainLocalExecutorsOnShutdown(ctx.taskRuntimePolicy)) {
         // Preserve the historical standalone shutdown contract.

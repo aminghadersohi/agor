@@ -98,6 +98,17 @@ export type IncompleteScheduledSessionCursor = Pick<
   'created_at' | 'session_id'
 >;
 
+export interface DueSessionAutoArchiveRef {
+  session_id: SessionID;
+  auto_archive_at: number;
+  tenant_id?: string;
+}
+
+export type DueSessionAutoArchiveCursor = Pick<
+  DueSessionAutoArchiveRef,
+  'auto_archive_at' | 'session_id'
+>;
+
 type SessionArchiveReason = NonNullable<Session['archived_reason']>;
 
 /** Domain validation failure for an atomic callback/genealogy transfer. */
@@ -200,6 +211,9 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         attention_generation: row.attention_generation ?? 0,
         archived: Boolean(row.archived), // Convert SQLite integer (0/1) to boolean
         archived_reason: row.archived_reason ?? undefined,
+        auto_archive: row.auto_archive,
+        auto_archive_after_seconds: row.auto_archive_after_seconds ?? undefined,
+        auto_archive_at: row.auto_archive_at?.toISOString(),
         current_context_usage: row.data.current_context_usage,
         context_window_limit: row.data.context_window_limit,
         last_context_update_at: row.data.last_context_update_at,
@@ -252,6 +266,9 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
       attention_generation: session.attention_generation ?? 0,
       archived: session.archived ?? false, // Default false for new sessions
       archived_reason: session.archived_reason ?? null,
+      auto_archive: session.auto_archive ?? 'never',
+      auto_archive_after_seconds: session.auto_archive_after_seconds ?? null,
+      auto_archive_at: session.auto_archive_at ? new Date(session.auto_archive_at) : null,
       data: {
         agentic_tool_version: session.agentic_tool_version,
         ...(session.sdk_session_id !== undefined ? { sdk_session_id: session.sdk_session_id } : {}),
@@ -838,6 +855,9 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
           sdk_session_id: sdkSessionIdUpdate,
           attention_generation: _callerAttentionGeneration,
           viewer_seen_attention_generation: _callerSeenAttentionGeneration,
+          archived_reason: archivedReasonUpdate,
+          auto_archive_at: autoArchiveAtUpdate,
+          auto_archive_after_seconds: autoArchiveAfterSecondsUpdate,
           ...genericUpdates
         } = updates as SessionUpdate & {
           attention_generation?: unknown;
@@ -848,6 +868,20 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
           delete merged.sdk_session_id;
         } else if (sdkSessionIdUpdate !== undefined) {
           merged.sdk_session_id = sdkSessionIdUpdate;
+        }
+        // `deepMerge` intentionally ignores undefined. These lifecycle fields
+        // use an own-property undefined as the public clear operation, so
+        // handle them explicitly. Missing this special case caused the
+        // observed impossible-looking `archived=false` +
+        // `archived_reason=btw_completed` state after prompt auto-unarchive.
+        if (Object.hasOwn(updates, 'archived_reason')) {
+          merged.archived_reason = archivedReasonUpdate;
+        }
+        if (Object.hasOwn(updates, 'auto_archive_at')) {
+          merged.auto_archive_at = autoArchiveAtUpdate;
+        }
+        if (Object.hasOwn(updates, 'auto_archive_after_seconds')) {
+          merged.auto_archive_after_seconds = autoArchiveAfterSecondsUpdate;
         }
         if (options.replaceAgenticConfig) {
           if (Object.hasOwn(updates, 'model_config')) {
@@ -1299,6 +1333,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
             .set({
               archived: first.archived,
               archived_reason: first.archivedReason,
+              auto_archive_at: null,
               updated_at: now,
             })
             .where(
@@ -1514,6 +1549,243 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
           : new Date(row.created_at as string | number).getTime(),
       ...(typeof row.tenant_id === 'string' ? { tenant_id: row.tenant_id } : {}),
     }));
+  }
+
+  /** Bounded routing-only discovery. Eligibility is rechecked under tenant scope. */
+  async findDueAutoArchiveRefs(
+    limit = 25,
+    after?: DueSessionAutoArchiveCursor,
+    options?: { eligibleAt?: number }
+  ): Promise<DueSessionAutoArchiveRef[]> {
+    if (!Number.isInteger(limit) || limit <= 0 || limit > 1_000) {
+      throw new RepositoryError('Due Session auto-archive limit must be between 1 and 1000');
+    }
+    const tenantColumn = (sessions as unknown as { tenant_id?: unknown }).tenant_id;
+    const dueTime =
+      options?.eligibleAt !== undefined
+        ? new Date(options.eligibleAt)
+        : isPostgresDatabase(this.db)
+          ? sql`CURRENT_TIMESTAMP`
+          : sql`CAST(strftime('%s', 'now') AS integer) * 1000`;
+    const afterCondition = after
+      ? or(
+          gt(sessions.auto_archive_at, new Date(after.auto_archive_at)),
+          and(
+            eq(sessions.auto_archive_at, new Date(after.auto_archive_at)),
+            gt(sessions.session_id, after.session_id)
+          )
+        )
+      : undefined;
+    const rows = await select(this.db, {
+      session_id: sessions.session_id,
+      auto_archive_at: sessions.auto_archive_at,
+      ...(isPostgresDatabase(this.db) && tenantColumn ? { tenant_id: tenantColumn } : {}),
+    })
+      .from(sessions)
+      .where(
+        and(
+          eq(sessions.archived, false),
+          eq(sessions.auto_archive, 'after_completion'),
+          isNotNull(sessions.auto_archive_at),
+          lte(sessions.auto_archive_at, dueTime),
+          or(isNotNull(sessions.parent_session_id), isNotNull(sessions.forked_from_session_id)),
+          afterCondition
+        )
+      )
+      .orderBy(asc(sessions.auto_archive_at), asc(sessions.session_id))
+      .limit(limit)
+      .all();
+    return (rows as Array<Record<string, unknown>>).map((row) => ({
+      session_id: row.session_id as SessionID,
+      auto_archive_at:
+        row.auto_archive_at instanceof Date
+          ? row.auto_archive_at.getTime()
+          : new Date(row.auto_archive_at as string | number).getTime(),
+      ...(typeof row.tenant_id === 'string' ? { tenant_id: row.tenant_id } : {}),
+    }));
+  }
+
+  /**
+   * Atomically performs the reversible archive transition. The exact deadline
+   * is the fence: a prompt, policy edit, unarchive, or later completion makes a
+   * stale worker lose without emitting an event.
+   */
+  async archiveDueChildIfEligible(
+    sessionId: SessionID,
+    expectedDeadlineMs: number
+  ): Promise<Session | null> {
+    return runDatabaseTransaction(this.db, async (txDb) => {
+      await lockRowForUpdate(txDb, this.db, sessions, eq(sessions.session_id, sessionId));
+      const row = await select(txDb).from(sessions).where(eq(sessions.session_id, sessionId)).one();
+      if (!row) return null;
+      const deadlineMs = row.auto_archive_at?.getTime();
+      if (
+        row.archived ||
+        row.auto_archive !== 'after_completion' ||
+        deadlineMs !== expectedDeadlineMs ||
+        (!row.parent_session_id && row.data.fork_origin !== 'btw') ||
+        !['idle', 'completed', 'failed', 'timed_out'].includes(row.status)
+      ) {
+        return null;
+      }
+
+      const branchRows = await select(txDb, {
+        session_id: sessions.session_id,
+        parent_session_id: sessions.parent_session_id,
+        forked_from_session_id: sessions.forked_from_session_id,
+        auto_archive: sessions.auto_archive,
+        archived: sessions.archived,
+        status: sessions.status,
+      })
+        .from(sessions)
+        .where(eq(sessions.branch_id, row.branch_id))
+        .all();
+      const children = new Map<string, string[]>();
+      for (const candidate of branchRows) {
+        for (const parentId of [candidate.parent_session_id, candidate.forked_from_session_id]) {
+          if (!parentId) continue;
+          const ids = children.get(parentId) ?? [];
+          ids.push(candidate.session_id);
+          children.set(parentId, ids);
+        }
+      }
+      const descendantIds: string[] = [];
+      const queue = [...(children.get(sessionId) ?? [])];
+      const visited = new Set<string>([sessionId]);
+      while (queue.length > 0) {
+        const id = queue.shift()!;
+        if (visited.has(id)) continue;
+        visited.add(id);
+        descendantIds.push(id);
+        queue.push(...(children.get(id) ?? []));
+      }
+
+      const relevantSessionIds = [sessionId, ...descendantIds];
+      const activeTask = await select(txDb, { one: sql<number>`1` })
+        .from(tasks)
+        .where(
+          and(
+            inArray(tasks.session_id, relevantSessionIds),
+            inArray(tasks.status, [
+              'queued',
+              'created',
+              'dispatching',
+              'running',
+              'stopping',
+              'awaiting_permission',
+              'awaiting_input',
+            ])
+          )
+        )
+        .limit(1)
+        .one();
+      if (activeTask) return null;
+      const activeDescendant = branchRows.some(
+        (candidate: (typeof branchRows)[number]) =>
+          descendantIds.includes(candidate.session_id) &&
+          !candidate.archived &&
+          ['running', 'stopping', 'awaiting_permission', 'awaiting_input'].includes(
+            candidate.status
+          )
+      );
+      if (activeDescendant) return null;
+
+      // Process eligible descendants first. This avoids promoting a still-visible
+      // auto-cleanup child to a graph root merely because its parent's shorter
+      // or older deadline was discovered first. Explicit `never` descendants
+      // do not pin their parent forever.
+      const pendingEligibleDescendant = branchRows.some(
+        (candidate: (typeof branchRows)[number]) =>
+          descendantIds.includes(candidate.session_id) &&
+          !candidate.archived &&
+          candidate.auto_archive === 'after_completion'
+      );
+      if (pendingEligibleDescendant) return null;
+
+      const sessionTasks = await select(txDb, {
+        status: tasks.status,
+        data: tasks.data,
+      })
+        .from(tasks)
+        .where(eq(tasks.session_id, sessionId))
+        .orderBy(desc(tasks.created_at), desc(tasks.task_id))
+        .all();
+      const latestTask = sessionTasks[0];
+      if (
+        !latestTask ||
+        !['completed', 'failed', 'stopped', 'timed_out'].includes(latestTask.status)
+      ) {
+        return null;
+      }
+      const callbackTarget = row.data.callback_config?.callback_session_id ?? row.parent_session_id;
+      const callbackRequired = callbackTarget && row.data.callback_config?.enabled !== false;
+      for (const completedTask of sessionTasks) {
+        if (!['completed', 'failed', 'stopped', 'timed_out'].includes(completedTask.status)) {
+          return null;
+        }
+        const metadata = completedTask.data.metadata;
+        const skipsCompletionDelivery = ['stopped', 'timed_out'].includes(completedTask.status);
+        const callbackDelivered = metadata?.callback_dispatches?.some(
+          (
+            dispatch: NonNullable<
+              import('@agor/core/types').TaskMetadata['callback_dispatches']
+            >[number]
+          ) => dispatch.target_session_id === callbackTarget
+        );
+        if (!skipsCompletionDelivery && callbackRequired && !callbackDelivered) return null;
+        const exactCallbackTarget = metadata?.completion_callback?.target_session_id;
+        if (
+          !skipsCompletionDelivery &&
+          exactCallbackTarget &&
+          !metadata?.callback_dispatches?.some(
+            (
+              dispatch: NonNullable<
+                import('@agor/core/types').TaskMetadata['callback_dispatches']
+              >[number]
+            ) => dispatch.target_session_id === exactCallbackTarget
+          )
+        ) {
+          return null;
+        }
+        if (
+          row.data.fork_origin === 'btw' &&
+          !skipsCompletionDelivery &&
+          !completedTask.data.termination_request &&
+          !metadata?.btw_result_delivered_at
+        ) {
+          return null;
+        }
+      }
+
+      const changed = await update(txDb, sessions)
+        .set({
+          archived: true,
+          archived_reason: row.data.fork_origin === 'btw' ? 'btw_completed' : 'auto_completed',
+          auto_archive_at: null,
+          updated_at: new Date(),
+        })
+        .where(
+          and(
+            eq(sessions.session_id, sessionId),
+            eq(sessions.archived, false),
+            eq(sessions.auto_archive, 'after_completion'),
+            eq(sessions.auto_archive_at, new Date(expectedDeadlineMs))
+          )
+        )
+        .run();
+      if (changed.rowsAffected !== 1) return null;
+      const updated = await select(txDb)
+        .from(sessions)
+        .leftJoin(branches, eq(sessions.branch_id, branches.branch_id))
+        .where(eq(sessions.session_id, sessionId))
+        .one();
+      if (!updated) return null;
+      return this.rowToSession(
+        updated.sessions,
+        (updated.branches?.board_id ?? null) as UUID | null,
+        await getBaseUrl()
+      );
+    });
   }
 
   async isScheduledInitializationComplete(sessionId: SessionID): Promise<boolean> {

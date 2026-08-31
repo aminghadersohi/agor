@@ -30,6 +30,7 @@ import {
   mapToCodexPermissionConfig,
 } from '@agor-live/client';
 import {
+  ClockCircleOutlined,
   DownOutlined,
   InboxOutlined,
   KeyOutlined,
@@ -37,7 +38,7 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import type { CollapseProps } from 'antd';
-import { Collapse, Divider, Form, InputNumber, Modal, Switch, Typography, theme } from 'antd';
+import { Collapse, Divider, Form, InputNumber, Modal, Select, Switch, Typography, theme } from 'antd';
 import React from 'react';
 import { useAgorStore } from '../../store/agorStore';
 import { selectMcpServerById, selectSessionMcpServerIds } from '../../store/selectors';
@@ -98,6 +99,8 @@ interface FormValues {
     coalesceSystemUpdates: boolean;
     maxCoalescedUpdates: number;
   };
+  autoArchive: Session['auto_archive'];
+  autoArchiveAfterSeconds?: number;
 }
 
 // Stable empty array for sessions with no attached MCP servers — keeps the
@@ -139,6 +142,8 @@ function buildInitialValues(session: Session, sessionMcpServerIds: string[]): Fo
       coalesceSystemUpdates: session.queue_config?.coalesce_system_updates ?? false,
       maxCoalescedUpdates: session.queue_config?.max_coalesced_updates ?? 8,
     },
+    autoArchive: session.auto_archive ?? 'never',
+    autoArchiveAfterSeconds: session.auto_archive_after_seconds,
   };
 }
 
@@ -220,6 +225,14 @@ function buildUpdates(values: FormValues, session: Session): Partial<Session> {
         Math.max(2, Math.floor(values.queueConfig.maxCoalescedUpdates || 8))
       ),
     };
+  if (values.autoArchive !== session.auto_archive) {
+    updates.auto_archive = values.autoArchive;
+  }
+  if (
+    values.autoArchive === 'after_completion' &&
+    values.autoArchiveAfterSeconds !== session.auto_archive_after_seconds
+  ) {
+    updates.auto_archive_after_seconds = values.autoArchiveAfterSeconds;
   }
 
   return updates;
@@ -418,6 +431,56 @@ export const SessionSettingsModal: React.FC<SessionSettingsModalProps> = ({
       </>
     ),
   });
+
+  if (session.fork_origin === 'btw' || session.genealogy?.parent_session_id) {
+    secondaryItems.push({
+      key: 'auto-archive',
+      label: (
+        <Typography.Text strong>
+          <ClockCircleOutlined style={{ marginRight: 8 }} />
+          Automatic Archival
+        </Typography.Text>
+      ),
+      children: (
+        <>
+          <Form.Item
+            name="autoArchive"
+            label="Policy"
+            tooltip="Archival hides this child from active trees without deleting its transcript, tasks, branch, or worktree."
+          >
+            <Select
+              options={[
+                { value: 'after_completion', label: 'Archive after completion' },
+                { value: 'never', label: 'Never (keep)' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate={(prev, curr) => prev.autoArchive !== curr.autoArchive}>
+            {({ getFieldValue }) =>
+              getFieldValue('autoArchive') === 'after_completion' && (
+                <Form.Item
+                  name="autoArchiveAfterSeconds"
+                  label="Grace period (seconds)"
+                  rules={[{ required: true, message: 'Enter a grace period' }]}
+                >
+                  <InputNumber
+                    min={1}
+                    max={365 * 24 * 60 * 60}
+                    precision={0}
+                    style={{ width: '100%' }}
+                  />
+                </Form.Item>
+              )
+            }
+          </Form.Item>
+          <Typography.Text type="secondary">
+            Re-prompting cancels a pending deadline. Unarchiving keeps the policy but waits for the
+            next completion before scheduling again.
+          </Typography.Text>
+        </>
+      ),
+    });
+  }
 
   secondaryItems.push({
     key: 'queue-config',

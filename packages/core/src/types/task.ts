@@ -177,7 +177,6 @@ export interface TaskMetadata {
     btw_session_id?: SessionID;
     dispatched_at: string;
   }>;
-
   /** Durable callback-delivery audit on direct callback Tasks and digest BTW Tasks. */
   callback_delivery?: {
     source_session_id: SessionID;
@@ -199,6 +198,9 @@ export interface TaskMetadata {
     btw_session_id?: SessionID;
     final_message_id?: MessageID;
   };
+
+  /** Durable acknowledgement that the inline BTW result reached its parent transcript. */
+  btw_result_delivered_at?: string;
   /**
    * Marks a task whose prompt was authored by the daemon (not typed by a
    * human). Used by widget auto-resume so the UI can label the queued

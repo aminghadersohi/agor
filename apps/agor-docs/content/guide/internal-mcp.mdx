@@ -271,6 +271,19 @@ Tenant identity is ambient for the MCP operation, but it does not hold a
 database transaction open. Individual service and repository calls use short
 tenant-scoped units of work.
 
+### Child-session archival policy
+
+`agor_sessions_spawn` and the `subsession`/`btw` modes of `agor_sessions_prompt`
+accept `autoArchive` (`never` or `after_completion`) plus a positive
+`autoArchiveAfterSeconds`. `agor_sessions_create` accepts the same pair when it
+creates a branch-local genealogy child, and `agor_sessions_update` changes the
+policy on an existing child. Responses include the persisted snake-case
+`auto_archive`, `auto_archive_after_seconds`, and `auto_archive_at` fields.
+
+The defaults are five minutes for BTW forks and one hour for spawned children.
+Root Sessions are never automatically archived. Archival is reversible and
+does not delete Session data or branch/worktree state.
+
 ## Session transfer operations
 
 Two intentionally separate tools move existing Session relationships:
