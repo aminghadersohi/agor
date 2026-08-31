@@ -115,7 +115,7 @@ import {
   createPostLayoutViewportIntent,
   decidePostLayoutViewport,
   layoutGeometryChanged,
-  layoutSnapshotsMatch,
+  layoutPositionsMatch,
   type PostLayoutViewportIntent,
   snapshotLayoutNodes,
 } from './canvas/postLayoutViewport';
@@ -931,6 +931,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       demoteAutoZone,
       deferAutoZone,
       arrangeBoardZones,
+      arrangeWholeBoard,
+      canArrangeWholeBoard,
+      isBoardArrangementActive,
       preserveAutoZoneFrameOnce,
       setPlacementCompact,
       zoneStackByNodeId,
@@ -949,6 +952,17 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       onArrangeNodes: handleArrangeNodes,
       onUserLayoutComplete: requestPostLayoutViewport,
     });
+
+    const arrangeBoardUnavailable = !mutationGate.canMutate || !canArrangeWholeBoard;
+    const arrangeBoardBusy = isBoardArrangementActive || isArranging;
+    const arrangeBoardDisabled = arrangeBoardUnavailable || arrangeBoardBusy;
+    const arrangeBoardTooltip = !mutationGate.canMutate
+      ? (mutationGate.message ?? 'Arrange board is unavailable while disconnected')
+      : isBoardArrangementActive || isArranging
+        ? 'Arrange board — layout in progress'
+        : !canArrangeWholeBoard
+          ? 'Arrange board — no visible unlocked board items to arrange'
+          : 'Arrange board';
 
     const handleToggleBranchCompact = useStableCallback((branchId: string, compact: boolean) => {
       if (!mutationGate.canMutate) return;
@@ -1340,10 +1354,15 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           const affectedIds = current.intent.after.map((rect) => rect.id);
           const currentNodes = instance.getNodes();
           const settled = snapshotLayoutNodes(currentNodes, affectedIds);
-          if (!layoutSnapshotsMatch(current.intent.after, settled)) {
+          if (!layoutPositionsMatch(current.intent.after, settled)) {
             pendingPostLayoutViewportRef.current = undefined;
             return;
           }
+
+          // Positions prove this is the requested transaction; sizes come
+          // from the settled graph so compact/rendered-height convergence
+          // cannot make the viewport decision stale or suppress a valid fit.
+          const settledIntent = { ...current.intent, after: settled };
 
           const pane = wrapper.getBoundingClientRect();
           const left = Math.max(0, pane.left);
@@ -1363,7 +1382,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           const topLeft = instance.screenToFlowPosition({ x: left, y: top });
           const bottomRight = instance.screenToFlowPosition({ x: right, y: bottom });
           const decision = decidePostLayoutViewport({
-            intent: current.intent,
+            intent: settledIntent,
             viewport: {
               left: Math.min(topLeft.x, bottomRight.x),
               top: Math.min(topLeft.y, bottomRight.y),
@@ -3788,6 +3807,23 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                     }}
                   >
                     <ZoomInOutlined style={{ fontSize: '16px' }} />
+                  </ControlButton>
+                </span>
+              </Tooltip>
+              <Tooltip title={arrangeBoardTooltip} placement="right" mouseEnterDelay={0.3}>
+                <span>
+                  <ControlButton
+                    aria-label="Arrange board"
+                    aria-disabled={arrangeBoardDisabled}
+                    disabled={arrangeBoardUnavailable}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (arrangeBoardDisabled) return;
+                      void arrangeWholeBoard();
+                    }}
+                    style={arrangeBoardBusy ? { cursor: 'not-allowed', opacity: 0.45 } : undefined}
+                  >
+                    <AppstoreOutlined style={{ fontSize: '16px' }} />
                   </ControlButton>
                 </span>
               </Tooltip>

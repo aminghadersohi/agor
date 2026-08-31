@@ -109,6 +109,29 @@ export function layoutSnapshotsMatch(
   });
 }
 
+/**
+ * Confirm that the persisted layout has settled at the requested positions.
+ * Rendered card heights can legitimately converge after persistence (for
+ * example when compact content paints), so callers that will consume the
+ * fresh settled rectangles should not reject that newer size information.
+ */
+export function layoutPositionsMatch(
+  expected: readonly LayoutNodeRect[],
+  actual: readonly LayoutNodeRect[],
+  tolerance = SNAPSHOT_TOLERANCE
+): boolean {
+  if (expected.length !== actual.length) return false;
+  const actualById = new Map(actual.map((rect) => [rect.id, rect]));
+  return expected.every((rect) => {
+    const candidate = actualById.get(rect.id);
+    return (
+      candidate !== undefined &&
+      Math.abs(rect.x - candidate.x) <= tolerance &&
+      Math.abs(rect.y - candidate.y) <= tolerance
+    );
+  });
+}
+
 export function layoutGeometryChanged(
   before: readonly LayoutNodeRect[],
   after: readonly LayoutNodeRect[],

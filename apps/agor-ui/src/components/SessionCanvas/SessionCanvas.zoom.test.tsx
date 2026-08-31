@@ -3,6 +3,7 @@
 import { BOARD_SNAP_GRID } from '@agor/core/layout/rectangle-packing';
 import type { AgorClient, Board } from '@agor-live/client';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { App as AntApp } from 'antd';
 import type { ButtonHTMLAttributes, MouseEventHandler, ReactNode } from 'react';
 import type { Node } from 'reactflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,6 +17,7 @@ const onNodesChangeInternalSpy = vi.fn();
 // Stable spy for the raw setNodes setter (setNodesUnsafe). Lets tests inspect
 // the functional updater passed when zIndex needs to change for zone selection.
 const setNodesUnsafeSpy = vi.fn();
+let nodesStateOverride: Node[] | undefined;
 
 vi.mock('reactflow', () => ({
   Background: () => <div data-testid="react-flow-background" />,
@@ -52,7 +54,7 @@ vi.mock('reactflow', () => ({
   useViewport: () => ({ x: 0, y: 0, zoom: 1 }),
   useEdgesState: (initialEdges: unknown[]) => [initialEdges, vi.fn(), vi.fn()],
   useNodesState: (initialNodes: unknown[]) => [
-    initialNodes,
+    nodesStateOverride ?? initialNodes,
     setNodesUnsafeSpy,
     onNodesChangeInternalSpy,
   ],
@@ -68,6 +70,7 @@ vi.mock('./canvas/ArtifactNode', () => ({
 
 beforeEach(() => {
   reactFlowProps = null;
+  nodesStateOverride = undefined;
   onNodesChangeInternalSpy.mockClear();
   setNodesUnsafeSpy.mockClear();
 });
@@ -703,5 +706,93 @@ describe('SessionCanvas zoom shortcuts', () => {
         expect(result).toBe(mockNodes);
       });
     });
+  });
+
+  it('exposes Arrange board by accessible name and explains an empty board', async () => {
+    render(
+      <ConnectionProvider
+        value={{
+          connected: true,
+          connecting: false,
+          outOfSync: false,
+          capturedSha: null,
+          currentSha: null,
+        }}
+      >
+        <SessionCanvas board={null} client={null} branches={[]} />
+      </ConnectionProvider>
+    );
+
+    const button = screen.getByRole('button', { name: 'Arrange board' });
+    expect(button).toBeDisabled();
+    fireEvent.mouseOver(button.parentElement as HTMLElement);
+    expect(
+      await screen.findByText('Arrange board — no visible unlocked board items to arrange')
+    ).toBeInTheDocument();
+  });
+
+  it('keeps focus while an Arrange board transaction blocks keyboard and double activation', async () => {
+    nodesStateOverride = [
+      {
+        id: 'zone-1',
+        type: 'zone',
+        position: { x: 1200, y: 900 },
+        width: 620,
+        height: 500,
+        data: {},
+      },
+    ];
+    let releaseWrite: (() => void) | undefined;
+    const patch = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          releaseWrite = () => resolve({});
+        })
+    );
+    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    const board = {
+      board_id: 'board-1',
+      objects: {
+        'zone-1': {
+          type: 'zone',
+          x: 1200,
+          y: 900,
+          width: 620,
+          height: 500,
+          label: 'Zone',
+        },
+      },
+    } as unknown as Board;
+    render(
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      </AntApp>
+    );
+
+    const button = screen.getByRole('button', { name: 'Arrange board' });
+    expect(button).toBeEnabled();
+    button.focus();
+    expect(button).toHaveFocus();
+    fireEvent.click(button);
+
+    await waitFor(() => expect(button).toHaveAttribute('aria-disabled', 'true'));
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(button).toHaveFocus();
+    fireEvent.click(button);
+    expect(patch).toHaveBeenCalledTimes(1);
+
+    releaseWrite?.();
+    await waitFor(() => expect(button).toHaveAttribute('aria-disabled', 'false'));
+    expect(button).toHaveFocus();
   });
 });

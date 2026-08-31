@@ -2496,13 +2496,267 @@ describe('arrangeBoardZones production path', () => {
     showSuccess.mockClear();
 
     await act(async () => {
-      await result.current.arrangeBoardZones(['one', 'two', 'three'], { userInitiated: true });
+      await result.current.arrangeWholeBoard();
     });
 
     expect(boardsPatch).not.toHaveBeenCalled();
     expect(boardObjectsPatch).not.toHaveBeenCalled();
     expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
     expect(showSuccess).toHaveBeenCalledWith('Zones and their contents are already arranged.');
+  });
+
+  it('routes Arrange board through byte-equivalent selected-all planner writes', async () => {
+    const board = makeBoard({
+      one: { type: 'zone', x: 1200, y: 600, width: 620, height: 500, label: 'One' },
+      note: { type: 'markdown', x: -400, y: 900, width: 320, content: 'Free note' },
+    });
+    const nodes: Node[] = [
+      {
+        id: 'one',
+        type: 'zone',
+        position: { x: 1200, y: 600 },
+        width: 620,
+        height: 500,
+        data: {},
+      },
+      {
+        id: 'note',
+        type: 'markdown',
+        position: { x: -400, y: 900 },
+        width: 320,
+        height: 180,
+        data: { objectId: 'note', width: 320 },
+      },
+    ];
+    const direct = makeRoutedClient();
+    const toolbar = makeRoutedClient();
+    const directView = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client: direct.client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    const toolbarView = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client: toolbar.client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await directView.result.current.arrangeBoardZones(['one'], { userInitiated: true });
+      await toolbarView.result.current.arrangeWholeBoard();
+    });
+
+    expect(toolbar.boardsPatch.mock.calls).toEqual(direct.boardsPatch.mock.calls);
+    expect(toolbar.boardObjectsPatch.mock.calls).toEqual(direct.boardObjectsPatch.mock.calls);
+  });
+
+  it('arranges free mixed objects without requiring a zone', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const onUserLayoutComplete = vi.fn();
+    const board = makeBoard({
+      note: { type: 'markdown', x: 1600, y: 900, width: 320, content: 'Note' },
+      app: {
+        type: 'app',
+        x: -800,
+        y: 600,
+        width: 360,
+        height: 220,
+        title: 'App',
+        template: 'react',
+        files: {},
+      },
+    });
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes: [
+            {
+              id: 'note',
+              type: 'markdown',
+              position: { x: 1600, y: 900 },
+              width: 320,
+              height: 180,
+              data: { objectId: 'note' },
+            },
+            {
+              id: 'app',
+              type: 'appNode',
+              position: { x: -800, y: 600 },
+              width: 360,
+              height: 220,
+              data: { objectId: 'app' },
+            },
+          ],
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+          onUserLayoutComplete,
+        }),
+      { wrapper }
+    );
+
+    expect(result.current.canArrangeWholeBoard).toBe(true);
+    await act(async () => result.current.arrangeWholeBoard());
+
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    expect(Object.keys(boardsPatch.mock.calls[0]?.[1].objects).sort()).toEqual(['app', 'note']);
+    expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves locked zones, locked objects, and their geometric membership', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const board = makeBoard({
+      open: { type: 'zone', x: 1400, y: 0, width: 620, height: 500, label: 'Open' },
+      locked: { type: 'zone', x: 0, y: 0, width: 620, height: 500, label: 'Locked', locked: true },
+      blocked: { type: 'zone', x: 0, y: 800, width: 620, height: 500, label: 'Blocked' },
+      member: {
+        type: 'artifact',
+        artifact_id: 'member-artifact',
+        x: 100,
+        y: 140,
+        width: 260,
+        height: 180,
+      },
+      protected: {
+        type: 'artifact',
+        artifact_id: 'protected-artifact',
+        x: 100,
+        y: 940,
+        width: 260,
+        height: 180,
+        locked: true,
+      },
+      free: { type: 'markdown', x: 2200, y: 900, width: 320, content: 'Free' },
+    });
+    const nodes: Node[] = [
+      { id: 'open', type: 'zone', position: { x: 1400, y: 0 }, width: 620, height: 500, data: {} },
+      {
+        id: 'locked',
+        type: 'zone',
+        position: { x: 0, y: 0 },
+        width: 620,
+        height: 500,
+        data: { locked: true },
+      },
+      {
+        id: 'blocked',
+        type: 'zone',
+        position: { x: 0, y: 800 },
+        width: 620,
+        height: 500,
+        data: {},
+      },
+      {
+        id: 'member',
+        type: 'artifactNode',
+        position: { x: 100, y: 140 },
+        width: 260,
+        height: 180,
+        data: { objectId: 'member' },
+      },
+      {
+        id: 'protected',
+        type: 'artifactNode',
+        position: { x: 100, y: 940 },
+        width: 260,
+        height: 180,
+        data: { objectId: 'protected', locked: true },
+      },
+      {
+        id: 'free',
+        type: 'markdown',
+        position: { x: 2200, y: 900 },
+        width: 320,
+        height: 180,
+        data: { objectId: 'free' },
+      },
+    ];
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => result.current.arrangeWholeBoard());
+
+    const objects = boardsPatch.mock.calls[0]?.[1].objects;
+    expect(Object.keys(objects).sort()).toEqual(['free', 'open']);
+    expect(objects.locked).toBeUndefined();
+    expect(objects.blocked).toBeUndefined();
+    expect(objects.member).toBeUndefined();
+    expect(objects.protected).toBeUndefined();
+  });
+
+  it('rejects a concurrent Arrange board click until the batch settles', async () => {
+    let releaseWrite: (() => void) | undefined;
+    const { client, boardsPatch } = makeRoutedClient();
+    boardsPatch.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseWrite = () => resolve({});
+        })
+    );
+    const board = makeBoard({
+      zone: { type: 'zone', x: 1600, y: 900, width: 620, height: 500, label: 'Zone' },
+    });
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes: [
+            {
+              id: 'zone',
+              type: 'zone',
+              position: { x: 1600, y: 900 },
+              width: 620,
+              height: 500,
+              data: {},
+            },
+          ],
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    let first: Promise<void> | undefined;
+    let second: Promise<void> | undefined;
+    act(() => {
+      first = result.current.arrangeWholeBoard();
+      second = result.current.arrangeWholeBoard();
+    });
+    expect(result.current.isBoardArrangementActive).toBe(true);
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+
+    releaseWrite?.();
+    await act(async () => Promise.all([first, second]));
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    expect(result.current.isBoardArrangementActive).toBe(false);
   });
 
   it('writes one zone batch, re-packs measured children, and cancels pending Auto Zone passes', async () => {

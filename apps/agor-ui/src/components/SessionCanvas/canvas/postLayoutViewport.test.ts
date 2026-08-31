@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createPostLayoutViewportIntent,
   decidePostLayoutViewport,
+  layoutPositionsMatch,
   layoutSnapshotsMatch,
   snapshotLayoutNodes,
 } from './postLayoutViewport';
@@ -132,6 +133,18 @@ describe('post-layout viewport snapshots', () => {
     expect(layoutSnapshotsMatch(request.after, snapshotLayoutNodes(after, ['one']))).toBe(true);
     expect(
       layoutSnapshotsMatch(
+        request.after,
+        snapshotLayoutNodes([{ ...after[0], position: { x: 640, y: 0 } }], ['one'])
+      )
+    ).toBe(false);
+    expect(
+      layoutPositionsMatch(
+        request.after,
+        snapshotLayoutNodes([{ ...after[0], width: 240, height: 140 }], ['one'])
+      )
+    ).toBe(true);
+    expect(
+      layoutPositionsMatch(
         request.after,
         snapshotLayoutNodes([{ ...after[0], position: { x: 640, y: 0 } }], ['one'])
       )

@@ -99,12 +99,21 @@ function renderedZoneFontScale(zoneId: string, flowWidth: number): number {
 }
 
 const ZONE_CANVAS_NODE_TYPES = new Set(['markdown', 'appNode', 'artifactNode']);
+const BOARD_ARRANGEABLE_NODE_TYPES = new Set(['branchNode', 'cardNode', ...ZONE_CANVAS_NODE_TYPES]);
+
+function isTopLevelZoneCanvasNode(node: Node): boolean {
+  return !node.parentId && ZONE_CANVAS_NODE_TYPES.has(node.type ?? '');
+}
 
 function isPositionableZoneCanvasNode(node: Node): boolean {
+  return !node.hidden && isTopLevelZoneCanvasNode(node) && node.data?.locked !== true;
+}
+
+function isArrangeableTopLevelNode(node: Node): boolean {
   return (
     !node.hidden &&
     !node.parentId &&
-    ZONE_CANVAS_NODE_TYPES.has(node.type ?? '') &&
+    BOARD_ARRANGEABLE_NODE_TYPES.has(node.type ?? '') &&
     node.data?.locked !== true
   );
 }
@@ -122,6 +131,77 @@ function nodeCenterInsideZone(
     centerY >= zone.y &&
     centerY <= zone.y + zone.height
   );
+}
+
+/**
+ * Resolve one board-arrangement scope from the rendered graph. Canvas objects
+ * are geometrically contained rather than parented, so classify them against
+ * every zone before filtering the requested zone set. That keeps an object in
+ * an unselected, hidden, or locked zone from being mistaken for a free item.
+ */
+function getBoardArrangementCandidates(
+  currentBoard: Board,
+  currentNodes: readonly Node[],
+  requestedZoneIds?: ReadonlySet<string>
+) {
+  const liveById = new Map(currentNodes.map((node) => [node.id, node]));
+  const allZones = Object.entries(currentBoard.objects ?? {}).flatMap(([zoneId, object]) => {
+    if (object.type !== 'zone') return [];
+    const live = liveById.get(zoneId);
+    const width = Number(live?.width ?? live?.style?.width);
+    const height = Number(live?.height ?? live?.style?.height);
+    return [
+      [
+        zoneId,
+        {
+          ...object,
+          x: live?.position.x ?? object.x,
+          y: live?.position.y ?? object.y,
+          width: Number.isFinite(width) && width > 0 ? width : object.width,
+          height: Number.isFinite(height) && height > 0 ? height : object.height,
+          fontSize: typeof live?.data?.fontSize === 'number' ? live.data.fontSize : object.fontSize,
+          status: typeof live?.data?.status === 'string' ? live.data.status : object.status,
+        },
+      ] as const,
+    ];
+  });
+  const zoneForCanvasNode = new Map<string, string>();
+  for (const node of currentNodes) {
+    if (!isTopLevelZoneCanvasNode(node)) continue;
+    const containing = allZones
+      .filter(([, zone]) => nodeCenterInsideZone(node, zone))
+      .sort(
+        ([leftId, left], [rightId, right]) =>
+          left.width * left.height - right.width * right.height || leftId.localeCompare(rightId)
+      )[0];
+    if (containing) zoneForCanvasNode.set(node.id, containing[0]);
+  }
+
+  // A locked/hidden canvas object has absolute coordinates. Moving its zone
+  // without moving the object would silently break membership, so preserve the
+  // complete zone rather than offering a partially effective arrangement.
+  const blockedZoneIds = new Set<string>();
+  for (const node of currentNodes) {
+    if (!isTopLevelZoneCanvasNode(node) || (!node.hidden && node.data?.locked !== true)) continue;
+    const zoneId = zoneForCanvasNode.get(node.id);
+    if (zoneId) blockedZoneIds.add(zoneId);
+  }
+
+  const selectedZones = allZones.filter(([zoneId]) => {
+    const live = liveById.get(zoneId);
+    return (
+      (!requestedZoneIds || requestedZoneIds.has(zoneId)) &&
+      Boolean(live) &&
+      !live?.hidden &&
+      live?.data?.locked !== true &&
+      !blockedZoneIds.has(zoneId)
+    );
+  });
+  const looseNodes = currentNodes.filter(
+    (node) => isArrangeableTopLevelNode(node) && !zoneForCanvasNode.has(node.id)
+  );
+
+  return { selectedZones, zoneForCanvasNode, looseNodes };
 }
 
 interface UseBoardObjectsProps {
@@ -198,6 +278,8 @@ export const useBoardObjects = ({
   const [calledOutNodeIds, setCalledOutNodeIds] = useState<ReadonlySet<string>>(new Set());
   const calledOutNodeIdsRef = useRef(calledOutNodeIds);
   calledOutNodeIdsRef.current = calledOutNodeIds;
+  const boardArrangementInFlightRef = useRef(false);
+  const [isBoardArrangementActive, setIsBoardArrangementActive] = useState(false);
 
   // Use the board object's reference directly. The store already preserves
   // unchanged board references, and serializing every object on every canvas
@@ -1372,7 +1454,7 @@ export const useBoardObjects = ({
   const arrangeBoardZones = useCallback(
     async (zoneIds: readonly string[], options: ArrangeBoardZonesOptions = {}) => {
       const currentBoard = boardRef.current;
-      if (!currentBoard || !client || zoneIds.length === 0) return;
+      if (!currentBoard || !client || boardArrangementInFlightRef.current) return;
       const { userInitiated = false, ...arrangementOptions } = options;
       const selected = new Set(zoneIds);
       const currentNodes = nodesRef.current;
@@ -1382,65 +1464,34 @@ export const useBoardObjects = ({
         if (placement.card_id) placementByNodeId.set(`card-${placement.card_id}`, placement);
       }
 
+      boardArrangementInFlightRef.current = true;
+      setIsBoardArrangementActive(true);
       try {
-        const selectedZones = Object.entries(currentBoard.objects ?? {}).flatMap(
-          ([zoneId, object]) => {
-            if (!selected.has(zoneId) || object.type !== 'zone') return [];
-            const live = currentNodes.find((node) => node.id === zoneId);
-            const width = Number(live?.width ?? live?.style?.width);
-            const height = Number(live?.height ?? live?.style?.height);
-            return [
-              [
-                zoneId,
-                {
-                  ...object,
-                  x: live?.position.x ?? object.x,
-                  y: live?.position.y ?? object.y,
-                  width: Number.isFinite(width) && width > 0 ? width : object.width,
-                  height: Number.isFinite(height) && height > 0 ? height : object.height,
-                  fontSize:
-                    typeof live?.data?.fontSize === 'number' ? live.data.fontSize : object.fontSize,
-                  status: typeof live?.data?.status === 'string' ? live.data.status : object.status,
-                  fontScale: renderedZoneFontScale(
-                    zoneId,
-                    Number.isFinite(width) && width > 0 ? width : object.width
-                  ),
-                },
-              ] as const,
-            ];
-          }
+        const candidates = getBoardArrangementCandidates(currentBoard, currentNodes, selected);
+        const selectedZones = candidates.selectedZones.map(
+          ([zoneId, object]) =>
+            [
+              zoneId,
+              {
+                ...object,
+                fontScale: renderedZoneFontScale(zoneId, object.width),
+              },
+            ] as const
         );
-        const zoneForCanvasNode = new Map<string, string>();
-        for (const node of currentNodes) {
-          if (!isPositionableZoneCanvasNode(node)) continue;
-          const containing = selectedZones
-            .filter(([, zone]) => nodeCenterInsideZone(node, zone))
-            .sort(
-              ([leftId, left], [rightId, right]) =>
-                left.width * left.height - right.width * right.height ||
-                leftId.localeCompare(rightId)
-            )[0];
-          if (containing) zoneForCanvasNode.set(node.id, containing[0]);
-        }
-        const looseNodes = currentNodes.filter(
-          (node) =>
-            !node.hidden &&
-            !node.parentId &&
-            ['branchNode', 'cardNode', 'markdown', 'appNode', 'artifactNode'].includes(
-              node.type ?? ''
-            ) &&
-            node.data?.locked !== true &&
-            !zoneForCanvasNode.has(node.id)
-        );
+        const { zoneForCanvasNode, looseNodes } = candidates;
         const plan = planBoardZoneArrangement(
           selectedZones.map(([zoneId, object]) => {
             const children = currentNodes.filter((node) => {
               if (
                 node.parentId === zoneId &&
+                !node.hidden &&
+                node.data?.locked !== true &&
                 (node.type === 'branchNode' || node.type === 'cardNode')
               )
                 return true;
-              return zoneForCanvasNode.get(node.id) === zoneId;
+              return (
+                isPositionableZoneCanvasNode(node) && zoneForCanvasNode.get(node.id) === zoneId
+              );
             });
             return {
               id: zoneId,
@@ -1712,6 +1763,9 @@ export const useBoardObjects = ({
       } catch (error) {
         console.error('Failed to arrange board zones:', error);
         showError('Failed to arrange zones');
+      } finally {
+        boardArrangementInFlightRef.current = false;
+        setIsBoardArrangementActive(false);
       }
     },
     [
@@ -1724,6 +1778,30 @@ export const useBoardObjects = ({
       showError,
       showSuccess,
     ]
+  );
+
+  /** Main-toolbar entry into the exact planner used by selected-zone Arrange. */
+  const arrangeWholeBoard = useCallback(async () => {
+    const currentBoard = boardRef.current;
+    if (!currentBoard) return;
+    const { selectedZones, looseNodes } = getBoardArrangementCandidates(
+      currentBoard,
+      nodesRef.current
+    );
+    if (selectedZones.length === 0 && looseNodes.length === 0) return;
+    await arrangeBoardZones(
+      selectedZones.map(([zoneId]) => zoneId),
+      { userInitiated: true }
+    );
+  }, [arrangeBoardZones]);
+
+  const currentBoardArrangementCandidates = board
+    ? getBoardArrangementCandidates(board, nodes)
+    : undefined;
+  const canArrangeWholeBoard = Boolean(
+    currentBoardArrangementCandidates &&
+      (currentBoardArrangementCandidates.selectedZones.length > 0 ||
+        currentBoardArrangementCandidates.looseNodes.length > 0)
   );
 
   runAutoZoneArrangeRef.current = (zoneId: string) => {
@@ -2143,6 +2221,9 @@ export const useBoardObjects = ({
     setZoneContentsCompact,
     justifyZoneContents,
     arrangeBoardZones,
+    arrangeWholeBoard,
+    canArrangeWholeBoard,
+    isBoardArrangementActive,
     preserveAutoZoneFrameOnce,
     batchUpdateObjectPositions,
     zoneStackByNodeId,
