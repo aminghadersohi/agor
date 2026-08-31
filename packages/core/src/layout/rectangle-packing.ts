@@ -96,6 +96,8 @@ export interface CompactRectangleLayoutItem extends RectangleLayoutItem {
 }
 
 export interface CompactRectangleLayoutOptions {
+  /** Optional outer container. Placements stay inside it after padding. */
+  bounds?: { width: number; height: number };
   padding?: number;
   gapX?: number;
   gapY?: number;
@@ -532,9 +534,10 @@ const clusterSeparated = (
  *
  * Unlike `layoutRectangles`, this is intentionally not a fixed row/column
  * grid. Every item is placed on the corner frontier created by prior items.
- * The enclosing diameter wins first, then area, then movement from the
- * supplied source geometry. Input order remains stable in the returned array,
- * and source geometry resolves equally compact alternatives with less motion.
+ * The larger enclosing dimension wins first, then area, perimeter, and
+ * movement from the supplied source geometry. Input order remains stable in
+ * the returned array, and source geometry resolves equally compact
+ * alternatives with less motion.
  */
 export function layoutCompactRectangles(
   sourceItems: readonly CompactRectangleLayoutItem[],
@@ -544,6 +547,13 @@ export function layoutCompactRectangles(
   const padding = ceilToGrid(finiteNonNegative(options.padding, 0), gridSize);
   const gapX = ceilToGrid(finiteNonNegative(options.gapX, 24), gridSize);
   const gapY = ceilToGrid(finiteNonNegative(options.gapY, 24), gridSize);
+  const bounds = options.bounds;
+  const usableWidth = bounds
+    ? Math.max(0, floorToGrid(finiteNonNegative(bounds.width, 0) - padding * 2, gridSize))
+    : Number.POSITIVE_INFINITY;
+  const usableHeight = bounds
+    ? Math.max(0, floorToGrid(finiteNonNegative(bounds.height, 0) - padding * 2, gridSize))
+    : Number.POSITIVE_INFINITY;
   const items = normalizedItems(sourceItems, gridSize).map((item, index) => ({
     ...item,
     sourceX: sourceItems[index]?.sourceX,
@@ -596,13 +606,24 @@ export function layoutCompactRectangles(
       addCandidate(existing.x + existing.width - item.width, existing.y + existing.height + gapY);
       addCandidate(existing.x + existing.width + gapX, existing.y + existing.height - item.height);
     }
-    const candidates = [...candidateByKey.values()].filter(({ x, y }) =>
-      placed.every((existing) =>
-        clusterSeparated(existing, { x, y, width: item.width, height: item.height }, gapX, gapY)
-      )
+    const candidates = [...candidateByKey.values()].filter(
+      ({ x, y }) =>
+        x + item.width <= usableWidth &&
+        y + item.height <= usableHeight &&
+        placed.every((existing) =>
+          clusterSeparated(existing, { x, y, width: item.width, height: item.height }, gapX, gapY)
+        )
     );
     if (candidates.length === 0) {
-      throw new Error(`Unable to place rectangle '${item.id}' in the compact cluster.`);
+      // Preserve the all-or-nothing contract used by bounded zone layout: an
+      // unsuccessful solve still returns deterministic collision-free
+      // geometry, but names every rectangle outside the requested frame so
+      // callers can refuse the write without partially moving anything.
+      const fallback = layoutCompactRectangles(sourceItems, { ...options, bounds: undefined });
+      return {
+        ...fallback,
+        overflowingItemIds: bounds ? overflowingIds(fallback.placements, bounds) : [],
+      };
     }
 
     const sourceX = Number.isFinite(item.sourceX) ? (item.sourceX as number) - sourceLeft : 0;
@@ -618,8 +639,9 @@ export function layoutCompactRectangles(
           ...placed.map((entry) => entry.y + entry.height)
         );
         return [
-          width * width + height * height,
+          Math.max(width, height),
           width * height,
+          width + height,
           (candidate.x - sourceX) ** 2 + (candidate.y - sourceY) ** 2,
           candidate.y,
           candidate.x,
@@ -672,6 +694,6 @@ export function layoutCompactRectangles(
     maxDeckDepth: 1,
     deckOffsetX: 0,
     deckOffsetY: 0,
-    overflowingItemIds: [],
+    overflowingItemIds: bounds ? overflowingIds(placements, bounds) : [],
   };
 }

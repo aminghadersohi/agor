@@ -30,7 +30,8 @@ export const DEFAULT_BOARD_ZONE_ARRANGEMENT = Object.freeze({
 });
 
 export interface BoardZoneArrangementItem extends ZoneLayoutSortItem {
-  entityType: BoardEntityType;
+  /** Present for branch/card placements; canvas nodes keep their natural size. */
+  entityType?: BoardEntityType;
   width: number;
   height: number;
   compact?: boolean;
@@ -109,14 +110,33 @@ export function planBoardZoneArrangement(
   const prepared = orderedZones.map((zone) => {
     const policy = normalizeZoneLayoutPolicy(zone.layout);
     const frame = getZoneLayoutFrame(zone);
-    const orderedItems = sortZoneLayoutItems(zone.items, policy);
+    // Compact geometry must not become its own next sort key: a frontier pack
+    // can intentionally fill a hole above an earlier item. Re-sorting those
+    // placements spatially on reload would change insertion order and churn.
+    // The supplied order is the durable logical order for the default compact
+    // mode; explicit semantic sorts and explicit grids retain their policy.
+    const orderedItems =
+      policy.preset === 'grid' && policy.columns === undefined && policy.sortBy === 'position'
+        ? [...zone.items]
+        : sortZoneLayoutItems(zone.items, policy);
     const items = orderedItems.map((item) => ({
       id: item.id,
-      ...(policy.preset === 'compact_list'
+      ...(policy.preset === 'compact_list' && item.entityType
         ? compactZoneItemSize(item.entityType, frame.usableWidth)
         : { width: item.width, height: item.height }),
+      sourceX: item.position.x,
+      sourceY: item.position.y - frame.headerInset,
     }));
     const gap = gridGap(policy.gap ?? 24);
+    const compact =
+      policy.preset === 'grid' && policy.columns === undefined
+        ? layoutCompactRectangles(items, {
+            padding: frame.padding,
+            gapX: gap,
+            gapY: gap,
+            gridSize: BOARD_GRID_SIZE,
+          })
+        : undefined;
     const shapes =
       items.length === 0
         ? [
@@ -126,15 +146,23 @@ export function planBoardZoneArrangement(
               height: Math.max(240, ceilBoardGridValue(zone.height)),
             },
           ]
-        : zoneShapesForItems(items, {
-            titleInset: frame.headerInset,
-            padding: frame.padding,
-            gapX: gap,
-            gapY: gap,
-            maxColumns: policy.preset === 'compact_list' ? 1 : policy.columns,
-            gridSize: BOARD_GRID_SIZE,
-          });
-    return { zone, policy, orderedItems, shapes, gap };
+        : compact
+          ? [
+              {
+                columns: compact.columns,
+                width: Math.max(400, ceilBoardGridValue(compact.width)),
+                height: Math.max(240, ceilBoardGridValue(compact.height + frame.headerInset)),
+              },
+            ]
+          : zoneShapesForItems(items, {
+              titleInset: frame.headerInset,
+              padding: frame.padding,
+              gapX: gap,
+              gapY: gap,
+              maxColumns: policy.preset === 'compact_list' ? 1 : policy.columns,
+              gridSize: BOARD_GRID_SIZE,
+            });
+    return { zone, policy, orderedItems, shapes, gap, compact };
   });
 
   const layout = layoutJustifiedZones(
@@ -207,25 +235,36 @@ export function planBoardZoneArrangement(
     const frame = getZoneLayoutFrame({ ...entry.zone, width: placement.width });
     const items = entry.orderedItems.map((item) => ({
       id: item.id,
-      ...(entry.policy.preset === 'compact_list'
+      ...(entry.policy.preset === 'compact_list' && item.entityType
         ? compactZoneItemSize(item.entityType, frame.usableWidth)
         : { width: item.width, height: item.height }),
+      sourceX: item.position.x,
+      sourceY: item.position.y - frame.headerInset,
     }));
-    const packed = layoutRectangles(items, {
-      bounds: {
-        width: frame.width,
-        height: Math.max(0, placement.height - frame.headerInset),
-      },
-      padding: frame.padding,
-      minPadding: frame.padding,
-      gapX: entry.gap,
-      gapY: entry.gap,
-      minGapX: entry.gap,
-      minGapY: entry.gap,
-      exactColumns: Math.max(1, Math.min(items.length || 1, placement.columns)),
-      allowDeck: false,
-      gridSize: BOARD_GRID_SIZE,
-    });
+    const bounds = {
+      width: frame.width,
+      height: Math.max(0, placement.height - frame.headerInset),
+    };
+    const packed = entry.compact
+      ? layoutCompactRectangles(items, {
+          bounds,
+          padding: frame.padding,
+          gapX: entry.gap,
+          gapY: entry.gap,
+          gridSize: BOARD_GRID_SIZE,
+        })
+      : layoutRectangles(items, {
+          bounds,
+          padding: frame.padding,
+          minPadding: frame.padding,
+          gapX: entry.gap,
+          gapY: entry.gap,
+          minGapX: entry.gap,
+          minGapY: entry.gap,
+          exactColumns: Math.max(1, Math.min(items.length || 1, placement.columns)),
+          allowDeck: false,
+          gridSize: BOARD_GRID_SIZE,
+        });
     if (packed.overflowingItemIds.length > 0) {
       throw new Error(
         `Zone '${placement.id}' shape did not contain ${packed.overflowingItemIds.join(', ')}.`

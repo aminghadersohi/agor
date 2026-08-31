@@ -101,6 +101,63 @@ describe('planBoardZoneArrangement', () => {
     expect(plan.zones[0]?.contentColumns).toBeLessThanOrEqual(2);
   });
 
+  it('uses the compact engine for heterogeneous entity and canvas children', () => {
+    const mixed: BoardZoneArrangementInput['items'] = [
+      item('wide-worktree', 520, 140, 20, 100),
+      item('card', 280, 180, 20, 280),
+      { id: 'tall-artifact', width: 260, height: 440, position: { x: 600, y: 100 } },
+      { id: 'note', width: 320, height: 140, position: { x: 880, y: 100 } },
+      { id: 'app', width: 360, height: 220, position: { x: 880, y: 280 } },
+    ];
+    const first = planBoardZoneArrangement([zone('mixed', 0, 0, mixed)]);
+    const arranged = first.zones[0];
+
+    expect(arranged?.items).toHaveLength(mixed.length);
+    expect(arranged?.contentColumns).toBeGreaterThan(0);
+    for (const [index, left] of (arranged?.items ?? []).entries()) {
+      expect(left.x + left.width).toBeLessThanOrEqual(arranged?.width ?? 0);
+      expect(left.y + left.height).toBeLessThanOrEqual(arranged?.height ?? 0);
+      for (const right of (arranged?.items ?? []).slice(index + 1)) {
+        expect(
+          left.x + left.width + 20 <= right.x ||
+            right.x + right.width + 20 <= left.x ||
+            left.y + left.height + 20 <= right.y ||
+            right.y + right.height + 20 <= left.y
+        ).toBe(true);
+      }
+    }
+
+    const byId = new Map(arranged?.items.map((entry) => [entry.id, entry]));
+    const second = planBoardZoneArrangement([
+      zone(
+        'mixed',
+        arranged?.position.x ?? 0,
+        arranged?.position.y ?? 0,
+        mixed.map((entry) => ({
+          ...entry,
+          position: {
+            x: byId.get(entry.id)?.x ?? entry.position.x,
+            y: byId.get(entry.id)?.y ?? entry.position.y,
+          },
+        }))
+      ),
+    ]);
+    expect(second.zones[0]?.items).toEqual(arranged?.items);
+  });
+
+  it('normalizes input permutations when a durable logical sort is configured', () => {
+    const items: BoardZoneArrangementInput['items'] = [
+      { ...item('c', 360, 180), title: 'Charlie' },
+      { ...item('a', 520, 140), title: 'Alpha' },
+      { id: 'artifact', width: 260, height: 440, position: { x: 700, y: 100 }, title: 'Bravo' },
+    ];
+    const arrange = (values: BoardZoneArrangementInput['items']) =>
+      planBoardZoneArrangement([{ ...zone('sorted', 0, 0, values), layout: { sortBy: 'title' } }])
+        .zones[0]?.items;
+
+    expect(arrange([items[2]!, items[0]!, items[1]!])).toEqual(arrange(items));
+  });
+
   it('packs content-sized zones and heterogeneous free board nodes into one idempotent cluster', () => {
     const zones = [
       zone('review', 0, 0, [item('review-card', 380, 120)]),

@@ -341,6 +341,26 @@ describe('layoutRectangles', () => {
     expect(cluster.placements[3]).toMatchObject({ x: 260, y: 420 });
   });
 
+  it('handles empty and single-item compact clusters without phantom movement', () => {
+    expect(layoutCompactRectangles([], { padding: 20 })).toMatchObject({
+      placements: [],
+      columns: 1,
+      rows: 0,
+      width: 40,
+      height: 40,
+    });
+    expect(
+      layoutCompactRectangles(
+        [{ id: 'only', width: 301, height: 179, sourceX: 480, sourceY: 260 }],
+        { padding: 20, gridSize: BOARD_GRID_SIZE }
+      )
+    ).toMatchObject({
+      placements: [{ id: 'only', x: 20, y: 20, width: 320, height: 180 }],
+      columns: 1,
+      rows: 1,
+    });
+  });
+
   it('is deterministic, grid-snapped, gap-separated, and retains input identity order', () => {
     const items = [
       { id: 'zone', width: 613, height: 377, sourceX: 900, sourceY: 100 },
@@ -412,5 +432,91 @@ describe('layoutRectangles', () => {
     );
 
     expect(second).toEqual(first);
+  });
+
+  it('packs a heterogeneous cluster inside a bounded zone without overlap', () => {
+    const result = layoutCompactRectangles(
+      [
+        { id: 'wide-card', width: 520, height: 120, sourceX: 20, sourceY: 80 },
+        { id: 'tall-artifact', width: 180, height: 380, sourceX: 20, sourceY: 240 },
+        { id: 'worktree', width: 300, height: 160, sourceX: 240, sourceY: 240 },
+        { id: 'note', width: 300, height: 160, sourceX: 240, sourceY: 440 },
+      ],
+      {
+        bounds: { width: 760, height: 660 },
+        padding: 20,
+        gapX: 20,
+        gapY: 20,
+        gridSize: BOARD_GRID_SIZE,
+      }
+    );
+
+    expect(result.overflowingItemIds).toEqual([]);
+    expectNoOverlap(result.placements);
+    for (const item of result.placements) {
+      expect(item.x).toBeGreaterThanOrEqual(20);
+      expect(item.y).toBeGreaterThanOrEqual(20);
+      expect(item.x + item.width).toBeLessThanOrEqual(740);
+      expect(item.y + item.height).toBeLessThanOrEqual(640);
+    }
+  });
+
+  it('honors a narrow zone bound when the unconstrained diameter prefers a horizontal pair', () => {
+    const result = layoutCompactRectangles(
+      [
+        { id: 'tall-a', width: 100, height: 300 },
+        { id: 'tall-b', width: 100, height: 300 },
+      ],
+      {
+        bounds: { width: 140, height: 660 },
+        padding: 20,
+        gapX: 20,
+        gapY: 20,
+        gridSize: BOARD_GRID_SIZE,
+      }
+    );
+
+    expect(result.overflowingItemIds).toEqual([]);
+    expect(result.placements[1]).toMatchObject({ x: 20, y: 340 });
+  });
+
+  it('reports bounded overflow without returning a partial cluster', () => {
+    const result = layoutCompactRectangles(
+      [
+        { id: 'one', width: 380, height: 200 },
+        { id: 'two', width: 380, height: 200 },
+      ],
+      {
+        bounds: { width: 420, height: 300 },
+        padding: 20,
+        gapX: 20,
+        gapY: 20,
+        gridSize: BOARD_GRID_SIZE,
+      }
+    );
+
+    expect(result.placements).toHaveLength(2);
+    expect(result.overflowingItemIds).toContain('two');
+    expectNoOverlap(result.placements);
+  });
+
+  it('absorbs sub-grid measurement noise into the same durable cluster', () => {
+    const options = { gapX: 20, gapY: 20, gridSize: BOARD_GRID_SIZE };
+    const base = layoutCompactRectangles(
+      [
+        { id: 'card', width: 379.1, height: 99.1, sourceX: 19.2, sourceY: 79.4 },
+        { id: 'artifact', width: 599.1, height: 399.1, sourceX: 419.2, sourceY: 79.4 },
+      ],
+      options
+    );
+    const noisy = layoutCompactRectangles(
+      [
+        { id: 'card', width: 379.8, height: 99.8, sourceX: 19.8, sourceY: 79.9 },
+        { id: 'artifact', width: 599.8, height: 399.8, sourceX: 419.8, sourceY: 79.9 },
+      ],
+      options
+    );
+
+    expect(noisy).toEqual(base);
   });
 });
