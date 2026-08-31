@@ -134,6 +134,17 @@ export function buildSandboxWrap(params: {
   } = params;
   if (!sandbox?.enabled) return null;
 
+  // Validate the per-user isolation contract before probing host support. A
+  // missing owner store is a request-scoping error, not an availability
+  // failure: reporting it first keeps the fail-closed reason stable across
+  // Linux hosts and developer machines where bubblewrap is unavailable.
+  if (sandbox.home_mode === 'per_user' && !ownerHomeStore) {
+    throw new Error(
+      'sandbox home_mode=per_user requires an owner home store, but none was resolved. ' +
+        'Refusing to fall back to a shared home (fail closed).'
+    );
+  }
+
   const unavailableReason =
     process.platform !== 'linux'
       ? `filesystem sandbox requires Linux (bubblewrap); platform is ${process.platform}`
