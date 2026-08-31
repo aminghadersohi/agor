@@ -1,3 +1,4 @@
+import { generateId } from '@agor/core/ids/browser';
 import type {
   AgenticToolName,
   AgorClient,
@@ -2823,7 +2824,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         onOk: async () => {
           const audit = await zoneWorkflow.advance({
             transition_id: selectedTransition.transition_id,
-            idempotency_key: globalThis.crypto.randomUUID() as never,
+            idempotency_key: generateId(),
             entities,
           });
           showSuccess(

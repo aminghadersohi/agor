@@ -63,7 +63,7 @@ describe('buildTenantInsertOrder', () => {
 describe('tenantPortabilityForeignKeys', () => {
   it('freezes the exact schema-derived movable FK set', () => {
     const foreignKeys = tenantPortabilityForeignKeys();
-    expect(foreignKeys).toHaveLength(109);
+    expect(foreignKeys).toHaveLength(111);
     expect(Object.isFrozen(foreignKeys)).toBe(true);
     const structuralKeys = foreignKeys.map((foreignKey) =>
       [
@@ -79,6 +79,27 @@ describe('tenantPortabilityForeignKeys', () => {
       expect(Object.isFrozen(foreignKey.childColumns)).toBe(true);
       expect(Object.isFrozen(foreignKey.parentColumns)).toBe(true);
     }
+  });
+
+  it('moves workflow definitions and audit history with their board', () => {
+    expect(tenantPortabilityForeignKeys()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          childTable: 'zone_workflow_transitions',
+          childColumns: ['tenant_id', 'board_id'],
+          parentTable: 'boards',
+          parentColumns: ['tenant_id', 'board_id'],
+          onDelete: 'cascade',
+        }),
+        expect.objectContaining({
+          childTable: 'zone_workflow_advances',
+          childColumns: ['tenant_id', 'board_id'],
+          parentTable: 'boards',
+          parentColumns: ['tenant_id', 'board_id'],
+          onDelete: 'cascade',
+        }),
+      ])
+    );
   });
 
   it('moves normalized board and branch policies with their resources and principals', () => {

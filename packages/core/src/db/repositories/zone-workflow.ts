@@ -254,163 +254,182 @@ export class ZoneWorkflowRepository {
     entities: ZoneWorkflowEntityRef[];
     requestedBy: UUID;
   }): Promise<ZoneWorkflowAdvanceResult> {
-    return runDatabaseTransaction(
-      this.db,
-      async (tx) => {
-        await lockRowForUpdate(
-          tx,
-          this.db,
-          zoneWorkflowTransitions,
-          eq(zoneWorkflowTransitions.transition_id, input.transitionId)
-        );
-        const transitionRow = await select(tx)
-          .from(zoneWorkflowTransitions)
-          .where(eq(zoneWorkflowTransitions.transition_id, input.transitionId))
-          .one();
-        if (!transitionRow) {
-          throw new EntityNotFoundError('ZoneWorkflowTransition', input.transitionId);
-        }
-        const transition = transitionFromRow(transitionRow);
+    const replay = (row: ZoneWorkflowAdvanceRow): ZoneWorkflowAdvanceResult => {
+      const audit = advanceFromRow(row, true);
+      if (audit.transition_id !== input.transitionId) {
+        throw new RepositoryError('Idempotency key was already used for another transition');
+      }
+      return { audit, moved: [], replayed: true };
+    };
 
-        const prior = await select(tx)
-          .from(zoneWorkflowAdvances)
-          .where(eq(zoneWorkflowAdvances.idempotency_key, input.idempotencyKey))
-          .one();
-        if (prior) {
-          const priorAudit = advanceFromRow(prior, true);
-          if (priorAudit.transition_id !== input.transitionId) {
-            throw new RepositoryError('Idempotency key was already used for another transition');
-          }
-          return { audit: priorAudit, moved: [], replayed: true };
-        }
+    try {
+      return await runDatabaseTransaction(
+        this.db,
+        async (tx) => {
+          // An idempotency receipt outlives its transition. Check it before the
+          // live edge so retries still resolve after an operator deletes the
+          // transition, and before any action guard can observe changed state.
+          const prior = await select(tx)
+            .from(zoneWorkflowAdvances)
+            .where(eq(zoneWorkflowAdvances.idempotency_key, input.idempotencyKey))
+            .one();
+          if (prior) return replay(prior);
 
-        if (!transition.enabled) throw new RepositoryError('Transition is disabled');
-        const boardRow = await select(tx)
-          .from(boards)
-          .where(eq(boards.board_id, transition.board_id))
-          .one();
-        if (!boardRow || boardRow.archived)
-          throw new RepositoryError('Board is archived or unavailable');
-        const boardData = parseJson<{ objects?: Record<string, unknown> }>(boardRow.data);
-        const sourceZone = boardData.objects?.[transition.source_zone_id];
-        const targetZone = boardData.objects?.[transition.target_zone_id];
-        if (!isZone(sourceZone) || !isZone(targetZone)) {
-          throw new RepositoryError('Transition source and target zones must still exist');
-        }
-
-        const refs = new Map(
-          input.entities.map((entity) => [`${entity.entity_type}:${entity.entity_id}`, entity])
-        );
-        if (refs.size !== input.entities.length)
-          throw new RepositoryError('Duplicate entities are not allowed');
-
-        const rows = await select(tx)
-          .from(boardObjects)
-          .where(eq(boardObjects.board_id, transition.board_id))
-          .all();
-        const byRef = new Map<string, (typeof rows)[number]>();
-        for (const row of rows) {
-          if (row.branch_id) byRef.set(`branch:${row.branch_id}`, row);
-          if (row.card_id) byRef.set(`card:${row.card_id}`, row);
-        }
-
-        const branchIds = input.entities
-          .filter(
-            (entity): entity is Extract<ZoneWorkflowEntityRef, { entity_type: 'branch' }> =>
-              entity.entity_type === 'branch'
-          )
-          .map((entity) => entity.entity_id);
-        const cardIds = input.entities
-          .filter(
-            (entity): entity is Extract<ZoneWorkflowEntityRef, { entity_type: 'card' }> =>
-              entity.entity_type === 'card'
-          )
-          .map((entity) => entity.entity_id);
-        const activeBranches = new Set(
-          branchIds.length
-            ? (
-                await select(tx, { id: branches.branch_id })
-                  .from(branches)
-                  .where(and(inArray(branches.branch_id, branchIds), eq(branches.archived, false)))
-                  .all()
-              ).map((row: { id: string }) => row.id)
-            : []
-        );
-        const activeCards = new Set(
-          cardIds.length
-            ? (
-                await select(tx, { id: cards.card_id })
-                  .from(cards)
-                  .where(and(inArray(cards.card_id, cardIds), eq(cards.archived, false)))
-                  .all()
-              ).map((row: { id: string }) => row.id)
-            : []
-        );
-
-        const moved: BoardEntityObject[] = [];
-        const auditedEntities: ZoneWorkflowAdvancedEntity[] = [];
-        for (const entity of input.entities) {
-          const key = `${entity.entity_type}:${entity.entity_id}`;
-          const row = byRef.get(key);
-          if (!row)
-            throw new RepositoryError('Every entity must be positioned on the transition board');
-          const active =
-            entity.entity_type === 'branch'
-              ? activeBranches.has(entity.entity_id)
-              : activeCards.has(entity.entity_id);
-          if (!active) throw new RepositoryError('Archived entities cannot be advanced');
-          const data = parseJson<{ position: { x: number; y: number }; zone_id?: string }>(
-            row.data
+          await lockRowForUpdate(
+            tx,
+            this.db,
+            zoneWorkflowTransitions,
+            eq(zoneWorkflowTransitions.transition_id, input.transitionId)
           );
-          if (data.zone_id !== transition.source_zone_id) {
-            throw new RepositoryError(
-              'Every entity must currently be in the transition source zone'
-            );
+          const transitionRow = await select(tx)
+            .from(zoneWorkflowTransitions)
+            .where(eq(zoneWorkflowTransitions.transition_id, input.transitionId))
+            .one();
+          if (!transitionRow) {
+            throw new EntityNotFoundError('ZoneWorkflowTransition', input.transitionId);
+          }
+          const transition = transitionFromRow(transitionRow);
+
+          if (!transition.enabled) throw new RepositoryError('Transition is disabled');
+          const boardRow = await select(tx)
+            .from(boards)
+            .where(eq(boards.board_id, transition.board_id))
+            .one();
+          if (!boardRow || boardRow.archived)
+            throw new RepositoryError('Board is archived or unavailable');
+          const boardData = parseJson<{ objects?: Record<string, unknown> }>(boardRow.data);
+          const sourceZone = boardData.objects?.[transition.source_zone_id];
+          const targetZone = boardData.objects?.[transition.target_zone_id];
+          if (!isZone(sourceZone) || !isZone(targetZone)) {
+            throw new RepositoryError('Transition source and target zones must still exist');
           }
 
-          const position = {
-            x: Math.max(20, Math.min(data.position.x, Math.max(20, targetZone.width - 80))),
-            y: Math.max(40, Math.min(data.position.y, Math.max(40, targetZone.height - 60))),
-          };
-          await update(tx, boardObjects)
-            .set({ data: { position, zone_id: transition.target_zone_id } })
-            .where(eq(boardObjects.object_id, row.object_id))
-            .run();
-          const updated = { ...row, data: { position, zone_id: transition.target_zone_id } };
-          moved.push(boardObjectFromRow(updated));
-          auditedEntities.push({
-            ...entity,
-            board_object_id: row.object_id as UUID,
-          });
-        }
+          const refs = new Map(
+            input.entities.map((entity) => [`${entity.entity_type}:${entity.entity_id}`, entity])
+          );
+          if (refs.size !== input.entities.length)
+            throw new RepositoryError('Duplicate entities are not allowed');
 
-        const auditInsert: ZoneWorkflowAdvanceInsert = {
-          advance_id: generateId(),
-          transition_id: transition.transition_id,
-          board_id: transition.board_id,
-          idempotency_key: input.idempotencyKey,
-          source_zone_id: transition.source_zone_id,
-          target_zone_id: transition.target_zone_id,
-          transition_label: transition.label,
-          transition_reason: transition.reason ?? null,
-          behavior: transition.behavior,
-          entities: auditedEntities,
-          requested_by: input.requestedBy,
-          requested_at: new Date(),
-          prompt_outcome:
-            transition.behavior === 'guidance_only' ? 'not_requested' : 'not_applicable',
-          prompt_error: null,
-        };
-        await insert(tx, zoneWorkflowAdvances).values(auditInsert).run();
-        const auditRow = await select(tx)
-          .from(zoneWorkflowAdvances)
-          .where(eq(zoneWorkflowAdvances.advance_id, auditInsert.advance_id))
-          .one();
-        if (!auditRow) throw new RepositoryError('Failed to persist workflow advance audit');
-        return { audit: advanceFromRow(auditRow), moved, replayed: false };
-      },
-      { sqliteImmediate: true, postgresIsolationLevel: 'serializable' }
-    );
+          const rows = await select(tx)
+            .from(boardObjects)
+            .where(eq(boardObjects.board_id, transition.board_id))
+            .all();
+          const byRef = new Map<string, (typeof rows)[number]>();
+          for (const row of rows) {
+            if (row.branch_id) byRef.set(`branch:${row.branch_id}`, row);
+            if (row.card_id) byRef.set(`card:${row.card_id}`, row);
+          }
+
+          const branchIds = input.entities
+            .filter(
+              (entity): entity is Extract<ZoneWorkflowEntityRef, { entity_type: 'branch' }> =>
+                entity.entity_type === 'branch'
+            )
+            .map((entity) => entity.entity_id);
+          const cardIds = input.entities
+            .filter(
+              (entity): entity is Extract<ZoneWorkflowEntityRef, { entity_type: 'card' }> =>
+                entity.entity_type === 'card'
+            )
+            .map((entity) => entity.entity_id);
+          const activeBranches = new Set(
+            branchIds.length
+              ? (
+                  await select(tx, { id: branches.branch_id })
+                    .from(branches)
+                    .where(
+                      and(inArray(branches.branch_id, branchIds), eq(branches.archived, false))
+                    )
+                    .all()
+                ).map((row: { id: string }) => row.id)
+              : []
+          );
+          const activeCards = new Set(
+            cardIds.length
+              ? (
+                  await select(tx, { id: cards.card_id })
+                    .from(cards)
+                    .where(and(inArray(cards.card_id, cardIds), eq(cards.archived, false)))
+                    .all()
+                ).map((row: { id: string }) => row.id)
+              : []
+          );
+
+          const moved: BoardEntityObject[] = [];
+          const auditedEntities: ZoneWorkflowAdvancedEntity[] = [];
+          for (const entity of input.entities) {
+            const key = `${entity.entity_type}:${entity.entity_id}`;
+            const row = byRef.get(key);
+            if (!row)
+              throw new RepositoryError('Every entity must be positioned on the transition board');
+            const active =
+              entity.entity_type === 'branch'
+                ? activeBranches.has(entity.entity_id)
+                : activeCards.has(entity.entity_id);
+            if (!active) throw new RepositoryError('Archived entities cannot be advanced');
+            const data = parseJson<{ position: { x: number; y: number }; zone_id?: string }>(
+              row.data
+            );
+            if (data.zone_id !== transition.source_zone_id) {
+              throw new RepositoryError(
+                'Every entity must currently be in the transition source zone'
+              );
+            }
+
+            const position = {
+              x: Math.max(20, Math.min(data.position.x, Math.max(20, targetZone.width - 80))),
+              y: Math.max(40, Math.min(data.position.y, Math.max(40, targetZone.height - 60))),
+            };
+            await update(tx, boardObjects)
+              .set({ data: { position, zone_id: transition.target_zone_id } })
+              .where(eq(boardObjects.object_id, row.object_id))
+              .run();
+            const updated = { ...row, data: { position, zone_id: transition.target_zone_id } };
+            moved.push(boardObjectFromRow(updated));
+            auditedEntities.push({
+              ...entity,
+              board_object_id: row.object_id as UUID,
+            });
+          }
+
+          const auditInsert: ZoneWorkflowAdvanceInsert = {
+            advance_id: generateId(),
+            transition_id: transition.transition_id,
+            board_id: transition.board_id,
+            idempotency_key: input.idempotencyKey,
+            source_zone_id: transition.source_zone_id,
+            target_zone_id: transition.target_zone_id,
+            transition_label: transition.label,
+            transition_reason: transition.reason ?? null,
+            behavior: transition.behavior,
+            entities: auditedEntities,
+            requested_by: input.requestedBy,
+            requested_at: new Date(),
+            prompt_outcome:
+              transition.behavior === 'guidance_only' ? 'not_requested' : 'not_applicable',
+            prompt_error: null,
+          };
+          await insert(tx, zoneWorkflowAdvances).values(auditInsert).run();
+          const auditRow = await select(tx)
+            .from(zoneWorkflowAdvances)
+            .where(eq(zoneWorkflowAdvances.advance_id, auditInsert.advance_id))
+            .one();
+          if (!auditRow) throw new RepositoryError('Failed to persist workflow advance audit');
+          return { audit: advanceFromRow(auditRow), moved, replayed: false };
+        },
+        { sqliteImmediate: true, postgresIsolationLevel: 'serializable' }
+      );
+    } catch (error) {
+      // A concurrent request can pass the preflight before the winner commits.
+      // The tenant-scoped unique index decides the winner; recover its durable
+      // receipt instead of leaking a dialect-specific uniqueness failure.
+      const prior = await select(this.db)
+        .from(zoneWorkflowAdvances)
+        .where(eq(zoneWorkflowAdvances.idempotency_key, input.idempotencyKey))
+        .one();
+      if (prior) return replay(prior);
+      throw error;
+    }
   }
 
   async setPromptOutcome(
