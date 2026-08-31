@@ -1076,6 +1076,25 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     observedSession: Session,
     params?: TaskParams
   ): Promise<void> {
+    // The terminal repository projection is already current enough to rule out
+    // the overwhelmingly common case. Avoid an unnecessary service read for
+    // parents and children that have not opted into archival; only an eligible
+    // deadline needs a post-commit refresh to honor a concurrent re-prompt or
+    // settings mutation.
+    const observedEligibleChild =
+      observedSession.fork_origin === 'btw' ||
+      Boolean(observedSession.genealogy?.parent_session_id);
+    const observedTtl = observedSession.auto_archive_after_seconds;
+    if (
+      !observedEligibleChild ||
+      observedSession.auto_archive !== 'after_completion' ||
+      !Number.isInteger(observedTtl) ||
+      !observedTtl ||
+      observedTtl <= 0
+    ) {
+      return;
+    }
+
     const session = await this.app.service('sessions').get(observedSession.session_id, params);
     const eligibleChild =
       session.fork_origin === 'btw' || Boolean(session.genealogy?.parent_session_id);
