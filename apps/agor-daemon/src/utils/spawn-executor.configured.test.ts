@@ -687,6 +687,8 @@ describe('configured executor spawning', () => {
     const branchPath = path.join(dataHome, 'worktrees', 'tenant-a', 'repo', 'feature');
     const ownerHomeStore = path.join(dataHome, 'tenants', 'tenant-a', 'homes', 'owner-a');
     mkdirSync(branchPath, { recursive: true });
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'linux' });
 
     try {
       const actualSandboxWrap =
@@ -777,6 +779,7 @@ describe('configured executor spawning', () => {
         })
       );
     } finally {
+      if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
       rmSync(root, { recursive: true, force: true });
     }
   });
