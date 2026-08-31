@@ -38,7 +38,17 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import type { CollapseProps } from 'antd';
-import { Collapse, Divider, Form, InputNumber, Modal, Select, Switch, Typography, theme } from 'antd';
+import {
+  Collapse,
+  Divider,
+  Form,
+  InputNumber,
+  Modal,
+  Select,
+  Switch,
+  Typography,
+  theme,
+} from 'antd';
 import React from 'react';
 import { useAgorStore } from '../../store/agorStore';
 import { selectMcpServerById, selectSessionMcpServerIds } from '../../store/selectors';
@@ -225,6 +235,7 @@ function buildUpdates(values: FormValues, session: Session): Partial<Session> {
         Math.max(2, Math.floor(values.queueConfig.maxCoalescedUpdates || 8))
       ),
     };
+  }
   if (values.autoArchive !== session.auto_archive) {
     updates.auto_archive = values.autoArchive;
   }
