@@ -204,8 +204,8 @@ describe('ZoneNode config modal', () => {
 });
 
 function renderZoneDensity(opts: {
-  pinnedItemCount: number;
-  compactItemCount: number;
+  densityExpandableItemCount: number;
+  compactDensityExpandableItemCount: number;
   onSetContentsCompact?: ReturnType<typeof vi.fn>;
   connection?: typeof CONNECTED;
 }) {
@@ -227,8 +227,8 @@ function renderZoneDensity(opts: {
         x: 0,
         y: 0,
         zIndex: 100,
-        pinnedItemCount: opts.pinnedItemCount,
-        compactItemCount: opts.compactItemCount,
+        densityExpandableItemCount: opts.densityExpandableItemCount,
+        compactDensityExpandableItemCount: opts.compactDensityExpandableItemCount,
         onSetContentsCompact: opts.onSetContentsCompact,
       }}
     />,
@@ -239,7 +239,11 @@ function renderZoneDensity(opts: {
 describe('ZoneNode density toolbar', () => {
   it('offers "Collapse contents" while any pinned item is still expanded', () => {
     const onSetContentsCompact = vi.fn();
-    renderZoneDensity({ pinnedItemCount: 3, compactItemCount: 0, onSetContentsCompact });
+    renderZoneDensity({
+      densityExpandableItemCount: 3,
+      compactDensityExpandableItemCount: 0,
+      onSetContentsCompact,
+    });
 
     const btn = screen.getByLabelText('Collapse contents');
     fireEvent.pointerDown(btn);
@@ -251,7 +255,11 @@ describe('ZoneNode density toolbar', () => {
 
   it('flips to "Expand contents" only once every pinned item is collapsed', () => {
     const onSetContentsCompact = vi.fn();
-    renderZoneDensity({ pinnedItemCount: 3, compactItemCount: 3, onSetContentsCompact });
+    renderZoneDensity({
+      densityExpandableItemCount: 3,
+      compactDensityExpandableItemCount: 3,
+      onSetContentsCompact,
+    });
 
     const btn = screen.getByLabelText('Expand contents');
     fireEvent.pointerDown(btn);
@@ -262,7 +270,11 @@ describe('ZoneNode density toolbar', () => {
 
   it('still collapses a partially collapsed zone, making it uniform in one click', () => {
     const onSetContentsCompact = vi.fn();
-    renderZoneDensity({ pinnedItemCount: 3, compactItemCount: 2, onSetContentsCompact });
+    renderZoneDensity({
+      densityExpandableItemCount: 3,
+      compactDensityExpandableItemCount: 2,
+      onSetContentsCompact,
+    });
 
     expect(screen.queryByLabelText('Expand contents')).toBeNull();
     fireEvent.pointerUp(screen.getByLabelText('Collapse contents'));
@@ -270,21 +282,24 @@ describe('ZoneNode density toolbar', () => {
     expect(onSetContentsCompact).toHaveBeenCalledWith('zone-1', true);
   });
 
-  it('disables the control on an empty zone', () => {
+  it('does not offer an inert control when a zone has no density-expandable entities', () => {
     const onSetContentsCompact = vi.fn();
-    renderZoneDensity({ pinnedItemCount: 0, compactItemCount: 0, onSetContentsCompact });
+    renderZoneDensity({
+      densityExpandableItemCount: 0,
+      compactDensityExpandableItemCount: 0,
+      onSetContentsCompact,
+    });
 
-    const btn = screen.getByLabelText('Collapse contents');
-    expect(btn).toBeDisabled();
-    fireEvent.pointerUp(btn);
+    expect(screen.queryByLabelText('Collapse contents')).toBeNull();
+    expect(screen.queryByLabelText('Expand contents')).toBeNull();
     expect(onSetContentsCompact).not.toHaveBeenCalled();
   });
 
   it('does not fire when the mutation gate is closed (disconnected)', () => {
     const onSetContentsCompact = vi.fn();
     renderZoneDensity({
-      pinnedItemCount: 2,
-      compactItemCount: 0,
+      densityExpandableItemCount: 2,
+      compactDensityExpandableItemCount: 0,
       onSetContentsCompact,
       connection: DISCONNECTED,
     });

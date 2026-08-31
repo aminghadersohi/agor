@@ -116,6 +116,7 @@ import {
   CANVAS_LAYOUT_CONTROLS_CLASS,
   SelectionLayoutPopover,
   type SelectionLayoutSettings,
+  selectionBoardZoneArrangementOptions,
 } from './canvas/SelectionLayoutPopover';
 import { useBoardObjects } from './canvas/useBoardObjects';
 import { findIntersectingObjects, findZoneAtPosition } from './canvas/utils/collisionDetection';
@@ -928,11 +929,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       void setPlacementCompact(boardObjectByBranch.get(branchId), compact);
     });
 
-    const handleToggleCardCompact = useStableCallback((cardId: string, compact: boolean) => {
-      if (!mutationGate.canMutate) return;
-      void setPlacementCompact(boardObjectByCard.get(cardId), compact);
-    });
-
     const handleBranchAutoZoneInteraction = useStableCallback((branchId: string) => {
       deferAutoZone(boardObjectByBranch.get(branchId)?.zone_id);
     });
@@ -1163,13 +1159,13 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       handleUnpinBranch,
       handleToggleBranchCompact,
       handleBranchAutoZoneInteraction,
-      canManageBoard,
       zoneStackByNodeId,
       calledOutNodeIds,
       calledOutZoneStackZIndex,
       zoneLabels,
       warnInvalidZoneRef,
       client,
+      canManageBoard,
     ]);
 
     // Handler to open card modal. Identity-stabilized so card-map churn does
@@ -1263,8 +1259,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             zoneColor,
             onClick: handleCardClick,
             onUnpin: handleUnpinCard,
-            compact: calledOut ? false : boardObject.compact === true,
-            onToggleCompact: canManageBoard ? handleToggleCardCompact : undefined,
             onAutoZoneInteraction: stackPresentation ? handleCardAutoZoneInteraction : undefined,
           } satisfies CardNodeData,
         });
@@ -1278,9 +1272,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       zoneLabels,
       handleCardClick,
       handleUnpinCard,
-      handleToggleCardCompact,
       handleCardAutoZoneInteraction,
-      canManageBoard,
       zoneStackByNodeId,
       calledOutNodeIds,
       calledOutZoneStackZIndex,
@@ -2613,8 +2605,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       ) => {
         if (!board || !client || selectedLayoutNodes.length < 2) return;
         const selectedZoneIds = getOnlySelectedZoneIds(selectedLayoutNodes);
-        if (action === 'arrange' && layoutSettings?.mode !== 'grid' && selectedZoneIds) {
-          await arrangeBoardZones(selectedZoneIds);
+        if (action === 'arrange' && selectedZoneIds) {
+          await arrangeBoardZones(
+            selectedZoneIds,
+            selectionBoardZoneArrangementOptions(selectedZoneIds.length, layoutSettings)
+          );
           return;
         }
         const size = (node: Node) =>

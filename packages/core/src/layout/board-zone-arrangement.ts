@@ -15,6 +15,7 @@ import {
 import {
   compactZoneItemSize,
   getZoneLayoutFrame,
+  isBoardEntityDensityExpandable,
   normalizeZoneLayoutPolicy,
   sortZoneLayoutItems,
   type ZoneLayoutSortItem,
@@ -123,7 +124,9 @@ export function planBoardZoneArrangement(
         : sortZoneLayoutItems(zone.items, policy);
     const items = orderedItems.map((item) => ({
       id: item.id,
-      ...(policy.preset === 'compact_list' && item.entityType
+      ...(policy.preset === 'compact_list' &&
+      item.entityType &&
+      isBoardEntityDensityExpandable(item.entityType)
         ? compactZoneItemSize(item.entityType, frame.usableWidth)
         : { width: item.width, height: item.height }),
       sourceX: item.position.x,
@@ -240,7 +243,9 @@ export function planBoardZoneArrangement(
     );
     const items = entry.orderedItems.map((item) => ({
       id: item.id,
-      ...(entry.policy.preset === 'compact_list' && item.entityType
+      ...(entry.policy.preset === 'compact_list' &&
+      item.entityType &&
+      isBoardEntityDensityExpandable(item.entityType)
         ? compactZoneItemSize(item.entityType, frame.usableWidth)
         : { width: item.width, height: item.height }),
       sourceX: item.position.x,

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   CANVAS_LAYOUT_CONTROLS_CLASS,
   SelectionLayoutPopover,
+  selectionBoardZoneArrangementOptions,
   selectionGridTracks,
 } from './SelectionLayoutPopover';
 
@@ -12,6 +13,42 @@ describe('selectionGridTracks', () => {
     expect(selectionGridTracks(7, 'columns', 3)).toEqual({ columns: 3, rows: 3 });
     expect(selectionGridTracks(7, 'rows', 2)).toEqual({ columns: 4, rows: 2 });
     expect(selectionGridTracks(2, 'columns', 20)).toEqual({ columns: 2, rows: 1 });
+  });
+});
+
+describe('selectionBoardZoneArrangementOptions', () => {
+  it('maps columns, rows, and final-row distribution into the shared zone planner', () => {
+    expect(
+      selectionBoardZoneArrangementOptions(7, {
+        mode: 'grid',
+        trackAxis: 'columns',
+        trackCount: 2,
+        matchRowHeights: false,
+        rowDistribution: 'packed',
+      })
+    ).toEqual({ maxPerRow: 2, justifyLastRow: false });
+    expect(
+      selectionBoardZoneArrangementOptions(7, {
+        mode: 'grid',
+        trackAxis: 'rows',
+        trackCount: 2,
+        matchRowHeights: true,
+        rowDistribution: 'justify',
+      })
+    ).toEqual({ maxPerRow: 4, justifyLastRow: true });
+  });
+
+  it('uses the exact ordinary Arrange options for compact or toolbar arrange', () => {
+    expect(selectionBoardZoneArrangementOptions(3)).toEqual({});
+    expect(
+      selectionBoardZoneArrangementOptions(3, {
+        mode: 'compact',
+        trackAxis: 'columns',
+        trackCount: 2,
+        matchRowHeights: false,
+        rowDistribution: 'packed',
+      })
+    ).toEqual({});
   });
 });
 

@@ -1,5 +1,6 @@
 import type {
   BoardEntityType,
+  BoardObjectType,
   BoardPosition,
   ZoneLayoutPolicy,
   ZoneLayoutPreset,
@@ -32,6 +33,33 @@ export const ZONE_CONTENT_JUSTIFICATIONS = [
   'bottom',
 ] as const;
 export type ZoneContentJustification = (typeof ZONE_CONTENT_JUSTIFICATIONS)[number];
+
+/**
+ * Board entities whose rendered surface has a real secondary-density state.
+ *
+ * A branch/worktree card owns collapsible session and environment content.
+ * Generic board cards, artifacts, notes, and apps do not share that contract;
+ * writing `compact` for them would only manufacture an inert control/state.
+ * Keep this runtime capability beside the shared layout policy so browser,
+ * daemon, and MCP callers cannot drift into different target sets.
+ */
+export const BOARD_DENSITY_EXPANDABLE_ENTITY_TYPES = [
+  'branch',
+] as const satisfies readonly BoardEntityType[];
+
+export type BoardDensityExpandableEntityType =
+  (typeof BOARD_DENSITY_EXPANDABLE_ENTITY_TYPES)[number];
+
+/** Every persisted board surface kind that callers may ask about. */
+export type BoardDensitySurfaceKind = BoardEntityType | BoardObjectType;
+
+export function isBoardEntityDensityExpandable(
+  entityType: BoardDensitySurfaceKind
+): entityType is BoardDensityExpandableEntityType {
+  return BOARD_DENSITY_EXPANDABLE_ENTITY_TYPES.includes(
+    entityType as BoardDensityExpandableEntityType
+  );
+}
 
 export const DEFAULT_ZONE_LAYOUT_POLICY: Readonly<ZoneLayoutPolicy> = {
   mode: 'manual',
@@ -380,7 +408,7 @@ function compareText(a: unknown, b: unknown): number {
   const right = normalizedLabel(b);
   if (!left && right) return 1;
   if (left && !right) return -1;
-  return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' });
+  return left.localeCompare(right, 'en', { numeric: true, sensitivity: 'base' });
 }
 
 function compareField(a: ZoneLayoutSortItem, b: ZoneLayoutSortItem, sortBy: ZoneLayoutSortBy) {
@@ -435,6 +463,15 @@ export function sortZoneLayoutItems<T extends ZoneLayoutSortItem>(
     const aMissing = isMissingSortValue(a, policy.sortBy);
     const bMissing = isMissingSortValue(b, policy.sortBy);
     if (aMissing !== bMissing) return aMissing ? 1 : -1;
-    return comparison * direction || a.id.localeCompare(b.id);
+
+    // A semantic field is often shared (or absent) across heterogeneous
+    // children. Falling straight through to an always-ascending opaque ID made
+    // direction changes appear to do nothing on real boards. Titles provide a
+    // visible, stable secondary key; IDs are the final total-order fence. Apply
+    // direction to the complete logical ordering while still keeping missing
+    // primary values in the final group above.
+    const titleTieBreak = policy.sortBy === 'title' ? 0 : compareText(a.title, b.title);
+    const idTieBreak = a.id === b.id ? 0 : a.id < b.id ? -1 : 1;
+    return (comparison || titleTieBreak || idTieBreak) * direction;
   });
 }

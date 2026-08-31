@@ -2,7 +2,10 @@
  * Hook for managing board objects (text labels, zones, etc.)
  */
 
-import { planBoardZoneArrangement } from '@agor/core/layout/board-zone-arrangement';
+import {
+  type BoardZoneArrangementOptions,
+  planBoardZoneArrangement,
+} from '@agor/core/layout/board-zone-arrangement';
 import {
   BOARD_GRID_SIZE,
   ceilBoardGridSize,
@@ -16,6 +19,7 @@ import {
   compactZoneItemSize,
   getZoneLayoutFrame,
   growZoneLayoutHeight,
+  isBoardEntityDensityExpandable,
   justifyZoneContentCluster,
   normalizeZoneLayoutPolicy,
   sortZoneLayoutItems,
@@ -260,10 +264,10 @@ export const useBoardObjects = ({
     [client, showError]
   );
 
-  /** Change one card/worktree's density without allowing auto-layout to undo it. */
+  /** Change one capable worktree's density without allowing auto-layout to undo it. */
   const setPlacementCompact = useCallback(
     async (placement: BoardEntityObject | undefined, compact: boolean) => {
-      if (!client || !placement) return;
+      if (!client || !placement || !isBoardEntityDensityExpandable(placement.entity_type)) return;
       const nodeId = placementNodeId(placement);
       const stack = nodeId ? zoneStackByNodeIdRef.current.get(nodeId) : undefined;
       if (nodeId && stack && compact && calledOutNodeIdsRef.current.has(nodeId)) {
@@ -290,15 +294,15 @@ export const useBoardObjects = ({
       try {
         await client.service('board-objects').patch(placement.object_id, { compact });
       } catch (error) {
-        console.error('Failed to update card density:', error);
-        showError('Failed to update card density');
+        console.error('Failed to update worktree density:', error);
+        showError('Failed to update worktree density');
       }
     },
     [client, deferAutoZone, demoteAutoZone, showError]
   );
 
   /**
-   * Collapse or expand every card/worktree pinned to a zone. This is the UI
+   * Collapse or expand every density-capable worktree pinned to a zone. This is the UI
    * half of `agor_boards_set_compact` with a `zoneId`: same targeting (pinned
    * entity placements only), same idempotence (placements already at the
    * requested density are skipped rather than re-patched).
@@ -313,7 +317,7 @@ export const useBoardObjects = ({
       const targets = boardObjectsForBoard.filter(
         (placement) =>
           placement.zone_id === zoneId &&
-          (placement.branch_id || placement.card_id) &&
+          isBoardEntityDensityExpandable(placement.entity_type) &&
           (placement.compact === true) !== compact
       );
       if (targets.length === 0) return;
@@ -374,8 +378,7 @@ export const useBoardObjects = ({
       // every item on the way in, so it owes them an expand on the way out.
       // Deliberately keyed to the preset *transition* and not to arranging in
       // grid — an automatic grid zone reflows on every session change, and
-      // expanding there would repeatedly stomp collapses the user made by hand
-      // with the per-card control.
+      // expanding there would repeatedly stomp worktree density chosen by hand.
       const previous = currentBoard.objects?.[objectId];
       const leftCompactList =
         previous?.type === 'zone' &&
@@ -397,9 +400,9 @@ export const useBoardObjects = ({
             manualInteraction: false,
           });
           // The positions still carry compact_list's one-row spacing, so the
-          // cards we just restored to full height would overlap. Re-pack once
+          // worktrees we just restored to full height would overlap. Re-pack once
           // they have actually rendered — the layout measures the DOM, so
-          // arranging before the expanded cards paint would measure the
+          // arranging before the expanded worktrees paint would measure the
           // collapsed heights and pack just as tightly. An automatic zone
           // reflows on its own, but a manual one has nothing else to fix this.
           setTimeout(() => {
@@ -675,8 +678,8 @@ export const useBoardObjects = ({
         requestedGap === 0 ? 0 : Math.max(BOARD_GRID_SIZE, snapBoardGridValue(requestedGap));
       let layoutItems = children.map(({ node, isCanvasObject }) => ({
         id: node.id,
-        ...(policy.preset === 'compact_list' && !isCanvasObject
-          ? compactZoneItemSize(node.type === 'branchNode' ? 'branch' : 'card', frame.usableWidth)
+        ...(policy.preset === 'compact_list' && !isCanvasObject && node.type === 'branchNode'
+          ? compactZoneItemSize('branch', frame.usableWidth)
           : itemSize(node)),
         sourceX: isCanvasObject ? node.position.x - zone.x : node.position.x,
         sourceY: isCanvasObject ? node.position.y - zone.y : node.position.y - frame.headerInset,
@@ -730,7 +733,9 @@ export const useBoardObjects = ({
         })
       );
       const stackRevealHeight = zoneStackRevealHeight([...renderedHeaderHeightById.values()]);
-      const canDeck = children.every(({ isCanvasObject }) => !isCanvasObject);
+      const canDeck = children.every(
+        ({ node, isCanvasObject }) => !isCanvasObject && node.type === 'branchNode'
+      );
       if (canDeck && layout.overflowingItemIds.length > 0) {
         // The stack renders every member collapsed. Lay it out at those same
         // compact dimensions before deciding how tall the zone must grow. If
@@ -849,7 +854,9 @@ export const useBoardObjects = ({
                 : { x: placement.x, y: placement.y + titleInset },
               data: {
                 ...node.data,
-                ...(!isCanvasObject && (layout.mode === 'deck' || policy.preset === 'compact_list')
+                ...(!isCanvasObject &&
+                node.type === 'branchNode' &&
+                (layout.mode === 'deck' || policy.preset === 'compact_list')
                   ? { compact: true }
                   : {}),
               },
@@ -977,7 +984,9 @@ export const useBoardObjects = ({
         policy.preset === 'compact_list' &&
         children.some(
           ({ node, isCanvasObject }) =>
-            !isCanvasObject && placementByNodeId.get(node.id)?.compact !== true
+            !isCanvasObject &&
+            node.type === 'branchNode' &&
+            placementByNodeId.get(node.id)?.compact !== true
         );
       if (
         !positionChanged &&
@@ -1088,6 +1097,7 @@ export const useBoardObjects = ({
               Math.abs(placement.size.height - height) >= 0.5;
             const shouldCompact =
               (policy.preset === 'compact_list' || layout.mode === 'deck') &&
+              isBoardEntityDensityExpandable(placement.entity_type) &&
               placement.compact !== true;
             if (!nodePositionChanged && !sizeChanged && !shouldCompact) return;
             await client.service('board-objects').patch(placement.object_id, {
@@ -1297,7 +1307,10 @@ export const useBoardObjects = ({
    * board mutation, so realtime cannot echo intermediate board snapshots.
    */
   const arrangeBoardZones = useCallback(
-    async (zoneIds: readonly string[]) => {
+    async (
+      zoneIds: readonly string[],
+      options: Omit<BoardZoneArrangementOptions, 'looseItems'> = {}
+    ) => {
       const currentBoard = boardRef.current;
       if (!currentBoard || !client || zoneIds.length === 0) return;
       const selected = new Set(zoneIds);
@@ -1420,6 +1433,7 @@ export const useBoardObjects = ({
             };
           }),
           {
+            ...options,
             looseItems: looseNodes.map((node) => ({
               id: node.id,
               ...node.position,
@@ -1507,6 +1521,37 @@ export const useBoardObjects = ({
             },
           ];
         });
+        const geometryChanged = arrangedNodes.some((next) => {
+          const current = currentNodes.find((node) => node.id === next.id);
+          if (!current) return true;
+          const currentSize = renderedNodeSize(current);
+          const nextSize = renderedNodeSize(next);
+          return (
+            Math.abs(current.position.x - next.position.x) >= 0.5 ||
+            Math.abs(current.position.y - next.position.y) >= 0.5 ||
+            Math.abs(currentSize.width - nextSize.width) >= 0.5 ||
+            Math.abs(currentSize.height - nextSize.height) >= 0.5
+          );
+        });
+        const densityChanged = plan.zones.some((zone) =>
+          zone.items.some((item) => {
+            const placement = placementByNodeId.get(item.id);
+            const zoneObject = currentBoard.objects?.[zone.id];
+            const policy = normalizeZoneLayoutPolicy(
+              zoneObject?.type === 'zone' ? zoneObject.layout : undefined
+            );
+            return (
+              placement !== undefined &&
+              policy.preset === 'compact_list' &&
+              isBoardEntityDensityExpandable(placement.entity_type) &&
+              placement.compact !== true
+            );
+          })
+        );
+        if (!geometryChanged && !densityChanged) {
+          showSuccess('Zones and their contents are already arranged.');
+          return;
+        }
         const arrangedNodeById = new Map(arrangedNodes.map((node) => [node.id, node]));
         setNodes((nodes) => nodes.map((node) => arrangedNodeById.get(node.id) ?? node));
         onArrangeNodes?.(arrangedNodes, dealTiming({ count: arrangedNodes.length }).totalMs);
@@ -1585,7 +1630,9 @@ export const useBoardObjects = ({
             await client.service('board-objects').patch(placement.object_id, {
               position: { x: item.x, y: item.y },
               size: { width: item.width, height: item.height },
-              ...(policy?.preset === 'compact_list' && placement.compact !== true
+              ...(policy?.preset === 'compact_list' &&
+              isBoardEntityDensityExpandable(placement.entity_type) &&
+              placement.compact !== true
                 ? { compact: true }
                 : {}),
             });
@@ -1821,15 +1868,19 @@ export const useBoardObjects = ({
         // React Flow node on the board.
         let pinnedItemCount = 0;
         let positionableItemCount = 0;
-        // Tracked alongside the pinned count so the zone toolbar can derive
-        // whether its density button should collapse or expand.
-        let compactItemCount = 0;
+        // Density is a capability, not a synonym for "pinned". Generic cards
+        // are positionable but do not own a collapsible secondary surface.
+        let densityExpandableItemCount = 0;
+        let compactDensityExpandableItemCount = 0;
         if (objectData.type === 'zone') {
           for (const boardObj of boardObjectsForBoard) {
             if (boardObj.zone_id === objectId && (boardObj.branch_id || boardObj.card_id)) {
               pinnedItemCount += 1;
               positionableItemCount += 1;
-              if (boardObj.compact === true) compactItemCount += 1;
+              if (isBoardEntityDensityExpandable(boardObj.entity_type)) {
+                densityExpandableItemCount += 1;
+                if (boardObj.compact === true) compactDensityExpandableItemCount += 1;
+              }
             }
           }
           positionableItemCount += nodesRef.current.filter(
@@ -1877,7 +1928,8 @@ export const useBoardObjects = ({
             layout: objectData.type === 'zone' ? objectData.layout : undefined,
             pinnedItemCount,
             positionableItemCount,
-            compactItemCount,
+            densityExpandableItemCount,
+            compactDensityExpandableItemCount,
             onUpdate: handleUpdateObject,
             onDelete: deleteZone,
             onReorder: reorderObject,

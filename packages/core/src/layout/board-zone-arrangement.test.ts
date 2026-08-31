@@ -12,6 +12,10 @@ const item = (id: string, width: number, height: number, x = 0, y = 0) => ({
   height,
   position: { x, y },
 });
+const branchItem = (id: string, width: number, height: number, x = 0, y = 0) => ({
+  ...item(id, width, height, x, y),
+  entityType: 'branch' as const,
+});
 const zone = (
   id: string,
   x: number,
@@ -84,6 +88,62 @@ describe('planBoardZoneArrangement', () => {
     expect(empty?.height).toBeGreaterThanOrEqual(240);
     expect(list?.contentColumns).toBe(1);
     expect(new Set(list?.items.map(({ x }) => x))).toHaveLength(1);
+  });
+
+  it('uses compact-list density geometry only for capable worktrees', () => {
+    const plan = planBoardZoneArrangement([
+      {
+        ...zone('honest-list', 0, 0, [
+          branchItem('worktree', 500, 220),
+          item('generic-card', 380, 180),
+          { id: 'artifact', width: 440, height: 300, position: { x: 0, y: 0 } },
+        ]),
+        layout: { preset: 'compact_list', gap: 8 },
+      },
+    ]);
+    const byId = new Map(plan.zones[0]?.items.map((entry) => [entry.id, entry]));
+
+    expect(byId.get('worktree')?.height).toBeLessThan(220);
+    expect(byId.get('generic-card')).toMatchObject({ width: 380, height: 180 });
+    expect(byId.get('artifact')).toMatchObject({ width: 440, height: 300 });
+  });
+
+  it('makes two-column Apply geometry identical to a repeated Arrange and idempotent', () => {
+    const source = [
+      zone('one', 0, 0, [branchItem('one-child', 500, 220)]),
+      zone('two', 2200, 0, [item('two-child', 380, 180)]),
+      zone('three', 0, 1600, [item('three-child', 380, 100)]),
+    ];
+    const options = { maxPerRow: 2 };
+    const applied = planBoardZoneArrangement(source, options);
+    const reapplied = planBoardZoneArrangement(
+      source.map((zoneInput) => {
+        const arranged = applied.zones.find(({ id }) => id === zoneInput.id)!;
+        const itemById = new Map(arranged.items.map((entry) => [entry.id, entry]));
+        return {
+          ...zoneInput,
+          x: arranged.position.x,
+          y: arranged.position.y,
+          width: arranged.width,
+          height: arranged.height,
+          items: zoneInput.items.map((entry) => ({
+            ...entry,
+            position: {
+              x: itemById.get(entry.id)?.x ?? entry.position.x,
+              y: itemById.get(entry.id)?.y ?? entry.position.y,
+            },
+          })),
+        };
+      }),
+      options
+    );
+
+    expect(reapplied).toEqual(applied);
+    expect(applied.zones.map(({ row, column }) => ({ row, column }))).toEqual([
+      { row: 0, column: 0 },
+      { row: 0, column: 1 },
+      { row: 1, column: 0 },
+    ]);
   });
 
   it('carries a measured title scale through zone sizing and child packing', () => {

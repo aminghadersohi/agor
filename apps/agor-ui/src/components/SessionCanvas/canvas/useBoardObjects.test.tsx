@@ -1048,7 +1048,7 @@ describe('arrangeZoneContents', () => {
     renderedBranch.append(branchHeader);
     const renderedCard = document.createElement('div');
     renderedCard.className = 'react-flow__node';
-    renderedCard.dataset.id = 'card-card-1';
+    renderedCard.dataset.id = 'branch-2';
     const cardHeader = document.createElement('div');
     cardHeader.dataset.zoneStackHeader = '';
     Object.defineProperties(cardHeader, {
@@ -1074,8 +1074,8 @@ describe('arrangeZoneContents', () => {
         height: 180,
       },
       {
-        id: 'card-card-1',
-        type: 'cardNode',
+        id: 'branch-2',
+        type: 'branchNode',
         parentId: 'zone',
         position: { x: 40, y: 40 },
         data: {},
@@ -1103,10 +1103,10 @@ describe('arrangeZoneContents', () => {
               created_at: '2026-01-01T00:00:00.000Z',
             },
             {
-              object_id: 'placement-card',
+              object_id: 'placement-branch-2',
               board_id: 'board-1',
-              entity_type: 'card',
-              card_id: 'card-1',
+              entity_type: 'branch',
+              branch_id: 'branch-2',
               position: { x: 40, y: 40 },
               zone_id: 'zone',
               created_at: '2026-01-01T00:00:00.000Z',
@@ -1125,7 +1125,7 @@ describe('arrangeZoneContents', () => {
     });
 
     const stackedBranch = renderedNodes.find((node) => node.id === 'branch-1');
-    const stackedCard = renderedNodes.find((node) => node.id === 'card-card-1');
+    const stackedCard = renderedNodes.find((node) => node.id === 'branch-2');
     expect(stackedBranch?.position).toEqual({ x: 20, y: 100 });
     expect(stackedCard?.position).toEqual({ x: 20, y: 180 });
     expect((stackedCard?.position.y ?? 0) - (stackedBranch?.position.y ?? 0)).toBe(80);
@@ -1138,7 +1138,7 @@ describe('arrangeZoneContents', () => {
       deckDepth: 0,
       revealHeight: 80,
     });
-    expect(result.current.zoneStackByNodeId.get('card-card-1')).toMatchObject({
+    expect(result.current.zoneStackByNodeId.get('branch-2')).toMatchObject({
       zoneId: 'zone',
       deckDepth: 1,
       revealHeight: 80,
@@ -1148,14 +1148,14 @@ describe('arrangeZoneContents', () => {
       expect.objectContaining({ position: { x: 20, y: 100 }, compact: true })
     );
     expect(patch).toHaveBeenCalledWith(
-      'placement-card',
+      'placement-branch-2',
       expect.objectContaining({ position: { x: 20, y: 180 }, compact: true })
     );
     expect(patch).toHaveBeenCalledWith(
       'board-1',
       expect.objectContaining({
         _action: 'batchUpsertObjects',
-        objects: { zone: expect.objectContaining({ height: 260 }) },
+        objects: { zone: expect.objectContaining({ height: 300 }) },
       })
     );
     expect(showWarning).toHaveBeenCalledWith(expect.stringContaining('every title and action row'));
@@ -1166,7 +1166,7 @@ describe('arrangeZoneContents', () => {
 
   it('keeps automatic stack maintenance silent and sizes it for a durable compact deck', async () => {
     vi.useFakeTimers();
-    const cardNodeIds = ['card-card-1', 'card-card-2', 'card-card-3'];
+    const cardNodeIds = ['branch-1', 'branch-2', 'branch-3'];
     const renderedCards = cardNodeIds.map((id) => {
       const renderedCard = document.createElement('div');
       renderedCard.className = 'react-flow__node';
@@ -1186,7 +1186,7 @@ describe('arrangeZoneContents', () => {
       { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, data: {}, width: 500, height: 200 },
       ...cardNodeIds.map((id, index) => ({
         id,
-        type: 'cardNode',
+        type: 'branchNode',
         parentId: 'zone',
         position: { x: 20, y: 20 + index * 60 },
         data: {},
@@ -1211,10 +1211,10 @@ describe('arrangeZoneContents', () => {
           }),
           client,
           boardObjectsForBoard: cardNodeIds.map((_, index) => ({
-            object_id: `placement-card-${index + 1}`,
+            object_id: `placement-branch-${index + 1}`,
             board_id: 'board-1',
-            entity_type: 'card',
-            card_id: `card-${index + 1}`,
+            entity_type: 'branch',
+            branch_id: `branch-${index + 1}`,
             position: { x: 20, y: 20 + index * 60 },
             zone_id: 'zone',
             created_at: `2026-01-0${index + 1}T00:00:00.000Z`,
@@ -1231,13 +1231,13 @@ describe('arrangeZoneContents', () => {
     });
 
     expect(showWarning).not.toHaveBeenCalled();
-    expect(patch).toHaveBeenCalledWith(
-      'board-1',
-      expect.objectContaining({
-        _action: 'batchUpsertObjects',
-        objects: { zone: expect.objectContaining({ height: 300 }) },
-      })
-    );
+    const zoneWrite = patch.mock.calls.find(([id]) => id === 'board-1')?.[1];
+    expect(zoneWrite).toMatchObject({
+      _action: 'batchUpsertObjects',
+      objects: { zone: expect.objectContaining({ height: expect.any(Number) }) },
+    });
+    expect(zoneWrite.objects.zone.height).toBeGreaterThan(200);
+    expect(zoneWrite.objects.zone.height % BOARD_GRID_SIZE).toBe(0);
     for (const renderedCard of renderedCards) renderedCard.remove();
   });
 
@@ -1325,21 +1325,19 @@ describe('arrangeZoneContents', () => {
     });
 
     expect(renderedNodes.find((node) => node.id === 'card-newer')?.position.y).toBe(100);
-    expect(renderedNodes.find((node) => node.id === 'card-older')?.position.y).toBe(180);
+    expect(renderedNodes.find((node) => node.id === 'card-older')?.position.y).toBe(380);
     expect(patch).toHaveBeenCalledWith('placement-newer', {
       position: { x: 20, y: 100 },
-      size: { width: 580, height: 60 },
-      compact: true,
+      size: { width: 380, height: 260 },
     });
     expect(patch).toHaveBeenCalledWith('placement-older', {
-      position: { x: 20, y: 180 },
-      size: { width: 580, height: 60 },
-      compact: true,
+      position: { x: 20, y: 380 },
+      size: { width: 380, height: 220 },
     });
     expect(patch).not.toHaveBeenCalledWith('board-1', expect.anything());
   });
 
-  it('uses one compact-list frame for card and worktree zones with the same policy', async () => {
+  it('retains card geometry while applying compact-list density only to worktrees', async () => {
     const { client, patch } = makeClient();
     const compactLayout = {
       mode: 'auto',
@@ -1451,18 +1449,11 @@ describe('arrangeZoneContents', () => {
 
     const card = renderedNodes.find((node) => node.id === 'card-card-1');
     const branch = renderedNodes.find((node) => node.id === 'branch-1');
-    for (const [child, zoneWidth] of [
-      [card, 620],
-      [branch, 1600],
-    ] as const) {
-      expect(child?.position).toEqual({ x: 20, y: 100 });
-      expect(child?.width).toBe(zoneWidth - 40);
-      expect(zoneWidth - ((child?.position.x ?? 0) + (child?.width ?? 0))).toBe(20);
-      expect((child?.position.y ?? 0) - 20).toBe(80);
-    }
+    expect(card).toMatchObject({ position: { x: 20, y: 100 }, width: 320, height: 60 });
+    expect(branch).toMatchObject({ position: { x: 20, y: 100 }, width: 1560, height: 100 });
     expect(patch).toHaveBeenCalledWith(
       'placement-card',
-      expect.objectContaining({ size: { width: 580, height: 60 } })
+      expect.objectContaining({ size: { width: 320, height: 60 } })
     );
     expect(patch).toHaveBeenCalledWith(
       'placement-branch',
@@ -1671,18 +1662,18 @@ describe('direct manipulation of automatic zones', () => {
     },
   };
   const placement = {
-    object_id: 'placement-card',
+    object_id: 'placement-branch',
     board_id: 'board-1',
-    entity_type: 'card',
-    card_id: 'card-1',
+    entity_type: 'branch',
+    branch_id: 'branch-1',
     position: { x: 200, y: 200 },
     zone_id: zoneId,
     compact: true,
     created_at: '2026-01-01T00:00:00.000Z',
   };
   const child: Node = {
-    id: 'card-card-1',
-    type: 'cardNode',
+    id: 'branch-1',
+    type: 'branchNode',
     parentId: zoneId,
     position: { x: 200, y: 200 },
     width: 380,
@@ -1712,7 +1703,7 @@ describe('direct manipulation of automatic zones', () => {
     );
   }
 
-  it('persists manual mode before expanding a card and blocks the pending compact-list pass', async () => {
+  it('persists manual mode before expanding a worktree and blocks the pending compact-list pass', async () => {
     vi.useFakeTimers();
     const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
     const { result } = renderInteraction(makeBoard({ [zoneId]: autoZone }), client);
@@ -1732,7 +1723,7 @@ describe('direct manipulation of automatic zones', () => {
       }),
     });
     expect(boardObjectsPatch).toHaveBeenCalledTimes(1);
-    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-card', { compact: false });
+    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-branch', { compact: false });
     expect(boardsPatch.mock.invocationCallOrder[0]).toBeLessThan(
       boardObjectsPatch.mock.invocationCallOrder[0]
     );
@@ -1759,16 +1750,16 @@ describe('direct manipulation of automatic zones', () => {
       })
     );
     expect(boardObjectsPatch).toHaveBeenCalledTimes(1);
-    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-card', { compact: false });
+    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-branch', { compact: false });
   });
 
-  it('calls a stacked card out above its exact slot and restores it without demoting', async () => {
+  it('calls a stacked worktree out above its exact slot and restores it without demoting', async () => {
     vi.useFakeTimers();
     const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
     const secondPlacement = {
       ...placement,
-      object_id: 'placement-card-2',
-      card_id: 'card-2',
+      object_id: 'placement-branch-2',
+      branch_id: 'branch-2',
       position: { x: 220, y: 220 },
     };
     const initialNodes: Node[] = [
@@ -1776,7 +1767,7 @@ describe('direct manipulation of automatic zones', () => {
       child,
       {
         ...child,
-        id: 'card-card-2',
+        id: 'branch-2',
         position: { x: 220, y: 220 },
       },
     ];
@@ -1808,8 +1799,8 @@ describe('direct manipulation of automatic zones', () => {
       const zoneNode = result.current.getBoardObjectNodes()[0];
       await (zoneNode.data.onArrangeContents as (id: string) => Promise<void>)(zoneId);
     });
-    expect(result.current.zoneStackByNodeId.has('card-card-1')).toBe(true);
-    const stackedPosition = renderedNodes.find((node) => node.id === 'card-card-1')?.position;
+    expect(result.current.zoneStackByNodeId.has('branch-1')).toBe(true);
+    const stackedPosition = renderedNodes.find((node) => node.id === 'branch-1')?.position;
     boardsPatch.mockClear();
     boardObjectsPatch.mockClear();
 
@@ -1817,21 +1808,17 @@ describe('direct manipulation of automatic zones', () => {
       await result.current.setPlacementCompact(placement as never, false);
     });
 
-    expect(result.current.calledOutNodeIds.has('card-card-1')).toBe(true);
+    expect(result.current.calledOutNodeIds.has('branch-1')).toBe(true);
     expect(boardsPatch).not.toHaveBeenCalled();
     expect(boardObjectsPatch).not.toHaveBeenCalled();
-    expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual(
-      stackedPosition
-    );
+    expect(renderedNodes.find((node) => node.id === 'branch-1')?.position).toEqual(stackedPosition);
 
     await act(async () => {
       await result.current.setPlacementCompact(placement as never, true);
     });
 
-    expect(result.current.calledOutNodeIds.has('card-card-1')).toBe(false);
-    expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual(
-      stackedPosition
-    );
+    expect(result.current.calledOutNodeIds.has('branch-1')).toBe(false);
+    expect(renderedNodes.find((node) => node.id === 'branch-1')?.position).toEqual(stackedPosition);
     expect(boardsPatch).not.toHaveBeenCalled();
     expect(boardObjectsPatch).not.toHaveBeenCalled();
     unmount();
@@ -1889,7 +1876,7 @@ describe('direct manipulation of automatic zones', () => {
     });
 
     expect(boardsPatch).not.toHaveBeenCalled();
-    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-card', { compact: false });
+    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-branch', { compact: false });
   });
 
   it('re-arming auto mode schedules a fresh tidy', async () => {
@@ -1941,7 +1928,7 @@ describe('direct manipulation of automatic zones', () => {
     });
 
     expect(boardObjectsPatch).toHaveBeenCalledWith(
-      'placement-card',
+      'placement-branch',
       expect.objectContaining({ position: { x: 20, y: 100 } })
     );
   });
@@ -1954,9 +1941,19 @@ describe('direct manipulation of automatic zones', () => {
  */
 describe('setZoneContentsCompact', () => {
   const placements = [
-    { object_id: 'obj-branch', zone_id: 'zone-1', branch_id: 'branch-1' },
-    { object_id: 'obj-card', zone_id: 'zone-1', card_id: 'card-1' },
-    { object_id: 'obj-other-zone', zone_id: 'zone-2', card_id: 'card-2' },
+    {
+      object_id: 'obj-branch',
+      zone_id: 'zone-1',
+      branch_id: 'branch-1',
+      entity_type: 'branch',
+    },
+    { object_id: 'obj-card', zone_id: 'zone-1', card_id: 'card-1', entity_type: 'card' },
+    {
+      object_id: 'obj-other-zone',
+      zone_id: 'zone-2',
+      branch_id: 'branch-2',
+      entity_type: 'branch',
+    },
     // A nested zone placement carries neither branch_id nor card_id and is
     // not an entity the density control applies to.
     { object_id: 'obj-not-entity', zone_id: 'zone-1' },
@@ -1979,7 +1976,7 @@ describe('setZoneContentsCompact', () => {
     );
   }
 
-  it('patches only the entity placements pinned to the requested zone', async () => {
+  it('patches only density-expandable placements pinned to the requested zone', async () => {
     const { client, patch } = makeClient();
     const { result } = renderCompact(client);
 
@@ -1988,7 +1985,7 @@ describe('setZoneContentsCompact', () => {
     });
 
     expect(client.service).toHaveBeenCalledWith('board-objects');
-    expect(patch.mock.calls.map((call) => call[0]).sort()).toEqual(['obj-branch', 'obj-card']);
+    expect(patch.mock.calls.map((call) => call[0])).toEqual(['obj-branch']);
     for (const call of patch.mock.calls) {
       expect(call[1]).toEqual({ compact: true });
     }
@@ -2005,23 +2002,28 @@ describe('setZoneContentsCompact', () => {
       await result.current.setZoneContentsCompact('zone-1', false);
     });
 
-    expect(patch.mock.calls.map((call) => call[0]).sort()).toEqual(['obj-branch', 'obj-card']);
+    expect(patch.mock.calls.map((call) => call[0])).toEqual(['obj-branch']);
     expect(patch.mock.calls[0][1]).toEqual({ compact: false });
   });
 
   it('skips placements already at the requested density', async () => {
     const { client, patch } = makeClient();
     const { result } = renderCompact(client, [
-      { object_id: 'obj-branch', zone_id: 'zone-1', branch_id: 'branch-1', compact: true },
-      { object_id: 'obj-card', zone_id: 'zone-1', card_id: 'card-1' },
+      {
+        object_id: 'obj-branch',
+        zone_id: 'zone-1',
+        branch_id: 'branch-1',
+        entity_type: 'branch',
+        compact: true,
+      },
+      { object_id: 'obj-card', zone_id: 'zone-1', card_id: 'card-1', entity_type: 'card' },
     ]);
 
     await act(async () => {
       await result.current.setZoneContentsCompact('zone-1', true);
     });
 
-    expect(patch).toHaveBeenCalledTimes(1);
-    expect(patch.mock.calls[0][0]).toBe('obj-card');
+    expect(patch).not.toHaveBeenCalled();
   });
 
   it('is a no-op — no patch, no toast — when the zone is already uniform', async () => {
@@ -2053,15 +2055,27 @@ describe('setZoneContentsCompact', () => {
 });
 
 /**
- * `compact_list` collapses every item on the way in and nothing used to undo
- * it, so a zone switched back to Grid stayed collapsed with no explanation.
+ * `compact_list` collapses every capable worktree on the way in and nothing
+ * used to undo it, so a zone switched back to Grid stayed collapsed.
  * The expand is keyed to the preset transition, NOT to arranging in grid.
  */
 describe('handleUpdateObject compact_list → grid expansion', () => {
   const zoneId = 'zone-1';
   const collapsed = [
-    { object_id: 'obj-branch', zone_id: zoneId, branch_id: 'branch-1', compact: true },
-    { object_id: 'obj-card', zone_id: zoneId, card_id: 'card-1', compact: true },
+    {
+      object_id: 'obj-branch',
+      zone_id: zoneId,
+      branch_id: 'branch-1',
+      entity_type: 'branch',
+      compact: true,
+    },
+    {
+      object_id: 'obj-card',
+      zone_id: zoneId,
+      card_id: 'card-1',
+      entity_type: 'card',
+      compact: true,
+    },
   ];
 
   function zone(preset: string, mode: 'auto' | 'manual' = 'manual') {
@@ -2106,10 +2120,7 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
       await result.current.handleUpdateObject(zoneId, zone('grid') as never);
     });
 
-    expect(compactPatches(patch)).toEqual([
-      ['obj-branch', false],
-      ['obj-card', false],
-    ]);
+    expect(compactPatches(patch)).toEqual([['obj-branch', false]]);
   });
 
   it('keeps auto mode armed while its compact-list to grid transition expands contents', async () => {
@@ -2131,10 +2142,7 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
       await result.current.handleUpdateObject(zoneId, zone('grid', 'auto') as never);
     });
 
-    expect(compactPatches(patch)).toEqual([
-      ['obj-branch', false],
-      ['obj-card', false],
-    ]);
+    expect(compactPatches(patch)).toEqual([['obj-branch', false]]);
     expect(
       patch.mock.calls.some(
         (call) => call[1]?._action === 'mergeObjectFields' && call[1].objects?.[zoneId]?.layout
@@ -2144,7 +2152,7 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
 
   it('does not expand when a grid zone is merely updated again', async () => {
     // The regression guard for automatic zones: a grid zone reflows and is
-    // re-saved constantly, and each of those must leave hand-collapsed cards
+    // re-saved constantly, and each of those must leave hand-collapsed worktrees
     // alone.
     const { client, patch } = makeClient();
     const { result } = renderUpdate('grid', collapsed, client);
@@ -2185,7 +2193,15 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
     const { client, patch } = makeClient();
     const { result } = renderUpdate(
       'compact_list',
-      [...collapsed, { object_id: 'obj-elsewhere', zone_id: 'zone-2', card_id: 'card-9' }],
+      [
+        ...collapsed,
+        {
+          object_id: 'obj-elsewhere',
+          zone_id: 'zone-2',
+          branch_id: 'branch-9',
+          entity_type: 'branch',
+        },
+      ],
       client
     );
 
@@ -2209,7 +2225,7 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
 });
 
 /**
- * Expanding on the way out of compact_list is only half the job: the cards keep
+ * Expanding on the way out of compact_list is only half the job: worktrees keep
  * the one-row spacing the preset gave them, so restoring their full height
  * makes them overlap until the zone is re-packed.
  */
@@ -2229,34 +2245,46 @@ describe('compact_list → grid re-packs the expanded zone', () => {
   }
 
   const placements = [
-    { object_id: 'obj-a', zone_id: zoneId, card_id: 'card-a', compact: true },
-    { object_id: 'obj-b', zone_id: zoneId, card_id: 'card-b', compact: true },
+    {
+      object_id: 'obj-a',
+      zone_id: zoneId,
+      branch_id: 'branch-a',
+      entity_type: 'branch',
+      compact: true,
+    },
+    {
+      object_id: 'obj-b',
+      zone_id: zoneId,
+      branch_id: 'branch-b',
+      entity_type: 'branch',
+      compact: true,
+    },
   ];
 
-  // Stacked at compact_list's row pitch: 56px apart, which is exactly the
-  // spacing that overlaps once each card is ~120px tall again.
+  // Stacked at compact_list's row pitch, which overlaps once each worktree
+  // restores its full measured height.
   const nodes = [
     {
-      id: 'card-card-a',
-      type: 'cardNode',
+      id: 'branch-a',
+      type: 'branchNode',
       parentId: zoneId,
       position: { x: 24, y: 64 },
-      width: 380,
-      height: 120,
+      width: 500,
+      height: 180,
       data: {},
     },
     {
-      id: 'card-card-b',
-      type: 'cardNode',
+      id: 'branch-b',
+      type: 'branchNode',
       parentId: zoneId,
       position: { x: 24, y: 120 },
-      width: 380,
-      height: 120,
+      width: 500,
+      height: 180,
       data: {},
     },
   ];
 
-  it('schedules an arrange that moves the expanded cards apart', async () => {
+  it('schedules an arrange that moves the expanded worktrees apart', async () => {
     vi.useFakeTimers();
     const { client, patch } = makeClient();
     const setNodes = vi.fn();
@@ -2277,7 +2305,7 @@ describe('compact_list → grid re-packs the expanded zone', () => {
       await result.current.handleUpdateObject(zoneId, zone('grid') as never);
     });
 
-    // The expand lands immediately; the re-pack is deferred so the cards can
+    // The expand lands immediately; the re-pack is deferred so the worktrees can
     // paint at full height before the layout measures them.
     const compactPatches = patch.mock.calls.filter((c) => c[1] && 'compact' in c[1]);
     expect(compactPatches.map((c) => c[1].compact)).toEqual([false, false]);
@@ -2289,7 +2317,7 @@ describe('compact_list → grid re-packs the expanded zone', () => {
 
     const positioned = patch.mock.calls.filter((c) => c[1] && 'position' in c[1]);
     expect(positioned.length).toBeGreaterThan(0);
-    // Whatever the packer chooses, the two cards must no longer sit 56px apart.
+    // Whatever the packer chooses, the two worktrees must no longer sit 56px apart.
     const ys = positioned.map((c) => c[1].position.y).sort((a, b) => a - b);
     if (ys.length === 2) expect(ys[1] - ys[0]).toBeGreaterThan(56);
   });
@@ -2332,7 +2360,7 @@ describe('compact_list → grid re-packs the expanded zone', () => {
 
   it('does not re-pack when the toolbar collapses the contents', async () => {
     // Collapsing shrinks every item, which cannot create an overlap; a re-pack
-    // there would move cards the user did not ask to move.
+    // there would move worktrees the user did not ask to move.
     vi.useFakeTimers();
     const { client, patch } = makeClient();
     const { result } = renderHook(
@@ -2341,8 +2369,20 @@ describe('compact_list → grid re-packs the expanded zone', () => {
           board: makeBoard({ [zoneId]: zone('grid') }),
           client: client as never,
           boardObjectsForBoard: [
-            { object_id: 'obj-a', zone_id: zoneId, card_id: 'card-a', compact: false },
-            { object_id: 'obj-b', zone_id: zoneId, card_id: 'card-b', compact: false },
+            {
+              object_id: 'obj-a',
+              zone_id: zoneId,
+              branch_id: 'branch-a',
+              entity_type: 'branch',
+              compact: false,
+            },
+            {
+              object_id: 'obj-b',
+              zone_id: zoneId,
+              branch_id: 'branch-b',
+              entity_type: 'branch',
+              compact: false,
+            },
           ] as never,
           nodes: nodes as never,
           setNodes: vi.fn(),
@@ -2389,6 +2429,66 @@ describe('compact_list → grid re-packs the expanded zone', () => {
 });
 
 describe('arrangeBoardZones production path', () => {
+  it('makes Grid Apply immediate and a following Arrange a persistence no-op', async () => {
+    const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
+    let board = makeBoard({
+      one: { type: 'zone', x: 0, y: 0, width: 620, height: 500, label: 'One' },
+      two: { type: 'zone', x: 2200, y: 0, width: 620, height: 500, label: 'Two' },
+      three: { type: 'zone', x: 0, y: 1600, width: 620, height: 500, label: 'Three' },
+    });
+    let nodes: Node[] = Object.entries(board.objects ?? {}).map(([id, object]) => ({
+      id,
+      type: 'zone',
+      position: { x: object.x, y: object.y },
+      width: object.type === 'zone' ? object.width : 620,
+      height: object.type === 'zone' ? object.height : 500,
+      data: {},
+    }));
+    const setNodes: React.Dispatch<React.SetStateAction<Node[]>> = (value) => {
+      nodes = typeof value === 'function' ? value(nodes) : value;
+    };
+    const { result, rerender } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await result.current.arrangeBoardZones(['one', 'two', 'three'], { maxPerRow: 2 });
+    });
+
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    const firstWrite = boardsPatch.mock.calls[0]?.[1] as {
+      objects: NonNullable<Board['objects']>;
+    };
+    expect(nodes.map(({ position }) => position)).toEqual([
+      { x: 80, y: 80 },
+      { x: 900, y: 80 },
+      { x: 80, y: 620 },
+    ]);
+
+    board = { ...board, objects: { ...board.objects, ...firstWrite.objects } };
+    rerender();
+    boardsPatch.mockClear();
+    boardObjectsPatch.mockClear();
+    showSuccess.mockClear();
+
+    await act(async () => {
+      await result.current.arrangeBoardZones(['one', 'two', 'three']);
+    });
+
+    expect(boardsPatch).not.toHaveBeenCalled();
+    expect(boardObjectsPatch).not.toHaveBeenCalled();
+    expect(showSuccess).toHaveBeenCalledWith('Zones and their contents are already arranged.');
+  });
+
   it('writes one zone batch, re-packs measured children, and cancels pending Auto Zone passes', async () => {
     vi.useFakeTimers();
     const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();

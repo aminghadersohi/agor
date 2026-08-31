@@ -46,7 +46,7 @@ export interface BoardEntityObject {
   /** Last measured rendered size, used by server-side layout tools. */
   size?: { width: number; height: number };
 
-  /** Shared compact presentation state for a board card/worktree. */
+  /** Shared compact presentation state for branch/worktree placements only. */
   compact?: boolean;
 
   /** Zone this entity is pinned to (optional) */

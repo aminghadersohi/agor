@@ -271,7 +271,15 @@ export const ZoneConfigModal = ({
           />
         </Form.Item>
 
-        <Form.Item name="layoutPreset" label="Presentation">
+        <Form.Item
+          name="layoutPreset"
+          label="Presentation"
+          help={
+            layoutPreset === 'compact_list'
+              ? 'List uses one column and collapses worktree details; cards and canvas objects keep their natural size.'
+              : undefined
+          }
+        >
           <Segmented
             block
             aria-label="Presentation"

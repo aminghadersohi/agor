@@ -4,6 +4,7 @@ import {
   compactZoneItemSize,
   getZoneLayoutFrame,
   growZoneLayoutHeight,
+  isBoardEntityDensityExpandable,
   justifyZoneContentCluster,
   normalizeZoneLayoutPolicy,
   sortZoneLayoutItems,
@@ -185,7 +186,58 @@ describe('normalizeZoneLayoutPolicy', () => {
   });
 });
 
+describe('board density capability', () => {
+  it('includes only branch/worktree surfaces and excludes every inert board kind', () => {
+    expect(isBoardEntityDensityExpandable('branch')).toBe(true);
+    for (const kind of ['card', 'text', 'markdown', 'app', 'artifact', 'zone'] as const) {
+      expect(isBoardEntityDensityExpandable(kind), kind).toBe(false);
+    }
+  });
+});
+
 describe('sortZoneLayoutItems', () => {
+  const sortableItems = [
+    item('alpha', {
+      title: 'Alpha',
+      position: { x: 0, y: 0 },
+      priority: 'urgent',
+      status: 'active',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+      createdAt: '2026-01-03T00:00:00.000Z',
+    }),
+    item('bravo', {
+      title: 'Bravo',
+      position: { x: 0, y: 20 },
+      priority: 'low',
+      status: 'done',
+      updatedAt: '2026-01-03T00:00:00.000Z',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    }),
+    item('charlie', {
+      title: 'Charlie',
+      position: { x: 20, y: 20 },
+      priority: 'medium',
+      status: 'blocked',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      createdAt: '2026-01-02T00:00:00.000Z',
+    }),
+  ];
+
+  it.each([
+    ['position', ['alpha', 'bravo', 'charlie']],
+    ['priority', ['alpha', 'charlie', 'bravo']],
+    ['status', ['charlie', 'alpha', 'bravo']],
+    ['updated', ['charlie', 'alpha', 'bravo']],
+    ['created', ['bravo', 'charlie', 'alpha']],
+    ['title', ['alpha', 'bravo', 'charlie']],
+  ] as const)('visibly reverses the complete deterministic %s order', (sortBy, ascending) => {
+    const asc = sortZoneLayoutItems(sortableItems, { sortBy, sortDirection: 'asc' });
+    const desc = sortZoneLayoutItems(sortableItems, { sortBy, sortDirection: 'desc' });
+
+    expect(asc.map(({ id }) => id)).toEqual(ascending);
+    expect(desc.map(({ id }) => id)).toEqual([...ascending].reverse());
+  });
+
   it('sorts urgent and ranked work first while leaving missing priority last', () => {
     const result = sortZoneLayoutItems(
       [
@@ -251,6 +303,23 @@ describe('sortZoneLayoutItems', () => {
       { sortBy: 'position', sortDirection: 'asc' }
     );
     expect(result.map(({ id }) => id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('applies direction to visible and opaque tie-breakers while keeping missing values last', () => {
+    const tied = [
+      item('a', { title: 'Bravo', priority: 'medium' }),
+      item('z', { title: 'Alpha', priority: 'medium' }),
+      item('y', { title: 'Alpha', priority: 'medium' }),
+      item('missing-z', { title: 'Zulu' }),
+      item('missing-a', { title: 'Able' }),
+    ];
+
+    expect(
+      sortZoneLayoutItems(tied, { sortBy: 'priority', sortDirection: 'asc' }).map(({ id }) => id)
+    ).toEqual(['y', 'z', 'a', 'missing-a', 'missing-z']);
+    expect(
+      sortZoneLayoutItems(tied, { sortBy: 'priority', sortDirection: 'desc' }).map(({ id }) => id)
+    ).toEqual(['a', 'z', 'y', 'missing-z', 'missing-a']);
   });
 });
 

@@ -1,3 +1,4 @@
+import type { BoardZoneArrangementOptions } from '@agor/core/layout/board-zone-arrangement';
 import { SettingOutlined } from '@ant-design/icons';
 import { Button, InputNumber, Popover, Segmented, Select, Space, Switch, Typography } from 'antd';
 import { useMemo, useState } from 'react';
@@ -27,6 +28,22 @@ export function selectionGridTracks(
   return axis === 'columns'
     ? { columns: tracks, rows: Math.ceil(count / tracks) }
     : { columns: Math.ceil(count / tracks), rows: tracks };
+}
+
+/**
+ * Translate selection UI tracks into the options understood by the one
+ * board-zone planner used by both Apply layout and Arrange zones.
+ */
+export function selectionBoardZoneArrangementOptions(
+  selectionCount: number,
+  settings?: SelectionLayoutSettings
+): Omit<BoardZoneArrangementOptions, 'looseItems'> {
+  if (settings?.mode !== 'grid') return {};
+  const tracks = selectionGridTracks(selectionCount, settings.trackAxis, settings.trackCount);
+  return {
+    maxPerRow: tracks.columns,
+    justifyLastRow: settings.rowDistribution === 'justify',
+  };
 }
 
 interface SelectionLayoutPopoverProps {

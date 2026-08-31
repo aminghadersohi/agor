@@ -645,10 +645,10 @@ describe('agor_boards_auto_arrange_zone', () => {
   it('uses accessible cascade offsets only when deck overflow is explicit', async () => {
     const patches: Array<{ id: string; position: { x: number; y: number } }> = [];
     const boardObjects = Array.from({ length: 20 }, (_, index) => ({
-      object_id: `card-${index}`,
+      object_id: `branch-${index}`,
       board_id: 'board-1',
-      card_id: `card-${index}`,
-      entity_type: 'card' as const,
+      branch_id: `branch-${index}`,
+      entity_type: 'branch' as const,
       position: { x: 0, y: 0 },
       zone_id: 'zone-1',
       created_at: '2026-06-01T00:00:00.000Z',
@@ -667,18 +667,18 @@ describe('agor_boards_auto_arrange_zone', () => {
             get: vi.fn(async () => ({
               board_id: 'board-1',
               objects: {
-                'zone-1': { type: 'zone', x: 100, y: 100, width: 620, height: 1800 },
+                'zone-1': { type: 'zone', x: 100, y: 100, width: 1000, height: 1800 },
               },
             })),
           };
         }
         if (name === 'board-objects') return boardObjectsService;
-        if (name === 'cards')
+        if (name === 'branches')
           return {
             find: vi.fn(async () => ({
-              data: boardObjects.map((object) => ({ card_id: object.card_id })),
+              data: boardObjects.map((object) => ({ branch_id: object.branch_id })),
             })),
-            get: vi.fn(async () => ({ title: 'Card', description: 'x'.repeat(1000) })),
+            get: vi.fn(async () => ({ name: 'Branch' })),
           };
         throw new Error(`Unexpected service call: ${name}`);
       },
@@ -690,7 +690,14 @@ describe('agor_boards_auto_arrange_zone', () => {
     });
 
     const rejected = JSON.parse(
-      (await arrange({ boardId: 'board-1', zoneId: 'zone-1', columns: 1 })).content[0].text
+      (
+        await arrange({
+          boardId: 'board-1',
+          zoneId: 'zone-1',
+          columns: 1,
+          includeArchived: true,
+        })
+      ).content[0].text
     );
     expect(rejected).toMatchObject({
       applied: false,
@@ -709,6 +716,7 @@ describe('agor_boards_auto_arrange_zone', () => {
           zoneId: 'zone-1',
           columns: 1,
           overflowStrategy: 'deck',
+          includeArchived: true,
         })
       ).content[0].text
     );
@@ -1201,7 +1209,7 @@ describe('agor_boards_auto_arrange_zone', () => {
       'placement-middle',
       'placement-older',
     ]);
-    expect(entityPatches.filter(({ data }) => data.compact === true)).toHaveLength(3);
+    expect(entityPatches.filter(({ data }) => data.compact === true)).toHaveLength(0);
     expect(boardPatch).not.toHaveBeenCalled();
   });
 });
@@ -2379,12 +2387,16 @@ describe('board layout tools with branch entities present', () => {
     expect(parsed.updates[0].contentColumns).toBe(1);
   });
 
-  it('uses the same compact-list frame for card and branch zone shapes', async () => {
+  it("uses density geometry for branches while retaining a generic card's natural frame", async () => {
     const compactLayout = { mode: 'auto', preset: 'compact_list', gap: 8 };
     const { app } = makeApp({
       entities: [
-        cardEntity({ zone_id: 'cards-zone', compact: true }),
-        branchEntity({ zone_id: 'branches-zone', compact: true }),
+        cardEntity({ zone_id: 'cards-zone', compact: true, size: { width: 380, height: 180 } }),
+        branchEntity({
+          zone_id: 'branches-zone',
+          compact: true,
+          size: { width: 500, height: 220 },
+        }),
       ],
       objects: {
         'cards-zone': {
@@ -2423,7 +2435,7 @@ describe('board layout tools with branch entities present', () => {
 
     expect(parsed.updates).toHaveLength(2);
     expect(parsed.updates.map((update: { size: { width: number } }) => update.size.width)).toEqual([
-      620, 620,
+      420, 620,
     ]);
     expect(
       parsed.updates.map((update: { contentColumns: number }) => update.contentColumns)
@@ -2589,7 +2601,7 @@ describe('agor_boards_auto_arrange zone avoidance', () => {
 });
 
 describe('agor_boards_set_compact', () => {
-  it('updates only explicitly targeted placements on the requested board', async () => {
+  it('updates only explicitly targeted branch placements on the requested board', async () => {
     const patch = vi.fn(async (objectId: string, data: { compact: boolean }) => ({
       object_id: objectId,
       board_id: 'board-1',
@@ -2618,17 +2630,43 @@ describe('agor_boards_set_compact', () => {
     });
 
     const parsed = JSON.parse(
-      (await setCompact({ boardId: 'board-1', objectIds: ['card-1'], compact: true })).content[0]
+      (await setCompact({ boardId: 'board-1', objectIds: ['branch-1'], compact: true })).content[0]
         .text
     );
 
     expect(patch).toHaveBeenCalledTimes(1);
     expect(patch).toHaveBeenCalledWith(
-      'card-1',
+      'branch-1',
       { compact: true },
       expect.objectContaining({ provider: 'mcp' })
     );
     expect(parsed).toMatchObject({ boardId: 'board-1', compact: true, updated: 1 });
+  });
+
+  it('rejects an explicit generic card target instead of returning an inert success', async () => {
+    const patch = vi.fn();
+    const app = {
+      service(name: string) {
+        if (name === 'board-objects')
+          return {
+            find: vi.fn(async () => ({
+              data: [{ object_id: 'card-1', board_id: 'board-1', entity_type: 'card' }],
+            })),
+            patch,
+          };
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+    const setCompact = registerAndCaptureHandler('agor_boards_set_compact', {
+      app,
+      userId: 'user-1',
+      baseServiceParams: { authenticated: true, provider: 'mcp' },
+    });
+
+    await expect(
+      setCompact({ boardId: 'board-1', objectIds: ['card-1'], compact: true })
+    ).rejects.toThrow('Compact presentation is supported only for branch placements');
+    expect(patch).not.toHaveBeenCalled();
   });
 });
 

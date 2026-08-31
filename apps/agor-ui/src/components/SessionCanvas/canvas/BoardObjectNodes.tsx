@@ -73,8 +73,10 @@ interface ZoneNodeData extends Omit<ZoneBoardObject, 'type'> {
   pinnedItemCount?: number;
   /** Every measured board node currently contained by this zone. */
   positionableItemCount?: number;
-  /** How many of the pinned items are currently collapsed. */
-  compactItemCount?: number;
+  /** Pinned entities whose rendered surface owns a real density state. */
+  densityExpandableItemCount?: number;
+  /** Density-capable pinned entities that are currently collapsed. */
+  compactDensityExpandableItemCount?: number;
   onUpdate?: (objectId: string, objectData: BoardObject) => void;
   onDelete?: (objectId: string, deleteAssociatedSessions: boolean) => void;
   onReorder?: (objectId: string, op: LayerOp) => void;
@@ -140,11 +142,12 @@ const ZoneNodeComponent = ({
   const mutationGate = useMutationGate();
   const mutationDisabled = !mutationGate.canMutate;
 
-  // A zone reads as collapsed only when every pinned item is. A partially
+  // A zone reads as collapsed only when every density-capable item is. A partially
   // collapsed zone still offers "Collapse contents", so one click makes the
   // whole zone uniform instead of toggling it into a different mixed state.
   const zoneContentsAllCompact =
-    (data.pinnedItemCount ?? 0) > 0 && (data.compactItemCount ?? 0) >= (data.pinnedItemCount ?? 0);
+    (data.densityExpandableItemCount ?? 0) > 0 &&
+    (data.compactDensityExpandableItemCount ?? 0) >= (data.densityExpandableItemCount ?? 0);
 
   // Inverse scale keeps zone labels at a legible size regardless of zoom.
   const scale = 1 / zoom;
@@ -765,17 +768,17 @@ const ZoneNodeComponent = ({
             pair: a zone whose items are all collapsed can only usefully be
             expanded, and vice versa, so a second slot would always be a no-op.
           */}
-          {renderActionButton(
-            'set-contents-compact',
-            zoneContentsAllCompact ? 'Expand contents' : 'Collapse contents',
-            zoneContentsAllCompact ? (
-              <PlusSquareOutlined style={layerIconStyle} />
-            ) : (
-              <MinusSquareOutlined style={layerIconStyle} />
-            ),
-            () => data.onSetContentsCompact?.(data.objectId, !zoneContentsAllCompact),
-            (data.pinnedItemCount ?? 0) < 1
-          )}
+          {(data.densityExpandableItemCount ?? 0) > 0 &&
+            renderActionButton(
+              'set-contents-compact',
+              zoneContentsAllCompact ? 'Expand contents' : 'Collapse contents',
+              zoneContentsAllCompact ? (
+                <PlusSquareOutlined style={layerIconStyle} />
+              ) : (
+                <MinusSquareOutlined style={layerIconStyle} />
+              ),
+              () => data.onSetContentsCompact?.(data.objectId, !zoneContentsAllCompact)
+            )}
           {verticalDivider}
           {/* Layer (z-order) controls */}
           <div
