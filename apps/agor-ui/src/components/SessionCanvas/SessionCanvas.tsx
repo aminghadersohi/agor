@@ -125,6 +125,7 @@ import {
   relativeToAbsolute,
 } from './canvas/utils/coordinateTransforms';
 import {
+  consumeTrackedDragPosition,
   flowSnapDistanceForZoom,
   getGuideLayoutRects,
   type LayoutGuide,
@@ -728,6 +729,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Debounce timer ref for position updates
     const layoutUpdateTimerRef = useRef<NodeJS.Timeout | null>(null);
     const pendingLayoutUpdatesRef = useRef<Record<string, { x: number; y: number }>>({});
+    // React Flow's drag-stop node can lag behind a position that our alignment
+    // guide handler applied through setNodes. Keep the last position actually
+    // accepted during this drag so the displayed and persisted geometry cannot
+    // diverge after the debounce/realtime echo.
+    const activeDragPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
     const isDraggingRef = useRef(false);
     const [isDraggingCanvas, setIsDraggingCanvas] = useState(false);
     const [alignmentGuides, setAlignmentGuides] = useState<LayoutGuide[]>([]);
@@ -2116,6 +2122,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           void demoteAutoZone(node.parentId);
         }
         isDraggingRef.current = true;
+        const absolutePos = node.positionAbsolute || node.position;
+        activeDragPositionsRef.current[node.id] = {
+          x: absolutePos.x,
+          y: absolutePos.y,
+        };
         setIsDraggingCanvas(true);
         setAlignmentGuides([]);
         const viewport = reactFlowInstanceRef.current?.getViewport();
@@ -2154,6 +2165,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               )
             );
             localPositionsRef.current[node.id] = { x: snapped.x, y: snapped.y };
+            activeDragPositionsRef.current[node.id] = { x: snapped.x, y: snapped.y };
             return;
           }
         }
@@ -2161,6 +2173,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         // Track this position locally so we don't get overwritten by WebSocket updates
         // IMPORTANT: Store ABSOLUTE position, not relative!
         localPositionsRef.current[node.id] = {
+          x: absolutePos.x,
+          y: absolutePos.y,
+        };
+        activeDragPositionsRef.current[node.id] = {
           x: absolutePos.x,
           y: absolutePos.y,
         };
@@ -2188,7 +2204,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
         // Track final position locally
         // IMPORTANT: Store ABSOLUTE position, not relative!
-        const absolutePos = node.positionAbsolute || node.position;
+        const eventAbsolutePos = node.positionAbsolute || node.position;
+        const absolutePos = consumeTrackedDragPosition(
+          node.id,
+          eventAbsolutePos,
+          activeDragPositionsRef.current
+        );
         localPositionsRef.current[node.id] = {
           x: absolutePos.x,
           y: absolutePos.y,

@@ -34,6 +34,21 @@ export interface SnapResult {
   guides: LayoutGuide[];
 }
 
+/**
+ * Consume the last geometry accepted by the controlled drag handler. React
+ * Flow can report its pre-guide position in onNodeDragStop after a guide snap,
+ * so the tracked position is authoritative for this one interaction only.
+ */
+export function consumeTrackedDragPosition(
+  nodeId: string,
+  eventPosition: { x: number; y: number },
+  trackedPositions: Record<string, { x: number; y: number }>
+): { x: number; y: number } {
+  const trackedPosition = trackedPositions[nodeId];
+  delete trackedPositions[nodeId];
+  return trackedPosition ?? eventPosition;
+}
+
 interface AlignmentCandidate {
   delta: number;
   guide: number;
