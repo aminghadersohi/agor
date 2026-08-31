@@ -371,7 +371,15 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
         position={Position.Left}
         className="zone-workflow-handle"
         aria-label={`Connect a transition into ${data.label}`}
-        style={{ background: token.colorPrimary, borderColor: token.colorBgContainer }}
+        style={
+          {
+            top: 28,
+            color: token.colorPrimary,
+            background: 'transparent',
+            borderColor: 'transparent',
+            '--zone-workflow-handle-border': token.colorBgContainer,
+          } as React.CSSProperties
+        }
       />
       <Handle
         id="workflow-right"
@@ -379,7 +387,15 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
         position={Position.Right}
         className="zone-workflow-handle"
         aria-label={`Connect a transition from ${data.label}`}
-        style={{ background: token.colorPrimary, borderColor: token.colorBgContainer }}
+        style={
+          {
+            top: 28,
+            color: token.colorPrimary,
+            background: 'transparent',
+            borderColor: 'transparent',
+            '--zone-workflow-handle-border': token.colorBgContainer,
+          } as React.CSSProperties
+        }
       />
       <NodeResizer
         isVisible={selected && !data.locked && !mutationDisabled}

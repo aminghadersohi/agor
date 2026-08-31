@@ -119,9 +119,26 @@
 }
 /* Canvas-editor exception: React Flow owns handle visibility outside React props. */
 .zone-workflow-handle {
+  /* Keep the pointer target usable after React Flow scales the canvas down.
+     The pseudo-element preserves the original compact visual marker. */
+  width: 28px;
+  height: 28px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 120ms ease;
+}
+
+.zone-workflow-handle::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  content: "";
+  background: currentColor;
+  border: 1px solid var(--zone-workflow-handle-border);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
 }
 
 .tool-mode-workflow .zone-workflow-handle {
