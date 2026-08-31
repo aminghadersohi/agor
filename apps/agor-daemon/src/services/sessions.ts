@@ -283,6 +283,12 @@ export type SessionInterruptAuthorityInput = {
   relationship: SessionInterruptRelationship;
 };
 
+export type SessionQueueBatchAuthorityInput = {
+  /** MCP supplies its own Session; browser/API callers leave this derived. */
+  callerSessionId?: SessionID;
+  relationship: SessionInterruptRelationship;
+};
+
 /**
  * Extended sessions service with custom methods
  */
@@ -530,6 +536,62 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       throw new Forbidden(
         `Current ${data.relationship} relationship does not authorize this Session to interrupt the target.`
       );
+    }
+    return {
+      caller_session_id: caller.session_id,
+      target_session_id: target.session_id,
+      relationship: data.relationship,
+    };
+  }
+
+  /**
+   * Resolve queue-batching authority from the target's current relationship.
+   * Merely naming a caller is never sufficient: both Sessions are checked for
+   * current prompt authority and the locked repository mutation rechecks the
+   * relationship before touching the queue.
+   */
+  async resolveQueueBatchAuthority(
+    targetId: string,
+    data: SessionQueueBatchAuthorityInput,
+    params?: SessionParams
+  ): Promise<SessionInterruptAuthority> {
+    const target = await this.requireSessionTransferAuthority(
+      targetId as SessionID,
+      params,
+      'destination'
+    );
+    const derivedCallerSessionId =
+      data.relationship === 'parent'
+        ? target.genealogy?.parent_session_id
+        : (getEffectiveDirectCallbackCoordinatorSessionId(target) ?? undefined);
+    if (
+      !derivedCallerSessionId ||
+      (data.callerSessionId && data.callerSessionId !== derivedCallerSessionId)
+    ) {
+      throw new Forbidden(
+        `Current ${data.relationship} relationship does not authorize this Session to batch the target queue.`
+      );
+    }
+    const caller = await this.requireSessionTransferAuthority(
+      derivedCallerSessionId,
+      params,
+      'destination'
+    );
+    if (getHiddenTenantId(caller) !== getHiddenTenantId(target)) {
+      throw new Forbidden('Queue coordinator and target must belong to the same tenant.');
+    }
+    if (
+      data.relationship === 'parent' &&
+      (target.genealogy?.parent_session_id !== caller.session_id ||
+        target.branch_id !== caller.branch_id)
+    ) {
+      throw new Forbidden('Current branch-local parent no longer authorizes queue batching.');
+    }
+    if (
+      data.relationship === 'coordinator' &&
+      getEffectiveDirectCallbackCoordinatorSessionId(target) !== caller.session_id
+    ) {
+      throw new Forbidden('Current callback coordinator no longer authorizes queue batching.');
     }
     return {
       caller_session_id: caller.session_id,

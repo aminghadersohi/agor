@@ -30,6 +30,8 @@ import {
   type Session,
   type SessionRelationship,
   type SessionType,
+  type TaskID,
+  type UserID,
   type ZoneBoardObject,
 } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
@@ -183,6 +185,31 @@ const sessionInterruptOutputSchema = z.object({
   termination_status: z.enum(['idle', 'terminal', 'condition_changed', 'pending', 'unverified']),
   pending_code: z.string().optional(),
   note: z.string().optional(),
+});
+
+const coordinatorQueueBatchPreviewSchema = z.object({
+  session_id: z.string(),
+  relationship: z.enum(['parent', 'coordinator']),
+  coordinator_session_id: z.string(),
+  queue_revision: z.string(),
+  expected_task_ids: z.array(z.string()),
+  source_task_count: z.number(),
+  source_request_count: z.number(),
+  unique_request_count: z.number(),
+  duplicate_request_count: z.number(),
+  compatible: z.boolean(),
+  refusal_reasons: z.array(z.string()),
+  combine_allowed: z.boolean(),
+  combine_refusal_reason: z.string().optional(),
+  combined_prompt: z.string().optional(),
+  combined_prompt_bytes: z.number().optional(),
+});
+
+const coordinatorQueueBatchOutputSchema = z.object({
+  outcome: z.enum(['preview', 'batched', 'already_batched']),
+  preview: coordinatorQueueBatchPreviewSchema,
+  execution_task_id: z.string().optional(),
+  superseded_task_ids: z.array(z.string()).optional(),
 });
 
 /**
@@ -1211,7 +1238,141 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 5e: agor_session_relationships_set_callback
+  // Tool 5e: preview/apply one coordinator-owned queue-batching contract.
+  server.registerTool(
+    'agor_sessions_batch_queue',
+    {
+      description:
+        'Preview or atomically batch the complete ordinary queued-prompt set of a child Session into one executor turn. Authority comes only from this MCP Session being the target current parent or enabled direct callback coordinator. Preview first, then pass its exact queueRevision and taskIds to combine or replace. COMBINE deterministically preserves distinct text with a later-conflicts-win header; REPLACE sends only the supplied canonical prompt while retaining every original Task and request as audit. This never alters running work; use agor_sessions_interrupt_with_message for an active Task.',
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        targetSessionId: mcpRequiredId(
+          'targetSessionId',
+          'Session',
+          'Child Session queue to batch'
+        ),
+        relationship: z
+          .enum(['parent', 'coordinator'])
+          .describe('Current relationship through which this MCP Session coordinates the child.'),
+        action: z.enum(['preview', 'combine', 'replace']),
+        queueRevision: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Exact queue_revision returned by preview; required for combine/replace.'),
+        taskIds: z
+          .array(z.string().min(1))
+          .optional()
+          .describe('Exact ordered expected_task_ids returned by preview; required for apply.'),
+        replacementPrompt: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Canonical prompt sent for replace. Original text remains audit-only.'),
+        idempotencyKey: z
+          .string()
+          .min(1)
+          .max(128)
+          .optional()
+          .describe('Stable retry key required for combine/replace.'),
+      }),
+      outputSchema: coordinatorQueueBatchOutputSchema,
+    },
+    async (args) => {
+      if (!ctx.sessionId) return sessionContextRequiredResult();
+      const targetSessionId = await resolveSessionId(ctx, args.targetSessionId);
+      const authority = await runWithMcpTenantDatabaseScope(ctx, () =>
+        (ctx.app.service('sessions') as unknown as SessionsServiceImpl).resolveQueueBatchAuthority(
+          targetSessionId,
+          { callerSessionId: ctx.sessionId!, relationship: args.relationship },
+          ctx.baseServiceParams
+        )
+      );
+      if (args.action === 'preview') {
+        const preview = await runWithMcpTenantDatabaseScope(ctx, (db) =>
+          new TaskRepository(db).previewCoordinatorQueueBatch({
+            session_id: authority.target_session_id,
+            relationship: authority.relationship,
+            requested_by_session_id: authority.caller_session_id,
+          })
+        );
+        if ('outcome' in preview) {
+          throw new Error('Coordinator relationship changed while previewing the queue.');
+        }
+        return structuredResult({ outcome: 'preview', preview });
+      }
+      if (!args.queueRevision || !args.taskIds || !args.idempotencyKey) {
+        throw new Error('combine/replace require queueRevision, taskIds, and idempotencyKey.');
+      }
+      if (args.action === 'replace' && !args.replacementPrompt?.trim()) {
+        throw new Error('replace requires a non-empty replacementPrompt.');
+      }
+      const strategy = args.action === 'replace' ? 'replace' : 'combine';
+      const tenantId = ctx.baseServiceParams.tenant?.tenant_id ?? getCurrentTenantId();
+      const result = await runWithMcpTenantDatabaseWrite(ctx, (db) =>
+        runWithTenantDatabaseTransaction(db, tenantId, async (operationDb) => {
+          await lockTenantAuthorizationFence(operationDb, ctx.baseServiceParams);
+          const actor = await resolveCurrentTenantAuthorityActor(
+            operationDb,
+            ctx.baseServiceParams
+          );
+          if (actor.service || actor.user_id !== ctx.userId) {
+            throw new Error('Queue batching requires the current authenticated human actor.');
+          }
+          const currentAuthority = await (
+            ctx.app.service('sessions') as unknown as SessionsServiceImpl
+          ).resolveQueueBatchAuthority(
+            targetSessionId,
+            { callerSessionId: ctx.sessionId!, relationship: args.relationship },
+            ctx.baseServiceParams
+          );
+          return new TaskRepository(operationDb).applyCoordinatorQueueBatch({
+            session_id: currentAuthority.target_session_id,
+            relationship: currentAuthority.relationship,
+            requested_by_session_id: currentAuthority.caller_session_id,
+            requested_by_user_id: actor.user_id as UserID,
+            operation_id: args.idempotencyKey!,
+            strategy,
+            expected_queue_revision: args.queueRevision!,
+            expected_task_ids: args.taskIds as TaskID[],
+            ...(strategy === 'replace' ? { replacement_prompt: args.replacementPrompt! } : {}),
+          });
+        })
+      );
+      if (result.outcome === 'relationship_changed') {
+        throw new Error('Coordinator relationship changed before the queue could be batched.');
+      }
+      if (result.outcome === 'batched') {
+        emitServiceEvent(ctx.app, {
+          path: 'tasks',
+          event: 'patched',
+          data: result.execution_task,
+          params: ctx.baseServiceParams,
+          id: result.execution_task.task_id,
+        });
+        for (const task of result.superseded_tasks) {
+          emitServiceEvent(ctx.app, {
+            path: 'tasks',
+            event: 'patched',
+            data: task,
+            params: ctx.baseServiceParams,
+            id: task.task_id,
+          });
+        }
+        await (
+          ctx.app.service('sessions') as unknown as SessionsServiceImpl
+        ).triggerQueueProcessing(targetSessionId, ctx.baseServiceParams);
+      }
+      return structuredResult({
+        outcome: result.outcome,
+        preview: result.preview,
+        execution_task_id: result.execution_task.task_id,
+        superseded_task_ids: result.superseded_tasks.map((task) => task.task_id),
+      });
+    }
+  );
+
+  // Tool 5f: agor_session_relationships_set_callback
   server.registerTool(
     'agor_session_relationships_set_callback',
     {
