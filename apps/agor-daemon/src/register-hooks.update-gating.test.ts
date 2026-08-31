@@ -405,6 +405,10 @@ const UPDATE_NOT_ROUTED: Record<string, string | readonly string[]> = {
   schedules: SCHEDULES_SERVICE_TRANSPORT_METHODS,
   tasks: TASKS_SERVICE_TRANSPORT_METHODS,
   users: USERS_SERVICE_TRANSPORT_METHODS,
+  'zone-workflow-transitions':
+    'no update method — ZoneWorkflowTransitionsService exposes patch for partial edits',
+  'zone-workflow-advances':
+    'no update method — ZoneWorkflowAdvancesService exposes immutable audit rows',
 };
 
 /** Services gating a sibling write verb but leaving `update` on the `all` chain. */
