@@ -1499,6 +1499,7 @@ describe('board layout tools with branch entities present', () => {
     entities: Array<Record<string, unknown>>;
     objects?: Record<string, unknown>;
     entityPatches?: Array<{ objectId: string; data: Record<string, unknown> }>;
+    boardPatches?: Array<Record<string, unknown>>;
   }) {
     const branchesFind = validatedBranchesFind((query) => ({
       data: (((query.branch_id as { $in?: string[] } | undefined)?.$in ?? []) as string[]).map(
@@ -1524,7 +1525,10 @@ describe('board layout tools with branch entities present', () => {
                 name: 'Board',
                 objects: options.objects ?? {},
               })),
-              patch: vi.fn(async (_id: string, data: Record<string, unknown>) => data),
+              patch: vi.fn(async (_id: string, data: Record<string, unknown>) => {
+                options.boardPatches?.push(data);
+                return data;
+              }),
             };
           if (name === 'boards/:id/permissions')
             return { find: vi.fn(async () => ({ board_access_revision: 1 })) };
@@ -1961,6 +1965,74 @@ describe('board layout tools with branch entities present', () => {
 
     expect(parsed.updates).toHaveLength(2);
     for (const update of parsed.updates) expectBoardGridRect(update);
+  });
+
+  it('persists one container batch and re-packs each visible child in the same call', async () => {
+    const boardPatches: Array<Record<string, unknown>> = [];
+    const entityPatches: Array<{ objectId: string; data: Record<string, unknown> }> = [];
+    const { app } = makeApp({
+      entities: [
+        branchEntity({
+          object_id: 'branch-placement',
+          zone_id: 'zone-a',
+          position: { x: 220, y: 300 },
+          size: { width: 500, height: 200 },
+        }),
+        cardEntity({
+          object_id: 'card-placement',
+          zone_id: 'zone-b',
+          position: { x: 200, y: 260 },
+          size: { width: 380, height: 100 },
+        }),
+      ],
+      objects: {
+        'zone-b': { type: 'zone', x: 800, y: 0, width: 620, height: 600, label: 'B' },
+        'zone-a': { type: 'zone', x: 0, y: 0, width: 620, height: 600, label: 'A' },
+      },
+      boardPatches,
+      entityPatches,
+    });
+    const arrangeZones = registerAndCaptureHandler('agor_boards_arrange_zones', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+    const parsed = JSON.parse((await arrangeZones({ boardId: 'board-1' })).content[0].text);
+
+    expect(boardPatches).toHaveLength(1);
+    expect(boardPatches[0]).toMatchObject({
+      _action: 'batchUpsertObjects',
+      objects: {
+        'zone-a': expect.objectContaining({ type: 'zone' }),
+        'zone-b': expect.objectContaining({ type: 'zone' }),
+      },
+    });
+    expect(entityPatches).toHaveLength(2);
+    expect(entityPatches).toEqual(
+      expect.arrayContaining([
+        {
+          objectId: 'branch-placement',
+          data: expect.objectContaining({
+            position: expect.any(Object),
+            size: { width: 500, height: 200 },
+          }),
+        },
+        {
+          objectId: 'card-placement',
+          data: expect.objectContaining({
+            position: expect.any(Object),
+            size: { width: 380, height: 100 },
+          }),
+        },
+      ])
+    );
+    expect(parsed.updates.map((update: { objectId: string }) => update.objectId)).toEqual([
+      'zone-a',
+      'zone-b',
+    ]);
+    expect(parsed.updates.map((update: { arrangedItems: number }) => update.arrangedItems)).toEqual(
+      [1, 1]
+    );
   });
 
   it('never offers a compact_list zone a multi-column shape', async () => {

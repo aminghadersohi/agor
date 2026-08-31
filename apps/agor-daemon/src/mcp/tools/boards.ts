@@ -1,4 +1,7 @@
-import { layoutJustifiedZones, zoneShapesForItems } from '@agor/core/layout/justified-zones';
+import {
+  type BoardZoneArrangementPlan,
+  planBoardZoneArrangement,
+} from '@agor/core/layout/board-zone-arrangement';
 import {
   BOARD_GRID_SIZE,
   ceilBoardGridValue,
@@ -350,8 +353,16 @@ interface ArrangeBoardZonesOptions {
 type ZoneObject = BoardObject & { type: 'zone'; width: number; height: number };
 
 interface ArrangedBoardZones {
-  layout: ReturnType<typeof layoutJustifiedZones>;
-  byId: Map<string, { id: string; zone: ZoneObject; itemCount: number }>;
+  plan: BoardZoneArrangementPlan;
+  byId: Map<
+    string,
+    {
+      id: string;
+      zone: ZoneObject;
+      itemCount: number;
+      entitiesById: Map<string, BoardEntityObject>;
+    }
+  >;
 }
 
 /**
@@ -360,8 +371,8 @@ interface ArrangedBoardZones {
  * Shared by `agor_boards_arrange_zones` and by the `reflow_board` overflow
  * strategy, so a zone that grows into its neighbours is repaired by exactly
  * the layout the explicit tool would have produced. Returns null when the
- * board has no zones. Contents keep their zone-relative positions; re-packing
- * items at the new widths is the caller's next step.
+ * board has no zones. Container and child geometry are planned together, then
+ * the containers are written in one board patch before child placements.
  */
 async function arrangeBoardZones(
   ctx: McpContext,
@@ -420,85 +431,126 @@ async function arrangeBoardZones(
         if (zonePolicy.preset === 'compact_list') {
           return {
             id: entity.object_id,
+            entityType: entity.entity_type,
+            position: entity.position,
+            compact: true,
             ...compactZoneItemSize(entity.entity_type, frame.usableWidth),
           };
         }
         if (entity.compact === true) {
           return {
             id: entity.object_id,
+            entityType: entity.entity_type,
+            position: entity.position,
+            compact: true,
             ...compactZoneItemSize(
               entity.entity_type,
               ARRANGE_DIMENSIONS[entity.entity_type].width
             ),
           };
         }
-        if (measured) return { id: entity.object_id, ...measured };
+        if (measured)
+          return {
+            id: entity.object_id,
+            entityType: entity.entity_type,
+            position: entity.position,
+            compact: entity.compact,
+            ...measured,
+          };
         if (entity.entity_type === 'card' && entity.card_id) {
           return {
             id: entity.object_id,
+            entityType: entity.entity_type,
+            position: entity.position,
             width: ARRANGE_DIMENSIONS.card.width,
             height: estimateCardHeight(metadata.get(entity.object_id)?.card),
           };
         }
-        return { id: entity.object_id, ...ARRANGE_DIMENSIONS[entity.entity_type] };
+        return {
+          id: entity.object_id,
+          entityType: entity.entity_type,
+          position: entity.position,
+          ...ARRANGE_DIMENSIONS[entity.entity_type],
+        };
       });
 
-      // The zone arrange spaces items by the zone's own gap, so the shapes have
-      // to be measured with that gap and not a board-level one.
-      const itemGap = zonePolicy.gap ?? 24;
       return {
         id: zoneId,
         zone,
         itemCount: items.length,
-        shapes: zoneShapesForItems(items, {
-          titleInset: frame.headerInset,
-          padding: frame.padding,
-          gapX: itemGap,
-          gapY: itemGap,
-          // compact_list is always one column; offering wider shapes would
-          // promise a landscape form the zone arrange will never produce.
-          ...(zonePolicy.preset === 'compact_list' ? { maxColumns: 1 } : {}),
-          gridSize: BOARD_GRID_SIZE,
-        }),
+        entitiesById: new Map(ordered.map((entity) => [entity.object_id, entity])),
+        x: zone.x,
+        y: zone.y,
+        width: zone.width,
+        height: zone.height,
+        fontSize: zone.fontSize,
+        status: zone.status,
+        layout: zonePolicy,
+        items,
       };
     })
   );
 
-  const layout = layoutJustifiedZones(zones, {
-    targetWidth: options.targetWidth ?? 1600,
+  const plan = planBoardZoneArrangement(zones, {
+    targetWidth: options.targetWidth,
     targetRowHeight: options.targetRowHeight,
-    gap: options.gap ?? 40,
-    startX: options.startX ?? DEFAULT_ARRANGE_START_X,
-    startY: options.startY ?? DEFAULT_ARRANGE_START_Y,
+    gap: options.gap,
+    startX: options.startX,
+    startY: options.startY,
     maxPerRow: options.maxPerRow,
-    justifyLastRow: options.justifyLastRow === true,
-    gridSize: BOARD_GRID_SIZE,
+    justifyLastRow: options.justifyLastRow,
   });
 
   const byId = new Map(zones.map((entry) => [entry.id, entry]));
   if (options.dryRun !== true) {
-    for (const placement of layout.placements) {
-      const entry = byId.get(placement.id);
-      if (!entry) continue;
-      await ctx.app.service('boards').patch(
-        boardId,
-        {
-          _action: 'upsertObject',
-          objectId: placement.id,
-          objectData: {
+    const objects = Object.fromEntries(
+      plan.zones.map((arranged) => {
+        const entry = byId.get(arranged.id);
+        if (!entry) throw new Error(`Missing board zone '${arranged.id}'.`);
+        return [
+          arranged.id,
+          {
             ...entry.zone,
-            x: placement.x,
-            y: placement.y,
-            width: placement.width,
-            height: placement.height,
+            x: arranged.position.x,
+            y: arranged.position.y,
+            width: arranged.width,
+            height: arranged.height,
           },
-        } as unknown as Partial<Board>,
+        ];
+      })
+    );
+    await ctx.app
+      .service('boards')
+      .patch(
+        boardId,
+        { _action: 'batchUpsertObjects', objects } as unknown as Partial<Board>,
         ctx.baseServiceParams
       );
-    }
+    await Promise.all(
+      plan.zones.flatMap((arranged) => {
+        const entry = byId.get(arranged.id);
+        if (!entry) throw new Error(`Missing board zone '${arranged.id}'.`);
+        return arranged.items.map(async (item) => {
+          const entity = entry.entitiesById.get(item.id);
+          if (!entity) throw new Error(`Missing board object '${item.id}'.`);
+          await ctx.app.service('board-objects').patch(
+            entity.object_id,
+            {
+              position: { x: item.x, y: item.y },
+              size: { width: item.width, height: item.height },
+              ...(normalizeZoneLayoutPolicy(entry.zone.layout).preset === 'compact_list' &&
+              entity.compact !== true
+                ? { compact: true }
+                : {}),
+            },
+            ctx.baseServiceParams
+          );
+        });
+      })
+    );
   }
 
-  return { layout, byId };
+  return { plan, byId };
 }
 
 export function registerBoardTools(server: McpServer, ctx: McpContext): void {
@@ -1701,7 +1753,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_arrange_zones',
     {
       description:
-        "Arrange a board's zones themselves into justified rows, photo-grid style: zones flow left-to-right and top-to-bottom, every zone in a row shares that row's height, and each full row is stretched flush to targetWidth. Zone widths and heights are both rewritten, so a zone becomes portrait or landscape depending on which shape lets its own contents fit the row. Pinned contents move with their zone; call agor_boards_auto_arrange_zone afterwards to re-pack the items inside each zone at its new width. Use targetRowHeight to stop one tall zone from dictating a row.",
+        "Arrange a board's zones and their visible contents as one operation. Zones retain spatial order, flow left-to-right and top-to-bottom in deterministic justified rows, and use measured child sizes to choose a legal portrait or landscape frame. All zone containers are written in one batch, then every zone's children are re-packed for that final frame. targetRowHeight defaults to 600.",
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
         targetWidth: mcpOptionalPositiveInt(
@@ -1710,7 +1762,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         ),
         targetRowHeight: mcpOptionalPositiveInt(
           'targetRowHeight',
-          'Preferred row height. Without it, a tall zone can be packed beside a short one and leave the short one mostly blank.'
+          'Preferred row height (default: 600).'
         ),
         gap: mcpOptionalNonNegativeInt('gap', 'Space between zones (default: 40).'),
         startX: mcpOptionalNumber('startX', 'Canvas X origin (default: 80).'),
@@ -1752,7 +1804,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           note: 'No zones present.',
         });
       }
-      const { layout, byId } = arranged;
+      const { plan, byId } = arranged;
+      const { layout } = plan;
 
       return textResult({
         boardId,
@@ -1768,17 +1821,18 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           layout.overflowingRows.length > 0
             ? `Row(s) ${layout.overflowingRows.join(', ')} hold a zone wider than targetWidth even at its narrowest shape; they were left at their natural width. Raise targetWidth or move a zone.`
             : null,
-        note: 'Zone contents keep their zone-relative positions. Run agor_boards_auto_arrange_zone on each zone to re-pack items at the new width.',
-        updates: layout.placements.map((placement) => ({
-          objectId: placement.id,
-          label: byId.get(placement.id)?.zone.label ?? null,
-          itemCount: byId.get(placement.id)?.itemCount ?? 0,
-          position: { x: placement.x, y: placement.y },
-          size: { width: placement.width, height: placement.height },
-          row: placement.row,
-          column: placement.column,
-          contentColumns: placement.columns,
-          slackY: placement.slackY,
+        note: 'Zone containers and child placements were planned together.',
+        updates: plan.zones.map((zone) => ({
+          objectId: zone.id,
+          label: byId.get(zone.id)?.zone.label ?? null,
+          itemCount: byId.get(zone.id)?.itemCount ?? 0,
+          arrangedItems: zone.items.length,
+          position: zone.position,
+          size: { width: zone.width, height: zone.height },
+          row: zone.row,
+          column: zone.column,
+          contentColumns: zone.contentColumns,
+          slackY: zone.slackY,
         })),
       });
     }

@@ -46,6 +46,12 @@
       "import": "./dist/layout/justified-zones.js",
       "require": "./dist/layout/justified-zones.cjs"
     },
+    "./layout/board-zone-arrangement": {
+      "source": "./src/layout/board-zone-arrangement.ts",
+      "types": "./dist/layout/board-zone-arrangement.d.ts",
+      "import": "./dist/layout/board-zone-arrangement.js",
+      "require": "./dist/layout/board-zone-arrangement.cjs"
+    },
     "./layout/rectangle-packing": {
       "source": "./src/layout/rectangle-packing.ts",
       "types": "./dist/layout/rectangle-packing.d.ts",
