@@ -690,11 +690,14 @@ describe('SessionsService direct OpenCode model selection', () => {
       agentic_tool_preset_id: preset.preset_id,
       model_config: { mode: 'exact', provider: 'openai', model: 'gpt-child' },
       genealogy: { spawn_point_task_id: undefined },
+      auto_archive: 'after_completion',
+      auto_archive_after_seconds: 3600,
     });
     expect(setMCPServers).toHaveBeenCalledWith(child.session_id, explicitMcpServerIds, 'spawn');
     await expect(service.fork(parentId, { prompt: 'Preset fork' })).resolves.toMatchObject({
       agentic_tool_preset_id: preset.preset_id,
       model_config: { mode: 'exact', provider: 'openai', model: 'gpt-child' },
+      auto_archive: 'never',
     });
 
     await new UsersRepository(db).update(owner.user_id, {

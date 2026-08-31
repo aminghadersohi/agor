@@ -106,6 +106,9 @@ function createPostgresStyleSessionRow(overrides?: Partial<SessionRow> & { tenan
     attention_generation: 0,
     archived: false,
     archived_reason: null,
+    auto_archive: 'never',
+    auto_archive_after_seconds: null,
+    auto_archive_at: null,
     data: {
       genealogy: { children: [] },
       contextFiles: [],
@@ -1074,6 +1077,39 @@ describe('SessionRepository.update', () => {
     expect(updated.title).toBe('Updated Title');
     expect(updated.session_id).toBe(data.session_id);
   });
+
+  dbTest(
+    'clears archive reason and deadline when own-property undefined is requested',
+    async ({ db }) => {
+      const repo = new SessionRepository(db);
+      const branch = await createTestBranch(db);
+      const created = await repo.create(
+        createSessionData({
+          branch_id: branch.branch_id,
+          archived: true,
+          archived_reason: 'btw_completed',
+          auto_archive: 'after_completion',
+          auto_archive_after_seconds: 300,
+          auto_archive_at: '2026-01-01T00:05:00.000Z',
+          fork_origin: 'btw',
+        })
+      );
+
+      const updated = await repo.update(created.session_id, {
+        archived: false,
+        archived_reason: undefined,
+        auto_archive_at: undefined,
+      });
+
+      expect(updated).toMatchObject({ archived: false, auto_archive_at: undefined });
+      expect(updated.archived_reason).toBeUndefined();
+      await expect(repo.findById(created.session_id)).resolves.toMatchObject({
+        archived: false,
+        auto_archive_at: undefined,
+      });
+      expect((await repo.findById(created.session_id))?.archived_reason).toBeUndefined();
+    }
+  );
 
   dbTest('should update session by short ID', async ({ db }) => {
     const repo = new SessionRepository(db);

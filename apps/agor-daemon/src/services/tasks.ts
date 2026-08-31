@@ -93,6 +93,7 @@ import {
   completionCallbackBtwTaskId,
   completionCallbackTaskId,
 } from '../utils/durable-task-id.js';
+import { btwResultMessageId } from '../utils/durable-task-id.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
 import {
   type ExecutorHeartbeatCallbackPayload,
@@ -779,23 +780,13 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       }
 
       if (session.fork_origin === 'btw') {
-        if (!suppressBtwCleanup) {
-          try {
-            await this.app.service('sessions').patch(session.session_id, {
-              archived: true,
-              archived_reason: 'btw_completed',
-            });
-            console.log(
-              `📦 [TasksService] Auto-archived btw fork session ${shortId(session.session_id)}`
-            );
-          } catch (error) {
-            console.warn(`⚠️  [TasksService] Failed to auto-archive btw fork:`, error);
-          }
-        }
-
         if (!isStop && !isTermination) {
           await this.injectBtwResultMessage(task, session, params);
         }
+      }
+
+      if (!suppressBtwCleanup || session.fork_origin !== 'btw') {
+        await this.scheduleAutoArchive(task, session, params);
       }
 
       if (!params?.suppressTerminalQueueProcessing) {
@@ -906,6 +897,8 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     if (!parentSessionId) return;
 
     try {
+      const latestTask = (await this.taskRepo.findById(task.task_id)) ?? task;
+      if (latestTask.metadata?.btw_result_delivered_at) return;
       const messagesService = this.app.service('messages');
 
       // Only the boundary messages are needed; do not hydrate the whole fork.
@@ -1001,7 +994,8 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       const previewText = `Q: ${promptText.substring(0, 80)} → A: ${responseText.substring(0, 100)}`;
 
       // Create via service so FeathersJS broadcasts the `created` event to all clients
-      const finalMessageId = callbackDigest?.final_message_id;
+      const finalMessageId =
+        callbackDigest?.final_message_id ?? btwResultMessageId(task.task_id, parentSessionId);
       try {
         await appendSystemMessage({
           app: this.app,
@@ -1010,7 +1004,6 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
           taskId: parentLatestTaskId as string | undefined,
           content: [{ type: 'text', text: responseText } as ContentBlock],
           contentPreview: previewText.substring(0, 200),
-          ...(finalMessageId ? { messageId: finalMessageId } : {}),
           metadata: {
             is_btw_result: true,
             ...(callbackDigest
@@ -1037,20 +1030,31 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
             btw_caller_title: callerTitle,
             source: 'agor',
           },
+          messageId: finalMessageId,
         });
       } catch (error) {
-        if (!finalMessageId) throw error;
         // The deterministic PK is the cross-daemon final-report fence. A
         // duplicate insert means another completion retry already delivered
         // this exact digest; verify the row instead of appending a second one.
         const existing = await messagesService.get(finalMessageId, { provider: undefined });
         if (
           existing?.session_id !== parentSessionId ||
-          existing?.metadata?.callback_source_task_id !== callbackDigest.source_task_id
+          (callbackDigest && existing?.metadata?.callback_source_task_id !== callbackDigest.source_task_id)
         ) {
           throw error;
         }
       }
+      const refreshed = (await this.taskRepo.findById(task.task_id)) ?? latestTask;
+      await super.patch(
+        task.task_id,
+        {
+          metadata: {
+            ...(refreshed.metadata ?? {}),
+            btw_result_delivered_at: new Date().toISOString(),
+          },
+        },
+        _params
+      );
 
       console.log(
         `💬 [TasksService] Injected btw result message into parent session ${shortId(parentSessionId)} from btw fork ${shortId(btwSession.session_id)}`
@@ -1058,6 +1062,51 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     } catch (error) {
       console.warn(`⚠️  [TasksService] Failed to inject btw result message:`, error);
       // Non-critical — don't break task completion
+    }
+  }
+
+  private async scheduleAutoArchive(
+    task: Task,
+    observedSession: Session,
+    params?: TaskParams
+  ): Promise<void> {
+    const session = await this.app.service('sessions').get(observedSession.session_id, params);
+    const eligibleChild =
+      session.fork_origin === 'btw' || Boolean(session.genealogy?.parent_session_id);
+    const ttl = session.auto_archive_after_seconds;
+    if (
+      !eligibleChild ||
+      session.auto_archive !== 'after_completion' ||
+      !Number.isInteger(ttl) ||
+      !ttl ||
+      ttl <= 0
+    ) {
+      return;
+    }
+    const completedAt = task.completed_at ? Date.parse(task.completed_at) : Date.now();
+    await this.app
+      .service('sessions')
+      .patch(
+        session.session_id,
+        { auto_archive_at: new Date(completedAt + ttl * 1_000).toISOString() },
+        params
+      );
+  }
+
+  /** Retry durable callback/BTW delivery before an auto-archive eligibility check. */
+  async ensureAutoArchiveDeliveries(sessionId: SessionID, params?: TaskParams): Promise<void> {
+    const session = await this.app.service('sessions').get(sessionId, params);
+    const tasks = await this.taskRepo.findBySession(sessionId);
+    for (const task of tasks) {
+      if (!isTerminalTaskStatus(task.status)) continue;
+      const skipsCompletionDelivery =
+        task.status === TaskStatus.STOPPED || task.status === TaskStatus.TIMED_OUT;
+      if (!skipsCompletionDelivery) {
+        await this.dispatchCompletionCallbacks(task, session, params);
+      }
+      if (session.fork_origin === 'btw' && !skipsCompletionDelivery && !task.termination_request) {
+        await this.injectBtwResultMessage(task, session, params);
+      }
     }
   }
 
@@ -1139,8 +1188,13 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       // Consume only the session-level one-shot that participated in this
       // delivery. A task-only callback must never mutate session callback state.
       const callbackMode = childSession.callback_config?.callback_mode ?? 'persistent';
+      const callbackMarkerCommitted = this.hasCompletionCallbackDispatch(
+        (await this.taskRepo.findById(task.task_id))?.metadata,
+        targetSessionId
+      );
       if (
         dispatchResult.callbackTask &&
+        callbackMarkerCommitted &&
         targetSessionId === sessionTargetId &&
         callbackMode === 'once'
       ) {
