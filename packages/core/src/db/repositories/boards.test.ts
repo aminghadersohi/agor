@@ -640,7 +640,9 @@ describe('BoardRepository.findAll', () => {
     const page = await repo.findPage({ sort: { name: 1 }, limit: 1, offset: 1 });
     expect(page.total).toBe(3);
     expect(page.data.map((board) => board.name)).toEqual(['B']);
-    expect(execute).toHaveBeenCalledTimes(2);
+    // Count page rows + fetch the page + one batched running-Session aggregate.
+    // The third query is constant per page, never one query per Board.
+    expect(execute).toHaveBeenCalledTimes(3);
     expect(
       execute.mock.calls
         .map(([query]) => JSON.stringify(query))
