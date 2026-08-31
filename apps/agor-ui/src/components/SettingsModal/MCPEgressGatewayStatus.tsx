@@ -71,11 +71,11 @@ export function MCPEgressGatewayStatus({ client, connectionReady }: Props) {
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
-    const gatewayStatusService = service(client, 'mcp-egress/status');
-    if (!client || !connectionReady || typeof gatewayStatusService?.find !== 'function') return;
+    const gatewayService = service(client, 'mcp-egress/status');
+    if (!client || !connectionReady || typeof gatewayService?.find !== 'function') return;
     setBusy(true);
     try {
-      setStatus((await gatewayStatusService.find()) as GatewayStatus);
+      setStatus((await gatewayService.find()) as GatewayStatus);
       setError(null);
     } catch {
       setError(
@@ -132,11 +132,11 @@ export function MCPEgressGatewayStatus({ client, connectionReady }: Props) {
     acknowledgeRawSecretDowngrade = false,
     verifiedLegacyExecutorsFenced = false
   ) => {
-    const gatewayStatusService = service(client, 'mcp-egress/status');
-    if (typeof gatewayStatusService?.patch !== 'function') return;
+    const gatewayService = service(client, 'mcp-egress/status');
+    if (typeof gatewayService?.patch !== 'function') return;
     setBusy(true);
     try {
-      await gatewayStatusService.patch(null, {
+      await gatewayService.patch(null, {
         mode,
         ...(acknowledgeRawSecretDowngrade ? { acknowledge_raw_secret_downgrade: true } : {}),
         ...(verifiedLegacyExecutorsFenced ? { verified_legacy_executors_fenced: true } : {}),
