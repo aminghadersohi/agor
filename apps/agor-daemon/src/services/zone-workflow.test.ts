@@ -68,6 +68,18 @@ describe('zone workflow services', () => {
         params
       )
     ).rejects.toThrow('source_zone_id must name a zone');
+    await expect(
+      transitions.create(
+        {
+          board_id: boardId,
+          source_zone_id: 'source',
+          target_zone_id: 'target',
+          label: 'Invalid behavior',
+          behavior: 'execute' as never,
+        },
+        params
+      )
+    ).rejects.toThrow('behavior must be guidance_only or target_zone_prompt');
 
     const transition = await transitions.create(
       {
@@ -80,6 +92,16 @@ describe('zone workflow services', () => {
     );
     const emit = vi.fn();
     const app = { service: vi.fn(() => ({ emit })) } as unknown as Application;
+    await expect(
+      new ZoneWorkflowAdvancesService(db, app).create(
+        {
+          transition_id: transition.transition_id,
+          idempotency_key: generateId() as UUID,
+          entities: [{ entity_type: 'repo' as never, entity_id: card.card_id as CardID }],
+        },
+        params
+      )
+    ).rejects.toThrow('Every entity must have a valid entity_type');
     const audit = await new ZoneWorkflowAdvancesService(db, app).create(
       {
         transition_id: transition.transition_id,
