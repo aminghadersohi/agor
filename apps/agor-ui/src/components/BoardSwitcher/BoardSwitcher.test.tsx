@@ -19,6 +19,7 @@ const board = {
   primary_owner_user_id: 'owner-1',
   created_at: '',
   last_updated: '',
+  running_session_count: 12,
 } as Board;
 const owner = { user_id: 'owner-1', role: 'member' } as User;
 
@@ -66,7 +67,7 @@ describe('BoardSwitcher long-name layout', () => {
     const item = await screen.findByRole('menuitem');
     const itemContent = item.querySelector<HTMLElement>('.ant-dropdown-menu-title-content');
     const name = item.querySelector<HTMLElement>('[data-board-name]');
-    const badgeRoot = item.querySelector<HTMLElement>('.ant-badge');
+    const badgeRoot = item.querySelector<HTMLElement>('[data-running-session-count-slot]');
     const badgeIndicator = item.querySelector<HTMLElement>('.ant-badge-count');
     const popup = screen.getByTestId('board-switcher-popup');
 
@@ -77,7 +78,7 @@ describe('BoardSwitcher long-name layout', () => {
     expect(name).toHaveStyle({ flex: '1', minWidth: '0' });
     expect(name).toHaveTextContent(adversarialBoardName);
     expect(badgeRoot).toHaveStyle({ flexShrink: '0' });
-    expect(badgeRoot?.style.backgroundColor).toBe('');
+    expect(badgeRoot).toHaveStyle({ width: '36px', minWidth: '36px', flexShrink: '0' });
     expect(badgeIndicator?.style.flexShrink).toBe('');
     expect(badgeIndicator?.style.backgroundColor).not.toBe('');
     expect(popup).toHaveStyle({ width: '320px', maxWidth: 'calc(100vw - 48px)' });
@@ -107,6 +108,42 @@ describe('BoardSwitcher long-name layout', () => {
     expect(item).toHaveFocus();
     expect(name).not.toHaveAttribute('tabindex');
     expect(await screen.findByRole('tooltip')).toHaveTextContent(adversarialBoardName);
+  });
+});
+
+describe('BoardSwitcher running Session counts', () => {
+  it('shows authoritative one/many copy and hides only the badge at zero', async () => {
+    const boards = [
+      { ...board, board_id: 'board-zero', name: 'Zero', running_session_count: 0 },
+      { ...board, board_id: 'board-one', name: 'One', running_session_count: 1 },
+      { ...board, board_id: 'board-many', name: 'Many', running_session_count: 7 },
+    ] as Board[];
+    const { container } = render(
+      <BoardSwitcher
+        boards={boards}
+        currentBoardId="board-zero"
+        onBoardChange={vi.fn()}
+        branchById={new Map()}
+        client={clientFor()}
+        currentUser={owner}
+      />
+    );
+
+    fireEvent.click(container.querySelector('button.ant-dropdown-trigger') as HTMLButtonElement);
+
+    const items = await screen.findAllByRole('menuitem');
+    expect(items).toHaveLength(3);
+    expect(items.find((item) => item.textContent?.includes('Zero'))).not.toHaveTextContent(
+      /running session/
+    );
+    expect(screen.getByLabelText('1 running session')).toBeInTheDocument();
+    expect(screen.getByLabelText('7 running sessions')).toBeInTheDocument();
+    expect(screen.queryByLabelText('0 running sessions')).not.toBeInTheDocument();
+    for (const item of items) {
+      expect(item.querySelector('[data-running-session-count-slot]')).toHaveStyle({
+        width: '36px',
+      });
+    }
   });
 });
 

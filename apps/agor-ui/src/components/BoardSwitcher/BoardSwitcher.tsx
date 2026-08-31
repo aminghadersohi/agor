@@ -2,7 +2,6 @@ import type { AgorClient, Board, Branch, User } from '@agor-live/client';
 import { DownOutlined, EditOutlined, HomeOutlined, SearchOutlined } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import {
-  Badge,
   Button,
   Divider,
   Dropdown,
@@ -19,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useCanManageBoard } from '../../hooks/useCanManageBoard';
 import { BoardEditModal } from '../BoardEditModal';
 import { BoardTile, getBoardEmoji } from '../BoardTile';
+import { RunningSessionCount } from '../RunningSessionCount';
 
 const { Text } = Typography;
 const { useToken } = theme;
@@ -77,17 +77,6 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
   const currentBoard = boards.find((b) => b.board_id === currentBoardId);
   const canManage = useCanManageBoard(client, currentBoard, currentUser);
 
-  const branchCountByBoard = useMemo(() => {
-    const counts = new Map<string, number>();
-    boards.forEach((board) => {
-      counts.set(board.board_id, 0);
-    });
-    for (const branch of branchById.values()) {
-      if (branch.board_id) counts.set(branch.board_id, (counts.get(branch.board_id) || 0) + 1);
-    }
-    return counts;
-  }, [boards, branchById]);
-
   const showFilter = boards.length >= FILTER_THRESHOLD;
 
   const closeDropdown = useCallback(() => {
@@ -132,7 +121,6 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
     }
 
     return filteredBoards.map((board) => {
-      const branchCount = branchCountByBoard.get(board.board_id) || 0;
       const isActive = board.board_id === currentBoardId;
       return {
         key: board.board_id,
@@ -154,16 +142,7 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
                 {board.name}
               </Text>
             </Flex>
-            <Badge
-              count={branchCount}
-              showZero
-              styles={{
-                root: { flexShrink: 0 },
-                indicator: {
-                  backgroundColor: isActive ? token.colorPrimary : token.colorBgTextHover,
-                },
-              }}
-            />
+            <RunningSessionCount count={board.running_session_count} />
           </Flex>
         ),
         onClick: () => handleBoardClick(board.board_id),
@@ -179,10 +158,8 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
   }, [
     boards,
     currentBoardId,
-    branchCountByBoard,
     branchById,
     handleBoardClick,
-    token,
     filterText,
     showFilter,
     keyboardTooltipBoardId,
