@@ -143,4 +143,39 @@ describe('ZoneConfigModal historical tool migration', () => {
       },
     });
   });
+
+  it('pairs Grow to fit with minimal collision reflow while preserving the public policy field', async () => {
+    const onUpdate = vi.fn();
+    render(
+      <AntdApp>
+        <ZoneConfigModal
+          open
+          onCancel={vi.fn()}
+          zoneName="Review"
+          objectId="zone-1"
+          onUpdate={onUpdate}
+          zoneData={{
+            type: 'zone',
+            x: 0,
+            y: 0,
+            width: 620,
+            height: 300,
+            label: 'Review',
+          }}
+        />
+      </AntdApp>
+    );
+
+    fireEvent.click(await screen.findByRole('switch', { name: 'Grow to fit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate.mock.calls[0][1]).toMatchObject({
+      layout: {
+        autoResizeHeight: true,
+        resize: 'height',
+        onOverflow: 'reflow_board',
+      },
+    });
+  });
 });

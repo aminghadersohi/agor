@@ -731,6 +731,91 @@ describe('arrangeZoneContents', () => {
     expect(boardsPatch.mock.calls[0]?.[1].objects.zone).toBeUndefined();
   });
 
+  it('minimally shifts a newly covered zone and its canvas contents in the same grow write', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const board = makeBoard({
+      grow: {
+        type: 'zone',
+        x: 0,
+        y: 0,
+        width: 620,
+        height: 120,
+        label: 'Growing',
+        layout: { mode: 'manual', resize: 'height', onOverflow: 'reflow_board' },
+      },
+      below: { type: 'zone', x: 0, y: 250, width: 620, height: 300, label: 'Below' },
+      note: { type: 'markdown', x: 40, y: 300, width: 200, height: 100, content: 'Fictional' },
+      far: { type: 'zone', x: 1200, y: 0, width: 400, height: 300, label: 'Far' },
+    });
+    const initialNodes: Node[] = [
+      { id: 'grow', type: 'zone', position: { x: 0, y: 0 }, data: {}, width: 620, height: 120 },
+      {
+        id: 'branch-a',
+        type: 'branchNode',
+        parentId: 'grow',
+        position: { x: 20, y: 100 },
+        data: { branch: { name: 'Branch A' } },
+        width: 500,
+        height: 200,
+      },
+      { id: 'below', type: 'zone', position: { x: 0, y: 250 }, data: {}, width: 620, height: 300 },
+      {
+        id: 'note',
+        type: 'markdown',
+        position: { x: 40, y: 300 },
+        data: {},
+        width: 200,
+        height: 100,
+      },
+      { id: 'far', type: 'zone', position: { x: 1200, y: 0 }, data: {}, width: 400, height: 300 },
+    ];
+    let renderedNodes = initialNodes;
+    const setNodes: React.Dispatch<React.SetStateAction<Node[]>> = (value) => {
+      renderedNodes = typeof value === 'function' ? value(renderedNodes) : value;
+    };
+    const onArrangeNodes = vi.fn();
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'placement-a',
+              board_id: 'board-1',
+              entity_type: 'branch',
+              branch_id: 'branch-a',
+              zone_id: 'grow',
+              position: { x: 20, y: 100 },
+              size: { width: 500, height: 200 },
+            },
+          ] as never,
+          nodes: initialNodes,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+          onArrangeNodes,
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      const zoneNode = result.current.getBoardObjectNodes().find((node) => node.id === 'grow');
+      expect(zoneNode).toBeDefined();
+      await (zoneNode!.data.onArrangeContents as (id: string) => Promise<void>)('grow');
+    });
+
+    const write = boardsPatch.mock.calls[0]?.[1];
+    const objects = write.objects as Record<string, { x: number; y: number; height: number }>;
+    expect(write._action).toBe('batchUpsertObjects');
+    expect(objects.grow.height).toBeGreaterThan(250);
+    expect(objects.below.x).toBe(0);
+    expect(objects.below.y).toBeGreaterThanOrEqual(objects.grow.height + BOARD_GRID_SIZE);
+    expect(objects.note.y - 300).toBe(objects.below.y - 250);
+    expect(objects.far).toBeUndefined();
+    expect(renderedNodes.find((node) => node.id === 'below')?.position.y).toBe(objects.below.y);
+    expect(onArrangeNodes).toHaveBeenCalledTimes(1);
+  });
+
   it('uses the live rendered height when dynamic branch content exceeds React Flow dimensions', async () => {
     const renderedBranch = document.createElement('div');
     renderedBranch.className = 'react-flow__node';

@@ -64,6 +64,12 @@
       "import": "./dist/layout/zone-layout.js",
       "require": "./dist/layout/zone-layout.cjs"
     },
+    "./layout/zone-growth-reflow": {
+      "source": "./src/layout/zone-growth-reflow.ts",
+      "types": "./dist/layout/zone-growth-reflow.d.ts",
+      "import": "./dist/layout/zone-growth-reflow.js",
+      "require": "./dist/layout/zone-growth-reflow.cjs"
+    },
     "./db": {
       "source": "./src/db/index.ts",
       "types": "./dist/db/index.d.ts",

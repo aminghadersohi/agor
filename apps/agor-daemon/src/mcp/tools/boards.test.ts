@@ -1984,6 +1984,58 @@ describe('board layout tools with branch entities present', () => {
     expect(parsed.warning).toContain('agor_boards_arrange_zones');
   });
 
+  it('minimally reflows newly covered zones and their canvas contents in one board patch', async () => {
+    const boardPatches: Array<Record<string, unknown>> = [];
+    const { app } = makeApp({
+      entities: [branchEntity({ zone_id: 'zone-1', size: { width: 500, height: 200 } })],
+      boardPatches,
+      objects: {
+        'zone-1': {
+          type: 'zone',
+          x: 0,
+          y: 0,
+          width: 620,
+          height: 120,
+          layout: {
+            mode: 'auto',
+            preset: 'grid',
+            autoResizeHeight: true,
+            onOverflow: 'reflow_board',
+          },
+        },
+        'zone-below': { type: 'zone', x: 0, y: 250, width: 620, height: 300 },
+        note: { type: 'markdown', x: 40, y: 300, width: 200, height: 100, content: 'Fictional' },
+        'zone-clear': { type: 'zone', x: 5000, y: 5000, width: 200, height: 200 },
+      },
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1' })).content[0].text
+    );
+    const objects = boardPatches[0]?.objects as Record<
+      string,
+      { x: number; y: number; width: number; height: number }
+    >;
+
+    expect(boardPatches).toHaveLength(1);
+    expect(parsed).toMatchObject({
+      reflowedBoard: true,
+      resizedOverZoneIds: ['zone-below'],
+      movedZoneIds: ['zone-below'],
+    });
+    expect(objects['zone-below'].x).toBe(0);
+    expect(objects['zone-below'].y).toBeGreaterThanOrEqual(
+      objects['zone-1'].height + BOARD_GRID_SIZE
+    );
+    expect(objects.note.y - 300).toBe(objects['zone-below'].y - 250);
+    expect(objects['zone-clear']).toBeUndefined();
+  });
+
   it('reports no covered zones when the grow stays clear of them', async () => {
     const { app } = makeApp({
       entities: [branchEntity({ zone_id: 'zone-1', size: { width: 500, height: 200 } })],

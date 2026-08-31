@@ -11,6 +11,7 @@ import {
   layoutRectangles,
   snapBoardGridValue,
 } from '@agor/core/layout/rectangle-packing';
+import { planZoneGrowthReflow } from '@agor/core/layout/zone-growth-reflow';
 import {
   compactZoneItemSize,
   getZoneLayoutFrame,
@@ -876,6 +877,69 @@ export const useBoardObjects = ({
           : frame.width;
       const zoneHeightChanged = Math.abs(nextZoneHeight - zone.height) >= 0.5;
       const zoneWidthChanged = Math.abs(nextZoneWidth - zone.width) >= 0.5;
+      const sourceZones = Object.entries(currentBoard.objects ?? {}).flatMap(([id, object]) => {
+        if (object.type !== 'zone') return [];
+        const liveNode = nodesRef.current.find((node) => node.id === id);
+        const liveWidth = Number(liveNode?.width ?? liveNode?.style?.width);
+        const liveHeight = Number(liveNode?.height ?? liveNode?.style?.height);
+        return [
+          {
+            id,
+            x: liveNode?.position.x ?? object.x,
+            y: liveNode?.position.y ?? object.y,
+            width: Number.isFinite(liveWidth) && liveWidth > 0 ? liveWidth : object.width,
+            height: Number.isFinite(liveHeight) && liveHeight > 0 ? liveHeight : object.height,
+          },
+        ];
+      });
+      const reflowPlan =
+        policy.onOverflow === 'reflow_board' && (zoneHeightChanged || zoneWidthChanged)
+          ? planZoneGrowthReflow(
+              sourceZones,
+              zoneId,
+              {
+                id: zoneId,
+                x: zone.x,
+                y: zone.y,
+                width: nextZoneWidth,
+                height: nextZoneHeight,
+              },
+              { gap: policy.gap }
+            )
+          : null;
+      const movedZoneIds = new Set(reflowPlan?.movedZoneIds ?? []);
+      const movedPlacementById = new Map(
+        reflowPlan?.placements
+          .filter((item) => movedZoneIds.has(item.id))
+          .map((item) => [item.id, item]) ?? []
+      );
+      const reflowedNodes = nodesRef.current.flatMap((node) => {
+        const movedZone = movedPlacementById.get(node.id);
+        if (node.type === 'zone' && movedZone) {
+          return [{ ...node, position: { x: movedZone.x, y: movedZone.y } }];
+        }
+        if (!isPositionableZoneCanvasNode(node)) return [];
+        const sourceZone = sourceZones
+          .filter(
+            (candidate) => movedZoneIds.has(candidate.id) && nodeCenterInsideZone(node, candidate)
+          )
+          .sort(
+            (left, right) =>
+              left.width * left.height - right.width * right.height ||
+              left.id.localeCompare(right.id)
+          )[0];
+        const placement = sourceZone ? movedPlacementById.get(sourceZone.id) : undefined;
+        if (!sourceZone || !placement) return [];
+        return [
+          {
+            ...node,
+            position: {
+              x: node.position.x + placement.x - sourceZone.x,
+              y: node.position.y + placement.y - sourceZone.y,
+            },
+          },
+        ];
+      });
 
       // One map for both the change check and the patch loop below. These used
       // to be resolved differently — the check scanned every placement on the
@@ -903,7 +967,24 @@ export const useBoardObjects = ({
       )
         return;
       const changedById = new Map(changedNodes.map((node) => [node.id, node]));
-      if (positionChanged || renderedSizeChanged) onArrangeNodes?.(changedNodes, timing.totalMs);
+      const reflowedById = new Map(reflowedNodes.map((node) => [node.id, node]));
+      const grownZoneNode = nodesRef.current.find((node) => node.id === zoneId);
+      const optimisticZone =
+        grownZoneNode && (zoneHeightChanged || zoneWidthChanged)
+          ? {
+              ...grownZoneNode,
+              width: nextZoneWidth,
+              height: nextZoneHeight,
+              style: { ...grownZoneNode.style, width: nextZoneWidth, height: nextZoneHeight },
+              data: { ...grownZoneNode.data, width: nextZoneWidth, height: nextZoneHeight },
+            }
+          : undefined;
+      const optimisticNodes = [
+        ...changedNodes,
+        ...reflowedNodes,
+        ...(optimisticZone ? [optimisticZone] : []),
+      ];
+      if (optimisticNodes.length > 0) onArrangeNodes?.(optimisticNodes, timing.totalMs);
       // Positions are an auto-layout output but are also part of the observer
       // signature (so a user's manual move can reflow an automatic zone).
       // Consume exactly the next signature change produced by our own write;
@@ -912,15 +993,9 @@ export const useBoardObjects = ({
       setNodes((currentNodes) =>
         currentNodes.map((node) => {
           if (node.id === zoneId && (zoneHeightChanged || zoneWidthChanged)) {
-            return {
-              ...node,
-              width: nextZoneWidth,
-              height: nextZoneHeight,
-              style: { ...node.style, width: nextZoneWidth, height: nextZoneHeight },
-              data: { ...node.data, width: nextZoneWidth, height: nextZoneHeight },
-            };
+            return optimisticZone ?? node;
           }
-          return changedById.get(node.id) ?? node;
+          return changedById.get(node.id) ?? reflowedById.get(node.id) ?? node;
         })
       );
 
@@ -946,13 +1021,29 @@ export const useBoardObjects = ({
             ];
           })
         );
-        if (zoneHeightChanged || zoneWidthChanged || Object.keys(canvasObjects).length > 0) {
+        const reflowedObjects = Object.fromEntries(
+          reflowedNodes.flatMap((node) => {
+            const existing = currentBoard.objects?.[node.id];
+            if (!existing) return [];
+            if (existing.type === 'zone') {
+              return [[node.id, { ...existing, x: node.position.x, y: node.position.y }] as const];
+            }
+            return [[node.id, { ...existing, x: node.position.x, y: node.position.y }] as const];
+          })
+        );
+        if (
+          zoneHeightChanged ||
+          zoneWidthChanged ||
+          Object.keys(canvasObjects).length > 0 ||
+          Object.keys(reflowedObjects).length > 0
+        ) {
           await client.service('boards').patch(currentBoard.board_id, {
             _action: 'batchUpsertObjects',
             objects: {
               ...(zoneHeightChanged || zoneWidthChanged
                 ? { [zoneId]: { ...zone, width: nextZoneWidth, height: nextZoneHeight } }
                 : {}),
+              ...reflowedObjects,
               ...canvasObjects,
             },
           } as unknown as Partial<Board>);

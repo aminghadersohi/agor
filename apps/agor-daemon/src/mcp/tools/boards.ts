@@ -9,6 +9,7 @@ import {
   layoutRectangles,
   snapBoardGridValue,
 } from '@agor/core/layout/rectangle-packing';
+import { planZoneGrowthReflow } from '@agor/core/layout/zone-growth-reflow';
 import {
   compactZoneItemSize,
   getZoneLayoutFrame,
@@ -1658,10 +1659,70 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
               height: appliedZoneHeight,
             })
           : [];
+      const reflowPlan =
+        zonePolicy.onOverflow === 'reflow_board' && resizedOverZoneIds.length > 0
+          ? planZoneGrowthReflow(
+              Object.entries(board.objects ?? {}).flatMap(([id, object]) =>
+                object.type === 'zone' ? [{ id, ...object }] : []
+              ),
+              zoneId,
+              {
+                id: zoneId,
+                x: zone.x,
+                y: zone.y,
+                width: appliedZoneWidth,
+                height: appliedZoneHeight,
+              },
+              { gap: zonePolicy.gap }
+            )
+          : null;
+      const movedZoneIds = reflowPlan?.movedZoneIds ?? [];
+      const reflowedZoneUpdates = Object.fromEntries(
+        movedZoneIds.flatMap((movedZoneId) => {
+          const source = board.objects?.[movedZoneId];
+          const placement = reflowPlan?.placements.find((item) => item.id === movedZoneId);
+          return source?.type === 'zone' && placement
+            ? [[movedZoneId, { ...source, x: placement.x, y: placement.y }] as const]
+            : [];
+        })
+      );
+      const translatedCanvasUpdates = Object.fromEntries(
+        Object.entries(board.objects ?? {}).flatMap(([objectId, object]) => {
+          if (object.type === 'zone' || (object.type === 'artifact' && object.locked === true)) {
+            return [];
+          }
+          const size = getCanvasObjectDimensions(object);
+          const center = { x: object.x + size.width / 2, y: object.y + size.height / 2 };
+          const sourceZone = movedZoneIds
+            .flatMap((movedZoneId) => {
+              const candidate = board.objects?.[movedZoneId];
+              return candidate?.type === 'zone' ? [[movedZoneId, candidate] as const] : [];
+            })
+            .filter(
+              ([, candidate]) =>
+                center.x >= candidate.x &&
+                center.x <= candidate.x + candidate.width &&
+                center.y >= candidate.y &&
+                center.y <= candidate.y + candidate.height
+            )
+            .sort(
+              ([leftId, left], [rightId, right]) =>
+                left.width * left.height - right.width * right.height ||
+                leftId.localeCompare(rightId)
+            )[0];
+          if (!sourceZone) return [];
+          const placement = reflowPlan?.placements.find((item) => item.id === sourceZone[0]);
+          if (!placement) return [];
+          const deltaX = placement.x - sourceZone[1].x;
+          const deltaY = placement.y - sourceZone[1].y;
+          return [[objectId, { ...object, x: object.x + deltaX, y: object.y + deltaY }] as const];
+        })
+      );
       if (
         appliedZoneHeight !== zone.height ||
         appliedZoneWidth !== zone.width ||
-        Object.keys(canvasObjectUpdates).length > 0
+        Object.keys(canvasObjectUpdates).length > 0 ||
+        movedZoneIds.length > 0
       ) {
         await ctx.app.service('boards').patch(
           boardId,
@@ -1677,6 +1738,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
                     },
                   }
                 : {}),
+              ...reflowedZoneUpdates,
+              ...translatedCanvasUpdates,
               ...canvasObjectUpdates,
             },
           } as unknown as Partial<Board>,
@@ -1684,18 +1747,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         );
       }
 
-      // A grow that covered a neighbour is a board-level problem, so repair it
-      // with the board-level layout rather than a bespoke nudge: the zones are
-      // re-justified into rows, which moves the covered zones out of the way.
-      // Only worth doing when something was actually covered.
-      let reflowedBoard = false;
-      if (zonePolicy.onOverflow === 'reflow_board' && resizedOverZoneIds.length > 0) {
-        reflowedBoard =
-          (await arrangeBoardZones(ctx, boardId, {
-            gap: zonePolicy.gap,
-            includeLooseItems: false,
-          })) !== null;
-      }
+      const reflowedBoard = movedZoneIds.length > 0;
 
       return textResult({
         boardId,
@@ -1729,12 +1781,13 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         resize: resizeMode,
         onOverflow: zonePolicy.onOverflow,
         resizedOverZoneIds,
+        movedZoneIds,
         reflowedBoard,
         warning:
           [
             resizedOverZoneIds.length > 0
               ? reflowedBoard
-                ? `Growing this zone covered ${resizedOverZoneIds.join(', ')}; the board's zones were re-justified into rows to separate them.`
+                ? `Growing this zone covered ${resizedOverZoneIds.join(', ')}; moved ${movedZoneIds.join(', ')} by the minimum collision-free shift.`
                 : `Growing this zone to ${appliedZoneWidth}x${appliedZoneHeight} now covers ${resizedOverZoneIds.join(', ')}. Run agor_boards_arrange_zones to separate them, or set the zone's onOverflow to "reflow_board" to have it done automatically.`
               : null,
             layout.overflowingItemIds.length > 0

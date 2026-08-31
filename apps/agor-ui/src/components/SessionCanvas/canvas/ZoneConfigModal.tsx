@@ -202,6 +202,9 @@ export const ZoneConfigModal = ({
           columns: values.layoutPreset === 'grid' ? values.layoutColumns : 1,
           gap: values.layoutGap,
           autoResizeHeight: values.layoutAutoResizeHeight,
+          onOverflow: values.layoutAutoResizeHeight
+            ? 'reflow_board'
+            : normalizeZoneLayoutPolicy(zoneData.layout).onOverflow,
         });
         const hasChanges =
           values.name !== zoneName ||
@@ -327,7 +330,7 @@ export const ZoneConfigModal = ({
             name="layoutAutoResizeHeight"
             label="Grow to fit"
             valuePropName="checked"
-            help="On: content can grow the zone; a manual resize becomes its new minimum. Off: the zone keeps its size."
+            help="On: content can grow the zone, minimally moving newly covered zones; a manual resize becomes its new minimum. Off: the zone keeps its size."
             style={{ flex: '1 1 200px' }}
           >
             <Switch />
