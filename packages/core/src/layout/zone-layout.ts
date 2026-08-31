@@ -8,7 +8,7 @@ import type {
   ZoneOverflowStrategy,
   ZoneResizeMode,
 } from '../types/board';
-import { BOARD_GRID_SIZE, ceilBoardGridValue } from './rectangle-packing';
+import { BOARD_GRID_SIZE, ceilBoardGridValue, snapBoardGridValue } from './rectangle-packing';
 
 export const ZONE_LAYOUT_MODES = ['manual', 'auto'] as const;
 export const ZONE_LAYOUT_PRESETS = ['grid', 'compact_list'] as const;
@@ -23,6 +23,8 @@ export const ZONE_LAYOUT_SORT_FIELDS = [
 export const ZONE_LAYOUT_SORT_DIRECTIONS = ['asc', 'desc'] as const;
 export const ZONE_RESIZE_MODES = ['fixed', 'height', 'both'] as const;
 export const ZONE_OVERFLOW_STRATEGIES = ['report', 'reflow_board'] as const;
+export const ZONE_CONTENT_JUSTIFICATIONS = ['left', 'middle', 'right', 'top', 'bottom'] as const;
+export type ZoneContentJustification = (typeof ZONE_CONTENT_JUSTIFICATIONS)[number];
 
 export const DEFAULT_ZONE_LAYOUT_POLICY: Readonly<ZoneLayoutPolicy> = {
   mode: 'manual',
@@ -60,6 +62,113 @@ export interface ZoneLayoutFrame {
   headerInset: number;
   /** Width available to a full-width compact-list child. */
   usableWidth: number;
+}
+
+export interface ZoneContentRect extends BoardPosition {
+  id: string;
+  width: number;
+  height: number;
+}
+
+export interface JustifiedZoneContents {
+  fits: boolean;
+  placements: ZoneContentRect[];
+}
+
+const JUSTIFY_OVERLAP_TOLERANCE = 0.5;
+
+function connectedSpanComponents(
+  items: readonly ZoneContentRect[],
+  span: 'horizontal' | 'vertical'
+): number[][] {
+  const start = (item: ZoneContentRect) => (span === 'horizontal' ? item.x : item.y);
+  const end = (item: ZoneContentRect) =>
+    start(item) + (span === 'horizontal' ? item.width : item.height);
+  const overlaps = (left: ZoneContentRect, right: ZoneContentRect) =>
+    Math.min(end(left), end(right)) - Math.max(start(left), start(right)) >
+    JUSTIFY_OVERLAP_TOLERANCE;
+  const ordered = items
+    .map((item, index) => ({ item, index }))
+    .sort(
+      (left, right) =>
+        start(left.item) - start(right.item) ||
+        end(left.item) - end(right.item) ||
+        left.item.id.localeCompare(right.item.id)
+    );
+  const remaining = new Set(ordered.map(({ index }) => index));
+  const components: number[][] = [];
+
+  for (const { index: seed } of ordered) {
+    if (!remaining.delete(seed)) continue;
+    const component = [seed];
+    for (let cursor = 0; cursor < component.length; cursor += 1) {
+      const current = component[cursor];
+      for (const { index: candidate } of ordered) {
+        if (!remaining.has(candidate) || !overlaps(items[current], items[candidate])) continue;
+        remaining.delete(candidate);
+        component.push(candidate);
+      }
+    }
+    components.push(component);
+  }
+  return components;
+}
+
+/**
+ * Align collision-independent rows or columns inside a zone frame. Horizontal
+ * actions translate connected components whose vertical spans overlap; top
+ * and bottom translate components whose horizontal spans overlap. Each
+ * component remains a rigid body, so collision-free geometry stays
+ * collision-free while separate rows/columns can align independently.
+ */
+export function justifyZoneContentCluster(
+  items: readonly ZoneContentRect[],
+  frame: ZoneLayoutFrame,
+  zoneHeight: number,
+  justification: ZoneContentJustification
+): JustifiedZoneContents {
+  if (items.length === 0) return { fits: true, placements: [] };
+
+  const contentLeft = frame.padding;
+  const contentRight = frame.width - frame.padding;
+  const contentTop = frame.headerInset + frame.padding;
+  const contentBottom = zoneHeight - frame.padding;
+  const horizontal =
+    justification === 'left' || justification === 'middle' || justification === 'right';
+  const components = connectedSpanComponents(items, horizontal ? 'vertical' : 'horizontal');
+  const placements = items.map((item) => ({ ...item }));
+
+  for (const component of components) {
+    const componentItems = component.map((index) => items[index]);
+    const start = horizontal
+      ? Math.min(...componentItems.map((item) => item.x))
+      : Math.min(...componentItems.map((item) => item.y));
+    const end = horizontal
+      ? Math.max(...componentItems.map((item) => item.x + item.width))
+      : Math.max(...componentItems.map((item) => item.y + item.height));
+    const contentStart = horizontal ? contentLeft : contentTop;
+    const contentEnd = horizontal ? contentRight : contentBottom;
+    if (end - start > contentEnd - contentStart + JUSTIFY_OVERLAP_TOLERANCE) {
+      return { fits: false, placements: [...items] };
+    }
+
+    const targetStart =
+      justification === 'right' || justification === 'bottom'
+        ? contentEnd - (end - start)
+        : justification === 'middle'
+          ? (contentStart + contentEnd - (end - start)) / 2
+          : contentStart;
+    const delta = snapBoardGridValue(targetStart - start);
+    for (const index of component) {
+      if (horizontal) placements[index].x += delta;
+      else placements[index].y += delta;
+    }
+  }
+
+  return {
+    fits: true,
+    placements,
+  };
 }
 
 /**

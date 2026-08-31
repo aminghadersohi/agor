@@ -3,6 +3,7 @@ import {
   compactZoneItemSize,
   getZoneLayoutFrame,
   growZoneLayoutHeight,
+  justifyZoneContentCluster,
   normalizeZoneLayoutPolicy,
   sortZoneLayoutItems,
   type ZoneLayoutSortItem,
@@ -13,6 +14,101 @@ describe('grow-only zone height', () => {
     expect(growZoneLayoutHeight(1000, 260)).toBe(1000);
     expect(growZoneLayoutHeight(1000, 1201)).toBe(1220);
     expect(growZoneLayoutHeight(120, 80)).toBe(200);
+  });
+});
+
+describe('zone content justification', () => {
+  const frame = getZoneLayoutFrame({ width: 620 });
+  const mixed = [
+    { id: 'wide', x: 100, y: 180, width: 300, height: 100 },
+    { id: 'tall', x: 420, y: 180, width: 100, height: 260 },
+    { id: 'small', x: 100, y: 300, width: 120, height: 80 },
+  ];
+
+  it.each([
+    ['left', { left: 20, top: 180, right: 440, bottom: 440 }],
+    ['right', { left: 180, top: 180, right: 600, bottom: 440 }],
+    ['top', { left: 100, top: 100, right: 520, bottom: 360 }],
+    ['bottom', { left: 100, top: 620, right: 520, bottom: 880 }],
+    ['middle', { left: 100, top: 180, right: 520, bottom: 440 }],
+  ] as const)('justifies collision-independent components to %s', (justification, expected) => {
+    const result = justifyZoneContentCluster(mixed, frame, 900, justification);
+    const bounds = {
+      left: Math.min(...result.placements.map((item) => item.x)),
+      top: Math.min(...result.placements.map((item) => item.y)),
+      right: Math.max(...result.placements.map((item) => item.x + item.width)),
+      bottom: Math.max(...result.placements.map((item) => item.y + item.height)),
+    };
+    expect(result.fits).toBe(true);
+    expect(bounds).toEqual(expected);
+    for (let left = 0; left < result.placements.length; left += 1) {
+      for (let right = left + 1; right < result.placements.length; right += 1) {
+        const a = result.placements[left];
+        const b = result.placements[right];
+        const overlapX = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+        const overlapY = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+        expect(overlapX > 0 && overlapY > 0).toBe(false);
+      }
+    }
+  });
+
+  it('centers the seeded Review rows independently without changing their vertical order', () => {
+    const reviewFrame = getZoneLayoutFrame({ width: 540 });
+    const review = [
+      { id: 'worktree', x: 20, y: 100, width: 500, height: 240 },
+      { id: 'card', x: 20, y: 380, width: 380, height: 100 },
+    ];
+
+    const centered = justifyZoneContentCluster(review, reviewFrame, 500, 'middle');
+    expect(centered).toEqual({
+      fits: true,
+      placements: [
+        { id: 'worktree', x: 20, y: 100, width: 500, height: 240 },
+        { id: 'card', x: 80, y: 380, width: 380, height: 100 },
+      ],
+    });
+    expect(justifyZoneContentCluster(centered.placements, reviewFrame, 500, 'middle')).toEqual(
+      centered
+    );
+    expect(
+      Object.fromEntries(
+        justifyZoneContentCluster([...review].reverse(), reviewFrame, 500, 'middle').placements.map(
+          ({ id, x, y }) => [id, { x, y }]
+        )
+      )
+    ).toEqual(Object.fromEntries(centered.placements.map(({ id, x, y }) => [id, { x, y }])));
+  });
+
+  it('bottom-aligns collision-independent columns without moving either column on X', () => {
+    const columns = [
+      { id: 'tall-left', x: 20, y: 100, width: 200, height: 200 },
+      { id: 'short-right', x: 300, y: 100, width: 200, height: 100 },
+    ];
+    expect(justifyZoneContentCluster(columns, frame, 900, 'bottom').placements).toEqual([
+      { ...columns[0], y: 680 },
+      { ...columns[1], y: 780 },
+    ]);
+  });
+
+  it('is permutation-stable, idempotent, and preserves connected-component offsets', () => {
+    const first = justifyZoneContentCluster(mixed, frame, 900, 'left');
+    const second = justifyZoneContentCluster(first.placements, frame, 900, 'left');
+    const permuted = justifyZoneContentCluster([...mixed].reverse(), frame, 900, 'left');
+    const byId = (items: typeof mixed) =>
+      Object.fromEntries(items.map(({ id, x, y }) => [id, { x, y }]));
+
+    expect(second).toEqual(first);
+    expect(byId(permuted.placements)).toEqual(byId(first.placements));
+    expect(first.placements[1].x - first.placements[0].x).toBe(mixed[1].x - mixed[0].x);
+    expect(first.placements.map(({ y }) => y)).toEqual(mixed.map(({ y }) => y));
+  });
+
+  it('refuses an axis that cannot fit instead of clipping or distorting the cluster', () => {
+    const oversized = [{ id: 'too-wide', x: 40, y: 120, width: 700, height: 100 }];
+    expect(justifyZoneContentCluster(oversized, frame, 900, 'right')).toEqual({
+      fits: false,
+      placements: oversized,
+    });
   });
 });
 

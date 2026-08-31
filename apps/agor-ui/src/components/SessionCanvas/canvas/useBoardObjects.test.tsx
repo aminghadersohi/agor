@@ -30,6 +30,109 @@ beforeEach(() => {
   showWarning.mockClear();
 });
 
+describe('justifyZoneContents production path', () => {
+  const zoneId = 'demo-zone-review';
+  const zone = {
+    type: 'zone',
+    x: -860,
+    y: 240,
+    width: 540,
+    height: 500,
+    label: 'Review',
+  };
+  const branch = {
+    id: 'branch-review',
+    type: 'branchNode',
+    parentId: zoneId,
+    position: { x: 20, y: 100 },
+    width: 500,
+    height: 240,
+    data: { branch: { name: 'Review branch' } },
+  } satisfies Node;
+
+  function renderJustify(nodes: Node[], placements: unknown[]) {
+    const routed = makeRoutedClient();
+    const setNodes = vi.fn();
+    const hook = renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({ [zoneId]: zone }),
+          client: routed.client,
+          boardObjectsForBoard: placements as never,
+          nodes,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    return { ...routed, setNodes, ...hook };
+  }
+
+  it('centers a single narrow child horizontally and persists its relative position', async () => {
+    const narrow = { ...branch, width: 380 } satisfies Node;
+    const view = renderJustify(
+      [narrow],
+      [
+        {
+          object_id: 'placement-branch',
+          branch_id: branch.id,
+          zone_id: zoneId,
+          position: narrow.position,
+        },
+      ]
+    );
+
+    await act(async () => view.result.current.justifyZoneContents(zoneId, 'middle'));
+
+    expect(view.boardsPatch).not.toHaveBeenCalled();
+    expect(view.boardObjectsPatch).toHaveBeenCalledTimes(1);
+    expect(view.boardObjectsPatch).toHaveBeenCalledWith('placement-branch', {
+      position: { x: 80, y: 100 },
+    });
+    expect(view.setNodes).toHaveBeenCalledTimes(1);
+    expect(showSuccess).toHaveBeenCalledWith('Justified 1 items to the center.');
+  });
+
+  it('centers the seeded Review rows independently while preserving their Y positions', async () => {
+    const card = {
+      id: 'card-review',
+      type: 'cardNode',
+      parentId: zoneId,
+      position: { x: 20, y: 380 },
+      width: 380,
+      height: 100,
+      data: { card: { title: 'Review card', data: {} } },
+    } satisfies Node;
+    const view = renderJustify(
+      [branch, card],
+      [
+        {
+          object_id: 'placement-branch',
+          branch_id: branch.id,
+          zone_id: zoneId,
+          position: branch.position,
+        },
+        {
+          object_id: 'placement-card',
+          card_id: 'review',
+          zone_id: zoneId,
+          position: card.position,
+        },
+      ]
+    );
+
+    await act(async () => view.result.current.justifyZoneContents(zoneId, 'middle'));
+
+    expect(view.boardsPatch).not.toHaveBeenCalled();
+    expect(view.boardObjectsPatch).toHaveBeenCalledTimes(1);
+    expect(view.boardObjectsPatch).toHaveBeenCalledWith('placement-card', {
+      position: { x: 80, y: 380 },
+    });
+    expect(view.setNodes).toHaveBeenCalledTimes(1);
+    expect(showSuccess).toHaveBeenCalledWith('Justified 1 items to the center.');
+  });
+});
+
 afterEach(() => {
   vi.useRealTimers();
 });
