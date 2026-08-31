@@ -2,7 +2,11 @@
  * Custom React Flow node components for board objects (text labels, zones, etc.)
  */
 
-import type { ZoneContentJustification } from '@agor/core/layout/zone-layout';
+import {
+  normalizeZoneLayoutPolicy,
+  setZoneLayoutMode,
+  type ZoneContentJustification,
+} from '@agor/core/layout/zone-layout';
 import type { BoardComment, BoardObject, User } from '@agor-live/client';
 import {
   AlignCenterOutlined,
@@ -18,6 +22,7 @@ import {
   MinusSquareOutlined,
   PlusSquareOutlined,
   SettingOutlined,
+  SyncOutlined,
   UnlockOutlined,
   VerticalAlignBottomOutlined,
   VerticalAlignMiddleOutlined,
@@ -77,7 +82,10 @@ interface ZoneNodeData extends Omit<ZoneBoardObject, 'type'> {
   densityExpandableItemCount?: number;
   /** Density-capable pinned entities that are currently collapsed. */
   compactDensityExpandableItemCount?: number;
-  onUpdate?: (objectId: string, objectData: BoardObject) => void;
+  onUpdate?: (
+    objectId: string,
+    objectData: BoardObject
+  ) => boolean | undefined | Promise<boolean | undefined>;
   onDelete?: (objectId: string, deleteAssociatedSessions: boolean) => void;
   onReorder?: (objectId: string, op: LayerOp) => void;
   onArrangeContents?: (objectId: string) => void;
@@ -148,6 +156,7 @@ const ZoneNodeComponent = ({
   const zoneContentsAllCompact =
     (data.densityExpandableItemCount ?? 0) > 0 &&
     (data.compactDensityExpandableItemCount ?? 0) >= (data.densityExpandableItemCount ?? 0);
+  const autoZoneEnabled = normalizeZoneLayoutPolicy(data.layout).mode === 'auto';
 
   // Inverse scale keeps zone labels at a legible size regardless of zoom.
   const scale = 1 / zoom;
@@ -227,6 +236,16 @@ const ZoneNodeComponent = ({
     if (label !== data.label && data.onUpdate) {
       data.onUpdate(data.objectId, createObjectData({ label }));
     }
+  };
+
+  const handleToggleAutoZone = () => {
+    if (mutationDisabled || !data.onUpdate) return;
+    void data.onUpdate(
+      data.objectId,
+      createObjectData({
+        layout: setZoneLayoutMode(data.layout, autoZoneEnabled ? 'manual' : 'auto'),
+      })
+    );
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -329,12 +348,14 @@ const ZoneNodeComponent = ({
     title: string,
     icon: React.ReactNode,
     action: () => void,
-    disabled = false
+    disabled = false,
+    options: { pressed?: boolean; active?: boolean } = {}
   ) => (
     <button
       key={key}
       type="button"
       aria-label={title}
+      aria-pressed={options.pressed}
       disabled={disabled}
       onPointerDown={(e) => {
         e.preventDefault();
@@ -359,6 +380,13 @@ const ZoneNodeComponent = ({
       }}
       style={{
         ...iconButtonStyle,
+        ...(options.active
+          ? {
+              backgroundColor: token.colorPrimaryBg,
+              borderColor: token.colorPrimary,
+              color: token.colorPrimary,
+            }
+          : {}),
         ...(disabled ? { opacity: 0.4, cursor: 'not-allowed' } : {}),
       }}
       title={title}
@@ -700,6 +728,19 @@ const ZoneNodeComponent = ({
             )}
           </button>
           {verticalDivider}
+          {renderActionButton(
+            'auto-zone',
+            autoZoneEnabled ? 'Disable Auto Zone' : 'Enable Auto Zone',
+            <SyncOutlined
+              style={{
+                ...layerIconStyle,
+                color: autoZoneEnabled ? token.colorPrimary : token.colorText,
+              }}
+            />,
+            handleToggleAutoZone,
+            false,
+            { pressed: autoZoneEnabled, active: autoZoneEnabled }
+          )}
           {renderActionButton(
             'arrange-contents',
             'Tidy up contents',

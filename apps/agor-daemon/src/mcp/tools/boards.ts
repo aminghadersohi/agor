@@ -17,6 +17,7 @@ import {
   growZoneLayoutHeight,
   isBoardEntityDensityExpandable,
   normalizeZoneLayoutPolicy,
+  setZoneLayoutMode,
   sortZoneLayoutItems,
   ZONE_LAYOUT_MODES,
   ZONE_LAYOUT_PRESETS,
@@ -1875,9 +1876,16 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       if (zone?.type !== 'zone') {
         throw new Error(`Zone '${zoneId}' was not found on board '${boardId}'.`);
       }
+      const modeTransition = setZoneLayoutMode(zone.layout, args.mode);
       const layout = normalizeZoneLayoutPolicy({
-        ...zone.layout,
-        mode: args.mode,
+        ...modeTransition,
+        // The legacy boolean remains a supported public input. A normalized
+        // transition contains `resize`, whose precedence would otherwise make
+        // the explicit boolean inert; remove it only when no modern resize was
+        // supplied so both spellings retain their documented behavior.
+        ...(args.autoResizeHeight !== undefined && args.resize === undefined
+          ? { resize: undefined }
+          : {}),
         ...(args.preset === undefined ? {} : { preset: args.preset }),
         ...(args.sortBy === undefined ? {} : { sortBy: args.sortBy }),
         ...(args.sortDirection === undefined ? {} : { sortDirection: args.sortDirection }),
@@ -1888,16 +1896,25 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         ...(args.onOverflow === undefined ? {} : { onOverflow: args.onOverflow }),
       } satisfies Partial<ZoneLayoutPolicy>);
       const updatedZone = { ...zone, layout };
-      await boardsService.patch(
+      const changed =
+        JSON.stringify(layout) !== JSON.stringify(normalizeZoneLayoutPolicy(zone.layout));
+      if (changed) {
+        await boardsService.patch(
+          boardId,
+          {
+            _action: 'upsertObject',
+            objectId: zoneId,
+            objectData: updatedZone,
+          } as unknown as Partial<Board>,
+          ctx.baseServiceParams
+        );
+      }
+      return textResult({
         boardId,
-        {
-          _action: 'upsertObject',
-          objectId: zoneId,
-          objectData: updatedZone,
-        } as unknown as Partial<Board>,
-        ctx.baseServiceParams
-      );
-      return textResult({ boardId, zoneId, layout, note: 'Zone layout policy updated.' });
+        zoneId,
+        layout,
+        note: changed ? 'Zone layout policy updated.' : 'Zone layout policy already matched.',
+      });
     }
   );
 

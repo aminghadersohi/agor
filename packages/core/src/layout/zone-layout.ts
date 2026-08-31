@@ -34,6 +34,51 @@ export const ZONE_CONTENT_JUSTIFICATIONS = [
 ] as const;
 export type ZoneContentJustification = (typeof ZONE_CONTENT_JUSTIFICATIONS)[number];
 
+/** Shared user-facing names for the persisted zone layout vocabulary. */
+export const ZONE_LAYOUT_PRESET_LABELS: Readonly<Record<ZoneLayoutPreset, string>> = {
+  grid: 'Grid',
+  compact_list: 'List',
+};
+
+export const ZONE_LAYOUT_SORT_LABELS: Readonly<Record<ZoneLayoutSortBy, string>> = {
+  position: 'Current position',
+  priority: 'Priority / rank',
+  status: 'Workflow status',
+  updated: 'Last updated',
+  created: 'Created',
+  title: 'Title',
+};
+
+export const ZONE_LAYOUT_SORT_DIRECTION_LABELS: Readonly<
+  Record<ZoneLayoutSortBy, Readonly<Record<ZoneLayoutSortDirection, string>>>
+> = {
+  position: { asc: 'Top-left first', desc: 'Bottom-right first' },
+  priority: { asc: 'Highest first', desc: 'Lowest first' },
+  status: { asc: 'Urgent to done', desc: 'Done to urgent' },
+  updated: { asc: 'Oldest first', desc: 'Newest first' },
+  created: { asc: 'Oldest first', desc: 'Newest first' },
+  title: { asc: 'A to Z', desc: 'Z to A' },
+};
+
+export const ZONE_OVERFLOW_STRATEGY_LABELS: Readonly<Record<ZoneOverflowStrategy, string>> = {
+  report: 'Report overflow',
+  reflow_board: 'Move neighboring zones',
+};
+
+export function defaultZoneLayoutSortDirection(sortBy: ZoneLayoutSortBy): ZoneLayoutSortDirection {
+  return sortBy === 'updated' || sortBy === 'created' ? 'desc' : 'asc';
+}
+
+export function zoneLayoutSortDirectionOptions(sortBy: ZoneLayoutSortBy) {
+  const labels = ZONE_LAYOUT_SORT_DIRECTION_LABELS[sortBy];
+  const preferred = defaultZoneLayoutSortDirection(sortBy);
+  const directions = [
+    preferred,
+    ...ZONE_LAYOUT_SORT_DIRECTIONS.filter((value) => value !== preferred),
+  ];
+  return directions.map((value) => ({ value, label: labels[value] }));
+}
+
 /**
  * Board entities whose rendered surface has a real secondary-density state.
  *
@@ -338,6 +383,30 @@ export function normalizeZoneLayoutPolicy(
     onOverflow,
     autoResizeHeight: resize !== 'fixed',
   };
+}
+
+/**
+ * Change only Auto Zone's maintenance mode while preserving the complete
+ * normalized policy. Enabling automation from the spatial-memory default uses
+ * newest activity rather than continually treating freshly persisted layout
+ * coordinates as new sort input. UI toolbar, modal, and MCP callers share this
+ * transition so an enable action cannot acquire surface-specific defaults.
+ */
+export function setZoneLayoutMode(
+  policy: Partial<ZoneLayoutPolicy> | undefined,
+  mode: ZoneLayoutPolicy['mode']
+): ZoneLayoutPolicy {
+  const current = normalizeZoneLayoutPolicy(policy);
+  if (current.mode === mode) return current;
+  if (mode === 'auto' && current.sortBy === 'position') {
+    return {
+      ...current,
+      mode,
+      sortBy: 'updated',
+      sortDirection: defaultZoneLayoutSortDirection('updated'),
+    };
+  }
+  return { ...current, mode };
 }
 
 const PRIORITY_RANKS: Readonly<Record<string, number>> = {

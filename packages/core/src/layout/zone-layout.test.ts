@@ -7,8 +7,10 @@ import {
   isBoardEntityDensityExpandable,
   justifyZoneContentCluster,
   normalizeZoneLayoutPolicy,
+  setZoneLayoutMode,
   sortZoneLayoutItems,
   type ZoneLayoutSortItem,
+  zoneLayoutSortDirectionOptions,
 } from './zone-layout';
 
 describe('grow-only zone height', () => {
@@ -183,6 +185,39 @@ describe('normalizeZoneLayoutPolicy', () => {
     });
     expect(normalizeZoneLayoutPolicy({ gap: -4 })).toMatchObject({ gap: 0 });
     expect(normalizeZoneLayoutPolicy({ gap: 200 })).toMatchObject({ gap: 96 });
+  });
+
+  it('shares an idempotent Auto Zone transition without overwriting configured sorting', () => {
+    expect(setZoneLayoutMode(undefined, 'auto')).toMatchObject({
+      mode: 'auto',
+      sortBy: 'updated',
+      sortDirection: 'desc',
+    });
+
+    const configured = setZoneLayoutMode(
+      { mode: 'manual', sortBy: 'title', sortDirection: 'desc', columns: 2, gap: 12 },
+      'auto'
+    );
+    expect(configured).toMatchObject({
+      mode: 'auto',
+      sortBy: 'title',
+      sortDirection: 'desc',
+      columns: 2,
+      gap: 12,
+    });
+    expect(setZoneLayoutMode(configured, 'auto')).toEqual(configured);
+    expect(setZoneLayoutMode(configured, 'manual')).toEqual({ ...configured, mode: 'manual' });
+  });
+
+  it('owns the direction labels used by every Configure Zone sort key', () => {
+    expect(zoneLayoutSortDirectionOptions('position')).toEqual([
+      { value: 'asc', label: 'Top-left first' },
+      { value: 'desc', label: 'Bottom-right first' },
+    ]);
+    expect(zoneLayoutSortDirectionOptions('updated')).toEqual([
+      { value: 'desc', label: 'Newest first' },
+      { value: 'asc', label: 'Oldest first' },
+    ]);
   });
 });
 

@@ -371,7 +371,7 @@ export const useBoardObjects = ({
   const handleUpdateObject = useCallback(
     async (objectId: string, objectData: BoardObject) => {
       const currentBoard = boardRef.current;
-      if (!currentBoard || !client) return;
+      if (!currentBoard || !client) return false;
 
       // Leaving `compact_list` is the one moment we can be certain a collapse
       // was the preset's doing rather than the user's: the preset collapsed
@@ -409,11 +409,14 @@ export const useBoardObjects = ({
             void arrangeZoneContentsRef.current?.(objectId, { silent: true });
           }, EXPANDED_REPACK_DELAY_MS);
         }
+        return true;
       } catch (error) {
         console.error('Failed to update object:', error);
+        showError('Failed to update board item');
+        return false;
       }
     },
-    [client, setZoneContentsCompact] // Board is read through boardRef, not a dep
+    [client, setZoneContentsCompact, showError] // Board is read through boardRef, not a dep
   );
 
   /**

@@ -33,6 +33,12 @@ function renderZone(
     positionableItemCount?: number;
     onArrangeContents?: ReturnType<typeof vi.fn>;
     onJustifyContents?: ReturnType<typeof vi.fn>;
+    onUpdate?: ReturnType<typeof vi.fn>;
+    layout?: {
+      mode: 'manual' | 'auto';
+      sortBy?: 'position' | 'title';
+      sortDirection?: 'asc' | 'desc';
+    };
   }
 ) {
   const wrapper = ({ children }: { children: ReactNode }) => (
@@ -55,6 +61,8 @@ function renderZone(
         zIndex: 100,
         suppressToolbar: extra?.suppressToolbar,
         positionableItemCount: extra?.positionableItemCount,
+        layout: extra?.layout,
+        onUpdate: extra?.onUpdate,
         onReorder,
         onArrangeContents: extra?.onArrangeContents,
         onJustifyContents: extra?.onJustifyContents,
@@ -200,6 +208,83 @@ describe('ZoneNode config modal', () => {
 
     expect(zoneConfigModalRenderSpy).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('zone-config-modal')).toHaveTextContent('Configure Zone: My Zone');
+  });
+
+  it('gives the toolbar and modal the same persisted layout state and update callback', () => {
+    const onUpdate = vi.fn();
+    renderZone(vi.fn(), CONNECTED, {
+      onUpdate,
+      layout: { mode: 'auto', sortBy: 'title', sortDirection: 'desc' },
+    });
+
+    fireEvent.pointerUp(screen.getByTitle('Configure zone'));
+    const modalProps = zoneConfigModalRenderSpy.mock.calls[0][0] as {
+      onUpdate: unknown;
+      zoneData: { layout?: unknown };
+    };
+    expect(modalProps.onUpdate).toBe(onUpdate);
+    expect(modalProps.zoneData.layout).toEqual({
+      mode: 'auto',
+      sortBy: 'title',
+      sortDirection: 'desc',
+    });
+  });
+});
+
+describe('ZoneNode Auto Zone toolbar toggle', () => {
+  it('uses the authoritative zone update callback once and exposes durable toggle state', () => {
+    const onUpdate = vi.fn();
+    const view = renderZone(vi.fn(), CONNECTED, {
+      onUpdate,
+      layout: { mode: 'manual', sortBy: 'position', sortDirection: 'asc' },
+    });
+
+    const enable = screen.getByRole('button', { name: 'Enable Auto Zone' });
+    expect(enable).toHaveAttribute('aria-pressed', 'false');
+    const inactiveBorderColor = enable.style.borderColor;
+    fireEvent.pointerDown(enable);
+    fireEvent.pointerUp(enable);
+    fireEvent.click(enable);
+
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(onUpdate).toHaveBeenCalledWith(
+      'zone-1',
+      expect.objectContaining({
+        layout: expect.objectContaining({
+          mode: 'auto',
+          sortBy: 'updated',
+          sortDirection: 'desc',
+        }),
+      })
+    );
+
+    view.unmount();
+    renderZone(vi.fn(), CONNECTED, {
+      onUpdate,
+      layout: { mode: 'auto', sortBy: 'title', sortDirection: 'desc' },
+    });
+    const disable = screen.getByRole('button', { name: 'Disable Auto Zone' });
+    expect(disable).toHaveAttribute('aria-pressed', 'true');
+    expect(disable.style.borderColor).not.toBe(inactiveBorderColor);
+  });
+
+  it('is keyboard operable without compounding the synthesized click and retains focus', () => {
+    const onUpdate = vi.fn();
+    renderZone(vi.fn(), CONNECTED, { onUpdate, layout: { mode: 'manual' } });
+    const toggle = screen.getByRole('button', { name: 'Enable Auto Zone' });
+    toggle.focus();
+    expect(toggle).toHaveFocus();
+    fireEvent.keyDown(toggle, { key: 'Enter' });
+    fireEvent.click(toggle, { detail: 0 });
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not expose a misleading toggle while the multi-selection toolbar owns the UI', () => {
+    renderZone(vi.fn(), CONNECTED, {
+      suppressToolbar: true,
+      layout: { mode: 'auto' },
+    });
+    expect(screen.queryByRole('button', { name: 'Disable Auto Zone' })).not.toBeInTheDocument();
   });
 });
 

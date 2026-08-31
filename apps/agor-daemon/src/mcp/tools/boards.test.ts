@@ -1276,6 +1276,52 @@ describe('agor_boards_set_zone_layout', () => {
       baseServiceParams
     );
   });
+
+  it('uses the shared Auto Zone transition and skips an already-matching durable policy', async () => {
+    const patch = vi.fn(async () => undefined);
+    let zoneLayout: Record<string, unknown> | undefined = { mode: 'manual', sortBy: 'position' };
+    const setLayout = registerAndCaptureHandler('agor_boards_set_zone_layout', {
+      app: {
+        service: () => ({
+          get: vi.fn(async () => ({
+            board_id: 'board-1',
+            objects: {
+              'zone-1': {
+                type: 'zone',
+                x: 0,
+                y: 0,
+                width: 620,
+                height: 900,
+                label: 'Work',
+                layout: zoneLayout,
+              },
+            },
+          })),
+          patch,
+        }),
+      },
+      userId: 'user-1',
+      baseServiceParams: { authenticated: true, provider: 'mcp' },
+    });
+
+    const enabled = JSON.parse(
+      (await setLayout({ boardId: 'board-1', zoneId: 'zone-1', mode: 'auto' })).content[0].text
+    );
+    expect(enabled.layout).toMatchObject({
+      mode: 'auto',
+      sortBy: 'updated',
+      sortDirection: 'desc',
+    });
+    expect(patch).toHaveBeenCalledTimes(1);
+
+    zoneLayout = enabled.layout;
+    patch.mockClear();
+    const unchanged = JSON.parse(
+      (await setLayout({ boardId: 'board-1', zoneId: 'zone-1', mode: 'auto' })).content[0].text
+    );
+    expect(unchanged.note).toBe('Zone layout policy already matched.');
+    expect(patch).not.toHaveBeenCalled();
+  });
 });
 
 describe('agor_boards_auto_arrange', () => {
