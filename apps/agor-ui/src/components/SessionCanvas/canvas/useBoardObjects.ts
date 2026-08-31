@@ -14,6 +14,7 @@ import {
 import {
   compactZoneItemSize,
   getZoneLayoutFrame,
+  growZoneLayoutHeight,
   normalizeZoneLayoutPolicy,
   sortZoneLayoutItems,
   type ZoneLayoutSortItem,
@@ -863,7 +864,7 @@ export const useBoardObjects = ({
       const nextZoneHeight = options.preserveZoneFrame
         ? zone.height
         : policy.autoResizeHeight
-          ? Math.max(200, ceilBoardGridValue(layout.height + titleInset))
+          ? growZoneLayoutHeight(zone.height, layout.height + titleInset)
           : layout.mode === 'deck'
             ? Math.max(zone.height, 200, ceilBoardGridValue(layout.height + titleInset))
             : zone.height;

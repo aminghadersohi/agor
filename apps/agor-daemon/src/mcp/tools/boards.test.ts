@@ -1115,7 +1115,7 @@ describe('agor_boards_auto_arrange_zone', () => {
     expect(parsed.warning).toMatch(/larger than the available zone/i);
   });
 
-  it('sorts by persisted metadata and can vertically fit a compact list', async () => {
+  it('sorts a compact list without shrinking its grow-only zone frame', async () => {
     const entities = ['older', 'latest', 'middle'].map((id) => ({
       object_id: `placement-${id}`,
       board_id: 'board-1',
@@ -1195,21 +1195,14 @@ describe('agor_boards_auto_arrange_zone', () => {
       rows: 3,
       autoResizeHeight: true,
     });
-    expect(parsed.zone.height).toBeLessThan(900);
+    expect(parsed.zone.height).toBe(900);
     expect(entityPatches.filter(({ data }) => 'position' in data).map(({ id }) => id)).toEqual([
       'placement-latest',
       'placement-middle',
       'placement-older',
     ]);
     expect(entityPatches.filter(({ data }) => data.compact === true)).toHaveLength(3);
-    expect(boardPatch).toHaveBeenCalledWith(
-      'board-1',
-      expect.objectContaining({
-        _action: 'batchUpsertObjects',
-        objects: { 'zone-1': expect.objectContaining({ height: parsed.zone.height }) },
-      }),
-      baseServiceParams
-    );
+    expect(boardPatch).not.toHaveBeenCalled();
   });
 });
 

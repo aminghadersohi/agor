@@ -621,11 +621,11 @@ describe('arrangeZoneContents', () => {
       expect.objectContaining({
         _action: 'batchUpsertObjects',
         objects: {
-          zone: expect.objectContaining({ x: 1000, y: 1000, width: 900 }),
           artifact: expect.objectContaining({ x: 1020, y: 1100 }),
         },
       })
     );
+    expect(boardsPatch.mock.calls[0]?.[1].objects.zone).toBeUndefined();
   });
 
   it('uses the live rendered height when dynamic branch content exceeds React Flow dimensions', async () => {
@@ -1033,13 +1033,7 @@ describe('arrangeZoneContents', () => {
       size: { width: 580, height: 60 },
       compact: true,
     });
-    expect(patch).toHaveBeenCalledWith(
-      'board-1',
-      expect.objectContaining({
-        _action: 'batchUpsertObjects',
-        objects: { zone: expect.objectContaining({ height: 260 }) },
-      })
-    );
+    expect(patch).not.toHaveBeenCalledWith('board-1', expect.anything());
   });
 
   it('uses one compact-list frame for card and worktree zones with the same policy', async () => {
@@ -2216,7 +2210,7 @@ describe('arrangeBoardZones production path', () => {
     expect(showWarning).not.toHaveBeenCalled();
   });
 
-  it('re-packs an explicitly resized Auto Zone without writing its container again', async () => {
+  it('keeps an explicitly resized Auto Zone as the floor across later re-packs', async () => {
     vi.useFakeTimers();
     const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
     const zoneId = 'zone-auto';
@@ -2264,5 +2258,13 @@ describe('arrangeBoardZones production path', () => {
     await act(async () => vi.advanceTimersByTimeAsync(1000));
     expect(boardsPatch).not.toHaveBeenCalled();
     expect(boardObjectsPatch).toHaveBeenCalledTimes(1);
+
+    boardsPatch.mockClear();
+    const zoneNode = result.current.getBoardObjectNodes().find((node) => node.id === zoneId);
+    expect(zoneNode).toBeDefined();
+    await act(async () => {
+      await (zoneNode!.data.onArrangeContents as (id: string) => Promise<void>)(zoneId);
+    });
+    expect(boardsPatch).not.toHaveBeenCalled();
   });
 });

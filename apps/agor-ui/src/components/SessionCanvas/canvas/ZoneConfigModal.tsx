@@ -327,7 +327,7 @@ export const ZoneConfigModal = ({
             name="layoutAutoResizeHeight"
             label="Grow to fit"
             valuePropName="checked"
-            help="On: the zone grows so nothing overlaps. Off: the zone keeps its size."
+            help="On: content can grow the zone; a manual resize becomes its new minimum. Off: the zone keeps its size."
             style={{ flex: '1 1 200px' }}
           >
             <Switch />

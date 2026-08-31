@@ -37,6 +37,14 @@ export const DEFAULT_ZONE_LAYOUT_POLICY: Readonly<ZoneLayoutPolicy> = {
 
 export const ZONE_LAYOUT_FRAME_PADDING = BOARD_GRID_SIZE;
 
+/**
+ * Auto-resize is deliberately grow-only. A direct zone resize establishes the
+ * user's new minimum frame while leaving future content growth armed.
+ */
+export function growZoneLayoutHeight(currentHeight: number, requiredHeight: number): number {
+  return Math.max(currentHeight, 200, ceilBoardGridValue(requiredHeight));
+}
+
 export interface ZoneLayoutFrameInput {
   width: number;
   fontSize?: number;

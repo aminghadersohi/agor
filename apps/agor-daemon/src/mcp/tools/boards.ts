@@ -12,6 +12,7 @@ import {
 import {
   compactZoneItemSize,
   getZoneLayoutFrame,
+  growZoneLayoutHeight,
   normalizeZoneLayoutPolicy,
   sortZoneLayoutItems,
   ZONE_LAYOUT_MODES,
@@ -1640,7 +1641,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       }
 
       const appliedZoneHeight = autoResizeHeight
-        ? Math.max(200, ceilBoardGridValue(layout.height + titleInset))
+        ? growZoneLayoutHeight(zone.height, layout.height + titleInset)
         : ceilBoardGridValue(zone.height);
       const appliedZoneWidth =
         resizeMode === 'both'

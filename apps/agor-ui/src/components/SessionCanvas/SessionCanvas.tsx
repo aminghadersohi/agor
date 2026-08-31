@@ -2002,10 +2002,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   : node.type === 'cardNode'
                     ? boardObjectByCard.get(node.id.replace('card-', ''))
                     : undefined;
+              const boardObject = node.type === 'zone' ? board?.objects?.[node.id] : undefined;
+              const persistedZone = boardObject?.type === 'zone' ? boardObject : undefined;
               const currentWidth =
-                node.type === 'zone' ? node.style?.width : entityBoardObject?.size?.width;
+                node.type === 'zone' ? persistedZone?.width : entityBoardObject?.size?.width;
               const currentHeight =
-                node.type === 'zone' ? node.style?.height : entityBoardObject?.size?.height;
+                node.type === 'zone' ? persistedZone?.height : entityBoardObject?.size?.height;
 
               // Skip if dimensions haven't changed (tolerance of 1px for floating point)
               if (
@@ -2018,7 +2020,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               }
 
               const currentPosition =
-                node.type === 'zone' ? board?.objects?.[node.id] : entityBoardObject?.position;
+                node.type === 'zone' ? persistedZone : entityBoardObject?.position;
               if (!currentPosition) return;
 
               // Accumulate the complete rect so a left/top handle persists

@@ -2,10 +2,19 @@ import { describe, expect, it } from 'vitest';
 import {
   compactZoneItemSize,
   getZoneLayoutFrame,
+  growZoneLayoutHeight,
   normalizeZoneLayoutPolicy,
   sortZoneLayoutItems,
   type ZoneLayoutSortItem,
 } from './zone-layout';
+
+describe('grow-only zone height', () => {
+  it('keeps a direct resize as the floor and still grows for larger contents', () => {
+    expect(growZoneLayoutHeight(1000, 260)).toBe(1000);
+    expect(growZoneLayoutHeight(1000, 1201)).toBe(1220);
+    expect(growZoneLayoutHeight(120, 80)).toBe(200);
+  });
+});
 
 describe('zone layout frame', () => {
   it('gives cards and worktrees the same inset, header reserve, and usable width', () => {
