@@ -113,6 +113,7 @@ import { CommentNode, ZoneNode } from './canvas/BoardObjectNodes';
 import { MarkdownNode } from './canvas/MarkdownNode';
 import { RemoteCursorLayer, type StaticRemoteCursor } from './canvas/RemoteCursorLayer';
 import {
+  CANVAS_LAYOUT_CONTROLS_CLASS,
   SelectionLayoutPopover,
   type SelectionLayoutSettings,
 } from './canvas/SelectionLayoutPopover';
@@ -152,6 +153,14 @@ import { mergePendingZoneGeometry, type ZoneGeometry } from './canvas/utils/pend
 import { persistedResizeRect, type ResizeRect } from './canvas/utils/resizeGeometry';
 import { ZoneTriggerModal } from './canvas/ZoneTriggerModal';
 import { DEFAULT_BOARD_OBJECT_Z_INDEX, selectedZIndex } from './canvas/zOrder';
+
+export function isCanvasSelectionControlTarget(target: Element): boolean {
+  return Boolean(
+    target.closest(
+      `.canvas-layout-toolbar, .${CANVAS_LAYOUT_CONTROLS_CLASS}, .ant-modal-root, .react-flow__controls, .react-flow__minimap, button, input, textarea, select, a, [role="button"]`
+    )
+  );
+}
 
 interface SessionCanvasProps {
   board: Board | null;
@@ -2837,11 +2846,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         const target = event.target;
         if (!(target instanceof Element)) return;
 
-        if (
-          target.closest(
-            '.canvas-layout-toolbar, .react-flow__controls, .react-flow__minimap, button, input, textarea, select, a, [role="button"]'
-          )
-        ) {
+        if (isCanvasSelectionControlTarget(target)) {
           return;
         }
 

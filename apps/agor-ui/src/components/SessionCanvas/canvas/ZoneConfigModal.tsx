@@ -274,6 +274,7 @@ export const ZoneConfigModal = ({
         <Form.Item name="layoutPreset" label="Presentation">
           <Segmented
             block
+            aria-label="Presentation"
             options={[
               { label: 'Grid', value: 'grid' },
               { label: 'List', value: 'compact_list' },

@@ -6,6 +6,9 @@ export type SelectionLayoutMode = 'compact' | 'grid';
 export type SelectionTrackAxis = 'columns' | 'rows';
 export type SelectionRowDistribution = 'packed' | 'justify';
 
+/** Marks portaled layout controls so canvas selection gestures ignore them. */
+export const CANVAS_LAYOUT_CONTROLS_CLASS = 'canvas-layout-controls';
+
 export interface SelectionLayoutSettings {
   mode: SelectionLayoutMode;
   trackAxis: SelectionTrackAxis;
@@ -64,6 +67,7 @@ export function SelectionLayoutPopover({ selectionCount, onApply }: SelectionLay
           <Space.Compact block>
             <Select
               aria-label="Fixed grid axis"
+              classNames={{ popup: { root: CANVAS_LAYOUT_CONTROLS_CLASS } }}
               value={trackAxis}
               options={[
                 { label: 'Columns', value: 'columns' },
@@ -95,6 +99,7 @@ export function SelectionLayoutPopover({ selectionCount, onApply }: SelectionLay
           </Space>
           <Select
             aria-label="Row distribution"
+            classNames={{ popup: { root: CANVAS_LAYOUT_CONTROLS_CLASS } }}
             value={rowDistribution}
             options={[
               { label: 'Packed rows', value: 'packed' },
@@ -127,6 +132,7 @@ export function SelectionLayoutPopover({ selectionCount, onApply }: SelectionLay
       onOpenChange={setOpen}
       destroyOnHidden
       placement="bottomRight"
+      classNames={{ root: CANVAS_LAYOUT_CONTROLS_CLASS }}
     >
       <Button
         size="small"

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { BOARD_GRID_SIZE } from './rectangle-packing';
 import {
   compactZoneItemSize,
   getZoneLayoutFrame,
@@ -31,6 +32,7 @@ describe('zone content justification', () => {
     ['top', { left: 100, top: 100, right: 520, bottom: 360 }],
     ['bottom', { left: 100, top: 620, right: 520, bottom: 880 }],
     ['middle', { left: 100, top: 180, right: 520, bottom: 440 }],
+    ['vertical_middle', { left: 100, top: 320, right: 520, bottom: 580 }],
   ] as const)('justifies collision-independent components to %s', (justification, expected) => {
     const result = justifyZoneContentCluster(mixed, frame, 900, justification);
     const bounds = {
@@ -50,6 +52,20 @@ describe('zone content justification', () => {
         expect(overlapX > 0 && overlapY > 0).toBe(false);
       }
     }
+  });
+
+  it('centers vertically on the zone itself without title or status bias', () => {
+    const child = [{ id: 'child', x: 20, y: 100, width: 500, height: 240 }];
+    const ordinary = getZoneLayoutFrame({ width: 540 });
+    const prominentTitle = getZoneLayoutFrame({ width: 540, fontSize: 48, status: 'Blocked' });
+
+    expect(prominentTitle.headerInset).toBeGreaterThan(ordinary.headerInset);
+    expect(justifyZoneContentCluster(child, ordinary, 500, 'vertical_middle').placements[0].y).toBe(
+      140
+    );
+    expect(
+      justifyZoneContentCluster(child, prominentTitle, 500, 'vertical_middle').placements[0].y
+    ).toBe(140);
   });
 
   it('centers the seeded Review rows independently without changing their vertical order', () => {
@@ -130,6 +146,17 @@ describe('zone layout frame', () => {
 
     for (const value of Object.values(frame)) expect(value % 20).toBe(0);
     expect(frame.headerInset).toBeGreaterThan(80);
+  });
+
+  it('reserves board-space title height at the current canvas scale', () => {
+    const normal = getZoneLayoutFrame({ width: 540, fontSize: 48, status: 'Active' });
+    const zoomedOut = getZoneLayoutFrame(
+      { width: 540, fontSize: 48, status: 'Active' },
+      { fontScale: 2 }
+    );
+
+    expect(zoomedOut.headerInset).toBeGreaterThan(normal.headerInset);
+    expect(zoomedOut.headerInset % BOARD_GRID_SIZE).toBe(0);
   });
 });
 

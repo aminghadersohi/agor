@@ -44,6 +44,8 @@ export interface BoardZoneArrangementInput {
   width: number;
   height: number;
   fontSize?: number;
+  /** Inverse canvas zoom for screen-stable zone title geometry. */
+  fontScale?: number;
   status?: string;
   layout?: Partial<ZoneLayoutPolicy>;
   items: readonly BoardZoneArrangementItem[];
@@ -109,7 +111,7 @@ export function planBoardZoneArrangement(
   const orderedZones = [...sourceZones].sort(spatialOrder);
   const prepared = orderedZones.map((zone) => {
     const policy = normalizeZoneLayoutPolicy(zone.layout);
-    const frame = getZoneLayoutFrame(zone);
+    const frame = getZoneLayoutFrame(zone, { fontScale: zone.fontScale });
     // Compact geometry must not become its own next sort key: a frontier pack
     // can intentionally fill a hole above an earlier item. Re-sorting those
     // placements spatially on reload would change insertion order and churn.
@@ -232,7 +234,10 @@ export function planBoardZoneArrangement(
   const zones = layout.placements.map((placement): ArrangedBoardZone => {
     const entry = preparedById.get(placement.id);
     if (!entry) throw new Error(`Missing arrangement input for zone '${placement.id}'.`);
-    const frame = getZoneLayoutFrame({ ...entry.zone, width: placement.width });
+    const frame = getZoneLayoutFrame(
+      { ...entry.zone, width: placement.width },
+      { fontScale: entry.zone.fontScale }
+    );
     const items = entry.orderedItems.map((item) => ({
       id: item.id,
       ...(entry.policy.preset === 'compact_list' && item.entityType

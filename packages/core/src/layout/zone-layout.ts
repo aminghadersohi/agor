@@ -23,7 +23,14 @@ export const ZONE_LAYOUT_SORT_FIELDS = [
 export const ZONE_LAYOUT_SORT_DIRECTIONS = ['asc', 'desc'] as const;
 export const ZONE_RESIZE_MODES = ['fixed', 'height', 'both'] as const;
 export const ZONE_OVERFLOW_STRATEGIES = ['report', 'reflow_board'] as const;
-export const ZONE_CONTENT_JUSTIFICATIONS = ['left', 'middle', 'right', 'top', 'bottom'] as const;
+export const ZONE_CONTENT_JUSTIFICATIONS = [
+  'left',
+  'middle',
+  'right',
+  'top',
+  'vertical_middle',
+  'bottom',
+] as const;
 export type ZoneContentJustification = (typeof ZONE_CONTENT_JUSTIFICATIONS)[number];
 
 export const DEFAULT_ZONE_LAYOUT_POLICY: Readonly<ZoneLayoutPolicy> = {
@@ -51,6 +58,15 @@ export interface ZoneLayoutFrameInput {
   width: number;
   fontSize?: number;
   status?: string;
+}
+
+export interface ZoneLayoutFrameOptions {
+  padding?: number;
+  /**
+   * Converts screen-stable title text into board-space geometry. Browsers pass
+   * the inverse canvas zoom; non-visual callers use the stable default of 1.
+   */
+  fontScale?: number;
 }
 
 export interface ZoneLayoutFrame {
@@ -117,9 +133,11 @@ function connectedSpanComponents(
 /**
  * Align collision-independent rows or columns inside a zone frame. Horizontal
  * actions translate connected components whose vertical spans overlap; top
- * and bottom translate components whose horizontal spans overlap. Each
+ * and vertical actions translate components whose horizontal spans overlap. Each
  * component remains a rigid body, so collision-free geometry stays
  * collision-free while separate rows/columns can align independently.
+ * `middle` retains its public horizontal-centering meaning;
+ * `vertical_middle` is the matching vertical-centering action.
  */
 export function justifyZoneContentCluster(
   items: readonly ZoneContentRect[],
@@ -146,7 +164,14 @@ export function justifyZoneContentCluster(
     const end = horizontal
       ? Math.max(...componentItems.map((item) => item.x + item.width))
       : Math.max(...componentItems.map((item) => item.y + item.height));
-    const contentStart = horizontal ? contentLeft : contentTop;
+    // Top alignment and automatic packing reserve the title/status header.
+    // Explicit vertical centering, however, targets the geometric center of
+    // the zone itself; a taller title must never bias the contents downward.
+    const contentStart = horizontal
+      ? contentLeft
+      : justification === 'vertical_middle'
+        ? frame.padding
+        : contentTop;
     const contentEnd = horizontal ? contentRight : contentBottom;
     if (end - start > contentEnd - contentStart + JUSTIFY_OVERLAP_TOLERANCE) {
       return { fits: false, placements: [...items] };
@@ -155,7 +180,7 @@ export function justifyZoneContentCluster(
     const targetStart =
       justification === 'right' || justification === 'bottom'
         ? contentEnd - (end - start)
-        : justification === 'middle'
+        : justification === 'middle' || justification === 'vertical_middle'
           ? (contentStart + contentEnd - (end - start)) / 2
           : contentStart;
     const delta = snapBoardGridValue(targetStart - start);
@@ -179,7 +204,7 @@ export function justifyZoneContentCluster(
  */
 export function getZoneLayoutFrame(
   zone: ZoneLayoutFrameInput,
-  options: { padding?: number } = {}
+  options: ZoneLayoutFrameOptions = {}
 ): ZoneLayoutFrame {
   const requestedPadding = options.padding ?? ZONE_LAYOUT_FRAME_PADDING;
   const padding =
@@ -193,8 +218,14 @@ export function getZoneLayoutFrame(
     typeof zone.fontSize === 'number' && Number.isFinite(zone.fontSize)
       ? Math.min(48, Math.max(10, zone.fontSize))
       : 14;
-  const labelHeight = Math.ceil(labelFontSize * 1.2);
-  const statusHeight = zone.status ? 8 + Math.ceil(labelFontSize * 1.05) : 0;
+  const fontScale =
+    typeof options.fontScale === 'number' && Number.isFinite(options.fontScale)
+      ? Math.min(10, Math.max(0.1, options.fontScale))
+      : 1;
+  const labelHeight = Math.ceil(labelFontSize * fontScale * 1.2);
+  const statusHeight = zone.status
+    ? Math.ceil(8 * fontScale) + Math.ceil(labelFontSize * fontScale * 1.05)
+    : 0;
   const headerInset = ceilBoardGridValue(Math.max(64, 32 + labelHeight + statusHeight));
 
   return {

@@ -7,7 +7,7 @@ import type { ButtonHTMLAttributes, MouseEventHandler, ReactNode } from 'react';
 import type { Node } from 'reactflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
-import SessionCanvas from './SessionCanvas';
+import SessionCanvas, { isCanvasSelectionControlTarget } from './SessionCanvas';
 
 let reactFlowProps: Record<string, unknown> | null = null;
 // Stable spy for the `useNodesState` setter (onNodesChangeInternal). Lets tests
@@ -73,6 +73,25 @@ beforeEach(() => {
 });
 
 describe('SessionCanvas zoom shortcuts', () => {
+  it('does not start a canvas selection gesture from portaled layout controls', () => {
+    const popover = document.createElement('div');
+    popover.className = 'canvas-layout-controls';
+    const gridControl = document.createElement('span');
+    popover.append(gridControl);
+
+    expect(isCanvasSelectionControlTarget(gridControl)).toBe(true);
+  });
+
+  it('does not capture a portaled modal segmented option as a canvas gesture', () => {
+    const modal = document.createElement('div');
+    modal.className = 'ant-modal-root';
+    const segmentedOption = document.createElement('span');
+    segmentedOption.className = 'ant-segmented-item-label';
+    modal.append(segmentedOption);
+
+    expect(isCanvasSelectionControlTarget(segmentedOption)).toBe(true);
+  });
+
   it('uses Command or Control plus scroll to zoom while preserving scroll panning', () => {
     render(<SessionCanvas board={null} client={null} branches={[]} />);
 

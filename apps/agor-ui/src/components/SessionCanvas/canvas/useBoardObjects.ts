@@ -74,6 +74,22 @@ function renderedNodeSize(node: Node): { width: number; height: number } {
   };
 }
 
+/**
+ * Zone titles stay a constant screen size while the board zooms. Convert that
+ * rendered size back into board units for one explicit layout pass so children
+ * cannot be packed underneath a large title. Missing DOM measurements retain
+ * the shared core/MCP fallback scale of 1.
+ */
+function renderedZoneFontScale(zoneId: string, flowWidth: number): number {
+  if (typeof document === 'undefined' || !Number.isFinite(flowWidth) || flowWidth <= 0) return 1;
+  const element = Array.from(
+    document.querySelectorAll<HTMLElement>('.react-flow__node-zone[data-id]')
+  ).find((candidate) => candidate.dataset.id === zoneId);
+  const renderedWidth = element?.getBoundingClientRect().width ?? 0;
+  if (!Number.isFinite(renderedWidth) || renderedWidth <= 0) return 1;
+  return flowWidth / renderedWidth;
+}
+
 const ZONE_CANVAS_NODE_TYPES = new Set(['markdown', 'appNode', 'artifactNode']);
 
 function isPositionableZoneCanvasNode(node: Node): boolean {
@@ -572,6 +588,7 @@ export const useBoardObjects = ({
       // reintroduce the older container geometry from the board snapshot.
       const visibleWidth = Number(liveZoneNode?.width ?? liveZoneNode?.style?.width);
       const visibleHeight = Number(liveZoneNode?.height ?? liveZoneNode?.style?.height);
+      const liveZoneData = liveZoneNode?.data as { fontSize?: number; status?: string } | undefined;
       const zone = {
         ...persistedZone,
         x: liveZoneNode?.position.x ?? persistedZone.x,
@@ -582,6 +599,8 @@ export const useBoardObjects = ({
           Number.isFinite(visibleHeight) && visibleHeight > 0
             ? visibleHeight
             : persistedZone.height,
+        fontSize: liveZoneData?.fontSize ?? persistedZone.fontSize,
+        status: liveZoneData?.status ?? persistedZone.status,
       };
 
       let changedNodes: Node[] = [];
@@ -648,7 +667,9 @@ export const useBoardObjects = ({
       }
 
       const itemSize = (node: Node) => ceilBoardGridSize(renderedNodeSize(node));
-      const frame = getZoneLayoutFrame(zone);
+      const frame = getZoneLayoutFrame(zone, {
+        fontScale: renderedZoneFontScale(zoneId, zone.width),
+      });
       const requestedGap = policy.gap ?? 24;
       const gridGap =
         requestedGap === 0 ? 0 : Math.max(BOARD_GRID_SIZE, snapBoardGridValue(requestedGap));
@@ -1108,9 +1129,10 @@ export const useBoardObjects = ({
   arrangeZoneContentsRef.current = arrangeZoneContents;
 
   /**
-   * Move a zone's visible heterogeneous contents as one rigid cluster. This is
-   * deliberately a one-shot direct edit: an armed Auto Zone is demoted before
-   * the optimistic position change, so no pending observer can re-pack it.
+   * Align a zone's visible heterogeneous rows or columns independently. This
+   * is deliberately a one-shot direct edit: an armed Auto Zone is demoted
+   * before the optimistic position change, so no pending observer can re-pack
+   * it.
    */
   const justifyZoneContents = useCallback(
     async (zoneId: string, justification: ZoneContentJustification) => {
@@ -1121,6 +1143,7 @@ export const useBoardObjects = ({
       const liveZoneNode = currentNodes.find((node) => node.id === zoneId);
       const visibleWidth = Number(liveZoneNode?.width ?? liveZoneNode?.style?.width);
       const visibleHeight = Number(liveZoneNode?.height ?? liveZoneNode?.style?.height);
+      const liveZoneData = liveZoneNode?.data as { fontSize?: number; status?: string } | undefined;
       const zone = {
         ...persistedZone,
         x: liveZoneNode?.position.x ?? persistedZone.x,
@@ -1131,6 +1154,8 @@ export const useBoardObjects = ({
           Number.isFinite(visibleHeight) && visibleHeight > 0
             ? visibleHeight
             : persistedZone.height,
+        fontSize: liveZoneData?.fontSize ?? persistedZone.fontSize,
+        status: liveZoneData?.status ?? persistedZone.status,
       };
       const placementByNodeId = new Map<string, BoardEntityObject>();
       for (const placement of boardObjectsForBoard) {
@@ -1164,7 +1189,9 @@ export const useBoardObjects = ({
 
       const justified = justifyZoneContentCluster(
         children.map(({ rect }) => rect),
-        getZoneLayoutFrame(zone),
+        getZoneLayoutFrame(zone, {
+          fontScale: renderedZoneFontScale(zoneId, zone.width),
+        }),
         zone.height,
         justification
       );
@@ -1186,12 +1213,19 @@ export const useBoardObjects = ({
           return [];
         return [{ ...node, position }];
       });
-      const label = justification === 'middle' ? 'center' : justification;
+      const label =
+        justification === 'middle'
+          ? 'center'
+          : justification === 'vertical_middle'
+            ? 'vertical center'
+            : justification;
       if (changedNodes.length === 0) {
         showSuccess(
           justification === 'middle'
             ? 'Contents are already centered in the zone.'
-            : `Contents are already justified to the ${label}.`
+            : justification === 'vertical_middle'
+              ? 'Contents are already centered vertically in the zone.'
+              : `Contents are already justified to the ${label}.`
         );
         return;
       }
@@ -1228,7 +1262,11 @@ export const useBoardObjects = ({
               .patch(placement.object_id, { position: node.position });
           })
         );
-        showSuccess(`Justified ${changedNodes.length} items to the ${label}.`);
+        showSuccess(
+          justification === 'vertical_middle'
+            ? `Centered ${changedNodes.length} items vertically in the zone.`
+            : `Justified ${changedNodes.length} items to the ${label}.`
+        );
       } catch (error) {
         console.error('Failed to justify zone contents:', error);
         showError('Failed to justify zone contents');
@@ -1286,6 +1324,13 @@ export const useBoardObjects = ({
                   y: live?.position.y ?? object.y,
                   width: Number.isFinite(width) && width > 0 ? width : object.width,
                   height: Number.isFinite(height) && height > 0 ? height : object.height,
+                  fontSize:
+                    typeof live?.data?.fontSize === 'number' ? live.data.fontSize : object.fontSize,
+                  status: typeof live?.data?.status === 'string' ? live.data.status : object.status,
+                  fontScale: renderedZoneFontScale(
+                    zoneId,
+                    Number.isFinite(width) && width > 0 ? width : object.width
+                  ),
                 },
               ] as const,
             ];
@@ -1330,6 +1375,7 @@ export const useBoardObjects = ({
               width: object.width,
               height: object.height,
               fontSize: object.fontSize,
+              fontScale: object.fontScale,
               status: object.status,
               layout: object.layout,
               items: children.map((node) => {

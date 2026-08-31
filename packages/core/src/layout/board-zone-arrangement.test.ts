@@ -86,6 +86,15 @@ describe('planBoardZoneArrangement', () => {
     expect(new Set(list?.items.map(({ x }) => x))).toHaveLength(1);
   });
 
+  it('carries a measured title scale through zone sizing and child packing', () => {
+    const base = { ...zone('large-title', 0, 0, [item('child', 500, 240)]), fontSize: 48 };
+    const normal = planBoardZoneArrangement([base]).zones[0]!;
+    const zoomedOut = planBoardZoneArrangement([{ ...base, fontScale: 2 }]).zones[0]!;
+
+    expect(zoomedOut.height).toBeGreaterThan(normal.height);
+    expect(zoomedOut.items[0]!.y).toBeGreaterThan(normal.items[0]!.y);
+  });
+
   it('does not exceed an explicit zone column preference', () => {
     const plan = planBoardZoneArrangement([
       {

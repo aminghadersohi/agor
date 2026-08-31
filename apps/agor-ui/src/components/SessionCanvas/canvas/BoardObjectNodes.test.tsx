@@ -31,6 +31,7 @@ function renderZone(
     selected?: boolean;
     suppressToolbar?: boolean;
     positionableItemCount?: number;
+    onArrangeContents?: ReturnType<typeof vi.fn>;
     onJustifyContents?: ReturnType<typeof vi.fn>;
   }
 ) {
@@ -55,6 +56,7 @@ function renderZone(
         suppressToolbar: extra?.suppressToolbar,
         positionableItemCount: extra?.positionableItemCount,
         onReorder,
+        onArrangeContents: extra?.onArrangeContents,
         onJustifyContents: extra?.onJustifyContents,
       }}
     />,
@@ -76,11 +78,41 @@ describe('ZoneNode layer toolbar', () => {
     expect(onJustifyContents).toHaveBeenCalledWith('zone-1', 'middle');
   });
 
-  it('bounds a growing toolbar and wraps extra actions upward away from zone contents', () => {
+  it('dispatches vertical centering through an explicit accessible action', () => {
+    const onJustifyContents = vi.fn();
+    renderZone(vi.fn(), CONNECTED, { positionableItemCount: 2, onJustifyContents });
+
+    const button = screen.getByRole('button', { name: 'Center contents vertically' });
+    fireEvent.pointerDown(button);
+    fireEvent.pointerUp(button);
+    fireEvent.click(button);
+
+    expect(onJustifyContents).toHaveBeenCalledTimes(1);
+    expect(onJustifyContents).toHaveBeenCalledWith('zone-1', 'vertical_middle');
+  });
+
+  it('allows a single card or worktree to be tidied while keeping empty zones disabled', () => {
+    const onArrangeContents = vi.fn();
+    renderZone(vi.fn(), CONNECTED, { positionableItemCount: 1, onArrangeContents });
+
+    const tidy = screen.getByRole('button', { name: 'Tidy up contents' });
+    expect(tidy).toBeEnabled();
+    fireEvent.pointerUp(tidy);
+    expect(onArrangeContents).toHaveBeenCalledWith('zone-1');
+
+    renderZone(vi.fn(), CONNECTED, { positionableItemCount: 0 });
+    expect(screen.getAllByRole('button', { name: 'Tidy up contents' }).at(-1)).toBeDisabled();
+  });
+
+  it('portals the bounded toolbar above every node stacking context and wraps upward', () => {
     renderZone(vi.fn(), CONNECTED);
 
-    expect(screen.getByRole('toolbar', { name: 'Zone actions' })).toHaveStyle({
-      bottom: 'calc(100% + 8px)',
+    const toolbar = screen.getByRole('toolbar', { name: 'Zone actions' });
+    expect(toolbar.parentElement).toBe(document.body);
+    expect(toolbar).toHaveStyle({
+      position: 'fixed',
+      zIndex: '10000',
+      transform: 'translate(-50%, -100%)',
       flexWrap: 'wrap',
       width: 'max-content',
       maxWidth: 'min(460px, calc(100vw - 32px))',

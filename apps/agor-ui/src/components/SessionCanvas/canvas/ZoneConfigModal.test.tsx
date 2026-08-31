@@ -47,6 +47,40 @@ function historicalZone(): BoardObject {
 }
 
 describe('ZoneConfigModal historical tool migration', () => {
+  it('selects and persists the List presentation', async () => {
+    const onUpdate = vi.fn();
+    render(
+      <AntdApp>
+        <ZoneConfigModal
+          open
+          onCancel={vi.fn()}
+          zoneName="Review"
+          objectId="zone-1"
+          onUpdate={onUpdate}
+          zoneData={{
+            type: 'zone',
+            x: 0,
+            y: 0,
+            width: 620,
+            height: 900,
+            label: 'Review',
+            layout: { mode: 'manual', preset: 'grid' },
+          }}
+        />
+      </AntdApp>
+    );
+
+    const list = await screen.findByText('List', { selector: '.ant-segmented-item-label' });
+    fireEvent.click(list);
+    expect(list.closest('.ant-segmented-item')).toHaveClass('ant-segmented-item-selected');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate.mock.calls[0][1]).toMatchObject({
+      layout: { preset: 'compact_list', columns: 1 },
+    });
+  });
+
   it('shows a persisted manual demotion by turning the Auto Zone control off', async () => {
     render(
       <AntdApp>

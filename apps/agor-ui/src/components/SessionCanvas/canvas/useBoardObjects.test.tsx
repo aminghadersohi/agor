@@ -93,6 +93,30 @@ describe('justifyZoneContents production path', () => {
     expect(showSuccess).toHaveBeenCalledWith('Justified 1 items to the center.');
   });
 
+  it('centers a child vertically and persists only its relative Y position', async () => {
+    const view = renderJustify(
+      [branch],
+      [
+        {
+          object_id: 'placement-branch',
+          branch_id: branch.id,
+          zone_id: zoneId,
+          position: branch.position,
+        },
+      ]
+    );
+
+    await act(async () => view.result.current.justifyZoneContents(zoneId, 'vertical_middle'));
+
+    expect(view.boardsPatch).not.toHaveBeenCalled();
+    expect(view.boardObjectsPatch).toHaveBeenCalledTimes(1);
+    expect(view.boardObjectsPatch).toHaveBeenCalledWith('placement-branch', {
+      position: { x: 20, y: 140 },
+    });
+    expect(view.setNodes).toHaveBeenCalledTimes(1);
+    expect(showSuccess).toHaveBeenCalledWith('Centered 1 items vertically in the zone.');
+  });
+
   it('centers the seeded Review rows independently while preserving their Y positions', async () => {
     const card = {
       id: 'card-review',
@@ -379,6 +403,97 @@ describe('batchUpdateObjectPositions', () => {
 });
 
 describe('arrangeZoneContents', () => {
+  it('reserves the scaled live title before packing a single child', async () => {
+    const { client, boardObjectsPatch } = makeRoutedClient();
+    const board = makeBoard({
+      zone: {
+        type: 'zone',
+        x: 0,
+        y: 0,
+        width: 540,
+        height: 500,
+        label: 'Large title',
+        fontSize: 48,
+      },
+    });
+    const initialNodes: Node[] = [
+      {
+        id: 'zone',
+        type: 'zone',
+        position: { x: 0, y: 0 },
+        data: { fontSize: 48 },
+        width: 540,
+        height: 500,
+      },
+      {
+        id: 'branch-1',
+        type: 'branchNode',
+        parentId: 'zone',
+        position: { x: 20, y: 100 },
+        data: {},
+        width: 500,
+        height: 240,
+      },
+    ];
+    let renderedNodes = initialNodes;
+    const setNodes: React.Dispatch<React.SetStateAction<Node[]>> = (value) => {
+      renderedNodes = typeof value === 'function' ? value(renderedNodes) : value;
+    };
+    const renderedZone = document.createElement('div');
+    renderedZone.className = 'react-flow__node-zone';
+    renderedZone.dataset.id = 'zone';
+    renderedZone.getBoundingClientRect = () =>
+      ({
+        width: 270,
+        height: 250,
+        x: 0,
+        y: 0,
+        top: 0,
+        left: 0,
+        right: 270,
+        bottom: 250,
+      }) as DOMRect;
+    document.body.append(renderedZone);
+
+    try {
+      const { result } = renderHook(
+        () =>
+          useBoardObjects({
+            board,
+            client,
+            boardObjectsForBoard: [
+              {
+                object_id: 'placement-branch',
+                branch_id: 'branch-1',
+                zone_id: 'zone',
+                position: { x: 20, y: 100 },
+              },
+            ] as never,
+            nodes: initialNodes,
+            setNodes,
+            deletedObjectsRef: { current: new Set<string>() },
+          }),
+        { wrapper }
+      );
+
+      const zoneNode = result.current.getBoardObjectNodes()[0];
+      await act(async () => {
+        await (zoneNode.data.onArrangeContents as (id: string) => Promise<void>)('zone');
+      });
+
+      expect(renderedNodes.find((node) => node.id === 'branch-1')?.position).toEqual({
+        x: 20,
+        y: 180,
+      });
+      expect(boardObjectsPatch).toHaveBeenCalledWith('placement-branch', {
+        position: { x: 20, y: 180 },
+        size: { width: 500, height: 240 },
+      });
+    } finally {
+      renderedZone.remove();
+    }
+  });
+
   it('packs once, starts one motion, and persists one complete patch per child', async () => {
     const { client, patch } = makeClient();
     const onArrangeNodes = vi.fn();

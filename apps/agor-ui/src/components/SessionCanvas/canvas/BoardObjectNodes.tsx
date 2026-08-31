@@ -20,13 +20,15 @@ import {
   SettingOutlined,
   UnlockOutlined,
   VerticalAlignBottomOutlined,
+  VerticalAlignMiddleOutlined,
   VerticalAlignTopOutlined,
 } from '@ant-design/icons';
 import { ColorPicker, theme } from 'antd';
 import type { Color } from 'antd/es/color-picker';
 import { AggregationColor } from 'antd/es/color-picker/color';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { NodeResizer, useViewport } from 'reactflow';
+import { createPortal } from 'react-dom';
+import { NodeResizer, useStore, useViewport } from 'reactflow';
 import { useMutationGate } from '../../../contexts/ConnectionContext';
 import { getContrastingTextColor } from '../../../utils/theme';
 import { getUserInitials } from '../../UserIdentityAvatar';
@@ -108,9 +110,20 @@ const saveRecentColor = (color: string) => {
   }
 };
 
-const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: boolean }) => {
+const ZoneNodeComponent = ({
+  data,
+  selected,
+  xPos,
+  yPos,
+}: {
+  data: ZoneNodeData;
+  selected?: boolean;
+  xPos?: number;
+  yPos?: number;
+}) => {
   const { token } = theme.useToken();
-  const { zoom } = useViewport();
+  const { x: viewportX, y: viewportY, zoom } = useViewport();
+  const reactFlowRoot = useStore((state) => state.domNode);
   const [isEditingLabel, setIsEditingLabel] = useState(false);
   const [label, setLabel] = useState(data.label);
   const [configModalOpen, setConfigModalOpen] = useState(false);
@@ -133,8 +146,11 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
   const zoneContentsAllCompact =
     (data.pinnedItemCount ?? 0) > 0 && (data.compactItemCount ?? 0) >= (data.pinnedItemCount ?? 0);
 
-  // Inverse scale to keep toolbar at constant size regardless of zoom
+  // Inverse scale keeps zone labels at a legible size regardless of zoom.
   const scale = 1 / zoom;
+  const toolbarHost = reactFlowRoot ?? (typeof document === 'undefined' ? null : document.body);
+  const toolbarLeft = viewportX + (xPos ?? data.x) * zoom + (data.width * zoom) / 2;
+  const toolbarTop = viewportY + (yPos ?? data.y) * zoom - 8;
 
   // Sync label state when data.label changes (from WebSocket or modal updates)
   useEffect(() => {
@@ -420,7 +436,10 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
         }}
       >
         {/* Toolbar - ALWAYS rendered, visibility controlled by CSS only */}
-        <div
+        {toolbarHost &&
+          createPortal(
+            /* biome-ignore format: keep the established toolbar body stable inside its portal */
+            <div
           className="nodrag nopan"
           role="toolbar"
           aria-label="Zone actions"
@@ -437,12 +456,15 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
             e.stopPropagation();
           }}
           style={{
-            position: 'absolute',
-            // Stay attached to the zone edge while growing upward, so a
-            // second row never covers the zone label or its contents.
-            bottom: 'calc(100% + 8px)',
-            left: '50%',
-            transform: `translateX(-50%) scale(${scale})`,
+            // A portal at the React Flow root escapes every node stacking
+            // context. It therefore stays above zones, cards, artifacts, and
+            // comments without raising the translucent zone container itself.
+            position: reactFlowRoot ? 'absolute' : 'fixed',
+            top: toolbarTop,
+            left: toolbarLeft,
+            // Anchor the toolbar's bottom edge above the zone. Extra wrapped
+            // rows grow upward and never cover the zone label or contents.
+            transform: 'translate(-50%, -100%)',
             transformOrigin: 'center bottom',
             display: data.suppressToolbar ? 'none' : 'flex',
             alignItems: 'center',
@@ -459,7 +481,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
             border: `1px solid ${token.colorBorder}`,
             borderRadius: token.borderRadius,
             boxShadow: token.boxShadowSecondary,
-            zIndex: 1000,
+            zIndex: 10_000,
             userSelect: 'none',
             // CSS-only visibility control (no DOM changes). When the
             // connection gate is closed we also dim and block clicks so the
@@ -680,7 +702,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
             'Tidy up contents',
             <AppstoreOutlined style={layerIconStyle} />,
             () => data.onArrangeContents?.(data.objectId),
-            (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 2
+            (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
           )}
           <fieldset
             className="nodrag nopan"
@@ -721,6 +743,13 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
               'Justify contents top',
               <VerticalAlignTopOutlined style={layerIconStyle} />,
               () => data.onJustifyContents?.(data.objectId, 'top'),
+              (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
+            )}
+            {renderActionButton(
+              'justify-vertical-middle',
+              'Center contents vertically',
+              <VerticalAlignMiddleOutlined style={layerIconStyle} />,
+              () => data.onJustifyContents?.(data.objectId, 'vertical_middle'),
               (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
             )}
             {renderActionButton(
@@ -906,7 +935,9 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
               }}
             />
           </button>
-        </div>
+        </div>,
+            toolbarHost
+          )}
         <div
           data-zone-marquee-ignore="true"
           style={{
