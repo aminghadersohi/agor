@@ -45,6 +45,30 @@ export function propagatedCompletionCallbackTaskId(
   return stableTaskId(subscriptionId, 'root_completion', targetSessionId);
 }
 
+/** One ephemeral digest Session per source completion event and standing destination. */
+export function completionCallbackBtwSessionId(
+  sourceTaskId: TaskID,
+  targetSessionId: SessionID
+): SessionID {
+  return stableTaskId(sourceTaskId, 'session_completion_btw', targetSessionId) as SessionID;
+}
+
+/** One digest Task inside the deterministic callback BTW Session. */
+export function completionCallbackBtwTaskId(
+  sourceTaskId: TaskID,
+  targetSessionId: SessionID
+): TaskID {
+  return stableTaskId(sourceTaskId, 'session_completion_btw_task', targetSessionId);
+}
+
+/** One final coordinator transcript message for a callback digest completion. */
+export function completionCallbackBtwResultMessageId(
+  sourceTaskId: TaskID,
+  targetSessionId: SessionID
+): MessageID {
+  return stableTaskId(sourceTaskId, 'session_completion_btw_result', targetSessionId) as MessageID;
+}
+
 /** One durable auto-resume Task per widget message. */
 export function widgetAutoResumeTaskId(widgetId: MessageID): TaskID {
   return stableTaskId(widgetId, 'widget_auto_resume');
