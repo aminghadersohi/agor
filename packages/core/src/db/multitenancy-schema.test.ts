@@ -189,6 +189,25 @@ describe('Postgres multitenancy schema coverage', () => {
     expect(migration).not.toContain('WITH CHECK');
   });
 
+  it('limits session auto-archive discovery to due routing rows and an explicit capability', () => {
+    const migration = readRepoFile('packages/core/drizzle/postgres/0100_session_auto_archive.sql');
+
+    expect(migration).toContain('FOR SELECT');
+    expect(migration).toContain('"archived" = false');
+    expect(migration).toContain('"auto_archive" = \'after_completion\'');
+    expect(migration).toContain('"auto_archive_at" IS NOT NULL');
+    expect(migration).toContain("current_setting('agor.system_scope', true)");
+    expect(migration).toContain("= 'session_auto_archive_discovery'");
+    const discoveryPolicy = migration.slice(
+      migration.indexOf('CREATE POLICY "session_auto_archive_discovery"')
+    );
+    expect(discoveryPolicy).not.toContain('WITH CHECK');
+    expect(migration).toContain('CREATE POLICY "session_auto_archive_migration_0100"');
+    expect(migration).toContain("= 'session_auto_archive_migration_0100'");
+    expect(migration).toContain('DROP POLICY "session_auto_archive_migration_0100"');
+    expect(migration).toContain("SELECT set_config('agor.system_scope', '', true)");
+  });
+
   it('limits Knowledge embedding discovery to routing-only candidate rows', () => {
     const migration = readRepoFile(
       'packages/core/drizzle/postgres/0074_knowledge_embedding_claims.sql'

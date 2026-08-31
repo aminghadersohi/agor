@@ -27,6 +27,7 @@ import {
   type Board,
   getEffectiveDirectCallbackCoordinatorSessionId,
   getSessionType,
+  SESSION_AUTO_ARCHIVE_POLICIES,
   type Session,
   type SessionRelationship,
   type SessionType,
@@ -243,6 +244,9 @@ function compactSessionForMcp(session: Session) {
     created_at: session.created_at,
     last_updated: session.last_updated,
     genealogy: session.genealogy,
+    auto_archive: session.auto_archive,
+    auto_archive_after_seconds: session.auto_archive_after_seconds,
+    auto_archive_at: session.auto_archive_at,
     task_count: session.tasks?.length ?? 0,
     schedule_id: session.schedule_id,
   };
@@ -751,6 +755,17 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             'MCP server IDs to attach. Overrides parent session inheritance. Omit to inherit from parent. Pass empty array for no MCPs.'
           ),
         modelConfig: modelConfigInputSchema,
+        autoArchive: z
+          .enum(SESSION_AUTO_ARCHIVE_POLICIES)
+          .optional()
+          .describe('Child cleanup policy (default: after_completion). Use never to keep it.'),
+        autoArchiveAfterSeconds: z
+          .number()
+          .int()
+          .positive()
+          .max(365 * 24 * 60 * 60)
+          .optional()
+          .describe('Grace period before archival when autoArchive is after_completion.'),
       }),
     },
     async (args) => {
@@ -767,6 +782,8 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         task_id: args.taskId,
         mcpServerIds: args.mcpServerIds,
         modelConfig: coerceModelConfig(args.modelConfig),
+        autoArchive: args.autoArchive,
+        autoArchiveAfterSeconds: args.autoArchiveAfterSeconds,
       };
 
       const childSession = await (
@@ -833,6 +850,16 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .describe(
             'Send a one-shot completion report for the exact prompted task back to the current calling Agor session.'
           ),
+        autoArchive: z
+          .enum(SESSION_AUTO_ARCHIVE_POLICIES)
+          .optional()
+          .describe('Cleanup policy for subsession/BTW modes. Defaults to after_completion.'),
+        autoArchiveAfterSeconds: z
+          .number()
+          .int()
+          .positive()
+          .max(365 * 24 * 60 * 60)
+          .optional(),
       }),
     },
     async (args) => {
@@ -937,6 +964,10 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
 
         if (mode === 'btw') {
           forkPatch.fork_origin = 'btw';
+          forkPatch.auto_archive = args.autoArchive ?? 'after_completion';
+          if (args.autoArchiveAfterSeconds !== undefined) {
+            forkPatch.auto_archive_after_seconds = args.autoArchiveAfterSeconds;
+          }
           forkPatch.callback_config = {
             enabled: true,
             callback_session_id: btwCallbackSessionId,
@@ -980,6 +1011,8 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           prompt: args.prompt,
           mcpServerIds: args.mcpServerIds,
           modelConfig: coerceModelConfig(args.modelConfig),
+          autoArchive: args.autoArchive,
+          autoArchiveAfterSeconds: args.autoArchiveAfterSeconds,
         };
         if (args.title) spawnData.title = args.title;
         if (args.agenticTool) spawnData.agent = args.agenticTool as AgenticToolName;
@@ -1410,6 +1443,16 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             'MCP server IDs to attach. Overrides branch and user default inheritance. Omit to use branch config > user defaults.'
           ),
         modelConfig: modelConfigInputSchema,
+        autoArchive: z
+          .enum(SESSION_AUTO_ARCHIVE_POLICIES)
+          .optional()
+          .describe('Cleanup policy for a branch-local child. Root sessions may only use never.'),
+        autoArchiveAfterSeconds: z
+          .number()
+          .int()
+          .positive()
+          .max(365 * 24 * 60 * 60)
+          .optional(),
       }),
     },
     async (args) => {
@@ -1576,6 +1619,10 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           children: [],
         },
         tasks: [],
+        ...(args.autoArchive !== undefined && { auto_archive: args.autoArchive }),
+        ...(args.autoArchiveAfterSeconds !== undefined && {
+          auto_archive_after_seconds: args.autoArchiveAfterSeconds,
+        }),
       };
 
       const session = await ctx.app.service('sessions').create(sessionData, ctx.baseServiceParams);
@@ -1706,7 +1753,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_update',
     {
       description:
-        'Update session metadata (title, description, status, archived, callback config). Useful for agents to self-document their work or manage callback settings.',
+        'Update session metadata (title, description, status, archived, callback config, automatic archival). Useful for agents to self-document their work or manage lifecycle settings.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         sessionId: mcpRequiredId(
@@ -1734,6 +1781,13 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .describe(
             'Callback mode: "once" fires once then auto-disables, "persistent" fires every time (optional)'
           ),
+        autoArchive: z.enum(SESSION_AUTO_ARCHIVE_POLICIES).optional(),
+        autoArchiveAfterSeconds: z
+          .number()
+          .int()
+          .positive()
+          .max(365 * 24 * 60 * 60)
+          .optional(),
       }),
     },
     async (args) => {
@@ -1744,6 +1798,10 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       if (args.archived !== undefined) {
         updates.archived = args.archived;
         updates.archived_reason = args.archived ? 'manual' : undefined;
+      }
+      if (args.autoArchive !== undefined) updates.auto_archive = args.autoArchive;
+      if (args.autoArchiveAfterSeconds !== undefined) {
+        updates.auto_archive_after_seconds = args.autoArchiveAfterSeconds;
       }
 
       // Handle callback config updates
@@ -1762,7 +1820,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
 
       if (Object.keys(updates).length === 0) {
         throw new Error(
-          'At least one field (title, description, status, archived, enableCallback, callbackMode) must be provided'
+          'At least one field (title, description, status, archived, enableCallback, callbackMode, autoArchive, autoArchiveAfterSeconds) must be provided'
         );
       }
 

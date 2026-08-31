@@ -36,6 +36,14 @@ export const SessionStatus = {
 
 export type SessionStatus = (typeof SessionStatus)[keyof typeof SessionStatus];
 
+/** Durable cleanup policy for non-root child Sessions. */
+export const SESSION_AUTO_ARCHIVE_POLICIES = ['never', 'after_completion'] as const;
+export type SessionAutoArchivePolicy = (typeof SESSION_AUTO_ARCHIVE_POLICIES)[number];
+
+/** Product defaults applied once, when an eligible child Session is created. */
+export const BTW_AUTO_ARCHIVE_AFTER_SECONDS = 5 * 60;
+export const SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS = 60 * 60;
+
 /** Durable outcome reported by the authenticated Session Stop endpoint. */
 export const SESSION_STOP_OUTCOMES = [
   'stopped',
@@ -548,6 +556,17 @@ export interface Session {
    */
   fork_origin?: 'btw';
 
+  // ===== Automatic Archive Policy =====
+
+  /** Automatic archival is opt-out for BTW forks and spawned child Sessions. */
+  auto_archive: SessionAutoArchivePolicy;
+
+  /** Grace period used to derive auto_archive_at after a terminal Task commits. */
+  auto_archive_after_seconds?: number;
+
+  /** Durable deadline. Cleared by prompt admission, manual archive, or unarchive. */
+  auto_archive_at?: string;
+
   // ===== Archive State =====
 
   /**
@@ -565,8 +584,14 @@ export interface Session {
    * - 'manual': User manually archived this session
    * - 'parent_archived': Cascaded from parent session being manually archived
    * - 'btw_completed': Ephemeral btw fork auto-archived after task completion
+   * - 'auto_completed': Spawned child auto-archived after its safe grace period
    */
-  archived_reason?: 'branch_archived' | 'manual' | 'parent_archived' | 'btw_completed';
+  archived_reason?:
+    | 'branch_archived'
+    | 'manual'
+    | 'parent_archived'
+    | 'btw_completed'
+    | 'auto_completed';
 
   /**
    * Durable non-genealogy relationships involving this session.
@@ -974,4 +999,10 @@ export interface SpawnConfig {
    * creator or an admin/superadmin can set this — otherwise it is ignored.
    */
   envVarNames?: string[];
+
+  /** Cleanup policy for the spawned child. Defaults to after_completion. */
+  autoArchive?: SessionAutoArchivePolicy;
+
+  /** Positive grace in seconds when autoArchive is after_completion. */
+  autoArchiveAfterSeconds?: number;
 }

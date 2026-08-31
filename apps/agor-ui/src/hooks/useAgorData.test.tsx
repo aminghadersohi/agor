@@ -368,6 +368,38 @@ describe('useAgorData — socket-event bailouts', () => {
     });
   });
 
+  it('promptly evicts an auto-archived child while retaining its root', async () => {
+    const root = makeSession({
+      session_id: 's-root',
+      genealogy: { children: ['s-child'] },
+    });
+    const child = makeSession({
+      session_id: 's-child',
+      genealogy: { parent_session_id: 's-root', children: [] },
+    });
+    const { client, emit } = makeMockClient({ sessions: [root, child] });
+    const { result } = renderHook(() => useAgorData(client));
+    await waitForInitialLoad(result);
+
+    act(() => {
+      emit('sessions', 'patched', {
+        ...child,
+        archived: true,
+        archived_reason: 'auto_completed',
+      });
+      flushRealtimeNow(STANDALONE_AUTHORITY_SCOPE);
+    });
+
+    expect(agorStore.getState().sessionById.has('s-root')).toBe(true);
+    expect(agorStore.getState().sessionById.has('s-child')).toBe(false);
+    expect(
+      agorStore
+        .getState()
+        .sessionsByBranch.get('b-1')
+        ?.map((s) => s.session_id)
+    ).toEqual(['s-root']);
+  });
+
   it('ignores `sessions.removed` for a session not in the map', async () => {
     const { client, emit } = makeMockClient();
     const { result } = renderHook(() => useAgorData(client));

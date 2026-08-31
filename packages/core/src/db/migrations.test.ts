@@ -1069,6 +1069,47 @@ describe('MCP catalog install identity migration', () => {
   });
 });
 
+describe('Session automatic archival migration', () => {
+  it('keeps legacy SQLite sessions and adds a bounded durable due index', async () => {
+    const client = createClient({ url: ':memory:' });
+    await client.executeMultiple(`
+      CREATE TABLE sessions (
+        session_id text PRIMARY KEY,
+        archived integer DEFAULT 0 NOT NULL,
+        data text NOT NULL
+      );
+      INSERT INTO sessions VALUES ('legacy-root', 0, '{}');
+      INSERT INTO sessions VALUES ('legacy-btw', 0, '{"fork_origin":"btw"}');
+    `);
+    const migration = await readFile(
+      new URL('../../drizzle/sqlite/0103_session_auto_archive.sql', import.meta.url),
+      'utf8'
+    );
+    await client.executeMultiple(migration.replaceAll('--> statement-breakpoint', ''));
+
+    const row = await client.execute(
+      'SELECT session_id, auto_archive, auto_archive_after_seconds, auto_archive_at FROM sessions ORDER BY session_id'
+    );
+    expect(row.rows).toEqual([
+      {
+        session_id: 'legacy-btw',
+        auto_archive: 'after_completion',
+        auto_archive_after_seconds: 300,
+        auto_archive_at: null,
+      },
+      {
+        session_id: 'legacy-root',
+        auto_archive: 'never',
+        auto_archive_after_seconds: null,
+        auto_archive_at: null,
+      },
+    ]);
+    const indexes = await client.execute("PRAGMA index_list('sessions')");
+    expect(indexes.rows.some((index) => index.name === 'sessions_auto_archive_due_idx')).toBe(true);
+    client.close();
+  });
+});
+
 describe('MCP stdio transport repair migrations', () => {
   it('removes only remote fields from SQLite stdio rows', async () => {
     const client = createClient({ url: ':memory:' });

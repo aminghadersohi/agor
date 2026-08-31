@@ -48,6 +48,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     tasks: [taskId],
     ready_for_prompt: false,
     archived: false,
+    auto_archive: 'never',
     genealogy: {
       parent_session_id: parentSessionId,
       children: [],
@@ -378,6 +379,35 @@ describe('TasksService completion callbacks', () => {
     );
   });
 
+  it('commits the completion callback before scheduling archival and never archives inline', async () => {
+    const { service, createPending, sessionsPatch } = makeService({
+      childSession: {
+        auto_archive: 'after_completion',
+        auto_archive_after_seconds: 60,
+      },
+    });
+
+    await service.patch(taskId, {
+      status: TaskStatus.COMPLETED,
+      completed_at: '2026-01-01T00:00:05.000Z',
+    });
+
+    const deadlineCall = sessionsPatch.mock.calls.find(
+      ([id, updates]) => id === childSessionId && updates.auto_archive_at
+    );
+    expect(deadlineCall).toBeDefined();
+    expect(deadlineCall?.[1]).toMatchObject({ auto_archive_at: '2026-01-01T00:01:05.000Z' });
+    expect(createPending.mock.invocationCallOrder[0]).toBeLessThan(
+      sessionsPatch.mock.invocationCallOrder[
+        sessionsPatch.mock.calls.indexOf(deadlineCall as (typeof sessionsPatch.mock.calls)[number])
+      ]!
+    );
+    expect(sessionsPatch).not.toHaveBeenCalledWith(
+      childSessionId,
+      expect.objectContaining({ archived: true })
+    );
+  });
+
   it('includeOriginalPrompt=false queues one templated callback without an original prompt section', async () => {
     const { service, createPending } = makeService({
       childSession: {
@@ -515,7 +545,8 @@ describe('TasksService completion callbacks', () => {
   });
 
   it('still triggers target queue processing if dispatch marker persistence fails after queueing', async () => {
-    const { service, repository, createPending, triggerQueueProcessing } = makeService();
+    const { service, repository, createPending, triggerQueueProcessing, sessionsPatch } =
+      makeService();
     const completedTask = makeTask({
       status: TaskStatus.COMPLETED,
       completed_at: '2026-01-01T00:00:05.000Z',
@@ -533,6 +564,10 @@ describe('TasksService completion callbacks', () => {
 
     expect(createPending).toHaveBeenCalledTimes(1);
     expect(triggerQueueProcessing).toHaveBeenCalledWith(parentSessionId, {});
+    expect(sessionsPatch).not.toHaveBeenCalledWith(
+      childSessionId,
+      expect.objectContaining({ callback_config: expect.objectContaining({ enabled: false }) })
+    );
   });
 
   it('runs once-mode cleanup only for the caller that actually attempts dispatch', async () => {

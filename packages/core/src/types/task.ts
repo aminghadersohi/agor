@@ -173,6 +173,8 @@ export interface TaskMetadata {
     queued_task_id?: TaskID;
     dispatched_at: string;
   }>;
+  /** Durable acknowledgement that the inline BTW result reached its parent transcript. */
+  btw_result_delivered_at?: string;
   /**
    * Marks a task whose prompt was authored by the daemon (not typed by a
    * human). Used by widget auto-resume so the UI can label the queued
