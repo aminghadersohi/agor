@@ -97,6 +97,13 @@ export function getSelectedLayoutNodes(nodes: Node[]): Node[] {
   return nodes.filter((node) => rootIds.has(node.id));
 }
 
+/** Exact selected zone ids for the authoritative zone planner; mixed selections return null. */
+export function getOnlySelectedZoneIds(nodes: readonly Node[]): string[] | null {
+  return nodes.length > 0 && nodes.every((node) => node.type === 'zone')
+    ? nodes.map((node) => node.id)
+    : null;
+}
+
 /**
  * A multi-zone selection uses the shared canvas layout toolbar. Mark each
  * selected zone so its single-object toolbar does not render underneath it.

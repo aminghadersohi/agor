@@ -1,10 +1,166 @@
 import { describe, expect, it } from 'vitest';
 import {
   BOARD_GRID_SIZE,
+  layoutAlignedRectangles,
+  layoutCompactRectangles,
   layoutRectangles,
+  layoutSelectionGrid,
   type RectanglePlacement,
   snapBoardGridPoint,
 } from './rectangle-packing';
+
+describe('layoutAlignedRectangles', () => {
+  const sideBySide = [
+    { id: 'a', width: 300, height: 200, sourceX: 0, sourceY: 100 },
+    { id: 'b', width: 400, height: 160, sourceX: 400, sourceY: 100 },
+    { id: 'c', width: 240, height: 240, sourceX: 900, sourceY: 100 },
+  ];
+
+  it('aligns a horizontal row on the left without stacking zones on one another', () => {
+    const result = layoutAlignedRectangles(sideBySide, 'left', {
+      gap: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+
+    expect(result.map(({ id, x, y }) => ({ id, x, y }))).toEqual([
+      { id: 'a', x: 0, y: 100 },
+      { id: 'b', x: 0, y: 340 },
+      { id: 'c', x: 0, y: 540 },
+    ]);
+    expectNoOverlap(result);
+  });
+
+  it('keeps already separated perpendicular positions and is permutation-stable', () => {
+    const separated = [
+      { ...sideBySide[0], sourceY: 0 },
+      { ...sideBySide[1], sourceY: 400 },
+      { ...sideBySide[2], sourceY: 900 },
+    ];
+    const first = layoutAlignedRectangles(separated, 'center', {
+      gap: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+    const permuted = layoutAlignedRectangles([...separated].reverse(), 'center', {
+      gap: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+
+    expect(first.map((item) => item.y)).toEqual([0, 400, 900]);
+    expect(new Map(permuted.map((item) => [item.id, item]))).toEqual(
+      new Map(first.map((item) => [item.id, item]))
+    );
+    expectNoOverlap(first);
+  });
+
+  it('aligns a vertical column on top and minimally shifts later peers to the right', () => {
+    const result = layoutAlignedRectangles(
+      [
+        { id: 'a', width: 300, height: 200, sourceX: 100, sourceY: 0 },
+        { id: 'b', width: 200, height: 300, sourceX: 100, sourceY: 400 },
+      ],
+      'top',
+      { gap: 40, gridSize: BOARD_GRID_SIZE }
+    );
+
+    expect(result.map(({ id, x, y }) => ({ id, x, y }))).toEqual([
+      { id: 'a', x: 100, y: 0 },
+      { id: 'b', x: 440, y: 0 },
+    ]);
+    expectNoOverlap(result);
+  });
+
+  it('is idempotent and absorbs sub-grid position noise', () => {
+    const options = { gap: 40, gridSize: BOARD_GRID_SIZE };
+    const first = layoutAlignedRectangles(sideBySide, 'right', options);
+    const repeated = layoutAlignedRectangles(
+      first.map((item) => ({
+        id: item.id,
+        width: item.width,
+        height: item.height,
+        sourceX: item.x + 0.4,
+        sourceY: item.y + 0.4,
+      })),
+      'right',
+      options
+    );
+
+    expect(repeated).toEqual(first);
+  });
+});
+
+describe('layoutSelectionGrid', () => {
+  const mixed = [
+    { id: 'wide', width: 360, height: 100, sourceX: 0, sourceY: 0 },
+    { id: 'tall', width: 120, height: 280, sourceX: 500, sourceY: 0 },
+    { id: 'small', width: 160, height: 80, sourceX: 0, sourceY: 400 },
+    { id: 'large', width: 280, height: 180, sourceX: 500, sourceY: 400 },
+    { id: 'note', width: 200, height: 120, sourceX: 900, sourceY: 400 },
+  ];
+
+  it('lets rows drive the derived column count while preserving spatial order', () => {
+    const result = layoutSelectionGrid([...mixed].reverse(), {
+      rows: 2,
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+
+    expect(result.columns).toBe(3);
+    expect(result.rows).toBe(2);
+    expect(result.placements.map((item) => item.id)).toEqual([
+      'wide',
+      'tall',
+      'small',
+      'large',
+      'note',
+    ]);
+    expectNoOverlap(result.placements);
+  });
+
+  it('matches heights within each row and justifies multi-item rows to stable outer edges', () => {
+    const result = layoutSelectionGrid(mixed, {
+      columns: 3,
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+      matchRowHeights: true,
+      rowDistribution: 'justify',
+      targetWidth: 1000,
+    });
+    const firstRow = result.placements.filter((item) => item.row === 0);
+    const secondRow = result.placements.filter((item) => item.row === 1);
+
+    expect(new Set(firstRow.map((item) => item.height))).toEqual(new Set([280]));
+    expect(new Set(secondRow.map((item) => item.height))).toEqual(new Set([180]));
+    expect(firstRow[0]?.x).toBe(0);
+    expect((firstRow.at(-1)?.x ?? 0) + (firstRow.at(-1)?.width ?? 0)).toBe(1000);
+    expect(secondRow[0]?.x).toBe(0);
+    expect((secondRow.at(-1)?.x ?? 0) + (secondRow.at(-1)?.width ?? 0)).toBe(1000);
+    expectNoOverlap(result.placements);
+  });
+
+  it('is idempotent and absorbs sub-grid source measurement noise', () => {
+    const options = {
+      columns: 2,
+      rowDistribution: 'justify' as const,
+      targetWidth: 900,
+      gridSize: BOARD_GRID_SIZE,
+    };
+    const first = layoutSelectionGrid(mixed, options);
+    const repeated = layoutSelectionGrid(
+      first.placements.map((item) => ({
+        id: item.id,
+        width: item.width,
+        height: item.height,
+        sourceX: item.x + 0.4,
+        sourceY: item.y + 0.4,
+      })),
+      options
+    );
+
+    expect(repeated).toEqual(first);
+  });
+});
 
 function expectNoOverlap(placements: RectanglePlacement[]): void {
   for (const [index, a] of placements.entries()) {
@@ -306,5 +462,216 @@ describe('layoutRectangles', () => {
       if (left) expect(left.x + left.width).toBeLessThanOrEqual(placement.x);
       if (above) expect(above.y + above.height).toBeLessThanOrEqual(placement.y);
     }
+  });
+
+  it('packs heterogeneous board shapes into a smaller-diameter non-grid cluster', () => {
+    const items = [
+      { id: 'wide', width: 800, height: 160, sourceX: 0, sourceY: 0 },
+      { id: 'tall', width: 220, height: 500, sourceX: 0, sourceY: 240 },
+      { id: 'artifact-a', width: 260, height: 180, sourceX: 300, sourceY: 240 },
+      { id: 'artifact-b', width: 260, height: 180, sourceX: 600, sourceY: 240 },
+      { id: 'card', width: 260, height: 180, sourceX: 600, sourceY: 460 },
+    ];
+    const cluster = layoutCompactRectangles(items, {
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+    const squareGrid = layoutRectangles(items, {
+      preferredColumns: 3,
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+
+    expect(cluster.mode).toBe('cluster');
+    expect(cluster.placements.map((item) => item.id)).toEqual(items.map((item) => item.id));
+    expectNoOverlap(cluster.placements);
+    expect(cluster.width ** 2 + cluster.height ** 2).toBeLessThan(
+      squareGrid.width ** 2 + squareGrid.height ** 2
+    );
+    // A true frontier pack fills the space beside the tall item rather than
+    // forcing every item into shared row heights and column widths.
+    expect(cluster.placements[2]).toMatchObject({ x: 260, y: 200 });
+    expect(cluster.placements[3]).toMatchObject({ x: 260, y: 420 });
+  });
+
+  it('handles empty and single-item compact clusters without phantom movement', () => {
+    expect(layoutCompactRectangles([], { padding: 20 })).toMatchObject({
+      placements: [],
+      columns: 1,
+      rows: 0,
+      width: 40,
+      height: 40,
+    });
+    expect(
+      layoutCompactRectangles(
+        [{ id: 'only', width: 301, height: 179, sourceX: 480, sourceY: 260 }],
+        { padding: 20, gridSize: BOARD_GRID_SIZE }
+      )
+    ).toMatchObject({
+      placements: [{ id: 'only', x: 20, y: 20, width: 320, height: 180 }],
+      columns: 1,
+      rows: 1,
+    });
+  });
+
+  it('is deterministic, grid-snapped, gap-separated, and retains input identity order', () => {
+    const items = [
+      { id: 'zone', width: 613, height: 377, sourceX: 900, sourceY: 100 },
+      { id: 'artifact', width: 347, height: 291, sourceX: 120, sourceY: 600 },
+      { id: 'worktree', width: 381, height: 143, sourceX: 540, sourceY: 620 },
+      { id: 'note', width: 219, height: 407, sourceX: 980, sourceY: 650 },
+    ];
+    const first = layoutCompactRectangles(items, {
+      padding: 20,
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+    const second = layoutCompactRectangles(items, {
+      padding: 20,
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+
+    expect(second).toEqual(first);
+    expect(first.placements.every((item) => item.x % 20 === 0 && item.y % 20 === 0)).toBe(true);
+    expect(first.placements.map((item) => item.id)).toEqual(items.map((item) => item.id));
+    for (const [index, left] of first.placements.entries()) {
+      for (const right of first.placements.slice(index + 1)) {
+        expect(
+          left.x + left.width + 40 <= right.x ||
+            right.x + right.width + 40 <= left.x ||
+            left.y + left.height + 40 <= right.y ||
+            right.y + right.height + 40 <= left.y
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('uses existing spatial geometry to break equally compact placement ties', () => {
+    const base = { id: 'base', width: 200, height: 200, sourceX: 0, sourceY: 0 };
+    const toRight = layoutCompactRectangles(
+      [base, { id: 'peer', width: 200, height: 200, sourceX: 300, sourceY: 0 }],
+      { gapX: 40, gapY: 40 }
+    );
+    const below = layoutCompactRectangles(
+      [base, { id: 'peer', width: 200, height: 200, sourceX: 0, sourceY: 300 }],
+      { gapX: 40, gapY: 40 }
+    );
+
+    expect(toRight.placements[1]).toMatchObject({ x: 240, y: 0 });
+    expect(below.placements[1]).toMatchObject({ x: 0, y: 240 });
+  });
+
+  it('is idempotent when its prior placements become the next source geometry', () => {
+    const items = [
+      { id: 'wide', width: 800, height: 160, sourceX: 0, sourceY: 0 },
+      { id: 'tall', width: 220, height: 500, sourceX: 0, sourceY: 240 },
+      { id: 'artifact-a', width: 260, height: 180, sourceX: 300, sourceY: 240 },
+      { id: 'artifact-b', width: 260, height: 180, sourceX: 600, sourceY: 240 },
+      { id: 'worktree', width: 260, height: 180, sourceX: 600, sourceY: 460 },
+    ];
+    const options = { gapX: 40, gapY: 40, gridSize: BOARD_GRID_SIZE };
+    const first = layoutCompactRectangles(items, options);
+    const firstById = new Map(first.placements.map((item) => [item.id, item]));
+    const second = layoutCompactRectangles(
+      items.map((item) => ({
+        ...item,
+        sourceX: firstById.get(item.id)?.x,
+        sourceY: firstById.get(item.id)?.y,
+      })),
+      options
+    );
+
+    expect(second).toEqual(first);
+  });
+
+  it('packs a heterogeneous cluster inside a bounded zone without overlap', () => {
+    const result = layoutCompactRectangles(
+      [
+        { id: 'wide-card', width: 520, height: 120, sourceX: 20, sourceY: 80 },
+        { id: 'tall-artifact', width: 180, height: 380, sourceX: 20, sourceY: 240 },
+        { id: 'worktree', width: 300, height: 160, sourceX: 240, sourceY: 240 },
+        { id: 'note', width: 300, height: 160, sourceX: 240, sourceY: 440 },
+      ],
+      {
+        bounds: { width: 760, height: 660 },
+        padding: 20,
+        gapX: 20,
+        gapY: 20,
+        gridSize: BOARD_GRID_SIZE,
+      }
+    );
+
+    expect(result.overflowingItemIds).toEqual([]);
+    expectNoOverlap(result.placements);
+    for (const item of result.placements) {
+      expect(item.x).toBeGreaterThanOrEqual(20);
+      expect(item.y).toBeGreaterThanOrEqual(20);
+      expect(item.x + item.width).toBeLessThanOrEqual(740);
+      expect(item.y + item.height).toBeLessThanOrEqual(640);
+    }
+  });
+
+  it('honors a narrow zone bound when the unconstrained diameter prefers a horizontal pair', () => {
+    const result = layoutCompactRectangles(
+      [
+        { id: 'tall-a', width: 100, height: 300 },
+        { id: 'tall-b', width: 100, height: 300 },
+      ],
+      {
+        bounds: { width: 140, height: 660 },
+        padding: 20,
+        gapX: 20,
+        gapY: 20,
+        gridSize: BOARD_GRID_SIZE,
+      }
+    );
+
+    expect(result.overflowingItemIds).toEqual([]);
+    expect(result.placements[1]).toMatchObject({ x: 20, y: 340 });
+  });
+
+  it('reports bounded overflow without returning a partial cluster', () => {
+    const result = layoutCompactRectangles(
+      [
+        { id: 'one', width: 380, height: 200 },
+        { id: 'two', width: 380, height: 200 },
+      ],
+      {
+        bounds: { width: 420, height: 300 },
+        padding: 20,
+        gapX: 20,
+        gapY: 20,
+        gridSize: BOARD_GRID_SIZE,
+      }
+    );
+
+    expect(result.placements).toHaveLength(2);
+    expect(result.overflowingItemIds).toContain('two');
+    expectNoOverlap(result.placements);
+  });
+
+  it('absorbs sub-grid measurement noise into the same durable cluster', () => {
+    const options = { gapX: 20, gapY: 20, gridSize: BOARD_GRID_SIZE };
+    const base = layoutCompactRectangles(
+      [
+        { id: 'card', width: 379.1, height: 99.1, sourceX: 19.2, sourceY: 79.4 },
+        { id: 'artifact', width: 599.1, height: 399.1, sourceX: 419.2, sourceY: 79.4 },
+      ],
+      options
+    );
+    const noisy = layoutCompactRectangles(
+      [
+        { id: 'card', width: 379.8, height: 99.8, sourceX: 19.8, sourceY: 79.9 },
+        { id: 'artifact', width: 599.8, height: 399.8, sourceX: 419.8, sourceY: 79.9 },
+      ],
+      options
+    );
+
+    expect(noisy).toEqual(base);
   });
 });

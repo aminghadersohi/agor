@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   getMarqueeSelection,
   getNodesInsideMarquee,
+  getOnlySelectedZoneIds,
   getSelectedLayoutNodes,
   removeSelectedDescendants,
   suppressIndividualZoneToolbarsForMultiSelect,
@@ -98,6 +99,21 @@ describe('marquee selection', () => {
       'branch-1',
       'card-1',
     ]);
+  });
+
+  it('hands only the explicitly selected zones to the authoritative zone planner', () => {
+    const selected = [
+      { id: 'zone-a', type: 'zone', position: { x: 0, y: 0 }, data: {} },
+      { id: 'zone-c', type: 'zone', position: { x: 800, y: 0 }, data: {} },
+    ] as Node[];
+
+    expect(getOnlySelectedZoneIds(selected)).toEqual(['zone-a', 'zone-c']);
+    expect(
+      getOnlySelectedZoneIds([
+        ...selected,
+        { id: 'artifact', type: 'artifactNode', position: { x: 0, y: 500 }, data: {} },
+      ])
+    ).toBeNull();
   });
 
   it('replaces two selected zone toolbars with the shared selection toolbar', () => {

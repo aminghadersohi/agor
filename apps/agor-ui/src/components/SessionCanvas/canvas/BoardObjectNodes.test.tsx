@@ -27,7 +27,13 @@ const DISCONNECTED = { ...CONNECTED, connected: false };
 function renderZone(
   onReorder: ReturnType<typeof vi.fn>,
   connection: typeof CONNECTED,
-  extra?: { selected?: boolean; suppressToolbar?: boolean }
+  extra?: {
+    selected?: boolean;
+    suppressToolbar?: boolean;
+    positionableItemCount?: number;
+    onArrangeContents?: ReturnType<typeof vi.fn>;
+    onJustifyContents?: ReturnType<typeof vi.fn>;
+  }
 ) {
   const wrapper = ({ children }: { children: ReactNode }) => (
     <ConnectionProvider value={connection}>
@@ -48,7 +54,10 @@ function renderZone(
         y: 0,
         zIndex: 100,
         suppressToolbar: extra?.suppressToolbar,
+        positionableItemCount: extra?.positionableItemCount,
         onReorder,
+        onArrangeContents: extra?.onArrangeContents,
+        onJustifyContents: extra?.onJustifyContents,
       }}
     />,
     { wrapper }
@@ -56,6 +65,60 @@ function renderZone(
 }
 
 describe('ZoneNode layer toolbar', () => {
+  it('dispatches Center in zone once through the direct toolbar production callback', () => {
+    const onJustifyContents = vi.fn();
+    renderZone(vi.fn(), CONNECTED, { positionableItemCount: 2, onJustifyContents });
+
+    const button = screen.getByRole('button', { name: 'Center in zone' });
+    fireEvent.pointerDown(button);
+    fireEvent.pointerUp(button);
+    fireEvent.click(button);
+
+    expect(onJustifyContents).toHaveBeenCalledTimes(1);
+    expect(onJustifyContents).toHaveBeenCalledWith('zone-1', 'middle');
+  });
+
+  it('dispatches vertical centering through an explicit accessible action', () => {
+    const onJustifyContents = vi.fn();
+    renderZone(vi.fn(), CONNECTED, { positionableItemCount: 2, onJustifyContents });
+
+    const button = screen.getByRole('button', { name: 'Center contents vertically' });
+    fireEvent.pointerDown(button);
+    fireEvent.pointerUp(button);
+    fireEvent.click(button);
+
+    expect(onJustifyContents).toHaveBeenCalledTimes(1);
+    expect(onJustifyContents).toHaveBeenCalledWith('zone-1', 'vertical_middle');
+  });
+
+  it('allows a single card or worktree to be tidied while keeping empty zones disabled', () => {
+    const onArrangeContents = vi.fn();
+    renderZone(vi.fn(), CONNECTED, { positionableItemCount: 1, onArrangeContents });
+
+    const tidy = screen.getByRole('button', { name: 'Tidy up contents' });
+    expect(tidy).toBeEnabled();
+    fireEvent.pointerUp(tidy);
+    expect(onArrangeContents).toHaveBeenCalledWith('zone-1');
+
+    renderZone(vi.fn(), CONNECTED, { positionableItemCount: 0 });
+    expect(screen.getAllByRole('button', { name: 'Tidy up contents' }).at(-1)).toBeDisabled();
+  });
+
+  it('portals the bounded toolbar above every node stacking context and wraps upward', () => {
+    renderZone(vi.fn(), CONNECTED);
+
+    const toolbar = screen.getByRole('toolbar', { name: 'Zone actions' });
+    expect(toolbar.parentElement).toBe(document.body);
+    expect(toolbar).toHaveStyle({
+      position: 'fixed',
+      zIndex: '10000',
+      transform: 'translate(-50%, -100%)',
+      flexWrap: 'wrap',
+      width: 'max-content',
+      maxWidth: 'min(460px, calc(100vw - 32px))',
+    });
+  });
+
   it('exposes the layer buttons with accessible labels', () => {
     renderZone(vi.fn(), CONNECTED);
     expect(screen.getByLabelText('Send to back')).toBeTruthy();
