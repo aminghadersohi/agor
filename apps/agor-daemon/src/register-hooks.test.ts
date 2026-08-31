@@ -1318,7 +1318,13 @@ describe('isPromptFlowPatchOnly', () => {
 
     it('accepts the prompt-route auto-unarchive shape', () => {
       // register-routes.ts: /sessions/:id/prompt auto-unarchives before sending
-      expect(isPromptFlowPatchOnly({ archived: false, archived_reason: undefined })).toBe(true);
+      expect(
+        isPromptFlowPatchOnly({
+          archived: false,
+          archived_reason: undefined,
+          auto_archive_at: undefined,
+        })
+      ).toBe(true);
     });
 
     it('accepts the stop-route idle shape', () => {

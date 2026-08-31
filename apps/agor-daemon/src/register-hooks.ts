@@ -360,6 +360,7 @@ export const PROMPT_FLOW_PATCH_FIELDS: readonly string[] = [
   'tasks',
   'archived',
   'archived_reason',
+  'auto_archive_at',
   'status',
   'ready_for_prompt',
   'sdk_session_id',

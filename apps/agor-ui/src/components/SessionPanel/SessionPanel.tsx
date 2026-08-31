@@ -1495,6 +1495,8 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
               includeLastMessage: config.includeLastMessage,
               includeOriginalPrompt: config.includeOriginalPrompt,
             },
+            autoArchive: config.autoArchive,
+            autoArchiveAfterSeconds: config.autoArchiveAfterSeconds,
             extraInstructions: config.extraInstructions,
           };
 
