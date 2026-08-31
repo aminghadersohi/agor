@@ -18,8 +18,8 @@ import {
 } from '@agor/core/config';
 import {
   assertTenantWritable,
-  CompletionSubscriptionRepository,
   BranchRepository,
+  CompletionSubscriptionRepository,
   type CurrentTaskExecutorSessionTokenAuthority,
   type ExecutorLaunchAuthority,
   type ExecutorLaunchAuthorityOptions,
@@ -88,12 +88,12 @@ import {
   truncateCallbackBtwResult,
 } from '../utils/callback-delivery.js';
 import {
+  btwResultMessageId,
   completionCallbackBtwResultMessageId,
   completionCallbackBtwSessionId,
   completionCallbackBtwTaskId,
   completionCallbackTaskId,
 } from '../utils/durable-task-id.js';
-import { btwResultMessageId } from '../utils/durable-task-id.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
 import {
   type ExecutorHeartbeatCallbackPayload,
@@ -1039,7 +1039,8 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         const existing = await messagesService.get(finalMessageId, { provider: undefined });
         if (
           existing?.session_id !== parentSessionId ||
-          (callbackDigest && existing?.metadata?.callback_source_task_id !== callbackDigest.source_task_id)
+          (callbackDigest &&
+            existing?.metadata?.callback_source_task_id !== callbackDigest.source_task_id)
         ) {
           throw error;
         }
@@ -1775,6 +1776,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
             queue_coalescing: {
               kind: 'callback',
               group_key: 'session-system-updates',
+            },
             callback_delivery: {
               source_session_id: childSession.session_id,
               source_task_id: task.task_id,
