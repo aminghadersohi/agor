@@ -5,7 +5,10 @@ import { type RegisterHooksContext, registerHooks } from './register-hooks.js';
 
 type RegisteredHook = (context: HookContext) => HookContext | Promise<HookContext>;
 
-function captureChains(canView: boolean, canMutate: boolean) {
+function captureChains(
+  canView: boolean,
+  canMutate: boolean | ((boardId: string, userId: string) => boolean)
+) {
   const chains = new Map<string, RegisteredHook[]>();
   const app = {
     service(path: string) {
@@ -24,7 +27,9 @@ function captureChains(canView: boolean, canMutate: boolean) {
   };
   const boardRepository = {
     canView: vi.fn(async () => canView),
-    canMutate: vi.fn(async () => canMutate),
+    canMutate: vi.fn(async (boardId: string, userId: string) =>
+      typeof canMutate === 'function' ? canMutate(boardId, userId) : canMutate
+    ),
   };
   registerHooks({
     db: {} as RegisterHooksContext['db'],
@@ -57,8 +62,11 @@ async function runChain(chains: Map<string, RegisteredHook[]>, key: string, cont
 afterEach(() => vi.restoreAllMocks());
 
 describe('registered zone workflow authorization', () => {
-  it('enforces the member write floor and current board mutation permission', async () => {
-    const denied = captureChains(true, false);
+  it('denies a distinct non-owner and enforces the member write floor', async () => {
+    const boardOwnerId = '00000000-0000-7000-8000-000000000002';
+    const callerId = '00000000-0000-7000-8000-000000000001';
+    expect(callerId).not.toBe(boardOwnerId);
+    const denied = captureChains(true, (_boardId, userId) => userId === boardOwnerId);
     const createContext = (role: 'viewer' | 'member') =>
       ({
         path: 'zone-workflow-transitions',
@@ -66,7 +74,7 @@ describe('registered zone workflow authorization', () => {
         data: { board_id: '00000000-0000-7000-8000-000000000010' },
         params: {
           provider: 'rest',
-          user: { user_id: '00000000-0000-7000-8000-000000000001', role },
+          user: { user_id: callerId, role },
         },
       }) as unknown as HookContext;
 
@@ -78,7 +86,10 @@ describe('registered zone workflow authorization', () => {
     await expect(
       runChain(denied.chains, 'zone-workflow-transitions.create', createContext('member'))
     ).rejects.toThrow(/Board resource is unavailable/);
-    expect(denied.boardRepository.canMutate).toHaveBeenCalled();
+    expect(denied.boardRepository.canMutate).toHaveBeenCalledWith(
+      '00000000-0000-7000-8000-000000000010',
+      callerId
+    );
 
     const allowed = captureChains(true, true);
     await expect(
