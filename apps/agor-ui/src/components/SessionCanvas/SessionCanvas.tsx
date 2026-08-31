@@ -111,6 +111,14 @@ import { ArtifactNode } from './canvas/ArtifactNodeLazy';
 import { ARRANGE_DEAL_CLASS } from './canvas/arrangeAnimation';
 import { CommentNode, ZoneNode } from './canvas/BoardObjectNodes';
 import { MarkdownNode } from './canvas/MarkdownNode';
+import {
+  createPostLayoutViewportIntent,
+  decidePostLayoutViewport,
+  layoutGeometryChanged,
+  layoutSnapshotsMatch,
+  type PostLayoutViewportIntent,
+  snapshotLayoutNodes,
+} from './canvas/postLayoutViewport';
 import { RemoteCursorLayer, type StaticRemoteCursor } from './canvas/RemoteCursorLayer';
 import {
   CANVAS_LAYOUT_CONTROLS_CLASS,
@@ -846,6 +854,23 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const pendingResizeUpdatesRef = useRef<Record<string, ResizeRect>>({});
     const arrangeMotionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [isArranging, setIsArranging] = useState(false);
+    const pendingPostLayoutViewportRef = useRef<
+      { token: number; intent: PostLayoutViewportIntent } | undefined
+    >(undefined);
+    const postLayoutViewportTokenRef = useRef(0);
+    const [queuedPostLayoutViewportToken, setQueuedPostLayoutViewportToken] = useState(0);
+
+    const cancelPendingPostLayoutViewport = useCallback(() => {
+      postLayoutViewportTokenRef.current += 1;
+      pendingPostLayoutViewportRef.current = undefined;
+    }, []);
+
+    const requestPostLayoutViewport = useCallback((intent: PostLayoutViewportIntent) => {
+      const token = postLayoutViewportTokenRef.current + 1;
+      postLayoutViewportTokenRef.current = token;
+      pendingPostLayoutViewportRef.current = { token, intent };
+      setQueuedPostLayoutViewportToken(token);
+    }, []);
 
     const handleArrangeNodes = useStableCallback((arrangedNodes: Node[], totalMs: number) => {
       const currentNodes = reactFlowInstanceRef.current?.getNodes() ?? nodes;
@@ -922,6 +947,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       activeUrlTargetArtifactId,
       onEditMarkdown: handleEditMarkdownNote,
       onArrangeNodes: handleArrangeNodes,
+      onUserLayoutComplete: requestPostLayoutViewport,
     });
 
     const handleToggleBranchCompact = useStableCallback((branchId: string, compact: boolean) => {
@@ -1288,6 +1314,92 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const reactFlowWrapperRef = useRef<HTMLDivElement | null>(null);
     // Track when ReactFlow instance is ready (state to trigger re-renders)
     const [isReactFlowReady, setIsReactFlowReady] = useState(false);
+
+    // One centralized post-layout camera policy. Explicit layout paths queue a
+    // request only after durable persistence; this waits for the existing deal
+    // animation lifecycle plus two paint frames, rejects stale geometry, and
+    // then decides whether the affected bounds actually need a fit.
+    useEffect(() => {
+      if (!isReactFlowReady || isArranging) return;
+      const pending = pendingPostLayoutViewportRef.current;
+      if (!pending || pending.token !== queuedPostLayoutViewportToken) return;
+      if (pending.intent.boardId !== board?.board_id) {
+        cancelPendingPostLayoutViewport();
+        return;
+      }
+
+      let firstFrame = 0;
+      let settledFrame = 0;
+      firstFrame = window.requestAnimationFrame(() => {
+        settledFrame = window.requestAnimationFrame(() => {
+          const current = pendingPostLayoutViewportRef.current;
+          const instance = reactFlowInstanceRef.current;
+          const wrapper = reactFlowWrapperRef.current;
+          if (!current || current.token !== pending.token || !instance || !wrapper) return;
+
+          const affectedIds = current.intent.after.map((rect) => rect.id);
+          const currentNodes = instance.getNodes();
+          const settled = snapshotLayoutNodes(currentNodes, affectedIds);
+          if (!layoutSnapshotsMatch(current.intent.after, settled)) {
+            pendingPostLayoutViewportRef.current = undefined;
+            return;
+          }
+
+          const pane = wrapper.getBoundingClientRect();
+          const left = Math.max(0, pane.left);
+          const top = Math.max(0, pane.top);
+          const right = Math.min(
+            document.documentElement.clientWidth || window.innerWidth,
+            pane.right
+          );
+          const bottom = Math.min(
+            document.documentElement.clientHeight || window.innerHeight,
+            pane.bottom
+          );
+          if (right <= left || bottom <= top) {
+            pendingPostLayoutViewportRef.current = undefined;
+            return;
+          }
+          const topLeft = instance.screenToFlowPosition({ x: left, y: top });
+          const bottomRight = instance.screenToFlowPosition({ x: right, y: bottom });
+          const decision = decidePostLayoutViewport({
+            intent: current.intent,
+            viewport: {
+              left: Math.min(topLeft.x, bottomRight.x),
+              top: Math.min(topLeft.y, bottomRight.y),
+              right: Math.max(topLeft.x, bottomRight.x),
+              bottom: Math.max(topLeft.y, bottomRight.y),
+            },
+            viewportPixels: { width: right - left, height: bottom - top },
+            zoom: instance.getZoom(),
+          });
+          pendingPostLayoutViewportRef.current = undefined;
+          if (!decision.fit) return;
+
+          const affected = currentNodes.filter((node) => affectedIds.includes(node.id));
+          if (affected.length === 0) return;
+          const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+          void instance.fitView({
+            nodes: affected,
+            padding: decision.padding,
+            minZoom: 0.1,
+            maxZoom: 1,
+            duration: reducedMotion ? 0 : 300,
+          });
+        });
+      });
+
+      return () => {
+        window.cancelAnimationFrame(firstFrame);
+        window.cancelAnimationFrame(settledFrame);
+      };
+    }, [
+      board?.board_id,
+      cancelPendingPostLayoutViewport,
+      isArranging,
+      isReactFlowReady,
+      queuedPostLayoutViewportToken,
+    ]);
 
     // Track which board we last fit the view for (prevents repeated fitView on node changes)
     const lastFitBoardIdRef = useRef<string | null>(null);
@@ -1920,6 +2032,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Intercept onNodesChange to detect resize events
     const onNodesChange = useCallback(
       (changes: NodeChange[]) => {
+        if (
+          changes.some(
+            (change) =>
+              change.type === 'dimensions' && 'resizing' in change && change.resizing === true
+          )
+        ) {
+          cancelPendingPostLayoutViewport();
+        }
         let effectiveChanges = changes;
         const incomingSelectChanges = changes.filter(
           (change): change is NodeSelectionChange => change.type === 'select'
@@ -2115,6 +2235,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         board,
         boardObjectByBranch,
         boardObjectByCard,
+        cancelPendingPostLayoutViewport,
         client,
         nodes,
         onNodesChangeInternal,
@@ -2126,6 +2247,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Handle node drag start
     const handleNodeDragStart: NodeDragHandler = useCallback(
       (_event, node) => {
+        cancelPendingPostLayoutViewport();
         // Auto-layout manages only cards/worktrees. Taking hold of one that is
         // already inside a zone is direct control of that zone's layout, so
         // demote immediately — before a pending auto pass can snap it back.
@@ -2143,7 +2265,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         const viewport = reactFlowInstanceRef.current?.getViewport();
         if (viewport) setGuideViewport(viewport);
       },
-      [demoteAutoZone]
+      [cancelPendingPostLayoutViewport, demoteAutoZone]
     );
 
     // Handle node drag - track local position changes
@@ -2606,10 +2728,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         if (!board || !client || selectedLayoutNodes.length < 2) return;
         const selectedZoneIds = getOnlySelectedZoneIds(selectedLayoutNodes);
         if (action === 'arrange' && selectedZoneIds) {
-          await arrangeBoardZones(
-            selectedZoneIds,
-            selectionBoardZoneArrangementOptions(selectedZoneIds.length, layoutSettings)
-          );
+          await arrangeBoardZones(selectedZoneIds, {
+            ...selectionBoardZoneArrangementOptions(selectedZoneIds.length, layoutSettings),
+            userInitiated: true,
+          });
           return;
         }
         const size = (node: Node) =>
@@ -2729,6 +2851,16 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           ];
         });
         const arrangedNodeById = new Map(arrangedNodes.map((node) => [node.id, node]));
+        const afterNodes = nodes.map((node) => arrangedNodeById.get(node.id) ?? node);
+        const layoutIntent = createPostLayoutViewportIntent({
+          source: 'user',
+          boardId: board.board_id,
+          scope: 'selection',
+          beforeNodes: nodes,
+          afterNodes,
+          affectedNodeIds: arrangedNodes.map((node) => node.id),
+        });
+        if (!layoutGeometryChanged(layoutIntent.before, layoutIntent.after)) return;
         setNodes((currentNodes) =>
           currentNodes.map((node) => arrangedNodeById.get(node.id) ?? node)
         );
@@ -2805,6 +2937,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             })
           )
         );
+        requestPostLayoutViewport(layoutIntent);
       },
       [
         arrangeBoardZones,
@@ -2815,6 +2948,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         client,
         handleArrangeNodes,
         nodes,
+        requestPostLayoutViewport,
         selectedLayoutNodes,
         setNodes,
       ]
@@ -3566,7 +3700,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               setGuideViewport(instance.getViewport?.() ?? { x: 0, y: 0, zoom: 1 });
               setIsReactFlowReady(true);
             }}
-            onMove={(_event, viewport) => {
+            onMove={(event, viewport) => {
+              if (event) cancelPendingPostLayoutViewport();
               if (alignmentGuides.length > 0) setGuideViewport(viewport);
             }}
             nodeTypes={nodeTypes}

@@ -497,6 +497,7 @@ describe('arrangeZoneContents', () => {
   it('packs once, starts one motion, and persists one complete patch per child', async () => {
     const { client, patch } = makeClient();
     const onArrangeNodes = vi.fn();
+    const onUserLayoutComplete = vi.fn();
     const board = makeBoard({
       zone: { type: 'zone', x: 0, y: 0, width: 900, height: 500, label: 'Zone' },
     });
@@ -561,6 +562,7 @@ describe('arrangeZoneContents', () => {
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
           onArrangeNodes,
+          onUserLayoutComplete,
         }),
       { wrapper }
     );
@@ -584,6 +586,10 @@ describe('arrangeZoneContents', () => {
       { x: 20, y: 300 },
     ]);
     expect(onArrangeNodes.mock.calls[0]?.[1]).toBeGreaterThan(0);
+    expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
+    expect(onUserLayoutComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'user', boardId: 'board-1', scope: 'zone' })
+    );
     expect(patch).toHaveBeenCalledTimes(2);
     expect(patch).toHaveBeenCalledWith('placement-branch', {
       position: { x: 20, y: 100 },
@@ -2431,6 +2437,7 @@ describe('compact_list → grid re-packs the expanded zone', () => {
 describe('arrangeBoardZones production path', () => {
   it('makes Grid Apply immediate and a following Arrange a persistence no-op', async () => {
     const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
+    const onUserLayoutComplete = vi.fn();
     let board = makeBoard({
       one: { type: 'zone', x: 0, y: 0, width: 620, height: 500, label: 'One' },
       two: { type: 'zone', x: 2200, y: 0, width: 620, height: 500, label: 'Two' },
@@ -2456,12 +2463,16 @@ describe('arrangeBoardZones production path', () => {
           nodes,
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          onUserLayoutComplete,
         }),
       { wrapper }
     );
 
     await act(async () => {
-      await result.current.arrangeBoardZones(['one', 'two', 'three'], { maxPerRow: 2 });
+      await result.current.arrangeBoardZones(['one', 'two', 'three'], {
+        maxPerRow: 2,
+        userInitiated: true,
+      });
     });
 
     expect(boardsPatch).toHaveBeenCalledTimes(1);
@@ -2473,6 +2484,10 @@ describe('arrangeBoardZones production path', () => {
       { x: 900, y: 80 },
       { x: 80, y: 620 },
     ]);
+    expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
+    expect(onUserLayoutComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'user', boardId: 'board-1', scope: 'board' })
+    );
 
     board = { ...board, objects: { ...board.objects, ...firstWrite.objects } };
     rerender();
@@ -2481,11 +2496,12 @@ describe('arrangeBoardZones production path', () => {
     showSuccess.mockClear();
 
     await act(async () => {
-      await result.current.arrangeBoardZones(['one', 'two', 'three']);
+      await result.current.arrangeBoardZones(['one', 'two', 'three'], { userInitiated: true });
     });
 
     expect(boardsPatch).not.toHaveBeenCalled();
     expect(boardObjectsPatch).not.toHaveBeenCalled();
+    expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
     expect(showSuccess).toHaveBeenCalledWith('Zones and their contents are already arranged.');
   });
 
@@ -2559,6 +2575,7 @@ describe('arrangeBoardZones production path', () => {
       },
     ];
     const onArrangeNodes = vi.fn();
+    const onUserLayoutComplete = vi.fn();
     const { result } = renderHook(
       () =>
         useBoardObjects({
@@ -2587,6 +2604,7 @@ describe('arrangeBoardZones production path', () => {
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
           onArrangeNodes,
+          onUserLayoutComplete,
         }),
       { wrapper }
     );
@@ -2609,6 +2627,7 @@ describe('arrangeBoardZones production path', () => {
     );
     expect(boardObjectsPatch).toHaveBeenCalledTimes(3);
     expect(onArrangeNodes).toHaveBeenCalledTimes(1);
+    expect(onUserLayoutComplete).not.toHaveBeenCalled();
     expect(showSuccess).toHaveBeenCalledTimes(1);
     expect(showWarning).not.toHaveBeenCalled();
   });

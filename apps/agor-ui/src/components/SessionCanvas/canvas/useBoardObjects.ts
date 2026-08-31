@@ -32,6 +32,10 @@ import type { Node } from 'reactflow';
 import { useThemedMessage } from '../../../utils/message';
 import { dealDelayMs, dealOrderIndex, dealStyle, dealTiming } from './arrangeAnimation';
 import { AutoZoneDeferral } from './autoZoneDeferral';
+import {
+  createPostLayoutViewportIntent,
+  type PostLayoutViewportIntent,
+} from './postLayoutViewport';
 import { zonesNeedingAutoArrange } from './utils/autoArrangeGuard';
 import {
   renderedZoneStackHeaderHeight,
@@ -135,7 +139,19 @@ interface UseBoardObjectsProps {
   onEditMarkdown?: (objectId: string, content: string, width: number) => void;
   /** Hold optimistic placements and enable motion before realtime echoes arrive. */
   onArrangeNodes?: (nodes: Node[], totalMs: number) => void;
+  /** Queue one smart viewport decision after a persisted, explicitly requested layout. */
+  onUserLayoutComplete?: (intent: PostLayoutViewportIntent) => void;
 }
+
+interface ArrangeZoneContentsOptions {
+  silent?: boolean;
+  preserveZoneFrame?: boolean;
+  userInitiated?: boolean;
+}
+
+type ArrangeBoardZonesOptions = Omit<BoardZoneArrangementOptions, 'looseItems'> & {
+  userInitiated?: boolean;
+};
 
 export const useBoardObjects = ({
   board,
@@ -148,6 +164,7 @@ export const useBoardObjects = ({
   activeUrlTargetArtifactId,
   onEditMarkdown,
   onArrangeNodes,
+  onUserLayoutComplete,
 }: UseBoardObjectsProps) => {
   // Use ref to avoid recreating callbacks when board changes
   const boardRef = useRef(board);
@@ -160,11 +177,7 @@ export const useBoardObjects = ({
   // `arrangeZoneContents` is declared below it and its dependency array is
   // evaluated during render. A ref keeps the call late-bound.
   const arrangeZoneContentsRef = useRef<
-    | ((
-        zoneId: string,
-        options?: { silent?: boolean; preserveZoneFrame?: boolean }
-      ) => Promise<void>)
-    | null
+    ((zoneId: string, options?: ArrangeZoneContentsOptions) => Promise<void>) | null
   >(null);
   const autoZoneDeferralRef = useRef<AutoZoneDeferral | null>(null);
   autoZoneDeferralRef.current ??= new AutoZoneDeferral();
@@ -190,6 +203,30 @@ export const useBoardObjects = ({
   // unchanged board references, and serializing every object on every canvas
   // render is prohibitively expensive on large boards.
   const boardObjects = board?.objects;
+
+  const completeUserLayout = useCallback(
+    (input: {
+      userInitiated?: boolean;
+      scope: PostLayoutViewportIntent['scope'];
+      beforeNodes: readonly Node[];
+      afterNodes: readonly Node[];
+      affectedNodeIds: readonly string[];
+    }) => {
+      const boardId = boardRef.current?.board_id;
+      if (!input.userInitiated || !boardId || !onUserLayoutComplete) return;
+      onUserLayoutComplete(
+        createPostLayoutViewportIntent({
+          source: 'user',
+          boardId,
+          scope: input.scope,
+          beforeNodes: input.beforeNodes,
+          afterNodes: input.afterNodes,
+          affectedNodeIds: input.affectedNodeIds,
+        })
+      );
+    },
+    [onUserLayoutComplete]
+  );
 
   useEffect(() => {
     for (const zoneId of manuallyControlledZoneIdsRef.current) {
@@ -584,11 +621,12 @@ export const useBoardObjects = ({
    * placements can be applied without translating through canvas coordinates.
    */
   const arrangeZoneContents = useCallback(
-    async (zoneId: string, options: { silent?: boolean; preserveZoneFrame?: boolean } = {}) => {
+    async (zoneId: string, options: ArrangeZoneContentsOptions = {}) => {
       const currentBoard = boardRef.current;
       const persistedZone = currentBoard?.objects?.[zoneId];
       if (!currentBoard || !client || persistedZone?.type !== 'zone') return;
-      const liveZoneNode = nodesRef.current.find((node) => node.id === zoneId);
+      const sourceNodes = nodesRef.current;
+      const liveZoneNode = sourceNodes.find((node) => node.id === zoneId);
       // A toolbar click can race the debounced persistence of a drag/resize.
       // Plan and write from the visible frame so arranging children can never
       // reintroduce the older container geometry from the board snapshot.
@@ -944,7 +982,7 @@ export const useBoardObjects = ({
           .filter((item) => movedZoneIds.has(item.id))
           .map((item) => [item.id, item]) ?? []
       );
-      const reflowedNodes = nodesRef.current.flatMap((node) => {
+      const reflowedNodes = sourceNodes.flatMap((node) => {
         const movedZone = movedPlacementById.get(node.id);
         if (node.type === 'zone' && movedZone) {
           return [{ ...node, position: { x: movedZone.x, y: movedZone.y } }];
@@ -1001,7 +1039,7 @@ export const useBoardObjects = ({
         return;
       const changedById = new Map(changedNodes.map((node) => [node.id, node]));
       const reflowedById = new Map(reflowedNodes.map((node) => [node.id, node]));
-      const grownZoneNode = nodesRef.current.find((node) => node.id === zoneId);
+      const grownZoneNode = sourceNodes.find((node) => node.id === zoneId);
       const optimisticZone =
         grownZoneNode && (zoneHeightChanged || zoneWidthChanged)
           ? {
@@ -1017,6 +1055,8 @@ export const useBoardObjects = ({
         ...reflowedNodes,
         ...(optimisticZone ? [optimisticZone] : []),
       ];
+      const optimisticById = new Map(optimisticNodes.map((node) => [node.id, node]));
+      const finalNodes = sourceNodes.map((node) => optimisticById.get(node.id) ?? node);
       if (optimisticNodes.length > 0) onArrangeNodes?.(optimisticNodes, timing.totalMs);
       // Positions are an auto-layout output but are also part of the observer
       // signature (so a user's manual move can reflow an automatic zone).
@@ -1123,6 +1163,17 @@ export const useBoardObjects = ({
             `Arranged ${changedNodes.length} items in a non-overlapping ${layoutMode === 'cluster' ? 'compact cluster' : 'grid'}.`
           );
         }
+        completeUserLayout({
+          userInitiated: options.userInitiated,
+          scope: 'zone',
+          beforeNodes: sourceNodes,
+          afterNodes: finalNodes,
+          affectedNodeIds: [
+            zoneId,
+            ...children.map(({ node }) => node.id),
+            ...reflowedNodes.map((node) => node.id),
+          ],
+        });
       } catch (error) {
         console.error('Failed to arrange zone contents:', error);
         showError('Failed to arrange zone contents');
@@ -1131,6 +1182,7 @@ export const useBoardObjects = ({
     [
       boardObjectsForBoard,
       client,
+      completeUserLayout,
       onArrangeNodes,
       restoreZoneCallouts,
       setNodes,
@@ -1275,6 +1327,13 @@ export const useBoardObjects = ({
               .patch(placement.object_id, { position: node.position });
           })
         );
+        completeUserLayout({
+          userInitiated: true,
+          scope: 'zone',
+          beforeNodes: currentNodes,
+          afterNodes: currentNodes.map((node) => changedById.get(node.id) ?? node),
+          affectedNodeIds: [zoneId, ...children.map(({ node }) => node.id)],
+        });
         showSuccess(
           justification === 'vertical_middle'
             ? `Centered ${changedNodes.length} items vertically in the zone.`
@@ -1288,6 +1347,7 @@ export const useBoardObjects = ({
     [
       boardObjectsForBoard,
       client,
+      completeUserLayout,
       demoteAutoZone,
       onArrangeNodes,
       setNodes,
@@ -1310,12 +1370,10 @@ export const useBoardObjects = ({
    * board mutation, so realtime cannot echo intermediate board snapshots.
    */
   const arrangeBoardZones = useCallback(
-    async (
-      zoneIds: readonly string[],
-      options: Omit<BoardZoneArrangementOptions, 'looseItems'> = {}
-    ) => {
+    async (zoneIds: readonly string[], options: ArrangeBoardZonesOptions = {}) => {
       const currentBoard = boardRef.current;
       if (!currentBoard || !client || zoneIds.length === 0) return;
+      const { userInitiated = false, ...arrangementOptions } = options;
       const selected = new Set(zoneIds);
       const currentNodes = nodesRef.current;
       const placementByNodeId = new Map<string, BoardEntityObject>();
@@ -1436,7 +1494,7 @@ export const useBoardObjects = ({
             };
           }),
           {
-            ...options,
+            ...arrangementOptions,
             looseItems: looseNodes.map((node) => ({
               id: node.id,
               ...node.position,
@@ -1641,6 +1699,13 @@ export const useBoardObjects = ({
             });
           })
         );
+        completeUserLayout({
+          userInitiated,
+          scope: 'board',
+          beforeNodes: currentNodes,
+          afterNodes: currentNodes.map((node) => arrangedNodeById.get(node.id) ?? node),
+          affectedNodeIds: arrangedNodes.map((node) => node.id),
+        });
         showSuccess(
           `Arranged ${plan.zones.length} zone${plan.zones.length === 1 ? '' : 's'}, ${plan.looseItems.length} free item${plan.looseItems.length === 1 ? '' : 's'}, and their contents.`
         );
@@ -1652,6 +1717,7 @@ export const useBoardObjects = ({
     [
       boardObjectsForBoard,
       client,
+      completeUserLayout,
       onArrangeNodes,
       restoreZoneCallouts,
       setNodes,
@@ -1936,7 +2002,8 @@ export const useBoardObjects = ({
             onUpdate: handleUpdateObject,
             onDelete: deleteZone,
             onReorder: reorderObject,
-            onArrangeContents: arrangeZoneContents,
+            onArrangeContents: (zoneId: string) =>
+              arrangeZoneContents(zoneId, { userInitiated: true }),
             onJustifyContents: justifyZoneContents,
             onSetContentsCompact: setZoneContentsCompact,
           },
