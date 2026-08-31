@@ -898,7 +898,11 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     if (!parentSessionId) return;
 
     try {
-      const latestTask = (await this.taskRepo.findById(task.task_id)) ?? task;
+      // The service constructor always supplies taskRepo. Keep this fallback
+      // for lifecycle helpers invoked in isolation (including recovery/tests),
+      // where only the tenant-scoped database handle is available.
+      const taskRepo = this.taskRepo ?? new TaskRepository(this.db);
+      const latestTask = (await taskRepo.findById(task.task_id)) ?? task;
       if (latestTask.metadata?.btw_result_delivered_at) return;
       const messagesService = this.app.service('messages');
 
@@ -1046,7 +1050,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
           throw error;
         }
       }
-      const refreshed = (await this.taskRepo.findById(task.task_id)) ?? latestTask;
+      const refreshed = (await taskRepo.findById(task.task_id)) ?? latestTask;
       await super.patch(
         task.task_id,
         {
