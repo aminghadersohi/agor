@@ -293,6 +293,13 @@ describe('SessionsService transfer authorization', () => {
         params(generateId() as UserID)
       )
     ).rejects.toThrow(/same tenant/);
+    await expect(
+      service.resolveQueueBatchAuthority(
+        sourceId,
+        { callerSessionId: destinationId, relationship: 'coordinator' },
+        params(generateId() as UserID)
+      )
+    ).rejects.toThrow(/same tenant/);
   });
 
   dbTest(
@@ -376,9 +383,27 @@ describe('SessionsService transfer authorization', () => {
         target_session_id: target.session_id,
         relationship: 'coordinator',
       });
+      await expect(
+        service.resolveQueueBatchAuthority(
+          target.session_id,
+          { callerSessionId: callerSession.session_id, relationship: 'coordinator' },
+          params(caller)
+        )
+      ).resolves.toEqual({
+        caller_session_id: callerSession.session_id,
+        target_session_id: target.session_id,
+        relationship: 'coordinator',
+      });
 
       await expect(
         service.resolveInterruptAuthority(
+          target.session_id,
+          { callerSessionId: unrelated.session_id, relationship: 'coordinator' },
+          params(caller)
+        )
+      ).rejects.toThrow(/does not authorize/);
+      await expect(
+        service.resolveQueueBatchAuthority(
           target.session_id,
           { callerSessionId: unrelated.session_id, relationship: 'coordinator' },
           params(caller)
@@ -388,6 +413,13 @@ describe('SessionsService transfer authorization', () => {
       await setTestBranchUserRole(db, targetBranch.branch_id, caller, 'viewer');
       await expect(
         service.resolveInterruptAuthority(
+          target.session_id,
+          { callerSessionId: callerSession.session_id, relationship: 'coordinator' },
+          params(caller)
+        )
+      ).rejects.toThrow(/Cannot use destination session/);
+      await expect(
+        service.resolveQueueBatchAuthority(
           target.session_id,
           { callerSessionId: callerSession.session_id, relationship: 'coordinator' },
           params(caller)
