@@ -243,7 +243,7 @@ describe('BranchSessionSections', () => {
 
     expect(screen.getByText('Root remains visible')).toBeInTheDocument();
     expect(screen.queryByText('Completed child clutter')).not.toBeInTheDocument();
-    expect(screen.getByText('1')).toBeInTheDocument();
+    expect(screen.getAllByLabelText(/open session/i)).toHaveLength(1);
   });
 
   it('nests local and remote children under MRU-sorted gateway parents', async () => {
