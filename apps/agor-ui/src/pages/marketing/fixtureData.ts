@@ -60,6 +60,7 @@ export const demoBoard: Board = {
   last_updated: demoNow,
   created_by: demoUsers[0].user_id,
   archived: false,
+  running_session_count: 0,
   url: '/demo/marketing-screenshots',
   background_color: 'linear-gradient(135deg, #f5af19 0%, #f12711 30%, #f5af19 60%, #f12711 100%)',
   objects: {
