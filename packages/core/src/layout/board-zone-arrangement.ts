@@ -6,7 +6,9 @@ import {
 } from './justified-zones.js';
 import {
   BOARD_GRID_SIZE,
+  type CompactRectangleLayoutResult,
   ceilBoardGridValue,
+  layoutCompactRectangles,
   layoutRectangles,
   type RectanglePlacement,
 } from './rectangle-packing.js';
@@ -46,6 +48,14 @@ export interface BoardZoneArrangementInput {
   items: readonly BoardZoneArrangementItem[];
 }
 
+export interface BoardZoneArrangementLooseItem {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface BoardZoneArrangementOptions {
   targetWidth?: number;
   targetRowHeight?: number;
@@ -54,6 +64,8 @@ export interface BoardZoneArrangementOptions {
   startY?: number;
   maxPerRow?: number;
   justifyLastRow?: boolean;
+  /** Free top-level board nodes packed beside the content-sized zone frames. */
+  looseItems?: readonly BoardZoneArrangementLooseItem[];
 }
 
 export interface ArrangedBoardZone {
@@ -71,6 +83,9 @@ export interface ArrangedBoardZone {
 export interface BoardZoneArrangementPlan {
   layout: JustifiedZoneResult;
   zones: ArrangedBoardZone[];
+  looseItems: RectanglePlacement[];
+  /** Present when the operation also packed free top-level board nodes. */
+  boardLayout?: CompactRectangleLayoutResult;
 }
 
 const spatialOrder = (a: BoardZoneArrangementInput, b: BoardZoneArrangementInput): number =>
@@ -136,6 +151,55 @@ export function planBoardZoneArrangement(
     }
   );
   const preparedById = new Map(prepared.map((entry) => [entry.zone.id, entry]));
+  const sourceZoneOrderById = new Map(sourceZones.map((zone, index) => [zone.id, index]));
+  const orderedLooseItems = [...(options.looseItems ?? [])];
+  const duplicateId = orderedLooseItems.find((item) => preparedById.has(item.id));
+  if (duplicateId) {
+    throw new Error(`Board layout item '${duplicateId.id}' conflicts with a zone id.`);
+  }
+  const boardLayout =
+    orderedLooseItems.length > 0
+      ? layoutCompactRectangles(
+          [
+            ...layout.placements
+              .map((placement) => {
+                const source = preparedById.get(placement.id)?.zone;
+                if (!source)
+                  throw new Error(`Missing arrangement input for zone '${placement.id}'.`);
+                return {
+                  id: placement.id,
+                  width: placement.width,
+                  height: placement.height,
+                  sourceX: source.x,
+                  sourceY: source.y,
+                };
+              })
+              .sort(
+                (a, b) =>
+                  (sourceZoneOrderById.get(a.id) ?? 0) - (sourceZoneOrderById.get(b.id) ?? 0)
+              ),
+            ...orderedLooseItems.map((item) => ({
+              id: item.id,
+              width: item.width,
+              height: item.height,
+              sourceX: item.x,
+              sourceY: item.y,
+            })),
+          ],
+          {
+            gapX: options.gap ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.gap,
+            gapY: options.gap ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.gap,
+            gridSize: BOARD_GRID_SIZE,
+          }
+        )
+      : undefined;
+  const boardPlacementById = new Map(
+    boardLayout?.placements.map((placement) => [placement.id, placement]) ?? []
+  );
+  const boardOrigin = {
+    x: options.startX ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.startX,
+    y: options.startY ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.startY,
+  };
 
   const zones = layout.placements.map((placement): ArrangedBoardZone => {
     const entry = preparedById.get(placement.id);
@@ -169,7 +233,12 @@ export function planBoardZoneArrangement(
     }
     return {
       id: placement.id,
-      position: { x: placement.x, y: placement.y },
+      position: boardLayout
+        ? {
+            x: boardOrigin.x + (boardPlacementById.get(placement.id)?.x ?? 0),
+            y: boardOrigin.y + (boardPlacementById.get(placement.id)?.y ?? 0),
+          }
+        : { x: placement.x, y: placement.y },
       width: placement.width,
       height: placement.height,
       row: placement.row,
@@ -183,5 +252,15 @@ export function planBoardZoneArrangement(
     };
   });
 
-  return { layout, zones };
+  const looseItems = orderedLooseItems.map((item) => {
+    const placement = boardPlacementById.get(item.id);
+    if (!placement) throw new Error(`Missing compact placement for board item '${item.id}'.`);
+    return {
+      ...placement,
+      x: boardOrigin.x + placement.x,
+      y: boardOrigin.y + placement.y,
+    };
+  });
+
+  return { layout, zones, looseItems, ...(boardLayout ? { boardLayout } : {}) };
 }

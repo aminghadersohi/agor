@@ -2,7 +2,7 @@ import {
   BOARD_GRID_SIZE,
   BOARD_SNAP_GRID,
   ceilBoardGridSize,
-  layoutRectangles,
+  layoutCompactRectangles,
   snapBoardGridPoint,
   snapBoardGridValue,
 } from '@agor/core/layout/rectangle-packing';
@@ -2572,17 +2572,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             width: Number(node.width ?? node.style?.width ?? 240),
             height: Number(node.height ?? node.style?.height ?? 120),
           });
-        const rects = selectedLayoutNodes
-          .map((node) => {
-            const position = getNodeAbsolutePosition(node, nodes);
-            return { node, position, ...size(node) };
-          })
-          .sort(
-            (a, b) =>
-              a.position.y - b.position.y ||
-              a.position.x - b.position.x ||
-              a.node.id.localeCompare(b.node.id)
-          );
+        const rects = selectedLayoutNodes.map((node) => {
+          const position = getNodeAbsolutePosition(node, nodes);
+          return { node, position, ...size(node) };
+        });
         const left = snapBoardGridValue(Math.min(...rects.map((item) => item.position.x)));
         const right = Math.max(...rects.map((item) => item.position.x + item.width));
         const top = snapBoardGridValue(Math.min(...rects.map((item) => item.position.y)));
@@ -2593,10 +2586,15 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         const targetHeight = rects[0]?.height ?? 120;
         const autoLayout =
           action === 'arrange'
-            ? layoutRectangles(
-                rects.map(({ node, width, height }) => ({ id: node.id, width, height })),
+            ? layoutCompactRectangles(
+                rects.map(({ node, position, width, height }) => ({
+                  id: node.id,
+                  width,
+                  height,
+                  sourceX: position.x,
+                  sourceY: position.y,
+                })),
                 {
-                  preferredColumns: Math.ceil(Math.sqrt(rects.length)),
                   gapX: BOARD_GRID_SIZE * 2,
                   gapY: BOARD_GRID_SIZE * 2,
                   gridSize: BOARD_GRID_SIZE,
@@ -2631,45 +2629,59 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         });
 
         const updateById = new Map(updates.map((update) => [update.node.id, update]));
-        setNodes((currentNodes) =>
-          currentNodes.map((node) => {
-            const update = updateById.get(node.id);
-            if (!update) return node;
-            const parent = node.parentId
-              ? currentNodes.find((candidate) => candidate.id === node.parentId)
-              : undefined;
-            const position = parent
-              ? absoluteToRelative(
-                  { x: update.x, y: update.y },
-                  getNodeAbsolutePosition(parent, currentNodes)
-                )
-              : { x: update.x, y: update.y };
-            return {
+        const arrangedNodes = nodes.flatMap((node) => {
+          const update = updateById.get(node.id);
+          if (!update) return [];
+          const parent = node.parentId
+            ? nodes.find((candidate) => candidate.id === node.parentId)
+            : undefined;
+          const position = parent
+            ? absoluteToRelative(
+                { x: update.x, y: update.y },
+                getNodeAbsolutePosition(parent, nodes)
+              )
+            : { x: update.x, y: update.y };
+          return [
+            {
               ...node,
               position,
               ...(action === 'arrange' || action === 'width' || action === 'height'
-                ? { style: { ...node.style, width: update.width, height: update.height } }
+                ? {
+                    width: update.width,
+                    height: update.height,
+                    style: { ...node.style, width: update.width, height: update.height },
+                  }
                 : {}),
-            };
-          })
+            },
+          ];
+        });
+        const arrangedNodeById = new Map(arrangedNodes.map((node) => [node.id, node]));
+        setNodes((currentNodes) =>
+          currentNodes.map((node) => arrangedNodeById.get(node.id) ?? node)
         );
+        handleArrangeNodes(arrangedNodes, 0);
 
+        const canvasObjectUpdates: Record<
+          string,
+          { x: number; y: number; width?: number; height?: number }
+        > = {};
+        const entityUpdates: Array<{
+          placement: BoardEntityObject;
+          position: { x: number; y: number };
+          width: number;
+          height: number;
+        }> = [];
         for (const update of updates) {
           localPositionsRef.current[update.node.id] = { x: update.x, y: update.y };
           const objectData = board.objects?.[update.node.id];
           if (objectData) {
-            await client.service('boards').patch(board.board_id, {
-              _action: 'upsertObject',
-              objectId: update.node.id,
-              objectData: {
-                ...objectData,
-                x: update.x,
-                y: update.y,
-                ...(action === 'arrange' || action === 'width' || action === 'height'
-                  ? { width: update.width, height: update.height }
-                  : {}),
-              },
-            } as unknown as Partial<Board>);
+            canvasObjectUpdates[update.node.id] = {
+              x: update.x,
+              y: update.y,
+              ...(action === 'arrange' || action === 'width' || action === 'height'
+                ? { width: update.width, height: update.height }
+                : {}),
+            };
             continue;
           }
           const branchObject = boardObjectByBranch.get(update.node.id);
@@ -2685,21 +2697,34 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   getNodeAbsolutePosition(parent, nodes)
                 )
               : { x: update.x, y: update.y };
-            await client.service('board-objects').patch(placement.object_id, {
+            entityUpdates.push({
+              placement,
               position,
-              ...(action === 'arrange' || action === 'width' || action === 'height'
-                ? { size: { width: update.width, height: update.height } }
-                : {}),
+              width: update.width,
+              height: update.height,
             });
           }
         }
+        await batchUpdateObjectPositions(canvasObjectUpdates);
+        await Promise.all(
+          entityUpdates.map(({ placement, position, width, height }) =>
+            client.service('board-objects').patch(placement.object_id, {
+              position,
+              ...(action === 'arrange' || action === 'width' || action === 'height'
+                ? { size: { width, height } }
+                : {}),
+            })
+          )
+        );
       },
       [
         arrangeBoardZones,
         board,
         boardObjectByBranch,
         boardObjectByCard,
+        batchUpdateObjectPositions,
         client,
+        handleArrangeNodes,
         nodes,
         selectedLayoutNodes,
         setNodes,

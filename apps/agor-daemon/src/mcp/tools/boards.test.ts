@@ -1286,14 +1286,21 @@ describe('agor_boards_auto_arrange', () => {
     const parsed = JSON.parse(result.content[0].text);
 
     expect(result.isError).toBeFalsy();
-    expect(parsed).toMatchObject({ arranged: 2, arrangedEntities: 1, arrangedCanvasObjects: 1 });
+    expect(parsed).toMatchObject({
+      arranged: 2,
+      arrangedEntities: 1,
+      arrangedCanvasObjects: 1,
+      layoutMode: 'cluster',
+    });
     expect(entityPatches).toEqual([
       { position: { x: 80, y: 80 }, size: { width: 500, height: 200 } },
     ]);
     expect(boardPatches).toHaveLength(1);
     expect(boardPatches[0]).toMatchObject({
-      objectId: 'artifact-1',
-      objectData: { x: 620, y: 80, width: 600, height: 400 },
+      _action: 'batchUpsertObjects',
+      objects: {
+        'artifact-1': { x: 80, y: 320, width: 600, height: 400 },
+      },
     });
   });
 
@@ -1335,8 +1342,8 @@ describe('agor_boards_auto_arrange', () => {
 
     expect(boardPatches).toHaveLength(1);
     expect(boardPatches[0]).toMatchObject({
-      objectId: 'artifact-1',
-      objectData: { width: 740, height: 420 },
+      _action: 'batchUpsertObjects',
+      objects: { 'artifact-1': { width: 740, height: 420 } },
     });
   });
 
@@ -1384,12 +1391,14 @@ describe('agor_boards_auto_arrange', () => {
       avoidedZoneIds: ['zone-1'],
       appliedStartY: 840,
     });
-    expect(boardPatches).toHaveLength(2);
-    expect(boardPatches.map((patch) => patch.objectId)).toEqual(['text-1', 'note-1']);
-    expect(boardPatches.map((patch) => patch.objectData)).toEqual([
-      expect.objectContaining({ x: 80, y: 840 }),
-      expect.objectContaining({ x: 320, y: 840 }),
-    ]);
+    expect(boardPatches).toHaveLength(1);
+    expect(boardPatches[0]).toMatchObject({
+      _action: 'batchUpsertObjects',
+      objects: {
+        'text-1': expect.objectContaining({ x: 80, y: 840 }),
+        'note-1': expect.objectContaining({ x: 320, y: 840 }),
+      },
+    });
   });
 
   it('can arrange zones as containers without requiring other canvas objects', async () => {
@@ -1426,7 +1435,15 @@ describe('agor_boards_auto_arrange', () => {
     );
 
     expect(parsed).toMatchObject({ arranged: 2, arrangedEntities: 0, arrangedCanvasObjects: 2 });
-    expect(boardPatches.map((patch) => patch.objectId)).toEqual(['zone-2', 'zone-1']);
+    expect(boardPatches).toEqual([
+      expect.objectContaining({
+        _action: 'batchUpsertObjects',
+        objects: expect.objectContaining({
+          'zone-2': expect.any(Object),
+          'zone-1': expect.any(Object),
+        }),
+      }),
+    ]);
   });
 });
 
@@ -2033,6 +2050,117 @@ describe('board layout tools with branch entities present', () => {
     expect(parsed.updates.map((update: { arrangedItems: number }) => update.arrangedItems)).toEqual(
       [1, 1]
     );
+  });
+
+  it('includes free worktrees and heterogeneous canvas objects in the same board cluster', async () => {
+    const boardPatches: Array<Record<string, unknown>> = [];
+    const entityPatches: Array<{ objectId: string; data: Record<string, unknown> }> = [];
+    const { app } = makeApp({
+      entities: [
+        branchEntity({
+          object_id: 'pinned-worktree',
+          zone_id: 'zone-a',
+          position: { x: 20, y: 100 },
+          size: { width: 500, height: 200 },
+        }),
+        branchEntity({
+          object_id: 'free-worktree',
+          zone_id: undefined,
+          position: { x: 900, y: 700 },
+          size: { width: 500, height: 200 },
+        }),
+      ],
+      objects: {
+        'zone-a': { type: 'zone', x: 0, y: 0, width: 620, height: 600, label: 'A' },
+        artifact: {
+          type: 'artifact',
+          artifact_id: 'artifact-1',
+          x: 0,
+          y: 800,
+          width: 720,
+          height: 420,
+        },
+        note: { type: 'markdown', x: 760, y: 800, width: 300, content: '# Note' },
+        app: {
+          type: 'app',
+          x: 1100,
+          y: 800,
+          width: 600,
+          height: 400,
+          title: 'Demo',
+          template: 'react',
+          files: {},
+        },
+        locked: {
+          type: 'artifact',
+          artifact_id: 'artifact-locked',
+          x: 1800,
+          y: 800,
+          width: 600,
+          height: 400,
+          locked: true,
+        },
+      },
+      boardPatches,
+      entityPatches,
+    });
+    const arrangeZones = registerAndCaptureHandler('agor_boards_arrange_zones', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse((await arrangeZones({ boardId: 'board-1' })).content[0].text);
+
+    expect(parsed).toMatchObject({ arranged: 1, arrangedLooseItems: 4 });
+    expect(parsed.looseUpdates.map((update: { objectId: string }) => update.objectId)).toEqual([
+      'free-worktree',
+      'artifact',
+      'note',
+      'app',
+    ]);
+    expect(boardPatches).toHaveLength(1);
+    expect(boardPatches[0]).toMatchObject({
+      _action: 'batchUpsertObjects',
+      objects: {
+        'zone-a': expect.any(Object),
+        artifact: expect.any(Object),
+        note: expect.any(Object),
+        app: expect.any(Object),
+      },
+    });
+    expect(
+      (boardPatches[0]?.objects as Record<string, unknown> | undefined)?.locked
+    ).toBeUndefined();
+    expect(entityPatches.map((patch) => patch.objectId)).toEqual(
+      expect.arrayContaining(['pinned-worktree', 'free-worktree'])
+    );
+
+    const topLevel = [
+      ...parsed.updates.map((update: { objectId: string; position: object; size: object }) => ({
+        id: update.objectId,
+        ...update.position,
+        ...update.size,
+      })),
+      ...parsed.looseUpdates.map(
+        (update: { objectId: string; position: object; size: object }) => ({
+          id: update.objectId,
+          ...update.position,
+          ...update.size,
+        })
+      ),
+    ] as Array<{ id: string; x: number; y: number; width: number; height: number }>;
+    for (const [index, left] of topLevel.entries()) {
+      for (const right of topLevel.slice(index + 1)) {
+        expect(
+          left.x + left.width <= right.x ||
+            right.x + right.width <= left.x ||
+            left.y + left.height <= right.y ||
+            right.y + right.height <= left.y,
+          `${left.id} overlaps ${right.id}`
+        ).toBe(true);
+      }
+    }
   });
 
   it('never offers a compact_list zone a multi-column shape', async () => {

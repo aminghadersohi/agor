@@ -218,6 +218,63 @@ describe('reorderObject', () => {
   });
 });
 
+describe('batchUpdateObjectPositions', () => {
+  it('persists a mixed canvas selection as one complete board snapshot mutation', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const board = makeBoard({
+      zone: { type: 'zone', x: 0, y: 0, width: 600, height: 400, label: 'Zone' },
+      artifact: {
+        type: 'artifact',
+        artifact_id: 'artifact-1',
+        x: 800,
+        y: 0,
+        width: 500,
+        height: 300,
+      },
+    });
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes: [],
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await result.current.batchUpdateObjectPositions({
+      zone: { x: 80, y: 80, width: 720, height: 520 },
+      artifact: { x: 840, y: 80, width: 500, height: 300 },
+    });
+
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    expect(boardsPatch).toHaveBeenCalledWith('board-1', {
+      _action: 'batchUpsertObjects',
+      objects: {
+        zone: {
+          type: 'zone',
+          x: 80,
+          y: 80,
+          width: 720,
+          height: 520,
+          label: 'Zone',
+        },
+        artifact: {
+          type: 'artifact',
+          artifact_id: 'artifact-1',
+          x: 840,
+          y: 80,
+          width: 500,
+          height: 300,
+        },
+      },
+    });
+  });
+});
+
 describe('arrangeZoneContents', () => {
   it('packs once, starts one motion, and persists one complete patch per child', async () => {
     const { client, patch } = makeClient();
@@ -1738,6 +1795,14 @@ describe('arrangeBoardZones production path', () => {
         label: 'A',
         layout: { mode: 'auto' },
       },
+      artifact: {
+        type: 'artifact',
+        artifact_id: 'artifact-1',
+        x: 0,
+        y: 800,
+        width: 720,
+        height: 420,
+      },
     });
     const nodes: Node[] = [
       { id: 'zone-b', type: 'zone', position: { x: 800, y: 0 }, width: 620, height: 600, data: {} },
@@ -1760,6 +1825,22 @@ describe('arrangeBoardZones production path', () => {
         height: 100,
         data: { card: { title: 'Card B', data: {} } },
       },
+      {
+        id: 'free-branch',
+        type: 'branchNode',
+        position: { x: 800, y: 800 },
+        width: 500,
+        height: 200,
+        data: { branch: { name: 'Free branch' } },
+      },
+      {
+        id: 'artifact',
+        type: 'artifactNode',
+        position: { x: 0, y: 800 },
+        width: 720,
+        height: 420,
+        data: { objectId: 'artifact', width: 720, height: 420 },
+      },
     ];
     const onArrangeNodes = vi.fn();
     const { result } = renderHook(
@@ -1779,6 +1860,11 @@ describe('arrangeBoardZones production path', () => {
               card_id: 'b',
               zone_id: 'zone-b',
               position: { x: 180, y: 220 },
+            },
+            {
+              object_id: 'placement-free',
+              branch_id: 'free-branch',
+              position: { x: 800, y: 800 },
             },
           ] as never,
           nodes,
@@ -1801,10 +1887,11 @@ describe('arrangeBoardZones production path', () => {
         objects: {
           'zone-a': expect.objectContaining({ type: 'zone' }),
           'zone-b': expect.objectContaining({ type: 'zone' }),
+          artifact: expect.objectContaining({ type: 'artifact' }),
         },
       })
     );
-    expect(boardObjectsPatch).toHaveBeenCalledTimes(2);
+    expect(boardObjectsPatch).toHaveBeenCalledTimes(3);
     expect(onArrangeNodes).toHaveBeenCalledTimes(1);
     expect(showSuccess).toHaveBeenCalledTimes(1);
     expect(showWarning).not.toHaveBeenCalled();

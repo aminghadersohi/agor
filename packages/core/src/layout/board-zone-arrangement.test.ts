@@ -100,4 +100,60 @@ describe('planBoardZoneArrangement', () => {
     ]);
     expect(plan.zones[0]?.contentColumns).toBeLessThanOrEqual(2);
   });
+
+  it('packs content-sized zones and heterogeneous free board nodes into one idempotent cluster', () => {
+    const zones = [
+      zone('review', 0, 0, [item('review-card', 380, 120)]),
+      zone('shipping', 900, 0, [item('shipping-worktree', 500, 200)]),
+    ];
+    const looseItems = [
+      { id: 'artifact', x: 0, y: 800, width: 720, height: 420 },
+      { id: 'free-card', x: 760, y: 800, width: 380, height: 100 },
+      { id: 'note', x: 1180, y: 800, width: 260, height: 500 },
+    ];
+    const first = planBoardZoneArrangement(zones, { looseItems });
+
+    expect(first.boardLayout?.mode).toBe('cluster');
+    expect(first.looseItems.map((entry) => entry.id)).toEqual(looseItems.map((entry) => entry.id));
+    const topLevel = [
+      ...first.zones.map((entry) => ({
+        id: entry.id,
+        x: entry.position.x,
+        y: entry.position.y,
+        width: entry.width,
+        height: entry.height,
+      })),
+      ...first.looseItems,
+    ];
+    for (const [index, left] of topLevel.entries()) {
+      for (const right of topLevel.slice(index + 1)) {
+        expect(
+          left.x + left.width <= right.x ||
+            right.x + right.width <= left.x ||
+            left.y + left.height <= right.y ||
+            right.y + right.height <= left.y,
+          `${left.id} overlaps ${right.id}`
+        ).toBe(true);
+      }
+    }
+
+    const firstZoneById = new Map(first.zones.map((entry) => [entry.id, entry]));
+    const second = planBoardZoneArrangement(
+      zones.map((entry) => ({
+        ...entry,
+        x: firstZoneById.get(entry.id)?.position.x ?? entry.x,
+        y: firstZoneById.get(entry.id)?.position.y ?? entry.y,
+      })),
+      {
+        looseItems: looseItems.map((entry) => {
+          const placed = first.looseItems.find((item) => item.id === entry.id);
+          return { ...entry, x: placed?.x ?? entry.x, y: placed?.y ?? entry.y };
+        }),
+      }
+    );
+    expect(new Map(second.zones.map((entry) => [entry.id, entry.position]))).toEqual(
+      new Map(first.zones.map((entry) => [entry.id, entry.position]))
+    );
+    expect(second.looseItems).toEqual(first.looseItems);
+  });
 });

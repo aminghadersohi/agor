@@ -85,6 +85,23 @@ export interface RectangleLayoutResult {
   overflowingItemIds: string[];
 }
 
+export interface CompactRectangleLayoutResult extends Omit<RectangleLayoutResult, 'mode'> {
+  mode: 'cluster';
+}
+
+export interface CompactRectangleLayoutItem extends RectangleLayoutItem {
+  /** Optional prior canvas position, used only as a final movement tie-break. */
+  sourceX?: number;
+  sourceY?: number;
+}
+
+export interface CompactRectangleLayoutOptions {
+  padding?: number;
+  gapX?: number;
+  gapY?: number;
+  gridSize?: number;
+}
+
 interface GridCandidate {
   placements: RectanglePlacement[];
   columns: number;
@@ -494,5 +511,167 @@ export function layoutRectangles(
     deckOffsetX: 0,
     deckOffsetY: 0,
     overflowingItemIds: bounds ? overflowingIds(fallback.placements, bounds) : [],
+  };
+}
+
+type ClusterPlacement = RectanglePlacement & { sourceX?: number; sourceY?: number };
+
+const clusterSeparated = (
+  left: ClusterPlacement,
+  right: { x: number; y: number; width: number; height: number },
+  gapX: number,
+  gapY: number
+): boolean =>
+  left.x + left.width + gapX <= right.x ||
+  right.x + right.width + gapX <= left.x ||
+  left.y + left.height + gapY <= right.y ||
+  right.y + right.height + gapY <= left.y;
+
+/**
+ * Pack heterogeneous canvas rectangles into a compact deterministic cluster.
+ *
+ * Unlike `layoutRectangles`, this is intentionally not a fixed row/column
+ * grid. Every item is placed on the corner frontier created by prior items.
+ * The enclosing diameter wins first, then area, then movement from the
+ * supplied source geometry. Input order remains stable in the returned array,
+ * and source geometry resolves equally compact alternatives with less motion.
+ */
+export function layoutCompactRectangles(
+  sourceItems: readonly CompactRectangleLayoutItem[],
+  options: CompactRectangleLayoutOptions = {}
+): CompactRectangleLayoutResult {
+  const gridSize = finiteNonNegative(options.gridSize, 0);
+  const padding = ceilToGrid(finiteNonNegative(options.padding, 0), gridSize);
+  const gapX = ceilToGrid(finiteNonNegative(options.gapX, 24), gridSize);
+  const gapY = ceilToGrid(finiteNonNegative(options.gapY, 24), gridSize);
+  const items = normalizedItems(sourceItems, gridSize).map((item, index) => ({
+    ...item,
+    sourceX: sourceItems[index]?.sourceX,
+    sourceY: sourceItems[index]?.sourceY,
+  }));
+  if (items.length === 0) {
+    return {
+      mode: 'cluster',
+      placements: [],
+      columns: 1,
+      rows: 0,
+      width: padding * 2,
+      height: padding * 2,
+      gapX,
+      gapY,
+      padding,
+      fitsWithoutOverlap: true,
+      stackCount: 0,
+      maxDeckDepth: 1,
+      deckOffsetX: 0,
+      deckOffsetY: 0,
+      overflowingItemIds: [],
+    };
+  }
+
+  const finiteSourceXs = items
+    .map((item) => item.sourceX)
+    .filter((value): value is number => Number.isFinite(value));
+  const finiteSourceYs = items
+    .map((item) => item.sourceY)
+    .filter((value): value is number => Number.isFinite(value));
+  const sourceLeft = finiteSourceXs.length > 0 ? Math.min(...finiteSourceXs) : 0;
+  const sourceTop = finiteSourceYs.length > 0 ? Math.min(...finiteSourceYs) : 0;
+  const placed: ClusterPlacement[] = [];
+
+  for (const [index, item] of items.entries()) {
+    const candidateByKey = new Map<string, { x: number; y: number }>();
+    const addCandidate = (x: number, y: number) => {
+      if (x < 0 || y < 0) return;
+      candidateByKey.set(`${x}:${y}`, { x, y });
+    };
+    addCandidate(0, 0);
+    for (const existing of placed) {
+      addCandidate(existing.x + existing.width + gapX, existing.y);
+      addCandidate(existing.x - item.width - gapX, existing.y);
+      addCandidate(existing.x, existing.y + existing.height + gapY);
+      addCandidate(existing.x, existing.y - item.height - gapY);
+      // Aligning opposite edges as well as top/left edges lets a short item
+      // fill the corner below or beside a larger heterogeneous neighbour.
+      addCandidate(existing.x + existing.width - item.width, existing.y + existing.height + gapY);
+      addCandidate(existing.x + existing.width + gapX, existing.y + existing.height - item.height);
+    }
+    const candidates = [...candidateByKey.values()].filter(({ x, y }) =>
+      placed.every((existing) =>
+        clusterSeparated(existing, { x, y, width: item.width, height: item.height }, gapX, gapY)
+      )
+    );
+    if (candidates.length === 0) {
+      throw new Error(`Unable to place rectangle '${item.id}' in the compact cluster.`);
+    }
+
+    const sourceX = Number.isFinite(item.sourceX) ? (item.sourceX as number) - sourceLeft : 0;
+    const sourceY = Number.isFinite(item.sourceY) ? (item.sourceY as number) - sourceTop : 0;
+    const best = candidates.sort((a, b) => {
+      const score = (candidate: { x: number; y: number }) => {
+        const width = Math.max(
+          candidate.x + item.width,
+          ...placed.map((entry) => entry.x + entry.width)
+        );
+        const height = Math.max(
+          candidate.y + item.height,
+          ...placed.map((entry) => entry.y + entry.height)
+        );
+        return [
+          width * width + height * height,
+          width * height,
+          (candidate.x - sourceX) ** 2 + (candidate.y - sourceY) ** 2,
+          candidate.y,
+          candidate.x,
+        ] as const;
+      };
+      const left = score(a);
+      const right = score(b);
+      for (let scoreIndex = 0; scoreIndex < left.length; scoreIndex += 1) {
+        const delta = (left[scoreIndex] ?? 0) - (right[scoreIndex] ?? 0);
+        if (delta !== 0) return delta;
+      }
+      return 0;
+    })[0];
+    if (!best) throw new Error(`Unable to select a placement for rectangle '${item.id}'.`);
+    placed.push({
+      ...item,
+      x: best.x,
+      y: best.y,
+      row: 0,
+      column: 0,
+      stackIndex: index,
+      deckDepth: 0,
+    });
+  }
+
+  const rowYs = [...new Set(placed.map((item) => item.y))].sort((a, b) => a - b);
+  const rowByY = new Map(rowYs.map((y, row) => [y, row]));
+  const placements = placed.map(({ sourceX: _sourceX, sourceY: _sourceY, ...item }) => ({
+    ...item,
+    x: item.x + padding,
+    y: item.y + padding,
+    row: rowByY.get(item.y) ?? 0,
+    column: placed.filter((peer) => peer.y === item.y && peer.x < item.x).length,
+  }));
+  const contentWidth = Math.max(...placed.map((item) => item.x + item.width));
+  const contentHeight = Math.max(...placed.map((item) => item.y + item.height));
+  const columns = Math.max(1, ...rowYs.map((y) => placed.filter((item) => item.y === y).length));
+  return {
+    mode: 'cluster',
+    placements,
+    columns,
+    rows: rowYs.length,
+    width: contentWidth + padding * 2,
+    height: contentHeight + padding * 2,
+    gapX,
+    gapY,
+    padding,
+    fitsWithoutOverlap: true,
+    stackCount: items.length,
+    maxDeckDepth: 1,
+    deckOffsetX: 0,
+    deckOffsetY: 0,
+    overflowingItemIds: [],
   };
 }

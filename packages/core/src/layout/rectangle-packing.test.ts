@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   BOARD_GRID_SIZE,
+  layoutCompactRectangles,
   layoutRectangles,
   type RectanglePlacement,
   snapBoardGridPoint,
@@ -306,5 +307,110 @@ describe('layoutRectangles', () => {
       if (left) expect(left.x + left.width).toBeLessThanOrEqual(placement.x);
       if (above) expect(above.y + above.height).toBeLessThanOrEqual(placement.y);
     }
+  });
+
+  it('packs heterogeneous board shapes into a smaller-diameter non-grid cluster', () => {
+    const items = [
+      { id: 'wide', width: 800, height: 160, sourceX: 0, sourceY: 0 },
+      { id: 'tall', width: 220, height: 500, sourceX: 0, sourceY: 240 },
+      { id: 'artifact-a', width: 260, height: 180, sourceX: 300, sourceY: 240 },
+      { id: 'artifact-b', width: 260, height: 180, sourceX: 600, sourceY: 240 },
+      { id: 'card', width: 260, height: 180, sourceX: 600, sourceY: 460 },
+    ];
+    const cluster = layoutCompactRectangles(items, {
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+    const squareGrid = layoutRectangles(items, {
+      preferredColumns: 3,
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+
+    expect(cluster.mode).toBe('cluster');
+    expect(cluster.placements.map((item) => item.id)).toEqual(items.map((item) => item.id));
+    expectNoOverlap(cluster.placements);
+    expect(cluster.width ** 2 + cluster.height ** 2).toBeLessThan(
+      squareGrid.width ** 2 + squareGrid.height ** 2
+    );
+    // A true frontier pack fills the space beside the tall item rather than
+    // forcing every item into shared row heights and column widths.
+    expect(cluster.placements[2]).toMatchObject({ x: 260, y: 200 });
+    expect(cluster.placements[3]).toMatchObject({ x: 260, y: 420 });
+  });
+
+  it('is deterministic, grid-snapped, gap-separated, and retains input identity order', () => {
+    const items = [
+      { id: 'zone', width: 613, height: 377, sourceX: 900, sourceY: 100 },
+      { id: 'artifact', width: 347, height: 291, sourceX: 120, sourceY: 600 },
+      { id: 'worktree', width: 381, height: 143, sourceX: 540, sourceY: 620 },
+      { id: 'note', width: 219, height: 407, sourceX: 980, sourceY: 650 },
+    ];
+    const first = layoutCompactRectangles(items, {
+      padding: 20,
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+    const second = layoutCompactRectangles(items, {
+      padding: 20,
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+
+    expect(second).toEqual(first);
+    expect(first.placements.every((item) => item.x % 20 === 0 && item.y % 20 === 0)).toBe(true);
+    expect(first.placements.map((item) => item.id)).toEqual(items.map((item) => item.id));
+    for (const [index, left] of first.placements.entries()) {
+      for (const right of first.placements.slice(index + 1)) {
+        expect(
+          left.x + left.width + 40 <= right.x ||
+            right.x + right.width + 40 <= left.x ||
+            left.y + left.height + 40 <= right.y ||
+            right.y + right.height + 40 <= left.y
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('uses existing spatial geometry to break equally compact placement ties', () => {
+    const base = { id: 'base', width: 200, height: 200, sourceX: 0, sourceY: 0 };
+    const toRight = layoutCompactRectangles(
+      [base, { id: 'peer', width: 200, height: 200, sourceX: 300, sourceY: 0 }],
+      { gapX: 40, gapY: 40 }
+    );
+    const below = layoutCompactRectangles(
+      [base, { id: 'peer', width: 200, height: 200, sourceX: 0, sourceY: 300 }],
+      { gapX: 40, gapY: 40 }
+    );
+
+    expect(toRight.placements[1]).toMatchObject({ x: 240, y: 0 });
+    expect(below.placements[1]).toMatchObject({ x: 0, y: 240 });
+  });
+
+  it('is idempotent when its prior placements become the next source geometry', () => {
+    const items = [
+      { id: 'wide', width: 800, height: 160, sourceX: 0, sourceY: 0 },
+      { id: 'tall', width: 220, height: 500, sourceX: 0, sourceY: 240 },
+      { id: 'artifact-a', width: 260, height: 180, sourceX: 300, sourceY: 240 },
+      { id: 'artifact-b', width: 260, height: 180, sourceX: 600, sourceY: 240 },
+      { id: 'worktree', width: 260, height: 180, sourceX: 600, sourceY: 460 },
+    ];
+    const options = { gapX: 40, gapY: 40, gridSize: BOARD_GRID_SIZE };
+    const first = layoutCompactRectangles(items, options);
+    const firstById = new Map(first.placements.map((item) => [item.id, item]));
+    const second = layoutCompactRectangles(
+      items.map((item) => ({
+        ...item,
+        sourceX: firstById.get(item.id)?.x,
+        sourceY: firstById.get(item.id)?.y,
+      })),
+      options
+    );
+
+    expect(second).toEqual(first);
   });
 });

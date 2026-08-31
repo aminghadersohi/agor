@@ -920,6 +920,15 @@ export const useBoardObjects = ({
       }
 
       try {
+        const looseNodes = currentNodes.filter(
+          (node) =>
+            !node.hidden &&
+            !node.parentId &&
+            ['branchNode', 'cardNode', 'markdown', 'appNode', 'artifactNode'].includes(
+              node.type ?? ''
+            ) &&
+            node.data?.locked !== true
+        );
         const plan = planBoardZoneArrangement(
           Object.entries(currentBoard.objects ?? {}).flatMap(([zoneId, object]) => {
             if (!selected.has(zoneId) || object.type !== 'zone') return [];
@@ -971,11 +980,20 @@ export const useBoardObjects = ({
                 }),
               },
             ];
-          })
+          }),
+          {
+            looseItems: looseNodes.map((node) => ({
+              id: node.id,
+              ...node.position,
+              ...ceilBoardGridSize(renderedNodeSize(node)),
+            })),
+          }
         );
         const arrangedZoneById = new Map(plan.zones.map((zone) => [zone.id, zone]));
         const arrangedItemById = new Map(
-          plan.zones.flatMap((zone) => zone.items.map((item) => [item.id, item] as const))
+          [...plan.zones.flatMap((zone) => zone.items), ...plan.looseItems].map(
+            (item) => [item.id, item] as const
+          )
         );
         const autoSignatureChangesByZoneId = new Map(
           plan.zones.map((zone) => {
@@ -1038,8 +1056,8 @@ export const useBoardObjects = ({
         setNodes((nodes) => nodes.map((node) => arrangedNodeById.get(node.id) ?? node));
         onArrangeNodes?.(arrangedNodes, dealTiming({ count: arrangedNodes.length }).totalMs);
 
-        const objects = Object.fromEntries(
-          plan.zones.map((zone) => {
+        const objects = Object.fromEntries([
+          ...plan.zones.map((zone) => {
             const existing = currentBoard.objects?.[zone.id];
             if (existing?.type !== 'zone') {
               throw new Error(`Missing board zone '${zone.id}'.`);
@@ -1054,33 +1072,56 @@ export const useBoardObjects = ({
                 height: zone.height,
               },
             ];
-          })
-        );
+          }),
+          ...plan.looseItems.flatMap((item) => {
+            const existing = currentBoard.objects?.[item.id];
+            if (!existing) return [];
+            return [
+              [
+                item.id,
+                {
+                  ...existing,
+                  x: item.x,
+                  y: item.y,
+                  ...('width' in existing ? { width: item.width } : {}),
+                  ...('height' in existing ? { height: item.height } : {}),
+                },
+              ] as const,
+            ];
+          }),
+        ]);
         await client.service('boards').patch(currentBoard.board_id, {
           _action: 'batchUpsertObjects',
           objects,
         } as unknown as Partial<Board>);
         await Promise.all(
-          plan.zones.flatMap((zone) =>
-            zone.items.map(async (item) => {
-              const placement = placementByNodeId.get(item.id);
-              if (!placement) return;
-              const zoneObject = currentBoard.objects?.[zone.id];
-              const policy = normalizeZoneLayoutPolicy(
-                zoneObject?.type === 'zone' ? zoneObject.layout : undefined
-              );
-              await client.service('board-objects').patch(placement.object_id, {
-                position: { x: item.x, y: item.y },
-                size: { width: item.width, height: item.height },
-                ...(policy.preset === 'compact_list' && placement.compact !== true
-                  ? { compact: true }
-                  : {}),
-              });
-            })
-          )
+          [
+            ...plan.zones.flatMap((zone) =>
+              zone.items.map((item) => {
+                const zoneObject = currentBoard.objects?.[zone.id];
+                return {
+                  item,
+                  policy: normalizeZoneLayoutPolicy(
+                    zoneObject?.type === 'zone' ? zoneObject.layout : undefined
+                  ),
+                };
+              })
+            ),
+            ...plan.looseItems.map((item) => ({ item, policy: undefined })),
+          ].map(async ({ item, policy }) => {
+            const placement = placementByNodeId.get(item.id);
+            if (!placement) return;
+            await client.service('board-objects').patch(placement.object_id, {
+              position: { x: item.x, y: item.y },
+              size: { width: item.width, height: item.height },
+              ...(policy?.preset === 'compact_list' && placement.compact !== true
+                ? { compact: true }
+                : {}),
+            });
+          })
         );
         showSuccess(
-          `Arranged ${plan.zones.length} zone${plan.zones.length === 1 ? '' : 's'} and their contents.`
+          `Arranged ${plan.zones.length} zone${plan.zones.length === 1 ? '' : 's'}, ${plan.looseItems.length} free item${plan.looseItems.length === 1 ? '' : 's'}, and their contents.`
         );
       } catch (error) {
         console.error('Failed to arrange board zones:', error);
@@ -1431,7 +1472,7 @@ export const useBoardObjects = ({
    * Batch update positions for board objects after drag
    */
   const batchUpdateObjectPositions = useCallback(
-    async (updates: Record<string, { x: number; y: number }>) => {
+    async (updates: Record<string, { x: number; y: number; width?: number; height?: number }>) => {
       const currentBoard = boardRef.current;
       if (!currentBoard || !client || Object.keys(updates).length === 0) return;
 
@@ -1452,7 +1493,9 @@ export const useBoardObjects = ({
             ...existingObject,
             x: position.x,
             y: position.y,
-          };
+            ...(position.width === undefined ? {} : { width: position.width }),
+            ...(position.height === undefined ? {} : { height: position.height }),
+          } as BoardObject;
         }
 
         if (Object.keys(objects).length === 0) {
