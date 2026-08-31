@@ -40,6 +40,7 @@ import {
   type TenantScopeAwareDatabase,
   TenantWriteGateActiveError,
   type UsersRepository,
+  ZoneWorkflowRepository,
 } from '@agor/core/db';
 import {
   MANAGED_ENV_EXECUTION_MODE_DEFAULT,
@@ -506,6 +507,8 @@ export const TENANT_OWNED_SERVICE_PATHS = [
   'artifacts',
   'artifact-trust-grants',
   'board-objects',
+  'zone-workflow-transitions',
+  'zone-workflow-advances',
   'session-mcp-servers',
   'user-mcp-oauth-tokens',
   'board-comments',
@@ -1241,6 +1244,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   const boardCommentsRepository = new BoardCommentsRepository(db);
   const boardObjectsRepository = new BoardObjectRepository(db);
   const cardRepository = new CardRepository(db);
+  const zoneWorkflowRepository = new ZoneWorkflowRepository(db);
 
   const authorizeExternalBoard = async (
     context: HookContext,
@@ -1747,6 +1751,97 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       remove: [
         requireMinimumRole(ROLES.MEMBER, 'delete board objects'),
         boardObjectAccess('delete board objects'),
+      ],
+    },
+  });
+
+  const zoneWorkflowBoardAccess =
+    (mode: 'view' | 'mutate', action: string, auditService = false) =>
+    async (context: HookContext): Promise<HookContext> => {
+      let boardId: BoardID | undefined;
+      if (context.method === 'find') {
+        const requested = (context.params.query as { board_id?: unknown } | undefined)?.board_id;
+        if (typeof requested !== 'string') {
+          throw new BadRequest('board_id is required when listing workflow data');
+        }
+        boardId = requested as BoardID;
+      } else if (context.method === 'create' && !auditService) {
+        boardId = (context.data as { board_id?: BoardID } | undefined)?.board_id;
+      } else if (context.method === 'create' && auditService) {
+        const transitionId = (context.data as { transition_id?: unknown } | undefined)
+          ?.transition_id;
+        const transition =
+          typeof transitionId === 'string'
+            ? await zoneWorkflowRepository.findTransition(transitionId)
+            : null;
+        boardId = transition?.board_id;
+      } else if (typeof context.id === 'string') {
+        boardId = auditService
+          ? (await zoneWorkflowRepository.findAdvance(context.id))?.board_id
+          : (await zoneWorkflowRepository.findTransition(context.id))?.board_id;
+      }
+      await authorizeExternalBoard(context, boardId, mode, action);
+      return context;
+    };
+
+  const authorizeWorkflowAdvanceEntities = async (context: HookContext): Promise<HookContext> => {
+    if (!executionMode.appRbacEnabled || !context.params.provider) return context;
+    const user = context.params.user;
+    if (!user) throw new NotAuthenticated('Authentication required');
+    if (user._isServiceAccount || hasMinimumRole(user.role, ROLES.ADMIN)) return context;
+    const entities = (context.data as { entities?: unknown } | undefined)?.entities;
+    if (!Array.isArray(entities)) throw new Forbidden('Workflow entities are unavailable');
+    for (const entity of entities) {
+      if (!entity || typeof entity !== 'object') {
+        throw new Forbidden('Workflow entities are unavailable');
+      }
+      const ref = entity as { entity_type?: unknown; entity_id?: unknown };
+      if (ref.entity_type === 'branch' && typeof ref.entity_id === 'string') {
+        const visible = await boardObjectsRepository
+          .canViewBranchReference(user.user_id as UUID, ref.entity_id as never)
+          .catch(() => false);
+        if (!visible) throw new Forbidden('Workflow entities are unavailable');
+      } else if (ref.entity_type === 'card' && typeof ref.entity_id === 'string') {
+        const visible = await cardRepository
+          .findVisibleById(user.user_id as UUID, ref.entity_id)
+          .catch(() => null);
+        if (!visible) throw new Forbidden('Workflow entities are unavailable');
+      } else {
+        throw new Forbidden('Workflow entities are unavailable');
+      }
+    }
+    return context;
+  };
+
+  safeService('zone-workflow-transitions')?.hooks({
+    before: {
+      all: [requireAuth],
+      find: [zoneWorkflowBoardAccess('view', 'view workflow transitions')],
+      get: [zoneWorkflowBoardAccess('view', 'view this workflow transition')],
+      create: [
+        requireMinimumRole(ROLES.MEMBER, 'create workflow transitions'),
+        zoneWorkflowBoardAccess('mutate', 'create workflow transitions'),
+      ],
+      patch: [
+        requireMinimumRole(ROLES.MEMBER, 'update workflow transitions'),
+        zoneWorkflowBoardAccess('mutate', 'update this workflow transition'),
+      ],
+      remove: [
+        requireMinimumRole(ROLES.MEMBER, 'delete workflow transitions'),
+        zoneWorkflowBoardAccess('mutate', 'delete this workflow transition'),
+      ],
+    },
+  });
+
+  safeService('zone-workflow-advances')?.hooks({
+    before: {
+      all: [requireAuth],
+      find: [zoneWorkflowBoardAccess('view', 'view workflow advance audit', true)],
+      get: [zoneWorkflowBoardAccess('view', 'view this workflow advance audit', true)],
+      create: [
+        requireMinimumRole(ROLES.MEMBER, 'advance workflow entities'),
+        zoneWorkflowBoardAccess('mutate', 'advance workflow entities', true),
+        authorizeWorkflowAdvanceEntities,
       ],
     },
   });

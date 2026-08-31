@@ -496,7 +496,24 @@ describe('SessionCanvas zoom shortcuts', () => {
 
     function makeClient() {
       const patch = vi.fn().mockResolvedValue({});
-      const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+      const workflowService = {
+        find: vi.fn().mockResolvedValue({ data: [] }),
+        on: vi.fn(),
+        off: vi.fn(),
+      };
+      const client = {
+        service: vi.fn((path: string) =>
+          path === 'zone-workflow-transitions' ? workflowService : { patch }
+        ),
+        io: {
+          on: vi.fn(),
+          off: vi.fn(),
+          emit: vi.fn(),
+          volatile: { emit: vi.fn() },
+        },
+        on: vi.fn(),
+        off: vi.fn(),
+      } as unknown as AgorClient;
       return { client, patch };
     }
 

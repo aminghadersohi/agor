@@ -60,6 +60,7 @@ import { registerSessionTools } from './tools/sessions.js';
 import { registerTaskTools } from './tools/tasks.js';
 import { registerUserTools } from './tools/users.js';
 import { registerWidgetTools } from './tools/widgets.js';
+import { registerZoneWorkflowTools } from './tools/zone-workflow.js';
 
 const DEBUG_MCP_REQUESTS =
   process.env.AGOR_DEBUG_MCP_REQUESTS === '1' || process.env.DEBUG?.includes('mcp-requests');
@@ -225,7 +226,13 @@ const DOMAIN_TOOL_REGISTRARS: DomainToolRegistrar[] = [
   { domain: 'repos', register: registerRepoTools },
   { domain: 'branches', register: registerBranchTools },
   { domain: 'environment', register: registerEnvironmentTools },
-  { domain: 'boards', register: registerBoardTools },
+  {
+    domain: 'boards',
+    register: (server, ctx) => {
+      registerBoardTools(server, ctx);
+      registerZoneWorkflowTools(server, ctx);
+    },
+  },
   {
     domain: 'cards',
     register: (server, ctx) => {

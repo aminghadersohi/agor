@@ -268,7 +268,6 @@
 .react-flow__node-appNode .react-flow__resize-control.line.bottom {
   height: 12px;
 }
-
 /*
  * Deal animation for an arrange.
  *
@@ -315,4 +314,37 @@
   .react-flow.agor-dealing .react-flow__node-zone {
     transition: none;
   }
+}
+
+/* Canvas-editor exception: React Flow owns handle visibility outside React props. */
+.zone-workflow-handle {
+  /* Keep the pointer target usable after React Flow scales the canvas down.
+     The pseudo-element preserves the original compact visual marker. */
+  width: 28px;
+  height: 28px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.zone-workflow-handle::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  content: "";
+  background: currentColor;
+  border: 1px solid var(--zone-workflow-handle-border);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.tool-mode-workflow .zone-workflow-handle {
+  opacity: 0.85;
+  pointer-events: auto;
+}
+
+.tool-mode-workflow .react-flow__edge:focus-visible .react-flow__edge-path {
+  stroke-width: 3;
 }

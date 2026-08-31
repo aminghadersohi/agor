@@ -81,6 +81,27 @@ describe('tenantPortabilityForeignKeys', () => {
     }
   });
 
+  it('moves workflow definitions and audit history with their board', () => {
+    expect(tenantPortabilityForeignKeys()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          childTable: 'zone_workflow_transitions',
+          childColumns: ['tenant_id', 'board_id'],
+          parentTable: 'boards',
+          parentColumns: ['tenant_id', 'board_id'],
+          onDelete: 'cascade',
+        }),
+        expect.objectContaining({
+          childTable: 'zone_workflow_advances',
+          childColumns: ['tenant_id', 'board_id'],
+          parentTable: 'boards',
+          parentColumns: ['tenant_id', 'board_id'],
+          onDelete: 'cascade',
+        }),
+      ])
+    );
+  });
+
   it('moves normalized board and branch policies with their resources and principals', () => {
     expect(tenantPortabilityForeignKeys()).toEqual(
       expect.arrayContaining([

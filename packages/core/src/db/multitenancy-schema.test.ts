@@ -68,6 +68,9 @@ function migrationTenantTables(): string[] {
   const sessionAttentionMigration = readRepoFile(
     'packages/core/drizzle/postgres/9009_session_attention_states.sql'
   );
+  const zoneWorkflowMigration = readRepoFile(
+    'packages/core/drizzle/postgres/9011_zone_workflow_transitions.sql'
+  );
   const retiredTables = retiredTenantTables();
   return [
     ...new Set(
@@ -88,6 +91,7 @@ function migrationTenantTables(): string[] {
         ...codexDeviceAuthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...capabilityPoliciesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...sessionAttentionMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...zoneWorkflowMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
       ]
         .map((m) => m[1])
         .filter((table) => !retiredTables.has(table))
@@ -111,6 +115,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'),
     readRepoFile('packages/core/drizzle/postgres/9004_board_branch_capability_policies.sql'),
     readRepoFile('packages/core/drizzle/postgres/9009_session_attention_states.sql'),
+    readRepoFile('packages/core/drizzle/postgres/9011_zone_workflow_transitions.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
   return [

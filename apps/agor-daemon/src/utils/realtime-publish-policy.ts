@@ -150,6 +150,14 @@ export const REALTIME_PUBLISH_POLICY = {
     minimumRole: 'member',
     why: 'useAgorData and BoardBranchList track card/zone placement live.',
   },
+  'zone-workflow-transitions': {
+    audience: 'board',
+    why: 'SessionCanvas keeps persistent directed zone transitions live.',
+  },
+  'zone-workflow-advances': {
+    audience: 'board',
+    why: 'Advance audit events and replay outcomes belong to the transition board audience.',
+  },
   'board-comments': {
     audience: 'board-resource',
     why: 'useAgorData renders comment threads live.',

@@ -8,6 +8,7 @@ import {
   snapBoardGridPoint,
   snapBoardGridValue,
 } from '@agor/core/layout/rectangle-packing';
+import { generateId } from '@agor/core/ids/browser';
 import type {
   AgenticToolName,
   AgorClient,
@@ -26,16 +27,21 @@ import type {
   SpawnConfig,
   User,
   ZoneTrigger,
+  ZoneWorkflowEntityRef,
+  ZoneWorkflowTransition,
 } from '@agor-live/client';
 import {
   AlignCenterOutlined,
   AlignLeftOutlined,
   AppstoreOutlined,
+  ApartmentOutlined,
+  ArrowRightOutlined,
   BorderOutlined,
   ColumnHeightOutlined,
   ColumnWidthOutlined,
   CommentOutlined,
   DeleteOutlined,
+  EditOutlined,
   FileMarkdownOutlined,
   MinusOutlined,
   PlusOutlined,
@@ -44,7 +50,7 @@ import {
   VerticalAlignTopOutlined,
   ZoomInOutlined,
 } from '@ant-design/icons';
-import { Button, Input, Modal, Popover, Slider, Tooltip, Typography, theme } from 'antd';
+import { Button, Flex, Input, Modal, Popover, Slider, Tooltip, Typography, theme } from 'antd';
 import React, {
   forwardRef,
   useCallback,
@@ -57,14 +63,17 @@ import React, {
 import {
   Background,
   BackgroundVariant,
+  type Connection,
   ControlButton,
   Controls,
   type Edge,
+  MarkerType,
   MiniMap,
   type Node,
   type NodeChange,
   type NodeDragHandler,
   type NodeSelectionChange,
+  Panel,
   ReactFlow,
   type ReactFlowInstance,
   useEdgesState,
@@ -118,6 +127,7 @@ import {
   type SelectionLayoutSettings,
 } from './canvas/SelectionLayoutPopover';
 import { useBoardObjects } from './canvas/useBoardObjects';
+import { useZoneWorkflow } from './canvas/useZoneWorkflow';
 import { findIntersectingObjects, findZoneAtPosition } from './canvas/utils/collisionDetection';
 import {
   getBranchParentInfo,
@@ -152,7 +162,12 @@ import { getValidZoneParentId, sanitizeOrphanedNodeParents } from './canvas/util
 import { mergePendingZoneGeometry, type ZoneGeometry } from './canvas/utils/pendingZoneGeometry';
 import { persistedResizeRect, type ResizeRect } from './canvas/utils/resizeGeometry';
 import { ZoneTriggerModal } from './canvas/ZoneTriggerModal';
+import {
+  ZoneWorkflowTransitionModal,
+  type ZoneWorkflowTransitionValues,
+} from './canvas/ZoneWorkflowTransitionModal';
 import { DEFAULT_BOARD_OBJECT_Z_INDEX, selectedZIndex } from './canvas/zOrder';
+import { getZoneWorkflowAdvanceNotice } from './canvas/zoneWorkflowAdvanceNotice';
 
 export function isCanvasSelectionControlTarget(target: Element): boolean {
   return Boolean(
@@ -520,7 +535,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
   ) => {
     const { token } = theme.useToken();
     const mutationGate = useMutationGate();
-    const { showError } = useThemedMessage();
+    const { showError, showSuccess, showWarning } = useThemedMessage();
 
     // Entity state via narrow store subscriptions. Each whole-map selector is a
     // stable module-level reference, so a slice only re-renders the canvas when
@@ -554,6 +569,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // other boards' object churn never re-renders the canvas. The factory is
     // memoized per boardId so the selector reference is stable across renders.
     const boardId = board?.board_id;
+    const zoneWorkflow = useZoneWorkflow(client, boardId);
     const boardObjectsSelector = useMemo(
       () => makeBoardObjectsForBoardSelector(boardId),
       [boardId]
@@ -592,8 +608,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
     // Tool state for canvas annotations
     const [activeTool, setActiveTool] = useState<
-      'select' | 'zone' | 'comment' | 'eraser' | 'markdown'
+      'select' | 'zone' | 'comment' | 'eraser' | 'markdown' | 'workflow'
     >('select');
+    const [selectedTransitionId, setSelectedTransitionId] = useState<string | null>(null);
+    const [transitionModal, setTransitionModal] = useState<{
+      sourceZoneId: string;
+      targetZoneId: string;
+      transition?: ZoneWorkflowTransition;
+    } | null>(null);
 
     // Zone drawing state (drag-to-draw)
     const [drawingZone, setDrawingZone] = useState<{
@@ -1287,9 +1309,78 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       warnInvalidZoneRef,
     ]);
 
-    // No edges needed for branch-centric boards
-    // (Session genealogy is visualized within BranchCard, not as canvas edges)
-    const initialEdges: Edge[] = useMemo(() => [], []);
+    const selectedTransition = useMemo(
+      () =>
+        zoneWorkflow.transitions.find(
+          (transition) => transition.transition_id === selectedTransitionId
+        ),
+      [zoneWorkflow.transitions, selectedTransitionId]
+    );
+
+    // Zones are the workflow nodes and persistent directed transitions are the
+    // links, matching ComfyUI's stable node-id/link-id graph model. React Flow
+    // owns viewport projection, so anchors stay attached through drag, resize,
+    // pan, and zoom without storing derived edge coordinates.
+    const initialEdges: Edge[] = useMemo(
+      () =>
+        zoneWorkflow.transitions
+          .filter(
+            (transition) =>
+              board?.objects?.[transition.source_zone_id]?.type === 'zone' &&
+              board?.objects?.[transition.target_zone_id]?.type === 'zone'
+          )
+          .map((transition) => {
+            const selected = transition.transition_id === selectedTransitionId;
+            return {
+              id: transition.transition_id,
+              source: transition.source_zone_id,
+              target: transition.target_zone_id,
+              sourceHandle: 'workflow-right',
+              targetHandle: 'workflow-left',
+              label: transition.label,
+              type: 'smoothstep',
+              selected,
+              focusable: activeTool === 'workflow',
+              interactionWidth: activeTool === 'workflow' ? 24 : 0,
+              markerEnd: {
+                type: MarkerType.ArrowClosed,
+                color: transition.enabled ? token.colorPrimary : token.colorTextDisabled,
+                width: 16,
+                height: 16,
+              },
+              style: {
+                stroke: transition.enabled ? token.colorPrimary : token.colorTextDisabled,
+                strokeWidth: selected ? 3 : 1.5,
+                strokeDasharray: transition.enabled ? undefined : '6 5',
+                opacity: activeTool === 'workflow' ? (transition.enabled ? 0.8 : 0.45) : 0.35,
+              },
+              labelStyle: {
+                fill: token.colorTextSecondary,
+                fontSize: token.fontSizeSM,
+                fontWeight: selected ? 600 : 400,
+              },
+              labelBgStyle: {
+                fill: token.colorBgElevated,
+                fillOpacity: 0.88,
+              },
+              labelBgPadding: [6, 3] as [number, number],
+              labelBgBorderRadius: token.borderRadiusSM,
+              data: { transition },
+            } satisfies Edge;
+          }),
+      [
+        zoneWorkflow.transitions,
+        board?.objects,
+        selectedTransitionId,
+        activeTool,
+        token.colorPrimary,
+        token.colorTextDisabled,
+        token.colorTextSecondary,
+        token.colorBgElevated,
+        token.fontSizeSM,
+        token.borderRadiusSM,
+      ]
+    );
 
     // Store ReactFlow instance ref
     const reactFlowInstanceRef = useRef<ReactFlowInstance | null>(null);
@@ -3129,6 +3220,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Pane click handler for comment placement
     const handlePaneClick = useCallback(
       (event: React.MouseEvent) => {
+        if (activeTool === 'workflow') setSelectedTransitionId(null);
         if (activeTool === 'comment' && reactFlowInstanceRef.current) {
           // Use screenToFlowPosition which automatically handles all offsets (including CommentsPanel)
           const position = reactFlowInstanceRef.current.screenToFlowPosition({
@@ -3330,6 +3422,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           return;
         }
 
+        if (activeTool === 'workflow') return;
+
         if (activeTool === 'comment' && reactFlowInstanceRef.current) {
           // Allow comment placement on sessions and zones
           if (node.type === 'branchNode' || node.type === 'zone') {
@@ -3424,6 +3518,151 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         ? Math.min(guideWrapperRect.height, documentHeight - guideWrapperRect.top)
         : documentHeight,
     };
+
+    const handleWorkflowConnect = useCallback(
+      (connection: Connection) => {
+        if (
+          activeTool !== 'workflow' ||
+          !mutationGate.canMutate ||
+          !connection.source ||
+          !connection.target
+        ) {
+          return;
+        }
+        if (connection.source === connection.target) {
+          showError('A workflow transition cannot link a zone to itself.');
+          return;
+        }
+        if (
+          board?.objects?.[connection.source]?.type !== 'zone' ||
+          board.objects?.[connection.target]?.type !== 'zone'
+        ) {
+          showError('Workflow transitions can only connect zones on this board.');
+          return;
+        }
+        setTransitionModal({
+          sourceZoneId: connection.source,
+          targetZoneId: connection.target,
+        });
+      },
+      [activeTool, mutationGate.canMutate, board?.objects, showError]
+    );
+
+    const saveWorkflowTransition = useCallback(
+      async (values: ZoneWorkflowTransitionValues) => {
+        if (!transitionModal) return;
+        try {
+          if (transitionModal.transition) {
+            await zoneWorkflow.patch(transitionModal.transition.transition_id, values);
+          } else {
+            await zoneWorkflow.create({
+              source_zone_id: transitionModal.sourceZoneId,
+              target_zone_id: transitionModal.targetZoneId,
+              ...values,
+            });
+          }
+          setTransitionModal(null);
+          showSuccess(
+            transitionModal.transition
+              ? 'Workflow transition updated.'
+              : 'Workflow transition created.'
+          );
+        } catch (error) {
+          showError(error instanceof Error ? error.message : String(error));
+        }
+      },
+      [transitionModal, zoneWorkflow, showSuccess, showError]
+    );
+
+    const editSelectedTransition = useCallback(() => {
+      if (!selectedTransition) return;
+      setTransitionModal({
+        sourceZoneId: selectedTransition.source_zone_id,
+        targetZoneId: selectedTransition.target_zone_id,
+        transition: selectedTransition,
+      });
+    }, [selectedTransition]);
+
+    const deleteSelectedTransition = useCallback(() => {
+      if (!selectedTransition || !mutationGate.canMutate) return;
+      Modal.confirm({
+        title: 'Delete workflow transition?',
+        content: `Delete “${selectedTransition.label}”? Historical advance audit records remain.`,
+        okText: 'Delete',
+        okButtonProps: { danger: true },
+        onOk: async () => {
+          await zoneWorkflow.remove(selectedTransition.transition_id);
+          setSelectedTransitionId(null);
+          showSuccess('Workflow transition deleted.');
+        },
+      });
+    }, [selectedTransition, mutationGate.canMutate, zoneWorkflow, showSuccess]);
+
+    const advanceSelectedEntities = useCallback(() => {
+      if (!selectedTransition?.enabled || !mutationGate.canMutate) return;
+      const selectedNodes = reactFlowInstanceRef.current
+        ?.getNodes()
+        .filter((node) => node.selected);
+      const entities: ZoneWorkflowEntityRef[] = [];
+      for (const node of selectedNodes ?? []) {
+        if (node.type === 'branchNode') {
+          const placement = boardObjectByBranch.get(node.id);
+          if (placement?.zone_id === selectedTransition.source_zone_id) {
+            entities.push({ entity_type: 'branch', entity_id: node.id as BranchID });
+          }
+        }
+        if (node.type === 'cardNode') {
+          const cardId = node.id.replace(/^card-/, '');
+          const placement = boardObjectByCard.get(cardId);
+          if (placement?.zone_id === selectedTransition.source_zone_id) {
+            entities.push({ entity_type: 'card', entity_id: cardId as never });
+          }
+        }
+      }
+      if (entities.length === 0) {
+        showError('Select one or more branches/cards in the transition source zone first.');
+        return;
+      }
+      Modal.confirm({
+        title: `Advance ${entities.length} selected ${entities.length === 1 ? 'item' : 'items'}?`,
+        content: (
+          <Flex vertical gap={8}>
+            <Typography.Text>
+              {zoneLabels[selectedTransition.source_zone_id] ?? 'Source'} →{' '}
+              {zoneLabels[selectedTransition.target_zone_id] ?? 'Target'}
+            </Typography.Text>
+            {selectedTransition.reason && (
+              <Typography.Text type="secondary">{selectedTransition.reason}</Typography.Text>
+            )}
+            <Typography.Text type="secondary">
+              This explicit operation is durable and retry-safe. Manual drag/drop remains separate.
+            </Typography.Text>
+          </Flex>
+        ),
+        okText: 'Advance',
+        onOk: async () => {
+          const audit = await zoneWorkflow.advance({
+            transition_id: selectedTransition.transition_id,
+            idempotency_key: generateId(),
+            entities,
+          });
+          const notice = getZoneWorkflowAdvanceNotice(audit);
+          if (notice.kind === 'error') showError(notice.message);
+          else if (notice.kind === 'warning') showWarning(notice.message);
+          else showSuccess(notice.message);
+        },
+      });
+    }, [
+      selectedTransition,
+      mutationGate.canMutate,
+      boardObjectByBranch,
+      boardObjectByCard,
+      zoneLabels,
+      zoneWorkflow,
+      showError,
+      showSuccess,
+      showWarning,
+    ]);
 
     return (
       <div
@@ -3561,6 +3800,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             edges={edges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
+            onConnect={handleWorkflowConnect}
+            onEdgeClick={(_event, edge) => {
+              if (activeTool === 'workflow') setSelectedTransitionId(edge.id);
+            }}
             onNodeDragStart={handleNodeDragStart}
             onNodeDrag={handleNodeDrag}
             onNodeDragStop={handleNodeDragStop}
@@ -3583,19 +3826,20 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // canvas gesture that mutates server state (zone/branch
             // position). Selection/focus stay enabled so click handlers
             // and keyboard a11y keep working in read-only mode.
-            nodesDraggable={mutationGate.canMutate}
-            nodesConnectable={false}
+            nodesDraggable={mutationGate.canMutate && activeTool !== 'workflow'}
+            nodesConnectable={activeTool === 'workflow' && mutationGate.canMutate}
+            edgesFocusable={activeTool === 'workflow'}
             elementsSelectable={true}
             elevateNodesOnSelect={false}
             // Two-finger scrolling to pan when in select mode (Figma-style)
             // Also allow click-drag to pan since selection box isn't useful here
             // Disable all panning when actively drawing a zone to prevent interference
-            panOnScroll={activeTool === 'select' && !drawingZone}
-            panOnDrag={activeTool !== 'select' && !drawingZone}
+            panOnScroll={(activeTool === 'select' || activeTool === 'workflow') && !drawingZone}
+            panOnDrag={activeTool === 'workflow' ? [1, 2] : activeTool !== 'select' && !drawingZone}
             // SessionCanvas owns marquee selection so it can begin on empty
             // zone bodies as well as the bare pane and can normalize selected
             // container hierarchies before group drag.
-            selectionOnDrag={false}
+            selectionOnDrag={activeTool === 'workflow'}
             className={[`tool-mode-${activeTool}`, isArranging && ARRANGE_DEAL_CLASS]
               .filter(Boolean)
               .join(' ')}
@@ -3603,10 +3847,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // Keep modifier-scroll zoom enabled so Command/Control + scroll behaves like Figma.
             deleteKeyCode={null}
             selectionKeyCode={null}
-            multiSelectionKeyCode={['Meta', 'Control', 'Shift']}
+            multiSelectionKeyCode={
+              activeTool === 'workflow' ? 'Shift' : ['Meta', 'Control', 'Shift']
+            }
             panActivationKeyCode={null}
             zoomActivationKeyCode={['Meta', 'Control']}
-            disableKeyboardA11y={true}
+            disableKeyboardA11y={activeTool !== 'workflow'}
             style={{ background: 'transparent' }}
           >
             {(!canvasBackground || isDraggingCanvas) && (
@@ -3677,6 +3923,35 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                     }}
                   >
                     <SelectOutlined style={{ fontSize: '16px' }} />
+                  </ControlButton>
+                </span>
+              </Tooltip>
+              <Tooltip
+                title={
+                  mutationGate.canMutate
+                    ? 'Workflow transitions'
+                    : (mutationGate.message ?? 'Workflow transitions')
+                }
+                placement="right"
+                mouseEnterDelay={0.3}
+              >
+                <span>
+                  <ControlButton
+                    aria-label="Workflow transitions"
+                    disabled={!mutationGate.canMutate}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setActiveTool(activeTool === 'workflow' ? 'select' : 'workflow');
+                    }}
+                    style={{
+                      borderLeft:
+                        activeTool === 'workflow'
+                          ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
+                          : 'none',
+                      opacity: mutationGate.canMutate ? 1 : 0.4,
+                    }}
+                  >
+                    <ApartmentOutlined style={{ fontSize: '16px' }} />
                   </ControlButton>
                 </span>
               </Tooltip>
@@ -3793,6 +4068,59 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 </span>
               </Tooltip>
             </Controls>
+            {activeTool === 'workflow' && (
+              <Panel position="top-center">
+                <Flex
+                  align="center"
+                  gap={8}
+                  style={{
+                    padding: token.paddingXS,
+                    border: `${token.lineWidth}px ${token.lineType} ${token.colorBorder}`,
+                    borderRadius: token.borderRadius,
+                    background: token.colorBgElevated,
+                    boxShadow: token.boxShadowSecondary,
+                  }}
+                >
+                  {selectedTransition ? (
+                    <>
+                      <Typography.Text strong>{selectedTransition.label}</Typography.Text>
+                      <Button
+                        size="small"
+                        icon={<ArrowRightOutlined />}
+                        type="primary"
+                        disabled={!selectedTransition.enabled || !mutationGate.canMutate}
+                        onClick={advanceSelectedEntities}
+                      >
+                        Advance selected
+                      </Button>
+                      <Button
+                        size="small"
+                        icon={<EditOutlined />}
+                        disabled={!mutationGate.canMutate}
+                        onClick={editSelectedTransition}
+                      >
+                        Edit
+                      </Button>
+                      <Button
+                        size="small"
+                        danger
+                        icon={<DeleteOutlined />}
+                        disabled={!mutationGate.canMutate}
+                        onClick={deleteSelectedTransition}
+                      >
+                        Delete
+                      </Button>
+                    </>
+                  ) : (
+                    <Typography.Text type="secondary">
+                      {zoneWorkflow.loading
+                        ? 'Loading transitions…'
+                        : 'Drag from a zone’s right connector to another zone, or select an arrow.'}
+                    </Typography.Text>
+                  )}
+                </Flex>
+              </Panel>
+            )}
             <MiniMap
               nodeColor={miniMapNodeColor}
               onClick={handleMiniMapClick}
@@ -3954,6 +4282,18 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               </div>
             </div>
           </Modal>
+        )}
+
+        {transitionModal && (
+          <ZoneWorkflowTransitionModal
+            open
+            transition={transitionModal.transition}
+            sourceLabel={zoneLabels[transitionModal.sourceZoneId] ?? transitionModal.sourceZoneId}
+            targetLabel={zoneLabels[transitionModal.targetZoneId] ?? transitionModal.targetZoneId}
+            disabled={!mutationGate.canMutate}
+            onCancel={() => setTransitionModal(null)}
+            onSave={saveWorkflowTransition}
+          />
         )}
 
         {/* Branch Zone Trigger Modal */}

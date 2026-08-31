@@ -18,6 +18,14 @@ const LOCAL_MIGRATION_SUFFIXES = [
   'profile_image_galleries',
   'profile_identity_models',
   'board_image_galleries',
+  'board_branch_capability_policies',
+  'strip_stdio_remote_fields',
+  'branch_sdk_home',
+  'session_sdk_home_scope',
+  'shared_session_prompting',
+  'session_attention_states',
+  'session_auto_archive',
+  'zone_workflow_transitions',
 ] as const;
 
 /** Both journals, Postgres first, as the migrator reads them off disk. */
@@ -212,7 +220,9 @@ describe('Postgres migrations', () => {
       expect(localEntries.map((entry) => entry.tag.replace(/^\d+_/, ''))).toEqual(
         LOCAL_MIGRATION_SUFFIXES
       );
-      expect(localEntries.map((entry) => entry.idx)).toEqual([9000, 9001, 9002, 9003]);
+      expect(localEntries.map((entry) => entry.idx)).toEqual([
+        9000, 9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011,
+      ]);
 
       const bandStart = entries.findIndex((entry) => entry.idx >= INTEGRATION_MIGRATION_BAND_START);
       expect(bandStart).toBeGreaterThan(-1);
@@ -263,6 +273,34 @@ describe('Postgres migrations', () => {
         `${dialect}: drizzle-kit generate would write ${nextPrefix}_* over an existing migration`
       ).toEqual([]);
     }
+  });
+
+  it('journals the matching zone-workflow migration and tenant-safe audit constraints', async () => {
+    const [postgresJournal, sqliteJournal] = await readJournals();
+    expect(postgresJournal.entries.at(-1)).toMatchObject({
+      idx: 9011,
+      tag: '9011_zone_workflow_transitions',
+    });
+    expect(sqliteJournal.entries.at(-1)).toMatchObject({
+      idx: 9011,
+      tag: '9011_zone_workflow_transitions',
+    });
+
+    const [postgres, sqlite] = await Promise.all([
+      readFile(
+        new URL('../../drizzle/postgres/9011_zone_workflow_transitions.sql', import.meta.url),
+        'utf8'
+      ),
+      readFile(
+        new URL('../../drizzle/sqlite/9011_zone_workflow_transitions.sql', import.meta.url),
+        'utf8'
+      ),
+    ]);
+    expect(postgres).toContain('FORCE ROW LEVEL SECURITY');
+    expect(postgres).toContain('"zone_workflow_advances_tenant_board_fk"');
+    expect(postgres).toContain('"zone_workflow_advances_tenant_idempotency_uq"');
+    expect(sqlite).toContain('REFERENCES `boards`(`board_id`) ON DELETE CASCADE');
+    expect(sqlite).toContain('`zone_workflow_advances_idempotency_uq`');
   });
 
   it('keeps Knowledge pgvector storage out of required base migrations', async () => {
@@ -1166,7 +1204,7 @@ describe('Session automatic archival migration', () => {
       INSERT INTO sessions VALUES ('legacy-btw', 0, '{"fork_origin":"btw"}');
     `);
     const migration = await readFile(
-      new URL('../../drizzle/sqlite/0103_session_auto_archive.sql', import.meta.url),
+      new URL('../../drizzle/sqlite/9010_session_auto_archive.sql', import.meta.url),
       'utf8'
     );
     await client.executeMultiple(migration.replaceAll('--> statement-breakpoint', ''));

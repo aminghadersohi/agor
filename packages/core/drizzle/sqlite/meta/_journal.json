@@ -745,10 +745,17 @@
       "breakpoints": true
     },
     {
-      "idx": 103,
+      "idx": 9010,
       "version": "6",
-      "when": 1788292800000,
-      "tag": "0103_session_auto_archive",
+      "when": 1788379200000,
+      "tag": "9010_session_auto_archive",
+      "breakpoints": true
+    },
+    {
+      "idx": 9011,
+      "version": "6",
+      "when": 1788465600000,
+      "tag": "9011_zone_workflow_transitions",
       "breakpoints": true
     }
   ]
