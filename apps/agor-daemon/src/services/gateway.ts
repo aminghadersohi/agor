@@ -3381,7 +3381,7 @@ export class GatewayService {
 
       const gatewayTaskMetadata = {
         queue_coalescing: {
-          kind: 'gateway',
+          kind: 'gateway' as const,
           group_key: 'session-system-updates',
         },
         ...(data.gateway_inbound_event_id
