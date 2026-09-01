@@ -1354,10 +1354,10 @@ describe('agor_branches_set_zone', () => {
     };
     const zone = {
       type: 'zone',
-      x: 0,
-      y: 0,
-      width: 400,
-      height: 200,
+      x: 2890,
+      y: 80,
+      width: 740,
+      height: 720,
       label: 'Evidence/QA',
       trigger: {
         behavior: 'show_picker',
@@ -1408,6 +1408,7 @@ describe('agor_branches_set_zone', () => {
       baseServiceParams,
     });
 
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
     const result = await setZone({
       branchId: 'branch-1',
       zoneId: 'zone-validate',
@@ -1420,7 +1421,12 @@ describe('agor_branches_set_zone', () => {
     expect(sessionsGet).toHaveBeenCalledWith('session-1', baseServiceParams);
     expect(boardObjectsPatch).toHaveBeenCalledWith(
       'obj-branch-1',
-      expect.objectContaining({ zone_id: 'zone-validate' }),
+      expect.objectContaining({
+        // Zone origin is intentionally non-zero: set_zone persists React Flow
+        // child coordinates, never canvas-absolute coordinates.
+        position: { x: 80, y: 80 },
+        zone_id: 'zone-validate',
+      }),
       baseServiceParams
     );
     expect(promptCreate).toHaveBeenCalledWith(
@@ -1428,6 +1434,7 @@ describe('agor_branches_set_zone', () => {
       { ...baseServiceParams, route: { id: 'session-1' } }
     );
     expect(parsed.trigger.sessionId).toBe('session-1');
+    random.mockRestore();
   });
 
   it('rejects show_picker zone triggers when the target session belongs to another branch', async () => {
