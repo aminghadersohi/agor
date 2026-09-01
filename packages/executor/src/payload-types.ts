@@ -303,6 +303,9 @@ export const GitBranchAddPayloadSchema = BasePayloadSchema.extend({
     /** Use restore mode: smart branch detection via ls-remote, falls back to creating from sourceBranch */
     restoreMode: z.boolean().optional(),
 
+    /** Retry/restore may adopt only a checkout durably owned by this DB branch. */
+    allowExistingCheckout: z.boolean().optional().default(false),
+
     /** User ID of the requesting user (for per-user credential resolution) */
     userId: z.string().uuid().optional(),
 

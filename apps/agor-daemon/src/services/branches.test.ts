@@ -171,6 +171,19 @@ function createPatchHarness(opts: {
     create: vi.fn(),
     findAll: vi.fn(async () => []),
     delete: vi.fn(),
+    acknowledgeProvisioningAttempt: vi.fn(async (_id, acknowledgement, expectedAttemptId) => {
+      const currentAttemptId = opts.current.provisioning_attempt_id;
+      const applied =
+        opts.current.archived !== true &&
+        opts.current.filesystem_status === 'creating' &&
+        (expectedAttemptId
+          ? expectedAttemptId === currentAttemptId
+          : currentAttemptId === undefined);
+      return {
+        applied,
+        branch: applied ? { ...opts.current, ...acknowledgement } : opts.current,
+      };
+    }),
   };
   const boardRepo = {
     clearPrimaryTeammateIfMatches: vi.fn(async () => ({
@@ -189,8 +202,9 @@ function createPatchHarness(opts: {
   const service = new BranchesService(createTenantScopeTestDb() as never, app);
   (service as unknown as { repository: typeof repository }).repository = repository;
   (service as unknown as { boardRepo: typeof boardRepo }).boardRepo = boardRepo;
-  (service as unknown as { branchRepo: { enrichWithZoneInfo: typeof vi.fn } }).branchRepo = {
+  (service as unknown as { branchRepo: Record<string, unknown> }).branchRepo = {
     enrichWithZoneInfo: vi.fn(async (branch) => branch),
+    acknowledgeProvisioningAttempt: repository.acknowledgeProvisioningAttempt,
   } as never;
   vi.spyOn(service as never, 'computeDefaultBoardPositionForBranch').mockResolvedValue({
     x: 10,
@@ -3098,14 +3112,11 @@ describe('BranchesService.patch provisioning attempt fence', () => {
       start_command: 'pnpm dev',
     } as never);
 
-    const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
-    expect(written).not.toHaveProperty('filesystem_status');
-    expect(written).not.toHaveProperty('provisioning_attempt_id');
-    // The checkout really was materialized and its environment templates were
-    // rendered — those ride along on the same ack and are attempt-independent,
-    // so they must survive. (Rendered templates are what the executor actually
-    // sends here; unix groups were removed from that payload.)
-    expect(written.start_command).toBe('pnpm dev');
+    expect(repository.acknowledgeProvisioningAttempt).toHaveBeenCalledWith(
+      branchId,
+      expect.objectContaining({ filesystem_status: 'ready', start_command: 'pnpm dev' }),
+      'attempt-A'
+    );
   });
 
   it('drops a superseded failure ack so it cannot fail the newer attempt', async () => {
@@ -3117,9 +3128,7 @@ describe('BranchesService.patch provisioning attempt fence', () => {
       provisioning_attempt_id: 'attempt-A',
     } as never);
 
-    const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
-    expect(written).not.toHaveProperty('filesystem_status');
-    expect(written).not.toHaveProperty('error_message');
+    expect(repository.acknowledgeProvisioningAttempt.mock.results.at(-1)?.value).toBeDefined();
   });
 
   it('applies the ack from the attempt that currently owns the row', async () => {
@@ -3130,20 +3139,26 @@ describe('BranchesService.patch provisioning attempt fence', () => {
       provisioning_attempt_id: 'attempt-B',
     } as never);
 
-    const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
-    expect(written.filesystem_status).toBe('ready');
+    expect(repository.acknowledgeProvisioningAttempt).toHaveBeenCalledWith(
+      branchId,
+      expect.objectContaining({ filesystem_status: 'ready' }),
+      'attempt-B'
+    );
   });
 
-  it('leaves an unfenced ack alone (older executor sends no generation)', async () => {
+  it('rejects an unfenced legacy ack when the row has a generation', async () => {
     const { service, repository } = harness('attempt-B');
 
     await service.patch(branchId, { filesystem_status: 'ready' } as never);
 
-    const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
-    expect(written.filesystem_status).toBe('ready');
+    expect(repository.acknowledgeProvisioningAttempt).toHaveBeenCalledWith(
+      branchId,
+      expect.objectContaining({ filesystem_status: 'ready' }),
+      undefined
+    );
   });
 
-  it('leaves an ack alone when the row carries no generation', async () => {
+  it('rejects a fenced ack when the legacy row carries no generation', async () => {
     const { service, repository } = harness(undefined);
 
     await service.patch(branchId, {
@@ -3151,8 +3166,11 @@ describe('BranchesService.patch provisioning attempt fence', () => {
       provisioning_attempt_id: 'attempt-A',
     } as never);
 
-    const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
-    expect(written.filesystem_status).toBe('ready');
+    expect(repository.acknowledgeProvisioningAttempt).toHaveBeenCalledWith(
+      branchId,
+      expect.objectContaining({ filesystem_status: 'ready' }),
+      'attempt-A'
+    );
   });
 
   it('reads the generation authoritatively rather than trusting the RBAC prefetch', async () => {
@@ -3192,10 +3210,11 @@ describe('BranchesService.patch provisioning attempt fence', () => {
       } as never
     );
 
-    const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
-    expect(written).not.toHaveProperty('filesystem_status');
-    expect(written).not.toHaveProperty('provisioning_attempt_id');
-    // Attempt-independent work still rides along, as on any other dropped ack.
-    expect(written.start_command).toBe('pnpm dev');
+    expect(repository.acknowledgeProvisioningAttempt).toHaveBeenCalledWith(
+      branchId,
+      expect.objectContaining({ filesystem_status: 'ready', start_command: 'pnpm dev' }),
+      'attempt-A'
+    );
+    expect(repository.update).not.toHaveBeenCalled();
   });
 });

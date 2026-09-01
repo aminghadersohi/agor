@@ -78,6 +78,7 @@ import {
   BTW_AUTO_ARCHIVE_AFTER_SECONDS,
   CALLBACK_DELIVERIES,
   getEffectiveDirectCallbackCoordinatorSessionId,
+  classifyBranchFilesystemReadiness,
   isAgenticToolDefaultConfigurationReference,
   SessionStatus,
   SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS,
@@ -814,6 +815,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       const branchRepo = new BranchRepository(scoped);
       const branch = await branchRepo.findById(createData.branch_id as BranchID);
       if (!branch) throw new NotFound(`Branch ${createData.branch_id} not found`);
+      this.assertBranchFilesystemRecordUsable(branch);
 
       // Minimal service harnesses predate application configuration. Treat an
       // absent getter as the product default (`inherit`); production always
@@ -883,16 +885,23 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     // (creation will fail later with the normal not-found path).
     if (!branch) return;
 
-    const status = branch.filesystem_status;
+    this.assertBranchFilesystemRecordUsable(branch);
+  }
 
-    if (status === 'creating') {
+  private assertBranchFilesystemRecordUsable(branch: Branch): void {
+    const branchId = branch.branch_id;
+
+    const status = branch.filesystem_status;
+    const readiness = classifyBranchFilesystemReadiness(branch);
+
+    if (readiness === 'pending') {
       throw new Conflict(
         'Branch provisioning is still in progress. The working directory is not ready yet — wait for provisioning to finish, then start the session again.',
         { code: 'BRANCH_PROVISIONING_INCOMPLETE', branchId, filesystemStatus: status }
       );
     }
 
-    if (status === 'failed') {
+    if (readiness === 'failed') {
       throw new Conflict(
         `Branch provisioning failed and the working directory was not created${
           branch.error_message ? `: ${branch.error_message}` : '.'
@@ -914,8 +923,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     // `ready` is not caught here and will surface downstream instead. Recording
     // that state accurately is the executor's job (it owns the disk), not
     // something the daemon can infer.
-    const usableStatus = status === undefined || status === 'ready' || status === 'preserved';
-    if (usableStatus) {
+    if (readiness === 'ready') {
       return;
     }
 
