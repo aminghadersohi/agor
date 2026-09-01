@@ -15,6 +15,7 @@ export interface SelectionLayoutSettings {
   trackAxis: SelectionTrackAxis;
   trackCount: number;
   matchRowHeights: boolean;
+  matchColumnWidths: boolean;
   rowDistribution: SelectionRowDistribution;
 }
 
@@ -38,13 +39,14 @@ export function selectionBoardZoneArrangementOptions(
   selectionCount: number,
   settings?: SelectionLayoutSettings
 ): Omit<BoardZoneArrangementOptions, 'looseItems'> {
-  if (settings?.mode !== 'grid') return {};
+  if (settings?.mode !== 'grid') return { compactOuterLayout: true };
   const tracks = selectionGridTracks(selectionCount, settings.trackAxis, settings.trackCount);
   return {
     fixedItemsPerRow: tracks.columns,
     compactFixedGrid: true,
     justifyLastRow: settings.rowDistribution === 'justify',
     matchRowHeights: settings.matchRowHeights,
+    matchColumnWidths: settings.matchColumnWidths,
   };
 }
 
@@ -53,16 +55,22 @@ const defaultSelectionTrackCount = (selectionCount: number): number =>
 
 interface SelectionLayoutPopoverProps {
   selectionCount: number;
+  zoneOnlySelection: boolean;
   onApply: (settings: SelectionLayoutSettings) => void | Promise<void>;
 }
 
-export function SelectionLayoutPopover({ selectionCount, onApply }: SelectionLayoutPopoverProps) {
+export function SelectionLayoutPopover({
+  selectionCount,
+  zoneOnlySelection,
+  onApply,
+}: SelectionLayoutPopoverProps) {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<SelectionLayoutMode>('compact');
   const [trackAxis, setTrackAxis] = useState<SelectionTrackAxis>('columns');
   const [trackCount, setTrackCount] = useState(defaultSelectionTrackCount(selectionCount));
   const trackCountWasEdited = useRef(false);
-  const [matchRowHeights, setMatchRowHeights] = useState(false);
+  const [matchRowHeights, setMatchRowHeights] = useState(zoneOnlySelection);
+  const [matchColumnWidths, setMatchColumnWidths] = useState(zoneOnlySelection);
   const [rowDistribution, setRowDistribution] = useState<SelectionRowDistribution>('packed');
   const tracks = useMemo(
     () => selectionGridTracks(selectionCount, trackAxis, trackCount),
@@ -79,6 +87,11 @@ export function SelectionLayoutPopover({ selectionCount, onApply }: SelectionLay
         : defaultSelectionTrackCount(selectionCount)
     );
   }, [selectionCount]);
+
+  useEffect(() => {
+    setMatchRowHeights(zoneOnlySelection);
+    setMatchColumnWidths(zoneOnlySelection);
+  }, [zoneOnlySelection]);
 
   const content = (
     <Space orientation="vertical" size="middle" style={{ width: 280 }}>
@@ -126,14 +139,34 @@ export function SelectionLayoutPopover({ selectionCount, onApply }: SelectionLay
             {tracks.columns} column{tracks.columns === 1 ? '' : 's'} × {tracks.rows} row
             {tracks.rows === 1 ? '' : 's'}
           </Typography.Text>
-          <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-            <Typography.Text>Match heights within rows</Typography.Text>
-            <Switch
-              aria-label="Match heights within rows"
-              checked={matchRowHeights}
-              onChange={setMatchRowHeights}
-            />
-          </Space>
+          {zoneOnlySelection ? (
+            <>
+              <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                <Typography.Text>Match zone frames to grid</Typography.Text>
+                <Switch
+                  aria-label="Match zone frames to grid"
+                  checked={matchRowHeights && matchColumnWidths}
+                  onChange={(checked) => {
+                    setMatchRowHeights(checked);
+                    setMatchColumnWidths(checked);
+                  }}
+                />
+              </Space>
+              <Typography.Text type="secondary">
+                Aligns zone borders to column widths and row heights. Turn off to preserve packed
+                sizes, which can leave extra space inside larger tracks.
+              </Typography.Text>
+            </>
+          ) : (
+            <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+              <Typography.Text>Match heights within rows</Typography.Text>
+              <Switch
+                aria-label="Match heights within rows"
+                checked={matchRowHeights}
+                onChange={setMatchRowHeights}
+              />
+            </Space>
+          )}
           <Select
             aria-label="Row distribution"
             classNames={{ popup: { root: CANVAS_LAYOUT_CONTROLS_CLASS } }}
@@ -151,7 +184,14 @@ export function SelectionLayoutPopover({ selectionCount, onApply }: SelectionLay
         type="primary"
         block
         onClick={() => {
-          void onApply({ mode, trackAxis, trackCount, matchRowHeights, rowDistribution });
+          void onApply({
+            mode,
+            trackAxis,
+            trackCount,
+            matchRowHeights,
+            matchColumnWidths,
+            rowDistribution,
+          });
           setOpen(false);
         }}
       >

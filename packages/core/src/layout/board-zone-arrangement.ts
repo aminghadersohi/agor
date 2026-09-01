@@ -75,9 +75,13 @@ export interface BoardZoneArrangementOptions {
   fixedItemsPerRow?: number;
   /** Preserve measured compact tracks for an explicit selection grid. */
   compactFixedGrid?: boolean;
+  /** Pack final heterogeneous zone frames without justified row-track slack. */
+  compactOuterLayout?: boolean;
   justifyLastRow?: boolean;
   /** Give every zone in an outer row the row's tallest final frame. */
   matchRowHeights?: boolean;
+  /** Give every zone in an outer column that column's widest final frame. */
+  matchColumnWidths?: boolean;
   /** Free top-level board nodes packed beside the content-sized zone frames. */
   looseItems?: readonly BoardZoneArrangementLooseItem[];
   /** Unselected visible peers that selection-scoped layout may not move or overlap. */
@@ -278,13 +282,13 @@ export function planBoardZoneArrangement(
       return [
         placement.id,
         {
-          width: selectedShape.width,
+          width: options.matchColumnWidths ? placement.width : selectedShape.width,
           height: options.matchRowHeights ? placement.height : selectedShape.height,
         },
       ] as const;
     })
   );
-  const targetFrames = layout.placements.map((placement) => {
+  const naturalTargetFrames = layout.placements.map((placement) => {
     const frame = finalFrameById.get(placement.id);
     if (!frame) throw new Error(`Missing final frame for zone '${placement.id}'.`);
     return {
@@ -294,6 +298,41 @@ export function planBoardZoneArrangement(
       stackIndex: placement.row * Math.max(1, options.fixedItemsPerRow ?? 1) + placement.column,
       deckDepth: 0,
     };
+  });
+  const compactOuterLayout = options.compactOuterLayout
+    ? layoutCompactRectangles(
+        naturalTargetFrames.map((placement) => {
+          const source = preparedById.get(placement.id)?.zone;
+          if (!source) throw new Error(`Missing arrangement input for zone '${placement.id}'.`);
+          return {
+            id: placement.id,
+            width: placement.width,
+            height: placement.height,
+            sourceX: source.x,
+            sourceY: source.y,
+          };
+        }),
+        {
+          gapX: options.gap ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.gap,
+          gapY: options.gap ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.gap,
+          gridSize: BOARD_GRID_SIZE,
+        }
+      )
+    : undefined;
+  const compactOuterPlacementById = new Map(
+    compactOuterLayout?.placements.map((placement) => [placement.id, placement]) ?? []
+  );
+  const targetFrames = naturalTargetFrames.map((placement) => {
+    const compactPlacement = compactOuterPlacementById.get(placement.id);
+    return compactPlacement
+      ? {
+          ...placement,
+          x: compactPlacement.x,
+          y: compactPlacement.y,
+          row: compactPlacement.row,
+          column: compactPlacement.column,
+        }
+      : placement;
   });
   const positionedLayout: JustifiedZoneResult = (() => {
     if (targetFrames.length === 0) return layout;
@@ -323,7 +362,23 @@ export function planBoardZoneArrangement(
     );
     return {
       ...layout,
-      placements: layout.placements.map((placement) => {
+      ...(compactOuterLayout
+        ? {
+            rows: compactOuterLayout.rows,
+            width: compactOuterLayout.width,
+            height: compactOuterLayout.height,
+            rowHeights: [...new Set(targetFrames.map((placement) => placement.y))]
+              .sort((left, right) => left - right)
+              .map((y) =>
+                Math.max(
+                  ...targetFrames
+                    .filter((placement) => placement.y === y)
+                    .map((placement) => placement.height)
+                )
+              ),
+          }
+        : {}),
+      placements: (compactOuterLayout ? targetFrames : layout.placements).map((placement) => {
         const positioned = obstaclePlacementById.get(placement.id);
         if (!positioned) throw new Error(`Missing positioned zone '${placement.id}'.`);
         return { ...placement, x: positioned.x, y: positioned.y };

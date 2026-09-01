@@ -1909,6 +1909,90 @@ describe('arrangeZoneContents', () => {
     renderedZone.remove();
     view.unmount();
   });
+
+  it('keeps durable canvas frames stable when hydrated DOM measurements alternate', async () => {
+    vi.useFakeTimers();
+    const { client, boardsPatch } = makeRoutedClient();
+    const zone = {
+      type: 'zone' as const,
+      x: 0,
+      y: 0,
+      width: 620,
+      height: 800,
+      label: 'Durable apps',
+      layout: { mode: 'auto' as const, preset: 'grid' as const, columns: 1, gap: 20 },
+    };
+    const first = {
+      type: 'app' as const,
+      x: 20,
+      y: 100,
+      width: 500,
+      height: 300,
+      title: 'First',
+      template: 'react' as const,
+      files: {},
+    };
+    const second = {
+      ...first,
+      y: 420,
+      height: 200,
+      title: 'Second',
+    };
+    let board = makeBoard({ zone, first, second });
+    let nodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, data: {}, ...zone },
+      {
+        id: 'first',
+        type: 'appNode',
+        position: { x: first.x, y: first.y },
+        data: { objectId: 'first', width: first.width, height: first.height },
+      },
+      {
+        id: 'second',
+        type: 'appNode',
+        position: { x: second.x, y: second.y },
+        data: { objectId: 'second', width: second.width, height: second.height },
+      },
+    ];
+    const measured = document.createElement('div');
+    measured.className = 'react-flow__node';
+    measured.dataset.id = 'first';
+    document.body.append(measured);
+    const setMeasurement = (height: number) => {
+      Object.defineProperties(measured, {
+        offsetWidth: { configurable: true, value: 500 },
+        scrollWidth: { configurable: true, value: 500 },
+        offsetHeight: { configurable: true, value: height },
+        scrollHeight: { configurable: true, value: height },
+      });
+    };
+    setMeasurement(340);
+
+    const view = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    for (let cycle = 0; cycle < 4; cycle += 1) {
+      await act(async () => vi.advanceTimersByTimeAsync(500));
+      setMeasurement(cycle % 2 === 0 ? 300 : 340);
+      board = makeBoard({ zone: { ...zone }, first: { ...first }, second: { ...second } });
+      nodes = nodes.map((node) => ({ ...node, data: { ...node.data } }));
+      view.rerender();
+    }
+
+    expect(boardsPatch).not.toHaveBeenCalled();
+    measured.remove();
+    view.unmount();
+  });
 });
 
 describe('direct manipulation of automatic zones', () => {
@@ -3320,10 +3404,10 @@ describe('arrangeBoardZones production path', () => {
     ];
     const onArrangeNodes = vi.fn();
     const onUserLayoutComplete = vi.fn();
-    const { result } = renderHook(
-      () =>
+    const view = renderHook(
+      (props: { board: Board; nodes: Node[] }) =>
         useBoardObjects({
-          board,
+          board: props.board,
           client,
           boardObjectsForBoard: [
             {
@@ -3344,17 +3428,26 @@ describe('arrangeBoardZones production path', () => {
               position: { x: 800, y: 800 },
             },
           ] as never,
-          nodes,
+          nodes: props.nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
           onArrangeNodes,
           onUserLayoutComplete,
         }),
-      { wrapper }
+      { wrapper, initialProps: { board, nodes } }
     );
 
     await act(async () => {
-      await result.current.arrangeBoardZones(['zone-b', 'zone-a']);
+      await view.result.current.arrangeBoardZones(['zone-b', 'zone-a']);
+    });
+    const write = boardsPatch.mock.calls[0]?.[1];
+    const arrangedNodes = onArrangeNodes.mock.calls[0]?.[0] as Node[];
+    const arrangedById = new Map(arrangedNodes.map((node) => [node.id, node]));
+    view.rerender({
+      board: { ...board, objects: { ...board.objects, ...write.objects } } as Board,
+      nodes: nodes.map((node) => arrangedById.get(node.id) ?? node),
+    });
+    await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
     expect(boardsPatch).toHaveBeenCalledTimes(1);

@@ -13,3 +13,29 @@ export function zonesNeedingAutoArrange<T extends readonly [string, unknown]>(
     return false;
   });
 }
+
+export interface ExpectedExplicitLayoutSignature {
+  signature: string;
+  acknowledged: boolean;
+}
+
+/**
+ * An explicit atomic layout can still rebuild board and placement selectors in
+ * separate React renders. Suppress every intermediate observer signature; the
+ * authoritative target settles the guard only after the service acknowledges
+ * the write. A caller keeps its normal coalesced fallback armed while an
+ * acknowledged non-target signature remains, so a genuine async size change
+ * is handled once rather than masked.
+ */
+export function expectedExplicitLayoutState(
+  currentSignature: string | undefined,
+  expected: ExpectedExplicitLayoutSignature | undefined
+): { suppress: boolean; settled: boolean; needsFallback: boolean } {
+  if (!expected) return { suppress: false, settled: false, needsFallback: false };
+  const settled = expected.acknowledged && currentSignature === expected.signature;
+  return {
+    suppress: true,
+    settled,
+    needsFallback: expected.acknowledged && !settled,
+  };
+}

@@ -3803,6 +3803,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               })}
               <SelectionLayoutPopover
                 selectionCount={selectedLayoutNodes.length}
+                zoneOnlySelection={selectedLayoutNodes.every((node) => node.type === 'zone')}
                 onApply={(settings) => handleLayoutAction('arrange', settings)}
               />
             </div>
