@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   type BoardZoneArrangementInput,
+  containingBoardZoneId,
   DEFAULT_BOARD_ZONE_ARRANGEMENT,
   planBoardZoneArrangement,
 } from './board-zone-arrangement';
+import { growZoneLayoutHeight } from './zone-layout';
 
 const item = (id: string, width: number, height: number, x = 0, y = 0) => ({
   id,
@@ -24,6 +26,75 @@ const zone = (
 ): BoardZoneArrangementInput => ({ id, x, y, width: 600, height: 500, items });
 
 describe('planBoardZoneArrangement', () => {
+  it('keeps a protruding anchored canvas child in its smallest containing zone', () => {
+    expect(
+      containingBoardZoneId({ x: 100, y: 120, width: 860, height: 660 }, [
+        { id: 'outer', x: 0, y: 0, width: 1200, height: 1000 },
+        { id: 'tiny', x: 80, y: 80, width: 300, height: 220 },
+      ])
+    ).toBe('tiny');
+    expect(
+      containingBoardZoneId({ x: 400, y: 400, width: 100, height: 100 }, [
+        { id: 'tiny', x: 80, y: 80, width: 300, height: 220 },
+      ])
+    ).toBeUndefined();
+  });
+
+  it('packs inner geometry before outer placement, growing small zones and compacting waste', () => {
+    const plan = planBoardZoneArrangement(
+      [
+        { ...zone('tiny', 0, 0, [item('protruding', 860, 660, 20, 120)]), width: 300, height: 220 },
+        { ...zone('wasteful', 400, 0, [item('single', 380, 100)]), width: 1600, height: 900 },
+        { ...zone('empty', 2100, 0, []), width: 1600, height: 900 },
+      ],
+      { looseItems: [{ id: 'free', x: 0, y: 1200, width: 500, height: 300 }] }
+    );
+    const tiny = plan.zones.find(({ id }) => id === 'tiny')!;
+    const wasteful = plan.zones.find(({ id }) => id === 'wasteful')!;
+    const empty = plan.zones.find(({ id }) => id === 'empty')!;
+
+    expect(tiny.width).toBeGreaterThanOrEqual(900);
+    expect(tiny.items[0]!.x + tiny.items[0]!.width).toBeLessThanOrEqual(tiny.width);
+    expect(tiny.items[0]!.y + tiny.items[0]!.height).toBeLessThanOrEqual(tiny.height);
+    expect(wasteful.width).toBeLessThan(1600);
+    expect(wasteful.height).toBeLessThan(900);
+    expect(empty).toMatchObject({ width: 600, height: 240 });
+    for (const arranged of plan.zones) {
+      expect(plan.boardLayout?.placements.find(({ id }) => id === arranged.id)).toMatchObject({
+        width: arranged.width,
+        height: arranged.height,
+      });
+    }
+    // Persisting this explicit packed frame makes it the next durable Auto
+    // Grow floor; background maintenance may grow it, but never undo Pack.
+    expect(growZoneLayoutHeight(wasteful.height, 120)).toBe(wasteful.height);
+    const free = plan.looseItems[0]!;
+    expect(
+      tiny.position.x + tiny.width <= free.x ||
+        free.x + free.width <= tiny.position.x ||
+        tiny.position.y + tiny.height <= free.y ||
+        free.y + free.height <= tiny.position.y
+    ).toBe(true);
+  });
+
+  it('preserves zone frames and child geometry when Pack zone contents is off', () => {
+    const source = {
+      ...zone('manual', 900, 700, [item('child', 860, 660, 20, 120)]),
+      width: 300,
+      height: 220,
+    };
+    const arranged = planBoardZoneArrangement([source], { packZoneContents: false }).zones[0]!;
+    expect(arranged).toMatchObject({ width: 300, height: 220 });
+    expect(arranged.items).toHaveLength(1);
+    expect(arranged.items[0]).toMatchObject({
+      id: 'child',
+      x: 20,
+      y: 120,
+      width: 860,
+      height: 660,
+    });
+  });
+
   it('uses shared defaults, preserves spatial order, and packs every child for its final frame', () => {
     const plan = planBoardZoneArrangement([
       zone('a-later', 900, 200, [item('later-card', 380, 100)]),

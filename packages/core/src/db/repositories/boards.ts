@@ -7,8 +7,10 @@
 import type {
   Board,
   BoardAccessMode,
+  BoardEntityObject,
   BoardExportBlob,
   BoardID,
+  BoardLayoutBatch,
   BoardObject,
   Branch,
   BranchPermissionLevel,
@@ -36,6 +38,7 @@ import {
   RepositoryError,
   resolveByShortIdPrefix,
 } from './base';
+import { BoardObjectRepository } from './board-objects';
 import { visibleBoardAccessCondition, visibleBoardReferenceAccessExists } from './branch-access';
 import { BranchRepository } from './branches';
 import { CapabilityPolicyRepository } from './capability-policies';
@@ -1060,6 +1063,55 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
       if (error instanceof EntityNotFoundError) throw error;
       throw new RepositoryError(
         `Failed to batch upsert board objects: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /**
+   * Commit canvas-object geometry and positioned entity geometry in one DB
+   * transaction. The board-scoped entity predicate prevents cross-board writes;
+   * requiring existing canvas ids prevents a stale layout echo from resurrecting
+   * an object deleted after planning.
+   */
+  async applyBoardLayout(
+    boardId: string,
+    batch: BoardLayoutBatch
+  ): Promise<{ board: Board; placements: BoardEntityObject[] }> {
+    try {
+      const fullId = (await this.resolveId(boardId)) as BoardID;
+      return await runDatabaseTransaction(
+        this.db,
+        async (tx) => {
+          const boardRepo = new BoardRepository(tx);
+          const current = await boardRepo.findById(fullId);
+          if (!current) throw new EntityNotFoundError('Board', boardId);
+          const currentObjects = current.objects ?? {};
+          for (const objectId of Object.keys(batch.objects)) {
+            if (!currentObjects[objectId]) {
+              throw new EntityNotFoundError('BoardObject', objectId);
+            }
+          }
+          const board =
+            Object.keys(batch.objects).length > 0
+              ? await boardRepo.update(fullId, {
+                  objects: { ...currentObjects, ...batch.objects },
+                })
+              : current;
+          const placementRepo = new BoardObjectRepository(tx);
+          const placements: BoardEntityObject[] = [];
+          for (const [objectId, layout] of Object.entries(batch.placements)) {
+            placements.push(await placementRepo.updateLayoutForBoard(fullId, objectId, layout));
+          }
+          return { board, placements };
+        },
+        { sqliteImmediate: true }
+      );
+    } catch (error) {
+      if (error instanceof RepositoryError) throw error;
+      if (error instanceof EntityNotFoundError) throw error;
+      throw new RepositoryError(
+        `Failed to apply board layout: ${error instanceof Error ? error.message : String(error)}`,
         error
       );
     }

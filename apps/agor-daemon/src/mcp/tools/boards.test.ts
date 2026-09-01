@@ -1704,14 +1704,16 @@ describe('board layout tools with branch entities present', () => {
     entityPatches?: Array<{ objectId: string; data: Record<string, unknown> }>;
     boardPatches?: Array<Record<string, unknown>>;
   }) {
+    const boardObjects = { ...(options.objects ?? {}) };
+    const entityState = options.entities.map((entity) => ({ ...entity }));
     const branchesFind = validatedBranchesFind((query) => ({
       data: (((query.branch_id as { $in?: string[] } | undefined)?.$in ?? []) as string[]).map(
         (id) => ({ branch_id: id, archived: false })
       ),
     }));
     const boardObjectsFind = vi.fn(async () => ({
-      data: options.entities,
-      total: options.entities.length,
+      data: entityState,
+      total: entityState.length,
       limit: 100,
       skip: 0,
     }));
@@ -1726,10 +1728,24 @@ describe('board layout tools with branch entities present', () => {
               get: vi.fn(async () => ({
                 board_id: 'board-1',
                 name: 'Board',
-                objects: options.objects ?? {},
+                objects: boardObjects,
               })),
               patch: vi.fn(async (_id: string, data: Record<string, unknown>) => {
                 options.boardPatches?.push(data);
+                if (data._action === 'applyLayout') {
+                  Object.assign(boardObjects, data.objects as Record<string, unknown>);
+                  for (const [objectId, placement] of Object.entries(
+                    (data.placements ?? {}) as Record<
+                      string,
+                      { position: unknown; size?: unknown; compact?: boolean }
+                    >
+                  )) {
+                    const entity = entityState.find(
+                      (candidate) => candidate.object_id === objectId
+                    );
+                    if (entity) Object.assign(entity, placement);
+                  }
+                }
                 return data;
               }),
             };
@@ -2256,31 +2272,23 @@ describe('board layout tools with branch entities present', () => {
 
     expect(boardPatches).toHaveLength(1);
     expect(boardPatches[0]).toMatchObject({
-      _action: 'batchUpsertObjects',
+      _action: 'applyLayout',
       objects: {
         'zone-a': expect.objectContaining({ type: 'zone' }),
         'zone-b': expect.objectContaining({ type: 'zone' }),
       },
+      placements: {
+        'branch-placement': {
+          position: expect.any(Object),
+          size: { width: 500, height: 200 },
+        },
+        'card-placement': {
+          position: expect.any(Object),
+          size: { width: 380, height: 100 },
+        },
+      },
     });
-    expect(entityPatches).toHaveLength(2);
-    expect(entityPatches).toEqual(
-      expect.arrayContaining([
-        {
-          objectId: 'branch-placement',
-          data: expect.objectContaining({
-            position: expect.any(Object),
-            size: { width: 500, height: 200 },
-          }),
-        },
-        {
-          objectId: 'card-placement',
-          data: expect.objectContaining({
-            position: expect.any(Object),
-            size: { width: 380, height: 100 },
-          }),
-        },
-      ])
-    );
+    expect(entityPatches).toHaveLength(0);
     expect(parsed.updates.map((update: { objectId: string }) => update.objectId)).toEqual([
       'zone-a',
       'zone-b',
@@ -2288,6 +2296,107 @@ describe('board layout tools with branch entities present', () => {
     expect(parsed.updates.map((update: { arrangedItems: number }) => update.arrangedItems)).toEqual(
       [1, 1]
     );
+  });
+
+  it('defaults Pack zone contents on, repairs anchored protrusion, compacts waste, and is idempotent', async () => {
+    const boardPatches: Array<Record<string, unknown>> = [];
+    const { app } = makeApp({
+      entities: [],
+      objects: {
+        tiny: { type: 'zone', x: 80, y: 80, width: 300, height: 220, label: 'Tiny' },
+        protruding: {
+          type: 'artifact',
+          artifact_id: 'artifact-protruding',
+          x: 100,
+          y: 120,
+          width: 860,
+          height: 660,
+        },
+        empty: { type: 'zone', x: 1800, y: 80, width: 1600, height: 900, label: 'Empty' },
+      },
+      boardPatches,
+    });
+    const arrangeZones = registerAndCaptureHandler('agor_boards_arrange_zones', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const first = JSON.parse((await arrangeZones({ boardId: 'board-1' })).content[0].text);
+    const tiny = first.updates.find((update: { objectId: string }) => update.objectId === 'tiny');
+    const empty = first.updates.find((update: { objectId: string }) => update.objectId === 'empty');
+    expect(first.packZoneContents).toBe(true);
+    expect(tiny.arrangedItems).toBe(1);
+    expect(tiny.size.width).toBeGreaterThanOrEqual(900);
+    expect(empty.size).toEqual({ width: 600, height: 240 });
+    expect(boardPatches).toHaveLength(1);
+    expect(boardPatches[0]).toMatchObject({
+      _action: 'applyLayout',
+      objects: {
+        tiny: expect.objectContaining({ width: tiny.size.width, height: tiny.size.height }),
+        protruding: expect.any(Object),
+        empty: expect.objectContaining({ width: 600, height: 240 }),
+      },
+      placements: {},
+    });
+
+    await arrangeZones({ boardId: 'board-1' });
+    expect(boardPatches).toHaveLength(1);
+  });
+
+  it('preserves zone frames and child-relative geometry when Pack zone contents is off', async () => {
+    const boardPatches: Array<Record<string, unknown>> = [];
+    const { app } = makeApp({
+      entities: [
+        branchEntity({
+          object_id: 'contained-worktree',
+          zone_id: 'manual',
+          position: { x: 20, y: 120 },
+          size: { width: 500, height: 200 },
+        }),
+      ],
+      objects: {
+        manual: { type: 'zone', x: 900, y: 700, width: 300, height: 220, label: 'Manual' },
+        protruding: {
+          type: 'artifact',
+          artifact_id: 'artifact-protruding',
+          x: 920,
+          y: 820,
+          width: 860,
+          height: 660,
+        },
+      },
+      boardPatches,
+    });
+    const arrangeZones = registerAndCaptureHandler('agor_boards_arrange_zones', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const parsed = JSON.parse(
+      (await arrangeZones({ boardId: 'board-1', packZoneContents: false })).content[0].text
+    );
+    expect(parsed.packZoneContents).toBe(false);
+    expect(parsed.updates[0]).toMatchObject({
+      objectId: 'manual',
+      size: { width: 300, height: 220 },
+      arrangedItems: 2,
+    });
+    expect(boardPatches).toHaveLength(1);
+    expect(boardPatches[0]).toMatchObject({
+      _action: 'applyLayout',
+      objects: {
+        manual: expect.objectContaining({ width: 300, height: 220 }),
+      },
+      placements: {},
+    });
+    const objects = boardPatches[0]?.objects as Record<
+      string,
+      { x: number; y: number; width: number; height: number }
+    >;
+    expect(objects.protruding.x - objects.manual.x).toBe(20);
+    expect(objects.protruding.y - objects.manual.y).toBe(120);
   });
 
   it('includes free worktrees and heterogeneous canvas objects in the same board cluster', async () => {
@@ -2359,20 +2468,21 @@ describe('board layout tools with branch entities present', () => {
     ]);
     expect(boardPatches).toHaveLength(1);
     expect(boardPatches[0]).toMatchObject({
-      _action: 'batchUpsertObjects',
+      _action: 'applyLayout',
       objects: {
         'zone-a': expect.any(Object),
         artifact: expect.any(Object),
         note: expect.any(Object),
         app: expect.any(Object),
       },
+      placements: {
+        'free-worktree': expect.any(Object),
+      },
     });
     expect(
       (boardPatches[0]?.objects as Record<string, unknown> | undefined)?.locked
     ).toBeUndefined();
-    expect(entityPatches.map((patch) => patch.objectId)).toEqual(
-      expect.arrayContaining(['pinned-worktree', 'free-worktree'])
-    );
+    expect(entityPatches).toHaveLength(0);
 
     const topLevel = [
       ...parsed.updates.map((update: { objectId: string; position: object; size: object }) => ({

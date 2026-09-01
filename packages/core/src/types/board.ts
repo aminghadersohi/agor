@@ -56,6 +56,28 @@ export interface BoardEntityObject {
   created_at: string;
 }
 
+/** One entity-row update in an atomic whole-board layout commit. */
+export interface BoardLayoutPlacementUpdate {
+  position: BoardPosition;
+  size: { width: number; height: number };
+  compact?: boolean;
+}
+
+/** Canvas and entity geometry committed together after one shared layout plan. */
+export interface BoardLayoutBatch {
+  objects: Record<string, BoardObject>;
+  placements: Record<string, BoardLayoutPlacementUpdate>;
+}
+
+/** One realtime payload lets observers apply both halves without an intermediate frame. */
+export interface BoardLayoutAppliedEvent {
+  board_id: BoardID;
+  board: Board;
+  placements: BoardEntityObject[];
+}
+
+export const BOARD_LAYOUT_APPLIED_EVENT = 'layout-applied' as const;
+
 /**
  * Text annotation object
  */

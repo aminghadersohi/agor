@@ -44,7 +44,7 @@ import {
   VerticalAlignTopOutlined,
   ZoomInOutlined,
 } from '@ant-design/icons';
-import { Button, Input, Modal, Popover, Slider, Tooltip, Typography, theme } from 'antd';
+import { Button, Checkbox, Input, Modal, Popover, Slider, Tooltip, Typography, theme } from 'antd';
 import React, {
   forwardRef,
   useCallback,
@@ -854,6 +854,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const pendingResizeUpdatesRef = useRef<Record<string, ResizeRect>>({});
     const arrangeMotionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [isArranging, setIsArranging] = useState(false);
+    const [arrangeBoardPopoverOpen, setArrangeBoardPopoverOpen] = useState(false);
+    const [packZoneContents, setPackZoneContents] = useState(true);
+    const arrangeBoardButtonWrapperRef = useRef<HTMLSpanElement>(null);
     const pendingPostLayoutViewportRef = useRef<
       { token: number; intent: PostLayoutViewportIntent } | undefined
     >(undefined);
@@ -3811,21 +3814,67 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 </span>
               </Tooltip>
               <Tooltip title={arrangeBoardTooltip} placement="right" mouseEnterDelay={0.3}>
-                <span>
-                  <ControlButton
-                    aria-label="Arrange board"
-                    aria-disabled={arrangeBoardDisabled}
-                    disabled={arrangeBoardUnavailable}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      if (arrangeBoardDisabled) return;
-                      void arrangeWholeBoard();
-                    }}
-                    style={arrangeBoardBusy ? { cursor: 'not-allowed', opacity: 0.45 } : undefined}
-                  >
-                    <AppstoreOutlined style={{ fontSize: '16px' }} />
-                  </ControlButton>
-                </span>
+                <Popover
+                  trigger="click"
+                  placement="rightTop"
+                  open={arrangeBoardPopoverOpen}
+                  onOpenChange={(open) => {
+                    if (!arrangeBoardDisabled) setArrangeBoardPopoverOpen(open);
+                  }}
+                  content={
+                    <div
+                      role="dialog"
+                      aria-label="Arrange board options"
+                      style={{ display: 'flex', flexDirection: 'column', gap: 10, width: 260 }}
+                    >
+                      <Typography.Text strong>Arrange board</Typography.Text>
+                      <Checkbox
+                        checked={packZoneContents}
+                        disabled={arrangeBoardBusy}
+                        onChange={(event) => setPackZoneContents(event.target.checked)}
+                      >
+                        Pack zone contents
+                      </Checkbox>
+                      <Typography.Text type="secondary">
+                        Repack eligible zone children and fit their frames before arranging the
+                        board. This does not enable Auto Zone.
+                      </Typography.Text>
+                      <Button
+                        type="primary"
+                        disabled={arrangeBoardDisabled}
+                        onClick={() => {
+                          if (arrangeBoardDisabled) return;
+                          setArrangeBoardPopoverOpen(false);
+                          arrangeBoardButtonWrapperRef.current?.querySelector('button')?.focus();
+                          void arrangeWholeBoard(packZoneContents);
+                        }}
+                      >
+                        Arrange board
+                      </Button>
+                    </div>
+                  }
+                >
+                  <span ref={arrangeBoardButtonWrapperRef}>
+                    <ControlButton
+                      aria-label="Arrange board"
+                      aria-haspopup="dialog"
+                      aria-expanded={arrangeBoardPopoverOpen}
+                      aria-disabled={arrangeBoardDisabled}
+                      disabled={arrangeBoardUnavailable}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (!arrangeBoardDisabled) {
+                          setArrangeBoardPopoverOpen((open) => !open);
+                        }
+                      }}
+                      style={
+                        arrangeBoardBusy ? { cursor: 'not-allowed', opacity: 0.45 } : undefined
+                      }
+                    >
+                      <AppstoreOutlined style={{ fontSize: '16px' }} />
+                    </ControlButton>
+                  </span>
+                </Popover>
               </Tooltip>
               {/* Custom toolbox buttons */}
               <Tooltip title="Select" placement="right" mouseEnterDelay={0.3}>

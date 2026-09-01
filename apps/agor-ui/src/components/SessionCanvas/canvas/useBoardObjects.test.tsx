@@ -2435,6 +2435,140 @@ describe('compact_list → grid re-packs the expanded zone', () => {
 });
 
 describe('arrangeBoardZones production path', () => {
+  it('packs an anchored protruding canvas child inside-out before placing its final zone frame', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const board = makeBoard({
+      tiny: { type: 'zone', x: 80, y: 80, width: 300, height: 220, label: 'Tiny' },
+      artifact: {
+        type: 'artifact',
+        x: 100,
+        y: 120,
+        width: 860,
+        height: 660,
+        artifact_id: 'artifact-1',
+      },
+    });
+    const nodes: Node[] = [
+      {
+        id: 'tiny',
+        type: 'zone',
+        position: { x: 80, y: 80 },
+        width: 300,
+        height: 220,
+        data: {},
+      },
+      {
+        id: 'artifact',
+        type: 'artifactNode',
+        position: { x: 100, y: 120 },
+        width: 860,
+        height: 660,
+        data: {},
+      },
+    ];
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => result.current.arrangeWholeBoard(true));
+
+    const write = boardsPatch.mock.calls[0]?.[1] as {
+      _action: string;
+      objects: NonNullable<Board['objects']>;
+    };
+    const zone = write.objects.tiny;
+    const artifact = write.objects.artifact;
+    expect(write._action).toBe('applyLayout');
+    expect(zone).toMatchObject({ type: 'zone' });
+    expect(artifact).toMatchObject({ type: 'artifact' });
+    if (zone?.type !== 'zone' || artifact?.type !== 'artifact') throw new Error('bad fixture');
+    expect(zone.width).toBeGreaterThanOrEqual(900);
+    expect(artifact.x).toBeGreaterThanOrEqual(zone.x);
+    expect(artifact.y).toBeGreaterThanOrEqual(zone.y);
+    expect(artifact.x + artifact.width).toBeLessThanOrEqual(zone.x + zone.width);
+    expect(artifact.y + artifact.height).toBeLessThanOrEqual(zone.y + zone.height);
+  });
+
+  it('preserves inner frames with Pack off and excludes a zone containing a locked child', async () => {
+    const unlockedClient = makeRoutedClient();
+    const unlockedBoard = makeBoard({
+      manual: { type: 'zone', x: 900, y: 700, width: 300, height: 220, label: 'Manual' },
+      artifact: {
+        type: 'artifact',
+        x: 920,
+        y: 740,
+        width: 860,
+        height: 660,
+        artifact_id: 'artifact-1',
+      },
+    });
+    const unlockedNodes: Node[] = [
+      {
+        id: 'manual',
+        type: 'zone',
+        position: { x: 900, y: 700 },
+        width: 300,
+        height: 220,
+        data: {},
+      },
+      {
+        id: 'artifact',
+        type: 'artifactNode',
+        position: { x: 920, y: 740 },
+        width: 860,
+        height: 660,
+        data: {},
+      },
+    ];
+    const unlocked = renderHook(
+      () =>
+        useBoardObjects({
+          board: unlockedBoard,
+          client: unlockedClient.client,
+          boardObjectsForBoard: [],
+          nodes: unlockedNodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    await act(async () => unlocked.result.current.arrangeWholeBoard(false));
+    const offObjects = unlockedClient.boardsPatch.mock.calls[0]?.[1]?.objects as NonNullable<
+      Board['objects']
+    >;
+    expect(offObjects.manual).toMatchObject({ width: 300, height: 220 });
+    expect(offObjects.artifact).toMatchObject({ x: 100, y: 120, width: 860, height: 660 });
+
+    unlocked.unmount();
+    const lockedClient = makeRoutedClient();
+    const lockedNodes = unlockedNodes.map((node) =>
+      node.id === 'artifact' ? { ...node, data: { locked: true } } : node
+    );
+    const locked = renderHook(
+      () =>
+        useBoardObjects({
+          board: unlockedBoard,
+          client: lockedClient.client,
+          boardObjectsForBoard: [],
+          nodes: lockedNodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    await act(async () => locked.result.current.arrangeWholeBoard(true));
+    expect(lockedClient.boardsPatch).not.toHaveBeenCalled();
+  });
+
   it('makes Grid Apply immediate and a following Arrange a persistence no-op', async () => {
     const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
     const onUserLayoutComplete = vi.fn();
@@ -2482,7 +2616,7 @@ describe('arrangeBoardZones production path', () => {
     expect(nodes.map(({ position }) => position)).toEqual([
       { x: 80, y: 80 },
       { x: 900, y: 80 },
-      { x: 80, y: 620 },
+      { x: 80, y: 360 },
     ]);
     expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
     expect(onUserLayoutComplete).toHaveBeenCalledWith(
@@ -2871,15 +3005,20 @@ describe('arrangeBoardZones production path', () => {
     expect(boardsPatch).toHaveBeenCalledWith(
       'board-1',
       expect.objectContaining({
-        _action: 'batchUpsertObjects',
+        _action: 'applyLayout',
         objects: {
           'zone-a': expect.objectContaining({ type: 'zone' }),
           'zone-b': expect.objectContaining({ type: 'zone' }),
           artifact: expect.objectContaining({ type: 'artifact' }),
         },
+        placements: expect.objectContaining({
+          'placement-a': expect.objectContaining({ position: expect.any(Object) }),
+          'placement-b': expect.objectContaining({ position: expect.any(Object) }),
+          'placement-free': expect.objectContaining({ position: expect.any(Object) }),
+        }),
       })
     );
-    expect(boardObjectsPatch).toHaveBeenCalledTimes(3);
+    expect(boardObjectsPatch).not.toHaveBeenCalled();
     expect(onArrangeNodes).toHaveBeenCalledTimes(1);
     expect(onUserLayoutComplete).not.toHaveBeenCalled();
     expect(showSuccess).toHaveBeenCalledTimes(1);

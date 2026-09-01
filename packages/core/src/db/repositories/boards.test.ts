@@ -14,6 +14,7 @@ import { select, update } from '../database-wrapper';
 import { boards as boardsTable } from '../schema';
 import { ownedDbTest as dbTest } from '../test-helpers';
 import { AmbiguousIdError, EntityNotFoundError } from './base';
+import { BoardObjectRepository } from './board-objects';
 import { BoardRepository } from './boards';
 import { BranchRepository } from './branches';
 import { CapabilityPolicyRepository } from './capability-policies';
@@ -1380,6 +1381,122 @@ describe('BoardRepository.batchUpsertBoardObjects', () => {
     expect(updated.objects).toEqual({
       'text-1': { type: 'text', x: 100, y: 200, content: 'Existing' },
     });
+  });
+});
+
+describe('BoardRepository.applyBoardLayout', () => {
+  dbTest(
+    'commits zone frames and entity layout in one board-scoped transaction',
+    async ({ db }) => {
+      const repo = new BoardRepository(db);
+      const board = await repo.create(
+        createBoardData({
+          objects: {
+            zone: { type: 'zone', x: 900, y: 700, width: 300, height: 220, label: 'Zone' },
+          },
+        })
+      );
+      const branch = await createBranchForBoard(db, board.board_id);
+      const placementRepo = new BoardObjectRepository(db);
+      const placement = await placementRepo.create({
+        board_id: board.board_id,
+        branch_id: branch.branch_id,
+        zone_id: 'zone',
+        position: { x: 20, y: 120 },
+        size: { width: 500, height: 240 },
+      });
+
+      const result = await repo.applyBoardLayout(board.board_id, {
+        objects: {
+          zone: { type: 'zone', x: 80, y: 80, width: 540, height: 380, label: 'Zone' },
+        },
+        placements: {
+          [placement.object_id]: {
+            position: { x: 20, y: 100 },
+            size: { width: 500, height: 240 },
+            compact: true,
+          },
+        },
+      });
+
+      expect(result.board.objects?.zone).toMatchObject({ x: 80, y: 80, width: 540, height: 380 });
+      expect(result.placements).toHaveLength(1);
+      expect(await placementRepo.findByObjectId(placement.object_id)).toMatchObject({
+        position: { x: 20, y: 100 },
+        compact: true,
+      });
+    }
+  );
+
+  dbTest('rolls back the frame when any placement belongs to another board', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const first = await repo.create(
+      createBoardData({
+        objects: {
+          zone: { type: 'zone', x: 10, y: 20, width: 300, height: 220, label: 'Zone' },
+        },
+      })
+    );
+    const second = await repo.create(createBoardData());
+    const foreignBranch = await createBranchForBoard(db, second.board_id);
+    const placementRepo = new BoardObjectRepository(db);
+    const foreign = await placementRepo.create({
+      board_id: second.board_id,
+      branch_id: foreignBranch.branch_id,
+      position: { x: 40, y: 60 },
+      size: { width: 500, height: 240 },
+    });
+
+    await expect(
+      repo.applyBoardLayout(first.board_id, {
+        objects: {
+          zone: { type: 'zone', x: 80, y: 80, width: 900, height: 700, label: 'Zone' },
+        },
+        placements: {
+          [foreign.object_id]: {
+            position: { x: 20, y: 100 },
+            size: { width: 500, height: 240 },
+          },
+        },
+      })
+    ).rejects.toThrow(EntityNotFoundError);
+
+    expect((await repo.findById(first.board_id))?.objects?.zone).toMatchObject({
+      x: 10,
+      y: 20,
+      width: 300,
+      height: 220,
+    });
+    expect(await placementRepo.findByObjectId(foreign.object_id)).toMatchObject({
+      position: { x: 40, y: 60 },
+    });
+  });
+
+  dbTest('rejects a stale plan instead of resurrecting a deleted canvas child', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const board = await repo.create(
+      createBoardData({
+        objects: {
+          zone: { type: 'zone', x: 10, y: 20, width: 300, height: 220, label: 'Zone' },
+          note: { type: 'markdown', x: 30, y: 100, width: 280, content: 'Delete me' },
+        },
+      })
+    );
+    await repo.removeBoardObject(board.board_id, 'note');
+
+    await expect(
+      repo.applyBoardLayout(board.board_id, {
+        objects: {
+          zone: { type: 'zone', x: 80, y: 80, width: 600, height: 480, label: 'Zone' },
+          note: { type: 'markdown', x: 100, y: 180, width: 280, content: 'Delete me' },
+        },
+        placements: {},
+      })
+    ).rejects.toThrow(EntityNotFoundError);
+
+    const after = await repo.findById(board.board_id);
+    expect(after?.objects?.zone).toMatchObject({ x: 10, y: 20, width: 300, height: 220 });
+    expect(after?.objects?.note).toBeUndefined();
   });
 });
 

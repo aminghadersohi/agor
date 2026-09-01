@@ -4,6 +4,7 @@
 
 import {
   type BoardZoneArrangementOptions,
+  containingBoardZoneId,
   planBoardZoneArrangement,
 } from '@agor/core/layout/board-zone-arrangement';
 import {
@@ -166,15 +167,14 @@ function getBoardArrangementCandidates(
     ];
   });
   const zoneForCanvasNode = new Map<string, string>();
+  const membershipZones = allZones.map(([id, zone]) => ({ id, ...zone }));
   for (const node of currentNodes) {
     if (!isTopLevelZoneCanvasNode(node)) continue;
-    const containing = allZones
-      .filter(([, zone]) => nodeCenterInsideZone(node, zone))
-      .sort(
-        ([leftId, left], [rightId, right]) =>
-          left.width * left.height - right.width * right.height || leftId.localeCompare(rightId)
-      )[0];
-    if (containing) zoneForCanvasNode.set(node.id, containing[0]);
+    const zoneId = containingBoardZoneId(
+      { ...node.position, ...renderedNodeSize(node) },
+      membershipZones
+    );
+    if (zoneId) zoneForCanvasNode.set(node.id, zoneId);
   }
 
   // A locked/hidden canvas object has absolute coordinates. Moving its zone
@@ -182,8 +182,10 @@ function getBoardArrangementCandidates(
   // complete zone rather than offering a partially effective arrangement.
   const blockedZoneIds = new Set<string>();
   for (const node of currentNodes) {
-    if (!isTopLevelZoneCanvasNode(node) || (!node.hidden && node.data?.locked !== true)) continue;
-    const zoneId = zoneForCanvasNode.get(node.id);
+    if (!node.hidden && node.data?.locked !== true) continue;
+    const zoneId =
+      node.parentId ??
+      (isTopLevelZoneCanvasNode(node) ? zoneForCanvasNode.get(node.id) : undefined);
     if (zoneId) blockedZoneIds.add(zoneId);
   }
 
@@ -1456,6 +1458,7 @@ export const useBoardObjects = ({
       const currentBoard = boardRef.current;
       if (!currentBoard || !client || boardArrangementInFlightRef.current) return;
       const { userInitiated = false, ...arrangementOptions } = options;
+      const packZoneContents = arrangementOptions.packZoneContents !== false;
       const selected = new Set(zoneIds);
       const currentNodes = nodesRef.current;
       const placementByNodeId = new Map<string, BoardEntityObject>();
@@ -1645,21 +1648,23 @@ export const useBoardObjects = ({
             Math.abs(currentSize.height - nextSize.height) >= 0.5
           );
         });
-        const densityChanged = plan.zones.some((zone) =>
-          zone.items.some((item) => {
-            const placement = placementByNodeId.get(item.id);
-            const zoneObject = currentBoard.objects?.[zone.id];
-            const policy = normalizeZoneLayoutPolicy(
-              zoneObject?.type === 'zone' ? zoneObject.layout : undefined
-            );
-            return (
-              placement !== undefined &&
-              policy.preset === 'compact_list' &&
-              isBoardEntityDensityExpandable(placement.entity_type) &&
-              placement.compact !== true
-            );
-          })
-        );
+        const densityChanged =
+          packZoneContents &&
+          plan.zones.some((zone) =>
+            zone.items.some((item) => {
+              const placement = placementByNodeId.get(item.id);
+              const zoneObject = currentBoard.objects?.[zone.id];
+              const policy = normalizeZoneLayoutPolicy(
+                zoneObject?.type === 'zone' ? zoneObject.layout : undefined
+              );
+              return (
+                placement !== undefined &&
+                policy.preset === 'compact_list' &&
+                isBoardEntityDensityExpandable(placement.entity_type) &&
+                placement.compact !== true
+              );
+            })
+          );
         if (!geometryChanged && !densityChanged) {
           showSuccess('Zones and their contents are already arranged.');
           return;
@@ -1668,7 +1673,7 @@ export const useBoardObjects = ({
         setNodes((nodes) => nodes.map((node) => arrangedNodeById.get(node.id) ?? node));
         onArrangeNodes?.(arrangedNodes, dealTiming({ count: arrangedNodes.length }).totalMs);
 
-        const objects = Object.fromEntries([
+        const plannedObjects = Object.fromEntries([
           ...plan.zones.map((zone) => {
             const existing = currentBoard.objects?.[zone.id];
             if (existing?.type !== 'zone') {
@@ -1718,11 +1723,13 @@ export const useBoardObjects = ({
             ];
           }),
         ]);
-        await client.service('boards').patch(currentBoard.board_id, {
-          _action: 'batchUpsertObjects',
-          objects,
-        } as unknown as Partial<Board>);
-        await Promise.all(
+        const objects = Object.fromEntries(
+          Object.entries(plannedObjects).filter(([objectId, next]) => {
+            const current = currentBoard.objects?.[objectId];
+            return current === undefined || JSON.stringify(current) !== JSON.stringify(next);
+          })
+        );
+        const plannedPlacements = Object.fromEntries(
           [
             ...plan.zones.flatMap((zone) =>
               zone.items.map((item) => {
@@ -1736,20 +1743,44 @@ export const useBoardObjects = ({
               })
             ),
             ...plan.looseItems.map((item) => ({ item, policy: undefined })),
-          ].map(async ({ item, policy }) => {
+          ].flatMap(({ item, policy }) => {
             const placement = placementByNodeId.get(item.id);
-            if (!placement) return;
-            await client.service('board-objects').patch(placement.object_id, {
-              position: { x: item.x, y: item.y },
-              size: { width: item.width, height: item.height },
-              ...(policy?.preset === 'compact_list' &&
-              isBoardEntityDensityExpandable(placement.entity_type) &&
-              placement.compact !== true
-                ? { compact: true }
-                : {}),
-            });
+            if (!placement) return [];
+            return [
+              [
+                placement.object_id,
+                {
+                  position: { x: item.x, y: item.y },
+                  size: { width: item.width, height: item.height },
+                  ...(packZoneContents &&
+                  policy?.preset === 'compact_list' &&
+                  isBoardEntityDensityExpandable(placement.entity_type) &&
+                  placement.compact !== true
+                    ? { compact: true }
+                    : {}),
+                },
+              ] as const,
+            ];
           })
         );
+        const placements = Object.fromEntries(
+          Object.entries(plannedPlacements).filter(([objectId, next]) => {
+            const current = boardObjectsForBoard.find(
+              (placement) => placement.object_id === objectId
+            );
+            return (
+              current === undefined ||
+              JSON.stringify(current.position) !== JSON.stringify(next.position) ||
+              JSON.stringify(current.size) !== JSON.stringify(next.size) ||
+              (next.compact !== undefined && next.compact !== current.compact)
+            );
+          })
+        );
+        await client.service('boards').patch(currentBoard.board_id, {
+          _action: 'applyLayout',
+          objects,
+          placements,
+        } as unknown as Partial<Board>);
         completeUserLayout({
           userInitiated,
           scope: 'board',
@@ -1781,19 +1812,22 @@ export const useBoardObjects = ({
   );
 
   /** Main-toolbar entry into the exact planner used by selected-zone Arrange. */
-  const arrangeWholeBoard = useCallback(async () => {
-    const currentBoard = boardRef.current;
-    if (!currentBoard) return;
-    const { selectedZones, looseNodes } = getBoardArrangementCandidates(
-      currentBoard,
-      nodesRef.current
-    );
-    if (selectedZones.length === 0 && looseNodes.length === 0) return;
-    await arrangeBoardZones(
-      selectedZones.map(([zoneId]) => zoneId),
-      { userInitiated: true }
-    );
-  }, [arrangeBoardZones]);
+  const arrangeWholeBoard = useCallback(
+    async (packZoneContents = true) => {
+      const currentBoard = boardRef.current;
+      if (!currentBoard) return;
+      const { selectedZones, looseNodes } = getBoardArrangementCandidates(
+        currentBoard,
+        nodesRef.current
+      );
+      if (selectedZones.length === 0 && looseNodes.length === 0) return;
+      await arrangeBoardZones(
+        selectedZones.map(([zoneId]) => zoneId),
+        { userInitiated: true, packZoneContents }
+      );
+    },
+    [arrangeBoardZones]
+  );
 
   const currentBoardArrangementCandidates = board
     ? getBoardArrangementCandidates(board, nodes)

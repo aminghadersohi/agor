@@ -30,6 +30,9 @@ export const DEFAULT_BOARD_ZONE_ARRANGEMENT = Object.freeze({
   justifyLastRow: false,
 });
 
+/** Empty explicit packs return to the ordinary seeded/creation width. */
+export const EMPTY_PACKED_ZONE_SIZE = Object.freeze({ width: 600, height: 240 });
+
 export interface BoardZoneArrangementItem extends ZoneLayoutSortItem {
   /** Present for branch/card placements; canvas nodes keep their natural size. */
   entityType?: BoardEntityType;
@@ -70,6 +73,13 @@ export interface BoardZoneArrangementOptions {
   justifyLastRow?: boolean;
   /** Free top-level board nodes packed beside the content-sized zone frames. */
   looseItems?: readonly BoardZoneArrangementLooseItem[];
+  /**
+   * Re-pack each eligible zone before arranging the resulting outer frames.
+   * Defaults to true for the explicit Arrange board/MCP operation. Set false
+   * to preserve every zone frame and child-relative placement while arranging
+   * only the top-level board objects.
+   */
+  packZoneContents?: boolean;
 }
 
 export interface ArrangedBoardZone {
@@ -98,6 +108,47 @@ const spatialOrder = (a: BoardZoneArrangementInput, b: BoardZoneArrangementInput
 const gridGap = (value: number): number =>
   value === 0 ? 0 : Math.max(BOARD_GRID_SIZE, ceilBoardGridValue(value));
 
+export interface BoardZoneMembershipRect {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Resolve geometric canvas membership consistently in the browser and MCP.
+ *
+ * Legacy canvas objects have no persisted zone id. The center remains the
+ * ordinary membership signal, but an object whose top-left anchor is inside a
+ * too-small zone is also a child: otherwise the exact protrusion that Pack is
+ * meant to repair is misclassified as a loose board object. Smallest-area then
+ * stable-id tie-breaking matches nested/overlapping-zone behavior everywhere.
+ */
+export function containingBoardZoneId(
+  item: Omit<BoardZoneMembershipRect, 'id'>,
+  zones: readonly BoardZoneMembershipRect[]
+): string | undefined {
+  const centerX = item.x + item.width / 2;
+  const centerY = item.y + item.height / 2;
+  return [...zones]
+    .filter(
+      (zone) =>
+        (centerX >= zone.x &&
+          centerX <= zone.x + zone.width &&
+          centerY >= zone.y &&
+          centerY <= zone.y + zone.height) ||
+        (item.x >= zone.x &&
+          item.x <= zone.x + zone.width &&
+          item.y >= zone.y &&
+          item.y <= zone.y + zone.height)
+    )
+    .sort(
+      (left, right) =>
+        left.width * left.height - right.width * right.height || left.id.localeCompare(right.id)
+    )[0]?.id;
+}
+
 /**
  * Plan both levels of a board-zone arrange as one deterministic operation.
  *
@@ -109,6 +160,7 @@ export function planBoardZoneArrangement(
   sourceZones: readonly BoardZoneArrangementInput[],
   options: BoardZoneArrangementOptions = {}
 ): BoardZoneArrangementPlan {
+  const packZoneContents = options.packZoneContents !== false;
   const orderedZones = [...sourceZones].sort(spatialOrder);
   const prepared = orderedZones.map((zone) => {
     const policy = normalizeZoneLayoutPolicy(zone.layout);
@@ -142,13 +194,20 @@ export function planBoardZoneArrangement(
             gridSize: BOARD_GRID_SIZE,
           })
         : undefined;
-    const shapes =
-      items.length === 0
+    const shapes = !packZoneContents
+      ? [
+          {
+            columns: 1,
+            width: zone.width,
+            height: zone.height,
+          },
+        ]
+      : items.length === 0
         ? [
             {
               columns: 1,
-              width: Math.max(400, ceilBoardGridValue(zone.width)),
-              height: Math.max(240, ceilBoardGridValue(zone.height)),
+              width: EMPTY_PACKED_ZONE_SIZE.width,
+              height: EMPTY_PACKED_ZONE_SIZE.height,
             },
           ]
         : compact
@@ -185,6 +244,27 @@ export function planBoardZoneArrangement(
   );
   const preparedById = new Map(prepared.map((entry) => [entry.zone.id, entry]));
   const sourceZoneOrderById = new Map(sourceZones.map((zone, index) => [zone.id, index]));
+  const finalFrameById = new Map(
+    layout.placements.map((placement) => {
+      const entry = preparedById.get(placement.id);
+      if (!entry) throw new Error(`Missing arrangement input for zone '${placement.id}'.`);
+      if (!packZoneContents) {
+        return [placement.id, { width: entry.zone.width, height: entry.zone.height }] as const;
+      }
+      const naturalHeight = placement.height - placement.slackY;
+      const selectedShape = entry.shapes
+        .filter((shape) => shape.columns === placement.columns)
+        .sort(
+          (left, right) =>
+            Math.abs(left.height - naturalHeight) - Math.abs(right.height - naturalHeight) ||
+            left.width - right.width
+        )[0];
+      if (!selectedShape) {
+        throw new Error(`Missing selected shape for zone '${placement.id}'.`);
+      }
+      return [placement.id, { width: selectedShape.width, height: selectedShape.height }] as const;
+    })
+  );
   const orderedLooseItems = [...(options.looseItems ?? [])];
   const duplicateId = orderedLooseItems.find((item) => preparedById.has(item.id));
   if (duplicateId) {
@@ -199,10 +279,11 @@ export function planBoardZoneArrangement(
                 const source = preparedById.get(placement.id)?.zone;
                 if (!source)
                   throw new Error(`Missing arrangement input for zone '${placement.id}'.`);
+                const frame = finalFrameById.get(placement.id);
+                if (!frame) throw new Error(`Missing final frame for zone '${placement.id}'.`);
                 return {
                   id: placement.id,
-                  width: placement.width,
-                  height: placement.height,
+                  ...frame,
                   sourceX: source.x,
                   sourceY: source.y,
                 };
@@ -237,8 +318,10 @@ export function planBoardZoneArrangement(
   const zones = layout.placements.map((placement): ArrangedBoardZone => {
     const entry = preparedById.get(placement.id);
     if (!entry) throw new Error(`Missing arrangement input for zone '${placement.id}'.`);
+    const finalFrame = finalFrameById.get(placement.id);
+    if (!finalFrame) throw new Error(`Missing final frame for zone '${placement.id}'.`);
     const frame = getZoneLayoutFrame(
-      { ...entry.zone, width: placement.width },
+      { ...entry.zone, width: finalFrame.width },
       { fontScale: entry.zone.fontScale }
     );
     const items = entry.orderedItems.map((item) => ({
@@ -253,28 +336,44 @@ export function planBoardZoneArrangement(
     }));
     const bounds = {
       width: frame.width,
-      height: Math.max(0, placement.height - frame.headerInset),
+      height: Math.max(0, finalFrame.height - frame.headerInset),
     };
-    const packed = entry.compact
-      ? layoutCompactRectangles(items, {
-          bounds,
-          padding: frame.padding,
-          gapX: entry.gap,
-          gapY: entry.gap,
-          gridSize: BOARD_GRID_SIZE,
-        })
-      : layoutRectangles(items, {
-          bounds,
-          padding: frame.padding,
-          minPadding: frame.padding,
-          gapX: entry.gap,
-          gapY: entry.gap,
-          minGapX: entry.gap,
-          minGapY: entry.gap,
-          exactColumns: Math.max(1, Math.min(items.length || 1, placement.columns)),
-          allowDeck: false,
-          gridSize: BOARD_GRID_SIZE,
-        });
+    const packed = !packZoneContents
+      ? {
+          columns: 1,
+          placements: entry.orderedItems.map((item) => ({
+            id: item.id,
+            x: item.position.x,
+            y: item.position.y,
+            width: item.width,
+            height: item.height,
+            row: 0,
+            column: 0,
+            stackIndex: 0,
+            deckDepth: 1,
+          })),
+          overflowingItemIds: [],
+        }
+      : entry.compact
+        ? layoutCompactRectangles(items, {
+            bounds,
+            padding: frame.padding,
+            gapX: entry.gap,
+            gapY: entry.gap,
+            gridSize: BOARD_GRID_SIZE,
+          })
+        : layoutRectangles(items, {
+            bounds,
+            padding: frame.padding,
+            minPadding: frame.padding,
+            gapX: entry.gap,
+            gapY: entry.gap,
+            minGapX: entry.gap,
+            minGapY: entry.gap,
+            exactColumns: Math.max(1, Math.min(items.length || 1, placement.columns)),
+            allowDeck: false,
+            gridSize: BOARD_GRID_SIZE,
+          });
     if (packed.overflowingItemIds.length > 0) {
       throw new Error(
         `Zone '${placement.id}' shape did not contain ${packed.overflowingItemIds.join(', ')}.`
@@ -288,15 +387,15 @@ export function planBoardZoneArrangement(
             y: boardOrigin.y + (boardPlacementById.get(placement.id)?.y ?? 0),
           }
         : { x: placement.x, y: placement.y },
-      width: placement.width,
-      height: placement.height,
+      width: finalFrame.width,
+      height: finalFrame.height,
       row: placement.row,
       column: placement.column,
       contentColumns: packed.columns,
       slackY: placement.slackY,
       items: packed.placements.map((item) => ({
         ...item,
-        y: item.y + frame.headerInset,
+        y: packZoneContents ? item.y + frame.headerInset : item.y,
       })),
     };
   });

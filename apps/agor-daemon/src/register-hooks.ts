@@ -75,6 +75,7 @@ import type {
   AuthenticatedParams,
   Board,
   BoardID,
+  BoardLayoutBatch,
   Branch,
   DeepReadonly,
   GatewayChannel,
@@ -91,6 +92,7 @@ import type {
 } from '@agor/core/types';
 import {
   assertPublicMCPOAuthCompatibilityMode,
+  BOARD_LAYOUT_APPLIED_EVENT,
   GATEWAY_CHANNEL_WRITE_FIELDS,
   GATEWAY_REDACTED_SENTINEL,
   hasMinimumRole,
@@ -3522,7 +3524,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         async (context: HookContext<Board>) => {
           // Handle atomic board object operations via _action parameter
           const contextData = context.data || {};
-          const { _action, objectId, objectData, objects, deleteAssociatedSessions } =
+          const { _action, objectId, objectData, objects, placements, deleteAssociatedSessions } =
             contextData as UnknownJson;
 
           if (_action === 'upsertObject') {
@@ -3596,6 +3598,49 @@ export function registerHooks(ctx: RegisterHooksContext): void {
             });
             // Skip normal patch flow to prevent double emit
             context.dispatch = result;
+            return context;
+          }
+
+          if (_action === 'applyLayout' && objects && placements) {
+            if (!context.id) throw new Error('Board ID required');
+            const result = await boardsService!.applyBoardLayout(
+              context.id as string,
+              { objects, placements } as unknown as BoardLayoutBatch
+            );
+            context.result = result.board;
+            // The complete payload is published first so current clients can
+            // apply both persistence surfaces in one store notification. The
+            // ordinary events that follow preserve compatibility and are
+            // reference-equal no-ops for those clients.
+            emitServiceEvent(app, {
+              path: 'boards',
+              event: BOARD_LAYOUT_APPLIED_EVENT,
+              data: {
+                board_id: result.board.board_id,
+                board: result.board,
+                placements: result.placements,
+              },
+              params: context.params,
+              id: context.id,
+              method: 'patch',
+            });
+            emitServiceEvent(app, {
+              path: 'boards',
+              event: 'patched',
+              data: result.board,
+              params: context.params,
+              id: context.id,
+            });
+            for (const placement of result.placements) {
+              emitServiceEvent(app, {
+                path: 'board-objects',
+                event: 'patched',
+                data: placement,
+                params: context.params,
+                id: placement.object_id,
+              });
+            }
+            context.dispatch = result.board;
             return context;
           }
 

@@ -2,7 +2,7 @@
 
 import { BOARD_SNAP_GRID } from '@agor/core/layout/rectangle-packing';
 import type { AgorClient, Board } from '@agor-live/client';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import type { ButtonHTMLAttributes, MouseEventHandler, ReactNode } from 'react';
 import type { Node } from 'reactflow';
@@ -784,6 +784,9 @@ describe('SessionCanvas zoom shortcuts', () => {
     button.focus();
     expect(button).toHaveFocus();
     fireEvent.click(button);
+    const options = await screen.findByRole('dialog', { name: 'Arrange board options' });
+    expect(within(options).getByRole('checkbox', { name: 'Pack zone contents' })).toBeChecked();
+    fireEvent.click(within(options).getByRole('button', { name: 'Arrange board' }));
 
     await waitFor(() => expect(button).toHaveAttribute('aria-disabled', 'true'));
     expect(patch).toHaveBeenCalledTimes(1);
@@ -794,5 +797,67 @@ describe('SessionCanvas zoom shortcuts', () => {
     releaseWrite?.();
     await waitFor(() => expect(button).toHaveAttribute('aria-disabled', 'false'));
     expect(button).toHaveFocus();
+  });
+
+  it('defaults Pack zone contents on and preserves the frame when the user turns it off', async () => {
+    nodesStateOverride = [
+      {
+        id: 'zone-1',
+        type: 'zone',
+        position: { x: 1200, y: 900 },
+        width: 620,
+        height: 500,
+        data: {},
+      },
+    ];
+    const patch = vi.fn().mockResolvedValue({});
+    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    const board = {
+      board_id: 'board-1',
+      objects: {
+        'zone-1': {
+          type: 'zone',
+          x: 1200,
+          y: 900,
+          width: 620,
+          height: 500,
+          label: 'Zone',
+        },
+      },
+    } as unknown as Board;
+    render(
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      </AntApp>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Arrange board' }));
+    const options = await screen.findByRole('dialog', { name: 'Arrange board options' });
+    const pack = within(options).getByRole('checkbox', { name: 'Pack zone contents' });
+    expect(pack).toBeChecked();
+    fireEvent.click(pack);
+    expect(pack).not.toBeChecked();
+    fireEvent.click(within(options).getByRole('button', { name: 'Arrange board' }));
+
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    expect(patch).toHaveBeenCalledWith(
+      'board-1',
+      expect.objectContaining({
+        _action: 'applyLayout',
+        objects: {
+          'zone-1': expect.objectContaining({ width: 620, height: 500 }),
+        },
+      })
+    );
   });
 });

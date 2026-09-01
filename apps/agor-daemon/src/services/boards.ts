@@ -21,8 +21,10 @@ import {
 import type {
   AuthenticatedParams,
   Board,
+  BoardEntityObject,
   BoardExportBlob,
   BoardID,
+  BoardLayoutBatch,
   BoardObject,
   QueryParams,
   TeammateWelcomeNoteRequest,
@@ -376,6 +378,15 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
     _params?: BoardParams
   ): Promise<Board> {
     return this.boardRepo.batchUpsertBoardObjects(boardId, objects);
+  }
+
+  /** Commit a planned whole-board layout across both persistence surfaces. */
+  async applyBoardLayout(
+    boardId: string,
+    batch: BoardLayoutBatch,
+    _params?: BoardParams
+  ): Promise<{ board: Board; placements: BoardEntityObject[] }> {
+    return this.boardRepo.applyBoardLayout(boardId, batch);
   }
 
   /**

@@ -1,5 +1,6 @@
 import {
   type BoardZoneArrangementPlan,
+  containingBoardZoneId,
   planBoardZoneArrangement,
 } from '@agor/core/layout/board-zone-arrangement';
 import {
@@ -347,6 +348,7 @@ interface ArrangeBoardZonesOptions {
   justifyLastRow?: boolean;
   dryRun?: boolean;
   includeLooseItems?: boolean;
+  packZoneContents?: boolean;
 }
 
 type ZoneObject = BoardObject & { type: 'zone'; width: number; height: number };
@@ -371,8 +373,8 @@ interface ArrangedBoardZones {
  * Shared by `agor_boards_arrange_zones` and by the `reflow_board` overflow
  * strategy, so a zone that grows into its neighbours is repaired by exactly
  * the layout the explicit tool would have produced. Returns null when the
- * board has no zones. Container and child geometry are planned together, then
- * the containers are written in one board patch before child placements.
+ * board has no zones. Container, child, and loose-object geometry are planned
+ * together and committed through one atomic board-layout mutation.
  */
 async function arrangeBoardZones(
   ctx: McpContext,
@@ -380,10 +382,10 @@ async function arrangeBoardZones(
   options: ArrangeBoardZonesOptions = {}
 ): Promise<ArrangedBoardZones | null> {
   const board = (await ctx.app.service('boards').get(boardId, ctx.baseServiceParams)) as Board;
-  const zoneEntries = Object.entries(board.objects ?? {}).filter(
+  const allZoneEntries = Object.entries(board.objects ?? {}).filter(
     ([, object]) => object.type === 'zone'
   ) as [string, ZoneObject][];
-  if (zoneEntries.length === 0) return null;
+  if (allZoneEntries.length === 0) return null;
 
   const entityResult = (await ctx.app.service('board-objects').find({
     query: { board_id: boardId },
@@ -391,24 +393,20 @@ async function arrangeBoardZones(
   })) as { data: Array<BoardEntityObject> };
   const visible = await filterVisibleBoardEntities(ctx, entityResult.data, false);
   const zoneForCanvasId = new Map<string, string>();
+  const membershipZones = allZoneEntries.map(([id, zone]) => ({ id, ...zone }));
+  const blockedZoneIds = new Set<string>();
   for (const [objectId, object] of Object.entries(board.objects ?? {})) {
-    if (object.type === 'zone' || (object.type === 'artifact' && object.locked === true)) continue;
+    if (object.type === 'zone') continue;
     const size = getCanvasObjectDimensions(object);
-    const center = { x: object.x + size.width / 2, y: object.y + size.height / 2 };
-    const containing = zoneEntries
-      .filter(
-        ([, zone]) =>
-          center.x >= zone.x &&
-          center.x <= zone.x + zone.width &&
-          center.y >= zone.y &&
-          center.y <= zone.y + zone.height
-      )
-      .sort(
-        ([leftId, left], [rightId, right]) =>
-          left.width * left.height - right.width * right.height || leftId.localeCompare(rightId)
-      )[0];
-    if (containing) zoneForCanvasId.set(objectId, containing[0]);
+    const zoneId = containingBoardZoneId({ x: object.x, y: object.y, ...size }, membershipZones);
+    if (!zoneId) continue;
+    zoneForCanvasId.set(objectId, zoneId);
+    if (object.type === 'artifact' && object.locked === true) blockedZoneIds.add(zoneId);
   }
+  const zoneEntries = allZoneEntries.filter(
+    ([zoneId, zone]) => zone.locked !== true && !blockedZoneIds.has(zoneId)
+  );
+  if (zoneEntries.length === 0) return null;
 
   // Size each zone's contents exactly the way the zone arrange will, because a
   // shape is only useful if the zone can genuinely hold its contents at it.
@@ -581,12 +579,13 @@ async function arrangeBoardZones(
     startY: options.startY,
     maxPerRow: options.maxPerRow,
     justifyLastRow: options.justifyLastRow,
+    packZoneContents: options.packZoneContents,
     looseItems,
   });
 
   const byId = new Map(zones.map((entry) => [entry.id, entry]));
   if (options.dryRun !== true) {
-    const objects = Object.fromEntries([
+    const plannedObjects = Object.fromEntries([
       ...plan.zones.map((arranged) => {
         const entry = byId.get(arranged.id);
         if (!entry) throw new Error(`Missing board zone '${arranged.id}'.`);
@@ -638,56 +637,67 @@ async function arrangeBoardZones(
         });
       }),
     ]);
-    await ctx.app
-      .service('boards')
-      .patch(
-        boardId,
-        { _action: 'batchUpsertObjects', objects } as unknown as Partial<Board>,
-        ctx.baseServiceParams
-      );
-    await Promise.all(
-      [
-        ...plan.zones.flatMap((arranged) => {
-          const entry = byId.get(arranged.id);
-          if (!entry) throw new Error(`Missing board zone '${arranged.id}'.`);
-          return arranged.items.flatMap((item) =>
-            entry.entitiesById.has(item.id) ? [{ item, entry }] : []
-          );
-        }),
-        ...plan.looseItems.flatMap((item) => {
-          const entity = looseEntitiesById.get(item.id);
-          return entity ? [{ item, entity }] : [];
-        }),
-      ].map(async (planned) => {
+    const objects = Object.fromEntries(
+      Object.entries(plannedObjects).filter(([objectId, next]) => {
+        const current = board.objects?.[objectId];
+        return current === undefined || JSON.stringify(current) !== JSON.stringify(next);
+      })
+    );
+    const plannedPlacements = [
+      ...plan.zones.flatMap((arranged) => {
+        const entry = byId.get(arranged.id);
+        if (!entry) throw new Error(`Missing board zone '${arranged.id}'.`);
+        return arranged.items.flatMap((item) =>
+          entry.entitiesById.has(item.id) ? [{ item, entry }] : []
+        );
+      }),
+      ...plan.looseItems.flatMap((item) => {
+        const entity = looseEntitiesById.get(item.id);
+        return entity ? [{ item, entity }] : [];
+      }),
+    ];
+    const placements = Object.fromEntries(
+      plannedPlacements.flatMap((planned) => {
         if ('entity' in planned) {
-          await ctx.app.service('board-objects').patch(
-            planned.entity.object_id,
-            {
-              position: { x: planned.item.x, y: planned.item.y },
-              size: { width: planned.item.width, height: planned.item.height },
-            },
-            ctx.baseServiceParams
-          );
-          return;
+          const update = {
+            position: { x: planned.item.x, y: planned.item.y },
+            size: { width: planned.item.width, height: planned.item.height },
+          };
+          return JSON.stringify(planned.entity.position) === JSON.stringify(update.position) &&
+            JSON.stringify(planned.entity.size) === JSON.stringify(update.size)
+            ? []
+            : [[planned.entity.object_id, update] as const];
         }
         const { item, entry } = planned;
         const entity = entry.entitiesById.get(item.id);
         if (!entity) throw new Error(`Missing board entity '${item.id}'.`);
-        await ctx.app.service('board-objects').patch(
-          entity.object_id,
-          {
-            position: { x: item.x, y: item.y },
-            size: { width: item.width, height: item.height },
-            ...(normalizeZoneLayoutPolicy(entry.zone.layout).preset === 'compact_list' &&
-            isBoardEntityDensityExpandable(entity.entity_type) &&
-            entity.compact !== true
-              ? { compact: true }
-              : {}),
-          },
-          ctx.baseServiceParams
-        );
+        const update = {
+          position: { x: item.x, y: item.y },
+          size: { width: item.width, height: item.height },
+          ...(options.packZoneContents !== false &&
+          normalizeZoneLayoutPolicy(entry.zone.layout).preset === 'compact_list' &&
+          isBoardEntityDensityExpandable(entity.entity_type) &&
+          entity.compact !== true
+            ? { compact: true }
+            : {}),
+        };
+        const compactMatches = update.compact === undefined || update.compact === entity.compact;
+        return JSON.stringify(entity.position) === JSON.stringify(update.position) &&
+          JSON.stringify(entity.size) === JSON.stringify(update.size) &&
+          compactMatches
+          ? []
+          : [[entity.object_id, update] as const];
       })
     );
+    if (Object.keys(objects).length > 0 || Object.keys(placements).length > 0) {
+      await ctx.app
+        .service('boards')
+        .patch(
+          boardId,
+          { _action: 'applyLayout', objects, placements } as unknown as Partial<Board>,
+          ctx.baseServiceParams
+        );
+    }
   }
 
   return { plan, byId };
@@ -2099,7 +2109,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_arrange_zones',
     {
       description:
-        "Arrange a board's zones, free worktrees/cards, and canvas objects as one operation. Zones use measured child sizes to choose legal frames; those frames and every visible free item (including artifacts) form one compact, collision-free board cluster. All canvas containers are written in one batch, then every zone's children are re-packed for its final frame. targetRowHeight defaults to 600.",
+        "Arrange a board's zones, free worktrees/cards, and canvas objects as one operation. By default, each eligible zone is packed inside-out from measured child sizes before its final frame joins every visible free item (including artifacts) in one collision-free board cluster. Disable packZoneContents to preserve zone frames and child-relative geometry. The complete plan is committed atomically. targetRowHeight defaults to 600.",
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
         targetWidth: mcpOptionalPositiveInt(
@@ -2120,6 +2130,12 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .describe(
             'Stretch the final row even when it is underfull (default: false, matching a photo grid).'
           ),
+        packZoneContents: z
+          .boolean()
+          .optional()
+          .describe(
+            'Pack each eligible zone inside-out and replace its manual size floor before arranging the final frames (default: true). False preserves zone frames and child-relative geometry.'
+          ),
         dryRun: z
           .boolean()
           .optional()
@@ -2138,6 +2154,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         startY: args.startY,
         maxPerRow: args.maxPerRow,
         justifyLastRow: args.justifyLastRow === true,
+        packZoneContents: args.packZoneContents !== false,
         dryRun: args.dryRun === true,
       });
 
@@ -2162,6 +2179,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         gap: layout.gap,
         rowHeights: layout.rowHeights,
         dryRun: args.dryRun === true,
+        packZoneContents: args.packZoneContents !== false,
         overflowingRows: layout.overflowingRows,
         warning:
           layout.overflowingRows.length > 0

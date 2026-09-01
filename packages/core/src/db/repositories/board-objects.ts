@@ -9,6 +9,7 @@ import type {
   BoardEntityObject,
   BoardEntityType,
   BoardID,
+  BoardLayoutPlacementUpdate,
   BranchID,
   CardID,
   UUID,
@@ -511,6 +512,49 @@ export class BoardObjectRepository {
         .from(boardObjects)
         .where(eq(boardObjects.object_id, objectId))
         .one();
+      if (!row) throw new RepositoryError('Failed to retrieve updated board object layout');
+      return this.rowToEntity(row);
+    } catch (error) {
+      if (error instanceof EntityNotFoundError) throw error;
+      throw new RepositoryError(
+        `Failed to update board object layout: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /**
+   * Update layout only when the entity belongs to the authoritative board.
+   * Whole-board commits use this inside the board repository transaction so a
+   * caller cannot smuggle another board's placement into an otherwise valid
+   * layout request.
+   */
+  async updateLayoutForBoard(
+    boardId: BoardID,
+    objectId: string,
+    layout: BoardLayoutPlacementUpdate
+  ): Promise<BoardEntityObject> {
+    try {
+      const condition = and(
+        eq(boardObjects.object_id, objectId),
+        eq(boardObjects.board_id, boardId)
+      );
+      const existing = await select(this.db).from(boardObjects).where(condition).one();
+      if (!existing) throw new EntityNotFoundError('BoardObject', objectId);
+      const existingData =
+        typeof existing.data === 'string' ? JSON.parse(existing.data) : existing.data;
+      await update(this.db, boardObjects)
+        .set({
+          data: {
+            ...existingData,
+            position: layout.position,
+            size: layout.size,
+            ...(layout.compact !== undefined ? { compact: layout.compact } : {}),
+          },
+        })
+        .where(condition)
+        .run();
+      const row = await select(this.db).from(boardObjects).where(condition).one();
       if (!row) throw new RepositoryError('Failed to retrieve updated board object layout');
       return this.rowToEntity(row);
     } catch (error) {

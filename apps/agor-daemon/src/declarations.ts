@@ -265,6 +265,14 @@ export interface BoardsServiceImpl extends Service<Board, Partial<Board>, Feathe
     objects: unknown[],
     params?: FeathersParams
   ): Promise<Board>;
+  applyBoardLayout(
+    boardId: string,
+    batch: import('@agor/core/types').BoardLayoutBatch,
+    params?: FeathersParams
+  ): Promise<{
+    board: Board;
+    placements: import('@agor/core/types').BoardEntityObject[];
+  }>;
   mergeBoardObjectFields(
     boardId: string,
     patches: Record<string, unknown>,
