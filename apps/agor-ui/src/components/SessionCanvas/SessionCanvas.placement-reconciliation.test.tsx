@@ -3,12 +3,13 @@ import type {
   Board,
   BoardEntityObject,
   Branch,
+  CardWithType,
   Repo,
   Session,
 } from '@agor-live/client';
 import { act, render } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { EMPTY_MAPS } from '../../store/agorMaps';
 import { boardObjectPatched, sessionPatched } from '../../store/agorRealtimeActions';
@@ -141,6 +142,25 @@ const implementingPlacement = {
   size: { width: 500, height: 180 },
 } as unknown as BoardEntityObject;
 
+const card = {
+  card_id: 'card-1',
+  board_id: BOARD_ID,
+  title: 'Independent pending placement',
+  created_at: '2026-09-01T00:00:00.000Z',
+  updated_at: '2026-09-01T00:00:00.000Z',
+  archived: false,
+} as unknown as CardWithType;
+
+const reviewingCardPlacement = {
+  object_id: 'board-object-card',
+  board_id: BOARD_ID,
+  card_id: card.card_id,
+  entity_type: 'card',
+  zone_id: REVIEWING_ZONE_ID,
+  position: { x: 80, y: 480 },
+  size: { width: 380, height: 120 },
+} as unknown as BoardEntityObject;
+
 const connected = {
   connected: true,
   connecting: false,
@@ -162,8 +182,117 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
       ...EMPTY_MAPS,
       repoById: new Map([[repo.repo_id, repo]]),
       branchById: new Map([[BRANCH_ID, branch]]),
-      boardObjectsByBoardId: new Map([[BOARD_ID, [implementingPlacement]]]),
+      cardById: new Map([[card.card_id, card]]),
+      boardObjectsByBoardId: new Map([[BOARD_ID, [implementingPlacement, reviewingCardPlacement]]]),
     });
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  it('does not persist a stale drag after cross-zone authority advances', async () => {
+    vi.useFakeTimers();
+    const patch = vi.fn().mockResolvedValue({});
+    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+
+    render(
+      <ConnectionProvider value={connected}>
+        <SessionCanvas board={board} client={client} branches={[branch]} />
+      </ConnectionProvider>
+    );
+    await act(async () => {});
+
+    const staleBranchNode = {
+      ...currentNode(BRANCH_ID),
+      position: { x: 60, y: 1240 },
+      positionAbsolute: { x: 1800, y: 1320 },
+      width: 500,
+      height: 180,
+    };
+    act(() => {
+      flowProps?.onNodeDragStart?.({}, staleBranchNode);
+      flowProps?.onNodeDrag?.({}, staleBranchNode);
+      flowProps?.onNodeDragStop?.({}, staleBranchNode);
+    });
+
+    // Queue an unrelated, valid card write after the branch. Both entries use
+    // the production shared debounce, so reconciliation must invalidate only
+    // the superseded branch entry.
+    const validCardNode = {
+      ...currentNode(`card-${card.card_id}`),
+      position: { x: 120, y: 400 },
+      positionAbsolute: { x: 3010, y: 480 },
+      width: 380,
+      height: 120,
+    };
+    act(() => {
+      flowProps?.onNodeDragStart?.({}, validCardNode);
+      flowProps?.onNodeDrag?.({}, validCardNode);
+      flowProps?.onNodeDragStop?.({}, validCardNode);
+    });
+
+    act(() =>
+      boardObjectPatched({
+        ...implementingPlacement,
+        zone_id: REVIEWING_ZONE_ID,
+        position: { x: 20, y: 100 },
+      })
+    );
+    await act(async () => {});
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(501);
+    });
+
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(patch).toHaveBeenCalledWith('board-object-card', {
+      position: { x: 120, y: 400 },
+      zone_id: REVIEWING_ZONE_ID,
+    });
+    expect(patch).not.toHaveBeenCalledWith('board-object-branch', expect.anything());
+  });
+
+  it('does not persist a stale drag after same-zone auto-arrange advances', async () => {
+    vi.useFakeTimers();
+    const patch = vi.fn().mockResolvedValue({});
+    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+
+    render(
+      <ConnectionProvider value={connected}>
+        <SessionCanvas board={board} client={client} branches={[branch]} />
+      </ConnectionProvider>
+    );
+    await act(async () => {});
+
+    const staleBranchNode = {
+      ...currentNode(BRANCH_ID),
+      position: { x: 60, y: 1240 },
+      positionAbsolute: { x: 1800, y: 1320 },
+      width: 500,
+      height: 180,
+    };
+    act(() => {
+      flowProps?.onNodeDragStart?.({}, staleBranchNode);
+      flowProps?.onNodeDrag?.({}, staleBranchNode);
+      flowProps?.onNodeDragStop?.({}, staleBranchNode);
+      boardObjectPatched({
+        ...implementingPlacement,
+        position: { x: 40, y: 260 },
+      });
+    });
+    await act(async () => {});
+
+    expect(currentNode(BRANCH_ID)).toMatchObject({
+      parentId: IMPLEMENTING_ZONE_ID,
+      position: { x: 40, y: 260 },
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(501);
+    });
+    expect(patch).not.toHaveBeenCalled();
   });
 
   it('drops stale local absolute geometry when set_zone moves a branch before a delayed local echo', async () => {

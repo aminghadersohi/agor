@@ -1414,8 +1414,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // A board-object placement event advanced independently of the
             // local absolute override. set_zone and auto-arrange own both the
             // React Flow parent and the relative position, so never translate
-            // the stale absolute point into the new parent coordinate space.
+            // the stale absolute point into the new parent coordinate space
+            // or let its delayed persistence overwrite that authority. Keep
+            // other nodes' independently queued updates intact.
             delete localPositionsRef.current[newNode.id];
+            delete pendingLayoutUpdatesRef.current[newNode.id];
             return {
               ...newNode,
               selected: existingNode?.selected,
