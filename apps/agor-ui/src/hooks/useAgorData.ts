@@ -1498,20 +1498,21 @@ export function useAgorData(
     // depend on the bump landing the instant the event does, not a frame later.
     const sessionPatchedBatched = (session: Session) => {
       if (!subscriptionIsCurrent()) return;
-        const previous = realtimeSessionLifecycleState.get(session.session_id) ??
-          realtimeSessionCountState.get(session.session_id) ??
-          agorStore.getState().sessionById.get(session.session_id);
-        realtimeSessionCountState.set(session.session_id, session);
-        if (countMembershipChanged(previous, session)) noteCountAffectingEvent();
-        if (previous && isSessionExecuting(previous) && !isSessionExecuting(session)) {
-          bumpRevision('sessions');
-          reconcileTerminalSession(session);
-          return;
-        }
-        if (isSessionExecuting(session)) {
-          terminalReconciliations.delete(session.session_id);
-        }
-        enqueueAuthoritativeSession(session);
+      const previous =
+        realtimeSessionLifecycleState.get(session.session_id) ??
+        realtimeSessionCountState.get(session.session_id) ??
+        agorStore.getState().sessionById.get(session.session_id);
+      realtimeSessionCountState.set(session.session_id, session);
+      if (countMembershipChanged(previous, session)) noteCountAffectingEvent();
+      if (previous && isSessionExecuting(previous) && !isSessionExecuting(session)) {
+        bumpRevision('sessions');
+        reconcileTerminalSession(session);
+        return;
+      }
+      if (isSessionExecuting(session)) {
+        terminalReconciliations.delete(session.session_id);
+      }
+      enqueueAuthoritativeSession(session);
     };
     // `created` clears any tombstone (remove-then-recreate in one frame) and
     // `removed` sets one + drops the id's queued patch, before the synchronous

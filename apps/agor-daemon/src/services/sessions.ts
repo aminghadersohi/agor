@@ -77,8 +77,8 @@ import type {
 import {
   BTW_AUTO_ARCHIVE_AFTER_SECONDS,
   CALLBACK_DELIVERIES,
-  getEffectiveDirectCallbackCoordinatorSessionId,
   classifyBranchFilesystemReadiness,
+  getEffectiveDirectCallbackCoordinatorSessionId,
   isAgenticToolDefaultConfigurationReference,
   SessionStatus,
   SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS,
