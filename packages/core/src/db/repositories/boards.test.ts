@@ -1408,7 +1408,7 @@ describe('BoardRepository.applyBoardLayout', () => {
 
       const result = await repo.applyBoardLayout(board.board_id, {
         objects: {
-          zone: { type: 'zone', x: 80, y: 80, width: 540, height: 380, label: 'Zone' },
+          zone: { x: 80, y: 80, width: 540, height: 380 },
         },
         placements: {
           [placement.object_id]: {
@@ -1420,6 +1420,9 @@ describe('BoardRepository.applyBoardLayout', () => {
       });
 
       expect(result.board.objects?.zone).toMatchObject({ x: 80, y: 80, width: 540, height: 380 });
+      expect(result.changed).toBe(true);
+      expect(result.changed_object_ids).toEqual(['zone']);
+      expect(result.changed_placement_ids).toEqual([placement.object_id]);
       expect(result.placements).toHaveLength(1);
       expect(await placementRepo.findByObjectId(placement.object_id)).toMatchObject({
         position: { x: 20, y: 100 },
@@ -1427,6 +1430,117 @@ describe('BoardRepository.applyBoardLayout', () => {
       });
     }
   );
+
+  dbTest('filters a byte-equivalent layout before any durable write', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const zone = { type: 'zone' as const, x: 80, y: 80, width: 540, height: 380, label: 'Zone' };
+    const board = await repo.create(createBoardData({ objects: { zone } }));
+    const branch = await createBranchForBoard(db, board.board_id);
+    const placementRepo = new BoardObjectRepository(db);
+    const placement = await placementRepo.create({
+      board_id: board.board_id,
+      branch_id: branch.branch_id,
+      zone_id: 'zone',
+      position: { x: 20, y: 100 },
+      size: { width: 500, height: 240 },
+      compact: true,
+    });
+    const unchanged = await repo.applyBoardLayout(board.board_id, {
+      objects: { zone: { ...zone } },
+      placements: {
+        [placement.object_id]: {
+          position: { x: 20, y: 100 },
+          size: { width: 500, height: 240 },
+          compact: true,
+        },
+      },
+    });
+
+    expect(unchanged).toEqual({
+      board,
+      placements: [placement],
+      changed: false,
+      changed_object_ids: [],
+      changed_placement_ids: [],
+    });
+    expect(await placementRepo.findByObjectId(placement.object_id)).toEqual(placement);
+  });
+
+  dbTest(
+    'returns the complete submitted placement snapshot when only canvas geometry changes',
+    async ({ db }) => {
+      const repo = new BoardRepository(db);
+      const board = await repo.create(
+        createBoardData({
+          objects: {
+            note: { type: 'markdown', x: 1240, y: 840, width: 320, content: 'Keep me' },
+          },
+        })
+      );
+      const branch = await createBranchForBoard(db, board.board_id);
+      const placementRepo = new BoardObjectRepository(db);
+      const placement = await placementRepo.create({
+        board_id: board.board_id,
+        branch_id: branch.branch_id,
+        position: { x: 20, y: 100 },
+        size: { width: 500, height: 240 },
+      });
+
+      const corrected = await repo.applyBoardLayout(board.board_id, {
+        objects: { note: { x: 1240, y: 760, width: 320 } },
+        placements: {
+          [placement.object_id]: {
+            position: placement.position,
+            size: placement.size!,
+          },
+        },
+      });
+
+      expect(corrected.changed).toBe(true);
+      expect(corrected.changed_object_ids).toEqual(['note']);
+      expect(corrected.changed_placement_ids).toEqual([]);
+      expect(corrected.placements).toEqual([placement]);
+      expect(corrected.board.objects?.note).toEqual({
+        type: 'markdown',
+        x: 1240,
+        y: 760,
+        width: 320,
+        content: 'Keep me',
+      });
+
+      const repeated = await repo.applyBoardLayout(board.board_id, {
+        objects: { note: { x: 1240, y: 760, width: 320 } },
+        placements: {
+          [placement.object_id]: {
+            position: placement.position,
+            size: placement.size!,
+          },
+        },
+      });
+      expect(repeated.changed).toBe(false);
+      expect(repeated.changed_object_ids).toEqual([]);
+      expect(repeated.changed_placement_ids).toEqual([]);
+    }
+  );
+
+  dbTest('rejects incomplete owned canvas geometry under the layout lock', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const board = await repo.create(
+      createBoardData({
+        objects: {
+          note: { type: 'markdown', x: 1240, y: 840, width: 320, content: 'Keep me' },
+        },
+      })
+    );
+
+    await expect(
+      repo.applyBoardLayout(board.board_id, {
+        objects: { note: { x: 1240, y: 760 } },
+        placements: {},
+      })
+    ).rejects.toThrow('requires complete width geometry');
+    expect((await repo.findById(board.board_id))?.objects?.note).toMatchObject({ y: 840 });
+  });
 
   dbTest('rolls back the frame when any placement belongs to another board', async ({ db }) => {
     const repo = new BoardRepository(db);
@@ -1450,7 +1564,7 @@ describe('BoardRepository.applyBoardLayout', () => {
     await expect(
       repo.applyBoardLayout(first.board_id, {
         objects: {
-          zone: { type: 'zone', x: 80, y: 80, width: 900, height: 700, label: 'Zone' },
+          zone: { x: 80, y: 80, width: 900, height: 700 },
         },
         placements: {
           [foreign.object_id]: {
@@ -1487,8 +1601,8 @@ describe('BoardRepository.applyBoardLayout', () => {
     await expect(
       repo.applyBoardLayout(board.board_id, {
         objects: {
-          zone: { type: 'zone', x: 80, y: 80, width: 600, height: 480, label: 'Zone' },
-          note: { type: 'markdown', x: 100, y: 180, width: 280, content: 'Delete me' },
+          zone: { x: 80, y: 80, width: 600, height: 480 },
+          note: { x: 100, y: 180, width: 280 },
         },
         placements: {},
       })

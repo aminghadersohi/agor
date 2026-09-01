@@ -28,6 +28,7 @@ import {
   type ZoneContentJustification,
   type ZoneLayoutSortItem,
 } from '@agor/core/layout/zone-layout';
+import type { BoardLayoutApplyResult, BoardLayoutBatch } from '@agor/core/types';
 import type { AgorClient, Board, BoardEntityObject, BoardObject } from '@agor-live/client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Node } from 'reactflow';
@@ -46,8 +47,9 @@ import {
   type PostLayoutViewportIntent,
 } from './postLayoutViewport';
 import {
-  type ExpectedExplicitLayoutSignature,
-  expectedExplicitLayoutState,
+  type ExpectedAutoLayoutSignature,
+  expectedAutoLayoutState,
+  layoutResultCoversBatch,
   zonesNeedingAutoArrange,
 } from './utils/autoArrangeGuard';
 import { getNodeAbsolutePosition } from './utils/coordinateTransforms';
@@ -309,6 +311,13 @@ interface ArrangeZoneContentsOptions {
   silent?: boolean;
   preserveZoneFrame?: boolean;
   userInitiated?: boolean;
+  /** Synchronous owner token required for background writes only. */
+  observerLease?: AutoZoneObserverLease;
+}
+
+interface AutoZoneObserverLease {
+  boardId: string | undefined;
+  owned: boolean;
 }
 
 type ArrangeBoardZonesOptions = Omit<BoardZoneArrangementOptions, 'looseItems'> & {
@@ -345,13 +354,26 @@ export const useBoardObjects = ({
   >(null);
   const autoZoneDeferralRef = useRef<AutoZoneDeferral | null>(null);
   autoZoneDeferralRef.current ??= new AutoZoneDeferral();
-  const runAutoZoneArrangeRef = useRef<(zoneId: string) => void>(() => undefined);
+  const runAutoZoneArrangeRef = useRef<
+    (zoneId: string, expectedLease?: AutoZoneObserverLease) => void
+  >(() => undefined);
   const lastAutoLayoutSignaturesRef = useRef<ReadonlyMap<string, string>>(new Map());
-  const expectedExplicitLayoutSignaturesRef = useRef(
-    new Map<string, ExpectedExplicitLayoutSignature>()
-  );
+  const expectedAutoLayoutSignaturesRef = useRef(new Map<string, ExpectedAutoLayoutSignature>());
+  const browserLocks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+  const autoZoneObserverLeaseRef = useRef<AutoZoneObserverLease>({
+    boardId: board?.board_id,
+    owned: browserLocks === undefined,
+  });
+  // Revoke the previous board synchronously during render. Waiting for effect
+  // cleanup leaves one frame where a route change can use stale React state.
+  if (autoZoneObserverLeaseRef.current.boardId !== board?.board_id) {
+    autoZoneObserverLeaseRef.current = {
+      boardId: board?.board_id,
+      owned: browserLocks === undefined,
+    };
+  }
   const [ownsAutoZoneObserver, setOwnsAutoZoneObserver] = useState(
-    () => typeof navigator === 'undefined' || navigator.locks === undefined
+    () => browserLocks === undefined
   );
   const skipNextAutoArrangeRef = useRef(new Set<string>());
   const preserveNextAutoZoneFrameRef = useRef(new Set<string>());
@@ -370,6 +392,24 @@ export const useBoardObjects = ({
   calledOutNodeIdsRef.current = calledOutNodeIds;
   const boardArrangementInFlightRef = useRef(false);
   const [isBoardArrangementActive, setIsBoardArrangementActive] = useState(false);
+
+  const acknowledgeExpectedAutoLayouts = useCallback((zoneIds: Iterable<string>) => {
+    for (const zoneId of zoneIds) {
+      const expected = expectedAutoLayoutSignaturesRef.current.get(zoneId);
+      if (!expected) continue;
+      expected.acknowledged = true;
+      if (lastAutoLayoutSignaturesRef.current.get(zoneId) === expected.signature) {
+        expectedAutoLayoutSignaturesRef.current.delete(zoneId);
+        autoZoneDeferralRef.current?.cancel(zoneId);
+      }
+    }
+  }, []);
+
+  const clearExpectedAutoLayouts = useCallback((zoneIds: Iterable<string>) => {
+    for (const zoneId of zoneIds) {
+      expectedAutoLayoutSignaturesRef.current.delete(zoneId);
+    }
+  }, []);
 
   // Use the board object's reference directly. The store already preserves
   // unchanged board references, and serializing every object on every canvas
@@ -416,26 +456,31 @@ export const useBoardObjects = ({
     const boardId = board?.board_id;
     const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
     lastAutoLayoutSignaturesRef.current = new Map();
-    expectedExplicitLayoutSignaturesRef.current.clear();
+    expectedAutoLayoutSignaturesRef.current.clear();
     if (!boardId || !locks) {
+      autoZoneObserverLeaseRef.current = { boardId, owned: true };
       setOwnsAutoZoneObserver(true);
       return;
     }
 
     let active = true;
     const controller = new AbortController();
+    const lease: AutoZoneObserverLease = { boardId, owned: false };
+    autoZoneObserverLeaseRef.current = lease;
     setOwnsAutoZoneObserver(false);
     void holdAutoZoneObserverLease(
       locks as unknown as AutoZoneObserverLockManager,
       boardId,
       controller.signal,
       (owned) => {
+        lease.owned = owned;
         if (active) setOwnsAutoZoneObserver(owned);
       }
     ).catch((error) => {
       if (active) console.error('Failed to coordinate Auto Zone observer ownership:', error);
     });
     return () => {
+      lease.owned = false;
       active = false;
       controller.abort();
     };
@@ -459,7 +504,8 @@ export const useBoardObjects = ({
     if (!zoneId) return;
     const zone = boardRef.current?.objects?.[zoneId];
     if (zone?.type !== 'zone' || normalizeZoneLayoutPolicy(zone.layout).mode !== 'auto') return;
-    autoZoneDeferralRef.current?.defer(zoneId, () => runAutoZoneArrangeRef.current(zoneId));
+    const lease = autoZoneObserverLeaseRef.current;
+    autoZoneDeferralRef.current?.defer(zoneId, () => runAutoZoneArrangeRef.current(zoneId, lease));
   }, []);
 
   /** Persist the user's decision to take control of an automatically laid-out zone. */
@@ -477,6 +523,7 @@ export const useBoardObjects = ({
 
       manuallyControlledZoneIdsRef.current.add(zoneId);
       autoZoneDeferralRef.current?.cancel(zoneId);
+      expectedAutoLayoutSignaturesRef.current.delete(zoneId);
       skipNextAutoArrangeRef.current.delete(zoneId);
       const demotion = client
         .service('boards')
@@ -826,6 +873,13 @@ export const useBoardObjects = ({
       const currentBoard = boardRef.current;
       const persistedZone = currentBoard?.objects?.[zoneId];
       if (!currentBoard || !client || persistedZone?.type !== 'zone') return;
+      if (
+        options.observerLease &&
+        (options.observerLease !== autoZoneObserverLeaseRef.current ||
+          !options.observerLease.owned ||
+          options.observerLease.boardId !== currentBoard.board_id)
+      )
+        return;
       const sourceNodes = nodesRef.current;
       const liveZoneNode = sourceNodes.find((node) => node.id === zoneId);
       // A toolbar click can race the debounced persistence of a drag/resize.
@@ -1296,14 +1350,42 @@ export const useBoardObjects = ({
       ];
       const optimisticById = new Map(optimisticNodes.map((node) => [node.id, node]));
       const finalNodes = sourceNodes.map((node) => optimisticById.get(node.id) ?? node);
+      const targetObserverSignature = autoZoneObserverSignature({
+        zoneId,
+        width: nextZoneWidth,
+        height: nextZoneHeight,
+        layout: zone.layout,
+        children: children.flatMap(({ node }) => {
+          const arrangedNode = changedById.get(node.id);
+          const arranged = placementById.get(node.id);
+          if (!arrangedNode || !arranged) return [];
+          return [
+            {
+              id: node.id,
+              x: arrangedNode.position.x,
+              y: arrangedNode.position.y,
+              width: arranged.width,
+              height: arranged.height,
+              sortData: autoZoneObserverSortData(node),
+            },
+          ];
+        }),
+      });
       if (optimisticNodes.length > 0 && options.userInitiated) {
         onArrangeNodes?.(optimisticNodes, timing.totalMs);
       }
-      // Positions are an auto-layout output but are also part of the observer
-      // signature (so a user's manual move can reflow an automatic zone).
-      // Consume exactly the next signature change produced by our own write;
-      // otherwise every arrange schedules a redundant second pass 400ms later.
-      if (policy.mode === 'auto') skipNextAutoArrangeRef.current.add(zoneId);
+      let expectedLayoutRegistered = false;
+      if (policy.mode === 'auto') {
+        // Match the exact normalized post-write target rather than blindly
+        // consuming one observer pass. Optimistic state, durable selectors,
+        // and realtime compatibility events can arrive in several renders.
+        expectedAutoLayoutSignaturesRef.current.set(zoneId, {
+          signature: targetObserverSignature,
+          acknowledged: false,
+        });
+        expectedLayoutRegistered = true;
+        skipNextAutoArrangeRef.current.delete(zoneId);
+      }
       setNodes((currentNodes) =>
         currentNodes.map((node) => {
           if (node.id === zoneId && (zoneHeightChanged || zoneWidthChanged)) {
@@ -1328,16 +1410,6 @@ export const useBoardObjects = ({
               ...('width' in existing ? { width: arranged.width } : {}),
               ...('height' in existing ? { height: arranged.height } : {}),
             } as BoardObject;
-            const unchanged =
-              Math.abs(existing.x - next.x) < 0.5 &&
-              Math.abs(existing.y - next.y) < 0.5 &&
-              (!('width' in existing) ||
-                !('width' in next) ||
-                Math.abs(Number(existing.width) - Number(next.width)) < 0.5) &&
-              (!('height' in existing) ||
-                !('height' in next) ||
-                Math.abs(Number(existing.height) - Number(next.height)) < 0.5);
-            if (unchanged) return [];
             return [[node.id, next] as const];
           })
         );
@@ -1353,9 +1425,7 @@ export const useBoardObjects = ({
         }
         const reflowedObjects = Object.fromEntries(reflowedEntries);
         const objects = {
-          ...(zoneHeightChanged || zoneWidthChanged
-            ? { [zoneId]: { ...zone, width: nextZoneWidth, height: nextZoneHeight } }
-            : {}),
+          [zoneId]: { ...zone, width: nextZoneWidth, height: nextZoneHeight },
           ...reflowedObjects,
           ...canvasObjects,
         };
@@ -1366,19 +1436,10 @@ export const useBoardObjects = ({
             const arranged = placementById.get(node.id);
             if (!arranged) return [];
             const { width, height } = arranged;
-            const nodePositionChanged =
-              !placement.position ||
-              Math.abs(placement.position.x - node.position.x) >= 0.5 ||
-              Math.abs(placement.position.y - node.position.y) >= 0.5;
-            const sizeChanged =
-              !placement.size ||
-              Math.abs(placement.size.width - width) >= 0.5 ||
-              Math.abs(placement.size.height - height) >= 0.5;
             const shouldCompact =
               (policy.preset === 'compact_list' || layout.mode === 'deck') &&
               isBoardEntityDensityExpandable(placement.entity_type) &&
               placement.compact !== true;
-            if (!nodePositionChanged && !sizeChanged && !shouldCompact) return [];
             return [
               [
                 placement.object_id,
@@ -1398,11 +1459,26 @@ export const useBoardObjects = ({
           // Canvas objects, the zone frame, and entity placements form one
           // geometry snapshot. Publishing the existing atomic layout action
           // prevents partial placement echoes from re-arming the observer.
-          await client.service('boards').patch(currentBoard.board_id, {
+          if (
+            options.observerLease &&
+            (options.observerLease !== autoZoneObserverLeaseRef.current ||
+              !options.observerLease.owned ||
+              options.observerLease.boardId !== currentBoard.board_id)
+          ) {
+            if (expectedLayoutRegistered) clearExpectedAutoLayouts([zoneId]);
+            return;
+          }
+          const result = (await client.service('boards').patch(currentBoard.board_id, {
             _action: 'applyLayout',
             objects,
             placements,
-          } as unknown as Partial<Board>);
+          } as unknown as Partial<Board>)) as unknown as BoardLayoutApplyResult;
+          if (!layoutResultCoversBatch(result, { objects, placements } as BoardLayoutBatch)) {
+            throw new Error('Board layout acknowledgement omitted committed geometry');
+          }
+          if (expectedLayoutRegistered) acknowledgeExpectedAutoLayouts([zoneId]);
+        } else if (expectedLayoutRegistered) {
+          clearExpectedAutoLayouts([zoneId]);
         }
         if (overflowCount > 0 && !options.silent) {
           showWarning(
@@ -1429,12 +1505,15 @@ export const useBoardObjects = ({
           ],
         });
       } catch (error) {
+        if (expectedLayoutRegistered) clearExpectedAutoLayouts([zoneId]);
         console.error('Failed to arrange zone contents:', error);
         showError('Failed to arrange zone contents');
       }
     },
     [
+      acknowledgeExpectedAutoLayouts,
       boardObjectsForBoard,
+      clearExpectedAutoLayouts,
       client,
       completeUserLayout,
       onArrangeNodes,
@@ -1852,7 +1931,7 @@ export const useBoardObjects = ({
               ];
             }),
           });
-          expectedExplicitLayoutSignaturesRef.current.set(arrangedZone.id, {
+          expectedAutoLayoutSignaturesRef.current.set(arrangedZone.id, {
             signature,
             acknowledged: false,
           });
@@ -1912,12 +1991,7 @@ export const useBoardObjects = ({
             ];
           }),
         ]);
-        const objects = Object.fromEntries(
-          Object.entries(plannedObjects).filter(([objectId, next]) => {
-            const current = currentBoard.objects?.[objectId];
-            return current === undefined || JSON.stringify(current) !== JSON.stringify(next);
-          })
-        );
+        const objects = plannedObjects;
         const plannedPlacements = Object.fromEntries(
           [
             ...plan.zones.flatMap((zone) =>
@@ -1952,42 +2026,16 @@ export const useBoardObjects = ({
             ];
           })
         );
-        const placements = Object.fromEntries(
-          Object.entries(plannedPlacements).filter(([objectId, next]) => {
-            const current = boardObjectsForBoard.find(
-              (placement) => placement.object_id === objectId
-            );
-            return (
-              current === undefined ||
-              JSON.stringify(current.position) !== JSON.stringify(next.position) ||
-              JSON.stringify(current.size) !== JSON.stringify(next.size) ||
-              (next.compact !== undefined && next.compact !== current.compact)
-            );
-          })
-        );
-        await client.service('boards').patch(currentBoard.board_id, {
+        const placements = plannedPlacements;
+        const result = (await client.service('boards').patch(currentBoard.board_id, {
           _action: 'applyLayout',
           objects,
           placements,
-        } as unknown as Partial<Board>);
-        for (const zoneId of explicitExpectationZoneIds) {
-          const expected = expectedExplicitLayoutSignaturesRef.current.get(zoneId);
-          if (!expected) continue;
-          expected.acknowledged = true;
-          if (lastAutoLayoutSignaturesRef.current.get(zoneId) === expected.signature) {
-            expectedExplicitLayoutSignaturesRef.current.delete(zoneId);
-            autoZoneDeferralRef.current?.cancel(zoneId);
-          } else {
-            autoZoneDeferralRef.current?.schedule(
-              zoneId,
-              () => {
-                expectedExplicitLayoutSignaturesRef.current.delete(zoneId);
-                runAutoZoneArrangeRef.current(zoneId);
-              },
-              AUTO_ZONE_BASE_DELAY_MS
-            );
-          }
+        } as unknown as Partial<Board>)) as unknown as BoardLayoutApplyResult;
+        if (!layoutResultCoversBatch(result, { objects, placements } as BoardLayoutBatch)) {
+          throw new Error('Board layout acknowledgement omitted committed geometry');
         }
+        acknowledgeExpectedAutoLayouts(explicitExpectationZoneIds);
         completeUserLayout({
           userInitiated,
           scope: layoutScope,
@@ -1999,9 +2047,7 @@ export const useBoardObjects = ({
           `Arranged ${plan.zones.length} zone${plan.zones.length === 1 ? '' : 's'}, ${plan.looseItems.length} free item${plan.looseItems.length === 1 ? '' : 's'}, and their contents.`
         );
       } catch (error) {
-        for (const zoneId of explicitExpectationZoneIds) {
-          expectedExplicitLayoutSignaturesRef.current.delete(zoneId);
-        }
+        clearExpectedAutoLayouts(explicitExpectationZoneIds);
         console.error('Failed to arrange board zones:', error);
         showError(
           error instanceof LayoutObstacleError
@@ -2014,7 +2060,9 @@ export const useBoardObjects = ({
       }
     },
     [
+      acknowledgeExpectedAutoLayouts,
       boardObjectsForBoard,
+      clearExpectedAutoLayouts,
       client,
       completeUserLayout,
       onArrangeNodes,
@@ -2052,9 +2100,15 @@ export const useBoardObjects = ({
         currentBoardArrangementCandidates.looseNodes.length > 0)
   );
 
-  runAutoZoneArrangeRef.current = (zoneId: string) => {
-    const zone = boardRef.current?.objects?.[zoneId];
+  runAutoZoneArrangeRef.current = (zoneId: string, expectedLease?: AutoZoneObserverLease) => {
+    const currentBoard = boardRef.current;
+    const lease = autoZoneObserverLeaseRef.current;
+    const zone = currentBoard?.objects?.[zoneId];
     if (
+      !currentBoard ||
+      (expectedLease !== undefined && expectedLease !== lease) ||
+      !lease.owned ||
+      lease.boardId !== currentBoard.board_id ||
       zone?.type !== 'zone' ||
       normalizeZoneLayoutPolicy(zone.layout).mode !== 'auto' ||
       manuallyControlledZoneIdsRef.current.has(zoneId)
@@ -2062,7 +2116,11 @@ export const useBoardObjects = ({
       return;
     restoreZoneCallouts(zoneId);
     const preserveZoneFrame = preserveNextAutoZoneFrameRef.current.delete(zoneId);
-    void arrangeZoneContentsRef.current?.(zoneId, { silent: true, preserveZoneFrame });
+    void arrangeZoneContentsRef.current?.(zoneId, {
+      silent: true,
+      preserveZoneFrame,
+      observerLease: lease,
+    });
   };
 
   useEffect(() => {
@@ -2073,7 +2131,13 @@ export const useBoardObjects = ({
         ? ([[objectId, object]] as const)
         : []
     );
-    if (!client || !ownsAutoZoneObserver) return;
+    if (
+      !client ||
+      !ownsAutoZoneObserver ||
+      !autoZoneObserverLeaseRef.current.owned ||
+      autoZoneObserverLeaseRef.current.boardId !== board?.board_id
+    )
+      return;
     if (autoZones.length === 0) {
       // Re-arming a zone must tidy even when its contents have not changed
       // since the last time auto mode ran.
@@ -2134,22 +2198,13 @@ export const useBoardObjects = ({
     if (observation.changedIds.size === 0) return;
     const changedZones = autoZones.filter(([zoneId]) => observation.changedIds.has(zoneId));
     const unsuppressedZones = changedZones.filter(([zoneId]) => {
-      const expected = expectedExplicitLayoutSignaturesRef.current.get(zoneId);
+      const expected = expectedAutoLayoutSignaturesRef.current.get(zoneId);
       const current = observation.signatures.get(zoneId);
-      const state = expectedExplicitLayoutState(current, expected);
+      const state = expectedAutoLayoutState(current, expected);
       if (!state.suppress) return true;
       autoZoneDeferralRef.current?.cancel(zoneId);
       if (state.settled) {
-        expectedExplicitLayoutSignaturesRef.current.delete(zoneId);
-      } else if (state.needsFallback) {
-        autoZoneDeferralRef.current?.schedule(
-          zoneId,
-          () => {
-            expectedExplicitLayoutSignaturesRef.current.delete(zoneId);
-            runAutoZoneArrangeRef.current(zoneId);
-          },
-          AUTO_ZONE_BASE_DELAY_MS
-        );
+        expectedAutoLayoutSignaturesRef.current.delete(zoneId);
       }
       return false;
     });
@@ -2159,13 +2214,14 @@ export const useBoardObjects = ({
     );
     if (zonesToArrange.length === 0) return;
     for (const [zoneId] of zonesToArrange) {
+      const lease = autoZoneObserverLeaseRef.current;
       autoZoneDeferralRef.current?.schedule(
         zoneId,
-        () => runAutoZoneArrangeRef.current(zoneId),
+        () => runAutoZoneArrangeRef.current(zoneId, lease),
         AUTO_ZONE_BASE_DELAY_MS
       );
     }
-  }, [boardObjects, boardObjectsForBoard, client, nodes, ownsAutoZoneObserver]);
+  }, [board?.board_id, boardObjects, boardObjectsForBoard, client, nodes, ownsAutoZoneObserver]);
 
   /**
    * Convert board.objects to React Flow nodes

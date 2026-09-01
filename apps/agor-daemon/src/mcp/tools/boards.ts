@@ -637,12 +637,11 @@ async function arrangeBoardZones(
         });
       }),
     ]);
-    const objects = Object.fromEntries(
-      Object.entries(plannedObjects).filter(([objectId, next]) => {
-        const current = board.objects?.[objectId];
-        return current === undefined || JSON.stringify(current) !== JSON.stringify(next);
-      })
-    );
+    const objects = plannedObjects;
+    const canvasGeometryChanged = Object.entries(plannedObjects).some(([objectId, next]) => {
+      const current = board.objects?.[objectId];
+      return current === undefined || JSON.stringify(current) !== JSON.stringify(next);
+    });
     const plannedPlacements = [
       ...plan.zones.flatMap((arranged) => {
         const entry = byId.get(arranged.id);
@@ -657,16 +656,13 @@ async function arrangeBoardZones(
       }),
     ];
     const placements = Object.fromEntries(
-      plannedPlacements.flatMap((planned) => {
+      plannedPlacements.map((planned) => {
         if ('entity' in planned) {
           const update = {
             position: { x: planned.item.x, y: planned.item.y },
             size: { width: planned.item.width, height: planned.item.height },
           };
-          return JSON.stringify(planned.entity.position) === JSON.stringify(update.position) &&
-            JSON.stringify(planned.entity.size) === JSON.stringify(update.size)
-            ? []
-            : [[planned.entity.object_id, update] as const];
+          return [planned.entity.object_id, update] as const;
         }
         const { item, entry } = planned;
         const entity = entry.entitiesById.get(item.id);
@@ -681,15 +677,33 @@ async function arrangeBoardZones(
             ? { compact: true }
             : {}),
         };
-        const compactMatches = update.compact === undefined || update.compact === entity.compact;
-        return JSON.stringify(entity.position) === JSON.stringify(update.position) &&
-          JSON.stringify(entity.size) === JSON.stringify(update.size) &&
-          compactMatches
-          ? []
-          : [[entity.object_id, update] as const];
+        return [entity.object_id, update] as const;
       })
     );
-    if (Object.keys(objects).length > 0 || Object.keys(placements).length > 0) {
+    const placementGeometryChanged = plannedPlacements.some((planned) => {
+      if ('entity' in planned) {
+        return (
+          planned.entity.position.x !== planned.item.x ||
+          planned.entity.position.y !== planned.item.y ||
+          planned.entity.size?.width !== planned.item.width ||
+          planned.entity.size?.height !== planned.item.height
+        );
+      }
+      const entity = planned.entry.entitiesById.get(planned.item.id);
+      if (!entity) throw new Error(`Missing board entity '${planned.item.id}'.`);
+      const shouldCompact =
+        options.packZoneContents !== false &&
+        normalizeZoneLayoutPolicy(planned.entry.zone.layout).preset === 'compact_list' &&
+        isBoardEntityDensityExpandable(entity.entity_type);
+      return (
+        entity.position.x !== planned.item.x ||
+        entity.position.y !== planned.item.y ||
+        entity.size?.width !== planned.item.width ||
+        entity.size?.height !== planned.item.height ||
+        (shouldCompact && entity.compact !== true)
+      );
+    });
+    if (canvasGeometryChanged || placementGeometryChanged) {
       await ctx.app
         .service('boards')
         .patch(

@@ -21,9 +21,9 @@ import {
 import type {
   AuthenticatedParams,
   Board,
-  BoardEntityObject,
   BoardExportBlob,
   BoardID,
+  BoardLayoutApplyResult,
   BoardLayoutBatch,
   BoardObject,
   QueryParams,
@@ -385,7 +385,7 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
     boardId: string,
     batch: BoardLayoutBatch,
     _params?: BoardParams
-  ): Promise<{ board: Board; placements: BoardEntityObject[] }> {
+  ): Promise<BoardLayoutApplyResult> {
     return this.boardRepo.applyBoardLayout(boardId, batch);
   }
 

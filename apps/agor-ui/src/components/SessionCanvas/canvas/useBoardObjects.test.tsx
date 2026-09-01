@@ -1,5 +1,5 @@
 import { BOARD_GRID_SIZE, snapBoardGridPoint } from '@agor/core/layout/rectangle-packing';
-import type { Board } from '@agor-live/client';
+import type { Board, BoardObject } from '@agor-live/client';
 import { act, renderHook } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import type { ReactNode } from 'react';
@@ -166,18 +166,44 @@ afterEach(() => {
  * only behavior exercised here, and it only touches `client` + `board`.
  */
 function makeClient() {
-  const patch = vi.fn().mockResolvedValue({});
+  const patch = vi.fn().mockImplementation(mockBoardPatchResult);
   const client = { service: vi.fn().mockReturnValue({ patch }) };
   return { client: client as never, patch };
 }
 
 function makeRoutedClient() {
-  const boardsPatch = vi.fn().mockResolvedValue({});
+  const boardsPatch = vi.fn().mockImplementation(mockBoardPatchResult);
   const boardObjectsPatch = vi.fn().mockResolvedValue({});
   const service = vi.fn((path: string) => ({
     patch: path === 'boards' ? boardsPatch : boardObjectsPatch,
   }));
   return { client: { service } as never, service, boardsPatch, boardObjectsPatch };
+}
+
+function mockBoardPatchResult(boardId: string, data: Record<string, unknown>) {
+  if (data?._action !== 'applyLayout') return Promise.resolve({});
+  const objects = (data.objects ?? {}) as Record<string, BoardObject>;
+  const placements = data.placements as Record<
+    string,
+    {
+      position: { x: number; y: number };
+      size: { width: number; height: number };
+      compact?: boolean;
+    }
+  >;
+  return Promise.resolve({
+    board: { board_id: boardId, objects },
+    placements: Object.entries(placements ?? {}).map(([objectId, layout]) => ({
+      object_id: objectId,
+      board_id: boardId,
+      entity_type: 'branch',
+      created_at: '2026-01-01T00:00:00.000Z',
+      ...layout,
+    })),
+    changed: true,
+    changed_object_ids: Object.keys(objects),
+    changed_placement_ids: Object.keys(placements ?? {}),
+  });
 }
 
 function layoutWrites(patch: { mock: { calls: unknown[][] } }) {
@@ -765,7 +791,7 @@ describe('arrangeZoneContents', () => {
       'placement-branch',
       'placement-card',
     ]);
-    expect(Object.keys(boardWrite.objects).sort()).toEqual(['app', 'artifact', 'note']);
+    expect(Object.keys(boardWrite.objects).sort()).toEqual(['app', 'artifact', 'note', 'zone']);
     expect(boardWrite.objects.locked).toBeUndefined();
 
     const arranged = renderedNodes.filter((node) =>
@@ -799,7 +825,7 @@ describe('arrangeZoneContents', () => {
     );
   });
 
-  it('omits byte-equivalent canvas geometry when another child needs layout', async () => {
+  it('submits the complete affected canvas snapshot when another child needs layout', async () => {
     const { client, boardsPatch } = makeRoutedClient();
     const board = makeBoard({
       zone: {
@@ -861,7 +887,10 @@ describe('arrangeZoneContents', () => {
     });
 
     expect(layoutWrites(boardsPatch)).toHaveLength(1);
-    expect(layoutWrites(boardsPatch)[0]?.objects).toEqual({});
+    expect(layoutWrites(boardsPatch)[0]?.objects).toEqual({
+      zone: expect.objectContaining({ x: 0, y: 0, width: 620, height: 700 }),
+      note: expect.objectContaining({ x: 20, y: 100, width: 360 }),
+    });
     expect(layoutPlacements(boardsPatch)['placement-branch']).toEqual({
       position: { x: 20, y: 220 },
       size: { width: 500, height: 240 },
@@ -931,12 +960,12 @@ describe('arrangeZoneContents', () => {
       'board-1',
       expect.objectContaining({
         _action: 'applyLayout',
-        objects: {
+        objects: expect.objectContaining({
           artifact: expect.objectContaining({ x: 1020, y: 1100 }),
-        },
+          zone: expect.objectContaining({ x: 1000, y: 1000, width: 900, height: 700 }),
+        }),
       })
     );
-    expect(boardsPatch.mock.calls[0]?.[1].objects.zone).toBeUndefined();
   });
 
   it('minimally shifts a newly covered zone and its canvas contents in the same grow write', async () => {
@@ -1652,7 +1681,7 @@ describe('arrangeZoneContents', () => {
       node.id === 'card-newer'
         ? { ...node, position: { x: 20, y: 100 } }
         : node.id === 'card-older'
-          ? { ...node, position: { x: 348, y: 88 } }
+          ? { ...node, position: { x: 20, y: 220 } }
           : node
     );
     rerender();
@@ -1740,6 +1769,334 @@ describe('arrangeZoneContents', () => {
     });
     expect(boardsPatch).toHaveBeenCalledTimes(1);
     expect(showWarning).not.toHaveBeenCalled();
+  });
+
+  it('corrects one material note move once in a mixed Auto Zone and consumes the durable target', async () => {
+    vi.useFakeTimers();
+    const { client, boardsPatch } = makeRoutedClient();
+    const zone = {
+      type: 'zone' as const,
+      x: 1200,
+      y: 400,
+      width: 760,
+      height: 900,
+      label: 'Mixed review',
+      layout: {
+        mode: 'auto' as const,
+        preset: 'grid' as const,
+        sortBy: 'position' as const,
+        sortDirection: 'asc' as const,
+        columns: 1,
+        gap: 20,
+        autoResizeHeight: true,
+        resize: 'height' as const,
+      },
+    };
+    const note = {
+      type: 'markdown' as const,
+      x: 1220,
+      y: 760,
+      width: 320,
+      content: '# Material note\n\nDurable mixed content.',
+    };
+    let board = makeBoard({ zone, note });
+    let placements = [
+      {
+        object_id: 'placement-worktree',
+        board_id: 'board-1',
+        entity_type: 'branch',
+        branch_id: 'worktree',
+        zone_id: 'zone',
+        position: { x: 20, y: 100 },
+        size: { width: 500, height: 240 },
+        created_at: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        object_id: 'placement-card',
+        board_id: 'board-1',
+        entity_type: 'card',
+        card_id: 'card',
+        zone_id: 'zone',
+        position: { x: 20, y: 680 },
+        size: { width: 380, height: 100 },
+        created_at: '2026-01-01T00:00:00.000Z',
+      },
+    ];
+    let nodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: zone.x, y: zone.y }, data: {}, ...zone },
+      {
+        id: 'worktree',
+        type: 'branchNode',
+        parentId: 'zone',
+        position: placements[0]!.position,
+        data: { branch: { name: 'Worktree' } },
+      },
+      {
+        id: 'card-card',
+        type: 'cardNode',
+        parentId: 'zone',
+        position: placements[1]!.position,
+        data: { card: { title: 'Card', data: {} } },
+      },
+      {
+        id: 'note',
+        type: 'markdown',
+        position: { x: note.x, y: note.y },
+        width: note.width,
+        height: 300,
+        data: { objectId: 'note', width: note.width, height: 300 },
+      },
+    ];
+    const measured = document.createElement('div');
+    measured.className = 'react-flow__node';
+    measured.dataset.id = 'note';
+    document.body.append(measured);
+    const setMeasuredHeight = (height: number) => {
+      Object.defineProperties(measured, {
+        offsetWidth: { configurable: true, value: 320 },
+        scrollWidth: { configurable: true, value: 320 },
+        offsetHeight: { configurable: true, value: height },
+        scrollHeight: { configurable: true, value: height },
+      });
+    };
+    setMeasuredHeight(300);
+    const view = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: placements as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    const applyWrite = (write: {
+      objects: Record<string, BoardObject>;
+      placements: Record<
+        string,
+        { position: { x: number; y: number }; size: { width: number; height: number } }
+      >;
+    }) => {
+      board = {
+        ...board,
+        objects: { ...board.objects, ...write.objects },
+      } as Board;
+      placements = placements.map((placement) => ({
+        ...placement,
+        ...(write.placements[placement.object_id] ?? {}),
+      }));
+      nodes = nodes.map((node) => {
+        const object = write.objects[node.id];
+        if (object) {
+          return {
+            ...node,
+            position: { x: object.x, y: object.y },
+            ...('width' in object ? { width: object.width } : {}),
+            ...('height' in object ? { height: object.height } : {}),
+          };
+        }
+        const placement = placements.find(
+          (candidate) =>
+            candidate.branch_id === node.id ||
+            (candidate.card_id && `card-${candidate.card_id}` === node.id)
+        );
+        return placement ? { ...node, position: placement.position } : node;
+      });
+    };
+
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(boardsPatch).not.toHaveBeenCalled();
+
+    const durableNote = board.objects!.note as BoardObject & { y: number };
+    board = makeBoard({ ...board.objects, note: { ...durableNote, y: durableNote.y + 80 } });
+    nodes = nodes.map((node) =>
+      node.id === 'note'
+        ? { ...node, position: { x: node.position.x, y: node.position.y + 80 } }
+        : node
+    );
+    view.rerender();
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    const correction = boardsPatch.mock.calls[0]![1];
+    expect(correction.objects.note.y).toBe(durableNote.y);
+    expect(Object.keys(correction.objects).sort()).toEqual(['note', 'zone']);
+    expect(Object.keys(correction.placements).sort()).toEqual([
+      'placement-card',
+      'placement-worktree',
+    ]);
+    applyWrite(correction);
+
+    for (let cycle = 0; cycle < 8; cycle += 1) {
+      setMeasuredHeight(cycle % 2 === 0 ? 280 : 340);
+      board = makeBoard(
+        Object.fromEntries(
+          Object.entries(board.objects ?? {}).map(([id, object]) => [id, { ...object }])
+        )
+      );
+      nodes = [...nodes].reverse().map((node) => ({ ...node, data: { ...node.data } }));
+      placements = placements.map((placement) => ({
+        ...placement,
+        position: { ...placement.position },
+        size: placement.size && { ...placement.size },
+      }));
+      view.rerender();
+      await act(async () => vi.advanceTimersByTimeAsync(500));
+    }
+
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    view.unmount();
+    setMeasuredHeight(300);
+
+    const reloaded = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: placements as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    measured.remove();
+    reloaded.unmount();
+  });
+
+  it('allows only the current board lease owner to write across acquisition and route races', async () => {
+    vi.useFakeTimers();
+    let tail = Promise.resolve();
+    let acquisitionCount = 0;
+    let resolveOwnerAcquired!: () => void;
+    let resolveObserverAcquired!: () => void;
+    const ownerAcquired = new Promise<void>((resolve) => {
+      resolveOwnerAcquired = resolve;
+    });
+    const observerAcquired = new Promise<void>((resolve) => {
+      resolveObserverAcquired = resolve;
+    });
+    const locks = {
+      request: async (
+        _name: string,
+        options: { signal: AbortSignal },
+        callback: () => Promise<void>
+      ) => {
+        const previous = tail;
+        let release!: () => void;
+        tail = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        await previous;
+        if (!options.signal.aborted) {
+          acquisitionCount += 1;
+          const held = callback();
+          if (acquisitionCount === 1) resolveOwnerAcquired();
+          if (acquisitionCount === 2) resolveObserverAcquired();
+          await held;
+        }
+        release();
+      },
+    };
+    const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: locks });
+
+    const zone = {
+      type: 'zone' as const,
+      x: 0,
+      y: 0,
+      width: 620,
+      height: 500,
+      label: 'Leased',
+      layout: { mode: 'auto' as const, preset: 'grid' as const },
+    };
+    const artifact = {
+      type: 'artifact' as const,
+      artifact_id: 'artifact-1',
+      x: 400,
+      y: 300,
+      width: 300,
+      height: 220,
+    };
+    let ownerBoard = makeBoard({ zone, artifact });
+    let ownerNodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, width: 620, height: 500, data: {} },
+      {
+        id: 'artifact',
+        type: 'artifactNode',
+        position: { x: artifact.x, y: artifact.y },
+        width: artifact.width,
+        height: artifact.height,
+        data: { objectId: 'artifact', width: artifact.width, height: artifact.height },
+      },
+    ];
+    const ownerClient = makeRoutedClient();
+    const observerClient = makeRoutedClient();
+    const owner = renderHook(
+      () =>
+        useBoardObjects({
+          board: ownerBoard,
+          client: ownerClient.client,
+          boardObjectsForBoard: [],
+          nodes: ownerNodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    const observer = renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({ zone, artifact }),
+          client: observerClient.client,
+          boardObjectsForBoard: [],
+          nodes: ownerNodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await ownerAcquired;
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(ownerClient.boardsPatch).toHaveBeenCalledTimes(1);
+    expect(observerClient.boardsPatch).not.toHaveBeenCalled();
+
+    // Queue an owner observation, then change boards before its delay expires.
+    // The old lease token must not be reinterpreted as ownership on the new route.
+    ownerNodes = ownerNodes.map((node) =>
+      node.id === 'artifact'
+        ? { ...node, position: { x: node.position.x, y: node.position.y + 80 } }
+        : node
+    );
+    owner.rerender();
+    ownerBoard = {
+      ...makeBoard({ zone: { ...zone, layout: { ...zone.layout, mode: 'manual' as const } } }),
+      board_id: 'board-2',
+    } as Board;
+    ownerNodes = [];
+    owner.rerender();
+
+    await act(async () => {
+      await observerAcquired;
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(ownerClient.boardsPatch).toHaveBeenCalledTimes(1);
+    expect(observerClient.boardsPatch).not.toHaveBeenCalled();
+
+    owner.unmount();
+    observer.unmount();
+    if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks);
+    else Reflect.deleteProperty(navigator, 'locks');
   });
 
   it('keeps a measured single-child Auto Zone stable across observer and realtime rebuilds', async () => {
@@ -3519,7 +3876,7 @@ describe('arrangeBoardZones production path', () => {
       { wrapper }
     );
     act(() => result.current.preserveAutoZoneFrameOnce(zoneId));
-    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await act(async () => vi.advanceTimersByTimeAsync(400));
     expect(boardsPatch).toHaveBeenCalledTimes(1);
     expect(layoutPlacements(boardsPatch)['placement-a']).toEqual({
       position: { x: 20, y: 100 },
@@ -3534,6 +3891,8 @@ describe('arrangeBoardZones production path', () => {
       await (zoneNode!.data.onArrangeContents as (id: string) => Promise<void>)(zoneId);
     });
     expect(layoutWrites(boardsPatch)).toHaveLength(1);
-    expect(layoutWrites(boardsPatch)[0]?.objects).toEqual({});
+    expect(layoutWrites(boardsPatch)[0]?.objects).toEqual({
+      'zone-auto': expect.objectContaining({ width: 800, height: 1000 }),
+    });
   });
 });

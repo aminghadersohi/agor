@@ -63,6 +63,47 @@ function createBranchData(overrides?: { branch_id?: BranchID; repo_id?: UUID; na
 }
 
 describe('BoardsService - Custom Methods', () => {
+  dbTest('returns a structured no-op for byte-identical layout geometry', async ({ db }) => {
+    await ensureTestUser(db);
+    const service = new BoardsService(db);
+    const board = (await service.create({
+      name: 'Layout service boundary',
+      created_by: TEST_USER,
+      objects: {
+        note: { type: 'markdown', x: 1240, y: 760, width: 320, content: 'Durable note' },
+      },
+    })) as Board;
+
+    const noOp = await service.applyBoardLayout(board.board_id, {
+      objects: { note: { x: 1240, y: 760, width: 320 } },
+      placements: {},
+    });
+    expect(noOp).toMatchObject({
+      changed: false,
+      changed_object_ids: [],
+      changed_placement_ids: [],
+      placements: [],
+    });
+    expect(noOp.board).toEqual(board);
+
+    const correction = await service.applyBoardLayout(board.board_id, {
+      objects: { note: { x: 1240, y: 840, width: 320 } },
+      placements: {},
+    });
+    expect(correction).toMatchObject({
+      changed: true,
+      changed_object_ids: ['note'],
+      changed_placement_ids: [],
+    });
+    expect(correction.board.objects?.note).toMatchObject({ y: 840, content: 'Durable note' });
+
+    const repeated = await service.applyBoardLayout(board.board_id, {
+      objects: { note: { x: 1240, y: 840, width: 320 } },
+      placements: {},
+    });
+    expect(repeated.changed).toBe(false);
+  });
+
   dbTest('rejects a client-supplied board id that is not UUIDv7', async ({ db }) => {
     const service = new BoardsService(db);
 

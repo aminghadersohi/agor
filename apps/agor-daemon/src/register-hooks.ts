@@ -3607,7 +3607,19 @@ export function registerHooks(ctx: RegisterHooksContext): void {
               context.id as string,
               { objects, placements } as unknown as BoardLayoutBatch
             );
-            context.result = result.board;
+            // This action returns a structured acknowledgement, not a Board.
+            // Suppress Feathers' automatic `patched` event so that result can
+            // never enter Board stores; the authorized atomic/manual events
+            // below are the only realtime publication for a material write.
+            context.event = null;
+            context.result = result;
+            if (result.changed === false) {
+              // A stale owner can submit an already-durable target while its
+              // local selectors catch up. Return the authoritative board but
+              // do not write or publish another observer-triggering echo.
+              context.dispatch = result;
+              return context;
+            }
             // The complete payload is published first so current clients can
             // apply both persistence surfaces in one store notification. The
             // ordinary events that follow preserve compatibility and are
@@ -3631,7 +3643,9 @@ export function registerHooks(ctx: RegisterHooksContext): void {
               params: context.params,
               id: context.id,
             });
+            const changedPlacementIds = new Set(result.changed_placement_ids);
             for (const placement of result.placements) {
+              if (!changedPlacementIds.has(placement.object_id)) continue;
               emitServiceEvent(app, {
                 path: 'board-objects',
                 event: 'patched',
@@ -3640,7 +3654,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
                 id: placement.object_id,
               });
             }
-            context.dispatch = result.board;
+            context.dispatch = result;
             return context;
           }
 

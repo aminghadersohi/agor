@@ -63,10 +63,38 @@ export interface BoardLayoutPlacementUpdate {
   compact?: boolean;
 }
 
+/**
+ * Complete persisted geometry for one canvas object in an atomic layout commit.
+ *
+ * Width and height remain conditional because not every board-object kind owns
+ * those fields (markdown owns width but derives height from its contents). The
+ * repository requires every dimension owned by the durable object to be
+ * present before comparing or writing the snapshot.
+ */
+export interface BoardLayoutObjectUpdate {
+  x: number;
+  y: number;
+  width?: number;
+  height?: number;
+}
+
 /** Canvas and entity geometry committed together after one shared layout plan. */
 export interface BoardLayoutBatch {
-  objects: Record<string, BoardObject>;
+  objects: Record<string, BoardLayoutObjectUpdate>;
   placements: Record<string, BoardLayoutPlacementUpdate>;
+}
+
+/** Result of filtering and committing one atomic board-layout request. */
+export interface BoardLayoutApplyResult {
+  board: Board;
+  /** Authoritative rows for every placement in the submitted full snapshot. */
+  placements: BoardEntityObject[];
+  /** False means the request matched durable state and wrote nothing. */
+  changed: boolean;
+  /** Canvas-object ids whose durable geometry changed. */
+  changed_object_ids: string[];
+  /** Placement ids whose durable geometry changed. */
+  changed_placement_ids: string[];
 }
 
 /** One realtime payload lets observers apply both halves without an intermediate frame. */

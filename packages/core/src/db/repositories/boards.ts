@@ -4,13 +4,16 @@
  * Type-safe CRUD operations for boards with short ID support.
  */
 
+import { isDeepStrictEqual } from 'node:util';
 import type {
   Board,
   BoardAccessMode,
   BoardEntityObject,
   BoardExportBlob,
   BoardID,
+  BoardLayoutApplyResult,
   BoardLayoutBatch,
+  BoardLayoutObjectUpdate,
   BoardObject,
   Branch,
   BranchPermissionLevel,
@@ -27,7 +30,14 @@ import { generateSlug } from '../../lib/slugs';
 import { normalizeExactEmojiShortcode } from '../../utils/emoji-shortcodes';
 import { getBoardUrl } from '../../utils/url';
 import type { Database } from '../client';
-import { deleteFrom, insert, runDatabaseTransaction, select, update } from '../database-wrapper';
+import {
+  deleteFrom,
+  insert,
+  lockRowForUpdate,
+  runDatabaseTransaction,
+  select,
+  update,
+} from '../database-wrapper';
 import { type BoardInsert, type BoardRow, boards, users } from '../schema';
 import {
   AmbiguousIdError,
@@ -46,6 +56,38 @@ import { CapabilityPolicyRepository } from './capability-policies';
 const BOARD_ACCESS_MODES = ['private', 'shared'] as const;
 const BOARD_DEFAULT_FS_ACCESS = ['none', 'read', 'write'] as const;
 const BOARD_DEFAULT_OTHERS_CAN = ['none', 'view', 'session', 'prompt', 'all'] as const;
+
+function completeBoardObjectGeometry(
+  objectId: string,
+  current: BoardObject,
+  incoming: BoardLayoutObjectUpdate
+): BoardLayoutObjectUpdate {
+  if (!Number.isFinite(incoming.x) || !Number.isFinite(incoming.y)) {
+    throw new RepositoryError(`Board layout object ${objectId} requires finite x/y geometry`);
+  }
+
+  const geometry: BoardLayoutObjectUpdate = { x: incoming.x, y: incoming.y };
+  for (const dimension of ['width', 'height'] as const) {
+    if (!(dimension in current)) continue;
+    const value = incoming[dimension];
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new RepositoryError(
+        `Board layout object ${objectId} requires complete ${dimension} geometry`
+      );
+    }
+    geometry[dimension] = value;
+  }
+  return geometry;
+}
+
+function boardObjectGeometry(object: BoardObject): BoardLayoutObjectUpdate {
+  return {
+    x: object.x,
+    y: object.y,
+    ...('width' in object ? { width: object.width } : {}),
+    ...('height' in object ? { height: object.height } : {}),
+  };
+}
 
 function validateBoardPermissionDefaults(board: Partial<Board>): void {
   if (board.access_mode !== undefined && !BOARD_ACCESS_MODES.includes(board.access_mode)) {
@@ -1077,12 +1119,16 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
   async applyBoardLayout(
     boardId: string,
     batch: BoardLayoutBatch
-  ): Promise<{ board: Board; placements: BoardEntityObject[] }> {
+  ): Promise<BoardLayoutApplyResult> {
     try {
       const fullId = (await this.resolveId(boardId)) as BoardID;
       return await runDatabaseTransaction(
         this.db,
         async (tx) => {
+          // Serialize all geometry surfaces through the board row. SQLite's
+          // immediate transaction already holds the write lock; PostgreSQL
+          // needs the explicit row lock before reading either snapshot half.
+          await lockRowForUpdate(tx, this.db, boards, eq(boards.board_id, fullId));
           const boardRepo = new BoardRepository(tx);
           const current = await boardRepo.findById(fullId);
           if (!current) throw new EntityNotFoundError('Board', boardId);
@@ -1092,18 +1138,36 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
               throw new EntityNotFoundError('BoardObject', objectId);
             }
           }
+          const changedObjects: Record<string, BoardObject> = {};
+          const changedObjectIds: string[] = [];
+          for (const [objectId, incoming] of Object.entries(batch.objects)) {
+            const currentObject = currentObjects[objectId];
+            const geometry = completeBoardObjectGeometry(objectId, currentObject, incoming);
+            if (isDeepStrictEqual(boardObjectGeometry(currentObject), geometry)) continue;
+            changedObjects[objectId] = { ...currentObject, ...geometry } as BoardObject;
+            changedObjectIds.push(objectId);
+          }
           const board =
-            Object.keys(batch.objects).length > 0
+            Object.keys(changedObjects).length > 0
               ? await boardRepo.update(fullId, {
-                  objects: { ...currentObjects, ...batch.objects },
+                  objects: { ...currentObjects, ...changedObjects },
                 })
               : current;
           const placementRepo = new BoardObjectRepository(tx);
           const placements: BoardEntityObject[] = [];
+          const changedPlacementIds: string[] = [];
           for (const [objectId, layout] of Object.entries(batch.placements)) {
-            placements.push(await placementRepo.updateLayoutForBoard(fullId, objectId, layout));
+            const result = await placementRepo.updateLayoutForBoard(fullId, objectId, layout);
+            placements.push(result.entity);
+            if (result.changed) changedPlacementIds.push(objectId);
           }
-          return { board, placements };
+          return {
+            board,
+            placements,
+            changed: changedObjectIds.length > 0 || changedPlacementIds.length > 0,
+            changed_object_ids: changedObjectIds,
+            changed_placement_ids: changedPlacementIds,
+          };
         },
         { sqliteImmediate: true }
       );
