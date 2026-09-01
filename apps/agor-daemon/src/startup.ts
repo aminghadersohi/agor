@@ -722,12 +722,14 @@ export async function startup(ctx: StartupContext): Promise<void> {
   // branch to 'failed' with an actionable message — recovery is an explicit,
   // human-triggered retry, not an automatic re-dispatch. Never deletes refs or
   // worktrees.
-  runPostStartJob('branch-provisioning-watchdog', () =>
-    runStartupTenantDatabaseScope(ctx, async () => {
-      const reposService = app.service('repos') as unknown as ReposServiceImpl;
-      await reposService.reconcileStuckCreatingBranches(startupTenantParams(config));
-    })
-  );
+  if (ctx.taskRuntimePolicy === 'standalone') {
+    runPostStartJob('branch-provisioning-watchdog', () =>
+      runStartupTenantDatabaseScope(ctx, async () => {
+        const reposService = app.service('repos') as unknown as ReposServiceImpl;
+        await reposService.reconcileStuckCreatingBranches(startupTenantParams(config));
+      })
+    );
+  }
 
   // Non-blocking credential spill repair. If an agent/user wrote a PAT into a
   // git remote URL while the daemon was down, scrub persisted repo metadata

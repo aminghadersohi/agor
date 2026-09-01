@@ -931,6 +931,7 @@ export const branches = sqliteTable(
         // Generation owning the in-flight provisioning attempt. Fences stale
         // acknowledgements from a superseded attempt (see Branch type).
         provisioning_attempt_id?: string;
+        provisioning_operation?: 'create' | 'retry' | 'restore';
 
         // Environment instance (runtime state only, no variables)
         environment_instance?: {

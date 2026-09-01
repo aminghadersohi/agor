@@ -86,10 +86,7 @@ import { isAllowedHealthCheckUrl } from '@agor/core/utils/url';
 import { DrizzleService, type Query } from '../adapters/drizzle';
 import { buildBranchCreatedAnalyticsProperties } from '../utils/analytics-payloads.js';
 import { consumeBranchArchiveDeleteAuthorization } from '../utils/branch-archive-delete-authorization.js';
-import {
-  ensureCanControlBranchEnvironment,
-  withoutPrefetchedRecord,
-} from '../utils/branch-authorization.js';
+import { ensureCanControlBranchEnvironment } from '../utils/branch-authorization.js';
 import { captureBranchRemovalRealtimeVisibility } from '../utils/branch-removal-realtime.js';
 import { ensureBranchWorkspaceAccess } from '../utils/branch-workspace-path.js';
 import { shouldUseCloneReferencePath } from '../utils/clone-reference.js';
@@ -1187,61 +1184,6 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
   }
 
   /**
-   * Discard a provisioning acknowledgement from an attempt that has since been
-   * superseded.
-   *
-   * `git.branch.add` is fire-and-forget and can be slow. If a user retries while
-   * an older attempt is still running, that older executor will eventually patch
-   * its own outcome — `ready` or `failed` — and without a fence it would land on
-   * the *newer* attempt: reporting a stale success as ready, or failing a
-   * healthy in-flight materialization. `filesystem_status` alone can't catch
-   * this; it says an attempt is in flight, not which one.
-   *
-   * Each dispatch carries a generation id, echoed back here. When it no longer
-   * matches the row, only the provisioning fields are dropped — any real work
-   * product on the same patch (unix group, rendered templates) still applies,
-   * since those are attempt-independent.
-   *
-   * Backward compatible: an ack with no generation (older executor, or a path
-   * that never dispatched one) is left alone rather than rejected.
-   */
-  private async dropSupersededProvisioningAck(
-    data: Partial<Branch>,
-    id: BranchID,
-    params?: BranchParams
-  ): Promise<Partial<Branch>> {
-    const ackAttemptId = data.provisioning_attempt_id;
-    if (!ackAttemptId || data.filesystem_status === undefined) {
-      return data;
-    }
-    // Read the generation authoritatively rather than reusing `patch`'s
-    // existence read. With `branch_rbac` on, `loadBranch` stores the row it
-    // authorized against as `_agorPrefetchedRecord`, and the adapter serves
-    // `super.get` from it — so that row predates this request's authorization
-    // work (`resolveUserPermission` et al). A retry's CAS can commit inside
-    // that window, leaving the cached generation equal to the ack's and
-    // admitting precisely the acknowledgement this fence exists to drop.
-    // Declining the cached row (same authorization and tenant path) is only
-    // paid when an ack actually carries a generation, so the point-read
-    // reduction in #2581 stays intact for every other patch.
-    const current = await super.get(id, withoutPrefetchedRecord(params));
-    const currentAttemptId = current.provisioning_attempt_id;
-    if (!currentAttemptId || currentAttemptId === ackAttemptId) {
-      return data;
-    }
-    console.warn(
-      `[branch-provisioning ${shortId(id)}] discarding '${data.filesystem_status}' ack from superseded attempt ${shortId(ackAttemptId)} (current attempt is ${shortId(currentAttemptId)})`
-    );
-    const {
-      filesystem_status: _status,
-      error_message: _error,
-      provisioning_attempt_id: _attempt,
-      ...rest
-    } = data;
-    return rest;
-  }
-
-  /**
    * Override patch to handle board_objects when board_id changes.
    *
    * Schedule config lives on the `schedules` table now (see
@@ -1265,7 +1207,21 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
     const currentBranch = await super.get(id, params);
     await this.assertCanMutateTeammateKnowledgeConfig(currentBranch, data, params);
     this.assertTeammateKindIsStable(currentBranch, data);
-    data = await this.dropSupersededProvisioningAck(data, id, params);
+    if (data.filesystem_status === 'ready' || data.filesystem_status === 'failed') {
+      const expectedAttemptId = data.provisioning_attempt_id;
+      const { provisioning_attempt_id: _attempt, ...acknowledgement } = data;
+      const result = await this.branchRepo.acknowledgeProvisioningAttempt(
+        id,
+        acknowledgement,
+        expectedAttemptId
+      );
+      if (!result.applied) {
+        console.warn(
+          `[branch-provisioning ${shortId(id)}] discarded terminal acknowledgement for a stale or inactive attempt`
+        );
+      }
+      return (await this.branchRepo.enrichWithZoneInfo(result.branch)) as BranchWithZoneAndSessions;
+    }
 
     const oldBoardId = currentBranch.board_id;
     const boardIdProvided = Object.hasOwn(data, 'board_id');
@@ -2004,8 +1960,17 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
       console.log(`📂 Branch directory missing, spawning executor to recreate: ${branch.path}`);
 
       // Set filesystem_status to 'creating' while we rebuild
+      const provisioningAttemptId = generateId();
       await this.withTenantDatabase(params, () =>
-        this.patch(id, { filesystem_status: 'creating' }, { ...params, provider: undefined })
+        this.patch(
+          id,
+          {
+            filesystem_status: 'creating',
+            provisioning_attempt_id: provisioningAttemptId,
+            provisioning_operation: 'restore',
+          },
+          { ...params, provider: undefined }
+        )
       );
 
       // Look up repo to get local_path
@@ -2033,6 +1998,7 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
       }
 
       try {
+        const tenantId = params?.tenant?.tenant_id ?? getCurrentTenantId();
         const sessionToken = await issueExecutorCommandToken(
           this.app,
           'git.branch.add',
@@ -2052,6 +2018,8 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
               // This is safe because it only creates a new branch when ls-remote confirms
               // the branch doesn't exist on the remote (no risk of force-deleting existing branches).
               restoreMode: true,
+              provisioningAttemptId,
+              allowExistingCheckout: true,
               useReference:
                 storageMode === 'clone' &&
                 !!repo.local_path &&
@@ -2070,6 +2038,27 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
               user_id: userId,
               branch_fs_access: branchFsAccess,
             },
+            onExit: async (code) => {
+              if (code === 0) return;
+              await runWithTenantDatabaseScope(this.db, tenantId, async (tenantDb) => {
+                const result = await new BranchRepository(
+                  tenantDb
+                ).markProvisioningFailedIfCreating(
+                  branch.branch_id,
+                  `Branch restore exited with code ${code ?? 'unknown'} before confirming completion. Retry provisioning to try again.`,
+                  provisioningAttemptId
+                );
+                if (result.changed) {
+                  emitServiceEvent(this.app, {
+                    path: 'branches',
+                    event: 'patched',
+                    data: result.branch,
+                    params,
+                    id: result.branch.branch_id,
+                  });
+                }
+              });
+            },
           }
         );
       } catch (error) {
@@ -2080,10 +2069,13 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
         // Mark as failed so the UI can show the error state
         const errMsg = error instanceof Error ? error.message : String(error);
         await this.withTenantDatabase(params, () =>
-          this.patch(
+          this.branchRepo.acknowledgeProvisioningAttempt(
             id,
-            { filesystem_status: 'failed', error_message: `Failed to spawn executor: ${errMsg}` },
-            { ...params, provider: undefined }
+            {
+              filesystem_status: 'failed',
+              error_message: `Failed to spawn executor: ${errMsg}`,
+            },
+            provisioningAttemptId
           )
         );
       }

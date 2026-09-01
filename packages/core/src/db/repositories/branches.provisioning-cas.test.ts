@@ -226,4 +226,57 @@ describe('BranchRepository provisioning CAS', () => {
     expect(changed).toBe(true);
     expect(branch.filesystem_status).toBe('failed');
   });
+
+  dbTest(
+    'terminal acknowledgement applies only to its current creating generation',
+    async ({ db }) => {
+      const { branchRepo, branchId } = await seedFailedBranch(db);
+      await branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-B');
+
+      const stale = await branchRepo.acknowledgeProvisioningAttempt(
+        branchId,
+        { filesystem_status: 'ready' },
+        'attempt-A'
+      );
+      expect(stale.applied).toBe(false);
+      expect(stale.branch.filesystem_status).toBe('creating');
+
+      const current = await branchRepo.acknowledgeProvisioningAttempt(
+        branchId,
+        { filesystem_status: 'ready' },
+        'attempt-B'
+      );
+      expect(current.applied).toBe(true);
+      expect(current.branch.filesystem_status).toBe('ready');
+    }
+  );
+
+  dbTest('archive cannot race an in-flight provisioning attempt', async ({ db }) => {
+    const { branchRepo, branchId } = await seedFailedBranch(db);
+    await branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-B');
+    await expect(
+      branchRepo.update(branchId, { archived: true, filesystem_status: 'preserved' })
+    ).rejects.toThrow(/provisioning is in progress/i);
+
+    const result = await branchRepo.acknowledgeProvisioningAttempt(
+      branchId,
+      { filesystem_status: 'ready' },
+      'attempt-B'
+    );
+    expect(result.applied).toBe(true);
+    expect(result.branch.archived).toBe(false);
+    expect(result.branch.filesystem_status).toBe('ready');
+  });
+
+  dbTest('legacy acknowledgements cannot overwrite a generated attempt', async ({ db }) => {
+    const { branchRepo, branchId } = await seedFailedBranch(db);
+    await branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-B');
+
+    const result = await branchRepo.acknowledgeProvisioningAttempt(branchId, {
+      filesystem_status: 'failed',
+      error_message: 'old executor',
+    });
+    expect(result.applied).toBe(false);
+    expect(result.branch.filesystem_status).toBe('creating');
+  });
 });
