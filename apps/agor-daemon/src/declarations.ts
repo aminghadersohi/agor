@@ -118,6 +118,11 @@ export interface SessionsServiceImpl
     data: import('./services/sessions.js').SessionInterruptAuthorityInput,
     params?: FeathersParams
   ): Promise<import('@agor/core/types').SessionInterruptAuthority>;
+  resolveQueueBatchAuthority(
+    id: string,
+    data: import('./services/sessions.js').SessionQueueBatchAuthorityInput,
+    params?: FeathersParams
+  ): Promise<import('@agor/core/types').SessionInterruptAuthority>;
   getGenealogy(
     id: string,
     params?: FeathersParams

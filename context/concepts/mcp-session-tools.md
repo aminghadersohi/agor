@@ -54,6 +54,11 @@ into SDK-private registration state.
    correction at highest priority. The target is supplied, but authority is
    derived from the target's current durable relationship and rechecked at the
    admission fence. A caller-stable `idempotencyKey` converges retries.
+8. **`agor_sessions_batch_queue`** — the current parent/coordinator previews
+   and compare-and-swaps a compatible unclaimed queue into one COMBINE or
+   REPLACE turn. The MCP Session is the caller identity; naming a target grants
+   nothing. Exact Task IDs, a queue revision, and a stable idempotency key fence
+   relationship/admission/dispatch races.
 
 All enforce the branch-centric model (every session references a branch). Permission modes map to each agent's native settings.
 
@@ -135,6 +140,17 @@ stopped Task does not emit natural-completion callbacks; later successful
 completion of the corrective Task follows its normal standing/root callback
 rules. Task-scoped executor authority is retired only by normal terminal
 settlement, never by interrupt admission.
+
+Queue batching is intentionally separate from prompt admission and interrupt.
+Preview exposes the deterministic combine prompt and compatibility failures;
+apply accepts only the exact preview revision/Task set while holding the
+Session row lock. Combine preserves first-occurrence order, uses normalized
+duplicate removal, and carries an explicit later-conflicts-win header. Replace
+sends one canonical prompt. Both retain original Task/request provenance and
+collapse identical completion contracts into the survivor's one result. Any
+claimed Task, mixed callback/control/admission contract, or attachment,
+widget, gateway, slash, source, interrupt, or internal continuation semantic
+fails closed.
 
 ## Overrides at create/spawn/subsession time
 

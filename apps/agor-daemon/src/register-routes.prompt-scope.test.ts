@@ -72,6 +72,16 @@ describe('prompt and widget transaction scopes', () => {
     expect(run).toContain('assertTaskExecutorPrincipal(task, params)');
   });
 
+  it('keeps authenticated Agor prompts eligible for ordinary queue compaction', () => {
+    const promptStart = source.indexOf("'/sessions/:id/prompt'");
+    const runStart = source.indexOf("'/tasks/:id/run'", promptStart);
+    const prompt = source.slice(promptStart, runStart);
+
+    expect(prompt).toContain("!!params.provider && messageSource === 'agor'");
+    expect(prompt).toContain('!params._taskCompletionCallback');
+    expect(prompt).toContain('data.metadata === undefined');
+  });
+
   it("does not let a collaborator run another actor's pre-created Task", () => {
     const task = { created_by: 'actor-a' } as Pick<Task, 'created_by'>;
 

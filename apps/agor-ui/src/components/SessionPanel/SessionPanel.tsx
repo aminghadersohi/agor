@@ -776,6 +776,12 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       if (task.session_id !== session.session_id) return;
       if (task.status !== TaskStatus.QUEUED) {
         setQueuedTasks((prev) => prev.filter((t) => t.task_id !== task.task_id));
+      } else {
+        setQueuedTasks((prev) =>
+          prev
+            .map((queued) => (queued.task_id === task.task_id ? task : queued))
+            .sort((a, b) => (a.queue_position ?? 0) - (b.queue_position ?? 0))
+        );
       }
     };
 

@@ -687,6 +687,18 @@ export const TaskBlock = React.memo<TaskBlockProps>(
                 prefix="By"
               />
             )}
+            {task.metadata?.coordinator_queue_batch && (
+              <Tag color="blue" style={{ fontSize: 11 }}>
+                {task.metadata.coordinator_queue_batch.source_request_count} requests → 1 turn (
+                {task.metadata.coordinator_queue_batch.strategy})
+              </Tag>
+            )}
+            {task.metadata?.coordinator_queue_batch_member && (
+              <Tag color="default" style={{ fontSize: 11 }}>
+                Batched into{' '}
+                {shortId(task.metadata.coordinator_queue_batch_member.execution_task_id)}
+              </Tag>
+            )}
             {normalized && (
               <TokenCountPill
                 count={normalized.tokenUsage.totalTokens}
