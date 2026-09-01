@@ -743,6 +743,13 @@
       "when": 1788465600000,
       "tag": "9011_zone_workflow_transitions",
       "breakpoints": true
+    },
+    {
+      "idx": 9012,
+      "version": "7",
+      "when": 1788552000000,
+      "tag": "9012_claude_oauth_attempts",
+      "breakpoints": true
     }
   ]
 }

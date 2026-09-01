@@ -163,6 +163,7 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
     '0091_codex_device_auth_attempts',
     '9004_board_branch_capability_policies',
     '9008_shared_session_prompting',
+    '9012_claude_oauth_attempts',
   ].map(
     (name) =>
       [
