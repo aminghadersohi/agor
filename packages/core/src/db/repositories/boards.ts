@@ -55,12 +55,12 @@ import {
   RepositoryError,
   resolveByShortIdPrefix,
 } from './base';
+import { BoardObjectRepository } from './board-objects';
 import {
   visibleBoardAccessCondition,
   visibleBoardReferenceAccessExists,
   visibleBranchAccessCondition,
 } from './branch-access';
-import { BoardObjectRepository } from './board-objects';
 import { BranchRepository } from './branches';
 import { CapabilityPolicyRepository } from './capability-policies';
 

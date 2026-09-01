@@ -171,6 +171,11 @@ import {
   translateTrackedChildPositions,
 } from './canvas/utils/coordinateTransforms';
 import {
+  type BoardEntityPlacementSnapshot,
+  sameBoardEntityPlacement,
+  snapshotBoardEntityPlacement,
+} from './canvas/utils/entityPlacementReconciliation';
+import {
   consumeTrackedDragPosition,
   flowSnapDistanceForZoom,
   getGuideLayoutRects,
@@ -187,11 +192,6 @@ import {
   removeSelectedDescendants,
   suppressIndividualZoneToolbarsForMultiSelect,
 } from './canvas/utils/marqueeSelection';
-import {
-  type BoardEntityPlacementSnapshot,
-  sameBoardEntityPlacement,
-  snapshotBoardEntityPlacement,
-} from './canvas/utils/entityPlacementReconciliation';
 import { getValidZoneParentId, sanitizeOrphanedNodeParents } from './canvas/utils/nodeParentUtils';
 import { mergePendingZoneGeometry, type ZoneGeometry } from './canvas/utils/pendingZoneGeometry';
 import { persistedResizeRect, type ResizeRect } from './canvas/utils/resizeGeometry';
@@ -853,9 +853,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // (placement unchanged: keep the optimistic local position) from a newer
     // board-object event such as set_zone/auto-arrange (placement changed: the
     // persisted zone-relative geometry is authoritative).
-     const authoritativeEntityPlacementsRef = useRef<
-       Map<string, BoardEntityPlacementSnapshot | null>
-     >(new Map());
+    const authoritativeEntityPlacementsRef = useRef<
+      Map<string, BoardEntityPlacementSnapshot | null>
+    >(new Map());
     // Track objects we've deleted locally (to prevent them from reappearing during WebSocket updates)
     const deletedObjectsRef = useRef<Set<string>>(new Set());
 

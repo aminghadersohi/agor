@@ -979,11 +979,7 @@ export async function handleGitBranchAdd(
     // Idempotency: only adopt a prior checkout when retry authority explicitly
     // permits it, and bind that checkout to both the resolved ref and branch.
     const alreadyMaterialized = payload.params.allowExistingCheckout
-      ? await isBranchAlreadyMaterialized(
-          branchPath,
-          resolvedStartingRef?.name ?? branch,
-          branchId
-        )
+      ? await isBranchAlreadyMaterialized(branchPath, resolvedStartingRef?.name ?? branch, branchId)
       : false;
     if (alreadyMaterialized) {
       console.log(

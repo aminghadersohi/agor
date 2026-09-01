@@ -49,10 +49,6 @@ vi.mock('@agor/core/db', () => ({
     work: (db: unknown) => Promise<unknown>
   ) => work({}),
   BranchRepository: class FakeBranchRepository {},
-  TaskRepository: class FakeTaskRepository {
-    findBySession = vi.fn(async () => completionMocks.tasks);
-    admitInterruptCorrection = interruptMocks.admit;
-  },
   CompletionSubscriptionRepository: class FakeCompletionSubscriptionRepository {
     resolveId = vi.fn(async (id: string) => id);
     get = vi.fn(async () => {
@@ -99,11 +95,12 @@ vi.mock('@agor/core/db', () => ({
     }));
   },
   UserApiKeysRepository: class FakeUserApiKeysRepository {},
-   TaskRepository: class FakeTaskRepository {
-     admitInterruptCorrection = interruptMocks.admit;
-     previewCoordinatorQueueBatch = interruptMocks.previewBatch;
-     applyCoordinatorQueueBatch = interruptMocks.applyBatch;
-   },
+  TaskRepository: class FakeTaskRepository {
+    findBySession = vi.fn(async () => completionMocks.tasks);
+    admitInterruptCorrection = interruptMocks.admit;
+    previewCoordinatorQueueBatch = interruptMocks.previewBatch;
+    applyCoordinatorQueueBatch = interruptMocks.applyBatch;
+  },
   shortId: (id: string) => id,
 }));
 
