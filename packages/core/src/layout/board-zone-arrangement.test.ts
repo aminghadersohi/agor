@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   type BoardZoneArrangementInput,
+  containingBoardZoneId,
   DEFAULT_BOARD_ZONE_ARRANGEMENT,
   planBoardZoneArrangement,
 } from './board-zone-arrangement';
+import { growZoneLayoutHeight } from './zone-layout';
 
 const item = (id: string, width: number, height: number, x = 0, y = 0) => ({
   id,
@@ -11,6 +13,10 @@ const item = (id: string, width: number, height: number, x = 0, y = 0) => ({
   width,
   height,
   position: { x, y },
+});
+const branchItem = (id: string, width: number, height: number, x = 0, y = 0) => ({
+  ...item(id, width, height, x, y),
+  entityType: 'branch' as const,
 });
 const zone = (
   id: string,
@@ -20,6 +26,75 @@ const zone = (
 ): BoardZoneArrangementInput => ({ id, x, y, width: 600, height: 500, items });
 
 describe('planBoardZoneArrangement', () => {
+  it('keeps a protruding anchored canvas child in its smallest containing zone', () => {
+    expect(
+      containingBoardZoneId({ x: 100, y: 120, width: 860, height: 660 }, [
+        { id: 'outer', x: 0, y: 0, width: 1200, height: 1000 },
+        { id: 'tiny', x: 80, y: 80, width: 300, height: 220 },
+      ])
+    ).toBe('tiny');
+    expect(
+      containingBoardZoneId({ x: 400, y: 400, width: 100, height: 100 }, [
+        { id: 'tiny', x: 80, y: 80, width: 300, height: 220 },
+      ])
+    ).toBeUndefined();
+  });
+
+  it('packs inner geometry before outer placement, growing small zones and compacting waste', () => {
+    const plan = planBoardZoneArrangement(
+      [
+        { ...zone('tiny', 0, 0, [item('protruding', 860, 660, 20, 120)]), width: 300, height: 220 },
+        { ...zone('wasteful', 400, 0, [item('single', 380, 100)]), width: 1600, height: 900 },
+        { ...zone('empty', 2100, 0, []), width: 1600, height: 900 },
+      ],
+      { looseItems: [{ id: 'free', x: 0, y: 1200, width: 500, height: 300 }] }
+    );
+    const tiny = plan.zones.find(({ id }) => id === 'tiny')!;
+    const wasteful = plan.zones.find(({ id }) => id === 'wasteful')!;
+    const empty = plan.zones.find(({ id }) => id === 'empty')!;
+
+    expect(tiny.width).toBeGreaterThanOrEqual(900);
+    expect(tiny.items[0]!.x + tiny.items[0]!.width).toBeLessThanOrEqual(tiny.width);
+    expect(tiny.items[0]!.y + tiny.items[0]!.height).toBeLessThanOrEqual(tiny.height);
+    expect(wasteful.width).toBeLessThan(1600);
+    expect(wasteful.height).toBeLessThan(900);
+    expect(empty).toMatchObject({ width: 600, height: 240 });
+    for (const arranged of plan.zones) {
+      expect(plan.boardLayout?.placements.find(({ id }) => id === arranged.id)).toMatchObject({
+        width: arranged.width,
+        height: arranged.height,
+      });
+    }
+    // Persisting this explicit packed frame makes it the next durable Auto
+    // Grow floor; background maintenance may grow it, but never undo Pack.
+    expect(growZoneLayoutHeight(wasteful.height, 120)).toBe(wasteful.height);
+    const free = plan.looseItems[0]!;
+    expect(
+      tiny.position.x + tiny.width <= free.x ||
+        free.x + free.width <= tiny.position.x ||
+        tiny.position.y + tiny.height <= free.y ||
+        free.y + free.height <= tiny.position.y
+    ).toBe(true);
+  });
+
+  it('preserves zone frames and child geometry when Pack zone contents is off', () => {
+    const source = {
+      ...zone('manual', 900, 700, [item('child', 860, 660, 20, 120)]),
+      width: 300,
+      height: 220,
+    };
+    const arranged = planBoardZoneArrangement([source], { packZoneContents: false }).zones[0]!;
+    expect(arranged).toMatchObject({ width: 300, height: 220 });
+    expect(arranged.items).toHaveLength(1);
+    expect(arranged.items[0]).toMatchObject({
+      id: 'child',
+      x: 20,
+      y: 120,
+      width: 860,
+      height: 660,
+    });
+  });
+
   it('uses shared defaults, preserves spatial order, and packs every child for its final frame', () => {
     const plan = planBoardZoneArrangement([
       zone('a-later', 900, 200, [item('later-card', 380, 100)]),
@@ -84,6 +159,294 @@ describe('planBoardZoneArrangement', () => {
     expect(empty?.height).toBeGreaterThanOrEqual(240);
     expect(list?.contentColumns).toBe(1);
     expect(new Set(list?.items.map(({ x }) => x))).toHaveLength(1);
+  });
+
+  it('uses compact-list density geometry only for capable worktrees', () => {
+    const plan = planBoardZoneArrangement([
+      {
+        ...zone('honest-list', 0, 0, [
+          branchItem('worktree', 500, 220),
+          item('generic-card', 380, 180),
+          { id: 'artifact', width: 440, height: 300, position: { x: 0, y: 0 } },
+        ]),
+        layout: { preset: 'compact_list', gap: 8 },
+      },
+    ]);
+    const byId = new Map(plan.zones[0]?.items.map((entry) => [entry.id, entry]));
+
+    expect(byId.get('worktree')?.height).toBeLessThan(220);
+    expect(byId.get('generic-card')).toMatchObject({ width: 380, height: 180 });
+    expect(byId.get('artifact')).toMatchObject({ width: 440, height: 300 });
+  });
+
+  it('makes two-column Apply geometry identical to a repeated Arrange and idempotent', () => {
+    const source = [
+      zone('one', 0, 0, [branchItem('one-child', 500, 220)]),
+      zone('two', 2200, 0, [item('two-child', 380, 180)]),
+      zone('three', 0, 1600, [item('three-child', 380, 100)]),
+    ];
+    const options = { fixedItemsPerRow: 2 };
+    const applied = planBoardZoneArrangement(source, options);
+    const reapplied = planBoardZoneArrangement(
+      source.map((zoneInput) => {
+        const arranged = applied.zones.find(({ id }) => id === zoneInput.id)!;
+        const itemById = new Map(arranged.items.map((entry) => [entry.id, entry]));
+        return {
+          ...zoneInput,
+          x: arranged.position.x,
+          y: arranged.position.y,
+          width: arranged.width,
+          height: arranged.height,
+          items: zoneInput.items.map((entry) => ({
+            ...entry,
+            position: {
+              x: itemById.get(entry.id)?.x ?? entry.position.x,
+              y: itemById.get(entry.id)?.y ?? entry.position.y,
+            },
+          })),
+        };
+      }),
+      options
+    );
+
+    expect(reapplied).toEqual(applied);
+    expect(applied.zones.map(({ row, column }) => ({ row, column }))).toEqual([
+      { row: 0, column: 0 },
+      { row: 0, column: 1 },
+      { row: 1, column: 0 },
+    ]);
+  });
+
+  it('produces a compact aligned three-by-three explicit outer grid', () => {
+    const source = Array.from({ length: 9 }, (_, index) => ({
+      ...zone(`zone-${index}`, (index % 4) * 900, Math.floor(index / 4) * 700, []),
+      width: 400 + (index % 3) * 80,
+      height: 260 + (index % 2) * 80,
+    }));
+    const plan = planBoardZoneArrangement(source, {
+      fixedItemsPerRow: 3,
+      compactFixedGrid: true,
+    });
+
+    expect(plan.layout.rows).toBe(3);
+    expect(plan.zones.map(({ row, column }) => ({ row, column }))).toEqual(
+      Array.from({ length: 9 }, (_, index) => ({
+        row: Math.floor(index / 3),
+        column: index % 3,
+      }))
+    );
+    for (const column of [0, 1, 2]) {
+      expect(
+        new Set(
+          plan.zones.filter((entry) => entry.column === column).map((entry) => entry.position.x)
+        ).size
+      ).toBe(1);
+    }
+    expect(plan.zones[2]!.position.x - plan.zones[1]!.position.x).toBe(
+      plan.zones[1]!.position.x - plan.zones[0]!.position.x
+    );
+    expect(plan.zones[1]!.position.x - (plan.zones[0]!.position.x + plan.zones[0]!.width)).toBe(40);
+
+    const twoColumns = planBoardZoneArrangement(source.slice(0, 2), {
+      fixedItemsPerRow: 2,
+      compactFixedGrid: true,
+    });
+    expect(
+      twoColumns.zones[1]!.position.x -
+        (twoColumns.zones[0]!.position.x + twoColumns.zones[0]!.width)
+    ).toBe(40);
+  });
+
+  it('keeps explicit selection rows rigid while minimally clearing fixed board obstacles', () => {
+    const source = [
+      { ...zone('one', 0, 0, []), width: 400, height: 260 },
+      { ...zone('two', 1200, 0, []), width: 520, height: 340 },
+      { ...zone('three', 0, 900, []), width: 440, height: 280 },
+    ];
+    const base = planBoardZoneArrangement(source, {
+      fixedItemsPerRow: 2,
+      packZoneContents: false,
+      anchorToSelectionBounds: true,
+    });
+    const blockedTarget = base.zones.find(({ id }) => id === 'two')!;
+    const obstacle = {
+      id: 'locked-note',
+      x: blockedTarget.position.x,
+      y: blockedTarget.position.y,
+      width: 300,
+      height: 180,
+    };
+    const options = {
+      fixedItemsPerRow: 2,
+      packZoneContents: false,
+      anchorToSelectionBounds: true,
+      fixedObstacles: [obstacle],
+    };
+    const arranged = planBoardZoneArrangement(source, options);
+    const firstDelta = {
+      x: arranged.zones[0]!.position.x - base.zones[0]!.position.x,
+      y: arranged.zones[0]!.position.y - base.zones[0]!.position.y,
+    };
+
+    expect(firstDelta).not.toEqual({ x: 0, y: 0 });
+    expect(
+      arranged.zones.map((entry, index) => ({
+        x: entry.position.x - base.zones[index]!.position.x,
+        y: entry.position.y - base.zones[index]!.position.y,
+      }))
+    ).toEqual(Array(arranged.zones.length).fill(firstDelta));
+    expect(arranged.zones.map(({ row, column }) => ({ row, column }))).toEqual([
+      { row: 0, column: 0 },
+      { row: 0, column: 1 },
+      { row: 1, column: 0 },
+    ]);
+    for (const entry of arranged.zones) {
+      expect(
+        entry.position.x < obstacle.x + obstacle.width + 40 &&
+          entry.position.x + entry.width + 40 > obstacle.x &&
+          entry.position.y < obstacle.y + obstacle.height + 40 &&
+          entry.position.y + entry.height + 40 > obstacle.y
+      ).toBe(false);
+    }
+
+    const repeated = planBoardZoneArrangement(
+      source.map((entry) => {
+        const next = arranged.zones.find(({ id }) => id === entry.id)!;
+        return { ...entry, x: next.position.x, y: next.position.y };
+      }),
+      options
+    );
+    expect(repeated).toEqual(arranged);
+  });
+
+  it('matches final zone heights only when the explicit grid requests it', () => {
+    const source = [
+      { ...zone('short', 0, 0, []), height: 240 },
+      { ...zone('tall', 800, 0, [item('child', 380, 420)]), height: 560 },
+    ];
+    const natural = planBoardZoneArrangement(source, { fixedItemsPerRow: 2 });
+    const matched = planBoardZoneArrangement(source, {
+      fixedItemsPerRow: 2,
+      matchRowHeights: true,
+    });
+
+    expect(natural.zones[0]!.height).not.toBe(natural.zones[1]!.height);
+    expect(matched.zones[0]!.height).toBe(matched.zones[1]!.height);
+  });
+
+  it('keeps Compact boundary gaps uniform instead of inheriting invisible justified tracks', () => {
+    const source = [
+      zone('empty', 0, 0, []),
+      zone('tall', 800, 0, [item('tall-child', 380, 500)]),
+      zone('wide', 0, 800, [item('wide-child', 760, 120)]),
+    ];
+    const compact = planBoardZoneArrangement(source, { compactOuterLayout: true });
+    const justified = planBoardZoneArrangement(source);
+
+    expect(compact.zones.map(({ position }) => position)).not.toEqual(
+      justified.zones.map(({ position }) => position)
+    );
+    for (const [index, current] of compact.zones.entries()) {
+      if (index === 0) continue;
+      expect(
+        compact.zones
+          .slice(0, index)
+          .some(
+            (previous) =>
+              previous.position.x + previous.width + 40 === current.position.x ||
+              current.position.x + current.width + 40 === previous.position.x ||
+              previous.position.y + previous.height + 40 === current.position.y ||
+              current.position.y + current.height + 40 === previous.position.y
+          )
+      ).toBe(true);
+    }
+    const repeated = planBoardZoneArrangement(
+      source.map((entry) => {
+        const arranged = compact.zones.find(({ id }) => id === entry.id)!;
+        const childById = new Map(arranged.items.map((child) => [child.id, child]));
+        return {
+          ...entry,
+          x: arranged.position.x,
+          y: arranged.position.y,
+          width: arranged.width,
+          height: arranged.height,
+          items: entry.items.map((child) => ({
+            ...child,
+            position: {
+              x: childById.get(child.id)?.x ?? child.position.x,
+              y: childById.get(child.id)?.y ?? child.position.y,
+            },
+          })),
+        };
+      }),
+      { compactOuterLayout: true }
+    );
+    expect(repeated).toEqual(compact);
+  });
+
+  it('matches both zone frame axes to explicit grid tracks without crossing content minimums', () => {
+    const source = [
+      zone('empty', 0, 0, []),
+      zone('tall', 800, 0, [item('tall-child', 380, 500)]),
+      zone('wide', 0, 800, [item('wide-child', 760, 120)]),
+    ];
+    const options = {
+      fixedItemsPerRow: 2,
+      compactFixedGrid: true,
+      matchColumnWidths: true,
+      matchRowHeights: true,
+    } as const;
+    const matched = planBoardZoneArrangement(source, options);
+    const [empty, tall, wide] = matched.zones;
+
+    expect(empty?.width).toBe(wide?.width);
+    expect(empty?.height).toBe(tall?.height);
+    expect((tall?.position.x ?? 0) - ((empty?.position.x ?? 0) + (empty?.width ?? 0))).toBe(40);
+    expect((wide?.position.y ?? 0) - ((empty?.position.y ?? 0) + (empty?.height ?? 0))).toBe(40);
+    for (const arranged of matched.zones) {
+      for (const child of arranged.items) {
+        expect(child.x + child.width).toBeLessThanOrEqual(arranged.width);
+        expect(child.y + child.height).toBeLessThanOrEqual(arranged.height);
+      }
+    }
+
+    const preserved = planBoardZoneArrangement(source, {
+      fixedItemsPerRow: 2,
+      compactFixedGrid: true,
+      matchColumnWidths: false,
+      matchRowHeights: false,
+    });
+    expect(preserved.zones.map(({ width, height }) => ({ width, height }))).toEqual([
+      { width: 600, height: 240 },
+      { width: 420, height: 620 },
+      { width: 800, height: 240 },
+    ]);
+    expect(preserved.zones[1]!.position.x - (preserved.zones[0]!.position.x + 600)).toBeGreaterThan(
+      40
+    );
+
+    const repeated = planBoardZoneArrangement(
+      source.map((entry) => {
+        const arranged = matched.zones.find(({ id }) => id === entry.id)!;
+        const childById = new Map(arranged.items.map((child) => [child.id, child]));
+        return {
+          ...entry,
+          x: arranged.position.x,
+          y: arranged.position.y,
+          width: arranged.width,
+          height: arranged.height,
+          items: entry.items.map((child) => ({
+            ...child,
+            position: {
+              x: childById.get(child.id)?.x ?? child.position.x,
+              y: childById.get(child.id)?.y ?? child.position.y,
+            },
+          })),
+        };
+      }),
+      options
+    );
+    expect(repeated).toEqual(matched);
   });
 
   it('carries a measured title scale through zone sizing and child packing', () => {

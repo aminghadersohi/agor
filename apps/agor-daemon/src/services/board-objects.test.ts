@@ -186,11 +186,18 @@ describe('BoardObjectsService.patch', () => {
   it('persists position, size, and compact state as one layout update', async () => {
     const service = new BoardObjectsService({} as Database);
     const updateLayout = vi.fn(async (_id, layout) => ({ object_id: 'object-1', ...layout }));
+    const findByObjectId = vi.fn(async () => ({
+      object_id: 'object-1',
+      entity_type: 'branch' as const,
+    }));
     (
       service as unknown as {
-        boardObjectRepo: { updateLayout: typeof updateLayout };
+        boardObjectRepo: {
+          findByObjectId: typeof findByObjectId;
+          updateLayout: typeof updateLayout;
+        };
       }
-    ).boardObjectRepo = { updateLayout };
+    ).boardObjectRepo = { findByObjectId, updateLayout };
 
     await expect(
       service.patch('object-1', {
@@ -209,5 +216,53 @@ describe('BoardObjectsService.patch', () => {
       size: { width: 486, height: 237 },
       compact: true,
     });
+  });
+
+  it('rejects compact state for a generic card before reaching persistence', async () => {
+    const service = new BoardObjectsService({} as Database);
+    const findByObjectId = vi.fn(async () => ({
+      object_id: 'card-placement',
+      entity_type: 'card' as const,
+    }));
+    const updateLayout = vi.fn();
+    (
+      service as unknown as {
+        boardObjectRepo: {
+          findByObjectId: typeof findByObjectId;
+          updateLayout: typeof updateLayout;
+        };
+      }
+    ).boardObjectRepo = { findByObjectId, updateLayout };
+
+    await expect(service.patch('card-placement', { compact: true })).rejects.toThrow(
+      'Compact presentation is supported only for branch placements'
+    );
+    expect(updateLayout).not.toHaveBeenCalled();
+  });
+
+  it('uses the tenant-visible read boundary for compact capability checks', async () => {
+    const service = new BoardObjectsService({} as Database);
+    const visibleBranch = { object_id: 'branch-placement', entity_type: 'branch' as const };
+    const findVisibleByObjectId = vi.fn(async () => visibleBranch);
+    const findByObjectId = vi.fn();
+    const updateCompact = vi.fn(async () => ({ ...visibleBranch, compact: true }));
+    (
+      service as unknown as {
+        boardObjectRepo: {
+          findVisibleByObjectId: typeof findVisibleByObjectId;
+          findByObjectId: typeof findByObjectId;
+          updateCompact: typeof updateCompact;
+        };
+      }
+    ).boardObjectRepo = { findVisibleByObjectId, findByObjectId, updateCompact };
+
+    await expect(
+      service.patch('branch-placement', { compact: true }, {
+        _agorSqlBoardAccessUserId: 'user-a',
+      } as never)
+    ).resolves.toMatchObject({ compact: true });
+    expect(findVisibleByObjectId).toHaveBeenCalledWith('user-a', 'branch-placement');
+    expect(findByObjectId).not.toHaveBeenCalled();
+    expect(updateCompact).toHaveBeenCalledWith('branch-placement', true);
   });
 });

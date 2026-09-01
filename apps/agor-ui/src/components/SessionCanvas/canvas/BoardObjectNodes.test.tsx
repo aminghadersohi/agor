@@ -4,7 +4,7 @@ import type { ReactNode } from 'react';
 import { ReactFlowProvider } from 'reactflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionProvider } from '../../../contexts/ConnectionContext';
-import { ZoneNode } from './BoardObjectNodes';
+import { clampZoneToolbarCenter, ZoneNode } from './BoardObjectNodes';
 
 const zoneConfigModalRenderSpy = vi.hoisted(() => vi.fn());
 
@@ -33,6 +33,12 @@ function renderZone(
     positionableItemCount?: number;
     onArrangeContents?: ReturnType<typeof vi.fn>;
     onJustifyContents?: ReturnType<typeof vi.fn>;
+    onUpdate?: ReturnType<typeof vi.fn>;
+    layout?: {
+      mode: 'manual' | 'auto';
+      sortBy?: 'position' | 'title';
+      sortDirection?: 'asc' | 'desc';
+    };
   }
 ) {
   const wrapper = ({ children }: { children: ReactNode }) => (
@@ -55,6 +61,8 @@ function renderZone(
         zIndex: 100,
         suppressToolbar: extra?.suppressToolbar,
         positionableItemCount: extra?.positionableItemCount,
+        layout: extra?.layout,
+        onUpdate: extra?.onUpdate,
         onReorder,
         onArrangeContents: extra?.onArrangeContents,
         onJustifyContents: extra?.onJustifyContents,
@@ -64,11 +72,31 @@ function renderZone(
   );
 }
 
+function expandExtraLayoutActions() {
+  const disclosure = screen.getByRole('button', { name: 'Show more layout actions' });
+  fireEvent.pointerUp(disclosure);
+  return disclosure;
+}
+
+describe('clampZoneToolbarCenter', () => {
+  it('preserves an already-visible center and clamps both edges after dynamic expansion', () => {
+    expect(clampZoneToolbarCenter(500, 600, 1200)).toBe(500);
+    expect(clampZoneToolbarCenter(50, 600, 1200)).toBe(316);
+    expect(clampZoneToolbarCenter(1150, 600, 1200)).toBe(884);
+  });
+
+  it('centers an over-wide toolbar inside the padded host instead of clipping one edge', () => {
+    expect(clampZoneToolbarCenter(700, 900, 700)).toBe(350);
+    expect(clampZoneToolbarCenter(42, 0, 0)).toBe(42);
+  });
+});
+
 describe('ZoneNode layer toolbar', () => {
   it('dispatches Center in zone once through the direct toolbar production callback', () => {
     const onJustifyContents = vi.fn();
     renderZone(vi.fn(), CONNECTED, { positionableItemCount: 2, onJustifyContents });
 
+    expandExtraLayoutActions();
     const button = screen.getByRole('button', { name: 'Center in zone' });
     fireEvent.pointerDown(button);
     fireEvent.pointerUp(button);
@@ -82,6 +110,7 @@ describe('ZoneNode layer toolbar', () => {
     const onJustifyContents = vi.fn();
     renderZone(vi.fn(), CONNECTED, { positionableItemCount: 2, onJustifyContents });
 
+    expandExtraLayoutActions();
     const button = screen.getByRole('button', { name: 'Center contents vertically' });
     fireEvent.pointerDown(button);
     fireEvent.pointerUp(button);
@@ -104,8 +133,8 @@ describe('ZoneNode layer toolbar', () => {
     expect(screen.getAllByRole('button', { name: 'Tidy up contents' }).at(-1)).toBeDisabled();
   });
 
-  it('portals the bounded toolbar above every node stacking context and wraps upward', () => {
-    renderZone(vi.fn(), CONNECTED);
+  it('keeps the pre-PR controls visible in one row and discloses only extra layout actions', () => {
+    renderZone(vi.fn(), CONNECTED, { positionableItemCount: 2 });
 
     const toolbar = screen.getByRole('toolbar', { name: 'Zone actions' });
     expect(toolbar.parentElement).toBe(document.body);
@@ -113,10 +142,52 @@ describe('ZoneNode layer toolbar', () => {
       position: 'fixed',
       zIndex: '10000',
       transform: 'translate(-50%, -100%)',
-      flexWrap: 'wrap',
+      flexWrap: 'nowrap',
       width: 'max-content',
-      maxWidth: 'min(460px, calc(100vw - 32px))',
+      maxWidth: 'calc(100vw - 32px)',
+      overflowX: 'auto',
     });
+
+    // Every control that predates #2540 remains directly visible.
+    expect(screen.getByTitle('Change border color')).toBeInTheDocument();
+    expect(screen.getByTitle('Change background color')).toBeInTheDocument();
+    expect(screen.getByTitle('Lock zone')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send to back' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Bring to front' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Smaller label' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Larger label' })).toBeInTheDocument();
+    expect(screen.getByTitle('Configure zone')).toBeInTheDocument();
+    expect(screen.getByTitle('Delete zone')).toBeInTheDocument();
+
+    // Primary layout controls stay direct; lower-frequency additions expand inline.
+    expect(screen.getByRole('button', { name: 'Enable Auto Zone' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Tidy up contents' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Center in zone' })).not.toBeInTheDocument();
+    const disclosure = expandExtraLayoutActions();
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: 'Center in zone' })).toBeInTheDocument();
+    expect(toolbar).toHaveStyle({ flexWrap: 'nowrap' });
+  });
+
+  it('operates the layout disclosure by keyboard, retains focus, and omits it for empty zones', () => {
+    const view = renderZone(vi.fn(), CONNECTED, { positionableItemCount: 1 });
+    const disclosure = screen.getByRole('button', { name: 'Show more layout actions' });
+    disclosure.focus();
+    fireEvent.keyDown(disclosure, { key: 'Enter' });
+    fireEvent.click(disclosure, { detail: 0 });
+    expect(disclosure).toHaveFocus();
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('group', { name: 'Justify contents' })).toBeInTheDocument();
+
+    fireEvent.keyDown(disclosure, { key: ' ' });
+    expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('group', { name: 'Justify contents' })).not.toBeInTheDocument();
+
+    view.unmount();
+    renderZone(vi.fn(), CONNECTED, { positionableItemCount: 0 });
+    expect(
+      screen.queryByRole('button', { name: 'Show more layout actions' })
+    ).not.toBeInTheDocument();
   });
 
   it('gives workflow connectors a zoom-tolerant pointer target', () => {
@@ -211,11 +282,88 @@ describe('ZoneNode config modal', () => {
     expect(zoneConfigModalRenderSpy).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('zone-config-modal')).toHaveTextContent('Configure Zone: My Zone');
   });
+
+  it('gives the toolbar and modal the same persisted layout state and update callback', () => {
+    const onUpdate = vi.fn();
+    renderZone(vi.fn(), CONNECTED, {
+      onUpdate,
+      layout: { mode: 'auto', sortBy: 'title', sortDirection: 'desc' },
+    });
+
+    fireEvent.pointerUp(screen.getByTitle('Configure zone'));
+    const modalProps = zoneConfigModalRenderSpy.mock.calls[0][0] as {
+      onUpdate: unknown;
+      zoneData: { layout?: unknown };
+    };
+    expect(modalProps.onUpdate).toBe(onUpdate);
+    expect(modalProps.zoneData.layout).toEqual({
+      mode: 'auto',
+      sortBy: 'title',
+      sortDirection: 'desc',
+    });
+  });
+});
+
+describe('ZoneNode Auto Zone toolbar toggle', () => {
+  it('uses the authoritative zone update callback once and exposes durable toggle state', () => {
+    const onUpdate = vi.fn();
+    const view = renderZone(vi.fn(), CONNECTED, {
+      onUpdate,
+      layout: { mode: 'manual', sortBy: 'position', sortDirection: 'asc' },
+    });
+
+    const enable = screen.getByRole('button', { name: 'Enable Auto Zone' });
+    expect(enable).toHaveAttribute('aria-pressed', 'false');
+    const inactiveBorderColor = enable.style.borderColor;
+    fireEvent.pointerDown(enable);
+    fireEvent.pointerUp(enable);
+    fireEvent.click(enable);
+
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(onUpdate).toHaveBeenCalledWith(
+      'zone-1',
+      expect.objectContaining({
+        layout: expect.objectContaining({
+          mode: 'auto',
+          sortBy: 'updated',
+          sortDirection: 'desc',
+        }),
+      })
+    );
+
+    view.unmount();
+    renderZone(vi.fn(), CONNECTED, {
+      onUpdate,
+      layout: { mode: 'auto', sortBy: 'title', sortDirection: 'desc' },
+    });
+    const disable = screen.getByRole('button', { name: 'Disable Auto Zone' });
+    expect(disable).toHaveAttribute('aria-pressed', 'true');
+    expect(disable.style.borderColor).not.toBe(inactiveBorderColor);
+  });
+
+  it('is keyboard operable without compounding the synthesized click and retains focus', () => {
+    const onUpdate = vi.fn();
+    renderZone(vi.fn(), CONNECTED, { onUpdate, layout: { mode: 'manual' } });
+    const toggle = screen.getByRole('button', { name: 'Enable Auto Zone' });
+    toggle.focus();
+    expect(toggle).toHaveFocus();
+    fireEvent.keyDown(toggle, { key: 'Enter' });
+    fireEvent.click(toggle, { detail: 0 });
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not expose a misleading toggle while the multi-selection toolbar owns the UI', () => {
+    renderZone(vi.fn(), CONNECTED, {
+      suppressToolbar: true,
+      layout: { mode: 'auto' },
+    });
+    expect(screen.queryByRole('button', { name: 'Disable Auto Zone' })).not.toBeInTheDocument();
+  });
 });
 
 function renderZoneDensity(opts: {
-  pinnedItemCount: number;
-  compactItemCount: number;
+  densityExpandableItemCount: number;
+  compactDensityExpandableItemCount: number;
   onSetContentsCompact?: ReturnType<typeof vi.fn>;
   connection?: typeof CONNECTED;
 }) {
@@ -237,8 +385,8 @@ function renderZoneDensity(opts: {
         x: 0,
         y: 0,
         zIndex: 100,
-        pinnedItemCount: opts.pinnedItemCount,
-        compactItemCount: opts.compactItemCount,
+        densityExpandableItemCount: opts.densityExpandableItemCount,
+        compactDensityExpandableItemCount: opts.compactDensityExpandableItemCount,
         onSetContentsCompact: opts.onSetContentsCompact,
       }}
     />,
@@ -249,8 +397,13 @@ function renderZoneDensity(opts: {
 describe('ZoneNode density toolbar', () => {
   it('offers "Collapse contents" while any pinned item is still expanded', () => {
     const onSetContentsCompact = vi.fn();
-    renderZoneDensity({ pinnedItemCount: 3, compactItemCount: 0, onSetContentsCompact });
+    renderZoneDensity({
+      densityExpandableItemCount: 3,
+      compactDensityExpandableItemCount: 0,
+      onSetContentsCompact,
+    });
 
+    expandExtraLayoutActions();
     const btn = screen.getByLabelText('Collapse contents');
     fireEvent.pointerDown(btn);
     fireEvent.pointerUp(btn);
@@ -261,8 +414,13 @@ describe('ZoneNode density toolbar', () => {
 
   it('flips to "Expand contents" only once every pinned item is collapsed', () => {
     const onSetContentsCompact = vi.fn();
-    renderZoneDensity({ pinnedItemCount: 3, compactItemCount: 3, onSetContentsCompact });
+    renderZoneDensity({
+      densityExpandableItemCount: 3,
+      compactDensityExpandableItemCount: 3,
+      onSetContentsCompact,
+    });
 
+    expandExtraLayoutActions();
     const btn = screen.getByLabelText('Expand contents');
     fireEvent.pointerDown(btn);
     fireEvent.pointerUp(btn);
@@ -272,38 +430,48 @@ describe('ZoneNode density toolbar', () => {
 
   it('still collapses a partially collapsed zone, making it uniform in one click', () => {
     const onSetContentsCompact = vi.fn();
-    renderZoneDensity({ pinnedItemCount: 3, compactItemCount: 2, onSetContentsCompact });
+    renderZoneDensity({
+      densityExpandableItemCount: 3,
+      compactDensityExpandableItemCount: 2,
+      onSetContentsCompact,
+    });
 
+    expandExtraLayoutActions();
     expect(screen.queryByLabelText('Expand contents')).toBeNull();
     fireEvent.pointerUp(screen.getByLabelText('Collapse contents'));
 
     expect(onSetContentsCompact).toHaveBeenCalledWith('zone-1', true);
   });
 
-  it('disables the control on an empty zone', () => {
+  it('does not offer an inert control when a zone has no density-expandable entities', () => {
     const onSetContentsCompact = vi.fn();
-    renderZoneDensity({ pinnedItemCount: 0, compactItemCount: 0, onSetContentsCompact });
+    renderZoneDensity({
+      densityExpandableItemCount: 0,
+      compactDensityExpandableItemCount: 0,
+      onSetContentsCompact,
+    });
 
-    const btn = screen.getByLabelText('Collapse contents');
-    expect(btn).toBeDisabled();
-    fireEvent.pointerUp(btn);
+    expect(screen.queryByLabelText('Collapse contents')).toBeNull();
+    expect(screen.queryByLabelText('Expand contents')).toBeNull();
     expect(onSetContentsCompact).not.toHaveBeenCalled();
   });
 
   it('does not fire when the mutation gate is closed (disconnected)', () => {
     const onSetContentsCompact = vi.fn();
     renderZoneDensity({
-      pinnedItemCount: 2,
-      compactItemCount: 0,
+      densityExpandableItemCount: 2,
+      compactDensityExpandableItemCount: 0,
       onSetContentsCompact,
       connection: DISCONNECTED,
     });
 
-    const btn = screen.getByLabelText('Collapse contents');
-    fireEvent.pointerDown(btn);
-    fireEvent.pointerUp(btn);
-    fireEvent.keyDown(btn, { key: 'Enter' });
+    const disclosure = screen.getByRole('button', { name: 'Show more layout actions' });
+    fireEvent.pointerDown(disclosure);
+    fireEvent.pointerUp(disclosure);
+    fireEvent.keyDown(disclosure, { key: 'Enter' });
 
+    expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByLabelText('Collapse contents')).toBeNull();
     expect(onSetContentsCompact).not.toHaveBeenCalled();
   });
 });

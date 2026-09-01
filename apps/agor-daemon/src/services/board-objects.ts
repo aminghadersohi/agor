@@ -12,6 +12,7 @@ import {
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
+import { isBoardEntityDensityExpandable } from '@agor/core/layout/zone-layout';
 import type {
   BoardEntityObject,
   BoardEntityType,
@@ -179,8 +180,17 @@ export class BoardObjectsService {
   async patch(
     id: string,
     data: Partial<BoardEntityObject>,
-    _params?: BoardObjectParams
+    params?: BoardObjectParams
   ): Promise<BoardEntityObject> {
+    if (typeof data.compact === 'boolean') {
+      // Reuse the tenant/access-scoped read path rather than bypassing the
+      // trusted SQL visibility context for this capability check.
+      const existing = await this.get(id, params);
+      if (!isBoardEntityDensityExpandable(existing.entity_type)) {
+        throw new Error('Compact presentation is supported only for branch placements');
+      }
+    }
+
     if (data.size) {
       if (
         !Number.isFinite(data.size.width) ||

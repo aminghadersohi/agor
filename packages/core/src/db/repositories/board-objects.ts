@@ -9,6 +9,7 @@ import type {
   BoardEntityObject,
   BoardEntityType,
   BoardID,
+  BoardLayoutPlacementUpdate,
   BranchID,
   CardID,
   UUID,
@@ -513,6 +514,67 @@ export class BoardObjectRepository {
         .one();
       if (!row) throw new RepositoryError('Failed to retrieve updated board object layout');
       return this.rowToEntity(row);
+    } catch (error) {
+      if (error instanceof EntityNotFoundError) throw error;
+      throw new RepositoryError(
+        `Failed to update board object layout: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /**
+   * Update layout only when the entity belongs to the authoritative board.
+   * Whole-board commits use this inside the board repository transaction so a
+   * caller cannot smuggle another board's placement into an otherwise valid
+   * layout request.
+   */
+  async updateLayoutForBoard(
+    boardId: BoardID,
+    objectId: string,
+    layout: BoardLayoutPlacementUpdate
+  ): Promise<{ entity: BoardEntityObject; changed: boolean }> {
+    try {
+      if (
+        !Number.isFinite(layout.position.x) ||
+        !Number.isFinite(layout.position.y) ||
+        !Number.isFinite(layout.size.width) ||
+        !Number.isFinite(layout.size.height)
+      ) {
+        throw new RepositoryError(
+          `Board object ${objectId} requires complete finite position and size geometry`
+        );
+      }
+      const condition = and(
+        eq(boardObjects.object_id, objectId),
+        eq(boardObjects.board_id, boardId)
+      );
+      const existing = await select(this.db).from(boardObjects).where(condition).one();
+      if (!existing) throw new EntityNotFoundError('BoardObject', objectId);
+      const existingData =
+        typeof existing.data === 'string' ? JSON.parse(existing.data) : existing.data;
+      const current = this.rowToEntity(existing);
+      const changed =
+        current.position.x !== layout.position.x ||
+        current.position.y !== layout.position.y ||
+        current.size?.width !== layout.size.width ||
+        current.size?.height !== layout.size.height ||
+        (layout.compact !== undefined && current.compact !== layout.compact);
+      if (!changed) return { entity: current, changed: false };
+      await update(this.db, boardObjects)
+        .set({
+          data: {
+            ...existingData,
+            position: layout.position,
+            size: layout.size,
+            ...(layout.compact !== undefined ? { compact: layout.compact } : {}),
+          },
+        })
+        .where(condition)
+        .run();
+      const row = await select(this.db).from(boardObjects).where(condition).one();
+      if (!row) throw new RepositoryError('Failed to retrieve updated board object layout');
+      return { entity: this.rowToEntity(row), changed: true };
     } catch (error) {
       if (error instanceof EntityNotFoundError) throw error;
       throw new RepositoryError(

@@ -1,5 +1,6 @@
 import type {
   BoardEntityType,
+  BoardObjectType,
   BoardPosition,
   ZoneLayoutPolicy,
   ZoneLayoutPreset,
@@ -32,6 +33,78 @@ export const ZONE_CONTENT_JUSTIFICATIONS = [
   'bottom',
 ] as const;
 export type ZoneContentJustification = (typeof ZONE_CONTENT_JUSTIFICATIONS)[number];
+
+/** Shared user-facing names for the persisted zone layout vocabulary. */
+export const ZONE_LAYOUT_PRESET_LABELS: Readonly<Record<ZoneLayoutPreset, string>> = {
+  grid: 'Grid',
+  compact_list: 'List',
+};
+
+export const ZONE_LAYOUT_SORT_LABELS: Readonly<Record<ZoneLayoutSortBy, string>> = {
+  position: 'Current position',
+  priority: 'Priority / rank',
+  status: 'Workflow status',
+  updated: 'Last updated',
+  created: 'Created',
+  title: 'Title',
+};
+
+export const ZONE_LAYOUT_SORT_DIRECTION_LABELS: Readonly<
+  Record<ZoneLayoutSortBy, Readonly<Record<ZoneLayoutSortDirection, string>>>
+> = {
+  position: { asc: 'Top-left first', desc: 'Bottom-right first' },
+  priority: { asc: 'Highest first', desc: 'Lowest first' },
+  status: { asc: 'Urgent to done', desc: 'Done to urgent' },
+  updated: { asc: 'Oldest first', desc: 'Newest first' },
+  created: { asc: 'Oldest first', desc: 'Newest first' },
+  title: { asc: 'A to Z', desc: 'Z to A' },
+};
+
+export const ZONE_OVERFLOW_STRATEGY_LABELS: Readonly<Record<ZoneOverflowStrategy, string>> = {
+  report: 'Report overflow',
+  reflow_board: 'Move neighboring zones',
+};
+
+export function defaultZoneLayoutSortDirection(sortBy: ZoneLayoutSortBy): ZoneLayoutSortDirection {
+  return sortBy === 'updated' || sortBy === 'created' ? 'desc' : 'asc';
+}
+
+export function zoneLayoutSortDirectionOptions(sortBy: ZoneLayoutSortBy) {
+  const labels = ZONE_LAYOUT_SORT_DIRECTION_LABELS[sortBy];
+  const preferred = defaultZoneLayoutSortDirection(sortBy);
+  const directions = [
+    preferred,
+    ...ZONE_LAYOUT_SORT_DIRECTIONS.filter((value) => value !== preferred),
+  ];
+  return directions.map((value) => ({ value, label: labels[value] }));
+}
+
+/**
+ * Board entities whose rendered surface has a real secondary-density state.
+ *
+ * A branch/worktree card owns collapsible session and environment content.
+ * Generic board cards, artifacts, notes, and apps do not share that contract;
+ * writing `compact` for them would only manufacture an inert control/state.
+ * Keep this runtime capability beside the shared layout policy so browser,
+ * daemon, and MCP callers cannot drift into different target sets.
+ */
+export const BOARD_DENSITY_EXPANDABLE_ENTITY_TYPES = [
+  'branch',
+] as const satisfies readonly BoardEntityType[];
+
+export type BoardDensityExpandableEntityType =
+  (typeof BOARD_DENSITY_EXPANDABLE_ENTITY_TYPES)[number];
+
+/** Every persisted board surface kind that callers may ask about. */
+export type BoardDensitySurfaceKind = BoardEntityType | BoardObjectType;
+
+export function isBoardEntityDensityExpandable(
+  entityType: BoardDensitySurfaceKind
+): entityType is BoardDensityExpandableEntityType {
+  return BOARD_DENSITY_EXPANDABLE_ENTITY_TYPES.includes(
+    entityType as BoardDensityExpandableEntityType
+  );
+}
 
 export const DEFAULT_ZONE_LAYOUT_POLICY: Readonly<ZoneLayoutPolicy> = {
   mode: 'manual',
@@ -312,6 +385,30 @@ export function normalizeZoneLayoutPolicy(
   };
 }
 
+/**
+ * Change only Auto Zone's maintenance mode while preserving the complete
+ * normalized policy. Enabling automation from the spatial-memory default uses
+ * newest activity rather than continually treating freshly persisted layout
+ * coordinates as new sort input. UI toolbar, modal, and MCP callers share this
+ * transition so an enable action cannot acquire surface-specific defaults.
+ */
+export function setZoneLayoutMode(
+  policy: Partial<ZoneLayoutPolicy> | undefined,
+  mode: ZoneLayoutPolicy['mode']
+): ZoneLayoutPolicy {
+  const current = normalizeZoneLayoutPolicy(policy);
+  if (current.mode === mode) return current;
+  if (mode === 'auto' && current.sortBy === 'position') {
+    return {
+      ...current,
+      mode,
+      sortBy: 'updated',
+      sortDirection: defaultZoneLayoutSortDirection('updated'),
+    };
+  }
+  return { ...current, mode };
+}
+
 const PRIORITY_RANKS: Readonly<Record<string, number>> = {
   urgent: 0,
   critical: 0,
@@ -380,7 +477,7 @@ function compareText(a: unknown, b: unknown): number {
   const right = normalizedLabel(b);
   if (!left && right) return 1;
   if (left && !right) return -1;
-  return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' });
+  return left.localeCompare(right, 'en', { numeric: true, sensitivity: 'base' });
 }
 
 function compareField(a: ZoneLayoutSortItem, b: ZoneLayoutSortItem, sortBy: ZoneLayoutSortBy) {
@@ -435,6 +532,15 @@ export function sortZoneLayoutItems<T extends ZoneLayoutSortItem>(
     const aMissing = isMissingSortValue(a, policy.sortBy);
     const bMissing = isMissingSortValue(b, policy.sortBy);
     if (aMissing !== bMissing) return aMissing ? 1 : -1;
-    return comparison * direction || a.id.localeCompare(b.id);
+
+    // A semantic field is often shared (or absent) across heterogeneous
+    // children. Falling straight through to an always-ascending opaque ID made
+    // direction changes appear to do nothing on real boards. Titles provide a
+    // visible, stable secondary key; IDs are the final total-order fence. Apply
+    // direction to the complete logical ordering while still keeping missing
+    // primary values in the final group above.
+    const titleTieBreak = policy.sortBy === 'title' ? 0 : compareText(a.title, b.title);
+    const idTieBreak = a.id === b.id ? 0 : a.id < b.id ? -1 : 1;
+    return (comparison || titleTieBreak || idTieBreak) * direction;
   });
 }

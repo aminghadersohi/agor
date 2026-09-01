@@ -1,5 +1,29 @@
 import { describe, expect, it } from 'vitest';
-import { translateTrackedChildPositions } from './coordinateTransforms';
+import {
+  getCurrentNodeAbsolutePosition,
+  translateTrackedChildPositions,
+} from './coordinateTransforms';
+
+describe('getCurrentNodeAbsolutePosition', () => {
+  it('ignores stale React Flow derived coordinates after a controlled layout update', () => {
+    const zone = {
+      id: 'zone',
+      position: { x: 600, y: 400 },
+      positionAbsolute: { x: 100, y: 100 },
+      data: {},
+    };
+    const child = {
+      id: 'child',
+      parentId: 'zone',
+      position: { x: 40, y: 80 },
+      positionAbsolute: { x: 140, y: 180 },
+      data: {},
+    };
+
+    expect(getCurrentNodeAbsolutePosition(zone, [zone, child])).toEqual({ x: 600, y: 400 });
+    expect(getCurrentNodeAbsolutePosition(child, [zone, child])).toEqual({ x: 640, y: 480 });
+  });
+});
 
 describe('translateTrackedChildPositions', () => {
   it('moves only optimistic direct children by the parent delta', () => {

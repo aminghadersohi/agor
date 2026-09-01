@@ -1,5 +1,5 @@
 import type { BoardObject } from '@agor-live/client';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { App as AntdApp } from 'antd';
 import { describe, expect, it, vi } from 'vitest';
 import { ZoneConfigModal } from './ZoneConfigModal';
@@ -73,6 +73,12 @@ describe('ZoneConfigModal historical tool migration', () => {
     const list = await screen.findByText('List', { selector: '.ant-segmented-item-label' });
     fireEvent.click(list);
     expect(list.closest('.ant-segmented-item')).toHaveClass('ant-segmented-item-selected');
+    await waitFor(() =>
+      expect(screen.queryByRole('spinbutton', { name: 'Columns' })).not.toBeInTheDocument()
+    );
+    expect(
+      await screen.findByText(/List uses one column and collapses worktree details/)
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
@@ -104,6 +110,9 @@ describe('ZoneConfigModal historical tool migration', () => {
     );
 
     expect(await screen.findByRole('switch', { name: 'Auto Zone' })).not.toBeChecked();
+    expect(
+      screen.getByText(/settings below remain saved and apply when you choose Tidy/)
+    ).toBeInTheDocument();
   });
 
   it('preserves the removed tool until the operator explicitly selects a supported one', async () => {
@@ -200,7 +209,14 @@ describe('ZoneConfigModal historical tool migration', () => {
       </AntdApp>
     );
 
+    const overflow = await screen.findByRole('combobox', { name: 'When growth overlaps' });
+    expect(overflow).toBeDisabled();
+    expect(
+      screen.getByText(/Enable Grow to fit before choosing an overlap action/)
+    ).toBeInTheDocument();
     fireEvent.click(await screen.findByRole('switch', { name: 'Grow to fit' }));
+    await waitFor(() => expect(overflow).toBeEnabled());
+    expect(screen.getByText('Move neighboring zones')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
@@ -211,5 +227,93 @@ describe('ZoneConfigModal historical tool migration', () => {
         onOverflow: 'reflow_board',
       },
     });
+  });
+
+  it('preserves the MCP-only both-axis grow mode when saving another field', async () => {
+    const onUpdate = vi.fn();
+    render(
+      <AntdApp>
+        <ZoneConfigModal
+          open
+          onCancel={vi.fn()}
+          zoneName="Review"
+          objectId="zone-1"
+          onUpdate={onUpdate}
+          zoneData={{
+            type: 'zone',
+            x: 0,
+            y: 0,
+            width: 620,
+            height: 300,
+            label: 'Review',
+            layout: { resize: 'both', onOverflow: 'report' },
+          }}
+        />
+      </AntdApp>
+    );
+
+    fireEvent.change(await screen.findByLabelText('Zone name'), { target: { value: 'Ready' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate.mock.calls[0][1]).toMatchObject({
+      layout: { resize: 'both', autoResizeHeight: true, onOverflow: 'report' },
+    });
+  });
+
+  it('does not write unchanged configuration and keeps the accessible toggle focusable', async () => {
+    const onUpdate = vi.fn();
+    const onCancel = vi.fn();
+    render(
+      <AntdApp>
+        <ZoneConfigModal
+          open
+          onCancel={onCancel}
+          zoneName="Review"
+          objectId="zone-1"
+          onUpdate={onUpdate}
+          zoneData={{ type: 'zone', x: 0, y: 0, width: 620, height: 900, label: 'Review' }}
+        />
+      </AntdApp>
+    );
+
+    const autoZone = await screen.findByRole('switch', { name: 'Auto Zone' });
+    autoZone.focus();
+    expect(autoZone).toHaveFocus();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(onCancel).toHaveBeenCalledTimes(1));
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+
+  it('waits for durable persistence before closing and stays open after a rejected save result', async () => {
+    let resolveSave: ((value: boolean) => void) | undefined;
+    const onUpdate = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveSave = resolve;
+        })
+    );
+    const onCancel = vi.fn();
+    const view = render(
+      <AntdApp>
+        <ZoneConfigModal
+          open
+          onCancel={onCancel}
+          zoneName="Review"
+          objectId="zone-1"
+          onUpdate={onUpdate}
+          zoneData={{ type: 'zone', x: 0, y: 0, width: 620, height: 900, label: 'Review' }}
+        />
+      </AntdApp>
+    );
+
+    fireEvent.change(await screen.findByLabelText('Zone name'), { target: { value: 'Ready' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(onCancel).not.toHaveBeenCalled();
+    await act(async () => resolveSave?.(false));
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(onCancel).not.toHaveBeenCalled();
+
+    view.unmount();
   });
 });
