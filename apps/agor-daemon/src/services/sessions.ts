@@ -62,6 +62,7 @@ import type {
   UUID,
 } from '@agor/core/types';
 import {
+  classifyBranchFilesystemReadiness,
   isAgenticToolDefaultConfigurationReference,
   SessionStatus,
   USER_DEFAULT_AGENTIC_CONFIGURATION,
@@ -477,15 +478,16 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (!branch) return;
 
     const status = branch.filesystem_status;
+    const readiness = classifyBranchFilesystemReadiness(branch);
 
-    if (status === 'creating') {
+    if (readiness === 'pending') {
       throw new Conflict(
         'Branch provisioning is still in progress. The working directory is not ready yet — wait for provisioning to finish, then start the session again.',
         { code: 'BRANCH_PROVISIONING_INCOMPLETE', branchId, filesystemStatus: status }
       );
     }
 
-    if (status === 'failed') {
+    if (readiness === 'failed') {
       throw new Conflict(
         `Branch provisioning failed and the working directory was not created${
           branch.error_message ? `: ${branch.error_message}` : '.'
@@ -507,8 +509,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     // `ready` is not caught here and will surface downstream instead. Recording
     // that state accurately is the executor's job (it owns the disk), not
     // something the daemon can infer.
-    const usableStatus = status === undefined || status === 'ready' || status === 'preserved';
-    if (usableStatus) {
+    if (readiness === 'ready') {
       return;
     }
 

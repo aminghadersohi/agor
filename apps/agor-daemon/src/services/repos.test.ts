@@ -52,6 +52,8 @@ const branchRepoMock = vi.hoisted(() => ({
   addOwner: vi.fn(async () => undefined),
   claimFailedForProvisioningRetry: vi.fn(),
   markProvisioningFailedIfCreating: vi.fn(),
+  acknowledgeProvisioningAttempt: vi.fn(),
+  findCreatingPage: vi.fn(),
   // Used by the real `ensureCanControlBranchEnvironment` gate, which the retry
   // path runs through — left unmocked on purpose so the tests exercise the
   // actual permission resolution rather than a stubbed verdict.
@@ -384,6 +386,10 @@ describe('ReposService.createBranch Git lifecycle execution', () => {
     } as unknown as Application;
     const service = new ReposService({} as never, app);
     vi.spyOn(service, 'get').mockResolvedValue(repo as never);
+    branchRepoMock.acknowledgeProvisioningAttempt.mockResolvedValue({
+      applied: true,
+      branch: failedBranch,
+    });
 
     const result = await service.createBranch(
       repo.repo_id,
@@ -399,13 +405,13 @@ describe('ReposService.createBranch Git lifecycle execution', () => {
       { user: { user_id: '550e8400-e29b-41d4-a716-446655440004' } } as never
     );
 
-    expect(branches.patch).toHaveBeenCalledWith(
+    expect(branchRepoMock.acknowledgeProvisioningAttempt).toHaveBeenCalledWith(
       creatingBranch.branch_id,
       {
         filesystem_status: 'failed',
         error_message: 'Failed to spawn executor: launcher unavailable',
       },
-      expect.objectContaining({ provider: undefined })
+      undefined
     );
     expect(result).toEqual(failedBranch);
   });
@@ -824,6 +830,12 @@ describe('ReposService branch provisioning lifecycle', () => {
     branchRepoMock.markProvisioningFailedIfCreating.mockReset();
     branchRepoMock.findById.mockReset();
     branchRepoMock.resolveUserPermission.mockReset();
+    branchRepoMock.acknowledgeProvisioningAttempt.mockReset();
+    branchRepoMock.findCreatingPage.mockReset();
+    branchRepoMock.acknowledgeProvisioningAttempt.mockImplementation(
+      async (_id, acknowledgement) => ({ applied: true, branch: branch(acknowledgement) })
+    );
+    branchRepoMock.findCreatingPage.mockResolvedValue([]);
     // Sensible defaults: CAS is a no-op unless a test opts in.
     branchRepoMock.markProvisioningFailedIfCreating.mockResolvedValue({
       changed: false,
@@ -917,13 +929,13 @@ describe('ReposService branch provisioning lifecycle', () => {
       service as unknown as { dispatchBranchProvisioning: (...a: unknown[]) => Promise<unknown> }
     ).dispatchBranchProvisioning(branch(), repo, 'user-1', undefined, 'create');
 
-    expect(patch).toHaveBeenCalledWith(
+    expect(branchRepoMock.acknowledgeProvisioningAttempt).toHaveBeenCalledWith(
       'b1',
       expect.objectContaining({
         filesystem_status: 'failed',
         error_message: expect.stringMatching(/failed to spawn executor/i),
       }),
-      expect.any(Object)
+      'attempt-1'
     );
     expect((result as { filesystem_status?: string }).filesystem_status).toBe('failed');
   });
@@ -1067,61 +1079,29 @@ describe('ReposService branch provisioning lifecycle', () => {
     expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
   });
 
-  it('retry recovers a creating branch stranded by a daemon restart (surfaces failed, then claims)', async () => {
+  it('does not infer that an old creating branch is orphaned', async () => {
     // Row last written before this process started ⇒ its materializer died with
     // the previous daemon. This is the path that keeps a stranded branch
     // repairable in tenants the startup watchdog never scans.
     const get = vi.fn(async () =>
       branch({ filesystem_status: 'creating', updated_at: '2020-01-01T00:00:00.000Z' })
     );
-    branchRepoMock.markProvisioningFailedIfCreating.mockResolvedValue({
-      changed: true,
-      branch: branch({ filesystem_status: 'failed' }),
-    });
-    branchRepoMock.claimFailedForProvisioningRetry.mockResolvedValue({
-      claimed: true,
-      branch: branch({ filesystem_status: 'creating' }),
-    });
     const { service } = makeService({ get, patch: vi.fn() });
-    (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
-      vi.fn(async () => repo);
-
-    const result = await service.retryBranchProvisioning('b1');
-
-    // Never bypasses the CAS: it is surfaced as failed, then claimed atomically.
-    expect(branchRepoMock.markProvisioningFailedIfCreating).toHaveBeenCalledWith(
-      'b1',
-      expect.stringMatching(/interrupted/i)
-    );
-    expect(branchRepoMock.claimFailedForProvisioningRetry).toHaveBeenCalledWith(
-      'b1',
-      expect.any(String)
-    );
-    expect(result.filesystem_status).toBe('creating');
-    expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledTimes(1);
+    await expect(service.retryBranchProvisioning('b1')).rejects.toThrow(/in progress/i);
+    expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
   });
 
-  it('a stranded creating branch still cannot double-dispatch (loser of the claim no-ops)', async () => {
+  it('two callers cannot take over a creating branch based on process age', async () => {
     const get = vi.fn(async () =>
       branch({ filesystem_status: 'creating', updated_at: '2020-01-01T00:00:00.000Z' })
     );
-    branchRepoMock.markProvisioningFailedIfCreating.mockResolvedValue({
-      changed: true,
-      branch: branch({ filesystem_status: 'failed' }),
-    });
-    branchRepoMock.claimFailedForProvisioningRetry
-      .mockResolvedValueOnce({ claimed: true, branch: branch({ filesystem_status: 'creating' }) })
-      .mockResolvedValueOnce({ claimed: false, branch: branch({ filesystem_status: 'creating' }) });
     const { service } = makeService({ get, patch: vi.fn() });
-    (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
-      vi.fn(async () => repo);
-
-    await Promise.all([
+    const results = await Promise.allSettled([
       service.retryBranchProvisioning('b1'),
       service.retryBranchProvisioning('b1'),
     ]);
-
-    expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledTimes(1);
+    expect(results.every((result) => result.status === 'rejected')).toBe(true);
+    expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
   });
 
   it('refuses an archived branch even when its status still reads failed', async () => {
@@ -1262,8 +1242,8 @@ describe('ReposService branch provisioning lifecycle', () => {
   it('watchdog marks every stuck creating branch failed — never recovers or re-dispatches', async () => {
     const stuckA = branch({ branch_id: 'a', filesystem_status: 'creating' });
     const stuckB = branch({ branch_id: 'b', filesystem_status: 'creating' });
-    const ready = branch({ branch_id: 'c', filesystem_status: 'ready' });
-    const find = vi.fn(async () => [stuckA, stuckB, ready]);
+    const find = vi.fn(async () => []);
+    branchRepoMock.findCreatingPage.mockResolvedValue([stuckA, stuckB]);
     branchRepoMock.markProvisioningFailedIfCreating.mockResolvedValue({
       changed: true,
       branch: branch({ filesystem_status: 'failed' }),

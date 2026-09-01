@@ -97,38 +97,6 @@ function sanitizeProvisioningError(error: unknown): string {
   }
 }
 
-/**
- * Wall-clock instant this daemon process started.
- *
- * `git.branch.add` is dispatched fire-and-forget as a child of this process, so
- * a materializer can only be live if the daemon that spawned it is still up. A
- * branch row that is still `creating` but was last written *before* this process
- * started therefore has no live materializer — it is an orphan from a previous
- * daemon lifetime. This is the same assumption the startup watchdog already
- * makes when it marks stuck `creating` branches `failed`; naming it here lets an
- * explicit user retry apply it too, in whatever tenant the caller belongs to.
- *
- * NOTE (multi-daemon, deferred): with two daemons sharing a database, a branch
- * being provisioned by daemon A could look orphaned to a newer daemon B. Single
- * daemon is the only deployment shape today (same trade the scheduler and widget
- * resolution already accept); a multi-daemon setup would need attempt-ID fencing
- * on the row rather than a process-start comparison.
- */
-const DAEMON_STARTED_AT_MS = Date.now() - Math.round(process.uptime() * 1000);
-
-/**
- * Is this `creating` branch a leftover from a previous daemon lifetime (i.e. no
- * materializer can still be running for it)? Conservative by construction: any
- * write to the row during provisioning pushes `updated_at` forward, so an
- * ambiguous row reads as "still in flight" and retry refuses it. False negatives
- * just mean the user waits; a false positive would double-dispatch.
- */
-function isOrphanedCreatingAttempt(branch: Branch): boolean {
-  const updatedAtMs = Date.parse(branch.updated_at);
-  if (Number.isNaN(updatedAtMs)) return false;
-  return updatedAtMs < DAEMON_STARTED_AT_MS;
-}
-
 function deriveLocalRepoSlug(remoteUrl: string | undefined, explicitSlug?: string): RepoSlug {
   if (explicitSlug) {
     if (!isValidSlug(explicitSlug)) {
@@ -866,7 +834,6 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     // causing ID collisions when archived branches held the assigned ID.
     const allUsedIds = await branchRepo.getAllUsedUniqueIds();
     const branchUniqueId = autoAssignBranchUniqueId(allUsedIds);
-
     const branchesService = this.app.service('branches');
 
     // Environment command templates (start_command, stop_command, etc.) are
@@ -895,6 +862,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
         // Generation owning this first attempt. Fences its acknowledgements
         // against any later retry that supersedes it.
         provisioning_attempt_id: generateId(),
+        provisioning_operation: 'create',
         // Environment templates are rendered after filesystem materialization.
         // RBAC fields are intentionally omitted at creation: new branches
         // always align with their board defaults. Overrides are a deliberate
@@ -1059,12 +1027,11 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     repo: Repo,
     userId: UserID,
     params: RepoParams | undefined,
-    reason: 'create' | 'retry' | 'reconcile',
+    reason: 'create' | 'retry' | 'restore',
     delegatedHomeKey?: string
   ): Promise<Branch> {
     const storageMode = branch.storage_mode ?? 'worktree';
     const logPrefix = `[branch-provisioning ${shortId(branch.branch_id)}]`;
-    const branchesService = this.app.service('branches');
     // Capture the tenant NOW (we are inside a request/startup scope). The
     // executor's onExit fires asynchronously after that scope has unwound, so
     // any DB write there must re-establish this tenant's transaction scope or
@@ -1107,6 +1074,8 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
             // attempt's late ack can be discarded instead of overwriting a
             // newer one.
             ...(attemptId ? { provisioningAttemptId: attemptId } : {}),
+            restoreMode: branch.provisioning_operation === 'restore',
+            allowExistingCheckout: reason !== 'create',
             useReference:
               storageMode === 'clone' &&
               !!repo.local_path &&
@@ -1147,14 +1116,17 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       // with no signal at all. Returned so callers surface the failed row.
       const message = error instanceof Error ? error.message : String(error);
       console.error(`${logPrefix} failed to spawn executor: ${message}`);
-      return (await branchesService.patch(
+      const { branch: failedBranch } = await new BranchRepository(
+        this.db
+      ).acknowledgeProvisioningAttempt(
         branch.branch_id,
         {
           filesystem_status: 'failed',
           error_message: `Failed to spawn executor: ${message}`,
         },
-        { ...params, provider: undefined }
-      )) as Branch;
+        attemptId
+      );
+      return failedBranch;
     }
   }
 
@@ -1296,27 +1268,13 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       return branch;
     }
     if (status === 'creating') {
-      if (!isOrphanedCreatingAttempt(branch)) {
-        throw new Conflict(
-          'Branch provisioning is already in progress. Wait for it to finish before retrying.',
-          {
-            code: 'BRANCH_PROVISIONING_IN_PROGRESS',
-            branchId: branch.branch_id,
-            filesystemStatus: status,
-          }
-        );
-      }
-      // Stranded by a daemon restart: no materializer can still be running for
-      // it. Surface it as `failed` so the claim below is the single, atomic
-      // entry point into a retry — this never bypasses the CAS.
-      console.warn(
-        `${logPrefix} retry found an interrupted 'creating' attempt from a previous daemon lifetime — surfacing it as failed before retrying`
-      );
-      await this.withTenantDatabase(params, () =>
-        branchRepo.markProvisioningFailedIfCreating(
-          branch.branch_id,
-          'Branch provisioning was interrupted — the daemon restarted before it completed. Retry provisioning to try again.'
-        )
+      throw new Conflict(
+        'Branch provisioning is already in progress. Wait for it to finish before retrying.',
+        {
+          code: 'BRANCH_PROVISIONING_IN_PROGRESS',
+          branchId: branch.branch_id,
+          filesystemStatus: status,
+        }
       );
     } else if (status !== 'failed') {
       throw new Conflict(
@@ -1384,15 +1342,12 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
   async reconcileStuckCreatingBranches(
     params?: RepoParams
   ): Promise<{ scanned: number; failed: number }> {
-    const branchesService = this.app.service('branches');
     const SCAN_LIMIT = 5000;
-    const result = (await branchesService.find({
-      query: { $limit: SCAN_LIMIT },
-      paginate: false,
-      ...params,
-    })) as Branch[] | { data: Branch[] };
-    const all = Array.isArray(result) ? result : result.data;
-    if (all.length >= SCAN_LIMIT) {
+    const branchRepo = new BranchRepository(this.db);
+    const stuck = await this.withTenantDatabase(params, () =>
+      branchRepo.findCreatingPage(SCAN_LIMIT + 1)
+    );
+    if (stuck.length > SCAN_LIMIT) {
       console.warn(
         `[branch-provisioning] watchdog: hit the ${SCAN_LIMIT}-row scan cap — some stuck branches may not be reconciled this pass.`
       );
@@ -1400,7 +1355,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     // Filter in memory: `filesystem_status` is a real column but the generic
     // service find does not guarantee arbitrary-column pushdown, so don't rely
     // on the query narrowing it for us.
-    const stuck = all.filter((branch) => branch.filesystem_status === 'creating');
+    stuck.length = Math.min(stuck.length, SCAN_LIMIT);
 
     const tenantId = getCurrentTenantId();
     // Count only transitions the CAS actually applied. A row can leave

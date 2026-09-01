@@ -366,6 +366,9 @@ export interface Branch {
    */
   provisioning_attempt_id?: string;
 
+  /** Materialization operation that the current/last attempt must replay. */
+  provisioning_operation?: 'create' | 'retry' | 'restore';
+
   // ===== RBAC: App-layer permissions (rbac.md) =====
 
   /** Immutable primary owner. This is intentionally independent of attribution. */

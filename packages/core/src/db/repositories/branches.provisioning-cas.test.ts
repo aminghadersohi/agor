@@ -226,4 +226,55 @@ describe('BranchRepository provisioning CAS', () => {
     expect(changed).toBe(true);
     expect(branch.filesystem_status).toBe('failed');
   });
+
+  dbTest(
+    'terminal acknowledgement applies only to its current creating generation',
+    async ({ db }) => {
+      const { branchRepo, branchId } = await seedFailedBranch(db);
+      await branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-B');
+
+      const stale = await branchRepo.acknowledgeProvisioningAttempt(
+        branchId,
+        { filesystem_status: 'ready' },
+        'attempt-A'
+      );
+      expect(stale.applied).toBe(false);
+      expect(stale.branch.filesystem_status).toBe('creating');
+
+      const current = await branchRepo.acknowledgeProvisioningAttempt(
+        branchId,
+        { filesystem_status: 'ready' },
+        'attempt-B'
+      );
+      expect(current.applied).toBe(true);
+      expect(current.branch.filesystem_status).toBe('ready');
+    }
+  );
+
+  dbTest('archive invalidates a late terminal acknowledgement', async ({ db }) => {
+    const { branchRepo, branchId } = await seedFailedBranch(db);
+    await branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-B');
+    await branchRepo.update(branchId, { archived: true, filesystem_status: 'preserved' });
+
+    const result = await branchRepo.acknowledgeProvisioningAttempt(
+      branchId,
+      { filesystem_status: 'ready' },
+      'attempt-B'
+    );
+    expect(result.applied).toBe(false);
+    expect(result.branch.archived).toBe(true);
+    expect(result.branch.filesystem_status).toBe('preserved');
+  });
+
+  dbTest('legacy acknowledgements cannot overwrite a generated attempt', async ({ db }) => {
+    const { branchRepo, branchId } = await seedFailedBranch(db);
+    await branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-B');
+
+    const result = await branchRepo.acknowledgeProvisioningAttempt(branchId, {
+      filesystem_status: 'failed',
+      error_message: 'old executor',
+    });
+    expect(result.applied).toBe(false);
+    expect(result.branch.filesystem_status).toBe('creating');
+  });
 });

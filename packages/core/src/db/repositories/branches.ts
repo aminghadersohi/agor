@@ -232,6 +232,7 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
         notes: branch.notes,
         error_message: branch.error_message,
         provisioning_attempt_id: branch.provisioning_attempt_id,
+        provisioning_operation: branch.provisioning_operation,
         environment_instance: branch.environment_instance,
         last_used: branch.last_used ?? new Date(now).toISOString(),
         custom_context: branch.custom_context,
@@ -759,6 +760,7 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
         filesystem_status: 'creating',
         error_message: undefined,
         provisioning_attempt_id: attemptId,
+        provisioning_operation: current.provisioning_operation === 'restore' ? 'restore' : 'retry',
       });
       const row = await update(txAsDb(tx), branches)
         .set(insertData)
@@ -834,6 +836,69 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
         .one();
       return { changed: true, branch: this.rowToBranch(row, baseUrl) };
     });
+  }
+
+  /**
+   * Atomically accept an executor's terminal provisioning acknowledgement.
+   * The generation/status/archive checks and the write share one row lock, so
+   * retry or lifecycle transitions cannot slip between validation and update.
+   * Legacy acknowledgements are accepted only for legacy rows which also have
+   * no generation.
+   */
+  async acknowledgeProvisioningAttempt(
+    id: string,
+    acknowledgement: Partial<Branch>,
+    expectedAttemptId?: string
+  ): Promise<{ applied: boolean; branch: Branch }> {
+    const existing = await this.findById(id);
+    if (!existing) throw new EntityNotFoundError('Branch', id);
+    const baseUrl = await getBaseUrl();
+    return this.db.transaction(async (tx) => {
+      await lockRowForUpdate(
+        txAsDb(tx),
+        this.db,
+        branches,
+        eq(branches.branch_id, existing.branch_id)
+      );
+      const currentRow = await select(txAsDb(tx))
+        .from(branches)
+        .where(eq(branches.branch_id, existing.branch_id))
+        .one();
+      if (!currentRow) throw new EntityNotFoundError('Branch', id);
+      const current = this.rowToBranch(currentRow, baseUrl);
+      const generationMatches = expectedAttemptId
+        ? current.provisioning_attempt_id === expectedAttemptId
+        : current.provisioning_attempt_id === undefined;
+      if (current.archived || current.filesystem_status !== 'creating' || !generationMatches) {
+        return { applied: false, branch: current };
+      }
+      const merged = deepMerge(current, {
+        ...acknowledgement,
+        branch_id: current.branch_id,
+        repo_id: current.repo_id,
+        created_at: current.created_at,
+        updated_at: new Date().toISOString(),
+      });
+      if (acknowledgement.filesystem_status !== 'failed') delete merged.error_message;
+      const row = await update(txAsDb(tx), branches)
+        .set(this.branchToInsert(merged))
+        .where(eq(branches.branch_id, current.branch_id))
+        .returning()
+        .one();
+      return { applied: true, branch: this.rowToBranch(row, baseUrl) };
+    });
+  }
+
+  /** Bounded database-side scan used only by the standalone startup repair. */
+  async findCreatingPage(limit: number): Promise<Branch[]> {
+    const rows = await select(this.db)
+      .from(branches)
+      .where(and(eq(branches.filesystem_status, 'creating'), eq(branches.archived, false)))
+      .orderBy(asc(branches.branch_id))
+      .limit(limit)
+      .all();
+    const baseUrl = await getBaseUrl();
+    return rows.map((row: BranchRow) => this.rowToBranch(row, baseUrl));
   }
 
   /**

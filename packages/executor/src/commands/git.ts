@@ -13,6 +13,7 @@
  */
 
 import { existsSync, mkdirSync } from 'node:fs';
+import { readFile, writeFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { getReposDir } from '@agor/core/config';
@@ -820,13 +821,17 @@ export async function handleGitClone(
  */
 async function isBranchAlreadyMaterialized(
   branchPath: string,
-  expectedRef: string
+  expectedRef: string,
+  expectedBranchId: string
 ): Promise<boolean> {
   if (!existsSync(join(branchPath, '.git'))) return false;
   try {
     const { git } = createGit(branchPath);
-    const head = (await git.revparse(['--abbrev-ref', 'HEAD'])).trim();
-    return head === expectedRef;
+    const headCommit = (await git.revparse(['HEAD^{commit}'])).trim();
+    const expectedCommit = (await git.revparse([`${expectedRef}^{commit}`])).trim();
+    if (headCommit !== expectedCommit) return false;
+    const markerPath = (await git.revparse(['--git-path', 'agor-branch-id'])).trim();
+    return (await readFile(resolve(branchPath, markerPath), 'utf8')).trim() === expectedBranchId;
   } catch {
     return false;
   }
@@ -922,7 +927,9 @@ export async function handleGitBranchAdd(
     // by the daemon safety net). If a checkout for exactly this ref is already
     // present, adopt it instead of re-running materialization — `git worktree
     // add` / `git clone` would otherwise fail on the already-attached ref.
-    const alreadyMaterialized = await isBranchAlreadyMaterialized(branchPath, branch);
+    const alreadyMaterialized = payload.params.allowExistingCheckout
+      ? await isBranchAlreadyMaterialized(branchPath, branch, branchId)
+      : false;
     if (alreadyMaterialized) {
       console.log(
         `[git.branch.add] Existing checkout for '${branch}' already present at ${branchPath} — adopting it (idempotent retry)`
@@ -1019,6 +1026,12 @@ export async function handleGitBranchAdd(
     }
 
     console.log(`[git.branch.add] Branch created at ${branchPath}`);
+
+    // Durable workspace ownership prevents a retry/restore from adopting an
+    // archived or unrelated checkout which merely happens to use the same ref.
+    const { git: materializedGit } = createGit(branchPath);
+    const markerPath = (await materializedGit.revparse(['--git-path', 'agor-branch-id'])).trim();
+    await writeFile(resolve(branchPath, markerPath), `${branchId}\n`, { mode: 0o600 });
 
     // Persist only filesystem outcome directly. Executable environment
     // rendering belongs to the daemon's existing authorization/validation
