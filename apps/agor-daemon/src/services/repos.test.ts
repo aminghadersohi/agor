@@ -1201,6 +1201,54 @@ describe('ReposService branch provisioning lifecycle', () => {
     expect(tenantDuringClaim).toBe('tenant-a');
   });
 
+  it("retry's dispatch — and its late onExit safety net — stay in the caller's tenant", async () => {
+    // The CAS scope asserted above is NOT sufficient on its own.
+    // `dispatchBranchProvisioning` reads `getCurrentTenantId()` at dispatch time
+    // and hands that id to the executor's `onExit`, which re-enters it through
+    // `runWithTenantDatabaseScope` long after the request scope has unwound.
+    // Remove the tenant wrapper from around the *dispatch* and the CAS test
+    // still passes, typecheck still passes — but the safety net's write lands
+    // under the wrong tenant (or none). Pin the whole chain: in-scope while
+    // dispatching, and the same tenant on the asynchronous failure write.
+    const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
+    let tenantDuringDispatch: string | undefined;
+    executorMocks.spawnExecutorFireAndForget.mockImplementation(() => {
+      tenantDuringDispatch = getCurrentTenantId() as string | undefined;
+      return undefined as never;
+    });
+    branchRepoMock.claimFailedForProvisioningRetry.mockResolvedValue({
+      claimed: true,
+      branch: branch({ filesystem_status: 'creating', provisioning_attempt_id: 'attempt-2' }),
+    });
+    let tenantDuringSafetyNet: string | undefined;
+    branchRepoMock.markProvisioningFailedIfCreating.mockImplementation(async () => {
+      tenantDuringSafetyNet = getCurrentTenantId() as string | undefined;
+      return { changed: true, branch: branch({ filesystem_status: 'failed' }) };
+    });
+    const { service } = makeService({ get, patch: vi.fn() }, fakeTenantCapableDb());
+    (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
+      vi.fn(async () => repo);
+
+    await service.retryBranchProvisioning('b1', {
+      tenant: { tenant_id: 'tenant-a', source: 'auth_claim' },
+    } as never);
+
+    expect(tenantDuringDispatch).toBe('tenant-a');
+
+    // Executor dies without acknowledging: the late write must re-enter
+    // tenant-a, and must be fenced on the generation this retry claimed.
+    grabOnExit()(9);
+
+    await vi.waitFor(() => {
+      expect(branchRepoMock.markProvisioningFailedIfCreating).toHaveBeenCalledWith(
+        'b1',
+        expect.stringMatching(/provisioning/i),
+        'attempt-2'
+      );
+    });
+    expect(tenantDuringSafetyNet).toBe('tenant-a');
+  });
+
   it('retry that loses the atomic claim (concurrent/double-click) does NOT dispatch a 2nd executor', async () => {
     const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
     // Another caller already flipped it to creating and won the claim.

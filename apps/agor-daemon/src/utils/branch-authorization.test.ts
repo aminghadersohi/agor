@@ -226,12 +226,18 @@ function makeHookContext(overrides: {
 }
 
 describe('ensureCanPromptInSession', () => {
-  const hookWithAuthority = (allowed: boolean) =>
+  const hookWithAuthority = (
+    allowed: boolean,
+    denialReason:
+      | 'branch_access_required'
+      | 'branch_session_sharing_disabled' = 'branch_session_sharing_disabled'
+  ) =>
     ensureCanPromptInSession({
       branchRepository: {
         resolveSessionPromptAuthority: vi.fn().mockResolvedValue({
           allowed,
-          reason: allowed ? 'own_session' : 'session_owner_did_not_share',
+          source: allowed ? 'own_session' : 'denied',
+          ...(allowed ? {} : { denial_reason: denialReason }),
         }),
       } as unknown as BranchRepository,
     });
@@ -248,7 +254,7 @@ describe('ensureCanPromptInSession', () => {
       await expect(hook(ctx)).resolves.toBe(ctx);
     });
 
-    it('denies prompting another user session without an owner grant', async () => {
+    it('denies prompting another user session when branch sharing is disabled', async () => {
       const hook = hookWithAuthority(false);
       const wt = makeBranch({ others_can: 'session' });
       const ctx = makeHookContext({
@@ -256,7 +262,7 @@ describe('ensureCanPromptInSession', () => {
         session: { created_by: OTHER_USER_ID },
         userId: USER_ID,
       });
-      await expect(hook(ctx)).rejects.toThrow(/owner has not shared/i);
+      await expect(hook(ctx)).rejects.toThrow(/branch does not allow shared session prompting/i);
     });
 
     it('allows prompting another user session when canonical authority allows it', async () => {
@@ -271,14 +277,14 @@ describe('ensureCanPromptInSession', () => {
     });
 
     it('denies prompting an own session without Collaborator access', async () => {
-      const hook = hookWithAuthority(false);
+      const hook = hookWithAuthority(false, 'branch_access_required');
       const wt = makeBranch({ others_can: 'view' });
       const ctx = makeHookContext({
         branch: wt,
         session: { created_by: USER_ID },
         userId: USER_ID,
       });
-      await expect(hook(ctx)).rejects.toThrow(/Collaborator access is required/i);
+      await expect(hook(ctx)).rejects.toThrow(/Only Collaborators and Managers/i);
     });
 
     it('accepts repository-authorized primary-owner access', async () => {
@@ -327,7 +333,7 @@ describe('request-scoped RBAC loading', () => {
   }
 
   it('reuses a loaded session and branch across RBAC hooks in one request', async () => {
-    const sessionService = { get: vi.fn(async () => session) };
+    const sessionRepo = { findById: vi.fn(async () => session) };
     const branchRepo = makeBranchRepo();
     const ctx = {
       path: 'messages',
@@ -340,33 +346,34 @@ describe('request-scoped RBAC loading', () => {
       },
     } as unknown as HookContext;
 
-    await loadSession(sessionService)(ctx);
-    await loadSession(sessionService)(ctx);
+    await loadSession(sessionRepo)(ctx);
+    await loadSession(sessionRepo)(ctx);
     await loadBranchFromSession(branchRepo as never)(ctx);
     await loadBranchFromSession(branchRepo as never)(ctx);
 
-    expect(sessionService.get).toHaveBeenCalledTimes(1);
+    expect(sessionRepo.findById).toHaveBeenCalledTimes(1);
     expect(branchRepo.findById).toHaveBeenCalledTimes(1);
     expect(branchRepo.isOwner).toHaveBeenCalledTimes(1);
     expect(branchRepo.resolveUserPermission).toHaveBeenCalledTimes(1);
   });
 
-  it('marks sessions.get hook-loaded session as prefetched for the service get()', async () => {
-    const sessionService = { get: vi.fn(async () => session) };
+  it('canonicalizes and passes the repository-loaded session to the service get()', async () => {
+    const sessionRepo = { findById: vi.fn(async () => session) };
     const branchRepo = makeBranchRepo();
     const ctx = {
       path: 'sessions',
       method: 'get',
-      id: session.session_id,
+      id: 'session-c',
       params: {
         provider: 'rest',
         user: { user_id: USER_ID, role: ROLES.MEMBER },
       },
     } as unknown as HookContext;
 
-    await loadSessionBranch(sessionService, branchRepo as never)(ctx);
+    await loadSessionBranch(sessionRepo, branchRepo as never)(ctx);
 
-    expect(sessionService.get).toHaveBeenCalledTimes(1);
+    expect(sessionRepo.findById).toHaveBeenCalledWith('session-c');
+    expect(ctx.id).toBe(session.session_id);
     expect(ctx.params.session).toBe(session);
     expect(
       (ctx.params as { _agorPrefetchedRecord?: { record: unknown } })._agorPrefetchedRecord
@@ -375,6 +382,28 @@ describe('request-scoped RBAC loading', () => {
       idField: 'session_id',
       record: session,
     });
+  });
+
+  it('canonicalizes session IDs in the shared session authorization hook', async () => {
+    const sessionRepo = { findById: vi.fn(async () => session) };
+    const ctx = {
+      path: 'sessions',
+      method: 'patch',
+      id: 'session-c',
+      params: {
+        provider: 'rest',
+        user: { user_id: USER_ID, role: ROLES.MEMBER },
+        sessionId: 'session-c',
+      },
+    } as unknown as HookContext;
+
+    await loadSession(sessionRepo)(ctx);
+
+    expect(ctx.id).toBe(session.session_id);
+    expect(
+      (ctx.params as { _agorPrefetchedRecord?: { id: string; record: unknown } })
+        ._agorPrefetchedRecord
+    ).toEqual({ id: session.session_id, idField: 'session_id', record: session });
   });
 
   // Every id-addressed verb must resolve here. A verb missing from the branch

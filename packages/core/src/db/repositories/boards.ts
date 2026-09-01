@@ -12,6 +12,7 @@ import type {
   BoardObject,
   Branch,
   BranchPermissionLevel,
+  EffectiveCapabilityPolicyAccess,
   UserID,
   UUID,
 } from '@agor/core/types';
@@ -83,7 +84,6 @@ export function mapBoardExportBlobToCreateData(
     access_mode: blob.access_mode,
     default_others_can: blob.default_others_can,
     default_others_fs_access: blob.default_others_fs_access,
-    default_dangerously_allow_session_sharing: blob.default_dangerously_allow_session_sharing,
     created_by: userId,
   };
 }
@@ -114,7 +114,6 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
       access_mode?: BoardAccessMode;
       default_others_can?: BranchPermissionLevel;
       default_others_fs_access?: 'none' | 'read' | 'write';
-      default_dangerously_allow_session_sharing?: boolean;
     };
 
     const boardId = row.board_id as UUID;
@@ -152,8 +151,6 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
         access_mode: data.access_mode ?? 'private',
         default_others_can: data.default_others_can ?? 'none',
         default_others_fs_access: data.default_others_fs_access ?? 'none',
-        default_dangerously_allow_session_sharing:
-          data.default_dangerously_allow_session_sharing ?? false,
       },
       row
     );
@@ -552,6 +549,11 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
   async canMutate(boardId: string, userId: UUID): Promise<boolean> {
     const board = await this.findById(boardId);
     if (!board) throw new EntityNotFoundError('Board', boardId);
+    return this.canMutateResolved(board, userId);
+  }
+
+  /** Resolve current edit authority for a canonical board loaded by this request. */
+  async canMutateResolved(board: Pick<Board, 'board_id'>, userId: UUID): Promise<boolean> {
     const access = await new CapabilityPolicyRepository(this.db).resolveBoardAccess(
       board.board_id,
       userId as UserID
@@ -572,11 +574,30 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
   async canView(boardId: string, userId: UUID): Promise<boolean> {
     const board = await this.findById(boardId);
     if (!board) throw new EntityNotFoundError('Board', boardId);
+    return this.canViewResolved(board, userId);
+  }
+
+  /** Resolve current view authority for a canonical board loaded by this request. */
+  async canViewResolved(board: Pick<Board, 'board_id'>, userId: UUID): Promise<boolean> {
     const access = await new CapabilityPolicyRepository(this.db).resolveBoardAccess(
       board.board_id,
       userId as UserID
     );
     return access.capabilities.includes('board.view');
+  }
+
+  /**
+   * Resolve a user's effective capability-policy access to a board.
+   *
+   * Mirrors `BranchRepository.resolveUserAccess` — the central app-layer
+   * resolver for point checks. Callers that need the full effective-access
+   * payload (not just a single boolean like `canMutate`/`canView`) use this.
+   */
+  async resolveUserAccess(board: Board, userId: UUID): Promise<EffectiveCapabilityPolicyAccess> {
+    return new CapabilityPolicyRepository(this.db).resolveBoardAccess(
+      board.board_id,
+      userId as UserID
+    );
   }
 
   /** Resolve a board only when the caller can currently view it. */
@@ -636,12 +657,9 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
         throw new RepositoryError('Primary ownership is immutable');
       }
       if (
-        [
-          'access_mode',
-          'default_others_can',
-          'default_others_fs_access',
-          'default_dangerously_allow_session_sharing',
-        ].some((field) => Object.hasOwn(updates, field))
+        ['access_mode', 'default_others_can', 'default_others_fs_access'].some((field) =>
+          Object.hasOwn(updates, field)
+        )
       ) {
         throw new RepositoryError(
           'Board permissions must be changed through the board permission policy service'
@@ -1165,13 +1183,12 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
       background_color: board.background_color,
       custom_css: board.custom_css,
       // Portable exports preserve only fallback/template behavior. Named
-      // users, groups, primary ownership, and home-sharing rules are
+      // users, groups, and primary ownership are
       // intentionally tenant-local security state and never leave with a
       // board template.
       access_mode: permissions.board_access.sharing_mode,
       default_others_can: defaultOthersCan,
       default_others_fs_access: templateOthers.fs_access,
-      default_dangerously_allow_session_sharing: false,
       objects: board.objects,
       custom_context: board.custom_context,
     };

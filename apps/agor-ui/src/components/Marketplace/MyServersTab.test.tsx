@@ -1,6 +1,6 @@
 import type { MCPMarketplaceOverview } from '@agor/core/types';
 import type { AgorClient } from '@agor-live/client';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { message } from 'antd';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MyServersTab } from './MyServersTab';
@@ -246,6 +246,23 @@ describe('Marketplace server actions', () => {
     expect(demotedRemove).toBeDisabled();
     await waitFor(() => expect(demotedRemove).not.toHaveClass('ant-popover-open'), {
       timeout: 5_000,
+    });
+
+    // Losing the popover's open class is not the end of its work: rc-motion
+    // runs an exit transition afterwards, and React 19 flushes the renders it
+    // schedules from a macrotask (`performWorkUntilDeadline`, via
+    // `setImmediate`). Returning here lets the file finish with that callback
+    // still queued, and it then runs against a torn-down jsdom — surfacing as
+    // an uncaught `ReferenceError: window is not defined` that fails the whole
+    // shard even though all 997 assertions passed. Unmount so nothing further
+    // is scheduled, then yield two macrotasks: the first lets the pending
+    // `setImmediate` run (it is queued for the current loop iteration's check
+    // phase, after timers), the second confirms the queue is drained — all
+    // while the environment still exists.
+    view.unmount();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
   });
 });
