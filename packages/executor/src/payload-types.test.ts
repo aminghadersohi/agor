@@ -722,6 +722,7 @@ describe('getSupportedCommands', () => {
     expect(commands).toContain('zellij.tab');
     expect(commands).toContain('agentic-tool.invoke');
     expect(commands).toContain('codex.auth-file');
-    expect(commands.length).toBe(30);
+    expect(commands).toContain('claude.auth-file');
+    expect(commands.length).toBe(31);
   });
 });

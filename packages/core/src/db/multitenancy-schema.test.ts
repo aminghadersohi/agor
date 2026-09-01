@@ -62,6 +62,9 @@ function migrationTenantTables(): string[] {
   const codexDeviceAuthMigration = readRepoFile(
     'packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'
   );
+  const claudeOauthMigration = readRepoFile(
+    'packages/core/drizzle/postgres/9012_claude_oauth_attempts.sql'
+  );
   const capabilityPoliciesMigration = readRepoFile(
     'packages/core/drizzle/postgres/9004_board_branch_capability_policies.sql'
   );
@@ -89,6 +92,7 @@ function migrationTenantTables(): string[] {
         ...profileImageMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...externalIdentitiesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...codexDeviceAuthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...claudeOauthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...capabilityPoliciesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...sessionAttentionMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...zoneWorkflowMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
@@ -116,6 +120,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/9004_board_branch_capability_policies.sql'),
     readRepoFile('packages/core/drizzle/postgres/9009_session_attention_states.sql'),
     readRepoFile('packages/core/drizzle/postgres/9011_zone_workflow_transitions.sql'),
+    readRepoFile('packages/core/drizzle/postgres/9012_claude_oauth_attempts.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
   return [

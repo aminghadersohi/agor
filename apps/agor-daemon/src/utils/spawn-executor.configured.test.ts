@@ -5,13 +5,23 @@ import path from 'node:path';
 import { Writable } from 'node:stream';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { containMock, sandboxWrapMock, spawnMock, trackMock, untrackMock } = vi.hoisted(() => ({
+const {
+  buildSandboxWrapMock,
+  containMock,
+  ensureAuthorityMock,
+  spawnMock,
+  trackMock,
+  untrackMock,
+} = vi.hoisted(() => ({
+  buildSandboxWrapMock: vi.fn(() => null),
   containMock: vi.fn(),
-  sandboxWrapMock: vi.fn(),
+  ensureAuthorityMock: vi.fn(),
   spawnMock: vi.fn(),
   trackMock: vi.fn(),
   untrackMock: vi.fn(),
 }));
+// The concurrent main handoff regression still uses the pre-rename identifier.
+const sandboxWrapMock = buildSandboxWrapMock;
 
 const OAUTH_DATA_HOME = '/private/synthetic-home';
 const LOCAL_RESPONSE_OPTIONS = { localResponseOriginUrl: 'http://localhost:3030' } as const;
@@ -32,6 +42,18 @@ vi.mock('../executor-tracking.js', () => ({
   untrackExecutorProcess: untrackMock,
 }));
 
+vi.mock('@agor/core/codex/credential-file', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agor/core/codex/credential-file')>();
+  return {
+    ...actual,
+    ensureCredentialAuthorityLayoutSync: ensureAuthorityMock,
+  };
+});
+
+vi.mock('./sandbox-wrap.js', () => ({
+  buildSandboxWrap: buildSandboxWrapMock,
+}));
+
 vi.mock('@agor/core/unix', () => ({
   isValidExecutionHomeKey: (username: string) => /^[a-z_][a-z0-9_-]{0,31}$/.test(username),
   probeBwrapPidNamespace: () => true,
@@ -44,11 +66,6 @@ vi.mock('./build-resolved-config-slice.js', () => ({
     resolvedConfig: {},
   }),
 }));
-
-vi.mock('./sandbox-wrap.js', async () => {
-  const actual = await vi.importActual<typeof import('./sandbox-wrap.js')>('./sandbox-wrap.js');
-  return { ...actual, buildSandboxWrap: sandboxWrapMock };
-});
 
 function createMockProcess() {
   const proc = new EventEmitter() as EventEmitter & {
@@ -164,6 +181,7 @@ describe('configured executor spawning', () => {
     sandboxWrapMock.mockReturnValue(null);
     containMock.mockReset();
     containMock.mockResolvedValue({ status: 'verified_absent' });
+    ensureAuthorityMock.mockClear();
     trackMock.mockReset();
     untrackMock.mockReset();
     vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -180,6 +198,50 @@ describe('configured executor spawning', () => {
       LOCAL_RESPONSE_OPTIONS
     );
   });
+
+  it.runIf(process.platform === 'linux')(
+    'prepares the real Claude authority layout synchronously before a per-user sandbox spawn',
+    async () => {
+      const installed = installMockExecutor('agor-executor-authority-layout-');
+      const root = mkdtempSync(path.join(tmpdir(), 'agor-sandbox-runtime-'));
+      const ownerStore = path.join(root, 'owner');
+      const branch = path.join(root, 'branch');
+      const { configureExecutor, spawnExecutor } = await import('./spawn-executor');
+      configureExecutor(
+        { sandbox: { enabled: true, home_mode: 'per_user' } },
+        {
+          ...LOCAL_RESPONSE_OPTIONS,
+          sandboxRuntimePaths: {
+            homeDir: path.join(root, 'home'),
+            dataHome: path.join(root, 'data'),
+            protectedDataRoots: [path.join(root, 'data')],
+            worktreesRoot: path.join(root, 'worktrees'),
+            agenticToolsPath: path.join(root, 'agentic-tools'),
+            agorConfigPath: path.join(root, 'config.yaml'),
+          },
+        }
+      );
+
+      spawnExecutor({
+        command: 'prompt',
+        params: { cwd: branch, sandboxHomeStore: ownerStore },
+      });
+
+      expect(spawnMock).toHaveBeenCalledOnce();
+      expect(ensureAuthorityMock).toHaveBeenCalledWith(
+        path.join(ownerStore, '.claude', '.credentials.json')
+      );
+      expect(ensureAuthorityMock.mock.invocationCallOrder[0]).toBeLessThan(
+        buildSandboxWrapMock.mock.invocationCallOrder[0] as number
+      );
+      expect(buildSandboxWrapMock).toHaveBeenCalledWith(
+        expect.objectContaining({ ownerHomeStore: ownerStore, branchPath: branch })
+      );
+
+      installed.restore();
+      rmSync(root, { recursive: true, force: true });
+    }
+  );
 
   it('uses execution.executor_command_template configured at startup', async () => {
     const proc = createMockProcess();
@@ -628,7 +690,7 @@ describe('configured executor spawning', () => {
   it('sandboxes short-lived branch commands with normalized filesystem access', async () => {
     const proc = createMockProcess();
     spawnMock.mockReturnValue(proc);
-    sandboxWrapMock.mockReturnValue({
+    buildSandboxWrapMock.mockReturnValue({
       cmd: 'bwrap',
       args: ['--synthetic-wrap', '--', '/operator/agor-executor', '--stdin'],
       extraEnv: { AGOR_SANDBOXED: '1' },
@@ -661,7 +723,7 @@ describe('configured executor spawning', () => {
     proc.emit('exit', 0);
 
     await expect(promise).resolves.toEqual({ success: true, data: { files: [] } });
-    expect(sandboxWrapMock).toHaveBeenCalledWith(
+    expect(buildSandboxWrapMock).toHaveBeenCalledWith(
       expect.objectContaining({
         branchPath: '/home/agor/.agor/worktrees/tenant-a/repo/feature',
         branchAccess: 'read',
@@ -787,7 +849,7 @@ describe('configured executor spawning', () => {
   it('maps a pinned credential source onto child fd 3 without serializing it', async () => {
     const proc = createMockProcess();
     spawnMock.mockReturnValue(proc);
-    sandboxWrapMock.mockReturnValue({
+    buildSandboxWrapMock.mockReturnValue({
       cmd: 'bwrap',
       args: ['--bind-fd', '3', '/branch-home/codex/auth.json', '--', 'executor'],
       extraEnv: {},
@@ -821,7 +883,7 @@ describe('configured executor spawning', () => {
       }
     );
 
-    expect(sandboxWrapMock).toHaveBeenCalledWith(
+    expect(buildSandboxWrapMock).toHaveBeenCalledWith(
       expect.objectContaining({
         branchSdkCredentialBinds: [{ fd: 3, destination: '/branch-home/codex/auth.json' }],
       })
