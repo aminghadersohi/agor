@@ -48,6 +48,8 @@ export interface JustifiedZoneOptions {
    * smaller visual groups. The final row contains the remainder.
    */
   fixedItemsPerRow?: number;
+  /** Keep explicit tracks at their measured compact width instead of filling targetWidth. */
+  stretchFixedTracks?: boolean;
   /**
    * Stretch the final row even when it holds fewer zones than fit.
    * Off by default: a photo grid leaves a short last row at its natural size
@@ -377,7 +379,9 @@ export function layoutJustifiedZones(
       : fixedColumnWidths.reduce((sum, width) => sum + width, 0) +
         gap * Math.max(0, fixedColumnWidths.length - 1);
   const fixedTrackWidths =
-    fixedColumnWidths !== undefined && fixedNaturalWidth <= targetWidth
+    fixedColumnWidths !== undefined &&
+    fixedNaturalWidth <= targetWidth &&
+    options.stretchFixedTracks !== false
       ? justify(fixedColumnWidths, targetWidth - fixedNaturalWidth, gridSize)
       : fixedColumnWidths;
   let y = startY;

@@ -223,7 +223,10 @@ describe('planBoardZoneArrangement', () => {
       width: 400 + (index % 3) * 80,
       height: 260 + (index % 2) * 80,
     }));
-    const plan = planBoardZoneArrangement(source, { fixedItemsPerRow: 3 });
+    const plan = planBoardZoneArrangement(source, {
+      fixedItemsPerRow: 3,
+      compactFixedGrid: true,
+    });
 
     expect(plan.layout.rows).toBe(3);
     expect(plan.zones.map(({ row, column }) => ({ row, column }))).toEqual(
@@ -242,6 +245,78 @@ describe('planBoardZoneArrangement', () => {
     expect(plan.zones[2]!.position.x - plan.zones[1]!.position.x).toBe(
       plan.zones[1]!.position.x - plan.zones[0]!.position.x
     );
+    expect(plan.zones[1]!.position.x - (plan.zones[0]!.position.x + plan.zones[0]!.width)).toBe(40);
+
+    const twoColumns = planBoardZoneArrangement(source.slice(0, 2), {
+      fixedItemsPerRow: 2,
+      compactFixedGrid: true,
+    });
+    expect(
+      twoColumns.zones[1]!.position.x -
+        (twoColumns.zones[0]!.position.x + twoColumns.zones[0]!.width)
+    ).toBe(40);
+  });
+
+  it('keeps explicit selection rows rigid while minimally clearing fixed board obstacles', () => {
+    const source = [
+      { ...zone('one', 0, 0, []), width: 400, height: 260 },
+      { ...zone('two', 1200, 0, []), width: 520, height: 340 },
+      { ...zone('three', 0, 900, []), width: 440, height: 280 },
+    ];
+    const base = planBoardZoneArrangement(source, {
+      fixedItemsPerRow: 2,
+      packZoneContents: false,
+      anchorToSelectionBounds: true,
+    });
+    const blockedTarget = base.zones.find(({ id }) => id === 'two')!;
+    const obstacle = {
+      id: 'locked-note',
+      x: blockedTarget.position.x,
+      y: blockedTarget.position.y,
+      width: 300,
+      height: 180,
+    };
+    const options = {
+      fixedItemsPerRow: 2,
+      packZoneContents: false,
+      anchorToSelectionBounds: true,
+      fixedObstacles: [obstacle],
+    };
+    const arranged = planBoardZoneArrangement(source, options);
+    const firstDelta = {
+      x: arranged.zones[0]!.position.x - base.zones[0]!.position.x,
+      y: arranged.zones[0]!.position.y - base.zones[0]!.position.y,
+    };
+
+    expect(firstDelta).not.toEqual({ x: 0, y: 0 });
+    expect(
+      arranged.zones.map((entry, index) => ({
+        x: entry.position.x - base.zones[index]!.position.x,
+        y: entry.position.y - base.zones[index]!.position.y,
+      }))
+    ).toEqual(Array(arranged.zones.length).fill(firstDelta));
+    expect(arranged.zones.map(({ row, column }) => ({ row, column }))).toEqual([
+      { row: 0, column: 0 },
+      { row: 0, column: 1 },
+      { row: 1, column: 0 },
+    ]);
+    for (const entry of arranged.zones) {
+      expect(
+        entry.position.x < obstacle.x + obstacle.width + 40 &&
+          entry.position.x + entry.width + 40 > obstacle.x &&
+          entry.position.y < obstacle.y + obstacle.height + 40 &&
+          entry.position.y + entry.height + 40 > obstacle.y
+      ).toBe(false);
+    }
+
+    const repeated = planBoardZoneArrangement(
+      source.map((entry) => {
+        const next = arranged.zones.find(({ id }) => id === entry.id)!;
+        return { ...entry, x: next.position.x, y: next.position.y };
+      }),
+      options
+    );
+    expect(repeated).toEqual(arranged);
   });
 
   it('matches final zone heights only when the explicit grid requests it', () => {

@@ -28,6 +28,7 @@ describe('selectionBoardZoneArrangementOptions', () => {
       })
     ).toEqual({
       fixedItemsPerRow: 2,
+      compactFixedGrid: true,
       justifyLastRow: false,
       matchRowHeights: false,
     });
@@ -41,6 +42,7 @@ describe('selectionBoardZoneArrangementOptions', () => {
       })
     ).toEqual({
       fixedItemsPerRow: 4,
+      compactFixedGrid: true,
       justifyLastRow: true,
       matchRowHeights: true,
     });

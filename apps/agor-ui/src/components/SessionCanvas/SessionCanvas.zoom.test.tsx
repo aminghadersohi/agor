@@ -860,4 +860,134 @@ describe('SessionCanvas zoom shortcuts', () => {
       })
     );
   });
+
+  it('atomically grids a heterogeneous selection around an unselected fixed obstacle', async () => {
+    nodesStateOverride = [
+      {
+        id: 'note-a',
+        type: 'markdown',
+        position: { x: 0, y: 0 },
+        positionAbsolute: { x: 0, y: 0 },
+        width: 200,
+        height: 100,
+        selected: true,
+        data: {},
+      },
+      {
+        id: 'app-b',
+        type: 'appNode',
+        position: { x: 800, y: 0 },
+        positionAbsolute: { x: 800, y: 0 },
+        width: 300,
+        height: 160,
+        selected: true,
+        data: {},
+      },
+      {
+        id: 'artifact-c',
+        type: 'artifactNode',
+        position: { x: 0, y: 500 },
+        positionAbsolute: { x: 0, y: 500 },
+        width: 240,
+        height: 200,
+        selected: true,
+        data: {},
+      },
+      {
+        id: 'fixed-note',
+        type: 'markdown',
+        position: { x: 380, y: 260 },
+        width: 300,
+        height: 160,
+        data: { locked: true },
+      },
+    ];
+    const patch = vi.fn().mockResolvedValue({});
+    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    let board = {
+      board_id: 'board-1',
+      objects: {
+        'note-a': { type: 'markdown', x: 0, y: 0, width: 200, content: 'A' },
+        'app-b': {
+          type: 'app',
+          x: 800,
+          y: 0,
+          width: 300,
+          height: 160,
+          title: 'B',
+          files: {},
+        },
+        'artifact-c': {
+          type: 'artifact',
+          x: 0,
+          y: 500,
+          width: 240,
+          height: 200,
+          artifact_id: 'artifact-1',
+        },
+        'fixed-note': {
+          type: 'markdown',
+          x: 380,
+          y: 260,
+          width: 300,
+          content: 'Fixed',
+        },
+      },
+    } as unknown as Board;
+    const view = render(
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      </AntApp>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(await screen.findByText('Grid', { exact: true }));
+    fireEvent.change(screen.getByLabelText('Number of columns'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
+
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    const write = patch.mock.calls[0]?.[1];
+    expect(write).toMatchObject({ _action: 'applyLayout', placements: {} });
+    expect(Object.keys(write.objects)).toEqual(['note-a', 'app-b', 'artifact-c']);
+    expect(write.objects['fixed-note']).toBeUndefined();
+    expect(write.objects['note-a']).toMatchObject({ x: 140, y: 60 });
+    expect(write.objects['app-b']).toMatchObject({ x: 380, y: 60 });
+    expect(write.objects['artifact-c']).toMatchObject({ x: 720, y: 60 });
+
+    board = { ...board, objects: { ...board.objects, ...write.objects } };
+    nodesStateOverride = nodesStateOverride?.map((node) => {
+      const object = write.objects[node.id];
+      return object ? { ...node, position: { x: object.x, y: object.y } } : node;
+    });
+    view.rerender(
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      </AntApp>
+    );
+    patch.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
+    await act(async () => Promise.resolve());
+    expect(patch).not.toHaveBeenCalled();
+  });
 });

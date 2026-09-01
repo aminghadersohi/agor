@@ -42,6 +42,7 @@ export function selectionBoardZoneArrangementOptions(
   const tracks = selectionGridTracks(selectionCount, settings.trackAxis, settings.trackCount);
   return {
     fixedItemsPerRow: tracks.columns,
+    compactFixedGrid: true,
     justifyLastRow: settings.rowDistribution === 'justify',
     matchRowHeights: settings.matchRowHeights,
   };

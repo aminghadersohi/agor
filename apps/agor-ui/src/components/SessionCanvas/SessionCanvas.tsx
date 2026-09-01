@@ -2,9 +2,11 @@ import {
   BOARD_GRID_SIZE,
   BOARD_SNAP_GRID,
   ceilBoardGridSize,
+  LayoutObstacleError,
   layoutAlignedRectangles,
   layoutCompactRectangles,
   layoutSelectionGrid,
+  placeLayoutAroundFixedObstacles,
   snapBoardGridPoint,
   snapBoardGridValue,
 } from '@agor/core/layout/rectangle-packing';
@@ -126,7 +128,12 @@ import {
   type SelectionLayoutSettings,
   selectionBoardZoneArrangementOptions,
 } from './canvas/SelectionLayoutPopover';
+import {
+  type SelectionLayoutContinuity,
+  stableSelectionLayoutOrder,
+} from './canvas/selectionLayoutContinuity';
 import { useBoardObjects } from './canvas/useBoardObjects';
+import { getMeasuredLayoutNodeSize } from './canvas/utils/boardNodeGeometry';
 import { findIntersectingObjects, findZoneAtPosition } from './canvas/utils/collisionDetection';
 import {
   getBranchParentInfo,
@@ -136,6 +143,7 @@ import {
 import {
   absoluteToRelative,
   calculateStoragePosition,
+  getCurrentNodeAbsolutePosition,
   getNodeAbsolutePosition,
   type ParentInfo,
   relativeToAbsolute,
@@ -154,6 +162,7 @@ import {
   getMarqueeSelection,
   getOnlySelectedZoneIds,
   getSelectedLayoutNodes,
+  isLayoutNodeType,
   removeSelectedDescendants,
   suppressIndividualZoneToolbarsForMultiSelect,
 } from './canvas/utils/marqueeSelection';
@@ -795,6 +804,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Track positions we've explicitly set (to avoid being overwritten by other clients)
     const localPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
     const localZoneGeometryRef = useRef<Record<string, ZoneGeometry>>({});
+    const selectionLayoutOrderRef = useRef<SelectionLayoutContinuity | undefined>(undefined);
+    const selectionLayoutBoardIdRef = useRef(board?.board_id);
+    if (selectionLayoutBoardIdRef.current !== board?.board_id) {
+      selectionLayoutBoardIdRef.current = board?.board_id;
+      selectionLayoutOrderRef.current = undefined;
+    }
     // Track objects we've deleted locally (to prevent them from reappearing during WebSocket updates)
     const deletedObjectsRef = useRef<Set<string>>(new Set());
 
@@ -2757,26 +2772,43 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           });
           return;
         }
-        const size = (node: Node) =>
-          ceilBoardGridSize({
-            width: Number(node.width ?? node.style?.width ?? 240),
-            height: Number(node.height ?? node.style?.height ?? 120),
+        const persistedSize = (node: Node) => {
+          const object = board.objects?.[node.id];
+          const placement =
+            boardObjectByBranch.get(node.id) ?? boardObjectByCard.get(node.id.replace('card-', ''));
+          const objectHeight = object && 'height' in object ? object.height : undefined;
+          return ceilBoardGridSize({
+            width: Number(
+              object?.width ?? placement?.size?.width ?? node.style?.width ?? node.width ?? 240
+            ),
+            height: Number(
+              objectHeight ?? placement?.size?.height ?? node.style?.height ?? node.height ?? 120
+            ),
           });
+        };
+        const size = (node: Node) =>
+          ceilBoardGridSize(getMeasuredLayoutNodeSize(node, persistedSize(node)));
         const rects = selectedLayoutNodes.map((node) => {
-          const position = getNodeAbsolutePosition(node, nodes);
-          return { node, position, ...size(node) };
+          const position = getCurrentNodeAbsolutePosition(node, nodes);
+          return { node, position, ...size(node), persistedSize: persistedSize(node) };
         });
         const left = snapBoardGridValue(Math.min(...rects.map((item) => item.position.x)));
         const right = Math.max(...rects.map((item) => item.position.x + item.width));
         const top = snapBoardGridValue(Math.min(...rects.map((item) => item.position.y)));
-        const targetWidth = rects[0]?.width ?? 240;
-        const targetHeight = rects[0]?.height ?? 120;
+        const targetWidth = rects[0]?.persistedSize.width ?? 240;
+        const targetHeight = rects[0]?.persistedSize.height ?? 120;
+        const order = stableSelectionLayoutOrder(
+          rects.map(({ node, position }) => ({ id: node.id, position })),
+          selectionLayoutOrderRef.current
+        );
+        const stableOrder = order.ids;
+        const orderById = new Map(stableOrder.map((id, index) => [id, index]));
         const layoutItems = rects.map(({ node, position, width, height }) => ({
           id: node.id,
           width,
           height,
-          sourceX: position.x,
-          sourceY: position.y,
+          sourceX: orderById.get(node.id) ?? 0,
+          sourceY: 0,
         }));
         const autoLayout =
           action !== 'arrange'
@@ -2805,32 +2837,91 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 gridSize: BOARD_GRID_SIZE,
               })
             : [];
+        const selectedIds = new Set(selectedLayoutNodes.map((node) => node.id));
+        const nodeById = new Map(nodes.map((node) => [node.id, node]));
+        const hasSelectedAncestor = (node: Node): boolean => {
+          let parentId = node.parentId;
+          const visited = new Set<string>();
+          while (parentId && !visited.has(parentId)) {
+            if (selectedIds.has(parentId)) return true;
+            visited.add(parentId);
+            parentId = nodeById.get(parentId)?.parentId;
+          }
+          return false;
+        };
+        const fixedObstacles = nodes.flatMap((node) => {
+          if (
+            node.hidden ||
+            selectedIds.has(node.id) ||
+            hasSelectedAncestor(node) ||
+            !isLayoutNodeType(node)
+          )
+            return [];
+          const obstacleSize = size(node);
+          if (obstacleSize.width <= 0 || obstacleSize.height <= 0) return [];
+          return [
+            {
+              id: node.id,
+              ...getCurrentNodeAbsolutePosition(node, nodes),
+              ...obstacleSize,
+            },
+          ];
+        });
+        let obstacleAwareLayout = autoLayout;
+        if (autoLayout) {
+          const minLayoutX = Math.min(...autoLayout.placements.map((placement) => placement.x));
+          const minLayoutY = Math.min(...autoLayout.placements.map((placement) => placement.y));
+          const maxLayoutX = Math.max(
+            ...autoLayout.placements.map((placement) => placement.x + placement.width)
+          );
+          const maxLayoutY = Math.max(
+            ...autoLayout.placements.map((placement) => placement.y + placement.height)
+          );
+          try {
+            const positioned = placeLayoutAroundFixedObstacles(autoLayout.placements, {
+              desiredOrigin: {
+                x: (left + right - (maxLayoutX - minLayoutX)) / 2,
+                y:
+                  (top +
+                    Math.max(...rects.map((item) => item.position.y + item.height)) -
+                    (maxLayoutY - minLayoutY)) /
+                  2,
+              },
+              obstacles: fixedObstacles,
+              gapX: BOARD_GRID_SIZE * 2,
+              gapY: BOARD_GRID_SIZE * 2,
+              gridSize: BOARD_GRID_SIZE,
+            });
+            obstacleAwareLayout = { ...autoLayout, placements: positioned.placements };
+          } catch (error) {
+            if (error instanceof LayoutObstacleError) {
+              showError('The selected layout cannot fit without overlapping fixed board objects.');
+              return;
+            }
+            throw error;
+          }
+        }
         const autoPlacementById = new Map(
-          autoLayout?.placements.map((placement) => [placement.id, placement]) ?? []
+          obstacleAwareLayout?.placements.map((placement) => [placement.id, placement]) ?? []
         );
         const alignedPlacementById = new Map(
           alignedPlacements.map((placement) => [placement.id, placement])
         );
-        const updates = rects.map(({ node, position, width, height }) => {
+        let updates = rects.map(({ node, position, width, height, persistedSize }) => {
           const autoPlacement = autoPlacementById.get(node.id);
           const alignedPlacement = alignedPlacementById.get(node.id);
-          const nextWidth =
-            action === 'width'
-              ? targetWidth
-              : action === 'arrange' && autoPlacement
-                ? autoPlacement.width
-                : width;
+          const nextWidth = action === 'width' ? targetWidth : persistedSize.width;
           const nextHeight =
             action === 'height'
               ? targetHeight
-              : action === 'arrange' && autoPlacement
-                ? autoPlacement.height
-                : height;
+              : action === 'arrange' && autoPlacement && layoutSettings?.matchRowHeights
+                ? persistedSize.height + (autoPlacement.height - height)
+                : persistedSize.height;
           let x = position.x;
           let y = position.y;
           if (autoPlacement) {
-            x = left + autoPlacement.x;
-            y = top + autoPlacement.y;
+            x = autoPlacement.x;
+            y = autoPlacement.y;
           }
           if (alignedPlacement) {
             x = alignedPlacement.x;
@@ -2843,8 +2934,52 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             y: snapped.y,
             width: nextWidth,
             height: nextHeight,
+            layoutWidth: autoPlacement?.width ?? nextWidth,
+            layoutHeight: autoPlacement?.height ?? nextHeight,
           };
         });
+        selectionLayoutOrderRef.current = {
+          ...order,
+          after: Object.fromEntries(updates.map(({ node, x, y }) => [node.id, { x, y }])),
+        };
+        if (action !== 'arrange') {
+          const guardPlacements = updates.map((update, index) => ({
+            id: update.node.id,
+            x: update.x,
+            y: update.y,
+            width: update.layoutWidth,
+            height: update.layoutHeight,
+            row: 0,
+            column: index,
+            stackIndex: index,
+            deckDepth: 0,
+          }));
+          try {
+            const guarded = placeLayoutAroundFixedObstacles(guardPlacements, {
+              desiredOrigin: {
+                x: Math.min(...guardPlacements.map((placement) => placement.x)),
+                y: Math.min(...guardPlacements.map((placement) => placement.y)),
+              },
+              obstacles: fixedObstacles,
+              gapX: BOARD_GRID_SIZE * 2,
+              gapY: BOARD_GRID_SIZE * 2,
+              gridSize: BOARD_GRID_SIZE,
+            });
+            const guardedById = new Map(
+              guarded.placements.map((placement) => [placement.id, placement])
+            );
+            updates = updates.map((update) => {
+              const placement = guardedById.get(update.node.id);
+              return placement ? { ...update, x: placement.x, y: placement.y } : update;
+            });
+          } catch (error) {
+            if (error instanceof LayoutObstacleError) {
+              showError('The selected layout cannot fit without overlapping fixed board objects.');
+              return;
+            }
+            throw error;
+          }
+        }
 
         const updateById = new Map(updates.map((update) => [update.node.id, update]));
         const arrangedNodes = nodes.flatMap((node) => {
@@ -2856,14 +2991,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           const position = parent
             ? absoluteToRelative(
                 { x: update.x, y: update.y },
-                getNodeAbsolutePosition(parent, nodes)
+                getCurrentNodeAbsolutePosition(parent, nodes)
               )
             : { x: update.x, y: update.y };
           return [
             {
               ...node,
               position,
-              ...(action === 'arrange' || action === 'width' || action === 'height'
+              ...(action === 'width' || action === 'height' || layoutSettings?.matchRowHeights
                 ? {
                     width: update.width,
                     height: update.height,
@@ -2889,19 +3024,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         );
         handleArrangeNodes(arrangedNodes, 0);
 
-        const canvasObjectUpdates: Record<
+        const canvasObjectUpdates: NonNullable<Board['objects']> = {};
+        const entityUpdates: Record<
           string,
-          { x: number; y: number; width?: number; height?: number }
+          { position: { x: number; y: number }; size: { width: number; height: number } }
         > = {};
-        const entityUpdates: Array<{
-          placement: BoardEntityObject;
-          position: { x: number; y: number };
-          width: number;
-          height: number;
-        }> = [];
         for (const update of updates) {
           if (update.node.type === 'zone') {
-            const previous = getNodeAbsolutePosition(update.node, nodes);
+            const previous = getCurrentNodeAbsolutePosition(update.node, nodes);
             translateTrackedChildPositions(
               nodes,
               update.node.id,
@@ -2919,13 +3049,17 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           localPositionsRef.current[update.node.id] = { x: update.x, y: update.y };
           const objectData = board.objects?.[update.node.id];
           if (objectData) {
-            canvasObjectUpdates[update.node.id] = {
+            const nextObject = {
+              ...objectData,
               x: update.x,
               y: update.y,
-              ...(action === 'arrange' || action === 'width' || action === 'height'
+              ...(action === 'width' || action === 'height' || layoutSettings?.matchRowHeights
                 ? { width: update.width, height: update.height }
                 : {}),
             };
+            if (JSON.stringify(nextObject) !== JSON.stringify(objectData)) {
+              canvasObjectUpdates[update.node.id] = nextObject as BoardObject;
+            }
             continue;
           }
           const branchObject = boardObjectByBranch.get(update.node.id);
@@ -2938,28 +3072,28 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             const position = parent
               ? absoluteToRelative(
                   { x: update.x, y: update.y },
-                  getNodeAbsolutePosition(parent, nodes)
+                  getCurrentNodeAbsolutePosition(parent, nodes)
                 )
               : { x: update.x, y: update.y };
-            entityUpdates.push({
-              placement,
+            const nextPlacement = {
               position,
-              width: update.width,
-              height: update.height,
-            });
+              size: { width: update.width, height: update.height },
+            };
+            if (
+              JSON.stringify(nextPlacement.position) !== JSON.stringify(placement.position) ||
+              JSON.stringify(nextPlacement.size) !== JSON.stringify(placement.size)
+            ) {
+              entityUpdates[placement.object_id] = nextPlacement;
+            }
           }
         }
-        await batchUpdateObjectPositions(canvasObjectUpdates);
-        await Promise.all(
-          entityUpdates.map(({ placement, position, width, height }) =>
-            client.service('board-objects').patch(placement.object_id, {
-              position,
-              ...(action === 'arrange' || action === 'width' || action === 'height'
-                ? { size: { width, height } }
-                : {}),
-            })
-          )
-        );
+        if (Object.keys(canvasObjectUpdates).length > 0 || Object.keys(entityUpdates).length > 0) {
+          await client.service('boards').patch(board.board_id, {
+            _action: 'applyLayout',
+            objects: canvasObjectUpdates,
+            placements: entityUpdates,
+          } as unknown as Partial<Board>);
+        }
         requestPostLayoutViewport(layoutIntent);
       },
       [
@@ -2967,13 +3101,13 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         board,
         boardObjectByBranch,
         boardObjectByCard,
-        batchUpdateObjectPositions,
         client,
         handleArrangeNodes,
         nodes,
         requestPostLayoutViewport,
         selectedLayoutNodes,
         setNodes,
+        showError,
       ]
     );
 

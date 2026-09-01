@@ -10,6 +10,7 @@ import {
   ceilBoardGridValue,
   layoutCompactRectangles,
   layoutRectangles,
+  placeLayoutAroundFixedObstacles,
   type RectanglePlacement,
 } from './rectangle-packing.js';
 import {
@@ -72,11 +73,17 @@ export interface BoardZoneArrangementOptions {
   maxPerRow?: number;
   /** Exact outer grid columns for an explicit selection layout. */
   fixedItemsPerRow?: number;
+  /** Preserve measured compact tracks for an explicit selection grid. */
+  compactFixedGrid?: boolean;
   justifyLastRow?: boolean;
   /** Give every zone in an outer row the row's tallest final frame. */
   matchRowHeights?: boolean;
   /** Free top-level board nodes packed beside the content-sized zone frames. */
   looseItems?: readonly BoardZoneArrangementLooseItem[];
+  /** Unselected visible peers that selection-scoped layout may not move or overlap. */
+  fixedObstacles?: readonly BoardZoneArrangementLooseItem[];
+  /** Center the compact result on the source selection rather than a board-wide origin. */
+  anchorToSelectionBounds?: boolean;
   /**
    * Re-pack each eligible zone before arranging the resulting outer frames.
    * Defaults to true for the explicit Arrange board/MCP operation. Set false
@@ -243,6 +250,7 @@ export function planBoardZoneArrangement(
       startY: options.startY ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.startY,
       maxPerRow: options.maxPerRow,
       fixedItemsPerRow: options.fixedItemsPerRow,
+      stretchFixedTracks: options.compactFixedGrid !== true,
       justifyLastRow: options.justifyLastRow ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.justifyLastRow,
       gridSize: BOARD_GRID_SIZE,
     }
@@ -276,6 +284,52 @@ export function planBoardZoneArrangement(
       ] as const;
     })
   );
+  const targetFrames = layout.placements.map((placement) => {
+    const frame = finalFrameById.get(placement.id);
+    if (!frame) throw new Error(`Missing final frame for zone '${placement.id}'.`);
+    return {
+      ...placement,
+      width: frame.width,
+      height: frame.height,
+      stackIndex: placement.row * Math.max(1, options.fixedItemsPerRow ?? 1) + placement.column,
+      deckDepth: 0,
+    };
+  });
+  const positionedLayout: JustifiedZoneResult = (() => {
+    if (targetFrames.length === 0) return layout;
+    const targetMinX = Math.min(...targetFrames.map((placement) => placement.x));
+    const targetMinY = Math.min(...targetFrames.map((placement) => placement.y));
+    const targetMaxX = Math.max(...targetFrames.map((placement) => placement.x + placement.width));
+    const targetMaxY = Math.max(...targetFrames.map((placement) => placement.y + placement.height));
+    const sourceMinX = Math.min(...orderedZones.map((zone) => zone.x));
+    const sourceMinY = Math.min(...orderedZones.map((zone) => zone.y));
+    const sourceMaxX = Math.max(...orderedZones.map((zone) => zone.x + zone.width));
+    const sourceMaxY = Math.max(...orderedZones.map((zone) => zone.y + zone.height));
+    const desiredOrigin = options.anchorToSelectionBounds
+      ? {
+          x: (sourceMinX + sourceMaxX - (targetMaxX - targetMinX)) / 2,
+          y: (sourceMinY + sourceMaxY - (targetMaxY - targetMinY)) / 2,
+        }
+      : { x: targetMinX, y: targetMinY };
+    const obstacleAware = placeLayoutAroundFixedObstacles(targetFrames, {
+      desiredOrigin,
+      obstacles: options.fixedObstacles,
+      gapX: options.gap ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.gap,
+      gapY: options.gap ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.gap,
+      gridSize: BOARD_GRID_SIZE,
+    });
+    const obstaclePlacementById = new Map(
+      obstacleAware.placements.map((placement) => [placement.id, placement])
+    );
+    return {
+      ...layout,
+      placements: layout.placements.map((placement) => {
+        const positioned = obstaclePlacementById.get(placement.id);
+        if (!positioned) throw new Error(`Missing positioned zone '${placement.id}'.`);
+        return { ...placement, x: positioned.x, y: positioned.y };
+      }),
+    };
+  })();
   const orderedLooseItems = [...(options.looseItems ?? [])];
   const duplicateId = orderedLooseItems.find((item) => preparedById.has(item.id));
   if (duplicateId) {
@@ -285,7 +339,7 @@ export function planBoardZoneArrangement(
     orderedLooseItems.length > 0
       ? layoutCompactRectangles(
           [
-            ...layout.placements
+            ...positionedLayout.placements
               .map((placement) => {
                 const source = preparedById.get(placement.id)?.zone;
                 if (!source)
@@ -326,7 +380,7 @@ export function planBoardZoneArrangement(
     y: options.startY ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.startY,
   };
 
-  const zones = layout.placements.map((placement): ArrangedBoardZone => {
+  const zones = positionedLayout.placements.map((placement): ArrangedBoardZone => {
     const entry = preparedById.get(placement.id);
     if (!entry) throw new Error(`Missing arrangement input for zone '${placement.id}'.`);
     const finalFrame = finalFrameById.get(placement.id);
@@ -421,5 +475,5 @@ export function planBoardZoneArrangement(
     };
   });
 
-  return { layout, zones, looseItems, ...(boardLayout ? { boardLayout } : {}) };
+  return { layout: positionedLayout, zones, looseItems, ...(boardLayout ? { boardLayout } : {}) };
 }

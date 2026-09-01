@@ -11,6 +11,7 @@ import {
   BOARD_GRID_SIZE,
   ceilBoardGridSize,
   ceilBoardGridValue,
+  LayoutObstacleError,
   layoutCompactRectangles,
   layoutRectangles,
   snapBoardGridValue,
@@ -38,6 +39,7 @@ import {
   type PostLayoutViewportIntent,
 } from './postLayoutViewport';
 import { zonesNeedingAutoArrange } from './utils/autoArrangeGuard';
+import { getNodeAbsolutePosition } from './utils/coordinateTransforms';
 import {
   renderedZoneStackHeaderHeight,
   stackExposesHeaders,
@@ -54,6 +56,7 @@ const CALLED_OUT_ZONE_STACK_Z_INDEX = 900;
 const placementNodeId = (placement: BoardEntityObject): string | undefined =>
   placement.branch_id ?? (placement.card_id ? `card-${placement.card_id}` : undefined);
 
+import { getMeasuredLayoutNodeSize } from './utils/boardNodeGeometry';
 import type { ReactFlowNode } from './utils/reactFlowTypes';
 import {
   computeLayerChanges,
@@ -64,23 +67,10 @@ import {
 
 function renderedNodeSize(node: Node): { width: number; height: number } {
   const measured = (node as ReactFlowNode).measured;
-  const fallback = {
-    width: Number(measured?.width ?? node.width ?? node.style?.width ?? 380),
-    height: Number(measured?.height ?? node.height ?? node.style?.height ?? 120),
-  };
-
-  if (typeof document === 'undefined') return fallback;
-  const element = Array.from(
-    document.querySelectorAll<HTMLElement>('.react-flow__node[data-id]')
-  ).find((candidate) => candidate.dataset.id === node.id);
-  if (!element) return fallback;
-
-  const width = Math.max(element.offsetWidth, element.scrollWidth);
-  const height = Math.max(element.offsetHeight, element.scrollHeight);
-  return {
-    width: Number.isFinite(width) && width > 0 ? Math.ceil(width) : fallback.width,
-    height: Number.isFinite(height) && height > 0 ? Math.ceil(height) : fallback.height,
-  };
+  return getMeasuredLayoutNodeSize(node, {
+    width: Number(measured?.width ?? 380),
+    height: Number(measured?.height ?? 120),
+  });
 }
 
 /**
@@ -119,6 +109,10 @@ function isArrangeableTopLevelNode(node: Node): boolean {
   );
 }
 
+function isVisibleBoardNode(node: Node): boolean {
+  return !node.hidden && BOARD_ARRANGEABLE_NODE_TYPES.has(node.type ?? '');
+}
+
 function nodeCenterInsideZone(
   node: Node,
   zone: { x: number; y: number; width: number; height: number }
@@ -145,7 +139,8 @@ function getBoardArrangementCandidates(
   currentNodes: readonly Node[],
   requestedZoneIds?: ReadonlySet<string>
 ) {
-  const liveById = new Map(currentNodes.map((node) => [node.id, node]));
+  const currentNodeList = [...currentNodes];
+  const liveById = new Map(currentNodeList.map((node) => [node.id, node]));
   const allZones = Object.entries(currentBoard.objects ?? {}).flatMap(([zoneId, object]) => {
     if (object.type !== 'zone') return [];
     const live = liveById.get(zoneId);
@@ -202,8 +197,28 @@ function getBoardArrangementCandidates(
   const looseNodes = currentNodes.filter(
     (node) => isArrangeableTopLevelNode(node) && !zoneForCanvasNode.has(node.id)
   );
+  const selectedZoneIds = new Set(selectedZones.map(([zoneId]) => zoneId));
+  const fixedObstacles = [
+    ...allZones.flatMap(([zoneId, zone]) => {
+      const live = liveById.get(zoneId);
+      return !selectedZoneIds.has(zoneId) && live && !live.hidden
+        ? [{ id: zoneId, x: zone.x, y: zone.y, width: zone.width, height: zone.height }]
+        : [];
+    }),
+    ...currentNodes.flatMap((node) => {
+      const containingZoneId = node.parentId ?? zoneForCanvasNode.get(node.id);
+      if (!isVisibleBoardNode(node) || selectedZoneIds.has(containingZoneId ?? '')) return [];
+      return [
+        {
+          id: node.id,
+          ...getNodeAbsolutePosition(node, currentNodeList),
+          ...ceilBoardGridSize(renderedNodeSize(node)),
+        },
+      ];
+    }),
+  ];
 
-  return { selectedZones, zoneForCanvasNode, looseNodes };
+  return { selectedZones, zoneForCanvasNode, looseNodes, fixedObstacles };
 }
 
 interface UseBoardObjectsProps {
@@ -1483,17 +1498,13 @@ export const useBoardObjects = ({
               },
             ] as const
         );
-        const { zoneForCanvasNode, looseNodes } = candidates;
-        const selectionOrigin = selectedZones.reduce(
-          (origin, [, zone]) => ({ x: Math.min(origin.x, zone.x), y: Math.min(origin.y, zone.y) }),
-          { x: Number.POSITIVE_INFINITY, y: Number.POSITIVE_INFINITY }
-        );
+        const { zoneForCanvasNode, looseNodes, fixedObstacles } = candidates;
         const scopedArrangementOptions =
           layoutScope === 'selection' && selectedZones.length > 0
             ? {
                 ...arrangementOptions,
-                startX: arrangementOptions.startX ?? selectionOrigin.x,
-                startY: arrangementOptions.startY ?? selectionOrigin.y,
+                anchorToSelectionBounds: true,
+                fixedObstacles,
               }
             : arrangementOptions;
         const plan = planBoardZoneArrangement(
@@ -1807,7 +1818,11 @@ export const useBoardObjects = ({
         );
       } catch (error) {
         console.error('Failed to arrange board zones:', error);
-        showError('Failed to arrange zones');
+        showError(
+          error instanceof LayoutObstacleError
+            ? 'The selected layout cannot fit without overlapping fixed board objects.'
+            : 'Failed to arrange zones'
+        );
       } finally {
         boardArrangementInFlightRef.current = false;
         setIsBoardArrangementActive(false);

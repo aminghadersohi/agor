@@ -2639,7 +2639,7 @@ describe('arrangeBoardZones production path', () => {
     expect(showSuccess).toHaveBeenCalledWith('Zones and their contents are already arranged.');
   });
 
-  it('keeps selection-only zone layout anchored and excludes every unselected free peer', async () => {
+  it('centers selection-only zone layout and routes around every unselected fixed peer', async () => {
     const { client, boardsPatch } = makeRoutedClient();
     const onUserLayoutComplete = vi.fn();
     const board = makeBoard({
@@ -2666,6 +2666,15 @@ describe('arrangeBoardZones production path', () => {
         width: 320,
         height: 180,
         data: { objectId: 'note' },
+      },
+      {
+        id: 'other-child',
+        type: 'cardNode',
+        parentId: 'other',
+        position: { x: -820, y: 500 },
+        width: 320,
+        height: 180,
+        data: { card: { title: 'Unselected protruding child' } },
       },
       {
         id: 'free-branch',
@@ -2707,7 +2716,8 @@ describe('arrangeBoardZones production path', () => {
     const write = boardsPatch.mock.calls[0]?.[1];
     expect(Object.keys(write.objects).sort()).toEqual(['one', 'two']);
     expect(write.placements).toEqual({});
-    expect(write.objects.one).toMatchObject({ x: 900, y: 700 });
+    expect(write.objects.one).toMatchObject({ x: 760, y: 920 });
+    expect(write.objects.two).toMatchObject({ x: 1580, y: 920 });
     expect(write.objects.other).toBeUndefined();
     expect(write.objects.note).toBeUndefined();
     expect(onUserLayoutComplete).toHaveBeenCalledWith(
