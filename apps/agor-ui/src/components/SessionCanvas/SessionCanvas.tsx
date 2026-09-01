@@ -2753,6 +2753,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           await arrangeBoardZones(selectedZoneIds, {
             ...selectionBoardZoneArrangementOptions(selectedZoneIds.length, layoutSettings),
             userInitiated: true,
+            layoutScope: 'selection',
           });
           return;
         }

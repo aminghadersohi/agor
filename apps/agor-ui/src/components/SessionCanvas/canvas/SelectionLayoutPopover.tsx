@@ -1,7 +1,7 @@
 import type { BoardZoneArrangementOptions } from '@agor/core/layout/board-zone-arrangement';
 import { SettingOutlined } from '@ant-design/icons';
 import { Button, InputNumber, Popover, Segmented, Select, Space, Switch, Typography } from 'antd';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 export type SelectionLayoutMode = 'compact' | 'grid';
 export type SelectionTrackAxis = 'columns' | 'rows';
@@ -41,10 +41,14 @@ export function selectionBoardZoneArrangementOptions(
   if (settings?.mode !== 'grid') return {};
   const tracks = selectionGridTracks(selectionCount, settings.trackAxis, settings.trackCount);
   return {
-    maxPerRow: tracks.columns,
+    fixedItemsPerRow: tracks.columns,
     justifyLastRow: settings.rowDistribution === 'justify',
+    matchRowHeights: settings.matchRowHeights,
   };
 }
+
+const defaultSelectionTrackCount = (selectionCount: number): number =>
+  Math.min(3, Math.max(1, selectionCount));
 
 interface SelectionLayoutPopoverProps {
   selectionCount: number;
@@ -55,13 +59,25 @@ export function SelectionLayoutPopover({ selectionCount, onApply }: SelectionLay
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<SelectionLayoutMode>('compact');
   const [trackAxis, setTrackAxis] = useState<SelectionTrackAxis>('columns');
-  const [trackCount, setTrackCount] = useState(Math.min(3, Math.max(1, selectionCount)));
+  const [trackCount, setTrackCount] = useState(defaultSelectionTrackCount(selectionCount));
+  const trackCountWasEdited = useRef(false);
   const [matchRowHeights, setMatchRowHeights] = useState(false);
   const [rowDistribution, setRowDistribution] = useState<SelectionRowDistribution>('packed');
   const tracks = useMemo(
     () => selectionGridTracks(selectionCount, trackAxis, trackCount),
     [selectionCount, trackAxis, trackCount]
   );
+
+  // The toolbar first appears when the second node is selected. Keep following
+  // the compact three-track default as that selection grows, but never stomp a
+  // count the user explicitly chose; only clamp it when nodes are removed.
+  useEffect(() => {
+    setTrackCount((current) =>
+      trackCountWasEdited.current
+        ? Math.max(1, Math.min(selectionCount, current))
+        : defaultSelectionTrackCount(selectionCount)
+    );
+  }, [selectionCount]);
 
   const content = (
     <Space orientation="vertical" size="middle" style={{ width: 280 }}>
@@ -98,7 +114,10 @@ export function SelectionLayoutPopover({ selectionCount, onApply }: SelectionLay
               min={1}
               max={Math.max(1, selectionCount)}
               value={trackCount}
-              onChange={(value) => setTrackCount(value ?? 1)}
+              onChange={(value) => {
+                trackCountWasEdited.current = true;
+                setTrackCount(value ?? 1);
+              }}
               style={{ width: '40%' }}
             />
           </Space.Compact>

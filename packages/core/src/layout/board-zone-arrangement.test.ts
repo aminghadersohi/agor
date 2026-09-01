@@ -185,7 +185,7 @@ describe('planBoardZoneArrangement', () => {
       zone('two', 2200, 0, [item('two-child', 380, 180)]),
       zone('three', 0, 1600, [item('three-child', 380, 100)]),
     ];
-    const options = { maxPerRow: 2 };
+    const options = { fixedItemsPerRow: 2 };
     const applied = planBoardZoneArrangement(source, options);
     const reapplied = planBoardZoneArrangement(
       source.map((zoneInput) => {
@@ -215,6 +215,48 @@ describe('planBoardZoneArrangement', () => {
       { row: 0, column: 1 },
       { row: 1, column: 0 },
     ]);
+  });
+
+  it('produces a compact aligned three-by-three explicit outer grid', () => {
+    const source = Array.from({ length: 9 }, (_, index) => ({
+      ...zone(`zone-${index}`, (index % 4) * 900, Math.floor(index / 4) * 700, []),
+      width: 400 + (index % 3) * 80,
+      height: 260 + (index % 2) * 80,
+    }));
+    const plan = planBoardZoneArrangement(source, { fixedItemsPerRow: 3 });
+
+    expect(plan.layout.rows).toBe(3);
+    expect(plan.zones.map(({ row, column }) => ({ row, column }))).toEqual(
+      Array.from({ length: 9 }, (_, index) => ({
+        row: Math.floor(index / 3),
+        column: index % 3,
+      }))
+    );
+    for (const column of [0, 1, 2]) {
+      expect(
+        new Set(
+          plan.zones.filter((entry) => entry.column === column).map((entry) => entry.position.x)
+        ).size
+      ).toBe(1);
+    }
+    expect(plan.zones[2]!.position.x - plan.zones[1]!.position.x).toBe(
+      plan.zones[1]!.position.x - plan.zones[0]!.position.x
+    );
+  });
+
+  it('matches final zone heights only when the explicit grid requests it', () => {
+    const source = [
+      { ...zone('short', 0, 0, []), height: 240 },
+      { ...zone('tall', 800, 0, [item('child', 380, 420)]), height: 560 },
+    ];
+    const natural = planBoardZoneArrangement(source, { fixedItemsPerRow: 2 });
+    const matched = planBoardZoneArrangement(source, {
+      fixedItemsPerRow: 2,
+      matchRowHeights: true,
+    });
+
+    expect(natural.zones[0]!.height).not.toBe(natural.zones[1]!.height);
+    expect(matched.zones[0]!.height).toBe(matched.zones[1]!.height);
   });
 
   it('carries a measured title scale through zone sizing and child packing', () => {

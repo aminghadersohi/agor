@@ -213,6 +213,46 @@ describe('layoutJustifiedZones', () => {
     expect(result.rows).toBe(2);
   });
 
+  it('keeps explicit grid rows and columns stable even when targetWidth would wrap them', () => {
+    const zones = Array.from({ length: 9 }, (_, index) => ({
+      id: `zone-${index}`,
+      shapes: [shape(1, index % 2 === 0 ? 600 : 420, 200 + (index % 3) * 40)],
+    }));
+    const result = layoutJustifiedZones(zones, {
+      targetWidth: 1600,
+      gap: 40,
+      startX: 80,
+      startY: 80,
+      fixedItemsPerRow: 3,
+    });
+
+    expect(result.rows).toBe(3);
+    expect(result.placements.map(({ row, column }) => ({ row, column }))).toEqual(
+      Array.from({ length: 9 }, (_, index) => ({
+        row: Math.floor(index / 3),
+        column: index % 3,
+      }))
+    );
+    for (const column of [0, 1, 2]) {
+      expect(
+        new Set(result.placements.filter((item) => item.column === column).map((item) => item.x))
+          .size
+      ).toBe(1);
+    }
+    expectNoOverlaps(result.placements);
+  });
+
+  it('does not create empty fixed tracks when the requested grid is wider than its items', () => {
+    const result = layoutJustifiedZones(
+      ['a', 'b'].map((id) => ({ id, shapes: [shape(1, 400, 200)] })),
+      { targetWidth: 1000, gap: 40, fixedItemsPerRow: 20 }
+    );
+
+    expect(result).toMatchObject({ rows: 1, overflowingRows: [] });
+    expect(result.placements.map(({ column }) => column)).toEqual([0, 1]);
+    expectNoOverlaps(result.placements);
+  });
+
   it('drops a shape that is wider and taller than another', () => {
     // 600x400 is dominated by 400x300: worse in both directions, never useful.
     const result = layoutJustifiedZones(

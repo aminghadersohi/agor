@@ -233,6 +233,8 @@ interface ArrangeZoneContentsOptions {
 
 type ArrangeBoardZonesOptions = Omit<BoardZoneArrangementOptions, 'looseItems'> & {
   userInitiated?: boolean;
+  /** Whole-board layout includes free peers; selection layout never does. */
+  layoutScope?: 'board' | 'selection';
 };
 
 export const useBoardObjects = ({
@@ -1457,7 +1459,7 @@ export const useBoardObjects = ({
     async (zoneIds: readonly string[], options: ArrangeBoardZonesOptions = {}) => {
       const currentBoard = boardRef.current;
       if (!currentBoard || !client || boardArrangementInFlightRef.current) return;
-      const { userInitiated = false, ...arrangementOptions } = options;
+      const { userInitiated = false, layoutScope = 'board', ...arrangementOptions } = options;
       const packZoneContents = arrangementOptions.packZoneContents !== false;
       const selected = new Set(zoneIds);
       const currentNodes = nodesRef.current;
@@ -1482,6 +1484,18 @@ export const useBoardObjects = ({
             ] as const
         );
         const { zoneForCanvasNode, looseNodes } = candidates;
+        const selectionOrigin = selectedZones.reduce(
+          (origin, [, zone]) => ({ x: Math.min(origin.x, zone.x), y: Math.min(origin.y, zone.y) }),
+          { x: Number.POSITIVE_INFINITY, y: Number.POSITIVE_INFINITY }
+        );
+        const scopedArrangementOptions =
+          layoutScope === 'selection' && selectedZones.length > 0
+            ? {
+                ...arrangementOptions,
+                startX: arrangementOptions.startX ?? selectionOrigin.x,
+                startY: arrangementOptions.startY ?? selectionOrigin.y,
+              }
+            : arrangementOptions;
         const plan = planBoardZoneArrangement(
           selectedZones.map(([zoneId, object]) => {
             const children = currentNodes.filter((node) => {
@@ -1548,8 +1562,8 @@ export const useBoardObjects = ({
             };
           }),
           {
-            ...arrangementOptions,
-            looseItems: looseNodes.map((node) => ({
+            ...scopedArrangementOptions,
+            looseItems: (layoutScope === 'board' ? looseNodes : []).map((node) => ({
               id: node.id,
               ...node.position,
               ...ceilBoardGridSize(renderedNodeSize(node)),
@@ -1783,7 +1797,7 @@ export const useBoardObjects = ({
         } as unknown as Partial<Board>);
         completeUserLayout({
           userInitiated,
-          scope: 'board',
+          scope: layoutScope,
           beforeNodes: currentNodes,
           afterNodes: currentNodes.map((node) => arrangedNodeById.get(node.id) ?? node),
           affectedNodeIds: arrangedNodes.map((node) => node.id),
@@ -1823,7 +1837,7 @@ export const useBoardObjects = ({
       if (selectedZones.length === 0 && looseNodes.length === 0) return;
       await arrangeBoardZones(
         selectedZones.map(([zoneId]) => zoneId),
-        { userInitiated: true, packZoneContents }
+        { userInitiated: true, layoutScope: 'board', packZoneContents }
       );
     },
     [arrangeBoardZones]

@@ -26,7 +26,11 @@ describe('selectionBoardZoneArrangementOptions', () => {
         matchRowHeights: false,
         rowDistribution: 'packed',
       })
-    ).toEqual({ maxPerRow: 2, justifyLastRow: false });
+    ).toEqual({
+      fixedItemsPerRow: 2,
+      justifyLastRow: false,
+      matchRowHeights: false,
+    });
     expect(
       selectionBoardZoneArrangementOptions(7, {
         mode: 'grid',
@@ -35,7 +39,11 @@ describe('selectionBoardZoneArrangementOptions', () => {
         matchRowHeights: true,
         rowDistribution: 'justify',
       })
-    ).toEqual({ maxPerRow: 4, justifyLastRow: true });
+    ).toEqual({
+      fixedItemsPerRow: 4,
+      justifyLastRow: true,
+      matchRowHeights: true,
+    });
   });
 
   it('uses the exact ordinary Arrange options for compact or toolbar arrange', () => {
@@ -80,5 +88,32 @@ describe('SelectionLayoutPopover', () => {
         rowDistribution: 'packed',
       })
     );
+  });
+
+  it('tracks the compact three-column default as a selection grows without overriding edits', async () => {
+    const onApply = vi.fn();
+    const view = render(
+      <AntApp>
+        <SelectionLayoutPopover selectionCount={2} onApply={onApply} />
+      </AntApp>
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(screen.getByText('Grid'));
+    expect(screen.getByText('2 columns × 1 row')).toBeInTheDocument();
+
+    view.rerender(
+      <AntApp>
+        <SelectionLayoutPopover selectionCount={9} onApply={onApply} />
+      </AntApp>
+    );
+    expect(await screen.findByText('3 columns × 3 rows')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Number of columns'), { target: { value: '4' } });
+    view.rerender(
+      <AntApp>
+        <SelectionLayoutPopover selectionCount={10} onApply={onApply} />
+      </AntApp>
+    );
+    expect(await screen.findByText('4 columns × 3 rows')).toBeInTheDocument();
   });
 });

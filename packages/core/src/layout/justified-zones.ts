@@ -43,6 +43,12 @@ export interface JustifiedZoneOptions {
   /** Upper bound on zones per row. */
   maxPerRow?: number;
   /**
+   * Exact number of zones in each complete row. Unlike `maxPerRow`, this is
+   * an explicit grid contract: targetWidth may not break a complete row into
+   * smaller visual groups. The final row contains the remainder.
+   */
+  fixedItemsPerRow?: number;
+  /**
    * Stretch the final row even when it holds fewer zones than fit.
    * Off by default: a photo grid leaves a short last row at its natural size
    * rather than blowing two thumbnails up to full width, and a lone zone
@@ -276,6 +282,10 @@ export function layoutJustifiedZones(
   const startY = snap(Number.isFinite(options.startY) ? (options.startY as number) : 80);
   const targetWidth = Math.max(gridSize, floor(positive(options.targetWidth, 1600)));
   const maxPerRow = Math.max(1, Math.floor(positive(options.maxPerRow, Number.MAX_SAFE_INTEGER)));
+  const requestedFixedItemsPerRow =
+    options.fixedItemsPerRow === undefined
+      ? undefined
+      : Math.max(1, Math.floor(positive(options.fixedItemsPerRow, 1)));
 
   const prepared = zones.map((zone) => ({
     id: zone.id,
@@ -300,6 +310,10 @@ export function layoutJustifiedZones(
       overflowingRows: [],
     };
   }
+  const fixedItemsPerRow =
+    requestedFixedItemsPerRow === undefined
+      ? undefined
+      : Math.min(prepared.length, requestedFixedItemsPerRow);
 
   /**
    * The width a zone wants to occupy when rows are being broken.
@@ -326,33 +340,60 @@ export function layoutJustifiedZones(
   // A zone that cannot fit a row even alone still gets its own row — reported
   // as overflowing rather than dropped.
   const rows: (typeof prepared)[] = [];
-  let current: typeof prepared = [];
-  for (const zone of prepared) {
-    const candidate = [...current, zone];
-    const naturalWidth =
-      candidate.reduce((sum, entry) => sum + preferredWidth(entry), 0) +
-      gap * (candidate.length - 1);
-    if (current.length > 0 && (naturalWidth > targetWidth || candidate.length > maxPerRow)) {
-      rows.push(current);
-      current = [zone];
-    } else {
-      current = candidate;
+  if (fixedItemsPerRow !== undefined) {
+    for (let index = 0; index < prepared.length; index += fixedItemsPerRow) {
+      rows.push(prepared.slice(index, index + fixedItemsPerRow));
     }
+  } else {
+    let current: typeof prepared = [];
+    for (const zone of prepared) {
+      const candidate = [...current, zone];
+      const naturalWidth =
+        candidate.reduce((sum, entry) => sum + preferredWidth(entry), 0) +
+        gap * (candidate.length - 1);
+      if (current.length > 0 && (naturalWidth > targetWidth || candidate.length > maxPerRow)) {
+        rows.push(current);
+        current = [zone];
+      } else {
+        current = candidate;
+      }
+    }
+    if (current.length > 0) rows.push(current);
   }
-  if (current.length > 0) rows.push(current);
 
   const placements: JustifiedZonePlacement[] = [];
   const rowHeights: number[] = [];
   const overflowingRows: number[] = [];
+  const solvedRows = rows.map((row) => solveRow(row, targetWidth, gap, options.targetRowHeight));
+  const fixedColumnWidths =
+    fixedItemsPerRow === undefined
+      ? undefined
+      : Array.from({ length: fixedItemsPerRow }, (_, column) =>
+          Math.max(0, ...solvedRows.map((solved) => solved.shapes[column]?.width ?? 0))
+        );
+  const fixedNaturalWidth =
+    fixedColumnWidths === undefined
+      ? 0
+      : fixedColumnWidths.reduce((sum, width) => sum + width, 0) +
+        gap * Math.max(0, fixedColumnWidths.length - 1);
+  const fixedTrackWidths =
+    fixedColumnWidths !== undefined && fixedNaturalWidth <= targetWidth
+      ? justify(fixedColumnWidths, targetWidth - fixedNaturalWidth, gridSize)
+      : fixedColumnWidths;
   let y = startY;
   let widest = 0;
 
   rows.forEach((row, rowIndex) => {
-    const solved = solveRow(row, targetWidth, gap, options.targetRowHeight);
+    const solved = solvedRows[rowIndex];
     const isLastRow = rowIndex === rows.length - 1;
-    const shouldJustify = !isLastRow || options.justifyLastRow === true;
+    const useFixedTracks =
+      fixedTrackWidths !== undefined &&
+      !(isLastRow && row.length < fixedTrackWidths.length && options.justifyLastRow === true);
+    const shouldJustify = !useFixedTracks && (!isLastRow || options.justifyLastRow === true);
 
-    let widths = solved.shapes.map((shape) => shape.width);
+    let widths = useFixedTracks
+      ? solved.shapes.map((_, column) => fixedTrackWidths[column] ?? 0)
+      : solved.shapes.map((shape) => shape.width);
     if (solved.totalWidth > targetWidth) {
       overflowingRows.push(rowIndex);
     } else if (shouldJustify) {

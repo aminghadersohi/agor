@@ -70,7 +70,11 @@ export interface BoardZoneArrangementOptions {
   startX?: number;
   startY?: number;
   maxPerRow?: number;
+  /** Exact outer grid columns for an explicit selection layout. */
+  fixedItemsPerRow?: number;
   justifyLastRow?: boolean;
+  /** Give every zone in an outer row the row's tallest final frame. */
+  matchRowHeights?: boolean;
   /** Free top-level board nodes packed beside the content-sized zone frames. */
   looseItems?: readonly BoardZoneArrangementLooseItem[];
   /**
@@ -238,6 +242,7 @@ export function planBoardZoneArrangement(
       startX: options.startX ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.startX,
       startY: options.startY ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.startY,
       maxPerRow: options.maxPerRow,
+      fixedItemsPerRow: options.fixedItemsPerRow,
       justifyLastRow: options.justifyLastRow ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.justifyLastRow,
       gridSize: BOARD_GRID_SIZE,
     }
@@ -262,7 +267,13 @@ export function planBoardZoneArrangement(
       if (!selectedShape) {
         throw new Error(`Missing selected shape for zone '${placement.id}'.`);
       }
-      return [placement.id, { width: selectedShape.width, height: selectedShape.height }] as const;
+      return [
+        placement.id,
+        {
+          width: selectedShape.width,
+          height: options.matchRowHeights ? placement.height : selectedShape.height,
+        },
+      ] as const;
     })
   );
   const orderedLooseItems = [...(options.looseItems ?? [])];

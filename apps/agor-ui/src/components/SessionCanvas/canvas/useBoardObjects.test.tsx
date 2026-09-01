@@ -2604,7 +2604,7 @@ describe('arrangeBoardZones production path', () => {
 
     await act(async () => {
       await result.current.arrangeBoardZones(['one', 'two', 'three'], {
-        maxPerRow: 2,
+        fixedItemsPerRow: 2,
         userInitiated: true,
       });
     });
@@ -2637,6 +2637,86 @@ describe('arrangeBoardZones production path', () => {
     expect(boardObjectsPatch).not.toHaveBeenCalled();
     expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
     expect(showSuccess).toHaveBeenCalledWith('Zones and their contents are already arranged.');
+  });
+
+  it('keeps selection-only zone layout anchored and excludes every unselected free peer', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const onUserLayoutComplete = vi.fn();
+    const board = makeBoard({
+      one: { type: 'zone', x: 900, y: 700, width: 420, height: 300, label: 'One' },
+      two: { type: 'zone', x: 1500, y: 900, width: 520, height: 340, label: 'Two' },
+      other: { type: 'zone', x: 2400, y: 200, width: 620, height: 500, label: 'Other' },
+      note: { type: 'markdown', x: -500, y: 1600, width: 320, content: 'Unselected note' },
+    });
+    const nodes: Node[] = [
+      { id: 'one', type: 'zone', position: { x: 900, y: 700 }, width: 420, height: 300, data: {} },
+      { id: 'two', type: 'zone', position: { x: 1500, y: 900 }, width: 520, height: 340, data: {} },
+      {
+        id: 'other',
+        type: 'zone',
+        position: { x: 2400, y: 200 },
+        width: 620,
+        height: 500,
+        data: {},
+      },
+      {
+        id: 'note',
+        type: 'markdown',
+        position: { x: -500, y: 1600 },
+        width: 320,
+        height: 180,
+        data: { objectId: 'note' },
+      },
+      {
+        id: 'free-branch',
+        type: 'branchNode',
+        position: { x: 400, y: -600 },
+        width: 500,
+        height: 200,
+        data: { branch: { name: 'Unselected branch' } },
+      },
+    ];
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'free-placement',
+              branch_id: 'free-branch',
+              position: { x: 400, y: -600 },
+            },
+          ] as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+          onUserLayoutComplete,
+        }),
+      { wrapper }
+    );
+
+    await act(async () =>
+      result.current.arrangeBoardZones(['one', 'two'], {
+        fixedItemsPerRow: 2,
+        layoutScope: 'selection',
+        userInitiated: true,
+      })
+    );
+
+    const write = boardsPatch.mock.calls[0]?.[1];
+    expect(Object.keys(write.objects).sort()).toEqual(['one', 'two']);
+    expect(write.placements).toEqual({});
+    expect(write.objects.one).toMatchObject({ x: 900, y: 700 });
+    expect(write.objects.other).toBeUndefined();
+    expect(write.objects.note).toBeUndefined();
+    expect(onUserLayoutComplete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: 'selection',
+        before: [expect.objectContaining({ id: 'one' }), expect.objectContaining({ id: 'two' })],
+        after: [expect.objectContaining({ id: 'one' }), expect.objectContaining({ id: 'two' })],
+      })
+    );
   });
 
   it('routes Arrange board through byte-equivalent selected-all planner writes', async () => {
