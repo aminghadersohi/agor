@@ -33,6 +33,7 @@ import {
   ENTITY_PATH_SEGMENTS,
   findByShortIdPrefix,
   hasMinimumRole,
+  isSessionExecuting,
   PAGINATION,
   ROLES,
 } from '@agor-live/client';
@@ -1446,18 +1447,71 @@ export function useAgorData(
     // keyed queue's tombstones keep a deferred patch from resurrecting a
     // session a synchronous `removed` just deleted (see `realtimeBatch`).
     const sessionsService = client.service('sessions');
+    // Terminal Task publication can race the next queued Task claim. The
+    // daemon may finish enriching a terminal Session snapshot after the new
+    // claim has already committed RUNNING, making that late event older than
+    // durable state. Applying it would remove the active indicator until a
+    // reload. Confirm only executing -> non-executing transitions with one
+    // caller-scoped point read; active events continue through immediately.
+    // A token (rather than a timer/poll) invalidates an in-flight read when a
+    // newer active event arrives or this authority subscription is replaced.
+    const terminalReconciliations = new Map<string, object>();
+    const realtimeSessionLifecycleState = new Map<string, Session>();
+    let terminalReconciliationCancelled = false;
+
+    const enqueueAuthoritativeSession = (session: Session) => {
+      if (!subscriptionIsCurrent() || terminalReconciliationCancelled) return;
+      realtimeSessionLifecycleState.set(session.session_id, session);
+      bumpRevision('sessions');
+      enqueueSessionPatch(subscriptionAuthorityScope, session);
+    };
+
+    const reconcileTerminalSession = (candidate: Session) => {
+      if (terminalReconciliations.has(candidate.session_id)) return;
+      const token = {};
+      terminalReconciliations.set(candidate.session_id, token);
+      void sessionsService
+        .get(candidate.session_id)
+        .then((authoritative: Session) => {
+          if (
+            terminalReconciliationCancelled ||
+            !subscriptionIsCurrent() ||
+            terminalReconciliations.get(candidate.session_id) !== token
+          ) {
+            return;
+          }
+          terminalReconciliations.delete(candidate.session_id);
+          enqueueAuthoritativeSession(authoritative);
+        })
+        .catch((error: unknown) => {
+          if (terminalReconciliations.get(candidate.session_id) === token) {
+            terminalReconciliations.delete(candidate.session_id);
+          }
+          // Preserve the last proven active state. A socket reconnect already
+          // performs a full authoritative hydration and will settle a real
+          // terminal transition if this point read failed with the connection.
+          console.warn('[useAgorData] terminal Session reconciliation failed:', error);
+        });
+    };
     // Keep the skip-apply-on-race revision bump SYNCHRONOUS — the background
     // hydration's quiet-window guard, and the queue's own stale-drop stamp, both
     // depend on the bump landing the instant the event does, not a frame later.
     const sessionPatchedBatched = (session: Session) => {
       if (!subscriptionIsCurrent()) return;
-      const previous =
-        realtimeSessionCountState.get(session.session_id) ??
-        agorStore.getState().sessionById.get(session.session_id);
-      realtimeSessionCountState.set(session.session_id, session);
-      if (countMembershipChanged(previous, session)) noteCountAffectingEvent();
-      bumpRevision('sessions');
-      enqueueSessionPatch(subscriptionAuthorityScope, session);
+        const previous = realtimeSessionLifecycleState.get(session.session_id) ??
+          realtimeSessionCountState.get(session.session_id) ??
+          agorStore.getState().sessionById.get(session.session_id);
+        realtimeSessionCountState.set(session.session_id, session);
+        if (countMembershipChanged(previous, session)) noteCountAffectingEvent();
+        if (previous && isSessionExecuting(previous) && !isSessionExecuting(session)) {
+          bumpRevision('sessions');
+          reconcileTerminalSession(session);
+          return;
+        }
+        if (isSessionExecuting(session)) {
+          terminalReconciliations.delete(session.session_id);
+        }
+        enqueueAuthoritativeSession(session);
     };
     // `created` clears any tombstone (remove-then-recreate in one frame) and
     // `removed` sets one + drops the id's queued patch, before the synchronous
@@ -1466,6 +1520,7 @@ export function useAgorData(
       if (!subscriptionIsCurrent()) return;
       realtimeSessionCountState.set(session.session_id, session);
       if (countsAsRunning(session)) noteCountAffectingEvent();
+      realtimeSessionLifecycleState.set(session.session_id, session);
       untombstoneSession(subscriptionAuthorityScope, session.session_id);
       scopedRealtime.sessionCreated(session);
     };
@@ -1474,6 +1529,8 @@ export function useAgorData(
       const previous = realtimeSessionCountState.get(session.session_id) ?? session;
       realtimeSessionCountState.delete(session.session_id);
       if (countsAsRunning(previous)) noteCountAffectingEvent();
+      realtimeSessionLifecycleState.delete(session.session_id);
+      terminalReconciliations.delete(session.session_id);
       tombstoneSession(subscriptionAuthorityScope, session.session_id);
       scopedRealtime.sessionRemoved(session);
     };
@@ -1724,6 +1781,9 @@ export function useAgorData(
     // Cleanup listeners on unmount
     return () => {
       runningCountRefreshCancelled = true;
+      terminalReconciliationCancelled = true;
+      terminalReconciliations.clear();
+      realtimeSessionLifecycleState.clear();
       // APPLY only when this is a same-authority resubscribe. The layout-phase
       // scope transition has already discarded an identity/role/auth/connection
       // queue, and makes this old passive cleanup a no-op. This preserves live
