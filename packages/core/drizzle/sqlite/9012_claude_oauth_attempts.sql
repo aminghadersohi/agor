@@ -33,4 +33,3 @@ CREATE UNIQUE INDEX `claude_oauth_attempts_current_user_uq`
 --> statement-breakpoint
 CREATE INDEX `claude_oauth_attempts_maintenance_idx`
 	ON `claude_oauth_attempts` (`status`, `expires_at`, `exchange_started_at`, `finished_at`);
-

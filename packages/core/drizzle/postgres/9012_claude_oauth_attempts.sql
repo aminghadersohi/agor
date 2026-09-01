@@ -103,4 +103,3 @@ CREATE POLICY "claude_oauth_maintenance_delete" ON "claude_oauth_attempts"
 		AND "status" IN ('succeeded', 'failed', 'ambiguous', 'expired')
 		AND "finished_at" <= CURRENT_TIMESTAMP - INTERVAL '24 hours'
 	);
-
