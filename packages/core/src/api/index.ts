@@ -150,6 +150,16 @@ export interface SessionPromptOptions extends Omit<SessionPromptRequest, 'prompt
   params?: Params;
 }
 
+/** Compare-and-swap request produced from a coordinator queue preview. */
+export interface SessionQueueBatchRequest {
+  relationship: import('../types').CoordinatorQueueBatchRelationship;
+  strategy: import('../types').CoordinatorQueueBatchStrategy;
+  expectedQueueRevision: string;
+  expectedTaskIds: string[];
+  idempotencyKey: string;
+  replacementPrompt?: string;
+}
+
 /** Required setup for an already-created session, applied before its first prompt. */
 export interface SessionInitializationRequest {
   /** Fence delayed calls to the identity that created the session. */
