@@ -48,6 +48,7 @@ const repositoryMocks = vi.hoisted(() => ({
 // BranchRepository()` in the service returns this same object.
 const branchRepoMock = vi.hoisted(() => ({
   findActiveByRepoAndName: vi.fn(async () => null),
+  findByRepoAndName: vi.fn(async () => null),
   getAllUsedUniqueIds: vi.fn(async () => [] as number[]),
   addOwner: vi.fn(async () => undefined),
   claimFailedForProvisioningRetry: vi.fn(),

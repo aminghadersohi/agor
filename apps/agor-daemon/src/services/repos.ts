@@ -720,14 +720,16 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       remote_url: repo.remote_url ? redactGitUrlCredentials(repo.remote_url) : repo.remote_url,
     });
 
-    // Check for duplicate branch name in this repo (non-archived only)
+    // The deterministic workspace path is owned by the branch name even while
+    // archived. Reusing it would let a new row collide with preserved cleanup.
     const branchRepo = new BranchRepository(this.db);
-    const existingBranch = await branchRepo.findActiveByRepoAndName(
-      repo.repo_id as UUID,
-      data.name
-    );
+    const existingBranch = await branchRepo.findByRepoAndName(repo.repo_id as UUID, data.name);
     if (existingBranch) {
-      throw new Error(`A branch named '${data.name}' already exists in this repository`);
+      throw new Conflict(
+        existingBranch.archived
+          ? `An archived branch named '${data.name}' still owns this workspace path. Unarchive it instead of creating a new branch.`
+          : `A branch named '${data.name}' already exists in this repository`
+      );
     }
 
     // Resolve + validate the storage mode. The daemon owns DB/auth/config

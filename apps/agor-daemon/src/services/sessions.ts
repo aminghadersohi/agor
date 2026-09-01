@@ -493,6 +493,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       const branchRepo = new BranchRepository(scoped);
       const branch = await branchRepo.findById(createData.branch_id as BranchID);
       if (!branch) throw new NotFound(`Branch ${createData.branch_id} not found`);
+      this.assertBranchFilesystemRecordUsable(branch);
 
       // Minimal service harnesses predate application configuration. Treat an
       // absent getter as the product default (`inherit`); production always
@@ -561,6 +562,12 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     // If the branch can't be loaded, defer to existing downstream handling
     // (creation will fail later with the normal not-found path).
     if (!branch) return;
+
+    this.assertBranchFilesystemRecordUsable(branch);
+  }
+
+  private assertBranchFilesystemRecordUsable(branch: Branch): void {
+    const branchId = branch.branch_id;
 
     const status = branch.filesystem_status;
     const readiness = classifyBranchFilesystemReadiness(branch);

@@ -3210,10 +3210,11 @@ describe('BranchesService.patch provisioning attempt fence', () => {
       } as never
     );
 
-    const written = repository.update.mock.calls.at(-1)?.[1] as Record<string, unknown>;
-    expect(written).not.toHaveProperty('filesystem_status');
-    expect(written).not.toHaveProperty('provisioning_attempt_id');
-    // Attempt-independent work still rides along, as on any other dropped ack.
-    expect(written.start_command).toBe('pnpm dev');
+    expect(repository.acknowledgeProvisioningAttempt).toHaveBeenCalledWith(
+      branchId,
+      expect.objectContaining({ filesystem_status: 'ready', start_command: 'pnpm dev' }),
+      'attempt-A'
+    );
+    expect(repository.update).not.toHaveBeenCalled();
   });
 });

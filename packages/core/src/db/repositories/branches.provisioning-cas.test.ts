@@ -251,19 +251,21 @@ describe('BranchRepository provisioning CAS', () => {
     }
   );
 
-  dbTest('archive invalidates a late terminal acknowledgement', async ({ db }) => {
+  dbTest('archive cannot race an in-flight provisioning attempt', async ({ db }) => {
     const { branchRepo, branchId } = await seedFailedBranch(db);
     await branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-B');
-    await branchRepo.update(branchId, { archived: true, filesystem_status: 'preserved' });
+    await expect(
+      branchRepo.update(branchId, { archived: true, filesystem_status: 'preserved' })
+    ).rejects.toThrow(/provisioning is in progress/i);
 
     const result = await branchRepo.acknowledgeProvisioningAttempt(
       branchId,
       { filesystem_status: 'ready' },
       'attempt-B'
     );
-    expect(result.applied).toBe(false);
-    expect(result.branch.archived).toBe(true);
-    expect(result.branch.filesystem_status).toBe('preserved');
+    expect(result.applied).toBe(true);
+    expect(result.branch.archived).toBe(false);
+    expect(result.branch.filesystem_status).toBe('ready');
   });
 
   dbTest('legacy acknowledgements cannot overwrite a generated attempt', async ({ db }) => {
