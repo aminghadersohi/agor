@@ -187,6 +187,11 @@ import {
   removeSelectedDescendants,
   suppressIndividualZoneToolbarsForMultiSelect,
 } from './canvas/utils/marqueeSelection';
+import {
+  type BoardEntityPlacementSnapshot,
+  sameBoardEntityPlacement,
+  snapshotBoardEntityPlacement,
+} from './canvas/utils/entityPlacementReconciliation';
 import { getValidZoneParentId, sanitizeOrphanedNodeParents } from './canvas/utils/nodeParentUtils';
 import { mergePendingZoneGeometry, type ZoneGeometry } from './canvas/utils/pendingZoneGeometry';
 import { persistedResizeRect, type ResizeRect } from './canvas/utils/resizeGeometry';
@@ -843,6 +848,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       selectionLayoutBoardIdRef.current = board?.board_id;
       selectionLayoutOrderRef.current = undefined;
     }
+    // Remember the last persisted placement observed for each branch/card.
+    // This lets reconciliation distinguish an unrelated branch/session repaint
+    // (placement unchanged: keep the optimistic local position) from a newer
+    // board-object event such as set_zone/auto-arrange (placement changed: the
+    // persisted zone-relative geometry is authoritative).
+     const authoritativeEntityPlacementsRef = useRef<
+       Map<string, BoardEntityPlacementSnapshot | null>
+     >(new Map());
     // Track objects we've deleted locally (to prevent them from reappearing during WebSocket updates)
     const deletedObjectsRef = useRef<Set<string>>(new Set());
 
@@ -1849,6 +1862,41 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         return incomingNodes.map((newNode) => {
           const existingNode = currentNodesById.get(newNode.id);
           const localPosition = localPositionsRef.current[newNode.id];
+          const placement =
+            newNode.type === 'branchNode'
+              ? boardObjectByBranch.get(newNode.id)
+              : newNode.type === 'cardNode'
+                ? boardObjectByCard.get(newNode.id.replace('card-', ''))
+                : undefined;
+          const currentAuthoritativePlacement = snapshotBoardEntityPlacement(placement);
+          const observedAuthoritativePlacement = authoritativeEntityPlacementsRef.current;
+          const hadPreviousAuthoritativePlacement = observedAuthoritativePlacement.has(newNode.id);
+          const previousAuthoritativePlacement =
+            observedAuthoritativePlacement.get(newNode.id) ?? null;
+          observedAuthoritativePlacement.set(newNode.id, currentAuthoritativePlacement);
+
+          const authoritativePlacementChanged =
+            hadPreviousAuthoritativePlacement &&
+            !sameBoardEntityPlacement(
+              previousAuthoritativePlacement,
+              currentAuthoritativePlacement
+            );
+
+          if (localPosition && authoritativePlacementChanged) {
+            // A board-object placement event advanced independently of the
+            // local absolute override. set_zone and auto-arrange own both the
+            // React Flow parent and the relative position, so never translate
+            // the stale absolute point into the new parent coordinate space
+            // or let its delayed persistence overwrite that authority. Keep
+            // other nodes' independently queued updates intact.
+            delete localPositionsRef.current[newNode.id];
+            delete pendingLayoutUpdatesRef.current[newNode.id];
+            return {
+              ...newNode,
+              selected: existingNode?.selected,
+              zIndex: existingNode?.zIndex ?? newNode.zIndex,
+            };
+          }
 
           if (localPosition) {
             let incomingAbsolutePosition = newNode.position;
@@ -1898,7 +1946,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           };
         });
       },
-      []
+      [boardObjectByBranch, boardObjectByCard]
     );
 
     // Memoized MiniMap nodeColor callback to prevent MiniMap canvas repaints on every render
