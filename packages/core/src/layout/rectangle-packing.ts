@@ -104,6 +104,43 @@ export interface CompactRectangleLayoutOptions {
   gridSize?: number;
 }
 
+/** A board rectangle that an explicit selection layout may not displace. */
+export interface FixedLayoutObstacle {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface ObstacleAwareLayoutOptions {
+  /** Desired absolute top-left for the compact selection cluster. */
+  desiredOrigin: { x: number; y: number };
+  obstacles?: readonly FixedLayoutObstacle[];
+  gapX?: number;
+  gapY?: number;
+  gridSize?: number;
+  /** Optional absolute canvas bounds. Omit for Agor's ordinary unbounded board. */
+  bounds?: { x: number; y: number; width: number; height: number };
+  /** Defensive search ceiling for unusually dense obstacle fields. */
+  maxCandidates?: number;
+}
+
+export interface ObstacleAwareLayoutResult<T extends RectanglePlacement = RectanglePlacement> {
+  placements: T[];
+  origin: { x: number; y: number };
+  width: number;
+  height: number;
+}
+
+/** An explicit layout must fail rather than moving or overlapping fixed peers. */
+export class LayoutObstacleError extends Error {
+  constructor(message = 'The selected layout cannot fit without overlapping fixed board objects.') {
+    super(message);
+    this.name = 'LayoutObstacleError';
+  }
+}
+
 interface GridCandidate {
   placements: RectanglePlacement[];
   columns: number;
@@ -869,4 +906,165 @@ export function layoutSelectionGrid(
     }
   }
   return { ...base, placements, width: targetWidth };
+}
+
+/**
+ * Translate one already-planned selection cluster around fixed board peers.
+ *
+ * Grid/compact planners remain responsible for the cluster's internal shape.
+ * This shared final step treats that shape as a rigid body and searches the
+ * nearest grid-aligned origin that clears every unselected obstacle. Because
+ * only one translation is applied, row partitioning, gaps, spatial order, and
+ * heterogeneous measured sizes cannot be distorted while avoiding peers.
+ */
+export function placeLayoutAroundFixedObstacles<T extends RectanglePlacement>(
+  sourcePlacements: readonly T[],
+  options: ObstacleAwareLayoutOptions
+): ObstacleAwareLayoutResult<T> {
+  const gridSize = finiteNonNegative(options.gridSize, 0);
+  const snap = (value: number): number =>
+    gridSize > 0 ? Math.round(value / gridSize) * gridSize : value;
+  const gapX = ceilToGrid(finiteNonNegative(options.gapX, 0), gridSize);
+  const gapY = ceilToGrid(finiteNonNegative(options.gapY, 0), gridSize);
+  const desiredOrigin = {
+    x: snap(options.desiredOrigin.x),
+    y: snap(options.desiredOrigin.y),
+  };
+  if (sourcePlacements.length === 0) {
+    return { placements: [], origin: desiredOrigin, width: 0, height: 0 };
+  }
+
+  for (const placement of sourcePlacements) {
+    if (
+      !Number.isFinite(placement.x) ||
+      !Number.isFinite(placement.y) ||
+      !Number.isFinite(placement.width) ||
+      !Number.isFinite(placement.height) ||
+      placement.width <= 0 ||
+      placement.height <= 0
+    ) {
+      throw new Error(`Layout placement '${placement.id}' has invalid geometry.`);
+    }
+  }
+  const minX = Math.min(...sourcePlacements.map((placement) => placement.x));
+  const minY = Math.min(...sourcePlacements.map((placement) => placement.y));
+  const maxX = Math.max(...sourcePlacements.map((placement) => placement.x + placement.width));
+  const maxY = Math.max(...sourcePlacements.map((placement) => placement.y + placement.height));
+  const relative = sourcePlacements.map((placement) => ({
+    placement,
+    x: placement.x - minX,
+    y: placement.y - minY,
+  }));
+  const width = maxX - minX;
+  const height = maxY - minY;
+  const obstacles = [...(options.obstacles ?? [])]
+    .map((obstacle) => {
+      if (
+        !Number.isFinite(obstacle.x) ||
+        !Number.isFinite(obstacle.y) ||
+        !Number.isFinite(obstacle.width) ||
+        !Number.isFinite(obstacle.height) ||
+        obstacle.width <= 0 ||
+        obstacle.height <= 0
+      ) {
+        throw new Error(`Layout obstacle '${obstacle.id}' has invalid geometry.`);
+      }
+      return obstacle;
+    })
+    .sort((left, right) => left.id.localeCompare(right.id));
+
+  const insideBounds = (origin: { x: number; y: number }): boolean => {
+    const bounds = options.bounds;
+    return (
+      !bounds ||
+      (origin.x >= bounds.x &&
+        origin.y >= bounds.y &&
+        origin.x + width <= bounds.x + bounds.width &&
+        origin.y + height <= bounds.y + bounds.height)
+    );
+  };
+  const firstCollision = (origin: { x: number; y: number }) => {
+    for (const obstacle of obstacles) {
+      const obstacleLeft = obstacle.x - gapX;
+      const obstacleRight = obstacle.x + obstacle.width + gapX;
+      const obstacleTop = obstacle.y - gapY;
+      const obstacleBottom = obstacle.y + obstacle.height + gapY;
+      for (const entry of relative) {
+        const left = origin.x + entry.x;
+        const top = origin.y + entry.y;
+        if (
+          left < obstacleRight &&
+          left + entry.placement.width > obstacleLeft &&
+          top < obstacleBottom &&
+          top + entry.placement.height > obstacleTop
+        ) {
+          return { obstacle, entry };
+        }
+      }
+    }
+    return undefined;
+  };
+  const score = (origin: { x: number; y: number }) => {
+    const dx = origin.x - desiredOrigin.x;
+    const dy = origin.y - desiredOrigin.y;
+    return [
+      dx * dx + dy * dy,
+      Math.abs(dx) + Math.abs(dy),
+      Math.abs(dy),
+      Math.abs(dx),
+      origin.y,
+      origin.x,
+    ];
+  };
+  const compareOrigins = (left: { x: number; y: number }, right: { x: number; y: number }) => {
+    const leftScore = score(left);
+    const rightScore = score(right);
+    for (let index = 0; index < leftScore.length; index += 1) {
+      const difference = leftScore[index] - rightScore[index];
+      if (difference !== 0) return difference;
+    }
+    return 0;
+  };
+  const key = (origin: { x: number; y: number }) => `${origin.x}:${origin.y}`;
+  const queue = [desiredOrigin];
+  const queued = new Set([key(desiredOrigin)]);
+  const maxCandidates = Math.max(1, Math.floor(options.maxCandidates ?? 8192));
+  let visited = 0;
+
+  while (queue.length > 0 && visited < maxCandidates) {
+    queue.sort(compareOrigins);
+    const origin = queue.shift();
+    if (!origin) break;
+    visited += 1;
+    if (!insideBounds(origin)) continue;
+    const collision = firstCollision(origin);
+    if (!collision) {
+      return {
+        placements: relative.map(({ placement, x, y }) => ({
+          ...placement,
+          x: origin.x + x,
+          y: origin.y + y,
+        })),
+        origin,
+        width,
+        height,
+      };
+    }
+
+    const { obstacle, entry } = collision;
+    const candidates = [
+      { x: obstacle.x - gapX - entry.x - entry.placement.width, y: origin.y },
+      { x: obstacle.x + obstacle.width + gapX - entry.x, y: origin.y },
+      { x: origin.x, y: obstacle.y - gapY - entry.y - entry.placement.height },
+      { x: origin.x, y: obstacle.y + obstacle.height + gapY - entry.y },
+    ].map(({ x, y }) => ({ x: snap(x), y: snap(y) }));
+    for (const candidate of candidates) {
+      const candidateKey = key(candidate);
+      if (queued.has(candidateKey)) continue;
+      queued.add(candidateKey);
+      queue.push(candidate);
+    }
+  }
+
+  throw new LayoutObstacleError();
 }

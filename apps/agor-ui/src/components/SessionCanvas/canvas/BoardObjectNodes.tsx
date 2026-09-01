@@ -2,7 +2,11 @@
  * Custom React Flow node components for board objects (text labels, zones, etc.)
  */
 
-import type { ZoneContentJustification } from '@agor/core/layout/zone-layout';
+import {
+  normalizeZoneLayoutPolicy,
+  setZoneLayoutMode,
+  type ZoneContentJustification,
+} from '@agor/core/layout/zone-layout';
 import type { BoardComment, BoardObject, User } from '@agor-live/client';
 import {
   AlignCenterOutlined,
@@ -13,11 +17,13 @@ import {
   CaretUpOutlined,
   CommentOutlined,
   DeleteOutlined,
+  EllipsisOutlined,
   FontSizeOutlined,
   LockOutlined,
   MinusSquareOutlined,
   PlusSquareOutlined,
   SettingOutlined,
+  SyncOutlined,
   UnlockOutlined,
   VerticalAlignBottomOutlined,
   VerticalAlignMiddleOutlined,
@@ -26,7 +32,7 @@ import {
 import { ColorPicker, theme } from 'antd';
 import type { Color } from 'antd/es/color-picker';
 import { AggregationColor } from 'antd/es/color-picker/color';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Handle, NodeResizer, Position, useStore, useViewport } from 'reactflow';
 import { useMutationGate } from '../../../contexts/ConnectionContext';
@@ -46,6 +52,24 @@ import {
 
 // Zone content opacity constant - used for zone background and color indicator
 export const ZONE_CONTENT_OPACITY = 0.1;
+
+const ZONE_TOOLBAR_VIEWPORT_PADDING = 16;
+
+/** Keep a dynamically sized zone toolbar inside its canvas host. */
+export function clampZoneToolbarCenter(
+  requestedLeft: number,
+  toolbarWidth: number,
+  hostWidth: number
+): number {
+  if (hostWidth <= 0) return requestedLeft;
+  const halfWidth = Math.min(
+    toolbarWidth / 2,
+    Math.max(0, hostWidth - ZONE_TOOLBAR_VIEWPORT_PADDING * 2) / 2
+  );
+  const minLeft = ZONE_TOOLBAR_VIEWPORT_PADDING + halfWidth;
+  const maxLeft = Math.max(minLeft, hostWidth - ZONE_TOOLBAR_VIEWPORT_PADDING - halfWidth);
+  return Math.min(Math.max(requestedLeft, minLeft), maxLeft);
+}
 
 /**
  * Get color palette from Ant Design preset colors
@@ -73,9 +97,14 @@ interface ZoneNodeData extends Omit<ZoneBoardObject, 'type'> {
   pinnedItemCount?: number;
   /** Every measured board node currently contained by this zone. */
   positionableItemCount?: number;
-  /** How many of the pinned items are currently collapsed. */
-  compactItemCount?: number;
-  onUpdate?: (objectId: string, objectData: BoardObject) => void;
+  /** Pinned entities whose rendered surface owns a real density state. */
+  densityExpandableItemCount?: number;
+  /** Density-capable pinned entities that are currently collapsed. */
+  compactDensityExpandableItemCount?: number;
+  onUpdate?: (
+    objectId: string,
+    objectData: BoardObject
+  ) => boolean | undefined | Promise<boolean | undefined>;
   onDelete?: (objectId: string, deleteAssociatedSessions: boolean) => void;
   onReorder?: (objectId: string, op: LayerOp) => void;
   onArrangeContents?: (objectId: string) => void;
@@ -129,8 +158,11 @@ const ZoneNodeComponent = ({
   const [configModalOpen, setConfigModalOpen] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [toolbarVisible, setToolbarVisible] = useState(false);
+  const [layoutActionsExpanded, setLayoutActionsExpanded] = useState(false);
+  const [toolbarBounds, setToolbarBounds] = useState({ toolbarWidth: 0, hostWidth: 0 });
   const [recentColors, setRecentColors] = useState<string[]>(getRecentColors());
   const labelInputRef = useRef<HTMLInputElement>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
   const colors = getColorPalette(token);
 
   // Connection gate: when disconnected / reconnecting / out-of-sync, every
@@ -140,17 +172,52 @@ const ZoneNodeComponent = ({
   const mutationGate = useMutationGate();
   const mutationDisabled = !mutationGate.canMutate;
 
-  // A zone reads as collapsed only when every pinned item is. A partially
+  // A zone reads as collapsed only when every density-capable item is. A partially
   // collapsed zone still offers "Collapse contents", so one click makes the
   // whole zone uniform instead of toggling it into a different mixed state.
   const zoneContentsAllCompact =
-    (data.pinnedItemCount ?? 0) > 0 && (data.compactItemCount ?? 0) >= (data.pinnedItemCount ?? 0);
+    (data.densityExpandableItemCount ?? 0) > 0 &&
+    (data.compactDensityExpandableItemCount ?? 0) >= (data.densityExpandableItemCount ?? 0);
+  const autoZoneEnabled = normalizeZoneLayoutPolicy(data.layout).mode === 'auto';
+  const positionableItemCount = data.positionableItemCount ?? data.pinnedItemCount ?? 0;
+  const hasExtraLayoutActions =
+    positionableItemCount > 0 || (data.densityExpandableItemCount ?? 0) > 0;
+  const layoutActionsId = `zone-layout-actions-${data.objectId}`;
 
   // Inverse scale keeps zone labels at a legible size regardless of zoom.
   const scale = 1 / zoom;
   const toolbarHost = reactFlowRoot ?? (typeof document === 'undefined' ? null : document.body);
   const toolbarLeft = viewportX + (xPos ?? data.x) * zoom + (data.width * zoom) / 2;
   const toolbarTop = viewportY + (yPos ?? data.y) * zoom - 8;
+  const clampedToolbarLeft = clampZoneToolbarCenter(
+    toolbarLeft,
+    toolbarBounds.toolbarWidth,
+    toolbarBounds.hostWidth
+  );
+
+  useLayoutEffect(() => {
+    const toolbar = toolbarRef.current;
+    if (!toolbar || typeof window === 'undefined') return;
+
+    const measure = () => {
+      const next = {
+        toolbarWidth: toolbar.getBoundingClientRect().width,
+        hostWidth: reactFlowRoot?.clientWidth ?? window.innerWidth,
+      };
+      setToolbarBounds((current) =>
+        current.toolbarWidth === next.toolbarWidth && current.hostWidth === next.hostWidth
+          ? current
+          : next
+      );
+    };
+
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(toolbar);
+    if (reactFlowRoot) observer.observe(reactFlowRoot);
+    return () => observer.disconnect();
+  }, [reactFlowRoot]);
 
   // Sync label state when data.label changes (from WebSocket or modal updates)
   useEffect(() => {
@@ -162,6 +229,7 @@ const ZoneNodeComponent = ({
     if (selected) {
       setToolbarVisible(true);
     } else {
+      setLayoutActionsExpanded(false);
       // Delay hiding to prevent flicker during re-renders
       const timer = setTimeout(() => setToolbarVisible(false), 100);
       return () => clearTimeout(timer);
@@ -224,6 +292,16 @@ const ZoneNodeComponent = ({
     if (label !== data.label && data.onUpdate) {
       data.onUpdate(data.objectId, createObjectData({ label }));
     }
+  };
+
+  const handleToggleAutoZone = () => {
+    if (mutationDisabled || !data.onUpdate) return;
+    void data.onUpdate(
+      data.objectId,
+      createObjectData({
+        layout: setZoneLayoutMode(data.layout, autoZoneEnabled ? 'manual' : 'auto'),
+      })
+    );
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -300,6 +378,7 @@ const ZoneNodeComponent = ({
     cursor: 'pointer',
     padding: 0,
     color: token.colorText,
+    flexShrink: 0,
   };
 
   const verticalDivider = (
@@ -310,6 +389,7 @@ const ZoneNodeComponent = ({
         backgroundColor: token.colorBorder,
         margin: '0 2px',
         alignSelf: 'center',
+        flexShrink: 0,
       }}
     />
   );
@@ -326,12 +406,21 @@ const ZoneNodeComponent = ({
     title: string,
     icon: React.ReactNode,
     action: () => void,
-    disabled = false
+    disabled = false,
+    options: {
+      pressed?: boolean;
+      active?: boolean;
+      expanded?: boolean;
+      controls?: string;
+    } = {}
   ) => (
     <button
       key={key}
       type="button"
       aria-label={title}
+      aria-pressed={options.pressed}
+      aria-expanded={options.expanded}
+      aria-controls={options.controls}
       disabled={disabled}
       onPointerDown={(e) => {
         e.preventDefault();
@@ -356,6 +445,13 @@ const ZoneNodeComponent = ({
       }}
       style={{
         ...iconButtonStyle,
+        ...(options.active
+          ? {
+              backgroundColor: token.colorPrimaryBg,
+              borderColor: token.colorPrimary,
+              color: token.colorPrimary,
+            }
+          : {}),
         ...(disabled ? { opacity: 0.4, cursor: 'not-allowed' } : {}),
       }}
       title={title}
@@ -472,6 +568,7 @@ const ZoneNodeComponent = ({
           createPortal(
             /* biome-ignore format: keep the established toolbar body stable inside its portal */
             <div
+          ref={toolbarRef}
           className="nodrag nopan"
           role="toolbar"
           aria-label="Zone actions"
@@ -493,21 +590,21 @@ const ZoneNodeComponent = ({
             // comments without raising the translucent zone container itself.
             position: reactFlowRoot ? 'absolute' : 'fixed',
             top: toolbarTop,
-            left: toolbarLeft,
-            // Anchor the toolbar's bottom edge above the zone. Extra wrapped
-            // rows grow upward and never cover the zone label or contents.
+            left: clampedToolbarLeft,
+            // Anchor the toolbar's bottom edge above the zone. The established
+            // zone controls stay in one row; lower-frequency layout controls
+            // expand horizontally from their disclosure instead of wrapping.
             transform: 'translate(-50%, -100%)',
             transformOrigin: 'center bottom',
             display: data.suppressToolbar ? 'none' : 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            flexWrap: 'wrap',
+            flexWrap: 'nowrap',
             gap: '8px',
-            rowGap: '6px',
             width: 'max-content',
-            // Preserve every direct action without letting the toolbar turn
-            // into a screen-wide strip as more controls are added.
-            maxWidth: 'min(460px, calc(100vw - 32px))',
+            maxWidth: reactFlowRoot ? 'calc(100% - 32px)' : 'calc(100vw - 32px)',
+            overflowX: 'auto',
+            overflowY: 'hidden',
             padding: '6px',
             background: token.colorBgElevated,
             border: `1px solid ${token.colorBorder}`,
@@ -532,7 +629,7 @@ const ZoneNodeComponent = ({
             onPointerUp={(e) => {
               e.stopPropagation();
             }}
-            style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
+            style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}
           >
             <span
               style={{
@@ -605,7 +702,7 @@ const ZoneNodeComponent = ({
             onPointerUp={(e) => {
               e.stopPropagation();
             }}
-            style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
+            style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}
           >
             <span
               style={{
@@ -703,6 +800,7 @@ const ZoneNodeComponent = ({
               userSelect: 'none',
               cursor: 'pointer',
               padding: 0,
+              flexShrink: 0,
             }}
             title={data.locked ? 'Unlock zone' : 'Lock zone'}
           >
@@ -729,16 +827,9 @@ const ZoneNodeComponent = ({
             )}
           </button>
           {verticalDivider}
-          {renderActionButton(
-            'arrange-contents',
-            'Tidy up contents',
-            <AppstoreOutlined style={layerIconStyle} />,
-            () => data.onArrangeContents?.(data.objectId),
-            (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
-          )}
           <fieldset
             className="nodrag nopan"
-            aria-label="Justify contents"
+            aria-label="Zone layout actions"
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -747,72 +838,127 @@ const ZoneNodeComponent = ({
               margin: 0,
               padding: 0,
               border: 0,
+              flexShrink: 0,
             }}
           >
             {renderActionButton(
-              'justify-left',
-              'Justify contents left',
-              <AlignLeftOutlined style={layerIconStyle} />,
-              () => data.onJustifyContents?.(data.objectId, 'left'),
-              (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
+              'auto-zone',
+              autoZoneEnabled ? 'Disable Auto Zone' : 'Enable Auto Zone',
+              <SyncOutlined
+                style={{
+                  ...layerIconStyle,
+                  color: autoZoneEnabled ? token.colorPrimary : token.colorText,
+                }}
+              />,
+              handleToggleAutoZone,
+              false,
+              { pressed: autoZoneEnabled, active: autoZoneEnabled }
             )}
             {renderActionButton(
-              'justify-middle',
-              'Center in zone',
-              <AlignCenterOutlined style={layerIconStyle} />,
-              () => data.onJustifyContents?.(data.objectId, 'middle'),
-              (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
+              'arrange-contents',
+              'Tidy up contents',
+              <AppstoreOutlined style={layerIconStyle} />,
+              () => data.onArrangeContents?.(data.objectId),
+              positionableItemCount < 1
             )}
-            {renderActionButton(
-              'justify-right',
-              'Justify contents right',
-              <AlignRightOutlined style={layerIconStyle} />,
-              () => data.onJustifyContents?.(data.objectId, 'right'),
-              (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
-            )}
-            {renderActionButton(
-              'justify-top',
-              'Justify contents top',
-              <VerticalAlignTopOutlined style={layerIconStyle} />,
-              () => data.onJustifyContents?.(data.objectId, 'top'),
-              (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
-            )}
-            {renderActionButton(
-              'justify-vertical-middle',
-              'Center contents vertically',
-              <VerticalAlignMiddleOutlined style={layerIconStyle} />,
-              () => data.onJustifyContents?.(data.objectId, 'vertical_middle'),
-              (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
-            )}
-            {renderActionButton(
-              'justify-bottom',
-              'Justify contents bottom',
-              <VerticalAlignBottomOutlined style={layerIconStyle} />,
-              () => data.onJustifyContents?.(data.objectId, 'bottom'),
-              (data.positionableItemCount ?? data.pinnedItemCount ?? 0) < 1
+            {hasExtraLayoutActions &&
+              renderActionButton(
+                'more-layout-actions',
+                layoutActionsExpanded ? 'Hide extra layout actions' : 'Show more layout actions',
+                <EllipsisOutlined style={layerIconStyle} />,
+                () => setLayoutActionsExpanded((expanded) => !expanded),
+                false,
+                {
+                  active: layoutActionsExpanded,
+                  expanded: layoutActionsExpanded,
+                  controls: layoutActionsId,
+                }
+              )}
+            {layoutActionsExpanded && hasExtraLayoutActions && (
+              <div
+                id={layoutActionsId}
+                style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}
+              >
+                <fieldset
+                  className="nodrag nopan"
+                  aria-label="Justify contents"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    minWidth: 0,
+                    margin: 0,
+                    padding: 0,
+                    border: 0,
+                  }}
+                >
+                  {renderActionButton(
+                    'justify-left',
+                    'Justify contents left',
+                    <AlignLeftOutlined style={layerIconStyle} />,
+                    () => data.onJustifyContents?.(data.objectId, 'left'),
+                    positionableItemCount < 1
+                  )}
+                  {renderActionButton(
+                    'justify-middle',
+                    'Center in zone',
+                    <AlignCenterOutlined style={layerIconStyle} />,
+                    () => data.onJustifyContents?.(data.objectId, 'middle'),
+                    positionableItemCount < 1
+                  )}
+                  {renderActionButton(
+                    'justify-right',
+                    'Justify contents right',
+                    <AlignRightOutlined style={layerIconStyle} />,
+                    () => data.onJustifyContents?.(data.objectId, 'right'),
+                    positionableItemCount < 1
+                  )}
+                  {renderActionButton(
+                    'justify-top',
+                    'Justify contents top',
+                    <VerticalAlignTopOutlined style={layerIconStyle} />,
+                    () => data.onJustifyContents?.(data.objectId, 'top'),
+                    positionableItemCount < 1
+                  )}
+                  {renderActionButton(
+                    'justify-vertical-middle',
+                    'Center contents vertically',
+                    <VerticalAlignMiddleOutlined style={layerIconStyle} />,
+                    () => data.onJustifyContents?.(data.objectId, 'vertical_middle'),
+                    positionableItemCount < 1
+                  )}
+                  {renderActionButton(
+                    'justify-bottom',
+                    'Justify contents bottom',
+                    <VerticalAlignBottomOutlined style={layerIconStyle} />,
+                    () => data.onJustifyContents?.(data.objectId, 'bottom'),
+                    positionableItemCount < 1
+                  )}
+                </fieldset>
+                {/*
+                  One derived-state density button rather than a Collapse/Expand
+                  pair: a zone whose items are all collapsed can only usefully be
+                  expanded, and vice versa, so a second slot would always be a no-op.
+                */}
+                {(data.densityExpandableItemCount ?? 0) > 0 &&
+                  renderActionButton(
+                    'set-contents-compact',
+                    zoneContentsAllCompact ? 'Expand contents' : 'Collapse contents',
+                    zoneContentsAllCompact ? (
+                      <PlusSquareOutlined style={layerIconStyle} />
+                    ) : (
+                      <MinusSquareOutlined style={layerIconStyle} />
+                    ),
+                    () => data.onSetContentsCompact?.(data.objectId, !zoneContentsAllCompact)
+                  )}
+              </div>
             )}
           </fieldset>
-          {/*
-            One derived-state density button rather than a Collapse/Expand
-            pair: a zone whose items are all collapsed can only usefully be
-            expanded, and vice versa, so a second slot would always be a no-op.
-          */}
-          {renderActionButton(
-            'set-contents-compact',
-            zoneContentsAllCompact ? 'Expand contents' : 'Collapse contents',
-            zoneContentsAllCompact ? (
-              <PlusSquareOutlined style={layerIconStyle} />
-            ) : (
-              <MinusSquareOutlined style={layerIconStyle} />
-            ),
-            () => data.onSetContentsCompact?.(data.objectId, !zoneContentsAllCompact),
-            (data.pinnedItemCount ?? 0) < 1
-          )}
           {verticalDivider}
           {/* Layer (z-order) controls */}
           <div
             className="nodrag nopan"
-            style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
+            style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}
           >
             {renderActionButton(
               'to-back',
@@ -843,7 +989,7 @@ const ZoneNodeComponent = ({
           {/* Label font-size stepper */}
           <div
             className="nodrag nopan"
-            style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
+            style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}
           >
             <FontSizeOutlined
               style={{ fontSize: '12px', color: token.colorTextSecondary }}
@@ -905,6 +1051,7 @@ const ZoneNodeComponent = ({
               userSelect: 'none',
               cursor: 'pointer',
               padding: 0,
+              flexShrink: 0,
             }}
             title="Configure zone"
           >
@@ -955,6 +1102,7 @@ const ZoneNodeComponent = ({
               cursor: 'pointer',
               padding: 0,
               color: token.colorTextSecondary,
+              flexShrink: 0,
             }}
             title="Delete zone"
           >

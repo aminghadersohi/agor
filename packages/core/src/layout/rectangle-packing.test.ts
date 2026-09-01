@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   BOARD_GRID_SIZE,
+  LayoutObstacleError,
   layoutAlignedRectangles,
   layoutCompactRectangles,
   layoutRectangles,
   layoutSelectionGrid,
+  placeLayoutAroundFixedObstacles,
   type RectanglePlacement,
   snapBoardGridPoint,
 } from './rectangle-packing';
@@ -159,6 +161,98 @@ describe('layoutSelectionGrid', () => {
     );
 
     expect(repeated).toEqual(first);
+  });
+
+  it.each(Array.from({ length: 10 }, (_, index) => index + 1))(
+    'partitions %i heterogeneous items into complete three-column rows with only the last partial',
+    (count) => {
+      const items = Array.from({ length: count }, (_, index) => ({
+        id: `item-${index}`,
+        width: 120 + (index % 3) * 40,
+        height: 80 + (index % 2) * 60,
+        sourceX: (index % 3) * 300,
+        sourceY: Math.floor(index / 3) * 300,
+      }));
+      const result = layoutSelectionGrid(items, {
+        columns: 3,
+        gapX: 40,
+        gapY: 40,
+        gridSize: BOARD_GRID_SIZE,
+      });
+      const rowSizes = Array.from(
+        { length: result.rows },
+        (_, row) => result.placements.filter((placement) => placement.row === row).length
+      );
+
+      expect(result.columns).toBe(Math.min(3, count));
+      expect(rowSizes.slice(0, -1)).toEqual(Array(Math.max(0, rowSizes.length - 1)).fill(3));
+      expect(rowSizes.at(-1)).toBe(count % 3 || Math.min(3, count));
+      expect(result.placements.map((placement) => placement.id)).toEqual(
+        items.map((item) => item.id)
+      );
+      expectNoOverlap(result.placements);
+    }
+  );
+
+  it('moves the regular grid minimally as one rigid cluster around fixed obstacles', () => {
+    const grid = layoutSelectionGrid(mixed, {
+      columns: 3,
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+    const obstacle = { id: 'fixed-note', x: 500, y: 100, width: 200, height: 160 };
+    const result = placeLayoutAroundFixedObstacles(grid.placements, {
+      desiredOrigin: { x: 100, y: 100 },
+      obstacles: [obstacle],
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+
+    expect(result.origin).toEqual({ x: 100, y: 300 });
+    expect(result.placements.map(({ id, row, column }) => ({ id, row, column }))).toEqual(
+      grid.placements.map(({ id, row, column }) => ({ id, row, column }))
+    );
+    expectNoOverlap([
+      ...result.placements,
+      { ...obstacle, row: -1, column: -1, stackIndex: -1, deckDepth: 0 },
+    ]);
+  });
+
+  it('keeps an already clear compact cluster byte-stable and reports impossible bounds', () => {
+    const grid = layoutSelectionGrid(mixed.slice(0, 3), {
+      columns: 3,
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+    const first = placeLayoutAroundFixedObstacles(grid.placements, {
+      desiredOrigin: { x: 200, y: 300 },
+      obstacles: [{ id: 'far-away', x: 4000, y: 4000, width: 200, height: 200 }],
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+    const repeated = placeLayoutAroundFixedObstacles(first.placements, {
+      desiredOrigin: first.origin,
+      obstacles: [{ id: 'far-away', x: 4000, y: 4000, width: 200, height: 200 }],
+      gapX: 40,
+      gapY: 40,
+      gridSize: BOARD_GRID_SIZE,
+    });
+
+    expect(repeated).toEqual(first);
+    expect(() =>
+      placeLayoutAroundFixedObstacles(grid.placements, {
+        desiredOrigin: { x: 0, y: 0 },
+        obstacles: [{ id: 'locked', x: 0, y: 0, width: 1000, height: 1000 }],
+        bounds: { x: 0, y: 0, width: 1000, height: 1000 },
+        gapX: 40,
+        gapY: 40,
+        gridSize: BOARD_GRID_SIZE,
+      })
+    ).toThrow(LayoutObstacleError);
   });
 });
 

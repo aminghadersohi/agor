@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   CANVAS_LAYOUT_CONTROLS_CLASS,
   SelectionLayoutPopover,
+  selectionBoardZoneArrangementOptions,
   selectionGridTracks,
 } from './SelectionLayoutPopover';
 
@@ -15,12 +16,63 @@ describe('selectionGridTracks', () => {
   });
 });
 
+describe('selectionBoardZoneArrangementOptions', () => {
+  it('maps columns, rows, and final-row distribution into the shared zone planner', () => {
+    expect(
+      selectionBoardZoneArrangementOptions(7, {
+        mode: 'grid',
+        trackAxis: 'columns',
+        trackCount: 2,
+        matchRowHeights: false,
+        matchColumnWidths: true,
+        rowDistribution: 'packed',
+      })
+    ).toEqual({
+      fixedItemsPerRow: 2,
+      compactFixedGrid: true,
+      justifyLastRow: false,
+      matchRowHeights: false,
+      matchColumnWidths: true,
+    });
+    expect(
+      selectionBoardZoneArrangementOptions(7, {
+        mode: 'grid',
+        trackAxis: 'rows',
+        trackCount: 2,
+        matchRowHeights: true,
+        matchColumnWidths: false,
+        rowDistribution: 'justify',
+      })
+    ).toEqual({
+      fixedItemsPerRow: 4,
+      compactFixedGrid: true,
+      justifyLastRow: true,
+      matchRowHeights: true,
+      matchColumnWidths: false,
+    });
+  });
+
+  it('uses the exact ordinary Arrange options for compact or toolbar arrange', () => {
+    expect(selectionBoardZoneArrangementOptions(3)).toEqual({ compactOuterLayout: true });
+    expect(
+      selectionBoardZoneArrangementOptions(3, {
+        mode: 'compact',
+        trackAxis: 'columns',
+        trackCount: 2,
+        matchRowHeights: false,
+        matchColumnWidths: false,
+        rowDistribution: 'packed',
+      })
+    ).toEqual({ compactOuterLayout: true });
+  });
+});
+
 describe('SelectionLayoutPopover', () => {
   it('keeps compact as the ordinary default and exposes explicit grid controls', async () => {
     const onApply = vi.fn();
     render(
       <AntApp>
-        <SelectionLayoutPopover selectionCount={7} onApply={onApply} />
+        <SelectionLayoutPopover selectionCount={7} zoneOnlySelection={false} onApply={onApply} />
       </AntApp>
     );
 
@@ -40,8 +92,59 @@ describe('SelectionLayoutPopover', () => {
         trackAxis: 'columns',
         trackCount: 3,
         matchRowHeights: true,
+        matchColumnWidths: false,
         rowDistribution: 'packed',
       })
+    );
+  });
+
+  it('tracks the compact three-column default as a selection grows without overriding edits', async () => {
+    const onApply = vi.fn();
+    const view = render(
+      <AntApp>
+        <SelectionLayoutPopover selectionCount={2} zoneOnlySelection={false} onApply={onApply} />
+      </AntApp>
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(screen.getByText('Grid'));
+    expect(screen.getByText('2 columns × 1 row')).toBeInTheDocument();
+
+    view.rerender(
+      <AntApp>
+        <SelectionLayoutPopover selectionCount={9} zoneOnlySelection={false} onApply={onApply} />
+      </AntApp>
+    );
+    expect(await screen.findByText('3 columns × 3 rows')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Number of columns'), { target: { value: '4' } });
+    view.rerender(
+      <AntApp>
+        <SelectionLayoutPopover selectionCount={10} zoneOnlySelection={false} onApply={onApply} />
+      </AntApp>
+    );
+    expect(await screen.findByText('4 columns × 3 rows')).toBeInTheDocument();
+  });
+
+  it('defaults honest zone-only grid frame matching on and explains the preserved-size option', async () => {
+    const onApply = vi.fn();
+    render(
+      <AntApp>
+        <SelectionLayoutPopover selectionCount={3} zoneOnlySelection onApply={onApply} />
+      </AntApp>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(screen.getByText('Grid', { exact: true }));
+    const matching = screen.getByRole('switch', { name: 'Match zone frames to grid' });
+    expect(matching).toBeChecked();
+    expect(screen.getByText(/can leave extra space inside larger tracks/i)).toBeInTheDocument();
+    fireEvent.click(matching);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply layout', hidden: true }));
+
+    await waitFor(() =>
+      expect(onApply).toHaveBeenCalledWith(
+        expect.objectContaining({ matchRowHeights: false, matchColumnWidths: false })
+      )
     );
   });
 });

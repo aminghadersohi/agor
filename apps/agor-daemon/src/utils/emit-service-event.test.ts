@@ -104,7 +104,14 @@ describe('board patch custom actions', () => {
       source.indexOf('return context;', source.indexOf("if (_action === 'deleteZone'"))
     );
 
-    expect(patchHook.match(/params: context\.params/g)).toHaveLength(5);
-    expect(patchHook.match(/emitServiceEvent\(app/g)).toHaveLength(5);
+    // applyLayout adds one complete layout event plus the board/object
+    // compatibility events; each must retain the authorized request params.
+    expect(patchHook.match(/params: context\.params/g)).toHaveLength(8);
+    expect(patchHook.match(/emitServiceEvent\(app/g)).toHaveLength(8);
+    const noOpGuard = patchHook.indexOf('if (result.changed === false)');
+    const firstLayoutEvent = patchHook.indexOf('event: BOARD_LAYOUT_APPLIED_EVENT');
+    expect(patchHook).toContain('context.event = null');
+    expect(noOpGuard).toBeGreaterThan(-1);
+    expect(noOpGuard).toBeLessThan(firstLayoutEvent);
   });
 });

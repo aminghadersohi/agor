@@ -1,6 +1,10 @@
 import type { Node } from 'reactflow';
 import { describe, expect, it } from 'vitest';
-import { getVisibleSelectableNodeRect, isVisibleSelectableBoardNode } from './boardNodeGeometry';
+import {
+  getMeasuredLayoutNodeSize,
+  getVisibleSelectableNodeRect,
+  isVisibleSelectableBoardNode,
+} from './boardNodeGeometry';
 
 const entityTypes = ['branchNode', 'cardNode', 'zone', 'markdown', 'appNode', 'artifactNode'];
 
@@ -58,5 +62,23 @@ describe('board node geometry eligibility', () => {
 
   it('rejects zero-area rendered nodes', () => {
     expect(getVisibleSelectableNodeRect(node('markdown', { width: 0 }), [])).toBeNull();
+  });
+
+  it('prefers the actual production node box to stale stored dimensions', () => {
+    const element = document.createElement('div');
+    element.className = 'react-flow__node';
+    element.dataset.id = 'branch';
+    Object.defineProperties(element, {
+      offsetWidth: { value: 380 },
+      offsetHeight: { value: 236 },
+      scrollWidth: { value: 400 },
+      scrollHeight: { value: 236 },
+    });
+    document.body.append(element);
+
+    expect(
+      getMeasuredLayoutNodeSize(node('branchNode', { id: 'branch', width: 300, height: 120 }))
+    ).toEqual({ width: 400, height: 236 });
+    element.remove();
   });
 });

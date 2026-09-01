@@ -1,5 +1,5 @@
 import { BOARD_GRID_SIZE, snapBoardGridPoint } from '@agor/core/layout/rectangle-packing';
-import type { Board } from '@agor-live/client';
+import type { Board, BoardObject } from '@agor-live/client';
 import { act, renderHook } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import type { ReactNode } from 'react';
@@ -166,18 +166,54 @@ afterEach(() => {
  * only behavior exercised here, and it only touches `client` + `board`.
  */
 function makeClient() {
-  const patch = vi.fn().mockResolvedValue({});
+  const patch = vi.fn().mockImplementation(mockBoardPatchResult);
   const client = { service: vi.fn().mockReturnValue({ patch }) };
   return { client: client as never, patch };
 }
 
 function makeRoutedClient() {
-  const boardsPatch = vi.fn().mockResolvedValue({});
+  const boardsPatch = vi.fn().mockImplementation(mockBoardPatchResult);
   const boardObjectsPatch = vi.fn().mockResolvedValue({});
   const service = vi.fn((path: string) => ({
     patch: path === 'boards' ? boardsPatch : boardObjectsPatch,
   }));
   return { client: { service } as never, service, boardsPatch, boardObjectsPatch };
+}
+
+function mockBoardPatchResult(boardId: string, data: Record<string, unknown>) {
+  if (data?._action !== 'applyLayout') return Promise.resolve({});
+  const objects = (data.objects ?? {}) as Record<string, BoardObject>;
+  const placements = data.placements as Record<
+    string,
+    {
+      position: { x: number; y: number };
+      size: { width: number; height: number };
+      compact?: boolean;
+    }
+  >;
+  return Promise.resolve({
+    board: { board_id: boardId, objects },
+    placements: Object.entries(placements ?? {}).map(([objectId, layout]) => ({
+      object_id: objectId,
+      board_id: boardId,
+      entity_type: 'branch',
+      created_at: '2026-01-01T00:00:00.000Z',
+      ...layout,
+    })),
+    changed: true,
+    changed_object_ids: Object.keys(objects),
+    changed_placement_ids: Object.keys(placements ?? {}),
+  });
+}
+
+function layoutWrites(patch: { mock: { calls: unknown[][] } }) {
+  return patch.mock.calls
+    .map((call) => call[1] as { _action?: string; objects?: object; placements?: object })
+    .filter((write) => write?._action === 'applyLayout');
+}
+
+function layoutPlacements(patch: { mock: { calls: unknown[][] } }): Record<string, unknown> {
+  return Object.assign({}, ...layoutWrites(patch).map((write) => write.placements ?? {}));
 }
 
 /** Like makeClient but `patch` rejects, to exercise the error path. */
@@ -404,7 +440,7 @@ describe('batchUpdateObjectPositions', () => {
 
 describe('arrangeZoneContents', () => {
   it('reserves the scaled live title before packing a single child', async () => {
-    const { client, boardObjectsPatch } = makeRoutedClient();
+    const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
     const board = makeBoard({
       zone: {
         type: 'zone',
@@ -485,7 +521,8 @@ describe('arrangeZoneContents', () => {
         x: 20,
         y: 180,
       });
-      expect(boardObjectsPatch).toHaveBeenCalledWith('placement-branch', {
+      expect(boardObjectsPatch).not.toHaveBeenCalled();
+      expect(layoutPlacements(boardsPatch)['placement-branch']).toEqual({
         position: { x: 20, y: 180 },
         size: { width: 500, height: 240 },
       });
@@ -497,6 +534,7 @@ describe('arrangeZoneContents', () => {
   it('packs once, starts one motion, and persists one complete patch per child', async () => {
     const { client, patch } = makeClient();
     const onArrangeNodes = vi.fn();
+    const onUserLayoutComplete = vi.fn();
     const board = makeBoard({
       zone: { type: 'zone', x: 0, y: 0, width: 900, height: 500, label: 'Zone' },
     });
@@ -561,6 +599,7 @@ describe('arrangeZoneContents', () => {
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
           onArrangeNodes,
+          onUserLayoutComplete,
         }),
       { wrapper }
     );
@@ -584,20 +623,27 @@ describe('arrangeZoneContents', () => {
       { x: 20, y: 300 },
     ]);
     expect(onArrangeNodes.mock.calls[0]?.[1]).toBeGreaterThan(0);
-    expect(patch).toHaveBeenCalledTimes(2);
-    expect(patch).toHaveBeenCalledWith('placement-branch', {
+    expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
+    expect(onUserLayoutComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'user', boardId: 'board-1', scope: 'zone' })
+    );
+    expect(patch).toHaveBeenCalledTimes(1);
+    const placements = layoutPlacements(patch);
+    expect(placements['placement-branch']).toEqual({
       position: { x: 20, y: 100 },
       size: { width: 400, height: 180 },
     });
-    expect(patch).toHaveBeenCalledWith('placement-card', {
+    expect(placements['placement-card']).toEqual({
       position: { x: 20, y: 300 },
       size: { width: 300, height: 100 },
     });
     expect(showSuccess).toHaveBeenCalledWith(
       'Arranged 2 items in a non-overlapping compact cluster.'
     );
-    for (const [, update] of patch.mock.calls) {
-      if (!('position' in update) || !('size' in update)) continue;
+    for (const update of Object.values(placements) as Array<{
+      position: { x: number; y: number };
+      size: { width: number; height: number };
+    }>) {
       expect(update.position.x % BOARD_GRID_SIZE).toBe(0);
       expect(update.position.y % BOARD_GRID_SIZE).toBe(0);
       expect(update.size.width % BOARD_GRID_SIZE).toBe(0);
@@ -734,14 +780,18 @@ describe('arrangeZoneContents', () => {
       await (zoneNode!.data.onArrangeContents as (id: string) => Promise<void>)('zone');
     });
 
-    expect(boardObjectsPatch).toHaveBeenCalledTimes(2);
+    expect(boardObjectsPatch).not.toHaveBeenCalled();
     expect(boardsPatch).toHaveBeenCalledTimes(1);
     const boardWrite = boardsPatch.mock.calls[0]?.[1] as {
       _action: string;
       objects: Record<string, { x: number; y: number }>;
     };
-    expect(boardWrite._action).toBe('batchUpsertObjects');
-    expect(Object.keys(boardWrite.objects).sort()).toEqual(['app', 'artifact', 'note']);
+    expect(boardWrite._action).toBe('applyLayout');
+    expect(Object.keys(layoutPlacements(boardsPatch)).sort()).toEqual([
+      'placement-branch',
+      'placement-card',
+    ]);
+    expect(Object.keys(boardWrite.objects).sort()).toEqual(['app', 'artifact', 'note', 'zone']);
     expect(boardWrite.objects.locked).toBeUndefined();
 
     const arranged = renderedNodes.filter((node) =>
@@ -773,6 +823,78 @@ describe('arrangeZoneContents', () => {
     expect(showSuccess).toHaveBeenCalledWith(
       'Arranged 5 items in a non-overlapping compact cluster.'
     );
+  });
+
+  it('submits the complete affected canvas snapshot when another child needs layout', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const board = makeBoard({
+      zone: {
+        type: 'zone',
+        x: 0,
+        y: 0,
+        width: 620,
+        height: 700,
+        label: 'Mixed',
+        layout: { mode: 'manual', preset: 'grid', columns: 1, sortBy: 'position', gap: 20 },
+      },
+      note: { type: 'markdown', x: 20, y: 100, width: 360, content: 'Stable note' },
+    });
+    const nodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, width: 620, height: 700, data: {} },
+      {
+        id: 'note',
+        type: 'markdown',
+        position: { x: 20, y: 100 },
+        width: 360,
+        height: 100,
+        data: { title: 'A note' },
+      },
+      {
+        id: 'branch',
+        type: 'branchNode',
+        parentId: 'zone',
+        position: { x: 20, y: 400 },
+        width: 500,
+        height: 240,
+        data: { branch: { name: 'B branch' } },
+      },
+    ];
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'placement-branch',
+              entity_type: 'branch',
+              branch_id: 'branch',
+              zone_id: 'zone',
+              position: { x: 20, y: 400 },
+              size: { width: 500, height: 240 },
+            },
+          ] as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    const zoneNode = result.current.getBoardObjectNodes().find((node) => node.id === 'zone');
+    await act(async () => {
+      await (zoneNode!.data.onArrangeContents as (id: string) => Promise<void>)('zone');
+    });
+
+    expect(layoutWrites(boardsPatch)).toHaveLength(1);
+    expect(layoutWrites(boardsPatch)[0]?.objects).toEqual({
+      zone: expect.objectContaining({ x: 0, y: 0, width: 620, height: 700 }),
+      note: expect.objectContaining({ x: 20, y: 100, width: 360 }),
+    });
+    expect(layoutPlacements(boardsPatch)['placement-branch']).toEqual({
+      position: { x: 20, y: 220 },
+      size: { width: 500, height: 240 },
+    });
   });
 
   it('uses the visible zone frame instead of overwriting it from a stale board snapshot', async () => {
@@ -837,13 +959,13 @@ describe('arrangeZoneContents', () => {
     expect(boardsPatch).toHaveBeenCalledWith(
       'board-1',
       expect.objectContaining({
-        _action: 'batchUpsertObjects',
-        objects: {
+        _action: 'applyLayout',
+        objects: expect.objectContaining({
           artifact: expect.objectContaining({ x: 1020, y: 1100 }),
-        },
+          zone: expect.objectContaining({ x: 1000, y: 1000, width: 900, height: 700 }),
+        }),
       })
     );
-    expect(boardsPatch.mock.calls[0]?.[1].objects.zone).toBeUndefined();
   });
 
   it('minimally shifts a newly covered zone and its canvas contents in the same grow write', async () => {
@@ -921,7 +1043,7 @@ describe('arrangeZoneContents', () => {
 
     const write = boardsPatch.mock.calls[0]?.[1];
     const objects = write.objects as Record<string, { x: number; y: number; height: number }>;
-    expect(write._action).toBe('batchUpsertObjects');
+    expect(write._action).toBe('applyLayout');
     expect(objects.grow.height).toBeGreaterThan(250);
     expect(objects.below.x).toBe(0);
     expect(objects.below.y).toBeGreaterThanOrEqual(objects.grow.height + BOARD_GRID_SIZE);
@@ -1022,11 +1144,12 @@ describe('arrangeZoneContents', () => {
       x: 20,
       y: 360,
     });
-    expect(patch).toHaveBeenCalledWith('placement-branch', {
+    const placements = layoutPlacements(patch);
+    expect(placements['placement-branch']).toEqual({
       position: { x: 20, y: 100 },
       size: { width: 500, height: 240 },
     });
-    expect(patch).toHaveBeenCalledWith('placement-card', {
+    expect(placements['placement-card']).toEqual({
       position: { x: 20, y: 360 },
       size: { width: 380, height: 100 },
     });
@@ -1048,7 +1171,7 @@ describe('arrangeZoneContents', () => {
     renderedBranch.append(branchHeader);
     const renderedCard = document.createElement('div');
     renderedCard.className = 'react-flow__node';
-    renderedCard.dataset.id = 'card-card-1';
+    renderedCard.dataset.id = 'branch-2';
     const cardHeader = document.createElement('div');
     cardHeader.dataset.zoneStackHeader = '';
     Object.defineProperties(cardHeader, {
@@ -1074,8 +1197,8 @@ describe('arrangeZoneContents', () => {
         height: 180,
       },
       {
-        id: 'card-card-1',
-        type: 'cardNode',
+        id: 'branch-2',
+        type: 'branchNode',
         parentId: 'zone',
         position: { x: 40, y: 40 },
         data: {},
@@ -1103,10 +1226,10 @@ describe('arrangeZoneContents', () => {
               created_at: '2026-01-01T00:00:00.000Z',
             },
             {
-              object_id: 'placement-card',
+              object_id: 'placement-branch-2',
               board_id: 'board-1',
-              entity_type: 'card',
-              card_id: 'card-1',
+              entity_type: 'branch',
+              branch_id: 'branch-2',
               position: { x: 40, y: 40 },
               zone_id: 'zone',
               created_at: '2026-01-01T00:00:00.000Z',
@@ -1125,7 +1248,7 @@ describe('arrangeZoneContents', () => {
     });
 
     const stackedBranch = renderedNodes.find((node) => node.id === 'branch-1');
-    const stackedCard = renderedNodes.find((node) => node.id === 'card-card-1');
+    const stackedCard = renderedNodes.find((node) => node.id === 'branch-2');
     expect(stackedBranch?.position).toEqual({ x: 20, y: 100 });
     expect(stackedCard?.position).toEqual({ x: 20, y: 180 });
     expect((stackedCard?.position.y ?? 0) - (stackedBranch?.position.y ?? 0)).toBe(80);
@@ -1138,25 +1261,20 @@ describe('arrangeZoneContents', () => {
       deckDepth: 0,
       revealHeight: 80,
     });
-    expect(result.current.zoneStackByNodeId.get('card-card-1')).toMatchObject({
+    expect(result.current.zoneStackByNodeId.get('branch-2')).toMatchObject({
       zoneId: 'zone',
       deckDepth: 1,
       revealHeight: 80,
     });
-    expect(patch).toHaveBeenCalledWith(
-      'placement-branch',
+    const placements = layoutPlacements(patch);
+    expect(placements['placement-branch']).toEqual(
       expect.objectContaining({ position: { x: 20, y: 100 }, compact: true })
     );
-    expect(patch).toHaveBeenCalledWith(
-      'placement-card',
+    expect(placements['placement-branch-2']).toEqual(
       expect.objectContaining({ position: { x: 20, y: 180 }, compact: true })
     );
-    expect(patch).toHaveBeenCalledWith(
-      'board-1',
-      expect.objectContaining({
-        _action: 'batchUpsertObjects',
-        objects: { zone: expect.objectContaining({ height: 260 }) },
-      })
+    expect(layoutWrites(patch)[0]).toEqual(
+      expect.objectContaining({ objects: { zone: expect.objectContaining({ height: 300 }) } })
     );
     expect(showWarning).toHaveBeenCalledWith(expect.stringContaining('every title and action row'));
 
@@ -1166,7 +1284,7 @@ describe('arrangeZoneContents', () => {
 
   it('keeps automatic stack maintenance silent and sizes it for a durable compact deck', async () => {
     vi.useFakeTimers();
-    const cardNodeIds = ['card-card-1', 'card-card-2', 'card-card-3'];
+    const cardNodeIds = ['branch-1', 'branch-2', 'branch-3'];
     const renderedCards = cardNodeIds.map((id) => {
       const renderedCard = document.createElement('div');
       renderedCard.className = 'react-flow__node';
@@ -1186,7 +1304,7 @@ describe('arrangeZoneContents', () => {
       { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, data: {}, width: 500, height: 200 },
       ...cardNodeIds.map((id, index) => ({
         id,
-        type: 'cardNode',
+        type: 'branchNode',
         parentId: 'zone',
         position: { x: 20, y: 20 + index * 60 },
         data: {},
@@ -1195,6 +1313,11 @@ describe('arrangeZoneContents', () => {
       })),
     ];
 
+    let renderedNodes = nodes;
+    const setNodes: React.Dispatch<React.SetStateAction<Node[]>> = (value) => {
+      renderedNodes = typeof value === 'function' ? value(renderedNodes) : value;
+    };
+    const onArrangeNodes = vi.fn();
     renderHook(
       () =>
         useBoardObjects({
@@ -1211,17 +1334,18 @@ describe('arrangeZoneContents', () => {
           }),
           client,
           boardObjectsForBoard: cardNodeIds.map((_, index) => ({
-            object_id: `placement-card-${index + 1}`,
+            object_id: `placement-branch-${index + 1}`,
             board_id: 'board-1',
-            entity_type: 'card',
-            card_id: `card-${index + 1}`,
+            entity_type: 'branch',
+            branch_id: `branch-${index + 1}`,
             position: { x: 20, y: 20 + index * 60 },
             zone_id: 'zone',
             created_at: `2026-01-0${index + 1}T00:00:00.000Z`,
           })) as never,
           nodes,
-          setNodes: vi.fn(),
+          setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          onArrangeNodes,
         }),
       { wrapper }
     );
@@ -1231,13 +1355,17 @@ describe('arrangeZoneContents', () => {
     });
 
     expect(showWarning).not.toHaveBeenCalled();
-    expect(patch).toHaveBeenCalledWith(
-      'board-1',
-      expect.objectContaining({
-        _action: 'batchUpsertObjects',
-        objects: { zone: expect.objectContaining({ height: 300 }) },
-      })
-    );
+    const zoneWrite = patch.mock.calls.find(([id]) => id === 'board-1')?.[1];
+    expect(zoneWrite).toMatchObject({
+      _action: 'applyLayout',
+      objects: { zone: expect.objectContaining({ height: expect.any(Number) }) },
+    });
+    expect(zoneWrite.objects.zone.height).toBeGreaterThan(200);
+    expect(zoneWrite.objects.zone.height % BOARD_GRID_SIZE).toBe(0);
+    expect(onArrangeNodes).not.toHaveBeenCalled();
+    for (const node of renderedNodes.filter((candidate) => cardNodeIds.includes(candidate.id))) {
+      expect(node.style?.['--agor-deal-duration' as never]).toBeUndefined();
+    }
     for (const renderedCard of renderedCards) renderedCard.remove();
   });
 
@@ -1325,21 +1453,20 @@ describe('arrangeZoneContents', () => {
     });
 
     expect(renderedNodes.find((node) => node.id === 'card-newer')?.position.y).toBe(100);
-    expect(renderedNodes.find((node) => node.id === 'card-older')?.position.y).toBe(180);
-    expect(patch).toHaveBeenCalledWith('placement-newer', {
+    expect(renderedNodes.find((node) => node.id === 'card-older')?.position.y).toBe(380);
+    const placements = layoutPlacements(patch);
+    expect(placements['placement-newer']).toEqual({
       position: { x: 20, y: 100 },
-      size: { width: 580, height: 60 },
-      compact: true,
+      size: { width: 380, height: 260 },
     });
-    expect(patch).toHaveBeenCalledWith('placement-older', {
-      position: { x: 20, y: 180 },
-      size: { width: 580, height: 60 },
-      compact: true,
+    expect(placements['placement-older']).toEqual({
+      position: { x: 20, y: 380 },
+      size: { width: 380, height: 220 },
     });
-    expect(patch).not.toHaveBeenCalledWith('board-1', expect.anything());
+    expect(layoutWrites(patch)).toHaveLength(1);
   });
 
-  it('uses one compact-list frame for card and worktree zones with the same policy', async () => {
+  it('retains card geometry while applying compact-list density only to worktrees', async () => {
     const { client, patch } = makeClient();
     const compactLayout = {
       mode: 'auto',
@@ -1451,21 +1578,13 @@ describe('arrangeZoneContents', () => {
 
     const card = renderedNodes.find((node) => node.id === 'card-card-1');
     const branch = renderedNodes.find((node) => node.id === 'branch-1');
-    for (const [child, zoneWidth] of [
-      [card, 620],
-      [branch, 1600],
-    ] as const) {
-      expect(child?.position).toEqual({ x: 20, y: 100 });
-      expect(child?.width).toBe(zoneWidth - 40);
-      expect(zoneWidth - ((child?.position.x ?? 0) + (child?.width ?? 0))).toBe(20);
-      expect((child?.position.y ?? 0) - 20).toBe(80);
-    }
-    expect(patch).toHaveBeenCalledWith(
-      'placement-card',
-      expect.objectContaining({ size: { width: 580, height: 60 } })
+    expect(card).toMatchObject({ position: { x: 20, y: 100 }, width: 320, height: 60 });
+    expect(branch).toMatchObject({ position: { x: 20, y: 100 }, width: 1560, height: 100 });
+    const placements = layoutPlacements(patch);
+    expect(placements['placement-card']).toEqual(
+      expect.objectContaining({ size: { width: 320, height: 60 } })
     );
-    expect(patch).toHaveBeenCalledWith(
-      'placement-branch',
+    expect(placements['placement-branch']).toEqual(
       expect.objectContaining({ size: { width: 1560, height: 100 } })
     );
   });
@@ -1547,11 +1666,12 @@ describe('arrangeZoneContents', () => {
       await vi.advanceTimersByTimeAsync(400);
     });
 
-    expect(patch).toHaveBeenCalledWith('placement-newer', {
+    const placements = layoutPlacements(patch);
+    expect(placements['placement-newer']).toEqual({
       position: { x: 20, y: 100 },
       size: { width: 300, height: 100 },
     });
-    expect(patch).toHaveBeenCalledWith('placement-older', {
+    expect(placements['placement-older']).toEqual({
       position: { x: 20, y: 220 },
       size: { width: 300, height: 100 },
     });
@@ -1561,7 +1681,7 @@ describe('arrangeZoneContents', () => {
       node.id === 'card-newer'
         ? { ...node, position: { x: 20, y: 100 } }
         : node.id === 'card-older'
-          ? { ...node, position: { x: 348, y: 88 } }
+          ? { ...node, position: { x: 20, y: 220 } }
           : node
     );
     rerender();
@@ -1650,6 +1770,586 @@ describe('arrangeZoneContents', () => {
     expect(boardsPatch).toHaveBeenCalledTimes(1);
     expect(showWarning).not.toHaveBeenCalled();
   });
+
+  it('corrects one material note move once in a mixed Auto Zone and consumes the durable target', async () => {
+    vi.useFakeTimers();
+    const { client, boardsPatch } = makeRoutedClient();
+    const zone = {
+      type: 'zone' as const,
+      x: 1200,
+      y: 400,
+      width: 760,
+      height: 900,
+      label: 'Mixed review',
+      layout: {
+        mode: 'auto' as const,
+        preset: 'grid' as const,
+        sortBy: 'position' as const,
+        sortDirection: 'asc' as const,
+        columns: 1,
+        gap: 20,
+        autoResizeHeight: true,
+        resize: 'height' as const,
+      },
+    };
+    const note = {
+      type: 'markdown' as const,
+      x: 1220,
+      y: 760,
+      width: 320,
+      content: '# Material note\n\nDurable mixed content.',
+    };
+    let board = makeBoard({ zone, note });
+    let placements = [
+      {
+        object_id: 'placement-worktree',
+        board_id: 'board-1',
+        entity_type: 'branch',
+        branch_id: 'worktree',
+        zone_id: 'zone',
+        position: { x: 20, y: 100 },
+        size: { width: 500, height: 240 },
+        created_at: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        object_id: 'placement-card',
+        board_id: 'board-1',
+        entity_type: 'card',
+        card_id: 'card',
+        zone_id: 'zone',
+        position: { x: 20, y: 680 },
+        size: { width: 380, height: 100 },
+        created_at: '2026-01-01T00:00:00.000Z',
+      },
+    ];
+    let nodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: zone.x, y: zone.y }, data: {}, ...zone },
+      {
+        id: 'worktree',
+        type: 'branchNode',
+        parentId: 'zone',
+        position: placements[0]!.position,
+        data: { branch: { name: 'Worktree' } },
+      },
+      {
+        id: 'card-card',
+        type: 'cardNode',
+        parentId: 'zone',
+        position: placements[1]!.position,
+        data: { card: { title: 'Card', data: {} } },
+      },
+      {
+        id: 'note',
+        type: 'markdown',
+        position: { x: note.x, y: note.y },
+        width: note.width,
+        height: 300,
+        data: { objectId: 'note', width: note.width, height: 300 },
+      },
+    ];
+    const measured = document.createElement('div');
+    measured.className = 'react-flow__node';
+    measured.dataset.id = 'note';
+    document.body.append(measured);
+    const setMeasuredHeight = (height: number) => {
+      Object.defineProperties(measured, {
+        offsetWidth: { configurable: true, value: 320 },
+        scrollWidth: { configurable: true, value: 320 },
+        offsetHeight: { configurable: true, value: height },
+        scrollHeight: { configurable: true, value: height },
+      });
+    };
+    setMeasuredHeight(300);
+    const view = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: placements as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    const applyWrite = (write: {
+      objects: Record<string, BoardObject>;
+      placements: Record<
+        string,
+        { position: { x: number; y: number }; size: { width: number; height: number } }
+      >;
+    }) => {
+      board = {
+        ...board,
+        objects: { ...board.objects, ...write.objects },
+      } as Board;
+      placements = placements.map((placement) => ({
+        ...placement,
+        ...(write.placements[placement.object_id] ?? {}),
+      }));
+      nodes = nodes.map((node) => {
+        const object = write.objects[node.id];
+        if (object) {
+          return {
+            ...node,
+            position: { x: object.x, y: object.y },
+            ...('width' in object ? { width: object.width } : {}),
+            ...('height' in object ? { height: object.height } : {}),
+          };
+        }
+        const placement = placements.find(
+          (candidate) =>
+            candidate.branch_id === node.id ||
+            (candidate.card_id && `card-${candidate.card_id}` === node.id)
+        );
+        return placement ? { ...node, position: placement.position } : node;
+      });
+    };
+
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(boardsPatch).not.toHaveBeenCalled();
+
+    const durableNote = board.objects!.note as BoardObject & { y: number };
+    board = makeBoard({ ...board.objects, note: { ...durableNote, y: durableNote.y + 80 } });
+    nodes = nodes.map((node) =>
+      node.id === 'note'
+        ? { ...node, position: { x: node.position.x, y: node.position.y + 80 } }
+        : node
+    );
+    view.rerender();
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    const correction = boardsPatch.mock.calls[0]![1];
+    expect(correction.objects.note.y).toBe(durableNote.y);
+    expect(Object.keys(correction.objects).sort()).toEqual(['note', 'zone']);
+    expect(Object.keys(correction.placements).sort()).toEqual([
+      'placement-card',
+      'placement-worktree',
+    ]);
+    applyWrite(correction);
+
+    for (let cycle = 0; cycle < 8; cycle += 1) {
+      setMeasuredHeight(cycle % 2 === 0 ? 280 : 340);
+      board = makeBoard(
+        Object.fromEntries(
+          Object.entries(board.objects ?? {}).map(([id, object]) => [id, { ...object }])
+        )
+      );
+      nodes = [...nodes].reverse().map((node) => ({ ...node, data: { ...node.data } }));
+      placements = placements.map((placement) => ({
+        ...placement,
+        position: { ...placement.position },
+        size: placement.size && { ...placement.size },
+      }));
+      view.rerender();
+      await act(async () => vi.advanceTimersByTimeAsync(500));
+    }
+
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    view.unmount();
+    setMeasuredHeight(300);
+
+    const reloaded = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: placements as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    measured.remove();
+    reloaded.unmount();
+  });
+
+  it('allows only the current board lease owner to write across acquisition and route races', async () => {
+    vi.useFakeTimers();
+    let tail = Promise.resolve();
+    let acquisitionCount = 0;
+    let resolveOwnerAcquired!: () => void;
+    let resolveObserverAcquired!: () => void;
+    const ownerAcquired = new Promise<void>((resolve) => {
+      resolveOwnerAcquired = resolve;
+    });
+    const observerAcquired = new Promise<void>((resolve) => {
+      resolveObserverAcquired = resolve;
+    });
+    const locks = {
+      request: async (
+        _name: string,
+        options: { signal: AbortSignal },
+        callback: () => Promise<void>
+      ) => {
+        const previous = tail;
+        let release!: () => void;
+        tail = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        await previous;
+        if (!options.signal.aborted) {
+          acquisitionCount += 1;
+          const held = callback();
+          if (acquisitionCount === 1) resolveOwnerAcquired();
+          if (acquisitionCount === 2) resolveObserverAcquired();
+          await held;
+        }
+        release();
+      },
+    };
+    const originalLocks = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: locks });
+
+    const zone = {
+      type: 'zone' as const,
+      x: 0,
+      y: 0,
+      width: 620,
+      height: 500,
+      label: 'Leased',
+      layout: { mode: 'auto' as const, preset: 'grid' as const },
+    };
+    const artifact = {
+      type: 'artifact' as const,
+      artifact_id: 'artifact-1',
+      x: 400,
+      y: 300,
+      width: 300,
+      height: 220,
+    };
+    let ownerBoard = makeBoard({ zone, artifact });
+    let ownerNodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, width: 620, height: 500, data: {} },
+      {
+        id: 'artifact',
+        type: 'artifactNode',
+        position: { x: artifact.x, y: artifact.y },
+        width: artifact.width,
+        height: artifact.height,
+        data: { objectId: 'artifact', width: artifact.width, height: artifact.height },
+      },
+    ];
+    const ownerClient = makeRoutedClient();
+    const observerClient = makeRoutedClient();
+    const owner = renderHook(
+      () =>
+        useBoardObjects({
+          board: ownerBoard,
+          client: ownerClient.client,
+          boardObjectsForBoard: [],
+          nodes: ownerNodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    const observer = renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({ zone, artifact }),
+          client: observerClient.client,
+          boardObjectsForBoard: [],
+          nodes: ownerNodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await ownerAcquired;
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(ownerClient.boardsPatch).toHaveBeenCalledTimes(1);
+    expect(observerClient.boardsPatch).not.toHaveBeenCalled();
+
+    // Queue an owner observation, then change boards before its delay expires.
+    // The old lease token must not be reinterpreted as ownership on the new route.
+    ownerNodes = ownerNodes.map((node) =>
+      node.id === 'artifact'
+        ? { ...node, position: { x: node.position.x, y: node.position.y + 80 } }
+        : node
+    );
+    owner.rerender();
+    ownerBoard = {
+      ...makeBoard({ zone: { ...zone, layout: { ...zone.layout, mode: 'manual' as const } } }),
+      board_id: 'board-2',
+    } as Board;
+    ownerNodes = [];
+    owner.rerender();
+
+    await act(async () => {
+      await observerAcquired;
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(ownerClient.boardsPatch).toHaveBeenCalledTimes(1);
+    expect(observerClient.boardsPatch).not.toHaveBeenCalled();
+
+    owner.unmount();
+    observer.unmount();
+    if (originalLocks) Object.defineProperty(navigator, 'locks', originalLocks);
+    else Reflect.deleteProperty(navigator, 'locks');
+  });
+
+  it('keeps a measured single-child Auto Zone stable across observer and realtime rebuilds', async () => {
+    vi.useFakeTimers();
+    const { client, boardsPatch } = makeRoutedClient();
+    const zone = {
+      type: 'zone' as const,
+      x: 660,
+      y: 1280,
+      width: 620,
+      height: 500,
+      label: 'Single Auto Zone',
+      fontSize: 20,
+      layout: {
+        mode: 'auto' as const,
+        preset: 'grid' as const,
+        sortBy: 'title' as const,
+        sortDirection: 'asc' as const,
+        columns: 3,
+        gap: 24,
+        autoResizeHeight: true,
+        resize: 'both' as const,
+        onOverflow: 'report' as const,
+      },
+    };
+    const note = {
+      type: 'markdown' as const,
+      x: 680,
+      y: 1380,
+      width: 360,
+      content: '# One item\n\nMeasured content.',
+    };
+    let board = makeBoard({ zone, note });
+    let nodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: zone.x, y: zone.y }, data: {}, ...zone },
+      {
+        id: 'note',
+        type: 'markdown',
+        position: { x: note.x, y: note.y },
+        data: { objectId: 'note', width: note.width },
+      },
+    ];
+    const measured = document.createElement('div');
+    measured.className = 'react-flow__node';
+    measured.dataset.id = 'note';
+    for (const [key, value] of [
+      ['offsetWidth', 360],
+      ['scrollWidth', 360],
+      ['offsetHeight', 244],
+      ['scrollHeight', 244],
+    ] as const) {
+      Object.defineProperty(measured, key, { configurable: true, value });
+    }
+    document.body.append(measured);
+    const renderedZone = document.createElement('div');
+    renderedZone.className = 'react-flow__node-zone';
+    renderedZone.dataset.id = 'zone';
+    renderedZone.getBoundingClientRect = () => ({ width: 310, height: 250 }) as DOMRect;
+    document.body.append(renderedZone);
+
+    const setNodes = vi.fn();
+    const view = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    for (let cycle = 0; cycle < 4; cycle += 1) {
+      await act(async () => vi.advanceTimersByTimeAsync(500));
+      // Simulate the production board/node rebuild caused by an unrelated
+      // realtime event. Object identity and node order may change, geometry may not.
+      board = makeBoard({ note: { ...note }, zone: { ...zone } });
+      nodes = [...nodes].reverse().map((node) => ({ ...node, data: { ...node.data } }));
+      view.rerender();
+    }
+
+    expect(boardsPatch).not.toHaveBeenCalled();
+    expect(setNodes).not.toHaveBeenCalled();
+    measured.remove();
+    renderedZone.remove();
+    view.unmount();
+  });
+
+  it('compares measured worktree output with durable geometry across realtime cycles', async () => {
+    vi.useFakeTimers();
+    const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
+    const zone = {
+      type: 'zone' as const,
+      x: 0,
+      y: 0,
+      width: 620,
+      height: 500,
+      label: 'Measured worktree',
+      fontSize: 48,
+      layout: { mode: 'auto' as const, preset: 'grid' as const },
+    };
+    let board = makeBoard({ zone });
+    let nodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, data: {}, ...zone },
+      {
+        id: 'branch',
+        type: 'branchNode',
+        parentId: 'zone',
+        position: { x: 20, y: 120 },
+        // React Flow's declarative fallback differs from the hydrated DOM.
+        width: 380,
+        height: 120,
+        data: { branch: { name: 'Hydrated worktree' } },
+      },
+    ];
+    const measured = document.createElement('div');
+    measured.className = 'react-flow__node';
+    measured.dataset.id = 'branch';
+    Object.defineProperties(measured, {
+      offsetWidth: { configurable: true, value: 500 },
+      scrollWidth: { configurable: true, value: 500 },
+      offsetHeight: { configurable: true, value: 236 },
+      scrollHeight: { configurable: true, value: 236 },
+    });
+    const renderedZone = document.createElement('div');
+    renderedZone.className = 'react-flow__node-zone';
+    renderedZone.dataset.id = 'zone';
+    renderedZone.getBoundingClientRect = () => ({ width: 310 }) as DOMRect;
+    document.body.append(measured, renderedZone);
+
+    const view = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'placement-branch',
+              board_id: 'board-1',
+              entity_type: 'branch',
+              branch_id: 'branch',
+              zone_id: 'zone',
+              position: { x: 20, y: 120 },
+              size: { width: 500, height: 240 },
+              created_at: '2026-01-01T00:00:00.000Z',
+            },
+          ] as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    for (let cycle = 0; cycle < 4; cycle += 1) {
+      await act(async () => vi.advanceTimersByTimeAsync(500));
+      board = makeBoard({ zone: { ...zone } });
+      nodes = [...nodes].reverse().map((node) => ({ ...node, data: { ...node.data } }));
+      view.rerender();
+    }
+
+    expect(boardsPatch).not.toHaveBeenCalled();
+    expect(boardObjectsPatch).not.toHaveBeenCalled();
+    measured.remove();
+    renderedZone.remove();
+    view.unmount();
+  });
+
+  it('keeps durable canvas frames stable when hydrated DOM measurements alternate', async () => {
+    vi.useFakeTimers();
+    const { client, boardsPatch } = makeRoutedClient();
+    const zone = {
+      type: 'zone' as const,
+      x: 0,
+      y: 0,
+      width: 620,
+      height: 800,
+      label: 'Durable apps',
+      layout: { mode: 'auto' as const, preset: 'grid' as const, columns: 1, gap: 20 },
+    };
+    const first = {
+      type: 'app' as const,
+      x: 20,
+      y: 100,
+      width: 500,
+      height: 300,
+      title: 'First',
+      template: 'react' as const,
+      files: {},
+    };
+    const second = {
+      ...first,
+      y: 420,
+      height: 200,
+      title: 'Second',
+    };
+    let board = makeBoard({ zone, first, second });
+    let nodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, data: {}, ...zone },
+      {
+        id: 'first',
+        type: 'appNode',
+        position: { x: first.x, y: first.y },
+        data: { objectId: 'first', width: first.width, height: first.height },
+      },
+      {
+        id: 'second',
+        type: 'appNode',
+        position: { x: second.x, y: second.y },
+        data: { objectId: 'second', width: second.width, height: second.height },
+      },
+    ];
+    const measured = document.createElement('div');
+    measured.className = 'react-flow__node';
+    measured.dataset.id = 'first';
+    document.body.append(measured);
+    const setMeasurement = (height: number) => {
+      Object.defineProperties(measured, {
+        offsetWidth: { configurable: true, value: 500 },
+        scrollWidth: { configurable: true, value: 500 },
+        offsetHeight: { configurable: true, value: height },
+        scrollHeight: { configurable: true, value: height },
+      });
+    };
+    setMeasurement(340);
+
+    const view = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    for (let cycle = 0; cycle < 4; cycle += 1) {
+      await act(async () => vi.advanceTimersByTimeAsync(500));
+      setMeasurement(cycle % 2 === 0 ? 300 : 340);
+      board = makeBoard({ zone: { ...zone }, first: { ...first }, second: { ...second } });
+      nodes = nodes.map((node) => ({ ...node, data: { ...node.data } }));
+      view.rerender();
+    }
+
+    expect(boardsPatch).not.toHaveBeenCalled();
+    measured.remove();
+    view.unmount();
+  });
 });
 
 describe('direct manipulation of automatic zones', () => {
@@ -1671,18 +2371,18 @@ describe('direct manipulation of automatic zones', () => {
     },
   };
   const placement = {
-    object_id: 'placement-card',
+    object_id: 'placement-branch',
     board_id: 'board-1',
-    entity_type: 'card',
-    card_id: 'card-1',
+    entity_type: 'branch',
+    branch_id: 'branch-1',
     position: { x: 200, y: 200 },
     zone_id: zoneId,
     compact: true,
     created_at: '2026-01-01T00:00:00.000Z',
   };
   const child: Node = {
-    id: 'card-card-1',
-    type: 'cardNode',
+    id: 'branch-1',
+    type: 'branchNode',
     parentId: zoneId,
     position: { x: 200, y: 200 },
     width: 380,
@@ -1712,7 +2412,7 @@ describe('direct manipulation of automatic zones', () => {
     );
   }
 
-  it('persists manual mode before expanding a card and blocks the pending compact-list pass', async () => {
+  it('persists manual mode before expanding a worktree and blocks the pending compact-list pass', async () => {
     vi.useFakeTimers();
     const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
     const { result } = renderInteraction(makeBoard({ [zoneId]: autoZone }), client);
@@ -1732,7 +2432,7 @@ describe('direct manipulation of automatic zones', () => {
       }),
     });
     expect(boardObjectsPatch).toHaveBeenCalledTimes(1);
-    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-card', { compact: false });
+    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-branch', { compact: false });
     expect(boardsPatch.mock.invocationCallOrder[0]).toBeLessThan(
       boardObjectsPatch.mock.invocationCallOrder[0]
     );
@@ -1759,16 +2459,16 @@ describe('direct manipulation of automatic zones', () => {
       })
     );
     expect(boardObjectsPatch).toHaveBeenCalledTimes(1);
-    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-card', { compact: false });
+    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-branch', { compact: false });
   });
 
-  it('calls a stacked card out above its exact slot and restores it without demoting', async () => {
+  it('calls a stacked worktree out above its exact slot and restores it without demoting', async () => {
     vi.useFakeTimers();
     const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
     const secondPlacement = {
       ...placement,
-      object_id: 'placement-card-2',
-      card_id: 'card-2',
+      object_id: 'placement-branch-2',
+      branch_id: 'branch-2',
       position: { x: 220, y: 220 },
     };
     const initialNodes: Node[] = [
@@ -1776,7 +2476,7 @@ describe('direct manipulation of automatic zones', () => {
       child,
       {
         ...child,
-        id: 'card-card-2',
+        id: 'branch-2',
         position: { x: 220, y: 220 },
       },
     ];
@@ -1808,8 +2508,8 @@ describe('direct manipulation of automatic zones', () => {
       const zoneNode = result.current.getBoardObjectNodes()[0];
       await (zoneNode.data.onArrangeContents as (id: string) => Promise<void>)(zoneId);
     });
-    expect(result.current.zoneStackByNodeId.has('card-card-1')).toBe(true);
-    const stackedPosition = renderedNodes.find((node) => node.id === 'card-card-1')?.position;
+    expect(result.current.zoneStackByNodeId.has('branch-1')).toBe(true);
+    const stackedPosition = renderedNodes.find((node) => node.id === 'branch-1')?.position;
     boardsPatch.mockClear();
     boardObjectsPatch.mockClear();
 
@@ -1817,21 +2517,17 @@ describe('direct manipulation of automatic zones', () => {
       await result.current.setPlacementCompact(placement as never, false);
     });
 
-    expect(result.current.calledOutNodeIds.has('card-card-1')).toBe(true);
+    expect(result.current.calledOutNodeIds.has('branch-1')).toBe(true);
     expect(boardsPatch).not.toHaveBeenCalled();
     expect(boardObjectsPatch).not.toHaveBeenCalled();
-    expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual(
-      stackedPosition
-    );
+    expect(renderedNodes.find((node) => node.id === 'branch-1')?.position).toEqual(stackedPosition);
 
     await act(async () => {
       await result.current.setPlacementCompact(placement as never, true);
     });
 
-    expect(result.current.calledOutNodeIds.has('card-card-1')).toBe(false);
-    expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual(
-      stackedPosition
-    );
+    expect(result.current.calledOutNodeIds.has('branch-1')).toBe(false);
+    expect(renderedNodes.find((node) => node.id === 'branch-1')?.position).toEqual(stackedPosition);
     expect(boardsPatch).not.toHaveBeenCalled();
     expect(boardObjectsPatch).not.toHaveBeenCalled();
     unmount();
@@ -1889,12 +2585,12 @@ describe('direct manipulation of automatic zones', () => {
     });
 
     expect(boardsPatch).not.toHaveBeenCalled();
-    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-card', { compact: false });
+    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-branch', { compact: false });
   });
 
   it('re-arming auto mode schedules a fresh tidy', async () => {
     vi.useFakeTimers();
-    const { client, boardObjectsPatch } = makeRoutedClient();
+    const { client, boardsPatch } = makeRoutedClient();
     let board = makeBoard({
       [zoneId]: { ...autoZone, layout: { ...autoZone.layout, mode: 'auto', preset: 'grid' } },
     });
@@ -1920,8 +2616,8 @@ describe('direct manipulation of automatic zones', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(400);
     });
-    expect(boardObjectsPatch).toHaveBeenCalled();
-    boardObjectsPatch.mockClear();
+    expect(layoutPlacements(boardsPatch)['placement-branch']).toBeDefined();
+    boardsPatch.mockClear();
 
     await act(async () => {
       await result.current.demoteAutoZone(zoneId);
@@ -1930,7 +2626,8 @@ describe('direct manipulation of automatic zones', () => {
       [zoneId]: { ...autoZone, layout: { ...autoZone.layout, mode: 'manual', preset: 'grid' } },
     });
     rerender();
-    expect(boardObjectsPatch).not.toHaveBeenCalled();
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    boardsPatch.mockClear();
 
     board = makeBoard({
       [zoneId]: { ...autoZone, layout: { ...autoZone.layout, mode: 'auto', preset: 'grid' } },
@@ -1940,8 +2637,7 @@ describe('direct manipulation of automatic zones', () => {
       await vi.advanceTimersByTimeAsync(400);
     });
 
-    expect(boardObjectsPatch).toHaveBeenCalledWith(
-      'placement-card',
+    expect(layoutPlacements(boardsPatch)['placement-branch']).toEqual(
       expect.objectContaining({ position: { x: 20, y: 100 } })
     );
   });
@@ -1954,9 +2650,19 @@ describe('direct manipulation of automatic zones', () => {
  */
 describe('setZoneContentsCompact', () => {
   const placements = [
-    { object_id: 'obj-branch', zone_id: 'zone-1', branch_id: 'branch-1' },
-    { object_id: 'obj-card', zone_id: 'zone-1', card_id: 'card-1' },
-    { object_id: 'obj-other-zone', zone_id: 'zone-2', card_id: 'card-2' },
+    {
+      object_id: 'obj-branch',
+      zone_id: 'zone-1',
+      branch_id: 'branch-1',
+      entity_type: 'branch',
+    },
+    { object_id: 'obj-card', zone_id: 'zone-1', card_id: 'card-1', entity_type: 'card' },
+    {
+      object_id: 'obj-other-zone',
+      zone_id: 'zone-2',
+      branch_id: 'branch-2',
+      entity_type: 'branch',
+    },
     // A nested zone placement carries neither branch_id nor card_id and is
     // not an entity the density control applies to.
     { object_id: 'obj-not-entity', zone_id: 'zone-1' },
@@ -1979,7 +2685,7 @@ describe('setZoneContentsCompact', () => {
     );
   }
 
-  it('patches only the entity placements pinned to the requested zone', async () => {
+  it('patches only density-expandable placements pinned to the requested zone', async () => {
     const { client, patch } = makeClient();
     const { result } = renderCompact(client);
 
@@ -1988,7 +2694,7 @@ describe('setZoneContentsCompact', () => {
     });
 
     expect(client.service).toHaveBeenCalledWith('board-objects');
-    expect(patch.mock.calls.map((call) => call[0]).sort()).toEqual(['obj-branch', 'obj-card']);
+    expect(patch.mock.calls.map((call) => call[0])).toEqual(['obj-branch']);
     for (const call of patch.mock.calls) {
       expect(call[1]).toEqual({ compact: true });
     }
@@ -2005,23 +2711,28 @@ describe('setZoneContentsCompact', () => {
       await result.current.setZoneContentsCompact('zone-1', false);
     });
 
-    expect(patch.mock.calls.map((call) => call[0]).sort()).toEqual(['obj-branch', 'obj-card']);
+    expect(patch.mock.calls.map((call) => call[0])).toEqual(['obj-branch']);
     expect(patch.mock.calls[0][1]).toEqual({ compact: false });
   });
 
   it('skips placements already at the requested density', async () => {
     const { client, patch } = makeClient();
     const { result } = renderCompact(client, [
-      { object_id: 'obj-branch', zone_id: 'zone-1', branch_id: 'branch-1', compact: true },
-      { object_id: 'obj-card', zone_id: 'zone-1', card_id: 'card-1' },
+      {
+        object_id: 'obj-branch',
+        zone_id: 'zone-1',
+        branch_id: 'branch-1',
+        entity_type: 'branch',
+        compact: true,
+      },
+      { object_id: 'obj-card', zone_id: 'zone-1', card_id: 'card-1', entity_type: 'card' },
     ]);
 
     await act(async () => {
       await result.current.setZoneContentsCompact('zone-1', true);
     });
 
-    expect(patch).toHaveBeenCalledTimes(1);
-    expect(patch.mock.calls[0][0]).toBe('obj-card');
+    expect(patch).not.toHaveBeenCalled();
   });
 
   it('is a no-op — no patch, no toast — when the zone is already uniform', async () => {
@@ -2053,15 +2764,27 @@ describe('setZoneContentsCompact', () => {
 });
 
 /**
- * `compact_list` collapses every item on the way in and nothing used to undo
- * it, so a zone switched back to Grid stayed collapsed with no explanation.
+ * `compact_list` collapses every capable worktree on the way in and nothing
+ * used to undo it, so a zone switched back to Grid stayed collapsed.
  * The expand is keyed to the preset transition, NOT to arranging in grid.
  */
 describe('handleUpdateObject compact_list → grid expansion', () => {
   const zoneId = 'zone-1';
   const collapsed = [
-    { object_id: 'obj-branch', zone_id: zoneId, branch_id: 'branch-1', compact: true },
-    { object_id: 'obj-card', zone_id: zoneId, card_id: 'card-1', compact: true },
+    {
+      object_id: 'obj-branch',
+      zone_id: zoneId,
+      branch_id: 'branch-1',
+      entity_type: 'branch',
+      compact: true,
+    },
+    {
+      object_id: 'obj-card',
+      zone_id: zoneId,
+      card_id: 'card-1',
+      entity_type: 'card',
+      compact: true,
+    },
   ];
 
   function zone(preset: string, mode: 'auto' | 'manual' = 'manual') {
@@ -2106,10 +2829,7 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
       await result.current.handleUpdateObject(zoneId, zone('grid') as never);
     });
 
-    expect(compactPatches(patch)).toEqual([
-      ['obj-branch', false],
-      ['obj-card', false],
-    ]);
+    expect(compactPatches(patch)).toEqual([['obj-branch', false]]);
   });
 
   it('keeps auto mode armed while its compact-list to grid transition expands contents', async () => {
@@ -2131,10 +2851,7 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
       await result.current.handleUpdateObject(zoneId, zone('grid', 'auto') as never);
     });
 
-    expect(compactPatches(patch)).toEqual([
-      ['obj-branch', false],
-      ['obj-card', false],
-    ]);
+    expect(compactPatches(patch)).toEqual([['obj-branch', false]]);
     expect(
       patch.mock.calls.some(
         (call) => call[1]?._action === 'mergeObjectFields' && call[1].objects?.[zoneId]?.layout
@@ -2144,7 +2861,7 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
 
   it('does not expand when a grid zone is merely updated again', async () => {
     // The regression guard for automatic zones: a grid zone reflows and is
-    // re-saved constantly, and each of those must leave hand-collapsed cards
+    // re-saved constantly, and each of those must leave hand-collapsed worktrees
     // alone.
     const { client, patch } = makeClient();
     const { result } = renderUpdate('grid', collapsed, client);
@@ -2185,7 +2902,15 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
     const { client, patch } = makeClient();
     const { result } = renderUpdate(
       'compact_list',
-      [...collapsed, { object_id: 'obj-elsewhere', zone_id: 'zone-2', card_id: 'card-9' }],
+      [
+        ...collapsed,
+        {
+          object_id: 'obj-elsewhere',
+          zone_id: 'zone-2',
+          branch_id: 'branch-9',
+          entity_type: 'branch',
+        },
+      ],
       client
     );
 
@@ -2209,7 +2934,7 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
 });
 
 /**
- * Expanding on the way out of compact_list is only half the job: the cards keep
+ * Expanding on the way out of compact_list is only half the job: worktrees keep
  * the one-row spacing the preset gave them, so restoring their full height
  * makes them overlap until the zone is re-packed.
  */
@@ -2229,34 +2954,46 @@ describe('compact_list → grid re-packs the expanded zone', () => {
   }
 
   const placements = [
-    { object_id: 'obj-a', zone_id: zoneId, card_id: 'card-a', compact: true },
-    { object_id: 'obj-b', zone_id: zoneId, card_id: 'card-b', compact: true },
+    {
+      object_id: 'obj-a',
+      zone_id: zoneId,
+      branch_id: 'branch-a',
+      entity_type: 'branch',
+      compact: true,
+    },
+    {
+      object_id: 'obj-b',
+      zone_id: zoneId,
+      branch_id: 'branch-b',
+      entity_type: 'branch',
+      compact: true,
+    },
   ];
 
-  // Stacked at compact_list's row pitch: 56px apart, which is exactly the
-  // spacing that overlaps once each card is ~120px tall again.
+  // Stacked at compact_list's row pitch, which overlaps once each worktree
+  // restores its full measured height.
   const nodes = [
     {
-      id: 'card-card-a',
-      type: 'cardNode',
+      id: 'branch-a',
+      type: 'branchNode',
       parentId: zoneId,
       position: { x: 24, y: 64 },
-      width: 380,
-      height: 120,
+      width: 500,
+      height: 180,
       data: {},
     },
     {
-      id: 'card-card-b',
-      type: 'cardNode',
+      id: 'branch-b',
+      type: 'branchNode',
       parentId: zoneId,
       position: { x: 24, y: 120 },
-      width: 380,
-      height: 120,
+      width: 500,
+      height: 180,
       data: {},
     },
   ];
 
-  it('schedules an arrange that moves the expanded cards apart', async () => {
+  it('schedules an arrange that moves the expanded worktrees apart', async () => {
     vi.useFakeTimers();
     const { client, patch } = makeClient();
     const setNodes = vi.fn();
@@ -2277,7 +3014,7 @@ describe('compact_list → grid re-packs the expanded zone', () => {
       await result.current.handleUpdateObject(zoneId, zone('grid') as never);
     });
 
-    // The expand lands immediately; the re-pack is deferred so the cards can
+    // The expand lands immediately; the re-pack is deferred so the worktrees can
     // paint at full height before the layout measures them.
     const compactPatches = patch.mock.calls.filter((c) => c[1] && 'compact' in c[1]);
     expect(compactPatches.map((c) => c[1].compact)).toEqual([false, false]);
@@ -2287,10 +3024,12 @@ describe('compact_list → grid re-packs the expanded zone', () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
 
-    const positioned = patch.mock.calls.filter((c) => c[1] && 'position' in c[1]);
+    const positioned = Object.values(layoutPlacements(patch)) as Array<{
+      position: { x: number; y: number };
+    }>;
     expect(positioned.length).toBeGreaterThan(0);
-    // Whatever the packer chooses, the two cards must no longer sit 56px apart.
-    const ys = positioned.map((c) => c[1].position.y).sort((a, b) => a - b);
+    // Whatever the packer chooses, the two worktrees must no longer sit 56px apart.
+    const ys = positioned.map((value) => value.position.y).sort((a, b) => a - b);
     if (ys.length === 2) expect(ys[1] - ys[0]).toBeGreaterThan(56);
   });
 
@@ -2324,15 +3063,17 @@ describe('compact_list → grid re-packs the expanded zone', () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
 
-    const positioned = patch.mock.calls.filter((c) => c[1] && 'position' in c[1]);
+    const positioned = Object.values(layoutPlacements(patch)) as Array<{
+      position: { x: number; y: number };
+    }>;
     expect(positioned.length).toBeGreaterThan(0);
-    const ys = positioned.map((c) => c[1].position.y).sort((a, b) => a - b);
+    const ys = positioned.map((value) => value.position.y).sort((a, b) => a - b);
     if (ys.length === 2) expect(ys[1] - ys[0]).toBeGreaterThan(56);
   });
 
   it('does not re-pack when the toolbar collapses the contents', async () => {
     // Collapsing shrinks every item, which cannot create an overlap; a re-pack
-    // there would move cards the user did not ask to move.
+    // there would move worktrees the user did not ask to move.
     vi.useFakeTimers();
     const { client, patch } = makeClient();
     const { result } = renderHook(
@@ -2341,8 +3082,20 @@ describe('compact_list → grid re-packs the expanded zone', () => {
           board: makeBoard({ [zoneId]: zone('grid') }),
           client: client as never,
           boardObjectsForBoard: [
-            { object_id: 'obj-a', zone_id: zoneId, card_id: 'card-a', compact: false },
-            { object_id: 'obj-b', zone_id: zoneId, card_id: 'card-b', compact: false },
+            {
+              object_id: 'obj-a',
+              zone_id: zoneId,
+              branch_id: 'branch-a',
+              entity_type: 'branch',
+              compact: false,
+            },
+            {
+              object_id: 'obj-b',
+              zone_id: zoneId,
+              branch_id: 'branch-b',
+              entity_type: 'branch',
+              compact: false,
+            },
           ] as never,
           nodes: nodes as never,
           setNodes: vi.fn(),
@@ -2389,6 +3142,554 @@ describe('compact_list → grid re-packs the expanded zone', () => {
 });
 
 describe('arrangeBoardZones production path', () => {
+  it('packs an anchored protruding canvas child inside-out before placing its final zone frame', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const board = makeBoard({
+      tiny: { type: 'zone', x: 80, y: 80, width: 300, height: 220, label: 'Tiny' },
+      artifact: {
+        type: 'artifact',
+        x: 100,
+        y: 120,
+        width: 860,
+        height: 660,
+        artifact_id: 'artifact-1',
+      },
+    });
+    const nodes: Node[] = [
+      {
+        id: 'tiny',
+        type: 'zone',
+        position: { x: 80, y: 80 },
+        width: 300,
+        height: 220,
+        data: {},
+      },
+      {
+        id: 'artifact',
+        type: 'artifactNode',
+        position: { x: 100, y: 120 },
+        width: 860,
+        height: 660,
+        data: {},
+      },
+    ];
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => result.current.arrangeWholeBoard(true));
+
+    const write = boardsPatch.mock.calls[0]?.[1] as {
+      _action: string;
+      objects: NonNullable<Board['objects']>;
+    };
+    const zone = write.objects.tiny;
+    const artifact = write.objects.artifact;
+    expect(write._action).toBe('applyLayout');
+    expect(zone).toMatchObject({ type: 'zone' });
+    expect(artifact).toMatchObject({ type: 'artifact' });
+    if (zone?.type !== 'zone' || artifact?.type !== 'artifact') throw new Error('bad fixture');
+    expect(zone.width).toBeGreaterThanOrEqual(900);
+    expect(artifact.x).toBeGreaterThanOrEqual(zone.x);
+    expect(artifact.y).toBeGreaterThanOrEqual(zone.y);
+    expect(artifact.x + artifact.width).toBeLessThanOrEqual(zone.x + zone.width);
+    expect(artifact.y + artifact.height).toBeLessThanOrEqual(zone.y + zone.height);
+  });
+
+  it('preserves inner frames with Pack off and excludes a zone containing a locked child', async () => {
+    const unlockedClient = makeRoutedClient();
+    const unlockedBoard = makeBoard({
+      manual: { type: 'zone', x: 900, y: 700, width: 300, height: 220, label: 'Manual' },
+      artifact: {
+        type: 'artifact',
+        x: 920,
+        y: 740,
+        width: 860,
+        height: 660,
+        artifact_id: 'artifact-1',
+      },
+    });
+    const unlockedNodes: Node[] = [
+      {
+        id: 'manual',
+        type: 'zone',
+        position: { x: 900, y: 700 },
+        width: 300,
+        height: 220,
+        data: {},
+      },
+      {
+        id: 'artifact',
+        type: 'artifactNode',
+        position: { x: 920, y: 740 },
+        width: 860,
+        height: 660,
+        data: {},
+      },
+    ];
+    const unlocked = renderHook(
+      () =>
+        useBoardObjects({
+          board: unlockedBoard,
+          client: unlockedClient.client,
+          boardObjectsForBoard: [],
+          nodes: unlockedNodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    await act(async () => unlocked.result.current.arrangeWholeBoard(false));
+    const offObjects = unlockedClient.boardsPatch.mock.calls[0]?.[1]?.objects as NonNullable<
+      Board['objects']
+    >;
+    expect(offObjects.manual).toMatchObject({ width: 300, height: 220 });
+    expect(offObjects.artifact).toMatchObject({ x: 100, y: 120, width: 860, height: 660 });
+
+    unlocked.unmount();
+    const lockedClient = makeRoutedClient();
+    const lockedNodes = unlockedNodes.map((node) =>
+      node.id === 'artifact' ? { ...node, data: { locked: true } } : node
+    );
+    const locked = renderHook(
+      () =>
+        useBoardObjects({
+          board: unlockedBoard,
+          client: lockedClient.client,
+          boardObjectsForBoard: [],
+          nodes: lockedNodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    await act(async () => locked.result.current.arrangeWholeBoard(true));
+    expect(lockedClient.boardsPatch).not.toHaveBeenCalled();
+  });
+
+  it('makes Grid Apply immediate and a following Arrange a persistence no-op', async () => {
+    const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
+    const onUserLayoutComplete = vi.fn();
+    let board = makeBoard({
+      one: { type: 'zone', x: 0, y: 0, width: 620, height: 500, label: 'One' },
+      two: { type: 'zone', x: 2200, y: 0, width: 620, height: 500, label: 'Two' },
+      three: { type: 'zone', x: 0, y: 1600, width: 620, height: 500, label: 'Three' },
+    });
+    let nodes: Node[] = Object.entries(board.objects ?? {}).map(([id, object]) => ({
+      id,
+      type: 'zone',
+      position: { x: object.x, y: object.y },
+      width: object.type === 'zone' ? object.width : 620,
+      height: object.type === 'zone' ? object.height : 500,
+      data: {},
+    }));
+    const setNodes: React.Dispatch<React.SetStateAction<Node[]>> = (value) => {
+      nodes = typeof value === 'function' ? value(nodes) : value;
+    };
+    const { result, rerender } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+          onUserLayoutComplete,
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await result.current.arrangeBoardZones(['one', 'two', 'three'], {
+        fixedItemsPerRow: 2,
+        userInitiated: true,
+      });
+    });
+
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    const firstWrite = boardsPatch.mock.calls[0]?.[1] as {
+      objects: NonNullable<Board['objects']>;
+    };
+    expect(nodes.map(({ position }) => position)).toEqual([
+      { x: 80, y: 80 },
+      { x: 900, y: 80 },
+      { x: 80, y: 360 },
+    ]);
+    expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
+    expect(onUserLayoutComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'user', boardId: 'board-1', scope: 'board' })
+    );
+
+    board = { ...board, objects: { ...board.objects, ...firstWrite.objects } };
+    rerender();
+    boardsPatch.mockClear();
+    boardObjectsPatch.mockClear();
+    showSuccess.mockClear();
+
+    await act(async () => {
+      await result.current.arrangeWholeBoard();
+    });
+
+    expect(boardsPatch).not.toHaveBeenCalled();
+    expect(boardObjectsPatch).not.toHaveBeenCalled();
+    expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
+    expect(showSuccess).toHaveBeenCalledWith('Zones and their contents are already arranged.');
+  });
+
+  it('centers selection-only zone layout and routes around every unselected fixed peer', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const onUserLayoutComplete = vi.fn();
+    const board = makeBoard({
+      one: { type: 'zone', x: 900, y: 700, width: 420, height: 300, label: 'One' },
+      two: { type: 'zone', x: 1500, y: 900, width: 520, height: 340, label: 'Two' },
+      other: { type: 'zone', x: 2400, y: 200, width: 620, height: 500, label: 'Other' },
+      note: { type: 'markdown', x: -500, y: 1600, width: 320, content: 'Unselected note' },
+    });
+    const nodes: Node[] = [
+      { id: 'one', type: 'zone', position: { x: 900, y: 700 }, width: 420, height: 300, data: {} },
+      { id: 'two', type: 'zone', position: { x: 1500, y: 900 }, width: 520, height: 340, data: {} },
+      {
+        id: 'other',
+        type: 'zone',
+        position: { x: 2400, y: 200 },
+        width: 620,
+        height: 500,
+        data: {},
+      },
+      {
+        id: 'note',
+        type: 'markdown',
+        position: { x: -500, y: 1600 },
+        width: 320,
+        height: 180,
+        data: { objectId: 'note' },
+      },
+      {
+        id: 'other-child',
+        type: 'cardNode',
+        parentId: 'other',
+        position: { x: -820, y: 500 },
+        width: 320,
+        height: 180,
+        data: { card: { title: 'Unselected protruding child' } },
+      },
+      {
+        id: 'free-branch',
+        type: 'branchNode',
+        position: { x: 400, y: -600 },
+        width: 500,
+        height: 200,
+        data: { branch: { name: 'Unselected branch' } },
+      },
+    ];
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'free-placement',
+              branch_id: 'free-branch',
+              position: { x: 400, y: -600 },
+            },
+          ] as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+          onUserLayoutComplete,
+        }),
+      { wrapper }
+    );
+
+    await act(async () =>
+      result.current.arrangeBoardZones(['one', 'two'], {
+        fixedItemsPerRow: 2,
+        layoutScope: 'selection',
+        userInitiated: true,
+      })
+    );
+
+    const write = boardsPatch.mock.calls[0]?.[1];
+    expect(Object.keys(write.objects).sort()).toEqual(['one', 'two']);
+    expect(write.placements).toEqual({});
+    expect(write.objects.one).toMatchObject({ x: 760, y: 920 });
+    expect(write.objects.two).toMatchObject({ x: 1580, y: 920 });
+    expect(write.objects.other).toBeUndefined();
+    expect(write.objects.note).toBeUndefined();
+    expect(onUserLayoutComplete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: 'selection',
+        before: [expect.objectContaining({ id: 'one' }), expect.objectContaining({ id: 'two' })],
+        after: [expect.objectContaining({ id: 'one' }), expect.objectContaining({ id: 'two' })],
+      })
+    );
+  });
+
+  it('routes Arrange board through byte-equivalent selected-all planner writes', async () => {
+    const board = makeBoard({
+      one: { type: 'zone', x: 1200, y: 600, width: 620, height: 500, label: 'One' },
+      note: { type: 'markdown', x: -400, y: 900, width: 320, content: 'Free note' },
+    });
+    const nodes: Node[] = [
+      {
+        id: 'one',
+        type: 'zone',
+        position: { x: 1200, y: 600 },
+        width: 620,
+        height: 500,
+        data: {},
+      },
+      {
+        id: 'note',
+        type: 'markdown',
+        position: { x: -400, y: 900 },
+        width: 320,
+        height: 180,
+        data: { objectId: 'note', width: 320 },
+      },
+    ];
+    const direct = makeRoutedClient();
+    const toolbar = makeRoutedClient();
+    const directView = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client: direct.client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    const toolbarView = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client: toolbar.client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await directView.result.current.arrangeBoardZones(['one'], { userInitiated: true });
+      await toolbarView.result.current.arrangeWholeBoard();
+    });
+
+    expect(toolbar.boardsPatch.mock.calls).toEqual(direct.boardsPatch.mock.calls);
+    expect(toolbar.boardObjectsPatch.mock.calls).toEqual(direct.boardObjectsPatch.mock.calls);
+  });
+
+  it('arranges free mixed objects without requiring a zone', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const onUserLayoutComplete = vi.fn();
+    const board = makeBoard({
+      note: { type: 'markdown', x: 1600, y: 900, width: 320, content: 'Note' },
+      app: {
+        type: 'app',
+        x: -800,
+        y: 600,
+        width: 360,
+        height: 220,
+        title: 'App',
+        template: 'react',
+        files: {},
+      },
+    });
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes: [
+            {
+              id: 'note',
+              type: 'markdown',
+              position: { x: 1600, y: 900 },
+              width: 320,
+              height: 180,
+              data: { objectId: 'note' },
+            },
+            {
+              id: 'app',
+              type: 'appNode',
+              position: { x: -800, y: 600 },
+              width: 360,
+              height: 220,
+              data: { objectId: 'app' },
+            },
+          ],
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+          onUserLayoutComplete,
+        }),
+      { wrapper }
+    );
+
+    expect(result.current.canArrangeWholeBoard).toBe(true);
+    await act(async () => result.current.arrangeWholeBoard());
+
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    expect(Object.keys(boardsPatch.mock.calls[0]?.[1].objects).sort()).toEqual(['app', 'note']);
+    expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves locked zones, locked objects, and their geometric membership', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const board = makeBoard({
+      open: { type: 'zone', x: 1400, y: 0, width: 620, height: 500, label: 'Open' },
+      locked: { type: 'zone', x: 0, y: 0, width: 620, height: 500, label: 'Locked', locked: true },
+      blocked: { type: 'zone', x: 0, y: 800, width: 620, height: 500, label: 'Blocked' },
+      member: {
+        type: 'artifact',
+        artifact_id: 'member-artifact',
+        x: 100,
+        y: 140,
+        width: 260,
+        height: 180,
+      },
+      protected: {
+        type: 'artifact',
+        artifact_id: 'protected-artifact',
+        x: 100,
+        y: 940,
+        width: 260,
+        height: 180,
+        locked: true,
+      },
+      free: { type: 'markdown', x: 2200, y: 900, width: 320, content: 'Free' },
+    });
+    const nodes: Node[] = [
+      { id: 'open', type: 'zone', position: { x: 1400, y: 0 }, width: 620, height: 500, data: {} },
+      {
+        id: 'locked',
+        type: 'zone',
+        position: { x: 0, y: 0 },
+        width: 620,
+        height: 500,
+        data: { locked: true },
+      },
+      {
+        id: 'blocked',
+        type: 'zone',
+        position: { x: 0, y: 800 },
+        width: 620,
+        height: 500,
+        data: {},
+      },
+      {
+        id: 'member',
+        type: 'artifactNode',
+        position: { x: 100, y: 140 },
+        width: 260,
+        height: 180,
+        data: { objectId: 'member' },
+      },
+      {
+        id: 'protected',
+        type: 'artifactNode',
+        position: { x: 100, y: 940 },
+        width: 260,
+        height: 180,
+        data: { objectId: 'protected', locked: true },
+      },
+      {
+        id: 'free',
+        type: 'markdown',
+        position: { x: 2200, y: 900 },
+        width: 320,
+        height: 180,
+        data: { objectId: 'free' },
+      },
+    ];
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => result.current.arrangeWholeBoard());
+
+    const objects = boardsPatch.mock.calls[0]?.[1].objects;
+    expect(Object.keys(objects).sort()).toEqual(['free', 'open']);
+    expect(objects.locked).toBeUndefined();
+    expect(objects.blocked).toBeUndefined();
+    expect(objects.member).toBeUndefined();
+    expect(objects.protected).toBeUndefined();
+  });
+
+  it('rejects a concurrent Arrange board click until the batch settles', async () => {
+    let releaseWrite: (() => void) | undefined;
+    const { client, boardsPatch } = makeRoutedClient();
+    boardsPatch.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseWrite = () => resolve({});
+        })
+    );
+    const board = makeBoard({
+      zone: { type: 'zone', x: 1600, y: 900, width: 620, height: 500, label: 'Zone' },
+    });
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes: [
+            {
+              id: 'zone',
+              type: 'zone',
+              position: { x: 1600, y: 900 },
+              width: 620,
+              height: 500,
+              data: {},
+            },
+          ],
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    let first: Promise<void> | undefined;
+    let second: Promise<void> | undefined;
+    act(() => {
+      first = result.current.arrangeWholeBoard();
+      second = result.current.arrangeWholeBoard();
+    });
+    expect(result.current.isBoardArrangementActive).toBe(true);
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+
+    releaseWrite?.();
+    await act(async () => Promise.all([first, second]));
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    expect(result.current.isBoardArrangementActive).toBe(false);
+  });
+
   it('writes one zone batch, re-packs measured children, and cancels pending Auto Zone passes', async () => {
     vi.useFakeTimers();
     const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
@@ -2459,10 +3760,11 @@ describe('arrangeBoardZones production path', () => {
       },
     ];
     const onArrangeNodes = vi.fn();
-    const { result } = renderHook(
-      () =>
+    const onUserLayoutComplete = vi.fn();
+    const view = renderHook(
+      (props: { board: Board; nodes: Node[] }) =>
         useBoardObjects({
-          board,
+          board: props.board,
           client,
           boardObjectsForBoard: [
             {
@@ -2483,32 +3785,48 @@ describe('arrangeBoardZones production path', () => {
               position: { x: 800, y: 800 },
             },
           ] as never,
-          nodes,
+          nodes: props.nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
           onArrangeNodes,
+          onUserLayoutComplete,
         }),
-      { wrapper }
+      { wrapper, initialProps: { board, nodes } }
     );
 
     await act(async () => {
-      await result.current.arrangeBoardZones(['zone-b', 'zone-a']);
+      await view.result.current.arrangeBoardZones(['zone-b', 'zone-a']);
+    });
+    const write = boardsPatch.mock.calls[0]?.[1];
+    const arrangedNodes = onArrangeNodes.mock.calls[0]?.[0] as Node[];
+    const arrangedById = new Map(arrangedNodes.map((node) => [node.id, node]));
+    view.rerender({
+      board: { ...board, objects: { ...board.objects, ...write.objects } } as Board,
+      nodes: nodes.map((node) => arrangedById.get(node.id) ?? node),
+    });
+    await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
     expect(boardsPatch).toHaveBeenCalledTimes(1);
     expect(boardsPatch).toHaveBeenCalledWith(
       'board-1',
       expect.objectContaining({
-        _action: 'batchUpsertObjects',
+        _action: 'applyLayout',
         objects: {
           'zone-a': expect.objectContaining({ type: 'zone' }),
           'zone-b': expect.objectContaining({ type: 'zone' }),
           artifact: expect.objectContaining({ type: 'artifact' }),
         },
+        placements: expect.objectContaining({
+          'placement-a': expect.objectContaining({ position: expect.any(Object) }),
+          'placement-b': expect.objectContaining({ position: expect.any(Object) }),
+          'placement-free': expect.objectContaining({ position: expect.any(Object) }),
+        }),
       })
     );
-    expect(boardObjectsPatch).toHaveBeenCalledTimes(3);
+    expect(boardObjectsPatch).not.toHaveBeenCalled();
     expect(onArrangeNodes).toHaveBeenCalledTimes(1);
+    expect(onUserLayoutComplete).not.toHaveBeenCalled();
     expect(showSuccess).toHaveBeenCalledTimes(1);
     expect(showWarning).not.toHaveBeenCalled();
   });
@@ -2558,9 +3876,13 @@ describe('arrangeBoardZones production path', () => {
       { wrapper }
     );
     act(() => result.current.preserveAutoZoneFrameOnce(zoneId));
-    await act(async () => vi.advanceTimersByTimeAsync(1000));
-    expect(boardsPatch).not.toHaveBeenCalled();
-    expect(boardObjectsPatch).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(400));
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    expect(layoutPlacements(boardsPatch)['placement-a']).toEqual({
+      position: { x: 20, y: 100 },
+      size: { width: 500, height: 200 },
+    });
+    expect(boardObjectsPatch).not.toHaveBeenCalled();
 
     boardsPatch.mockClear();
     const zoneNode = result.current.getBoardObjectNodes().find((node) => node.id === zoneId);
@@ -2568,6 +3890,9 @@ describe('arrangeBoardZones production path', () => {
     await act(async () => {
       await (zoneNode!.data.onArrangeContents as (id: string) => Promise<void>)(zoneId);
     });
-    expect(boardsPatch).not.toHaveBeenCalled();
+    expect(layoutWrites(boardsPatch)).toHaveLength(1);
+    expect(layoutWrites(boardsPatch)[0]?.objects).toEqual({
+      'zone-auto': expect.objectContaining({ width: 800, height: 1000 }),
+    });
   });
 });

@@ -2,7 +2,8 @@
 
 import { BOARD_SNAP_GRID } from '@agor/core/layout/rectangle-packing';
 import type { AgorClient, Board } from '@agor-live/client';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { App as AntApp } from 'antd';
 import type { ButtonHTMLAttributes, MouseEventHandler, ReactNode } from 'react';
 import type { Node } from 'reactflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,6 +17,7 @@ const onNodesChangeInternalSpy = vi.fn();
 // Stable spy for the raw setNodes setter (setNodesUnsafe). Lets tests inspect
 // the functional updater passed when zIndex needs to change for zone selection.
 const setNodesUnsafeSpy = vi.fn();
+let nodesStateOverride: Node[] | undefined;
 
 vi.mock('reactflow', () => ({
   Background: () => <div data-testid="react-flow-background" />,
@@ -52,7 +54,7 @@ vi.mock('reactflow', () => ({
   useViewport: () => ({ x: 0, y: 0, zoom: 1 }),
   useEdgesState: (initialEdges: unknown[]) => [initialEdges, vi.fn(), vi.fn()],
   useNodesState: (initialNodes: unknown[]) => [
-    initialNodes,
+    nodesStateOverride ?? initialNodes,
     setNodesUnsafeSpy,
     onNodesChangeInternalSpy,
   ],
@@ -68,6 +70,7 @@ vi.mock('./canvas/ArtifactNode', () => ({
 
 beforeEach(() => {
   reactFlowProps = null;
+  nodesStateOverride = undefined;
   onNodesChangeInternalSpy.mockClear();
   setNodesUnsafeSpy.mockClear();
 });
@@ -720,5 +723,431 @@ describe('SessionCanvas zoom shortcuts', () => {
         expect(result).toBe(mockNodes);
       });
     });
+  });
+
+  it('exposes Arrange board by accessible name and explains an empty board', async () => {
+    render(
+      <ConnectionProvider
+        value={{
+          connected: true,
+          connecting: false,
+          outOfSync: false,
+          capturedSha: null,
+          currentSha: null,
+        }}
+      >
+        <SessionCanvas board={null} client={null} branches={[]} />
+      </ConnectionProvider>
+    );
+
+    const button = screen.getByRole('button', { name: 'Arrange board' });
+    expect(button).toBeDisabled();
+    fireEvent.mouseOver(button.parentElement as HTMLElement);
+    expect(
+      await screen.findByText('Arrange board — no visible unlocked board items to arrange')
+    ).toBeInTheDocument();
+  });
+
+  it('keeps focus while an Arrange board transaction blocks keyboard and double activation', async () => {
+    nodesStateOverride = [
+      {
+        id: 'zone-1',
+        type: 'zone',
+        position: { x: 1200, y: 900 },
+        width: 620,
+        height: 500,
+        data: {},
+      },
+    ];
+    let releaseWrite: (() => void) | undefined;
+    const patch = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          releaseWrite = () => resolve({});
+        })
+    );
+    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    const board = {
+      board_id: 'board-1',
+      objects: {
+        'zone-1': {
+          type: 'zone',
+          x: 1200,
+          y: 900,
+          width: 620,
+          height: 500,
+          label: 'Zone',
+        },
+      },
+    } as unknown as Board;
+    render(
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      </AntApp>
+    );
+
+    const button = screen.getByRole('button', { name: 'Arrange board' });
+    expect(button).toBeEnabled();
+    button.focus();
+    expect(button).toHaveFocus();
+    fireEvent.click(button);
+    const options = await screen.findByRole('dialog', { name: 'Arrange board options' });
+    expect(within(options).getByRole('checkbox', { name: 'Pack zone contents' })).toBeChecked();
+    fireEvent.click(within(options).getByRole('button', { name: 'Arrange board' }));
+
+    await waitFor(() => expect(button).toHaveAttribute('aria-disabled', 'true'));
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(button).toHaveFocus();
+    fireEvent.click(button);
+    expect(patch).toHaveBeenCalledTimes(1);
+
+    releaseWrite?.();
+    await waitFor(() => expect(button).toHaveAttribute('aria-disabled', 'false'));
+    expect(button).toHaveFocus();
+  });
+
+  it('defaults Pack zone contents on and preserves the frame when the user turns it off', async () => {
+    nodesStateOverride = [
+      {
+        id: 'zone-1',
+        type: 'zone',
+        position: { x: 1200, y: 900 },
+        width: 620,
+        height: 500,
+        data: {},
+      },
+    ];
+    const patch = vi.fn().mockResolvedValue({});
+    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    const board = {
+      board_id: 'board-1',
+      objects: {
+        'zone-1': {
+          type: 'zone',
+          x: 1200,
+          y: 900,
+          width: 620,
+          height: 500,
+          label: 'Zone',
+        },
+      },
+    } as unknown as Board;
+    render(
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      </AntApp>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Arrange board' }));
+    const options = await screen.findByRole('dialog', { name: 'Arrange board options' });
+    const pack = within(options).getByRole('checkbox', { name: 'Pack zone contents' });
+    expect(pack).toBeChecked();
+    fireEvent.click(pack);
+    expect(pack).not.toBeChecked();
+    fireEvent.click(within(options).getByRole('button', { name: 'Arrange board' }));
+
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    expect(patch).toHaveBeenCalledWith(
+      'board-1',
+      expect.objectContaining({
+        _action: 'applyLayout',
+        objects: {
+          'zone-1': expect.objectContaining({ width: 620, height: 500 }),
+        },
+      })
+    );
+  });
+
+  it('atomically grids a heterogeneous selection around an unselected fixed obstacle', async () => {
+    nodesStateOverride = [
+      {
+        id: 'note-a',
+        type: 'markdown',
+        position: { x: 0, y: 0 },
+        positionAbsolute: { x: 0, y: 0 },
+        width: 200,
+        height: 100,
+        selected: true,
+        data: {},
+      },
+      {
+        id: 'app-b',
+        type: 'appNode',
+        position: { x: 800, y: 0 },
+        positionAbsolute: { x: 800, y: 0 },
+        width: 300,
+        height: 160,
+        selected: true,
+        data: {},
+      },
+      {
+        id: 'artifact-c',
+        type: 'artifactNode',
+        position: { x: 0, y: 500 },
+        positionAbsolute: { x: 0, y: 500 },
+        width: 240,
+        height: 200,
+        selected: true,
+        data: {},
+      },
+      {
+        id: 'fixed-note',
+        type: 'markdown',
+        position: { x: 380, y: 260 },
+        width: 300,
+        height: 160,
+        data: { locked: true },
+      },
+    ];
+    const patch = vi.fn().mockResolvedValue({});
+    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    let board = {
+      board_id: 'board-1',
+      objects: {
+        'note-a': { type: 'markdown', x: 0, y: 0, width: 200, content: 'A' },
+        'app-b': {
+          type: 'app',
+          x: 800,
+          y: 0,
+          width: 300,
+          height: 160,
+          title: 'B',
+          files: {},
+        },
+        'artifact-c': {
+          type: 'artifact',
+          x: 0,
+          y: 500,
+          width: 240,
+          height: 200,
+          artifact_id: 'artifact-1',
+        },
+        'fixed-note': {
+          type: 'markdown',
+          x: 380,
+          y: 260,
+          width: 300,
+          content: 'Fixed',
+        },
+      },
+    } as unknown as Board;
+    const view = render(
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      </AntApp>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(await screen.findByText('Grid', { exact: true }));
+    fireEvent.change(screen.getByLabelText('Number of columns'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
+
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    const write = patch.mock.calls[0]?.[1];
+    expect(write).toMatchObject({ _action: 'applyLayout', placements: {} });
+    expect(Object.keys(write.objects)).toEqual(['note-a', 'app-b', 'artifact-c']);
+    expect(write.objects['fixed-note']).toBeUndefined();
+    expect(write.objects['note-a']).toMatchObject({ x: 140, y: 60 });
+    expect(write.objects['app-b']).toMatchObject({ x: 380, y: 60 });
+    expect(write.objects['artifact-c']).toMatchObject({ x: 720, y: 60 });
+
+    board = { ...board, objects: { ...board.objects, ...write.objects } };
+    nodesStateOverride = nodesStateOverride?.map((node) => {
+      const object = write.objects[node.id];
+      return object ? { ...node, position: { x: object.x, y: object.y } } : node;
+    });
+    view.rerender(
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      </AntApp>
+    );
+    patch.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
+    await act(async () => Promise.resolve());
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it('atomically matches an unequal three-zone grid to uniform tracks and repeats as a no-op', async () => {
+    nodesStateOverride = [
+      {
+        id: 'zone-empty',
+        type: 'zone',
+        position: { x: 0, y: 0 },
+        width: 600,
+        height: 240,
+        selected: true,
+        data: {},
+      },
+      {
+        id: 'zone-tall',
+        type: 'zone',
+        position: { x: 800, y: 0 },
+        width: 600,
+        height: 700,
+        selected: true,
+        data: {},
+      },
+      {
+        id: 'tall-note',
+        type: 'markdown',
+        position: { x: 820, y: 100 },
+        width: 380,
+        height: 500,
+        data: {},
+      },
+      {
+        id: 'zone-wide',
+        type: 'zone',
+        position: { x: 0, y: 900 },
+        width: 900,
+        height: 300,
+        selected: true,
+        data: {},
+      },
+      {
+        id: 'wide-note',
+        type: 'markdown',
+        position: { x: 20, y: 980 },
+        width: 760,
+        height: 120,
+        data: {},
+      },
+      {
+        id: 'locked-peer',
+        type: 'zone',
+        position: { x: 1600, y: 200 },
+        width: 300,
+        height: 180,
+        selected: true,
+        data: { locked: true },
+      },
+    ];
+    const patch = vi.fn().mockResolvedValue({});
+    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    let board = {
+      board_id: 'board-1',
+      objects: {
+        'zone-empty': { type: 'zone', x: 0, y: 0, width: 600, height: 240, label: 'Empty' },
+        'zone-tall': { type: 'zone', x: 800, y: 0, width: 600, height: 700, label: 'Tall' },
+        'tall-note': { type: 'markdown', x: 820, y: 100, width: 380, content: 'Tall' },
+        'zone-wide': { type: 'zone', x: 0, y: 900, width: 900, height: 300, label: 'Wide' },
+        'wide-note': { type: 'markdown', x: 20, y: 980, width: 760, content: 'Wide' },
+        'locked-peer': {
+          type: 'zone',
+          x: 1600,
+          y: 200,
+          width: 300,
+          height: 180,
+          label: 'Locked',
+        },
+      },
+    } as unknown as Board;
+    const view = render(
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      </AntApp>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(await screen.findByText('Grid', { exact: true }));
+    expect(screen.getByRole('switch', { name: 'Match zone frames to grid' })).toBeChecked();
+    fireEvent.change(screen.getByLabelText('Number of columns'), { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
+
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    const write = patch.mock.calls[0]?.[1];
+    expect(write).toMatchObject({ _action: 'applyLayout', placements: {} });
+    expect(write.objects['locked-peer']).toBeUndefined();
+    const empty = write.objects['zone-empty'];
+    const tall = write.objects['zone-tall'];
+    const wide = write.objects['zone-wide'];
+    expect(empty.width).toBe(wide.width);
+    expect(empty.height).toBe(tall.height);
+    expect(tall.x - (empty.x + empty.width)).toBe(40);
+    expect(wide.y - (empty.y + empty.height)).toBe(40);
+
+    board = { ...board, objects: { ...board.objects, ...write.objects } } as Board;
+    nodesStateOverride = nodesStateOverride.map((node) => {
+      const object = write.objects[node.id];
+      return object
+        ? {
+            ...node,
+            position: { x: object.x, y: object.y },
+            ...('width' in object ? { width: object.width } : {}),
+            ...('height' in object ? { height: object.height } : {}),
+          }
+        : node;
+    });
+    view.rerender(
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      </AntApp>
+    );
+    patch.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
+    await act(async () => Promise.resolve());
+    expect(patch).not.toHaveBeenCalled();
   });
 });

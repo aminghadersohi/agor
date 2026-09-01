@@ -17,6 +17,10 @@ const LAYOUT_NODE_TYPES = new Set([
   'artifactNode',
 ]);
 
+export function isLayoutNodeType(node: Node): boolean {
+  return LAYOUT_NODE_TYPES.has(node.type ?? '');
+}
+
 /**
  * Return every eligible node with a positive-area overlap with the marquee.
  * Strict inequalities intentionally exclude an edge/corner touch. Selecting a
@@ -88,7 +92,7 @@ export function getSelectedLayoutNodes(nodes: Node[]): Node[] {
           node.selected &&
           !node.hidden &&
           node.selectable !== false &&
-          LAYOUT_NODE_TYPES.has(node.type ?? '') &&
+          isLayoutNodeType(node) &&
           node.data?.locked !== true
       )
       .map((node) => node.id)

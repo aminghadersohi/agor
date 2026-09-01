@@ -15,6 +15,29 @@ export function getRenderedNodeSize(node: Node): { width: number; height: number
   };
 }
 
+/** Measure the real outer box used by explicit layout without changing marquee hit-testing. */
+export function getMeasuredLayoutNodeSize(
+  node: Node,
+  fallback: { width: number; height: number } = { width: 0, height: 0 }
+): { width: number; height: number } {
+  const stored = {
+    width: Number(node.width ?? node.style?.width ?? node.data?.width ?? fallback.width),
+    height: Number(node.height ?? node.style?.height ?? node.data?.height ?? fallback.height),
+  };
+  if (typeof document === 'undefined') return stored;
+
+  const element = Array.from(
+    document.querySelectorAll<HTMLElement>('.react-flow__node[data-id]')
+  ).find((candidate) => candidate.dataset.id === node.id);
+  if (!element) return stored;
+  const width = Math.max(element.offsetWidth, element.scrollWidth);
+  const height = Math.max(element.offsetHeight, element.scrollHeight);
+  return {
+    width: Number.isFinite(width) && width > 0 ? Math.ceil(width) : stored.width,
+    height: Number.isFinite(height) && height > 0 ? Math.ceil(height) : stored.height,
+  };
+}
+
 /**
  * Eligibility shared by marquee hit-testing and design-guide geometry.
  *

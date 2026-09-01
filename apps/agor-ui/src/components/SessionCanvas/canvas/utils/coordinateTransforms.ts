@@ -49,6 +49,30 @@ export function getNodeAbsolutePosition(node: Node, allNodes: Node[]): Position 
 }
 
 /**
+ * Resolve absolute geometry from the current controlled node state.
+ *
+ * React Flow's derived `positionAbsolute` can trail an optimistic or realtime
+ * position update by a render. Explicit repeated layouts must instead use the
+ * authoritative `position` values or they can plan a second, different grid
+ * from stale pre-layout coordinates.
+ */
+export function getCurrentNodeAbsolutePosition(node: Node, allNodes: Node[]): Position {
+  const byId = new Map(allNodes.map((candidate) => [candidate.id, candidate]));
+  const resolve = (candidate: Node, visited: Set<string>): Position => {
+    if (!candidate.parentId || visited.has(candidate.parentId)) return candidate.position;
+    const parent = byId.get(candidate.parentId);
+    if (!parent) return candidate.position;
+    visited.add(candidate.parentId);
+    const parentPosition = resolve(parent, visited);
+    return {
+      x: parentPosition.x + candidate.position.x,
+      y: parentPosition.y + candidate.position.y,
+    };
+  };
+  return resolve(node, new Set([node.id]));
+}
+
+/**
  * Convert absolute position to relative position within a parent
  *
  * @param absolutePos - Position in board coordinates
