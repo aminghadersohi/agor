@@ -35,6 +35,12 @@ import { useThemedMessage } from '../../../utils/message';
 import { dealDelayMs, dealOrderIndex, dealStyle, dealTiming } from './arrangeAnimation';
 import { AutoZoneDeferral } from './autoZoneDeferral';
 import {
+  type AutoZoneObserverInput,
+  type AutoZoneObserverLockManager,
+  changedAutoZoneObserverIds,
+  holdAutoZoneObserverLease,
+} from './autoZoneObserver';
+import {
   createPostLayoutViewportIntent,
   type PostLayoutViewportIntent,
 } from './postLayoutViewport';
@@ -281,7 +287,10 @@ export const useBoardObjects = ({
   const autoZoneDeferralRef = useRef<AutoZoneDeferral | null>(null);
   autoZoneDeferralRef.current ??= new AutoZoneDeferral();
   const runAutoZoneArrangeRef = useRef<(zoneId: string) => void>(() => undefined);
-  const lastAutoLayoutSignatureRef = useRef('');
+  const lastAutoLayoutSignaturesRef = useRef<ReadonlyMap<string, string>>(new Map());
+  const [ownsAutoZoneObserver, setOwnsAutoZoneObserver] = useState(
+    () => typeof navigator === 'undefined' || navigator.locks === undefined
+  );
   const skipNextAutoArrangeRef = useRef(new Set<string>());
   const preserveNextAutoZoneFrameRef = useRef(new Set<string>());
   // Direct manipulation wins immediately, before the persisted board patch
@@ -340,6 +349,34 @@ export const useBoardObjects = ({
   }, [boardObjects]);
 
   useEffect(() => () => autoZoneDeferralRef.current?.dispose(), []);
+
+  useEffect(() => {
+    const boardId = board?.board_id;
+    const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+    lastAutoLayoutSignaturesRef.current = new Map();
+    if (!boardId || !locks) {
+      setOwnsAutoZoneObserver(true);
+      return;
+    }
+
+    let active = true;
+    const controller = new AbortController();
+    setOwnsAutoZoneObserver(false);
+    void holdAutoZoneObserverLease(
+      locks as unknown as AutoZoneObserverLockManager,
+      boardId,
+      controller.signal,
+      (owned) => {
+        if (active) setOwnsAutoZoneObserver(owned);
+      }
+    ).catch((error) => {
+      if (active) console.error('Failed to coordinate Auto Zone observer ownership:', error);
+    });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [board?.board_id]);
 
   const restoreZoneCallouts = useCallback((zoneId: string) => {
     setCalledOutNodeIds((current) => {
@@ -813,7 +850,12 @@ export const useBoardObjects = ({
 
       const itemSize = (node: Node) => ceilBoardGridSize(renderedNodeSize(node));
       const frame = getZoneLayoutFrame(zone, {
-        fontScale: renderedZoneFontScale(zoneId, zone.width),
+        // Background Auto Zone writes must be viewport-independent. The
+        // screen-stable title occupies a different board-space height at each
+        // zoom, so measuring it during an observer pass made two clients (or
+        // two reload widths) persist competing child offsets. Explicit layout
+        // still plans against the title the initiating user actually sees.
+        fontScale: options.userInitiated ? renderedZoneFontScale(zoneId, zone.width) : 1,
       });
       const requestedGap = policy.gap ?? 24;
       const gridGap =
@@ -976,6 +1018,12 @@ export const useBoardObjects = ({
           typeof window !== 'undefined' &&
           window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
       });
+      // Background Auto Zone maintenance must not impose a temporary measured
+      // box on content. React Flow rebuilds entity/canvas nodes from durable
+      // state after realtime events; animating a snapped planner box and then
+      // restoring the natural DOM box made ResizeObserver alternate forever.
+      // Explicit user actions retain the established deal animation.
+      const presentPlannedSize = options.userInitiated === true;
       changedNodes = children.map(({ node, isCanvasObject }) => {
         const placement = placementById.get(node.id);
         return placement
@@ -989,8 +1037,7 @@ export const useBoardObjects = ({
                       .filter((name) => name !== 'auto-zone-stack-item')
                       .join(' '),
               zIndex: layout.mode === 'deck' ? 500 + placement.deckDepth : node.zIndex,
-              width: placement.width,
-              height: placement.height,
+              ...(presentPlannedSize ? { width: placement.width, height: placement.height } : {}),
               position: isCanvasObject
                 ? { x: zone.x + placement.x, y: zone.y + placement.y + titleInset }
                 : { x: placement.x, y: placement.y + titleInset },
@@ -1005,33 +1052,26 @@ export const useBoardObjects = ({
               style: {
                 ...node.style,
                 ...(layout.mode === 'deck' ? { pointerEvents: 'auto' as const } : {}),
-                width: placement.width,
-                height: placement.height,
-                ...dealStyle(
-                  dealDelayMs(dealOrderIndex(placement, layout.columns), timing),
-                  timing
-                ),
+                ...(presentPlannedSize
+                  ? {
+                      width: placement.width,
+                      height: placement.height,
+                      ...dealStyle(
+                        dealDelayMs(dealOrderIndex(placement, layout.columns), timing),
+                        timing
+                      ),
+                    }
+                  : {}),
               },
             }
           : node;
       });
-      const positionChanged = changedNodes.some((node) => {
+      const visualPositionChanged = changedNodes.some((node) => {
         const current = children.find((child) => child.id === node.id)?.node;
         return (
           !current ||
           Math.abs(current.position.x - node.position.x) >= 0.5 ||
           Math.abs(current.position.y - node.position.y) >= 0.5
-        );
-      });
-      const renderedSizeChanged = changedNodes.some((node) => {
-        const current = children.find((child) => child.id === node.id)?.node;
-        return (
-          !current ||
-          Math.abs(Number(current.width ?? current.style?.width ?? 0) - Number(node.width ?? 0)) >=
-            0.5 ||
-          Math.abs(
-            Number(current.height ?? current.style?.height ?? 0) - Number(node.height ?? 0)
-          ) >= 0.5
         );
       });
       const nextZoneHeight = options.preserveZoneFrame
@@ -1122,6 +1162,38 @@ export const useBoardObjects = ({
         if (placement.card_id) placementByNodeId.set(`card-${placement.card_id}`, placement);
       }
 
+      // Compare planner output with durable geometry, not React Flow's
+      // approximate node props. The latter intentionally differ from measured
+      // cards/worktrees and are rebuilt after every board realtime event; using
+      // them made an already-persisted layout look changed forever.
+      const durableEntityGeometryChanged = children.some(({ node, isCanvasObject }) => {
+        if (isCanvasObject) return false;
+        const durable = placementByNodeId.get(node.id);
+        const arranged = placementById.get(node.id);
+        if (!durable || !arranged) return false;
+        if (!durable.position) return true;
+        return (
+          Math.abs(durable.position.x - arranged.x) >= 0.5 ||
+          Math.abs(durable.position.y - (arranged.y + titleInset)) >= 0.5 ||
+          !durable.size ||
+          Math.abs(durable.size.width - arranged.width) >= 0.5 ||
+          Math.abs(durable.size.height - arranged.height) >= 0.5
+        );
+      });
+      const durableCanvasGeometryChanged = children.some(({ node, isCanvasObject }) => {
+        if (!isCanvasObject) return false;
+        const durable = currentBoard.objects?.[node.id];
+        const arrangedNode = changedNodes.find((candidate) => candidate.id === node.id);
+        const arranged = placementById.get(node.id);
+        if (!durable || !arrangedNode || !arranged) return false;
+        return (
+          Math.abs(durable.x - arrangedNode.position.x) >= 0.5 ||
+          Math.abs(durable.y - arrangedNode.position.y) >= 0.5 ||
+          ('width' in durable && Math.abs(Number(durable.width) - arranged.width) >= 0.5) ||
+          ('height' in durable && Math.abs(Number(durable.height) - arranged.height) >= 0.5)
+        );
+      });
+
       const compactChanged =
         policy.preset === 'compact_list' &&
         children.some(
@@ -1131,8 +1203,9 @@ export const useBoardObjects = ({
             placementByNodeId.get(node.id)?.compact !== true
         );
       if (
-        !positionChanged &&
-        !renderedSizeChanged &&
+        !visualPositionChanged &&
+        !durableEntityGeometryChanged &&
+        !durableCanvasGeometryChanged &&
         !zoneHeightChanged &&
         !zoneWidthChanged &&
         !compactChanged
@@ -1158,7 +1231,9 @@ export const useBoardObjects = ({
       ];
       const optimisticById = new Map(optimisticNodes.map((node) => [node.id, node]));
       const finalNodes = sourceNodes.map((node) => optimisticById.get(node.id) ?? node);
-      if (optimisticNodes.length > 0) onArrangeNodes?.(optimisticNodes, timing.totalMs);
+      if (optimisticNodes.length > 0 && options.userInitiated) {
+        onArrangeNodes?.(optimisticNodes, timing.totalMs);
+      }
       // Positions are an auto-layout output but are also part of the observer
       // signature (so a user's manual move can reflow an automatic zone).
       // Consume exactly the next signature change produced by our own write;
@@ -1181,18 +1256,24 @@ export const useBoardObjects = ({
             const arranged = placementById.get(node.id);
             const existing = currentBoard.objects?.[node.id];
             if (!arrangedNode || !arranged || !existing) return [];
-            return [
-              [
-                node.id,
-                {
-                  ...existing,
-                  x: arrangedNode.position.x,
-                  y: arrangedNode.position.y,
-                  ...('width' in existing ? { width: arranged.width } : {}),
-                  ...('height' in existing ? { height: arranged.height } : {}),
-                },
-              ] as const,
-            ];
+            const next = {
+              ...existing,
+              x: arrangedNode.position.x,
+              y: arrangedNode.position.y,
+              ...('width' in existing ? { width: arranged.width } : {}),
+              ...('height' in existing ? { height: arranged.height } : {}),
+            } as BoardObject;
+            const unchanged =
+              Math.abs(existing.x - next.x) < 0.5 &&
+              Math.abs(existing.y - next.y) < 0.5 &&
+              (!('width' in existing) ||
+                !('width' in next) ||
+                Math.abs(Number(existing.width) - Number(next.width)) < 0.5) &&
+              (!('height' in existing) ||
+                !('height' in next) ||
+                Math.abs(Number(existing.height) - Number(next.height)) < 0.5);
+            if (unchanged) return [];
+            return [[node.id, next] as const];
           })
         );
         const reflowedEntries: Array<readonly [string, BoardObject]> = [];
@@ -1206,35 +1287,24 @@ export const useBoardObjects = ({
           }
         }
         const reflowedObjects = Object.fromEntries(reflowedEntries);
-        if (
-          zoneHeightChanged ||
-          zoneWidthChanged ||
-          Object.keys(canvasObjects).length > 0 ||
-          Object.keys(reflowedObjects).length > 0
-        ) {
-          await client.service('boards').patch(currentBoard.board_id, {
-            _action: 'batchUpsertObjects',
-            objects: {
-              ...(zoneHeightChanged || zoneWidthChanged
-                ? { [zoneId]: { ...zone, width: nextZoneWidth, height: nextZoneHeight } }
-                : {}),
-              ...reflowedObjects,
-              ...canvasObjects,
-            },
-          } as unknown as Partial<Board>);
-        }
-        await Promise.all(
-          changedNodes.map(async (node) => {
+        const objects = {
+          ...(zoneHeightChanged || zoneWidthChanged
+            ? { [zoneId]: { ...zone, width: nextZoneWidth, height: nextZoneHeight } }
+            : {}),
+          ...reflowedObjects,
+          ...canvasObjects,
+        };
+        const placements = Object.fromEntries(
+          changedNodes.flatMap((node) => {
             const placement = placementByNodeId.get(node.id);
-            if (!placement) return;
+            if (!placement) return [];
             const arranged = placementById.get(node.id);
-            if (!arranged) return;
+            if (!arranged) return [];
             const { width, height } = arranged;
-            const currentNode = children.find((child) => child.id === node.id)?.node;
             const nodePositionChanged =
-              !currentNode ||
-              Math.abs(currentNode.position.x - node.position.x) >= 0.5 ||
-              Math.abs(currentNode.position.y - node.position.y) >= 0.5;
+              !placement.position ||
+              Math.abs(placement.position.x - node.position.x) >= 0.5 ||
+              Math.abs(placement.position.y - node.position.y) >= 0.5;
             const sizeChanged =
               !placement.size ||
               Math.abs(placement.size.width - width) >= 0.5 ||
@@ -1243,14 +1313,32 @@ export const useBoardObjects = ({
               (policy.preset === 'compact_list' || layout.mode === 'deck') &&
               isBoardEntityDensityExpandable(placement.entity_type) &&
               placement.compact !== true;
-            if (!nodePositionChanged && !sizeChanged && !shouldCompact) return;
-            await client.service('board-objects').patch(placement.object_id, {
-              ...(nodePositionChanged ? { position: node.position } : {}),
-              ...(sizeChanged ? { size: { width, height } } : {}),
-              ...(shouldCompact ? { compact: true } : {}),
-            });
+            if (!nodePositionChanged && !sizeChanged && !shouldCompact) return [];
+            return [
+              [
+                placement.object_id,
+                {
+                  // applyLayout's placement contract is a complete geometry
+                  // snapshot. Supplying only the changed half would serialize
+                  // the other required field as undefined in the repository.
+                  position: node.position,
+                  size: { width, height },
+                  ...(shouldCompact ? { compact: true } : {}),
+                },
+              ] as const,
+            ];
           })
         );
+        if (Object.keys(objects).length > 0 || Object.keys(placements).length > 0) {
+          // Canvas objects, the zone frame, and entity placements form one
+          // geometry snapshot. Publishing the existing atomic layout action
+          // prevents partial placement echoes from re-arming the observer.
+          await client.service('boards').patch(currentBoard.board_id, {
+            _action: 'applyLayout',
+            objects,
+            placements,
+          } as unknown as Partial<Board>);
+        }
         if (overflowCount > 0 && !options.silent) {
           showWarning(
             `Arranged ${changedNodes.length} items, but ${overflowCount} cannot fit inside this zone.`
@@ -1888,11 +1976,11 @@ export const useBoardObjects = ({
         ? ([[objectId, object]] as const)
         : []
     );
-    if (!client) return;
+    if (!client || !ownsAutoZoneObserver) return;
     if (autoZones.length === 0) {
       // Re-arming a zone must tidy even when its contents have not changed
       // since the last time auto mode ran.
-      lastAutoLayoutSignatureRef.current = '';
+      lastAutoLayoutSignaturesRef.current = new Map();
       return;
     }
 
@@ -1908,39 +1996,40 @@ export const useBoardObjects = ({
       if (containing) autoZoneForCanvasNode.set(node.id, containing[0]);
     }
 
-    const signature = autoZones
-      .map(([zoneId, zone]) => {
-        const children = nodes
-          .filter((node) => {
-            if (
-              node.parentId === zoneId &&
-              (node.type === 'branchNode' || node.type === 'cardNode')
-            )
-              return true;
-            return autoZoneForCanvasNode.get(node.id) === zoneId;
-          })
-          .map((node) => {
-            const size = ceilBoardGridSize(renderedNodeSize(node));
-            const data = node.data as {
-              branch?: {
-                name?: string;
-                created_at?: string;
-                updated_at?: string;
-                filesystem_status?: string;
-              };
-              card?: {
-                title?: string;
-                created_at?: string;
-                updated_at?: string;
-                data?: Record<string, unknown>;
-              };
+    const observerInputs: AutoZoneObserverInput[] = autoZones.map(([zoneId, zone]) => ({
+      zoneId,
+      width: zone.width,
+      height: zone.height,
+      layout: zone.layout,
+      children: nodes
+        .filter((node) => {
+          if (node.parentId === zoneId && (node.type === 'branchNode' || node.type === 'cardNode'))
+            return true;
+          return autoZoneForCanvasNode.get(node.id) === zoneId;
+        })
+        .map((node) => {
+          const size = ceilBoardGridSize(renderedNodeSize(node));
+          const data = node.data as {
+            branch?: {
+              name?: string;
+              created_at?: string;
+              updated_at?: string;
+              filesystem_status?: string;
             };
-            return [
-              node.id,
-              snapBoardGridValue(node.position.x),
-              snapBoardGridValue(node.position.y),
-              size.width,
-              size.height,
+            card?: {
+              title?: string;
+              created_at?: string;
+              updated_at?: string;
+              data?: Record<string, unknown>;
+            };
+          };
+          return {
+            id: node.id,
+            x: node.position.x,
+            y: node.position.y,
+            width: size.width,
+            height: size.height,
+            sortData: [
               data.branch?.name,
               data.branch?.created_at,
               data.branch?.updated_at,
@@ -1951,15 +2040,18 @@ export const useBoardObjects = ({
               data.card?.data?.priority,
               data.card?.data?.rank,
               data.card?.data?.status,
-            ];
-          });
-        return [zoneId, zone.width, zone.height, zone.layout, children];
-      })
-      .map((value) => JSON.stringify(value))
-      .join('|');
-    if (signature === lastAutoLayoutSignatureRef.current) return;
-    lastAutoLayoutSignatureRef.current = signature;
-    const zonesToArrange = zonesNeedingAutoArrange(autoZones, skipNextAutoArrangeRef.current);
+            ],
+          };
+        }),
+    }));
+    const observation = changedAutoZoneObserverIds(
+      observerInputs,
+      lastAutoLayoutSignaturesRef.current
+    );
+    lastAutoLayoutSignaturesRef.current = observation.signatures;
+    if (observation.changedIds.size === 0) return;
+    const changedZones = autoZones.filter(([zoneId]) => observation.changedIds.has(zoneId));
+    const zonesToArrange = zonesNeedingAutoArrange(changedZones, skipNextAutoArrangeRef.current);
     if (zonesToArrange.length === 0) return;
     for (const [zoneId] of zonesToArrange) {
       autoZoneDeferralRef.current?.schedule(
@@ -1968,7 +2060,7 @@ export const useBoardObjects = ({
         AUTO_ZONE_BASE_DELAY_MS
       );
     }
-  }, [boardObjects, client, nodes]);
+  }, [boardObjects, client, nodes, ownsAutoZoneObserver]);
 
   /**
    * Convert board.objects to React Flow nodes

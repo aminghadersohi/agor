@@ -180,6 +180,16 @@ function makeRoutedClient() {
   return { client: { service } as never, service, boardsPatch, boardObjectsPatch };
 }
 
+function layoutWrites(patch: { mock: { calls: unknown[][] } }) {
+  return patch.mock.calls
+    .map((call) => call[1] as { _action?: string; objects?: object; placements?: object })
+    .filter((write) => write?._action === 'applyLayout');
+}
+
+function layoutPlacements(patch: { mock: { calls: unknown[][] } }): Record<string, unknown> {
+  return Object.assign({}, ...layoutWrites(patch).map((write) => write.placements ?? {}));
+}
+
 /** Like makeClient but `patch` rejects, to exercise the error path. */
 function makeRejectingClient() {
   const patch = vi.fn().mockRejectedValue(new Error('network down'));
@@ -404,7 +414,7 @@ describe('batchUpdateObjectPositions', () => {
 
 describe('arrangeZoneContents', () => {
   it('reserves the scaled live title before packing a single child', async () => {
-    const { client, boardObjectsPatch } = makeRoutedClient();
+    const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
     const board = makeBoard({
       zone: {
         type: 'zone',
@@ -485,7 +495,8 @@ describe('arrangeZoneContents', () => {
         x: 20,
         y: 180,
       });
-      expect(boardObjectsPatch).toHaveBeenCalledWith('placement-branch', {
+      expect(boardObjectsPatch).not.toHaveBeenCalled();
+      expect(layoutPlacements(boardsPatch)['placement-branch']).toEqual({
         position: { x: 20, y: 180 },
         size: { width: 500, height: 240 },
       });
@@ -590,20 +601,23 @@ describe('arrangeZoneContents', () => {
     expect(onUserLayoutComplete).toHaveBeenCalledWith(
       expect.objectContaining({ source: 'user', boardId: 'board-1', scope: 'zone' })
     );
-    expect(patch).toHaveBeenCalledTimes(2);
-    expect(patch).toHaveBeenCalledWith('placement-branch', {
+    expect(patch).toHaveBeenCalledTimes(1);
+    const placements = layoutPlacements(patch);
+    expect(placements['placement-branch']).toEqual({
       position: { x: 20, y: 100 },
       size: { width: 400, height: 180 },
     });
-    expect(patch).toHaveBeenCalledWith('placement-card', {
+    expect(placements['placement-card']).toEqual({
       position: { x: 20, y: 300 },
       size: { width: 300, height: 100 },
     });
     expect(showSuccess).toHaveBeenCalledWith(
       'Arranged 2 items in a non-overlapping compact cluster.'
     );
-    for (const [, update] of patch.mock.calls) {
-      if (!('position' in update) || !('size' in update)) continue;
+    for (const update of Object.values(placements) as Array<{
+      position: { x: number; y: number };
+      size: { width: number; height: number };
+    }>) {
       expect(update.position.x % BOARD_GRID_SIZE).toBe(0);
       expect(update.position.y % BOARD_GRID_SIZE).toBe(0);
       expect(update.size.width % BOARD_GRID_SIZE).toBe(0);
@@ -740,13 +754,17 @@ describe('arrangeZoneContents', () => {
       await (zoneNode!.data.onArrangeContents as (id: string) => Promise<void>)('zone');
     });
 
-    expect(boardObjectsPatch).toHaveBeenCalledTimes(2);
+    expect(boardObjectsPatch).not.toHaveBeenCalled();
     expect(boardsPatch).toHaveBeenCalledTimes(1);
     const boardWrite = boardsPatch.mock.calls[0]?.[1] as {
       _action: string;
       objects: Record<string, { x: number; y: number }>;
     };
-    expect(boardWrite._action).toBe('batchUpsertObjects');
+    expect(boardWrite._action).toBe('applyLayout');
+    expect(Object.keys(layoutPlacements(boardsPatch)).sort()).toEqual([
+      'placement-branch',
+      'placement-card',
+    ]);
     expect(Object.keys(boardWrite.objects).sort()).toEqual(['app', 'artifact', 'note']);
     expect(boardWrite.objects.locked).toBeUndefined();
 
@@ -779,6 +797,75 @@ describe('arrangeZoneContents', () => {
     expect(showSuccess).toHaveBeenCalledWith(
       'Arranged 5 items in a non-overlapping compact cluster.'
     );
+  });
+
+  it('omits byte-equivalent canvas geometry when another child needs layout', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const board = makeBoard({
+      zone: {
+        type: 'zone',
+        x: 0,
+        y: 0,
+        width: 620,
+        height: 700,
+        label: 'Mixed',
+        layout: { mode: 'manual', preset: 'grid', columns: 1, sortBy: 'position', gap: 20 },
+      },
+      note: { type: 'markdown', x: 20, y: 100, width: 360, content: 'Stable note' },
+    });
+    const nodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, width: 620, height: 700, data: {} },
+      {
+        id: 'note',
+        type: 'markdown',
+        position: { x: 20, y: 100 },
+        width: 360,
+        height: 100,
+        data: { title: 'A note' },
+      },
+      {
+        id: 'branch',
+        type: 'branchNode',
+        parentId: 'zone',
+        position: { x: 20, y: 400 },
+        width: 500,
+        height: 240,
+        data: { branch: { name: 'B branch' } },
+      },
+    ];
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'placement-branch',
+              entity_type: 'branch',
+              branch_id: 'branch',
+              zone_id: 'zone',
+              position: { x: 20, y: 400 },
+              size: { width: 500, height: 240 },
+            },
+          ] as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    const zoneNode = result.current.getBoardObjectNodes().find((node) => node.id === 'zone');
+    await act(async () => {
+      await (zoneNode!.data.onArrangeContents as (id: string) => Promise<void>)('zone');
+    });
+
+    expect(layoutWrites(boardsPatch)).toHaveLength(1);
+    expect(layoutWrites(boardsPatch)[0]?.objects).toEqual({});
+    expect(layoutPlacements(boardsPatch)['placement-branch']).toEqual({
+      position: { x: 20, y: 220 },
+      size: { width: 500, height: 240 },
+    });
   });
 
   it('uses the visible zone frame instead of overwriting it from a stale board snapshot', async () => {
@@ -843,7 +930,7 @@ describe('arrangeZoneContents', () => {
     expect(boardsPatch).toHaveBeenCalledWith(
       'board-1',
       expect.objectContaining({
-        _action: 'batchUpsertObjects',
+        _action: 'applyLayout',
         objects: {
           artifact: expect.objectContaining({ x: 1020, y: 1100 }),
         },
@@ -927,7 +1014,7 @@ describe('arrangeZoneContents', () => {
 
     const write = boardsPatch.mock.calls[0]?.[1];
     const objects = write.objects as Record<string, { x: number; y: number; height: number }>;
-    expect(write._action).toBe('batchUpsertObjects');
+    expect(write._action).toBe('applyLayout');
     expect(objects.grow.height).toBeGreaterThan(250);
     expect(objects.below.x).toBe(0);
     expect(objects.below.y).toBeGreaterThanOrEqual(objects.grow.height + BOARD_GRID_SIZE);
@@ -1028,11 +1115,12 @@ describe('arrangeZoneContents', () => {
       x: 20,
       y: 360,
     });
-    expect(patch).toHaveBeenCalledWith('placement-branch', {
+    const placements = layoutPlacements(patch);
+    expect(placements['placement-branch']).toEqual({
       position: { x: 20, y: 100 },
       size: { width: 500, height: 240 },
     });
-    expect(patch).toHaveBeenCalledWith('placement-card', {
+    expect(placements['placement-card']).toEqual({
       position: { x: 20, y: 360 },
       size: { width: 380, height: 100 },
     });
@@ -1149,20 +1237,15 @@ describe('arrangeZoneContents', () => {
       deckDepth: 1,
       revealHeight: 80,
     });
-    expect(patch).toHaveBeenCalledWith(
-      'placement-branch',
+    const placements = layoutPlacements(patch);
+    expect(placements['placement-branch']).toEqual(
       expect.objectContaining({ position: { x: 20, y: 100 }, compact: true })
     );
-    expect(patch).toHaveBeenCalledWith(
-      'placement-branch-2',
+    expect(placements['placement-branch-2']).toEqual(
       expect.objectContaining({ position: { x: 20, y: 180 }, compact: true })
     );
-    expect(patch).toHaveBeenCalledWith(
-      'board-1',
-      expect.objectContaining({
-        _action: 'batchUpsertObjects',
-        objects: { zone: expect.objectContaining({ height: 300 }) },
-      })
+    expect(layoutWrites(patch)[0]).toEqual(
+      expect.objectContaining({ objects: { zone: expect.objectContaining({ height: 300 }) } })
     );
     expect(showWarning).toHaveBeenCalledWith(expect.stringContaining('every title and action row'));
 
@@ -1201,6 +1284,11 @@ describe('arrangeZoneContents', () => {
       })),
     ];
 
+    let renderedNodes = nodes;
+    const setNodes: React.Dispatch<React.SetStateAction<Node[]>> = (value) => {
+      renderedNodes = typeof value === 'function' ? value(renderedNodes) : value;
+    };
+    const onArrangeNodes = vi.fn();
     renderHook(
       () =>
         useBoardObjects({
@@ -1226,8 +1314,9 @@ describe('arrangeZoneContents', () => {
             created_at: `2026-01-0${index + 1}T00:00:00.000Z`,
           })) as never,
           nodes,
-          setNodes: vi.fn(),
+          setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          onArrangeNodes,
         }),
       { wrapper }
     );
@@ -1239,11 +1328,15 @@ describe('arrangeZoneContents', () => {
     expect(showWarning).not.toHaveBeenCalled();
     const zoneWrite = patch.mock.calls.find(([id]) => id === 'board-1')?.[1];
     expect(zoneWrite).toMatchObject({
-      _action: 'batchUpsertObjects',
+      _action: 'applyLayout',
       objects: { zone: expect.objectContaining({ height: expect.any(Number) }) },
     });
     expect(zoneWrite.objects.zone.height).toBeGreaterThan(200);
     expect(zoneWrite.objects.zone.height % BOARD_GRID_SIZE).toBe(0);
+    expect(onArrangeNodes).not.toHaveBeenCalled();
+    for (const node of renderedNodes.filter((candidate) => cardNodeIds.includes(candidate.id))) {
+      expect(node.style?.['--agor-deal-duration' as never]).toBeUndefined();
+    }
     for (const renderedCard of renderedCards) renderedCard.remove();
   });
 
@@ -1332,15 +1425,16 @@ describe('arrangeZoneContents', () => {
 
     expect(renderedNodes.find((node) => node.id === 'card-newer')?.position.y).toBe(100);
     expect(renderedNodes.find((node) => node.id === 'card-older')?.position.y).toBe(380);
-    expect(patch).toHaveBeenCalledWith('placement-newer', {
+    const placements = layoutPlacements(patch);
+    expect(placements['placement-newer']).toEqual({
       position: { x: 20, y: 100 },
       size: { width: 380, height: 260 },
     });
-    expect(patch).toHaveBeenCalledWith('placement-older', {
+    expect(placements['placement-older']).toEqual({
       position: { x: 20, y: 380 },
       size: { width: 380, height: 220 },
     });
-    expect(patch).not.toHaveBeenCalledWith('board-1', expect.anything());
+    expect(layoutWrites(patch)).toHaveLength(1);
   });
 
   it('retains card geometry while applying compact-list density only to worktrees', async () => {
@@ -1457,12 +1551,11 @@ describe('arrangeZoneContents', () => {
     const branch = renderedNodes.find((node) => node.id === 'branch-1');
     expect(card).toMatchObject({ position: { x: 20, y: 100 }, width: 320, height: 60 });
     expect(branch).toMatchObject({ position: { x: 20, y: 100 }, width: 1560, height: 100 });
-    expect(patch).toHaveBeenCalledWith(
-      'placement-card',
+    const placements = layoutPlacements(patch);
+    expect(placements['placement-card']).toEqual(
       expect.objectContaining({ size: { width: 320, height: 60 } })
     );
-    expect(patch).toHaveBeenCalledWith(
-      'placement-branch',
+    expect(placements['placement-branch']).toEqual(
       expect.objectContaining({ size: { width: 1560, height: 100 } })
     );
   });
@@ -1544,11 +1637,12 @@ describe('arrangeZoneContents', () => {
       await vi.advanceTimersByTimeAsync(400);
     });
 
-    expect(patch).toHaveBeenCalledWith('placement-newer', {
+    const placements = layoutPlacements(patch);
+    expect(placements['placement-newer']).toEqual({
       position: { x: 20, y: 100 },
       size: { width: 300, height: 100 },
     });
-    expect(patch).toHaveBeenCalledWith('placement-older', {
+    expect(placements['placement-older']).toEqual({
       position: { x: 20, y: 220 },
       size: { width: 300, height: 100 },
     });
@@ -1646,6 +1740,174 @@ describe('arrangeZoneContents', () => {
     });
     expect(boardsPatch).toHaveBeenCalledTimes(1);
     expect(showWarning).not.toHaveBeenCalled();
+  });
+
+  it('keeps a measured single-child Auto Zone stable across observer and realtime rebuilds', async () => {
+    vi.useFakeTimers();
+    const { client, boardsPatch } = makeRoutedClient();
+    const zone = {
+      type: 'zone' as const,
+      x: 660,
+      y: 1280,
+      width: 620,
+      height: 500,
+      label: 'Single Auto Zone',
+      fontSize: 20,
+      layout: {
+        mode: 'auto' as const,
+        preset: 'grid' as const,
+        sortBy: 'title' as const,
+        sortDirection: 'asc' as const,
+        columns: 3,
+        gap: 24,
+        autoResizeHeight: true,
+        resize: 'both' as const,
+        onOverflow: 'report' as const,
+      },
+    };
+    const note = {
+      type: 'markdown' as const,
+      x: 680,
+      y: 1380,
+      width: 360,
+      content: '# One item\n\nMeasured content.',
+    };
+    let board = makeBoard({ zone, note });
+    let nodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: zone.x, y: zone.y }, data: {}, ...zone },
+      {
+        id: 'note',
+        type: 'markdown',
+        position: { x: note.x, y: note.y },
+        data: { objectId: 'note', width: note.width },
+      },
+    ];
+    const measured = document.createElement('div');
+    measured.className = 'react-flow__node';
+    measured.dataset.id = 'note';
+    for (const [key, value] of [
+      ['offsetWidth', 360],
+      ['scrollWidth', 360],
+      ['offsetHeight', 244],
+      ['scrollHeight', 244],
+    ] as const) {
+      Object.defineProperty(measured, key, { configurable: true, value });
+    }
+    document.body.append(measured);
+    const renderedZone = document.createElement('div');
+    renderedZone.className = 'react-flow__node-zone';
+    renderedZone.dataset.id = 'zone';
+    renderedZone.getBoundingClientRect = () => ({ width: 310, height: 250 }) as DOMRect;
+    document.body.append(renderedZone);
+
+    const setNodes = vi.fn();
+    const view = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    for (let cycle = 0; cycle < 4; cycle += 1) {
+      await act(async () => vi.advanceTimersByTimeAsync(500));
+      // Simulate the production board/node rebuild caused by an unrelated
+      // realtime event. Object identity and node order may change, geometry may not.
+      board = makeBoard({ note: { ...note }, zone: { ...zone } });
+      nodes = [...nodes].reverse().map((node) => ({ ...node, data: { ...node.data } }));
+      view.rerender();
+    }
+
+    expect(boardsPatch).not.toHaveBeenCalled();
+    expect(setNodes).not.toHaveBeenCalled();
+    measured.remove();
+    renderedZone.remove();
+    view.unmount();
+  });
+
+  it('compares measured worktree output with durable geometry across realtime cycles', async () => {
+    vi.useFakeTimers();
+    const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
+    const zone = {
+      type: 'zone' as const,
+      x: 0,
+      y: 0,
+      width: 620,
+      height: 500,
+      label: 'Measured worktree',
+      fontSize: 48,
+      layout: { mode: 'auto' as const, preset: 'grid' as const },
+    };
+    let board = makeBoard({ zone });
+    let nodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, data: {}, ...zone },
+      {
+        id: 'branch',
+        type: 'branchNode',
+        parentId: 'zone',
+        position: { x: 20, y: 120 },
+        // React Flow's declarative fallback differs from the hydrated DOM.
+        width: 380,
+        height: 120,
+        data: { branch: { name: 'Hydrated worktree' } },
+      },
+    ];
+    const measured = document.createElement('div');
+    measured.className = 'react-flow__node';
+    measured.dataset.id = 'branch';
+    Object.defineProperties(measured, {
+      offsetWidth: { configurable: true, value: 500 },
+      scrollWidth: { configurable: true, value: 500 },
+      offsetHeight: { configurable: true, value: 236 },
+      scrollHeight: { configurable: true, value: 236 },
+    });
+    const renderedZone = document.createElement('div');
+    renderedZone.className = 'react-flow__node-zone';
+    renderedZone.dataset.id = 'zone';
+    renderedZone.getBoundingClientRect = () => ({ width: 310 }) as DOMRect;
+    document.body.append(measured, renderedZone);
+
+    const view = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'placement-branch',
+              board_id: 'board-1',
+              entity_type: 'branch',
+              branch_id: 'branch',
+              zone_id: 'zone',
+              position: { x: 20, y: 120 },
+              size: { width: 500, height: 240 },
+              created_at: '2026-01-01T00:00:00.000Z',
+            },
+          ] as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    for (let cycle = 0; cycle < 4; cycle += 1) {
+      await act(async () => vi.advanceTimersByTimeAsync(500));
+      board = makeBoard({ zone: { ...zone } });
+      nodes = [...nodes].reverse().map((node) => ({ ...node, data: { ...node.data } }));
+      view.rerender();
+    }
+
+    expect(boardsPatch).not.toHaveBeenCalled();
+    expect(boardObjectsPatch).not.toHaveBeenCalled();
+    measured.remove();
+    renderedZone.remove();
+    view.unmount();
   });
 });
 
@@ -1887,7 +2149,7 @@ describe('direct manipulation of automatic zones', () => {
 
   it('re-arming auto mode schedules a fresh tidy', async () => {
     vi.useFakeTimers();
-    const { client, boardObjectsPatch } = makeRoutedClient();
+    const { client, boardsPatch } = makeRoutedClient();
     let board = makeBoard({
       [zoneId]: { ...autoZone, layout: { ...autoZone.layout, mode: 'auto', preset: 'grid' } },
     });
@@ -1913,8 +2175,8 @@ describe('direct manipulation of automatic zones', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(400);
     });
-    expect(boardObjectsPatch).toHaveBeenCalled();
-    boardObjectsPatch.mockClear();
+    expect(layoutPlacements(boardsPatch)['placement-branch']).toBeDefined();
+    boardsPatch.mockClear();
 
     await act(async () => {
       await result.current.demoteAutoZone(zoneId);
@@ -1923,7 +2185,8 @@ describe('direct manipulation of automatic zones', () => {
       [zoneId]: { ...autoZone, layout: { ...autoZone.layout, mode: 'manual', preset: 'grid' } },
     });
     rerender();
-    expect(boardObjectsPatch).not.toHaveBeenCalled();
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    boardsPatch.mockClear();
 
     board = makeBoard({
       [zoneId]: { ...autoZone, layout: { ...autoZone.layout, mode: 'auto', preset: 'grid' } },
@@ -1933,8 +2196,7 @@ describe('direct manipulation of automatic zones', () => {
       await vi.advanceTimersByTimeAsync(400);
     });
 
-    expect(boardObjectsPatch).toHaveBeenCalledWith(
-      'placement-branch',
+    expect(layoutPlacements(boardsPatch)['placement-branch']).toEqual(
       expect.objectContaining({ position: { x: 20, y: 100 } })
     );
   });
@@ -2321,10 +2583,12 @@ describe('compact_list → grid re-packs the expanded zone', () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
 
-    const positioned = patch.mock.calls.filter((c) => c[1] && 'position' in c[1]);
+    const positioned = Object.values(layoutPlacements(patch)) as Array<{
+      position: { x: number; y: number };
+    }>;
     expect(positioned.length).toBeGreaterThan(0);
     // Whatever the packer chooses, the two worktrees must no longer sit 56px apart.
-    const ys = positioned.map((c) => c[1].position.y).sort((a, b) => a - b);
+    const ys = positioned.map((value) => value.position.y).sort((a, b) => a - b);
     if (ys.length === 2) expect(ys[1] - ys[0]).toBeGreaterThan(56);
   });
 
@@ -2358,9 +2622,11 @@ describe('compact_list → grid re-packs the expanded zone', () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
 
-    const positioned = patch.mock.calls.filter((c) => c[1] && 'position' in c[1]);
+    const positioned = Object.values(layoutPlacements(patch)) as Array<{
+      position: { x: number; y: number };
+    }>;
     expect(positioned.length).toBeGreaterThan(0);
-    const ys = positioned.map((c) => c[1].position.y).sort((a, b) => a - b);
+    const ys = positioned.map((value) => value.position.y).sort((a, b) => a - b);
     if (ys.length === 2) expect(ys[1] - ys[0]).toBeGreaterThan(56);
   });
 
@@ -3161,8 +3427,12 @@ describe('arrangeBoardZones production path', () => {
     );
     act(() => result.current.preserveAutoZoneFrameOnce(zoneId));
     await act(async () => vi.advanceTimersByTimeAsync(1000));
-    expect(boardsPatch).not.toHaveBeenCalled();
-    expect(boardObjectsPatch).toHaveBeenCalledTimes(1);
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    expect(layoutPlacements(boardsPatch)['placement-a']).toEqual({
+      position: { x: 20, y: 100 },
+      size: { width: 500, height: 200 },
+    });
+    expect(boardObjectsPatch).not.toHaveBeenCalled();
 
     boardsPatch.mockClear();
     const zoneNode = result.current.getBoardObjectNodes().find((node) => node.id === zoneId);
@@ -3170,6 +3440,7 @@ describe('arrangeBoardZones production path', () => {
     await act(async () => {
       await (zoneNode!.data.onArrangeContents as (id: string) => Promise<void>)(zoneId);
     });
-    expect(boardsPatch).not.toHaveBeenCalled();
+    expect(layoutWrites(boardsPatch)).toHaveLength(1);
+    expect(layoutWrites(boardsPatch)[0]?.objects).toEqual({});
   });
 });
