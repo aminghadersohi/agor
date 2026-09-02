@@ -12,7 +12,7 @@
  * round-trip.
  */
 
-import type { SessionAutoArchivePolicy } from '../types/session';
+import type { CallbackDelivery, SessionAutoArchivePolicy } from '../types/session';
 import { renderTemplate } from './handlebars-helpers';
 
 export interface SpawnSubsessionContext {
@@ -33,6 +33,7 @@ export interface SpawnSubsessionContext {
   hasCallbackConfig?: boolean;
   callbackConfig?: {
     enableCallback?: boolean;
+    callbackDelivery?: CallbackDelivery;
     includeLastMessage?: boolean;
     includeOriginalPrompt?: boolean;
   };
@@ -86,6 +87,8 @@ REQUEST: """
     - Callback Configuration:
     {{#if callbackConfig.enableCallback}}ENABLED - Include last message:
       {{callbackConfig.includeLastMessage}}
+      - Delivery:
+      {{callbackConfig.callbackDelivery}}
       - Include original prompt:
       {{callbackConfig.includeOriginalPrompt}}{{else}}NO CALLBACK{{/if}}
   {{/if}}
@@ -141,6 +144,9 @@ hashing and JWT for tokens."
   - enableCallback:
   {{callbackConfig.enableCallback}}
 {{/if}}
+{{#if (isDefined callbackConfig.callbackDelivery)}}
+  - callbackDelivery: "{{callbackConfig.callbackDelivery}}"
+{{/if}}
 {{#if (isDefined callbackConfig.includeLastMessage)}}
   - includeLastMessage:
   {{callbackConfig.includeLastMessage}}
@@ -180,7 +186,9 @@ session will do YOUR EXACT TOOL CALL MUST BE: agor_sessions_spawn({ "prompt": "{
   "mcpServerIds": [{{#each mcpServerIds}}"{{this}}"{{#unless @last}},
     {{/unless}}{{/each}}],{{/if}}{{#if (isDefined callbackConfig.enableCallback)}}
   "enableCallback":
-  {{callbackConfig.enableCallback}},{{/if}}{{#if (isDefined callbackConfig.includeLastMessage)}}
+  {{callbackConfig.enableCallback}},{{/if}}{{#if (isDefined callbackConfig.callbackDelivery)}}
+  "callbackDelivery":
+  "{{callbackConfig.callbackDelivery}}",{{/if}}{{#if (isDefined callbackConfig.includeLastMessage)}}
   "includeLastMessage":
   {{callbackConfig.includeLastMessage}},{{/if}}{{#if
   (isDefined callbackConfig.includeOriginalPrompt)
@@ -207,6 +215,7 @@ export function renderSpawnSubsessionPrompt(context: SpawnSubsessionContext): st
       context.codexNetworkAccess !== undefined ||
       (context.mcpServerIds?.length ?? 0) > 0 ||
       context.callbackConfig?.enableCallback !== undefined ||
+      context.callbackConfig?.callbackDelivery !== undefined ||
       context.callbackConfig?.includeLastMessage !== undefined ||
       context.callbackConfig?.includeOriginalPrompt !== undefined ||
       context.extraInstructions !== undefined ||
@@ -216,6 +225,7 @@ export function renderSpawnSubsessionPrompt(context: SpawnSubsessionContext): st
   const hasCallbackConfig =
     context.hasCallbackConfig ??
     (context.callbackConfig?.enableCallback !== undefined ||
+      context.callbackConfig?.callbackDelivery !== undefined ||
       context.callbackConfig?.includeLastMessage !== undefined ||
       context.callbackConfig?.includeOriginalPrompt !== undefined);
 

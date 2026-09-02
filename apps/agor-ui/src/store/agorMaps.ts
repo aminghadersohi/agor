@@ -115,6 +115,28 @@ export function replaceIfChanged<T extends object>(
   return next;
 }
 
+/**
+ * Merge only the caller-scoped running-Session projection from a fresh lean
+ * boards list. Existing full board metadata (objects/custom_css) stays intact,
+ * and unchanged counts preserve both entity and Map references.
+ */
+export function applyBoardRunningSessionCounts(
+  prev: Map<string, Board>,
+  authoritativeBoards: readonly Board[]
+): Map<string, Board> {
+  let next = prev;
+  for (const board of authoritativeBoards) {
+    const existing = prev.get(board.board_id);
+    if (!existing || existing.running_session_count === board.running_session_count) continue;
+    if (next === prev) next = new Map(prev);
+    next.set(board.board_id, {
+      ...existing,
+      running_session_count: board.running_session_count,
+    });
+  }
+  return next;
+}
+
 // Reconcile a freshly-built id-map against the previous one: reuse the prior
 // entity reference for every row that is value-equal, and return the PRIOR Map
 // object itself when nothing changed at all. Without this, a wholesale rebuild

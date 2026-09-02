@@ -37,6 +37,7 @@ import {
   MCPServerRepository,
   MessagesRepository,
   MISSING_TASK_ACTOR_ERROR,
+  RepositoryError,
   resolveMcpMemberPolicy,
   runWithTenantDatabaseScope,
   runWithTenantDatabaseTransaction,
@@ -139,6 +140,7 @@ import type {
   TasksServiceImpl,
 } from './declarations.js';
 import { registerExecutorResponseRoutes } from './executor-response-channel.js';
+import { hasClaudeSubscriptionOAuthCapability } from './ha-support.js';
 import { probeDatabase, probePendingMigrations } from './health/db-probe.js';
 import {
   authenticatedHealthDb,
@@ -2154,7 +2156,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
               !data.idempotencyTaskId &&
               !params._taskCompletionCallback &&
               data.metadata === undefined &&
-              messageSource === undefined &&
+              (messageSource === undefined || (!!params.provider && messageSource === 'agor')) &&
               !hasAttachmentSemantics &&
               !data.prompt.trimStart().startsWith('/');
             const task = await runWithTenantDatabaseTransaction(
@@ -3308,6 +3310,133 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     } as any,
     {
       find: { role: ROLES.MEMBER, action: 'view queue' },
+    },
+    requireAuth
+  );
+
+  // Explicit coordinator queue batching. Unlike automatic ordinary-prompt
+  // compaction, this path may cross a Session continuation fence only after a
+  // current parent/direct coordinator is resolved and authorized. Preview
+  // supplies an exact queue revision + Task set; apply rechecks both while
+  // holding the same Session row lock used by admission and dispatch.
+  registerAuthenticatedRoute(
+    app,
+    '/sessions/:id/tasks/queue/batch',
+    {
+      async find(params: RouteParams) {
+        const sessionId = params.route?.id;
+        if (!sessionId) throw new BadRequest('Session ID required');
+        const relationship = params.query?.relationship;
+        if (relationship !== 'parent' && relationship !== 'coordinator') {
+          throw new BadRequest("relationship must be 'parent' or 'coordinator'");
+        }
+        const authority = await sessionsService.resolveQueueBatchAuthority(
+          sessionId,
+          { relationship },
+          params
+        );
+        const preview = await new TaskRepository(db).previewCoordinatorQueueBatch({
+          session_id: authority.target_session_id,
+          relationship: authority.relationship,
+          requested_by_session_id: authority.caller_session_id,
+        });
+        if ('outcome' in preview) {
+          throw new Conflict('Coordinator relationship changed while previewing the queue');
+        }
+        return preview;
+      },
+      async create(
+        data: {
+          relationship: 'parent' | 'coordinator';
+          strategy: 'combine' | 'replace';
+          expectedQueueRevision: string;
+          expectedTaskIds: string[];
+          idempotencyKey: string;
+          replacementPrompt?: string;
+        },
+        params: RouteParams
+      ) {
+        const sessionId = params.route?.id;
+        if (!sessionId) throw new BadRequest('Session ID required');
+        if (data.relationship !== 'parent' && data.relationship !== 'coordinator') {
+          throw new BadRequest("relationship must be 'parent' or 'coordinator'");
+        }
+        if (data.strategy !== 'combine' && data.strategy !== 'replace') {
+          throw new BadRequest("strategy must be 'combine' or 'replace'");
+        }
+        if (!data.expectedQueueRevision || !Array.isArray(data.expectedTaskIds)) {
+          throw new BadRequest('expectedQueueRevision and expectedTaskIds are required');
+        }
+        if (!data.idempotencyKey?.trim() || data.idempotencyKey.length > 128) {
+          throw new BadRequest('idempotencyKey must contain 1–128 characters');
+        }
+        if (data.strategy === 'replace' && !data.replacementPrompt?.trim()) {
+          throw new BadRequest('replacementPrompt is required for replace');
+        }
+        const tenantId = getCurrentTenantId();
+        if (!tenantId) throw new Error('Missing active tenant context for queue batching');
+        let result: Awaited<ReturnType<TaskRepository['applyCoordinatorQueueBatch']>>;
+        try {
+          result = await runWithTenantDatabaseTransaction(db, tenantId, async (operationDb) => {
+            await lockTenantAuthorizationFence(operationDb, params);
+            const actor = await resolveCurrentTenantAuthorityActor(operationDb, params);
+            if (actor.service || !params.user?.user_id || actor.user_id !== params.user.user_id) {
+              throw new Forbidden('Queue batching requires the current authenticated human actor');
+            }
+            const authority = await sessionsService.resolveQueueBatchAuthority(
+              sessionId,
+              { relationship: data.relationship },
+              params
+            );
+            return new TaskRepository(operationDb).applyCoordinatorQueueBatch({
+              session_id: authority.target_session_id,
+              relationship: authority.relationship,
+              requested_by_session_id: authority.caller_session_id,
+              requested_by_user_id: actor.user_id as UserID,
+              operation_id: data.idempotencyKey,
+              strategy: data.strategy,
+              expected_queue_revision: data.expectedQueueRevision,
+              expected_task_ids: data.expectedTaskIds as TaskID[],
+              ...(data.strategy === 'replace'
+                ? { replacement_prompt: data.replacementPrompt! }
+                : {}),
+            });
+          });
+        } catch (error) {
+          if (error instanceof RepositoryError) throw new Conflict(error.message);
+          throw error;
+        }
+        if (result.outcome === 'relationship_changed') {
+          throw new Conflict('Coordinator relationship changed before the queue could be batched');
+        }
+        if (result.outcome === 'batched') {
+          emitServiceEvent(app, {
+            path: 'tasks',
+            event: 'patched',
+            data: result.execution_task,
+            params,
+            id: result.execution_task.task_id,
+          });
+          for (const superseded of result.superseded_tasks) {
+            emitServiceEvent(app, {
+              path: 'tasks',
+              event: 'patched',
+              data: superseded,
+              params,
+              id: superseded.task_id,
+            });
+          }
+          deferInFreshTenantScope(params, async () => {
+            await sessionsService.triggerQueueProcessing(result.execution_task.session_id, params);
+          });
+        }
+        return result;
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: Service type not compatible with Express
+    } as any,
+    {
+      find: { role: ROLES.MEMBER, action: 'preview queue batching' },
+      create: { role: ROLES.MEMBER, action: 'batch queued prompts' },
     },
     requireAuth
   );
@@ -5497,6 +5626,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           multiUser: (config.execution?.unix_user_mode ?? 'simple') !== 'simple',
           // Tenant agentic-tool settings provide the authoritative availability gate.
           cursorSdk: true,
+          // Provider-policy release boundary. Absence is false; the daemon
+          // independently rejects the OAuth service when disabled.
+          claudeSubscriptionOAuth: hasClaudeSubscriptionOAuthCapability(config, deployment),
           // Resolved branch storage policy. The daemon still enforces this at
           // create time; the UI uses it to pick the right default and disable
           // unavailable storage modes before submit.
@@ -5520,19 +5652,16 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         // Gated behind auth like the rest of this block (any authenticated
         // user, matching the existing `database`/`execution` fields below —
         // not admin-only).
-        const migrations = await probePendingMigrations(db);
-        const mcpEgressMode = await getMCPEgressGatewayMode(db);
         const healthTenantId =
           (params as AuthenticatedParams | undefined)?.tenant?.tenant_id ?? getCurrentTenantId();
-        const mcpEgressRuntime = healthTenantId
-          ? mcpEgressGateway.status(healthTenantId)
-          : {
-              inFlightRequests: 0,
-              activeRequests: 0,
-              providerInFlightRequests: 0,
-              reservedRequests: 0,
-              oldestRequestMs: 0,
-            };
+        if (!healthTenantId) {
+          throw new NotAuthenticated('Missing tenant context for authenticated health');
+        }
+        const migrations = await probePendingMigrations(db);
+        const mcpEgressMode = await runWithTenantDatabaseScope(db, healthTenantId, (tenantDb) =>
+          getMCPEgressGatewayMode(tenantDb)
+        );
+        const mcpEgressRuntime = mcpEgressGateway.status(healthTenantId);
 
         return {
           ...publicResponse,

@@ -123,6 +123,7 @@ export const ForkSpawnModal: React.FC<ForkSpawnModalProps> = ({
       form.setFieldsValue({
         prompt: initialPrompt,
         enableCallback: session.callback_config?.enabled,
+        callbackDelivery: session.callback_config?.delivery ?? 'direct',
         includeLastMessage: session.callback_config?.include_last_message,
         includeOriginalPrompt: session.callback_config?.include_original_prompt,
         autoArchive: 'after_completion',
@@ -212,6 +213,9 @@ export const ForkSpawnModal: React.FC<ForkSpawnModalProps> = ({
         // Callback fields are always included when explicitly set
         if (values.enableCallback !== undefined) {
           spawnConfig.enableCallback = values.enableCallback;
+        }
+        if (values.callbackDelivery !== undefined) {
+          spawnConfig.callbackDelivery = values.callbackDelivery;
         }
         if (values.includeLastMessage !== undefined) {
           spawnConfig.includeLastMessage = values.includeLastMessage;
@@ -421,6 +425,21 @@ export const ForkSpawnModal: React.FC<ForkSpawnModalProps> = ({
                 {({ getFieldValue }) =>
                   getFieldValue('enableCallback') && (
                     <>
+                      <Form.Item
+                        name="callbackDelivery"
+                        label="Delivery"
+                        style={{ marginLeft: 24 }}
+                        tooltip="Direct preserves the existing callback. BTW digests it in an ephemeral destination fork when available. Auto uses BTW only for busy destinations or callbacks of at least 8 KiB."
+                      >
+                        <Select
+                          options={[
+                            { value: 'direct', label: 'Direct (default)' },
+                            { value: 'btw', label: 'BTW digest' },
+                            { value: 'auto', label: 'Auto' },
+                          ]}
+                        />
+                      </Form.Item>
+
                       <Form.Item
                         name="includeLastMessage"
                         valuePropName="checked"

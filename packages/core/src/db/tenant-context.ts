@@ -35,6 +35,7 @@ export type SystemDatabaseCapability =
   | 'mcp_oauth_callback'
   | 'mcp_oauth_maintenance'
   | 'codex_device_auth_maintenance'
+  | 'claude_oauth_maintenance'
   | 'github_install_state_callback'
   | 'github_install_state_maintenance'
   | 'upload_maintenance';

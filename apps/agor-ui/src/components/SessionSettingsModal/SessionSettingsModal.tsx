@@ -90,6 +90,7 @@ interface FormValues {
   custom_context: string;
   callbackConfig: {
     enabled: boolean;
+    delivery: NonNullable<Session['callback_config']>['delivery'];
     includeLastMessage: boolean;
     template?: string;
   };
@@ -128,6 +129,7 @@ function buildInitialValues(session: Session, sessionMcpServerIds: string[]): Fo
     custom_context: session.custom_context ? JSON.stringify(session.custom_context, null, 2) : '',
     callbackConfig: {
       enabled: session.callback_config?.enabled ?? true,
+      delivery: session.callback_config?.delivery ?? 'direct',
       includeLastMessage: session.callback_config?.include_last_message ?? true,
       template: session.callback_config?.template,
     },
@@ -198,7 +200,9 @@ function buildUpdates(values: FormValues, session: Session): Partial<Session> {
 
   if (values.callbackConfig) {
     updates.callback_config = {
+      ...session.callback_config,
       enabled: values.callbackConfig.enabled ?? true,
+      delivery: values.callbackConfig.delivery ?? 'direct',
       include_last_message: values.callbackConfig.includeLastMessage ?? true,
       template: values.callbackConfig.template || undefined,
     };

@@ -1,0 +1,55 @@
+---
+title: Local Ollama with OpenCode
+description: Configure Agor's experimental per-user Ollama preset for the existing OpenCode executor.
+---
+
+# Local Ollama with OpenCode (experimental)
+
+Agor can expose one host-local Ollama model as the canonical OpenCode provider
+`ollama`. This is a preset for the existing OpenCode executor, not a separate
+agentic tool.
+
+## Configure
+
+1. Run Ollama on the **same host network as the Agor executor**. The preset does
+   not route to another machine or container when loopback is unreachable.
+2. In **Settings → AI & Agents → OpenCode → Providers**, find **Ollama (local via
+   OpenCode)**.
+3. Keep or change the literal loopback endpoint (default
+   `http://127.0.0.1:11435`), test the connection, and select an exact installed
+   model ID.
+4. Enable and save the preset. Create an OpenCode session and select provider
+   `ollama` plus that exact model.
+
+No API key is required for loopback Ollama. Agor accepts only unambiguous IPv4
+or IPv6 loopback HTTP origins. Hostnames, user information, paths, queries,
+fragments, redirects, and non-loopback addresses are refused.
+
+## Admission and capacity
+
+The connection status distinguishes an unreachable service, a reachable
+service, a missing model, a model without Ollama's `tools` capability, an unsafe
+context allocation, and a ready model. Capability and context metadata come
+from Ollama's `show` and `ps` APIs; OpenCode's static model metadata is not used
+to admit a local agentic model.
+
+The preset fixes OpenCode's context budget at **32,768 tokens** and re-checks a
+running Ollama allocation when available. A conflicting allocation is refused.
+The experimental preset permits **one Agor runner at a time** for an endpoint.
+Size, context, tools, thinking, and vision metadata appear when Ollama reports
+them.
+
+## Isolation and existing configuration
+
+The setting is per user and remains private to that user's tenant/user scope.
+It follows OpenCode's existing local-execution and owner-prompt policy; hosted,
+delegated, and foreign-owner execution are not enabled by this preset.
+
+At launch Agor adds the provider only to the invocation-scoped private OpenCode
+configuration and preserves Agor's protected agent, MCP, and permission rules.
+A branch-level `opencode.json` or `opencode.jsonc` remains an advanced override
+for other providers. If it also defines the canonical `ollama` provider, Agor
+reports a conflict instead of silently overwriting either definition.
+
+Cloud Codex is unaffected: the preset does not set `OPENAI_BASE_URL`, alter
+Codex settings, or replace any cloud provider.

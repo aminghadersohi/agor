@@ -328,6 +328,16 @@ export interface Board {
   /** Whether this board is archived (soft deleted) */
   archived: boolean;
 
+  /**
+   * Number of non-archived Sessions whose exact durable Session status is
+   * `running`, on non-archived branches visible to the current caller.
+   *
+   * This is an authoritative, caller-scoped board-list projection. It counts
+   * Sessions rather than Tasks and deliberately excludes waiting/stopping
+   * states so the UI label "running" remains exact.
+   */
+  running_session_count: number;
+
   /** ISO 8601 timestamp when the board was archived */
   archived_at?: string;
 

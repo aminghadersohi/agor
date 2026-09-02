@@ -56,6 +56,9 @@ function migrationTenantTables(): string[] {
   const codexDeviceAuthMigration = readRepoFile(
     'packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'
   );
+  const claudeOauthMigration = readRepoFile(
+    'packages/core/drizzle/postgres/0100_claude_oauth_attempts.sql'
+  );
   const capabilityPoliciesMigration = readRepoFile(
     'packages/core/drizzle/postgres/0095_board_branch_capability_policies.sql'
   );
@@ -73,6 +76,7 @@ function migrationTenantTables(): string[] {
         ...discordGatewayHybridMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...externalIdentitiesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...codexDeviceAuthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...claudeOauthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...capabilityPoliciesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
       ]
         .map((m) => m[1])
@@ -93,6 +97,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0094_discord_gateway_hybrid.sql'),
     readRepoFile('packages/core/drizzle/postgres/0090_external_user_identities.sql'),
     readRepoFile('packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0100_claude_oauth_attempts.sql'),
     readRepoFile('packages/core/drizzle/postgres/0095_board_branch_capability_policies.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
@@ -190,7 +195,7 @@ describe('Postgres multitenancy schema coverage', () => {
   });
 
   it('limits session auto-archive discovery to due routing rows and an explicit capability', () => {
-    const migration = readRepoFile('packages/core/drizzle/postgres/0100_session_auto_archive.sql');
+    const migration = readRepoFile('packages/core/drizzle/postgres/0101_session_auto_archive.sql');
 
     expect(migration).toContain('FOR SELECT');
     expect(migration).toContain('"archived" = false');
@@ -202,9 +207,9 @@ describe('Postgres multitenancy schema coverage', () => {
       migration.indexOf('CREATE POLICY "session_auto_archive_discovery"')
     );
     expect(discoveryPolicy).not.toContain('WITH CHECK');
-    expect(migration).toContain('CREATE POLICY "session_auto_archive_migration_0100"');
-    expect(migration).toContain("= 'session_auto_archive_migration_0100'");
-    expect(migration).toContain('DROP POLICY "session_auto_archive_migration_0100"');
+    expect(migration).toContain('CREATE POLICY "session_auto_archive_migration_0101"');
+    expect(migration).toContain("= 'session_auto_archive_migration_0101'");
+    expect(migration).toContain('DROP POLICY "session_auto_archive_migration_0101"');
     expect(migration).toContain("SELECT set_config('agor.system_scope', '', true)");
   });
 
