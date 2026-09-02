@@ -362,6 +362,7 @@ interface ArrangedBoardZones {
       zone: ZoneObject;
       itemCount: number;
       entitiesById: Map<string, BoardEntityObject>;
+      densityExpandableIds: Set<string>;
       canvasById: Map<string, BoardObject>;
     }
   >;
@@ -429,7 +430,10 @@ async function arrangeBoardZones(
         contents.filter(
           (entity) =>
             zonePolicy.sortBy !== 'position' ||
-            (entity.card_id !== undefined && !measuredSize(entity))
+            (entity.card_id !== undefined &&
+              (zonePolicy.preset === 'compact_list' ||
+                entity.compact === true ||
+                !measuredSize(entity)))
         )
       );
       const ordered =
@@ -450,24 +454,27 @@ async function arrangeBoardZones(
 
       const items = ordered.map((entity) => {
         const measured = measuredSize(entity);
-        if (
-          zonePolicy.preset === 'compact_list' &&
-          isBoardEntityDensityExpandable(entity.entity_type)
-        ) {
+        const densityExpandable = isBoardEntityDensityExpandable(
+          entity.entity_type,
+          metadata.get(entity.object_id)?.card
+        );
+        if (zonePolicy.preset === 'compact_list' && densityExpandable) {
           return {
             id: entity.object_id,
             entityType: entity.entity_type,
             position: entity.position,
             compact: true,
+            densityExpandable,
             ...compactZoneItemSize(entity.entity_type, frame.usableWidth),
           };
         }
-        if (entity.compact === true && isBoardEntityDensityExpandable(entity.entity_type)) {
+        if (entity.compact === true && densityExpandable) {
           return {
             id: entity.object_id,
             entityType: entity.entity_type,
             position: entity.position,
             compact: true,
+            densityExpandable,
             ...compactZoneItemSize(
               entity.entity_type,
               ARRANGE_DIMENSIONS[entity.entity_type].width
@@ -480,6 +487,7 @@ async function arrangeBoardZones(
             entityType: entity.entity_type,
             position: entity.position,
             compact: entity.compact,
+            densityExpandable,
             ...measured,
           };
         if (entity.entity_type === 'card' && entity.card_id) {
@@ -487,6 +495,7 @@ async function arrangeBoardZones(
             id: entity.object_id,
             entityType: entity.entity_type,
             position: entity.position,
+            densityExpandable,
             width: ARRANGE_DIMENSIONS.card.width,
             height: estimateCardHeight(metadata.get(entity.object_id)?.card),
           };
@@ -495,6 +504,7 @@ async function arrangeBoardZones(
           id: entity.object_id,
           entityType: entity.entity_type,
           position: entity.position,
+          densityExpandable,
           ...ARRANGE_DIMENSIONS[entity.entity_type],
         };
       });
@@ -519,6 +529,9 @@ async function arrangeBoardZones(
         zone,
         itemCount: items.length + canvasItems.length,
         entitiesById: new Map(ordered.map((entity) => [entity.object_id, entity])),
+        densityExpandableIds: new Set(
+          items.filter((item) => item.densityExpandable).map((item) => item.id)
+        ),
         canvasById,
         x: zone.x,
         y: zone.y,
@@ -672,7 +685,7 @@ async function arrangeBoardZones(
           size: { width: item.width, height: item.height },
           ...(options.packZoneContents !== false &&
           normalizeZoneLayoutPolicy(entry.zone.layout).preset === 'compact_list' &&
-          isBoardEntityDensityExpandable(entity.entity_type) &&
+          entry.densityExpandableIds.has(entity.object_id) &&
           entity.compact !== true
             ? { compact: true }
             : {}),
@@ -694,7 +707,7 @@ async function arrangeBoardZones(
       const shouldCompact =
         options.packZoneContents !== false &&
         normalizeZoneLayoutPolicy(planned.entry.zone.layout).preset === 'compact_list' &&
-        isBoardEntityDensityExpandable(entity.entity_type);
+        planned.entry.densityExpandableIds.has(entity.object_id);
       return (
         entity.position.x !== planned.item.x ||
         entity.position.y !== planned.item.y ||
@@ -1317,7 +1330,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .enum(ZONE_LAYOUT_PRESETS)
           .optional()
           .describe(
-            'Layout presentation. grid preserves current density; compact_list uses one column and collapses branch/worktree secondary content only.'
+            'Layout presentation. grid preserves current density; compact_list uses one column and collapses capable worktree/generic-card body content.'
           ),
         sortBy: z
           .enum(ZONE_LAYOUT_SORT_FIELDS)
@@ -1392,12 +1405,19 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const metadataEntities = entities.filter(
         (entity) =>
           zonePolicy.sortBy !== 'position' ||
-          (zonePolicy.preset === 'grid' &&
-            entity.compact !== true &&
-            measuredSize(entity) === undefined &&
-            entity.card_id !== undefined)
+          (entity.card_id !== undefined &&
+            (zonePolicy.preset === 'compact_list' ||
+              entity.compact === true ||
+              measuredSize(entity) === undefined))
       );
       const metadata = await loadEntityLayoutMetadata(ctx, metadataEntities);
+      const densityExpandableIds = new Set(
+        entities
+          .filter((entity) =>
+            isBoardEntityDensityExpandable(entity.entity_type, metadata.get(entity.object_id)?.card)
+          )
+          .map((entity) => entity.object_id)
+      );
       if (
         !(
           zonePolicy.preset === 'grid' &&
@@ -1422,7 +1442,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       for (const entity of entities) {
         if (hasUnusableSize(entity)) unusableSizeObjectIds.push(entity.object_id);
         const measured = measuredSize(entity);
-        if (entity.compact === true && isBoardEntityDensityExpandable(entity.entity_type)) {
+        if (entity.compact === true && densityExpandableIds.has(entity.object_id)) {
           naturalDimensions.set(
             entity.object_id,
             compactZoneItemSize(entity.entity_type, ARRANGE_DIMENSIONS[entity.entity_type].width)
@@ -1466,7 +1486,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const dimensions = new Map(
         entities.map((entity) => [
           entity.object_id,
-          zonePolicy.preset === 'compact_list' && isBoardEntityDensityExpandable(entity.entity_type)
+          zonePolicy.preset === 'compact_list' && densityExpandableIds.has(entity.object_id)
             ? compactZoneItemSize(entity.entity_type, frame.usableWidth)
             : (naturalDimensions.get(entity.object_id) ?? ARRANGE_DIMENSIONS[entity.entity_type]),
         ])
@@ -1562,7 +1582,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
               allowDeck:
                 args.overflowStrategy === 'deck' &&
                 canvasItems.length === 0 &&
-                entities.every((entity) => isBoardEntityDensityExpandable(entity.entity_type)),
+                entities.every((entity) => entity.entity_type === 'branch'),
               deckOffsetX: DECK_OFFSET_X,
               deckOffsetY: DECK_OFFSET_Y,
             }
@@ -1650,7 +1670,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
               position,
               size: { width: placement.width, height: placement.height },
               ...(zonePolicy.preset === 'compact_list' &&
-              isBoardEntityDensityExpandable(source.entity.entity_type) &&
+              densityExpandableIds.has(source.entity.object_id) &&
               source.entity.compact !== true
                 ? { compact: true }
                 : {}),
@@ -1849,7 +1869,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_set_zone_layout',
     {
       description:
-        'Configure a zone layout policy. Manual mode preserves spatial memory until Arrange contents is requested. Auto Zone mode maintains the selected ordering and preset as items or measured sizes change. compact_list uses one row per item and collapses only branch/worktree secondary content; generic cards and canvas objects retain their natural density.',
+        'Configure a zone layout policy. Manual mode preserves spatial memory until Arrange contents is requested. Auto Zone mode maintains the selected ordering and preset as items or measured sizes change. compact_list uses one row per item and collapses capable worktree/generic-card body content; header-only cards and canvas objects retain their natural density.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
@@ -1947,13 +1967,11 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_set_compact',
     {
       description:
-        'Collapse or expand branch/worktree cards in the shared board presentation. Generic cards, artifacts, notes, and apps have no density state and are never targeted. Target explicit branch placement IDs, a zone, or the entire board.',
+        'Collapse or expand worktrees and generic cards with description/note body content in the shared board presentation. Header-only cards, artifacts, notes, and apps are never targeted. Target explicit placement IDs, a zone, or the entire board.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
-        compact: z
-          .boolean()
-          .describe('true collapses branch/worktree secondary content; false expands it.'),
+        compact: z.boolean().describe('true hides capable card body content; false restores it.'),
         objectIds: z
           .array(mcpRequiredString('objectId', 'Board object ID'))
           .min(1)
@@ -1963,7 +1981,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         entityType: z
           .enum(BOARD_DENSITY_EXPANDABLE_ENTITY_TYPES)
           .optional()
-          .describe('Limit targets to branch/worktree placements.'),
+          .describe('Limit targets to worktree or generic-card placements.'),
       }),
     },
     async (args) => {
@@ -1985,12 +2003,19 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       if (requestedIds.size && selected.length !== requestedIds.size) {
         throw new Error('One or more board object IDs do not belong to this accessible board.');
       }
-      const targets = selected.filter((object) =>
-        isBoardEntityDensityExpandable(object.entity_type)
+      const metadata = await loadEntityLayoutMetadata(
+        ctx,
+        selected.filter((object) => object.entity_type === 'card')
       );
-      if (requestedIds.size && targets.length !== selected.length) {
-        throw new Error('Compact presentation is supported only for branch placements.');
+      const capable = selected.filter((object) =>
+        isBoardEntityDensityExpandable(object.entity_type, metadata.get(object.object_id)?.card)
+      );
+      if (requestedIds.size && capable.length !== selected.length) {
+        throw new Error(
+          'Compact presentation is supported only for worktrees and generic cards with body content.'
+        );
       }
+      const targets = capable.filter((object) => (object.compact === true) !== args.compact);
       if (targets.length === 0) {
         return textResult({ boardId, compact: args.compact, updated: 0, updates: [] });
       }

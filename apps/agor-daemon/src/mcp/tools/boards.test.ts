@@ -2799,16 +2799,83 @@ describe('agor_boards_set_compact', () => {
     expect(parsed).toMatchObject({ boardId: 'board-1', compact: true, updated: 1 });
   });
 
-  it('rejects an explicit generic card target instead of returning an inert success', async () => {
-    const patch = vi.fn();
+  it('updates an explicit generic card target when it has collapsible body content', async () => {
+    const patch = vi.fn(async (objectId: string, data: { compact: boolean }) => ({
+      object_id: objectId,
+      board_id: 'board-1',
+      card_id: 'card-record-1',
+      entity_type: 'card',
+      compact: data.compact,
+    }));
     const app = {
       service(name: string) {
         if (name === 'board-objects')
           return {
             find: vi.fn(async () => ({
-              data: [{ object_id: 'card-1', board_id: 'board-1', entity_type: 'card' }],
+              data: [
+                {
+                  object_id: 'card-1',
+                  board_id: 'board-1',
+                  card_id: 'card-record-1',
+                  entity_type: 'card',
+                },
+              ],
             })),
             patch,
+          };
+        if (name === 'cards')
+          return {
+            get: vi.fn(async () => ({
+              card_id: 'card-record-1',
+              board_id: 'board-1',
+              title: 'Fictional tracking card',
+              note: 'Needs a reviewer',
+            })),
+          };
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+    const setCompact = registerAndCaptureHandler('agor_boards_set_compact', {
+      app,
+      userId: 'user-1',
+      baseServiceParams: { authenticated: true, provider: 'mcp' },
+    });
+
+    const parsed = JSON.parse(
+      (await setCompact({ boardId: 'board-1', objectIds: ['card-1'], compact: true })).content[0]
+        .text
+    );
+
+    expect(parsed).toMatchObject({ updated: 1 });
+    expect(patch).toHaveBeenCalledWith(
+      'card-1',
+      { compact: true },
+      expect.objectContaining({ provider: 'mcp' })
+    );
+  });
+
+  it('rejects an explicit header-only card and skips repeated same-state writes', async () => {
+    const patch = vi.fn();
+    let withBody = false;
+    const placement = {
+      object_id: 'card-1',
+      board_id: 'board-1',
+      card_id: 'card-record-1',
+      entity_type: 'card',
+      compact: true,
+    };
+    const app = {
+      service(name: string) {
+        if (name === 'board-objects')
+          return { find: vi.fn(async () => ({ data: [placement] })), patch };
+        if (name === 'cards')
+          return {
+            get: vi.fn(async () => ({
+              card_id: 'card-record-1',
+              board_id: 'board-1',
+              title: 'Header only',
+              ...(withBody ? { description: 'Now has body content' } : {}),
+            })),
           };
         throw new Error(`Unexpected service call: ${name}`);
       },
@@ -2821,7 +2888,15 @@ describe('agor_boards_set_compact', () => {
 
     await expect(
       setCompact({ boardId: 'board-1', objectIds: ['card-1'], compact: true })
-    ).rejects.toThrow('Compact presentation is supported only for branch placements');
+    ).rejects.toThrow('worktrees and generic cards with body content');
+    expect(patch).not.toHaveBeenCalled();
+
+    withBody = true;
+    const repeated = JSON.parse(
+      (await setCompact({ boardId: 'board-1', objectIds: ['card-1'], compact: true })).content[0]
+        .text
+    );
+    expect(repeated).toMatchObject({ updated: 0, updates: [] });
     expect(patch).not.toHaveBeenCalled();
   });
 });

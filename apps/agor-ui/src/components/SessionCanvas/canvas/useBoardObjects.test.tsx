@@ -1466,7 +1466,7 @@ describe('arrangeZoneContents', () => {
     expect(layoutWrites(patch)).toHaveLength(1);
   });
 
-  it('retains card geometry while applying compact-list density only to worktrees', async () => {
+  it('uses rendered compact geometry for both worktrees and generic cards with body content', async () => {
     const { client, patch } = makeClient();
     const compactLayout = {
       mode: 'auto',
@@ -1518,7 +1518,7 @@ describe('arrangeZoneContents', () => {
         type: 'cardNode',
         parentId: 'cards-zone',
         position: { x: 31, y: 72 },
-        data: {},
+        data: { card: { title: 'Tracking card', description: 'Rendered body' } },
         width: 304,
         height: 60,
       },
@@ -1578,11 +1578,11 @@ describe('arrangeZoneContents', () => {
 
     const card = renderedNodes.find((node) => node.id === 'card-card-1');
     const branch = renderedNodes.find((node) => node.id === 'branch-1');
-    expect(card).toMatchObject({ position: { x: 20, y: 100 }, width: 320, height: 60 });
+    expect(card).toMatchObject({ position: { x: 20, y: 100 }, width: 580, height: 60 });
     expect(branch).toMatchObject({ position: { x: 20, y: 100 }, width: 1560, height: 100 });
     const placements = layoutPlacements(patch);
     expect(placements['placement-card']).toEqual(
-      expect.objectContaining({ size: { width: 320, height: 60 } })
+      expect.objectContaining({ size: { width: 580, height: 60 } })
     );
     expect(placements['placement-branch']).toEqual(
       expect.objectContaining({ size: { width: 1560, height: 100 } })
@@ -2658,6 +2658,12 @@ describe('setZoneContentsCompact', () => {
     },
     { object_id: 'obj-card', zone_id: 'zone-1', card_id: 'card-1', entity_type: 'card' },
     {
+      object_id: 'obj-header-only-card',
+      zone_id: 'zone-1',
+      card_id: 'header-only',
+      entity_type: 'card',
+    },
+    {
       object_id: 'obj-other-zone',
       zone_id: 'zone-2',
       branch_id: 'branch-2',
@@ -2677,7 +2683,20 @@ describe('setZoneContentsCompact', () => {
           }),
           client: client as never,
           boardObjectsForBoard: boardObjectsForBoard as never,
-          nodes: [],
+          nodes: [
+            {
+              id: 'card-card-1',
+              type: 'cardNode',
+              position: { x: 0, y: 0 },
+              data: { card: { card_id: 'card-1', description: 'Rendered body' } },
+            },
+            {
+              id: 'card-header-only',
+              type: 'cardNode',
+              position: { x: 0, y: 0 },
+              data: { card: { card_id: 'header-only', title: 'Header only' } },
+            },
+          ],
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
         }),
@@ -2685,7 +2704,7 @@ describe('setZoneContentsCompact', () => {
     );
   }
 
-  it('patches only density-expandable placements pinned to the requested zone', async () => {
+  it('patches worktrees and body cards while excluding header-only cards and other zones', async () => {
     const { client, patch } = makeClient();
     const { result } = renderCompact(client);
 
@@ -2694,10 +2713,26 @@ describe('setZoneContentsCompact', () => {
     });
 
     expect(client.service).toHaveBeenCalledWith('board-objects');
-    expect(patch.mock.calls.map((call) => call[0])).toEqual(['obj-branch']);
+    expect(patch.mock.calls.map((call) => call[0])).toEqual(['obj-branch', 'obj-card']);
     for (const call of patch.mock.calls) {
       expect(call[1]).toEqual({ compact: true });
     }
+  });
+
+  it('derives the zone toolbar capability from real card bodies, not card kind alone', () => {
+    const { client } = makeClient();
+    const { result } = renderCompact(client, [
+      { ...placements[0], compact: true },
+      { ...placements[1], compact: true },
+      { ...placements[2], compact: true },
+    ]);
+
+    const zone = result.current.getBoardObjectNodes()[0];
+    expect(zone.data).toMatchObject({
+      positionableItemCount: 3,
+      densityExpandableItemCount: 2,
+      compactDensityExpandableItemCount: 2,
+    });
   });
 
   it('expands a collapsed zone back to full density', async () => {
@@ -2711,7 +2746,7 @@ describe('setZoneContentsCompact', () => {
       await result.current.setZoneContentsCompact('zone-1', false);
     });
 
-    expect(patch.mock.calls.map((call) => call[0])).toEqual(['obj-branch']);
+    expect(patch.mock.calls.map((call) => call[0])).toEqual(['obj-branch', 'obj-card']);
     expect(patch.mock.calls[0][1]).toEqual({ compact: false });
   });
 
@@ -2725,7 +2760,13 @@ describe('setZoneContentsCompact', () => {
         entity_type: 'branch',
         compact: true,
       },
-      { object_id: 'obj-card', zone_id: 'zone-1', card_id: 'card-1', entity_type: 'card' },
+      {
+        object_id: 'obj-card',
+        zone_id: 'zone-1',
+        card_id: 'card-1',
+        entity_type: 'card',
+        compact: true,
+      },
     ]);
 
     await act(async () => {

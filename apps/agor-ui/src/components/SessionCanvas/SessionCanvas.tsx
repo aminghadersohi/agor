@@ -987,6 +987,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       void setPlacementCompact(boardObjectByBranch.get(branchId), compact);
     });
 
+    const handleToggleCardCompact = useStableCallback((cardId: string, compact: boolean) => {
+      if (!mutationGate.canMutate) return;
+      void setPlacementCompact(boardObjectByCard.get(cardId), compact, cardById.get(cardId));
+    });
+
     const handleBranchAutoZoneInteraction = useStableCallback((branchId: string) => {
       deferAutoZone(boardObjectByBranch.get(branchId)?.zone_id);
     });
@@ -1317,6 +1322,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             zoneColor,
             onClick: handleCardClick,
             onUnpin: handleUnpinCard,
+            compact: calledOut ? false : boardObject.compact === true,
+            onToggleCompact: canManageBoard ? handleToggleCardCompact : undefined,
             onAutoZoneInteraction: stackPresentation ? handleCardAutoZoneInteraction : undefined,
           } satisfies CardNodeData,
         });
@@ -1330,11 +1337,13 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       zoneLabels,
       handleCardClick,
       handleUnpinCard,
+      handleToggleCardCompact,
       handleCardAutoZoneInteraction,
       zoneStackByNodeId,
       calledOutNodeIds,
       calledOutZoneStackZIndex,
       warnInvalidZoneRef,
+      canManageBoard,
     ]);
 
     // No edges needed for branch-centric boards

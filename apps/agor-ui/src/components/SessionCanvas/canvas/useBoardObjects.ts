@@ -29,7 +29,7 @@ import {
   type ZoneLayoutSortItem,
 } from '@agor/core/layout/zone-layout';
 import type { BoardLayoutApplyResult, BoardLayoutBatch } from '@agor/core/types';
-import type { AgorClient, Board, BoardEntityObject, BoardObject } from '@agor-live/client';
+import type { AgorClient, Board, BoardEntityObject, BoardObject, Card } from '@agor-live/client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Node } from 'reactflow';
 import { useThemedMessage } from '../../../utils/message';
@@ -97,6 +97,20 @@ const autoZoneObserverSortData = (node: Node): readonly unknown[] => {
 
 const placementNodeId = (placement: BoardEntityObject): string | undefined =>
   placement.branch_id ?? (placement.card_id ? `card-${placement.card_id}` : undefined);
+
+const densityCardForNode = (node: Node | undefined): Card | undefined =>
+  node?.type === 'cardNode' ? ((node.data as { card?: Card }).card ?? undefined) : undefined;
+
+const isDensityExpandableNode = (node: Node): boolean =>
+  node.type === 'branchNode' ||
+  (node.type === 'cardNode' && isBoardEntityDensityExpandable('card', densityCardForNode(node)));
+
+const isDensityExpandablePlacement = (
+  placement: BoardEntityObject,
+  node: Node | undefined,
+  card?: Card
+): boolean =>
+  isBoardEntityDensityExpandable(placement.entity_type, card ?? densityCardForNode(node));
 
 import { getMeasuredLayoutNodeSize } from './utils/boardNodeGeometry';
 import type { ReactFlowNode } from './utils/reactFlowTypes';
@@ -549,11 +563,15 @@ export const useBoardObjects = ({
     [client, showError]
   );
 
-  /** Change one capable worktree's density without allowing auto-layout to undo it. */
+  /** Change one capable worktree/card's density without allowing auto-layout to undo it. */
   const setPlacementCompact = useCallback(
-    async (placement: BoardEntityObject | undefined, compact: boolean) => {
-      if (!client || !placement || !isBoardEntityDensityExpandable(placement.entity_type)) return;
+    async (placement: BoardEntityObject | undefined, compact: boolean, card?: Card) => {
+      if (!client || !placement) return;
       const nodeId = placementNodeId(placement);
+      const node = nodeId
+        ? nodesRef.current.find((candidate) => candidate.id === nodeId)
+        : undefined;
+      if (!isDensityExpandablePlacement(placement, node, card)) return;
       const stack = nodeId ? zoneStackByNodeIdRef.current.get(nodeId) : undefined;
       if (nodeId && stack && compact && calledOutNodeIdsRef.current.has(nodeId)) {
         setCalledOutNodeIds((current) => {
@@ -575,19 +593,20 @@ export const useBoardObjects = ({
         deferAutoZone(stack.zoneId);
         return;
       }
+      if ((placement.compact === true) === compact) return;
       if (placement.zone_id && !(await demoteAutoZone(placement.zone_id))) return;
       try {
         await client.service('board-objects').patch(placement.object_id, { compact });
       } catch (error) {
-        console.error('Failed to update worktree density:', error);
-        showError('Failed to update worktree density');
+        console.error('Failed to update card density:', error);
+        showError('Failed to update card density');
       }
     },
     [client, deferAutoZone, demoteAutoZone, showError]
   );
 
   /**
-   * Collapse or expand every density-capable worktree pinned to a zone. This is the UI
+   * Collapse or expand every density-capable worktree/card pinned to a zone. This is the UI
    * half of `agor_boards_set_compact` with a `zoneId`: same targeting (pinned
    * entity placements only), same idempotence (placements already at the
    * requested density are skipped rather than re-patched).
@@ -599,12 +618,15 @@ export const useBoardObjects = ({
       options: { silent?: boolean; manualInteraction?: boolean } = {}
     ) => {
       if (!client) return;
-      const targets = boardObjectsForBoard.filter(
-        (placement) =>
+      const nodeById = new Map(nodesRef.current.map((node) => [node.id, node]));
+      const targets = boardObjectsForBoard.filter((placement) => {
+        const nodeId = placementNodeId(placement);
+        return (
           placement.zone_id === zoneId &&
-          isBoardEntityDensityExpandable(placement.entity_type) &&
+          isDensityExpandablePlacement(placement, nodeId ? nodeById.get(nodeId) : undefined) &&
           (placement.compact === true) !== compact
-      );
+        );
+      });
       if (targets.length === 0) return;
       if (options.manualInteraction !== false && !(await demoteAutoZone(zoneId))) return;
 
@@ -992,8 +1014,8 @@ export const useBoardObjects = ({
         requestedGap === 0 ? 0 : Math.max(BOARD_GRID_SIZE, snapBoardGridValue(requestedGap));
       let layoutItems = children.map(({ node, isCanvasObject }) => ({
         id: node.id,
-        ...(policy.preset === 'compact_list' && !isCanvasObject && node.type === 'branchNode'
-          ? compactZoneItemSize('branch', frame.usableWidth)
+        ...(policy.preset === 'compact_list' && !isCanvasObject && isDensityExpandableNode(node)
+          ? compactZoneItemSize(node.type === 'branchNode' ? 'branch' : 'card', frame.usableWidth)
           : itemSize(node)),
         sourceX: isCanvasObject ? node.position.x - zone.x : node.position.x,
         sourceY: isCanvasObject ? node.position.y - zone.y : node.position.y - frame.headerInset,
@@ -1438,7 +1460,7 @@ export const useBoardObjects = ({
             const { width, height } = arranged;
             const shouldCompact =
               (policy.preset === 'compact_list' || layout.mode === 'deck') &&
-              isBoardEntityDensityExpandable(placement.entity_type) &&
+              isDensityExpandablePlacement(placement, node) &&
               placement.compact !== true;
             return [
               [
@@ -1789,6 +1811,7 @@ export const useBoardObjects = ({
                     : {
                         entityType:
                           node.type === 'branchNode' ? ('branch' as const) : ('card' as const),
+                        densityExpandable: isDensityExpandableNode(node),
                       }),
                   position: isCanvasObject
                     ? { x: node.position.x - object.x, y: node.position.y - object.y }
@@ -1893,7 +1916,10 @@ export const useBoardObjects = ({
               return (
                 placement !== undefined &&
                 policy.preset === 'compact_list' &&
-                isBoardEntityDensityExpandable(placement.entity_type) &&
+                isDensityExpandablePlacement(
+                  placement,
+                  currentNodes.find((node) => node.id === item.id)
+                ) &&
                 placement.compact !== true
               );
             })
@@ -2017,7 +2043,10 @@ export const useBoardObjects = ({
                   size: { width: item.width, height: item.height },
                   ...(packZoneContents &&
                   policy?.preset === 'compact_list' &&
-                  isBoardEntityDensityExpandable(placement.entity_type) &&
+                  isDensityExpandablePlacement(
+                    placement,
+                    currentNodes.find((node) => node.id === item.id)
+                  ) &&
                   placement.compact !== true
                     ? { compact: true }
                     : {}),
@@ -2340,7 +2369,11 @@ export const useBoardObjects = ({
             if (boardObj.zone_id === objectId && (boardObj.branch_id || boardObj.card_id)) {
               pinnedItemCount += 1;
               positionableItemCount += 1;
-              if (isBoardEntityDensityExpandable(boardObj.entity_type)) {
+              const nodeId = placementNodeId(boardObj);
+              const node = nodeId
+                ? nodesRef.current.find((candidate) => candidate.id === nodeId)
+                : undefined;
+              if (isDensityExpandablePlacement(boardObj, node)) {
                 densityExpandableItemCount += 1;
                 if (boardObj.compact === true) compactDensityExpandableItemCount += 1;
               }

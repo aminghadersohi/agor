@@ -9,6 +9,7 @@ import {
   type BoardObjectFindFilters,
   type BoardObjectFindOptions,
   BoardObjectRepository,
+  CardRepository,
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
@@ -86,6 +87,7 @@ export function normalizeBoardObjectFindQuery(
  */
 export class BoardObjectsService {
   private boardObjectRepo: BoardObjectRepository;
+  private cardRepo: CardRepository;
   public emit?: (event: string, data: BoardEntityObject, params?: BoardObjectParams) => void;
 
   constructor(
@@ -93,6 +95,7 @@ export class BoardObjectsService {
     private app?: Application
   ) {
     this.boardObjectRepo = new BoardObjectRepository(db);
+    this.cardRepo = new CardRepository(db);
   }
 
   /**
@@ -186,9 +189,22 @@ export class BoardObjectsService {
       // Reuse the tenant/access-scoped read path rather than bypassing the
       // trusted SQL visibility context for this capability check.
       const existing = await this.get(id, params);
-      if (!isBoardEntityDensityExpandable(existing.entity_type)) {
-        throw new Error('Compact presentation is supported only for branch placements');
+      const card = existing.card_id ? await this.cardRepo.findById(existing.card_id) : undefined;
+      if (
+        !isBoardEntityDensityExpandable(existing.entity_type, card) ||
+        (card !== undefined && card?.board_id !== existing.board_id)
+      ) {
+        throw new Error(
+          'Compact presentation is supported only for worktrees and generic cards with body content'
+        );
       }
+      if (
+        (existing.compact === true) === data.compact &&
+        !data.position &&
+        !data.size &&
+        !('zone_id' in data)
+      )
+        return existing;
     }
 
     if (data.size) {

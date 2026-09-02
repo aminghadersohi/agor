@@ -10,8 +10,15 @@
  * - Note (always shown in full, distinct background)
  */
 
+import { hasCardDensityBody } from '@agor/core/layout/zone-layout';
 import type { CardWithType } from '@agor-live/client';
-import { DragOutlined, LinkOutlined, PushpinFilled } from '@ant-design/icons';
+import {
+  DragOutlined,
+  LinkOutlined,
+  MinusSquareOutlined,
+  PlusSquareOutlined,
+  PushpinFilled,
+} from '@ant-design/icons';
 import { Button, Tooltip, Typography, theme } from 'antd';
 
 function isSafeUrl(url: string): boolean {
@@ -40,14 +47,33 @@ export interface CardNodeData {
   zoneColor?: string;
   onClick?: (cardId: string) => void;
   onUnpin?: (cardId: string) => void;
+  /** Shared board presentation state, controlled by board layout/MCP tools. */
+  compact?: boolean;
+  /** Omitted when the viewer cannot mutate the board. */
+  onToggleCompact?: (cardId: string, compact: boolean) => void;
   /** Keep a called-out card's rolling Auto Zone deferral alive. */
   onAutoZoneInteraction?: (cardId: string) => void;
 }
 
 const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
   const { token } = theme.useToken();
-  const { card, isPinned, zoneName, zoneColor, onClick, onUnpin, onAutoZoneInteraction } = data;
+  const {
+    card,
+    isPinned,
+    zoneName,
+    zoneColor,
+    onClick,
+    onUnpin,
+    compact = false,
+    onToggleCompact,
+    onAutoZoneInteraction,
+  } = data;
   const [descExpanded, setDescExpanded] = useState(false);
+  const hasCollapsibleBody = hasCardDensityBody(card);
+  // Old payloads may carry compact for a card whose body was later removed.
+  // Keep that header-only surface expanded and control-free rather than
+  // manufacturing an inert density state.
+  const isCompact = hasCollapsibleBody && compact;
 
   const borderColor = card.effective_color || token.colorBorder;
   const emoji = card.effective_emoji;
@@ -90,7 +116,7 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
         transition: 'box-shadow 0.2s, border-color 0.3s',
       }}
     >
-      {/* Header: emoji + title + link + pin + drag */}
+      {/* Header: emoji + title + link + density + pin + drag */}
       <div
         data-zone-stack-header
         className={REACT_FLOW_DRAG_HANDLE_CLASS}
@@ -101,7 +127,7 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
           padding: '10px 12px',
           cursor: 'grab',
           borderBottom:
-            card.description || card.note ? `1px solid ${token.colorBorderSecondary}` : 'none',
+            hasCollapsibleBody && !isCompact ? `1px solid ${token.colorBorderSecondary}` : 'none',
         }}
       >
         {emoji && <span style={{ fontSize: 16, flexShrink: 0 }}>{emoji}</span>}
@@ -132,6 +158,21 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
             <LinkOutlined style={{ fontSize: 12 }} />
           </a>
         )}
+        {hasCollapsibleBody && onToggleCompact && (
+          <Button
+            type="text"
+            size="small"
+            icon={isCompact ? <PlusSquareOutlined /> : <MinusSquareOutlined />}
+            aria-label={isCompact ? 'Expand card' : 'Collapse card'}
+            title={isCompact ? 'Expand card' : 'Collapse card'}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleCompact(card.card_id, !isCompact);
+            }}
+            className={REACT_FLOW_NO_DRAG_CLASS}
+            style={{ flexShrink: 0, width: 24, height: 24, padding: 0 }}
+          />
+        )}
         {isPinned && (
           <Tooltip
             title={
@@ -161,7 +202,7 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
       </div>
 
       {/* Description (collapsed) */}
-      {card.description && (
+      {!isCompact && card.description && (
         <div
           className={REACT_FLOW_NO_DRAG_CLASS}
           style={{
@@ -203,7 +244,7 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
       )}
 
       {/* Note (always shown in full, distinct background) */}
-      {card.note && (
+      {!isCompact && card.note && (
         <div
           style={{
             padding: '8px 12px',
