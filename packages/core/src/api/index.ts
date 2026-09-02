@@ -60,6 +60,9 @@ import type {
   OpenCodeOAuthAttempt,
   OpenCodeOAuthAttemptPatch,
   OpenCodeOAuthConnectRequest,
+  OpenCodeOllamaDiscovery,
+  OpenCodeOllamaSettingsPatch,
+  OpenCodeOllamaTestRequest,
   OpenCodeProviderSettings,
   PatchAgenticToolPreset,
   PermissionMode,
@@ -332,6 +335,7 @@ export interface ServiceTypes {
   'agentic-tool-presets': AgenticToolPreset;
   'opencode-auth': OpenCodeProviderSettings;
   'opencode-models': OpenCodeModelCatalog;
+  'opencode-ollama': OpenCodeOllamaDiscovery;
   'executor-git-environment': ExecutorGitEnvironment;
 }
 
@@ -489,6 +493,16 @@ export interface OpenCodeAuthService {
 
 export interface OpenCodeModelsService {
   find(params?: Params): Promise<OpenCodeModelCatalog>;
+}
+
+export interface OpenCodeOllamaService {
+  find(params?: Params): Promise<OpenCodeOllamaDiscovery>;
+  create(data: OpenCodeOllamaTestRequest, params?: Params): Promise<OpenCodeOllamaDiscovery>;
+  patch(
+    id: null,
+    data: OpenCodeOllamaSettingsPatch,
+    params?: Params
+  ): Promise<OpenCodeOllamaDiscovery>;
 }
 
 /**
@@ -893,6 +907,7 @@ export interface AgorClient
   service(path: 'agentic-tool-presets'): AgenticToolPresetsService;
   service(path: 'opencode-auth'): OpenCodeAuthService;
   service(path: 'opencode-models'): OpenCodeModelsService;
+  service(path: 'opencode-ollama'): OpenCodeOllamaService;
   service(path: `board-comments/${string}/reposition`): BoardCommentRepositionService;
 
   // Standard services (CRUD only)

@@ -723,6 +723,15 @@ describe('tenant-owned service registration', () => {
     ]);
   });
 
+  it('keeps the host-local Ollama control plane inside OpenCode tenant and HA gates', () => {
+    expect(TENANT_IDENTITY_ONLY_SERVICE_PATHS).toContain('opencode-ollama');
+    expect(TENANT_OWNED_SERVICE_PATHS).not.toContain('opencode-ollama');
+    expect(CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES).toContainEqual([
+      'opencode-ollama',
+      'openCodeAuth',
+    ]);
+  });
+
   it('wraps Knowledge policy and indexing admin services in tenant database scope', () => {
     expect(TENANT_OWNED_SERVICE_PATHS).toEqual(
       expect.arrayContaining([
