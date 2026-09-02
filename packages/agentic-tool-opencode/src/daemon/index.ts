@@ -1,6 +1,6 @@
 import type { AgorConfig } from '@agor/core/config';
 import { BadRequest } from '@agor/core/feathers';
-import type { Session } from '@agor/core/types';
+import type { OpenCodeOllamaInvocationConfig, Session } from '@agor/core/types';
 import { createOpenCodeExecutorContext } from '../shared/executor-context.js';
 import {
   hasCompleteOpenCodeModelConfig,
@@ -36,12 +36,13 @@ export const OPENCODE_DAEMON_CONTRIBUTION = {
     tenantId: string;
     session: Pick<Session, 'created_by' | 'unix_username'>;
     homeDir: string;
+    ollama?: OpenCodeOllamaInvocationConfig;
   }) {
     const namespace = resolveOpenCodeTaskCredentialNamespace(input);
     return {
       namespaceKey: namespace.namespaceKey,
       executorPayload: {
-        agenticToolContext: createOpenCodeExecutorContext(namespace.dataHome),
+        agenticToolContext: createOpenCodeExecutorContext(namespace.dataHome, input.ollama),
       },
     };
   },

@@ -42,6 +42,7 @@ export const guideNavigation: Record<string, NavigationItem> = {
   architecture: 'Architecture',
   'typescript-client': 'TypeScript Client',
   'sdk-comparison': 'SDK Comparison',
+  'opencode-local-ollama': 'Local Ollama with OpenCode',
   'one-time-launch-auth': 'One-Time Launch Auth',
   '--- Development': {
     type: 'separator',

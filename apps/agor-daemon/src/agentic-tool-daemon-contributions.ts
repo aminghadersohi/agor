@@ -1,5 +1,5 @@
 import { OPENCODE_DAEMON_CONTRIBUTION } from '@agor/agentic-tool-opencode/daemon';
-import type { AgenticToolName, Session } from '@agor/core/types';
+import type { AgenticToolName, OpenCodeOllamaInvocationConfig, Session } from '@agor/core/types';
 
 /**
  * Result of a tool's executor-launch hook: a key used to serialize native-state
@@ -30,6 +30,7 @@ export interface AgenticToolDaemonContribution {
     tenantId: string;
     session: Pick<Session, 'created_by' | 'unix_username'>;
     homeDir: string;
+    ollama?: OpenCodeOllamaInvocationConfig;
   }) => ExecutorLaunchContribution;
 }
 
