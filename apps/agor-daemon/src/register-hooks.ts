@@ -559,6 +559,7 @@ export const TENANT_IDENTITY_ONLY_SERVICE_PATHS = [
   'claude-auth/logout',
   'opencode-auth',
   'opencode-models',
+  'opencode-ollama',
   'claude-models',
   'copilot-models',
   'cursor-models',
@@ -654,6 +655,7 @@ export const CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES = [
   ['claude-auth/logout', 'claudeAuth'],
   ['opencode-auth', 'openCodeAuth'],
   ['opencode-models', 'openCodeAuth'],
+  ['opencode-ollama', 'openCodeAuth'],
 ] as const satisfies ReadonlyArray<readonly [string, Parameters<typeof rejectInConstrainedHa>[1]]>;
 
 const taskFieldSet = (...fields: (keyof Task)[]) => new Set<string>(fields);

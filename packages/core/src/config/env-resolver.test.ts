@@ -375,6 +375,14 @@ describe('resolveUserEnvironment — per-tool credential scoping', () => {
     await usersRepo.setToolConfigField(userId, 'gemini', 'GEMINI_API_KEY', 'gemini-key');
     await usersRepo.setToolConfigField(userId, 'copilot', 'COPILOT_GITHUB_TOKEN', 'gh-copilot');
     await usersRepo.setToolConfigField(userId, 'cursor', 'CURSOR_API_KEY', 'cursor-key');
+    await usersRepo.setToolConfigField(userId, 'opencode', 'ollama_enabled', 'true');
+    await usersRepo.setToolConfigField(
+      userId,
+      'opencode',
+      'ollama_endpoint',
+      'http://127.0.0.1:11435'
+    );
+    await usersRepo.setToolConfigField(userId, 'opencode', 'ollama_model', 'qwen3-coder:30b');
 
     return userId;
   }
@@ -416,6 +424,10 @@ describe('resolveUserEnvironment — per-tool credential scoping', () => {
     expect(env.GEMINI_API_KEY).toBeUndefined();
     expect(env.COPILOT_GITHUB_TOKEN).toBeUndefined();
     expect(env.CURSOR_API_KEY).toBeUndefined();
+    // The first-class local Ollama preset belongs only to OpenCode. It must
+    // never rewrite Codex's independently configured cloud-compatible route.
+    expect(env.OLLAMA_HOST).toBeUndefined();
+    expect(env.OLLAMA_MODEL).toBeUndefined();
   });
 
   dbTest('tool=gemini merges only GEMINI_API_KEY', async ({ db }) => {

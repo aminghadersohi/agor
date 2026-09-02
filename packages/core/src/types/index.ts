@@ -24,6 +24,7 @@ export * from './mcp-marketplace';
 export * from './message';
 export * from './opencode-auth';
 export * from './opencode-models';
+export * from './opencode-ollama';
 export * from './presence';
 export * from './profile-image';
 export * from './realtime';

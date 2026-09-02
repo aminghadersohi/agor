@@ -598,6 +598,9 @@ importers:
       '@agor/core':
         specifier: workspace:*
         version: link:../core
+      jsonc-parser:
+        specifier: ^3.3.1
+        version: 3.3.1
       zod:
         specifier: ^4.3.6
         version: 4.4.3

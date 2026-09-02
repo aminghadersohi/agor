@@ -239,6 +239,10 @@ export const REALTIME_PUBLISH_POLICY = {
   'gateway-channels/app-info': { audience: 'none', why: 'Probe result belongs to the caller.' },
   'opencode-auth': { audience: 'none', why: 'Credential control plane.' },
   'opencode-models': { audience: 'none', why: 'Per-caller model list.' },
+  'opencode-ollama': {
+    audience: 'none',
+    why: 'Per-caller local-provider settings and connectivity probe results.',
+  },
 
   // ---------------------------------------------------------------------------
   // Silent: authentication and credential control planes. These are the paths

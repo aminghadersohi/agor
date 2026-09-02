@@ -3,6 +3,7 @@ import { type AgenticToolName, DEFAULT_AGENTIC_TOOL_NAME, isAgenticToolName } fr
 import type { ArtifactID, BranchID, SessionID, UserID } from './id';
 import type { ProfileImageID } from './profile-image';
 import type { ScheduleID } from './schedule';
+import type { OpenCodeConfig } from './opencode-ollama';
 import type { EffortLevel, PermissionMode } from './session';
 
 /** Canonical syntax for the transitional delegated execution-home key. */
@@ -247,7 +248,7 @@ export interface AgenticToolsConfig {
   gemini?: GeminiConfig;
   copilot?: CopilotConfig;
   cursor?: CursorConfig;
-  opencode?: Record<string, never>;
+  opencode?: OpenCodeConfig;
 }
 
 /** Union of all valid env-var-named fields across all tool configs. */
@@ -341,6 +342,7 @@ export const AGENTIC_TOOLS_PUBLIC_FIELDS: {
 } = {
   'claude-code': ['ANTHROPIC_BASE_URL'],
   codex: ['OPENAI_BASE_URL'],
+  opencode: ['ollama_enabled', 'ollama_endpoint', 'ollama_model'],
 } as const;
 
 /**
