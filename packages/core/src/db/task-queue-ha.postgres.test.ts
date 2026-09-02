@@ -266,6 +266,65 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)('Session Task queue HA (Pos
     });
   });
 
+  it('converges concurrent coordinator batch retries under the Session lock', async () => {
+    const seed = await seedTenant(db, `queue-batch-ha-${generateId()}`);
+    const sessionId = await createSession(db, seed);
+    const coordinatorId = await createSession(db, seed);
+    await runWithTenantDatabaseScope(db, seed.tenantId, (scoped) =>
+      new SessionRepository(scoped).update(sessionId, {
+        callback_config: { enabled: true, callback_session_id: coordinatorId },
+      })
+    );
+    await Promise.all(
+      Array.from({ length: 5 }, (_, index) =>
+        runWithTenantDatabaseScope(db, seed.tenantId, (scoped) => {
+          const requestId = generateId() as TaskID;
+          return new TaskRepository(scoped).createPending({
+            task_id: requestId,
+            session_id: sessionId,
+            created_by: seed.userId,
+            full_prompt: index === 4 ? 'instruction  1' : `instruction ${index}`,
+            status: TaskStatus.QUEUED,
+            compaction: { request_id: requestId, eligible: true, stream: true },
+          });
+        })
+      )
+    );
+    const preview = await runWithTenantDatabaseScope(db, seed.tenantId, (scoped) =>
+      new TaskRepository(scoped).previewCoordinatorQueueBatch({
+        session_id: sessionId,
+        relationship: 'coordinator',
+        requested_by_session_id: coordinatorId,
+      })
+    );
+    if ('outcome' in preview) throw new Error('coordinator relationship disappeared');
+    expect(preview.source_task_count).toBe(5);
+    const input = {
+      session_id: sessionId,
+      relationship: 'coordinator' as const,
+      requested_by_session_id: coordinatorId,
+      requested_by_user_id: seed.userId,
+      operation_id: 'ha-batch-retry',
+      strategy: 'combine' as const,
+      expected_queue_revision: preview.queue_revision,
+      expected_task_ids: preview.expected_task_ids,
+    };
+    const results = await Promise.all(
+      Array.from({ length: 2 }, () =>
+        runWithTenantDatabaseScope(db, seed.tenantId, (scoped) =>
+          new TaskRepository(scoped).applyCoordinatorQueueBatch(input)
+        )
+      )
+    );
+    expect(results.map((result) => result.outcome).sort()).toEqual(['already_batched', 'batched']);
+    await runWithTenantDatabaseScope(db, seed.tenantId, async (scoped) => {
+      const all = await new TaskRepository(scoped).findBySession(sessionId);
+      expect(all.filter((task) => task.status === TaskStatus.QUEUED)).toHaveLength(1);
+      expect(all.filter((task) => task.metadata?.coordinator_queue_batch_member)).toHaveLength(4);
+      expect(all.filter((task) => task.metadata?.coordinator_queue_batch)).toHaveLength(1);
+    });
+  });
+
   it('keeps discovery routing-only and refuses cross-tenant claim/inference', async () => {
     const a = await seedTenant(db, `queue-tenant-a-${generateId()}`);
     const b = await seedTenant(db, `queue-tenant-b-${generateId()}`);
@@ -305,6 +364,13 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)('Session Task queue HA (Pos
       await expect(
         tasks.claimDispatchAndProjectSession(queuedB.task_id, TaskStatus.QUEUED, {
           status: TaskStatus.DISPATCHING,
+        })
+      ).rejects.toThrow(/not found/);
+      await expect(
+        tasks.previewCoordinatorQueueBatch({
+          session_id: sessionB,
+          relationship: 'coordinator',
+          requested_by_session_id: sessionB,
         })
       ).rejects.toThrow(/not found/);
     });

@@ -698,8 +698,15 @@
     {
       "idx": 100,
       "version": "7",
+      "when": 1788206400001,
+      "tag": "0100_claude_oauth_attempts",
+      "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
       "when": 1788292800000,
-      "tag": "0100_session_auto_archive",
+      "tag": "0101_session_auto_archive",
       "breakpoints": true
     }
   ]

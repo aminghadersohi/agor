@@ -229,6 +229,109 @@ describe('SessionsService.patch — agentic_tool immutability guard', () => {
   });
 });
 
+describe('SessionsService callback BTW stable fork identity', () => {
+  dbTest('reuses one production Session row and one genealogy child on retry', async ({ db }) => {
+    const service = new SessionsService(db, STUB_APP);
+    const branchId = await createBranch(db);
+    const parentId = await createSession(db, branchId, {
+      agentic_tool: 'claude-code',
+      sdk_session_id: 'sdk-parent-state',
+    });
+    const stableSessionId = generateId();
+    const sourceSessionId = generateId();
+    const sourceTaskId = generateId();
+    const finalMessageId = generateId();
+    const callbackConfig: NonNullable<Session['callback_config']> = {
+      enabled: false,
+      callback_mode: 'once',
+      delivery: 'direct',
+      digest: {
+        kind: 'callback_digest',
+        source_session_id: sourceSessionId,
+        source_task_id: sourceTaskId,
+        destination_session_id: parentId,
+        relationship_ids: [],
+        route: 'standing',
+        requested_delivery: 'btw',
+        resolved_delivery: 'btw',
+        callback_created_by: TEST_USER_ID,
+        final_message_id: finalMessageId,
+      },
+    };
+
+    const first = await service.fork(parentId, {
+      prompt: 'Digest callback',
+      stableSessionId,
+      forkOrigin: 'btw',
+      callbackConfig,
+    });
+    const retried = await service.fork(parentId, {
+      prompt: 'Digest callback',
+      stableSessionId,
+      forkOrigin: 'btw',
+      callbackConfig,
+    });
+
+    expect(first.session_id).toBe(stableSessionId);
+    expect(retried.session_id).toBe(stableSessionId);
+    expect(
+      (await new SessionRepository(db).findAll()).filter(
+        (session) => session.session_id === stableSessionId
+      )
+    ).toHaveLength(1);
+    const parent = await new SessionRepository(db).findById(parentId);
+    expect(parent?.genealogy?.children.filter((id) => id === stableSessionId)).toHaveLength(1);
+  });
+
+  dbTest(
+    'rejects caller-authored digest provenance and invalid delivery values',
+    async ({ db }) => {
+      const service = new SessionsService(db, STUB_APP);
+      const branchId = await createBranch(db);
+      const sessionId = await createSession(db, branchId);
+      const providerParams = { provider: 'rest' } as never;
+
+      await expect(
+        service.patch(
+          sessionId,
+          {
+            callback_config: {
+              enabled: false,
+              digest: {
+                kind: 'callback_digest',
+                source_session_id: generateId(),
+                source_task_id: generateId(),
+                destination_session_id: sessionId,
+                relationship_ids: [],
+                route: 'standing',
+                requested_delivery: 'btw',
+                resolved_delivery: 'btw',
+                callback_created_by: TEST_USER_ID,
+                final_message_id: generateId(),
+              },
+            },
+          },
+          providerParams
+        )
+      ).rejects.toThrow(/server-managed/);
+      await expect(
+        service.patch(
+          sessionId,
+          { callback_config: { delivery: 'surprise' as never } },
+          providerParams
+        )
+      ).rejects.toThrow(/direct, btw, or auto/);
+      await expect(
+        service.fork(
+          sessionId,
+          { prompt: 'forge digest', stableSessionId: generateId() },
+          providerParams
+        )
+      ).rejects.toThrow(/server-managed/);
+    }
+  );
+});
+
 describe('SessionsService direct OpenCode model selection', () => {
   const modelConfig = (provider?: string, model = 'gpt-test') => ({
     mode: 'exact' as const,

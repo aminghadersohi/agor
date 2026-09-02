@@ -54,6 +54,11 @@ into SDK-private registration state.
    correction at highest priority. The target is supplied, but authority is
    derived from the target's current durable relationship and rechecked at the
    admission fence. A caller-stable `idempotencyKey` converges retries.
+8. **`agor_sessions_batch_queue`** — the current parent/coordinator previews
+   and compare-and-swaps a compatible unclaimed queue into one COMBINE or
+   REPLACE turn. The MCP Session is the caller identity; naming a target grants
+   nothing. Exact Task IDs, a queue revision, and a stable idempotency key fence
+   relationship/admission/dispatch races.
 
 All enforce the branch-centric model (every session references a branch). Permission modes map to each agent's native settings.
 
@@ -71,8 +76,25 @@ Callbacks enabled by `agor_sessions_create` default to `persistent`; use
 be muted or resumed with `agor_session_relationships_set_callback` without
 deleting the relationship. Spawned child and `btw` callbacks remain one-shot.
 
+Standing callbacks also accept `callbackDelivery: "direct" | "btw" | "auto"`.
+Omission means `direct`. Explicit `btw` uses an ephemeral fork of the current
+destination when the destination/branch are active, prompt authority still
+holds, the active agent integration supports forks, and forkable SDK state is
+present. `auto` selects BTW exactly when the destination is busy or the rendered
+callback is at least 8 KiB. Unavailable or failed BTW creation falls back to the
+same deterministic direct callback Task with an audited reason. Callback digest
+answers are hard-capped at 4 KiB and use deterministic Session, Task, and final
+Message IDs. Digest Sessions have a durable loop guard and cannot callback
+themselves.
+
+The exact-Task subscription from `agor_sessions_prompt(callback:true)` remains
+direct by design. If it coalesces with a standing subscription for the same
+source Task and destination, direct wins. Root-propagated exact-Task requests
+therefore do not acquire standing BTW policy accidentally. Callback and digest
+Tasks remain excluded from ordinary queued-prompt compaction.
+
 Standing callback retargeting preserves the callback's enabled state, mode,
-template, and include flags. Completion dispatch reloads the Session after the
+delivery policy, template, and include flags. Completion dispatch reloads the Session after the
 terminal Task commit, so a Task that was already running when the transfer
 committed follows only the new standing destination. The immutable
 `Task.metadata.completion_callback` written by `agor_sessions_prompt` with
@@ -107,12 +129,24 @@ completion of the corrective Task follows its normal standing/root callback
 rules. Task-scoped executor authority is retired only by normal terminal
 settlement, never by interrupt admission.
 
+Queue batching is intentionally separate from prompt admission and interrupt.
+Preview exposes the deterministic combine prompt and compatibility failures;
+apply accepts only the exact preview revision/Task set while holding the
+Session row lock. Combine preserves first-occurrence order, uses normalized
+duplicate removal, and carries an explicit later-conflicts-win header. Replace
+sends one canonical prompt. Both retain original Task/request provenance and
+collapse identical completion contracts into the survivor's one result. Any
+claimed Task, mixed callback/control/admission contract, or attachment,
+widget, gateway, slash, source, interrupt, or internal continuation semantic
+fails closed.
+
 ## Overrides at create/spawn/subsession time
 
 `agor_sessions_create`, `agor_sessions_spawn`, and `agor_sessions_prompt` with `mode: "subsession"` all accept:
 
 - **`modelConfig`** — `{ model: string, mode?: 'alias' | 'exact', effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max', provider?: string }`. `model` is required when the object is provided. Threaded into `session.model_config` and consumed by `packages/executor/src/sdk-handlers/claude/query-builder.ts`.
 - **`mcpServerIds`** — pins which MCP servers attach. `[]` = no MCPs. Omit to inherit (branch → parent → user default). Failed attachments surface as `mcpAttachFailures: [{ mcp_server_id, reason }]` in the response (not silently logged).
+- **`callbackDelivery`** — standing callback policy (`direct`, `btw`, or `auto`). Exact-Task `callback:true` remains direct.
 
 ## Security note for spawn/fork
 

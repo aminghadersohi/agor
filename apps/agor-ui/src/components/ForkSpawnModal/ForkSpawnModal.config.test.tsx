@@ -168,4 +168,38 @@ describe('ForkSpawnModal configuration defaults', { timeout: 10_000 }, () => {
       );
     });
   });
+
+  it('preserves the parent callback delivery policy in spawn submissions', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ForkSpawnModal
+        open
+        action="spawn"
+        session={
+          {
+            ...claudeSession,
+            callback_config: { enabled: true, delivery: 'auto' },
+          } as Session
+        }
+        currentUser={null}
+        initialPrompt="spawn with callback digest policy"
+        onConfirm={onConfirm}
+        onCancel={vi.fn()}
+        client={null}
+        userById={new Map()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Spawn Session' }));
+
+    await waitFor(() =>
+      expect(onConfirm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: 'spawn with callback digest policy',
+          enableCallback: true,
+          callbackDelivery: 'auto',
+        })
+      )
+    );
+  });
 });

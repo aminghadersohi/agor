@@ -12,10 +12,17 @@ import {
   type Database,
   generateId,
   RepoRepository,
+  SessionRepository,
   UsersRepository,
 } from '@agor/core/db';
 import { BadRequest } from '@agor/core/feathers';
-import type { Board, BoardID, BranchID, UUID } from '@agor/core/types';
+import {
+  type Board,
+  type BoardID,
+  type BranchID,
+  SessionStatus,
+  type UUID,
+} from '@agor/core/types';
 import { describe, expect, vi } from 'vitest';
 import { ownedDbTest as dbTest } from '../../../../packages/core/src/db/test-helpers';
 import { type BoardParams, BoardsService } from './boards';
@@ -512,6 +519,38 @@ describe('BoardsService.find SQL pushdown', () => {
     await repo.update(archived.board_id, { archived: true });
     return { service, b1, b2, archived };
   }
+
+  dbTest(
+    'returns the authoritative running Session projection on each API page row',
+    async ({ db }) => {
+      const service = new BoardsService(db);
+      const repo = await new RepoRepository(db).create(createRepoData());
+      const board = (await service.create({
+        name: 'Running API board',
+        created_by: TEST_USER,
+      })) as Board;
+      const branch = await new BranchRepository(db).create({
+        ...createBranchData({ repo_id: repo.repo_id, name: 'running-api' }),
+        board_id: board.board_id,
+      });
+      await new SessionRepository(db).create({
+        branch_id: branch.branch_id,
+        created_by: TEST_USER,
+        agentic_tool: 'claude-code',
+        status: SessionStatus.RUNNING,
+      });
+
+      const result = (await service.find({
+        query: { archived: false, lean: true, $limit: 1 },
+      })) as { data: Board[]; total: number };
+
+      expect(result.total).toBe(1);
+      expect(result.data[0]).toMatchObject({
+        board_id: board.board_id,
+        running_session_count: 1,
+      });
+    }
+  );
 
   dbTest(
     'pages the whole tenant scope in SQL when no filter is present (rbac off)',

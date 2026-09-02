@@ -7,6 +7,7 @@ import type { ExecutorCommandResult } from '../../utils/spawn-executor.js';
 import { resolveAuthenticatedOpenCodeSubjectContext } from './credential-namespace.js';
 import { startOpenCodeExecutorInvocation } from './executor-command.js';
 import { blockOpenCodeNativeStateNamespace } from './native-state-coordinator.js';
+import { discoverOpenCodeOllamaForSubject } from './ollama-service.js';
 
 const MODEL_CATALOG_FAILURE = 'OpenCode model catalog could not be loaded. Try again.';
 
@@ -37,7 +38,36 @@ async function readModelCatalog(
   if (!result.success || !result.data) {
     throw new BadRequest(MODEL_CATALOG_FAILURE);
   }
-  return result.data as OpenCodeModelCatalog;
+  const catalog = result.data as OpenCodeModelCatalog;
+  const ollama = await discoverOpenCodeOllamaForSubject({ db, config, params });
+  if (!ollama.configuration.enabled) return catalog;
+  const selected = ollama.models.find((model) => model.id === ollama.configuration.model);
+  return {
+    ...catalog,
+    providers: [
+      ...catalog.providers.filter((provider) => provider.id !== 'ollama'),
+      {
+        id: 'ollama',
+        name: 'Ollama (local via OpenCode)',
+        availableForSelection: ollama.status === 'ready' && Boolean(selected),
+        suggestedModel: selected?.id,
+        models: selected
+          ? [
+              {
+                id: selected.id,
+                name: selected.name,
+                status: 'active' as const,
+                sizeBytes: selected.sizeBytes,
+                contextTokens: selected.runningContextTokens ?? selected.contextTokens,
+                tools: selected.tools,
+                thinking: selected.thinking,
+                vision: selected.vision,
+              },
+            ]
+          : [],
+      },
+    ],
+  };
 }
 
 export class OpenCodeModelsService {

@@ -98,6 +98,15 @@ describe('MCP tool registry', () => {
         'message',
         'idempotencyKey',
       ],
+      agor_sessions_batch_queue: [
+        'targetSessionId',
+        'relationship',
+        'action',
+        'queueRevision',
+        'taskIds',
+        'replacementPrompt',
+        'idempotencyKey',
+      ],
       agor_boards_get: ['boardId'],
       agor_branches_create: ['repoId', 'branchName', 'boardId', 'waitForReady', 'waitTimeoutMs'],
       agor_branches_wait_for_ready: ['branchId', 'waitTimeoutMs'],
@@ -183,6 +192,10 @@ describe('MCP tool registry', () => {
         'corrective_task_id',
         'termination_status',
       ]),
+    });
+    expect(registry.get('agor_sessions_batch_queue')?.outputSchema).toMatchObject({
+      type: 'object',
+      required: expect.arrayContaining(['outcome', 'preview']),
     });
   });
 });
@@ -627,6 +640,97 @@ describe('POST /mcp with personal API keys', () => {
         expect(retargetCallback).toHaveBeenCalledWith(
           'sess-source',
           { callbackSessionId: 'sess-new' },
+          expect.objectContaining({ provider: 'mcp' })
+        );
+      },
+      { multi_tenancy: undefined },
+      /* toolSearchEnabled */ true
+    );
+  });
+
+  it('discovers and executes callbackDelivery through the real progressive /mcp surface', async () => {
+    await mockPersonalApiKeyUser();
+    const patch = vi.fn(async (_id: string, updates: Record<string, unknown>) => ({
+      session_id: 'sess-child',
+      branch_id: 'branch-1',
+      agentic_tool: 'codex',
+      ...updates,
+    }));
+    const sessions = {
+      get: vi.fn(async (id: string) => ({
+        session_id: id,
+        branch_id: 'branch-1',
+        agentic_tool: 'codex',
+        callback_config: {
+          enabled: true,
+          callback_session_id: 'sess-coordinator',
+          callback_mode: 'persistent',
+        },
+      })),
+      patch,
+    };
+
+    await withMcpServer(
+      {
+        users: {
+          get: vi.fn(async () => ({
+            user_id: 'user-1',
+            email: 'alice@example.com',
+            role: 'member',
+          })),
+        },
+        sessions,
+      },
+      async (baseUrl) => {
+        let requestId = 0;
+        const call = async (name: string, args: Record<string, unknown>) => {
+          const response = await fetch(`${baseUrl}/mcp`, {
+            method: 'POST',
+            headers: {
+              Accept: 'application/json, text/event-stream',
+              'Content-Type': 'application/json',
+              'X-API-Key': 'agor_sk_valid',
+              'X-Agor-Session-Id': 'sess-caller',
+            },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id: ++requestId,
+              method: 'tools/call',
+              params: { name, arguments: args },
+            }),
+          });
+          const envelope = parseMcpResponse(await response.text());
+          expect(envelope.error).toBeUndefined();
+          return JSON.parse(envelope.result!.content![0].text);
+        };
+
+        const search = await call('agor_search_tools', {
+          query: 'sessions update callback',
+        });
+        expect(search.tools).toEqual(
+          expect.arrayContaining([expect.objectContaining({ name: 'agor_sessions_update' })])
+        );
+
+        const details = await call('agor_get_tool_details', {
+          tool_name: 'agor_sessions_update',
+        });
+        expect(details.tool.inputSchema.properties.callbackDelivery).toBeDefined();
+        expect(JSON.stringify(details.tool.inputSchema.properties.callbackDelivery)).toContain(
+          'btw'
+        );
+
+        await call('agor_execute_tool', {
+          tool_name: 'agor_sessions_update',
+          arguments: { sessionId: 'sess-child', callbackDelivery: 'auto' },
+        });
+        expect(patch).toHaveBeenCalledWith(
+          'sess-child',
+          expect.objectContaining({
+            callback_config: expect.objectContaining({
+              callback_session_id: 'sess-coordinator',
+              delivery: 'auto',
+            }),
+          }),
           expect.objectContaining({ provider: 'mcp' })
         );
       },

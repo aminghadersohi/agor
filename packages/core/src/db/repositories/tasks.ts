@@ -4,8 +4,15 @@
  * Type-safe CRUD operations for tasks with short ID support.
  */
 
+import { createHash } from 'node:crypto';
+
 import type {
   CapabilityPolicyFsAccess,
+  CoordinatorQueueBatchApplyInput,
+  CoordinatorQueueBatchApplyResult,
+  CoordinatorQueueBatchPreview,
+  CoordinatorQueueBatchRequestAudit,
+  CoordinatorQueueBatchSourceAudit,
   ExecutorPulse,
   ExecutorTerminationCompleteInput,
   SdkFailure,
@@ -74,6 +81,8 @@ import { deepMerge } from './merge-utils';
 export const MAX_COMPACTED_PROMPT_BYTES = 32 * 1024;
 const COMPACTED_PROMPT_HEADER =
   'Several queued requests were compacted into this turn. Follow each distinct instruction in first-occurrence order.';
+export const COORDINATOR_COMBINED_PROMPT_HEADER =
+  'A coordinator combined several queued requests into this execution turn. Follow every distinct instruction in first-occurrence order. Later instructions override earlier instructions only when they conflict.';
 
 export function normalizePromptForDeduplication(text: string): string {
   return text
@@ -122,8 +131,180 @@ function utf8Bytes(text: string): number {
   return new TextEncoder().encode(text).byteLength;
 }
 
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, child]) => child !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function exactCallbackContract(task: Task): string {
+  return stableJson(task.metadata?.completion_callback ?? null);
+}
+
+function coordinatorBatchSource(tasksInQueue: Task[]): {
+  sources: CoordinatorQueueBatchSourceAudit[];
+  requests: CoordinatorQueueBatchRequestAudit[];
+} {
+  const sources = tasksInQueue.map((task): CoordinatorQueueBatchSourceAudit => {
+    const requests = task.metadata?.prompt_compaction?.requests?.length
+      ? task.metadata.prompt_compaction.requests.map((request) => ({ ...request }))
+      : [
+          {
+            request_id: task.task_id,
+            submitted_at: task.created_at,
+            created_by: task.created_by as import('@agor/core/types').UserID,
+            text: task.full_prompt,
+            normalized_text: normalizePromptForDeduplication(task.full_prompt),
+          },
+        ];
+    return {
+      task_id: task.task_id,
+      queue_position: task.queue_position!,
+      created_at: task.created_at,
+      created_by: task.created_by as import('@agor/core/types').UserID,
+      requests,
+    };
+  });
+  const firstByNormalizedText = new Map<string, TaskID>();
+  const requests = sources.flatMap((source) =>
+    source.requests.map((request) => {
+      const { duplicate_of_request_id: _priorDuplicate, ...base } = request;
+      const first = firstByNormalizedText.get(request.normalized_text);
+      if (first) return { ...base, duplicate_of_request_id: first };
+      firstByNormalizedText.set(request.normalized_text, request.request_id);
+      return base;
+    })
+  );
+  return { sources, requests };
+}
+
+function coordinatorCombinedPrompt(requests: CoordinatorQueueBatchRequestAudit[]): string {
+  const unique = requests.filter((request) => !request.duplicate_of_request_id);
+  return [
+    COORDINATOR_COMBINED_PROMPT_HEADER,
+    ...unique.map(
+      (request, index) =>
+        `\n--- Instruction ${index + 1} (request ${request.request_id}) ---\n${request.text}`
+    ),
+  ].join('\n');
+}
+
+function ordinaryCoordinatorBatchRefusalReasons(tasksInQueue: Task[]): string[] {
+  const reasons = new Set<string>();
+  if (tasksInQueue.length < 2) reasons.add('At least two queued Tasks are required.');
+  const creator = tasksInQueue[0]?.created_by;
+  const control = stableJson(tasksInQueue[0]?.metadata?.prompt_control ?? null);
+  const callback = tasksInQueue[0] ? exactCallbackContract(tasksInQueue[0]) : 'null';
+  const admissionClass = tasksInQueue[0]?.metadata?.completion_callback
+    ? 'exact_completion_callback'
+    : 'ordinary';
+  for (const task of tasksInQueue) {
+    if (task.status !== TaskStatus.QUEUED) reasons.add('Every source Task must still be queued.');
+    if (task.created_by !== creator) reasons.add('Queued Tasks have different execution actors.');
+    if (stableJson(task.metadata?.prompt_control ?? null) !== control) {
+      reasons.add('Queued Tasks have different permission or stream controls.');
+    }
+    if (exactCallbackContract(task) !== callback) {
+      reasons.add('Queued Tasks have different exact completion callback contracts.');
+    }
+    const currentClass = task.metadata?.completion_callback
+      ? 'exact_completion_callback'
+      : 'ordinary';
+    if (currentClass !== admissionClass)
+      reasons.add('Queued Tasks have different admission classes.');
+    const permittedMetadata = new Set([
+      'queued_by_user_id',
+      'source',
+      'prompt_compaction',
+      'prompt_control',
+      'completion_callback',
+    ]);
+    if (Object.keys(task.metadata ?? {}).some((key) => !permittedMetadata.has(key))) {
+      reasons.add(
+        'A queued Task has attachment, callback, widget, gateway, control, or internal semantics.'
+      );
+    }
+    if (task.metadata?.source === 'gateway') reasons.add('Gateway prompts cannot be batched.');
+    if (
+      task.full_prompt.trimStart().startsWith('/') ||
+      task.full_prompt.includes('Attachments — use `agor_upload_materialize` to access:') ||
+      task.full_prompt.includes('/_uploads/')
+    ) {
+      reasons.add('Slash controls and attachment-bearing prompts cannot be batched.');
+    }
+  }
+  return [...reasons];
+}
+
+function coordinatorQueueRevision(sessionRow: SessionRow, tasksInQueue: Task[]): string {
+  const sessionData = sessionRow.data as SessionRow['data'] & {
+    callback_config?: unknown;
+  };
+  const material = {
+    session_id: sessionRow.session_id,
+    parent_session_id: sessionRow.parent_session_id,
+    callback_config: sessionData.callback_config ?? null,
+    tasks: tasksInQueue.map((task) => ({
+      task_id: task.task_id,
+      status: task.status,
+      queue_position: task.queue_position,
+      created_by: task.created_by,
+      full_prompt: task.full_prompt,
+      metadata: task.metadata ?? null,
+    })),
+  };
+  return `sha256:${createHash('sha256').update(stableJson(material)).digest('hex')}`;
+}
+
+function buildCoordinatorQueueBatchPreview(
+  sessionRow: SessionRow,
+  tasksInQueue: Task[],
+  relationship: CoordinatorQueueBatchApplyInput['relationship'],
+  coordinatorSessionId: SessionID
+): CoordinatorQueueBatchPreview {
+  const { requests } = coordinatorBatchSource(tasksInQueue);
+  const refusalReasons = ordinaryCoordinatorBatchRefusalReasons(tasksInQueue);
+  const combinedPrompt = coordinatorCombinedPrompt(requests);
+  const combinedPromptBytes = utf8Bytes(combinedPrompt);
+  const combineRefusalReason =
+    combinedPromptBytes > MAX_COMPACTED_PROMPT_BYTES
+      ? `The combined prompt is ${combinedPromptBytes} bytes; the ${MAX_COMPACTED_PROMPT_BYTES}-byte limit is never truncated.`
+      : undefined;
+  const duplicateRequestCount = requests.filter(
+    (request) => !!request.duplicate_of_request_id
+  ).length;
+  const compatible = refusalReasons.length === 0;
+  return {
+    session_id: sessionRow.session_id as SessionID,
+    relationship,
+    coordinator_session_id: coordinatorSessionId,
+    queue_revision: coordinatorQueueRevision(sessionRow, tasksInQueue),
+    expected_task_ids: tasksInQueue.map((task) => task.task_id),
+    source_task_count: tasksInQueue.length,
+    source_request_count: requests.length,
+    unique_request_count: requests.length - duplicateRequestCount,
+    duplicate_request_count: duplicateRequestCount,
+    compatible,
+    refusal_reasons: refusalReasons,
+    combine_allowed: compatible && !combineRefusalReason,
+    ...(combineRefusalReason ? { combine_refusal_reason: combineRefusalReason } : {}),
+    ...(compatible
+      ? { combined_prompt: combinedPrompt, combined_prompt_bytes: combinedPromptBytes }
+      : {}),
+  };
+}
+
 function hasOnlyOrdinaryPromptMetadata(metadata: TaskMetadata | undefined): boolean {
-  return Object.keys(metadata ?? {}).every((key) => key === 'queued_by_user_id');
+  return (
+    metadata?.source !== 'gateway' &&
+    Object.keys(metadata ?? {}).every((key) => key === 'queued_by_user_id' || key === 'source')
+  );
 }
 
 function executorOwnsTask(row: Pick<TaskRow, 'status' | 'executor_connected_at'>): boolean {
@@ -2108,6 +2289,316 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
   }
 
   /**
+   * Preview the complete current queue under the same compatibility rules used
+   * by the atomic coordinator mutation. The returned revision and exact Task
+   * set are mandatory compare-and-swap fences for applyCoordinatorQueueBatch.
+   */
+  async previewCoordinatorQueueBatch(input: {
+    session_id: SessionID;
+    relationship: CoordinatorQueueBatchApplyInput['relationship'];
+    requested_by_session_id: SessionID;
+  }): Promise<CoordinatorQueueBatchPreview | { outcome: 'relationship_changed' }> {
+    const sessionRow = await select(this.db)
+      .from(sessions)
+      .where(eq(sessions.session_id, input.session_id))
+      .one();
+    if (!sessionRow) throw new EntityNotFoundError('Session', input.session_id);
+    const callerRow = await select(this.db)
+      .from(sessions)
+      .where(eq(sessions.session_id, input.requested_by_session_id))
+      .one();
+    const callback = (
+      sessionRow.data as SessionRow['data'] & {
+        callback_config?: { enabled?: boolean; callback_session_id?: SessionID };
+      }
+    ).callback_config;
+    const relationshipMatches =
+      input.relationship === 'parent'
+        ? sessionRow.parent_session_id === input.requested_by_session_id &&
+          callerRow?.branch_id === sessionRow.branch_id &&
+          !callerRow.archived
+        : callback?.enabled !== false &&
+          callback?.callback_session_id === input.requested_by_session_id &&
+          !!callerRow &&
+          !callerRow.archived;
+    if (!relationshipMatches) return { outcome: 'relationship_changed' };
+    const rows = (await select(this.db)
+      .from(tasks)
+      .where(and(eq(tasks.session_id, input.session_id), eq(tasks.status, TaskStatus.QUEUED)))
+      .orderBy(asc(tasks.queue_position), asc(tasks.created_at), asc(tasks.task_id))
+      .all()) as TaskRow[];
+    return buildCoordinatorQueueBatchPreview(
+      sessionRow,
+      rows.map((row) => this.rowToTask(row)),
+      input.relationship,
+      input.requested_by_session_id
+    );
+  }
+
+  /**
+   * Atomically collapse a coordinator-owned compatible queue into its first
+   * Task. The Session lock is shared with admission and dispatch, so no Task
+   * can be appended or cross QUEUED -> DISPATCHING between the expected-state
+   * check and this mutation. Superseded Tasks remain durable terminal audit
+   * rows and never enter normal completion delivery.
+   */
+  async applyCoordinatorQueueBatch(
+    input: CoordinatorQueueBatchApplyInput
+  ): Promise<CoordinatorQueueBatchApplyResult> {
+    return this.runTaskMutation(() =>
+      runDatabaseTransaction(
+        this.db,
+        async (txDb) => {
+          await lockRowForUpdate(
+            txDb,
+            this.db,
+            sessions,
+            eq(sessions.session_id, input.session_id)
+          );
+          const sessionRow = await select(txDb)
+            .from(sessions)
+            .where(eq(sessions.session_id, input.session_id))
+            .one();
+          if (!sessionRow) throw new EntityNotFoundError('Session', input.session_id);
+          if (sessionRow.archived) throw new RepositoryError('Target Session is archived');
+
+          const callback = (
+            sessionRow.data as SessionRow['data'] & {
+              callback_config?: { enabled?: boolean; callback_session_id?: SessionID };
+            }
+          ).callback_config;
+          const callerRow = await select(txDb)
+            .from(sessions)
+            .where(eq(sessions.session_id, input.requested_by_session_id))
+            .one();
+          const relationshipMatches =
+            input.relationship === 'parent'
+              ? sessionRow.parent_session_id === input.requested_by_session_id &&
+                callerRow?.branch_id === sessionRow.branch_id &&
+                !callerRow.archived
+              : callback?.enabled !== false &&
+                callback?.callback_session_id === input.requested_by_session_id &&
+                !!callerRow &&
+                !callerRow.archived;
+          if (!relationshipMatches) return { outcome: 'relationship_changed' };
+
+          if (input.expected_task_ids.length < 2) {
+            throw new RepositoryError('At least two expected queued Task IDs are required');
+          }
+          const sessionTaskRows = (await select(txDb)
+            .from(tasks)
+            .where(eq(tasks.session_id, input.session_id))
+            .all()) as TaskRow[];
+          const expectedTaskIdSet = new Set(input.expected_task_ids);
+          const expectedRows = sessionTaskRows.filter((row) =>
+            expectedTaskIdSet.has(row.task_id as TaskID)
+          );
+
+          // HA-safe retry: the first commit leaves a complete operation marker
+          // on every source row. Reconstruct and return it instead of requiring
+          // the queue (which correctly no longer contains the superseded rows).
+          const existingExecutionRow = sessionTaskRows.find(
+            (row) => row.data.metadata?.coordinator_queue_batch?.operation_id === input.operation_id
+          );
+          if (existingExecutionRow) {
+            const executionTask = this.rowToTask(existingExecutionRow);
+            const audit = executionTask.metadata!.coordinator_queue_batch!;
+            const expectedSet = new Set(input.expected_task_ids);
+            const auditedSet = new Set(audit.source_tasks.map((source) => source.task_id));
+            const allRowsMarked = expectedRows.every((row) => {
+              const metadata = row.data.metadata;
+              return (
+                metadata?.coordinator_queue_batch?.operation_id === input.operation_id ||
+                metadata?.coordinator_queue_batch_member?.operation_id === input.operation_id
+              );
+            });
+            const sameOperation =
+              audit.strategy === input.strategy &&
+              audit.expected_queue_revision === input.expected_queue_revision &&
+              audit.requested_by_user_id === input.requested_by_user_id &&
+              audit.coordinator_session_id === input.requested_by_session_id &&
+              audit.relationship === input.relationship &&
+              audit.replacement_prompt === input.replacement_prompt &&
+              expectedRows.length === input.expected_task_ids.length &&
+              expectedSet.size === auditedSet.size &&
+              [...expectedSet].every((taskId) => auditedSet.has(taskId)) &&
+              allRowsMarked;
+            if (!sameOperation) {
+              throw new RepositoryError(
+                `Coordinator queue batch operation ${input.operation_id} was already used with different input`
+              );
+            }
+            const requests = audit.source_tasks.flatMap((source) => source.requests);
+            const combinedPrompt = coordinatorCombinedPrompt(requests);
+            const combinedPromptBytes = utf8Bytes(combinedPrompt);
+            const preview: CoordinatorQueueBatchPreview = {
+              session_id: input.session_id,
+              relationship: input.relationship,
+              coordinator_session_id: input.requested_by_session_id,
+              queue_revision: audit.expected_queue_revision,
+              expected_task_ids: audit.source_tasks.map((source) => source.task_id),
+              source_task_count: audit.source_task_count,
+              source_request_count: audit.source_request_count,
+              unique_request_count: audit.unique_request_count,
+              duplicate_request_count: audit.duplicate_request_count,
+              compatible: true,
+              refusal_reasons: [],
+              combine_allowed: combinedPromptBytes <= MAX_COMPACTED_PROMPT_BYTES,
+              ...(combinedPromptBytes > MAX_COMPACTED_PROMPT_BYTES
+                ? {
+                    combine_refusal_reason: `The combined prompt is ${combinedPromptBytes} bytes; the ${MAX_COMPACTED_PROMPT_BYTES}-byte limit is never truncated.`,
+                  }
+                : {}),
+              combined_prompt: combinedPrompt,
+              combined_prompt_bytes: combinedPromptBytes,
+            };
+            return {
+              outcome: 'already_batched',
+              preview,
+              execution_task: executionTask,
+              superseded_tasks: expectedRows
+                .filter((row) => row.task_id !== existingExecutionRow.task_id)
+                .map((row) => this.rowToTask(row)),
+            };
+          }
+          if (
+            sessionTaskRows.some((row) => {
+              const metadata = row.data.metadata;
+              return (
+                metadata?.coordinator_queue_batch?.operation_id === input.operation_id ||
+                metadata?.coordinator_queue_batch_member?.operation_id === input.operation_id
+              );
+            })
+          ) {
+            throw new RepositoryError('Coordinator queue batch retry markers are incomplete');
+          }
+
+          const queueRows = (await select(txDb)
+            .from(tasks)
+            .where(and(eq(tasks.session_id, input.session_id), eq(tasks.status, TaskStatus.QUEUED)))
+            .orderBy(asc(tasks.queue_position), asc(tasks.created_at), asc(tasks.task_id))
+            .all()) as TaskRow[];
+          const queueTasks = queueRows.map((row) => this.rowToTask(row));
+          const preview = buildCoordinatorQueueBatchPreview(
+            sessionRow,
+            queueTasks,
+            input.relationship,
+            input.requested_by_session_id
+          );
+          if (
+            preview.queue_revision !== input.expected_queue_revision ||
+            preview.expected_task_ids.length !== input.expected_task_ids.length ||
+            preview.expected_task_ids.some(
+              (taskId, index) => taskId !== input.expected_task_ids[index]
+            )
+          ) {
+            throw new RepositoryError(
+              'Queued Tasks changed after preview; refresh the queue before batching'
+            );
+          }
+          if (!preview.compatible) {
+            throw new RepositoryError(preview.refusal_reasons.join(' '));
+          }
+          if (input.strategy === 'combine' && !preview.combine_allowed) {
+            throw new RepositoryError(
+              preview.combine_refusal_reason ?? 'Combined prompt exceeds the safe byte limit'
+            );
+          }
+          if (input.strategy === 'replace' && !input.replacement_prompt?.trim()) {
+            throw new RepositoryError('A non-empty replacement prompt is required');
+          }
+          if (input.strategy === 'combine' && input.replacement_prompt !== undefined) {
+            throw new RepositoryError('COMBINE does not accept a replacement prompt');
+          }
+
+          const executionRow = queueRows[0]!;
+          const executionTaskBefore = queueTasks[0]!;
+          const { sources, requests } = coordinatorBatchSource(queueTasks);
+          const duplicateRequestCount = requests.filter(
+            (request) => !!request.duplicate_of_request_id
+          ).length;
+          const batchedAt = new Date().toISOString();
+          const batchAudit = {
+            version: 1 as const,
+            operation_id: input.operation_id,
+            strategy: input.strategy,
+            batched_at: batchedAt,
+            requested_by_user_id: input.requested_by_user_id,
+            coordinator_session_id: input.requested_by_session_id,
+            relationship: input.relationship,
+            expected_queue_revision: input.expected_queue_revision,
+            source_task_count: sources.length,
+            source_request_count: requests.length,
+            unique_request_count: requests.length - duplicateRequestCount,
+            duplicate_request_count: duplicateRequestCount,
+            source_tasks: sources,
+            ...(input.strategy === 'replace'
+              ? { replacement_prompt: input.replacement_prompt! }
+              : {}),
+          };
+          const executionData = {
+            ...executionRow.data,
+            full_prompt:
+              input.strategy === 'combine' ? preview.combined_prompt! : input.replacement_prompt!,
+            metadata: {
+              ...(executionTaskBefore.metadata ?? {}),
+              coordinator_queue_batch: batchAudit,
+            },
+          };
+          await update(txDb, tasks)
+            .set({ data: executionData })
+            .where(
+              and(eq(tasks.task_id, executionRow.task_id), eq(tasks.status, TaskStatus.QUEUED))
+            )
+            .run();
+
+          const supersededRows: TaskRow[] = [];
+          for (const row of queueRows.slice(1)) {
+            const data = {
+              ...row.data,
+              metadata: {
+                ...(row.data.metadata ?? {}),
+                coordinator_queue_batch_member: {
+                  version: 1 as const,
+                  operation_id: input.operation_id,
+                  strategy: input.strategy,
+                  execution_task_id: executionRow.task_id as TaskID,
+                  batched_at: batchedAt,
+                },
+              },
+            };
+            const completedAt = new Date(batchedAt);
+            await update(txDb, tasks)
+              .set({
+                status: TaskStatus.STOPPED,
+                queue_position: null,
+                completed_at: completedAt,
+                data,
+              })
+              .where(and(eq(tasks.task_id, row.task_id), eq(tasks.status, TaskStatus.QUEUED)))
+              .run();
+            supersededRows.push({
+              ...row,
+              status: TaskStatus.STOPPED,
+              queue_position: null,
+              completed_at: completedAt,
+              data,
+            });
+          }
+          const executionTask = this.rowToTask({ ...executionRow, data: executionData });
+          return {
+            outcome: 'batched',
+            preview,
+            execution_task: executionTask,
+            superseded_tasks: supersededRows.map((row) => this.rowToTask(row)),
+          };
+        },
+        { sqliteImmediate: true }
+      )
+    );
+  }
+
+  /**
    * Create a pending task — either CREATED (will spawn immediately) or
    * QUEUED (will drain later) — owning the sentinel defaults that the
    * caller would otherwise have to assemble by hand.
@@ -2309,13 +2800,14 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
                   input.compaction!.permission_mode &&
                 tail.metadata?.prompt_control?.stream === input.compaction!.stream;
               const ordinaryTailMetadata = Object.keys(tail.metadata ?? {}).every((key) =>
-                ['queued_by_user_id', 'prompt_compaction', 'prompt_control'].includes(key)
+                ['queued_by_user_id', 'source', 'prompt_compaction', 'prompt_control'].includes(key)
               );
               const safeTail =
                 tail.created_by === input.created_by &&
                 !!currentCompaction &&
                 currentCompaction.version === 1 &&
                 ordinaryTailMetadata &&
+                tail.metadata?.source !== 'gateway' &&
                 !tail.metadata?.completion_callback &&
                 !tail.metadata?.is_agor_callback &&
                 !tail.metadata?.widget_id &&

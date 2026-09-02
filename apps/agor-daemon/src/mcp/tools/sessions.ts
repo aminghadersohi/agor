@@ -25,12 +25,15 @@ import {
   AGENTIC_TOOL_NAMES,
   type AgenticToolName,
   type Board,
+  CALLBACK_DELIVERIES,
   getEffectiveDirectCallbackCoordinatorSessionId,
   getSessionType,
   SESSION_AUTO_ARCHIVE_POLICIES,
   type Session,
   type SessionRelationship,
   type SessionType,
+  type TaskID,
+  type UserID,
   type ZoneBoardObject,
 } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
@@ -132,6 +135,13 @@ const modelConfigInputSchema = z
     "Model override for this session. Pass either a model ID string (e.g. 'claude-opus-4-6') or a full { mode, model, effort, advisorModel, provider } object. Overrides the user default model_config and is threaded through to the spawned agent process. Call agor_models_list to discover valid model IDs per agenticTool."
   );
 
+const callbackDeliverySchema = z
+  .enum(CALLBACK_DELIVERIES)
+  .optional()
+  .describe(
+    'Standing callback delivery: direct preserves the existing queued callback; btw uses an ephemeral destination fork when available and falls back direct; auto uses BTW only when the destination is busy or the rendered callback is at least 8 KiB. Exact-task prompt callbacks remain direct.'
+  );
+
 const callbackRetargetOutputSchema = z.object({
   session_id: z.string().describe('Fully resolved callback source Session ID.'),
   previous_callback_session_id: z
@@ -184,6 +194,31 @@ const sessionInterruptOutputSchema = z.object({
   termination_status: z.enum(['idle', 'terminal', 'condition_changed', 'pending', 'unverified']),
   pending_code: z.string().optional(),
   note: z.string().optional(),
+});
+
+const coordinatorQueueBatchPreviewSchema = z.object({
+  session_id: z.string(),
+  relationship: z.enum(['parent', 'coordinator']),
+  coordinator_session_id: z.string(),
+  queue_revision: z.string(),
+  expected_task_ids: z.array(z.string()),
+  source_task_count: z.number(),
+  source_request_count: z.number(),
+  unique_request_count: z.number(),
+  duplicate_request_count: z.number(),
+  compatible: z.boolean(),
+  refusal_reasons: z.array(z.string()),
+  combine_allowed: z.boolean(),
+  combine_refusal_reason: z.string().optional(),
+  combined_prompt: z.string().optional(),
+  combined_prompt_bytes: z.number().optional(),
+});
+
+const coordinatorQueueBatchOutputSchema = z.object({
+  outcome: z.enum(['preview', 'batched', 'already_batched']),
+  preview: coordinatorQueueBatchPreviewSchema,
+  execution_task_id: z.string().optional(),
+  superseded_task_ids: z.array(z.string()).optional(),
 });
 
 /**
@@ -607,6 +642,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         }));
       result.effective_direct_callback_coordinator_session_id =
         getEffectiveDirectCallbackCoordinatorSessionId(session);
+      result.effective_callback_delivery = session.callback_config?.delivery ?? 'direct';
 
       if (session.branch_id) {
         try {
@@ -735,6 +771,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .boolean()
           .optional()
           .describe('Enable callback to parent on completion (default: true)'),
+        callbackDelivery: callbackDeliverySchema,
         includeLastMessage: z
           .boolean()
           .optional()
@@ -776,6 +813,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         title: args.title,
         agent: args.agenticTool as AgenticToolName | undefined,
         enableCallback: args.enableCallback,
+        callbackDelivery: args.callbackDelivery,
         includeLastMessage: args.includeLastMessage,
         includeOriginalPrompt: args.includeOriginalPrompt,
         extraInstructions: args.extraInstructions,
@@ -844,11 +882,14 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             'MCP server IDs for subsession mode. Overrides parent inheritance. Omit to inherit from parent. Pass empty array for no MCPs.'
           ),
         modelConfig: modelConfigInputSchema,
+        callbackDelivery: callbackDeliverySchema.describe(
+          'Standing callback delivery for subsession mode. Ignored by continue/fork/btw; the separate callback:true exact-task subscription always stays direct.'
+        ),
         callback: z
           .boolean()
           .optional()
           .describe(
-            'Send a one-shot completion report for the exact prompted task back to the current calling Agor session.'
+            'Send a one-shot direct completion report for the exact prompted task back to the current calling Agor session. Exact-task subscriptions are deliberately separate from standing callbackDelivery policy.'
           ),
         autoArchive: z
           .enum(SESSION_AUTO_ARCHIVE_POLICIES)
@@ -1013,6 +1054,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           modelConfig: coerceModelConfig(args.modelConfig),
           autoArchive: args.autoArchive,
           autoArchiveAfterSeconds: args.autoArchiveAfterSeconds,
+          callbackDelivery: args.callbackDelivery,
         };
         if (args.title) spawnData.title = args.title;
         if (args.agenticTool) spawnData.agent = args.agenticTool as AgenticToolName;
@@ -1244,7 +1286,141 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 5e: agor_session_relationships_set_callback
+  // Tool 5e: preview/apply one coordinator-owned queue-batching contract.
+  server.registerTool(
+    'agor_sessions_batch_queue',
+    {
+      description:
+        'Preview or atomically batch the complete ordinary queued-prompt set of a child Session into one executor turn. Authority comes only from this MCP Session being the target current parent or enabled direct callback coordinator. Preview first, then pass its exact queueRevision and taskIds to combine or replace. COMBINE deterministically preserves distinct text with a later-conflicts-win header; REPLACE sends only the supplied canonical prompt while retaining every original Task and request as audit. This never alters running work; use agor_sessions_interrupt_with_message for an active Task.',
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        targetSessionId: mcpRequiredId(
+          'targetSessionId',
+          'Session',
+          'Child Session queue to batch'
+        ),
+        relationship: z
+          .enum(['parent', 'coordinator'])
+          .describe('Current relationship through which this MCP Session coordinates the child.'),
+        action: z.enum(['preview', 'combine', 'replace']),
+        queueRevision: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Exact queue_revision returned by preview; required for combine/replace.'),
+        taskIds: z
+          .array(z.string().min(1))
+          .optional()
+          .describe('Exact ordered expected_task_ids returned by preview; required for apply.'),
+        replacementPrompt: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Canonical prompt sent for replace. Original text remains audit-only.'),
+        idempotencyKey: z
+          .string()
+          .min(1)
+          .max(128)
+          .optional()
+          .describe('Stable retry key required for combine/replace.'),
+      }),
+      outputSchema: coordinatorQueueBatchOutputSchema,
+    },
+    async (args) => {
+      if (!ctx.sessionId) return sessionContextRequiredResult();
+      const targetSessionId = await resolveSessionId(ctx, args.targetSessionId);
+      const authority = await runWithMcpTenantDatabaseScope(ctx, () =>
+        (ctx.app.service('sessions') as unknown as SessionsServiceImpl).resolveQueueBatchAuthority(
+          targetSessionId,
+          { callerSessionId: ctx.sessionId!, relationship: args.relationship },
+          ctx.baseServiceParams
+        )
+      );
+      if (args.action === 'preview') {
+        const preview = await runWithMcpTenantDatabaseScope(ctx, (db) =>
+          new TaskRepository(db).previewCoordinatorQueueBatch({
+            session_id: authority.target_session_id,
+            relationship: authority.relationship,
+            requested_by_session_id: authority.caller_session_id,
+          })
+        );
+        if ('outcome' in preview) {
+          throw new Error('Coordinator relationship changed while previewing the queue.');
+        }
+        return structuredResult({ outcome: 'preview', preview });
+      }
+      if (!args.queueRevision || !args.taskIds || !args.idempotencyKey) {
+        throw new Error('combine/replace require queueRevision, taskIds, and idempotencyKey.');
+      }
+      if (args.action === 'replace' && !args.replacementPrompt?.trim()) {
+        throw new Error('replace requires a non-empty replacementPrompt.');
+      }
+      const strategy = args.action === 'replace' ? 'replace' : 'combine';
+      const tenantId = ctx.baseServiceParams.tenant?.tenant_id ?? getCurrentTenantId();
+      const result = await runWithMcpTenantDatabaseWrite(ctx, (db) =>
+        runWithTenantDatabaseTransaction(db, tenantId, async (operationDb) => {
+          await lockTenantAuthorizationFence(operationDb, ctx.baseServiceParams);
+          const actor = await resolveCurrentTenantAuthorityActor(
+            operationDb,
+            ctx.baseServiceParams
+          );
+          if (actor.service || actor.user_id !== ctx.userId) {
+            throw new Error('Queue batching requires the current authenticated human actor.');
+          }
+          const currentAuthority = await (
+            ctx.app.service('sessions') as unknown as SessionsServiceImpl
+          ).resolveQueueBatchAuthority(
+            targetSessionId,
+            { callerSessionId: ctx.sessionId!, relationship: args.relationship },
+            ctx.baseServiceParams
+          );
+          return new TaskRepository(operationDb).applyCoordinatorQueueBatch({
+            session_id: currentAuthority.target_session_id,
+            relationship: currentAuthority.relationship,
+            requested_by_session_id: currentAuthority.caller_session_id,
+            requested_by_user_id: actor.user_id as UserID,
+            operation_id: args.idempotencyKey!,
+            strategy,
+            expected_queue_revision: args.queueRevision!,
+            expected_task_ids: args.taskIds as TaskID[],
+            ...(strategy === 'replace' ? { replacement_prompt: args.replacementPrompt! } : {}),
+          });
+        })
+      );
+      if (result.outcome === 'relationship_changed') {
+        throw new Error('Coordinator relationship changed before the queue could be batched.');
+      }
+      if (result.outcome === 'batched') {
+        emitServiceEvent(ctx.app, {
+          path: 'tasks',
+          event: 'patched',
+          data: result.execution_task,
+          params: ctx.baseServiceParams,
+          id: result.execution_task.task_id,
+        });
+        for (const task of result.superseded_tasks) {
+          emitServiceEvent(ctx.app, {
+            path: 'tasks',
+            event: 'patched',
+            data: task,
+            params: ctx.baseServiceParams,
+            id: task.task_id,
+          });
+        }
+        await (
+          ctx.app.service('sessions') as unknown as SessionsServiceImpl
+        ).triggerQueueProcessing(targetSessionId, ctx.baseServiceParams);
+      }
+      return structuredResult({
+        outcome: result.outcome,
+        preview: result.preview,
+        execution_task_id: result.execution_task.task_id,
+        superseded_task_ids: result.superseded_tasks.map((task) => task.task_id),
+      });
+    }
+  );
+
+  // Tool 5f: agor_session_relationships_set_callback
   server.registerTool(
     'agor_session_relationships_set_callback',
     {
@@ -1429,6 +1605,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .describe(
             'Callback firing mode: "persistent" (default) fires on every completion until unlinked, "once" fires on the first completion then auto-disables'
           ),
+        callbackDelivery: callbackDeliverySchema,
         parentSessionId: z
           .string()
           .min(1, 'parentSessionId cannot be empty when provided.')
@@ -1521,6 +1698,12 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       }
       if (wantsCallback) {
         callbackConfig.callback_mode = args.callbackMode ?? 'persistent';
+      }
+      if (args.callbackDelivery !== undefined) {
+        if (!wantsCallback) {
+          throw new Error('callbackDelivery requires enableCallback or callbackSessionId');
+        }
+        callbackConfig.delivery = args.callbackDelivery;
       }
 
       // Determine the parent session to link to in the genealogy, and — for a
@@ -1722,7 +1905,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       }
 
       const callbackNote = callbackConfig.callback_session_id
-        ? ` Callback will be sent to session ${shortId(callbackConfig.callback_session_id as string)} on completion.`
+        ? ` Callback will be sent to session ${shortId(callbackConfig.callback_session_id as string)} on completion using ${String(callbackConfig.delivery ?? 'direct')} delivery.`
         : '';
 
       const parentNote = resolvedParentSessionId
@@ -1788,6 +1971,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .positive()
           .max(365 * 24 * 60 * 60)
           .optional(),
+        callbackDelivery: callbackDeliverySchema,
       }),
     },
     async (args) => {
@@ -1805,7 +1989,11 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       }
 
       // Handle callback config updates
-      if (args.enableCallback !== undefined || args.callbackMode !== undefined) {
+      if (
+        args.enableCallback !== undefined ||
+        args.callbackMode !== undefined ||
+        args.callbackDelivery !== undefined
+      ) {
         const sessionId = await resolveSessionId(ctx, args.sessionId);
         const existingSession = await ctx.app
           .service('sessions')
@@ -1815,12 +2003,13 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           ...existingCallback,
           ...(args.enableCallback !== undefined ? { enabled: args.enableCallback } : {}),
           ...(args.callbackMode !== undefined ? { callback_mode: args.callbackMode } : {}),
+          ...(args.callbackDelivery !== undefined ? { delivery: args.callbackDelivery } : {}),
         };
       }
 
       if (Object.keys(updates).length === 0) {
         throw new Error(
-          'At least one field (title, description, status, archived, enableCallback, callbackMode, autoArchive, autoArchiveAfterSeconds) must be provided'
+          'At least one field (title, description, status, archived, enableCallback, callbackMode, callbackDelivery, autoArchive, autoArchiveAfterSeconds) must be provided'
         );
       }
 

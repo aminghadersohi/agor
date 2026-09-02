@@ -621,8 +621,7 @@ export function OnboardingWizard({
       }
       if (agent === 'gemini') return !!(gemini?.GEMINI_API_KEY || user.env_vars?.GEMINI_API_KEY);
       if (agent === 'opencode') {
-        const opencode = user.agentic_tools?.opencode;
-        return !!opencode?.[TOOL_API_KEY_NAMES.opencode ?? 'ANTHROPIC_API_KEY'];
+        return user.agentic_tools_public_values?.opencode?.ollama_enabled === 'true';
       }
       return false;
     },

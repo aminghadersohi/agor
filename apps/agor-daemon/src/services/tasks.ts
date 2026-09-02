@@ -5,6 +5,7 @@
  * Uses DrizzleService adapter with TaskRepository.
  */
 
+import { AGENTIC_TOOL_CAPABILITIES } from '@agor/agentic-tools';
 import { analyticsLogger } from '@agor/core/analytics';
 import {
   type ChildCompletionContext,
@@ -17,6 +18,7 @@ import {
 } from '@agor/core/config';
 import {
   assertTenantWritable,
+  BranchRepository,
   type CurrentTaskExecutorSessionTokenAuthority,
   type ExecutorLaunchAuthority,
   type ExecutorLaunchAuthorityOptions,
@@ -77,8 +79,21 @@ import {
   beginExecutorTermination,
   requestExecutorTermination,
 } from '../termination-coordinator.js';
+import { requireActiveAgenticTool } from '../utils/agentic-tool-runtime.js';
 import { appendSystemMessage } from '../utils/append-system-message.js';
-import { btwResultMessageId, completionCallbackTaskId } from '../utils/durable-task-id.js';
+import { ensureCanPromptTargetSession } from '../utils/branch-authorization.js';
+import {
+  type CallbackBtwUnavailableReason,
+  decideCallbackDelivery,
+  truncateCallbackBtwResult,
+} from '../utils/callback-delivery.js';
+import {
+  btwResultMessageId,
+  completionCallbackBtwResultMessageId,
+  completionCallbackBtwSessionId,
+  completionCallbackBtwTaskId,
+  completionCallbackTaskId,
+} from '../utils/durable-task-id.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
 import {
   type ExecutorHeartbeatCallbackPayload,
@@ -158,6 +173,8 @@ export type TaskParams = QueryParams<{
 
 interface CompletionCallbackDispatchResult {
   callbackTask?: Task;
+  delivery?: 'direct' | 'btw';
+  btwSessionId?: SessionID;
 }
 
 /**
@@ -940,6 +957,10 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       if (!responseText) {
         responseText = `(btw fork completed with status: ${task.status}, but no text response was found)`;
       }
+      const callbackDigest = btwSession.callback_config?.digest;
+      if (callbackDigest?.kind === 'callback_digest') {
+        responseText = truncateCallbackBtwResult(responseText);
+      }
 
       // Find the parent's current running task to attach the message to
       const parentSession = await this.app.service('sessions').get(parentSessionId);
@@ -961,7 +982,8 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       const previewText = `Q: ${promptText.substring(0, 80)} → A: ${responseText.substring(0, 100)}`;
 
       // Create via service so FeathersJS broadcasts the `created` event to all clients
-      const messageId = btwResultMessageId(task.task_id, parentSessionId);
+      const finalMessageId = callbackDigest?.final_message_id;
+      const messageId = finalMessageId ?? btwResultMessageId(task.task_id, parentSessionId);
       try {
         await appendSystemMessage({
           app: this.app,
@@ -970,8 +992,21 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
           taskId: parentLatestTaskId as string | undefined,
           content: [{ type: 'text', text: responseText } as ContentBlock],
           contentPreview: previewText.substring(0, 200),
+          messageId,
           metadata: {
             is_btw_result: true,
+            ...(callbackDigest
+              ? {
+                  is_callback_digest_result: true,
+                  callback_source_session_id: callbackDigest.source_session_id,
+                  callback_source_task_id: callbackDigest.source_task_id,
+                  callback_destination_session_id: callbackDigest.destination_session_id,
+                  callback_relationship_ids: callbackDigest.relationship_ids,
+                  callback_route: callbackDigest.route,
+                  callback_requested_delivery: callbackDigest.requested_delivery,
+                  callback_resolved_delivery: callbackDigest.resolved_delivery,
+                }
+              : {}),
             // The ephemeral btw fork session
             btw_session_id: btwSession.session_id,
             btw_task_id: task.task_id,
@@ -984,12 +1019,19 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
             btw_caller_title: callerTitle,
             source: 'agor',
           },
-          messageId,
         });
       } catch (error) {
-        // A prior attempt can commit the stable message before its Task marker.
-        // Treat that exact row as delivered; any other failure remains retryable.
-        await messagesService.get(messageId).catch(() => Promise.reject(error));
+        // The deterministic PK is the cross-daemon final-report fence. A
+        // duplicate insert means another completion retry already delivered
+        // this exact result; verify its destination and provenance instead of
+        // appending a second one.
+        const existing = await messagesService.get(messageId, { provider: undefined });
+        const mismatchedDigest =
+          callbackDigest &&
+          existing?.metadata?.callback_source_task_id !== callbackDigest.source_task_id;
+        if (existing?.session_id !== parentSessionId || mismatchedDigest) {
+          throw error;
+        }
       }
 
       const refreshed = (await this.taskRepo.findById(task.task_id)) ?? latestTask;
@@ -1073,6 +1115,13 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     childSession: Session,
     params?: TaskParams
   ): Promise<void> {
+    // A callback-digest BTW emits exactly one bounded system result through
+    // injectBtwResultMessage. It must never recursively subscribe its own
+    // completion to either direct or BTW callback delivery.
+    if (childSession.callback_config?.digest?.kind === 'callback_digest') {
+      return;
+    }
+
     const sessionTargetId = this.resolveCompletionCallbackTarget(childSession);
     const taskTargetId = task.metadata?.completion_callback?.target_session_id;
     const targetSessionIds = [
@@ -1098,11 +1147,11 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         // This ensures callbacks are never missed due to timing issues.
         try {
           console.log(
-            `🔄 [TasksService] Triggering callback target queue processing for ${shortId(targetSessionId)} (callback queued)`
+            `🔄 [TasksService] Triggering callback delivery queue processing for ${shortId(dispatchResult.callbackTask.session_id)} (${dispatchResult.delivery ?? 'direct'} queued)`
           );
           // Pass empty params to avoid leaking child's auth context to target.
           // The queue processor reconstructs target auth from queued task metadata.
-          await this.triggerQueueProcessingAfterCommit(targetSessionId, {});
+          await this.triggerQueueProcessingAfterCommit(dispatchResult.callbackTask.session_id, {});
         } catch (error) {
           // Don't throw - target issues shouldn't break child queue processing.
           console.warn(
@@ -1171,6 +1220,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     task: Task,
     targetSessionId: SessionID,
     queuedTaskId: TaskID | undefined,
+    dispatch: Pick<CompletionCallbackDispatchResult, 'delivery' | 'btwSessionId'>,
     params?: TaskParams
   ): Promise<void> {
     const latestTask = (await this.taskRepo.findById(task.task_id)) ?? task;
@@ -1184,6 +1234,8 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
           event: 'task_completion',
           target_session_id: targetSessionId,
           queued_task_id: queuedTaskId,
+          delivery: dispatch.delivery ?? 'direct',
+          ...(dispatch.btwSessionId ? { btw_session_id: dispatch.btwSessionId } : {}),
           dispatched_at: new Date().toISOString(),
         },
       ],
@@ -1214,18 +1266,19 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         return {};
       }
 
-      const queuedCallbackTask = await this.queueCallbackToSession(
+      const queuedCallback = await this.queueCallbackToSession(
         task,
         childSession,
         targetSessionId,
         params
       );
-      if (queuedCallbackTask) {
+      if (queuedCallback.callbackTask) {
         try {
           await this.markCompletionCallbackDispatched(
             task,
             targetSessionId,
-            queuedCallbackTask.task_id,
+            queuedCallback.callbackTask.task_id,
+            queuedCallback,
             params
           );
         } catch (error) {
@@ -1236,7 +1289,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         }
       }
 
-      return { callbackTask: queuedCallbackTask };
+      return queuedCallback;
     })();
 
     this.completionCallbackDispatches.set(dispatchKey, dispatch);
@@ -1252,13 +1305,186 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
    * The target is always callback_config.callback_session_id, set by both
    * spawn (defaults to parent) and create (when enableCallback is true).
    */
+  private async callbackBtwUnavailableReason(
+    targetSession: Session,
+    callbackCreator: string,
+    db: ConstructorParameters<typeof BranchRepository>[0] = this.db
+  ): Promise<CallbackBtwUnavailableReason | undefined> {
+    if (
+      targetSession.archived ||
+      !new Set<Session['status']>([
+        SessionStatus.IDLE,
+        SessionStatus.RUNNING,
+        SessionStatus.AWAITING_PERMISSION,
+        SessionStatus.AWAITING_INPUT,
+      ]).has(targetSession.status)
+    ) {
+      return 'destination_inactive';
+    }
+
+    let targetTool: ReturnType<typeof requireActiveAgenticTool>;
+    try {
+      targetTool = requireActiveAgenticTool(targetSession.agentic_tool);
+    } catch {
+      return 'unsupported_agent';
+    }
+    if (!AGENTIC_TOOL_CAPABILITIES[targetTool]?.supportsSessionFork) {
+      return 'unsupported_agent';
+    }
+    if (!targetSession.sdk_session_id) return 'missing_fork_state';
+
+    const branchRepo = new BranchRepository(db);
+    const branch = await branchRepo.findById(targetSession.branch_id);
+    if (!branch || branch.archived) return 'branch_inactive';
+
+    try {
+      await ensureCanPromptTargetSession(
+        targetSession.session_id,
+        callbackCreator,
+        this.app,
+        branchRepo
+      );
+    } catch {
+      return 'permission_denied';
+    }
+    return undefined;
+  }
+
+  private callbackRelationshipIds(
+    childSession: Session,
+    targetSessionId: SessionID
+  ): import('@agor/core/types').SessionRelationshipID[] {
+    return (childSession.remote_relationships?.as_target ?? [])
+      .filter(
+        (relationship) =>
+          relationship.relationship_type === 'remote_create' &&
+          relationship.callback_session_id === targetSessionId
+      )
+      .map((relationship) => relationship.relationship_id);
+  }
+
+  private callbackDigestPrompt(callbackMessage: string): string {
+    return [
+      '[Agor callback digest]',
+      'Reconcile the completion report below against this coordinator conversation.',
+      'Return at most ONE concise, actionable result. Preserve blockers, decisions, required follow-ups, and critical provenance.',
+      'Do not request another callback, spawn a callback digest, or repeat the full report.',
+      'Keep the answer under 4 KiB; Agor applies a hard output cap.',
+      '',
+      '--- completion report ---',
+      callbackMessage,
+    ].join('\n');
+  }
+
+  private async queueCallbackThroughBtw(input: {
+    task: Task;
+    childSession: Session;
+    targetSession: Session;
+    callbackMessage: string;
+    callbackCreator: string;
+    requestedDelivery: 'btw' | 'auto';
+    relationshipIds: import('@agor/core/types').SessionRelationshipID[];
+  }): Promise<CompletionCallbackDispatchResult> {
+    const { task, childSession, callbackCreator, relationshipIds } = input;
+    const sessionsService = this.app.service('sessions') as unknown as SessionsService;
+    // Re-read inside the materialization unit so archival, branch state, SDK
+    // state, or permission changes between preflight and insertion fail closed.
+    const targetSession = await sessionsService.get(input.targetSession.session_id, {
+      provider: undefined,
+    });
+    const racedUnavailableReason = await this.callbackBtwUnavailableReason(
+      targetSession,
+      callbackCreator
+    );
+    if (racedUnavailableReason) {
+      throw new Conflict(`Callback BTW became unavailable: ${racedUnavailableReason}`);
+    }
+    const btwSessionId = completionCallbackBtwSessionId(task.task_id, targetSession.session_id);
+    const btwTaskId = completionCallbackBtwTaskId(task.task_id, targetSession.session_id);
+    const finalMessageId = completionCallbackBtwResultMessageId(
+      task.task_id,
+      targetSession.session_id
+    );
+    const digestPrompt = this.callbackDigestPrompt(input.callbackMessage);
+    const btwSession = await sessionsService.fork(
+      targetSession.session_id,
+      {
+        prompt: digestPrompt,
+        task_id: targetSession.tasks?.[targetSession.tasks.length - 1],
+        stableSessionId: btwSessionId,
+        forkOrigin: 'btw',
+        callbackConfig: {
+          enabled: false,
+          callback_mode: 'once',
+          delivery: 'direct',
+          digest: {
+            kind: 'callback_digest',
+            source_session_id: childSession.session_id,
+            source_task_id: task.task_id,
+            destination_session_id: targetSession.session_id,
+            relationship_ids: relationshipIds,
+            route: 'standing',
+            requested_delivery: input.requestedDelivery,
+            resolved_delivery: 'btw',
+            callback_created_by: callbackCreator as import('@agor/core/types').UserID,
+            final_message_id: finalMessageId,
+          },
+        },
+      },
+      { provider: undefined }
+    );
+
+    const callbackTask = await this.taskRepo.createPending({
+      task_id: btwTaskId,
+      session_id: btwSession.session_id,
+      full_prompt: digestPrompt,
+      created_by: callbackCreator,
+      status: TaskStatus.QUEUED,
+      metadata: {
+        is_agor_callback: true,
+        system_authored: true,
+        source: 'agor',
+        child_session_id: childSession.session_id,
+        child_task_id: task.task_id,
+        queued_by_user_id: callbackCreator,
+        initial_message_id: btwTaskId as MessageID,
+        callback_delivery: {
+          source_session_id: childSession.session_id,
+          source_task_id: task.task_id,
+          destination_session_id: targetSession.session_id,
+          relationship_ids: relationshipIds,
+          route: 'standing',
+          requested_delivery: input.requestedDelivery,
+          resolved_delivery: 'btw',
+          btw_session_id: btwSession.session_id,
+          final_message_id: finalMessageId,
+        },
+      },
+    });
+
+    if (callbackTask.status === TaskStatus.QUEUED) {
+      // Realtime publication is advisory. Once the durable digest Task exists,
+      // an emitter failure must not make the caller fall back to direct and
+      // admit a second delivery path for the same completion.
+      try {
+        this.emit?.('queued', callbackTask);
+      } catch (error) {
+        console.warn(
+          `⚠️  [TasksService] Failed to publish queued callback BTW task ${shortId(callbackTask.task_id)}:`,
+          error
+        );
+      }
+    }
+    return { callbackTask, delivery: 'btw', btwSessionId: btwSession.session_id };
+  }
+
   private async queueCallbackToSession(
     task: Task,
     childSession: Session,
     targetSessionId: SessionID,
     params?: TaskParams
-  ): Promise<Task | undefined> {
-    if (!targetSessionId) return undefined;
+  ): Promise<CompletionCallbackDispatchResult> {
+    if (!targetSessionId) return {};
 
     try {
       // Get target session to check callback config
@@ -1279,7 +1505,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         console.log(
           `⏭️  [TasksService] Callbacks disabled for child session ${shortId(childSession.session_id)}`
         );
-        return undefined;
+        return {};
       }
 
       // Check if we should include original spawn prompt - child overrides take precedence
@@ -1377,7 +1603,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         console.warn(
           `⚠️  [TasksService] Cannot queue callback: target session ${shortId(targetSessionId)} has no creator (anonymous session)`
         );
-        return undefined;
+        return {};
       }
 
       // Create QUEUED task on the target session carrying the callback prompt.
@@ -1396,10 +1622,101 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
           : undefined) ??
         childSession.callback_config?.callback_created_by ??
         targetSession.created_by;
-      const callbackTaskId = completionCallbackTaskId(task.task_id, targetSessionId);
+      const directCallbackTaskId = completionCallbackTaskId(task.task_id, targetSessionId);
+      const existingDirectCallback = await this.taskRepo.findById(directCallbackTaskId);
+      if (
+        existingDirectCallback?.session_id === targetSessionId &&
+        existingDirectCallback.metadata?.child_task_id === task.task_id
+      ) {
+        // A prior BTW materialization attempt may have fallen back after
+        // creating only part of its deterministic side-session state. The
+        // durable direct Task is the arbitration winner: never resurrect the
+        // BTW path on a later completion retry.
+        return { callbackTask: existingDirectCallback, delivery: 'direct' };
+      }
+      const relationshipIds = this.callbackRelationshipIds(childSession, targetSessionId);
+      const route = isExactTaskCallback ? 'exact_task' : 'standing';
+      const requestedDelivery = isExactTaskCallback
+        ? 'direct'
+        : (childSession.callback_config?.delivery ?? 'direct');
+      let deliveryDecision = decideCallbackDelivery({
+        requested: requestedDelivery,
+        payload: callbackMessage,
+        destinationBusy: targetSession.status !== SessionStatus.IDLE,
+        callbackDigestSource: childSession.callback_config?.digest?.kind === 'callback_digest',
+      });
+      const tenantId = getCurrentTenantId() ?? params?.tenant?.tenant_id;
+
+      if (deliveryDecision.resolved === 'btw') {
+        const preflight = (db?: ConstructorParameters<typeof BranchRepository>[0]) =>
+          this.callbackBtwUnavailableReason(targetSession, callbackCreator, db);
+        const unavailableReason = tenantId
+          ? await runWithTenantDatabaseScope(this.db, tenantId, (tenantDb) => preflight(tenantDb))
+          : await preflight();
+        deliveryDecision = decideCallbackDelivery({
+          requested: requestedDelivery,
+          payload: callbackMessage,
+          destinationBusy: targetSession.status !== SessionStatus.IDLE,
+          unavailableReason,
+          callbackDigestSource: childSession.callback_config?.digest?.kind === 'callback_digest',
+        });
+      }
+
+      if (deliveryDecision.resolved === 'btw') {
+        try {
+          const queueBtw = () =>
+            this.queueCallbackThroughBtw({
+              task,
+              childSession,
+              targetSession,
+              callbackMessage,
+              callbackCreator,
+              requestedDelivery: requestedDelivery as 'btw' | 'auto',
+              relationshipIds,
+            });
+          return tenantId
+            ? await runWithTenantDatabaseScope(this.db, tenantId, async (tenantDb) => {
+                await assertTenantWritable(tenantDb, tenantId);
+                return queueBtw();
+              })
+            : await queueBtw();
+        } catch (error) {
+          const admittedBtwTask = await this.taskRepo.findById(
+            completionCallbackBtwTaskId(task.task_id, targetSessionId)
+          );
+          const stableBtwSessionId = completionCallbackBtwSessionId(task.task_id, targetSessionId);
+          if (
+            admittedBtwTask?.session_id === stableBtwSessionId &&
+            admittedBtwTask.metadata?.child_task_id === task.task_id
+          ) {
+            // Task admission is the durable delivery boundary. Failures after
+            // it (for example realtime publication) must reconcile to BTW,
+            // not create a direct duplicate.
+            return {
+              callbackTask: admittedBtwTask,
+              delivery: 'btw',
+              btwSessionId: stableBtwSessionId,
+            };
+          }
+          // Capability/state was checked before the attempt. A storage or
+          // concurrent lifecycle failure still falls back to the same stable
+          // direct Task so the callback is never lost merely because BTW
+          // materialization failed.
+          console.warn(
+            `⚠️  [TasksService] Callback BTW creation failed; falling back to direct delivery:`,
+            error instanceof Error ? error.message : String(error)
+          );
+          deliveryDecision = {
+            ...deliveryDecision,
+            resolved: 'direct',
+            fallback_reason: 'creation_failed',
+          };
+        }
+      }
+
       const createCallbackTask = () =>
         this.taskRepo.createPending({
-          task_id: callbackTaskId,
+          task_id: directCallbackTaskId,
           session_id: targetSessionId,
           full_prompt: callbackMessage,
           created_by: callbackCreator,
@@ -1410,10 +1727,21 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
             child_session_id: childSession.session_id,
             child_task_id: task.task_id,
             queued_by_user_id: callbackCreator,
-            initial_message_id: callbackTaskId as MessageID,
+            initial_message_id: directCallbackTaskId as MessageID,
+            callback_delivery: {
+              source_session_id: childSession.session_id,
+              source_task_id: task.task_id,
+              destination_session_id: targetSessionId,
+              relationship_ids: relationshipIds,
+              route,
+              requested_delivery: requestedDelivery,
+              resolved_delivery: 'direct',
+              ...(deliveryDecision.fallback_reason
+                ? { fallback_reason: deliveryDecision.fallback_reason }
+                : {}),
+            },
           },
         });
-      const tenantId = getCurrentTenantId() ?? params?.tenant?.tenant_id;
       const callbackTask = tenantId
         ? await runWithTenantDatabaseScope(this.db, tenantId, async (tenantDb) => {
             await assertTenantWritable(tenantDb, tenantId);
@@ -1434,14 +1762,14 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
 
       // NOTE: Queue processing is handled by the centralized dispatcher after
       // it confirms a callback task was actually queued.
-      return callbackTask;
+      return { callbackTask, delivery: 'direct' };
     } catch (error) {
       console.error(
         `❌ [TasksService] Failed to queue callback to ${targetSessionId} for session ${childSession.session_id}:`,
         error
       );
       // Don't throw - callback failure shouldn't break task completion
-      return undefined;
+      return {};
     }
   }
 

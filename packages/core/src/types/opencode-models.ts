@@ -9,6 +9,11 @@ export interface OpenCodeCatalogModel {
   id: string;
   name: string;
   status: OpenCodeModelStatus;
+  sizeBytes?: number;
+  contextTokens?: number;
+  tools?: boolean;
+  thinking?: boolean;
+  vision?: boolean;
 }
 
 export interface OpenCodeCatalogProvider {

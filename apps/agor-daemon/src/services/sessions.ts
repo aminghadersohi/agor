@@ -73,6 +73,7 @@ import type {
 } from '@agor/core/types';
 import {
   BTW_AUTO_ARCHIVE_AFTER_SECONDS,
+  CALLBACK_DELIVERIES,
   getEffectiveDirectCallbackCoordinatorSessionId,
   isAgenticToolDefaultConfigurationReference,
   SessionStatus,
@@ -111,6 +112,21 @@ type SessionArchiveTarget = {
   archived: boolean;
   archivedReason: SessionArchiveReason | null;
 };
+
+/** Internal idempotency/provenance options used by callback-digest BTW forks. */
+export type SessionForkInput = {
+  prompt: string;
+  task_id?: string;
+  stableSessionId?: SessionID;
+  forkOrigin?: Session['fork_origin'];
+  callbackConfig?: Session['callback_config'];
+};
+
+function assertCallbackDelivery(value: unknown): void {
+  if (value !== undefined && !CALLBACK_DELIVERIES.includes(value as never)) {
+    throw new BadRequest('callback delivery must be direct, btw, or auto');
+  }
+}
 
 const MANUAL_ARCHIVED_REASON = 'manual' satisfies SessionArchiveReason;
 const PARENT_ARCHIVED_REASON = 'parent_archived' satisfies SessionArchiveReason;
@@ -296,6 +312,12 @@ export type SessionRelayDestinationInput = {
 
 export type SessionInterruptAuthorityInput = {
   callerSessionId: SessionID;
+  relationship: SessionInterruptRelationship;
+};
+
+export type SessionQueueBatchAuthorityInput = {
+  /** MCP supplies its own Session; browser/API callers leave this derived. */
+  callerSessionId?: SessionID;
   relationship: SessionInterruptRelationship;
 };
 
@@ -554,6 +576,62 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     };
   }
 
+  /**
+   * Resolve queue-batching authority from the target's current relationship.
+   * Merely naming a caller is never sufficient: both Sessions are checked for
+   * current prompt authority and the locked repository mutation rechecks the
+   * relationship before touching the queue.
+   */
+  async resolveQueueBatchAuthority(
+    targetId: string,
+    data: SessionQueueBatchAuthorityInput,
+    params?: SessionParams
+  ): Promise<SessionInterruptAuthority> {
+    const target = await this.requireSessionTransferAuthority(
+      targetId as SessionID,
+      params,
+      'destination'
+    );
+    const derivedCallerSessionId =
+      data.relationship === 'parent'
+        ? target.genealogy?.parent_session_id
+        : (getEffectiveDirectCallbackCoordinatorSessionId(target) ?? undefined);
+    if (
+      !derivedCallerSessionId ||
+      (data.callerSessionId && data.callerSessionId !== derivedCallerSessionId)
+    ) {
+      throw new Forbidden(
+        `Current ${data.relationship} relationship does not authorize this Session to batch the target queue.`
+      );
+    }
+    const caller = await this.requireSessionTransferAuthority(
+      derivedCallerSessionId,
+      params,
+      'destination'
+    );
+    if (getHiddenTenantId(caller) !== getHiddenTenantId(target)) {
+      throw new Forbidden('Queue coordinator and target must belong to the same tenant.');
+    }
+    if (
+      data.relationship === 'parent' &&
+      (target.genealogy?.parent_session_id !== caller.session_id ||
+        target.branch_id !== caller.branch_id)
+    ) {
+      throw new Forbidden('Current branch-local parent no longer authorizes queue batching.');
+    }
+    if (
+      data.relationship === 'coordinator' &&
+      getEffectiveDirectCallbackCoordinatorSessionId(target) !== caller.session_id
+    ) {
+      throw new Forbidden('Current callback coordinator no longer authorizes queue batching.');
+    }
+    return {
+      caller_session_id: caller.session_id,
+      target_session_id: target.session_id,
+      relationship: data.relationship,
+    };
+  }
+
   private async resolveDirectCreateModelFallback(
     agenticTool: AgenticToolName,
     data: CreateSessionInput,
@@ -670,6 +748,10 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     }
     if (Object.hasOwn(data, 'sdk_home_scope')) {
       throw new BadRequest('sdk_home_scope is server-managed and cannot be set by clients');
+    }
+    assertCallbackDelivery(data.callback_config?.delivery);
+    if (params?.provider && data.callback_config?.digest !== undefined) {
+      throw new BadRequest('callback digest provenance is server-managed');
     }
     const agenticTool = requireActiveAgenticTool(data.agentic_tool ?? 'claude-code');
     this.assertDeploymentToolConfigured(agenticTool);
@@ -1094,11 +1176,15 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
    *
    * Creates a new session branching from the current session at a decision point.
    */
-  async fork(
-    id: string,
-    data: { prompt: string; task_id?: string },
-    params?: SessionParams
-  ): Promise<Session> {
+  async fork(id: string, data: SessionForkInput, params?: SessionParams): Promise<Session> {
+    if (
+      params?.provider &&
+      (data.stableSessionId !== undefined ||
+        data.forkOrigin !== undefined ||
+        data.callbackConfig !== undefined)
+    ) {
+      throw new BadRequest('stable callback BTW fork fields are server-managed');
+    }
     const parent = await this.get(id, params);
     const parentTool = requireActiveAgenticTool(parent.agentic_tool);
 
@@ -1114,32 +1200,73 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     });
     this.assertSupportedModelConfig(parentTool, inherited.model_config);
 
-    const forkedSession = await this.create(
-      {
-        agentic_tool: parentTool,
-        agentic_tool_preset_id: inherited.agentic_tool_preset_id,
-        status: SessionStatus.IDLE,
-        title: data.prompt.substring(0, 100), // First 100 chars as title
-        description: data.prompt,
-        branch_id: parent.branch_id,
-        created_by, // See resolveChildIdentity — defaults to caller, not parent owner
-        unix_username, // Stamped by resolveChildIdentity — this.create() bypasses
-        // the setSessionUnixUsername hook so we must set it explicitly here.
-        // Delegated deployments refuse to launch sessions with a null home key.
-        genealogy: {
-          forked_from_session_id: parent.session_id,
-          fork_point_task_id: data.task_id as TaskID,
-          fork_point_message_index: await this.sessionRepo.countMessages(parent.session_id),
-          children: [],
+    let existingStableFork: Session | null = null;
+    if (data.stableSessionId) {
+      existingStableFork = await this.sessionRepo.findById(data.stableSessionId);
+      if (
+        existingStableFork &&
+        (existingStableFork.genealogy?.forked_from_session_id !== parent.session_id ||
+          existingStableFork.branch_id !== parent.branch_id ||
+          existingStableFork.fork_origin !== data.forkOrigin)
+      ) {
+        throw new Conflict(`Stable callback BTW Session identity is already in use.`);
+      }
+    }
+
+    const createFork = async () =>
+      this.create(
+        {
+          ...(data.stableSessionId ? { session_id: data.stableSessionId } : {}),
+          agentic_tool: parentTool,
+          agentic_tool_preset_id: inherited.agentic_tool_preset_id,
+          status: SessionStatus.IDLE,
+          title: data.prompt.substring(0, 100), // First 100 chars as title
+          description: data.prompt,
+          branch_id: parent.branch_id,
+          created_by, // See resolveChildIdentity — defaults to caller, not parent owner
+          unix_username, // Stamped by resolveChildIdentity — this.create() bypasses
+          // the setSessionUnixUsername hook so we must set it explicitly here.
+          // Delegated deployments refuse to launch sessions with a null home key.
+          genealogy: {
+            forked_from_session_id: parent.session_id,
+            fork_point_task_id: data.task_id as TaskID,
+            fork_point_message_index: await this.sessionRepo.countMessages(parent.session_id),
+            children: [],
+          },
+          contextFiles: [...(parent.contextFiles || [])],
+          permission_config: inherited.permission_config,
+          model_config: inherited.model_config,
+          ...(data.forkOrigin ? { fork_origin: data.forkOrigin } : {}),
+          ...(data.callbackConfig ? { callback_config: data.callbackConfig } : {}),
+          tasks: [],
+          // Don't copy sdk_session_id - fork will get its own via forkSession:true
         },
-        contextFiles: [...(parent.contextFiles || [])],
-        permission_config: inherited.permission_config,
-        model_config: inherited.model_config,
-        tasks: [],
-        // Don't copy sdk_session_id - fork will get its own via forkSession:true
-      },
-      { ...params, _agenticConfigResolved: true, _sdkHomeScope: parent.sdk_home_scope }
-    );
+        { ...params, _agenticConfigResolved: true, _sdkHomeScope: parent.sdk_home_scope }
+      );
+
+    let forkedSession: Session | Session[];
+    if (existingStableFork) {
+      forkedSession = existingStableFork;
+    } else {
+      try {
+        forkedSession = await createFork();
+      } catch (error) {
+        // A competing daemon may have won the deterministic Session insert.
+        // Re-read and validate that exact row rather than creating a sibling.
+        const raced = data.stableSessionId
+          ? await this.sessionRepo.findById(data.stableSessionId)
+          : null;
+        if (
+          !raced ||
+          raced.genealogy?.forked_from_session_id !== parent.session_id ||
+          raced.branch_id !== parent.branch_id ||
+          raced.fork_origin !== data.forkOrigin
+        ) {
+          throw error;
+        }
+        forkedSession = raced;
+      }
+    }
 
     // Cast forkedSession to Session to handle return type
     const session = forkedSession as Session;
@@ -1168,16 +1295,18 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
 
     // Update parent's children list
     const parentChildren = parent.genealogy?.children || [];
-    await this.patch(
-      id,
-      {
-        genealogy: {
-          ...parent.genealogy,
-          children: [...parentChildren, session.session_id],
+    if (!parentChildren.includes(session.session_id)) {
+      await this.patch(
+        id,
+        {
+          genealogy: {
+            ...parent.genealogy,
+            children: [...parentChildren, session.session_id],
+          },
         },
-      },
-      params
-    );
+        params
+      );
+    }
 
     return session;
   }
@@ -1193,6 +1322,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     }
     assertAutoArchivePolicy(data.autoArchive);
     assertAutoArchiveTtl(data.autoArchiveAfterSeconds);
+    assertCallbackDelivery(data.callbackDelivery);
     const parent = await this.get(id, params);
     requireActiveAgenticTool(parent.agentic_tool);
     const targetTool = requireActiveAgenticTool(data.agent || parent.agentic_tool);
@@ -1287,6 +1417,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         ? { include_original_prompt: data.includeOriginalPrompt }
         : {}),
       callback_mode: data.callbackMode ?? 'once',
+      ...(data.callbackDelivery ? { delivery: data.callbackDelivery } : {}),
     };
 
     let finalPrompt = data.prompt;
@@ -1817,6 +1948,10 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       if (data.archived !== undefined) {
         data = { ...data, auto_archive_at: undefined };
       }
+    }
+    assertCallbackDelivery(data.callback_config?.delivery);
+    if (params?.provider && data.callback_config?.digest !== undefined) {
+      throw new BadRequest('callback digest provenance is server-managed');
     }
     let replaceAgenticConfig = false;
     if (
