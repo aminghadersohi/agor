@@ -17,7 +17,7 @@ const postgresUrl = process.env.AGOR_TEST_POSTGRES_URL;
 const enabled = process.env.AGOR_DB_DIALECT === 'postgresql' && Boolean(postgresUrl);
 const migrationsFolder = resolve(dirname(fileURLToPath(import.meta.url)), '../../drizzle/postgres');
 
-describe.skipIf(!enabled)('zone workflow PostgreSQL 0099 -> 0101 upgrade', () => {
+describe.skipIf(!enabled)('zone workflow PostgreSQL 0101 -> 0102 upgrade', () => {
   let db: Database;
   let priorFolder: string;
   let tenantId: string;
@@ -26,14 +26,14 @@ describe.skipIf(!enabled)('zone workflow PostgreSQL 0099 -> 0101 upgrade', () =>
 
   beforeAll(async () => {
     db = createDatabase({ dialect: 'postgresql', url: postgresUrl! });
-    priorFolder = await mkdtemp(join(tmpdir(), 'agor-pg-migrations-through-0099-'));
+    priorFolder = await mkdtemp(join(tmpdir(), 'agor-pg-migrations-through-0101-'));
     await cp(migrationsFolder, priorFolder, { recursive: true });
     await unlink(join(priorFolder, '0102_zone_workflow_transitions.sql'));
     const journalPath = join(priorFolder, 'meta', '_journal.json');
     const journal = JSON.parse(await readFile(journalPath, 'utf8')) as {
       entries: Array<{ idx: number }>;
     };
-    journal.entries = journal.entries.filter((entry) => entry.idx <= 99);
+    journal.entries = journal.entries.filter((entry) => entry.idx <= 101);
     await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
     await migratePostgres(db as never, { migrationsFolder: priorFolder });
 
