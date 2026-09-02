@@ -111,6 +111,53 @@ callback contracts, attachment lifecycle, credential attribution, and control
 ordering. Queue/status responses expose the admission request ID, shared
 execution Task ID, request IDs/count, unique count, and duplicate count.
 
+The continuation fence is intentional. A Session with a branch-local parent or
+enabled direct callback coordinator can report once per Task, and an exact-Task
+callback is itself a one-result subscription. Automatically folding those Tasks
+would silently change five completion contracts into one without the
+coordinator choosing that behavior. PR #20 therefore kept
+`hasCompletionContinuation` as a hard automatic fence instead of treating a
+matching prompt actor as sufficient.
+
+## Explicit coordinator queue batching
+
+A current branch-local parent or enabled direct callback coordinator can opt in
+to one aggregated result with `agor_sessions_batch_queue` or **Combine queue**
+in the Queued Tasks drawer. Preview returns an exact ordered Task-ID set and a
+SHA-256 queue revision. Apply holds the durable Session row lock shared by
+prompt admission and dispatch, then rejects if the relationship, callback
+contract, queue revision, or Task set changed. A stable idempotency key makes
+the committed operation safe to retry across daemons.
+
+- **COMBINE** keeps every distinct instruction in deterministic
+  first-occurrence order. Unicode/whitespace-normalized duplicates keep full
+  audit records but do not repeat executor bytes. The generated header says
+  later instructions override earlier ones only when they conflict. No LLM
+  summarizes the queue. A result above 32 KiB is refused, never truncated.
+- **REPLACE** sends only one caller-supplied canonical prompt. This is the safe
+  token-saving choice for “no, do not do that” corrections. Every original
+  Task/request ID, actor, timestamp, normalized/original text, and callback
+  contract remains durable in Task metadata.
+
+Only compatible QUEUED prompts can participate. Actor, tenant, exact callback,
+standing callback state, permission mode, stream mode, and admission class must
+match. Attachments, widgets, gateways, slash controls, interrupt corrections,
+daemon callbacks/continuations, non-Agor source metadata, and other internal semantics
+are barriers. The first Task remains QUEUED with the aggregate audit; the other
+Tasks remain in history as STOPPED batch members pointing to that execution
+Task. Because those audit-only members never pass through natural completion,
+identical callbacks produce exactly one aggregate completion from the survivor.
+The visible task history labels both sides as N requests → one turn.
+
+This operation never rewrites a claimed Task. For work already dispatching or
+running, use `agor_sessions_interrupt_with_message`: it requests verified Stop
+and queues one correction ahead of ordinary work. Queue batching instead edits
+only an unclaimed, revision-fenced queue and never performs interruption.
+There is deliberately no second prompt-time “compact this queue” flag: adding a
+follow-up and rewriting older intent in one opaque call would skip the required
+preview and blur COMBINE versus REPLACE. Coordinators use the single batch
+preview/apply contract after ordinary prompt admission instead.
+
 An authorized interrupt correction is a separate non-compactable Task. It is
 inserted ahead of ordinary queued work while the active Task and Session are
 atomically moved to STOPPING. It cannot dispatch until the existing termination

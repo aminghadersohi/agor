@@ -338,6 +338,22 @@ durably queued; an idle target simply queues it without a fake Stop. Reusing an
 corrective Task. Stopped turns do not fire natural-completion callbacks; the
 correction's eventual completion follows normal callback routing.
 
+`agor_sessions_batch_queue(targetSessionId, relationship, action, ...)` is the
+unclaimed-queue counterpart. The calling MCP Session must again be the target's
+current parent or enabled direct callback coordinator; a target ID grants no
+authority. Call `action: "preview"` first. It returns `queue_revision`, the
+exact ordered `expected_task_ids`, compatibility counts, and the deterministic
+combined prompt. Then call `action: "combine"` or `action: "replace"` with
+those fences and a stable `idempotencyKey`.
+
+Combine preserves every distinct instruction and removes only normalized
+duplicates. Replace requires `replacementPrompt` and sends only that canonical
+text. Both retain the original Tasks and full request provenance, produce one
+execution Task and one aggregate callback, and refuse mixed callback/control or
+attachment/widget/gateway/internal semantics. A queue or relationship change
+invalidates the preview. This tool never stops running work; use
+`agor_sessions_interrupt_with_message` for that case.
+
 ## Best Practices
 
 - **Keep permission policies tight.** MCP calls respect Agor’s permission system. Configure approvals so agents only do what the team expects.

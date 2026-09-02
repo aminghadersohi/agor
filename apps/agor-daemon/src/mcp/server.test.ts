@@ -98,6 +98,15 @@ describe('MCP tool registry', () => {
         'message',
         'idempotencyKey',
       ],
+      agor_sessions_batch_queue: [
+        'targetSessionId',
+        'relationship',
+        'action',
+        'queueRevision',
+        'taskIds',
+        'replacementPrompt',
+        'idempotencyKey',
+      ],
       agor_boards_get: ['boardId'],
       agor_branches_create: ['repoId', 'branchName', 'boardId', 'waitForReady', 'waitTimeoutMs'],
       agor_branches_wait_for_ready: ['branchId', 'waitTimeoutMs'],
@@ -183,6 +192,10 @@ describe('MCP tool registry', () => {
         'corrective_task_id',
         'termination_status',
       ]),
+    });
+    expect(registry.get('agor_sessions_batch_queue')?.outputSchema).toMatchObject({
+      type: 'object',
+      required: expect.arrayContaining(['outcome', 'preview']),
     });
   });
 });
