@@ -28,7 +28,7 @@ describe.skipIf(!enabled)('zone workflow PostgreSQL 0099 -> 0101 upgrade', () =>
     db = createDatabase({ dialect: 'postgresql', url: postgresUrl! });
     priorFolder = await mkdtemp(join(tmpdir(), 'agor-pg-migrations-through-0099-'));
     await cp(migrationsFolder, priorFolder, { recursive: true });
-    await unlink(join(priorFolder, '0101_zone_workflow_transitions.sql'));
+    await unlink(join(priorFolder, '0102_zone_workflow_transitions.sql'));
     const journalPath = join(priorFolder, 'meta', '_journal.json');
     const journal = JSON.parse(await readFile(journalPath, 'utf8')) as {
       entries: Array<{ idx: number }>;

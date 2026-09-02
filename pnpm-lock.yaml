@@ -586,6 +586,9 @@ importers:
       '@agor/core':
         specifier: workspace:*
         version: link:../core
+      jsonc-parser:
+        specifier: ^3.3.1
+        version: 3.3.1
       zod:
         specifier: ^4.3.6
         version: 4.4.3
@@ -908,6 +911,9 @@ importers:
       js-yaml:
         specifier: '>=4.3.1 <5'
         version: 4.3.1
+      jsonc-parser:
+        specifier: ^3.3.1
+        version: 3.3.1
       jsonwebtoken:
         specifier: ^9.0.3
         version: 9.0.3
@@ -12036,7 +12042,7 @@ snapshots:
       '@google-cloud/logging': 11.2.1(encoding@0.1.13)(supports-color@8.1.1)
       '@google-cloud/opentelemetry-cloud-monitoring-exporter': 0.21.0(@opentelemetry/api@1.9.0)(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.0))(@opentelemetry/resources@2.7.1(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-metrics@2.7.1(@opentelemetry/api@1.9.0))(encoding@0.1.13)(supports-color@8.1.1)
       '@google-cloud/opentelemetry-cloud-trace-exporter': 3.0.0(@opentelemetry/api@1.9.0)(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.0))(@opentelemetry/resources@2.7.1(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.7.1(@opentelemetry/api@1.9.0))(encoding@0.1.13)(supports-color@8.1.1)
-      '@google/genai': 1.43.0(@modelcontextprotocol/sdk@1.29.0(supports-color@8.1.1)(zod@4.4.3))(supports-color@8.1.1)
+      '@google/genai': 1.43.0(@modelcontextprotocol/sdk@1.29.0(supports-color@8.1.1)(zod@3.25.76))(supports-color@8.1.1)
       '@grpc/grpc-js': 1.14.4
       '@iarna/toml': 2.2.5
       '@modelcontextprotocol/sdk': 1.29.0(supports-color@8.1.1)(zod@3.25.76)
@@ -12119,6 +12125,19 @@ snapshots:
       - react-native-b4a
       - supports-color
       - tree-sitter
+      - utf-8-validate
+
+  '@google/genai@1.43.0(@modelcontextprotocol/sdk@1.29.0(supports-color@8.1.1)(zod@3.25.76))(supports-color@8.1.1)':
+    dependencies:
+      google-auth-library: 10.9.0(supports-color@8.1.1)
+      p-retry: 4.6.2
+      protobufjs: 7.6.5
+      ws: 8.21.0
+    optionalDependencies:
+      '@modelcontextprotocol/sdk': 1.29.0(supports-color@8.1.1)(zod@3.25.76)
+    transitivePeerDependencies:
+      - bufferutil
+      - supports-color
       - utf-8-validate
 
   '@google/genai@1.43.0(@modelcontextprotocol/sdk@1.29.0(supports-color@8.1.1)(zod@4.4.3))(supports-color@8.1.1)':

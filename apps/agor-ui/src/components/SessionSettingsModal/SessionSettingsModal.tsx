@@ -29,9 +29,15 @@ import {
   isAgenticToolName,
   mapToCodexPermissionConfig,
 } from '@agor-live/client';
-import { DownOutlined, KeyOutlined, SettingOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import {
+  ClockCircleOutlined,
+  DownOutlined,
+  KeyOutlined,
+  SettingOutlined,
+  ThunderboltOutlined,
+} from '@ant-design/icons';
 import type { CollapseProps } from 'antd';
-import { Collapse, Divider, Form, Modal, Typography, theme } from 'antd';
+import { Collapse, Divider, Form, InputNumber, Modal, Select, Typography, theme } from 'antd';
 import React from 'react';
 import { useAgorStore } from '../../store/agorStore';
 import { selectMcpServerById, selectSessionMcpServerIds } from '../../store/selectors';
@@ -84,9 +90,12 @@ interface FormValues {
   custom_context: string;
   callbackConfig: {
     enabled: boolean;
+    delivery: NonNullable<Session['callback_config']>['delivery'];
     includeLastMessage: boolean;
     template?: string;
   };
+  autoArchive: Session['auto_archive'];
+  autoArchiveAfterSeconds?: number;
 }
 
 // Stable empty array for sessions with no attached MCP servers — keeps the
@@ -120,9 +129,12 @@ function buildInitialValues(session: Session, sessionMcpServerIds: string[]): Fo
     custom_context: session.custom_context ? JSON.stringify(session.custom_context, null, 2) : '',
     callbackConfig: {
       enabled: session.callback_config?.enabled ?? true,
+      delivery: session.callback_config?.delivery ?? 'direct',
       includeLastMessage: session.callback_config?.include_last_message ?? true,
       template: session.callback_config?.template,
     },
+    autoArchive: session.auto_archive ?? 'never',
+    autoArchiveAfterSeconds: session.auto_archive_after_seconds,
   };
 }
 
@@ -188,10 +200,22 @@ function buildUpdates(values: FormValues, session: Session): Partial<Session> {
 
   if (values.callbackConfig) {
     updates.callback_config = {
+      ...session.callback_config,
       enabled: values.callbackConfig.enabled ?? true,
+      delivery: values.callbackConfig.delivery ?? 'direct',
       include_last_message: values.callbackConfig.includeLastMessage ?? true,
       template: values.callbackConfig.template || undefined,
     };
+  }
+
+  if (values.autoArchive !== session.auto_archive) {
+    updates.auto_archive = values.autoArchive;
+  }
+  if (
+    values.autoArchive === 'after_completion' &&
+    values.autoArchiveAfterSeconds !== session.auto_archive_after_seconds
+  ) {
+    updates.auto_archive_after_seconds = values.autoArchiveAfterSeconds;
   }
 
   return updates;
@@ -390,6 +414,56 @@ export const SessionSettingsModal: React.FC<SessionSettingsModalProps> = ({
       </>
     ),
   });
+
+  if (session.fork_origin === 'btw' || session.genealogy?.parent_session_id) {
+    secondaryItems.push({
+      key: 'auto-archive',
+      label: (
+        <Typography.Text strong>
+          <ClockCircleOutlined style={{ marginRight: 8 }} />
+          Automatic Archival
+        </Typography.Text>
+      ),
+      children: (
+        <>
+          <Form.Item
+            name="autoArchive"
+            label="Policy"
+            tooltip="Archival hides this child from active trees without deleting its transcript, tasks, branch, or worktree."
+          >
+            <Select
+              options={[
+                { value: 'after_completion', label: 'Archive after completion' },
+                { value: 'never', label: 'Never (keep)' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate={(prev, curr) => prev.autoArchive !== curr.autoArchive}>
+            {({ getFieldValue }) =>
+              getFieldValue('autoArchive') === 'after_completion' && (
+                <Form.Item
+                  name="autoArchiveAfterSeconds"
+                  label="Grace period (seconds)"
+                  rules={[{ required: true, message: 'Enter a grace period' }]}
+                >
+                  <InputNumber
+                    min={1}
+                    max={365 * 24 * 60 * 60}
+                    precision={0}
+                    style={{ width: '100%' }}
+                  />
+                </Form.Item>
+              )
+            }
+          </Form.Item>
+          <Typography.Text type="secondary">
+            Re-prompting cancels a pending deadline. Unarchiving keeps the policy but waits for the
+            next completion before scheduling again.
+          </Typography.Text>
+        </>
+      ),
+    });
+  }
 
   secondaryItems.push({
     key: 'advanced',

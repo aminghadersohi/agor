@@ -20,6 +20,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const interruptMocks = vi.hoisted(() => ({
   admit: vi.fn(),
   terminate: vi.fn(),
+  previewBatch: vi.fn(),
+  applyBatch: vi.fn(),
 }));
 
 vi.mock('../resolve-ids.js', () => ({
@@ -76,6 +78,8 @@ vi.mock('@agor/core/db', () => ({
   UserApiKeysRepository: class FakeUserApiKeysRepository {},
   TaskRepository: class FakeTaskRepository {
     admitInterruptCorrection = interruptMocks.admit;
+    previewCoordinatorQueueBatch = interruptMocks.previewBatch;
+    applyCoordinatorQueueBatch = interruptMocks.applyBatch;
   },
   shortId: (id: string) => id,
 }));
@@ -288,6 +292,91 @@ describe('session transfer MCP tools', () => {
       corrective_task_id: 'task-correction',
       target_task_id: 'task-running',
       termination_status: 'terminal',
+    });
+  });
+
+  it('previews then replaces a queue through the calling MCP Session authority', async () => {
+    const preview = {
+      session_id: 'sess-child',
+      relationship: 'coordinator',
+      coordinator_session_id: 'sess-caller',
+      queue_revision: 'sha256:queue-1',
+      expected_task_ids: ['task-1', 'task-2'],
+      source_task_count: 2,
+      source_request_count: 3,
+      unique_request_count: 2,
+      duplicate_request_count: 1,
+      compatible: true,
+      refusal_reasons: [],
+      combine_allowed: true,
+      combined_prompt: 'combined preview',
+      combined_prompt_bytes: 16,
+    };
+    interruptMocks.previewBatch.mockResolvedValueOnce(preview);
+    interruptMocks.applyBatch.mockResolvedValueOnce({
+      outcome: 'batched',
+      preview,
+      execution_task: { task_id: 'task-1', session_id: 'sess-child', status: 'queued' },
+      superseded_tasks: [{ task_id: 'task-2', session_id: 'sess-child', status: 'stopped' }],
+    });
+    const resolveQueueBatchAuthority = vi.fn(async () => ({
+      caller_session_id: 'sess-caller',
+      target_session_id: 'sess-child',
+      relationship: 'coordinator',
+    }));
+    const triggerQueueProcessing = vi.fn(async () => undefined);
+    const app = makeFakeApp({
+      sessions: { resolveQueueBatchAuthority, triggerQueueProcessing },
+      tasks: { emit: vi.fn() },
+    });
+    const { agor_sessions_batch_queue } = await registerAndCaptureHandlers(
+      {
+        app,
+        userId: 'user-1',
+        sessionId: 'sess-caller',
+        baseServiceParams: { provider: 'mcp', user: { user_id: 'user-1' } },
+      },
+      ['agor_sessions_batch_queue']
+    );
+
+    const previewResponse = await agor_sessions_batch_queue({
+      targetSessionId: 'sess-child',
+      relationship: 'coordinator',
+      action: 'preview',
+    });
+    expect(previewResponse.structuredContent).toEqual({ outcome: 'preview', preview });
+
+    const replaceResponse = await agor_sessions_batch_queue({
+      targetSessionId: 'sess-child',
+      relationship: 'coordinator',
+      action: 'replace',
+      queueRevision: preview.queue_revision,
+      taskIds: preview.expected_task_ids,
+      replacementPrompt: 'Canonical correction only.',
+      idempotencyKey: 'batch-1',
+    });
+    expect(resolveQueueBatchAuthority).toHaveBeenCalledWith(
+      'sess-child',
+      { callerSessionId: 'sess-caller', relationship: 'coordinator' },
+      expect.objectContaining({ provider: 'mcp' })
+    );
+    expect(interruptMocks.applyBatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session_id: 'sess-child',
+        requested_by_session_id: 'sess-caller',
+        requested_by_user_id: 'user-1',
+        operation_id: 'batch-1',
+        strategy: 'replace',
+        replacement_prompt: 'Canonical correction only.',
+        expected_queue_revision: preview.queue_revision,
+        expected_task_ids: preview.expected_task_ids,
+      })
+    );
+    expect(triggerQueueProcessing).toHaveBeenCalledWith('sess-child', expect.any(Object));
+    expect(replaceResponse.structuredContent).toMatchObject({
+      outcome: 'batched',
+      execution_task_id: 'task-1',
+      superseded_task_ids: ['task-2'],
     });
   });
 
@@ -511,6 +600,7 @@ describe('agor_sessions_get_current_context', () => {
           callback_config: {
             enabled: true,
             callback_session_id: 'sess-current-coordinator',
+            delivery: 'auto',
           },
           remote_relationships: {
             as_target: [
@@ -557,6 +647,7 @@ describe('agor_sessions_get_current_context', () => {
     expect(result.effective_direct_callback_coordinator_session_id).toBe(
       'sess-current-coordinator'
     );
+    expect(result.effective_callback_delivery).toBe('auto');
   });
 });
 
@@ -578,7 +669,15 @@ describe('agor_sessions_list', () => {
             limit: 50,
             skip: 0,
             data: [
-              { session_id: 'sess-target', branch_id: 'wt-1', status: 'idle', mcp_token: 'tok1' },
+              {
+                session_id: 'sess-target',
+                branch_id: 'wt-1',
+                status: 'idle',
+                auto_archive: 'after_completion',
+                auto_archive_after_seconds: 3600,
+                auto_archive_at: '2026-01-01T01:00:00.000Z',
+                mcp_token: 'tok1',
+              },
               { session_id: 'sess-other', branch_id: 'wt-2', status: 'idle', mcp_token: 'tok2' },
             ],
           };
@@ -598,6 +697,11 @@ describe('agor_sessions_list', () => {
     expect(parsed.total).toBe(1);
     expect(parsed.data).toHaveLength(1);
     expect(parsed.data[0].session_id).toBe('sess-target');
+    expect(parsed.data[0]).toMatchObject({
+      auto_archive: 'after_completion',
+      auto_archive_after_seconds: 3600,
+      auto_archive_at: '2026-01-01T01:00:00.000Z',
+    });
     expect(parsed.data[0]).not.toHaveProperty('mcp_token');
   });
 
@@ -1073,6 +1177,7 @@ describe('agor_sessions_create', () => {
       branchId: 'wt-1',
       agenticTool: 'claude-code',
       enableCallback: true,
+      callbackDelivery: 'auto',
     });
 
     // New session genealogy should reference the calling session as parent
@@ -1082,6 +1187,7 @@ describe('agor_sessions_create', () => {
       enabled: true,
       callback_session_id: 'sess-caller',
       callback_mode: 'persistent',
+      delivery: 'auto',
     });
 
     // Parent's children list should be updated to include the new session
@@ -1706,6 +1812,8 @@ describe('agor_sessions_spawn', () => {
     await agor_sessions_spawn({
       prompt: 'do the thing',
       modelConfig: { model: 'claude-opus-4-6', effort: 'high' },
+      autoArchive: 'never',
+      autoArchiveAfterSeconds: 900,
     });
 
     expect(spawnCalls).toHaveLength(1);
@@ -1713,6 +1821,33 @@ describe('agor_sessions_spawn', () => {
       model: 'claude-opus-4-6',
       effort: 'high',
     });
+    expect(spawnCalls[0].data).toMatchObject({
+      autoArchive: 'never',
+      autoArchiveAfterSeconds: 900,
+    });
+  });
+
+  it('threads callbackDelivery into SpawnConfig without changing the direct default', async () => {
+    const spawnCalls: Array<{ id: string; data: any }> = [];
+    const app = makeFakeApp({
+      sessions: {
+        spawn: async (id: string, data: any) => {
+          spawnCalls.push({ id, data });
+          return { session_id: 'sess-child', permission_config: { mode: 'acceptEdits' } };
+        },
+      },
+      '/sessions/:id/prompt': {
+        create: async () => ({ task_id: 't1', status: 'running' }),
+      },
+    });
+    const { agor_sessions_spawn } = await registerAndCaptureHandlers(
+      { app, userId: 'user-1', sessionId: 'sess-parent' },
+      ['agor_sessions_spawn']
+    );
+
+    await agor_sessions_spawn({ prompt: 'digest this completion', callbackDelivery: 'btw' });
+
+    expect(spawnCalls[0].data.callbackDelivery).toBe('btw');
   });
 
   it('threads provider through SpawnConfig.modelConfig (OpenCode)', async () => {
@@ -1788,6 +1923,8 @@ describe('agor_sessions_prompt (subsession mode)', () => {
       prompt: 'delegated work',
       mode: 'subsession',
       modelConfig: { model: 'claude-opus-4-6', effort: 'max', provider: 'anthropic' },
+      autoArchive: 'after_completion',
+      autoArchiveAfterSeconds: 1800,
     });
 
     expect(spawnCalls).toHaveLength(1);
@@ -1796,6 +1933,10 @@ describe('agor_sessions_prompt (subsession mode)', () => {
       model: 'claude-opus-4-6',
       effort: 'max',
       provider: 'anthropic',
+    });
+    expect(spawnCalls[0].data).toMatchObject({
+      autoArchive: 'after_completion',
+      autoArchiveAfterSeconds: 1800,
     });
   });
 });
@@ -2167,6 +2308,56 @@ describe('agor_models_list', () => {
 });
 
 describe('inputSchema → JSON Schema conversion (MCP discovery)', () => {
+  it('updates callback delivery while preserving the existing callback route', async () => {
+    const patch = vi.fn(async (_id: string, updates: Record<string, unknown>) => ({
+      session_id: 'sess-child',
+      ...updates,
+    }));
+    const app = makeFakeApp({
+      sessions: {
+        get: async () => ({
+          session_id: 'sess-child',
+          callback_config: {
+            enabled: true,
+            callback_session_id: 'sess-coordinator',
+            callback_created_by: 'user-1',
+            callback_mode: 'persistent',
+          },
+        }),
+        patch,
+      },
+    });
+    const tools = await registerAndCaptureTools(
+      { app, userId: 'user-1', sessionId: 'sess-caller' },
+      ['agor_sessions_update']
+    );
+
+    expect(
+      tools.agor_sessions_update.cfg.inputSchema?.safeParse({
+        sessionId: 'sess-child',
+        callbackDelivery: 'auto',
+      }).success
+    ).toBe(true);
+    await tools.agor_sessions_update.cb({
+      sessionId: 'sess-child',
+      callbackDelivery: 'auto',
+    });
+
+    expect(patch).toHaveBeenCalledWith(
+      'sess-child',
+      {
+        callback_config: {
+          enabled: true,
+          callback_session_id: 'sess-coordinator',
+          callback_created_by: 'user-1',
+          callback_mode: 'persistent',
+          delivery: 'auto',
+        },
+      },
+      expect.any(Object)
+    );
+  });
+
   it('accepts every active tool and rejects historical tools on session creation boundaries', async () => {
     const tools = await registerAndCaptureTools(
       { app: {}, userId: 'user-1', sessionId: 'sess-1' },

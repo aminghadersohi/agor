@@ -24,6 +24,90 @@ export type TaskStatus = (typeof TaskStatus)[keyof typeof TaskStatus];
 /** Task states that have not yet crossed the daemon's durable dispatch fence. */
 export type TaskPendingDispatchStatus = typeof TaskStatus.CREATED | typeof TaskStatus.QUEUED;
 
+/** Explicit coordinator-owned ways to turn a compatible queue into one turn. */
+export type CoordinatorQueueBatchStrategy = 'combine' | 'replace';
+
+/** Relationship that currently grants a Session authority over a worker queue. */
+export type CoordinatorQueueBatchRelationship = 'parent' | 'coordinator';
+
+export interface CoordinatorQueueBatchRequestAudit {
+  request_id: TaskID;
+  submitted_at: string;
+  created_by: UserID;
+  text: string;
+  normalized_text: string;
+  duplicate_of_request_id?: TaskID;
+}
+
+export interface CoordinatorQueueBatchSourceAudit {
+  task_id: TaskID;
+  queue_position: number;
+  created_at: string;
+  created_by: UserID;
+  /** Complete request provenance, including earlier automatic compaction. */
+  requests: CoordinatorQueueBatchRequestAudit[];
+}
+
+/** Durable audit on the one Task that will execute for a coordinator batch. */
+export interface CoordinatorQueueBatchAudit {
+  version: 1;
+  operation_id: string;
+  strategy: CoordinatorQueueBatchStrategy;
+  batched_at: string;
+  requested_by_user_id: UserID;
+  coordinator_session_id: SessionID;
+  relationship: CoordinatorQueueBatchRelationship;
+  expected_queue_revision: string;
+  source_task_count: number;
+  source_request_count: number;
+  unique_request_count: number;
+  duplicate_request_count: number;
+  source_tasks: CoordinatorQueueBatchSourceAudit[];
+  /** Present only for REPLACE; source text remains in source_tasks, not the executor prompt. */
+  replacement_prompt?: string;
+}
+
+export interface CoordinatorQueueBatchPreview {
+  session_id: SessionID;
+  relationship: CoordinatorQueueBatchRelationship;
+  coordinator_session_id: SessionID;
+  queue_revision: string;
+  expected_task_ids: TaskID[];
+  source_task_count: number;
+  source_request_count: number;
+  unique_request_count: number;
+  duplicate_request_count: number;
+  compatible: boolean;
+  refusal_reasons: string[];
+  /** COMBINE additionally enforces its byte ceiling; REPLACE remains available. */
+  combine_allowed: boolean;
+  combine_refusal_reason?: string;
+  /** Exact deterministic COMBINE prompt; omitted only for semantic incompatibility. */
+  combined_prompt?: string;
+  combined_prompt_bytes?: number;
+}
+
+export interface CoordinatorQueueBatchApplyInput {
+  session_id: SessionID;
+  relationship: CoordinatorQueueBatchRelationship;
+  requested_by_session_id: SessionID;
+  requested_by_user_id: UserID;
+  operation_id: string;
+  strategy: CoordinatorQueueBatchStrategy;
+  expected_queue_revision: string;
+  expected_task_ids: TaskID[];
+  replacement_prompt?: string;
+}
+
+export type CoordinatorQueueBatchApplyResult =
+  | { outcome: 'relationship_changed' }
+  | {
+      outcome: 'batched' | 'already_batched';
+      preview: CoordinatorQueueBatchPreview;
+      execution_task: Task;
+      superseded_tasks: Task[];
+    };
+
 export type ExecutorMode = 'local' | 'templated';
 
 export const ExecutorPulseKind = {
@@ -171,8 +255,36 @@ export interface TaskMetadata {
     event: 'task_completion' | 'session_completion';
     target_session_id: SessionID;
     queued_task_id?: TaskID;
+    /** Actual delivery path used for this dispatch. Historical rows omit it and are direct. */
+    delivery?: 'direct' | 'btw';
+    /** Ephemeral callback-digest BTW Session, when `delivery` is `btw`. */
+    btw_session_id?: SessionID;
     dispatched_at: string;
   }>;
+  /** Durable acknowledgement that the inline BTW result reached its parent transcript. */
+  btw_result_delivered_at?: string;
+
+  /** Durable callback-delivery audit on direct callback Tasks and digest BTW Tasks. */
+  callback_delivery?: {
+    source_session_id: SessionID;
+    source_task_id: TaskID;
+    destination_session_id: SessionID;
+    relationship_ids: import('./id').SessionRelationshipID[];
+    route: 'standing' | 'exact_task';
+    requested_delivery: import('./session').CallbackDelivery;
+    resolved_delivery: 'direct' | 'btw';
+    fallback_reason?:
+      | 'unsupported_agent'
+      | 'missing_fork_state'
+      | 'destination_inactive'
+      | 'branch_inactive'
+      | 'permission_denied'
+      | 'loop_guard'
+      | 'policy_direct'
+      | 'creation_failed';
+    btw_session_id?: SessionID;
+    final_message_id?: MessageID;
+  };
   /**
    * Marks a task whose prompt was authored by the daemon (not typed by a
    * human). Used by widget auto-resume so the UI can label the queued
@@ -236,6 +348,18 @@ export interface TaskMetadata {
   prompt_control?: {
     permission_mode?: import('./session').PermissionMode;
     stream: boolean;
+  };
+
+  /** One explicit coordinator operation collapsed these queued requests into this Task. */
+  coordinator_queue_batch?: CoordinatorQueueBatchAudit;
+
+  /** Audit on an original Task retained terminally but intentionally not executed. */
+  coordinator_queue_batch_member?: {
+    version: 1;
+    operation_id: string;
+    strategy: CoordinatorQueueBatchStrategy;
+    execution_task_id: TaskID;
+    batched_at: string;
   };
 
   /**

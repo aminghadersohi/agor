@@ -140,6 +140,27 @@ describe('Postgres migrations', () => {
     ).toEqual([]);
   });
 
+  it('enforces the Claude OAuth mutation-authority migration as an offline cutover', () => {
+    expect(
+      pendingOfflineCutoverMigrations('postgresql', {
+        applied: ['0093_scheduler_poison_recovery'],
+        pending: ['0100_claude_oauth_attempts'],
+      })
+    ).toEqual(['0100_claude_oauth_attempts']);
+    expect(
+      pendingOfflineCutoverMigrations('sqlite', {
+        applied: ['0096_scheduler_poison_recovery'],
+        pending: ['0103_claude_oauth_attempts'],
+      })
+    ).toEqual([]);
+    expect(
+      pendingOfflineCutoverMigrations('postgresql', {
+        applied: [],
+        pending: ['0000_cuddly_captain_america', '0100_claude_oauth_attempts'],
+      })
+    ).toEqual([]);
+  });
+
   it('assigns GitHub install state unique post-HA migration watermarks', async () => {
     const [postgresJournal, sqliteJournal] = await readJournals();
 
@@ -199,20 +220,20 @@ describe('Postgres migrations', () => {
     const [postgresJournal, sqliteJournal] = await readJournals();
     expect(postgresJournal.entries.at(-1)).toMatchObject({
       idx: 100,
-      tag: '0101_zone_workflow_transitions',
+      tag: '0102_zone_workflow_transitions',
     });
     expect(sqliteJournal.entries.at(-1)).toMatchObject({
       idx: 103,
-      tag: '0104_zone_workflow_transitions',
+      tag: '0105_zone_workflow_transitions',
     });
 
     const [postgres, sqlite] = await Promise.all([
       readFile(
-        new URL('../../drizzle/postgres/0101_zone_workflow_transitions.sql', import.meta.url),
+        new URL('../../drizzle/postgres/0102_zone_workflow_transitions.sql', import.meta.url),
         'utf8'
       ),
       readFile(
-        new URL('../../drizzle/sqlite/0104_zone_workflow_transitions.sql', import.meta.url),
+        new URL('../../drizzle/sqlite/0105_zone_workflow_transitions.sql', import.meta.url),
         'utf8'
       ),
     ]);
@@ -1094,6 +1115,47 @@ describe('MCP catalog install identity migration', () => {
     expect(sqlite).toContain('owner_user_id` IS loser.`owner_user_id');
     expect(sqlite).toContain("coalesce(`owner_user_id`,'')");
     expect(postgres).toContain('coalesce("owner_user_id",\'\')');
+  });
+});
+
+describe('Session automatic archival migration', () => {
+  it('keeps legacy SQLite sessions and adds a bounded durable due index', async () => {
+    const client = createClient({ url: ':memory:' });
+    await client.executeMultiple(`
+      CREATE TABLE sessions (
+        session_id text PRIMARY KEY,
+        archived integer DEFAULT 0 NOT NULL,
+        data text NOT NULL
+      );
+      INSERT INTO sessions VALUES ('legacy-root', 0, '{}');
+      INSERT INTO sessions VALUES ('legacy-btw', 0, '{"fork_origin":"btw"}');
+    `);
+    const migration = await readFile(
+      new URL('../../drizzle/sqlite/0104_session_auto_archive.sql', import.meta.url),
+      'utf8'
+    );
+    await client.executeMultiple(migration.replaceAll('--> statement-breakpoint', ''));
+
+    const row = await client.execute(
+      'SELECT session_id, auto_archive, auto_archive_after_seconds, auto_archive_at FROM sessions ORDER BY session_id'
+    );
+    expect(row.rows).toEqual([
+      {
+        session_id: 'legacy-btw',
+        auto_archive: 'after_completion',
+        auto_archive_after_seconds: 300,
+        auto_archive_at: null,
+      },
+      {
+        session_id: 'legacy-root',
+        auto_archive: 'never',
+        auto_archive_after_seconds: null,
+        auto_archive_at: null,
+      },
+    ]);
+    const indexes = await client.execute("PRAGMA index_list('sessions')");
+    expect(indexes.rows.some((index) => index.name === 'sessions_auto_archive_due_idx')).toBe(true);
+    client.close();
   });
 });
 

@@ -270,6 +270,19 @@ Tenant identity is ambient for the MCP operation, but it does not hold a
 database transaction open. Individual service and repository calls use short
 tenant-scoped units of work.
 
+### Child-session archival policy
+
+`agor_sessions_spawn` and the `subsession`/`btw` modes of `agor_sessions_prompt`
+accept `autoArchive` (`never` or `after_completion`) plus a positive
+`autoArchiveAfterSeconds`. `agor_sessions_create` accepts the same pair when it
+creates a branch-local genealogy child, and `agor_sessions_update` changes the
+policy on an existing child. Responses include the persisted snake-case
+`auto_archive`, `auto_archive_after_seconds`, and `auto_archive_at` fields.
+
+The defaults are five minutes for BTW forks and one hour for spawned children.
+Root Sessions are never automatically archived. Archival is reversible and
+does not delete Session data or branch/worktree state.
+
 ## Session transfer operations
 
 Two intentionally separate tools move existing Session relationships:
@@ -278,7 +291,7 @@ Two intentionally separate tools move existing Session relationships:
   standing/direct completion destination. Matching cross-branch
   `remote_create` rows change in the same transaction, and the response returns
   the resolved source, previous destination, new destination, and relationship
-  IDs. Callback enablement, mode, template, and include flags are preserved.
+  IDs. Callback enablement, mode, delivery policy, template, and include flags are preserved.
 - `agor_sessions_reparent(sessionId, parentSessionId)` changes branch-local
   genealogy only. The nullable parent remains in the same branch, both parent
   child lists are updated atomically, and direct or indirect cycles fail.
@@ -294,11 +307,25 @@ goes only to the new direct destination. Exact-Task callbacks created by
 subscriptions—including requests propagated from a root orchestrator—and are
 not rewritten by direct retargeting.
 
+`agor_sessions_create`, `agor_sessions_spawn`,
+`agor_sessions_prompt(mode:"subsession")`, and `agor_sessions_update` expose
+`callbackDelivery: "direct" | "btw" | "auto"` for standing callbacks. Omission
+means backward-compatible direct delivery. BTW is preflighted against current
+destination/branch state, prompt authority, active agent fork capability, and
+forkable SDK state. `auto` selects BTW only for a busy destination or a rendered
+callback of at least 8 KiB. Unavailable or failed BTW creation falls back to a
+deterministic direct Task with an audited reason; it does not drop the callback.
+The digest answer is hard-capped at 4 KiB, and deterministic side Session/Task
+and final Message IDs fence HA retries. Digest Sessions cannot recursively
+deliver callbacks. Exact-Task `callback:true` subscriptions remain direct and
+outside this policy, as do root-propagated variants.
+
 `agor_sessions_get_current_context` exposes three intentionally distinct
 relationships: current branch-local `parent_session_id`, immutable
 `remote_origins`, and the currently enabled
 `effective_direct_callback_coordinator_session_id`. A retarget updates the last
-field but never rewrites provenance; a reparent updates the first.
+field but never rewrites provenance; a reparent updates the first. The context
+also returns `effective_callback_delivery` (`direct` when omitted on storage).
 
 `agor_session_relationships_report(destination, message)` is the safe manual
 relay path. `destination` must be `parent` or `coordinator`; no arbitrary target
@@ -323,6 +350,22 @@ durably queued; an idle target simply queues it without a fake Stop. Reusing an
 `idempotencyKey` for the same caller, target, and exact message returns the same
 corrective Task. Stopped turns do not fire natural-completion callbacks; the
 correction's eventual completion follows normal callback routing.
+
+`agor_sessions_batch_queue(targetSessionId, relationship, action, ...)` is the
+unclaimed-queue counterpart. The calling MCP Session must again be the target's
+current parent or enabled direct callback coordinator; a target ID grants no
+authority. Call `action: "preview"` first. It returns `queue_revision`, the
+exact ordered `expected_task_ids`, compatibility counts, and the deterministic
+combined prompt. Then call `action: "combine"` or `action: "replace"` with
+those fences and a stable `idempotencyKey`.
+
+Combine preserves every distinct instruction and removes only normalized
+duplicates. Replace requires `replacementPrompt` and sends only that canonical
+text. Both retain the original Tasks and full request provenance, produce one
+execution Task and one aggregate callback, and refuse mixed callback/control or
+attachment/widget/gateway/internal semantics. A queue or relationship change
+invalidates the preview. This tool never stops running work; use
+`agor_sessions_interrupt_with_message` for that case.
 
 ## Best Practices
 

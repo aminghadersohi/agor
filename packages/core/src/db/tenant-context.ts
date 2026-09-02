@@ -30,10 +30,12 @@ export type SystemDatabaseCapability =
   | 'scheduler_discovery'
   | 'task_queue_discovery'
   | 'task_runtime_discovery'
+  | 'session_auto_archive_discovery'
   | 'executor_token_maintenance'
   | 'mcp_oauth_callback'
   | 'mcp_oauth_maintenance'
   | 'codex_device_auth_maintenance'
+  | 'claude_oauth_maintenance'
   | 'github_install_state_callback'
   | 'github_install_state_maintenance'
   | 'upload_maintenance';

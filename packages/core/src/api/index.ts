@@ -57,6 +57,9 @@ import type {
   OpenCodeOAuthAttempt,
   OpenCodeOAuthAttemptPatch,
   OpenCodeOAuthConnectRequest,
+  OpenCodeOllamaDiscovery,
+  OpenCodeOllamaSettingsPatch,
+  OpenCodeOllamaTestRequest,
   OpenCodeProviderSettings,
   PatchAgenticToolPreset,
   PermissionMode,
@@ -144,6 +147,16 @@ export interface SessionPromptRequest {
 
 export interface SessionPromptOptions extends Omit<SessionPromptRequest, 'prompt'> {
   params?: Params;
+}
+
+/** Compare-and-swap request produced from a coordinator queue preview. */
+export interface SessionQueueBatchRequest {
+  relationship: import('../types').CoordinatorQueueBatchRelationship;
+  strategy: import('../types').CoordinatorQueueBatchStrategy;
+  expectedQueueRevision: string;
+  expectedTaskIds: string[];
+  idempotencyKey: string;
+  replacementPrompt?: string;
 }
 
 /** Required setup for an already-created session, applied before its first prompt. */
@@ -306,6 +319,7 @@ export interface ServiceTypes {
   'agentic-tool-presets': AgenticToolPreset;
   'opencode-auth': OpenCodeProviderSettings;
   'opencode-models': OpenCodeModelCatalog;
+  'opencode-ollama': OpenCodeOllamaDiscovery;
   'executor-git-environment': ExecutorGitEnvironment;
 }
 
@@ -463,6 +477,16 @@ export interface OpenCodeAuthService {
 
 export interface OpenCodeModelsService {
   find(params?: Params): Promise<OpenCodeModelCatalog>;
+}
+
+export interface OpenCodeOllamaService {
+  find(params?: Params): Promise<OpenCodeOllamaDiscovery>;
+  create(data: OpenCodeOllamaTestRequest, params?: Params): Promise<OpenCodeOllamaDiscovery>;
+  patch(
+    id: null,
+    data: OpenCodeOllamaSettingsPatch,
+    params?: Params
+  ): Promise<OpenCodeOllamaDiscovery>;
 }
 
 /**
@@ -866,6 +890,7 @@ export interface AgorClient
   service(path: 'agentic-tool-presets'): AgenticToolPresetsService;
   service(path: 'opencode-auth'): OpenCodeAuthService;
   service(path: 'opencode-models'): OpenCodeModelsService;
+  service(path: 'opencode-ollama'): OpenCodeOllamaService;
   service(path: `board-comments/${string}/reposition`): BoardCommentRepositionService;
 
   // Standard services (CRUD only)
