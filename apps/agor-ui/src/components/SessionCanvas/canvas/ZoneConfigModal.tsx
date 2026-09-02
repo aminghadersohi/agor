@@ -290,7 +290,7 @@ export const ZoneConfigModal = ({
           label="Presentation"
           help={
             layoutPreset === 'compact_list'
-              ? 'List uses one column and collapses worktree details; cards and canvas objects keep their natural size.'
+              ? 'List uses one column and collapses worktree and capable generic-card details; header-only cards and canvas objects keep their natural size.'
               : undefined
           }
         >

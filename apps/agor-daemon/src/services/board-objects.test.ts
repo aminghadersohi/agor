@@ -218,26 +218,110 @@ describe('BoardObjectsService.patch', () => {
     });
   });
 
-  it('rejects compact state for a generic card before reaching persistence', async () => {
+  it('accepts compact state for a generic card with rendered body content', async () => {
     const service = new BoardObjectsService({} as Database);
     const findByObjectId = vi.fn(async () => ({
       object_id: 'card-placement',
+      board_id: 'board-1',
+      card_id: 'card-1',
       entity_type: 'card' as const,
     }));
-    const updateLayout = vi.fn();
+    const updateCompact = vi.fn(async () => ({
+      object_id: 'card-placement',
+      board_id: 'board-1',
+      card_id: 'card-1',
+      entity_type: 'card' as const,
+      compact: true,
+    }));
+    const findById = vi.fn(async () => ({
+      card_id: 'card-1',
+      board_id: 'board-1',
+      title: 'Fictional card',
+      description: 'Rendered details',
+    }));
     (
       service as unknown as {
         boardObjectRepo: {
           findByObjectId: typeof findByObjectId;
-          updateLayout: typeof updateLayout;
+          updateCompact: typeof updateCompact;
         };
+        cardRepo: { findById: typeof findById };
       }
-    ).boardObjectRepo = { findByObjectId, updateLayout };
+    ).boardObjectRepo = { findByObjectId, updateCompact };
+    (service as unknown as { cardRepo: { findById: typeof findById } }).cardRepo = { findById };
+
+    await expect(service.patch('card-placement', { compact: true })).resolves.toMatchObject({
+      compact: true,
+    });
+    expect(updateCompact).toHaveBeenCalledWith('card-placement', true);
+  });
+
+  it('rejects compact state for a header-only generic card before persistence', async () => {
+    const service = new BoardObjectsService({} as Database);
+    const findByObjectId = vi.fn(async () => ({
+      object_id: 'card-placement',
+      board_id: 'board-1',
+      card_id: 'card-1',
+      entity_type: 'card' as const,
+    }));
+    const updateCompact = vi.fn();
+    const findById = vi.fn(async () => ({
+      card_id: 'card-1',
+      board_id: 'board-1',
+      title: 'Header only',
+    }));
+    (service as unknown as { boardObjectRepo: unknown }).boardObjectRepo = {
+      findByObjectId,
+      updateCompact,
+    };
+    (service as unknown as { cardRepo: unknown }).cardRepo = { findById };
 
     await expect(service.patch('card-placement', { compact: true })).rejects.toThrow(
-      'Compact presentation is supported only for branch placements'
+      'worktrees and generic cards with body content'
     );
-    expect(updateLayout).not.toHaveBeenCalled();
+    expect(updateCompact).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the card body is outside the scoped board/tenant read', async () => {
+    const service = new BoardObjectsService({} as Database);
+    const findByObjectId = vi.fn(async () => ({
+      object_id: 'card-placement',
+      board_id: 'board-tenant-a',
+      card_id: 'card-tenant-b',
+      entity_type: 'card' as const,
+    }));
+    const updateCompact = vi.fn();
+    const findById = vi.fn(async () => null);
+    (service as unknown as { boardObjectRepo: unknown }).boardObjectRepo = {
+      findByObjectId,
+      updateCompact,
+    };
+    (service as unknown as { cardRepo: unknown }).cardRepo = { findById };
+
+    await expect(service.patch('card-placement', { compact: true })).rejects.toThrow(
+      'worktrees and generic cards with body content'
+    );
+    expect(findById).toHaveBeenCalledWith('card-tenant-b');
+    expect(updateCompact).not.toHaveBeenCalled();
+  });
+
+  it('returns the authoritative row without writing a repeated density state', async () => {
+    const service = new BoardObjectsService({} as Database);
+    const existing = {
+      object_id: 'branch-placement',
+      entity_type: 'branch' as const,
+      compact: true,
+      size: { width: 500, height: 64 },
+    };
+    const findByObjectId = vi.fn(async () => existing);
+    const updateCompact = vi.fn();
+    (service as unknown as { boardObjectRepo: unknown }).boardObjectRepo = {
+      findByObjectId,
+      updateCompact,
+    };
+
+    await expect(service.patch('branch-placement', { compact: true })).resolves.toBe(existing);
+    expect(updateCompact).not.toHaveBeenCalled();
   });
 
   it('uses the tenant-visible read boundary for compact capability checks', async () => {

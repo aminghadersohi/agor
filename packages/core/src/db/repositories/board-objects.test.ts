@@ -15,6 +15,7 @@ import { EntityNotFoundError, RepositoryError } from './base';
 import { BoardObjectRepository } from './board-objects';
 import { BoardRepository } from './boards';
 import { BranchRepository } from './branches';
+import { CardRepository } from './cards';
 import { RepoRepository } from './repos';
 
 /**
@@ -916,6 +917,56 @@ describe('BoardObjectRepository.updateLayout', () => {
   });
 });
 
+describe('BoardObjectRepository.updateLayoutForBoard density capability', () => {
+  dbTest(
+    'atomically persists compact geometry for a generic card with body content',
+    async ({ db }) => {
+      const boardId = await createBoard(db);
+      const card = await new CardRepository(db).create({
+        board_id: boardId,
+        title: 'Fictional tracker',
+        description: 'Rendered detail',
+      });
+      const boardObjectRepo = new BoardObjectRepository(db);
+      const placement = await boardObjectRepo.create({
+        board_id: boardId,
+        card_id: card.card_id,
+        position: { x: 10, y: 20 },
+      });
+
+      const result = await boardObjectRepo.updateLayoutForBoard(boardId, placement.object_id, {
+        position: { x: 20, y: 40 },
+        size: { width: 380, height: 60 },
+        compact: true,
+      });
+
+      expect(result).toMatchObject({
+        changed: true,
+        entity: { position: { x: 20, y: 40 }, size: { width: 380, height: 60 }, compact: true },
+      });
+    }
+  );
+
+  dbTest('rejects compact geometry for a header-only generic card', async ({ db }) => {
+    const boardId = await createBoard(db);
+    const card = await new CardRepository(db).create({ board_id: boardId, title: 'Header only' });
+    const boardObjectRepo = new BoardObjectRepository(db);
+    const placement = await boardObjectRepo.create({
+      board_id: boardId,
+      card_id: card.card_id,
+      position: { x: 10, y: 20 },
+    });
+
+    await expect(
+      boardObjectRepo.updateLayoutForBoard(boardId, placement.object_id, {
+        position: { x: 20, y: 40 },
+        size: { width: 380, height: 60 },
+        compact: true,
+      })
+    ).rejects.toThrow('does not own collapsible body content');
+  });
+});
+
 describe('BoardObjectRepository.updateCompact', () => {
   dbTest('invalidates measurements when presentation mode changes', async ({ db }) => {
     const repoRepo = new RepoRepository(db);
@@ -940,6 +991,33 @@ describe('BoardObjectRepository.updateCompact', () => {
     expect(moved).toMatchObject({ compact: true, position: { x: 30, y: 40 } });
     expect(resized).toMatchObject({ compact: true, size: { width: 500, height: 64 } });
     expect(expanded).toMatchObject({ compact: false, size: undefined });
+  });
+
+  dbTest('keeps the current measurement on repeated same-state actions', async ({ db }) => {
+    const repoRepo = new RepoRepository(db);
+    const branchRepo = new BranchRepository(db);
+    const boardObjectRepo = new BoardObjectRepository(db);
+    const repo = await repoRepo.create(createRepoData());
+    const branch = await branchRepo.create(createBranchData({ repo_id: repo.repo_id }));
+    const boardId = await createBoard(db);
+    const created = await boardObjectRepo.create({
+      board_id: boardId,
+      branch_id: branch.branch_id,
+      position: { x: 10, y: 20 },
+      size: { width: 500, height: 200 },
+    });
+
+    const repeatedExpanded = await boardObjectRepo.updateCompact(created.object_id, false);
+    await boardObjectRepo.updateCompact(created.object_id, true);
+    const measuredCompact = await boardObjectRepo.updateSize(created.object_id, {
+      width: 500,
+      height: 64,
+    });
+    const repeatedCompact = await boardObjectRepo.updateCompact(created.object_id, true);
+
+    expect(repeatedExpanded.size).toEqual({ width: 500, height: 200 });
+    expect(measuredCompact.size).toEqual({ width: 500, height: 64 });
+    expect(repeatedCompact).toMatchObject({ compact: true, size: { width: 500, height: 64 } });
   });
 });
 

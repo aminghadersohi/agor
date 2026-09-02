@@ -40,6 +40,8 @@ export interface BoardZoneArrangementItem extends ZoneLayoutSortItem {
   width: number;
   height: number;
   compact?: boolean;
+  /** Definitive rendered density capability; required to compact generic cards. */
+  densityExpandable?: boolean;
 }
 
 export interface BoardZoneArrangementInput {
@@ -193,7 +195,7 @@ export function planBoardZoneArrangement(
       id: item.id,
       ...(policy.preset === 'compact_list' &&
       item.entityType &&
-      isBoardEntityDensityExpandable(item.entityType)
+      (item.densityExpandable ?? isBoardEntityDensityExpandable(item.entityType))
         ? compactZoneItemSize(item.entityType, frame.usableWidth)
         : { width: item.width, height: item.height }),
       sourceX: item.position.x,
@@ -448,7 +450,7 @@ export function planBoardZoneArrangement(
       id: item.id,
       ...(entry.policy.preset === 'compact_list' &&
       item.entityType &&
-      isBoardEntityDensityExpandable(item.entityType)
+      (item.densityExpandable ?? isBoardEntityDensityExpandable(item.entityType))
         ? compactZoneItemSize(item.entityType, frame.usableWidth)
         : { width: item.width, height: item.height }),
       sourceX: item.position.x,

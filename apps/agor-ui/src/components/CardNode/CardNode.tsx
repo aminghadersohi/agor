@@ -6,12 +6,21 @@
  * - Zone border color when pinned to a zone (matching BranchCard pattern)
  * - CardType emoji + title (with optional URL link)
  * - Pin icon when in a zone (click to unpin)
- * - Description (collapsed after ~100 chars)
- * - Note (always shown in full, distinct background)
+ * - Description (previewed after ~100 chars, expandable inside the bounded body)
+ * - Note (complete inside the bounded keyboard-scrollable body)
  */
 
+// biome-ignore-all lint/a11y/noNoninteractiveTabindex: the bounded overflow section must be keyboard-focusable so arrow/Page keys can scroll its complete content
+
+import { GENERIC_BOARD_CARD_LAYOUT, hasCardDensityBody } from '@agor/core/layout/zone-layout';
 import type { CardWithType } from '@agor-live/client';
-import { DragOutlined, LinkOutlined, PushpinFilled } from '@ant-design/icons';
+import {
+  DragOutlined,
+  LinkOutlined,
+  MinusSquareOutlined,
+  PlusSquareOutlined,
+  PushpinFilled,
+} from '@ant-design/icons';
 import { Button, Tooltip, Typography, theme } from 'antd';
 
 function isSafeUrl(url: string): boolean {
@@ -30,8 +39,7 @@ import {
 } from '../../utils/reactFlowDragClasses';
 import { ensureColorVisible, isDarkTheme } from '../../utils/theme';
 
-const DESCRIPTION_MAX_CHARS = 100;
-const CARD_WIDTH = 380;
+const DESCRIPTION_MAX_CHARS = GENERIC_BOARD_CARD_LAYOUT.descriptionPreviewChars;
 
 export interface CardNodeData {
   card: CardWithType;
@@ -40,14 +48,34 @@ export interface CardNodeData {
   zoneColor?: string;
   onClick?: (cardId: string) => void;
   onUnpin?: (cardId: string) => void;
+  /** Shared board presentation state, controlled by board layout/MCP tools. */
+  compact?: boolean;
+  /** Omitted when the viewer cannot mutate the board. */
+  onToggleCompact?: (cardId: string, compact: boolean) => void;
   /** Keep a called-out card's rolling Auto Zone deferral alive. */
   onAutoZoneInteraction?: (cardId: string) => void;
 }
 
 const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
   const { token } = theme.useToken();
-  const { card, isPinned, zoneName, zoneColor, onClick, onUnpin, onAutoZoneInteraction } = data;
+  const {
+    card,
+    isPinned,
+    zoneName,
+    zoneColor,
+    onClick,
+    onUnpin,
+    compact = false,
+    onToggleCompact,
+    onAutoZoneInteraction,
+  } = data;
   const [descExpanded, setDescExpanded] = useState(false);
+  const [bodyFocused, setBodyFocused] = useState(false);
+  const hasCollapsibleBody = hasCardDensityBody(card);
+  // Old payloads may carry compact for a card whose body was later removed.
+  // Keep that header-only surface expanded and control-free rather than
+  // manufacturing an inert density state.
+  const isCompact = hasCollapsibleBody && compact;
 
   const borderColor = card.effective_color || token.colorBorder;
   const emoji = card.effective_emoji;
@@ -76,7 +104,7 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
       onPointerDownCapture={() => onAutoZoneInteraction?.(card.card_id)}
       onFocusCapture={() => onAutoZoneInteraction?.(card.card_id)}
       style={{
-        width: CARD_WIDTH,
+        width: GENERIC_BOARD_CARD_LAYOUT.width,
         background: token.colorBgContainer,
         border:
           isPinned && zoneColor
@@ -90,7 +118,7 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
         transition: 'box-shadow 0.2s, border-color 0.3s',
       }}
     >
-      {/* Header: emoji + title + link + pin + drag */}
+      {/* Header: emoji + title + link + density + pin + drag */}
       <div
         data-zone-stack-header
         className={REACT_FLOW_DRAG_HANDLE_CLASS}
@@ -101,7 +129,7 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
           padding: '10px 12px',
           cursor: 'grab',
           borderBottom:
-            card.description || card.note ? `1px solid ${token.colorBorderSecondary}` : 'none',
+            hasCollapsibleBody && !isCompact ? `1px solid ${token.colorBorderSecondary}` : 'none',
         }}
       >
         {emoji && <span style={{ fontSize: 16, flexShrink: 0 }}>{emoji}</span>}
@@ -132,6 +160,21 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
             <LinkOutlined style={{ fontSize: 12 }} />
           </a>
         )}
+        {hasCollapsibleBody && onToggleCompact && (
+          <Button
+            type="text"
+            size="small"
+            icon={isCompact ? <PlusSquareOutlined /> : <MinusSquareOutlined />}
+            aria-label={isCompact ? 'Expand card' : 'Collapse card'}
+            title={isCompact ? 'Expand card' : 'Collapse card'}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleCompact(card.card_id, !isCompact);
+            }}
+            className={REACT_FLOW_NO_DRAG_CLASS}
+            style={{ flexShrink: 0, width: 24, height: 24, padding: 0 }}
+          />
+        )}
         {isPinned && (
           <Tooltip
             title={
@@ -160,69 +203,86 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
         />
       </div>
 
-      {/* Description (collapsed) */}
-      {card.description && (
-        <div
-          className={REACT_FLOW_NO_DRAG_CLASS}
+      {!isCompact && hasCollapsibleBody && (
+        <section
+          data-card-density-body
+          className={`${REACT_FLOW_NO_DRAG_CLASS} nopan nowheel`}
+          aria-label={`${card.title} details`}
+          tabIndex={0}
+          onFocus={() => setBodyFocused(true)}
+          onBlur={() => setBodyFocused(false)}
           style={{
-            padding: '8px 12px',
-            borderBottom: card.note ? `1px solid ${token.colorBorderSecondary}` : 'none',
+            maxHeight: GENERIC_BOARD_CARD_LAYOUT.bodyMaxHeight,
+            overflowY: 'auto',
+            overscrollBehavior: 'contain',
+            scrollbarGutter: 'stable',
+            boxShadow: bodyFocused ? `inset 0 0 0 2px ${token.colorPrimary}` : 'none',
           }}
         >
-          <Typography.Text
-            style={{
-              fontSize: 12,
-              color: token.colorTextSecondary,
-              lineHeight: '1.5',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-            }}
-          >
-            {truncatedDesc}
-          </Typography.Text>
-          {needsTruncation && (
-            <Button
-              type="link"
-              size="small"
-              onClick={(e) => {
-                e.stopPropagation();
-                setDescExpanded(!descExpanded);
-              }}
+          {/* Description preview/expansion stays inside the bounded body. */}
+          {card.description && (
+            <div
               style={{
-                padding: 0,
-                height: 'auto',
-                fontSize: 11,
-                color: token.colorLink,
-                marginLeft: 4,
+                padding: '8px 12px',
+                borderBottom: card.note ? `1px solid ${token.colorBorderSecondary}` : 'none',
               }}
             >
-              {descExpanded ? 'less' : 'more'}
-            </Button>
+              <Typography.Text
+                style={{
+                  fontSize: 12,
+                  color: token.colorTextSecondary,
+                  lineHeight: '1.5',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                }}
+              >
+                {truncatedDesc}
+              </Typography.Text>
+              {needsTruncation && (
+                <Button
+                  type="link"
+                  size="small"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setDescExpanded(!descExpanded);
+                  }}
+                  style={{
+                    padding: 0,
+                    height: 'auto',
+                    fontSize: 11,
+                    color: token.colorLink,
+                    marginLeft: 4,
+                  }}
+                >
+                  {descExpanded ? 'less' : 'more'}
+                </Button>
+              )}
+            </div>
           )}
-        </div>
-      )}
 
-      {/* Note (always shown in full, distinct background) */}
-      {card.note && (
-        <div
-          style={{
-            padding: '8px 12px',
-            background: token.colorFillQuaternary,
-            borderTop: !card.description ? `1px solid ${token.colorBorderSecondary}` : 'none',
-          }}
-        >
-          <Typography.Text
-            style={{
-              fontSize: 12,
-              color: token.colorText,
-              lineHeight: '1.5',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-            }}
-          >
-            {card.note}
-          </Typography.Text>
-        </div>
+          {/* Notes remain complete and keyboard-scrollable inside the same body. */}
+          {card.note && (
+            <div
+              style={{
+                padding: '8px 12px',
+                background: token.colorFillQuaternary,
+                borderTop: !card.description ? `1px solid ${token.colorBorderSecondary}` : 'none',
+              }}
+            >
+              <Typography.Text
+                style={{
+                  fontSize: 12,
+                  color: token.colorText,
+                  lineHeight: '1.5',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                }}
+              >
+                {card.note}
+              </Typography.Text>
+            </div>
+          )}
+        </section>
       )}
     </div>
   );
