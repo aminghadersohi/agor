@@ -219,11 +219,11 @@ describe('Postgres migrations', () => {
   it('journals the matching zone-workflow migration and tenant-safe audit constraints', async () => {
     const [postgresJournal, sqliteJournal] = await readJournals();
     expect(postgresJournal.entries.at(-1)).toMatchObject({
-      idx: 100,
+      idx: 102,
       tag: '0102_zone_workflow_transitions',
     });
     expect(sqliteJournal.entries.at(-1)).toMatchObject({
-      idx: 103,
+      idx: 105,
       tag: '0105_zone_workflow_transitions',
     });
 
