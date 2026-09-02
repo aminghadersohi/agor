@@ -68,7 +68,7 @@ export async function executeOpenCodeTask(params: {
     if (!session.model_config?.provider?.trim() || !session.model_config.model?.trim()) {
       throw new Error(OPENCODE_MODEL_CONFIG_PAIR_ERROR);
     }
-    const { dataHome } = parseOpenCodeExecutorContext(params.agenticToolContext);
+    const { dataHome, ollama } = parseOpenCodeExecutorContext(params.agenticToolContext);
 
     const repos = createFeathersBackedRepositories(client);
     const contextUserId = await resolveContextUserId({
@@ -160,6 +160,7 @@ export async function executeOpenCodeTask(params: {
         permissionMode: params.permissionMode,
         signal: params.abortController.signal,
         dataHome,
+        ollama,
         persistOpenCodeSessionId: async (openCodeSessionId) => {
           await client.service('sessions').patch(sessionId, { sdk_session_id: openCodeSessionId });
         },

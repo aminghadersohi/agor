@@ -8,6 +8,8 @@
 
 import type { SpawnOptions } from 'node:child_process';
 import type { randomBytes as nodeRandomBytes } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { renderAgorSystemPrompt } from '@agor/core/templates/session-context';
 import { mergeMCPRemoteHeaders } from '@agor/core/tools/mcp/http-headers';
 import { resolveMCPAuthHeaders } from '@agor/core/tools/mcp/jwt-auth';
@@ -17,6 +19,7 @@ import {
   type ExecutorPulseKind,
   type MCPServer,
   type MessageID,
+  type OpenCodeOllamaInvocationConfig,
   type PermissionMode,
   type SessionID,
   shortId,
@@ -25,6 +28,7 @@ import {
   type ToolUse,
 } from '@agor/core/types';
 import type { createOpencodeClient } from '@opencode-ai/sdk';
+import { type ParseError, parse } from 'jsonc-parser';
 import { OPENCODE_MODEL_CONFIG_PAIR_ERROR } from '../shared/index.js';
 import type { OpenCodeCommand } from './binary.js';
 import {
@@ -91,6 +95,7 @@ export type RunOpenCodeTurnInput = {
   mcpToken?: string;
   permissionMode?: PermissionMode;
   dataHome?: string;
+  ollama?: OpenCodeOllamaInvocationConfig;
   signal: AbortSignal;
   persistOpenCodeSessionId: (sessionId: string) => Promise<void>;
 };
@@ -117,6 +122,88 @@ export type OpenCodeInvocationConfig = {
   mcpToolPermissions?: ReadonlyMap<string, ToolPermission>;
   [key: string]: unknown;
 };
+
+const PROJECT_CONFIG_FILES = ['opencode.json', 'opencode.jsonc'] as const;
+
+async function readProjectProviders(directory: string): Promise<Record<string, unknown>> {
+  let found: { name: string; providers: Record<string, unknown> } | undefined;
+  for (const name of PROJECT_CONFIG_FILES) {
+    let text: string;
+    try {
+      text = await readFile(join(directory, name), 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw new Error(`OpenCode project configuration ${name} could not be inspected safely`);
+    }
+    if (text.length > 1_048_576) {
+      throw new Error(`OpenCode project configuration ${name} is too large to inspect safely`);
+    }
+    const errors: ParseError[] = [];
+    const parsed = parse(text, errors, { allowTrailingComma: true, disallowComments: false });
+    if (errors.length > 0 || !parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(`OpenCode project configuration ${name} is invalid`);
+    }
+    const rawProviders = (parsed as { provider?: unknown }).provider;
+    const providers =
+      rawProviders && typeof rawProviders === 'object' && !Array.isArray(rawProviders)
+        ? (rawProviders as Record<string, unknown>)
+        : {};
+    if (found) {
+      throw new Error(
+        `Both ${found.name} and ${name} exist; remove the ambiguous duplicate OpenCode project configuration`
+      );
+    }
+    found = { name, providers };
+  }
+  return found?.providers ?? {};
+}
+
+/**
+ * Invocation config wins for Agor's canonical `ollama` ID. A branch may still
+ * define every other provider; defining `ollama` is an explicit conflict, not
+ * a silent endpoint/model replacement.
+ */
+export async function mergeOpenCodeOllamaProvider(
+  resolved: OpenCodeInvocationConfig,
+  directory: string,
+  ollama: OpenCodeOllamaInvocationConfig | undefined
+): Promise<OpenCodeInvocationConfig> {
+  if (!ollama) return resolved;
+  const projectProviders = await readProjectProviders(directory);
+  if (Object.hasOwn(projectProviders, 'ollama')) {
+    throw new Error(
+      'Branch opencode.json defines provider "ollama", which conflicts with the enabled Agor local preset. Disable the preset or remove/rename the branch provider.'
+    );
+  }
+  const providers =
+    resolved.provider && typeof resolved.provider === 'object' && !Array.isArray(resolved.provider)
+      ? (resolved.provider as Record<string, unknown>)
+      : {};
+  if (Object.hasOwn(providers, 'ollama')) {
+    throw new Error('Invocation configuration already defines protected provider "ollama".');
+  }
+  return {
+    ...resolved,
+    provider: {
+      ...projectProviders,
+      ...providers,
+      ollama: {
+        npm: '@ai-sdk/openai-compatible',
+        name: 'Ollama (local via Agor)',
+        options: { baseURL: `${ollama.endpoint}/v1` },
+        models: {
+          [ollama.model.id]: {
+            name: ollama.model.name,
+            attachment: ollama.model.vision,
+            reasoning: ollama.model.thinking,
+            tool_call: ollama.model.tools,
+            limit: { context: ollama.contextTokens, output: 8_192 },
+          },
+        },
+      },
+    },
+  };
+}
 
 export interface OpenCodeStreamingCallbacks {
   onPulse?(kind: ExecutorPulseKind, detail?: string): void;
@@ -671,6 +758,11 @@ export class OpenCodeTool {
     let resolvedInvocationConfig: OpenCodeInvocationConfig;
     try {
       resolvedInvocationConfig = await this.dependencies.resolveInvocationConfig(input);
+      resolvedInvocationConfig = await mergeOpenCodeOllamaProvider(
+        resolvedInvocationConfig,
+        input.directory,
+        input.ollama
+      );
     } catch (error) {
       throw preliminarySanitizer.error(error);
     }

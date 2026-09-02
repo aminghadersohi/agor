@@ -137,6 +137,10 @@ import {
   inOpenCodeNativeStateMutationSlot,
   type OpenCodeNativeStateMutationFence,
 } from './integrations/opencode/native-state-coordinator.js';
+import {
+  inOpenCodeOllamaExecutionSlot,
+  resolveReadyOpenCodeOllamaForLaunch,
+} from './integrations/opencode/ollama-service.js';
 import { scrubMCPSecretsFromExecutorEnv } from './mcp-egress/executor-env.js';
 import { getDaemonMetrics } from './metrics/index.js';
 import {
@@ -1513,6 +1517,16 @@ function createExecuteHandler(
     // Generalized executor-launch hook (design §4/§13 Phase 2). Every tool has a
     // daemon contribution; only OpenCode implements getExecutorLaunch today, so
     // this stays a no-op for all other tools and preserves prior behavior.
+    const ollamaLaunch =
+      session.agentic_tool === 'opencode' && session.model_config?.provider === 'ollama'
+        ? await resolveReadyOpenCodeOllamaForLaunch({
+            db,
+            tenantId,
+            userId,
+            model: session.model_config.model,
+          })
+        : undefined;
+
     const executorLaunch = (() => {
       const contribution = getAgenticToolDaemonContribution(session.agentic_tool);
       if (!contribution?.getExecutorLaunch) return undefined;
@@ -1523,6 +1537,7 @@ function createExecuteHandler(
         tenantId,
         session,
         homeDir: executorHomeDir,
+        ollama: ollamaLaunch,
       });
     })();
 
@@ -1754,19 +1769,23 @@ function createExecuteHandler(
       const ready = createDeferredSignal();
       const finished = createDeferredSignal();
       let spawned = false;
-      const slot = inOpenCodeNativeStateMutationSlot(executorLaunch.namespaceKey, async (fence) => {
-        try {
-          spawnExecutor(
-            executorPayload,
-            executorOptions({ fence, ready, finished, markSpawned: () => (spawned = true) })
-          );
-          await ready.promise;
-          await finished.promise;
-        } catch (error) {
-          if (!spawned) await fence.releaseWithoutWriter();
-          throw error;
-        }
-      });
+      const runNativeSlot = () =>
+        inOpenCodeNativeStateMutationSlot(executorLaunch.namespaceKey, async (fence) => {
+          try {
+            spawnExecutor(
+              executorPayload,
+              executorOptions({ fence, ready, finished, markSpawned: () => (spawned = true) })
+            );
+            await ready.promise;
+            await finished.promise;
+          } catch (error) {
+            if (!spawned) await fence.releaseWithoutWriter();
+            throw error;
+          }
+        });
+      const slot = ollamaLaunch
+        ? inOpenCodeOllamaExecutionSlot(ollamaLaunch.endpoint, runNativeSlot)
+        : runNativeSlot();
       void slot.catch((error) => {
         ready.reject(error);
         console.error(`${logPrefix} Native-state writer failed:`, error);

@@ -126,6 +126,77 @@ function deviceCodeAttempt(attemptId: string) {
 }
 
 describe('OpenCodeProviderSettings', () => {
+  it('tests, saves, and surfaces the experimental local Ollama status without an API key', async () => {
+    const disabled = {
+      providerId: 'ollama' as const,
+      experimental: true as const,
+      configuration: {
+        enabled: false,
+        endpoint: 'http://127.0.0.1:11435',
+        model: '',
+      },
+      status: 'unavailable' as const,
+      message: 'The experimental local provider is disabled.',
+      models: [],
+    };
+    const reachable = {
+      ...disabled,
+      configuration: { ...disabled.configuration, enabled: true },
+      status: 'service-reachable' as const,
+      message: 'Ollama is reachable. Select an exact tools-capable model.',
+      models: [
+        {
+          id: 'qwen3-coder:30b',
+          name: 'qwen3-coder:30b',
+          sizeBytes: 18_000_000_000,
+          contextTokens: 32_768,
+          tools: true,
+          thinking: true,
+          vision: false,
+        },
+      ],
+    };
+    const ready = {
+      ...reachable,
+      configuration: { ...reachable.configuration, model: 'qwen3-coder:30b' },
+      status: 'ready' as const,
+      message: 'Ready with a 32,768-token running allocation.',
+    };
+    const auth = createAuthService({ find: vi.fn().mockResolvedValue(initial) });
+    const ollama = {
+      find: vi.fn().mockResolvedValue(disabled),
+      create: vi.fn().mockResolvedValue(reachable),
+      patch: vi.fn().mockResolvedValue(ready),
+    };
+    const client = {
+      service: vi.fn((path: string) => (path === 'opencode-ollama' ? ollama : auth)),
+    } as unknown as AgorClient;
+    render(
+      <AntApp>
+        <OpenCodeProviderSettings client={client} copyText={copySuccessfully} />
+      </AntApp>
+    );
+
+    expect(await screen.findByText('Ollama (local via OpenCode)')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Ollama API key')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    expect(await screen.findByText(/Ollama is reachable/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Exact Ollama model'), {
+      target: { value: 'qwen3-coder:30b' },
+    });
+    fireEvent.click(screen.getByRole('switch'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save local provider' }));
+
+    await waitFor(() =>
+      expect(ollama.patch).toHaveBeenCalledWith(null, {
+        enabled: true,
+        endpoint: 'http://127.0.0.1:11435',
+        model: 'qwen3-coder:30b',
+      })
+    );
+    expect(await screen.findByText(/Ready with a 32,768-token/i)).toBeInTheDocument();
+  });
+
   it('keeps the selected provider credential draft isolated from visible runtime providers', async () => {
     const providers: Settings = {
       ...initial,

@@ -1,6 +1,6 @@
 import { isTenantAgenticToolEnabled, loadConfigSync } from '@agor/core/config';
 import { runWithTenantContext, UsersRepository } from '@agor/core/db';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createOpenCodeModelsService } from './models-service';
 
 const resolveBinary = vi.hoisted(() => vi.fn());
@@ -76,11 +76,16 @@ beforeEach(() => {
     execution: { unix_user_mode: 'simple', branch_rbac: true },
   } as never);
   usersRepository.mockImplementation(function repository() {
-    return { findById: vi.fn(async () => ({ unix_username: 'alice' })) };
+    return {
+      findById: vi.fn(async () => ({ unix_username: 'alice' })),
+      getToolConfig: vi.fn(async () => null),
+    };
   } as never);
   runCommand.mockResolvedValue({ success: true, data: catalog });
   resolveBinary.mockResolvedValue('/packaged/opencode');
 });
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe('OpenCode model catalog service', () => {
   it('requires the authenticated subject and accepts no target identity or scope', async () => {
@@ -117,6 +122,66 @@ describe('OpenCode model catalog service', () => {
       }),
       expect.any(Object)
     );
+  });
+
+  it("adds only the caller's ready exact Ollama model to the existing catalog", async () => {
+    usersRepository.mockImplementation(function repository() {
+      return {
+        findById: vi.fn(async () => ({ unix_username: 'alice' })),
+        getToolConfig: vi.fn(async () => ({
+          ollama_enabled: 'true',
+          ollama_endpoint: 'http://127.0.0.1:11435',
+          ollama_model: 'qwen3-coder:30b',
+        })),
+      };
+    } as never);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (request: string | URL | Request) => {
+        const url = String(request);
+        if (url.endsWith('/api/version')) return Response.json({ version: '0.33.2' });
+        if (url.endsWith('/api/tags')) {
+          return Response.json({
+            models: [
+              {
+                name: 'qwen3-coder:30b',
+                size: 18_000_000_000,
+                details: { parameter_size: '30.5B', quantization_level: 'Q4_K_M' },
+              },
+            ],
+          });
+        }
+        if (url.endsWith('/api/ps')) return Response.json({ models: [] });
+        if (url.endsWith('/api/show')) {
+          return Response.json({
+            capabilities: ['completion', 'tools'],
+            model_info: { 'qwen3.context_length': 262_144 },
+          });
+        }
+        throw new Error(`unexpected request ${url}`);
+      })
+    );
+
+    const result = await runWithTenantContext('tenant-a', () => service().find(params));
+
+    expect(result.providers).toEqual([
+      catalog.providers[0],
+      expect.objectContaining({
+        id: 'ollama',
+        availableForSelection: true,
+        suggestedModel: 'qwen3-coder:30b',
+        models: [
+          expect.objectContaining({
+            id: 'qwen3-coder:30b',
+            sizeBytes: 18_000_000_000,
+            contextTokens: 262_144,
+            tools: true,
+            thinking: false,
+            vision: false,
+          }),
+        ],
+      }),
+    ]);
   });
 
   it.each(['missing', 'not executable'])(
