@@ -2458,7 +2458,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         };
         setIsDraggingCanvas(true);
         setAlignmentGuides([]);
-        const viewport = reactFlowInstanceRef.current?.getViewport();
+        const viewport = reactFlowInstanceRef.current?.getViewport?.();
         if (viewport) setGuideViewport(viewport);
       },
       [cancelPendingPostLayoutViewport, demoteAutoZone]
