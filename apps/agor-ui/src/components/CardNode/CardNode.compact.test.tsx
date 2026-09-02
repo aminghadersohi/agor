@@ -1,3 +1,4 @@
+import { GENERIC_BOARD_CARD_LAYOUT } from '@agor/core/layout/zone-layout';
 import type { CardWithType } from '@agor-live/client';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
@@ -33,14 +34,38 @@ describe('CardNode density capability', () => {
     );
 
     expect(screen.getByText('Planning card')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Planning card details' })).toBeNull();
     expect(screen.queryByText('Persist this exact description.')).toBeNull();
     expect(screen.queryByText('Persist this exact note.')).toBeNull();
     fireEvent.click(screen.getByLabelText('Expand card'));
     expect(onToggleCompact).toHaveBeenCalledWith('card-1', false);
 
     rerender(<CardNode data={{ card: makeCard(), compact: false, onToggleCompact }} />);
+    expect(screen.getByRole('region', { name: 'Planning card details' })).toBeTruthy();
     expect(screen.getByText('Persist this exact description.')).toBeTruthy();
     expect(screen.getByText('Persist this exact note.')).toBeTruthy();
+  });
+
+  it('keeps very long description and note content in one bounded keyboard scroll region', () => {
+    const description = 'Fictional launch description. '.repeat(200);
+    const note = 'Fictional status line.\n'.repeat(200);
+    render(<CardNode data={{ card: makeCard({ description, note }), onToggleCompact: vi.fn() }} />);
+
+    const body = screen.getByRole('region', { name: 'Planning card details' });
+    expect(body.getAttribute('tabindex')).toBe('0');
+    expect(body.classList).toEqual(expect.objectContaining(['nodrag', 'nopan', 'nowheel']));
+    expect(body.style.maxHeight).toBe(`${GENERIC_BOARD_CARD_LAYOUT.bodyMaxHeight}px`);
+    expect(body.style.overflowY).toBe('auto');
+    expect(body.style.overscrollBehavior).toBe('contain');
+    expect(body.textContent).toContain(note);
+    expect(screen.getByLabelText('Collapse card').closest('[data-card-density-body]')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'more' }));
+    expect(body.textContent).toContain(description);
+    fireEvent.focus(body);
+    expect(body.style.boxShadow).toContain('inset 0 0 0 2px');
+    fireEvent.blur(body);
+    expect(body.style.boxShadow).toBe('none');
   });
 
   it('does not manufacture a toggle or hide content on a header-only card', () => {

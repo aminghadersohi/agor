@@ -103,6 +103,54 @@ export type BoardDensitySurfaceKind = BoardEntityType | BoardObjectType;
 
 export type CardDensityContent = Pick<Card, 'description' | 'note'>;
 
+/**
+ * One board-space sizing contract for the generic CardNode surface.
+ *
+ * Keep this independent of canvas zoom: React Flow scales board space as a
+ * whole, while a viewport-responsive cap would change the measured node size
+ * merely because one collaborator zoomed and could make Auto Zone oscillate.
+ * The lower body is therefore capped at a readable fraction of the standard
+ * card width and becomes an accessible internal scroll region. UI rendering
+ * and non-visual planners both consume these values.
+ */
+export const GENERIC_BOARD_CARD_LAYOUT = {
+  width: 380,
+  minHeight: 56,
+  headerEstimatedHeight: 50,
+  bodyMaxHeight: 320,
+  descriptionPreviewChars: 100,
+  estimatedCharsPerLine: 48,
+  estimatedLineHeight: 18,
+  sectionVerticalPadding: 16,
+  descriptionMoreHeight: 18,
+} as const;
+
+export function estimateExpandedGenericCardHeight(
+  card: CardDensityContent | null | undefined
+): number {
+  const lineCount = (value: string | null | undefined) =>
+    value
+      ? Math.max(1, Math.ceil(value.length / GENERIC_BOARD_CARD_LAYOUT.estimatedCharsPerLine))
+      : 0;
+  const description = card?.description
+    ? GENERIC_BOARD_CARD_LAYOUT.sectionVerticalPadding +
+      lineCount(card.description.slice(0, GENERIC_BOARD_CARD_LAYOUT.descriptionPreviewChars)) *
+        GENERIC_BOARD_CARD_LAYOUT.estimatedLineHeight +
+      (card.description.length > GENERIC_BOARD_CARD_LAYOUT.descriptionPreviewChars
+        ? GENERIC_BOARD_CARD_LAYOUT.descriptionMoreHeight
+        : 0)
+    : 0;
+  const note = card?.note
+    ? GENERIC_BOARD_CARD_LAYOUT.sectionVerticalPadding +
+      lineCount(card.note) * GENERIC_BOARD_CARD_LAYOUT.estimatedLineHeight
+    : 0;
+  const boundedBody = Math.min(GENERIC_BOARD_CARD_LAYOUT.bodyMaxHeight, description + note);
+  return Math.max(
+    GENERIC_BOARD_CARD_LAYOUT.minHeight,
+    GENERIC_BOARD_CARD_LAYOUT.headerEstimatedHeight + boundedBody
+  );
+}
+
 /** Whether CardNode renders a lower section which compact mode can hide. */
 export function hasCardDensityBody(
   card: CardDensityContent | null | undefined

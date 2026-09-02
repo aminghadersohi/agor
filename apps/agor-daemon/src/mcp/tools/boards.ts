@@ -14,6 +14,8 @@ import { planZoneGrowthReflow } from '@agor/core/layout/zone-growth-reflow';
 import {
   BOARD_DENSITY_EXPANDABLE_ENTITY_TYPES,
   compactZoneItemSize,
+  estimateExpandedGenericCardHeight,
+  GENERIC_BOARD_CARD_LAYOUT,
   getZoneLayoutFrame,
   growZoneLayoutHeight,
   isBoardEntityDensityExpandable,
@@ -77,7 +79,10 @@ const ARRANGE_DIMENSIONS = {
   // A card with only a title is roughly one header row. Content adds height
   // below; using 150px as the minimum made normal cards look artificially
   // oversized and caused unnecessary deck layouts.
-  card: { width: 380, height: 56 },
+  card: {
+    width: GENERIC_BOARD_CARD_LAYOUT.width,
+    height: GENERIC_BOARD_CARD_LAYOUT.minHeight,
+  },
 } as const;
 const DECK_OFFSET_X = 12;
 const DECK_OFFSET_Y = 48;
@@ -124,28 +129,6 @@ async function loadEntityLayoutMetadata(
     })
   );
   return metadata;
-}
-
-/**
- * CardNode grows with its description and (unlike the React Flow placeholder
- * height) renders the note in full. Estimate the rendered rectangle from the
- * persisted content before laying out. This is deliberately conservative: a
- * false overflow warning is preferable to putting the bottom of a card
- * outside its zone.
- */
-function estimateCardHeight(
-  card: { title?: string; description?: string; note?: string } | undefined
-): number {
-  const lineCount = (value: string | undefined, charsPerLine: number) =>
-    value ? Math.max(1, Math.ceil(value.length / charsPerLine)) : 0;
-  const header = 50;
-  const description = card?.description
-    ? 16 +
-      lineCount(card.description.slice(0, 100), 48) * 18 +
-      (card.description.length > 100 ? 18 : 0)
-    : 0;
-  const note = card?.note ? 16 + lineCount(card.note, 48) * 18 : 0;
-  return Math.max(ARRANGE_DIMENSIONS.card.height, header + description + note);
 }
 
 /**
@@ -497,7 +480,7 @@ async function arrangeBoardZones(
             position: entity.position,
             densityExpandable,
             width: ARRANGE_DIMENSIONS.card.width,
-            height: estimateCardHeight(metadata.get(entity.object_id)?.card),
+            height: estimateExpandedGenericCardHeight(metadata.get(entity.object_id)?.card),
           };
         }
         return {
@@ -571,7 +554,7 @@ async function arrangeBoardZones(
           id: entity.object_id,
           ...entity.position,
           width: ARRANGE_DIMENSIONS.card.width,
-          height: estimateCardHeight(looseMetadata.get(entity.object_id)?.card),
+          height: estimateExpandedGenericCardHeight(looseMetadata.get(entity.object_id)?.card),
         };
       }
       return { id: entity.object_id, ...entity.position, ...ARRANGE_DIMENSIONS.branch };
@@ -1142,7 +1125,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           };
           entityDimensions = {
             width: ARRANGE_DIMENSIONS.card.width,
-            height: estimateCardHeight(card),
+            height: estimateExpandedGenericCardHeight(card),
           };
         } else {
           entityDimensions = ARRANGE_DIMENSIONS[entity.entity_type];
@@ -1453,7 +1436,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           const card = metadata.get(entity.object_id)?.card;
           naturalDimensions.set(entity.object_id, {
             width: ARRANGE_DIMENSIONS.card.width,
-            height: estimateCardHeight(card),
+            height: estimateExpandedGenericCardHeight(card),
           });
         } else {
           naturalDimensions.set(entity.object_id, ARRANGE_DIMENSIONS[entity.entity_type]);

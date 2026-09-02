@@ -1,4 +1,9 @@
-import { BOARD_GRID_SIZE, snapBoardGridPoint } from '@agor/core/layout/rectangle-packing';
+import {
+  BOARD_GRID_SIZE,
+  ceilBoardGridValue,
+  snapBoardGridPoint,
+} from '@agor/core/layout/rectangle-packing';
+import { GENERIC_BOARD_CARD_LAYOUT } from '@agor/core/layout/zone-layout';
 import { branchQueryValidator, typedValidateQuery } from '@agor/core/lib/feathers-validation';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { describe, expect, it, vi } from 'vitest';
@@ -1701,6 +1706,7 @@ describe('board layout tools with branch entities present', () => {
   function makeApp(options: {
     entities: Array<Record<string, unknown>>;
     objects?: Record<string, unknown>;
+    card?: { description?: string; note?: string };
     entityPatches?: Array<{ objectId: string; data: Record<string, unknown> }>;
     boardPatches?: Array<Record<string, unknown>>;
   }) {
@@ -1766,7 +1772,11 @@ describe('board layout tools with branch entities present', () => {
               find: vi.fn(async (params?: { query?: { card_id?: { $in?: string[] } } }) => ({
                 data: (params?.query?.card_id?.$in ?? []).map((card_id) => ({ card_id })),
               })),
-              get: vi.fn(async (id: string) => ({ card_id: id, title: 'Card' })),
+              get: vi.fn(async (id: string) => ({
+                card_id: id,
+                title: 'Card',
+                ...options.card,
+              })),
             };
           if (name === 'branches')
             return {
@@ -1966,6 +1976,35 @@ describe('board layout tools with branch entities present', () => {
     // unless each was sized by kind; requiredWidth proves the branch was not
     // silently laid out at card width.
     expect(parsed.requiredWidth).toBeGreaterThanOrEqual(500);
+  });
+
+  it('bounds an unmeasured long generic card with the shared rendered-body contract', async () => {
+    const entityPatches: Array<{ objectId: string; data: Record<string, unknown> }> = [];
+    const { app } = makeApp({
+      entities: [cardEntity({ zone_id: 'zone-1' })],
+      objects: { 'zone-1': { type: 'zone', x: 0, y: 0, width: 620, height: 900 } },
+      entityPatches,
+      card: {
+        description: 'Fictional description. '.repeat(1_000),
+        note: 'Fictional status.\n'.repeat(1_000),
+      },
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const result = await arrange({ boardId: 'board-1', zoneId: 'zone-1' });
+
+    expect(result.isError).toBeFalsy();
+    expect(entityPatches).toHaveLength(1);
+    expect(entityPatches[0].data.size).toEqual({
+      width: GENERIC_BOARD_CARD_LAYOUT.width,
+      height: ceilBoardGridValue(
+        GENERIC_BOARD_CARD_LAYOUT.headerEstimatedHeight + GENERIC_BOARD_CARD_LAYOUT.bodyMaxHeight
+      ),
+    });
   });
 
   it.each([
