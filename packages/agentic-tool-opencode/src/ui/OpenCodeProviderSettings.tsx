@@ -1,6 +1,22 @@
 import type { AgorClient } from '@agor/core/client';
-import type { OpenCodeOAuthAttempt, OpenCodeProviderSettings as Settings } from '@agor/core/types';
-import { Alert, Button, List, Select, Space, Typography } from 'antd';
+import type {
+  OpenCodeOAuthAttempt,
+  OpenCodeOllamaDiscovery,
+  OpenCodeProviderSettings as Settings,
+} from '@agor/core/types';
+import {
+  Alert,
+  AutoComplete,
+  Button,
+  Divider,
+  Input,
+  List,
+  Select,
+  Space,
+  Switch,
+  Tag,
+  Typography,
+} from 'antd';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   isActiveOAuthAttempt,
@@ -14,6 +30,168 @@ import { invalidateOpenCodeModelCatalog } from './useOpenCodeModelCatalog';
 interface ProviderAction {
   generation: number;
   actionId: number;
+}
+
+const OLLAMA_STATUS_TONE: Record<
+  OpenCodeOllamaDiscovery['status'],
+  'default' | 'processing' | 'warning' | 'error' | 'success'
+> = {
+  unavailable: 'error',
+  'service-reachable': 'processing',
+  'model-missing': 'warning',
+  'no-tools': 'error',
+  'unsafe-context': 'error',
+  ready: 'success',
+};
+
+const formatBytes = (bytes: number | undefined) =>
+  bytes === undefined ? undefined : `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+
+function OllamaLocalProviderSettings({ client }: { client: AgorClient }) {
+  const [discovery, setDiscovery] = useState<OpenCodeOllamaDiscovery>();
+  const [enabled, setEnabled] = useState(false);
+  const [endpoint, setEndpoint] = useState('http://127.0.0.1:11435');
+  const [model, setModel] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    void client
+      .service('opencode-ollama')
+      .find()
+      .then((next) => {
+        if (!mounted.current) return;
+        // Older/test clients may not expose the new service yet. Keep native
+        // provider management usable rather than interpreting another DTO.
+        if (next?.providerId !== 'ollama' || !Array.isArray(next.models)) return;
+        setDiscovery(next);
+        setEnabled(next.configuration.enabled);
+        setEndpoint(next.configuration.endpoint);
+        setModel(next.configuration.model);
+      })
+      .catch(() => mounted.current && setError('Local Ollama settings could not be loaded.'));
+    return () => {
+      mounted.current = false;
+    };
+  }, [client]);
+
+  const run = async (operation: () => Promise<OpenCodeOllamaDiscovery>) => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      const next = await operation();
+      if (!mounted.current) return;
+      setDiscovery(next);
+      setEndpoint(next.configuration.endpoint);
+      setModel(next.configuration.model);
+      invalidateOpenCodeModelCatalog(client);
+    } catch (failure) {
+      if (mounted.current) {
+        setError(failure instanceof Error ? failure.message : 'The Ollama operation failed.');
+      }
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
+
+  const selected = discovery?.models.find((candidate) => candidate.id === model);
+  const modelDetails = selected
+    ? [
+        formatBytes(selected.sizeBytes),
+        selected.contextTokens
+          ? `${selected.contextTokens.toLocaleString()} max context`
+          : undefined,
+        selected.runningContextTokens
+          ? `${selected.runningContextTokens.toLocaleString()} running context`
+          : undefined,
+        selected.tools ? 'tools' : 'no tools',
+        selected.thinking ? 'thinking' : undefined,
+        selected.vision ? 'vision' : undefined,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : undefined;
+
+  return (
+    <Space orientation="vertical" size="small" style={{ width: '100%' }}>
+      <Space wrap>
+        <Typography.Text strong>Ollama (local via OpenCode)</Typography.Text>
+        <Tag color="gold">Experimental</Tag>
+        {discovery && <Tag color={OLLAMA_STATUS_TONE[discovery.status]}>{discovery.status}</Tag>}
+      </Space>
+      <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>
+        Uses the existing OpenCode executor and a loopback-only Ollama service on the executor host.
+        No API key is sent or required.
+      </Typography.Paragraph>
+      <Space>
+        <Switch checked={enabled} onChange={setEnabled} />
+        <Typography.Text>{enabled ? 'Enabled' : 'Disabled'}</Typography.Text>
+      </Space>
+      <Input
+        aria-label="Ollama loopback endpoint"
+        value={endpoint}
+        onChange={(event) => setEndpoint(event.target.value)}
+        placeholder="http://127.0.0.1:11435"
+      />
+      <AutoComplete
+        aria-label="Exact Ollama model"
+        value={model}
+        options={(discovery?.models ?? []).map((candidate) => ({
+          value: candidate.id,
+          label: `${candidate.name}${candidate.tools ? '' : ' · no tools'}`,
+        }))}
+        onChange={setModel}
+        placeholder="Exact model ID, e.g. qwen3-coder:30b"
+        style={{ width: '100%' }}
+        filterOption={(input, option) =>
+          String(option?.value ?? '')
+            .toLowerCase()
+            .includes(input.toLowerCase())
+        }
+      />
+      {modelDetails && <Typography.Text type="secondary">{modelDetails}</Typography.Text>}
+      {discovery && (
+        <Alert
+          type={discovery.status === 'ready' ? 'success' : 'info'}
+          showIcon
+          title={discovery.message}
+        />
+      )}
+      {error && <Alert type="error" showIcon title={error} />}
+      <Space wrap>
+        <Button
+          loading={busy}
+          onClick={() =>
+            void run(() => client.service('opencode-ollama').create({ endpoint, model }))
+          }
+        >
+          Test connection
+        </Button>
+        <Button
+          type="primary"
+          loading={busy}
+          disabled={enabled && !model.trim()}
+          onClick={() =>
+            void run(async () => {
+              const next = await client
+                .service('opencode-ollama')
+                .patch(null, { enabled, endpoint, model });
+              setEnabled(next.configuration.enabled);
+              return next;
+            })
+          }
+        >
+          Save local provider
+        </Button>
+      </Space>
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        Provider ID is always <code>ollama</code>. Agor admits tools-capable models only, fixes the
+        context budget at 32,768 tokens, and permits one local runner at a time.
+      </Typography.Text>
+    </Space>
+  );
 }
 
 function providerListEmptyText(settings: Settings | null, error: string | undefined): string {
@@ -380,6 +558,8 @@ export function OpenCodeProviderSettings({
 
   return (
     <Space orientation="vertical" size="middle" style={{ width: '100%' }}>
+      <OllamaLocalProviderSettings client={client} />
+      <Divider style={{ margin: '8px 0' }} />
       <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
         Connect providers through native API-key or subscription authorization in the managed
         OpenCode runtime.

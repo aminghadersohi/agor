@@ -73,6 +73,7 @@ import type {
   AgenticCredentialSources,
   AgenticToolName,
   AgenticToolsConfig,
+  AgenticToolsStatus,
   AgenticToolsUpdate,
   AuthenticatedParams,
   Branch,
@@ -104,6 +105,7 @@ import {
   toAgenticToolsStatus,
   WORKSPACE_DEFAULT_AGENTIC_CONFIGURATION,
 } from '@agor/core/types';
+import { normalizeOpenCodeOllamaEndpoint } from '../integrations/opencode/ollama-service.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
 import { resolveOwnerHomeStore } from '../utils/sandbox-context.js';
 import type { ClaudeUserCredentialPatchCoordinator } from './claude-credential-mutation.js';
@@ -348,6 +350,46 @@ function applyAgenticToolsPatch(
     }
   }
   return next;
+}
+
+const OPENCODE_LOCAL_PROVIDER_FIELDS = new Set([
+  'ollama_enabled',
+  'ollama_endpoint',
+  'ollama_model',
+]);
+
+/** Keep the generic user PATCH route from bypassing the bounded preset service. */
+function validateOpenCodeAgenticToolsPatch(patch: AgenticToolsUpdate): void {
+  const fields = patch.opencode as Record<string, string | null> | undefined;
+  if (!fields) return;
+  for (const [field, value] of Object.entries(fields)) {
+    if (!OPENCODE_LOCAL_PROVIDER_FIELDS.has(field)) {
+      throw new BadRequest(`Unsupported OpenCode setting: ${field}`);
+    }
+    if (value === null) continue;
+    if (field === 'ollama_enabled' && value !== 'true' && value !== 'false') {
+      throw new BadRequest('Ollama enabled state must be true or false.');
+    }
+    if (field === 'ollama_endpoint') normalizeOpenCodeOllamaEndpoint(value);
+    if (
+      field === 'ollama_model' &&
+      (value.length > 160 || !/^[A-Za-z0-9][A-Za-z0-9._/:+-]*$/.test(value))
+    ) {
+      throw new BadRequest('Ollama model must be an exact local model ID.');
+    }
+  }
+}
+
+/** Local-provider presence is private state, not tenant directory metadata. */
+function agenticToolsStatusForRequester(
+  stored: StoredAgenticTools | undefined,
+  ownerId: string,
+  requesterId: UserID | undefined
+): AgenticToolsStatus | undefined {
+  const status = toAgenticToolsStatus(stored);
+  if (!status || requesterId === ownerId || status.opencode === undefined) return status;
+  const { opencode: _privateOpenCodeState, ...publicStatus } = status;
+  return Object.keys(publicStatus).length > 0 ? publicStatus : undefined;
 }
 
 /**
@@ -1161,6 +1203,7 @@ export class UsersService {
       }
 
       // Handle per-tool credential patches (encrypt-on-write, drop-on-null).
+      if (data.agentic_tools) validateOpenCodeAgenticToolsPatch(data.agentic_tools);
       const nextAgenticTools: StoredAgenticTools = data.agentic_tools
         ? applyAgenticToolsPatch(currentData?.agentic_tools ?? {}, data.agentic_tools)
         : (currentData?.agentic_tools ?? {});
@@ -1971,8 +2014,9 @@ export class UsersService {
       must_change_password: !!row.must_change_password,
       created_at: row.created_at,
       updated_at: row.updated_at ?? undefined,
-      // Per-tool credential presence (boolean only — never expose decrypted values).
-      agentic_tools: toAgenticToolsStatus(data.agentic_tools),
+      // OpenCode local-provider presence is owner-only; other tools retain the
+      // directory's historical credential-presence behavior.
+      agentic_tools: agenticToolsStatusForRequester(data.agentic_tools, row.user_id, requesterId),
       agentic_auth_methods: data.agentic_auth_methods,
       agentic_credential_sources: data.agentic_credential_sources,
       // Self-only: return plaintext for whitelisted non-secret fields
