@@ -5,6 +5,7 @@
  * For spawn: includes configuration options (agent, callback, etc.)
  */
 
+import { SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS } from '@agor/core/types';
 import type {
   AgenticToolName,
   AgorClient,
@@ -14,7 +15,7 @@ import type {
   User,
 } from '@agor-live/client';
 import { getDefaultPermissionMode, isAgenticToolName } from '@agor-live/client';
-import { Alert, Checkbox, Form, Modal, Radio, Typography, theme } from 'antd';
+import { Alert, Checkbox, Form, InputNumber, Modal, Radio, Select, Typography, theme } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import { AgenticConfigChipRow } from '../AgenticConfigChipRow';
 import { buildModelConfigFromFormValues } from '../AgenticToolConfigForm/agenticConfigHelpers';
@@ -122,8 +123,11 @@ export const ForkSpawnModal: React.FC<ForkSpawnModalProps> = ({
       form.setFieldsValue({
         prompt: initialPrompt,
         enableCallback: session.callback_config?.enabled,
+        callbackDelivery: session.callback_config?.delivery ?? 'direct',
         includeLastMessage: session.callback_config?.include_last_message,
         includeOriginalPrompt: session.callback_config?.include_original_prompt,
+        autoArchive: 'after_completion',
+        autoArchiveAfterSeconds: SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS,
       });
       setSelectedAgent(agentTool);
     }
@@ -210,11 +214,18 @@ export const ForkSpawnModal: React.FC<ForkSpawnModalProps> = ({
         if (values.enableCallback !== undefined) {
           spawnConfig.enableCallback = values.enableCallback;
         }
+        if (values.callbackDelivery !== undefined) {
+          spawnConfig.callbackDelivery = values.callbackDelivery;
+        }
         if (values.includeLastMessage !== undefined) {
           spawnConfig.includeLastMessage = values.includeLastMessage;
         }
         if (values.includeOriginalPrompt !== undefined) {
           spawnConfig.includeOriginalPrompt = values.includeOriginalPrompt;
+        }
+        spawnConfig.autoArchive = values.autoArchive;
+        if (values.autoArchive === 'after_completion') {
+          spawnConfig.autoArchiveAfterSeconds = values.autoArchiveAfterSeconds;
         }
 
         await onConfirm(spawnConfig);
@@ -415,6 +426,21 @@ export const ForkSpawnModal: React.FC<ForkSpawnModalProps> = ({
                   getFieldValue('enableCallback') && (
                     <>
                       <Form.Item
+                        name="callbackDelivery"
+                        label="Delivery"
+                        style={{ marginLeft: 24 }}
+                        tooltip="Direct preserves the existing callback. BTW digests it in an ephemeral destination fork when available. Auto uses BTW only for busy destinations or callbacks of at least 8 KiB."
+                      >
+                        <Select
+                          options={[
+                            { value: 'direct', label: 'Direct (default)' },
+                            { value: 'btw', label: 'BTW digest' },
+                            { value: 'auto', label: 'Auto' },
+                          ]}
+                        />
+                      </Form.Item>
+
+                      <Form.Item
                         name="includeLastMessage"
                         valuePropName="checked"
                         style={{ marginLeft: 24 }}
@@ -434,6 +460,37 @@ export const ForkSpawnModal: React.FC<ForkSpawnModalProps> = ({
                 }
               </Form.Item>
             </div>
+
+            <Form.Item
+              name="autoArchive"
+              label="After completion"
+              tooltip="Archiving only hides the child from active trees. Its transcript and branch are retained."
+            >
+              <Select
+                options={[
+                  { value: 'after_completion', label: 'Archive after grace period' },
+                  { value: 'never', label: 'Keep until manually archived' },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item noStyle shouldUpdate={(prev, curr) => prev.autoArchive !== curr.autoArchive}>
+              {({ getFieldValue }) =>
+                getFieldValue('autoArchive') === 'after_completion' && (
+                  <Form.Item
+                    name="autoArchiveAfterSeconds"
+                    label="Grace period (seconds)"
+                    rules={[{ required: true, message: 'Enter a grace period' }]}
+                  >
+                    <InputNumber
+                      min={1}
+                      max={365 * 24 * 60 * 60}
+                      precision={0}
+                      style={{ width: '100%' }}
+                    />
+                  </Form.Item>
+                )
+              }
+            </Form.Item>
           </>
         )}
       </Form>

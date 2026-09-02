@@ -13,6 +13,11 @@ function stableTaskId(sourceId: string, domain: string, discriminator = ''): Tas
   return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}` as TaskID;
 }
 
+/** One inline parent-transcript message per completed BTW Task. */
+export function btwResultMessageId(sourceTaskId: TaskID, parentSessionId: SessionID): MessageID {
+  return stableTaskId(sourceTaskId, 'btw_result', parentSessionId) as unknown as MessageID;
+}
+
 /** One corrective Task for one caller-selected interrupt idempotency key. */
 export function interruptCorrectionTaskId(
   targetSessionId: SessionID,
@@ -29,6 +34,30 @@ export function interruptCorrectionTaskId(
 /** One durable Task per source completion event and callback target. */
 export function completionCallbackTaskId(sourceTaskId: TaskID, targetSessionId: SessionID): TaskID {
   return stableTaskId(sourceTaskId, 'session_completion', targetSessionId);
+}
+
+/** One ephemeral digest Session per source completion event and standing destination. */
+export function completionCallbackBtwSessionId(
+  sourceTaskId: TaskID,
+  targetSessionId: SessionID
+): SessionID {
+  return stableTaskId(sourceTaskId, 'session_completion_btw', targetSessionId) as SessionID;
+}
+
+/** One digest Task inside the deterministic callback BTW Session. */
+export function completionCallbackBtwTaskId(
+  sourceTaskId: TaskID,
+  targetSessionId: SessionID
+): TaskID {
+  return stableTaskId(sourceTaskId, 'session_completion_btw_task', targetSessionId);
+}
+
+/** One final coordinator transcript message for a callback digest completion. */
+export function completionCallbackBtwResultMessageId(
+  sourceTaskId: TaskID,
+  targetSessionId: SessionID
+): MessageID {
+  return stableTaskId(sourceTaskId, 'session_completion_btw_result', targetSessionId) as MessageID;
 }
 
 /** One durable auto-resume Task per widget message. */

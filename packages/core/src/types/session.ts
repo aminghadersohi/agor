@@ -19,7 +19,15 @@ import type {
 } from './agentic-tool';
 import type { AgenticToolConfigurationReference } from './agentic-tool-preset';
 import type { ContextFilePath } from './context';
-import type { BoardID, BranchID, SessionID, SessionRelationshipID, TaskID, UserID } from './id';
+import type {
+  BoardID,
+  BranchID,
+  MessageID,
+  SessionID,
+  SessionRelationshipID,
+  TaskID,
+  UserID,
+} from './id';
 import type { ScheduleID } from './schedule';
 import type { TaskStatus, TerminationCoordinationPendingCode } from './task';
 
@@ -35,6 +43,38 @@ export const SessionStatus = {
 } as const;
 
 export type SessionStatus = (typeof SessionStatus)[keyof typeof SessionStatus];
+
+/** Durable cleanup policy for non-root child Sessions. */
+export const SESSION_AUTO_ARCHIVE_POLICIES = ['never', 'after_completion'] as const;
+export type SessionAutoArchivePolicy = (typeof SESSION_AUTO_ARCHIVE_POLICIES)[number];
+
+/** Product defaults applied once, when an eligible child Session is created. */
+export const BTW_AUTO_ARCHIVE_AFTER_SECONDS = 5 * 60;
+export const SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS = 60 * 60;
+
+/**
+ * How a standing child-completion callback reaches its coordinator.
+ *
+ * `direct` preserves the historical behavior. `btw` asks an ephemeral fork of
+ * the destination to digest the callback first. `auto` applies Agor's
+ * deterministic callback-delivery policy and otherwise remains direct.
+ */
+export const CALLBACK_DELIVERIES = ['direct', 'btw', 'auto'] as const;
+export type CallbackDelivery = (typeof CALLBACK_DELIVERIES)[number];
+
+/** Durable provenance carried only by ephemeral callback-digest BTW forks. */
+export interface CallbackDigestProvenance {
+  kind: 'callback_digest';
+  source_session_id: SessionID;
+  source_task_id: TaskID;
+  destination_session_id: SessionID;
+  relationship_ids: SessionRelationshipID[];
+  route: 'standing';
+  requested_delivery: Exclude<CallbackDelivery, 'direct'>;
+  resolved_delivery: 'btw';
+  callback_created_by: UserID;
+  final_message_id: MessageID;
+}
 
 /** Durable outcome reported by the authenticated Session Stop endpoint. */
 export const SESSION_STOP_OUTCOMES = [
@@ -535,6 +575,10 @@ export interface Session {
      * - "once": Fire callback on first completion, then auto-disable
      */
     callback_mode?: 'once' | 'persistent';
+    /** Delivery policy for standing callbacks. Omitted means `direct`. */
+    delivery?: CallbackDelivery;
+    /** Internal, durable loop guard and audit for callback-digest BTW forks. */
+    digest?: CallbackDigestProvenance;
   };
 
   // ===== Fork Origin =====
@@ -547,6 +591,17 @@ export interface Session {
    * Sessions with fork_origin:"btw" are auto-archived after task completion.
    */
   fork_origin?: 'btw';
+
+  // ===== Automatic Archive Policy =====
+
+  /** Automatic archival is opt-out for BTW forks and spawned child Sessions. */
+  auto_archive: SessionAutoArchivePolicy;
+
+  /** Grace period used to derive auto_archive_at after a terminal Task commits. */
+  auto_archive_after_seconds?: number;
+
+  /** Durable deadline. Cleared by prompt admission, manual archive, or unarchive. */
+  auto_archive_at?: string;
 
   // ===== Archive State =====
 
@@ -565,8 +620,14 @@ export interface Session {
    * - 'manual': User manually archived this session
    * - 'parent_archived': Cascaded from parent session being manually archived
    * - 'btw_completed': Ephemeral btw fork auto-archived after task completion
+   * - 'auto_completed': Spawned child auto-archived after its safe grace period
    */
-  archived_reason?: 'branch_archived' | 'manual' | 'parent_archived' | 'btw_completed';
+  archived_reason?:
+    | 'branch_archived'
+    | 'manual'
+    | 'parent_archived'
+    | 'btw_completed'
+    | 'auto_completed';
 
   /**
    * Durable non-genealogy relationships involving this session.
@@ -956,6 +1017,9 @@ export interface SpawnConfig {
   /** Callback mode: "once" (default) fires once then auto-disables, "persistent" fires every time */
   callbackMode?: 'once' | 'persistent';
 
+  /** Standing callback delivery policy. Omitted means backward-compatible `direct`. */
+  callbackDelivery?: CallbackDelivery;
+
   /** Include child's final result in callback (default: true) */
   includeLastMessage?: boolean;
 
@@ -974,4 +1038,10 @@ export interface SpawnConfig {
    * creator or an admin/superadmin can set this — otherwise it is ignored.
    */
   envVarNames?: string[];
+
+  /** Cleanup policy for the spawned child. Defaults to after_completion. */
+  autoArchive?: SessionAutoArchivePolicy;
+
+  /** Positive grace in seconds when autoArchive is after_completion. */
+  autoArchiveAfterSeconds?: number;
 }

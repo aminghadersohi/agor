@@ -1,4 +1,12 @@
-import type { AgorClient, Branch, Session, SpawnConfig, Task } from '@agor-live/client';
+import type {
+  AgorClient,
+  Branch,
+  CoordinatorQueueBatchApplyResult,
+  CoordinatorQueueBatchPreview,
+  Session,
+  SpawnConfig,
+  Task,
+} from '@agor-live/client';
 import { getTeammateConfig, isTeammate, sessionPath } from '@agor-live/client';
 import {
   CopyOutlined,
@@ -6,7 +14,19 @@ import {
   VerticalAlignBottomOutlined,
   VerticalAlignTopOutlined,
 } from '@ant-design/icons';
-import { Alert, Button, Divider, Space, Tooltip, Typography, theme } from 'antd';
+import {
+  Alert,
+  Button,
+  Divider,
+  Input,
+  Modal,
+  Radio,
+  Select,
+  Space,
+  Tooltip,
+  Typography,
+  theme,
+} from 'antd';
 import React from 'react';
 import { useAppActions } from '../../contexts/AppActionsContext';
 import { useAgorStore } from '../../store/agorStore';
@@ -61,7 +81,108 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
     const { token } = theme.useToken();
     const { showSuccess, showError } = useThemedMessage();
     const [resumeQueueInFlight, setResumeQueueInFlight] = React.useState(false);
+    const [batchOpen, setBatchOpen] = React.useState(false);
+    const [batchLoading, setBatchLoading] = React.useState(false);
+    const [batchStrategy, setBatchStrategy] = React.useState<'combine' | 'replace'>('combine');
+    const [replacementPrompt, setReplacementPrompt] = React.useState('');
+    const [batchPreview, setBatchPreview] = React.useState<CoordinatorQueueBatchPreview | null>(
+      null
+    );
+    const availableBatchRelationships = React.useMemo(() => {
+      const relationships: Array<'parent' | 'coordinator'> = [];
+      if (session.genealogy?.parent_session_id) relationships.push('parent');
+      if (
+        session.callback_config?.callback_session_id &&
+        session.callback_config.enabled !== false
+      ) {
+        relationships.push('coordinator');
+      }
+      return relationships;
+    }, [session.callback_config, session.genealogy?.parent_session_id]);
+    const [batchRelationship, setBatchRelationship] = React.useState<'parent' | 'coordinator'>(
+      availableBatchRelationships.includes('coordinator') ? 'coordinator' : 'parent'
+    );
+    const batchOperationIdRef = React.useRef<string>('');
     const isQueueHeldByFailure = queuedTasks.length > 0 && session.status === 'failed';
+
+    React.useEffect(() => {
+      if (availableBatchRelationships.includes(batchRelationship)) return;
+      setBatchRelationship(
+        availableBatchRelationships.includes('coordinator') ? 'coordinator' : 'parent'
+      );
+    }, [availableBatchRelationships, batchRelationship]);
+
+    const loadBatchPreview = React.useCallback(async () => {
+      if (!client || !batchOpen) return;
+      setBatchLoading(true);
+      try {
+        const preview = (await client
+          .service(`/sessions/${session.session_id}/tasks/queue/batch`)
+          .find({
+            query: { relationship: batchRelationship },
+          })) as unknown as CoordinatorQueueBatchPreview;
+        setBatchPreview(preview);
+      } catch (error) {
+        setBatchPreview(null);
+        showError(
+          `Cannot preview queue batching: ${error instanceof Error ? error.message : String(error)}`
+        );
+      } finally {
+        setBatchLoading(false);
+      }
+    }, [batchOpen, batchRelationship, client, session.session_id, showError]);
+
+    React.useEffect(() => {
+      void loadBatchPreview();
+    }, [loadBatchPreview]);
+
+    const openBatchDialog = React.useCallback(() => {
+      batchOperationIdRef.current = crypto.randomUUID();
+      setBatchStrategy('combine');
+      setReplacementPrompt('');
+      setBatchPreview(null);
+      setBatchOpen(true);
+    }, []);
+
+    const applyQueueBatch = React.useCallback(async () => {
+      if (!client || !batchPreview || batchLoading) return;
+      setBatchLoading(true);
+      try {
+        const result = (await client
+          .service(`/sessions/${session.session_id}/tasks/queue/batch`)
+          .create({
+            relationship: batchRelationship,
+            strategy: batchStrategy,
+            expectedQueueRevision: batchPreview.queue_revision,
+            expectedTaskIds: batchPreview.expected_task_ids,
+            idempotencyKey: batchOperationIdRef.current,
+            ...(batchStrategy === 'replace' ? { replacementPrompt } : {}),
+          })) as CoordinatorQueueBatchApplyResult;
+        if (result.outcome === 'relationship_changed') {
+          throw new Error('Coordinator relationship changed; reopen the preview.');
+        }
+        setQueuedTasks([result.execution_task]);
+        showSuccess(`${result.preview.source_request_count} queued requests will run as one turn`);
+        setBatchOpen(false);
+      } catch (error) {
+        showError(
+          `Failed to batch queued instructions: ${error instanceof Error ? error.message : String(error)}`
+        );
+      } finally {
+        setBatchLoading(false);
+      }
+    }, [
+      batchLoading,
+      batchPreview,
+      batchRelationship,
+      batchStrategy,
+      client,
+      replacementPrompt,
+      session.session_id,
+      setQueuedTasks,
+      showError,
+      showSuccess,
+    ]);
 
     const handleResumeHeldQueue = React.useCallback(async () => {
       if (!client || resumeQueueInFlight) return;
@@ -208,19 +329,32 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
               boxShadow: `0 -2px 8px ${token.colorBgMask}`,
             }}
           >
-            <Typography.Text
-              type="secondary"
+            <div
               style={{
-                fontSize: token.fontSizeSM,
-                display: 'block',
                 marginBottom: token.sizeUnit * 2,
-                fontWeight: 500,
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: token.sizeUnit * 2,
               }}
             >
-              Queued Tasks ({queuedTasks.length})
-            </Typography.Text>
+              <Typography.Text
+                type="secondary"
+                style={{
+                  fontSize: token.fontSizeSM,
+                  fontWeight: 500,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                }}
+              >
+                Queued Tasks ({queuedTasks.length})
+              </Typography.Text>
+              {queuedTasks.length > 1 && availableBatchRelationships.length > 0 && (
+                <Button size="small" onClick={openBatchDialog}>
+                  Combine queue
+                </Button>
+              )}
+            </div>
             {isQueueHeldByFailure && (
               <Alert
                 type="warning"
@@ -256,12 +390,22 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
                     gap: token.sizeUnit * 2,
                   }}
                 >
-                  <Typography.Text ellipsis style={{ flex: 1 }}>
-                    <span style={{ color: token.colorTextSecondary, marginRight: token.sizeUnit }}>
-                      {idx + 1}.
-                    </span>
-                    {task.full_prompt}
-                  </Typography.Text>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <Typography.Text ellipsis style={{ display: 'block' }}>
+                      <span
+                        style={{ color: token.colorTextSecondary, marginRight: token.sizeUnit }}
+                      >
+                        {idx + 1}.
+                      </span>
+                      {task.full_prompt}
+                    </Typography.Text>
+                    {task.metadata?.coordinator_queue_batch && (
+                      <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                        {task.metadata.coordinator_queue_batch.source_request_count} requests became
+                        one execution turn ({task.metadata.coordinator_queue_batch.strategy})
+                      </Typography.Text>
+                    )}
+                  </div>
                   <Space size={4}>
                     {isQueueHeldByFailure && idx === 0 && (
                       <Button
@@ -318,6 +462,110 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
             </Space>
           </div>
         )}
+
+        <Modal
+          open={batchOpen}
+          title="Batch queued instructions"
+          onCancel={() => setBatchOpen(false)}
+          okText={batchStrategy === 'combine' ? 'Combine queue' : 'Replace queued instructions'}
+          okButtonProps={{
+            danger: batchStrategy === 'replace',
+            disabled:
+              !batchPreview?.compatible ||
+              (batchStrategy === 'combine' && !batchPreview.combine_allowed) ||
+              (batchStrategy === 'replace' && !replacementPrompt.trim()),
+          }}
+          confirmLoading={batchLoading}
+          onOk={() => void applyQueueBatch()}
+        >
+          <Space orientation="vertical" size={12} style={{ width: '100%' }}>
+            {availableBatchRelationships.length > 1 && (
+              <Select
+                value={batchRelationship}
+                onChange={setBatchRelationship}
+                options={availableBatchRelationships.map((relationship) => ({
+                  value: relationship,
+                  label: relationship === 'parent' ? 'Branch-local parent' : 'Callback coordinator',
+                }))}
+                style={{ width: '100%' }}
+              />
+            )}
+            <Radio.Group
+              value={batchStrategy}
+              onChange={(event) => setBatchStrategy(event.target.value)}
+              optionType="button"
+              buttonStyle="solid"
+              options={[
+                { label: 'Combine queue', value: 'combine' },
+                { label: 'Replace queued instructions', value: 'replace' },
+              ]}
+            />
+            {batchPreview && (
+              <div
+                style={{ display: 'flex', justifyContent: 'space-between', gap: token.sizeUnit }}
+              >
+                <Typography.Text type="secondary">
+                  {batchPreview.source_task_count} Tasks / {batchPreview.source_request_count}{' '}
+                  requests → 1 execution turn; {batchPreview.duplicate_request_count} normalized
+                  duplicates omitted from executor bytes.
+                </Typography.Text>
+                <Button size="small" loading={batchLoading} onClick={() => void loadBatchPreview()}>
+                  Refresh
+                </Button>
+              </div>
+            )}
+            {batchPreview && !batchPreview.compatible && (
+              <Alert
+                type="error"
+                showIcon
+                message="This queue cannot be batched safely"
+                description={batchPreview.refusal_reasons.join(' ')}
+              />
+            )}
+            {batchPreview?.compatible &&
+              batchStrategy === 'combine' &&
+              !batchPreview.combine_allowed && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="Combined prompt is too large"
+                  description={`${batchPreview.combine_refusal_reason} Replace remains available and is never truncated.`}
+                />
+              )}
+            {batchStrategy === 'combine' ? (
+              <>
+                <Alert
+                  type="info"
+                  showIcon
+                  message="Distinct instructions are preserved"
+                  description="Order is deterministic, normalized duplicates are omitted, and the executor is told that later instructions override earlier ones only when they conflict. Switch to Replace to edit a canonical correction."
+                />
+                <Input.TextArea
+                  value={batchPreview?.combined_prompt ?? ''}
+                  readOnly
+                  autoSize={{ minRows: 6, maxRows: 12 }}
+                  aria-label="Combined executor prompt preview"
+                />
+              </>
+            ) : (
+              <>
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="Only this replacement is sent"
+                  description="Every original Task, author, timestamp, request ID, and text remains in audit history, but original instructions are omitted from executor bytes."
+                />
+                <Input.TextArea
+                  value={replacementPrompt}
+                  onChange={(event) => setReplacementPrompt(event.target.value)}
+                  autoSize={{ minRows: 6, maxRows: 12 }}
+                  placeholder="Enter the canonical replacement instructions"
+                  aria-label="Canonical replacement instructions"
+                />
+              </>
+            )}
+          </Space>
+        </Modal>
 
         {/* Advanced Spawn Modal */}
         <ForkSpawnModal

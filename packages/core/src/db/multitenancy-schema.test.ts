@@ -56,11 +56,14 @@ function migrationTenantTables(): string[] {
   const codexDeviceAuthMigration = readRepoFile(
     'packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'
   );
+  const claudeOauthMigration = readRepoFile(
+    'packages/core/drizzle/postgres/0100_claude_oauth_attempts.sql'
+  );
   const capabilityPoliciesMigration = readRepoFile(
     'packages/core/drizzle/postgres/0095_board_branch_capability_policies.sql'
   );
   const zoneWorkflowMigration = readRepoFile(
-    'packages/core/drizzle/postgres/0101_zone_workflow_transitions.sql'
+    'packages/core/drizzle/postgres/0102_zone_workflow_transitions.sql'
   );
   const retiredTables = retiredTenantTables();
   return [
@@ -76,6 +79,7 @@ function migrationTenantTables(): string[] {
         ...discordGatewayHybridMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...externalIdentitiesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...codexDeviceAuthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...claudeOauthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...capabilityPoliciesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...zoneWorkflowMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
       ]
@@ -97,8 +101,9 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0094_discord_gateway_hybrid.sql'),
     readRepoFile('packages/core/drizzle/postgres/0090_external_user_identities.sql'),
     readRepoFile('packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0100_claude_oauth_attempts.sql'),
     readRepoFile('packages/core/drizzle/postgres/0095_board_branch_capability_policies.sql'),
-    readRepoFile('packages/core/drizzle/postgres/0101_zone_workflow_transitions.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0102_zone_workflow_transitions.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
   return [
@@ -192,6 +197,25 @@ describe('Postgres multitenancy schema coverage', () => {
     expect(migration).toContain("current_setting('agor.system_scope', true)");
     expect(migration).toContain("= 'task_runtime_discovery'");
     expect(migration).not.toContain('WITH CHECK');
+  });
+
+  it('limits session auto-archive discovery to due routing rows and an explicit capability', () => {
+    const migration = readRepoFile('packages/core/drizzle/postgres/0101_session_auto_archive.sql');
+
+    expect(migration).toContain('FOR SELECT');
+    expect(migration).toContain('"archived" = false');
+    expect(migration).toContain('"auto_archive" = \'after_completion\'');
+    expect(migration).toContain('"auto_archive_at" IS NOT NULL');
+    expect(migration).toContain("current_setting('agor.system_scope', true)");
+    expect(migration).toContain("= 'session_auto_archive_discovery'");
+    const discoveryPolicy = migration.slice(
+      migration.indexOf('CREATE POLICY "session_auto_archive_discovery"')
+    );
+    expect(discoveryPolicy).not.toContain('WITH CHECK');
+    expect(migration).toContain('CREATE POLICY "session_auto_archive_migration_0101"');
+    expect(migration).toContain("= 'session_auto_archive_migration_0101'");
+    expect(migration).toContain('DROP POLICY "session_auto_archive_migration_0101"');
+    expect(migration).toContain("SELECT set_config('agor.system_scope', '', true)");
   });
 
   it('limits Knowledge embedding discovery to routing-only candidate rows', () => {

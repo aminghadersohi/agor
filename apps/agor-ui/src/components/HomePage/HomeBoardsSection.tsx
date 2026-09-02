@@ -1,11 +1,5 @@
 import type { Board, Branch, Session } from '@agor-live/client';
-import {
-  ClockCircleOutlined,
-  LeftOutlined,
-  PlusOutlined,
-  RightOutlined,
-  ThunderboltOutlined,
-} from '@ant-design/icons';
+import { ClockCircleOutlined, LeftOutlined, PlusOutlined, RightOutlined } from '@ant-design/icons';
 import { Button, Empty, Tooltip, Typography, theme } from 'antd';
 import type React from 'react';
 import { memo, useMemo, useState } from 'react';
@@ -14,6 +8,7 @@ import { selectBoardById, selectBranchById, selectSessionsByBranch } from '../..
 import { getTimeMs } from '../../utils/entityTime';
 import { formatRelativeTime } from '../../utils/time';
 import { BoardTile, getBoardEmoji } from '../BoardTile';
+import { RunningSessionCount } from '../RunningSessionCount';
 import { glassSurfaceStyle, withAlpha } from './homeStyles';
 import type { HomePageProps } from './types';
 
@@ -32,7 +27,7 @@ interface BoardHomeRow {
   board: Board;
   emoji: string | undefined;
   branchCount: number;
-  activeCount: number;
+  runningCount: number;
   latestSessionAt: Session['last_updated'] | null;
   latest: number;
   visitRank: number;
@@ -74,24 +69,18 @@ const groupVisibleSessionsByBranch = (
   return grouped;
 };
 
-const activeSessions = (sessions: Session[]) =>
-  sessions.filter(
-    (s) =>
-      s.status === 'running' || s.status === 'awaiting_permission' || s.status === 'awaiting_input'
-  );
-
 const BoardHomeCard = memo(function BoardHomeCard({
   board,
   emoji,
   branchCount,
-  activeCount,
+  runningCount,
   latestSessionAt,
   onBoardClick,
 }: {
   board: Board;
   emoji: string | undefined;
   branchCount: number;
-  activeCount: number;
+  runningCount: number;
   latestSessionAt: Session['last_updated'] | null;
   onBoardClick: (boardId: string) => void;
 }) {
@@ -160,16 +149,11 @@ const BoardHomeCard = memo(function BoardHomeCard({
                 {board.name}
               </Text>
             </Tooltip>
-            <div style={{ display: 'flex', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <Text type="secondary" style={{ fontSize: 12 }}>
                 {branchCount} branch{branchCount !== 1 ? 'es' : ''}
               </Text>
-              {activeCount > 0 && (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  <ThunderboltOutlined style={{ marginRight: 2 }} />
-                  {activeCount} active
-                </Text>
-              )}
+              <RunningSessionCount count={runningCount} />
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
               <ClockCircleOutlined style={{ fontSize: 11, color: token.colorTextSecondary }} />
@@ -226,7 +210,10 @@ export const HomeBoardsSection: React.FC<
           board,
           emoji: getBoardEmoji(board, branchById),
           branchCount: branches.length,
-          activeCount: activeSessions(sessions).length,
+          // This caller-scoped aggregate comes from boards.find; the Home
+          // session buckets are deliberately partial during first paint and
+          // must never be used to infer a board-wide count.
+          runningCount: board.running_session_count,
           latestSessionAt,
           latest: Number.isFinite(latest) ? latest : 0,
           visitRank: visitRank.get(board.board_id) ?? Number.POSITIVE_INFINITY,
@@ -314,13 +301,13 @@ export const HomeBoardsSection: React.FC<
             gap: 12,
           }}
         >
-          {visibleRows.map(({ board, emoji, branchCount, activeCount, latestSessionAt }) => (
+          {visibleRows.map(({ board, emoji, branchCount, runningCount, latestSessionAt }) => (
             <BoardHomeCard
               key={board.board_id}
               board={board}
               emoji={emoji}
               branchCount={branchCount}
-              activeCount={activeCount}
+              runningCount={runningCount}
               latestSessionAt={latestSessionAt}
               onBoardClick={onBoardClick}
             />

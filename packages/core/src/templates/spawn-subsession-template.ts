@@ -12,6 +12,7 @@
  * round-trip.
  */
 
+import type { CallbackDelivery, SessionAutoArchivePolicy } from '../types/session';
 import { renderTemplate } from './handlebars-helpers';
 
 export interface SpawnSubsessionContext {
@@ -32,10 +33,13 @@ export interface SpawnSubsessionContext {
   hasCallbackConfig?: boolean;
   callbackConfig?: {
     enableCallback?: boolean;
+    callbackDelivery?: CallbackDelivery;
     includeLastMessage?: boolean;
     includeOriginalPrompt?: boolean;
   };
   extraInstructions?: string;
+  autoArchive?: SessionAutoArchivePolicy;
+  autoArchiveAfterSeconds?: number;
 }
 
 const SPAWN_SUBSESSION_TEMPLATE = `INSTRUCTION: The user is requesting a subsession to handle a delegated task. You MUST use the Agor
@@ -83,6 +87,8 @@ REQUEST: """
     - Callback Configuration:
     {{#if callbackConfig.enableCallback}}ENABLED - Include last message:
       {{callbackConfig.includeLastMessage}}
+      - Delivery:
+      {{callbackConfig.callbackDelivery}}
       - Include original prompt:
       {{callbackConfig.includeOriginalPrompt}}{{else}}NO CALLBACK{{/if}}
   {{/if}}
@@ -90,6 +96,9 @@ REQUEST: """
     - Extra Instructions: """
     {{extraInstructions}}
     """
+  {{/if}}
+  {{#if autoArchive}}
+    - Auto Archive: {{autoArchive}}{{#if autoArchiveAfterSeconds}} after {{autoArchiveAfterSeconds}} seconds{{/if}}
   {{/if}}
 {{/if}}
 
@@ -135,6 +144,9 @@ hashing and JWT for tokens."
   - enableCallback:
   {{callbackConfig.enableCallback}}
 {{/if}}
+{{#if (isDefined callbackConfig.callbackDelivery)}}
+  - callbackDelivery: "{{callbackConfig.callbackDelivery}}"
+{{/if}}
 {{#if (isDefined callbackConfig.includeLastMessage)}}
   - includeLastMessage:
   {{callbackConfig.includeLastMessage}}
@@ -145,6 +157,12 @@ hashing and JWT for tokens."
 {{/if}}
 {{#if extraInstructions}}
   - extraInstructions: """{{extraInstructions}}"""
+{{/if}}
+{{#if autoArchive}}
+  - autoArchive: "{{autoArchive}}"
+{{/if}}
+{{#if autoArchiveAfterSeconds}}
+  - autoArchiveAfterSeconds: {{autoArchiveAfterSeconds}}
 {{/if}}
 
 CRITICAL: - Do NOT explain or respond directly to the user - ALWAYS use the MCP tool - this is
@@ -168,7 +186,9 @@ session will do YOUR EXACT TOOL CALL MUST BE: agor_sessions_spawn({ "prompt": "{
   "mcpServerIds": [{{#each mcpServerIds}}"{{this}}"{{#unless @last}},
     {{/unless}}{{/each}}],{{/if}}{{#if (isDefined callbackConfig.enableCallback)}}
   "enableCallback":
-  {{callbackConfig.enableCallback}},{{/if}}{{#if (isDefined callbackConfig.includeLastMessage)}}
+  {{callbackConfig.enableCallback}},{{/if}}{{#if (isDefined callbackConfig.callbackDelivery)}}
+  "callbackDelivery":
+  "{{callbackConfig.callbackDelivery}}",{{/if}}{{#if (isDefined callbackConfig.includeLastMessage)}}
   "includeLastMessage":
   {{callbackConfig.includeLastMessage}},{{/if}}{{#if
   (isDefined callbackConfig.includeOriginalPrompt)
@@ -176,6 +196,7 @@ session will do YOUR EXACT TOOL CALL MUST BE: agor_sessions_spawn({ "prompt": "{
   "includeOriginalPrompt":
   {{callbackConfig.includeOriginalPrompt}},{{/if}}{{#if extraInstructions}}
   "extraInstructions": """{{extraInstructions}}"""{{/if}}
+  {{#if autoArchive}},"autoArchive": "{{autoArchive}}"{{/if}}{{#if autoArchiveAfterSeconds}},"autoArchiveAfterSeconds": {{autoArchiveAfterSeconds}}{{/if}}
 }) Proceed now by calling agor_sessions_spawn with the exact parameters shown above.`;
 
 /**
@@ -194,13 +215,17 @@ export function renderSpawnSubsessionPrompt(context: SpawnSubsessionContext): st
       context.codexNetworkAccess !== undefined ||
       (context.mcpServerIds?.length ?? 0) > 0 ||
       context.callbackConfig?.enableCallback !== undefined ||
+      context.callbackConfig?.callbackDelivery !== undefined ||
       context.callbackConfig?.includeLastMessage !== undefined ||
       context.callbackConfig?.includeOriginalPrompt !== undefined ||
-      context.extraInstructions !== undefined);
+      context.extraInstructions !== undefined ||
+      context.autoArchive !== undefined ||
+      context.autoArchiveAfterSeconds !== undefined);
 
   const hasCallbackConfig =
     context.hasCallbackConfig ??
     (context.callbackConfig?.enableCallback !== undefined ||
+      context.callbackConfig?.callbackDelivery !== undefined ||
       context.callbackConfig?.includeLastMessage !== undefined ||
       context.callbackConfig?.includeOriginalPrompt !== undefined);
 

@@ -16,16 +16,22 @@
  * maps); the maps live in `agorStore`, so map assertions read them via
  * `agorStore.getState().<map>` while load-state reads stay on `result.current`.
  */
-import { act, renderHook, waitFor } from '@testing-library/react';
+import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import { RunningSessionCount } from '../components/RunningSessionCount';
 import { getRevision } from '../store/agorHydration';
-import { agorStore } from '../store/agorStore';
+import { agorStore, useAgorStore } from '../store/agorStore';
 // Session `patched`/`updated` writes are coalesced to one flush per frame (see
 // realtimeBatch); flush synchronously in tests that assert the post-patch store.
 import { flushRealtimeNow } from '../store/realtimeBatch';
 import { useAgorData } from './useAgorData';
 
 const STANDALONE_AUTHORITY_SCOPE = '__standalone__:__standalone__:0';
+
+const VisibleBoardRunningCount = ({ boardId }: { boardId: string }) => {
+  const count = useAgorStore((state) => state.boardById.get(boardId)?.running_session_count ?? 0);
+  return <RunningSessionCount count={count} />;
+};
 
 /**
  * Minimal AgorClient stand-in. Implements just enough of the service /
@@ -225,6 +231,62 @@ function deferred() {
 }
 
 describe('useAgorData — socket-event bailouts', () => {
+  it('refreshes authoritative visible board counts on real Session state/archive events', async () => {
+    const board = {
+      board_id: 'board-running-count',
+      name: 'Realtime board',
+      archived: false,
+      running_session_count: 0,
+    };
+    const idle = makeSession({
+      session_id: 'session-running-count',
+      branch_id: 'branch-running-count',
+      branch_board_id: board.board_id,
+      status: 'idle',
+    });
+    const seed: Record<string, unknown[]> = {
+      sessions: [idle],
+      'sessions:findAll': [idle],
+      boards: [board],
+      'boards:findAll': [board],
+      branches: [makeBranch({ branch_id: 'branch-running-count', board_id: board.board_id })],
+    };
+    const { client, emit, fetchArguments, fetchCount } = makeMockClient(seed);
+    const { result } = renderHook(() => useAgorData(client));
+    await waitForInitialLoad(result);
+    render(<VisibleBoardRunningCount boardId={board.board_id} />);
+    expect(screen.queryByLabelText('1 running session')).not.toBeInTheDocument();
+    const initialBoardFetches = fetchCount('boards', 'findAll');
+
+    seed['boards:findAll'] = [{ ...board, running_session_count: 1 }];
+    act(() => emit('sessions', 'patched', { ...idle, status: 'running' }));
+
+    await waitFor(() =>
+      expect(agorStore.getState().boardById.get(board.board_id)?.running_session_count).toBe(1)
+    );
+    expect(screen.getByLabelText('1 running session')).toBeVisible();
+    expect(fetchCount('boards', 'findAll')).toBeGreaterThan(initialBoardFetches);
+    expect(fetchArguments('boards', 'findAll')).toContainEqual({
+      query: { archived: false, lean: true, $limit: 10_000 },
+    });
+
+    // Archive is a count transition even when the durable status remains
+    // running; a prop-only implementation would miss this production event.
+    seed['boards:findAll'] = [{ ...board, running_session_count: 0 }];
+    act(() =>
+      emit('sessions', 'patched', {
+        ...idle,
+        status: 'running',
+        archived: true,
+      })
+    );
+
+    await waitFor(() =>
+      expect(agorStore.getState().boardById.get(board.board_id)?.running_session_count).toBe(0)
+    );
+    expect(screen.queryByLabelText('1 running session')).not.toBeInTheDocument();
+  });
+
   it('scopes the real cold mobile board load before fetching board entities', async () => {
     const boardId = '01a012d8-1b9b-7909-b6f4-2024dfc7c51e';
     const { client, fetchArguments } = makeMockClient({
@@ -366,6 +428,38 @@ describe('useAgorData — socket-event bailouts', () => {
       status: 'idle',
       ready_for_prompt: true,
     });
+  });
+
+  it('promptly evicts an auto-archived child while retaining its root', async () => {
+    const root = makeSession({
+      session_id: 's-root',
+      genealogy: { children: ['s-child'] },
+    });
+    const child = makeSession({
+      session_id: 's-child',
+      genealogy: { parent_session_id: 's-root', children: [] },
+    });
+    const { client, emit } = makeMockClient({ sessions: [root, child] });
+    const { result } = renderHook(() => useAgorData(client));
+    await waitForInitialLoad(result);
+
+    act(() => {
+      emit('sessions', 'patched', {
+        ...child,
+        archived: true,
+        archived_reason: 'auto_completed',
+      });
+      flushRealtimeNow(STANDALONE_AUTHORITY_SCOPE);
+    });
+
+    expect(agorStore.getState().sessionById.has('s-root')).toBe(true);
+    expect(agorStore.getState().sessionById.has('s-child')).toBe(false);
+    expect(
+      agorStore
+        .getState()
+        .sessionsByBranch.get('b-1')
+        ?.map((s) => s.session_id)
+    ).toEqual(['s-root']);
   });
 
   it('ignores `sessions.removed` for a session not in the map', async () => {

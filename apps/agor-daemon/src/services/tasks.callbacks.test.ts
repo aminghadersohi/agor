@@ -8,6 +8,7 @@ const childSessionId = '018f0000-0000-7000-8000-000000000101';
 const parentSessionId = '018f0000-0000-7000-8000-000000000102';
 const taskId = '018f0000-0000-7000-8000-000000000201';
 const callbackTaskId = '018f0000-0000-7000-8000-000000000301';
+const relationshipId = '018f0000-0000-7000-8000-000000000302';
 const userId = '018f0000-0000-7000-8000-000000000401';
 const durableCallbackTaskId = completionCallbackTaskId(
   taskId as Task['task_id'],
@@ -48,6 +49,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     tasks: [taskId],
     ready_for_prompt: false,
     archived: false,
+    auto_archive: 'never',
     genealogy: {
       parent_session_id: parentSessionId,
       children: [],
@@ -106,13 +108,26 @@ function makeService(
     session_id: parentSessionId,
     status: TaskStatus.QUEUED,
   });
-  const createPending = vi.fn(async (data: Partial<Task>) => ({ ...callbackTask, ...data }));
+  const createPending = vi.fn(async (data: Partial<Task>) => {
+    const pending = { ...callbackTask, ...data } as Task;
+    tasksById.set(pending.task_id, pending);
+    return pending;
+  });
 
   const sessionsPatch = vi.fn(async (id: string, updates: Partial<Session>) => {
     const target = id === parentSessionId ? parentSession : childSession;
     Object.assign(target, updates);
     return { ...target };
   });
+  const sessionsFork = vi.fn(async (_id: string, data: Record<string, unknown>) =>
+    makeSession({
+      session_id: data.stableSessionId as Session['session_id'],
+      genealogy: { forked_from_session_id: parentSessionId, children: [] },
+      fork_origin: 'btw',
+      callback_config: data.callbackConfig as Session['callback_config'],
+      tasks: [],
+    })
+  );
   const triggerQueueProcessing = vi.fn(async () => undefined);
   const messagesFind = vi.fn(async () => [
     {
@@ -144,6 +159,7 @@ function makeService(
         return {
           get: vi.fn(async (id: string) => (id === parentSessionId ? parentSession : childSession)),
           patch: sessionsPatch,
+          fork: sessionsFork,
           triggerQueueProcessing,
         };
       }
@@ -158,6 +174,7 @@ function makeService(
     repository,
     createPending,
     sessionsPatch,
+    sessionsFork,
     triggerQueueProcessing,
     messagesFind,
     revokeTaskTokens,
@@ -308,6 +325,73 @@ describe('TasksService completion callbacks', () => {
     );
   });
 
+  it('owns a callback BTW under the current retargeted destination, never the stale one', async () => {
+    const newDestinationId = '018f0000-0000-7000-8000-000000000889' as Session['session_id'];
+    const { service, childSession, sessionsPatch, sessionsFork, triggerQueueProcessing } =
+      makeService({
+        childSession: {
+          callback_config: {
+            enabled: true,
+            callback_session_id: parentSessionId,
+            callback_created_by: userId,
+            callback_mode: 'persistent',
+            delivery: 'btw',
+          },
+        },
+      });
+    const latestChild = makeSession({
+      ...childSession,
+      callback_config: {
+        ...childSession.callback_config,
+        callback_session_id: newDestinationId,
+      },
+    });
+    let childReads = 0;
+    service.app.service.mockImplementation((name: string) => {
+      if (name === 'sessions') {
+        return {
+          get: vi.fn(async (id: string) => {
+            if (id === childSessionId) {
+              childReads += 1;
+              return childReads === 1 ? childSession : latestChild;
+            }
+            return makeSession({
+              session_id: id as Session['session_id'],
+              status: 'idle',
+              tasks: [],
+              callback_config: undefined,
+            });
+          }),
+          patch: sessionsPatch,
+          fork: sessionsFork,
+          triggerQueueProcessing,
+        };
+      }
+      if (name === 'messages') return { find: vi.fn(async () => []) };
+      if (name === 'branches') return { get: vi.fn() };
+      throw new Error(`unexpected service ${name}`);
+    });
+    vi.spyOn(service as any, 'callbackBtwUnavailableReason').mockResolvedValue(undefined);
+
+    await service.patch(taskId, { status: TaskStatus.COMPLETED });
+
+    await vi.waitFor(() => expect(sessionsFork).toHaveBeenCalledOnce());
+    expect(sessionsFork).toHaveBeenCalledWith(
+      newDestinationId,
+      expect.objectContaining({
+        callbackConfig: expect.objectContaining({
+          digest: expect.objectContaining({ destination_session_id: newDestinationId }),
+        }),
+      }),
+      { provider: undefined }
+    );
+    expect(sessionsFork).not.toHaveBeenCalledWith(
+      parentSessionId,
+      expect.anything(),
+      expect.anything()
+    );
+  });
+
   it('queues exactly one templated callback with last-message metadata for a completed subsession task', async () => {
     const {
       service,
@@ -375,6 +459,35 @@ describe('TasksService completion callbacks', () => {
           queued_task_id: durableCallbackTaskId,
         }),
       ])
+    );
+  });
+
+  it('commits the completion callback before scheduling archival and never archives inline', async () => {
+    const { service, createPending, sessionsPatch } = makeService({
+      childSession: {
+        auto_archive: 'after_completion',
+        auto_archive_after_seconds: 60,
+      },
+    });
+
+    await service.patch(taskId, {
+      status: TaskStatus.COMPLETED,
+      completed_at: '2026-01-01T00:00:05.000Z',
+    });
+
+    const deadlineCall = sessionsPatch.mock.calls.find(
+      ([id, updates]) => id === childSessionId && updates.auto_archive_at
+    );
+    expect(deadlineCall).toBeDefined();
+    expect(deadlineCall?.[1]).toMatchObject({ auto_archive_at: '2026-01-01T00:01:05.000Z' });
+    expect(createPending.mock.invocationCallOrder[0]).toBeLessThan(
+      sessionsPatch.mock.invocationCallOrder[
+        sessionsPatch.mock.calls.indexOf(deadlineCall as (typeof sessionsPatch.mock.calls)[number])
+      ]!
+    );
+    expect(sessionsPatch).not.toHaveBeenCalledWith(
+      childSessionId,
+      expect.objectContaining({ archived: true })
     );
   });
 
@@ -514,8 +627,288 @@ describe('TasksService completion callbacks', () => {
     expect(createPending).toHaveBeenCalledTimes(1);
   });
 
+  it('routes explicit BTW through one deterministic digest fork and one digest Task', async () => {
+    const { service, createPending, sessionsFork, triggerQueueProcessing, childSession } =
+      makeService({
+        childSession: {
+          callback_config: {
+            enabled: true,
+            callback_session_id: parentSessionId,
+            callback_created_by: userId,
+            callback_mode: 'persistent',
+            delivery: 'btw',
+          },
+        },
+      });
+    childSession.remote_relationships = {
+      as_target: [
+        {
+          relationship_id: relationshipId as any,
+          source_session_id: parentSessionId as Session['session_id'],
+          target_session_id: childSessionId as Session['session_id'],
+          relationship_type: 'remote_create',
+          created_by: userId as any,
+          created_at: '2026-01-01T00:00:00.000Z',
+          callback_enabled: true,
+          callback_session_id: parentSessionId as Session['session_id'],
+        },
+      ],
+    };
+    vi.spyOn(service as any, 'callbackBtwUnavailableReason').mockResolvedValue(undefined);
+    const completedTask = makeTask({
+      status: TaskStatus.COMPLETED,
+      completed_at: '2026-01-01T00:00:05.000Z',
+    });
+
+    await Promise.all([
+      (service as any).dispatchCompletionCallbacks(completedTask, childSession, {}),
+      (service as any).dispatchCompletionCallbacks(completedTask, childSession, {}),
+    ]);
+
+    expect(sessionsFork).toHaveBeenCalledTimes(1);
+    expect(sessionsFork).toHaveBeenCalledWith(
+      parentSessionId,
+      expect.objectContaining({
+        stableSessionId: expect.any(String),
+        forkOrigin: 'btw',
+        callbackConfig: expect.objectContaining({
+          enabled: false,
+          delivery: 'direct',
+          digest: expect.objectContaining({
+            source_task_id: taskId,
+            destination_session_id: parentSessionId,
+            relationship_ids: [relationshipId],
+          }),
+        }),
+      }),
+      { provider: undefined }
+    );
+    expect(createPending).toHaveBeenCalledTimes(1);
+    const digestTask = createPending.mock.calls[0][0];
+    expect(digestTask.session_id).not.toBe(parentSessionId);
+    expect(digestTask.metadata).toMatchObject({
+      callback_delivery: {
+        source_task_id: taskId,
+        destination_session_id: parentSessionId,
+        requested_delivery: 'btw',
+        resolved_delivery: 'btw',
+        relationship_ids: [relationshipId],
+      },
+    });
+    expect(triggerQueueProcessing).toHaveBeenCalledWith(digestTask.session_id, {});
+  });
+
+  it('falls back to one direct Task with an audited reason when BTW is unavailable', async () => {
+    const { service, createPending, sessionsFork, childSession } = makeService({
+      childSession: {
+        callback_config: {
+          enabled: true,
+          callback_session_id: parentSessionId,
+          callback_created_by: userId,
+          callback_mode: 'persistent',
+          delivery: 'btw',
+        },
+      },
+    });
+    vi.spyOn(service as any, 'callbackBtwUnavailableReason').mockResolvedValue(
+      'missing_fork_state'
+    );
+
+    await (service as any).dispatchCompletionCallbacks(
+      makeTask({ status: TaskStatus.COMPLETED }),
+      childSession,
+      {}
+    );
+
+    expect(sessionsFork).not.toHaveBeenCalled();
+    expect(createPending).toHaveBeenCalledOnce();
+    expect(createPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session_id: parentSessionId,
+        metadata: expect.objectContaining({
+          callback_delivery: expect.objectContaining({
+            requested_delivery: 'btw',
+            resolved_delivery: 'direct',
+            fallback_reason: 'missing_fork_state',
+          }),
+        }),
+      })
+    );
+  });
+
+  it('keeps the durable direct fallback as the retry winner after BTW creation fails', async () => {
+    const { service, createPending, sessionsFork, childSession } = makeService({
+      childSession: {
+        callback_config: {
+          enabled: true,
+          callback_session_id: parentSessionId,
+          callback_created_by: userId,
+          callback_mode: 'persistent',
+          delivery: 'btw',
+        },
+      },
+    });
+    vi.spyOn(service as any, 'callbackBtwUnavailableReason').mockResolvedValue(undefined);
+    const queueBtw = vi
+      .spyOn(service as any, 'queueCallbackThroughBtw')
+      .mockRejectedValue(new Error('side-session insert failed'));
+    const completed = makeTask({ status: TaskStatus.COMPLETED });
+
+    const first = await (service as any).queueCallbackToSession(
+      completed,
+      childSession,
+      parentSessionId,
+      {}
+    );
+    const second = await (service as any).queueCallbackToSession(
+      completed,
+      childSession,
+      parentSessionId,
+      {}
+    );
+
+    expect(first.delivery).toBe('direct');
+    expect(second.delivery).toBe('direct');
+    expect(queueBtw).toHaveBeenCalledOnce();
+    expect(sessionsFork).not.toHaveBeenCalled();
+    expect(createPending).toHaveBeenCalledOnce();
+    expect(createPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session_id: parentSessionId,
+        metadata: expect.objectContaining({
+          callback_delivery: expect.objectContaining({ fallback_reason: 'creation_failed' }),
+        }),
+      })
+    );
+  });
+
+  it('keeps auto direct while idle and uses BTW while busy', async () => {
+    const idle = makeService({
+      childSession: {
+        callback_config: {
+          enabled: true,
+          callback_session_id: parentSessionId,
+          callback_created_by: userId,
+          callback_mode: 'persistent',
+          delivery: 'auto',
+        },
+      },
+    });
+    await (idle.service as any).dispatchCompletionCallbacks(
+      makeTask({ status: TaskStatus.COMPLETED }),
+      idle.childSession,
+      {}
+    );
+    expect(idle.sessionsFork).not.toHaveBeenCalled();
+    expect(idle.createPending).toHaveBeenCalledWith(
+      expect.objectContaining({ session_id: parentSessionId })
+    );
+
+    const busy = makeService({
+      childSession: {
+        callback_config: {
+          enabled: true,
+          callback_session_id: parentSessionId,
+          callback_created_by: userId,
+          callback_mode: 'persistent',
+          delivery: 'auto',
+        },
+      },
+      parentSession: { status: 'running' },
+    });
+    vi.spyOn(busy.service as any, 'callbackBtwUnavailableReason').mockResolvedValue(undefined);
+    await (busy.service as any).dispatchCompletionCallbacks(
+      makeTask({ status: TaskStatus.COMPLETED }),
+      busy.childSession,
+      {}
+    );
+    expect(busy.sessionsFork).toHaveBeenCalledOnce();
+  });
+
+  it('keeps an exact-Task subscription direct even when standing policy is BTW', async () => {
+    const { service, createPending, sessionsFork, childSession } = makeService({
+      childSession: {
+        callback_config: {
+          enabled: true,
+          callback_session_id: parentSessionId,
+          callback_created_by: userId,
+          callback_mode: 'persistent',
+          delivery: 'btw',
+        },
+      },
+      task: {
+        metadata: {
+          completion_callback: {
+            target_session_id: parentSessionId as Session['session_id'],
+            requested_from_session_id: parentSessionId as Session['session_id'],
+            requested_by_user_id: userId,
+          },
+        },
+      },
+    });
+
+    await (service as any).dispatchCompletionCallbacks(
+      makeTask({
+        status: TaskStatus.COMPLETED,
+        metadata: {
+          completion_callback: {
+            target_session_id: parentSessionId as Session['session_id'],
+            requested_from_session_id: parentSessionId as Session['session_id'],
+            requested_by_user_id: userId,
+          },
+        },
+      }),
+      childSession,
+      {}
+    );
+
+    expect(sessionsFork).not.toHaveBeenCalled();
+    expect(createPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session_id: parentSessionId,
+        metadata: expect.objectContaining({
+          callback_delivery: expect.objectContaining({ route: 'exact_task' }),
+        }),
+      })
+    );
+  });
+
+  it('loop-guards callback digest completion before any callback Task or fork is created', async () => {
+    const { service, createPending, sessionsFork, childSession } = makeService({
+      childSession: {
+        fork_origin: 'btw',
+        callback_config: {
+          enabled: false,
+          delivery: 'direct',
+          digest: {
+            kind: 'callback_digest',
+            source_session_id: childSessionId as Session['session_id'],
+            source_task_id: taskId as Task['task_id'],
+            destination_session_id: parentSessionId as Session['session_id'],
+            relationship_ids: [],
+            route: 'standing',
+            requested_delivery: 'btw',
+            resolved_delivery: 'btw',
+            callback_created_by: userId as any,
+            final_message_id: callbackTaskId as any,
+          },
+        },
+      },
+    });
+
+    await (service as any).dispatchCompletionCallbacks(
+      makeTask({ status: TaskStatus.COMPLETED }),
+      childSession,
+      {}
+    );
+
+    expect(createPending).not.toHaveBeenCalled();
+    expect(sessionsFork).not.toHaveBeenCalled();
+  });
+
   it('still triggers target queue processing if dispatch marker persistence fails after queueing', async () => {
-    const { service, repository, createPending, triggerQueueProcessing } = makeService();
+    const { service, repository, createPending, triggerQueueProcessing, sessionsPatch } =
+      makeService();
     const completedTask = makeTask({
       status: TaskStatus.COMPLETED,
       completed_at: '2026-01-01T00:00:05.000Z',
@@ -533,6 +926,10 @@ describe('TasksService completion callbacks', () => {
 
     expect(createPending).toHaveBeenCalledTimes(1);
     expect(triggerQueueProcessing).toHaveBeenCalledWith(parentSessionId, {});
+    expect(sessionsPatch).not.toHaveBeenCalledWith(
+      childSessionId,
+      expect.objectContaining({ callback_config: expect.objectContaining({ enabled: false }) })
+    );
   });
 
   it('runs once-mode cleanup only for the caller that actually attempts dispatch', async () => {

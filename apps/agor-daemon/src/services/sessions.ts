@@ -72,9 +72,12 @@ import type {
   UUID,
 } from '@agor/core/types';
 import {
+  BTW_AUTO_ARCHIVE_AFTER_SECONDS,
+  CALLBACK_DELIVERIES,
   getEffectiveDirectCallbackCoordinatorSessionId,
   isAgenticToolDefaultConfigurationReference,
   SessionStatus,
+  SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS,
   USER_DEFAULT_AGENTIC_CONFIGURATION,
 } from '@agor/core/types';
 import { assertExecutionHomeKeySatisfiesMode } from '@agor/core/unix';
@@ -110,8 +113,37 @@ type SessionArchiveTarget = {
   archivedReason: SessionArchiveReason | null;
 };
 
+/** Internal idempotency/provenance options used by callback-digest BTW forks. */
+export type SessionForkInput = {
+  prompt: string;
+  task_id?: string;
+  stableSessionId?: SessionID;
+  forkOrigin?: Session['fork_origin'];
+  callbackConfig?: Session['callback_config'];
+};
+
+function assertCallbackDelivery(value: unknown): void {
+  if (value !== undefined && !CALLBACK_DELIVERIES.includes(value as never)) {
+    throw new BadRequest('callback delivery must be direct, btw, or auto');
+  }
+}
+
 const MANUAL_ARCHIVED_REASON = 'manual' satisfies SessionArchiveReason;
 const PARENT_ARCHIVED_REASON = 'parent_archived' satisfies SessionArchiveReason;
+
+function assertAutoArchivePolicy(value: unknown): void {
+  if (value === undefined || value === 'never' || value === 'after_completion') return;
+  throw new BadRequest('auto_archive must be never or after_completion');
+}
+
+function assertAutoArchiveTtl(value: number | undefined): void {
+  if (value === undefined) return;
+  if (!Number.isInteger(value) || value <= 0 || value > 365 * 24 * 60 * 60) {
+    throw new BadRequest(
+      'auto_archive_after_seconds must be a positive integer no greater than one year'
+    );
+  }
+}
 
 function sessionConfigurationSource(
   data: Pick<CreateSessionInput, 'model_config' | 'permission_config'>
@@ -280,6 +312,12 @@ export type SessionRelayDestinationInput = {
 
 export type SessionInterruptAuthorityInput = {
   callerSessionId: SessionID;
+  relationship: SessionInterruptRelationship;
+};
+
+export type SessionQueueBatchAuthorityInput = {
+  /** MCP supplies its own Session; browser/API callers leave this derived. */
+  callerSessionId?: SessionID;
   relationship: SessionInterruptRelationship;
 };
 
@@ -538,6 +576,62 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     };
   }
 
+  /**
+   * Resolve queue-batching authority from the target's current relationship.
+   * Merely naming a caller is never sufficient: both Sessions are checked for
+   * current prompt authority and the locked repository mutation rechecks the
+   * relationship before touching the queue.
+   */
+  async resolveQueueBatchAuthority(
+    targetId: string,
+    data: SessionQueueBatchAuthorityInput,
+    params?: SessionParams
+  ): Promise<SessionInterruptAuthority> {
+    const target = await this.requireSessionTransferAuthority(
+      targetId as SessionID,
+      params,
+      'destination'
+    );
+    const derivedCallerSessionId =
+      data.relationship === 'parent'
+        ? target.genealogy?.parent_session_id
+        : (getEffectiveDirectCallbackCoordinatorSessionId(target) ?? undefined);
+    if (
+      !derivedCallerSessionId ||
+      (data.callerSessionId && data.callerSessionId !== derivedCallerSessionId)
+    ) {
+      throw new Forbidden(
+        `Current ${data.relationship} relationship does not authorize this Session to batch the target queue.`
+      );
+    }
+    const caller = await this.requireSessionTransferAuthority(
+      derivedCallerSessionId,
+      params,
+      'destination'
+    );
+    if (getHiddenTenantId(caller) !== getHiddenTenantId(target)) {
+      throw new Forbidden('Queue coordinator and target must belong to the same tenant.');
+    }
+    if (
+      data.relationship === 'parent' &&
+      (target.genealogy?.parent_session_id !== caller.session_id ||
+        target.branch_id !== caller.branch_id)
+    ) {
+      throw new Forbidden('Current branch-local parent no longer authorizes queue batching.');
+    }
+    if (
+      data.relationship === 'coordinator' &&
+      getEffectiveDirectCallbackCoordinatorSessionId(target) !== caller.session_id
+    ) {
+      throw new Forbidden('Current callback coordinator no longer authorizes queue batching.');
+    }
+    return {
+      caller_session_id: caller.session_id,
+      target_session_id: target.session_id,
+      relationship: data.relationship,
+    };
+  }
+
   private async resolveDirectCreateModelFallback(
     agenticTool: AgenticToolName,
     data: CreateSessionInput,
@@ -655,6 +749,10 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (Object.hasOwn(data, 'sdk_home_scope')) {
       throw new BadRequest('sdk_home_scope is server-managed and cannot be set by clients');
     }
+    assertCallbackDelivery(data.callback_config?.delivery);
+    if (params?.provider && data.callback_config?.digest !== undefined) {
+      throw new BadRequest('callback digest provenance is server-managed');
+    }
     const agenticTool = requireActiveAgenticTool(data.agentic_tool ?? 'claude-code');
     this.assertDeploymentToolConfigured(agenticTool);
     if (!(await isTenantAgenticToolEnabled(agenticTool, this.db))) {
@@ -666,6 +764,34 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       ...sessionData
     } = data;
     let createData: Partial<Session> = { ...sessionData };
+    assertAutoArchivePolicy(createData.auto_archive);
+    const isSpawnedChild = Boolean(createData.genealogy?.parent_session_id);
+    const isBtw = createData.fork_origin === 'btw';
+    const defaultTtl = isBtw
+      ? BTW_AUTO_ARCHIVE_AFTER_SECONDS
+      : isSpawnedChild
+        ? SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS
+        : undefined;
+    if (createData.auto_archive_after_seconds !== undefined && !isSpawnedChild && !isBtw) {
+      throw new BadRequest(
+        'Automatic archival is available only for spawned child and BTW sessions'
+      );
+    }
+    if (createData.auto_archive === undefined) {
+      createData.auto_archive = defaultTtl ? 'after_completion' : 'never';
+    }
+    if (createData.auto_archive === 'after_completion') {
+      if (!isSpawnedChild && !isBtw) {
+        throw new BadRequest(
+          'Automatic archival is available only for spawned child and BTW sessions'
+        );
+      }
+      createData.auto_archive_after_seconds ??= defaultTtl;
+      assertAutoArchiveTtl(createData.auto_archive_after_seconds);
+    } else {
+      createData.auto_archive_after_seconds = undefined;
+      createData.auto_archive_at = undefined;
+    }
     if (params?._agenticConfigResolved) {
       createData = {
         ...createData,
@@ -1050,11 +1176,15 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
    *
    * Creates a new session branching from the current session at a decision point.
    */
-  async fork(
-    id: string,
-    data: { prompt: string; task_id?: string },
-    params?: SessionParams
-  ): Promise<Session> {
+  async fork(id: string, data: SessionForkInput, params?: SessionParams): Promise<Session> {
+    if (
+      params?.provider &&
+      (data.stableSessionId !== undefined ||
+        data.forkOrigin !== undefined ||
+        data.callbackConfig !== undefined)
+    ) {
+      throw new BadRequest('stable callback BTW fork fields are server-managed');
+    }
     const parent = await this.get(id, params);
     const parentTool = requireActiveAgenticTool(parent.agentic_tool);
 
@@ -1070,32 +1200,73 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     });
     this.assertSupportedModelConfig(parentTool, inherited.model_config);
 
-    const forkedSession = await this.create(
-      {
-        agentic_tool: parentTool,
-        agentic_tool_preset_id: inherited.agentic_tool_preset_id,
-        status: SessionStatus.IDLE,
-        title: data.prompt.substring(0, 100), // First 100 chars as title
-        description: data.prompt,
-        branch_id: parent.branch_id,
-        created_by, // See resolveChildIdentity — defaults to caller, not parent owner
-        unix_username, // Stamped by resolveChildIdentity — this.create() bypasses
-        // the setSessionUnixUsername hook so we must set it explicitly here.
-        // Delegated deployments refuse to launch sessions with a null home key.
-        genealogy: {
-          forked_from_session_id: parent.session_id,
-          fork_point_task_id: data.task_id as TaskID,
-          fork_point_message_index: await this.sessionRepo.countMessages(parent.session_id),
-          children: [],
+    let existingStableFork: Session | null = null;
+    if (data.stableSessionId) {
+      existingStableFork = await this.sessionRepo.findById(data.stableSessionId);
+      if (
+        existingStableFork &&
+        (existingStableFork.genealogy?.forked_from_session_id !== parent.session_id ||
+          existingStableFork.branch_id !== parent.branch_id ||
+          existingStableFork.fork_origin !== data.forkOrigin)
+      ) {
+        throw new Conflict(`Stable callback BTW Session identity is already in use.`);
+      }
+    }
+
+    const createFork = async () =>
+      this.create(
+        {
+          ...(data.stableSessionId ? { session_id: data.stableSessionId } : {}),
+          agentic_tool: parentTool,
+          agentic_tool_preset_id: inherited.agentic_tool_preset_id,
+          status: SessionStatus.IDLE,
+          title: data.prompt.substring(0, 100), // First 100 chars as title
+          description: data.prompt,
+          branch_id: parent.branch_id,
+          created_by, // See resolveChildIdentity — defaults to caller, not parent owner
+          unix_username, // Stamped by resolveChildIdentity — this.create() bypasses
+          // the setSessionUnixUsername hook so we must set it explicitly here.
+          // Delegated deployments refuse to launch sessions with a null home key.
+          genealogy: {
+            forked_from_session_id: parent.session_id,
+            fork_point_task_id: data.task_id as TaskID,
+            fork_point_message_index: await this.sessionRepo.countMessages(parent.session_id),
+            children: [],
+          },
+          contextFiles: [...(parent.contextFiles || [])],
+          permission_config: inherited.permission_config,
+          model_config: inherited.model_config,
+          ...(data.forkOrigin ? { fork_origin: data.forkOrigin } : {}),
+          ...(data.callbackConfig ? { callback_config: data.callbackConfig } : {}),
+          tasks: [],
+          // Don't copy sdk_session_id - fork will get its own via forkSession:true
         },
-        contextFiles: [...(parent.contextFiles || [])],
-        permission_config: inherited.permission_config,
-        model_config: inherited.model_config,
-        tasks: [],
-        // Don't copy sdk_session_id - fork will get its own via forkSession:true
-      },
-      { ...params, _agenticConfigResolved: true, _sdkHomeScope: parent.sdk_home_scope }
-    );
+        { ...params, _agenticConfigResolved: true, _sdkHomeScope: parent.sdk_home_scope }
+      );
+
+    let forkedSession: Session | Session[];
+    if (existingStableFork) {
+      forkedSession = existingStableFork;
+    } else {
+      try {
+        forkedSession = await createFork();
+      } catch (error) {
+        // A competing daemon may have won the deterministic Session insert.
+        // Re-read and validate that exact row rather than creating a sibling.
+        const raced = data.stableSessionId
+          ? await this.sessionRepo.findById(data.stableSessionId)
+          : null;
+        if (
+          !raced ||
+          raced.genealogy?.forked_from_session_id !== parent.session_id ||
+          raced.branch_id !== parent.branch_id ||
+          raced.fork_origin !== data.forkOrigin
+        ) {
+          throw error;
+        }
+        forkedSession = raced;
+      }
+    }
 
     // Cast forkedSession to Session to handle return type
     const session = forkedSession as Session;
@@ -1124,16 +1295,18 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
 
     // Update parent's children list
     const parentChildren = parent.genealogy?.children || [];
-    await this.patch(
-      id,
-      {
-        genealogy: {
-          ...parent.genealogy,
-          children: [...parentChildren, session.session_id],
+    if (!parentChildren.includes(session.session_id)) {
+      await this.patch(
+        id,
+        {
+          genealogy: {
+            ...parent.genealogy,
+            children: [...parentChildren, session.session_id],
+          },
         },
-      },
-      params
-    );
+        params
+      );
+    }
 
     return session;
   }
@@ -1147,6 +1320,9 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (!data.prompt) {
       throw new Error('Spawn requires a prompt');
     }
+    assertAutoArchivePolicy(data.autoArchive);
+    assertAutoArchiveTtl(data.autoArchiveAfterSeconds);
+    assertCallbackDelivery(data.callbackDelivery);
     const parent = await this.get(id, params);
     requireActiveAgenticTool(parent.agentic_tool);
     const targetTool = requireActiveAgenticTool(data.agent || parent.agentic_tool);
@@ -1241,6 +1417,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         ? { include_original_prompt: data.includeOriginalPrompt }
         : {}),
       callback_mode: data.callbackMode ?? 'once',
+      ...(data.callbackDelivery ? { delivery: data.callbackDelivery } : {}),
     };
 
     let finalPrompt = data.prompt;
@@ -1271,6 +1448,11 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         permission_config: permissionConfig,
         model_config: modelConfig,
         callback_config: callbackConfig,
+        auto_archive: data.autoArchive ?? 'after_completion',
+        auto_archive_after_seconds:
+          data.autoArchive === 'never'
+            ? undefined
+            : (data.autoArchiveAfterSeconds ?? SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS),
         // Don't copy sdk_session_id - spawn will get its own via forkSession:true
       },
       { ...params, _agenticConfigResolved: true, _sdkHomeScope: parent.sdk_home_scope }
@@ -1705,6 +1887,71 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
   ): Promise<Session | Session[]> {
     if (Object.hasOwn(data, 'sdk_home_scope')) {
       throw new BadRequest('sdk_home_scope is immutable and server-managed');
+    }
+    assertAutoArchivePolicy(data.auto_archive);
+    assertAutoArchiveTtl(data.auto_archive_after_seconds);
+    if (id && !Array.isArray(id)) {
+      const currentForArchivePolicy = await this.get(String(id), params);
+      const becomesBtw =
+        data.fork_origin === 'btw' || currentForArchivePolicy.fork_origin === 'btw';
+      const isChild = Boolean(currentForArchivePolicy.genealogy?.parent_session_id);
+      if (data.auto_archive_after_seconds !== undefined && !becomesBtw && !isChild) {
+        throw new BadRequest(
+          'Automatic archival is available only for spawned child and BTW sessions'
+        );
+      }
+      if (data.fork_origin === 'btw' && data.auto_archive === undefined) {
+        data = {
+          ...data,
+          auto_archive: 'after_completion',
+          auto_archive_after_seconds: BTW_AUTO_ARCHIVE_AFTER_SECONDS,
+        };
+      }
+      if (data.auto_archive === 'after_completion') {
+        if (!becomesBtw && !isChild) {
+          throw new BadRequest(
+            'Automatic archival is available only for spawned child and BTW sessions'
+          );
+        }
+        data = {
+          ...data,
+          auto_archive_after_seconds:
+            data.auto_archive_after_seconds ??
+            currentForArchivePolicy.auto_archive_after_seconds ??
+            (becomesBtw ? BTW_AUTO_ARCHIVE_AFTER_SECONDS : SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS),
+        };
+      }
+      const editsActivePolicy =
+        data.auto_archive === 'after_completion' ||
+        (data.auto_archive_after_seconds !== undefined &&
+          currentForArchivePolicy.auto_archive === 'after_completion');
+      if (
+        editsActivePolicy &&
+        currentForArchivePolicy.auto_archive_at &&
+        currentForArchivePolicy.auto_archive_after_seconds
+      ) {
+        const nextTtl =
+          data.auto_archive_after_seconds ?? currentForArchivePolicy.auto_archive_after_seconds;
+        const completedAt =
+          Date.parse(currentForArchivePolicy.auto_archive_at) -
+          currentForArchivePolicy.auto_archive_after_seconds * 1_000;
+        data = {
+          ...data,
+          auto_archive_at: new Date(completedAt + nextTtl * 1_000).toISOString(),
+        };
+      }
+      if (data.auto_archive === 'never') {
+        data = { ...data, auto_archive_after_seconds: undefined, auto_archive_at: undefined };
+      }
+      // Manual archive/unarchive is authoritative. Retain the policy, but a
+      // restore is not rescheduled until a later Task reaches terminal state.
+      if (data.archived !== undefined) {
+        data = { ...data, auto_archive_at: undefined };
+      }
+    }
+    assertCallbackDelivery(data.callback_config?.delivery);
+    if (params?.provider && data.callback_config?.digest !== undefined) {
+      throw new BadRequest('callback digest provenance is server-managed');
     }
     let replaceAgenticConfig = false;
     if (
