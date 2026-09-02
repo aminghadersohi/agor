@@ -15,11 +15,18 @@ import type {
   UUID,
 } from '@agor/core/types';
 import { and, asc, eq, getTableColumns, isNotNull, isNull, or, type SQL, sql } from 'drizzle-orm';
+import { isBoardEntityDensityExpandable } from '../../layout/zone-layout.js';
 import { generateId } from '../../lib/ids';
 import { toAbsolutePosition } from '../../utils/board-placement.js';
 import type { Database } from '../client';
 import { deleteFrom, insert, jsonExtract, select, update } from '../database-wrapper';
-import { type BoardObjectInsert, type BoardObjectRow, boardObjects, branches } from '../schema';
+import {
+  type BoardObjectInsert,
+  type BoardObjectRow,
+  boardObjects,
+  branches,
+  cards,
+} from '../schema';
 import { EntityNotFoundError, RepositoryError } from './base';
 import {
   visibleBoardReferenceAccessExists,
@@ -554,6 +561,23 @@ export class BoardObjectRepository {
       const existingData =
         typeof existing.data === 'string' ? JSON.parse(existing.data) : existing.data;
       const current = this.rowToEntity(existing);
+      if (layout.compact !== undefined) {
+        const card = existing.card_id
+          ? await select(this.db, {
+              board_id: cards.board_id,
+              description: cards.description,
+              note: cards.note,
+            })
+              .from(cards)
+              .where(and(eq(cards.card_id, existing.card_id), eq(cards.board_id, boardId)))
+              .one()
+          : undefined;
+        if (!isBoardEntityDensityExpandable(current.entity_type, card ?? undefined)) {
+          throw new RepositoryError(
+            `Board object ${objectId} does not own collapsible body content`
+          );
+        }
+      }
       const changed =
         current.position.x !== layout.position.x ||
         current.position.y !== layout.position.y ||
@@ -650,6 +674,12 @@ export class BoardObjectRepository {
     if (!existing) throw new EntityNotFoundError('BoardObject', objectId);
     const existingData =
       typeof existing.data === 'string' ? JSON.parse(existing.data) : existing.data;
+    // Missing compact is the historical expanded state. Treat an explicit
+    // false request as equal so repeated density actions neither rewrite the
+    // row nor discard the authoritative measurement for the current mode.
+    if ((existingData.compact === true) === compact) {
+      return this.rowToEntity(existing);
+    }
     const { size: _staleSize, ...placementData } = existingData;
     await update(this.db, boardObjects)
       .set({ data: { ...placementData, compact } })

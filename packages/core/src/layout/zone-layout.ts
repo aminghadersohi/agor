@@ -9,6 +9,7 @@ import type {
   ZoneOverflowStrategy,
   ZoneResizeMode,
 } from '../types/board';
+import type { Card } from '../types/card';
 import { BOARD_GRID_SIZE, ceilBoardGridValue, snapBoardGridValue } from './rectangle-packing';
 
 export const ZONE_LAYOUT_MODES = ['manual', 'auto'] as const;
@@ -80,16 +81,18 @@ export function zoneLayoutSortDirectionOptions(sortBy: ZoneLayoutSortBy) {
 }
 
 /**
- * Board entities whose rendered surface has a real secondary-density state.
+ * Board entity kinds which can own a real secondary-density state.
  *
  * A branch/worktree card owns collapsible session and environment content.
- * Generic board cards, artifacts, notes, and apps do not share that contract;
- * writing `compact` for them would only manufacture an inert control/state.
+ * A generic card owns that state only while it has a rendered description or
+ * note body. Artifacts, notes, and apps do not share that contract; writing
+ * `compact` for them would only manufacture an inert control/state.
  * Keep this runtime capability beside the shared layout policy so browser,
  * daemon, and MCP callers cannot drift into different target sets.
  */
 export const BOARD_DENSITY_EXPANDABLE_ENTITY_TYPES = [
   'branch',
+  'card',
 ] as const satisfies readonly BoardEntityType[];
 
 export type BoardDensityExpandableEntityType =
@@ -98,12 +101,68 @@ export type BoardDensityExpandableEntityType =
 /** Every persisted board surface kind that callers may ask about. */
 export type BoardDensitySurfaceKind = BoardEntityType | BoardObjectType;
 
-export function isBoardEntityDensityExpandable(
-  entityType: BoardDensitySurfaceKind
-): entityType is BoardDensityExpandableEntityType {
-  return BOARD_DENSITY_EXPANDABLE_ENTITY_TYPES.includes(
-    entityType as BoardDensityExpandableEntityType
+export type CardDensityContent = Pick<Card, 'description' | 'note'>;
+
+/**
+ * One board-space sizing contract for the generic CardNode surface.
+ *
+ * Keep this independent of canvas zoom: React Flow scales board space as a
+ * whole, while a viewport-responsive cap would change the measured node size
+ * merely because one collaborator zoomed and could make Auto Zone oscillate.
+ * The lower body is therefore capped at a readable fraction of the standard
+ * card width and becomes an accessible internal scroll region. UI rendering
+ * and non-visual planners both consume these values.
+ */
+export const GENERIC_BOARD_CARD_LAYOUT = {
+  width: 380,
+  minHeight: 56,
+  headerEstimatedHeight: 50,
+  bodyMaxHeight: 320,
+  descriptionPreviewChars: 100,
+  estimatedCharsPerLine: 48,
+  estimatedLineHeight: 18,
+  sectionVerticalPadding: 16,
+  descriptionMoreHeight: 18,
+} as const;
+
+export function estimateExpandedGenericCardHeight(
+  card: CardDensityContent | null | undefined
+): number {
+  const lineCount = (value: string | null | undefined) =>
+    value
+      ? Math.max(1, Math.ceil(value.length / GENERIC_BOARD_CARD_LAYOUT.estimatedCharsPerLine))
+      : 0;
+  const description = card?.description
+    ? GENERIC_BOARD_CARD_LAYOUT.sectionVerticalPadding +
+      lineCount(card.description.slice(0, GENERIC_BOARD_CARD_LAYOUT.descriptionPreviewChars)) *
+        GENERIC_BOARD_CARD_LAYOUT.estimatedLineHeight +
+      (card.description.length > GENERIC_BOARD_CARD_LAYOUT.descriptionPreviewChars
+        ? GENERIC_BOARD_CARD_LAYOUT.descriptionMoreHeight
+        : 0)
+    : 0;
+  const note = card?.note
+    ? GENERIC_BOARD_CARD_LAYOUT.sectionVerticalPadding +
+      lineCount(card.note) * GENERIC_BOARD_CARD_LAYOUT.estimatedLineHeight
+    : 0;
+  const boundedBody = Math.min(GENERIC_BOARD_CARD_LAYOUT.bodyMaxHeight, description + note);
+  return Math.max(
+    GENERIC_BOARD_CARD_LAYOUT.minHeight,
+    GENERIC_BOARD_CARD_LAYOUT.headerEstimatedHeight + boundedBody
   );
+}
+
+/** Whether CardNode renders a lower section which compact mode can hide. */
+export function hasCardDensityBody(
+  card: CardDensityContent | null | undefined
+): card is CardDensityContent {
+  return Boolean(card?.description || card?.note);
+}
+
+export function isBoardEntityDensityExpandable(
+  entityType: BoardDensitySurfaceKind,
+  card?: CardDensityContent | null
+): entityType is BoardDensityExpandableEntityType {
+  return entityType === 'branch' || (entityType === 'card' && hasCardDensityBody(card));
 }
 
 export const DEFAULT_ZONE_LAYOUT_POLICY: Readonly<ZoneLayoutPolicy> = {

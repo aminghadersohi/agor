@@ -1,4 +1,9 @@
-import { BOARD_GRID_SIZE, snapBoardGridPoint } from '@agor/core/layout/rectangle-packing';
+import {
+  BOARD_GRID_SIZE,
+  ceilBoardGridValue,
+  snapBoardGridPoint,
+} from '@agor/core/layout/rectangle-packing';
+import { GENERIC_BOARD_CARD_LAYOUT } from '@agor/core/layout/zone-layout';
 import { branchQueryValidator, typedValidateQuery } from '@agor/core/lib/feathers-validation';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { describe, expect, it, vi } from 'vitest';
@@ -1701,6 +1706,7 @@ describe('board layout tools with branch entities present', () => {
   function makeApp(options: {
     entities: Array<Record<string, unknown>>;
     objects?: Record<string, unknown>;
+    card?: { description?: string; note?: string };
     entityPatches?: Array<{ objectId: string; data: Record<string, unknown> }>;
     boardPatches?: Array<Record<string, unknown>>;
   }) {
@@ -1766,7 +1772,11 @@ describe('board layout tools with branch entities present', () => {
               find: vi.fn(async (params?: { query?: { card_id?: { $in?: string[] } } }) => ({
                 data: (params?.query?.card_id?.$in ?? []).map((card_id) => ({ card_id })),
               })),
-              get: vi.fn(async (id: string) => ({ card_id: id, title: 'Card' })),
+              get: vi.fn(async (id: string) => ({
+                card_id: id,
+                title: 'Card',
+                ...options.card,
+              })),
             };
           if (name === 'branches')
             return {
@@ -1966,6 +1976,35 @@ describe('board layout tools with branch entities present', () => {
     // unless each was sized by kind; requiredWidth proves the branch was not
     // silently laid out at card width.
     expect(parsed.requiredWidth).toBeGreaterThanOrEqual(500);
+  });
+
+  it('bounds an unmeasured long generic card with the shared rendered-body contract', async () => {
+    const entityPatches: Array<{ objectId: string; data: Record<string, unknown> }> = [];
+    const { app } = makeApp({
+      entities: [cardEntity({ zone_id: 'zone-1' })],
+      objects: { 'zone-1': { type: 'zone', x: 0, y: 0, width: 620, height: 900 } },
+      entityPatches,
+      card: {
+        description: 'Fictional description. '.repeat(1_000),
+        note: 'Fictional status.\n'.repeat(1_000),
+      },
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const result = await arrange({ boardId: 'board-1', zoneId: 'zone-1' });
+
+    expect(result.isError).toBeFalsy();
+    expect(entityPatches).toHaveLength(1);
+    expect(entityPatches[0].data.size).toEqual({
+      width: GENERIC_BOARD_CARD_LAYOUT.width,
+      height: ceilBoardGridValue(
+        GENERIC_BOARD_CARD_LAYOUT.headerEstimatedHeight + GENERIC_BOARD_CARD_LAYOUT.bodyMaxHeight
+      ),
+    });
   });
 
   it.each([
@@ -2799,16 +2838,83 @@ describe('agor_boards_set_compact', () => {
     expect(parsed).toMatchObject({ boardId: 'board-1', compact: true, updated: 1 });
   });
 
-  it('rejects an explicit generic card target instead of returning an inert success', async () => {
-    const patch = vi.fn();
+  it('updates an explicit generic card target when it has collapsible body content', async () => {
+    const patch = vi.fn(async (objectId: string, data: { compact: boolean }) => ({
+      object_id: objectId,
+      board_id: 'board-1',
+      card_id: 'card-record-1',
+      entity_type: 'card',
+      compact: data.compact,
+    }));
     const app = {
       service(name: string) {
         if (name === 'board-objects')
           return {
             find: vi.fn(async () => ({
-              data: [{ object_id: 'card-1', board_id: 'board-1', entity_type: 'card' }],
+              data: [
+                {
+                  object_id: 'card-1',
+                  board_id: 'board-1',
+                  card_id: 'card-record-1',
+                  entity_type: 'card',
+                },
+              ],
             })),
             patch,
+          };
+        if (name === 'cards')
+          return {
+            get: vi.fn(async () => ({
+              card_id: 'card-record-1',
+              board_id: 'board-1',
+              title: 'Fictional tracking card',
+              note: 'Needs a reviewer',
+            })),
+          };
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+    const setCompact = registerAndCaptureHandler('agor_boards_set_compact', {
+      app,
+      userId: 'user-1',
+      baseServiceParams: { authenticated: true, provider: 'mcp' },
+    });
+
+    const parsed = JSON.parse(
+      (await setCompact({ boardId: 'board-1', objectIds: ['card-1'], compact: true })).content[0]
+        .text
+    );
+
+    expect(parsed).toMatchObject({ updated: 1 });
+    expect(patch).toHaveBeenCalledWith(
+      'card-1',
+      { compact: true },
+      expect.objectContaining({ provider: 'mcp' })
+    );
+  });
+
+  it('rejects an explicit header-only card and skips repeated same-state writes', async () => {
+    const patch = vi.fn();
+    let withBody = false;
+    const placement = {
+      object_id: 'card-1',
+      board_id: 'board-1',
+      card_id: 'card-record-1',
+      entity_type: 'card',
+      compact: true,
+    };
+    const app = {
+      service(name: string) {
+        if (name === 'board-objects')
+          return { find: vi.fn(async () => ({ data: [placement] })), patch };
+        if (name === 'cards')
+          return {
+            get: vi.fn(async () => ({
+              card_id: 'card-record-1',
+              board_id: 'board-1',
+              title: 'Header only',
+              ...(withBody ? { description: 'Now has body content' } : {}),
+            })),
           };
         throw new Error(`Unexpected service call: ${name}`);
       },
@@ -2821,7 +2927,15 @@ describe('agor_boards_set_compact', () => {
 
     await expect(
       setCompact({ boardId: 'board-1', objectIds: ['card-1'], compact: true })
-    ).rejects.toThrow('Compact presentation is supported only for branch placements');
+    ).rejects.toThrow('worktrees and generic cards with body content');
+    expect(patch).not.toHaveBeenCalled();
+
+    withBody = true;
+    const repeated = JSON.parse(
+      (await setCompact({ boardId: 'board-1', objectIds: ['card-1'], compact: true })).content[0]
+        .text
+    );
+    expect(repeated).toMatchObject({ updated: 0, updates: [] });
     expect(patch).not.toHaveBeenCalled();
   });
 });

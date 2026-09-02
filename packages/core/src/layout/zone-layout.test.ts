@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { BOARD_GRID_SIZE } from './rectangle-packing';
 import {
   compactZoneItemSize,
+  estimateExpandedGenericCardHeight,
+  GENERIC_BOARD_CARD_LAYOUT,
   getZoneLayoutFrame,
   growZoneLayoutHeight,
   isBoardEntityDensityExpandable,
@@ -222,11 +224,27 @@ describe('normalizeZoneLayoutPolicy', () => {
 });
 
 describe('board density capability', () => {
-  it('includes only branch/worktree surfaces and excludes every inert board kind', () => {
+  it('includes worktrees and only generic cards with a real rendered body', () => {
     expect(isBoardEntityDensityExpandable('branch')).toBe(true);
-    for (const kind of ['card', 'text', 'markdown', 'app', 'artifact', 'zone'] as const) {
+    expect(isBoardEntityDensityExpandable('card', { description: 'Details' })).toBe(true);
+    expect(isBoardEntityDensityExpandable('card', { note: 'Live note' })).toBe(true);
+    expect(isBoardEntityDensityExpandable('card', {})).toBe(false);
+    for (const kind of ['text', 'markdown', 'app', 'artifact', 'zone'] as const) {
       expect(isBoardEntityDensityExpandable(kind), kind).toBe(false);
     }
+  });
+
+  it('caps expanded generic-card estimates at the shared scroll-body contract', () => {
+    expect(estimateExpandedGenericCardHeight(undefined)).toBe(GENERIC_BOARD_CARD_LAYOUT.minHeight);
+
+    const veryLong = estimateExpandedGenericCardHeight({
+      description: 'Fictional description. '.repeat(1_000),
+      note: 'Fictional status line.\n'.repeat(1_000),
+    });
+    expect(veryLong).toBe(
+      GENERIC_BOARD_CARD_LAYOUT.headerEstimatedHeight + GENERIC_BOARD_CARD_LAYOUT.bodyMaxHeight
+    );
+    expect(veryLong).toBeLessThan(400);
   });
 });
 

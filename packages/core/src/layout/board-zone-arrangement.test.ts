@@ -161,12 +161,13 @@ describe('planBoardZoneArrangement', () => {
     expect(new Set(list?.items.map(({ x }) => x))).toHaveLength(1);
   });
 
-  it('uses compact-list density geometry only for capable worktrees', () => {
+  it('uses compact-list geometry for capable worktrees/cards but not header-only or canvas items', () => {
     const plan = planBoardZoneArrangement([
       {
         ...zone('honest-list', 0, 0, [
           branchItem('worktree', 500, 220),
-          item('generic-card', 380, 180),
+          { ...item('generic-card', 380, 180), densityExpandable: true },
+          { ...item('header-only-card', 380, 140), densityExpandable: false },
           { id: 'artifact', width: 440, height: 300, position: { x: 0, y: 0 } },
         ]),
         layout: { preset: 'compact_list', gap: 8 },
@@ -175,7 +176,8 @@ describe('planBoardZoneArrangement', () => {
     const byId = new Map(plan.zones[0]?.items.map((entry) => [entry.id, entry]));
 
     expect(byId.get('worktree')?.height).toBeLessThan(220);
-    expect(byId.get('generic-card')).toMatchObject({ width: 380, height: 180 });
+    expect(byId.get('generic-card')?.height).toBeLessThan(180);
+    expect(byId.get('header-only-card')).toMatchObject({ width: 380, height: 140 });
     expect(byId.get('artifact')).toMatchObject({ width: 440, height: 300 });
   });
 
