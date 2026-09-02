@@ -261,6 +261,8 @@ export interface TaskMetadata {
     btw_session_id?: SessionID;
     dispatched_at: string;
   }>;
+  /** Durable acknowledgement that the inline BTW result reached its parent transcript. */
+  btw_result_delivered_at?: string;
 
   /** Durable callback-delivery audit on direct callback Tasks and digest BTW Tasks. */
   callback_delivery?: {

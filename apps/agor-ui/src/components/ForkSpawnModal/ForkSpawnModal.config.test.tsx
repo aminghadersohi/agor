@@ -162,6 +162,8 @@ describe('ForkSpawnModal configuration defaults', { timeout: 10_000 }, () => {
           prompt: 'spawn a child',
           presetId: 'preset-1',
           mcpServerIds: ['mcp-1'],
+          autoArchive: 'after_completion',
+          autoArchiveAfterSeconds: 3600,
         })
       );
     });

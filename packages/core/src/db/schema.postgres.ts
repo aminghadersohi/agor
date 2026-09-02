@@ -146,8 +146,13 @@ export const sessions = pgTable(
     // Archive state (cascaded from branch archive)
     archived: t.bool('archived').notNull().default(false),
     archived_reason: text('archived_reason', {
-      enum: ['branch_archived', 'manual', 'parent_archived', 'btw_completed'],
+      enum: ['branch_archived', 'manual', 'parent_archived', 'btw_completed', 'auto_completed'],
     }),
+    auto_archive: text('auto_archive', { enum: ['never', 'after_completion'] })
+      .notNull()
+      .default('never'),
+    auto_archive_after_seconds: integer('auto_archive_after_seconds'),
+    auto_archive_at: t.timestamp('auto_archive_at'),
 
     // JSON blob for everything else (cross-DB via json() type)
     data: t
@@ -238,6 +243,13 @@ export const sessions = pgTable(
       table.tenant_id,
       table.archived,
       table.updated_at
+    ),
+    autoArchiveDueIdx: index('sessions_auto_archive_due_idx').on(
+      table.tenant_id,
+      table.archived,
+      table.auto_archive,
+      table.auto_archive_at,
+      table.session_id
     ),
     parentIdx: index('sessions_parent_idx').on(table.parent_session_id),
     forkedIdx: index('sessions_forked_idx').on(table.forked_from_session_id),

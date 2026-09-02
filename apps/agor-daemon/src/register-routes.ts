@@ -2082,13 +2082,20 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           throw error;
         }
 
-        // Auto-unarchive on prompt
-        if (session.archived) {
-          console.log(
-            `📦 [Prompt] Auto-unarchiving session ${shortId(id)} (was archived: ${session.archived_reason || 'unknown reason'})`
-          );
+        // Prompt admission authoritatively cancels a pending cleanup. If an
+        // automatic archive won the race first, the same patch restores it.
+        if (session.archived || session.auto_archive_at) {
+          if (session.archived) {
+            console.log(
+              `📦 [Prompt] Auto-unarchiving session ${shortId(id)} (was archived: ${session.archived_reason || 'unknown reason'})`
+            );
+          }
           session = (await runWithTenantDatabaseScope(db, promptTenantId, () =>
-            sessionsService.patch(id, { archived: false, archived_reason: undefined }, params)
+            sessionsService.patch(
+              id,
+              { archived: false, archived_reason: undefined, auto_archive_at: undefined },
+              params
+            )
           )) as typeof session;
         }
 
