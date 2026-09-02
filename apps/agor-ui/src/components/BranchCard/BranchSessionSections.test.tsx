@@ -221,6 +221,27 @@ describe('BranchSessionSections', () => {
     expect(screen.getByText('1')).toBeInTheDocument();
   });
 
+  it('removes an automatically archived child without hiding its root', () => {
+    const root = makeManualSession({
+      session_id: 'session-root',
+      title: 'Root remains visible',
+      genealogy: { children: ['session-auto-archived-child'] },
+    });
+    const archivedChild = makeManualSession({
+      session_id: 'session-auto-archived-child',
+      title: 'Completed child clutter',
+      archived: true,
+      archived_reason: 'auto_completed',
+      genealogy: { parent_session_id: root.session_id, children: [] },
+    });
+
+    renderSections({ sessions: [root, archivedChild] });
+
+    expect(screen.getByText('Root remains visible')).toBeInTheDocument();
+    expect(screen.queryByText('Completed child clutter')).not.toBeInTheDocument();
+    expect(screen.getByText('1')).toBeInTheDocument();
+  });
+
   it('nests local and remote children under MRU-sorted gateway parents', async () => {
     const olderGateway = makeGatewaySession({
       session_id: 'gateway-older',

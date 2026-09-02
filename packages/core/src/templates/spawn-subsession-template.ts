@@ -12,7 +12,7 @@
  * round-trip.
  */
 
-import type { CallbackDelivery } from '../types/session';
+import type { CallbackDelivery, SessionAutoArchivePolicy } from '../types/session';
 import { renderTemplate } from './handlebars-helpers';
 
 export interface SpawnSubsessionContext {
@@ -38,6 +38,8 @@ export interface SpawnSubsessionContext {
     includeOriginalPrompt?: boolean;
   };
   extraInstructions?: string;
+  autoArchive?: SessionAutoArchivePolicy;
+  autoArchiveAfterSeconds?: number;
 }
 
 const SPAWN_SUBSESSION_TEMPLATE = `INSTRUCTION: The user is requesting a subsession to handle a delegated task. You MUST use the Agor
@@ -94,6 +96,9 @@ REQUEST: """
     - Extra Instructions: """
     {{extraInstructions}}
     """
+  {{/if}}
+  {{#if autoArchive}}
+    - Auto Archive: {{autoArchive}}{{#if autoArchiveAfterSeconds}} after {{autoArchiveAfterSeconds}} seconds{{/if}}
   {{/if}}
 {{/if}}
 
@@ -153,6 +158,12 @@ hashing and JWT for tokens."
 {{#if extraInstructions}}
   - extraInstructions: """{{extraInstructions}}"""
 {{/if}}
+{{#if autoArchive}}
+  - autoArchive: "{{autoArchive}}"
+{{/if}}
+{{#if autoArchiveAfterSeconds}}
+  - autoArchiveAfterSeconds: {{autoArchiveAfterSeconds}}
+{{/if}}
 
 CRITICAL: - Do NOT explain or respond directly to the user - ALWAYS use the MCP tool - this is
 mandatory - The child session starts fresh - include ALL relevant context in your prompt - Use the
@@ -185,6 +196,7 @@ session will do YOUR EXACT TOOL CALL MUST BE: agor_sessions_spawn({ "prompt": "{
   "includeOriginalPrompt":
   {{callbackConfig.includeOriginalPrompt}},{{/if}}{{#if extraInstructions}}
   "extraInstructions": """{{extraInstructions}}"""{{/if}}
+  {{#if autoArchive}},"autoArchive": "{{autoArchive}}"{{/if}}{{#if autoArchiveAfterSeconds}},"autoArchiveAfterSeconds": {{autoArchiveAfterSeconds}}{{/if}}
 }) Proceed now by calling agor_sessions_spawn with the exact parameters shown above.`;
 
 /**
@@ -206,7 +218,9 @@ export function renderSpawnSubsessionPrompt(context: SpawnSubsessionContext): st
       context.callbackConfig?.callbackDelivery !== undefined ||
       context.callbackConfig?.includeLastMessage !== undefined ||
       context.callbackConfig?.includeOriginalPrompt !== undefined ||
-      context.extraInstructions !== undefined);
+      context.extraInstructions !== undefined ||
+      context.autoArchive !== undefined ||
+      context.autoArchiveAfterSeconds !== undefined);
 
   const hasCallbackConfig =
     context.hasCallbackConfig ??

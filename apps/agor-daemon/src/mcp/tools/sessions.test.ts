@@ -669,7 +669,15 @@ describe('agor_sessions_list', () => {
             limit: 50,
             skip: 0,
             data: [
-              { session_id: 'sess-target', branch_id: 'wt-1', status: 'idle', mcp_token: 'tok1' },
+              {
+                session_id: 'sess-target',
+                branch_id: 'wt-1',
+                status: 'idle',
+                auto_archive: 'after_completion',
+                auto_archive_after_seconds: 3600,
+                auto_archive_at: '2026-01-01T01:00:00.000Z',
+                mcp_token: 'tok1',
+              },
               { session_id: 'sess-other', branch_id: 'wt-2', status: 'idle', mcp_token: 'tok2' },
             ],
           };
@@ -689,6 +697,11 @@ describe('agor_sessions_list', () => {
     expect(parsed.total).toBe(1);
     expect(parsed.data).toHaveLength(1);
     expect(parsed.data[0].session_id).toBe('sess-target');
+    expect(parsed.data[0]).toMatchObject({
+      auto_archive: 'after_completion',
+      auto_archive_after_seconds: 3600,
+      auto_archive_at: '2026-01-01T01:00:00.000Z',
+    });
     expect(parsed.data[0]).not.toHaveProperty('mcp_token');
   });
 
@@ -1799,12 +1812,18 @@ describe('agor_sessions_spawn', () => {
     await agor_sessions_spawn({
       prompt: 'do the thing',
       modelConfig: { model: 'claude-opus-4-6', effort: 'high' },
+      autoArchive: 'never',
+      autoArchiveAfterSeconds: 900,
     });
 
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0].data.modelConfig).toEqual({
       model: 'claude-opus-4-6',
       effort: 'high',
+    });
+    expect(spawnCalls[0].data).toMatchObject({
+      autoArchive: 'never',
+      autoArchiveAfterSeconds: 900,
     });
   });
 
@@ -1904,6 +1923,8 @@ describe('agor_sessions_prompt (subsession mode)', () => {
       prompt: 'delegated work',
       mode: 'subsession',
       modelConfig: { model: 'claude-opus-4-6', effort: 'max', provider: 'anthropic' },
+      autoArchive: 'after_completion',
+      autoArchiveAfterSeconds: 1800,
     });
 
     expect(spawnCalls).toHaveLength(1);
@@ -1912,6 +1933,10 @@ describe('agor_sessions_prompt (subsession mode)', () => {
       model: 'claude-opus-4-6',
       effort: 'max',
       provider: 'anthropic',
+    });
+    expect(spawnCalls[0].data).toMatchObject({
+      autoArchive: 'after_completion',
+      autoArchiveAfterSeconds: 1800,
     });
   });
 });

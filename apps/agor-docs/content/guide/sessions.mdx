@@ -59,7 +59,7 @@ Use spawns when the parent is orchestrating and you want children to do focused 
 
 ### BTW — ephemeral side question
 
-A **btw** is an ephemeral fork that runs concurrently and auto-archives when done. The parent never blocks. The answer is delivered back as a message in the parent's conversation.
+A **btw** is an ephemeral fork that runs concurrently. After its result and completion callback are durably delivered, it auto-archives following a five-minute grace period. The parent never blocks.
 
 The "btw" button (❓) sits next to the prompt input. Click it, type your question, and it runs in a separate ephemeral session. When it completes, the result is injected back into the parent.
 
@@ -74,6 +74,20 @@ For orchestrating agents, the same thing is exposed via `agor_sessions_prompt` w
 />
 
 _A btw question runs in an ephemeral fork; the answer is delivered back inline in the parent's timeline._
+
+### Automatic archival for child sessions
+
+New spawned child sessions default to `after_completion` with a one-hour grace period. Set **After completion** to **Never (keep)** when creating the child, or update the child later. The policy is stored on each child rather than inherited as a mutable parent default, so later parent changes cannot unexpectedly retire existing children. The MCP `spawn`, `prompt`, `create`, and `session-update` surfaces use the same `autoArchive: "never" | "after_completion"` and `autoArchiveAfterSeconds` fields.
+
+Automatic archival is intentionally conservative:
+
+- root sessions are never eligible;
+- a prompt or resume cancels the pending deadline;
+- running, stopping, permission/input waits, live executors, undelivered callbacks/results, and active descendants block archival;
+- workers retry from the persisted deadline after daemon restarts, and concurrent workers converge on one archive transition;
+- manual archive/unarchive wins. Unarchive clears the current deadline but retains the policy, which is scheduled again only after a later task completes.
+
+Archival is reversible metadata cleanup. It hides the session from normal trees and board views; it does **not** delete transcripts, tasks, reports, branches, worktrees, or environments. Archived sessions remain available through history and `includeArchived` queries.
 
 ---
 

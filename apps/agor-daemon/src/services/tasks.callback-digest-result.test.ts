@@ -115,12 +115,7 @@ describe('callback BTW final report idempotency', () => {
         throw new Error(`Unexpected service ${name}`);
       },
     } as unknown as Application;
-    const service = Object.create(TasksService.prototype) as TasksService & {
-      db: typeof db;
-      app: Application;
-    };
-    service.db = db;
-    service.app = app;
+    const service = new TasksService(db, app);
 
     await Promise.all([
       (service as any).injectBtwResultMessage(sideTask, side),
@@ -141,6 +136,9 @@ describe('callback BTW final report idempotency', () => {
       callback_source_session_id: sourceSessionId,
       callback_source_task_id: sourceTaskId,
       callback_destination_session_id: destination.session_id,
+    });
+    await expect(new TaskRepository(db).findById(sideTask.task_id)).resolves.toMatchObject({
+      metadata: { btw_result_delivered_at: expect.any(String) },
     });
   });
 });

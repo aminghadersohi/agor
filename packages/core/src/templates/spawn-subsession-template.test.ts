@@ -56,6 +56,16 @@ describe('renderSpawnSubsessionPrompt', () => {
     expect(out).toMatch(/"a",\s*"b",\s*"c"\s*\]/);
   });
 
+  it('renders the child cleanup policy into the exact MCP call', () => {
+    const out = renderSpawnSubsessionPrompt({
+      userPrompt: 'x',
+      autoArchive: 'after_completion',
+      autoArchiveAfterSeconds: 1800,
+    });
+    expect(out).toContain('"autoArchive": "after_completion"');
+    expect(out).toContain('"autoArchiveAfterSeconds": 1800');
+  });
+
   it('does NOT leak parentPermissionMode into the rendered output even if passed', () => {
     // Defence-in-depth pin for the parent-vs-child permissionMode bug:
     // `parentPermissionMode` is not a template variable; if a caller

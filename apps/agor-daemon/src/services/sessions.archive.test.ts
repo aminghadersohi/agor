@@ -124,6 +124,59 @@ async function getArchivedState(
 
 describe('SessionsService archive routes', () => {
   dbTest(
+    'defaults BTW cleanup to five minutes and keeps ordinary roots ineligible',
+    async ({ db }) => {
+      const service = new SessionsService(db, STUB_APP);
+      const branchId = await createBranch(db);
+      const root = await createSession(db, branchId);
+
+      await expect(
+        service.patch(root.session_id, { auto_archive: 'after_completion' })
+      ).rejects.toThrow(/only for spawned child and BTW/i);
+
+      await expect(service.patch(root.session_id, { fork_origin: 'btw' })).resolves.toMatchObject({
+        auto_archive: 'after_completion',
+        auto_archive_after_seconds: 300,
+        auto_archive_at: undefined,
+      });
+    }
+  );
+
+  dbTest(
+    'clears a pending automatic deadline when prompt flow restores the child',
+    async ({ db }) => {
+      const service = new SessionsService(db, STUB_APP);
+      const branchId = await createBranch(db);
+      const parent = await createSession(db, branchId);
+      const child = await createSession(db, branchId, {
+        genealogy: { parent_session_id: parent.session_id, children: [] },
+        auto_archive: 'after_completion',
+        auto_archive_after_seconds: 60,
+        auto_archive_at: '2026-01-01T00:01:00.000Z',
+      });
+
+      await service.patch(child.session_id, { auto_archive_after_seconds: 120 });
+      await expect(new SessionRepository(db).findById(child.session_id)).resolves.toMatchObject({
+        auto_archive_after_seconds: 120,
+        auto_archive_at: '2026-01-01T00:02:00.000Z',
+      });
+
+      await service.patch(child.session_id, {
+        archived: false,
+        archived_reason: undefined,
+        auto_archive_at: undefined,
+      });
+
+      await expect(new SessionRepository(db).findById(child.session_id)).resolves.toMatchObject({
+        archived: false,
+        auto_archive: 'after_completion',
+        auto_archive_after_seconds: 120,
+        auto_archive_at: undefined,
+      });
+    }
+  );
+
+  dbTest(
     'archives and unarchives branch-local spawned, forked, and nested descendants',
     async ({ db }) => {
       const service = new SessionsService(db, STUB_APP);
