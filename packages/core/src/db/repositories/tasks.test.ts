@@ -3181,6 +3181,31 @@ describe('TaskRepository.createPending', () => {
     }
   );
 
+  dbTest(
+    'compacts ordinary external prompts with server-authored Agor provenance',
+    async ({ db }) => {
+      const taskRepo = new TaskRepository(db);
+      const sessionId = await createSessionWithDeps(db);
+      const requestIds = [generateId(), generateId()];
+      for (const [index, requestId] of requestIds.entries()) {
+        await taskRepo.createPending(
+          createPendingInput({
+            session_id: sessionId,
+            status: TaskStatus.QUEUED,
+            task_id: requestId,
+            full_prompt: `external prompt ${index}`,
+            metadata: { queued_by_user_id: 'test-user', source: 'agor' },
+            compaction: { request_id: requestId, eligible: true, stream: true },
+          })
+        );
+      }
+      const queued = await taskRepo.findQueued(sessionId);
+      expect(queued).toHaveLength(1);
+      expect(queued[0]?.metadata?.prompt_compaction?.requests).toHaveLength(2);
+      expect(queued[0]?.metadata?.source).toBe('agor');
+    }
+  );
+
   dbTest('chunks deterministically at the compacted prompt byte bound', async ({ db }) => {
     const taskRepo = new TaskRepository(db);
     const sessionId = await createSessionWithDeps(db);
@@ -3256,6 +3281,37 @@ describe('TaskRepository.createPending', () => {
     expect((await taskRepo.findQueued(sessionId)).map((task) => task.task_id)).toEqual(requestIds);
   });
 
+  dbTest('keeps branch-local parent continuation prompts as separate Tasks', async ({ db }) => {
+    const taskRepo = new TaskRepository(db);
+    const sessionRepo = new SessionRepository(db);
+    const sessionId = await createSessionWithDeps(db);
+    const child = await sessionRepo.findById(sessionId);
+    const parent = await sessionRepo.create({
+      session_id: generateId(),
+      branch_id: child!.branch_id,
+      agentic_tool: 'claude-code',
+      created_by: 'test-user' as UUID,
+    });
+    await sessionRepo.update(sessionId, {
+      genealogy: {
+        ...(child?.genealogy ?? { children: [] }),
+        parent_session_id: parent.session_id,
+      },
+    });
+    const requestIds = [generateId(), generateId()];
+    for (const requestId of requestIds) {
+      await taskRepo.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          task_id: requestId,
+          compaction: { request_id: requestId, eligible: true, stream: true },
+        })
+      );
+    }
+    expect((await taskRepo.findQueued(sessionId)).map((task) => task.task_id)).toEqual(requestIds);
+  });
+
   dbTest('keeps exact-Task completion callback requests separate', async ({ db }) => {
     const taskRepo = new TaskRepository(db);
     const sessionId = await createSessionWithDeps(db);
@@ -3328,6 +3384,349 @@ describe('TaskRepository.createPending', () => {
     expect(next.task_id).toBe(nextId);
     expect((await taskRepo.findById(first.task_id))?.full_prompt).toBe(claim.task.full_prompt);
     expect(claim.task.full_prompt).not.toContain('later');
+  });
+});
+
+describe('TaskRepository coordinator queue batching', () => {
+  dbTest(
+    'reproduces a five-prompt callback queue and combines it with provenance and later-wins wording',
+    async ({ db }) => {
+      const taskRepo = new TaskRepository(db);
+      const sessionRepo = new SessionRepository(db);
+      const sessionId = await createSessionWithDeps(db);
+      const coordinatorId = await createSessionWithDeps(db);
+      await sessionRepo.update(sessionId, {
+        callback_config: {
+          enabled: true,
+          callback_session_id: coordinatorId,
+          callback_mode: 'persistent',
+          include_last_message: true,
+        },
+      });
+      const prompts = [
+        'Use an in-memory queue.',
+        'Add concurrency tests.',
+        '  Add   concurrency tests. ',
+        'No, do not use an in-memory queue; use the durable database.',
+        'Document the operator workflow.',
+      ];
+      for (const prompt of prompts) {
+        const requestId = generateId();
+        await taskRepo.createPending(
+          createPendingInput({
+            session_id: sessionId,
+            status: TaskStatus.QUEUED,
+            task_id: requestId,
+            full_prompt: prompt,
+            compaction: { request_id: requestId, eligible: true, stream: true },
+          })
+        );
+      }
+
+      const before = await taskRepo.findQueued(sessionId);
+      expect(before).toHaveLength(5);
+      const preview = await taskRepo.previewCoordinatorQueueBatch({
+        session_id: sessionId,
+        relationship: 'coordinator',
+        requested_by_session_id: coordinatorId,
+      });
+      expect(preview).toMatchObject({
+        source_task_count: 5,
+        source_request_count: 5,
+        unique_request_count: 4,
+        duplicate_request_count: 1,
+        compatible: true,
+      });
+      if ('outcome' in preview) throw new Error('relationship unexpectedly changed');
+      expect(preview.combined_prompt).toContain(
+        'Later instructions override earlier instructions only when they conflict.'
+      );
+      expect(preview.combined_prompt).toContain(prompts[0]);
+      expect(preview.combined_prompt).toContain(prompts[3]);
+
+      const result = await taskRepo.applyCoordinatorQueueBatch({
+        session_id: sessionId,
+        relationship: 'coordinator',
+        requested_by_session_id: coordinatorId,
+        requested_by_user_id: 'test-user' as UserID,
+        operation_id: 'fictional-five-combine',
+        strategy: 'combine',
+        expected_queue_revision: preview.queue_revision,
+        expected_task_ids: preview.expected_task_ids,
+      });
+      expect(result.outcome).toBe('batched');
+      if (result.outcome !== 'batched') throw new Error('queue was not batched');
+      expect(await taskRepo.findQueued(sessionId)).toHaveLength(1);
+      expect(result.superseded_tasks).toHaveLength(4);
+      expect(result.superseded_tasks.every((task) => task.status === TaskStatus.STOPPED)).toBe(
+        true
+      );
+      expect(result.execution_task.metadata?.coordinator_queue_batch).toMatchObject({
+        source_task_count: 5,
+        source_request_count: 5,
+        unique_request_count: 4,
+        duplicate_request_count: 1,
+      });
+      expect(
+        result.execution_task.metadata?.coordinator_queue_batch?.source_tasks.map(
+          (source) => source.task_id
+        )
+      ).toEqual(before.map((task) => task.task_id));
+      expect(
+        result.execution_task.metadata?.coordinator_queue_batch?.source_tasks.flatMap((source) =>
+          source.requests.map((request) => request.text)
+        )
+      ).toEqual(prompts);
+    }
+  );
+
+  dbTest(
+    'replaces executor bytes, preserves originals, and converges HA retries',
+    async ({ db }) => {
+      const taskRepo = new TaskRepository(db);
+      const sessionRepo = new SessionRepository(db);
+      const sessionId = await createSessionWithDeps(db);
+      const coordinatorId = await createSessionWithDeps(db);
+      await sessionRepo.update(sessionId, {
+        callback_config: { enabled: true, callback_session_id: coordinatorId },
+      });
+      for (const prompt of ['Do the unsafe thing.', "No, don't do that.", 'Also keep the tests.']) {
+        const requestId = generateId();
+        await taskRepo.createPending(
+          createPendingInput({
+            session_id: sessionId,
+            status: TaskStatus.QUEUED,
+            task_id: requestId,
+            full_prompt: prompt,
+            compaction: { request_id: requestId, eligible: true, stream: true },
+          })
+        );
+      }
+      const preview = await taskRepo.previewCoordinatorQueueBatch({
+        session_id: sessionId,
+        relationship: 'coordinator',
+        requested_by_session_id: coordinatorId,
+      });
+      if ('outcome' in preview) throw new Error('relationship unexpectedly changed');
+      const input = {
+        session_id: sessionId,
+        relationship: 'coordinator' as const,
+        requested_by_session_id: coordinatorId,
+        requested_by_user_id: 'test-user' as UserID,
+        operation_id: 'replace-retry',
+        strategy: 'replace' as const,
+        expected_queue_revision: preview.queue_revision,
+        expected_task_ids: preview.expected_task_ids,
+        replacement_prompt: 'Keep the tests. Use only the reviewed durable approach.',
+      };
+      const first = await taskRepo.applyCoordinatorQueueBatch(input);
+      const retry = await taskRepo.applyCoordinatorQueueBatch(input);
+      expect(first.outcome).toBe('batched');
+      expect(retry.outcome).toBe('already_batched');
+      if (first.outcome !== 'batched' || retry.outcome !== 'already_batched') {
+        throw new Error('unexpected replace outcome');
+      }
+      expect(first.execution_task.full_prompt).toBe(input.replacement_prompt);
+      expect(first.execution_task.full_prompt).not.toContain('unsafe thing');
+      expect(
+        first.execution_task.metadata?.coordinator_queue_batch?.source_tasks[0]?.requests[0]?.text
+      ).toBe('Do the unsafe thing.');
+      expect(retry.execution_task.task_id).toBe(first.execution_task.task_id);
+      await expect(
+        taskRepo.applyCoordinatorQueueBatch({ ...input, replacement_prompt: 'Different retry' })
+      ).rejects.toThrow(/already used with different input/);
+    }
+  );
+
+  dbTest(
+    'refuses callback/control contracts and loses safely to a dispatch claim',
+    async ({ db }) => {
+      const taskRepo = new TaskRepository(db);
+      const sessionRepo = new SessionRepository(db);
+      const sessionId = await createSessionWithDeps(db);
+      const coordinatorId = await createSessionWithDeps(db);
+      const otherCallbackId = await createSessionWithDeps(db);
+      await sessionRepo.update(sessionId, {
+        status: SessionStatus.IDLE,
+        ready_for_prompt: true,
+        callback_config: { enabled: true, callback_session_id: coordinatorId },
+      });
+      const firstId = generateId();
+      const secondId = generateId();
+      const callbackFor = (target: UUID) => ({
+        completion_callback: {
+          target_session_id: target,
+          requested_from_session_id: target,
+          requested_by_user_id: 'test-user',
+        },
+        prompt_control: { stream: true },
+      });
+      const first = await taskRepo.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          task_id: firstId,
+          metadata: callbackFor(coordinatorId),
+          compaction: { request_id: firstId, eligible: false, stream: true },
+        })
+      );
+      await taskRepo.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          task_id: secondId,
+          metadata: callbackFor(otherCallbackId),
+          compaction: { request_id: secondId, eligible: false, stream: true },
+        })
+      );
+      const incompatible = await taskRepo.previewCoordinatorQueueBatch({
+        session_id: sessionId,
+        relationship: 'coordinator',
+        requested_by_session_id: coordinatorId,
+      });
+      if ('outcome' in incompatible) throw new Error('relationship unexpectedly changed');
+      expect(incompatible.compatible).toBe(false);
+      expect(incompatible.refusal_reasons.join(' ')).toMatch(/callback contracts/);
+
+      await taskRepo.claimDispatchAndProjectSession(first.task_id, TaskStatus.QUEUED, {
+        status: TaskStatus.DISPATCHING,
+      });
+      await expect(
+        taskRepo.applyCoordinatorQueueBatch({
+          session_id: sessionId,
+          relationship: 'coordinator',
+          requested_by_session_id: coordinatorId,
+          requested_by_user_id: 'test-user' as UserID,
+          operation_id: 'claim-race',
+          strategy: 'combine',
+          expected_queue_revision: incompatible.queue_revision,
+          expected_task_ids: incompatible.expected_task_ids,
+        })
+      ).rejects.toThrow(/changed after preview/);
+    }
+  );
+
+  dbTest(
+    'allows identical exact callbacks once and never truncates an oversized preview',
+    async ({ db }) => {
+      const taskRepo = new TaskRepository(db);
+      const sessionRepo = new SessionRepository(db);
+      const sessionId = await createSessionWithDeps(db);
+      const coordinatorId = await createSessionWithDeps(db);
+      await sessionRepo.update(sessionId, {
+        callback_config: { enabled: true, callback_session_id: coordinatorId },
+      });
+      const exact = {
+        target_session_id: coordinatorId,
+        requested_from_session_id: coordinatorId,
+        requested_by_user_id: 'test-user',
+      };
+      for (const prompt of [`first:${'x'.repeat(17_000)}`, `second:${'y'.repeat(17_000)}`]) {
+        const id = generateId();
+        await taskRepo.createPending(
+          createPendingInput({
+            session_id: sessionId,
+            status: TaskStatus.QUEUED,
+            task_id: id,
+            full_prompt: prompt,
+            metadata: { completion_callback: exact },
+            compaction: { request_id: id, eligible: false, stream: true },
+          })
+        );
+      }
+      const preview = await taskRepo.previewCoordinatorQueueBatch({
+        session_id: sessionId,
+        relationship: 'coordinator',
+        requested_by_session_id: coordinatorId,
+      });
+      if ('outcome' in preview) throw new Error('relationship unexpectedly changed');
+      expect(preview.compatible).toBe(true);
+      expect(preview.combine_allowed).toBe(false);
+      expect(preview.combine_refusal_reason).toMatch(/never truncated/);
+      expect(preview.combined_prompt).toContain(`first:${'x'.repeat(17_000)}`);
+      await expect(
+        taskRepo.applyCoordinatorQueueBatch({
+          session_id: sessionId,
+          relationship: 'coordinator',
+          requested_by_session_id: coordinatorId,
+          requested_by_user_id: 'test-user' as UserID,
+          operation_id: 'oversized-combine',
+          strategy: 'combine',
+          expected_queue_revision: preview.queue_revision,
+          expected_task_ids: preview.expected_task_ids,
+        })
+      ).rejects.toThrow(/never truncated/);
+      const replacement = `canonical:${'z'.repeat(40_000)}`;
+      const replaced = await taskRepo.applyCoordinatorQueueBatch({
+        session_id: sessionId,
+        relationship: 'coordinator',
+        requested_by_session_id: coordinatorId,
+        requested_by_user_id: 'test-user' as UserID,
+        operation_id: 'oversized-replace',
+        strategy: 'replace',
+        expected_queue_revision: preview.queue_revision,
+        expected_task_ids: preview.expected_task_ids,
+        replacement_prompt: replacement,
+      });
+      if (replaced.outcome !== 'batched') throw new Error('replacement was not batched');
+      expect(replaced.execution_task.full_prompt).toBe(replacement);
+      expect(new TextEncoder().encode(replaced.execution_task.full_prompt).byteLength).toBe(
+        new TextEncoder().encode(replacement).byteLength
+      );
+    }
+  );
+
+  dbTest('collapses identical exact callbacks onto the one executable survivor', async ({ db }) => {
+    const taskRepo = new TaskRepository(db);
+    const sessionRepo = new SessionRepository(db);
+    const sessionId = await createSessionWithDeps(db);
+    const coordinatorId = await createSessionWithDeps(db);
+    await sessionRepo.update(sessionId, {
+      callback_config: { enabled: true, callback_session_id: coordinatorId },
+    });
+    const exact = {
+      target_session_id: coordinatorId,
+      requested_from_session_id: coordinatorId,
+      requested_by_user_id: 'test-user',
+    };
+    for (const prompt of ['first exact request', 'second exact request']) {
+      const id = generateId();
+      await taskRepo.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          task_id: id,
+          full_prompt: prompt,
+          metadata: { completion_callback: exact },
+          compaction: { request_id: id, eligible: false, stream: true },
+        })
+      );
+    }
+    const preview = await taskRepo.previewCoordinatorQueueBatch({
+      session_id: sessionId,
+      relationship: 'coordinator',
+      requested_by_session_id: coordinatorId,
+    });
+    if ('outcome' in preview) throw new Error('relationship unexpectedly changed');
+    expect(preview.compatible).toBe(true);
+    const result = await taskRepo.applyCoordinatorQueueBatch({
+      session_id: sessionId,
+      relationship: 'coordinator',
+      requested_by_session_id: coordinatorId,
+      requested_by_user_id: 'test-user' as UserID,
+      operation_id: 'one-exact-callback',
+      strategy: 'combine',
+      expected_queue_revision: preview.queue_revision,
+      expected_task_ids: preview.expected_task_ids,
+    });
+    if (result.outcome !== 'batched') throw new Error('queue was not batched');
+    expect(result.execution_task.metadata?.completion_callback).toEqual(exact);
+    expect(result.superseded_tasks[0]?.metadata?.completion_callback).toEqual(exact);
+    expect(
+      (await taskRepo.findBySession(sessionId)).filter(
+        (task) => task.status === TaskStatus.QUEUED && task.metadata?.completion_callback
+      )
+    ).toHaveLength(1);
   });
 });
 

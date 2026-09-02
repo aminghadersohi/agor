@@ -272,3 +272,52 @@ describe('live runtime projection', () => {
     expect(shouldRenderLiveTaskProgress({ status } as Task)).toBe(false);
   });
 });
+
+describe('coordinator queue batch audit', () => {
+  const baseTask = {
+    task_id: '018f0000-0000-7000-8000-000000000001',
+    session_id: '018f0000-0000-7000-8000-000000000002',
+    status: 'queued',
+    created_at: '2026-08-31T12:00:00.000Z',
+    created_by: '018f0000-0000-7000-8000-000000000003',
+    full_prompt: 'combined',
+    git_state: { ref_at_start: 'main', sha_at_start: '' },
+    message_range: { start_index: -1, end_index: -1, start_timestamp: '2026-08-31T12:00:00.000Z' },
+    tool_use_count: 0,
+  } as Task;
+
+  it('labels the one execution turn with its retained request count', () => {
+    render(
+      <TaskBlock
+        task={{
+          ...baseTask,
+          metadata: {
+            coordinator_queue_batch: {
+              version: 1,
+              operation_id: 'batch-1',
+              strategy: 'replace',
+              batched_at: baseTask.created_at,
+              requested_by_user_id: baseTask.created_by as never,
+              coordinator_session_id: baseTask.session_id,
+              relationship: 'coordinator',
+              expected_queue_revision: 'sha256:test',
+              source_task_count: 5,
+              source_request_count: 5,
+              unique_request_count: 4,
+              duplicate_request_count: 1,
+              source_tasks: [],
+              replacement_prompt: 'canonical',
+            },
+          },
+        }}
+        isExpanded={false}
+        onExpandChange={vi.fn()}
+        taskMessages={[]}
+        taskMessagesLoaded
+        onLoadTaskMessages={vi.fn()}
+        onUnloadTaskMessages={vi.fn()}
+      />
+    );
+    expect(screen.getByText(/5 requests → 1 turn \(replace\)/)).toBeInTheDocument();
+  });
+});

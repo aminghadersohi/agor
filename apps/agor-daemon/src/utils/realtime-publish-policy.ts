@@ -384,6 +384,10 @@ export const REALTIME_PUBLISH_POLICY = {
   },
   'sessions/:id/restart-cli': { audience: 'none', why: NO_CONSUMER },
   'sessions/:id/tasks/queue': { audience: 'none', why: `${NO_CONSUMER} Lands as tasks.queued.` },
+  'sessions/:id/tasks/queue/batch': {
+    audience: 'none',
+    why: `${NO_CONSUMER} Lands as tasks.patched.`,
+  },
   'tasks/:id/run': { audience: 'none', why: `${NO_CONSUMER} Lands as tasks.patched.` },
   'tasks/:id/complete': { audience: 'none', why: `${NO_CONSUMER} Lands as tasks.patched.` },
   'tasks/:id/fail': { audience: 'none', why: `${NO_CONSUMER} Lands as tasks.patched.` },

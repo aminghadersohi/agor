@@ -20,6 +20,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const interruptMocks = vi.hoisted(() => ({
   admit: vi.fn(),
   terminate: vi.fn(),
+  previewBatch: vi.fn(),
+  applyBatch: vi.fn(),
 }));
 
 vi.mock('../resolve-ids.js', () => ({
@@ -76,6 +78,8 @@ vi.mock('@agor/core/db', () => ({
   UserApiKeysRepository: class FakeUserApiKeysRepository {},
   TaskRepository: class FakeTaskRepository {
     admitInterruptCorrection = interruptMocks.admit;
+    previewCoordinatorQueueBatch = interruptMocks.previewBatch;
+    applyCoordinatorQueueBatch = interruptMocks.applyBatch;
   },
   shortId: (id: string) => id,
 }));
@@ -288,6 +292,91 @@ describe('session transfer MCP tools', () => {
       corrective_task_id: 'task-correction',
       target_task_id: 'task-running',
       termination_status: 'terminal',
+    });
+  });
+
+  it('previews then replaces a queue through the calling MCP Session authority', async () => {
+    const preview = {
+      session_id: 'sess-child',
+      relationship: 'coordinator',
+      coordinator_session_id: 'sess-caller',
+      queue_revision: 'sha256:queue-1',
+      expected_task_ids: ['task-1', 'task-2'],
+      source_task_count: 2,
+      source_request_count: 3,
+      unique_request_count: 2,
+      duplicate_request_count: 1,
+      compatible: true,
+      refusal_reasons: [],
+      combine_allowed: true,
+      combined_prompt: 'combined preview',
+      combined_prompt_bytes: 16,
+    };
+    interruptMocks.previewBatch.mockResolvedValueOnce(preview);
+    interruptMocks.applyBatch.mockResolvedValueOnce({
+      outcome: 'batched',
+      preview,
+      execution_task: { task_id: 'task-1', session_id: 'sess-child', status: 'queued' },
+      superseded_tasks: [{ task_id: 'task-2', session_id: 'sess-child', status: 'stopped' }],
+    });
+    const resolveQueueBatchAuthority = vi.fn(async () => ({
+      caller_session_id: 'sess-caller',
+      target_session_id: 'sess-child',
+      relationship: 'coordinator',
+    }));
+    const triggerQueueProcessing = vi.fn(async () => undefined);
+    const app = makeFakeApp({
+      sessions: { resolveQueueBatchAuthority, triggerQueueProcessing },
+      tasks: { emit: vi.fn() },
+    });
+    const { agor_sessions_batch_queue } = await registerAndCaptureHandlers(
+      {
+        app,
+        userId: 'user-1',
+        sessionId: 'sess-caller',
+        baseServiceParams: { provider: 'mcp', user: { user_id: 'user-1' } },
+      },
+      ['agor_sessions_batch_queue']
+    );
+
+    const previewResponse = await agor_sessions_batch_queue({
+      targetSessionId: 'sess-child',
+      relationship: 'coordinator',
+      action: 'preview',
+    });
+    expect(previewResponse.structuredContent).toEqual({ outcome: 'preview', preview });
+
+    const replaceResponse = await agor_sessions_batch_queue({
+      targetSessionId: 'sess-child',
+      relationship: 'coordinator',
+      action: 'replace',
+      queueRevision: preview.queue_revision,
+      taskIds: preview.expected_task_ids,
+      replacementPrompt: 'Canonical correction only.',
+      idempotencyKey: 'batch-1',
+    });
+    expect(resolveQueueBatchAuthority).toHaveBeenCalledWith(
+      'sess-child',
+      { callerSessionId: 'sess-caller', relationship: 'coordinator' },
+      expect.objectContaining({ provider: 'mcp' })
+    );
+    expect(interruptMocks.applyBatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session_id: 'sess-child',
+        requested_by_session_id: 'sess-caller',
+        requested_by_user_id: 'user-1',
+        operation_id: 'batch-1',
+        strategy: 'replace',
+        replacement_prompt: 'Canonical correction only.',
+        expected_queue_revision: preview.queue_revision,
+        expected_task_ids: preview.expected_task_ids,
+      })
+    );
+    expect(triggerQueueProcessing).toHaveBeenCalledWith('sess-child', expect.any(Object));
+    expect(replaceResponse.structuredContent).toMatchObject({
+      outcome: 'batched',
+      execution_task_id: 'task-1',
+      superseded_task_ids: ['task-2'],
     });
   });
 
