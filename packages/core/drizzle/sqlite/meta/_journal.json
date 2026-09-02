@@ -722,6 +722,13 @@
       "when": 1788292800000,
       "tag": "0104_session_auto_archive",
       "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "6",
+      "when": 1788379200000,
+      "tag": "0105_zone_workflow_transitions",
+      "breakpoints": true
     }
   ]
 }

@@ -85,6 +85,11 @@ import type {
   UserAvatarSyncResult,
   UserID,
   UUID,
+  ZoneWorkflowAdvance,
+  ZoneWorkflowAdvanceRequest,
+  ZoneWorkflowTransition,
+  ZoneWorkflowTransitionCreate,
+  ZoneWorkflowTransitionPatch,
 } from '@agor/core/types';
 import authentication, { type AuthenticationClient } from '@feathersjs/authentication-client';
 import type { Application, Paginated, Params } from '@feathersjs/feathers';
@@ -291,6 +296,8 @@ export interface ServiceTypes {
   cards: CardWithType;
   'card-types': CardType; // CardType CRUD
   artifacts: Artifact;
+  'zone-workflow-transitions': ZoneWorkflowTransition;
+  'zone-workflow-advances': ZoneWorkflowAdvance;
   'mcp-servers': MCPServer;
   'mcp-catalog': MCPCatalogEntry;
   'mcp-catalog/readiness': MCPCatalogReadiness;
@@ -372,6 +379,17 @@ export interface AgorService<
   // Emit custom events to WebSocket clients (available at runtime via FeathersJS socket.io integration)
   emit(event: string, data: unknown): void;
 }
+
+export interface ZoneWorkflowTransitionsService
+  extends AgorService<
+    ZoneWorkflowTransition,
+    ClientInput<ZoneWorkflowTransitionCreate>,
+    never,
+    ClientInput<ZoneWorkflowTransitionPatch>
+  > {}
+
+export interface ZoneWorkflowAdvancesService
+  extends AgorService<ZoneWorkflowAdvance, ClientInput<ZoneWorkflowAdvanceRequest>, never, never> {}
 
 /** Schedules return storage-facing rows but accept active-only public write data. */
 export interface SchedulesService
@@ -861,6 +879,8 @@ export interface AgorClient
   service(path: 'boards/:id/permissions'): BoardPermissionsService;
   service(path: 'branches/:id/permissions'): BranchPermissionsService;
   service(path: 'workspace-preferences'): WorkspacePreferencesService;
+  service(path: 'zone-workflow-transitions'): ZoneWorkflowTransitionsService;
+  service(path: 'zone-workflow-advances'): ZoneWorkflowAdvancesService;
   service(path: 'schedules'): SchedulesService;
   service(path: 'gateway-channels'): GatewayChannelsService;
   service(path: 'kb/settings'): KnowledgeSettingsService;
