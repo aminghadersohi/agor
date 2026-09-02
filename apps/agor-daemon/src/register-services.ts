@@ -288,6 +288,10 @@ import {
   createUsersService,
   USERS_SERVICE_TRANSPORT_METHODS,
 } from './services/users.js';
+import {
+  createZoneWorkflowAdvancesService,
+  createZoneWorkflowTransitionsService,
+} from './services/zone-workflow.js';
 import { requestExecutorTermination } from './termination-coordinator.js';
 import { appendSystemMessage } from './utils/append-system-message.js';
 import { requireMinimumRole } from './utils/authorization.js';
@@ -554,7 +558,15 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
           id: boardObject.object_id,
         });
       },
-      (event) => emitServiceEvent(app, { path: 'boards', ...event })
+      (event) => emitServiceEvent(app, { path: 'boards', ...event }),
+      (transition, params) =>
+        emitServiceEvent(app, {
+          path: 'zone-workflow-transitions',
+          event: 'removed',
+          data: transition,
+          params,
+          id: transition.transition_id,
+        })
     ),
     {
       methods: [
@@ -576,6 +588,8 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
     }
   );
   app.use('/board-objects', createBoardObjectsService(db, app));
+  app.use('/zone-workflow-transitions', createZoneWorkflowTransitionsService(db));
+  app.use('/zone-workflow-advances', createZoneWorkflowAdvancesService(db, app));
 
   const boardsService = safeService('boards') as unknown as BoardsServiceImpl | undefined;
   app.use('/card-types', createCardTypesService(db));
