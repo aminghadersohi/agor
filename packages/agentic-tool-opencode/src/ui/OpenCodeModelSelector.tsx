@@ -57,6 +57,22 @@ function compactWarning(
 const modelPairValue = (providerId: string, modelId: string) =>
   JSON.stringify([providerId, modelId]);
 
+function catalogModelLabel(
+  model: NonNullable<OpenCodeModelCatalog['providers'][number]>['models'][number]
+): string {
+  const capabilities = [
+    model.tools ? 'tools' : undefined,
+    model.thinking ? 'thinking' : undefined,
+    model.vision ? 'vision' : undefined,
+  ]
+    .filter(Boolean)
+    .join(', ');
+  const size = model.sizeBytes ? `${(model.sizeBytes / 1024 ** 3).toFixed(1)} GB` : undefined;
+  const context = model.contextTokens ? `${model.contextTokens.toLocaleString()} ctx` : undefined;
+  const detail = [size, context, capabilities].filter(Boolean).join(' · ');
+  return detail ? `${model.name} · ${detail}` : model.name;
+}
+
 function compactModelOptions(
   catalog: OpenCodeModelCatalog | null,
   value: OpenCodeModelConfig | undefined,
@@ -70,7 +86,7 @@ function compactModelOptions(
         label: provider.name,
         options: provider.models.map((model) => ({
           value: modelPairValue(provider.id, model.id),
-          label: model.name,
+          label: catalogModelLabel(model),
           disabled: false,
           searchText:
             `${provider.name} ${provider.id} ${model.name} ${model.id} ${model.status}`.toLowerCase(),
@@ -287,8 +303,8 @@ export const OpenCodeModelSelector: React.FC<OpenCodeModelSelectorProps> = ({
           value: candidate.id,
           label:
             candidate.status === 'active'
-              ? candidate.name
-              : `${candidate.name} · ${candidate.status}`,
+              ? catalogModelLabel(candidate)
+              : `${catalogModelLabel(candidate)} · ${candidate.status}`,
           searchText:
             `${candidate.name} ${candidate.id} ${candidate.status} ${selectedCatalogProvider.name} ${selectedCatalogProvider.id}`.toLowerCase(),
         }))

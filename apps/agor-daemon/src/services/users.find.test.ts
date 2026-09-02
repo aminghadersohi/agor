@@ -76,6 +76,53 @@ describe('UsersService.find', () => {
     expect(page.data.map((user) => user.email)).toEqual(['bravo@example.com']);
   });
 
+  dbTest('keeps local OpenCode provider presence private to its owner', async ({ db }) => {
+    const service = new UsersService(db);
+    const owner = await service.create({
+      email: 'ollama-owner@example.com',
+      password: 'test-password-1234',
+    });
+    const other = await service.create({
+      email: 'ollama-other@example.com',
+      password: 'test-password-1234',
+    });
+    await expect(
+      service.patch(
+        owner.user_id,
+        {
+          agentic_tools: {
+            opencode: { ollama_endpoint: 'http://user:secret@127.0.0.1:11435' },
+          },
+        },
+        { user: owner } as never
+      )
+    ).rejects.toThrow(/without credentials/i);
+    await service.patch(
+      owner.user_id,
+      {
+        agentic_tools: {
+          opencode: {
+            ollama_enabled: 'true',
+            ollama_endpoint: 'http://127.0.0.1:11435',
+            ollama_model: 'qwen3-coder:30b',
+          },
+        },
+      },
+      { user: owner } as never
+    );
+
+    const self = await service.get(owner.user_id, { user: owner } as never);
+    const foreign = await service.get(owner.user_id, { user: other } as never);
+
+    expect(self.agentic_tools?.opencode).toEqual({
+      ollama_enabled: true,
+      ollama_endpoint: true,
+      ollama_model: true,
+    });
+    expect(foreign.agentic_tools?.opencode).toBeUndefined();
+    expect(foreign.agentic_tools_public_values).toBeUndefined();
+  });
+
   dbTest(
     'searches name/email/unix_username case-insensitively before pagination',
     async ({ db }) => {
