@@ -1,9 +1,9 @@
 import type { CodexApprovalPolicy, CodexNetworkAccess, CodexSandboxMode } from './agentic-tool';
 import { type AgenticToolName, DEFAULT_AGENTIC_TOOL_NAME, isAgenticToolName } from './agentic-tool';
 import type { ArtifactID, BranchID, SessionID, UserID } from './id';
+import type { OpenCodeConfig } from './opencode-ollama';
 import type { ProfileImageID } from './profile-image';
 import type { ScheduleID } from './schedule';
-import type { OpenCodeConfig } from './opencode-ollama';
 import type { EffortLevel, PermissionMode } from './session';
 
 /** Canonical syntax for the transitional delegated execution-home key. */
