@@ -116,6 +116,44 @@ When spawning, you can override:
 - **Permissions**: Stricter or looser approval requirements
 - **MCP servers**: Different tool sets (Codex MCP support pending)
 - **Callback content**: Include last message (default on), include original prompt (default off), extra formatting instructions
+- **Callback delivery**: `direct` (default), `btw`, or `auto`
+
+### Direct, BTW, and auto delivery
+
+`direct` is the existing behavior: Agor queues the rendered callback as a new
+turn on the destination Session. It remains the default, so existing Sessions
+and API callers do not change behavior.
+
+`btw` first gives that rendered callback to an ephemeral fork of the **current
+destination**. The fork reconciles the report with the coordinator's context,
+then Agor injects at most one result into the destination transcript. The result
+is hard-capped at 4 KiB, and the fork auto-archives. The fork is owned and
+configured from the destination Session, not the completed worker, so callback
+retargeting that commits before completion also moves BTW ownership and context
+to the new destination.
+
+`auto` is deterministic. It selects BTW when the destination is busy or the
+rendered callback is at least 8 KiB; otherwise it selects direct. There is no
+model-based routing decision.
+
+BTW availability is checked before creation: the destination Session and
+Branch must be active, the callback actor must still have prompt authority, the
+destination agent must support session forks, and the destination must have
+forkable SDK state. When explicit `btw` or `auto` selects BTW but any check
+fails—or materialization loses a concurrent lifecycle race—Agor queues the
+original callback directly with the fallback reason in Task audit metadata.
+The callback is never discarded merely because BTW is unavailable.
+
+Callback-digest forks carry the source Session/Task, current destination,
+remote-relationship IDs, requested/resolved delivery, stable side Session/Task
+IDs, and stable final-message ID. Those identities make completion retries
+converge on at most one side Session and one final coordinator result. A digest
+fork cannot recursively request callback delivery.
+
+This policy applies only to standing Session callbacks. The immutable
+`agor_sessions_prompt(..., callback: true)` exact-Task subscription (including
+root-originated subscriptions) remains direct. When exact-Task and standing
+subscriptions coalesce for the same source Task and destination, direct wins.
 
 ### Comparison with Claude Code's native subagents
 
@@ -209,6 +247,8 @@ while normalized duplicates are sent only once. Combined prompts are capped at
 Callbacks, continuations, attachments, slash controls, gateways, widgets,
 different actors, and interrupt corrections remain separate because they have
 distinct identity, lifecycle, permission, or completion contracts.
+BTW delivery does not put callback/control work into this compaction path; the
+digest Task remains a separately identified internal callback Task.
 
 ---
 
@@ -219,8 +259,8 @@ Callback routing and genealogy answer different questions and move separately:
 - **Retarget a callback** with `agor_sessions_retarget_callback` when an existing
   worker should report to a different orchestrator. The worker's direct route
   and any matching cross-branch `remote_create` relationship change atomically.
-  Enabled/off state, `once`/`persistent` mode, template, and included-content
-  flags are preserved. A Task already running when the change commits reads the
+  Enabled/off state, `once`/`persistent` mode, delivery policy, template, and
+  included-content flags are preserved. A Task already running when the change commits reads the
   new standing route when it completes; it does not also notify the old direct
   destination.
 - **Reparent genealogy** with `agor_sessions_reparent` when a Session should

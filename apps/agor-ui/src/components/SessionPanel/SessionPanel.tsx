@@ -1492,6 +1492,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             mcpServerIds: config.mcpServerIds,
             callbackConfig: {
               enableCallback: config.enableCallback,
+              callbackDelivery: config.callbackDelivery,
               includeLastMessage: config.includeLastMessage,
               includeOriginalPrompt: config.includeOriginalPrompt,
             },

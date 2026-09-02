@@ -171,8 +171,34 @@ export interface TaskMetadata {
     event: 'task_completion' | 'session_completion';
     target_session_id: SessionID;
     queued_task_id?: TaskID;
+    /** Actual delivery path used for this dispatch. Historical rows omit it and are direct. */
+    delivery?: 'direct' | 'btw';
+    /** Ephemeral callback-digest BTW Session, when `delivery` is `btw`. */
+    btw_session_id?: SessionID;
     dispatched_at: string;
   }>;
+
+  /** Durable callback-delivery audit on direct callback Tasks and digest BTW Tasks. */
+  callback_delivery?: {
+    source_session_id: SessionID;
+    source_task_id: TaskID;
+    destination_session_id: SessionID;
+    relationship_ids: import('./id').SessionRelationshipID[];
+    route: 'standing' | 'exact_task';
+    requested_delivery: import('./session').CallbackDelivery;
+    resolved_delivery: 'direct' | 'btw';
+    fallback_reason?:
+      | 'unsupported_agent'
+      | 'missing_fork_state'
+      | 'destination_inactive'
+      | 'branch_inactive'
+      | 'permission_denied'
+      | 'loop_guard'
+      | 'policy_direct'
+      | 'creation_failed';
+    btw_session_id?: SessionID;
+    final_message_id?: MessageID;
+  };
   /**
    * Marks a task whose prompt was authored by the daemon (not typed by a
    * human). Used by widget auto-resume so the UI can label the queued

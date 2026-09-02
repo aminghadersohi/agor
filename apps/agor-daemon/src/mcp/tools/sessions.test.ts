@@ -511,6 +511,7 @@ describe('agor_sessions_get_current_context', () => {
           callback_config: {
             enabled: true,
             callback_session_id: 'sess-current-coordinator',
+            delivery: 'auto',
           },
           remote_relationships: {
             as_target: [
@@ -557,6 +558,7 @@ describe('agor_sessions_get_current_context', () => {
     expect(result.effective_direct_callback_coordinator_session_id).toBe(
       'sess-current-coordinator'
     );
+    expect(result.effective_callback_delivery).toBe('auto');
   });
 });
 
@@ -1073,6 +1075,7 @@ describe('agor_sessions_create', () => {
       branchId: 'wt-1',
       agenticTool: 'claude-code',
       enableCallback: true,
+      callbackDelivery: 'auto',
     });
 
     // New session genealogy should reference the calling session as parent
@@ -1082,6 +1085,7 @@ describe('agor_sessions_create', () => {
       enabled: true,
       callback_session_id: 'sess-caller',
       callback_mode: 'persistent',
+      delivery: 'auto',
     });
 
     // Parent's children list should be updated to include the new session
@@ -1715,6 +1719,29 @@ describe('agor_sessions_spawn', () => {
     });
   });
 
+  it('threads callbackDelivery into SpawnConfig without changing the direct default', async () => {
+    const spawnCalls: Array<{ id: string; data: any }> = [];
+    const app = makeFakeApp({
+      sessions: {
+        spawn: async (id: string, data: any) => {
+          spawnCalls.push({ id, data });
+          return { session_id: 'sess-child', permission_config: { mode: 'acceptEdits' } };
+        },
+      },
+      '/sessions/:id/prompt': {
+        create: async () => ({ task_id: 't1', status: 'running' }),
+      },
+    });
+    const { agor_sessions_spawn } = await registerAndCaptureHandlers(
+      { app, userId: 'user-1', sessionId: 'sess-parent' },
+      ['agor_sessions_spawn']
+    );
+
+    await agor_sessions_spawn({ prompt: 'digest this completion', callbackDelivery: 'btw' });
+
+    expect(spawnCalls[0].data.callbackDelivery).toBe('btw');
+  });
+
   it('threads provider through SpawnConfig.modelConfig (OpenCode)', async () => {
     const spawnCalls: Array<{ id: string; data: any }> = [];
     const app = makeFakeApp({
@@ -2167,6 +2194,56 @@ describe('agor_models_list', () => {
 });
 
 describe('inputSchema → JSON Schema conversion (MCP discovery)', () => {
+  it('updates callback delivery while preserving the existing callback route', async () => {
+    const patch = vi.fn(async (_id: string, updates: Record<string, unknown>) => ({
+      session_id: 'sess-child',
+      ...updates,
+    }));
+    const app = makeFakeApp({
+      sessions: {
+        get: async () => ({
+          session_id: 'sess-child',
+          callback_config: {
+            enabled: true,
+            callback_session_id: 'sess-coordinator',
+            callback_created_by: 'user-1',
+            callback_mode: 'persistent',
+          },
+        }),
+        patch,
+      },
+    });
+    const tools = await registerAndCaptureTools(
+      { app, userId: 'user-1', sessionId: 'sess-caller' },
+      ['agor_sessions_update']
+    );
+
+    expect(
+      tools.agor_sessions_update.cfg.inputSchema?.safeParse({
+        sessionId: 'sess-child',
+        callbackDelivery: 'auto',
+      }).success
+    ).toBe(true);
+    await tools.agor_sessions_update.cb({
+      sessionId: 'sess-child',
+      callbackDelivery: 'auto',
+    });
+
+    expect(patch).toHaveBeenCalledWith(
+      'sess-child',
+      {
+        callback_config: {
+          enabled: true,
+          callback_session_id: 'sess-coordinator',
+          callback_created_by: 'user-1',
+          callback_mode: 'persistent',
+          delivery: 'auto',
+        },
+      },
+      expect.any(Object)
+    );
+  });
+
   it('accepts every active tool and rejects historical tools on session creation boundaries', async () => {
     const tools = await registerAndCaptureTools(
       { app: {}, userId: 'user-1', sessionId: 'sess-1' },
