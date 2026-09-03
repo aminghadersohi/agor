@@ -83,7 +83,13 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     );
 
     const user = userEvent.setup();
-    const getTrigger = () => screen.getByRole('button', { name: 'Arrange board' });
+    const getTrigger = () => {
+      const button = document.querySelector<HTMLButtonElement>(
+        'button.react-flow__controls-button[aria-label="Arrange board"]'
+      );
+      if (!button) throw new Error('Arrange board toolbar trigger is unavailable.');
+      return button;
+    };
     let trigger = await screen.findByRole('button', { name: 'Arrange board' });
     const getSelectedZone = () =>
       document.querySelector<HTMLElement>('.react-flow__node[data-id="zone-0"]');
