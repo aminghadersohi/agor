@@ -68,6 +68,7 @@ import React, {
   forwardRef,
   useCallback,
   useEffect,
+  useId,
   useImperativeHandle,
   useMemo,
   useRef,
@@ -901,6 +902,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const [lastBoardRow, setLastBoardRow] = useState<'start' | 'center' | 'end' | 'justify'>(
       'start'
     );
+    const arrangeBoardModeHelpId = useId();
+    const packZoneContentsHelpId = useId();
+    const resizeZoneFramesHelpId = useId();
+    const justifyBoardRowsHelpId = useId();
+    const lastBoardRowLabelId = useId();
+    const lastBoardRowHelpId = useId();
     const arrangeBoardButtonWrapperRef = useRef<HTMLSpanElement>(null);
     const pendingPostLayoutViewportRef = useRef<
       { token: number; intent: PostLayoutViewportIntent } | undefined
@@ -4102,6 +4109,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   trigger="click"
                   placement="rightTop"
                   open={arrangeBoardPopoverOpen}
+                  destroyOnHidden
+                  classNames={{ root: CANVAS_LAYOUT_CONTROLS_CLASS }}
                   onOpenChange={(open) => {
                     if (!arrangeBoardDisabled) setArrangeBoardPopoverOpen(open);
                   }}
@@ -4109,12 +4118,19 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                     <div
                       role="dialog"
                       aria-label="Arrange board options"
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Escape') return;
+                        event.stopPropagation();
+                        setArrangeBoardPopoverOpen(false);
+                        arrangeBoardButtonWrapperRef.current?.querySelector('button')?.focus();
+                      }}
                       style={{ display: 'flex', flexDirection: 'column', gap: 10, width: 260 }}
                     >
                       <Typography.Text strong>Arrange board</Typography.Text>
                       <Segmented
                         block
                         aria-label="Board layout mode"
+                        aria-describedby={arrangeBoardModeHelpId}
                         value={arrangeBoardMode}
                         options={[
                           { label: 'Grid', value: 'grid' },
@@ -4123,7 +4139,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                         disabled={arrangeBoardBusy}
                         onChange={(value) => setArrangeBoardMode(value as 'grid' | 'compact')}
                       />
-                      <Typography.Text type="secondary">
+                      <Typography.Text id={arrangeBoardModeHelpId} type="secondary">
                         {arrangeBoardMode === 'grid'
                           ? 'Builds stable, photo-style rows from the usable canvas shape.'
                           : 'Minimizes cluster diameter first for a dense two-dimensional ball.'}
@@ -4131,44 +4147,73 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                       <Checkbox
                         checked={packZoneContents}
                         disabled={arrangeBoardBusy}
+                        aria-describedby={packZoneContentsHelpId}
                         onChange={(event) => setPackZoneContents(event.target.checked)}
                       >
                         Pack zone contents
                       </Checkbox>
-                      <Typography.Text type="secondary">
+                      <Typography.Text id={packZoneContentsHelpId} type="secondary">
                         Repack eligible zone children and fit their frames before arranging the
                         board. This does not enable Auto Zone.
                       </Typography.Text>
                       <Checkbox
                         checked={resizeZoneFrames}
                         disabled={arrangeBoardBusy || !packZoneContents}
+                        aria-describedby={resizeZoneFramesHelpId}
                         onChange={(event) => setResizeZoneFrames(event.target.checked)}
                       >
                         Match / resize zone frames
                       </Checkbox>
-                      <Typography.Text type="secondary">
-                        Turn off to preserve safe zone frames. Undersized frames still grow so
-                        children cannot protrude.
+                      <Typography.Text id={resizeZoneFramesHelpId} type="secondary">
+                        {packZoneContents
+                          ? 'Turn off to preserve safe zone frames. Undersized frames still grow so children cannot protrude.'
+                          : 'Unavailable while Pack zone contents is off; existing zone frames are preserved.'}
                       </Typography.Text>
                       <Checkbox
                         checked={justifyBoardRows}
-                        disabled={arrangeBoardBusy || arrangeBoardMode === 'compact'}
+                        disabled={
+                          arrangeBoardBusy ||
+                          arrangeBoardMode === 'compact' ||
+                          !packZoneContents ||
+                          !resizeZoneFrames
+                        }
+                        aria-describedby={justifyBoardRowsHelpId}
                         onChange={(event) => setJustifyBoardRows(event.target.checked)}
                       >
                         Justify rows
                       </Checkbox>
+                      <Typography.Text id={justifyBoardRowsHelpId} type="secondary">
+                        {arrangeBoardMode === 'compact'
+                          ? 'Unavailable in Compact, which minimizes cluster diameter instead of forming rows.'
+                          : !packZoneContents || !resizeZoneFrames
+                            ? 'Enable Pack zone contents and Match / resize zone frames to stretch complete rows to the viewport target.'
+                            : 'Stretches eligible zone frames in complete rows to the usable viewport target. Turn off for natural-width rows.'}
+                      </Typography.Text>
+                      <Typography.Text id={lastBoardRowLabelId}>Last row behavior</Typography.Text>
                       <Select
-                        aria-label="Last row behavior"
+                        aria-labelledby={lastBoardRowLabelId}
+                        aria-describedby={lastBoardRowHelpId}
                         value={lastBoardRow}
                         disabled={arrangeBoardBusy || arrangeBoardMode === 'compact'}
+                        virtual={false}
+                        classNames={{ popup: { root: CANVAS_LAYOUT_CONTROLS_CLASS } }}
                         options={[
                           { label: 'Last row: left', value: 'start' },
                           { label: 'Last row: centered', value: 'center' },
                           { label: 'Last row: right', value: 'end' },
-                          { label: 'Last row: justify', value: 'justify' },
+                          {
+                            label: 'Last row: justify',
+                            value: 'justify',
+                            disabled: !packZoneContents || !resizeZoneFrames,
+                          },
                         ]}
                         onChange={setLastBoardRow}
                       />
+                      <Typography.Text id={lastBoardRowHelpId} type="secondary">
+                        {arrangeBoardMode === 'compact'
+                          ? 'Unavailable in Compact because it has no row-ending alignment.'
+                          : 'Align a short final row without resizing it, or justify it when frame resizing is enabled.'}
+                      </Typography.Text>
                       <Button
                         type="primary"
                         disabled={arrangeBoardDisabled}
