@@ -110,14 +110,12 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     const fitView = within(dialog).getByRole('checkbox', {
       name: 'Fit view after arranging',
     });
+    const fitViewLabel = within(dialog).getByText('Fit view after arranging', { exact: true });
     expect(fitView).toBeChecked();
-    await act(async () =>
-      user.click(within(dialog).getByText('Fit view after arranging', { exact: true }))
-    );
+    await waitFor(() => expect(fitViewLabel).toBeVisible());
+    await act(async () => user.click(fitViewLabel));
     expect(fitView).not.toBeChecked();
-    await act(async () =>
-      user.click(within(dialog).getByText('Fit view after arranging', { exact: true }))
-    );
+    await act(async () => user.click(fitViewLabel));
     expect(fitView).toBeChecked();
     await act(async () =>
       user.click(within(dialog).getByText('Pack zone contents', { exact: true }))

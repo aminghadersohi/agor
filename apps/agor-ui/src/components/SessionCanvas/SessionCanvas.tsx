@@ -4111,7 +4111,15 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                         setArrangeBoardPopoverOpen(false);
                         arrangeBoardButtonWrapperRef.current?.querySelector('button')?.focus();
                       }}
-                      style={{ display: 'flex', flexDirection: 'column', gap: 10, width: 260 }}
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 10,
+                        width: 260,
+                        maxHeight: 'calc(100vh - 32px)',
+                        overflowY: 'auto',
+                        paddingInlineEnd: 4,
+                      }}
                     >
                       <Typography.Text strong>Arrange board</Typography.Text>
                       <Segmented
@@ -4130,6 +4138,18 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                         {arrangeBoardMode === 'grid'
                           ? 'Builds stable, photo-style rows from the usable canvas shape.'
                           : 'Minimizes cluster diameter first for a dense two-dimensional ball.'}
+                      </Typography.Text>
+                      <Checkbox
+                        checked={fitViewAfterArranging}
+                        disabled={arrangeBoardBusy}
+                        aria-describedby={fitViewAfterArrangingHelpId}
+                        onChange={(event) => setFitViewAfterArranging(event.target.checked)}
+                      >
+                        Fit view after arranging
+                      </Checkbox>
+                      <Typography.Text id={fitViewAfterArrangingHelpId} type="secondary">
+                        Frame the complete arranged board once after its rendered geometry settles.
+                        Turn off to preserve the current camera.
                       </Typography.Text>
                       <Checkbox
                         checked={packZoneContents}
@@ -4200,18 +4220,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                         {arrangeBoardMode === 'compact'
                           ? 'Unavailable in Compact because it has no row-ending alignment.'
                           : 'Align a short final row without resizing it, or justify it when frame resizing is enabled.'}
-                      </Typography.Text>
-                      <Checkbox
-                        checked={fitViewAfterArranging}
-                        disabled={arrangeBoardBusy}
-                        aria-describedby={fitViewAfterArrangingHelpId}
-                        onChange={(event) => setFitViewAfterArranging(event.target.checked)}
-                      >
-                        Fit view after arranging
-                      </Checkbox>
-                      <Typography.Text id={fitViewAfterArrangingHelpId} type="secondary">
-                        Frame the complete arranged board once after its rendered geometry settles.
-                        Turn off to preserve the current camera.
                       </Typography.Text>
                       <Button
                         type="primary"
