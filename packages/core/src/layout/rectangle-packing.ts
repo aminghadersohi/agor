@@ -102,6 +102,8 @@ export interface CompactRectangleLayoutOptions {
   gapX?: number;
   gapY?: number;
   gridSize?: number;
+  /** Preserve caller order for semantic zone sorts; outer clusters use size-first search. */
+  preserveInputOrder?: boolean;
 }
 
 /** A board rectangle that an explicit selection layout may not displace. */
@@ -555,6 +557,12 @@ export function layoutRectangles(
 
 type ClusterPlacement = RectanglePlacement & { sourceX?: number; sourceY?: number };
 
+interface ClusterState {
+  placements: ClusterPlacement[];
+}
+
+const COMPACT_LAYOUT_BEAM_WIDTH = 192;
+
 const clusterSeparated = (
   left: ClusterPlacement,
   right: { x: number; y: number; width: number; height: number },
@@ -624,34 +632,139 @@ export function layoutCompactRectangles(
     .filter((value): value is number => Number.isFinite(value));
   const sourceLeft = finiteSourceXs.length > 0 ? Math.min(...finiteSourceXs) : 0;
   const sourceTop = finiteSourceYs.length > 0 ? Math.min(...finiteSourceYs) : 0;
-  const placed: ClusterPlacement[] = [];
+  const sourcePositionById = new Map(
+    items.map((item) => [
+      item.id,
+      {
+        x: Number.isFinite(item.sourceX) ? (item.sourceX as number) - sourceLeft : 0,
+        y: Number.isFinite(item.sourceY) ? (item.sourceY as number) - sourceTop : 0,
+      },
+    ])
+  );
+  // Largest-first placement makes the frontier independent of caller array
+  // order and prevents a run of small cards from walling a large frame onto a
+  // shelf. Stable ids resolve equal shapes, so realtime array permutations do
+  // not alter the result.
+  const searchItems = options.preserveInputOrder
+    ? [...items]
+    : [...items].sort(
+        (left, right) =>
+          Math.max(right.width, right.height) - Math.max(left.width, left.height) ||
+          right.width * right.height - left.width * left.height ||
+          right.height - left.height ||
+          right.width - left.width ||
+          left.id.localeCompare(right.id)
+      );
 
-  for (const [index, item] of items.entries()) {
-    const candidateByKey = new Map<string, { x: number; y: number }>();
-    const addCandidate = (x: number, y: number) => {
-      if (x < 0 || y < 0) return;
-      candidateByKey.set(`${x}:${y}`, { x, y });
-    };
-    addCandidate(0, 0);
-    for (const existing of placed) {
-      addCandidate(existing.x + existing.width + gapX, existing.y);
-      addCandidate(existing.x - item.width - gapX, existing.y);
-      addCandidate(existing.x, existing.y + existing.height + gapY);
-      addCandidate(existing.x, existing.y - item.height - gapY);
-      // Aligning opposite edges as well as top/left edges lets a short item
-      // fill the corner below or beside a larger heterogeneous neighbour.
-      addCandidate(existing.x + existing.width - item.width, existing.y + existing.height + gapY);
-      addCandidate(existing.x + existing.width + gapX, existing.y + existing.height - item.height);
+  const normalizeState = (placements: readonly ClusterPlacement[]): ClusterPlacement[] => {
+    const minX = Math.min(...placements.map((placement) => placement.x));
+    const minY = Math.min(...placements.map((placement) => placement.y));
+    return placements.map((placement) => ({
+      ...placement,
+      x: placement.x - minX,
+      y: placement.y - minY,
+    }));
+  };
+  const stateBounds = (placements: readonly ClusterPlacement[]) => ({
+    width: Math.max(...placements.map((placement) => placement.x + placement.width)),
+    height: Math.max(...placements.map((placement) => placement.y + placement.height)),
+  });
+  const stateScore = (state: ClusterState) => {
+    const frame = stateBounds(state.placements);
+    const movement = state.placements.reduce((total, placement) => {
+      const source = sourcePositionById.get(placement.id) ?? { x: 0, y: 0 };
+      return total + (placement.x - source.x) ** 2 + (placement.y - source.y) ** 2;
+    }, 0);
+    const stableGeometry = [...state.placements]
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .flatMap((placement) => [placement.y, placement.x]);
+    return [
+      Math.max(frame.width, frame.height),
+      frame.width * frame.height,
+      frame.width + frame.height,
+      movement,
+      ...stableGeometry,
+    ];
+  };
+  const compareStates = (left: ClusterState, right: ClusterState): number => {
+    const leftScore = stateScore(left);
+    const rightScore = stateScore(right);
+    for (let index = 0; index < Math.max(leftScore.length, rightScore.length); index += 1) {
+      const delta = (leftScore[index] ?? 0) - (rightScore[index] ?? 0);
+      if (delta !== 0) return delta;
     }
-    const candidates = [...candidateByKey.values()].filter(
-      ({ x, y }) =>
-        x + item.width <= usableWidth &&
-        y + item.height <= usableHeight &&
-        placed.every((existing) =>
-          clusterSeparated(existing, { x, y, width: item.width, height: item.height }, gapX, gapY)
+    return 0;
+  };
+
+  let beam: ClusterState[] = [{ placements: [] }];
+  for (const [stackIndex, item] of searchItems.entries()) {
+    const nextByGeometry = new Map<string, ClusterState>();
+    for (const state of beam) {
+      const candidateByKey = new Map<string, { x: number; y: number }>();
+      const addCandidate = (x: number, y: number) => {
+        candidateByKey.set(`${x}:${y}`, { x, y });
+      };
+      addCandidate(0, 0);
+      for (const existing of state.placements) {
+        const left = existing.x - item.width - gapX;
+        const right = existing.x + existing.width + gapX;
+        const above = existing.y - item.height - gapY;
+        const below = existing.y + existing.height + gapY;
+        addCandidate(right, existing.y);
+        addCandidate(left, existing.y);
+        addCandidate(existing.x, below);
+        addCandidate(existing.x, above);
+        addCandidate(right, existing.y + existing.height - item.height);
+        addCandidate(left, existing.y + existing.height - item.height);
+        addCandidate(existing.x + existing.width - item.width, below);
+        addCandidate(existing.x + existing.width - item.width, above);
+      }
+      for (const candidate of candidateByKey.values()) {
+        const previousPlacement = state.placements[state.placements.length - 1];
+        if (
+          options.preserveInputOrder &&
+          (candidate.x < 0 ||
+            candidate.y < 0 ||
+            (previousPlacement &&
+              (candidate.y < previousPlacement.y ||
+                (candidate.y === previousPlacement.y && candidate.x < previousPlacement.x))))
         )
-    );
-    if (candidates.length === 0) {
+          continue;
+        if (
+          !state.placements.every((existing) =>
+            clusterSeparated(
+              existing,
+              { ...candidate, width: item.width, height: item.height },
+              gapX,
+              gapY
+            )
+          )
+        )
+          continue;
+        const placements = normalizeState([
+          ...state.placements,
+          {
+            ...item,
+            ...candidate,
+            row: 0,
+            column: 0,
+            stackIndex,
+            deckDepth: 0,
+          },
+        ]);
+        const frame = stateBounds(placements);
+        if (frame.width > usableWidth || frame.height > usableHeight) continue;
+        const key = [...placements]
+          .sort((left, right) => left.id.localeCompare(right.id))
+          .map((placement) => `${placement.id}:${placement.x}:${placement.y}`)
+          .join('|');
+        const next = { placements };
+        const previous = nextByGeometry.get(key);
+        if (!previous || compareStates(next, previous) < 0) nextByGeometry.set(key, next);
+      }
+    }
+    beam = [...nextByGeometry.values()].sort(compareStates).slice(0, COMPACT_LAYOUT_BEAM_WIDTH);
+    if (beam.length === 0) {
       // Preserve the all-or-nothing contract used by bounded zone layout: an
       // unsuccessful solve still returns deterministic collision-free
       // geometry, but names every rectangle outside the requested frame so
@@ -662,57 +775,27 @@ export function layoutCompactRectangles(
         overflowingItemIds: bounds ? overflowingIds(fallback.placements, bounds) : [],
       };
     }
-
-    const sourceX = Number.isFinite(item.sourceX) ? (item.sourceX as number) - sourceLeft : 0;
-    const sourceY = Number.isFinite(item.sourceY) ? (item.sourceY as number) - sourceTop : 0;
-    const best = candidates.sort((a, b) => {
-      const score = (candidate: { x: number; y: number }) => {
-        const width = Math.max(
-          candidate.x + item.width,
-          ...placed.map((entry) => entry.x + entry.width)
-        );
-        const height = Math.max(
-          candidate.y + item.height,
-          ...placed.map((entry) => entry.y + entry.height)
-        );
-        return [
-          Math.max(width, height),
-          width * height,
-          width + height,
-          (candidate.x - sourceX) ** 2 + (candidate.y - sourceY) ** 2,
-          candidate.y,
-          candidate.x,
-        ] as const;
-      };
-      const left = score(a);
-      const right = score(b);
-      for (let scoreIndex = 0; scoreIndex < left.length; scoreIndex += 1) {
-        const delta = (left[scoreIndex] ?? 0) - (right[scoreIndex] ?? 0);
-        if (delta !== 0) return delta;
-      }
-      return 0;
-    })[0];
-    if (!best) throw new Error(`Unable to select a placement for rectangle '${item.id}'.`);
-    placed.push({
-      ...item,
-      x: best.x,
-      y: best.y,
-      row: 0,
-      column: 0,
-      stackIndex: index,
-      deckDepth: 0,
-    });
   }
+
+  const placed = beam.sort(compareStates)[0]?.placements;
+  if (!placed) throw new Error('Unable to select a compact rectangle layout.');
 
   const rowYs = [...new Set(placed.map((item) => item.y))].sort((a, b) => a - b);
   const rowByY = new Map(rowYs.map((y, row) => [y, row]));
-  const placements = placed.map(({ sourceX: _sourceX, sourceY: _sourceY, ...item }) => ({
-    ...item,
-    x: item.x + padding,
-    y: item.y + padding,
-    row: rowByY.get(item.y) ?? 0,
-    column: placed.filter((peer) => peer.y === item.y && peer.x < item.x).length,
-  }));
+  const placementById = new Map(placed.map((placement) => [placement.id, placement]));
+  const placements = items.map((source, index) => {
+    const item = placementById.get(source.id);
+    if (!item) throw new Error(`Missing compact placement for rectangle '${source.id}'.`);
+    const { sourceX: _sourceX, sourceY: _sourceY, ...geometry } = item;
+    return {
+      ...geometry,
+      x: item.x + padding,
+      y: item.y + padding,
+      row: rowByY.get(item.y) ?? 0,
+      column: placed.filter((peer) => peer.y === item.y && peer.x < item.x).length,
+      stackIndex: index,
+    };
+  });
   const contentWidth = Math.max(...placed.map((item) => item.x + item.width));
   const contentHeight = Math.max(...placed.map((item) => item.y + item.height));
   const columns = Math.max(1, ...rowYs.map((y) => placed.filter((item) => item.y === y).length));

@@ -3524,8 +3524,15 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         async (context: HookContext<Board>) => {
           // Handle atomic board object operations via _action parameter
           const contextData = context.data || {};
-          const { _action, objectId, objectData, objects, placements, deleteAssociatedSessions } =
-            contextData as UnknownJson;
+          const {
+            _action,
+            objectId,
+            objectData,
+            objects,
+            placements,
+            expected,
+            deleteAssociatedSessions,
+          } = contextData as UnknownJson;
 
           if (_action === 'upsertObject') {
             if (!objectId || !objectData) {
@@ -3605,7 +3612,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
             if (!context.id) throw new Error('Board ID required');
             const result = await boardsService!.applyBoardLayout(
               context.id as string,
-              { objects, placements } as unknown as BoardLayoutBatch
+              { objects, placements, expected } as unknown as BoardLayoutBatch
             );
             // This action returns a structured acknowledgement, not a Board.
             // Suppress Feathers' automatic `patched` event so that result can

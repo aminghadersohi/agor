@@ -615,12 +615,13 @@ describe('arrangeZoneContents', () => {
     });
     expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual({
       x: 20,
-      y: 300,
+      y: 320,
     });
     expect(onArrangeNodes).toHaveBeenCalledTimes(1);
     expect(onArrangeNodes.mock.calls[0]?.[0].map((node: Node) => node.position)).toEqual([
       { x: 20, y: 100 },
-      { x: 20, y: 300 },
+      { x: 20, y: 320 },
+      { x: 0, y: 0 },
     ]);
     expect(onArrangeNodes.mock.calls[0]?.[1]).toBeGreaterThan(0);
     expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
@@ -634,7 +635,7 @@ describe('arrangeZoneContents', () => {
       size: { width: 400, height: 180 },
     });
     expect(placements['placement-card']).toEqual({
-      position: { x: 20, y: 300 },
+      position: { x: 20, y: 320 },
       size: { width: 300, height: 100 },
     });
     expect(showSuccess).toHaveBeenCalledWith(
@@ -888,7 +889,7 @@ describe('arrangeZoneContents', () => {
 
     expect(layoutWrites(boardsPatch)).toHaveLength(1);
     expect(layoutWrites(boardsPatch)[0]?.objects).toEqual({
-      zone: expect.objectContaining({ x: 0, y: 0, width: 620, height: 700 }),
+      zone: expect.objectContaining({ x: 0, y: 0, width: 540, height: 480 }),
       note: expect.objectContaining({ x: 20, y: 100, width: 360 }),
     });
     expect(layoutPlacements(boardsPatch)['placement-branch']).toEqual({
@@ -962,7 +963,7 @@ describe('arrangeZoneContents', () => {
         _action: 'applyLayout',
         objects: expect.objectContaining({
           artifact: expect.objectContaining({ x: 1020, y: 1100 }),
-          zone: expect.objectContaining({ x: 1000, y: 1000, width: 900, height: 700 }),
+          zone: expect.objectContaining({ x: 1000, y: 1000, width: 400, height: 340 }),
         }),
       })
     );
@@ -1142,7 +1143,7 @@ describe('arrangeZoneContents', () => {
     });
     expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual({
       x: 20,
-      y: 360,
+      y: 380,
     });
     const placements = layoutPlacements(patch);
     expect(placements['placement-branch']).toEqual({
@@ -1150,7 +1151,7 @@ describe('arrangeZoneContents', () => {
       size: { width: 500, height: 240 },
     });
     expect(placements['placement-card']).toEqual({
-      position: { x: 20, y: 360 },
+      position: { x: 20, y: 380 },
       size: { width: 380, height: 100 },
     });
 
@@ -1158,7 +1159,7 @@ describe('arrangeZoneContents', () => {
     renderedCard.remove();
   });
 
-  it('uses rendered headers for an interactive stack instead of refusing overflow', async () => {
+  it('uses rendered headers while growing a too-small zone instead of stacking', async () => {
     const renderedBranch = document.createElement('div');
     renderedBranch.className = 'react-flow__node';
     renderedBranch.dataset.id = 'branch-1';
@@ -1250,39 +1251,31 @@ describe('arrangeZoneContents', () => {
     const stackedBranch = renderedNodes.find((node) => node.id === 'branch-1');
     const stackedCard = renderedNodes.find((node) => node.id === 'branch-2');
     expect(stackedBranch?.position).toEqual({ x: 20, y: 100 });
-    expect(stackedCard?.position).toEqual({ x: 20, y: 180 });
-    expect((stackedCard?.position.y ?? 0) - (stackedBranch?.position.y ?? 0)).toBe(80);
-    expect(stackedBranch?.className).toContain('auto-zone-stack-item');
-    expect(stackedBranch?.style?.pointerEvents).toBe('auto');
-    expect(stackedCard?.style?.pointerEvents).toBe('auto');
-    expect(stackedCard?.zIndex).toBeGreaterThan(stackedBranch?.zIndex ?? 0);
-    expect(result.current.zoneStackByNodeId.get('branch-1')).toMatchObject({
-      zoneId: 'zone',
-      deckDepth: 0,
-      revealHeight: 80,
-    });
-    expect(result.current.zoneStackByNodeId.get('branch-2')).toMatchObject({
-      zoneId: 'zone',
-      deckDepth: 1,
-      revealHeight: 80,
-    });
+    expect(stackedCard?.position).toEqual({ x: 20, y: 320 });
+    expect(
+      (stackedCard?.position.y ?? 0) - (stackedBranch?.position.y ?? 0)
+    ).toBeGreaterThanOrEqual(stackedBranch?.height ?? 0);
+    expect(stackedBranch?.className ?? '').not.toContain('auto-zone-stack-item');
+    expect(result.current.zoneStackByNodeId.size).toBe(0);
     const placements = layoutPlacements(patch);
     expect(placements['placement-branch']).toEqual(
-      expect.objectContaining({ position: { x: 20, y: 100 }, compact: true })
+      expect.objectContaining({ position: { x: 20, y: 100 } })
     );
     expect(placements['placement-branch-2']).toEqual(
-      expect.objectContaining({ position: { x: 20, y: 180 }, compact: true })
+      expect.objectContaining({ position: { x: 20, y: 320 } })
     );
     expect(layoutWrites(patch)[0]).toEqual(
-      expect.objectContaining({ objects: { zone: expect.objectContaining({ height: 300 }) } })
+      expect.objectContaining({
+        objects: { zone: expect.objectContaining({ width: 440, height: 440 }) },
+      })
     );
-    expect(showWarning).toHaveBeenCalledWith(expect.stringContaining('every title and action row'));
+    expect(showWarning).not.toHaveBeenCalled();
 
     renderedBranch.remove();
     renderedCard.remove();
   });
 
-  it('keeps automatic stack maintenance silent and sizes it for a durable compact deck', async () => {
+  it('grows automatic zones promptly with one visible motion instead of stacking', async () => {
     vi.useFakeTimers();
     const cardNodeIds = ['branch-1', 'branch-2', 'branch-3'];
     const renderedCards = cardNodeIds.map((id) => {
@@ -1351,7 +1344,7 @@ describe('arrangeZoneContents', () => {
     );
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(120);
     });
 
     expect(showWarning).not.toHaveBeenCalled();
@@ -1362,7 +1355,12 @@ describe('arrangeZoneContents', () => {
     });
     expect(zoneWrite.objects.zone.height).toBeGreaterThan(200);
     expect(zoneWrite.objects.zone.height % BOARD_GRID_SIZE).toBe(0);
-    expect(onArrangeNodes).not.toHaveBeenCalled();
+    expect(onArrangeNodes).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(patch.mock.calls.filter(([id]) => id === 'board-1')).toHaveLength(1);
+    expect(onArrangeNodes).toHaveBeenCalledTimes(1);
     for (const node of renderedNodes.filter((candidate) => cardNodeIds.includes(candidate.id))) {
       expect(node.style?.['--agor-deal-duration' as never]).toBeUndefined();
     }
@@ -1453,14 +1451,14 @@ describe('arrangeZoneContents', () => {
     });
 
     expect(renderedNodes.find((node) => node.id === 'card-newer')?.position.y).toBe(100);
-    expect(renderedNodes.find((node) => node.id === 'card-older')?.position.y).toBe(380);
+    expect(renderedNodes.find((node) => node.id === 'card-older')?.position.y).toBe(400);
     const placements = layoutPlacements(patch);
     expect(placements['placement-newer']).toEqual({
       position: { x: 20, y: 100 },
       size: { width: 380, height: 260 },
     });
     expect(placements['placement-older']).toEqual({
-      position: { x: 20, y: 380 },
+      position: { x: 20, y: 400 },
       size: { width: 380, height: 220 },
     });
     expect(layoutWrites(patch)).toHaveLength(1);
@@ -1578,14 +1576,14 @@ describe('arrangeZoneContents', () => {
 
     const card = renderedNodes.find((node) => node.id === 'card-card-1');
     const branch = renderedNodes.find((node) => node.id === 'branch-1');
-    expect(card).toMatchObject({ position: { x: 20, y: 100 }, width: 580, height: 60 });
-    expect(branch).toMatchObject({ position: { x: 20, y: 100 }, width: 1560, height: 100 });
+    expect(card).toMatchObject({ position: { x: 20, y: 100 }, width: 320, height: 60 });
+    expect(branch).toMatchObject({ position: { x: 20, y: 100 }, width: 580, height: 100 });
     const placements = layoutPlacements(patch);
     expect(placements['placement-card']).toEqual(
-      expect.objectContaining({ size: { width: 580, height: 60 } })
+      expect.objectContaining({ size: { width: 320, height: 60 } })
     );
     expect(placements['placement-branch']).toEqual(
-      expect.objectContaining({ size: { width: 1560, height: 100 } })
+      expect.objectContaining({ size: { width: 580, height: 100 } })
     );
   });
 
@@ -1672,7 +1670,7 @@ describe('arrangeZoneContents', () => {
       size: { width: 300, height: 100 },
     });
     expect(placements['placement-older']).toEqual({
-      position: { x: 20, y: 220 },
+      position: { x: 20, y: 240 },
       size: { width: 300, height: 100 },
     });
 
@@ -2462,7 +2460,7 @@ describe('direct manipulation of automatic zones', () => {
     expect(boardObjectsPatch).toHaveBeenCalledWith('placement-branch', { compact: false });
   });
 
-  it('calls a stacked worktree out above its exact slot and restores it without demoting', async () => {
+  it('uses ordinary density controls after grow-to-fit packing rather than transient stacks', async () => {
     vi.useFakeTimers();
     const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
     const secondPlacement = {
@@ -2508,8 +2506,8 @@ describe('direct manipulation of automatic zones', () => {
       const zoneNode = result.current.getBoardObjectNodes()[0];
       await (zoneNode.data.onArrangeContents as (id: string) => Promise<void>)(zoneId);
     });
-    expect(result.current.zoneStackByNodeId.has('branch-1')).toBe(true);
-    const stackedPosition = renderedNodes.find((node) => node.id === 'branch-1')?.position;
+    expect(result.current.zoneStackByNodeId.size).toBe(0);
+    const packedPosition = renderedNodes.find((node) => node.id === 'branch-1')?.position;
     boardsPatch.mockClear();
     boardObjectsPatch.mockClear();
 
@@ -2517,19 +2515,27 @@ describe('direct manipulation of automatic zones', () => {
       await result.current.setPlacementCompact(placement as never, false);
     });
 
-    expect(result.current.calledOutNodeIds.has('branch-1')).toBe(true);
-    expect(boardsPatch).not.toHaveBeenCalled();
-    expect(boardObjectsPatch).not.toHaveBeenCalled();
-    expect(renderedNodes.find((node) => node.id === 'branch-1')?.position).toEqual(stackedPosition);
+    expect(result.current.calledOutNodeIds.has('branch-1')).toBe(false);
+    expect(boardsPatch).toHaveBeenCalledWith(
+      'board-1',
+      expect.objectContaining({
+        _action: 'upsertObject',
+        objectId: zoneId,
+        objectData: expect.objectContaining({
+          layout: expect.objectContaining({ mode: 'manual' }),
+        }),
+      })
+    );
+    expect(boardObjectsPatch).toHaveBeenCalledWith('placement-branch', { compact: false });
+    expect(renderedNodes.find((node) => node.id === 'branch-1')?.position).toEqual(packedPosition);
 
     await act(async () => {
       await result.current.setPlacementCompact(placement as never, true);
     });
 
     expect(result.current.calledOutNodeIds.has('branch-1')).toBe(false);
-    expect(renderedNodes.find((node) => node.id === 'branch-1')?.position).toEqual(stackedPosition);
-    expect(boardsPatch).not.toHaveBeenCalled();
-    expect(boardObjectsPatch).not.toHaveBeenCalled();
+    expect(renderedNodes.find((node) => node.id === 'branch-1')?.position).toEqual(packedPosition);
+    expect(boardObjectsPatch).toHaveBeenCalledTimes(1);
     unmount();
   });
 
@@ -3351,21 +3357,16 @@ describe('arrangeBoardZones production path', () => {
     );
 
     await act(async () => {
-      await result.current.arrangeBoardZones(['one', 'two', 'three'], {
-        fixedItemsPerRow: 2,
-        userInitiated: true,
-      });
+      await result.current.arrangeBoardZones(['one', 'two', 'three'], { userInitiated: true });
     });
 
     expect(boardsPatch).toHaveBeenCalledTimes(1);
     const firstWrite = boardsPatch.mock.calls[0]?.[1] as {
       objects: NonNullable<Board['objects']>;
     };
-    expect(nodes.map(({ position }) => position)).toEqual([
-      { x: 80, y: 80 },
-      { x: 900, y: 80 },
-      { x: 80, y: 360 },
-    ]);
+    expect(nodes.map(({ position }) => position)).toEqual(
+      Object.values(firstWrite.objects).map((object) => ({ x: object.x, y: object.y }))
+    );
     expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
     expect(onUserLayoutComplete).toHaveBeenCalledWith(
       expect.objectContaining({ source: 'user', boardId: 'board-1', scope: 'board' })
@@ -3464,8 +3465,8 @@ describe('arrangeBoardZones production path', () => {
     const write = boardsPatch.mock.calls[0]?.[1];
     expect(Object.keys(write.objects).sort()).toEqual(['one', 'two']);
     expect(write.placements).toEqual({});
-    expect(write.objects.one).toMatchObject({ x: 760, y: 920 });
-    expect(write.objects.two).toMatchObject({ x: 1580, y: 920 });
+    expect(write.objects.one).toMatchObject({ x: 660, y: 920 });
+    expect(write.objects.two).toMatchObject({ x: 1480, y: 920 });
     expect(write.objects.other).toBeUndefined();
     expect(write.objects.note).toBeUndefined();
     expect(onUserLayoutComplete).toHaveBeenCalledWith(
@@ -3680,6 +3681,14 @@ describe('arrangeBoardZones production path', () => {
     expect(objects.blocked).toBeUndefined();
     expect(objects.member).toBeUndefined();
     expect(objects.protected).toBeUndefined();
+    expect(Object.keys(boardsPatch.mock.calls[0]?.[1].expected.objects).sort()).toEqual([
+      'blocked',
+      'free',
+      'locked',
+      'member',
+      'open',
+      'protected',
+    ]);
   });
 
   it('rejects a concurrent Arrange board click until the batch settles', async () => {
@@ -3872,7 +3881,7 @@ describe('arrangeBoardZones production path', () => {
     expect(showWarning).not.toHaveBeenCalled();
   });
 
-  it('keeps an explicitly resized Auto Zone as the floor across later re-packs', async () => {
+  it('lets explicit Pack shrink a preserved Auto Zone frame to a new content-safe floor', async () => {
     vi.useFakeTimers();
     const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
     const zoneId = 'zone-auto';
@@ -3933,7 +3942,7 @@ describe('arrangeBoardZones production path', () => {
     });
     expect(layoutWrites(boardsPatch)).toHaveLength(1);
     expect(layoutWrites(boardsPatch)[0]?.objects).toEqual({
-      'zone-auto': expect.objectContaining({ width: 800, height: 1000 }),
+      'zone-auto': expect.objectContaining({ width: 540, height: 320 }),
     });
   });
 });

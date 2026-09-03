@@ -51,7 +51,19 @@ import {
   VerticalAlignTopOutlined,
   ZoomInOutlined,
 } from '@ant-design/icons';
-import { Button, Checkbox, Input, Modal, Popover, Slider, Tooltip, Typography, theme } from 'antd';
+import {
+  Button,
+  Checkbox,
+  Input,
+  Modal,
+  Popover,
+  Segmented,
+  Select,
+  Slider,
+  Tooltip,
+  Typography,
+  theme,
+} from 'antd';
 import React, {
   forwardRef,
   useCallback,
@@ -166,7 +178,6 @@ import {
 } from './canvas/utils/layoutGuides';
 import {
   getMarqueeSelection,
-  getOnlySelectedZoneIds,
   getSelectedLayoutNodes,
   isLayoutNodeType,
   removeSelectedDescendants,
@@ -884,6 +895,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const [isArranging, setIsArranging] = useState(false);
     const [arrangeBoardPopoverOpen, setArrangeBoardPopoverOpen] = useState(false);
     const [packZoneContents, setPackZoneContents] = useState(true);
+    const [arrangeBoardMode, setArrangeBoardMode] = useState<'grid' | 'compact'>('grid');
+    const [justifyBoardRows, setJustifyBoardRows] = useState(true);
+    const [resizeZoneFrames, setResizeZoneFrames] = useState(true);
+    const [lastBoardRow, setLastBoardRow] = useState<'start' | 'center' | 'end' | 'justify'>(
+      'start'
+    );
     const arrangeBoardButtonWrapperRef = useRef<HTMLSpanElement>(null);
     const pendingPostLayoutViewportRef = useRef<
       { token: number; intent: PostLayoutViewportIntent } | undefined
@@ -1365,6 +1382,36 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Store ReactFlow instance ref
     const reactFlowInstanceRef = useRef<ReactFlowInstance | null>(null);
     const reactFlowWrapperRef = useRef<HTMLDivElement | null>(null);
+    const getUsableBoardAspect = useCallback(() => {
+      const wrapper = reactFlowWrapperRef.current;
+      if (!wrapper || typeof document === 'undefined') return 16 / 9;
+      const pane = wrapper.getBoundingClientRect();
+      let left = Math.max(0, pane.left);
+      const top = Math.max(0, pane.top);
+      const right = Math.min(document.documentElement.clientWidth || window.innerWidth, pane.right);
+      const bottom = Math.min(
+        document.documentElement.clientHeight || window.innerHeight,
+        pane.bottom
+      );
+      // The vertical React Flow controls are the one persistent chrome strip
+      // inside the pane. Excluding its real rendered edge keeps the target
+      // rectangle stable across responsive/overflow variants without baking
+      // desktop toolbar dimensions into board-space layout.
+      const controls = wrapper.querySelector<HTMLElement>('.react-flow__controls');
+      const controlsRect = controls?.getBoundingClientRect();
+      if (
+        controlsRect &&
+        controlsRect.left < right &&
+        controlsRect.right > left &&
+        controlsRect.top < bottom &&
+        controlsRect.bottom > top
+      ) {
+        left = Math.min(right, Math.max(left, controlsRect.right + 16));
+      }
+      const width = Math.max(1, right - left);
+      const height = Math.max(1, bottom - top);
+      return width / height;
+    }, []);
     // Track when ReactFlow instance is ready (state to trigger re-renders)
     const [isReactFlowReady, setIsReactFlowReady] = useState(false);
 
@@ -2852,12 +2899,23 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         layoutSettings?: SelectionLayoutSettings
       ) => {
         if (!board || !client || selectedLayoutNodes.length < 2) return;
-        const selectedZoneIds = getOnlySelectedZoneIds(selectedLayoutNodes);
-        if (action === 'arrange' && selectedZoneIds) {
+        const selectedTopLevelRoots = selectedLayoutNodes.every(
+          (node) =>
+            !node.parentId &&
+            ['zone', 'branchNode', 'cardNode', 'markdown', 'appNode', 'artifactNode'].includes(
+              node.type ?? ''
+            )
+        );
+        if (action === 'arrange' && selectedTopLevelRoots) {
+          const selectedZoneIds = selectedLayoutNodes
+            .filter((node) => node.type === 'zone')
+            .map((node) => node.id);
           await arrangeBoardZones(selectedZoneIds, {
-            ...selectionBoardZoneArrangementOptions(selectedZoneIds.length, layoutSettings),
+            ...selectionBoardZoneArrangementOptions(selectedLayoutNodes.length, layoutSettings),
+            ...(!layoutSettings ? { targetAspectRatio: getUsableBoardAspect() } : {}),
             userInitiated: true,
             layoutScope: 'selection',
+            selectedRootIds: selectedLayoutNodes.map((node) => node.id),
           });
           return;
         }
@@ -3192,6 +3250,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         boardObjectByCard,
         client,
         handleArrangeNodes,
+        getUsableBoardAspect,
         nodes,
         requestPostLayoutViewport,
         selectedLayoutNodes,
@@ -4053,6 +4112,22 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                       style={{ display: 'flex', flexDirection: 'column', gap: 10, width: 260 }}
                     >
                       <Typography.Text strong>Arrange board</Typography.Text>
+                      <Segmented
+                        block
+                        aria-label="Board layout mode"
+                        value={arrangeBoardMode}
+                        options={[
+                          { label: 'Grid', value: 'grid' },
+                          { label: 'Compact', value: 'compact' },
+                        ]}
+                        disabled={arrangeBoardBusy}
+                        onChange={(value) => setArrangeBoardMode(value as 'grid' | 'compact')}
+                      />
+                      <Typography.Text type="secondary">
+                        {arrangeBoardMode === 'grid'
+                          ? 'Builds stable, photo-style rows from the usable canvas shape.'
+                          : 'Minimizes cluster diameter first for a dense two-dimensional ball.'}
+                      </Typography.Text>
                       <Checkbox
                         checked={packZoneContents}
                         disabled={arrangeBoardBusy}
@@ -4064,6 +4139,36 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                         Repack eligible zone children and fit their frames before arranging the
                         board. This does not enable Auto Zone.
                       </Typography.Text>
+                      <Checkbox
+                        checked={resizeZoneFrames}
+                        disabled={arrangeBoardBusy || !packZoneContents}
+                        onChange={(event) => setResizeZoneFrames(event.target.checked)}
+                      >
+                        Match / resize zone frames
+                      </Checkbox>
+                      <Typography.Text type="secondary">
+                        Turn off to preserve safe zone frames. Undersized frames still grow so
+                        children cannot protrude.
+                      </Typography.Text>
+                      <Checkbox
+                        checked={justifyBoardRows}
+                        disabled={arrangeBoardBusy || arrangeBoardMode === 'compact'}
+                        onChange={(event) => setJustifyBoardRows(event.target.checked)}
+                      >
+                        Justify rows
+                      </Checkbox>
+                      <Select
+                        aria-label="Last row behavior"
+                        value={lastBoardRow}
+                        disabled={arrangeBoardBusy || arrangeBoardMode === 'compact'}
+                        options={[
+                          { label: 'Last row: left', value: 'start' },
+                          { label: 'Last row: centered', value: 'center' },
+                          { label: 'Last row: right', value: 'end' },
+                          { label: 'Last row: justify', value: 'justify' },
+                        ]}
+                        onChange={setLastBoardRow}
+                      />
                       <Button
                         type="primary"
                         disabled={arrangeBoardDisabled}
@@ -4071,7 +4176,15 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                           if (arrangeBoardDisabled) return;
                           setArrangeBoardPopoverOpen(false);
                           arrangeBoardButtonWrapperRef.current?.querySelector('button')?.focus();
-                          void arrangeWholeBoard(packZoneContents);
+                          void arrangeWholeBoard({
+                            mode: arrangeBoardMode,
+                            packZoneContents,
+                            resizeZoneFrames,
+                            justifyRows: justifyBoardRows,
+                            justifyLastRow: lastBoardRow === 'justify',
+                            lastRowAlignment: lastBoardRow === 'justify' ? 'start' : lastBoardRow,
+                            targetAspectRatio: getUsableBoardAspect(),
+                          });
                         }}
                       >
                         Arrange board

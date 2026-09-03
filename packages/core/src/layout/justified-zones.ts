@@ -32,6 +32,8 @@ export interface JustifiedZoneInput {
   id: string;
   /** Legal shapes for this zone. Must be non-empty. */
   shapes: readonly ZoneShape[];
+  /** Whether row justification may enlarge this frame without scaling its contents. */
+  resizable?: boolean;
 }
 
 export interface JustifiedZoneOptions {
@@ -57,6 +59,12 @@ export interface JustifiedZoneOptions {
    * stretched across the canvas reads as a rendering fault, not a layout.
    */
   justifyLastRow?: boolean;
+  /** Disable all row stretching while retaining deterministic row breaks. */
+  justifyRows?: boolean;
+  /** Resize eligible frames to the tallest natural shape in their row. */
+  matchRowHeights?: boolean;
+  /** Placement of a short final row when it is not justified. */
+  lastRowAlignment?: 'start' | 'center' | 'end';
   /**
    * Preferred row height, the photo-grid knob.
    *
@@ -261,6 +269,26 @@ function justify(widths: number[], leftover: number, gridSize: number): number[]
   return stretched;
 }
 
+function justifyResizable(
+  widths: number[],
+  resizable: readonly boolean[],
+  leftover: number,
+  gridSize: number
+): number[] {
+  const eligible = widths.flatMap((width, index) => (resizable[index] ? [{ width, index }] : []));
+  if (eligible.length === 0) return widths;
+  const stretched = justify(
+    eligible.map(({ width }) => width),
+    leftover,
+    gridSize
+  );
+  const result = [...widths];
+  eligible.forEach(({ index }, eligibleIndex) => {
+    result[index] = stretched[eligibleIndex];
+  });
+  return result;
+}
+
 /**
  * Lay zones out in justified rows.
  *
@@ -291,6 +319,7 @@ export function layoutJustifiedZones(
 
   const prepared = zones.map((zone) => ({
     id: zone.id,
+    resizable: zone.resizable !== false,
     shapes: usefulShapes(
       zone.shapes.map((shape) => ({
         ...shape,
@@ -393,37 +422,59 @@ export function layoutJustifiedZones(
     const useFixedTracks =
       fixedTrackWidths !== undefined &&
       !(isLastRow && row.length < fixedTrackWidths.length && options.justifyLastRow === true);
-    const shouldJustify = !useFixedTracks && (!isLastRow || options.justifyLastRow === true);
+    const shouldJustify =
+      options.justifyRows !== false &&
+      !useFixedTracks &&
+      (!isLastRow || options.justifyLastRow === true);
 
     let widths = useFixedTracks
-      ? solved.shapes.map((_, column) => fixedTrackWidths[column] ?? 0)
+      ? solved.shapes.map((shape, column) =>
+          row[column]?.resizable ? (fixedTrackWidths[column] ?? shape.width) : shape.width
+        )
       : solved.shapes.map((shape) => shape.width);
     if (solved.totalWidth > targetWidth) {
       overflowingRows.push(rowIndex);
     } else if (shouldJustify) {
-      widths = justify(widths, targetWidth - solved.totalWidth, gridSize);
+      widths = justifyResizable(
+        widths,
+        row.map((zone) => zone.resizable),
+        targetWidth - solved.totalWidth,
+        gridSize
+      );
     }
 
-    let x = startX;
+    const actualWidth = widths.reduce((sum, width) => sum + width, 0) + gap * (row.length - 1);
+    const alignment = isLastRow ? (options.lastRowAlignment ?? 'start') : 'start';
+    let x =
+      startX +
+      (alignment === 'center'
+        ? Math.max(0, snap((targetWidth - actualWidth) / 2))
+        : alignment === 'end'
+          ? Math.max(0, targetWidth - actualWidth)
+          : 0);
+    let actualRowHeight = 0;
     row.forEach((zone, columnIndex) => {
       const shape = solved.shapes[columnIndex];
+      const height =
+        zone.resizable && options.matchRowHeights !== false ? solved.rowHeight : shape.height;
       placements.push({
         id: zone.id,
         x,
         y,
         width: widths[columnIndex],
-        height: solved.rowHeight,
+        height,
         row: rowIndex,
         column: columnIndex,
         columns: shape.columns,
-        slackY: solved.rowHeight - shape.height,
+        slackY: height - shape.height,
       });
       x += widths[columnIndex] + gap;
+      actualRowHeight = Math.max(actualRowHeight, height);
     });
 
-    widest = Math.max(widest, x - gap - startX);
-    rowHeights.push(solved.rowHeight);
-    y += solved.rowHeight + gap;
+    widest = Math.max(widest, actualWidth);
+    rowHeights.push(actualRowHeight);
+    y += actualRowHeight + gap;
   });
 
   return {

@@ -6,6 +6,8 @@ export interface ZoneGrowthRect {
   y: number;
   width: number;
   height: number;
+  /** Fixed obstacle which participates in collisions but is never displaced. */
+  locked?: boolean;
 }
 
 export interface ZoneGrowthReflowPlan {
@@ -81,6 +83,7 @@ export function planZoneGrowthReflow(
       // This collision already existed before the edge moved, so the grow did
       // not cause it and must not turn into unsolicited cleanup.
       if (overlaps(movement.before, candidate)) continue;
+      if (candidate.locked) continue;
 
       const shiftRight = growsRight
         ? ceilBoardGridValue(movement.after.x + movement.after.width + gap - candidate.x)

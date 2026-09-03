@@ -28,11 +28,14 @@ describe('selectionBoardZoneArrangementOptions', () => {
         rowDistribution: 'packed',
       })
     ).toEqual({
+      mode: 'grid',
       fixedItemsPerRow: 2,
       compactFixedGrid: true,
+      justifyRows: false,
       justifyLastRow: false,
       matchRowHeights: false,
       matchColumnWidths: true,
+      resizeZoneFrames: true,
     });
     expect(
       selectionBoardZoneArrangementOptions(7, {
@@ -44,16 +47,25 @@ describe('selectionBoardZoneArrangementOptions', () => {
         rowDistribution: 'justify',
       })
     ).toEqual({
+      mode: 'grid',
       fixedItemsPerRow: 4,
       compactFixedGrid: true,
+      justifyRows: true,
       justifyLastRow: true,
       matchRowHeights: true,
       matchColumnWidths: false,
+      resizeZoneFrames: true,
     });
   });
 
   it('uses the exact ordinary Arrange options for compact or toolbar arrange', () => {
-    expect(selectionBoardZoneArrangementOptions(3)).toEqual({ compactOuterLayout: true });
+    expect(selectionBoardZoneArrangementOptions(3)).toEqual({
+      mode: 'grid',
+      justifyRows: true,
+      resizeZoneFrames: true,
+      matchRowHeights: true,
+      matchColumnWidths: true,
+    });
     expect(
       selectionBoardZoneArrangementOptions(3, {
         mode: 'compact',
@@ -63,12 +75,12 @@ describe('selectionBoardZoneArrangementOptions', () => {
         matchColumnWidths: false,
         rowDistribution: 'packed',
       })
-    ).toEqual({ compactOuterLayout: true });
+    ).toEqual({ mode: 'compact' });
   });
 });
 
 describe('SelectionLayoutPopover', () => {
-  it('keeps compact as the ordinary default and exposes explicit grid controls', async () => {
+  it('keeps the shared justified grid as the ordinary default and exposes compact controls', async () => {
     const onApply = vi.fn();
     render(
       <AntApp>
@@ -77,11 +89,9 @@ describe('SelectionLayoutPopover', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
-    expect(await screen.findByText(/smallest stable, collision-free cluster/i)).toBeInTheDocument();
+    expect(await screen.findByLabelText('Fixed grid axis')).toBeInTheDocument();
     const gridControl = screen.getByText('Grid');
     expect(gridControl.closest(`.${CANVAS_LAYOUT_CONTROLS_CLASS}`)).not.toBeNull();
-    fireEvent.click(gridControl);
-    expect(screen.getByLabelText('Fixed grid axis')).toBeInTheDocument();
     expect(screen.getByText('3 columns × 3 rows')).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText('Match heights within rows'));
     fireEvent.click(screen.getByRole('button', { name: 'Apply layout', hidden: true }));
@@ -96,6 +106,10 @@ describe('SelectionLayoutPopover', () => {
         rowDistribution: 'packed',
       })
     );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(screen.getByText('Compact'));
+    expect(await screen.findByText(/smallest stable, collision-free cluster/i)).toBeInTheDocument();
   });
 
   it('tracks the compact three-column default as a selection grows without overriding edits', async () => {
