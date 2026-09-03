@@ -47,6 +47,7 @@ import {
   hasKnowledgeNamespacePermission,
   resolveKnowledgeNamespacePermission,
 } from '../../services/knowledge-access.js';
+import { isKnowledgeDocumentVersionMismatchError } from '../../services/knowledge-errors.js';
 import { issueExecutorCommandToken } from '../../services/session-token-service.js';
 import {
   TEAMMATE_MEMORY_PATH_TEMPLATE,
@@ -840,10 +841,6 @@ function teammateMemoryCreateVisibility(
     : 'public';
 }
 
-function isKnowledgeVersionMismatch(error: unknown): boolean {
-  return error instanceof Error && error.message.startsWith('Knowledge document version mismatch:');
-}
-
 const TEAMMATE_POLICY_RANK: Record<TeammateKnowledgeGrantAccess, number> = {
   none: 0,
   read: 1,
@@ -1183,7 +1180,7 @@ export function registerKnowledgeTools(server: McpServer, ctx: McpContext): void
         );
         return textResult({ namespace: namespace.slug, path: docPath, appended, document: result });
       } catch (error) {
-        if (isKnowledgeVersionMismatch(error)) {
+        if (isKnowledgeDocumentVersionMismatchError(error)) {
           if (attempt < TEAMMATE_MEMORY_APPEND_MAX_ATTEMPTS) continue;
           break;
         }

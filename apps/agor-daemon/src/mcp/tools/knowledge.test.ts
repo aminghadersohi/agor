@@ -9,6 +9,8 @@ vi.mock('@agor/core/db', () => ({
 }));
 
 vi.mock('@agor/core/feathers', () => ({
+  BadRequest: class BadRequest extends Error {},
+  Forbidden: class Forbidden extends Error {},
   NotFound: class NotFound extends Error {},
 }));
 
@@ -325,7 +327,66 @@ describe('teammate memory append access policy', () => {
     expect(putDocument).not.toHaveBeenCalled();
   });
 
-  it('re-reads and merges after an optimistic append conflict without governance fields', async () => {
+  it.each([
+    ['missing current version', undefined],
+    ['missing current version fields', {}],
+    ['invalid zero version number', { version_number: 0 }],
+  ])('fails closed before updating with %s', async (_, currentVersion) => {
+    const getDocument = vi.fn().mockResolvedValue({
+      document: { visibility: 'private', edit_policy: 'owner' },
+      current_version: currentVersion,
+      content: '# 2026-09-03\n',
+    });
+    const putDocument = vi.fn();
+    const tools = await captureKnowledgeTools(
+      teammateMemoryServices({
+        namespaceVisibility: 'private',
+        teammateVisibility: 'private',
+        getDocument,
+        putDocument,
+      }),
+      { sessionId: 'session-1' }
+    );
+
+    await expect(
+      tools.agor_teammate_memory_append.handler?.({
+        date: '2026-09-03',
+        bullets: 'New memory',
+      })
+    ).rejects.toThrow(/without an existing document version/);
+    expect(putDocument).not.toHaveBeenCalled();
+  });
+
+  it('fails closed before updating when existing content is not a string', async () => {
+    const getDocument = vi.fn().mockResolvedValue({
+      document: { visibility: 'private', edit_policy: 'owner' },
+      current_version: { version_id: 'version-1', version_number: 1 },
+      content: null,
+    });
+    const putDocument = vi.fn();
+    const tools = await captureKnowledgeTools(
+      teammateMemoryServices({
+        namespaceVisibility: 'private',
+        teammateVisibility: 'private',
+        getDocument,
+        putDocument,
+      }),
+      { sessionId: 'session-1' }
+    );
+
+    await expect(
+      tools.agor_teammate_memory_append.handler?.({
+        date: '2026-09-03',
+        bullets: 'New memory',
+      })
+    ).rejects.toThrow(/without the existing document content/);
+    expect(putDocument).not.toHaveBeenCalled();
+  });
+
+  it('retries a typed optimistic conflict even when its user-facing wording changes', async () => {
+    const { KnowledgeDocumentVersionMismatchError } = await import(
+      '../../services/knowledge-errors.js'
+    );
     const getDocument = vi
       .fn()
       .mockResolvedValueOnce({
@@ -338,12 +399,11 @@ describe('teammate memory append access policy', () => {
         current_version: { version_id: 'version-2', version_number: 2 },
         content: '# 2026-09-03\n\nOriginal.\n\nConcurrent memory.\n',
       });
-    const putDocument = vi
-      .fn()
-      .mockRejectedValueOnce(
-        new Error('Knowledge document version mismatch: expected version-1, current is 2')
-      )
-      .mockResolvedValueOnce({ document_id: 'doc-1' });
+    const conflict = new KnowledgeDocumentVersionMismatchError('version-1', 2);
+    conflict.message = 'Optimistic concurrency wording changed';
+    const putDocument = vi.fn().mockRejectedValueOnce(conflict).mockResolvedValueOnce({
+      document_id: 'doc-1',
+    });
     const tools = await captureKnowledgeTools(
       teammateMemoryServices({
         namespaceVisibility: 'private',
@@ -369,6 +429,9 @@ describe('teammate memory append access policy', () => {
   });
 
   it('turns a create/upsert race into a policy-preserving retry', async () => {
+    const { KnowledgeDocumentVersionMismatchError } = await import(
+      '../../services/knowledge-errors.js'
+    );
     const getDocument = vi
       .fn()
       .mockResolvedValueOnce(undefined)
@@ -379,9 +442,7 @@ describe('teammate memory append access policy', () => {
       });
     const putDocument = vi
       .fn()
-      .mockRejectedValueOnce(
-        new Error('Knowledge document version mismatch: expected 0, current is 1')
-      )
+      .mockRejectedValueOnce(new KnowledgeDocumentVersionMismatchError(0, 1))
       .mockResolvedValueOnce({ document_id: 'doc-1' });
     const tools = await captureKnowledgeTools(
       teammateMemoryServices({
@@ -409,6 +470,66 @@ describe('teammate memory append access policy', () => {
     expect(retry.content_text).toContain('Concurrent private memory.');
     expect(retry).not.toHaveProperty('visibility');
     expect(retry).not.toHaveProperty('edit_policy');
+  });
+
+  it('stops after the bounded optimistic retry budget is exhausted', async () => {
+    const { KnowledgeDocumentVersionMismatchError } = await import(
+      '../../services/knowledge-errors.js'
+    );
+    const getDocument = vi.fn().mockResolvedValue({
+      document: { visibility: 'private', edit_policy: 'owner' },
+      current_version: { version_id: 'version-1', version_number: 1 },
+      content: '# 2026-09-03\n\nExisting.\n',
+    });
+    const putDocument = vi
+      .fn()
+      .mockRejectedValue(new KnowledgeDocumentVersionMismatchError('version-1', 2));
+    const tools = await captureKnowledgeTools(
+      teammateMemoryServices({
+        namespaceVisibility: 'private',
+        teammateVisibility: 'private',
+        getDocument,
+        putDocument,
+      }),
+      { sessionId: 'session-1' }
+    );
+
+    await expect(
+      tools.agor_teammate_memory_append.handler?.({
+        date: '2026-09-03',
+        bullets: 'New memory',
+      })
+    ).rejects.toThrow(/document changed concurrently/);
+    expect(getDocument).toHaveBeenCalledTimes(3);
+    expect(putDocument).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry non-version failures', async () => {
+    const failure = new Error('Synthetic storage failure');
+    const getDocument = vi.fn().mockResolvedValue({
+      document: { visibility: 'private', edit_policy: 'owner' },
+      current_version: { version_id: 'version-1', version_number: 1 },
+      content: '# 2026-09-03\n\nExisting.\n',
+    });
+    const putDocument = vi.fn().mockRejectedValue(failure);
+    const tools = await captureKnowledgeTools(
+      teammateMemoryServices({
+        namespaceVisibility: 'private',
+        teammateVisibility: 'private',
+        getDocument,
+        putDocument,
+      }),
+      { sessionId: 'session-1' }
+    );
+
+    await expect(
+      tools.agor_teammate_memory_append.handler?.({
+        date: '2026-09-03',
+        bullets: 'New memory',
+      })
+    ).rejects.toBe(failure);
+    expect(getDocument).toHaveBeenCalledTimes(1);
+    expect(putDocument).toHaveBeenCalledTimes(1);
   });
 });
 
