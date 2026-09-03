@@ -1214,6 +1214,20 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
               throw new EntityNotFoundError('BoardObject', objectId);
             }
           }
+          if (batch.expected) {
+            if (
+              !Object.keys(batch.objects).every((id) => id in batch.expected!.objects) ||
+              !Object.keys(batch.placements).every((id) => id in batch.expected!.placements)
+            ) {
+              throw new RepositoryError('Board layout expected snapshot must cover every update');
+            }
+            for (const [objectId, expected] of Object.entries(batch.expected.objects)) {
+              const object = currentObjects[objectId];
+              if (!object || !isDeepStrictEqual(boardObjectGeometry(object), expected)) {
+                throw new RepositoryError('Board layout source snapshot is stale');
+              }
+            }
+          }
           const changedObjects: Record<string, BoardObject> = {};
           const changedObjectIds: string[] = [];
           for (const [objectId, incoming] of Object.entries(batch.objects)) {
@@ -1230,6 +1244,27 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
                 })
               : current;
           const placementRepo = new BoardObjectRepository(tx);
+          if (batch.expected) {
+            const currentPlacements = new Map(
+              (await placementRepo.findByBoardId(fullId)).map((entity) => [
+                entity.object_id,
+                entity,
+              ])
+            );
+            for (const [objectId, expected] of Object.entries(batch.expected.placements)) {
+              const entity = currentPlacements.get(objectId);
+              const currentLayout = entity
+                ? {
+                    position: entity.position,
+                    ...(entity.size ? { size: entity.size } : {}),
+                    ...(entity.compact === undefined ? {} : { compact: entity.compact }),
+                  }
+                : undefined;
+              if (entity?.board_id !== fullId || !isDeepStrictEqual(currentLayout, expected)) {
+                throw new RepositoryError('Board layout source snapshot is stale');
+              }
+            }
+          }
           const placements: BoardEntityObject[] = [];
           const changedPlacementIds: string[] = [];
           for (const [objectId, layout] of Object.entries(batch.placements)) {

@@ -64,4 +64,47 @@ describe('planZoneGrowthReflow', () => {
     expect(byId(permuted.placements)).toEqual(byId(first.placements));
     expect(planZoneGrowthReflow(first.placements, 'grow', next).movedZoneIds).toEqual([]);
   });
+
+  it('cascades through heterogeneous top-level roots while preserving locked obstacles', () => {
+    const roots = [
+      zone('grow', 0, 0),
+      zone('note', 0, 240, 300, 180),
+      zone('app', 0, 440, 300, 260),
+      { ...zone('locked-artifact', 520, 40, 300, 300), locked: true },
+    ];
+    const plan = planZoneGrowthReflow(roots, 'grow', zone('grow', 0, 0, 300, 380));
+
+    expect(plan.movedZoneIds).toEqual(['note', 'app']);
+    expect(plan.placements.find(({ id }) => id === 'locked-artifact')).toEqual(roots[3]);
+    expect(plan.placements.find(({ id }) => id === 'note')?.y).toBe(400);
+    expect(plan.placements.find(({ id }) => id === 'app')?.y).toBe(600);
+  });
+
+  it('minimally repositions the growing zone rather than covering a locked obstacle', () => {
+    const roots = [zone('grow', 0, 0), { ...zone('locked', 320, 0, 300, 300), locked: true }];
+    const plan = planZoneGrowthReflow(roots, 'grow', zone('grow', 0, 0, 360, 300));
+    const grown = plan.placements.find(({ id }) => id === 'grow')!;
+    const locked = plan.placements.find(({ id }) => id === 'locked')!;
+
+    expect(plan.movedZoneIds).toEqual(['grow']);
+    expect(grown.x + grown.width).toBeLessThanOrEqual(locked.x - 20);
+    expect(locked).toEqual(roots[1]);
+  });
+
+  it('routes a displaced peer around a locked obstacle during a cascade', () => {
+    const roots = [
+      zone('grow', 0, 0),
+      zone('peer', 320, 0, 300, 300),
+      { ...zone('locked', 640, 0, 300, 300), locked: true },
+    ];
+    const plan = planZoneGrowthReflow(roots, 'grow', zone('grow', 0, 0, 360, 300));
+    const grown = plan.placements.find(({ id }) => id === 'grow')!;
+    const peer = plan.placements.find(({ id }) => id === 'peer')!;
+    const locked = plan.placements.find(({ id }) => id === 'locked')!;
+
+    expect(plan.movedZoneIds).toEqual(['peer']);
+    expect(peer.y).toBeGreaterThan(grown.y + grown.height);
+    expect(peer.y).toBeGreaterThan(locked.y + locked.height);
+    expect(locked).toEqual(roots[2]);
+  });
 });

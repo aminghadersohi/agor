@@ -83,6 +83,19 @@ export interface BoardLayoutObjectUpdate {
 export interface BoardLayoutBatch {
   objects: Record<string, BoardLayoutObjectUpdate>;
   placements: Record<string, BoardLayoutPlacementUpdate>;
+  /**
+   * Optional pre-plan geometry snapshot. It must cover every submitted id and
+   * may include unchanged obstacles/peers so the repository can reject any
+   * board change that invalidated the plan under the board-row transaction
+   * lock, preventing a delayed tab or observer from overwriting newer geometry.
+   */
+  expected?: {
+    objects: Record<string, BoardLayoutObjectUpdate>;
+    placements: Record<
+      string,
+      Omit<BoardLayoutPlacementUpdate, 'size'> & { size?: BoardLayoutPlacementUpdate['size'] }
+    >;
+  };
 }
 
 /** Result of filtering and committing one atomic board-layout request. */

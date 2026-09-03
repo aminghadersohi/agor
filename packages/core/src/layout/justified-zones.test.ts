@@ -298,6 +298,54 @@ describe('layoutJustifiedZones', () => {
     expectNoOverlaps(result.placements);
     expect(result.placements).toHaveLength(9);
   });
+
+  it('makes row justification and short-last-row alignment explicit', () => {
+    const zones = ['a', 'b', 'c'].map((id) => ({ id, shapes: [shape(1, 300, 200)] }));
+    const justified = layoutJustifiedZones(zones, {
+      targetWidth: 800,
+      gap: 40,
+      maxPerRow: 2,
+      startX: 0,
+      startY: 0,
+      lastRowAlignment: 'center',
+    });
+    expect(justified.placements.slice(0, 2).map(({ width }) => width)).toEqual([380, 380]);
+    expect(justified.placements[2]).toMatchObject({ x: 250, width: 300 });
+
+    const natural = layoutJustifiedZones(zones, {
+      targetWidth: 800,
+      gap: 40,
+      maxPerRow: 2,
+      startX: 0,
+      startY: 0,
+      justifyRows: false,
+      lastRowAlignment: 'end',
+    });
+    expect(natural.placements.slice(0, 2).map(({ width }) => width)).toEqual([300, 300]);
+    expect(natural.placements[2]).toMatchObject({ x: 500, width: 300 });
+  });
+
+  it('never resizes an ineligible loose frame while justifying eligible peers', () => {
+    const result = layoutJustifiedZones(
+      [
+        { id: 'zone', shapes: [shape(1, 300, 200)] },
+        { id: 'note', shapes: [shape(1, 200, 120)], resizable: false },
+      ],
+      {
+        targetWidth: 800,
+        gap: 40,
+        maxPerRow: 2,
+        startX: 0,
+        startY: 0,
+        justifyLastRow: true,
+      }
+    );
+    expect(result.placements.find(({ id }) => id === 'note')).toMatchObject({
+      width: 200,
+      height: 120,
+    });
+    expect(result.placements.find(({ id }) => id === 'zone')?.width).toBe(560);
+  });
 });
 
 describe('zoneShapesForItems', () => {
