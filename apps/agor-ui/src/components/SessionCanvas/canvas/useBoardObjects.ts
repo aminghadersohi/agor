@@ -1307,6 +1307,7 @@ export const useBoardObjects = ({
           .filter((item) => movedZoneIds.has(item.id))
           .map((item) => [item.id, item]) ?? []
       );
+      const grownRootPlacement = movedPlacementById.get(zoneId);
       const zoneRootIds = new Set(
         sourceNodes.filter((node) => node.type === 'zone').map((node) => node.id)
       );
@@ -1330,12 +1331,13 @@ export const useBoardObjects = ({
           )[0];
         const placement = sourceZone ? movedPlacementById.get(sourceZone.id) : undefined;
         if (!sourceZone || !placement) return [];
+        const packedNode = changedNodes.find((candidate) => candidate.id === node.id) ?? node;
         return [
           {
-            ...node,
+            ...packedNode,
             position: {
-              x: node.position.x + placement.x - sourceZone.x,
-              y: node.position.y + placement.y - sourceZone.y,
+              x: packedNode.position.x + placement.x - sourceZone.x,
+              y: packedNode.position.y + placement.y - sourceZone.y,
             },
           },
         ];
@@ -1397,6 +1399,9 @@ export const useBoardObjects = ({
         grownZoneNode && (zoneHeightChanged || zoneWidthChanged)
           ? {
               ...grownZoneNode,
+              position: grownRootPlacement
+                ? { x: grownRootPlacement.x, y: grownRootPlacement.y }
+                : grownZoneNode.position,
               width: nextZoneWidth,
               height: nextZoneHeight,
               style: { ...grownZoneNode.style, width: nextZoneWidth, height: nextZoneHeight },
@@ -1416,7 +1421,7 @@ export const useBoardObjects = ({
         height: nextZoneHeight,
         layout: zone.layout,
         children: children.flatMap(({ node }) => {
-          const arrangedNode = changedById.get(node.id);
+          const arrangedNode = reflowedById.get(node.id) ?? changedById.get(node.id);
           const arranged = placementById.get(node.id);
           if (!arrangedNode || !arranged) return [];
           return [
@@ -1451,7 +1456,7 @@ export const useBoardObjects = ({
           if (node.id === zoneId && (zoneHeightChanged || zoneWidthChanged)) {
             return optimisticZone ?? node;
           }
-          return changedById.get(node.id) ?? reflowedById.get(node.id) ?? node;
+          return reflowedById.get(node.id) ?? changedById.get(node.id) ?? node;
         })
       );
 
@@ -1459,7 +1464,7 @@ export const useBoardObjects = ({
         const canvasObjects = Object.fromEntries(
           children.flatMap(({ node, isCanvasObject }) => {
             if (!isCanvasObject) return [];
-            const arrangedNode = changedById.get(node.id);
+            const arrangedNode = reflowedById.get(node.id) ?? changedById.get(node.id);
             const arranged = placementById.get(node.id);
             const existing = currentBoard.objects?.[node.id];
             if (!arrangedNode || !arranged || !existing) return [];
@@ -1475,6 +1480,7 @@ export const useBoardObjects = ({
         );
         const reflowedEntries: Array<readonly [string, BoardObject]> = [];
         for (const node of reflowedNodes) {
+          if (node.id === zoneId) continue;
           const existing = currentBoard.objects?.[node.id];
           if (existing) {
             reflowedEntries.push([
@@ -1485,7 +1491,13 @@ export const useBoardObjects = ({
         }
         const reflowedObjects = Object.fromEntries(reflowedEntries);
         const objects = {
-          [zoneId]: { ...zone, width: nextZoneWidth, height: nextZoneHeight },
+          [zoneId]: {
+            ...zone,
+            x: grownRootPlacement?.x ?? zone.x,
+            y: grownRootPlacement?.y ?? zone.y,
+            width: nextZoneWidth,
+            height: nextZoneHeight,
+          },
           ...reflowedObjects,
           ...canvasObjects,
         };

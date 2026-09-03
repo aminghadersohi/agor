@@ -1054,6 +1054,87 @@ describe('arrangeZoneContents', () => {
     expect(onArrangeNodes).toHaveBeenCalledTimes(1);
   });
 
+  it('moves a growing zone and its parented contents together rather than covering a locked root', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const board = makeBoard({
+      grow: {
+        type: 'zone',
+        x: 0,
+        y: 0,
+        width: 400,
+        height: 120,
+        label: 'Growing',
+        layout: { mode: 'manual', resize: 'both', onOverflow: 'reflow_board' },
+      },
+      locked: {
+        type: 'zone',
+        x: 420,
+        y: 0,
+        width: 300,
+        height: 300,
+        label: 'Locked',
+        locked: true,
+      },
+    });
+    const initialNodes: Node[] = [
+      { id: 'grow', type: 'zone', position: { x: 0, y: 0 }, data: {}, width: 400, height: 120 },
+      {
+        id: 'branch-a',
+        type: 'branchNode',
+        parentId: 'grow',
+        position: { x: 20, y: 100 },
+        data: { branch: { name: 'Branch A' } },
+        width: 500,
+        height: 200,
+      },
+      {
+        id: 'locked',
+        type: 'zone',
+        position: { x: 420, y: 0 },
+        data: { locked: true },
+        width: 300,
+        height: 300,
+      },
+    ];
+    const setNodes = vi.fn();
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'placement-a',
+              board_id: 'board-1',
+              entity_type: 'branch',
+              branch_id: 'branch-a',
+              zone_id: 'grow',
+              position: { x: 20, y: 100 },
+              size: { width: 500, height: 200 },
+            },
+          ] as never,
+          nodes: initialNodes,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      const zoneNode = result.current.getBoardObjectNodes().find((node) => node.id === 'grow');
+      expect(zoneNode).toBeDefined();
+      await (zoneNode!.data.onArrangeContents as (id: string) => Promise<void>)('grow');
+    });
+
+    const write = boardsPatch.mock.calls[0]?.[1];
+    const objects = write.objects as Record<string, { x: number; y: number; width: number }>;
+    expect(write._action).toBe('applyLayout');
+    expect(objects.grow.x + objects.grow.width).toBeLessThanOrEqual(420 - BOARD_GRID_SIZE);
+    expect(objects.locked).toBeUndefined();
+    expect(write.placements['placement-a'].position).toEqual({ x: 20, y: 100 });
+    expect(setNodes).toHaveBeenCalledTimes(1);
+  });
+
   it('uses the live rendered height when dynamic branch content exceeds React Flow dimensions', async () => {
     const renderedBranch = document.createElement('div');
     renderedBranch.className = 'react-flow__node';
