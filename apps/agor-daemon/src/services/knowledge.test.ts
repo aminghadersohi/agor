@@ -502,6 +502,57 @@ describe('KnowledgeDocumentsService permissions', () => {
   );
 
   dbTest(
+    'rejects a create-only upsert race before changing existing document governance',
+    async ({ db }) => {
+      const owner = await seedUser(db, 'owner');
+      const namespace = await new KnowledgeNamespaceRepository(db).create({
+        slug: 'create-only-policy-race',
+        display_name: 'Create-only policy race',
+        visibility_default: 'private',
+        owner_user_id: owner.user_id as UserID,
+      });
+      const service = new KnowledgeDocumentsService(db);
+      const existing = await service.putDocument(
+        {
+          namespace_slug: namespace.slug,
+          path: 'memory/today.md',
+          content_text: '# Today\n\nPrivate memory',
+          edit_policy: 'owner',
+        },
+        params(owner)
+      );
+
+      await expect(
+        service.putDocument(
+          {
+            namespace_slug: namespace.slug,
+            path: 'memory/today.md',
+            content_text: '# Today\n\nStale replacement',
+            visibility: 'public',
+            edit_policy: 'public',
+            expected_version: 0,
+          },
+          params(owner)
+        )
+      ).rejects.toBeInstanceOf(BadRequest);
+
+      await expect(
+        service.getDocument(
+          {
+            document_id: existing.document_id,
+            include_content: true,
+          },
+          params(owner)
+        )
+      ).resolves.toMatchObject({
+        visibility: 'private',
+        edit_policy: 'owner',
+        content: '# Today\n\nPrivate memory',
+      });
+    }
+  );
+
+  dbTest(
     'projects human and assistant authors on document and history service responses',
     async ({ db }) => {
       const owner = await seedUser(db, 'Attribution Owner');
