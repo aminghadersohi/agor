@@ -5,7 +5,7 @@ import type { AgorClient, Board } from '@agor-live/client';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import type { ButtonHTMLAttributes, MouseEventHandler, ReactNode } from 'react';
-import type { Node } from 'reactflow';
+import type { Node, NodeDragHandler } from 'reactflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import SessionCanvas, { isCanvasSelectionControlTarget } from './SessionCanvas';
@@ -205,6 +205,7 @@ describe('SessionCanvas zoom shortcuts', () => {
     setNodesUnsafeSpy.mockClear();
 
     act(() => {
+      (reactFlowProps?.onNodeDragStart as NodeDragHandler)?.({}, flowNodes[1], [flowNodes[1]]);
       (reactFlowProps?.onNodeDrag as (event: unknown, node: Node) => void)?.({}, flowNodes[1]);
     });
 
@@ -354,6 +355,487 @@ describe('SessionCanvas zoom shortcuts', () => {
       await Promise.resolve();
 
       expect(patch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('React Flow group-drag persistence', () => {
+    const connected = {
+      connected: true,
+      connecting: false,
+      outOfSync: false,
+      capturedSha: null,
+      currentSha: null,
+    };
+
+    function renderDragCanvas(board: Board, client: AgorClient, getNodes: () => Node[]) {
+      nodesStateOverride = getNodes();
+      const view = render(
+        <ConnectionProvider value={connected}>
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      );
+      act(() => {
+        (reactFlowProps?.onInit as (instance: unknown) => void)?.({
+          getNodes,
+          getViewport: () => ({ x: 0, y: 0, zoom: 0.5 }),
+          getZoom: () => 0.5,
+          screenToFlowPosition: ({ x, y }: { x: number; y: number }) => ({ x, y }),
+        });
+      });
+      return view;
+    }
+
+    function movedBy(node: Node, x: number, y: number): Node {
+      const absolute = node.positionAbsolute ?? node.position;
+      return {
+        ...node,
+        position: { x: node.position.x + x, y: node.position.y + y },
+        positionAbsolute: { x: absolute.x + x, y: absolute.y + y },
+      };
+    }
+
+    function applyLayoutPayload(board: Board, payload: Record<string, unknown>): Board {
+      const updates = payload.objects as NonNullable<Board['objects']>;
+      return {
+        ...board,
+        objects: Object.fromEntries(
+          Object.entries(board.objects ?? {}).map(([objectId, object]) => [
+            objectId,
+            updates[objectId] ? { ...object, ...updates[objectId] } : object,
+          ])
+        ),
+      } as Board;
+    }
+
+    it('atomically persists three unequal selected zones with one snapped delta only after debounce', async () => {
+      let durableBoard = {
+        board_id: 'board-1',
+        objects: {
+          'zone-a': {
+            type: 'zone',
+            x: 0,
+            y: 0,
+            width: 320,
+            height: 240,
+            label: 'A',
+            layout: { mode: 'auto', preset: 'grid', resize: 'height', autoResizeHeight: true },
+          },
+          'zone-b': {
+            type: 'zone',
+            x: 500,
+            y: 200,
+            width: 640,
+            height: 420,
+            label: 'B',
+            layout: { mode: 'manual', preset: 'compact_list', resize: 'height' },
+          },
+          'zone-c': {
+            type: 'zone',
+            x: 200,
+            y: 800,
+            width: 280,
+            height: 520,
+            label: 'C',
+          },
+          'zone-locked': {
+            type: 'zone',
+            x: 1500,
+            y: 0,
+            width: 300,
+            height: 200,
+            label: 'Locked',
+            locked: true,
+          },
+          'zone-fixed': {
+            type: 'zone',
+            x: 1800,
+            y: 500,
+            width: 300,
+            height: 200,
+            label: 'Fixed',
+          },
+          peer: {
+            type: 'zone',
+            x: 805,
+            y: 80,
+            width: 200,
+            height: 200,
+            label: 'Guide peer',
+          },
+        },
+      } as unknown as Board;
+      const patch = vi.fn(async (_boardId: string, payload: Record<string, unknown>) => {
+        durableBoard = applyLayoutPayload(durableBoard, payload);
+        return {
+          board: durableBoard,
+          placements: [],
+          changed: true,
+          changed_object_ids: Object.keys(payload.objects as object),
+          changed_placement_ids: [],
+        };
+      });
+      const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+      const zone = (
+        id: string,
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        extra: Partial<Node> = {}
+      ): Node => ({
+        id,
+        type: 'zone',
+        position: { x, y },
+        positionAbsolute: { x, y },
+        width,
+        height,
+        selected: true,
+        data: {},
+        ...extra,
+      });
+      const selected = [
+        zone('zone-a', 0, 0, 320, 240),
+        zone('zone-b', 500, 200, 640, 420),
+        zone('zone-c', 200, 800, 280, 520),
+      ];
+      const child: Node = {
+        id: 'branch-child',
+        type: 'branchNode',
+        parentId: 'zone-a',
+        position: { x: 40, y: 60 },
+        positionAbsolute: { x: 40, y: 60 },
+        selected: true,
+        data: {},
+      };
+      const locked = zone('zone-locked', 1500, 0, 300, 200, {
+        draggable: false,
+        data: { locked: true },
+      });
+      const fixed = zone('zone-fixed', 1800, 500, 300, 200, { selected: false });
+      const peer = zone('peer', 805, 80, 200, 200, { selected: false });
+      let liveNodes = [...selected, child, locked, fixed, peer];
+      renderDragCanvas(durableBoard, client, () => liveNodes);
+
+      // React Flow has applied the 20px grid delta. Its third callback argument
+      // excludes both the selected child (owned by zone-a) and locked zone.
+      const rawMoved = selected.map((node) => movedBy(node, 480, 80));
+      liveNodes = [...rawMoved, child, locked, fixed, peer];
+      setNodesUnsafeSpy.mockClear();
+
+      vi.useFakeTimers();
+      try {
+        act(() => {
+          (reactFlowProps?.onNodeDragStart as NodeDragHandler)?.({}, selected[0], selected);
+          (reactFlowProps?.onNodeDrag as NodeDragHandler)?.({}, rawMoved[0], rawMoved);
+          (reactFlowProps?.onNodeDragStop as NodeDragHandler)?.({}, rawMoved[0], rawMoved);
+        });
+
+        // Guide snapping aligns zone-a's right edge (800) to peer.x (805), so
+        // every zone receives the same +5 guide correction on top of the grid delta.
+        const acceptedResult = setNodesUnsafeSpy.mock.calls
+          .map(([updater]) =>
+            typeof updater === 'function' ? (updater as (value: Node[]) => Node[])(liveNodes) : []
+          )
+          .find((result) => result.find((node) => node.id === 'zone-a')?.position.x === 485);
+        expect(
+          acceptedResult
+            ?.filter((node) => node.id.startsWith('zone-') && node.id !== 'zone-locked')
+            .map((node) => [node.id, node.position])
+        ).toEqual([
+          ['zone-a', { x: 485, y: 80 }],
+          ['zone-b', { x: 985, y: 280 }],
+          ['zone-c', { x: 685, y: 880 }],
+          ['zone-fixed', { x: 1800, y: 500 }],
+        ]);
+        expect(acceptedResult?.find((node) => node.id === child.id)).toMatchObject({
+          parentId: 'zone-a',
+          position: { x: 40, y: 60 },
+        });
+
+        await act(async () => vi.advanceTimersByTimeAsync(499));
+        expect(patch).not.toHaveBeenCalled();
+        await act(async () => vi.advanceTimersByTimeAsync(1));
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(patch).toHaveBeenCalledTimes(1);
+      expect(patch).toHaveBeenCalledWith('board-1', {
+        _action: 'applyLayout',
+        objects: {
+          'zone-a': { x: 485, y: 80, width: 320, height: 240 },
+          'zone-b': { x: 985, y: 280, width: 640, height: 420 },
+          'zone-c': { x: 685, y: 880, width: 280, height: 520 },
+        },
+        placements: {},
+      });
+      expect(durableBoard.objects?.['zone-a']).toMatchObject({
+        x: 485,
+        y: 80,
+        layout: { mode: 'auto', preset: 'grid', resize: 'height', autoResizeHeight: true },
+      });
+      expect(durableBoard.objects?.['zone-b']).toMatchObject({
+        x: 985,
+        y: 280,
+        layout: { mode: 'manual', preset: 'compact_list', resize: 'height' },
+      });
+      expect(durableBoard.objects?.['zone-locked']).toMatchObject({ x: 1500, y: 0 });
+      expect(durableBoard.objects?.['zone-fixed']).toMatchObject({ x: 1800, y: 500 });
+    });
+
+    it('holds both dropped zones through a stale echo, then reloads their authoritative positions', async () => {
+      let durableBoard = {
+        board_id: 'board-echo',
+        objects: {
+          'zone-a': { type: 'zone', x: 0, y: 0, width: 300, height: 200, label: 'A' },
+          'zone-b': { type: 'zone', x: 500, y: 400, width: 450, height: 350, label: 'B' },
+        },
+      } as unknown as Board;
+      const patch = vi.fn(async (_boardId: string, payload: Record<string, unknown>) => {
+        durableBoard = applyLayoutPayload(durableBoard, payload);
+        return {
+          board: durableBoard,
+          placements: [],
+          changed: true,
+          changed_object_ids: Object.keys(payload.objects as object),
+          changed_placement_ids: [],
+        };
+      });
+      const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+      const start: Node[] = [
+        {
+          id: 'zone-a',
+          type: 'zone',
+          position: { x: 0, y: 0 },
+          positionAbsolute: { x: 0, y: 0 },
+          width: 300,
+          height: 200,
+          selected: true,
+          data: {},
+        },
+        {
+          id: 'zone-b',
+          type: 'zone',
+          position: { x: 500, y: 400 },
+          positionAbsolute: { x: 500, y: 400 },
+          width: 450,
+          height: 350,
+          selected: true,
+          data: {},
+        },
+      ];
+      let liveNodes = start;
+      const view = renderDragCanvas(durableBoard, client, () => liveNodes);
+      const moved = start.map((node) => movedBy(node, 120, 60));
+      liveNodes = moved;
+
+      vi.useFakeTimers();
+      try {
+        act(() => {
+          (reactFlowProps?.onNodeDragStart as NodeDragHandler)?.({}, start[0], start);
+          (reactFlowProps?.onNodeDrag as NodeDragHandler)?.({}, moved[0], moved);
+          (reactFlowProps?.onNodeDragStop as NodeDragHandler)?.({}, moved[0], moved);
+        });
+
+        // A pre-debounce realtime board echo still contains the old positions.
+        setNodesUnsafeSpy.mockClear();
+        view.rerender(
+          <ConnectionProvider value={connected}>
+            <SessionCanvas board={{ ...durableBoard }} client={client} branches={[]} />
+          </ConnectionProvider>
+        );
+        const staleEchoUpdater = setNodesUnsafeSpy.mock.calls.at(-1)?.[0] as
+          | ((value: Node[]) => Node[])
+          | undefined;
+        const protectedNodes = staleEchoUpdater?.(moved);
+        expect(protectedNodes?.find((node) => node.id === 'zone-a')?.position).toEqual({
+          x: 120,
+          y: 60,
+        });
+        expect(protectedNodes?.find((node) => node.id === 'zone-b')?.position).toEqual({
+          x: 620,
+          y: 460,
+        });
+
+        await act(async () => vi.advanceTimersByTimeAsync(500));
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(patch).toHaveBeenCalledTimes(1);
+
+      // An authoritative echo and a clean remount (reload/second consumer)
+      // both reconstruct every zone at the one committed group snapshot.
+      view.unmount();
+      nodesStateOverride = undefined;
+      setNodesUnsafeSpy.mockClear();
+      render(
+        <ConnectionProvider value={connected}>
+          <SessionCanvas board={durableBoard} client={client} branches={[]} />
+        </ConnectionProvider>
+      );
+      const reloaded = setNodesUnsafeSpy.mock.calls
+        .map(([updater]) =>
+          typeof updater === 'function' ? (updater as (value: Node[]) => Node[])([]) : []
+        )
+        .find((result) => result.some((node) => node.id === 'zone-a'));
+      expect(reloaded?.find((node) => node.id === 'zone-a')?.position).toEqual({ x: 120, y: 60 });
+      expect(reloaded?.find((node) => node.id === 'zone-b')?.position).toEqual({ x: 620, y: 460 });
+    });
+
+    it('keeps a no-op drag write-free and preserves the single-zone drag path', async () => {
+      let durableBoard = {
+        board_id: 'board-single',
+        objects: {
+          zone: { type: 'zone', x: 40, y: 80, width: 360, height: 240, label: 'Single' },
+        },
+      } as unknown as Board;
+      const patch = vi.fn(async (_boardId: string, payload: Record<string, unknown>) => {
+        durableBoard = applyLayoutPayload(durableBoard, payload);
+        return {
+          board: durableBoard,
+          placements: [],
+          changed: true,
+          changed_object_ids: ['zone'],
+          changed_placement_ids: [],
+        };
+      });
+      const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+      const start: Node = {
+        id: 'zone',
+        type: 'zone',
+        position: { x: 40, y: 80 },
+        positionAbsolute: { x: 40, y: 80 },
+        width: 360,
+        height: 240,
+        selected: true,
+        data: {},
+      };
+      let liveNodes = [start];
+      renderDragCanvas(durableBoard, client, () => liveNodes);
+
+      vi.useFakeTimers();
+      try {
+        act(() => {
+          (reactFlowProps?.onNodeDragStart as NodeDragHandler)?.({}, start, [start]);
+          (reactFlowProps?.onNodeDragStop as NodeDragHandler)?.({}, start, [start]);
+        });
+        await act(async () => vi.advanceTimersByTimeAsync(500));
+        expect(patch).not.toHaveBeenCalled();
+
+        const moved = movedBy(start, 80, 40);
+        liveNodes = [moved];
+        act(() => {
+          (reactFlowProps?.onNodeDragStart as NodeDragHandler)?.({}, start, [start]);
+          (reactFlowProps?.onNodeDrag as NodeDragHandler)?.({}, moved, [moved]);
+          (reactFlowProps?.onNodeDragStop as NodeDragHandler)?.({}, moved, [moved]);
+        });
+        await act(async () => vi.advanceTimersByTimeAsync(500));
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(patch).toHaveBeenCalledTimes(1);
+      expect(patch).toHaveBeenCalledWith('board-single', {
+        _action: 'applyLayout',
+        objects: { zone: { x: 120, y: 120, width: 360, height: 240 } },
+        placements: {},
+      });
+    });
+
+    it('serializes rapid group drops so an older in-flight batch cannot win last', async () => {
+      let durableBoard = {
+        board_id: 'board-rapid',
+        objects: {
+          'zone-a': { type: 'zone', x: 0, y: 0, width: 300, height: 200, label: 'A' },
+          'zone-b': { type: 'zone', x: 500, y: 300, width: 420, height: 260, label: 'B' },
+        },
+      } as unknown as Board;
+      let releaseFirst: (() => void) | undefined;
+      let callCount = 0;
+      const patch = vi.fn(async (_boardId: string, payload: Record<string, unknown>) => {
+        callCount += 1;
+        const resultBoard = applyLayoutPayload(durableBoard, payload);
+        if (callCount === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        durableBoard = resultBoard;
+        return {
+          board: resultBoard,
+          placements: [],
+          changed: true,
+          changed_object_ids: Object.keys(payload.objects as object),
+          changed_placement_ids: [],
+        };
+      });
+      const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+      const start: Node[] = [
+        {
+          id: 'zone-a',
+          type: 'zone',
+          position: { x: 0, y: 0 },
+          positionAbsolute: { x: 0, y: 0 },
+          width: 300,
+          height: 200,
+          selected: true,
+          data: {},
+        },
+        {
+          id: 'zone-b',
+          type: 'zone',
+          position: { x: 500, y: 300 },
+          positionAbsolute: { x: 500, y: 300 },
+          width: 420,
+          height: 260,
+          selected: true,
+          data: {},
+        },
+      ];
+      let liveNodes = start;
+      renderDragCanvas(durableBoard, client, () => liveNodes);
+      const drag = (from: Node[], to: Node[]) => {
+        act(() => {
+          (reactFlowProps?.onNodeDragStart as NodeDragHandler)?.({}, from[0], from);
+          (reactFlowProps?.onNodeDrag as NodeDragHandler)?.({}, to[0], to);
+          (reactFlowProps?.onNodeDragStop as NodeDragHandler)?.({}, to[0], to);
+        });
+      };
+
+      vi.useFakeTimers();
+      try {
+        const first = start.map((node) => movedBy(node, 100, 100));
+        liveNodes = first;
+        drag(start, first);
+        await act(async () => vi.advanceTimersByTimeAsync(500));
+        expect(patch).toHaveBeenCalledTimes(1);
+
+        const second = first.map((node) => movedBy(node, 60, 40));
+        liveNodes = second;
+        drag(first, second);
+        await act(async () => vi.advanceTimersByTimeAsync(500));
+        expect(patch).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+          releaseFirst?.();
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(patch).toHaveBeenCalledTimes(2);
+      expect(patch.mock.calls.map(([, payload]) => payload.objects)).toEqual([
+        {
+          'zone-a': { x: 100, y: 100, width: 300, height: 200 },
+          'zone-b': { x: 600, y: 400, width: 420, height: 260 },
+        },
+        {
+          'zone-a': { x: 160, y: 140, width: 300, height: 200 },
+          'zone-b': { x: 660, y: 440, width: 420, height: 260 },
+        },
+      ]);
     });
   });
 
