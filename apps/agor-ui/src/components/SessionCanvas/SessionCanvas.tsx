@@ -208,8 +208,8 @@ import {
   type ZoneWorkflowTransitionValues,
 } from './canvas/ZoneWorkflowTransitionModal';
 import { DEFAULT_BOARD_OBJECT_Z_INDEX, selectedZIndex } from './canvas/zOrder';
-import { getZoneWorkflowAdvanceNotice } from './canvas/zoneWorkflowAdvanceNotice';
 import { createZoneTriggerSession } from './canvas/zoneTriggerSessionCreation';
+import { getZoneWorkflowAdvanceNotice } from './canvas/zoneWorkflowAdvanceNotice';
 
 export function isCanvasSelectionControlTarget(target: Element): boolean {
   return Boolean(

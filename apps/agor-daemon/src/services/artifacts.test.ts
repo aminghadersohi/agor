@@ -18,8 +18,8 @@ import {
   type Database,
   eq,
   RepoRepository,
-  ScheduleRepository,
   runWithTenantContext,
+  ScheduleRepository,
   SessionRepository,
   shortId,
   UsersRepository,
@@ -791,6 +791,9 @@ describe('ArtifactsService binding execution', () => {
     } finally {
       rmSync(tmpRoot, { recursive: true, force: true });
     }
+  });
+});
+
 describe('ArtifactsService executor sandbox ownership', () => {
   const perUserSandboxConfig = {
     paths: { data_home: '/srv/agor-data' },
