@@ -2,6 +2,11 @@ import type { Node } from 'reactflow';
 
 export type PostLayoutViewportSource = 'user' | 'auto' | 'realtime';
 export type PostLayoutViewportScope = 'board' | 'selection' | 'zone';
+export type PostLayoutViewportMode = 'smart' | 'fit' | 'preserve';
+
+export function arrangeBoardViewportMode(fitViewAfterArranging: boolean): PostLayoutViewportMode {
+  return fitViewAfterArranging ? 'fit' : 'preserve';
+}
 
 export interface LayoutNodeRect {
   id: string;
@@ -15,6 +20,8 @@ export interface PostLayoutViewportIntent {
   source: PostLayoutViewportSource;
   boardId: string;
   scope: PostLayoutViewportScope;
+  /** Smart policy by default; explicit whole-board Arrange may force or suppress one fit. */
+  mode: PostLayoutViewportMode;
   before: readonly LayoutNodeRect[];
   after: readonly LayoutNodeRect[];
 }
@@ -35,8 +42,80 @@ export interface PostLayoutViewportDecisionInput {
 
 export interface PostLayoutViewportDecision {
   fit: boolean;
-  reason: 'not-user' | 'no-material-change' | 'comfortable' | 'clipped' | 'scale';
+  reason:
+    | 'not-user'
+    | 'preserve-requested'
+    | 'fit-requested'
+    | 'no-material-change'
+    | 'comfortable'
+    | 'clipped'
+    | 'scale';
   padding: number;
+}
+
+interface PendingPostLayoutViewport {
+  token: number;
+  intent: PostLayoutViewportIntent;
+}
+
+/**
+ * Invocation-order fence for the shared post-layout viewport path. A layout
+ * reserves a token before its first async write. Direct manipulation cancels
+ * that token, and completion may queue only while it is still current.
+ */
+export class PostLayoutViewportCoordinator {
+  private token = 0;
+  private pending: PendingPostLayoutViewport | undefined;
+
+  begin(): number {
+    this.token += 1;
+    this.pending = undefined;
+    return this.token;
+  }
+
+  cancel(): void {
+    this.begin();
+  }
+
+  queue(intent: PostLayoutViewportIntent, token?: number): PendingPostLayoutViewport | undefined {
+    const resolvedToken = token ?? this.begin();
+    if (resolvedToken !== this.token) return undefined;
+    this.pending = { token: resolvedToken, intent };
+    return this.pending;
+  }
+
+  peek(token: number): PendingPostLayoutViewport | undefined {
+    return this.pending?.token === token ? this.pending : undefined;
+  }
+
+  consume(token: number): PostLayoutViewportIntent | undefined {
+    const pending = this.peek(token);
+    if (!pending) return undefined;
+    this.pending = undefined;
+    return pending.intent;
+  }
+
+  discard(token: number): void {
+    if (this.pending?.token === token) this.pending = undefined;
+  }
+}
+
+export interface SettledPostLayoutViewportInput {
+  coordinator: PostLayoutViewportCoordinator;
+  token: number;
+  currentNodes: readonly Node[];
+  viewport: LayoutViewportBounds;
+  viewportPixels: { width: number; height: number };
+  zoom: number;
+  reducedMotion: boolean;
+}
+
+export interface SettledPostLayoutViewportFit {
+  nodes: Node[];
+  padding: number;
+  minZoom: number;
+  maxZoom: number;
+  duration: number;
 }
 
 const MATERIAL_GEOMETRY_DELTA = 8;
@@ -167,6 +246,10 @@ export function decidePostLayoutViewport(
 ): PostLayoutViewportDecision {
   const padding = input.intent.scope === 'board' ? 0.12 : 0.16;
   if (input.intent.source !== 'user') return { fit: false, reason: 'not-user', padding };
+  if (input.intent.mode === 'preserve') {
+    return { fit: false, reason: 'preserve-requested', padding };
+  }
+  if (input.intent.mode === 'fit') return { fit: true, reason: 'fit-requested', padding };
   if (!layoutGeometryChanged(input.intent.before, input.intent.after, MATERIAL_GEOMETRY_DELTA)) {
     return { fit: false, reason: 'no-material-change', padding };
   }
@@ -197,10 +280,51 @@ export function decidePostLayoutViewport(
   return { fit: false, reason: 'comfortable', padding };
 }
 
+/**
+ * Consume one settled request. Position matching proves the rendered graph is
+ * the transaction that queued the request; fresh rendered sizes remain valid
+ * inputs so content can finish measuring before the single fit is calculated.
+ */
+export function consumeSettledPostLayoutViewport(
+  input: SettledPostLayoutViewportInput
+): SettledPostLayoutViewportFit | null {
+  const pending = input.coordinator.peek(input.token);
+  if (!pending) return null;
+
+  const affectedIds = pending.intent.after.map((rect) => rect.id);
+  const settled = snapshotLayoutNodes(input.currentNodes, affectedIds);
+  if (!layoutPositionsMatch(pending.intent.after, settled)) {
+    input.coordinator.discard(input.token);
+    return null;
+  }
+
+  const intent = input.coordinator.consume(input.token);
+  if (!intent) return null;
+  const decision = decidePostLayoutViewport({
+    intent: { ...intent, after: settled },
+    viewport: input.viewport,
+    viewportPixels: input.viewportPixels,
+    zoom: input.zoom,
+  });
+  if (!decision.fit) return null;
+
+  const affectedIdSet = new Set(affectedIds);
+  const nodes = input.currentNodes.filter((node) => affectedIdSet.has(node.id) && !node.hidden);
+  if (nodes.length === 0) return null;
+  return {
+    nodes,
+    padding: decision.padding,
+    minZoom: 0.1,
+    maxZoom: 1,
+    duration: input.reducedMotion ? 0 : 300,
+  };
+}
+
 export function createPostLayoutViewportIntent(input: {
   source: PostLayoutViewportSource;
   boardId: string;
   scope: PostLayoutViewportScope;
+  mode?: PostLayoutViewportMode;
   beforeNodes: readonly Node[];
   afterNodes: readonly Node[];
   affectedNodeIds: readonly string[];
@@ -209,6 +333,7 @@ export function createPostLayoutViewportIntent(input: {
     source: input.source,
     boardId: input.boardId,
     scope: input.scope,
+    mode: input.mode ?? 'smart',
     before: snapshotLayoutNodes(input.beforeNodes, input.affectedNodeIds),
     after: snapshotLayoutNodes(input.afterNodes, input.affectedNodeIds),
   };

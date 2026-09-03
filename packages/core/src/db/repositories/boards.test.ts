@@ -1483,6 +1483,62 @@ describe('BoardRepository.applyBoardLayout', () => {
   });
 
   dbTest(
+    'rejects a delayed full-snapshot layout instead of overwriting a newer writer',
+    async ({ db }) => {
+      const repo = new BoardRepository(db);
+      const zone = { type: 'zone' as const, x: 80, y: 80, width: 600, height: 400, label: 'Zone' };
+      const note = { type: 'markdown' as const, x: 900, y: 80, width: 320, content: 'Obstacle' };
+      const board = await repo.create(createBoardData({ objects: { zone, note } }));
+      const branch = await createBranchForBoard(db, board.board_id);
+      const placementRepo = new BoardObjectRepository(db);
+      const placement = await placementRepo.create({
+        board_id: board.board_id,
+        branch_id: branch.branch_id,
+        zone_id: 'zone',
+        position: { x: 20, y: 100 },
+        size: { width: 500, height: 200 },
+      });
+      const expected = {
+        objects: {
+          zone: { x: 80, y: 80, width: 600, height: 400 },
+          note: { x: 900, y: 80, width: 320 },
+        },
+        placements: {
+          [placement.object_id]: {
+            position: { x: 20, y: 100 },
+            size: { width: 500, height: 200 },
+          },
+        },
+      };
+
+      await repo.applyBoardLayout(board.board_id, {
+        objects: { note: { x: 940, y: 80, width: 320 } },
+        placements: {},
+      });
+      await expect(
+        repo.applyBoardLayout(board.board_id, {
+          objects: { zone: { x: 0, y: 0, width: 700, height: 500 } },
+          placements: {
+            [placement.object_id]: {
+              position: { x: 20, y: 80 },
+              size: { width: 500, height: 200 },
+            },
+          },
+          expected,
+        })
+      ).rejects.toThrow('source snapshot is stale');
+      expect((await repo.findById(board.board_id))?.objects?.zone).toMatchObject({
+        x: 80,
+        width: 600,
+      });
+      expect((await repo.findById(board.board_id))?.objects?.note).toMatchObject({ x: 940 });
+      expect(await placementRepo.findByObjectId(placement.object_id)).toMatchObject({
+        position: { x: 20, y: 100 },
+      });
+    }
+  );
+
+  dbTest(
     'returns the complete submitted placement snapshot when only canvas geometry changes',
     async ({ db }) => {
       const repo = new BoardRepository(db);

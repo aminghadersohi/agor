@@ -58,9 +58,9 @@ describe('planBoardZoneArrangement', () => {
     expect(tiny.items[0]!.y + tiny.items[0]!.height).toBeLessThanOrEqual(tiny.height);
     expect(wasteful.width).toBeLessThan(1600);
     expect(wasteful.height).toBeLessThan(900);
-    expect(empty).toMatchObject({ width: 600, height: 240 });
+    expect(empty).toMatchObject({ width: 600, height: 300 });
     for (const arranged of plan.zones) {
-      expect(plan.boardLayout?.placements.find(({ id }) => id === arranged.id)).toMatchObject({
+      expect(plan.layout.placements.find(({ id }) => id === arranged.id)).toMatchObject({
         width: arranged.width,
         height: arranged.height,
       });
@@ -95,17 +95,17 @@ describe('planBoardZoneArrangement', () => {
     });
   });
 
-  it('uses shared defaults, preserves spatial order, and packs every child for its final frame', () => {
+  it('uses shared defaults, preserves persisted input order, and packs every child', () => {
     const plan = planBoardZoneArrangement([
       zone('a-later', 900, 200, [item('later-card', 380, 100)]),
       zone('z-first', 20, 20, [item('first-card', 380, 120), item('first-branch', 500, 200)]),
     ]);
-    expect(plan.zones.map(({ id }) => id)).toEqual(['z-first', 'a-later']);
+    expect(plan.zones.map(({ id }) => id)).toEqual(['a-later', 'z-first']);
     expect(plan.zones[0]?.position).toEqual({
       x: DEFAULT_BOARD_ZONE_ARRANGEMENT.startX,
       y: DEFAULT_BOARD_ZONE_ARRANGEMENT.startY,
     });
-    expect(plan.zones.map(({ items }) => items.length)).toEqual([2, 1]);
+    expect(plan.zones.map(({ items }) => items.length)).toEqual([1, 2]);
     for (const arranged of plan.zones) {
       for (const child of arranged.items) {
         expect(child.x).toBeGreaterThanOrEqual(0);
@@ -219,6 +219,46 @@ describe('planBoardZoneArrangement', () => {
     ]);
   });
 
+  it('does not feed justified compact-list frame width back into the next Arrange', () => {
+    const source = [
+      {
+        ...zone('list', 0, 0, [
+          branchItem('branch', 500, 240),
+          { ...item('card', 380, 180), densityExpandable: true },
+        ]),
+        layout: { preset: 'compact_list' as const, gap: 40 },
+      },
+      zone('wide', 700, 0, [item('wide-card', 700, 260)]),
+      zone('small', 0, 700, [item('small-card', 320, 180)]),
+    ];
+    const options = { targetAspectRatio: 16 / 9, justifyRows: true };
+    const first = planBoardZoneArrangement(source, options);
+    const secondSource = source.map((zoneInput) => {
+      const arranged = first.zones.find(({ id }) => id === zoneInput.id)!;
+      const arrangedItems = new Map(arranged.items.map((entry) => [entry.id, entry]));
+      return {
+        ...zoneInput,
+        ...arranged.position,
+        width: arranged.width,
+        height: arranged.height,
+        items: zoneInput.items.map((entry) => {
+          const output = arrangedItems.get(entry.id)!;
+          return {
+            ...entry,
+            width: output.width,
+            height: output.height,
+            position: { x: output.x, y: output.y },
+          };
+        }),
+      };
+    });
+
+    expect(planBoardZoneArrangement(secondSource, options)).toEqual(first);
+    expect(first.zones.find(({ id }) => id === 'list')?.items.map(({ width }) => width)).toEqual([
+      500, 500,
+    ]);
+  });
+
   it('produces a compact aligned three-by-three explicit outer grid', () => {
     const source = Array.from({ length: 9 }, (_, index) => ({
       ...zone(`zone-${index}`, (index % 4) * 900, Math.floor(index / 4) * 700, []),
@@ -326,7 +366,10 @@ describe('planBoardZoneArrangement', () => {
       { ...zone('short', 0, 0, []), height: 240 },
       { ...zone('tall', 800, 0, [item('child', 380, 420)]), height: 560 },
     ];
-    const natural = planBoardZoneArrangement(source, { fixedItemsPerRow: 2 });
+    const natural = planBoardZoneArrangement(source, {
+      fixedItemsPerRow: 2,
+      matchRowHeights: false,
+    });
     const matched = planBoardZoneArrangement(source, {
       fixedItemsPerRow: 2,
       matchRowHeights: true,
@@ -542,7 +585,7 @@ describe('planBoardZoneArrangement', () => {
       { id: 'free-card', x: 760, y: 800, width: 380, height: 100 },
       { id: 'note', x: 1180, y: 800, width: 260, height: 500 },
     ];
-    const first = planBoardZoneArrangement(zones, { looseItems });
+    const first = planBoardZoneArrangement(zones, { looseItems, mode: 'compact' });
 
     expect(first.boardLayout?.mode).toBe('cluster');
     expect(first.looseItems.map((entry) => entry.id)).toEqual(looseItems.map((entry) => entry.id));
@@ -576,6 +619,7 @@ describe('planBoardZoneArrangement', () => {
         y: firstZoneById.get(entry.id)?.position.y ?? entry.y,
       })),
       {
+        mode: 'compact',
         looseItems: looseItems.map((entry) => {
           const placed = first.looseItems.find((item) => item.id === entry.id);
           return { ...entry, x: placed?.x ?? entry.x, y: placed?.y ?? entry.y };
@@ -586,5 +630,125 @@ describe('planBoardZoneArrangement', () => {
       new Map(first.zones.map((entry) => [entry.id, entry.position]))
     );
     expect(second.looseItems).toEqual(first.looseItems);
+  });
+
+  it('uses identical authoritative geometry for whole-board and select-all scopes modulo anchoring', () => {
+    const zones = [
+      zone('alpha', 120, 100, [item('alpha-card', 380, 160)]),
+      zone('beta', 980, 120, [branchItem('beta-worktree', 500, 240)]),
+      zone('gamma', 120, 820, [
+        item('gamma-card', 300, 180),
+        { id: 'gamma-app', width: 620, height: 380, position: { x: 420, y: 80 } },
+      ]),
+    ];
+    const looseItems = [
+      { id: 'note', x: 780, y: 760, width: 360, height: 260 },
+      { id: 'artifact', x: 1220, y: 760, width: 640, height: 420 },
+    ];
+    const options = {
+      mode: 'grid' as const,
+      targetAspectRatio: 16 / 9,
+      justifyRows: true,
+      resizeZoneFrames: true,
+      looseItems,
+    };
+    const whole = planBoardZoneArrangement(zones, options);
+    const selected = planBoardZoneArrangement(zones, {
+      ...options,
+      anchorToSelectionBounds: true,
+    });
+    const normalized = (plan: ReturnType<typeof planBoardZoneArrangement>) => {
+      const roots = [
+        ...plan.zones.map((entry) => ({
+          id: entry.id,
+          ...entry.position,
+          width: entry.width,
+          height: entry.height,
+        })),
+        ...plan.looseItems.map(({ id, x, y, width, height }) => ({ id, x, y, width, height })),
+      ];
+      const minX = Math.min(...roots.map((entry) => entry.x));
+      const minY = Math.min(...roots.map((entry) => entry.y));
+      return new Map(
+        roots.map((entry) => [entry.id, { ...entry, x: entry.x - minX, y: entry.y - minY }])
+      );
+    };
+
+    expect(normalized(selected)).toEqual(normalized(whole));
+    expect(selected.zones.map((entry) => entry.items)).toEqual(
+      whole.zones.map((entry) => entry.items)
+    );
+  });
+
+  it.each([7, 8, 9, 10])(
+    'lays out %i mixed roots in stable viewport-shaped Grid rows without overlap',
+    (count) => {
+      const looseItems = Array.from({ length: count }, (_, index) => ({
+        id: `root-${index}`,
+        x: (index % 4) * 520,
+        y: Math.floor(index / 4) * 360,
+        width: index % 3 === 0 ? 600 : index % 3 === 1 ? 380 : 260,
+        height: index % 2 === 0 ? 220 : 360,
+      }));
+      const first = planBoardZoneArrangement([], {
+        mode: 'grid',
+        targetAspectRatio: 16 / 9,
+        looseItems,
+      });
+      const second = planBoardZoneArrangement([], {
+        mode: 'grid',
+        targetAspectRatio: 16 / 9,
+        looseItems: looseItems.map((item) => {
+          const placed = first.looseItems.find((candidate) => candidate.id === item.id)!;
+          return { ...item, x: placed.x, y: placed.y };
+        }),
+      });
+      for (const [index, left] of first.looseItems.entries()) {
+        for (const right of first.looseItems.slice(index + 1)) {
+          expect(
+            left.x + left.width <= right.x ||
+              right.x + right.width <= left.x ||
+              left.y + left.height <= right.y ||
+              right.y + right.height <= left.y
+          ).toBe(true);
+        }
+      }
+      expect(second.looseItems).toEqual(first.looseItems);
+    }
+  );
+
+  it('uses viewport aspect for row composition and exposes safe zone-frame resizing off', () => {
+    const looseItems = Array.from({ length: 9 }, (_, index) => ({
+      id: `item-${index}`,
+      x: index * 20,
+      y: index * 20,
+      width: 400,
+      height: 240,
+    }));
+    const wide = planBoardZoneArrangement([], {
+      mode: 'grid',
+      targetAspectRatio: 2.2,
+      looseItems,
+    });
+    const tall = planBoardZoneArrangement([], {
+      mode: 'grid',
+      targetAspectRatio: 0.75,
+      looseItems,
+    });
+    expect(wide.layout.rows).toBeLessThan(tall.layout.rows);
+
+    const source = [
+      { ...zone('small', 0, 0, [item('large-child', 760, 420)]), width: 300, height: 220 },
+      { ...zone('manual', 900, 0, [item('small-child', 300, 100)]), width: 940, height: 700 },
+    ];
+    const preserved = planBoardZoneArrangement(source, {
+      mode: 'grid',
+      resizeZoneFrames: false,
+    });
+    expect(preserved.zones.find(({ id }) => id === 'small')?.width).toBeGreaterThan(300);
+    expect(preserved.zones.find(({ id }) => id === 'manual')).toMatchObject({
+      width: 940,
+      height: 700,
+    });
   });
 });

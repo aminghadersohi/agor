@@ -39,14 +39,31 @@ export function selectionBoardZoneArrangementOptions(
   selectionCount: number,
   settings?: SelectionLayoutSettings
 ): Omit<BoardZoneArrangementOptions, 'looseItems'> {
-  if (settings?.mode !== 'grid') return { compactOuterLayout: true };
-  const tracks = selectionGridTracks(selectionCount, settings.trackAxis, settings.trackCount);
+  if (settings?.mode === 'compact') return { mode: 'compact' };
+  if (!settings) {
+    return {
+      mode: 'grid',
+      justifyRows: true,
+      resizeZoneFrames: true,
+      matchRowHeights: true,
+      matchColumnWidths: true,
+    };
+  }
+  const gridSettings = settings;
+  const tracks = selectionGridTracks(
+    selectionCount,
+    gridSettings.trackAxis,
+    gridSettings.trackCount
+  );
   return {
+    mode: 'grid',
     fixedItemsPerRow: tracks.columns,
     compactFixedGrid: true,
-    justifyLastRow: settings.rowDistribution === 'justify',
-    matchRowHeights: settings.matchRowHeights,
-    matchColumnWidths: settings.matchColumnWidths,
+    justifyRows: gridSettings.rowDistribution === 'justify',
+    justifyLastRow: gridSettings.rowDistribution === 'justify',
+    matchRowHeights: gridSettings.matchRowHeights,
+    matchColumnWidths: gridSettings.matchColumnWidths,
+    resizeZoneFrames: gridSettings.matchRowHeights || gridSettings.matchColumnWidths,
   };
 }
 
@@ -65,7 +82,7 @@ export function SelectionLayoutPopover({
   onApply,
 }: SelectionLayoutPopoverProps) {
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<SelectionLayoutMode>('compact');
+  const [mode, setMode] = useState<SelectionLayoutMode>('grid');
   const [trackAxis, setTrackAxis] = useState<SelectionTrackAxis>('columns');
   const [trackCount, setTrackCount] = useState(defaultSelectionTrackCount(selectionCount));
   const trackCountWasEdited = useRef(false);

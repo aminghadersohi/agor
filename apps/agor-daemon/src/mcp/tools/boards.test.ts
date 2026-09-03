@@ -927,7 +927,16 @@ describe('agor_boards_auto_arrange_zone', () => {
     expect(parsed.updates.map((update: { objectId: string }) => update.objectId)).not.toContain(
       'locked'
     );
-    for (const [index, left] of parsed.updates.entries()) {
+    const relativeUpdates = parsed.updates.map(
+      (update: { objectId: string; position: { x: number; y: number } }) => ({
+        ...update,
+        position:
+          update.objectId === 'branch-placement' || update.objectId === 'card-placement'
+            ? update.position
+            : { x: update.position.x - 100, y: update.position.y - 100 },
+      })
+    );
+    for (const [index, left] of relativeUpdates.entries()) {
       const leftSize =
         left.objectId === 'branch-placement'
           ? { width: 520, height: 140 }
@@ -938,7 +947,7 @@ describe('agor_boards_auto_arrange_zone', () => {
               : left.objectId === 'note'
                 ? { width: 320, height: 140 }
                 : { width: 360, height: 220 };
-      for (const right of parsed.updates.slice(index + 1)) {
+      for (const right of relativeUpdates.slice(index + 1)) {
         const rightSize =
           right.objectId === 'branch-placement'
             ? { width: 520, height: 140 }
@@ -2329,8 +2338,8 @@ describe('board layout tools with branch entities present', () => {
     });
     expect(entityPatches).toHaveLength(0);
     expect(parsed.updates.map((update: { objectId: string }) => update.objectId)).toEqual([
-      'zone-a',
       'zone-b',
+      'zone-a',
     ]);
     expect(parsed.updates.map((update: { arrangedItems: number }) => update.arrangedItems)).toEqual(
       [1, 1]
@@ -2367,14 +2376,14 @@ describe('board layout tools with branch entities present', () => {
     expect(first.packZoneContents).toBe(true);
     expect(tiny.arrangedItems).toBe(1);
     expect(tiny.size.width).toBeGreaterThanOrEqual(900);
-    expect(empty.size).toEqual({ width: 600, height: 240 });
+    expect(empty.size).toEqual({ width: 600, height: tiny.size.height });
     expect(boardPatches).toHaveLength(1);
     expect(boardPatches[0]).toMatchObject({
       _action: 'applyLayout',
       objects: {
         tiny: expect.objectContaining({ width: tiny.size.width, height: tiny.size.height }),
         protruding: expect.any(Object),
-        empty: expect.objectContaining({ width: 600, height: 240 }),
+        empty: expect.objectContaining({ width: 600, height: tiny.size.height }),
       },
       placements: {},
     });
@@ -2498,7 +2507,7 @@ describe('board layout tools with branch entities present', () => {
 
     const parsed = JSON.parse((await arrangeZones({ boardId: 'board-1' })).content[0].text);
 
-    expect(parsed).toMatchObject({ arranged: 1, arrangedLooseItems: 4 });
+    expect(parsed).toMatchObject({ arranged: 5, arrangedLooseItems: 4 });
     expect(parsed.looseUpdates.map((update: { objectId: string }) => update.objectId)).toEqual([
       'free-worktree',
       'artifact',
@@ -2630,7 +2639,7 @@ describe('board layout tools with branch entities present', () => {
 
     expect(parsed.updates).toHaveLength(2);
     expect(parsed.updates.map((update: { size: { width: number } }) => update.size.width)).toEqual([
-      420, 620,
+      420, 540,
     ]);
     expect(
       parsed.updates.map((update: { contentColumns: number }) => update.contentColumns)
