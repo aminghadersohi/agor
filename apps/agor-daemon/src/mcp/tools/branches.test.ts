@@ -1581,6 +1581,7 @@ describe('agor_branches_set_zone', () => {
         }
         if (name === 'board-objects') {
           return {
+            find: vi.fn(async () => ({ data: [] })),
             findByBranchId: vi.fn(async () => persistedBoardObject),
             patch: boardObjectsPatch,
           };
@@ -1594,8 +1595,6 @@ describe('agor_branches_set_zone', () => {
       userId: 'user-1',
       baseServiceParams,
     });
-    vi.spyOn(Math, 'random').mockReturnValue(0);
-
     const result = await setZone({ branchId: 'branch-1', zoneId: 'zone-review' });
     const parsed = JSON.parse(result.content[0].text);
 
@@ -1606,11 +1605,11 @@ describe('agor_branches_set_zone', () => {
     // stale out-of-bounds y must never survive the ordinary upstream path.
     expect(boardObjectsPatch).toHaveBeenCalledWith(
       'obj-branch-1',
-      { position: { x: 80, y: 80 }, zone_id: 'zone-review' },
+      { position: { x: 24, y: 24 }, zone_id: 'zone-review' },
       baseServiceParams
     );
-    expect(persistedBoardObject.position).toEqual({ x: 80, y: 80 });
-    expect(parsed.position).toEqual({ x: 80, y: 80 });
+    expect(persistedBoardObject.position).toEqual({ x: 24, y: 24 });
+    expect(parsed.position).toEqual({ x: 24, y: 24 });
     expect(parsed.position).not.toEqual({ x: 24, y: 1562.814299097225 });
     expect(parsed.position.x + 500).toBeLessThanOrEqual(zone.width);
     expect(parsed.position.y + 200).toBeLessThanOrEqual(zone.height);
@@ -1691,7 +1690,6 @@ describe('agor_branches_set_zone', () => {
       baseServiceParams,
     });
 
-    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
     const result = await setZone({
       branchId: 'branch-1',
       zoneId: 'zone-validate',
@@ -1705,9 +1703,9 @@ describe('agor_branches_set_zone', () => {
     expect(boardObjectsPatch).toHaveBeenCalledWith(
       'obj-branch-1',
       expect.objectContaining({
-        // Zone origin is intentionally non-zero: set_zone persists React Flow
-        // child coordinates, never canvas-absolute coordinates.
-        position: { x: 80, y: 80 },
+        // set_zone persists zone-relative coordinates using the shared content
+        // inset, never the zone's canvas origin.
+        position: { x: 24, y: 24 },
         zone_id: 'zone-validate',
       }),
       baseServiceParams
@@ -1717,7 +1715,6 @@ describe('agor_branches_set_zone', () => {
       { ...baseServiceParams, route: { id: 'session-1' } }
     );
     expect(parsed.trigger.sessionId).toBe('session-1');
-    random.mockRestore();
   });
 
   it('rejects show_picker zone triggers when the target session belongs to another branch', async () => {

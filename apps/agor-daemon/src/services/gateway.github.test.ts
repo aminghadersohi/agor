@@ -455,6 +455,10 @@ describe('GatewayService GitHub integration', () => {
       expect.objectContaining({
         metadata: {
           gateway_reply_metadata: { processing_comment_id: 905 },
+          queue_coalescing: {
+            group_key: 'session-system-updates',
+            kind: 'gateway',
+          },
         },
       }),
       expect.anything()
