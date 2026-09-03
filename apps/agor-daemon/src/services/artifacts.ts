@@ -23,10 +23,10 @@ import {
   BranchRepository,
   bindRepositoryToTenantUnitOfWork,
   generateId,
-  ScheduleRepository,
-  SessionRepository,
   getCurrentTenantId,
   RepoRepository,
+  ScheduleRepository,
+  SessionRepository,
   type TenantScopeAwareDatabase,
   UsersRepository,
 } from '@agor/core/db';
