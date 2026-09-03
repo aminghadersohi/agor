@@ -217,6 +217,72 @@ describe('FileService executor failures', () => {
     expect(JSON.stringify(vi.mocked(requestExecutor).mock.calls[0])).not.toContain('branch-owner');
   });
 
+  it('passes the typed write payload and caller-scoped mounts through the production handler', async () => {
+    vi.spyOn(UsersRepository.prototype, 'getFilesystemHomeProjection').mockResolvedValue({
+      user_id: 'user-1',
+      filesystem_home: null,
+    } as never);
+    vi.spyOn(RepoRepository.prototype, 'findById').mockResolvedValue({
+      local_path: '/srv/tenants/tenant-a/repos/org/repo',
+    } as never);
+    vi.mocked(requestExecutor).mockResolvedValue({
+      success: true,
+      data: {
+        file: {
+          path: 'README.md',
+          title: 'Updated',
+          size: 9,
+          lastModified: '2026-09-03T00:01:00.000Z',
+          isText: true,
+          mimeType: 'text/markdown',
+          content: '# Updated',
+          encoding: 'utf-8',
+        },
+      },
+    });
+    const service = new FileService(
+      createBranchRepo(undefined, 'write'),
+      { run: vi.fn() } as never,
+      createApp({
+        paths: { data_home: '/srv/agor' },
+        multi_tenancy: {
+          mode: 'required_from_auth',
+          filesystem_isolation_enabled: true,
+          tenants_base_folder: '/srv/tenants',
+        },
+        execution: { sandbox: { enabled: true, home_mode: 'per_user' } },
+      })
+    );
+
+    await runWithTenantContext('tenant-a', () =>
+      service.patch(
+        'README.md',
+        { content: '# Updated', expectedLastModified: '2026-09-03T00:00:00.000Z' },
+        {
+          query: { branch_id: 'branch-1' },
+          user: { user_id: 'user-1', email: 'member@example.com', role: 'member' },
+        }
+      )
+    );
+
+    expect(requestExecutor).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: 'branch.files.write',
+        params: expect.objectContaining({
+          cwd: '/tenant-a/branch-1',
+          principalBranchAccess: 'write',
+          filePath: 'README.md',
+          content: '# Updated',
+          expectedLastModified: '2026-09-03T00:00:00.000Z',
+          sandboxHomeStore: '/srv/tenants/tenant-a/homes/user-1',
+          sandboxWorktreesRoot: '/srv/tenants/tenant-a/worktrees',
+          sandboxBaseRepoPath: '/srv/tenants/tenant-a/repos/org/repo',
+        }),
+      }),
+      expect.any(Object)
+    );
+  });
+
   it('scopes database reads but leaves executor work outside the transaction', async () => {
     const db = { run: vi.fn() } as never;
     const findById = vi.fn(async () => {
