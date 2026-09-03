@@ -25,7 +25,10 @@ import {
   generateId,
   ScheduleRepository,
   SessionRepository,
+  getCurrentTenantId,
+  RepoRepository,
   type TenantScopeAwareDatabase,
+  UsersRepository,
 } from '@agor/core/db';
 import {
   type Application,
@@ -54,6 +57,7 @@ import type {
   ArtifactTrustScopeType,
   AuthenticatedParams,
   BoardID,
+  Branch,
   BranchID,
   QueryParams,
   SandpackConfig,
@@ -82,6 +86,7 @@ import { AGOR_RUNTIME_SOURCE } from '../utils/agor-runtime-source.js';
 import { ensureBranchWorkspaceAccess } from '../utils/branch-workspace-path.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
 import { resolveDelegatedExecutionHomeKey } from '../utils/executor-delegated-home.js';
+import { resolveOwnerHomeStore, resolveSandboxStoragePaths } from '../utils/sandbox-context.js';
 import {
   detectLegacyFormat,
   envVarPrefixForTemplate,
@@ -364,6 +369,8 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
   private boardRepo: BoardRepository;
   private scheduleRepo: ScheduleRepository;
   private sessionRepo: SessionRepository;
+  private repoRepo: RepoRepository;
+  private usersRepo: UsersRepository;
   private app: Application;
   /** Held for `resolveUserEnvironment` (scope-aware env-var resolution). */
   private dbRef: TenantScopeAwareDatabase;
@@ -445,9 +452,70 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     this.boardRepo = bindRepositoryToTenantUnitOfWork(db, new BoardRepository(db));
     this.scheduleRepo = bindRepositoryToTenantUnitOfWork(db, new ScheduleRepository(db));
     this.sessionRepo = bindRepositoryToTenantUnitOfWork(db, new SessionRepository(db));
+    this.repoRepo = bindRepositoryToTenantUnitOfWork(db, new RepoRepository(db));
+    this.usersRepo = bindRepositoryToTenantUnitOfWork(db, new UsersRepository(db));
     this.app = app;
     this.dbRef = db;
     this.runtimeIntrospectionEnabled = options.runtimeIntrospectionEnabled !== false;
+  }
+
+  /**
+   * Resolve the authoritative, caller-scoped mount inputs required by local
+   * artifact executor commands. Artifact publish/validate/land all run in the
+   * authenticated actor's filesystem sandbox, not the branch owner's home.
+   *
+   * Request and ambient tenant identities are both trusted boundaries, but
+   * they must agree when both are present. Unsafe filesystem_home overrides,
+   * missing tenant ownership, and credential-authority preflight failures all
+   * throw before launch; there is deliberately no shared-home fallback.
+   *
+   * Architecture follow-up: register-services and BranchesService compose the
+   * same mount family. Keep this caller-specific resolver local until a shared
+   * helper can preserve each path's DB/tenant contract with integration tests.
+   */
+  private async resolveExecutorSandboxMounts(
+    branch: Branch,
+    userId: UserID,
+    params: ArtifactParams
+  ): Promise<{
+    sandboxHomeStore?: string;
+    sandboxWorktreesRoot?: string;
+    sandboxBaseRepoPath?: string;
+  }> {
+    const config = this.app.get('config');
+    const sandbox = config.execution?.sandbox;
+    if (sandbox?.enabled !== true || sandbox.home_mode !== 'per_user') return {};
+
+    const requestTenantId = params.tenant?.tenant_id ? String(params.tenant.tenant_id) : undefined;
+    const ambientTenantId = getCurrentTenantId();
+    const ambientTenant = ambientTenantId ? String(ambientTenantId) : undefined;
+    if (requestTenantId && ambientTenant && requestTenantId !== ambientTenant) {
+      throw new Forbidden('Artifact executor tenant identity mismatch');
+    }
+    const tenantId = ambientTenant ?? requestTenantId;
+    const filesystemHome =
+      (await this.usersRepo.findById(userId))?.filesystem_home?.trim() || undefined;
+    const mounts: {
+      sandboxHomeStore?: string;
+      sandboxWorktreesRoot?: string;
+      sandboxBaseRepoPath?: string;
+    } = {
+      sandboxHomeStore: resolveOwnerHomeStore({
+        config,
+        tenantId,
+        ownerUserId: userId,
+        filesystemHome,
+      }),
+      sandboxWorktreesRoot: resolveSandboxStoragePaths(config, tenantId).worktreesRoot,
+    };
+
+    // Linked worktrees need their shared git directory available. Clone-mode
+    // branches carry .git inside the branch and need no base-repo mount.
+    if (branch.storage_mode !== 'clone' && branch.repo_id) {
+      const repo = await this.repoRepo.findById(branch.repo_id);
+      mounts.sandboxBaseRepoPath = repo?.local_path ?? undefined;
+    }
+    return mounts;
   }
 
   private assertRuntimeIntrospectionEnabled(): void {
@@ -969,6 +1037,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
 
     const userId = params.user?.user_id;
     if (!userId) throw new NotAuthenticated('Authentication required');
+    const sandboxMounts = await this.resolveExecutorSandboxMounts(branch, userId as UserID, params);
     const sessionToken = await issueExecutorCommandToken(
       this.app,
       'artifact.publish',
@@ -986,6 +1055,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
           publishData: data,
           cwd: branch.path,
           principalBranchAccess: branchFsAccess,
+          ...sandboxMounts,
         },
       },
       {
@@ -1491,6 +1561,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     );
     const userId = params.user?.user_id;
     if (!userId) throw new NotAuthenticated('Authentication required');
+    const sandboxMounts = await this.resolveExecutorSandboxMounts(branch, userId as UserID, params);
     const sessionToken = await issueExecutorCommandToken(
       this.app,
       'branch-artifact-land',
@@ -1509,6 +1580,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
           overwrite: options.overwrite,
           cwd: branch.path,
           principalBranchAccess: branchFsAccess,
+          ...sandboxMounts,
         },
       },
       {
@@ -2248,6 +2320,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     );
     const userId = params.user?.user_id;
     if (!userId) throw new NotAuthenticated('Authentication required');
+    const sandboxMounts = await this.resolveExecutorSandboxMounts(branch, userId as UserID, params);
     const result = await requestExecutor(
       {
         command: 'branch.artifact.validate',
@@ -2263,6 +2336,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
           subpath: input.subpath,
           cwd: branch.path,
           principalBranchAccess: branchFsAccess,
+          ...sandboxMounts,
         },
       },
       {
