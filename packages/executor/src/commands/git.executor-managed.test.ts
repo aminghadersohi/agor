@@ -25,12 +25,18 @@ const mocks = vi.hoisted(() => ({
   ensureGitRemoteUrl: vi.fn(),
   scanGitConfigRemoteCredentials: vi.fn(),
   scrubGitConfigRemoteCredentials: vi.fn(),
+  writeFile: vi.fn(),
   userHome: '/passwd/home',
 }));
 
 vi.mock('node:os', async () => {
   const actual = await vi.importActual<typeof import('node:os')>('node:os');
   return { ...actual, userInfo: vi.fn(() => ({ homedir: mocks.userHome })) };
+});
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, writeFile: mocks.writeFile };
 });
 
 vi.mock('@agor/core/config', async () => {
@@ -51,7 +57,15 @@ vi.mock('../git/index.js', async () => {
   const actual = await vi.importActual<Record<string, unknown>>('../git/index.js');
   return {
     ...actual,
-    createGit: vi.fn(() => ({ git: { addConfig: mocks.addConfig, raw: mocks.gitRaw } })),
+    createGit: vi.fn(() => ({
+      git: {
+        addConfig: mocks.addConfig,
+        raw: mocks.gitRaw,
+        revparse: vi.fn(async (args: string[]) =>
+          args.includes('--git-path') ? '.git/agor-branch-id' : ''
+        ),
+      },
+    })),
     cloneRepo: mocks.cloneRepo,
     createBranch: mocks.createBranch,
     createBranchAsClone: mocks.createBranchAsClone,
@@ -222,6 +236,7 @@ beforeEach(() => {
   });
   mocks.scrubGitConfigRemoteCredentials.mockResolvedValue({ findings: [] });
   mocks.ensureGitRemoteUrl.mockResolvedValue({ changed: false });
+  mocks.writeFile.mockResolvedValue(undefined);
 });
 
 describe('managed executor git/fs commands', () => {
@@ -314,6 +329,11 @@ describe('managed executor git/fs commands', () => {
         depth: 42,
         referencePath: '/trusted/repo',
       })
+    );
+    expect(mocks.writeFile).toHaveBeenCalledWith(
+      '/trusted/branch/.git/agor-branch-id',
+      `${branchId}\n`,
+      { mode: 0o600 }
     );
     expect(patchedBranches).toContainEqual({ filesystem_status: 'ready' });
     expect(patchedBranches).toContainEqual({

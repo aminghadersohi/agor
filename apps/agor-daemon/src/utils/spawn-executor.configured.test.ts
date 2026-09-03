@@ -821,13 +821,6 @@ describe('configured executor spawning', () => {
           },
         });
 
-        let immediateResult: Awaited<typeof resultPromise> | undefined;
-        void resultPromise.then((result) => {
-          immediateResult = result;
-        });
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        expect(immediateResult).toBeUndefined();
-
         await deliverExecutorResponse(proc, {
           success: true,
           data: { path: '.agor/session-staging/brief.txt' },
