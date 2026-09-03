@@ -12,6 +12,11 @@ import {
   snapBoardGridValue,
 } from '@agor/core/layout/rectangle-packing';
 import type {
+  BoardLayoutApplyResult,
+  BoardLayoutBatch,
+  BoardLayoutObjectUpdate,
+} from '@agor/core/types';
+import type {
   AgenticToolName,
   AgorClient,
   Board,
@@ -154,6 +159,7 @@ import {
 } from './canvas/selectionLayoutContinuity';
 import { useBoardObjects } from './canvas/useBoardObjects';
 import { useZoneWorkflow } from './canvas/useZoneWorkflow';
+import { layoutResultCoversBatch } from './canvas/utils/autoArrangeGuard';
 import { getMeasuredLayoutNodeSize } from './canvas/utils/boardNodeGeometry';
 import { findIntersectingObjects, findZoneAtPosition } from './canvas/utils/collisionDetection';
 import {
@@ -802,11 +808,18 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Debounce timer ref for position updates
     const layoutUpdateTimerRef = useRef<NodeJS.Timeout | null>(null);
     const pendingLayoutUpdatesRef = useRef<Record<string, { x: number; y: number }>>({});
+    // Serialize rapid debounced writes so an older request can never commit
+    // after the geometry from a newer drop.
+    const layoutPersistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
     // React Flow's drag-stop node can lag behind a position that our alignment
     // guide handler applied through setNodes. Keep the last position actually
     // accepted during this drag so the displayed and persisted geometry cannot
     // diverge after the debounce/realtime echo.
     const activeDragPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
+    // React Flow's third drag callback argument is the exact set of directly
+    // movable nodes. It already excludes locked nodes and descendants whose
+    // selected parent owns the gesture.
+    const activeDragNodeIdsRef = useRef<Set<string>>(new Set());
     const isDraggingRef = useRef(false);
     const [isDraggingCanvas, setIsDraggingCanvas] = useState(false);
     const [alignmentGuides, setAlignmentGuides] = useState<LayoutGuide[]>([]);
@@ -990,7 +1003,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Board objects hook
     const {
       getBoardObjectNodes,
-      batchUpdateObjectPositions,
       deleteObject,
       demoteAutoZone,
       deferAutoZone,
@@ -2442,7 +2454,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
     // Handle node drag start
     const handleNodeDragStart: NodeDragHandler = useCallback(
-      (_event, node) => {
+      (_event, node, draggedNodes) => {
         cancelPendingPostLayoutViewport();
         // Auto-layout manages only cards/worktrees. Taking hold of one that is
         // already inside a zone is direct control of that zone's layout, so
@@ -2451,11 +2463,19 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           void demoteAutoZone(node.parentId);
         }
         isDraggingRef.current = true;
-        const absolutePos = node.positionAbsolute || node.position;
-        activeDragPositionsRef.current[node.id] = {
-          x: absolutePos.x,
-          y: absolutePos.y,
-        };
+        activeDragPositionsRef.current = {};
+        const directlyDraggedNodes = (draggedNodes?.length ? draggedNodes : [node]).filter(
+          (candidate) =>
+            !candidate.hidden && candidate.draggable !== false && candidate.data?.locked !== true
+        );
+        activeDragNodeIdsRef.current = new Set(directlyDraggedNodes.map(({ id }) => id));
+        for (const draggedNode of directlyDraggedNodes) {
+          const absolutePos = draggedNode.positionAbsolute || draggedNode.position;
+          activeDragPositionsRef.current[draggedNode.id] = {
+            x: absolutePos.x,
+            y: absolutePos.y,
+          };
+        }
         setIsDraggingCanvas(true);
         setAlignmentGuides([]);
         const viewport = reactFlowInstanceRef.current?.getViewport?.();
@@ -2466,23 +2486,53 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
     // Handle node drag - track local position changes
     const handleNodeDrag: NodeDragHandler = useCallback(
-      (_event, node) => {
+      (_event, node, draggedNodes) => {
         const absolutePos = node.positionAbsolute || node.position;
         const currentNodes = reactFlowInstanceRef.current?.getNodes() ?? nodes;
-        const trackAcceptedPosition = (position: { x: number; y: number }) => {
-          const previous = activeDragPositionsRef.current[node.id];
-          if (node.type === 'zone' && previous) {
+        const callbackNodeById = new Map(
+          (draggedNodes?.length ? draggedNodes : [node]).map((candidate) => [
+            candidate.id,
+            candidate,
+          ])
+        );
+        const currentNodeById = new Map(currentNodes.map((candidate) => [candidate.id, candidate]));
+        const directlyDraggedNodes = [...activeDragNodeIdsRef.current].flatMap((nodeId) => {
+          const draggedNode = callbackNodeById.get(nodeId) ?? currentNodeById.get(nodeId);
+          return draggedNode ? [draggedNode] : [];
+        });
+        const trackAcceptedPosition = (draggedNode: Node, position: { x: number; y: number }) => {
+          const previous = activeDragPositionsRef.current[draggedNode.id];
+          if (draggedNode.type === 'zone' && previous) {
             translateTrackedChildPositions(
               currentNodes,
-              node.id,
+              draggedNode.id,
               previous,
               position,
               localPositionsRef.current
             );
           }
-          activeDragPositionsRef.current[node.id] = position;
+          activeDragPositionsRef.current[draggedNode.id] = position;
+          localPositionsRef.current[draggedNode.id] = position;
+          if (draggedNode.type === 'zone') {
+            const boardObject = board?.objects?.[draggedNode.id];
+            localZoneGeometryRef.current[draggedNode.id] = {
+              x: position.x,
+              y: position.y,
+              width: Number(
+                draggedNode.width ??
+                  draggedNode.style?.width ??
+                  (boardObject && 'width' in boardObject ? boardObject.width : 0)
+              ),
+              height: Number(
+                draggedNode.height ??
+                  draggedNode.style?.height ??
+                  (boardObject && 'height' in boardObject ? boardObject.height : 0)
+              ),
+            };
+          }
         };
         const layoutRects = getGuideLayoutRects(node, currentNodes);
+        let correction = { x: 0, y: 0 };
         if (layoutRects) {
           const zoom = reactFlowInstanceRef.current?.getZoom() ?? guideViewport.zoom;
           const snapped = snapRectToPeers(
@@ -2492,83 +2542,100 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           );
           setAlignmentGuides(snapped.guides);
           if (snapped.x !== absolutePos.x || snapped.y !== absolutePos.y) {
-            const parent = node.parentId
-              ? currentNodes.find((candidate) => candidate.id === node.parentId)
-              : undefined;
-            const position = parent
-              ? absoluteToRelative(
-                  { x: snapped.x, y: snapped.y },
-                  getNodeAbsolutePosition(parent, currentNodes)
-                )
-              : { x: snapped.x, y: snapped.y };
-            setNodes((currentNodes) =>
-              currentNodes.map((current) =>
-                current.id === node.id ? { ...current, position } : current
-              )
+            correction = { x: snapped.x - absolutePos.x, y: snapped.y - absolutePos.y };
+            const draggedNodeById = new Map(
+              directlyDraggedNodes.map((draggedNode) => [draggedNode.id, draggedNode])
             );
-            localPositionsRef.current[node.id] = { x: snapped.x, y: snapped.y };
-            trackAcceptedPosition({ x: snapped.x, y: snapped.y });
-            return;
+            setNodes((currentNodes) =>
+              currentNodes.map((current) => {
+                const draggedNode = draggedNodeById.get(current.id);
+                if (!draggedNode) return current;
+                const rawPosition = draggedNode.positionAbsolute || draggedNode.position;
+                const acceptedPosition = {
+                  x: rawPosition.x + correction.x,
+                  y: rawPosition.y + correction.y,
+                };
+                const parent = draggedNode.parentId
+                  ? currentNodes.find((candidate) => candidate.id === draggedNode.parentId)
+                  : undefined;
+                return {
+                  ...current,
+                  position: parent
+                    ? absoluteToRelative(
+                        acceptedPosition,
+                        getNodeAbsolutePosition(parent, currentNodes)
+                      )
+                    : acceptedPosition,
+                };
+              })
+            );
           }
         }
 
-        // Track this position locally so we don't get overwritten by WebSocket updates
-        // IMPORTANT: Store ABSOLUTE position, not relative!
-        localPositionsRef.current[node.id] = {
-          x: absolutePos.x,
-          y: absolutePos.y,
-        };
-        trackAcceptedPosition({ x: absolutePos.x, y: absolutePos.y });
-        if (node.type === 'zone') {
-          localZoneGeometryRef.current[node.id] = {
-            x: absolutePos.x,
-            y: absolutePos.y,
-            width: Number(node.width ?? node.style?.width ?? 0),
-            height: Number(node.height ?? node.style?.height ?? 0),
-          };
+        // React Flow already gave the group one pointer/grid delta. Apply any
+        // guide correction to that whole set and guard every accepted position.
+        for (const draggedNode of directlyDraggedNodes) {
+          const rawPosition = draggedNode.positionAbsolute || draggedNode.position;
+          trackAcceptedPosition(draggedNode, {
+            x: rawPosition.x + correction.x,
+            y: rawPosition.y + correction.y,
+          });
         }
       },
-      [guideViewport.zoom, nodes, setNodes]
+      [board?.objects, guideViewport.zoom, nodes, setNodes]
     );
 
     // Handle node drag end - persist layout to board (debounced)
     const handleNodeDragStop: NodeDragHandler = useCallback(
-      (_event, node) => {
+      (_event, node, draggedNodes) => {
         if (!board || !client || !reactFlowInstanceRef.current) return;
+        const currentNodes = reactFlowInstanceRef.current.getNodes();
+        const callbackNodeById = new Map(
+          (draggedNodes?.length ? draggedNodes : [node]).map((candidate) => [
+            candidate.id,
+            candidate,
+          ])
+        );
+        const currentNodeById = new Map(currentNodes.map((candidate) => [candidate.id, candidate]));
 
-        // Reset dragging flag immediately to allow node sync effects to run
+        // Populate every group member's optimistic guard before board sync is
+        // re-enabled. Otherwise the old board snapshot can snap secondary
+        // selected zones back during the 500ms debounce.
+        for (const nodeId of activeDragNodeIdsRef.current) {
+          const draggedNode = callbackNodeById.get(nodeId) ?? currentNodeById.get(nodeId);
+          if (!draggedNode) continue;
+          const eventAbsolutePos = draggedNode.positionAbsolute || draggedNode.position;
+          const absolutePos = consumeTrackedDragPosition(
+            nodeId,
+            eventAbsolutePos,
+            activeDragPositionsRef.current
+          );
+          localPositionsRef.current[nodeId] = absolutePos;
+          pendingLayoutUpdatesRef.current[nodeId] = absolutePos;
+
+          if (draggedNode.type === 'zone') {
+            const objectData = board.objects?.[nodeId];
+            localZoneGeometryRef.current[nodeId] = {
+              x: absolutePos.x,
+              y: absolutePos.y,
+              width: Number(
+                draggedNode.width ??
+                  draggedNode.style?.width ??
+                  (objectData && 'width' in objectData ? objectData.width : 0)
+              ),
+              height: Number(
+                draggedNode.height ??
+                  draggedNode.style?.height ??
+                  (objectData && 'height' in objectData ? objectData.height : 0)
+              ),
+            };
+          }
+        }
+        activeDragNodeIdsRef.current.clear();
+
         isDraggingRef.current = false;
         setIsDraggingCanvas(false);
         setAlignmentGuides([]);
-
-        // Track final position locally
-        // IMPORTANT: Store ABSOLUTE position, not relative!
-        const eventAbsolutePos = node.positionAbsolute || node.position;
-        const absolutePos = consumeTrackedDragPosition(
-          node.id,
-          eventAbsolutePos,
-          activeDragPositionsRef.current
-        );
-        localPositionsRef.current[node.id] = {
-          x: absolutePos.x,
-          y: absolutePos.y,
-        };
-
-        if (node.type === 'zone') {
-          localZoneGeometryRef.current[node.id] = {
-            x: absolutePos.x,
-            y: absolutePos.y,
-            width: Number(node.width ?? node.style?.width ?? 0),
-            height: Number(node.height ?? node.style?.height ?? 0),
-          };
-        }
-
-        // Accumulate position updates
-        // IMPORTANT: Store ABSOLUTE position for consistency!
-        pendingLayoutUpdatesRef.current[node.id] = {
-          x: absolutePos.x,
-          y: absolutePos.y,
-        };
 
         // Clear existing timer
         if (layoutUpdateTimerRef.current) {
@@ -2580,6 +2647,16 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           const updates = pendingLayoutUpdatesRef.current;
           pendingLayoutUpdatesRef.current = {};
 
+          // Reserve this gesture's place before awaiting the previous one.
+          // Requests therefore reach the server in drop order even when an
+          // earlier response is delayed.
+          const previousWrite = layoutPersistenceQueueRef.current;
+          let releaseWrite: () => void = () => undefined;
+          layoutPersistenceQueueRef.current = new Promise<void>((resolve) => {
+            releaseWrite = resolve;
+          });
+          await previousWrite;
+
           try {
             // Separate updates for branches vs zones vs markdown vs comments
             const branchUpdates: Array<{
@@ -2587,9 +2664,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               position: { x: number; y: number };
               zone_id?: string | null;
             }> = [];
-            const zoneUpdates: Record<string, { x: number; y: number }> = {};
-            const markdownUpdates: Record<string, { x: number; y: number }> = {};
-            const artifactUpdates: Record<string, { x: number; y: number }> = {};
+            const canvasObjectUpdates: Record<string, BoardLayoutObjectUpdate> = {};
             const commentUpdates: Array<{
               comment: BoardComment;
               position: { x: number; y: number };
@@ -2598,21 +2673,35 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             }> = [];
 
             // Find all current nodes to check types
-            const currentNodes = nodes;
+            const currentNodes = reactFlowInstanceRef.current?.getNodes() ?? nodes;
 
             for (const [nodeId, position] of Object.entries(updates)) {
               const draggedNode = currentNodes.find((n) => n.id === nodeId);
 
-              if (draggedNode?.type === 'zone') {
-                // Zone moved - update position via batchUpdateObjectPositions
-                zoneUpdates[nodeId] = position;
-              } else if (draggedNode?.type === 'markdown') {
-                // Markdown note moved - update position via batchUpdateObjectPositions
-                markdownUpdates[nodeId] = position;
-              } else if (draggedNode?.type === 'artifactNode') {
-                // Artifact moved - update position via batchUpdateObjectPositions
-                // Board objects key is the nodeId itself (e.g. "artifact-{uuid}")
-                artifactUpdates[nodeId] = position;
+              if (
+                draggedNode?.type === 'zone' ||
+                draggedNode?.type === 'markdown' ||
+                draggedNode?.type === 'artifactNode'
+              ) {
+                const currentObject = board.objects?.[nodeId];
+                if (!currentObject) continue;
+                const localZoneGeometry = localZoneGeometryRef.current[nodeId];
+                const geometry: BoardLayoutObjectUpdate = {
+                  x: position.x,
+                  y: position.y,
+                  ...('width' in currentObject
+                    ? { width: localZoneGeometry?.width || currentObject.width }
+                    : {}),
+                  ...('height' in currentObject
+                    ? { height: localZoneGeometry?.height || currentObject.height }
+                    : {}),
+                };
+                const unchanged =
+                  currentObject.x === geometry.x &&
+                  currentObject.y === geometry.y &&
+                  (!('width' in currentObject) || currentObject.width === geometry.width) &&
+                  (!('height' in currentObject) || currentObject.height === geometry.height);
+                if (!unchanged) canvasObjectUpdates[nodeId] = geometry;
               } else if (draggedNode?.type === 'comment') {
                 // Comment pin moved - extract comment_id from node id
                 const commentId = nodeId.replace('comment-', '');
@@ -2827,19 +2916,17 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               }
             }
 
-            // Update zone positions
-            if (Object.keys(zoneUpdates).length > 0) {
-              await batchUpdateObjectPositions(zoneUpdates);
-            }
-
-            // Update markdown positions
-            if (Object.keys(markdownUpdates).length > 0) {
-              await batchUpdateObjectPositions(markdownUpdates);
-            }
-
-            // Update artifact positions
-            if (Object.keys(artifactUpdates).length > 0) {
-              await batchUpdateObjectPositions(artifactUpdates);
+            // Persist every changed canvas object from the gesture as one
+            // authoritative geometry transaction/realtime batch.
+            if (Object.keys(canvasObjectUpdates).length > 0) {
+              const batch: BoardLayoutBatch = { objects: canvasObjectUpdates, placements: {} };
+              const result = (await client.service('boards').patch(board.board_id, {
+                _action: 'applyLayout',
+                ...batch,
+              } as unknown as Partial<Board>)) as unknown as BoardLayoutApplyResult;
+              if (!layoutResultCoversBatch(result, batch)) {
+                throw new Error('Board drag acknowledgement omitted committed geometry');
+              }
             }
 
             // Update comment positions
@@ -2896,19 +2983,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             }
           } catch (error) {
             console.error('Failed to persist layout:', error);
+          } finally {
+            releaseWrite();
           }
         }, 500);
       },
-      [
-        board,
-        client,
-        batchUpdateObjectPositions,
-        nodes,
-        boardObjectByBranch,
-        boardObjectByCard,
-        commentById,
-        setNodes,
-      ]
+      [board, client, nodes, boardObjectByBranch, boardObjectByCard, commentById, setNodes]
     );
 
     const selectedLayoutNodes = useMemo(() => getSelectedLayoutNodes(nodes), [nodes]);
