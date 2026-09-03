@@ -119,6 +119,7 @@ export class FileService
       resolved.delegatedHomeKey,
       resolved.branchPath,
       resolved.fsAccess,
+      resolved.sandboxMounts,
       {
         filePath: id.toString(),
         content: data.content,
@@ -241,12 +242,23 @@ export class FileService
         config.execution?.allow_superadmin === true
       );
       const delegatedHomeKey = await resolveDelegatedExecutionHomeKey(this.db, userId, config);
+      // Writes use the same caller-scoped sandbox mounts as reads. The executor
+      // remains responsible for rejecting traversal and symlink escapes inside
+      // this explicitly authorized branch root.
+      const sandboxMounts = await resolveBranchExecutorSandboxMounts({
+        config,
+        tenantId,
+        executionUserId: userId as UserID,
+        branch,
+        db: this.db,
+      });
       return {
         branchId: branch.branch_id,
         branchPath: branch.path,
         delegatedHomeKey,
         fsAccess,
         userId,
+        sandboxMounts,
       };
     });
   }
