@@ -3404,7 +3404,7 @@ describe('arrangeBoardZones production path', () => {
     expect(lockedClient.boardsPatch).not.toHaveBeenCalled();
   });
 
-  it('makes Grid Apply immediate and a following Arrange a persistence no-op', async () => {
+  it('emits one explicit full-board fit intent for material and unchanged Arrange writes', async () => {
     const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
     const onUserLayoutComplete = vi.fn();
     let board = makeBoard({
@@ -3438,7 +3438,7 @@ describe('arrangeBoardZones production path', () => {
     );
 
     await act(async () => {
-      await result.current.arrangeBoardZones(['one', 'two', 'three'], { userInitiated: true });
+      await result.current.arrangeWholeBoard({ viewportMode: 'fit' });
     });
 
     expect(boardsPatch).toHaveBeenCalledTimes(1);
@@ -3450,7 +3450,12 @@ describe('arrangeBoardZones production path', () => {
     );
     expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
     expect(onUserLayoutComplete).toHaveBeenCalledWith(
-      expect.objectContaining({ source: 'user', boardId: 'board-1', scope: 'board' })
+      expect.objectContaining({
+        source: 'user',
+        boardId: 'board-1',
+        scope: 'board',
+        mode: 'fit',
+      })
     );
 
     board = { ...board, objects: { ...board.objects, ...firstWrite.objects } };
@@ -3460,13 +3465,83 @@ describe('arrangeBoardZones production path', () => {
     showSuccess.mockClear();
 
     await act(async () => {
-      await result.current.arrangeWholeBoard();
+      await result.current.arrangeWholeBoard({ viewportMode: 'fit' });
     });
 
     expect(boardsPatch).not.toHaveBeenCalled();
     expect(boardObjectsPatch).not.toHaveBeenCalled();
-    expect(onUserLayoutComplete).toHaveBeenCalledTimes(1);
+    expect(onUserLayoutComplete).toHaveBeenCalledTimes(2);
+    expect(onUserLayoutComplete.mock.calls[1]?.[0]).toMatchObject({
+      mode: 'fit',
+      before: expect.any(Array),
+      after: expect.any(Array),
+    });
+    expect(onUserLayoutComplete.mock.calls[1]?.[0].before).toEqual(
+      onUserLayoutComplete.mock.calls[1]?.[0].after
+    );
     expect(showSuccess).toHaveBeenCalledWith('Zones and their contents are already arranged.');
+  });
+
+  it('routes unchecked whole-board Arrange through preserve intents without changing writes', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const onUserLayoutComplete = vi.fn();
+    const onUserLayoutStart = vi.fn(() => 17);
+    const board = makeBoard({
+      moving: { type: 'zone', x: 1600, y: 900, width: 620, height: 500, label: 'Moving' },
+      fixed: { type: 'zone', x: -900, y: -600, width: 480, height: 340, label: 'Fixed' },
+    });
+    const nodes: Node[] = [
+      {
+        id: 'moving',
+        type: 'zone',
+        position: { x: 1600, y: 900 },
+        width: 620,
+        height: 500,
+        data: {},
+      },
+      {
+        id: 'fixed',
+        type: 'zone',
+        position: { x: -900, y: -600 },
+        width: 480,
+        height: 340,
+        data: { locked: true },
+      },
+    ];
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+          onUserLayoutStart,
+          onUserLayoutComplete,
+        }),
+      { wrapper }
+    );
+
+    await act(async () => result.current.arrangeWholeBoard({ viewportMode: 'preserve' }));
+
+    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    expect(onUserLayoutStart).toHaveBeenCalledTimes(1);
+    expect(onUserLayoutComplete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: 'preserve',
+        scope: 'board',
+        before: expect.arrayContaining([
+          expect.objectContaining({ id: 'moving' }),
+          expect.objectContaining({ id: 'fixed' }),
+        ]),
+        after: expect.arrayContaining([
+          expect.objectContaining({ id: 'moving' }),
+          expect.objectContaining({ id: 'fixed' }),
+        ]),
+      }),
+      17
+    );
   });
 
   it('centers selection-only zone layout and routes around every unselected fixed peer', async () => {
@@ -3553,6 +3628,7 @@ describe('arrangeBoardZones production path', () => {
     expect(onUserLayoutComplete).toHaveBeenCalledWith(
       expect.objectContaining({
         scope: 'selection',
+        mode: 'smart',
         before: [expect.objectContaining({ id: 'one' }), expect.objectContaining({ id: 'two' })],
         after: [expect.objectContaining({ id: 'one' }), expect.objectContaining({ id: 'two' })],
       })

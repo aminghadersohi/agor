@@ -107,6 +107,18 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     const matchFrames = within(dialog).getByRole('checkbox', {
       name: 'Match / resize zone frames',
     });
+    const fitView = within(dialog).getByRole('checkbox', {
+      name: 'Fit view after arranging',
+    });
+    expect(fitView).toBeChecked();
+    await act(async () =>
+      user.click(within(dialog).getByText('Fit view after arranging', { exact: true }))
+    );
+    expect(fitView).not.toBeChecked();
+    await act(async () =>
+      user.click(within(dialog).getByText('Fit view after arranging', { exact: true }))
+    );
+    expect(fitView).toBeChecked();
     await act(async () =>
       user.click(within(dialog).getByText('Pack zone contents', { exact: true }))
     );
@@ -187,6 +199,12 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     justify.focus();
     await act(async () => user.keyboard(' '));
     expect(justify).not.toBeChecked();
+    const keyboardFitView = within(dialog).getByRole('checkbox', {
+      name: 'Fit view after arranging',
+    });
+    keyboardFitView.focus();
+    await act(async () => user.keyboard(' '));
+    expect(keyboardFitView).not.toBeChecked();
     const lastRow = within(dialog).getByRole('combobox', { name: 'Last row behavior' });
     lastRow.focus();
     await act(async () => user.keyboard('{Enter}'));

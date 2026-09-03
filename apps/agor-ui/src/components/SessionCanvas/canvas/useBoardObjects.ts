@@ -41,6 +41,7 @@ import {
 import {
   createPostLayoutViewportIntent,
   type PostLayoutViewportIntent,
+  type PostLayoutViewportMode,
 } from './postLayoutViewport';
 import {
   type ExpectedAutoLayoutSignature,
@@ -354,8 +355,10 @@ interface UseBoardObjectsProps {
   onEditMarkdown?: (objectId: string, content: string, width: number) => void;
   /** Hold optimistic placements and enable motion before realtime echoes arrive. */
   onArrangeNodes?: (nodes: Node[], totalMs: number) => void;
-  /** Queue one smart viewport decision after a persisted, explicitly requested layout. */
-  onUserLayoutComplete?: (intent: PostLayoutViewportIntent) => void;
+  /** Fence a user layout before persistence so later direct input wins. */
+  onUserLayoutStart?: () => number;
+  /** Queue one viewport decision after a persisted, explicitly requested layout. */
+  onUserLayoutComplete?: (intent: PostLayoutViewportIntent, intentToken?: number) => void;
 }
 
 interface ArrangeZoneContentsOptions {
@@ -377,6 +380,10 @@ type ArrangeBoardZonesOptions = Omit<BoardZoneArrangementOptions, 'looseItems'> 
   layoutScope?: 'board' | 'selection';
   /** Selection-scoped top-level roots. Whole-board callers omit this. */
   selectedRootIds?: readonly string[];
+  /** Main-toolbar Arrange may explicitly fit or preserve; other layout surfaces stay smart. */
+  viewportMode?: PostLayoutViewportMode;
+  /** Invocation-order fence reserved before the first asynchronous boundary. */
+  viewportIntentToken?: number;
 };
 
 export const useBoardObjects = ({
@@ -390,6 +397,7 @@ export const useBoardObjects = ({
   activeUrlTargetArtifactId,
   onEditMarkdown,
   onArrangeNodes,
+  onUserLayoutStart,
   onUserLayoutComplete,
 }: UseBoardObjectsProps) => {
   // Use ref to avoid recreating callbacks when board changes
@@ -476,19 +484,22 @@ export const useBoardObjects = ({
       beforeNodes: readonly Node[];
       afterNodes: readonly Node[];
       affectedNodeIds: readonly string[];
+      mode?: PostLayoutViewportMode;
+      viewportIntentToken?: number;
     }) => {
       const boardId = boardRef.current?.board_id;
       if (!input.userInitiated || !boardId || !onUserLayoutComplete) return;
-      onUserLayoutComplete(
-        createPostLayoutViewportIntent({
-          source: 'user',
-          boardId,
-          scope: input.scope,
-          beforeNodes: input.beforeNodes,
-          afterNodes: input.afterNodes,
-          affectedNodeIds: input.affectedNodeIds,
-        })
-      );
+      const intent = createPostLayoutViewportIntent({
+        source: 'user',
+        boardId,
+        scope: input.scope,
+        mode: input.mode,
+        beforeNodes: input.beforeNodes,
+        afterNodes: input.afterNodes,
+        affectedNodeIds: input.affectedNodeIds,
+      });
+      if (input.viewportIntentToken === undefined) onUserLayoutComplete(intent);
+      else onUserLayoutComplete(intent, input.viewportIntentToken);
     },
     [onUserLayoutComplete]
   );
@@ -941,6 +952,7 @@ export const useBoardObjects = ({
           options.observerLease.boardId !== currentBoard.board_id)
       )
         return;
+      const viewportIntentToken = options.userInitiated ? onUserLayoutStart?.() : undefined;
       const sourceNodes = nodesRef.current;
       const liveZoneNode = sourceNodes.find((node) => node.id === zoneId);
       // A toolbar click can race the debounced persistence of a drag/resize.
@@ -1573,6 +1585,7 @@ export const useBoardObjects = ({
         }
         completeUserLayout({
           userInitiated: options.userInitiated,
+          viewportIntentToken,
           scope: 'zone',
           beforeNodes: sourceNodes,
           afterNodes: finalNodes,
@@ -1594,6 +1607,7 @@ export const useBoardObjects = ({
       clearExpectedAutoLayouts,
       client,
       completeUserLayout,
+      onUserLayoutStart,
       onArrangeNodes,
       restoreZoneCallouts,
       setNodes,
@@ -1705,6 +1719,7 @@ export const useBoardObjects = ({
         );
         return;
       }
+      const viewportIntentToken = onUserLayoutStart?.();
       if (!(await demoteAutoZone(zoneId))) return;
 
       const changedById = new Map(changedNodes.map((node) => [node.id, node]));
@@ -1740,6 +1755,7 @@ export const useBoardObjects = ({
         );
         completeUserLayout({
           userInitiated: true,
+          viewportIntentToken,
           scope: 'zone',
           beforeNodes: currentNodes,
           afterNodes: currentNodes.map((node) => changedById.get(node.id) ?? node),
@@ -1761,6 +1777,7 @@ export const useBoardObjects = ({
       completeUserLayout,
       demoteAutoZone,
       onArrangeNodes,
+      onUserLayoutStart,
       setNodes,
       showError,
       showSuccess,
@@ -1788,8 +1805,13 @@ export const useBoardObjects = ({
         userInitiated = false,
         layoutScope = 'board',
         selectedRootIds,
+        viewportMode = 'smart',
+        viewportIntentToken: suppliedViewportIntentToken,
         ...arrangementOptions
       } = options;
+      const viewportIntentToken = userInitiated
+        ? (suppliedViewportIntentToken ?? onUserLayoutStart?.())
+        : undefined;
       const packZoneContents = arrangementOptions.packZoneContents !== false;
       const selected = new Set(zoneIds);
       const currentNodes = nodesRef.current;
@@ -1992,11 +2014,32 @@ export const useBoardObjects = ({
               );
             })
           );
+        const arrangedNodeById = new Map(arrangedNodes.map((node) => [node.id, node]));
+        const afterNodes = currentNodes.map((node) => arrangedNodeById.get(node.id) ?? node);
+        const affectedNodeIds =
+          layoutScope === 'board' && viewportMode !== 'smart'
+            ? [
+                ...new Set([
+                  ...arrangedNodes.map((node) => node.id),
+                  ...fixedObstacles.map((node) => node.id),
+                ]),
+              ]
+            : arrangedNodes.map((node) => node.id);
         if (!geometryChanged && !densityChanged) {
+          if (viewportMode !== 'smart') {
+            completeUserLayout({
+              userInitiated,
+              viewportIntentToken,
+              scope: layoutScope,
+              mode: viewportMode,
+              beforeNodes: currentNodes,
+              afterNodes,
+              affectedNodeIds,
+            });
+          }
           showSuccess('Zones and their contents are already arranged.');
           return;
         }
-        const arrangedNodeById = new Map(arrangedNodes.map((node) => [node.id, node]));
         for (const arrangedZone of plan.zones) {
           const zoneObject = currentBoard.objects?.[arrangedZone.id];
           if (
@@ -2142,10 +2185,12 @@ export const useBoardObjects = ({
         acknowledgeExpectedAutoLayouts(explicitExpectationZoneIds);
         completeUserLayout({
           userInitiated,
+          viewportIntentToken,
           scope: layoutScope,
+          mode: viewportMode,
           beforeNodes: currentNodes,
-          afterNodes: currentNodes.map((node) => arrangedNodeById.get(node.id) ?? node),
-          affectedNodeIds: arrangedNodes.map((node) => node.id),
+          afterNodes,
+          affectedNodeIds,
         });
         showSuccess(
           `Arranged ${plan.zones.length} zone${plan.zones.length === 1 ? '' : 's'}, ${plan.looseItems.length} free item${plan.looseItems.length === 1 ? '' : 's'}, and their contents.`
@@ -2169,6 +2214,7 @@ export const useBoardObjects = ({
       clearExpectedAutoLayouts,
       client,
       completeUserLayout,
+      onUserLayoutStart,
       onArrangeNodes,
       restoreZoneCallouts,
       setNodes,
@@ -2180,7 +2226,12 @@ export const useBoardObjects = ({
   /** Main-toolbar entry into the exact planner used by selected-zone Arrange. */
   const arrangeWholeBoard = useCallback(
     async (
-      options: boolean | Omit<BoardZoneArrangementOptions, 'looseItems' | 'fixedObstacles'> = {}
+      options:
+        | boolean
+        | Omit<
+            ArrangeBoardZonesOptions,
+            'userInitiated' | 'layoutScope' | 'selectedRootIds' | 'fixedObstacles'
+          > = {}
     ) => {
       const currentBoard = boardRef.current;
       if (!currentBoard) return;

@@ -1273,6 +1273,10 @@ describe('SessionCanvas zoom shortcuts', () => {
       within(options).getByRole('checkbox', { name: 'Match / resize zone frames' })
     ).toBeChecked();
     expect(within(options).getByRole('checkbox', { name: 'Justify rows' })).toBeChecked();
+    expect(
+      within(options).getByRole('checkbox', { name: 'Fit view after arranging' })
+    ).toBeChecked();
+    expect(within(options).getByText(/preserve the current camera/i)).toBeInTheDocument();
     expect(within(options).getByRole('combobox', { name: 'Last row behavior' })).toBeEnabled();
     expect(within(options).getByText('Last row: left')).toBeInTheDocument();
     fireEvent.click(within(options).getByRole('button', { name: 'Arrange board' }));

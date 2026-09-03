@@ -132,12 +132,12 @@ import { ARRANGE_DEAL_CLASS } from './canvas/arrangeAnimation';
 import { CommentNode, ZoneNode } from './canvas/BoardObjectNodes';
 import { MarkdownNode } from './canvas/MarkdownNode';
 import {
+  arrangeBoardViewportMode,
+  consumeSettledPostLayoutViewport,
   createPostLayoutViewportIntent,
-  decidePostLayoutViewport,
   layoutGeometryChanged,
-  layoutPositionsMatch,
+  PostLayoutViewportCoordinator,
   type PostLayoutViewportIntent,
-  snapshotLayoutNodes,
 } from './canvas/postLayoutViewport';
 import { RemoteCursorLayer, type StaticRemoteCursor } from './canvas/RemoteCursorLayer';
 import {
@@ -899,6 +899,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const [arrangeBoardMode, setArrangeBoardMode] = useState<'grid' | 'compact'>('grid');
     const [justifyBoardRows, setJustifyBoardRows] = useState(true);
     const [resizeZoneFrames, setResizeZoneFrames] = useState(true);
+    const [fitViewAfterArranging, setFitViewAfterArranging] = useState(true);
     const [lastBoardRow, setLastBoardRow] = useState<'start' | 'center' | 'end' | 'justify'>(
       'start'
     );
@@ -908,24 +909,27 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const justifyBoardRowsHelpId = useId();
     const lastBoardRowLabelId = useId();
     const lastBoardRowHelpId = useId();
+    const fitViewAfterArrangingHelpId = useId();
     const arrangeBoardButtonWrapperRef = useRef<HTMLSpanElement>(null);
-    const pendingPostLayoutViewportRef = useRef<
-      { token: number; intent: PostLayoutViewportIntent } | undefined
-    >(undefined);
-    const postLayoutViewportTokenRef = useRef(0);
+    const postLayoutViewportCoordinatorRef = useRef(new PostLayoutViewportCoordinator());
     const [queuedPostLayoutViewportToken, setQueuedPostLayoutViewportToken] = useState(0);
 
     const cancelPendingPostLayoutViewport = useCallback(() => {
-      postLayoutViewportTokenRef.current += 1;
-      pendingPostLayoutViewportRef.current = undefined;
+      postLayoutViewportCoordinatorRef.current.cancel();
     }, []);
 
-    const requestPostLayoutViewport = useCallback((intent: PostLayoutViewportIntent) => {
-      const token = postLayoutViewportTokenRef.current + 1;
-      postLayoutViewportTokenRef.current = token;
-      pendingPostLayoutViewportRef.current = { token, intent };
-      setQueuedPostLayoutViewportToken(token);
-    }, []);
+    const beginPostLayoutViewportIntent = useCallback(
+      () => postLayoutViewportCoordinatorRef.current.begin(),
+      []
+    );
+
+    const requestPostLayoutViewport = useCallback(
+      (intent: PostLayoutViewportIntent, intentToken?: number) => {
+        const pending = postLayoutViewportCoordinatorRef.current.queue(intent, intentToken);
+        if (pending) setQueuedPostLayoutViewportToken(pending.token);
+      },
+      []
+    );
 
     const handleArrangeNodes = useStableCallback((arrangedNodes: Node[], totalMs: number) => {
       const currentNodes = reactFlowInstanceRef.current?.getNodes() ?? nodes;
@@ -1004,6 +1008,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       activeUrlTargetArtifactId,
       onEditMarkdown: handleEditMarkdownNote,
       onArrangeNodes: handleArrangeNodes,
+      onUserLayoutStart: beginPostLayoutViewportIntent,
       onUserLayoutComplete: requestPostLayoutViewport,
     });
 
@@ -1428,8 +1433,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // then decides whether the affected bounds actually need a fit.
     useEffect(() => {
       if (!isReactFlowReady || isArranging) return;
-      const pending = pendingPostLayoutViewportRef.current;
-      if (!pending || pending.token !== queuedPostLayoutViewportToken) return;
+      const coordinator = postLayoutViewportCoordinatorRef.current;
+      const pending = coordinator.peek(queuedPostLayoutViewportToken);
+      if (!pending) return;
       if (pending.intent.boardId !== board?.board_id) {
         cancelPendingPostLayoutViewport();
         return;
@@ -1439,23 +1445,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       let settledFrame = 0;
       firstFrame = window.requestAnimationFrame(() => {
         settledFrame = window.requestAnimationFrame(() => {
-          const current = pendingPostLayoutViewportRef.current;
           const instance = reactFlowInstanceRef.current;
           const wrapper = reactFlowWrapperRef.current;
-          if (!current || current.token !== pending.token || !instance || !wrapper) return;
-
-          const affectedIds = current.intent.after.map((rect) => rect.id);
+          if (!coordinator.peek(pending.token) || !instance || !wrapper) return;
           const currentNodes = instance.getNodes();
-          const settled = snapshotLayoutNodes(currentNodes, affectedIds);
-          if (!layoutPositionsMatch(current.intent.after, settled)) {
-            pendingPostLayoutViewportRef.current = undefined;
-            return;
-          }
-
-          // Positions prove this is the requested transaction; sizes come
-          // from the settled graph so compact/rendered-height convergence
-          // cannot make the viewport decision stale or suppress a valid fit.
-          const settledIntent = { ...current.intent, after: settled };
 
           const pane = wrapper.getBoundingClientRect();
           const left = Math.max(0, pane.left);
@@ -1469,13 +1462,15 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             pane.bottom
           );
           if (right <= left || bottom <= top) {
-            pendingPostLayoutViewportRef.current = undefined;
+            coordinator.discard(pending.token);
             return;
           }
           const topLeft = instance.screenToFlowPosition({ x: left, y: top });
           const bottomRight = instance.screenToFlowPosition({ x: right, y: bottom });
-          const decision = decidePostLayoutViewport({
-            intent: settledIntent,
+          const fit = consumeSettledPostLayoutViewport({
+            coordinator,
+            token: pending.token,
+            currentNodes,
             viewport: {
               left: Math.min(topLeft.x, bottomRight.x),
               top: Math.min(topLeft.y, bottomRight.y),
@@ -1484,20 +1479,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             },
             viewportPixels: { width: right - left, height: bottom - top },
             zoom: instance.getZoom(),
+            reducedMotion: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false,
           });
-          pendingPostLayoutViewportRef.current = undefined;
-          if (!decision.fit) return;
-
-          const affected = currentNodes.filter((node) => affectedIds.includes(node.id));
-          if (affected.length === 0) return;
-          const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-          void instance.fitView({
-            nodes: affected,
-            padding: decision.padding,
-            minZoom: 0.1,
-            maxZoom: 1,
-            duration: reducedMotion ? 0 : 300,
-          });
+          if (fit) void instance.fitView(fit);
         });
       });
 
@@ -2906,6 +2890,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         layoutSettings?: SelectionLayoutSettings
       ) => {
         if (!board || !client || selectedLayoutNodes.length < 2) return;
+        const viewportIntentToken = beginPostLayoutViewportIntent();
         const selectedTopLevelRoots = selectedLayoutNodes.every(
           (node) =>
             !node.parentId &&
@@ -2922,6 +2907,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             ...(!layoutSettings ? { targetAspectRatio: getUsableBoardAspect() } : {}),
             userInitiated: true,
             layoutScope: 'selection',
+            viewportIntentToken,
             selectedRootIds: selectedLayoutNodes.map((node) => node.id),
           });
           return;
@@ -3248,10 +3234,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             placements: entityUpdates,
           } as unknown as Partial<Board>);
         }
-        requestPostLayoutViewport(layoutIntent);
+        requestPostLayoutViewport(layoutIntent, viewportIntentToken);
       },
       [
         arrangeBoardZones,
+        beginPostLayoutViewportIntent,
         board,
         boardObjectByBranch,
         boardObjectByCard,
@@ -4214,6 +4201,18 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                           ? 'Unavailable in Compact because it has no row-ending alignment.'
                           : 'Align a short final row without resizing it, or justify it when frame resizing is enabled.'}
                       </Typography.Text>
+                      <Checkbox
+                        checked={fitViewAfterArranging}
+                        disabled={arrangeBoardBusy}
+                        aria-describedby={fitViewAfterArrangingHelpId}
+                        onChange={(event) => setFitViewAfterArranging(event.target.checked)}
+                      >
+                        Fit view after arranging
+                      </Checkbox>
+                      <Typography.Text id={fitViewAfterArrangingHelpId} type="secondary">
+                        Frame the complete arranged board once after its rendered geometry settles.
+                        Turn off to preserve the current camera.
+                      </Typography.Text>
                       <Button
                         type="primary"
                         disabled={arrangeBoardDisabled}
@@ -4229,6 +4228,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                             justifyLastRow: lastBoardRow === 'justify',
                             lastRowAlignment: lastBoardRow === 'justify' ? 'start' : lastBoardRow,
                             targetAspectRatio: getUsableBoardAspect(),
+                            viewportMode: arrangeBoardViewportMode(fitViewAfterArranging),
                           });
                         }}
                       >
