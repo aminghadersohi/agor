@@ -268,9 +268,9 @@ describe('Postgres multitenancy schema coverage', () => {
       migration.indexOf('CREATE POLICY "session_auto_archive_discovery"')
     );
     expect(discoveryPolicy).not.toContain('WITH CHECK');
-    expect(migration).toContain('CREATE POLICY "session_auto_archive_migration_0101"');
-    expect(migration).toContain("= 'session_auto_archive_migration_0101'");
-    expect(migration).toContain('DROP POLICY "session_auto_archive_migration_0101"');
+    expect(migration).toContain('CREATE POLICY "session_auto_archive_migration_0100"');
+    expect(migration).toContain("= 'session_auto_archive_migration_0100'");
+    expect(migration).toContain('DROP POLICY "session_auto_archive_migration_0100"');
     expect(migration).toContain("SELECT set_config('agor.system_scope', '', true)");
   });
 
