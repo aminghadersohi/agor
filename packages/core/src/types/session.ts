@@ -44,6 +44,13 @@ export const SessionStatus = {
 
 export type SessionStatus = (typeof SessionStatus)[keyof typeof SessionStatus];
 
+/** Durable cleanup policy for non-root child Sessions. */
+export const SESSION_AUTO_ARCHIVE_POLICIES = ['never', 'after_completion'] as const;
+export type SessionAutoArchivePolicy = (typeof SESSION_AUTO_ARCHIVE_POLICIES)[number];
+
+/** Product defaults applied once, when an eligible child Session is created. */
+export const BTW_AUTO_ARCHIVE_AFTER_SECONDS = 5 * 60;
+export const SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS = 60 * 60;
 /**
  * How a standing child-completion callback reaches its coordinator.
  *
@@ -67,14 +74,6 @@ export interface CallbackDigestProvenance {
   callback_created_by: UserID;
   final_message_id: MessageID;
 }
-
-/** Durable cleanup policy for non-root child Sessions. */
-export const SESSION_AUTO_ARCHIVE_POLICIES = ['never', 'after_completion'] as const;
-export type SessionAutoArchivePolicy = (typeof SESSION_AUTO_ARCHIVE_POLICIES)[number];
-
-/** Product defaults applied once, when an eligible child Session is created. */
-export const BTW_AUTO_ARCHIVE_AFTER_SECONDS = 5 * 60;
-export const SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS = 60 * 60;
 
 /** Durable outcome reported by the authenticated Session Stop endpoint. */
 export const SESSION_STOP_OUTCOMES = [
