@@ -160,19 +160,19 @@ describe('Postgres migrations', () => {
     expect(
       pendingOfflineCutoverMigrations('postgresql', {
         applied: ['0093_scheduler_poison_recovery'],
-        pending: ['0100_claude_oauth_attempts'],
+        pending: ['9012_claude_oauth_attempts'],
       })
-    ).toEqual(['0100_claude_oauth_attempts']);
+    ).toEqual(['9012_claude_oauth_attempts']);
     expect(
       pendingOfflineCutoverMigrations('sqlite', {
         applied: ['0096_scheduler_poison_recovery'],
-        pending: ['0103_claude_oauth_attempts'],
+        pending: ['9012_claude_oauth_attempts'],
       })
-    ).toEqual([]);
+    ).toEqual(['9012_claude_oauth_attempts']);
     expect(
       pendingOfflineCutoverMigrations('postgresql', {
         applied: [],
-        pending: ['0000_cuddly_captain_america', '0100_claude_oauth_attempts'],
+        pending: ['0000_cuddly_captain_america', '9012_claude_oauth_attempts'],
       })
     ).toEqual([]);
   });
@@ -298,14 +298,18 @@ describe('Postgres migrations', () => {
 
   it('journals the matching zone-workflow migration and tenant-safe audit constraints', async () => {
     const [postgresJournal, sqliteJournal] = await readJournals();
-    expect(postgresJournal.entries.at(-1)).toMatchObject({
-      idx: 9011,
-      tag: '9011_zone_workflow_transitions',
-    });
-    expect(sqliteJournal.entries.at(-1)).toMatchObject({
-      idx: 9011,
-      tag: '9011_zone_workflow_transitions',
-    });
+    expect(postgresJournal.entries).toContainEqual(
+      expect.objectContaining({
+        idx: 9011,
+        tag: '9011_zone_workflow_transitions',
+      })
+    );
+    expect(sqliteJournal.entries).toContainEqual(
+      expect.objectContaining({
+        idx: 9011,
+        tag: '9011_zone_workflow_transitions',
+      })
+    );
 
     const [postgres, sqlite] = await Promise.all([
       readFile(
