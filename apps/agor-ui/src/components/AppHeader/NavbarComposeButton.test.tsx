@@ -261,7 +261,9 @@ describe('NavbarComposeButton', () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       renderCompose({ primary: primaryBranch });
-      expect(await screen.findByText('🤖')).toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: 'Compose — ask your primary assistant' })
+      ).toBeInTheDocument();
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
       });
@@ -277,7 +279,7 @@ describe('NavbarComposeButton', () => {
 
   it('shows the 🤖 placeholder emoji on the trigger when no primary is set', async () => {
     renderCompose({ primary: null });
-    expect(await screen.findByText('🤖')).toBeInTheDocument();
+    expect(await screen.findByRole('img', { name: 'robot' })).toBeInTheDocument();
   });
 
   it('shows a "Start quick session" tooltip on the trigger', async () => {
