@@ -1,10 +1,11 @@
-import { BOARD_GRID_SIZE, snapBoardGridPoint } from '@agor/core/layout/rectangle-packing';
+import { BOARD_GRID_SIZE } from '@agor/core/layout/rectangle-packing';
 import type { Board, BoardObject } from '@agor-live/client';
 import { act, renderHook } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import type { ReactNode } from 'react';
 import type { Node } from 'reactflow';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ConnectionProvider } from '../../../contexts/ConnectionContext';
 import { useBoardObjects } from './useBoardObjects';
 
 // Spy the themed error toast so the failure path of reorderObject is observable.
@@ -24,10 +25,22 @@ vi.mock('../../../utils/message', () => ({
   }),
 }));
 
+const connectionState = {
+  connected: true,
+  connecting: false,
+  authGeneration: 1,
+  outOfSync: false,
+  capturedSha: null,
+  currentSha: null,
+};
+
 beforeEach(() => {
   showError.mockClear();
   showSuccess.mockClear();
   showWarning.mockClear();
+  connectionState.connected = true;
+  connectionState.connecting = false;
+  connectionState.outOfSync = false;
 });
 
 describe('justifyZoneContents production path', () => {
@@ -157,6 +170,227 @@ describe('justifyZoneContents production path', () => {
   });
 });
 
+describe('stale layout recovery production path', () => {
+  const zoneId = 'zone-current';
+  const staleBoard = {
+    board_id: 'board-1',
+    objects: {
+      [zoneId]: {
+        type: 'zone',
+        x: 0,
+        y: 0,
+        width: 620,
+        height: 560,
+        label: 'Current',
+        layout: {
+          mode: 'manual',
+          preset: 'grid',
+          density: 'collapse',
+          columns: 1,
+          gap: 12,
+        },
+      },
+    },
+  } as unknown as Board;
+  const freshBoard = {
+    board_id: 'board-1',
+    objects: {
+      [zoneId]: {
+        type: 'zone',
+        x: 40,
+        y: 60,
+        width: 620,
+        height: 560,
+        label: 'Current',
+        layout: {
+          mode: 'manual',
+          preset: 'grid',
+          density: 'collapse',
+          columns: 1,
+          gap: 12,
+        },
+      },
+    },
+  } as unknown as Board;
+  const stalePlacement = {
+    object_id: 'placement-current',
+    board_id: 'board-1',
+    entity_type: 'branch',
+    branch_id: 'branch-current',
+    zone_id: zoneId,
+    position: { x: 180, y: 260 },
+    size: { width: 500, height: 220 },
+  };
+  const freshPlacement = {
+    ...stalePlacement,
+    position: { x: 120, y: 180 },
+    size: { width: 500, height: 240 },
+  };
+  const staleNodes: Node[] = [
+    {
+      id: zoneId,
+      type: 'zone',
+      position: { x: 0, y: 0 },
+      width: 620,
+      height: 560,
+      data: {},
+    },
+    {
+      id: 'branch-current',
+      type: 'branchNode',
+      parentId: zoneId,
+      position: { x: 180, y: 260 },
+      width: 500,
+      height: 220,
+      data: { branch: { name: 'Fictional branch' } },
+    },
+  ];
+
+  function renderStaleRecovery(options?: { auto?: boolean; staleAttempts?: number }) {
+    const board = options?.auto
+      ? makeBoard({
+          [zoneId]: {
+            ...staleBoard.objects?.[zoneId],
+            type: 'zone',
+            layout: { mode: 'auto', preset: 'grid', columns: 1, gap: 12 },
+          },
+        })
+      : staleBoard;
+    const authoritativeBoard = options?.auto
+      ? makeBoard({
+          [zoneId]: {
+            ...freshBoard.objects?.[zoneId],
+            type: 'zone',
+            layout: { mode: 'auto', preset: 'grid', columns: 1, gap: 12 },
+          },
+        })
+      : freshBoard;
+    const staleAttempts = options?.staleAttempts ?? 1;
+    let applyAttempts = 0;
+    const boardsPatch = vi.fn().mockImplementation((boardId, data) => {
+      if (data?._action !== 'applyLayout') return {};
+      applyAttempts += 1;
+      if (applyAttempts <= staleAttempts) {
+        return Promise.reject(new Error('RepositoryError: Board layout source snapshot is stale'));
+      }
+      return mockBoardPatchResult(boardId, data);
+    });
+    const boardsGet = vi.fn().mockResolvedValue(authoritativeBoard);
+    const placementsFindAll = vi.fn().mockResolvedValue([freshPlacement]);
+    const service = vi.fn((path: string) =>
+      path === 'boards'
+        ? { patch: boardsPatch, get: boardsGet }
+        : { patch: vi.fn(), findAll: placementsFindAll }
+    );
+    const setNodes = vi.fn();
+    const view = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client: { service } as never,
+          boardObjectsForBoard: [stalePlacement] as never,
+          nodes: staleNodes,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    return { ...view, boardsPatch, boardsGet, placementsFindAll, setNodes };
+  }
+
+  it('replans one stale explicit zone action from authoritative geometry without a stale optimistic write', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const view = renderStaleRecovery();
+    const zoneNode = view.result.current.getBoardObjectNodes().find((node) => node.id === zoneId);
+    expect(zoneNode).toBeDefined();
+
+    await act(async () => {
+      await (zoneNode!.data.onArrangeContents as (id: string) => Promise<void>)(zoneId);
+    });
+
+    const writes = layoutWrites(view.boardsPatch);
+    expect(writes).toHaveLength(2);
+    expect(writes[1]?.expected).toMatchObject({
+      objects: { [zoneId]: { x: 40, y: 60, width: 620, height: 560 } },
+      placements: {
+        'placement-current': {
+          position: { x: 120, y: 180 },
+          size: { width: 500, height: 240 },
+        },
+      },
+    });
+    expect(writes[1]?.placements).toMatchObject({
+      'placement-current': { compact: true },
+    });
+    expect(view.boardsGet).toHaveBeenCalledTimes(1);
+    expect(view.placementsFindAll).toHaveBeenCalledTimes(1);
+    expect(view.setNodes).toHaveBeenCalledTimes(1);
+    expect(showError).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalledWith(
+      'Failed to arrange zone contents:',
+      expect.anything()
+    );
+    consoleError.mockRestore();
+  });
+
+  it('bounds a repeatedly stale background Auto Zone pass without logs, toasts, or feedback writes', async () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const view = renderStaleRecovery({ auto: true, staleAttempts: 2 });
+
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+
+    expect(layoutWrites(view.boardsPatch)).toHaveLength(2);
+    expect(view.boardsGet).toHaveBeenCalledTimes(1);
+    expect(view.setNodes).not.toHaveBeenCalled();
+    expect(showError).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalledWith(
+      'Failed to arrange zone contents:',
+      expect.anything()
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(layoutWrites(view.boardsPatch)).toHaveLength(2);
+    consoleError.mockRestore();
+  });
+
+  it('reports one actionable failure when an explicit replan loses a second race', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const view = renderStaleRecovery({ staleAttempts: 2 });
+    const zoneNode = view.result.current.getBoardObjectNodes().find((node) => node.id === zoneId);
+    expect(zoneNode).toBeDefined();
+
+    await act(async () => {
+      await (zoneNode!.data.onArrangeContents as (id: string) => Promise<void>)(zoneId);
+    });
+
+    expect(layoutWrites(view.boardsPatch)).toHaveLength(2);
+    expect(showError).toHaveBeenCalledTimes(1);
+    expect(showError).toHaveBeenCalledWith('The board changed again while arranging. Try again.');
+    expect(consoleError).not.toHaveBeenCalledWith(
+      'Failed to arrange zone contents:',
+      expect.anything()
+    );
+    consoleError.mockRestore();
+  });
+
+  it('lets an explicit Auto Zone action supersede its scheduled observer pass', async () => {
+    vi.useFakeTimers();
+    const view = renderStaleRecovery({ auto: true });
+    const zoneNode = view.result.current.getBoardObjectNodes().find((node) => node.id === zoneId);
+    expect(zoneNode).toBeDefined();
+
+    await act(async () => {
+      await (zoneNode!.data.onArrangeContents as (id: string) => Promise<void>)(zoneId);
+    });
+    expect(layoutWrites(view.boardsPatch)).toHaveLength(2);
+
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(layoutWrites(view.boardsPatch)).toHaveLength(2);
+    expect(view.setNodes).toHaveBeenCalledTimes(1);
+    expect(showError).not.toHaveBeenCalled();
+  });
+});
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -167,8 +401,9 @@ afterEach(() => {
  */
 function makeClient() {
   const patch = vi.fn().mockImplementation(mockBoardPatchResult);
-  const client = { service: vi.fn().mockReturnValue({ patch }) };
-  return { client: client as never, patch };
+  const service = vi.fn().mockReturnValue({ patch });
+  const client = { service };
+  return { client: client as never, patch, service };
 }
 
 function makeRoutedClient() {
@@ -227,11 +462,15 @@ function makeBoard(objects: Record<string, unknown>): Board {
   return { board_id: 'board-1', objects } as unknown as Board;
 }
 
-const wrapper = ({ children }: { children: ReactNode }) => <AntApp>{children}</AntApp>;
+const wrapper = ({ children }: { children: ReactNode }) => (
+  <ConnectionProvider value={connectionState}>
+    <AntApp>{children}</AntApp>
+  </ConnectionProvider>
+);
 
-function renderReorder(board: Board, client: unknown) {
+function renderReorder(board: Board, client: unknown, canEdit = true) {
   return renderHook(
-    () =>
+    ({ effectiveCanEdit }) =>
       useBoardObjects({
         board,
         client: client as never,
@@ -239,10 +478,160 @@ function renderReorder(board: Board, client: unknown) {
         nodes: [],
         setNodes: vi.fn(),
         deletedObjectsRef: { current: new Set<string>() },
+        canEdit: effectiveCanEdit,
       }),
-    { wrapper }
+    { wrapper, initialProps: { effectiveCanEdit: canEdit } }
   );
 }
+
+describe('zone toolbar metadata', () => {
+  it('reports geometric overlaps, layer no-ops, and effective edit permission', () => {
+    const { client } = makeClient();
+    const board = makeBoard({
+      a: { type: 'zone', x: 0, y: 0, width: 200, height: 200, label: 'A', zIndex: 100 },
+      b: { type: 'zone', x: 100, y: 100, width: 200, height: 200, label: 'B', zIndex: 110 },
+      c: { type: 'zone', x: 500, y: 500, width: 200, height: 200, label: 'C', zIndex: 120 },
+    });
+    const { result } = renderReorder(board, client, false);
+
+    const nodes = result.current.getBoardObjectNodes();
+    const a = nodes.find((node) => node.id === 'a');
+    const c = nodes.find((node) => node.id === 'c');
+
+    expect(a?.data).toMatchObject({
+      canEdit: false,
+      overlappingZoneCount: 1,
+      layerAvailability: { front: true, forward: true, backward: false, back: false },
+    });
+    expect(a?.draggable).toBe(false);
+    expect(c?.data).toMatchObject({
+      overlappingZoneCount: 0,
+      layerAvailability: { front: false, forward: false, backward: true, back: true },
+    });
+  });
+
+  it('passes effective edit permission to every structural object component', () => {
+    const { client } = makeClient();
+    const board = makeBoard({
+      app: {
+        type: 'app',
+        x: 0,
+        y: 0,
+        width: 300,
+        height: 200,
+        title: 'App',
+        template: 'react',
+        files: {},
+      },
+      artifact: {
+        type: 'artifact',
+        x: 0,
+        y: 0,
+        width: 300,
+        height: 200,
+        artifact_id: 'artifact-1',
+      },
+      note: { type: 'markdown', x: 0, y: 0, width: 300, content: 'Note' },
+    });
+    const { result } = renderReorder(board, client, false);
+
+    for (const node of result.current.getBoardObjectNodes()) {
+      expect(node.data.canEdit).toBe(false);
+      expect(node.draggable).toBe(false);
+    }
+  });
+});
+
+describe('updateObject', () => {
+  it('returns false when the board patch rejects so modal callers stay open', async () => {
+    const { client, patch } = makeRejectingClient();
+    const note = {
+      type: 'markdown',
+      x: 0,
+      y: 0,
+      width: 300,
+      content: 'Review',
+    } as BoardObject;
+    const board = makeBoard({ a: note });
+    const { result } = renderReorder(board, client);
+    const node = result.current.getBoardObjectNodes().find(({ id }) => id === 'a');
+    const onUpdate = node?.data.onUpdate as (
+      objectId: string,
+      objectData: BoardObject
+    ) => Promise<boolean>;
+
+    await expect(onUpdate('a', { ...note, content: 'Updated' })).resolves.toBe(false);
+
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(showError).toHaveBeenCalledWith('Failed to save board object');
+  });
+
+  it('blocks stale update and delete callbacks after permission revocation', async () => {
+    const { client, patch } = makeClient();
+    const setNodes = vi.fn();
+    const note = {
+      type: 'markdown',
+      x: 0,
+      y: 0,
+      width: 300,
+      content: 'Review',
+    } as BoardObject;
+    const board = makeBoard({ a: note });
+    const { result, rerender } = renderHook(
+      ({ canEdit }) =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [],
+          nodes: [],
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+          canEdit,
+        }),
+      { wrapper, initialProps: { canEdit: true } }
+    );
+    const data = result.current.getBoardObjectNodes()[0]?.data;
+    const onUpdate = data.onUpdate as (
+      objectId: string,
+      objectData: BoardObject
+    ) => Promise<boolean>;
+    const onDelete = data.onDelete as (objectId: string) => Promise<void>;
+
+    rerender({ canEdit: false });
+    await expect(onUpdate('a', { ...note, content: 'Updated' })).resolves.toBe(false);
+    await onDelete('a');
+
+    expect(patch).not.toHaveBeenCalled();
+    expect(setNodes).not.toHaveBeenCalled();
+  });
+});
+
+describe('deleteArtifact', () => {
+  it('blocks a stale lifecycle-delete callback after the connection gate closes', async () => {
+    const { client, service } = makeClient();
+    const board = makeBoard({
+      artifact: {
+        type: 'artifact',
+        x: 0,
+        y: 0,
+        width: 300,
+        height: 200,
+        artifact_id: 'artifact-1',
+      },
+    });
+    const { result, rerender } = renderReorder(board, client);
+    const onDeleteArtifact = result.current.getBoardObjectNodes()[0]?.data.onDeleteArtifact as (
+      objectId: string,
+      artifactId: string
+    ) => Promise<void>;
+
+    connectionState.connecting = true;
+    rerender({ effectiveCanEdit: true });
+    await onDeleteArtifact('artifact', 'artifact-1');
+
+    expect(service).not.toHaveBeenCalled();
+  });
+});
 
 describe('reorderObject', () => {
   it('"front" sends a single mergeObjectFields patch with the clamped zIndex', async () => {
@@ -439,6 +828,76 @@ describe('batchUpdateObjectPositions', () => {
 });
 
 describe('arrangeZoneContents', () => {
+  it.each([4, 12, 24])('persists a real %ipx child boundary gap', async (gap) => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const board = makeBoard({
+      zone: {
+        type: 'zone',
+        x: 0,
+        y: 0,
+        width: 900,
+        height: 500,
+        label: 'Fictional density',
+        layout: { mode: 'manual', preset: 'grid', columns: 2, gap },
+      },
+    });
+    const nodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: 0, y: 0 }, width: 900, height: 500, data: {} },
+      ...['left', 'right'].map(
+        (id): Node => ({
+          id,
+          type: 'branchNode',
+          parentId: 'zone',
+          position: { x: 20, y: 100 },
+          width: 380,
+          height: 100,
+          data: {},
+        })
+      ),
+    ];
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: [
+            {
+              object_id: 'placement-left',
+              entity_type: 'branch',
+              branch_id: 'left',
+              zone_id: 'zone',
+              position: { x: 20, y: 100 },
+            },
+            {
+              object_id: 'placement-right',
+              entity_type: 'branch',
+              branch_id: 'right',
+              zone_id: 'zone',
+              position: { x: 20, y: 100 },
+            },
+          ] as never,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    const zoneNode = result.current.getBoardObjectNodes().find((node) => node.id === 'zone');
+    await act(async () => {
+      await (zoneNode!.data.onArrangeContents as (id: string) => Promise<void>)('zone');
+    });
+
+    const placements = layoutPlacements(boardsPatch);
+    const left = placements['placement-left'];
+    const right = placements['placement-right'];
+    const boundaryGap =
+      right.position.x === left.position.x
+        ? right.position.y - (left.position.y + left.size.height)
+        : right.position.x - (left.position.x + left.size.width);
+    expect(boundaryGap).toBe(gap);
+  });
+
   it('reserves the scaled live title before packing a single child', async () => {
     const { client, boardsPatch, boardObjectsPatch } = makeRoutedClient();
     const board = makeBoard({
@@ -615,12 +1074,12 @@ describe('arrangeZoneContents', () => {
     });
     expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual({
       x: 20,
-      y: 320,
+      y: 304,
     });
     expect(onArrangeNodes).toHaveBeenCalledTimes(1);
     expect(onArrangeNodes.mock.calls[0]?.[0].map((node: Node) => node.position)).toEqual([
       { x: 20, y: 100 },
-      { x: 20, y: 320 },
+      { x: 20, y: 304 },
       { x: 0, y: 0 },
     ]);
     expect(onArrangeNodes.mock.calls[0]?.[1]).toBeGreaterThan(0);
@@ -635,7 +1094,7 @@ describe('arrangeZoneContents', () => {
       size: { width: 400, height: 180 },
     });
     expect(placements['placement-card']).toEqual({
-      position: { x: 20, y: 320 },
+      position: { x: 20, y: 304 },
       size: { width: 300, height: 100 },
     });
     expect(showSuccess).toHaveBeenCalledWith(
@@ -645,11 +1104,8 @@ describe('arrangeZoneContents', () => {
       position: { x: number; y: number };
       size: { width: number; height: number };
     }>) {
-      expect(update.position.x % BOARD_GRID_SIZE).toBe(0);
-      expect(update.position.y % BOARD_GRID_SIZE).toBe(0);
       expect(update.size.width % BOARD_GRID_SIZE).toBe(0);
       expect(update.size.height % BOARD_GRID_SIZE).toBe(0);
-      expect(snapBoardGridPoint(update.position)).toEqual(update.position);
     }
   });
 
@@ -1224,7 +1680,7 @@ describe('arrangeZoneContents', () => {
     });
     expect(renderedNodes.find((node) => node.id === 'card-card-1')?.position).toEqual({
       x: 20,
-      y: 380,
+      y: 364,
     });
     const placements = layoutPlacements(patch);
     expect(placements['placement-branch']).toEqual({
@@ -1232,7 +1688,7 @@ describe('arrangeZoneContents', () => {
       size: { width: 500, height: 240 },
     });
     expect(placements['placement-card']).toEqual({
-      position: { x: 20, y: 380 },
+      position: { x: 20, y: 364 },
       size: { width: 380, height: 100 },
     });
 
@@ -1332,7 +1788,7 @@ describe('arrangeZoneContents', () => {
     const stackedBranch = renderedNodes.find((node) => node.id === 'branch-1');
     const stackedCard = renderedNodes.find((node) => node.id === 'branch-2');
     expect(stackedBranch?.position).toEqual({ x: 20, y: 100 });
-    expect(stackedCard?.position).toEqual({ x: 20, y: 320 });
+    expect(stackedCard?.position).toEqual({ x: 20, y: 304 });
     expect(
       (stackedCard?.position.y ?? 0) - (stackedBranch?.position.y ?? 0)
     ).toBeGreaterThanOrEqual(stackedBranch?.height ?? 0);
@@ -1343,7 +1799,7 @@ describe('arrangeZoneContents', () => {
       expect.objectContaining({ position: { x: 20, y: 100 } })
     );
     expect(placements['placement-branch-2']).toEqual(
-      expect.objectContaining({ position: { x: 20, y: 320 } })
+      expect.objectContaining({ position: { x: 20, y: 304 } })
     );
     expect(layoutWrites(patch)[0]).toEqual(
       expect.objectContaining({
@@ -1448,7 +1904,7 @@ describe('arrangeZoneContents', () => {
     for (const renderedCard of renderedCards) renderedCard.remove();
   });
 
-  it('uses persisted latest-first ordering and compact dimensions for the list preset', async () => {
+  it('uses List ordering while preserving expanded body-card density', async () => {
     const { client, patch } = makeClient();
     const board = makeBoard({
       zone: {
@@ -1474,7 +1930,13 @@ describe('arrangeZoneContents', () => {
         type: 'cardNode',
         parentId: 'zone',
         position: { x: 200, y: 300 },
-        data: { card: { title: 'Older', updated_at: '2026-01-01T00:00:00.000Z' } },
+        data: {
+          card: {
+            title: 'Older',
+            description: 'Fictional body',
+            updated_at: '2026-01-01T00:00:00.000Z',
+          },
+        },
         width: 380,
         height: 220,
       },
@@ -1483,7 +1945,13 @@ describe('arrangeZoneContents', () => {
         type: 'cardNode',
         parentId: 'zone',
         position: { x: 200, y: 100 },
-        data: { card: { title: 'Newer', updated_at: '2026-02-01T00:00:00.000Z' } },
+        data: {
+          card: {
+            title: 'Newer',
+            description: 'Fictional body',
+            updated_at: '2026-02-01T00:00:00.000Z',
+          },
+        },
         width: 380,
         height: 260,
       },
@@ -1532,24 +2000,26 @@ describe('arrangeZoneContents', () => {
     });
 
     expect(renderedNodes.find((node) => node.id === 'card-newer')?.position.y).toBe(100);
-    expect(renderedNodes.find((node) => node.id === 'card-older')?.position.y).toBe(400);
+    expect(renderedNodes.find((node) => node.id === 'card-older')?.position.y).toBe(384);
     const placements = layoutPlacements(patch);
     expect(placements['placement-newer']).toEqual({
       position: { x: 20, y: 100 },
       size: { width: 380, height: 260 },
     });
     expect(placements['placement-older']).toEqual({
-      position: { x: 20, y: 400 },
+      position: { x: 20, y: 384 },
       size: { width: 380, height: 220 },
     });
+    expect(Object.values(placements).every((placement) => !('compact' in placement))).toBe(true);
     expect(layoutWrites(patch)).toHaveLength(1);
   });
 
-  it('uses rendered compact geometry for both worktrees and generic cards with body content', async () => {
+  it('atomically applies explicit Collapse geometry to worktrees and body cards', async () => {
     const { client, patch } = makeClient();
     const compactLayout = {
       mode: 'auto',
       preset: 'compact_list',
+      density: 'collapse',
       sortBy: 'position',
       sortDirection: 'asc',
       gap: 8,
@@ -1628,7 +2098,7 @@ describe('arrangeZoneContents', () => {
               card_id: 'card-1',
               position: { x: 31, y: 72 },
               zone_id: 'cards-zone',
-              compact: true,
+              compact: false,
               created_at: '2026-01-01T00:00:00.000Z',
             },
             {
@@ -1638,7 +2108,7 @@ describe('arrangeZoneContents', () => {
               branch_id: 'branch-1',
               position: { x: 11, y: 47 },
               zone_id: 'branches-zone',
-              compact: true,
+              compact: false,
               created_at: '2026-01-01T00:00:00.000Z',
             },
           ] as never,
@@ -1661,10 +2131,10 @@ describe('arrangeZoneContents', () => {
     expect(branch).toMatchObject({ position: { x: 20, y: 100 }, width: 580, height: 100 });
     const placements = layoutPlacements(patch);
     expect(placements['placement-card']).toEqual(
-      expect.objectContaining({ size: { width: 320, height: 60 } })
+      expect.objectContaining({ size: { width: 320, height: 60 }, compact: true })
     );
     expect(placements['placement-branch']).toEqual(
-      expect.objectContaining({ size: { width: 580, height: 100 } })
+      expect.objectContaining({ size: { width: 580, height: 100 }, compact: true })
     );
   });
 
@@ -1751,7 +2221,7 @@ describe('arrangeZoneContents', () => {
       size: { width: 300, height: 100 },
     });
     expect(placements['placement-older']).toEqual({
-      position: { x: 20, y: 240 },
+      position: { x: 20, y: 224 },
       size: { width: 300, height: 100 },
     });
 
@@ -2891,12 +3361,8 @@ describe('setZoneContentsCompact', () => {
   });
 });
 
-/**
- * `compact_list` collapses every capable worktree on the way in and nothing
- * used to undo it, so a zone switched back to Grid stayed collapsed.
- * The expand is keyed to the preset transition, NOT to arranging in grid.
- */
-describe('handleUpdateObject compact_list → grid expansion', () => {
+/** Geometry presentation never owns density; preset edits preserve every item. */
+describe('handleUpdateObject density/preset orthogonality', () => {
   const zoneId = 'zone-1';
   const collapsed = [
     {
@@ -2949,7 +3415,7 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
       .map((call) => [call[0], call[1].compact]);
   }
 
-  it('expands the zone contents when the preset leaves compact_list for grid', async () => {
+  it('preserves collapsed contents when the preset leaves compact_list for grid', async () => {
     const { client, patch } = makeClient();
     const { result } = renderUpdate('compact_list', collapsed, client);
 
@@ -2957,10 +3423,10 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
       await result.current.handleUpdateObject(zoneId, zone('grid') as never);
     });
 
-    expect(compactPatches(patch)).toEqual([['obj-branch', false]]);
+    expect(compactPatches(patch)).toEqual([]);
   });
 
-  it('keeps auto mode armed while its compact-list to grid transition expands contents', async () => {
+  it('keeps auto mode armed without mutating density on a preset transition', async () => {
     const { client, patch } = makeClient();
     const { result } = renderHook(
       () =>
@@ -2979,7 +3445,7 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
       await result.current.handleUpdateObject(zoneId, zone('grid', 'auto') as never);
     });
 
-    expect(compactPatches(patch)).toEqual([['obj-branch', false]]);
+    expect(compactPatches(patch)).toEqual([]);
     expect(
       patch.mock.calls.some(
         (call) => call[1]?._action === 'mergeObjectFields' && call[1].objects?.[zoneId]?.layout
@@ -3061,12 +3527,7 @@ describe('handleUpdateObject compact_list → grid expansion', () => {
   });
 });
 
-/**
- * Expanding on the way out of compact_list is only half the job: worktrees keep
- * the one-row spacing the preset gave them, so restoring their full height
- * makes them overlap until the zone is re-packed.
- */
-describe('compact_list → grid re-packs the expanded zone', () => {
+describe('explicit density changes own any required re-pack', () => {
   const zoneId = 'zone-1';
 
   function zone(preset: string) {
@@ -3121,7 +3582,7 @@ describe('compact_list → grid re-packs the expanded zone', () => {
     },
   ];
 
-  it('schedules an arrange that moves the expanded worktrees apart', async () => {
+  it('does not expand or re-pack merely because List changes to Grid', async () => {
     vi.useFakeTimers();
     const { client, patch } = makeClient();
     const setNodes = vi.fn();
@@ -3142,23 +3603,15 @@ describe('compact_list → grid re-packs the expanded zone', () => {
       await result.current.handleUpdateObject(zoneId, zone('grid') as never);
     });
 
-    // The expand lands immediately; the re-pack is deferred so the worktrees can
-    // paint at full height before the layout measures them.
     const compactPatches = patch.mock.calls.filter((c) => c[1] && 'compact' in c[1]);
-    expect(compactPatches.map((c) => c[1].compact)).toEqual([false, false]);
+    expect(compactPatches.map((c) => c[1].compact)).toEqual([]);
     expect(patch.mock.calls.some((c) => c[1] && 'position' in c[1])).toBe(false);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
 
-    const positioned = Object.values(layoutPlacements(patch)) as Array<{
-      position: { x: number; y: number };
-    }>;
-    expect(positioned.length).toBeGreaterThan(0);
-    // Whatever the packer chooses, the two worktrees must no longer sit 56px apart.
-    const ys = positioned.map((value) => value.position.y).sort((a, b) => a - b);
-    if (ys.length === 2) expect(ys[1] - ys[0]).toBeGreaterThan(56);
+    expect(Object.values(layoutPlacements(patch))).toEqual([]);
   });
 
   it('re-packs when the zone toolbar expands the contents directly', async () => {
@@ -3270,6 +3723,134 @@ describe('compact_list → grid re-packs the expanded zone', () => {
 });
 
 describe('arrangeBoardZones production path', () => {
+  it('preserves mixed density by default and applies only explicit collapse or expand atomically', async () => {
+    const board = makeBoard({
+      zone: {
+        type: 'zone',
+        x: 900,
+        y: 500,
+        width: 900,
+        height: 700,
+        label: 'Fictional review',
+        layout: { mode: 'manual', preset: 'compact_list' },
+      },
+    });
+    const nodes: Node[] = [
+      { id: 'zone', type: 'zone', position: { x: 900, y: 500 }, width: 900, height: 700, data: {} },
+      {
+        id: 'expanded',
+        type: 'branchNode',
+        parentId: 'zone',
+        position: { x: 20, y: 100 },
+        width: 500,
+        height: 200,
+        data: { compact: false },
+      },
+      {
+        id: 'collapsed',
+        type: 'branchNode',
+        parentId: 'zone',
+        position: { x: 20, y: 324 },
+        width: 500,
+        height: 100,
+        data: { compact: true },
+      },
+      {
+        id: 'card-body',
+        type: 'cardNode',
+        parentId: 'zone',
+        position: { x: 20, y: 448 },
+        width: 380,
+        height: 140,
+        data: { card: { title: 'Sample', description: 'Fictional body' } },
+      },
+      {
+        id: 'card-header',
+        type: 'cardNode',
+        parentId: 'zone',
+        position: { x: 420, y: 448 },
+        width: 380,
+        height: 60,
+        data: { card: { title: 'Header only' } },
+      },
+    ];
+    const placements = [
+      {
+        object_id: 'p-expanded',
+        board_id: 'board-1',
+        entity_type: 'branch',
+        branch_id: 'expanded',
+        zone_id: 'zone',
+        position: { x: 20, y: 100 },
+        size: { width: 500, height: 200 },
+        compact: false,
+      },
+      {
+        object_id: 'p-collapsed',
+        board_id: 'board-1',
+        entity_type: 'branch',
+        branch_id: 'collapsed',
+        zone_id: 'zone',
+        position: { x: 20, y: 324 },
+        size: { width: 500, height: 100 },
+        compact: true,
+      },
+      {
+        object_id: 'p-body',
+        board_id: 'board-1',
+        entity_type: 'card',
+        card_id: 'body',
+        zone_id: 'zone',
+        position: { x: 20, y: 448 },
+        size: { width: 380, height: 140 },
+      },
+      {
+        object_id: 'p-header',
+        board_id: 'board-1',
+        entity_type: 'card',
+        card_id: 'header',
+        zone_id: 'zone',
+        position: { x: 420, y: 448 },
+        size: { width: 380, height: 60 },
+      },
+    ] as never;
+
+    const run = async (density: 'preserve' | 'expand' | 'collapse') => {
+      const routed = makeRoutedClient();
+      const view = renderHook(
+        () =>
+          useBoardObjects({
+            board,
+            client: routed.client,
+            boardObjectsForBoard: placements,
+            nodes,
+            setNodes: vi.fn(),
+            deletedObjectsRef: { current: new Set<string>() },
+          }),
+        { wrapper }
+      );
+      await act(async () => view.result.current.arrangeWholeBoard({ density }));
+      return routed.boardsPatch.mock.calls[0]?.[1].placements as Record<
+        string,
+        { compact?: boolean }
+      >;
+    };
+
+    const preserved = await run('preserve');
+    expect(Object.values(preserved).every((placement) => placement.compact === undefined)).toBe(
+      true
+    );
+    const collapsed = await run('collapse');
+    expect(collapsed['p-expanded']?.compact).toBe(true);
+    expect(collapsed['p-body']?.compact).toBe(true);
+    expect(collapsed['p-collapsed']?.compact).toBeUndefined();
+    expect(collapsed['p-header']?.compact).toBeUndefined();
+    const expanded = await run('expand');
+    expect(expanded['p-collapsed']?.compact).toBe(false);
+    expect(expanded['p-expanded']?.compact).toBeUndefined();
+    expect(expanded['p-header']?.compact).toBeUndefined();
+  });
+
   it('packs an anchored protruding canvas child inside-out before placing its final zone frame', async () => {
     const { client, boardsPatch } = makeRoutedClient();
     const board = makeBoard({
@@ -4084,6 +4665,8 @@ describe('arrangeBoardZones production path', () => {
     );
     act(() => result.current.preserveAutoZoneFrameOnce(zoneId));
     await act(async () => vi.advanceTimersByTimeAsync(400));
+    expect(boardsPatch).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
     expect(boardsPatch).toHaveBeenCalledTimes(1);
     expect(layoutPlacements(boardsPatch)['placement-a']).toEqual({
       position: { x: 20, y: 100 },
@@ -4101,5 +4684,145 @@ describe('arrangeBoardZones production path', () => {
     expect(layoutWrites(boardsPatch)[0]?.objects).toEqual({
       'zone-auto': expect.objectContaining({ width: 540, height: 320 }),
     });
+  });
+});
+
+describe('whole-board stale layout recovery', () => {
+  const staleBoard = makeBoard({
+    zone: { type: 'zone', x: 1600, y: 900, width: 620, height: 500, label: 'Planning' },
+  });
+  const freshBoard = makeBoard({
+    zone: { type: 'zone', x: 1760, y: 980, width: 620, height: 500, label: 'Planning' },
+  });
+  const staleNodes: Node[] = [
+    {
+      id: 'zone',
+      type: 'zone',
+      position: { x: 1600, y: 900 },
+      width: 620,
+      height: 500,
+      data: {},
+    },
+  ];
+
+  function renderWholeBoardRecovery(firstWrite: Promise<unknown>) {
+    let attempts = 0;
+    const boardsPatch = vi.fn().mockImplementation((boardId, data) => {
+      attempts += 1;
+      if (attempts === 1) return firstWrite;
+      return mockBoardPatchResult(boardId, data);
+    });
+    const boardsGet = vi.fn().mockResolvedValue(freshBoard);
+    const placementsFindAll = vi.fn().mockResolvedValue([]);
+    const service = vi.fn((path: string) =>
+      path === 'boards'
+        ? { patch: boardsPatch, get: boardsGet }
+        : { patch: vi.fn(), findAll: placementsFindAll }
+    );
+    const setNodes = vi.fn();
+    const view = renderHook(
+      () =>
+        useBoardObjects({
+          board: staleBoard,
+          client: { service } as never,
+          boardObjectsForBoard: [],
+          nodes: staleNodes,
+          setNodes,
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+    return { ...view, boardsPatch, boardsGet, placementsFindAll, setNodes };
+  }
+
+  it('replans Arrange Board once from a fresh complete source snapshot', async () => {
+    const view = renderWholeBoardRecovery(
+      Promise.reject(new Error('Board layout source snapshot is stale'))
+    );
+
+    await act(async () => view.result.current.arrangeWholeBoard());
+
+    expect(layoutWrites(view.boardsPatch)).toHaveLength(2);
+    expect(layoutWrites(view.boardsPatch)[1]?.expected.objects).toEqual({
+      zone: { x: 1760, y: 980, width: 620, height: 500 },
+    });
+    expect(view.boardsGet).toHaveBeenCalledTimes(1);
+    expect(view.placementsFindAll).toHaveBeenCalledTimes(1);
+    expect(view.setNodes).toHaveBeenCalledTimes(1);
+    expect(showError).not.toHaveBeenCalled();
+  });
+
+  it('cancels a stale replan when a newer drag/resize intent takes ownership', async () => {
+    let rejectFirst: ((error: Error) => void) | undefined;
+    const firstWrite = new Promise((_, reject) => {
+      rejectFirst = reject;
+    });
+    const view = renderWholeBoardRecovery(firstWrite);
+
+    let arrange: Promise<void> | undefined;
+    act(() => {
+      arrange = view.result.current.arrangeWholeBoard();
+    });
+    act(() => view.result.current.cancelPendingLayoutRecovery());
+    rejectFirst?.(new Error('Board layout source snapshot is stale'));
+    await act(async () => arrange);
+
+    expect(layoutWrites(view.boardsPatch)).toHaveLength(1);
+    expect(view.boardsGet).not.toHaveBeenCalled();
+    expect(view.setNodes).not.toHaveBeenCalled();
+    expect(showError).not.toHaveBeenCalled();
+  });
+});
+
+describe('board object finite-geometry node boundary', () => {
+  it('does not mis-render legacy text or non-finite objects as zones', () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const board = makeBoard({
+      'legacy-text': { type: 'text', x: 20, y: 40, content: 'Fictional label' },
+      invalid: {
+        type: 'zone',
+        x: Number.POSITIVE_INFINITY,
+        y: 0,
+        width: 400,
+        height: 300,
+        label: 'Invalid',
+      },
+      'missing-size': {
+        type: 'zone',
+        x: 100,
+        y: 100,
+        label: 'Invalid runtime payload',
+      } as never,
+      valid: { type: 'zone', x: 0, y: 0, width: 400, height: 300, label: 'Valid' },
+    });
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client: makeClient().client,
+          boardObjectsForBoard: [],
+          nodes: [],
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+        }),
+      { wrapper }
+    );
+
+    expect(result.current.getBoardObjectNodes().map((node) => node.id)).toEqual(['valid']);
+    expect(consoleWarn).toHaveBeenCalledWith('Skipping board object with invalid geometry:', {
+      objectId: 'invalid',
+      type: 'zone',
+    });
+    expect(consoleWarn).toHaveBeenCalledWith('Skipping board object with invalid geometry:', {
+      objectId: 'missing-size',
+      type: 'zone',
+    });
+    expect(consoleWarn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        content: 'Fictional label',
+      })
+    );
+    consoleWarn.mockRestore();
   });
 });

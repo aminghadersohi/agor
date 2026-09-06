@@ -8,6 +8,7 @@
 import type { Board, BoardID, BoardObject, UUID } from '@agor/core/types';
 import { eq } from 'drizzle-orm';
 import { describe, expect, vi } from 'vitest';
+import { normalizeZoneLayoutPolicy } from '../../layout/zone-layout';
 import { generateId, shortId, toShortId } from '../../lib/ids';
 import type { Database } from '../client';
 import { select, update } from '../database-wrapper';
@@ -35,6 +36,7 @@ function createBoardData(overrides?: Partial<Board>): Partial<Board> {
     custom_css: overrides?.custom_css,
     objects: overrides?.objects,
     custom_context: overrides?.custom_context,
+    zone_layout_defaults: overrides?.zone_layout_defaults,
     created_by: overrides?.created_by ?? 'test-user',
     created_at: overrides?.created_at,
     last_updated: overrides?.last_updated,
@@ -50,6 +52,14 @@ function createBoardData(overrides?: Partial<Board>): Partial<Board> {
     data.background_color = overrides.background_color;
   }
   return data;
+}
+
+function inheritedZone(zone: Extract<BoardObject, { type: 'zone' }>): BoardObject {
+  return {
+    ...zone,
+    layout_binding: 'inherit',
+    layout: normalizeZoneLayoutPolicy(undefined),
+  };
 }
 
 function createRepoData(overrides?: { repo_id?: UUID; slug?: string }) {
@@ -116,6 +126,27 @@ async function getStoredBoardIcon(db: Database, boardId: UUID): Promise<string |
 // ============================================================================
 
 describe('BoardRepository.create', () => {
+  dbTest('rejects non-finite canvas geometry before persistence', async ({ db }) => {
+    const repo = new BoardRepository(db);
+
+    await expect(
+      repo.create(
+        createBoardData({
+          objects: {
+            zone: {
+              type: 'zone',
+              x: Number.NaN,
+              y: 20,
+              width: 500,
+              height: 400,
+              label: 'Fictional zone',
+            },
+          },
+        })
+      )
+    ).rejects.toThrow('requires finite x/y geometry');
+  });
+
   dbTest('leaves an omitted background unset (renders the themed default)', async ({ db }) => {
     const repo = new BoardRepository(db);
 
@@ -1155,6 +1186,33 @@ describe('BoardRepository.getDefault', () => {
 // ============================================================================
 
 describe('BoardRepository.upsertBoardObject', () => {
+  dbTest('rejects non-finite or non-positive owned dimensions', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const board = await repo.create(createBoardData());
+
+    await expect(
+      repo.upsertBoardObject(board.board_id, 'zone-invalid', {
+        type: 'zone',
+        x: 10,
+        y: 20,
+        width: Number.POSITIVE_INFINITY,
+        height: 400,
+        label: 'Fictional zone',
+      })
+    ).rejects.toThrow('requires a positive finite width');
+    await expect(
+      repo.upsertBoardObject(board.board_id, 'note-invalid', {
+        type: 'markdown',
+        x: 10,
+        y: 20,
+        width: 0,
+        content: 'Fictional note',
+      })
+    ).rejects.toThrow('requires a positive finite width');
+
+    expect((await repo.findById(board.board_id))?.objects).toBeUndefined();
+  });
+
   dbTest('should add new text object to empty board', async ({ db }) => {
     const repo = new BoardRepository(db);
     const board = await repo.create(createBoardData());
@@ -1190,7 +1248,7 @@ describe('BoardRepository.upsertBoardObject', () => {
 
     const updated = await repo.upsertBoardObject(board.board_id, 'zone-1', zoneObject);
 
-    expect(updated.objects).toEqual({ 'zone-1': zoneObject });
+    expect(updated.objects).toEqual({ 'zone-1': inheritedZone(zoneObject) });
   });
 
   dbTest('should update existing object', async ({ db }) => {
@@ -1237,7 +1295,7 @@ describe('BoardRepository.upsertBoardObject', () => {
 
     expect(updated.objects).toEqual({
       'text-1': existingText,
-      'zone-1': newZone,
+      'zone-1': inheritedZone(newZone),
     });
   });
 
@@ -1345,6 +1403,221 @@ describe('BoardRepository.removeBoardObject', () => {
 // BatchUpsertBoardObjects
 // ============================================================================
 
+describe('BoardRepository zone layout defaults', () => {
+  dbTest(
+    'makes new zones inherit normalized defaults while legacy zones remain overrides',
+    async ({ db }) => {
+      const repo = new BoardRepository(db);
+      const board = await repo.create(
+        createBoardData({
+          zone_layout_defaults: {
+            mode: 'auto',
+            preset: 'compact_list',
+            sortBy: 'updated',
+            sortDirection: 'desc',
+            gap: 8,
+            resize: 'height',
+            onOverflow: 'reflow_board',
+          },
+          objects: {
+            legacy: {
+              type: 'zone',
+              x: 0,
+              y: 0,
+              width: 600,
+              height: 400,
+              label: 'Legacy override',
+            },
+          },
+        })
+      );
+
+      const updated = await repo.upsertBoardObject(board.board_id, 'new-zone', {
+        type: 'zone',
+        x: 700,
+        y: 0,
+        width: 600,
+        height: 400,
+        label: 'New inherited zone',
+      });
+
+      expect(updated.objects?.legacy).not.toHaveProperty('layout_binding');
+      expect(updated.objects?.['new-zone']).toMatchObject({
+        layout_binding: 'inherit',
+        layout: { mode: 'auto', preset: 'compact_list', gap: 8 },
+      });
+      expect((await repo.findById(board.board_id))?.objects?.['new-zone']).toEqual(
+        updated.objects?.['new-zone']
+      );
+
+      const uiCreated = await repo.upsertBoardObject(board.board_id, 'ui-created-zone', {
+        type: 'zone',
+        x: 1400,
+        y: 0,
+        width: 600,
+        height: 400,
+        label: 'UI-created inherited zone',
+        layout_binding: 'inherit',
+        // The UI snapshots the effective policy so optimistic and persisted
+        // rendering agree. An explicit inherit binding must take precedence
+        // over the presence of that snapshot.
+        layout: normalizeZoneLayoutPolicy(board.zone_layout_defaults),
+      });
+      expect(uiCreated.objects?.['ui-created-zone']).toMatchObject({
+        layout_binding: 'inherit',
+        layout: { mode: 'auto', preset: 'compact_list', gap: 8 },
+      });
+    }
+  );
+
+  dbTest(
+    'preserves overrides, updates followers, and applies to all only by explicit intent',
+    async ({ db }) => {
+      const repo = new BoardRepository(db);
+      const board = await repo.create(
+        createBoardData({
+          zone_layout_defaults: {
+            mode: 'manual',
+            preset: 'grid',
+            sortBy: 'position',
+            sortDirection: 'asc',
+            gap: 24,
+          },
+          objects: {
+            override: {
+              type: 'zone',
+              x: 0,
+              y: 0,
+              width: 600,
+              height: 400,
+              label: 'Explicit',
+              layout: {
+                mode: 'manual',
+                preset: 'grid',
+                sortBy: 'title',
+                sortDirection: 'asc',
+                gap: 40,
+              },
+            },
+            follower: {
+              type: 'zone',
+              x: 700,
+              y: 0,
+              width: 640,
+              height: 420,
+              label: 'Follower',
+              locked: true,
+              layout_binding: 'inherit',
+              layout: {
+                mode: 'manual',
+                preset: 'grid',
+                sortBy: 'position',
+                sortDirection: 'asc',
+                gap: 24,
+              },
+            },
+          },
+        })
+      );
+
+      const preserved = await repo.setZoneLayoutDefaults(board.board_id, { gap: 8 });
+      expect(preserved.changed_zone_ids).toEqual(['follower']);
+      expect(preserved.board.objects?.override).not.toHaveProperty('layout_binding');
+      expect(preserved.board.objects?.override).toMatchObject({
+        layout: { gap: 40, sortBy: 'title' },
+      });
+      expect(preserved.board.objects?.follower).toMatchObject({
+        layout_binding: 'inherit',
+        layout: { gap: 8 },
+        locked: true,
+        width: 640,
+        height: 420,
+      });
+
+      const applied = await repo.setZoneLayoutDefaults(
+        board.board_id,
+        { ...preserved.board.zone_layout_defaults, gap: 4 },
+        { applyToExisting: true }
+      );
+      expect(applied.changed_zone_ids).toEqual(['override', 'follower']);
+      expect(applied.board.objects?.override).toMatchObject({
+        label: 'Explicit',
+        layout_binding: 'inherit',
+        layout: { gap: 4 },
+      });
+    }
+  );
+
+  dbTest(
+    'returns a zero-write result and rejects a stale two-tab source snapshot',
+    async ({ db }) => {
+      const repo = new BoardRepository(db);
+      const board = await repo.create(
+        createBoardData({
+          zone_layout_defaults: {
+            mode: 'manual',
+            preset: 'grid',
+            sortBy: 'position',
+            sortDirection: 'asc',
+            gap: 12,
+          },
+          objects: {
+            zone: {
+              type: 'zone',
+              x: 0,
+              y: 0,
+              width: 600,
+              height: 400,
+              label: 'Fictional review',
+              layout_binding: 'inherit',
+              layout: {
+                mode: 'manual',
+                preset: 'grid',
+                sortBy: 'position',
+                sortDirection: 'asc',
+                gap: 12,
+              },
+            },
+          },
+        })
+      );
+      const zoneObject = board.objects!.zone as Extract<BoardObject, { type: 'zone' }>;
+      const expected = {
+        defaults: board.zone_layout_defaults!,
+        zones: {
+          zone: { binding: 'inherit' as const, layout: zoneObject.layout! },
+        },
+      };
+
+      const unchanged = await repo.setZoneLayoutDefaults(
+        board.board_id,
+        board.zone_layout_defaults!,
+        { expected }
+      );
+      expect(unchanged).toMatchObject({ changed: false, changed_zone_ids: [] });
+      expect(unchanged.board.last_updated).toBe(board.last_updated);
+
+      await repo.upsertBoardObject(board.board_id, 'zone', {
+        ...zoneObject,
+        layout_binding: 'override',
+        layout: { ...zoneObject.layout!, gap: 40 },
+      });
+      await expect(
+        repo.setZoneLayoutDefaults(board.board_id, { gap: 4 }, { expected })
+      ).rejects.toThrow('source snapshot is stale');
+    }
+  );
+
+  dbTest('rejects a non-atomic global-default rewrite', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const board = await repo.create(createBoardData());
+
+    await expect(
+      repo.update(board.board_id, { zone_layout_defaults: normalizeZoneLayoutPolicy({ gap: 4 }) })
+    ).rejects.toThrow('use setZoneLayoutDefaults');
+  });
+});
+
 describe('BoardRepository.batchUpsertBoardObjects', () => {
   dbTest('should add multiple objects at once', async ({ db }) => {
     const repo = new BoardRepository(db);
@@ -1358,7 +1631,10 @@ describe('BoardRepository.batchUpsertBoardObjects', () => {
 
     const updated = await repo.batchUpsertBoardObjects(board.board_id, objects);
 
-    expect(updated.objects).toEqual(objects);
+    expect(updated.objects).toEqual({
+      ...objects,
+      'zone-1': inheritedZone(objects['zone-1'] as Extract<BoardObject, { type: 'zone' }>),
+    });
   });
 
   dbTest('should update existing and add new objects', async ({ db }) => {
@@ -1378,7 +1654,10 @@ describe('BoardRepository.batchUpsertBoardObjects', () => {
 
     const updated = await repo.batchUpsertBoardObjects(board.board_id, objects);
 
-    expect(updated.objects).toEqual(objects);
+    expect(updated.objects).toEqual({
+      ...objects,
+      'zone-1': inheritedZone(objects['zone-1'] as Extract<BoardObject, { type: 'zone' }>),
+    });
   });
 
   dbTest('should handle empty objects record', async ({ db }) => {
@@ -1612,6 +1891,31 @@ describe('BoardRepository.applyBoardLayout', () => {
       })
     ).rejects.toThrow('requires complete width geometry');
     expect((await repo.findById(board.board_id))?.objects?.note).toMatchObject({ y: 840 });
+  });
+
+  dbTest('rejects non-finite layout geometry without changing current state', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const board = await repo.create(
+      createBoardData({
+        objects: {
+          zone: { type: 'zone', x: 10, y: 20, width: 500, height: 400, label: 'Zone' },
+        },
+      })
+    );
+
+    await expect(
+      repo.applyBoardLayout(board.board_id, {
+        objects: { zone: { x: Number.NaN, y: 20, width: 500, height: 400 } },
+        placements: {},
+      })
+    ).rejects.toThrow('requires finite x/y geometry');
+
+    expect((await repo.findById(board.board_id))?.objects?.zone).toMatchObject({
+      x: 10,
+      y: 20,
+      width: 500,
+      height: 400,
+    });
   });
 
   dbTest('rolls back the frame when any placement belongs to another board', async ({ db }) => {

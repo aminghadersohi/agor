@@ -7,15 +7,12 @@ import {
   containingBoardZoneId,
   planBoardZoneArrangement,
 } from '@agor/core/layout/board-zone-arrangement';
-import {
-  BOARD_GRID_SIZE,
-  ceilBoardGridSize,
-  LayoutObstacleError,
-  snapBoardGridValue,
-} from '@agor/core/layout/rectangle-packing';
+import { ceilBoardGridSize, LayoutObstacleError } from '@agor/core/layout/rectangle-packing';
 import { planZoneGrowthReflow } from '@agor/core/layout/zone-growth-reflow';
 import {
   compactZoneItemSize,
+  estimateExpandedGenericCardHeight,
+  GENERIC_BOARD_CARD_LAYOUT,
   getZoneLayoutFrame,
   isBoardEntityDensityExpandable,
   justifyZoneContentCluster,
@@ -28,6 +25,7 @@ import type { BoardLayoutApplyResult, BoardLayoutBatch } from '@agor/core/types'
 import type { AgorClient, Board, BoardEntityObject, BoardObject, Card } from '@agor-live/client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Node } from 'reactflow';
+import { useMutationGate } from '../../../contexts/ConnectionContext';
 import { useThemedMessage } from '../../../utils/message';
 import { dealDelayMs, dealOrderIndex, dealStyle, dealTiming } from './arrangeAnimation';
 import { AutoZoneDeferral } from './autoZoneDeferral';
@@ -38,6 +36,12 @@ import {
   changedAutoZoneObserverIds,
   holdAutoZoneObserverLease,
 } from './autoZoneObserver';
+import {
+  type AuthoritativeLayoutSource,
+  fetchAuthoritativeLayoutSource,
+  isBoardLayoutSnapshotStale,
+  MAX_LAYOUT_STALE_REPLANS,
+} from './layoutConflictRecovery';
 import {
   createPostLayoutViewportIntent,
   type PostLayoutViewportIntent,
@@ -139,6 +143,16 @@ const isDensityExpandablePlacement = (
   card?: Card
 ): boolean =>
   isBoardEntityDensityExpandable(placement.entity_type, card ?? densityCardForNode(node));
+
+const expandedDensitySize = (node: Node): { width: number; height: number } =>
+  ceilBoardGridSize(
+    node.type === 'cardNode'
+      ? {
+          width: GENERIC_BOARD_CARD_LAYOUT.width,
+          height: estimateExpandedGenericCardHeight(densityCardForNode(node)),
+        }
+      : { width: 500, height: 200 }
+  );
 
 import { getMeasuredLayoutNodeSize } from './utils/boardNodeGeometry';
 import type { ReactFlowNode } from './utils/reactFlowTypes';
@@ -359,6 +373,15 @@ interface UseBoardObjectsProps {
   onUserLayoutStart?: () => number;
   /** Queue one viewport decision after a persisted, explicitly requested layout. */
   onUserLayoutComplete?: (intent: PostLayoutViewportIntent, intentToken?: number) => void;
+  /** Effective board.edit permission, resolved by the canvas. */
+  canEdit?: boolean;
+}
+
+function zonesOverlap(
+  a: Extract<BoardObject, { type: 'zone' }>,
+  b: Extract<BoardObject, { type: 'zone' }>
+): boolean {
+  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
 }
 
 interface ArrangeZoneContentsOptions {
@@ -367,11 +390,27 @@ interface ArrangeZoneContentsOptions {
   userInitiated?: boolean;
   /** Synchronous owner token required for background writes only. */
   observerLease?: AutoZoneObserverLease;
+  /** Internal bounded-conflict recovery state; never exposed by UI controls. */
+  recovery?: LayoutRecoveryState;
 }
 
 interface AutoZoneObserverLease {
   boardId: string | undefined;
   owned: boolean;
+}
+
+interface LayoutIntentToken {
+  epoch: number;
+  scope: 'board' | 'zone';
+  key: string;
+  generation: number;
+}
+
+interface LayoutRecoveryState {
+  attempt: number;
+  intent: LayoutIntentToken;
+  source: AuthoritativeLayoutSource;
+  viewportIntentToken?: number;
 }
 
 type ArrangeBoardZonesOptions = Omit<BoardZoneArrangementOptions, 'looseItems'> & {
@@ -384,6 +423,8 @@ type ArrangeBoardZonesOptions = Omit<BoardZoneArrangementOptions, 'looseItems'> 
   viewportMode?: PostLayoutViewportMode;
   /** Invocation-order fence reserved before the first asynchronous boundary. */
   viewportIntentToken?: number;
+  /** Internal bounded-conflict recovery state; never exposed by UI controls. */
+  recovery?: LayoutRecoveryState;
 };
 
 export const useBoardObjects = ({
@@ -399,12 +440,18 @@ export const useBoardObjects = ({
   onArrangeNodes,
   onUserLayoutStart,
   onUserLayoutComplete,
+  canEdit = true,
 }: UseBoardObjectsProps) => {
   // Use ref to avoid recreating callbacks when board changes
   const boardRef = useRef(board);
   boardRef.current = board;
   const nodesRef = useRef(nodes);
   nodesRef.current = nodes;
+  const canEditRef = useRef(canEdit);
+  canEditRef.current = canEdit;
+  const mutationGate = useMutationGate();
+  const canMutateRef = useRef(mutationGate.canMutate);
+  canMutateRef.current = mutationGate.canMutate;
 
   const { showError, showSuccess, showWarning } = useThemedMessage();
   // `handleUpdateObject` re-packs a zone after expanding it, but
@@ -453,6 +500,44 @@ export const useBoardObjects = ({
   calledOutNodeIdsRef.current = calledOutNodeIds;
   const boardArrangementInFlightRef = useRef(false);
   const [isBoardArrangementActive, setIsBoardArrangementActive] = useState(false);
+  const layoutIntentEpochRef = useRef(0);
+  const boardLayoutGenerationRef = useRef(0);
+  const zoneLayoutGenerationRef = useRef(new Map<string, number>());
+
+  const beginZoneLayoutIntent = useCallback((zoneId: string, userInitiated: boolean) => {
+    if (userInitiated) layoutIntentEpochRef.current += 1;
+    const generation = (zoneLayoutGenerationRef.current.get(zoneId) ?? 0) + 1;
+    zoneLayoutGenerationRef.current.set(zoneId, generation);
+    return {
+      epoch: layoutIntentEpochRef.current,
+      scope: 'zone' as const,
+      key: zoneId,
+      generation,
+    };
+  }, []);
+
+  const beginBoardLayoutIntent = useCallback(() => {
+    layoutIntentEpochRef.current += 1;
+    boardLayoutGenerationRef.current += 1;
+    return {
+      epoch: layoutIntentEpochRef.current,
+      scope: 'board' as const,
+      key: 'board',
+      generation: boardLayoutGenerationRef.current,
+    };
+  }, []);
+
+  const layoutIntentIsCurrent = useCallback((intent: LayoutIntentToken): boolean => {
+    if (intent.epoch !== layoutIntentEpochRef.current) return false;
+    return intent.scope === 'board'
+      ? intent.generation === boardLayoutGenerationRef.current
+      : intent.generation === zoneLayoutGenerationRef.current.get(intent.key);
+  }, []);
+
+  /** Direct manipulation supersedes any not-yet-committed layout or stale replan. */
+  const cancelPendingLayoutRecovery = useCallback(() => {
+    layoutIntentEpochRef.current += 1;
+  }, []);
 
   const acknowledgeExpectedAutoLayouts = useCallback((zoneIds: Iterable<string>) => {
     for (const zoneId of zoneIds) {
@@ -519,6 +604,9 @@ export const useBoardObjects = ({
   useEffect(() => {
     const boardId = board?.board_id;
     const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+    layoutIntentEpochRef.current += 1;
+    boardLayoutGenerationRef.current = 0;
+    zoneLayoutGenerationRef.current.clear();
     lastAutoLayoutSignaturesRef.current = new Map();
     expectedAutoLayoutSignaturesRef.current.clear();
     if (!boardId || !locks) {
@@ -597,7 +685,11 @@ export const useBoardObjects = ({
           // layout-policy transition durable rather than a successful no-op.
           _action: 'upsertObject',
           objectId: zoneId,
-          objectData: { ...zone, layout: { ...layout, mode: 'manual' } },
+          objectData: {
+            ...zone,
+            layout: { ...layout, mode: 'manual' },
+            layout_binding: 'override',
+          },
         } as unknown as Partial<Board>)
         .then(() => true)
         .catch((error) => {
@@ -728,20 +820,7 @@ export const useBoardObjects = ({
   const handleUpdateObject = useCallback(
     async (objectId: string, objectData: BoardObject) => {
       const currentBoard = boardRef.current;
-      if (!currentBoard || !client) return false;
-
-      // Leaving `compact_list` is the one moment we can be certain a collapse
-      // was the preset's doing rather than the user's: the preset collapsed
-      // every item on the way in, so it owes them an expand on the way out.
-      // Deliberately keyed to the preset *transition* and not to arranging in
-      // grid — an automatic grid zone reflows on every session change, and
-      // expanding there would repeatedly stomp worktree density chosen by hand.
-      const previous = currentBoard.objects?.[objectId];
-      const leftCompactList =
-        previous?.type === 'zone' &&
-        objectData.type === 'zone' &&
-        normalizeZoneLayoutPolicy(previous.layout).preset === 'compact_list' &&
-        normalizeZoneLayoutPolicy(objectData.layout).preset !== 'compact_list';
+      if (!canEditRef.current || !currentBoard || !client) return false;
 
       try {
         await client.service('boards').patch(currentBoard.board_id, {
@@ -749,31 +828,14 @@ export const useBoardObjects = ({
           objectId,
           objectData,
         } as unknown as Partial<Board>);
-        if (leftCompactList) {
-          // Silent: this is one user action, and a toast per internal step
-          // reads as a bug.
-          await setZoneContentsCompact(objectId, false, {
-            silent: true,
-            manualInteraction: false,
-          });
-          // The positions still carry compact_list's one-row spacing, so the
-          // worktrees we just restored to full height would overlap. Re-pack once
-          // they have actually rendered — the layout measures the DOM, so
-          // arranging before the expanded worktrees paint would measure the
-          // collapsed heights and pack just as tightly. An automatic zone
-          // reflows on its own, but a manual one has nothing else to fix this.
-          setTimeout(() => {
-            void arrangeZoneContentsRef.current?.(objectId, { silent: true });
-          }, EXPANDED_REPACK_DELAY_MS);
-        }
         return true;
       } catch (error) {
         console.error('Failed to update object:', error);
-        showError('Failed to update board item');
+        showError('Failed to save board object');
         return false;
       }
     },
-    [client, setZoneContentsCompact, showError] // Board is read through boardRef, not a dep
+    [client, showError] // Board and permissions are read through refs, not deps
   );
 
   /**
@@ -801,7 +863,7 @@ export const useBoardObjects = ({
   const reorderObject = useCallback(
     async (objectId: string, op: LayerOp) => {
       const currentBoard = boardRef.current;
-      if (!currentBoard || !client) return;
+      if (!canEditRef.current || !currentBoard || !client) return;
 
       const objects = currentBoard.objects ?? {};
       const target = objects[objectId];
@@ -842,7 +904,7 @@ export const useBoardObjects = ({
    */
   const deleteZone = useCallback(
     async (objectId: string, _deleteAssociatedSessions: boolean) => {
-      if (!board || !client) return;
+      if (!canEditRef.current || !board || !client) return;
 
       // Mark as deleted to prevent re-appearance during WebSocket updates
       deletedObjectsRef.current.add(objectId);
@@ -878,7 +940,7 @@ export const useBoardObjects = ({
   const deleteObject = useCallback(
     async (objectId: string) => {
       const currentBoard = boardRef.current;
-      if (!currentBoard || !client) return;
+      if (!canEditRef.current || !currentBoard || !client) return;
 
       // Mark as deleted to prevent re-appearance during WebSocket updates
       deletedObjectsRef.current.add(objectId);
@@ -912,7 +974,10 @@ export const useBoardObjects = ({
    */
   const deleteArtifact = useCallback(
     async (objectId: string, artifactId: string) => {
-      if (!client) return;
+      // Artifact lifecycle authorization is creator/admin based rather than
+      // board.edit based, but it still obeys the global connection/version
+      // mutation gate. The ref protects callbacks captured before reconnect.
+      if (!canMutateRef.current || !client) return;
 
       // Mark as deleted to prevent re-appearance during WebSocket updates
       deletedObjectsRef.current.add(objectId);
@@ -942,18 +1007,27 @@ export const useBoardObjects = ({
    */
   const arrangeZoneContents = useCallback(
     async (zoneId: string, options: ArrangeZoneContentsOptions = {}) => {
-      const currentBoard = boardRef.current;
+      const currentBoard = options.recovery?.source.board ?? boardRef.current;
       const persistedZone = currentBoard?.objects?.[zoneId];
       if (!currentBoard || !client || persistedZone?.type !== 'zone') return;
+      const intent =
+        options.recovery?.intent ?? beginZoneLayoutIntent(zoneId, options.userInitiated === true);
+      if (!options.recovery && options.userInitiated) {
+        autoZoneDeferralRef.current?.cancel(zoneId);
+      }
       if (
-        options.observerLease &&
-        (options.observerLease !== autoZoneObserverLeaseRef.current ||
-          !options.observerLease.owned ||
-          options.observerLease.boardId !== currentBoard.board_id)
+        !layoutIntentIsCurrent(intent) ||
+        (options.observerLease &&
+          (options.observerLease !== autoZoneObserverLeaseRef.current ||
+            !options.observerLease.owned ||
+            options.observerLease.boardId !== currentBoard.board_id))
       )
         return;
-      const viewportIntentToken = options.userInitiated ? onUserLayoutStart?.() : undefined;
-      const sourceNodes = nodesRef.current;
+      const viewportIntentToken =
+        options.recovery?.viewportIntentToken ??
+        (options.userInitiated ? onUserLayoutStart?.() : undefined);
+      const sourceNodes = options.recovery?.source.nodes ?? nodesRef.current;
+      const sourcePlacements = options.recovery?.source.placements ?? boardObjectsForBoard;
       const liveZoneNode = sourceNodes.find((node) => node.id === zoneId);
       // A toolbar click can race the debounced persistence of a drag/resize.
       // Plan and write from the visible frame so arranging children can never
@@ -1039,7 +1113,7 @@ export const useBoardObjects = ({
       }
 
       const placementByNodeId = new Map<string, BoardEntityObject>();
-      for (const placement of boardObjectsForBoard) {
+      for (const placement of sourcePlacements) {
         if (placement.branch_id) placementByNodeId.set(placement.branch_id, placement);
         if (placement.card_id) placementByNodeId.set(`card-${placement.card_id}`, placement);
       }
@@ -1060,9 +1134,7 @@ export const useBoardObjects = ({
         // still plans against the title the initiating user actually sees.
         fontScale,
       });
-      const requestedGap = policy.gap ?? 24;
-      const gridGap =
-        requestedGap === 0 ? 0 : Math.max(BOARD_GRID_SIZE, snapBoardGridValue(requestedGap));
+      const exactGap = policy.gap ?? 24;
       const layoutItems = children.map(({ node, isCanvasObject }) => ({
         id: node.id,
         ...itemSize(node),
@@ -1102,6 +1174,8 @@ export const useBoardObjects = ({
                       entityType:
                         node.type === 'branchNode' ? ('branch' as const) : ('card' as const),
                       densityExpandable: isDensityExpandableNode(node),
+                      compact: placementByNodeId.get(node.id)?.compact,
+                      expandedSize: expandedDensitySize(node),
                     }),
               };
             }),
@@ -1134,8 +1208,8 @@ export const useBoardObjects = ({
         rows: new Set(packedZone.items.map((item) => item.row)).size,
         width: packedZone.width,
         height: packedZone.height - frame.headerInset,
-        gapX: gridGap,
-        gapY: gridGap,
+        gapX: exactGap,
+        gapY: exactGap,
         padding: frame.padding,
         fitsWithoutOverlap: true,
         stackCount: packedZone.items.length,
@@ -1236,10 +1310,8 @@ export const useBoardObjects = ({
                 : { x: placement.x, y: placement.y + titleInset },
               data: {
                 ...node.data,
-                ...(!isCanvasObject &&
-                node.type === 'branchNode' &&
-                (layout.mode === 'deck' || policy.preset === 'compact_list')
-                  ? { compact: true }
+                ...(!isCanvasObject && placement.compact !== undefined
+                  ? { compact: placement.compact }
                   : {}),
               },
               style: {
@@ -1387,14 +1459,16 @@ export const useBoardObjects = ({
         );
       });
 
-      const compactChanged =
-        policy.preset === 'compact_list' &&
-        children.some(
-          ({ node, isCanvasObject }) =>
-            !isCanvasObject &&
-            node.type === 'branchNode' &&
-            placementByNodeId.get(node.id)?.compact !== true
+      const compactChanged = children.some(({ node, isCanvasObject }) => {
+        if (isCanvasObject) return false;
+        const durable = placementByNodeId.get(node.id);
+        const arranged = placementById.get(node.id);
+        return (
+          durable !== undefined &&
+          arranged?.compact !== undefined &&
+          (durable.compact === true) !== arranged.compact
         );
+      });
       if (
         !visualPositionChanged &&
         !durableEntityGeometryChanged &&
@@ -1448,9 +1522,6 @@ export const useBoardObjects = ({
           ];
         }),
       });
-      if (optimisticNodes.length > 0) {
-        onArrangeNodes?.(optimisticNodes, timing.totalMs);
-      }
       let expectedLayoutRegistered = false;
       if (policy.mode === 'auto') {
         // Match the exact normalized post-write target rather than blindly
@@ -1463,15 +1534,6 @@ export const useBoardObjects = ({
         expectedLayoutRegistered = true;
         skipNextAutoArrangeRef.current.delete(zoneId);
       }
-      setNodes((currentNodes) =>
-        currentNodes.map((node) => {
-          if (node.id === zoneId && (zoneHeightChanged || zoneWidthChanged)) {
-            return optimisticZone ?? node;
-          }
-          return reflowedById.get(node.id) ?? changedById.get(node.id) ?? node;
-        })
-      );
-
       try {
         const canvasObjects = Object.fromEntries(
           children.flatMap(({ node, isCanvasObject }) => {
@@ -1519,10 +1581,9 @@ export const useBoardObjects = ({
             if (!placement) return [];
             const arranged = placementById.get(node.id);
             const { width, height } = arranged ?? ceilBoardGridSize(renderedNodeSize(node));
-            const shouldCompact =
-              (policy.preset === 'compact_list' || layout.mode === 'deck') &&
-              isDensityExpandablePlacement(placement, node) &&
-              placement.compact !== true;
+            const targetCompact = arranged?.compact;
+            const densityChanged =
+              targetCompact !== undefined && (placement.compact === true) !== targetCompact;
             return [
               [
                 placement.object_id,
@@ -1532,7 +1593,7 @@ export const useBoardObjects = ({
                   // the other required field as undefined in the repository.
                   position: node.position,
                   size: { width, height },
-                  ...(shouldCompact ? { compact: true } : {}),
+                  ...(densityChanged ? { compact: targetCompact } : {}),
                 },
               ] as const,
             ];
@@ -1543,10 +1604,11 @@ export const useBoardObjects = ({
           // geometry snapshot. Publishing the existing atomic layout action
           // prevents partial placement echoes from re-arming the observer.
           if (
-            options.observerLease &&
-            (options.observerLease !== autoZoneObserverLeaseRef.current ||
-              !options.observerLease.owned ||
-              options.observerLease.boardId !== currentBoard.board_id)
+            !layoutIntentIsCurrent(intent) ||
+            (options.observerLease &&
+              (options.observerLease !== autoZoneObserverLeaseRef.current ||
+                !options.observerLease.owned ||
+                options.observerLease.boardId !== currentBoard.board_id))
           ) {
             if (expectedLayoutRegistered) clearExpectedAutoLayouts([zoneId]);
             return;
@@ -1556,7 +1618,7 @@ export const useBoardObjects = ({
             placements,
             expected: expectedLayoutSnapshot(
               currentBoard,
-              new Map(boardObjectsForBoard.map((placement) => [placement.object_id, placement]))
+              new Map(sourcePlacements.map((placement) => [placement.object_id, placement]))
             ),
           };
           const result = (await client.service('boards').patch(currentBoard.board_id, {
@@ -1569,6 +1631,18 @@ export const useBoardObjects = ({
           if (expectedLayoutRegistered) acknowledgeExpectedAutoLayouts([zoneId]);
         } else if (expectedLayoutRegistered) {
           clearExpectedAutoLayouts([zoneId]);
+        }
+        if (!layoutIntentIsCurrent(intent)) return;
+        if (optimisticNodes.length > 0) {
+          onArrangeNodes?.(optimisticNodes, timing.totalMs);
+          setNodes((currentNodes) =>
+            currentNodes.map((node) => {
+              if (node.id === zoneId && (zoneHeightChanged || zoneWidthChanged)) {
+                return optimisticZone ?? node;
+              }
+              return reflowedById.get(node.id) ?? changedById.get(node.id) ?? node;
+            })
+          );
         }
         if (overflowCount > 0 && !options.silent) {
           showWarning(
@@ -1597,16 +1671,59 @@ export const useBoardObjects = ({
         });
       } catch (error) {
         if (expectedLayoutRegistered) clearExpectedAutoLayouts([zoneId]);
+        if (isBoardLayoutSnapshotStale(error)) {
+          const attempt = options.recovery?.attempt ?? 0;
+          if (!layoutIntentIsCurrent(intent)) return;
+          if (attempt < MAX_LAYOUT_STALE_REPLANS) {
+            try {
+              const source = await fetchAuthoritativeLayoutSource(
+                client,
+                currentBoard.board_id,
+                nodesRef.current
+              );
+              if (!source || !layoutIntentIsCurrent(intent)) {
+                if (options.userInitiated && layoutIntentIsCurrent(intent)) {
+                  showError(
+                    'The board changed while arranging. Try again after it finishes loading.'
+                  );
+                }
+                return;
+              }
+              await arrangeZoneContentsRef.current?.(zoneId, {
+                ...options,
+                recovery: {
+                  attempt: attempt + 1,
+                  intent,
+                  source,
+                  viewportIntentToken,
+                },
+              });
+            } catch (refreshError) {
+              console.error('Failed to refresh current board layout:', refreshError);
+              if (options.userInitiated) showError('Failed to refresh the current board layout');
+            }
+            return;
+          }
+          // A second conflict means another writer won again. Background
+          // maintenance stops silently; explicit intent gets one actionable
+          // message and never enters an observer/toast loop.
+          if (options.userInitiated) {
+            showError('The board changed again while arranging. Try again.');
+          }
+          return;
+        }
         console.error('Failed to arrange zone contents:', error);
         showError('Failed to arrange zone contents');
       }
     },
     [
       acknowledgeExpectedAutoLayouts,
+      beginZoneLayoutIntent,
       boardObjectsForBoard,
       clearExpectedAutoLayouts,
       client,
       completeUserLayout,
+      layoutIntentIsCurrent,
       onUserLayoutStart,
       onArrangeNodes,
       restoreZoneCallouts,
@@ -1786,11 +1903,20 @@ export const useBoardObjects = ({
   );
 
   /** Keep an explicitly dragged/resized Auto Zone frame while its children re-pack. */
-  const preserveAutoZoneFrameOnce = useCallback((zoneId: string) => {
-    const zone = boardRef.current?.objects?.[zoneId];
-    if (zone?.type !== 'zone' || normalizeZoneLayoutPolicy(zone.layout).mode !== 'auto') return;
-    preserveNextAutoZoneFrameRef.current.add(zoneId);
-  }, []);
+  const preserveAutoZoneFrameOnce = useCallback(
+    (zoneId: string) => {
+      const zone = boardRef.current?.objects?.[zoneId];
+      if (zone?.type !== 'zone' || normalizeZoneLayoutPolicy(zone.layout).mode !== 'auto') return;
+      cancelPendingLayoutRecovery();
+      clearExpectedAutoLayouts([zoneId]);
+      preserveNextAutoZoneFrameRef.current.add(zoneId);
+      const lease = autoZoneObserverLeaseRef.current;
+      autoZoneDeferralRef.current?.defer(zoneId, () =>
+        runAutoZoneArrangeRef.current(zoneId, lease)
+      );
+    },
+    [cancelPendingLayoutRecovery, clearExpectedAutoLayouts]
+  );
 
   /**
    * Arrange selected zone containers and their measured children using the
@@ -1799,30 +1925,36 @@ export const useBoardObjects = ({
    */
   const arrangeBoardZones = useCallback(
     async (zoneIds: readonly string[], options: ArrangeBoardZonesOptions = {}) => {
-      const currentBoard = boardRef.current;
-      if (!currentBoard || !client || boardArrangementInFlightRef.current) return;
       const {
         userInitiated = false,
         layoutScope = 'board',
         selectedRootIds,
         viewportMode = 'smart',
         viewportIntentToken: suppliedViewportIntentToken,
+        recovery,
         ...arrangementOptions
       } = options;
-      const viewportIntentToken = userInitiated
-        ? (suppliedViewportIntentToken ?? onUserLayoutStart?.())
-        : undefined;
-      const packZoneContents = arrangementOptions.packZoneContents !== false;
+      const currentBoard = recovery?.source.board ?? boardRef.current;
+      const ownsInFlight = !recovery;
+      if (!currentBoard || !client || (ownsInFlight && boardArrangementInFlightRef.current)) return;
+      const intent = recovery?.intent ?? beginBoardLayoutIntent();
+      if (!layoutIntentIsCurrent(intent)) return;
+      const viewportIntentToken =
+        recovery?.viewportIntentToken ??
+        (userInitiated ? (suppliedViewportIntentToken ?? onUserLayoutStart?.()) : undefined);
       const selected = new Set(zoneIds);
-      const currentNodes = nodesRef.current;
+      const currentNodes = recovery?.source.nodes ?? nodesRef.current;
+      const sourcePlacements = recovery?.source.placements ?? boardObjectsForBoard;
       const placementByNodeId = new Map<string, BoardEntityObject>();
-      for (const placement of boardObjectsForBoard) {
+      for (const placement of sourcePlacements) {
         if (placement.branch_id) placementByNodeId.set(placement.branch_id, placement);
         if (placement.card_id) placementByNodeId.set(`card-${placement.card_id}`, placement);
       }
 
-      boardArrangementInFlightRef.current = true;
-      setIsBoardArrangementActive(true);
+      if (ownsInFlight) {
+        boardArrangementInFlightRef.current = true;
+        setIsBoardArrangementActive(true);
+      }
       const explicitExpectationZoneIds = new Set<string>();
       try {
         const candidates = getBoardArrangementCandidates(
@@ -1900,6 +2032,7 @@ export const useBoardObjects = ({
                         entityType:
                           node.type === 'branchNode' ? ('branch' as const) : ('card' as const),
                         densityExpandable: isDensityExpandableNode(node),
+                        expandedSize: expandedDensitySize(node),
                       }),
                   position: isCanvasObject
                     ? { x: node.position.x - object.x, y: node.position.y - object.y }
@@ -1919,11 +2052,24 @@ export const useBoardObjects = ({
           {
             ...scopedArrangementOptions,
             looseItems: (layoutScope === 'board' || selectedRootIds ? looseNodes : []).map(
-              (node) => ({
-                id: node.id,
-                ...node.position,
-                ...ceilBoardGridSize(renderedNodeSize(node)),
-              })
+              (node) => {
+                const placement = placementByNodeId.get(node.id);
+                const isEntity = node.type === 'branchNode' || node.type === 'cardNode';
+                return {
+                  id: node.id,
+                  ...node.position,
+                  ...ceilBoardGridSize(renderedNodeSize(node)),
+                  ...(isEntity
+                    ? {
+                        entityType:
+                          node.type === 'branchNode' ? ('branch' as const) : ('card' as const),
+                        compact: placement?.compact,
+                        densityExpandable: isDensityExpandableNode(node),
+                        expandedSize: expandedDensitySize(node),
+                      }
+                    : {}),
+                };
+              }
             ),
           }
         );
@@ -1979,6 +2125,10 @@ export const useBoardObjects = ({
               width: item.width,
               height: item.height,
               style: { ...node.style, width: item.width, height: item.height },
+              data: {
+                ...node.data,
+                ...(item.compact === undefined ? {} : { compact: item.compact }),
+              },
             },
           ];
         });
@@ -1994,26 +2144,17 @@ export const useBoardObjects = ({
             Math.abs(currentSize.height - nextSize.height) >= 0.5
           );
         });
-        const densityChanged =
-          packZoneContents &&
-          plan.zones.some((zone) =>
-            zone.items.some((item) => {
-              const placement = placementByNodeId.get(item.id);
-              const zoneObject = currentBoard.objects?.[zone.id];
-              const policy = normalizeZoneLayoutPolicy(
-                zoneObject?.type === 'zone' ? zoneObject.layout : undefined
-              );
-              return (
-                placement !== undefined &&
-                policy.preset === 'compact_list' &&
-                isDensityExpandablePlacement(
-                  placement,
-                  currentNodes.find((node) => node.id === item.id)
-                ) &&
-                placement.compact !== true
-              );
-            })
+        const densityChanged = [
+          ...plan.zones.flatMap((zone) => zone.items),
+          ...plan.looseItems,
+        ].some((item) => {
+          const placement = placementByNodeId.get(item.id);
+          return (
+            placement !== undefined &&
+            item.compact !== undefined &&
+            (placement.compact === true) !== item.compact
           );
+        });
         const arrangedNodeById = new Map(arrangedNodes.map((node) => [node.id, node]));
         const afterNodes = currentNodes.map((node) => arrangedNodeById.get(node.id) ?? node);
         const affectedNodeIds =
@@ -2075,9 +2216,6 @@ export const useBoardObjects = ({
           explicitExpectationZoneIds.add(arrangedZone.id);
           skipNextAutoArrangeRef.current.delete(arrangedZone.id);
         }
-        setNodes((nodes) => nodes.map((node) => arrangedNodeById.get(node.id) ?? node));
-        onArrangeNodes?.(arrangedNodes, dealTiming({ count: arrangedNodes.length }).totalMs);
-
         const plannedObjects = Object.fromEntries([
           ...plan.zones.map((zone) => {
             const existing = currentBoard.objects?.[zone.id];
@@ -2131,19 +2269,9 @@ export const useBoardObjects = ({
         const objects = plannedObjects;
         const plannedPlacements = Object.fromEntries(
           [
-            ...plan.zones.flatMap((zone) =>
-              zone.items.map((item) => {
-                const zoneObject = currentBoard.objects?.[zone.id];
-                return {
-                  item,
-                  policy: normalizeZoneLayoutPolicy(
-                    zoneObject?.type === 'zone' ? zoneObject.layout : undefined
-                  ),
-                };
-              })
-            ),
-            ...plan.looseItems.map((item) => ({ item, policy: undefined })),
-          ].flatMap(({ item, policy }) => {
+            ...plan.zones.flatMap((zone) => zone.items.map((item) => ({ item }))),
+            ...plan.looseItems.map((item) => ({ item })),
+          ].flatMap(({ item }) => {
             const placement = placementByNodeId.get(item.id);
             if (!placement) return [];
             return [
@@ -2152,14 +2280,8 @@ export const useBoardObjects = ({
                 {
                   position: { x: item.x, y: item.y },
                   size: { width: item.width, height: item.height },
-                  ...(packZoneContents &&
-                  policy?.preset === 'compact_list' &&
-                  isDensityExpandablePlacement(
-                    placement,
-                    currentNodes.find((node) => node.id === item.id)
-                  ) &&
-                  placement.compact !== true
-                    ? { compact: true }
+                  ...(item.compact !== undefined && (placement.compact === true) !== item.compact
+                    ? { compact: item.compact }
                     : {}),
                 },
               ] as const,
@@ -2172,9 +2294,10 @@ export const useBoardObjects = ({
           placements,
           expected: expectedLayoutSnapshot(
             currentBoard,
-            new Map(boardObjectsForBoard.map((placement) => [placement.object_id, placement]))
+            new Map(sourcePlacements.map((placement) => [placement.object_id, placement]))
           ),
         };
+        if (!layoutIntentIsCurrent(intent)) return;
         const result = (await client.service('boards').patch(currentBoard.board_id, {
           _action: 'applyLayout',
           ...batch,
@@ -2183,6 +2306,9 @@ export const useBoardObjects = ({
           throw new Error('Board layout acknowledgement omitted committed geometry');
         }
         acknowledgeExpectedAutoLayouts(explicitExpectationZoneIds);
+        if (!layoutIntentIsCurrent(intent)) return;
+        setNodes((nodes) => nodes.map((node) => arrangedNodeById.get(node.id) ?? node));
+        onArrangeNodes?.(arrangedNodes, dealTiming({ count: arrangedNodes.length }).totalMs);
         completeUserLayout({
           userInitiated,
           viewportIntentToken,
@@ -2197,6 +2323,44 @@ export const useBoardObjects = ({
         );
       } catch (error) {
         clearExpectedAutoLayouts(explicitExpectationZoneIds);
+        if (isBoardLayoutSnapshotStale(error)) {
+          const attempt = recovery?.attempt ?? 0;
+          if (!layoutIntentIsCurrent(intent)) return;
+          if (attempt < MAX_LAYOUT_STALE_REPLANS) {
+            try {
+              const source = await fetchAuthoritativeLayoutSource(
+                client,
+                currentBoard.board_id,
+                nodesRef.current
+              );
+              if (!source || !layoutIntentIsCurrent(intent)) {
+                if (userInitiated && layoutIntentIsCurrent(intent)) {
+                  showError(
+                    'The board changed while arranging. Try again after it finishes loading.'
+                  );
+                }
+                return;
+              }
+              await arrangeBoardZones(zoneIds, {
+                ...options,
+                recovery: {
+                  attempt: attempt + 1,
+                  intent,
+                  source,
+                  viewportIntentToken,
+                },
+              });
+            } catch (refreshError) {
+              console.error('Failed to refresh current board layout:', refreshError);
+              if (userInitiated) showError('Failed to refresh the current board layout');
+            }
+            return;
+          }
+          if (userInitiated) {
+            showError('The board changed again while arranging. Try again.');
+          }
+          return;
+        }
         console.error('Failed to arrange board zones:', error);
         showError(
           error instanceof LayoutObstacleError
@@ -2204,16 +2368,20 @@ export const useBoardObjects = ({
             : 'Failed to arrange zones'
         );
       } finally {
-        boardArrangementInFlightRef.current = false;
-        setIsBoardArrangementActive(false);
+        if (ownsInFlight) {
+          boardArrangementInFlightRef.current = false;
+          setIsBoardArrangementActive(false);
+        }
       }
     },
     [
       acknowledgeExpectedAutoLayouts,
+      beginBoardLayoutIntent,
       boardObjectsForBoard,
       clearExpectedAutoLayouts,
       client,
       completeUserLayout,
+      layoutIntentIsCurrent,
       onUserLayoutStart,
       onArrangeNodes,
       restoreZoneCallouts,
@@ -2244,7 +2412,12 @@ export const useBoardObjects = ({
         typeof options === 'boolean' ? { packZoneContents: options } : options;
       await arrangeBoardZones(
         selectedZones.map(([zoneId]) => zoneId),
-        { userInitiated: true, layoutScope: 'board', ...arrangementOptions }
+        {
+          userInitiated: true,
+          layoutScope: 'board',
+          density: 'preserve',
+          ...arrangementOptions,
+        }
       );
     },
     [arrangeBoardZones]
@@ -2388,20 +2561,45 @@ export const useBoardObjects = ({
   const getBoardObjectNodes = useCallback((): Node[] => {
     if (!boardObjects) return [];
 
+    const zoneEntries = Object.entries(boardObjects).filter(
+      (entry): entry is [string, Extract<BoardObject, { type: 'zone' }>] => entry[1].type === 'zone'
+    );
+    const zonePeers = zoneEntries.map(([id, zone]) => ({
+      id,
+      zIndex: sanitizeZIndex(zone.zIndex, DEFAULT_BOARD_OBJECT_Z_INDEX.zone),
+    }));
+
     return Object.entries(boardObjects)
-      .filter(([, objectData]) => {
-        // Filter out objects with invalid positions (prevents NaN errors in React Flow)
+      .filter(([objectId, objectData]) => {
+        // Legacy text annotations have no desktop renderer. Do not fall
+        // through to the zone renderer: their optional width previously made
+        // the portaled zone toolbar calculate `left: NaN`.
+        if (objectData.type === 'text') return false;
+        // Reject non-finite durable geometry at the React Flow node boundary.
+        // This is a source guard, not a CSS fallback: invalid objects never
+        // enter React Flow's transform or portal calculations.
         const hasValidPosition =
           typeof objectData.x === 'number' &&
           typeof objectData.y === 'number' &&
-          !Number.isNaN(objectData.x) &&
-          !Number.isNaN(objectData.y);
+          Number.isFinite(objectData.x) &&
+          Number.isFinite(objectData.y);
+        const width = 'width' in objectData ? objectData.width : undefined;
+        const height = 'height' in objectData ? objectData.height : undefined;
+        const hasPositiveFiniteWidth = Number.isFinite(width) && Number(width) > 0;
+        const hasPositiveFiniteHeight = Number.isFinite(height) && Number(height) > 0;
+        const hasValidSize =
+          objectData.type === 'markdown'
+            ? hasPositiveFiniteWidth
+            : hasPositiveFiniteWidth && hasPositiveFiniteHeight;
 
-        if (!hasValidPosition) {
-          console.warn(`Skipping board object with invalid position:`, objectData);
+        if (!hasValidPosition || !hasValidSize) {
+          console.warn('Skipping board object with invalid geometry:', {
+            objectId,
+            type: objectData.type,
+          });
         }
 
-        return hasValidPosition;
+        return hasValidPosition && hasValidSize;
       })
       .map(([objectId, objectData]) => {
         // App node (live Sandpack preview)
@@ -2410,7 +2608,7 @@ export const useBoardObjects = ({
             id: objectId,
             type: 'appNode',
             position: { x: objectData.x, y: objectData.y },
-            // draggable inherits from canvas-level nodesDraggable (mutationGate.canMutate)
+            draggable: canEdit,
             selectable: true,
             // Above markdown (300), below branches (500) by default.
             zIndex: sanitizeZIndex(objectData.zIndex, DEFAULT_BOARD_OBJECT_Z_INDEX.app),
@@ -2427,6 +2625,7 @@ export const useBoardObjects = ({
               showConsole: objectData.showConsole,
               width: objectData.width,
               height: objectData.height,
+              canEdit,
               onUpdate: handleUpdateObject,
               onDelete: deleteObject,
             },
@@ -2440,9 +2639,7 @@ export const useBoardObjects = ({
             id: objectId,
             type: 'artifactNode',
             position: { x: objectData.x, y: objectData.y },
-            // Locked artifacts are never draggable. Unlocked artifacts inherit
-            // from canvas-level nodesDraggable (mutationGate.canMutate).
-            ...(isLocked ? { draggable: false } : {}),
+            draggable: canEdit && !isLocked,
             selectable: true,
             zIndex: sanitizeZIndex(objectData.zIndex, DEFAULT_BOARD_OBJECT_Z_INDEX.artifact),
             className: eraserMode ? 'eraser-mode' : undefined,
@@ -2454,6 +2651,7 @@ export const useBoardObjects = ({
               locked: isLocked,
               x: objectData.x,
               y: objectData.y,
+              canEdit,
               isActiveUrlTarget: objectData.artifact_id === activeUrlTargetArtifactId,
               onUpdate: handleUpdateObject,
               onDeleteArtifact: deleteArtifact,
@@ -2467,7 +2665,7 @@ export const useBoardObjects = ({
             id: objectId,
             type: 'markdown',
             position: { x: objectData.x, y: objectData.y },
-            // draggable inherits from canvas-level nodesDraggable (mutationGate.canMutate)
+            draggable: canEdit,
             selectable: true,
             // Above zones (100), below branches (500) by default.
             zIndex: sanitizeZIndex(objectData.zIndex, DEFAULT_BOARD_OBJECT_Z_INDEX.markdown),
@@ -2476,6 +2674,7 @@ export const useBoardObjects = ({
               objectId,
               content: objectData.content,
               width: objectData.width,
+              canEdit,
               onUpdate: handleUpdateObject,
               onEdit: onEditMarkdown,
               onDelete: deleteObject,
@@ -2520,9 +2719,7 @@ export const useBoardObjects = ({
           id: objectId,
           type: 'zone',
           position: { x: objectData.x, y: objectData.y },
-          // Locked zones are never draggable. Unlocked zones inherit from
-          // canvas-level nodesDraggable (mutationGate.canMutate).
-          ...(isLocked ? { draggable: false } : {}),
+          draggable: canEdit && !isLocked,
           // Zones behind branches and comments by default; honor explicit order.
           zIndex: sanitizeZIndex(objectData.zIndex, DEFAULT_BOARD_OBJECT_Z_INDEX.zone),
           className: eraserMode ? 'eraser-mode' : undefined,
@@ -2552,10 +2749,29 @@ export const useBoardObjects = ({
             y: objectData.y,
             trigger: objectData.type === 'zone' ? objectData.trigger : undefined,
             layout: objectData.type === 'zone' ? objectData.layout : undefined,
+            layout_binding: objectData.type === 'zone' ? objectData.layout_binding : undefined,
+            boardZoneLayoutDefaults: board?.zone_layout_defaults,
             pinnedItemCount,
             positionableItemCount,
             densityExpandableItemCount,
             compactDensityExpandableItemCount,
+            canEdit,
+            overlappingZoneCount:
+              objectData.type === 'zone'
+                ? zoneEntries.filter(
+                    ([peerId, peer]) => peerId !== objectId && zonesOverlap(objectData, peer)
+                  ).length
+                : 0,
+            layerAvailability:
+              objectData.type === 'zone'
+                ? (['front', 'forward', 'backward', 'back'] as const).reduce(
+                    (availability, op) => {
+                      availability[op] = computeLayerChanges(op, objectId, zonePeers).length > 0;
+                      return availability;
+                    },
+                    {} as Record<LayerOp, boolean>
+                  )
+                : undefined,
             onUpdate: handleUpdateObject,
             onDelete: deleteZone,
             onReorder: reorderObject,
@@ -2579,7 +2795,9 @@ export const useBoardObjects = ({
     setZoneContentsCompact,
     eraserMode,
     activeUrlTargetArtifactId,
+    board?.zone_layout_defaults,
     onEditMarkdown,
+    canEdit,
   ]);
 
   /**
@@ -2588,11 +2806,12 @@ export const useBoardObjects = ({
   const addZoneNode = useCallback(
     async (x: number, y: number) => {
       const currentBoard = boardRef.current;
-      if (!currentBoard || !client) return;
+      if (!canEditRef.current || !currentBoard || !client) return;
 
       const objectId = `zone-${Date.now()}`;
       const width = 400;
       const height = 600;
+      const inheritedLayout = normalizeZoneLayoutPolicy(currentBoard.zone_layout_defaults);
 
       // Optimistic update
       setNodes((nodes) => [
@@ -2601,7 +2820,7 @@ export const useBoardObjects = ({
           id: objectId,
           type: 'zone',
           position: { x, y },
-          // draggable inherits from canvas-level nodesDraggable (mutationGate.canMutate)
+          draggable: canEdit,
           zIndex: DEFAULT_BOARD_OBJECT_Z_INDEX.zone, // Zones behind branches and comments
           style: {
             width,
@@ -2613,6 +2832,10 @@ export const useBoardObjects = ({
             width,
             height,
             color: undefined, // Will use theme default (colorBorder)
+            layout: inheritedLayout,
+            layout_binding: 'inherit',
+            boardZoneLayoutDefaults: currentBoard.zone_layout_defaults,
+            canEdit,
             onUpdate: handleUpdateObject,
           },
         },
@@ -2630,6 +2853,8 @@ export const useBoardObjects = ({
             width,
             height,
             label: 'New Zone',
+            layout: inheritedLayout,
+            layout_binding: 'inherit',
             // No color specified - will use theme default
           },
         } as unknown as Partial<Board>);
@@ -2639,7 +2864,7 @@ export const useBoardObjects = ({
         setNodes((nodes) => nodes.filter((n) => n.id !== objectId));
       }
     },
-    [client, setNodes, handleUpdateObject] // Removed board dependency
+    [canEdit, client, setNodes, handleUpdateObject] // Removed board dependency
   );
 
   /**
@@ -2648,7 +2873,8 @@ export const useBoardObjects = ({
   const batchUpdateObjectPositions = useCallback(
     async (updates: Record<string, { x: number; y: number; width?: number; height?: number }>) => {
       const currentBoard = boardRef.current;
-      if (!currentBoard || !client || Object.keys(updates).length === 0) return;
+      if (!canEditRef.current || !currentBoard || !client || Object.keys(updates).length === 0)
+        return;
 
       try {
         // Build objects payload with full object data + new positions
@@ -2703,6 +2929,7 @@ export const useBoardObjects = ({
     arrangeWholeBoard,
     canArrangeWholeBoard,
     isBoardArrangementActive,
+    cancelPendingLayoutRecovery,
     preserveAutoZoneFrameOnce,
     batchUpdateObjectPositions,
     zoneStackByNodeId,

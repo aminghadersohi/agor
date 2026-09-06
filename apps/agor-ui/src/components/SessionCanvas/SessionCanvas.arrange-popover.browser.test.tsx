@@ -6,16 +6,49 @@
  * captures the pointer as a marquee gesture before Segmented/Checkbox/Select
  * can update, which makes the controls look inert and clears node selection.
  */
-import type { AgorClient, Board } from '@agor-live/client';
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import type { AgorClient, Board, User } from '@agor-live/client';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { App as AntApp } from 'antd';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { userEvent } from 'vitest/browser';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
+import { __setAuthConfigForTests } from '../../hooks/useAuthConfig';
+import { agorStore } from '../../store/agorStore';
 import { CANVAS_LAYOUT_CONTROLS_CLASS } from './canvas/SelectionLayoutPopover';
 import SessionCanvas from './SessionCanvas';
 
+async function visibleSelectOption(label: string): Promise<HTMLElement> {
+  let option: HTMLElement | undefined;
+  await waitFor(() => {
+    option = screen
+      .getAllByText(label, { selector: '.ant-select-item-option-content' })
+      .find((candidate) => {
+        const dropdown = candidate.closest('.ant-select-dropdown');
+        const bounds = candidate.getBoundingClientRect();
+        return (
+          dropdown &&
+          !dropdown.classList.contains('ant-select-dropdown-hidden') &&
+          bounds.width > 0 &&
+          bounds.height > 0
+        );
+      });
+    expect(option).toBeVisible();
+  });
+  return option!;
+}
+
 afterEach(cleanup);
+
+const CURRENT_USER = {
+  user_id: 'fictional-layout-owner',
+  username: 'fictional-layout-owner',
+  role: 'member',
+} as User;
+
+beforeEach(() => {
+  __setAuthConfigForTests({ requireAuth: false }, { branchRbac: false });
+  agorStore.setState({ userById: new Map([[CURRENT_USER.user_id, CURRENT_USER]]) });
+});
 
 const geometry = (payload: Record<string, unknown>) =>
   Object.fromEntries(
@@ -30,6 +63,97 @@ const geometry = (payload: Record<string, unknown>) =>
   );
 
 describe('SessionCanvas Arrange Board popover (real browser)', () => {
+  it('keeps legacy text and toolbar state changes free of product-owned style warnings', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const manualBoard = {
+      board_id: 'fictional-console-board',
+      objects: {
+        'legacy-text': {
+          type: 'text',
+          x: 20,
+          y: 40,
+          content: 'Fictional legacy annotation',
+        },
+        zone: {
+          type: 'zone',
+          x: 100,
+          y: 120,
+          width: 500,
+          height: 400,
+          label: 'Fictional review',
+          layout: { mode: 'manual' },
+        },
+      },
+    } as unknown as Board;
+    const patch = vi.fn();
+    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    const renderCanvas = (board: Board) => (
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas
+            board={board}
+            client={client}
+            branches={[]}
+            currentUserId={CURRENT_USER.user_id}
+            height={700}
+          />
+        </ConnectionProvider>
+      </AntApp>
+    );
+
+    const view = render(renderCanvas(manualBoard));
+    const user = userEvent.setup();
+    const zoneNode = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>('.react-flow__node[data-id="zone"]');
+      if (!node) throw new Error('Fictional zone did not render.');
+      return node;
+    });
+    await act(async () => user.click(zoneNode));
+    const toolbar = screen.getByRole('toolbar', { name: 'Zone actions' });
+    expect(Number.isFinite(Number.parseFloat(toolbar.style.left))).toBe(true);
+    expect(document.querySelector('.react-flow__node[data-id="legacy-text"]')).toBeNull();
+    await act(async () => user.click(screen.getByRole('button', { name: 'More zone actions' })));
+    const enableAutoZone = await screen.findByRole('menuitem', { name: /Enable Auto Zone/ });
+    await waitFor(() => expect(enableAutoZone).toBeVisible());
+    expect(enableAutoZone.closest(`.${CANVAS_LAYOUT_CONTROLS_CLASS}`)).not.toBeNull();
+    await act(async () => user.click(enableAutoZone));
+    expect(zoneNode).toHaveClass('selected');
+
+    view.rerender(
+      renderCanvas({
+        ...manualBoard,
+        objects: {
+          ...manualBoard.objects,
+          zone: {
+            ...manualBoard.objects?.zone,
+            type: 'zone',
+            layout: { mode: 'auto' },
+          },
+        },
+      } as Board)
+    );
+    await act(async () => user.click(screen.getByRole('button', { name: 'More zone actions' })));
+    expect(await screen.findByText('Disable Auto Zone')).toBeInTheDocument();
+
+    const productStyleWarnings = consoleError.mock.calls.filter((args) => {
+      const message = args.map(String).join(' ');
+      return (
+        /NaN is an invalid value for the [`']?left/i.test(message) ||
+        (/borderColor/i.test(message) && /shorthand|rerender|style property/i.test(message))
+      );
+    });
+    expect(productStyleWarnings).toEqual([]);
+    consoleError.mockRestore();
+  });
+
   it('keeps pointer and keyboard input inside the portal and applies the selected planner options', async () => {
     // This interaction regression needs enough space for React Flow's desktop
     // controls and the complete option surface. Narrow projects still import
@@ -77,7 +201,13 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
             currentSha: null,
           }}
         >
-          <SessionCanvas board={durableBoard} client={client} branches={[]} height={760} />
+          <SessionCanvas
+            board={durableBoard}
+            client={client}
+            branches={[]}
+            currentUserId={CURRENT_USER.user_id}
+            height={760}
+          />
         </ConnectionProvider>
       </AntApp>
     );
@@ -111,6 +241,15 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
       name: 'Fit view after arranging',
     });
     const fitViewLabel = within(dialog).getByText('Fit view after arranging', { exact: true });
+    const density = within(dialog).getByRole('combobox', { name: 'Content expansion' });
+    await act(async () => user.click(density));
+    const collapse = await visibleSelectOption('Collapse eligible contents');
+    expect(collapse.closest(`.${CANVAS_LAYOUT_CONTROLS_CLASS}`)).not.toBeNull();
+    // Ant owns this portaled option through a delegated click handler. A
+    // direct browser click keeps the assertion focused on that production
+    // boundary instead of vitest/browser's locator retargeting behavior.
+    fireEvent.click(collapse!);
+    await waitFor(() => expect(density).toHaveAttribute('aria-expanded', 'false'));
     expect(fitView).toBeChecked();
     await waitFor(() => expect(fitViewLabel).toBeVisible());
     await act(async () => user.click(fitViewLabel));
@@ -121,6 +260,7 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
       user.click(within(dialog).getByText('Pack zone contents', { exact: true }))
     );
     expect(pack).not.toBeChecked();
+    expect(density).toBeDisabled();
     expect(matchFrames).toBeDisabled();
     expect(within(dialog).getByText(/existing zone frames are preserved/i)).toBeVisible();
     await act(async () =>
@@ -171,6 +311,12 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     });
     await act(async () => user.click(trigger));
     dialog = await screen.findByRole('dialog', { name: 'Arrange board options' });
+    const reopenedDensity = within(dialog).getByRole('combobox', { name: 'Content expansion' });
+    await act(async () => user.click(reopenedDensity));
+    const preserve = await visibleSelectOption('Preserve current expansion');
+    expect(preserve.closest('.ant-select-item-option')).toHaveClass(
+      'ant-select-item-option-selected'
+    );
     await act(async () =>
       user.click(within(dialog).getByRole('button', { name: 'Arrange board' }))
     );

@@ -25,7 +25,7 @@ import {
   getCurrentTenantId,
   runWithTenantContext,
 } from '@agor/core/db';
-import { type Branch, type HookContext, TaskStatus } from '@agor/core/types';
+import { type Branch, type HookContext, type Task, TaskStatus } from '@agor/core/types';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -53,6 +53,7 @@ import {
   validateBranchEnvPolicyHook,
 } from './register-hooks';
 import { canReceiveMcpTokenForSession } from './utils/mcp-token-authorization';
+import { resolvePromptOrigin } from './utils/prompt-origin';
 
 const makeSession = (sessionId: string): import('@agor/core/types').Session =>
   ({
@@ -327,7 +328,11 @@ describe('protectExternalTaskCreate', () => {
       session_id: 'session-1',
       full_prompt: 'hello',
       status: TaskStatus.CREATED,
+      metadata: { source: 'agor' },
     });
+    expect(
+      resolvePromptOrigin(hook.data as Pick<Task, 'metadata'>, { custom_context: undefined })
+    ).toEqual({ kind: 'human' });
   });
 
   it.each(['running', 'queued', 'completed'])('rejects externally forged status %s', (status) => {
@@ -1480,10 +1485,13 @@ describe('canReceiveMcpTokenForSession', () => {
 });
 
 describe('TENANT_IDENTITY_ONLY_SERVICE_PATHS', () => {
-  it.each(['file', 'files'])('%s is identity-only and never request-transaction owned', (path) => {
-    expect(TENANT_IDENTITY_ONLY_SERVICE_PATHS).toContain(path);
-    expect(TENANT_OWNED_SERVICE_PATHS).not.toContain(path);
-  });
+  it.each(['file', 'files', 'gateway-channels/test', 'gateway-channels/app-info'])(
+    '%s is identity-only and never request-transaction owned',
+    (path) => {
+      expect(TENANT_IDENTITY_ONLY_SERVICE_PATHS).toContain(path);
+      expect(TENANT_OWNED_SERVICE_PATHS).not.toContain(path);
+    }
+  );
 
   // Regression: the codex-auth endpoints do network/process work after a short
   // tenant DB read, then call getCurrentTenantId() to open their own units of

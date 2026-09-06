@@ -205,7 +205,7 @@ import { appendSystemMessage } from './utils/append-system-message.js';
 import { buildAuthRateLimitKey } from './utils/auth-rate-limit-key.js';
 import {
   ensureMinimumRole,
-  registerAuthenticatedRoute as registerAuthenticatedRouteBase,
+  registerAuthenticatedRoute as registerAuthenticatedRouteUnscoped,
   requireMinimumRole,
 } from './utils/authorization.js';
 import { authorizeBranchArchiveDelete } from './utils/branch-archive-delete-authorization.js';
@@ -227,6 +227,7 @@ import {
 } from './utils/mcp-header-secrets.js';
 import { canConfigureMcpServers } from './utils/mcp-server-authorization.js';
 import { patchUnlessRemoved } from './utils/patch-unless-removed.js';
+import { resolvePromptOrigin } from './utils/prompt-origin.js';
 import {
   buildPromptTaskMetadata,
   type InternalPromptTaskMetadataInput,
@@ -253,10 +254,10 @@ import {
 import { buildTaskLaunchState } from './utils/task-launch-state.js';
 import { normalizeMessageSource, runExistingTask } from './utils/task-runner.js';
 import { isAgenticToolEnabledForTenant } from './utils/tenant-agentic-tool-validation.js';
+import { createTenantScopedAuthenticatedRouteRegistrar } from './utils/tenant-authenticated-route.js';
 import {
   createTenantDatabaseScopeAroundHook,
   createTenantWriteAdmissionAroundHook,
-  createTenantWriteGateAroundHook,
   deferWithTenantContext,
   withFreshTenantWrite,
 } from './utils/tenant-db-scope.js';
@@ -529,26 +530,6 @@ export function createRequiredTenantDatabaseRunner(db: TenantScopeAwareDatabase)
     if (!tenantId) throw new Error('Missing active tenant context for database operation');
     return runWithTenantDatabaseScope(db, tenantId, work);
   };
-}
-
-/**
- * Register an authenticated custom route with the same tenant transaction and
- * write-freeze gate as ordinary tenant-owned Feathers services. Custom routes
- * are installed after `registerHooks()`, so this registrar—not a static path
- * list—is their authoritative database boundary.
- */
-export function createTenantScopedAuthenticatedRouteRegistrar(options: {
-  db: TenantScopeAwareDatabase;
-  config: AgorConfig;
-  jwtSecret: string;
-}): typeof registerAuthenticatedRouteBase {
-  const tenantDatabaseScopeAround = createTenantDatabaseScopeAroundHook(options);
-  const tenantWriteGateAround = createTenantWriteGateAroundHook(options.db);
-  return (routeApp, path, service, authConfig, routeRequireAuth, routeOptions = {}) =>
-    registerAuthenticatedRouteBase(routeApp, path, service, authConfig, routeRequireAuth, {
-      ...routeOptions,
-      around: [tenantDatabaseScopeAround, tenantWriteGateAround, ...(routeOptions.around ?? [])],
-    });
 }
 
 type BoardCommentRouteParams = Pick<AuthenticatedParams, 'provider' | 'user'>;
@@ -916,7 +897,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     jwtSecret,
   });
 
-  const registerLongAuthenticatedRoute: typeof registerAuthenticatedRouteBase = (
+  const registerLongAuthenticatedRoute: typeof registerAuthenticatedRouteUnscoped = (
     routeApp,
     path,
     service,
@@ -924,7 +905,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     routeRequireAuth,
     options = {}
   ) =>
-    registerAuthenticatedRouteBase(routeApp, path, service, authConfig, routeRequireAuth, {
+    registerAuthenticatedRouteUnscoped(routeApp, path, service, authConfig, routeRequireAuth, {
       ...options,
       around: [tenantIdentityAround, tenantWriteAdmissionAround, ...(options.around ?? [])],
     });
@@ -1865,6 +1846,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     const useStreaming = options.stream !== false;
     const sessionId = task.session_id;
     const taskId = task.task_id;
+    const promptOrigin = resolvePromptOrigin(updatedTask, session);
 
     // Background spawn + failure handling. Returning the patched Task to the
     // caller before this resolves matches the previous behavior — the HTTP
@@ -1885,6 +1867,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             permissionMode: options.permissionMode,
             stream: useStreaming,
             messageSource: runtimeMessageSource,
+            promptOrigin,
           },
           params
         );
@@ -2555,8 +2538,13 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
 
         const promptService = app.service('/sessions/:id/prompt');
         return promptService.create(
-          { prompt: metaPrompt, permissionMode: parentPermissionMode, messageSource: 'agor' },
-          { ...params, route: { id } }
+          {
+            prompt: metaPrompt,
+            permissionMode: parentPermissionMode,
+            messageSource: 'agor',
+            metadata: { system_authored: true },
+          },
+          { ...params, provider: undefined, route: { id } }
         );
       },
     },
@@ -2929,7 +2917,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             authentication: params.authentication,
             tenant: params.tenant,
           };
-          await promptService.create({ prompt: promptText }, promptParams);
+          // This provider-less nested service call represents text submitted
+          // by the authenticated uploader, not daemon-authored automation.
+          await promptService.create({ prompt: promptText, messageSource: 'agor' }, promptParams);
         } catch (_error) {
           console.error('❌ [Upload Handler] Failed to notify agent');
           notificationError = 'Failed to send notification to agent';

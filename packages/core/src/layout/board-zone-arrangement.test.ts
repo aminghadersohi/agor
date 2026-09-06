@@ -170,7 +170,7 @@ describe('planBoardZoneArrangement', () => {
           { ...item('header-only-card', 380, 140), densityExpandable: false },
           { id: 'artifact', width: 440, height: 300, position: { x: 0, y: 0 } },
         ]),
-        layout: { preset: 'compact_list', gap: 8 },
+        layout: { preset: 'compact_list', density: 'collapse', gap: 8 },
       },
     ]);
     const byId = new Map(plan.zones[0]?.items.map((entry) => [entry.id, entry]));
@@ -226,7 +226,7 @@ describe('planBoardZoneArrangement', () => {
           branchItem('branch', 500, 240),
           { ...item('card', 380, 180), densityExpandable: true },
         ]),
-        layout: { preset: 'compact_list' as const, gap: 40 },
+        layout: { preset: 'compact_list' as const, density: 'collapse' as const, gap: 40 },
       },
       zone('wide', 700, 0, [item('wide-card', 700, 260)]),
       zone('small', 0, 700, [item('small-card', 320, 180)]),
@@ -257,6 +257,50 @@ describe('planBoardZoneArrangement', () => {
     expect(first.zones.find(({ id }) => id === 'list')?.items.map(({ width }) => width)).toEqual([
       500, 500,
     ]);
+  });
+
+  it('keeps compact geometry orthogonal to mixed density unless explicitly requested', () => {
+    const source = [
+      {
+        ...zone('mixed', 0, 0, [
+          { ...branchItem('expanded', 500, 220), compact: false },
+          {
+            ...branchItem('collapsed', 500, 100),
+            compact: true,
+            expandedSize: { width: 500, height: 220 },
+          },
+          { ...item('header-only', 380, 60), densityExpandable: false },
+        ]),
+        layout: { preset: 'compact_list' as const },
+      },
+    ];
+
+    const preserved = planBoardZoneArrangement(source, { mode: 'compact' });
+    expect(
+      Object.fromEntries(
+        preserved.zones[0]?.items.map(({ id, compact, height }) => [id, { compact, height }]) ?? []
+      )
+    ).toEqual({
+      expanded: { compact: false, height: 220 },
+      collapsed: { compact: true, height: 100 },
+      'header-only': { compact: undefined, height: 60 },
+    });
+
+    const collapsed = planBoardZoneArrangement(source, { mode: 'grid', density: 'collapse' });
+    expect(
+      Object.fromEntries(collapsed.zones[0]?.items.map(({ id, compact }) => [id, compact]) ?? [])
+    ).toEqual({ expanded: true, collapsed: true, 'header-only': undefined });
+
+    const expanded = planBoardZoneArrangement(source, { density: 'expand' });
+    expect(
+      Object.fromEntries(
+        expanded.zones[0]?.items.map(({ id, compact, height }) => [id, { compact, height }]) ?? []
+      )
+    ).toEqual({
+      expanded: { compact: false, height: 220 },
+      collapsed: { compact: false, height: 220 },
+      'header-only': { compact: undefined, height: 60 },
+    });
   });
 
   it('produces a compact aligned three-by-three explicit outer grid', () => {
@@ -427,6 +471,74 @@ describe('planBoardZoneArrangement', () => {
       { compactOuterLayout: true }
     );
     expect(repeated).toEqual(compact);
+  });
+
+  it('propagates zone spacing to real child boundaries in Grid and Compact board modes', () => {
+    const boundaryGap = (gap: number, mode: 'grid' | 'compact') => {
+      const arranged = planBoardZoneArrangement(
+        [
+          {
+            ...zone('density', 0, 0, [item('left', 380, 100), item('right', 380, 100)]),
+            layout: { preset: 'grid', columns: 2, gap },
+          },
+        ],
+        { mode, packZoneContents: true, resizeZoneFrames: true, justifyRows: mode === 'grid' }
+      ).zones[0]!;
+      const [left, right] = arranged.items;
+      const actualGap =
+        arranged.contentColumns === 1
+          ? right!.y - (left!.y + left!.height)
+          : right!.x - (left!.x + left!.width);
+      expect(actualGap).toBe(gap);
+      return arranged;
+    };
+
+    for (const mode of ['grid', 'compact'] as const) {
+      const roomy = boundaryGap(24, mode);
+      const medium = boundaryGap(12, mode);
+      const dense = boundaryGap(4, mode);
+      expect(
+        mode === 'grid'
+          ? [roomy.width, medium.width, dense.width]
+          : [roomy.height, medium.height, dense.height]
+      ).toEqual(mode === 'grid' ? [840, 820, 820] : [360, 340, 340]);
+      expect(
+        planBoardZoneArrangement(
+          [
+            {
+              ...zone('density', dense.position.x, dense.position.y, [
+                item('left', 380, 100, dense.items[0]!.x, dense.items[0]!.y),
+                item('right', 380, 100, dense.items[1]!.x, dense.items[1]!.y),
+              ]),
+              width: dense.width,
+              height: dense.height,
+              layout: { preset: 'grid', columns: 2, gap: 4 },
+            },
+          ],
+          { mode, packZoneContents: true, resizeZoneFrames: true, justifyRows: mode === 'grid' }
+        ).zones[0]
+      ).toEqual(dense);
+    }
+  });
+
+  it('does not rewrite child spacing when Pack is off', () => {
+    const source = {
+      ...zone('manual', 100, 200, [
+        item('left', 380, 100, 20, 120),
+        item('right', 380, 100, 460, 120),
+      ]),
+      layout: { preset: 'grid' as const, columns: 2, gap: 4 },
+    };
+    for (const mode of ['grid', 'compact'] as const) {
+      expect(
+        planBoardZoneArrangement([source], { mode, packZoneContents: false }).zones[0]?.items.map(
+          ({ x, y }) => ({ x, y })
+        )
+      ).toEqual([
+        { x: 20, y: 120 },
+        { x: 460, y: 120 },
+      ]);
+    }
   });
 
   it('matches both zone frame axes to explicit grid tracks without crossing content minimums', () => {

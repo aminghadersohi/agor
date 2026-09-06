@@ -8,10 +8,13 @@ import {
   growZoneLayoutHeight,
   isBoardEntityDensityExpandable,
   justifyZoneContentCluster,
+  layoutCompactTarget,
   normalizeZoneLayoutPolicy,
+  resolveZoneLayoutPolicy,
   setZoneLayoutMode,
   sortZoneLayoutItems,
   type ZoneLayoutSortItem,
+  zoneLayoutBinding,
   zoneLayoutSortDirectionOptions,
 } from './zone-layout';
 
@@ -187,6 +190,13 @@ describe('normalizeZoneLayoutPolicy', () => {
     });
     expect(normalizeZoneLayoutPolicy({ gap: -4 })).toMatchObject({ gap: 0 });
     expect(normalizeZoneLayoutPolicy({ gap: 200 })).toMatchObject({ gap: 96 });
+    expect(normalizeZoneLayoutPolicy({ preset: 'compact_list' })).toMatchObject({
+      preset: 'compact_list',
+      density: 'preserve',
+    });
+    expect(normalizeZoneLayoutPolicy({ density: 'collapse' })).toMatchObject({
+      density: 'collapse',
+    });
   });
 
   it('shares an idempotent Auto Zone transition without overwriting configured sorting', () => {
@@ -211,6 +221,14 @@ describe('normalizeZoneLayoutPolicy', () => {
     expect(setZoneLayoutMode(configured, 'manual')).toEqual({ ...configured, mode: 'manual' });
   });
 
+  it('treats legacy zones as overrides and resolves explicit inheritance through board defaults', () => {
+    expect(zoneLayoutBinding({})).toBe('override');
+    expect(resolveZoneLayoutPolicy({ layout: { gap: 40 } }, { gap: 4 })).toMatchObject({ gap: 40 });
+    expect(
+      resolveZoneLayoutPolicy({ layout_binding: 'inherit', layout: { gap: 40 } }, { gap: 4 })
+    ).toMatchObject({ gap: 4 });
+  });
+
   it('owns the direction labels used by every Configure Zone sort key', () => {
     expect(zoneLayoutSortDirectionOptions('position')).toEqual([
       { value: 'asc', label: 'Top-left first' },
@@ -224,6 +242,15 @@ describe('normalizeZoneLayoutPolicy', () => {
 });
 
 describe('board density capability', () => {
+  it('preserves the exact legacy value unless an eligible explicit policy changes it', () => {
+    expect(layoutCompactTarget('preserve', undefined, true)).toBeUndefined();
+    expect(layoutCompactTarget('preserve', false, true)).toBe(false);
+    expect(layoutCompactTarget('preserve', true, true)).toBe(true);
+    expect(layoutCompactTarget('collapse', false, true)).toBe(true);
+    expect(layoutCompactTarget('expand', true, true)).toBe(false);
+    expect(layoutCompactTarget('collapse', undefined, false)).toBeUndefined();
+  });
+
   it('includes worktrees and only generic cards with a real rendered body', () => {
     expect(isBoardEntityDensityExpandable('branch')).toBe(true);
     expect(isBoardEntityDensityExpandable('card', { description: 'Details' })).toBe(true);
