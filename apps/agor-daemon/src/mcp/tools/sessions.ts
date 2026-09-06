@@ -983,9 +983,11 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           prompt: args.prompt,
           permissionMode: childSession.permission_config?.mode || 'acceptEdits',
           stream: true,
+          metadata: { system_authored: true },
         },
         {
           ...ctx.baseServiceParams,
+          provider: undefined,
           ...(continuation
             ? {
                 _completionContinuation: {
@@ -1160,8 +1162,8 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         const task = await ctx.app
           .service('/sessions/:id/prompt')
           .create(
-            { prompt: args.prompt, stream: true },
-            { ...callbackParams, route: { id: sessionId } }
+            { prompt: args.prompt, stream: true, metadata: { system_authored: true } },
+            { ...callbackParams, provider: undefined, route: { id: sessionId } }
           );
 
         if (task.status === 'queued') {
@@ -1259,8 +1261,9 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             prompt: args.prompt,
             permissionMode: updatedSession.permission_config?.mode,
             stream: true,
+            metadata: { system_authored: true },
           },
-          { ...callbackParams, route: { id: forkedSession.session_id } }
+          { ...callbackParams, provider: undefined, route: { id: forkedSession.session_id } }
         );
 
         const note =
@@ -1297,8 +1300,9 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             prompt: args.prompt,
             permissionMode: childSession.permission_config?.mode,
             stream: true,
+            metadata: { system_authored: true },
           },
-          { ...callbackParams, route: { id: childSession.session_id } }
+          { ...callbackParams, provider: undefined, route: { id: childSession.session_id } }
         );
 
         return textResult({
@@ -2379,9 +2383,11 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             prompt: args.initialPrompt,
             permissionMode: session.permission_config?.mode,
             stream: true,
+            metadata: { system_authored: true },
           },
           {
             ...ctx.baseServiceParams,
+            provider: undefined,
             ...(rootOrigin
               ? {
                   _completionSubscriptionRequest: {
@@ -2839,7 +2845,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         codex: {
           default: DEFAULT_CODEX_MODEL,
           models: codexModels,
-          note: 'Latest models are listed first; omit modelConfig to use the default. Current models are supported defaults; older entries marked provider-dependent may vary by Codex account and are checked by Codex at startup. This is Agor’s known-model registry, not a dynamic Codex CLI/provider listing. Provider-specific IDs absent from this list must be passed with mode "exact". Known unsupported legacy aliases are omitted.',
+          note: 'Latest models are listed first; omit modelConfig to use the default. Entries marked provider-dependent, including newly rolling-out models, may vary by Codex account and are checked by Codex at startup. This is Agor’s known-model registry, not a dynamic Codex CLI/provider listing. Provider-specific IDs absent from this list must be passed with mode "exact". Known unsupported legacy aliases are omitted.',
         },
         gemini: {
           default: DEFAULT_GEMINI_MODEL,

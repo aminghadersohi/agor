@@ -7,9 +7,12 @@
 
 import { PAGINATION } from '@agor/core/config';
 import {
+  BoardCommentsRepository,
   BoardObjectRepository,
   BoardRepository,
+  getCurrentTenantId,
   mapBoardExportBlobToCreateData,
+  runWithTenantDatabaseTransaction,
   type TenantScopeAwareDatabase,
   ZoneWorkflowRepository,
 } from '@agor/core/db';
@@ -19,14 +22,18 @@ import {
   buildTeammateWelcomeNoteObject,
   TEAMMATE_WELCOME_NOTE_OBJECT_ID,
 } from '@agor/core/templates/teammate-welcome-note';
-import type {
+import {
   AuthenticatedParams,
   Board,
+  type BoardComment,
   BoardExportBlob,
   BoardID,
   BoardLayoutApplyResult,
   BoardLayoutBatch,
   BoardObject,
+  type BoardZoneLayoutDefaultsApplyResult,
+  type BoardZoneLayoutDefaultsExpected,
+  boardCommentZoneParentObjectKey,
   QueryParams,
   TeammateWelcomeNoteRequest,
   UUID,
@@ -49,6 +56,7 @@ export interface BoardParams
     name?: string;
   }> {
   user?: AuthenticatedParams['user'];
+  tenant?: AuthenticatedParams['tenant'];
   /** Internal hook signal; set only when ensureTeammateWelcomeNote writes. */
   teammateWelcomeNoteMutated?: boolean;
   /** Internal RBAC SQL pushdown marker set by register-hooks for external regular users. */
@@ -88,13 +96,22 @@ function shouldSqlPageBoardQuery(query?: Record<string, unknown>): boolean {
   return true;
 }
 
+export interface BoardsServiceEvents {
+  emitBoardObjectPatched?: (
+    boardObject: BoardObjectPatchedEventPayload,
+    params?: BoardParams
+  ) => void;
+  emitBoardEvent?: (event: Omit<ManualServiceEvent, 'path'>) => void;
+  emitBoardCommentPatched?: (comment: BoardComment, params?: BoardParams) => void;
+  emitZoneWorkflowRemoved?: (transition: ZoneWorkflowTransition, params?: BoardParams) => void;
+}
+
 /**
  * Extended boards service with custom methods
  */
 export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardParams> {
+  private db: TenantScopeAwareDatabase;
   private boardRepo: BoardRepository;
-  private boardObjectRepo: BoardObjectRepository;
-  private zoneWorkflowRepo: ZoneWorkflowRepository;
   private emitBoardObjectPatched?: (
     boardObject: BoardObjectPatchedEventPayload,
     params?: BoardParams
@@ -104,16 +121,9 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
     transition: ZoneWorkflowTransition,
     params?: BoardParams
   ) => void;
+  private emitBoardCommentPatched?: (comment: BoardComment, params?: BoardParams) => void;
 
-  constructor(
-    db: TenantScopeAwareDatabase,
-    emitBoardObjectPatched?: (
-      boardObject: BoardObjectPatchedEventPayload,
-      params?: BoardParams
-    ) => void,
-    emitBoardEvent?: (event: Omit<ManualServiceEvent, 'path'>) => void,
-    emitZoneWorkflowRemoved?: (transition: ZoneWorkflowTransition, params?: BoardParams) => void
-  ) {
+  constructor(db: TenantScopeAwareDatabase, events: BoardsServiceEvents = {}) {
     const boardRepo = new BoardRepository(db);
     super(boardRepo, {
       id: 'board_id',
@@ -124,12 +134,12 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
       },
     });
 
+    this.db = db;
     this.boardRepo = boardRepo;
-    this.boardObjectRepo = new BoardObjectRepository(db);
-    this.zoneWorkflowRepo = new ZoneWorkflowRepository(db);
-    this.emitBoardObjectPatched = emitBoardObjectPatched;
-    this.emitBoardEvent = emitBoardEvent;
-    this.emitZoneWorkflowRemoved = emitZoneWorkflowRemoved;
+    this.emitBoardObjectPatched = events.emitBoardObjectPatched;
+    this.emitBoardEvent = events.emitBoardEvent;
+    this.emitBoardCommentPatched = events.emitBoardCommentPatched;
+    this.emitZoneWorkflowRemoved = events.emitZoneWorkflowRemoved;
   }
 
   /**
@@ -294,35 +304,69 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
     objectId: string,
     _params?: BoardParams
   ): Promise<Board> {
-    const board = await this.boardRepo.findBySlugOrId(boardId);
-    const object = board?.objects?.[objectId];
+    const tenantId = _params?.tenant?.tenant_id ?? getCurrentTenantId();
+    return runWithTenantDatabaseTransaction(this.db, tenantId, async (operationDb) => {
+      const boardRepo = new BoardRepository(operationDb);
+      const boardObjectRepo = new BoardObjectRepository(operationDb);
+      const boardCommentsRepo = new BoardCommentsRepository(operationDb);
+      const board = await boardRepo.findBySlugOrId(boardId);
+      const object = board?.objects?.[objectId];
 
-    // A generic removeObject path can remove zones too (e.g. MCP
-    // agor_boards_update.removeObjects). Clear entity zone references first so
-    // future board renders do not construct React Flow children with a missing
-    // parent. Convert zone-relative positions to absolute while the zone origin
-    // is still available.
-    if (board && object?.type === 'zone') {
-      const removedTransitions = await this.zoneWorkflowRepo.removeTransitionsForZone(
-        board.board_id,
-        objectId
-      );
-      for (const transition of removedTransitions) {
-        this.emitZoneWorkflowRemoved?.(transition, _params);
+      // A generic removeObject path can remove zones too (e.g. MCP
+      // agor_boards_update.removeObjects). Clear entity zone references first so
+      // future board renders do not construct React Flow children with a missing
+      // parent. Convert zone-relative positions to absolute while the zone origin
+      // is still available.
+      if (board && object?.type === 'zone') {
+        const zoneWorkflowRepo = new ZoneWorkflowRepository(operationDb);
+        const removedTransitions = await zoneWorkflowRepo.removeTransitionsForZone(
+          board.board_id,
+          objectId
+        );
+        for (const transition of removedTransitions) {
+          this.emitZoneWorkflowRemoved?.(transition, _params);
+        }
+        const cleared = await boardObjectRepo.clearZoneReferences(board.board_id, objectId, {
+          x: object.x,
+          y: object.y,
+        });
+
+        for (const boardObject of cleared) {
+          const payload = toBoardObjectPatchedEventPayload(boardObject);
+          if (_params) this.emitBoardObjectPatched?.(payload, _params);
+          else this.emitBoardObjectPatched?.(payload);
+        }
+
+        // Spatial comments can also be pinned to a zone. Keep them visible by
+        // converting their relative offsets to absolute board coordinates before
+        // the parent zone disappears. Replies have no position and are unaffected.
+        const comments = await boardCommentsRepo.findByBoard(board.board_id);
+        for (const comment of comments) {
+          const relative = comment.position?.relative;
+          if (
+            relative?.parent_type !== 'zone' ||
+            boardCommentZoneParentObjectKey(relative.parent_id) !== objectId
+          ) {
+            continue;
+          }
+
+          const updated = await boardCommentsRepo.update(comment.comment_id, {
+            position: {
+              absolute: {
+                x: object.x + relative.offset_x,
+                y: object.y + relative.offset_y,
+              },
+            },
+          });
+          if (_params) this.emitBoardCommentPatched?.(updated, _params);
+          else this.emitBoardCommentPatched?.(updated);
+        }
       }
-      const cleared = await this.boardObjectRepo.clearZoneReferences(board.board_id, objectId, {
-        x: object.x,
-        y: object.y,
-      });
 
-      for (const boardObject of cleared) {
-        const payload = toBoardObjectPatchedEventPayload(boardObject);
-        if (_params) this.emitBoardObjectPatched?.(payload, _params);
-        else this.emitBoardObjectPatched?.(payload);
-      }
-    }
-
-    return this.boardRepo.removeBoardObject(boardId, objectId);
+      // The registered emitters delegate to emitServiceEvent, whose
+      // transaction-aware queue publishes these patches only after commit.
+      return boardRepo.removeBoardObject(boardId, objectId);
+    });
   }
 
   /**
@@ -406,6 +450,16 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
     return this.boardRepo.applyBoardLayout(boardId, batch);
   }
 
+  /** Update board-level zone defaults and intentional followers in one row lock/write. */
+  async setZoneLayoutDefaults(
+    boardId: string,
+    defaults: NonNullable<Board['zone_layout_defaults']>,
+    options: { applyToExisting?: boolean; expected?: BoardZoneLayoutDefaultsExpected },
+    _params?: BoardParams
+  ): Promise<BoardZoneLayoutDefaultsApplyResult> {
+    return this.boardRepo.setZoneLayoutDefaults(boardId, defaults, options);
+  }
+
   /**
    * Custom method: Atomically shallow-merge field patches into existing board
    * objects (used by z-order reorder to persist only the changed zIndex).
@@ -425,9 +479,9 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
     boardId: string,
     objectId: string,
     _deleteAssociatedSessions: boolean,
-    _params?: BoardParams
+    params?: BoardParams
   ): Promise<{ board: Board; affectedSessions: string[] }> {
-    const board = await this.removeBoardObject(boardId, objectId);
+    const board = await this.removeBoardObject(boardId, objectId, params);
     return {
       board,
       affectedSessions: [],
@@ -621,12 +675,7 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
  */
 export function createBoardsService(
   db: TenantScopeAwareDatabase,
-  emitBoardObjectPatched?: (
-    boardObject: BoardObjectPatchedEventPayload,
-    params?: BoardParams
-  ) => void,
-  emitBoardEvent?: (event: Omit<ManualServiceEvent, 'path'>) => void,
-  emitZoneWorkflowRemoved?: (transition: ZoneWorkflowTransition, params?: BoardParams) => void
+  events: BoardsServiceEvents = {}
 ): BoardsService {
-  return new BoardsService(db, emitBoardObjectPatched, emitBoardEvent, emitZoneWorkflowRemoved);
+  return new BoardsService(db, events);
 }

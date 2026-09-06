@@ -15,6 +15,8 @@ import type {
   BoardLayoutBatch,
   BoardLayoutObjectUpdate,
   BoardObject,
+  BoardZoneLayoutDefaultsApplyResult,
+  BoardZoneLayoutDefaultsExpected,
   Branch,
   BranchPermissionLevel,
   EffectiveCapabilityPolicyAccess,
@@ -25,6 +27,7 @@ import { isTeammate, SessionStatus } from '@agor/core/types';
 import { and, asc, desc, eq, inArray, isNull, like, ne, type SQL, sql } from 'drizzle-orm';
 import * as yaml from 'js-yaml';
 import { getBaseUrl } from '../../config/config-manager';
+import { normalizeZoneLayoutPolicy, zoneLayoutBinding } from '../../layout/zone-layout.js';
 import { generateId } from '../../lib/ids';
 import { generateSlug } from '../../lib/slugs';
 import { normalizeExactEmojiShortcode } from '../../utils/emoji-shortcodes';
@@ -100,6 +103,40 @@ function boardObjectGeometry(object: BoardObject): BoardLayoutObjectUpdate {
   };
 }
 
+function validateBoardObjectGeometry(objectId: string, object: BoardObject): void {
+  if (!Number.isFinite(object.x) || !Number.isFinite(object.y)) {
+    throw new RepositoryError(`Board object ${objectId} requires finite x/y geometry`);
+  }
+  const requirePositiveFiniteDimension = (dimension: 'width' | 'height', value: number) => {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new RepositoryError(`Board object ${objectId} requires a positive finite ${dimension}`);
+    }
+  };
+  if (object.type === 'zone' || object.type === 'app' || object.type === 'artifact') {
+    requirePositiveFiniteDimension('width', object.width);
+    requirePositiveFiniteDimension('height', object.height);
+  } else if (object.type === 'markdown') {
+    requirePositiveFiniteDimension('width', object.width);
+  }
+  if (object.type === 'text') {
+    for (const dimension of ['width', 'height'] as const) {
+      const value = object[dimension];
+      if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
+        throw new RepositoryError(
+          `Board object ${objectId} requires a positive finite ${dimension} when provided`
+        );
+      }
+    }
+  }
+}
+
+function validateBoardObjectsGeometry(objects: Record<string, BoardObject> | undefined): void {
+  if (!objects) return;
+  for (const [objectId, object] of Object.entries(objects)) {
+    validateBoardObjectGeometry(objectId, object);
+  }
+}
+
 function validateBoardPermissionDefaults(board: Partial<Board>): void {
   if (board.access_mode !== undefined && !BOARD_ACCESS_MODES.includes(board.access_mode)) {
     throw new RepositoryError(`Invalid board access_mode: ${board.access_mode}`);
@@ -140,6 +177,7 @@ export function mapBoardExportBlobToCreateData(
     access_mode: blob.access_mode,
     default_others_can: blob.default_others_can,
     default_others_fs_access: blob.default_others_fs_access,
+    zone_layout_defaults: blob.zone_layout_defaults,
     created_by: userId,
   };
 }
@@ -171,6 +209,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
       access_mode?: BoardAccessMode;
       default_others_can?: BranchPermissionLevel;
       default_others_fs_access?: 'none' | 'read' | 'write';
+      zone_layout_defaults?: Board['zone_layout_defaults'];
     };
 
     const boardId = row.board_id as UUID;
@@ -250,6 +289,10 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
         objects: board.objects,
         custom_context: board.custom_context,
         profile_image_id: board.profile_image_id,
+        zone_layout_defaults:
+          board.zone_layout_defaults === undefined
+          ? undefined
+          : normalizeZoneLayoutPolicy(board.zone_layout_defaults),
       },
     };
   }
@@ -324,6 +367,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
   async create(data: Partial<Board>): Promise<Board> {
     try {
       this.rejectGenericPrimaryTeammateWrite(data, 'set');
+      validateBoardObjectsGeometry(data.objects);
       const boardId = data.board_id ?? generateId();
       const baseUrl = await getBaseUrl();
       let finalSlug: string | undefined;
@@ -774,6 +818,12 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
   async update(id: string, updates: Partial<Board>): Promise<Board> {
     try {
       this.rejectGenericPrimaryTeammateWrite(updates, 'set');
+      validateBoardObjectsGeometry(updates.objects);
+      if (Object.hasOwn(updates, 'zone_layout_defaults')) {
+        throw new RepositoryError(
+          'Cannot set zone_layout_defaults via generic board writes; use setZoneLayoutDefaults()'
+        );
+      }
       if (Object.hasOwn(updates, 'primary_owner_user_id')) {
         throw new RepositoryError('Primary ownership is immutable');
       }
@@ -1104,6 +1154,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
     objectData: BoardObject
   ): Promise<Board> {
     try {
+      validateBoardObjectGeometry(objectId, objectData);
       const fullId = await this.resolveId(boardId);
 
       const current = await this.findById(fullId);
@@ -1111,8 +1162,29 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
         throw new EntityNotFoundError('Board', boardId);
       }
 
-      // Add or update the object
-      const updatedObjects = { ...(current.objects || {}), [objectId]: objectData };
+      const existing = current.objects?.[objectId];
+      let normalizedObject = objectData;
+      if (objectData.type === 'zone') {
+        const defaults = normalizeZoneLayoutPolicy(current.zone_layout_defaults);
+        const isNew = existing === undefined;
+        const binding = isNew
+          ? objectData.layout_binding !== undefined
+            ? zoneLayoutBinding(objectData)
+            : objectData.layout !== undefined
+              ? 'override'
+              : 'inherit'
+          : zoneLayoutBinding(objectData);
+        normalizedObject = {
+          ...objectData,
+          layout_binding: binding,
+          layout: binding === 'inherit' ? defaults : normalizeZoneLayoutPolicy(objectData.layout),
+        };
+      }
+
+      // Add or update the object. New zones with no explicit policy inherit the
+      // board default here at the persistence boundary, so UI and MCP creation
+      // paths cannot drift.
+      const updatedObjects = { ...(current.objects || {}), [objectId]: normalizedObject };
 
       // Use the standard update method to ensure proper serialization
       return this.update(fullId, { objects: updatedObjects });
@@ -1121,6 +1193,115 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
       if (error instanceof EntityNotFoundError) throw error;
       throw new RepositoryError(
         `Failed to upsert board object: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /**
+   * Atomically update the board zone policy and every zone which intentionally
+   * follows it. Overrides are preserved unless applyToExisting is explicit.
+   */
+  async setZoneLayoutDefaults(
+    boardId: string,
+    defaults: Partial<NonNullable<Board['zone_layout_defaults']>>,
+    options: {
+      applyToExisting?: boolean;
+      expected?: BoardZoneLayoutDefaultsExpected;
+    } = {}
+  ): Promise<BoardZoneLayoutDefaultsApplyResult> {
+    try {
+      const fullId = (await this.resolveId(boardId)) as BoardID;
+      return await runDatabaseTransaction(
+        this.db,
+        async (tx) => {
+          await lockRowForUpdate(tx, this.db, boards, eq(boards.board_id, fullId));
+          const boardRepo = new BoardRepository(tx);
+          const current = await boardRepo.findById(fullId);
+          if (!current) throw new EntityNotFoundError('Board', boardId);
+
+          const currentDefaults = normalizeZoneLayoutPolicy(current.zone_layout_defaults);
+          const currentZones = Object.fromEntries(
+            Object.entries(current.objects ?? {}).flatMap(([objectId, object]) =>
+              object.type === 'zone'
+                ? [
+                    [
+                      objectId,
+                      {
+                        binding: zoneLayoutBinding(object),
+                        layout: normalizeZoneLayoutPolicy(object.layout),
+                      },
+                    ] as const,
+                  ]
+                : []
+            )
+          );
+          const expectedZones = options.expected
+            ? Object.fromEntries(
+                Object.entries(options.expected.zones).map(([objectId, zone]) => [
+                  objectId,
+                  {
+                    binding: zone.binding,
+                    layout: normalizeZoneLayoutPolicy(zone.layout),
+                  },
+                ])
+              )
+            : undefined;
+          if (
+            options.expected &&
+            (!isDeepStrictEqual(
+              currentDefaults,
+              normalizeZoneLayoutPolicy(options.expected.defaults)
+            ) ||
+              !isDeepStrictEqual(currentZones, expectedZones))
+          ) {
+            throw new RepositoryError('Zone layout defaults source snapshot is stale');
+          }
+
+          const normalizedDefaults = normalizeZoneLayoutPolicy({ ...currentDefaults, ...defaults });
+          const objects = { ...(current.objects ?? {}) };
+          const changedZoneIds: string[] = [];
+          for (const [objectId, object] of Object.entries(objects)) {
+            if (object.type !== 'zone') continue;
+            if (!options.applyToExisting && zoneLayoutBinding(object) !== 'inherit') continue;
+            const next = {
+              ...object,
+              layout_binding: 'inherit' as const,
+              layout: normalizedDefaults,
+            };
+            const alreadyFollowsSemantically =
+              zoneLayoutBinding(object) === 'inherit' &&
+              isDeepStrictEqual(normalizeZoneLayoutPolicy(object.layout), normalizedDefaults);
+            if (alreadyFollowsSemantically) continue;
+            objects[objectId] = next;
+            changedZoneIds.push(objectId);
+          }
+
+          const changed =
+            !isDeepStrictEqual(currentDefaults, normalizedDefaults) || changedZoneIds.length > 0;
+          let board = current;
+          if (changed) {
+            const insertData = boardRepo.boardToInsert({
+              ...current,
+              zone_layout_defaults: normalizedDefaults,
+              objects,
+            });
+            await update(tx, boards)
+              .set({ updated_at: new Date(), data: insertData.data })
+              .where(eq(boards.board_id, fullId))
+              .run();
+            const updatedBoard = await boardRepo.findById(fullId);
+            if (!updatedBoard) throw new EntityNotFoundError('Board', boardId);
+            board = updatedBoard;
+          }
+          return { board, changed, changed_zone_ids: changedZoneIds };
+        },
+        { sqliteImmediate: true }
+      );
+    } catch (error) {
+      if (error instanceof RepositoryError || error instanceof EntityNotFoundError) throw error;
+      throw new RepositoryError(
+        `Failed to set zone layout defaults: ${error instanceof Error ? error.message : String(error)}`,
         error
       );
     }
@@ -1416,6 +1597,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
       access_mode: permissions.board_access.sharing_mode,
       default_others_can: defaultOthersCan,
       default_others_fs_access: templateOthers.fs_access,
+      zone_layout_defaults: board.zone_layout_defaults,
       objects: board.objects,
       custom_context: board.custom_context,
     };

@@ -93,6 +93,7 @@ import type {
   MCPServerID,
   MessageSource,
   Params,
+  PromptOrigin,
   SessionID,
   UserID,
   UUID,
@@ -550,9 +551,8 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   } as any);
   app.use(
     '/boards',
-    createBoardsService(
-      db,
-      (boardObject, params) => {
+    createBoardsService(db, {
+      emitBoardObjectPatched: (boardObject, params) => {
         emitServiceEvent(app, {
           path: 'board-objects',
           event: 'patched',
@@ -561,16 +561,24 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
           id: boardObject.object_id,
         });
       },
-      (event) => emitServiceEvent(app, { path: 'boards', ...event }),
-      (transition, params) =>
+      emitBoardEvent: (event) => emitServiceEvent(app, { path: 'boards', ...event }),
+      emitZoneWorkflowRemoved: (transition, params) =>
         emitServiceEvent(app, {
           path: 'zone-workflow-transitions',
           event: 'removed',
           data: transition,
           params,
           id: transition.transition_id,
-        })
-    ),
+        }),
+      emitBoardCommentPatched: (comment, params) =>
+        emitServiceEvent(app, {
+          path: 'board-comments',
+          event: 'patched',
+          data: comment,
+          params,
+          id: comment.comment_id,
+        }),
+    }),
     {
       events: [BOARD_LAYOUT_APPLIED_EVENT],
       methods: [
@@ -1151,6 +1159,7 @@ function createExecuteHandler(
       permissionMode?: import('@agor/core/types').PermissionMode;
       stream?: boolean;
       messageSource?: MessageSource;
+      promptOrigin?: PromptOrigin;
     },
     // biome-ignore lint/suspicious/noExplicitAny: FeathersJS params type varies by context
     params: any
@@ -1589,6 +1598,7 @@ function createExecuteHandler(
         permissionMode: permissionModeForPayload as 'ask' | 'auto' | 'allow-all' | undefined,
         cwd,
         messageSource: data.messageSource,
+        promptOrigin: data.promptOrigin,
         // Authoritative sandbox mount inputs (consumed in spawn-executor →
         // buildSandboxWrap). Undefined when the sandbox / per_user home is off.
         sandboxBaseRepoPath,
