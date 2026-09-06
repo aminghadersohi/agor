@@ -291,8 +291,8 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
         profile_image_id: board.profile_image_id,
         zone_layout_defaults:
           board.zone_layout_defaults === undefined
-          ? undefined
-          : normalizeZoneLayoutPolicy(board.zone_layout_defaults),
+            ? undefined
+            : normalizeZoneLayoutPolicy(board.zone_layout_defaults),
       },
     };
   }

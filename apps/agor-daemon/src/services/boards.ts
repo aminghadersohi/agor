@@ -23,21 +23,21 @@ import {
   TEAMMATE_WELCOME_NOTE_OBJECT_ID,
 } from '@agor/core/templates/teammate-welcome-note';
 import {
-  AuthenticatedParams,
-  Board,
+  type AuthenticatedParams,
+  type Board,
   type BoardComment,
-  BoardExportBlob,
-  BoardID,
-  BoardLayoutApplyResult,
-  BoardLayoutBatch,
-  BoardObject,
+  type BoardExportBlob,
+  type BoardID,
+  type BoardLayoutApplyResult,
+  type BoardLayoutBatch,
+  type BoardObject,
   type BoardZoneLayoutDefaultsApplyResult,
   type BoardZoneLayoutDefaultsExpected,
   boardCommentZoneParentObjectKey,
-  QueryParams,
-  TeammateWelcomeNoteRequest,
-  UUID,
-  ZoneWorkflowTransition,
+  type QueryParams,
+  type TeammateWelcomeNoteRequest,
+  type UUID,
+  type ZoneWorkflowTransition,
 } from '@agor/core/types';
 import { NotFoundError } from '@agor/core/utils/errors';
 import { DrizzleService, type Query } from '../adapters/drizzle';
