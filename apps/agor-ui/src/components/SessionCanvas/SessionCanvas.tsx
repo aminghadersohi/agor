@@ -4348,7 +4348,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // The connection gate is global; each node carries its narrower
             // authorization (board.edit for structure, author/admin for
             // comments). Selection/focus remain available in read-only mode.
-            nodesDraggable={canMutateBoard && activeTool !== 'workflow'}
+            // React Flow's global gate must remain open for a Viewer who may
+            // reposition their own comments. Structural nodes carry the
+            // narrower `draggable: canMutateBoard` permission, while comment
+            // nodes carry their author/admin-specific permission.
+            nodesDraggable={(canMutateBoard || canMutateComments) && activeTool !== 'workflow'}
             nodesConnectable={activeTool === 'workflow' && canMutateBoard}
             edgesFocusable={activeTool === 'workflow'}
             elementsSelectable={true}

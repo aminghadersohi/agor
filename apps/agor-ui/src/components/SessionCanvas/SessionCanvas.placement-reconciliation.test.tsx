@@ -16,6 +16,10 @@ import { boardObjectPatched, sessionPatched } from '../../store/agorRealtimeActi
 import { agorStore } from '../../store/agorStore';
 import SessionCanvas from './SessionCanvas';
 
+vi.mock('../../hooks/useCanManageBoard', () => ({
+  useCanManageBoard: () => true,
+}));
+
 interface FlowNode {
   id: string;
   type?: string;
