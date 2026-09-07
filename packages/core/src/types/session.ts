@@ -19,6 +19,7 @@ import type {
 } from './agentic-tool';
 import type { AgenticToolConfigurationReference } from './agentic-tool-preset';
 import type { ContextFilePath } from './context';
+import type { ChannelType } from './gateway';
 import type {
   BoardID,
   BranchID,
@@ -439,6 +440,8 @@ export interface Session {
    * Access in templates: {{ session.context.teamName }}
    */
   custom_context?: Record<string, unknown> & {
+    /** Server-owned provenance for sessions admitted by a gateway channel. */
+    gateway_source?: GatewaySource;
     /**
      * Scheduled run metadata (populated by scheduler)
      *
@@ -687,6 +690,8 @@ export type CreateSessionInput = Omit<
   agentic_tool?: AgenticToolName;
   agentic_tool_preset_id?: AgenticToolConfigurationReference | null;
   model_config?: Partial<NonNullable<Session['model_config']>> | null;
+  /** MCP server IDs to attach in the same create call (issue #2629). */
+  mcpServerIds?: string[];
 };
 
 /** Session patch semantics: omit/undefined preserves, string sets, null clears. */
@@ -842,7 +847,7 @@ export function getEffectiveDirectCallbackCoordinatorSessionId(
 export interface GatewaySource {
   channel_id: string;
   channel_name: string;
-  channel_type: string;
+  channel_type: ChannelType;
   thread_id: string;
   /** GitHub-specific: "owner/repo" format */
   github_repo?: string;

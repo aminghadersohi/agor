@@ -23,12 +23,14 @@ const board = {
 } as Board;
 const owner = { user_id: 'owner-1', role: 'member' } as User;
 
-function clientFor({ reject }: { reject?: unknown } = {}) {
+function clientFor({ reject, findResult }: { reject?: unknown; findResult?: unknown } = {}) {
   return {
     service: () => ({
       find: vi
         .fn()
-        .mockImplementation(() => (reject ? Promise.reject(reject) : Promise.resolve([]))),
+        .mockImplementation(() =>
+          reject ? Promise.reject(reject) : Promise.resolve(findResult ?? [])
+        ),
       findAll: vi.fn().mockResolvedValue([]),
     }),
   } as unknown as AgorClient;
@@ -173,6 +175,14 @@ describe('BoardSwitcher current-board edit shortcut', () => {
     expect(edit.closest('span[style*="position: absolute"]')).toHaveStyle({ right: '28px' });
   });
 
+  it('reserves room in the name row so a long name never underlaps the edit action', async () => {
+    renderSwitcher();
+    const edit = await screen.findByRole('button', { name: /Edit current board:/ });
+    const trigger = edit.closest('div')?.querySelector('button.ant-dropdown-trigger');
+    // controlHeightSM (24) + paddingSM (12) with the default antd seed token.
+    expect(trigger?.querySelector('.ant-flex')).toHaveStyle({ marginRight: '36px' });
+  });
+
   it('keeps the action keyboard reachable and reveals it on focus-within', async () => {
     renderSwitcher();
     const edit = await screen.findByRole('button', { name: /Edit current board:/ });
@@ -187,7 +197,10 @@ describe('BoardSwitcher current-board edit shortcut', () => {
   });
 
   it('hides the action when normalized policy resolution denies management', async () => {
-    renderSwitcher(clientFor(), { user_id: 'member-2', role: 'member' } as User);
+    renderSwitcher(clientFor({ findResult: { capabilities: ['board.view'] } }), {
+      user_id: 'member-2',
+      role: 'member',
+    } as User);
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: /Edit current board:/ })).not.toBeInTheDocument()
     );

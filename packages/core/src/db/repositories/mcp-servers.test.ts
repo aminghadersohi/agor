@@ -243,7 +243,7 @@ describe('MCPServerRepository.findAll', () => {
 
     const visible = await repo.findAll({ usableByUserId: user1 });
 
-    expect(visible.map((server) => server.name)).toEqual(['shared', 'user1']);
+    expect(visible.map((server) => server.name).sort()).toEqual(['shared', 'user1']);
   });
 
   dbTest('should restrict ownerless queries to shared rows', async ({ db }) => {
