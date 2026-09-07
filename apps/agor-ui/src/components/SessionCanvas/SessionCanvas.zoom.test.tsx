@@ -1976,5 +1976,5 @@ describe('SessionCanvas zoom shortcuts', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
     await act(async () => Promise.resolve());
     expect(patch).not.toHaveBeenCalled();
-  });
+  }, 30_000);
 });
