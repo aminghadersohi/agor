@@ -17,6 +17,7 @@ import {
   SessionRepository,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
+import { sessionQueryValidator, typedValidateQuery } from '@agor/core/lib/feathers-validation';
 import type { Session, UUID } from '@agor/core/types';
 import { SessionStatus } from '@agor/core/types';
 import { describe, expect } from 'vitest';
@@ -278,4 +279,20 @@ describe('SessionsService.find — recency sort + pagination (SQL pushdown)', ()
     });
     expect(ids(result)).toEqual([s1, s3].sort());
   });
+});
+
+dbTest('lists only authorized Essential Sessions after public query validation', async ({ db }) => {
+  const service = new SessionsService(db, STUB_APP);
+  const board = await createBoard(db);
+  const branch = await createBranchOnBoard(db, board);
+  await createSession(db, branch);
+  const essential = await createSession(db, branch, { power_priority: 'essential' });
+  const context = { params: { query: { power_priority: 'essential', $limit: 1 } } };
+  await typedValidateQuery(sessionQueryValidator)(context);
+  expect(
+    ids(await service.find({ ...context.params, _agorSqlSessionAccessUserId: 'test-user' as UUID }))
+  ).toEqual([essential]);
+  expect(
+    ids(await service.find({ ...context.params, _agorSqlSessionAccessUserId: generateId() }))
+  ).toEqual([]);
 });

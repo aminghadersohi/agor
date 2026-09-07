@@ -53,6 +53,7 @@ describe('MobileNavTree settings navigation', () => {
       'MCP Servers',
       'Gateway Channels',
       'Groups',
+      'UPS Power',
       'Users',
       'About',
     ]) {

@@ -1,8 +1,12 @@
 import type { User } from '@agor-live/client';
 import { UnorderedListOutlined } from '@ant-design/icons';
-import { Button, Layout, Space, Typography, theme } from 'antd';
+import { Button, Flex, Layout, Space, Typography, theme } from 'antd';
+import { createContext, type ReactNode, useContext } from 'react';
 import { BrandMark } from '../BrandMark';
 import { UserIdentityAvatar } from '../UserIdentityAvatar';
+
+// Shared header accessory owned by MobileApp, across home/board/session/comments routes.
+export const MobileHeaderAccessory = createContext<ReactNode>(null);
 
 const { Header } = Layout;
 const { Title } = Typography;
@@ -25,6 +29,7 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
   onLogout,
 }) => {
   const { token } = theme.useToken();
+  const accessory = useContext(MobileHeaderAccessory);
 
   return (
     <Header
@@ -37,12 +42,14 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
         borderBottom: `1px solid ${token.colorBorderSecondary}`,
       }}
     >
-      <Space size={8} align="center" style={{ flex: 1 }}>
+      <Flex gap={8} align="center" style={{ flex: 1, minWidth: 0 }}>
         {showLogo && <BrandMark size={32} />}
 
         <Title
           level={5}
+          ellipsis={{ tooltip: title || 'agor' }}
           style={{
+            minWidth: 0,
             margin: 0,
             marginTop: -4,
             color: token.colorText,
@@ -52,9 +59,10 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
         >
           {title || 'agor'}
         </Title>
-      </Space>
+      </Flex>
 
-      <Space size={12} align="center">
+      <Space size={12} align="center" style={{ flexShrink: 0 }}>
+        {accessory}
         {user && <UserIdentityAvatar user={user} size={28} fontSize="20px" />}
 
         {showMenu && (
