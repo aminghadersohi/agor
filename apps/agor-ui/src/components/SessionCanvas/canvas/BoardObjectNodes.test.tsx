@@ -72,6 +72,18 @@ async function openArrangeMenu() {
 }
 
 describe('ZoneNode compact toolbar', () => {
+  it('gives workflow connectors a zoom-tolerant pointer target controlled by tool-mode CSS', () => {
+    renderZone(vi.fn(), CONNECTED);
+    const source = screen.getByLabelText('Connect a transition from My Zone');
+    const target = screen.getByLabelText('Connect a transition into My Zone');
+    for (const handle of [source, target]) {
+      expect(handle).toHaveClass('zone-workflow-handle');
+      expect(handle).toHaveStyle({ background: 'transparent' });
+      expect(handle.style.pointerEvents).toBe('');
+      expect(handle.style.opacity).toBe('');
+    }
+  });
+
   it('keeps common actions top-level and buries layer controls in More', () => {
     renderZone(vi.fn(), CONNECTED);
 

@@ -754,9 +754,8 @@ async function startDaemonWithOwnedMetrics(
   configureUploadStagingStoreFromConfig(effectiveConfig, undefined, db);
 
   // --------------------------------------------------------------------------
-  // RBAC flags
+  // Authorization settings
   // --------------------------------------------------------------------------
-  const branchRbacEnabled = effectiveConfig.execution?.branch_rbac === true;
   const allowSuperadmin = effectiveConfig.execution?.allow_superadmin === true;
   const superadminOpts = { allowSuperadmin };
 
@@ -777,7 +776,7 @@ async function startDaemonWithOwnedMetrics(
       db_backend: process.env.AGOR_DB_DIALECT === 'postgresql' ? 'postgresql' : 'sqlite',
       os_family: platform(),
       node_major: Number.parseInt(process.versions.node.split('.')[0] ?? '0', 10),
-      branch_rbac: branchRbacEnabled,
+      branch_rbac: true,
       unix_user_mode: effectiveConfig.execution?.unix_user_mode ?? 'simple',
     };
 
@@ -826,7 +825,6 @@ async function startDaemonWithOwnedMetrics(
     bundledUiAvailable,
     DAEMON_PORT,
     UI_PORT,
-    branchRbacEnabled,
     allowSuperadmin,
     requireAuth,
     deployment,
@@ -862,7 +860,6 @@ async function startDaemonWithOwnedMetrics(
     config: effectiveConfig,
     externalLaunchProvider,
     jwtSecret,
-    branchRbacEnabled,
     requireAuth,
     enforcePasswordChange,
     superadminOpts,

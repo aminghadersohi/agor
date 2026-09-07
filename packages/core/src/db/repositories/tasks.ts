@@ -485,10 +485,6 @@ export interface TerminationClaimInput {
   now?: Date;
 }
 
-export interface ExecutorLaunchAuthorityOptions {
-  branchRbacEnabled: boolean;
-}
-
 export interface ExecutorLaunchAuthority {
   principal_user_id: string;
   session_id: string;
@@ -497,7 +493,7 @@ export interface ExecutorLaunchAuthority {
 }
 
 /** Server-authenticated Task-token scope supplied to the repository hot path. */
-export interface TaskRuntimeAuthorityScope extends ExecutorLaunchAuthorityOptions {
+export interface TaskRuntimeAuthorityScope {
   token_fingerprint: string;
   principal_user_id: string;
   session_id: string;
@@ -1496,10 +1492,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
    * resource sources. A retry may observe the same floor, but it can never
    * replace a write projection with read/none (or read with none).
    */
-  async bindExecutorLaunchAuthority(
-    id: string,
-    options: ExecutorLaunchAuthorityOptions
-  ): Promise<ExecutorLaunchAuthority> {
+  async bindExecutorLaunchAuthority(id: string): Promise<ExecutorLaunchAuthority> {
     return this.mutateLockedTask(id, async (txDb, row, fullId) => {
       if (
         row.status !== TaskStatus.DISPATCHING ||
@@ -1511,7 +1504,6 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       const access = await resolveSessionRuntimeBranchAccess(txDb, {
         sessionId: row.session_id,
         principalUserId: row.created_by,
-        ...options,
       });
       if (!access?.can_prompt_session) {
         throw new RepositoryError('Authorization to launch this task is unavailable');
@@ -1561,7 +1553,6 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       const access = await resolveSessionRuntimeBranchAccess(txDb, {
         sessionId: row.session_id,
         principalUserId: row.created_by,
-        branchRbacEnabled: authority.branchRbacEnabled,
       });
       if (
         authority.principal_user_id !== row.created_by ||

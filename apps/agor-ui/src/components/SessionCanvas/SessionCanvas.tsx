@@ -4043,7 +4043,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       (connection: Connection) => {
         if (
           activeTool !== 'workflow' ||
-          !mutationGate.canMutate ||
+          !canMutateBoard ||
           !connection.source ||
           !connection.target
         ) {
@@ -4065,12 +4065,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           targetZoneId: connection.target,
         });
       },
-      [activeTool, mutationGate.canMutate, board?.objects, showError]
+      [activeTool, canMutateBoard, board?.objects, showError]
     );
 
     const saveWorkflowTransition = useCallback(
       async (values: ZoneWorkflowTransitionValues) => {
-        if (!transitionModal) return;
+        if (!transitionModal || !canMutateBoard) return;
         try {
           if (transitionModal.transition) {
             await zoneWorkflow.patch(transitionModal.transition.transition_id, values);
@@ -4091,20 +4091,20 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           showError(error instanceof Error ? error.message : String(error));
         }
       },
-      [transitionModal, zoneWorkflow, showSuccess, showError]
+      [transitionModal, canMutateBoard, zoneWorkflow, showSuccess, showError]
     );
 
     const editSelectedTransition = useCallback(() => {
-      if (!selectedTransition) return;
+      if (!selectedTransition || !canMutateBoard) return;
       setTransitionModal({
         sourceZoneId: selectedTransition.source_zone_id,
         targetZoneId: selectedTransition.target_zone_id,
         transition: selectedTransition,
       });
-    }, [selectedTransition]);
+    }, [selectedTransition, canMutateBoard]);
 
     const deleteSelectedTransition = useCallback(() => {
-      if (!selectedTransition || !mutationGate.canMutate) return;
+      if (!selectedTransition || !canMutateBoard) return;
       Modal.confirm({
         title: 'Delete workflow transition?',
         content: `Delete “${selectedTransition.label}”? Historical advance audit records remain.`,
@@ -4116,10 +4116,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           showSuccess('Workflow transition deleted.');
         },
       });
-    }, [selectedTransition, mutationGate.canMutate, zoneWorkflow, showSuccess]);
+    }, [selectedTransition, canMutateBoard, zoneWorkflow, showSuccess]);
 
     const advanceSelectedEntities = useCallback(() => {
-      if (!selectedTransition?.enabled || !mutationGate.canMutate) return;
+      if (!selectedTransition?.enabled || !canMutateBoard) return;
       const selectedNodes = reactFlowInstanceRef.current
         ?.getNodes()
         .filter((node) => node.selected);
@@ -4174,7 +4174,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       });
     }, [
       selectedTransition,
-      mutationGate.canMutate,
+      canMutateBoard,
       boardObjectByBranch,
       boardObjectByCard,
       zoneLabels,
@@ -4806,7 +4806,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                         size="small"
                         icon={<ArrowRightOutlined />}
                         type="primary"
-                        disabled={!selectedTransition.enabled || !mutationGate.canMutate}
+                        disabled={!selectedTransition.enabled || !canMutateBoard}
                         onClick={advanceSelectedEntities}
                       >
                         Advance selected
@@ -4814,7 +4814,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                       <Button
                         size="small"
                         icon={<EditOutlined />}
-                        disabled={!mutationGate.canMutate}
+                        disabled={!canMutateBoard}
                         onClick={editSelectedTransition}
                       >
                         Edit
@@ -4823,7 +4823,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                         size="small"
                         danger
                         icon={<DeleteOutlined />}
-                        disabled={!mutationGate.canMutate}
+                        disabled={!canMutateBoard}
                         onClick={deleteSelectedTransition}
                       >
                         Delete
@@ -5008,7 +5008,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             transition={transitionModal.transition}
             sourceLabel={zoneLabels[transitionModal.sourceZoneId] ?? transitionModal.sourceZoneId}
             targetLabel={zoneLabels[transitionModal.targetZoneId] ?? transitionModal.targetZoneId}
-            disabled={!mutationGate.canMutate}
+            disabled={!canMutateBoard}
             onCancel={() => setTransitionModal(null)}
             onSave={saveWorkflowTransition}
           />

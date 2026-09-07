@@ -48,7 +48,6 @@ interface RegisterProfileImageRoutesOptions {
   app: Application;
   db: TenantScopeAwareDatabase;
   authMiddleware: RequestHandler;
-  branchRbacEnabled: boolean;
   allowSuperadmin: boolean;
   createIdentityModelClient?: () => MeshyIdentityModelClient;
 }
@@ -79,7 +78,6 @@ export function registerProfileImageRoutes({
   app,
   db,
   authMiddleware,
-  branchRbacEnabled,
   allowSuperadmin,
   createIdentityModelClient = () =>
     new MeshyIdentityModelClient(process.env.MESHY_API_KEY?.trim() ?? ''),
@@ -130,7 +128,7 @@ export function registerProfileImageRoutes({
       if (!board) throw new NotFound('Profile unavailable');
       const bypassAccess =
         params.user?._isServiceAccount || hasMinimumRole(params.user?.role, ROLES.ADMIN);
-      if (branchRbacEnabled && !bypassAccess) {
+      if (!bypassAccess) {
         const allowed = await runWithTenantDatabaseScope(db, tenantId, () =>
           mode === 'manage'
             ? boards.canMutate(board.board_id, userId as UUID)
@@ -145,7 +143,7 @@ export function registerProfileImageRoutes({
       branches.findById(subjectId as BranchID)
     );
     if (!branch || !isTeammate(branch)) throw new NotFound('Profile unavailable');
-    if (branchRbacEnabled) {
+    {
       const allowed = await runWithTenantDatabaseScope(db, tenantId, async () => {
         const isOwner = await branches.isOwner(branch.branch_id, userId as UUID);
         const effectivePermission = await branches.resolveUserPermission(branch, userId as UUID);
