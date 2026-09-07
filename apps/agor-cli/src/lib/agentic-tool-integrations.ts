@@ -165,11 +165,19 @@ export async function writeAgenticToolSelectionManifest(
 }
 
 /** Hold this deployment-local lock across selection and the complete reconciliation. */
+// Reserve before asynchronous filesystem work: same-process stale-lock
+// reclaimers must not remove a directory another local caller just replaced.
+const activeInstallLockRoots = new Set<string>();
+
 export async function acquireAgenticToolInstallLock(): Promise<() => Promise<void>> {
   const root = getAgenticToolsRoot();
   const lock = join(root, '.install.lock');
-  await ensureSharedManagedDirectory(root);
+  const busyMessage =
+    'Another `agor install` is already updating agentic tools. Try again when it finishes.';
+  if (activeInstallLockRoots.has(root)) throw new Error(busyMessage);
+  activeInstallLockRoots.add(root);
   try {
+    await ensureSharedManagedDirectory(root);
     const release = await acquireFileLock(root, {
       lockfilePath: lock,
       realpath: false,
@@ -191,16 +199,24 @@ export async function acquireAgenticToolInstallLock(): Promise<() => Promise<voi
     });
     try {
       await chmod(lock, PRIVATE_MANAGED_DIRECTORY_MODE);
-      return release;
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        try {
+          await release();
+        } finally {
+          activeInstallLockRoots.delete(root);
+        }
+      };
     } catch (error) {
       await release();
       throw error;
     }
   } catch (error) {
+    activeInstallLockRoots.delete(root);
     if ((error as NodeJS.ErrnoException).code === 'ELOCKED') {
-      throw new Error(
-        'Another `agor install` is already updating agentic tools. Try again when it finishes.'
-      );
+      throw new Error(busyMessage);
     }
     throw error;
   }

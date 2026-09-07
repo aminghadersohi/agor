@@ -62,7 +62,9 @@ describe.skipIf(!enabled)('zone workflow PostgreSQL 9009 -> 9011 upgrade', () =>
   });
 
   it('preserves existing tenant data and installs usable forced-RLS workflow tables', async () => {
-    await runMigrations(db);
+    // This isolated upgrade fixture has no daemon clients. Later upstream
+    // migrations may require a cutover even though this test targets workflows.
+    await runMigrations(db, { allowOfflineCutover: true });
     await runWithTenantDatabaseScope(db, tenantId, async (scoped) => {
       const board = await new BoardRepository(scoped).findById(boardId);
       expect(board?.name).toBe('Pre-workflow board');

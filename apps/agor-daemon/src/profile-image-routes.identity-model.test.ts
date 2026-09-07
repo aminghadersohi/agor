@@ -1,6 +1,6 @@
 import type { Server } from 'node:http';
-import { ProfileImageRepository, UsersRepository } from '@agor/core/db';
-import type { ProfileImageID, TenantID, UserID } from '@agor/core/types';
+import { BoardRepository, ProfileImageRepository, UsersRepository } from '@agor/core/db';
+import type { ProfileImageID, TenantID, UserID, UUID } from '@agor/core/types';
 import express from 'express';
 import sharp from 'sharp';
 import { afterEach, describe, expect, vi } from 'vitest';
@@ -53,11 +53,12 @@ describe('profile identity model routes', () => {
 
       const app = express();
       app.use(express.json());
+      let requestRole = 'admin';
       const authMiddleware: express.RequestHandler = (request, _response, next) => {
         (request as typeof request & { feathers: unknown }).feathers = {
           provider: 'rest',
           tenant: { tenant_id: tenantId },
-          user: { ...user, role: 'admin' },
+          user: { ...user, role: requestRole },
         };
         next();
       };
@@ -65,7 +66,6 @@ describe('profile identity model routes', () => {
         app: app as never,
         db,
         authMiddleware,
-        branchRbacEnabled: false,
         allowSuperadmin: false,
         createIdentityModelClient: () => provider,
       });
@@ -118,6 +118,22 @@ describe('profile identity model routes', () => {
         'https://assets.meshy.ai/model.glb?signature=private'
       );
       expect(provider.delete).toHaveBeenCalledWith('provider-task-1');
+
+      const board = await new BoardRepository(db).create({
+        name: 'Fictional private profile board',
+        created_by: user.user_id as UUID,
+      });
+      requestRole = 'member';
+      const canView = vi.spyOn(BoardRepository.prototype, 'canView').mockResolvedValue(false);
+      try {
+        const deniedBoard = await fetch(
+          `${origin}/profile-images?subjectType=board&subjectId=${board.board_id}`
+        );
+        expect(deniedBoard.status).toBe(404);
+        expect(canView).toHaveBeenCalledWith(board.board_id, user.user_id);
+      } finally {
+        canView.mockRestore();
+      }
     }
   );
 });

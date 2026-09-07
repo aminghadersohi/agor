@@ -804,7 +804,6 @@ describe('ArtifactsService executor sandbox ownership', () => {
     },
     execution: {
       unix_user_mode: 'sandbox',
-      branch_rbac: false,
       sandbox: { enabled: true, home_mode: 'per_user' },
     },
   };
@@ -2554,7 +2553,7 @@ describe('ArtifactsService.find SQL pushdown', () => {
     return { service, boardA, boardB, branch1, branch2, onBranch1, onBranch2, orphan };
   }
 
-  dbTest('pushes board_id into the repository read (rbac off)', async ({ db }) => {
+  dbTest('pushes board_id into the repository read', async ({ db }) => {
     const { service, boardA } = await seedPushdownFixture(db);
     const repoFindAll = vi.spyOn(
       (service as unknown as { artifactRepo: ArtifactRepository }).artifactRepo,

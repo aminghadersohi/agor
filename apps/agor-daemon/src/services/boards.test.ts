@@ -15,6 +15,7 @@ import {
   RepoRepository,
   SessionRepository,
   UsersRepository,
+  ZoneWorkflowRepository,
 } from '@agor/core/db';
 import { BadRequest } from '@agor/core/feathers';
 import {
@@ -339,9 +340,11 @@ describe('BoardsService - Custom Methods', () => {
     async ({ db }) => {
       const emitBoardObjectPatched = vi.fn();
       const emitBoardCommentPatched = vi.fn();
+      const emitZoneWorkflowRemoved = vi.fn();
       const service = new BoardsService(db, {
         emitBoardObjectPatched,
         emitBoardCommentPatched,
+        emitZoneWorkflowRemoved,
       });
       const repoRepo = new RepoRepository(db);
       const branchRepo = new BranchRepository(db);
@@ -366,6 +369,16 @@ describe('BoardsService - Custom Methods', () => {
         },
       })) as Board;
 
+      const workflowRepo = new ZoneWorkflowRepository(db);
+      const transition = await workflowRepo.createTransition(
+        {
+          board_id: board.board_id,
+          source_zone_id: 'zone-review',
+          target_zone_id: 'zone-done',
+          label: 'Complete review',
+        },
+        TEST_USER
+      );
       const boardObject = await boardObjectRepo.create({
         board_id: board.board_id,
         branch_id: branch.branch_id,
@@ -392,6 +405,8 @@ describe('BoardsService - Custom Methods', () => {
       const updatedComment = await commentsRepo.findById(comment.comment_id);
       const preservedBranch = await branchRepo.findById(branch.branch_id);
       expect(result.board.objects?.['zone-review']).toBeUndefined();
+      expect(await workflowRepo.findTransition(transition.transition_id)).toBeNull();
+      expect(emitZoneWorkflowRemoved).toHaveBeenCalledWith(transition, undefined);
       expect(result.affectedSessions).toEqual([]);
       expect(preservedBranch?.branch_id).toBe(branch.branch_id);
       expect(updatedBoardObject?.zone_id).toBeUndefined();
@@ -438,6 +453,16 @@ describe('BoardsService - Custom Methods', () => {
         },
       },
     })) as Board;
+    const workflowRepo = new ZoneWorkflowRepository(db);
+    const transition = await workflowRepo.createTransition(
+      {
+        board_id: board.board_id,
+        source_zone_id: 'zone-review',
+        target_zone_id: 'zone-done',
+        label: 'Complete review',
+      },
+      TEST_USER
+    );
     const boardObject = await boardObjectRepo.create({
       board_id: board.board_id,
       branch_id: branch.branch_id,
@@ -476,6 +501,7 @@ describe('BoardsService - Custom Methods', () => {
     expect(preservedBoardObject?.zone_id).toBe('zone-review');
     expect(preservedBoardObject?.position).toEqual({ x: 10, y: 20 });
     expect(preservedComment?.position).toEqual(comment.position);
+    expect(await workflowRepo.findTransition(transition.transition_id)).toEqual(transition);
   });
 
   dbTest(
@@ -736,7 +762,7 @@ describe('BoardsService.find SQL pushdown', () => {
   );
 
   dbTest(
-    'pages the whole tenant scope in SQL when no filter is present (rbac off)',
+    'pages the whole authorized tenant scope in SQL when no filter is present',
     async ({ db }) => {
       const { service } = await seed(db);
       const repoFindPage = vi.spyOn(

@@ -974,9 +974,13 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         autoArchiveAfterSeconds: args.autoArchiveAfterSeconds,
       };
 
-      const childSession = await (
-        ctx.app.service('sessions') as unknown as SessionsServiceImpl
-      ).spawn(currentSessionId, spawnData, ctx.baseServiceParams);
+      // spawn/fork are custom methods, not Feathers transport methods. Scope
+      // only child admission/persistence; prompting must run after this unit
+      // commits, without holding a transaction across executor orchestration.
+      const sessionsService = ctx.app.service('sessions') as unknown as SessionsServiceImpl;
+      const childSession = await runWithMcpTenantDatabaseWrite(ctx, () =>
+        sessionsService.spawn(currentSessionId, spawnData, ctx.baseServiceParams)
+      );
 
       const task = await ctx.app.service('/sessions/:id/prompt').create(
         {
@@ -1224,9 +1228,10 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         const forkData: { prompt: string; task_id?: string } = { prompt: args.prompt };
         if (args.taskId) forkData.task_id = args.taskId;
 
-        const forkedSession = await (
-          ctx.app.service('sessions') as unknown as SessionsServiceImpl
-        ).fork(sessionId, forkData, ctx.baseServiceParams);
+        const sessionsService = ctx.app.service('sessions') as unknown as SessionsServiceImpl;
+        const forkedSession = await runWithMcpTenantDatabaseWrite(ctx, () =>
+          sessionsService.fork(sessionId, forkData, ctx.baseServiceParams)
+        );
 
         // Build patch for the fork — title for both modes, btw-specific metadata for btw
         const forkPatch: Record<string, unknown> = {};
@@ -1291,9 +1296,10 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         if (args.agenticTool) spawnData.agent = args.agenticTool as AgenticToolName;
         if (args.taskId) spawnData.task_id = args.taskId;
 
-        const childSession = await (
-          ctx.app.service('sessions') as unknown as SessionsServiceImpl
-        ).spawn(sessionId, spawnData, ctx.baseServiceParams);
+        const sessionsService = ctx.app.service('sessions') as unknown as SessionsServiceImpl;
+        const childSession = await runWithMcpTenantDatabaseWrite(ctx, () =>
+          sessionsService.spawn(sessionId, spawnData, ctx.baseServiceParams)
+        );
 
         const task = await ctx.app.service('/sessions/:id/prompt').create(
           {
@@ -1496,9 +1502,8 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       }
 
       if (termination.status === 'terminal' || termination.status === 'idle') {
-        await (
-          ctx.app.service('sessions') as unknown as SessionsServiceImpl
-        ).triggerQueueProcessing(targetSessionId, ctx.baseServiceParams);
+        const sessionsService = ctx.app.service('sessions') as unknown as SessionsServiceImpl;
+        await sessionsService.triggerQueueProcessing(targetSessionId, ctx.baseServiceParams);
       }
 
       return structuredResult({
@@ -1640,9 +1645,8 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             id: task.task_id,
           });
         }
-        await (
-          ctx.app.service('sessions') as unknown as SessionsServiceImpl
-        ).triggerQueueProcessing(targetSessionId, ctx.baseServiceParams);
+        const sessionsService = ctx.app.service('sessions') as unknown as SessionsServiceImpl;
+        await sessionsService.triggerQueueProcessing(targetSessionId, ctx.baseServiceParams);
       }
       return structuredResult({
         outcome: result.outcome,

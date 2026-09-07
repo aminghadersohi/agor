@@ -121,6 +121,7 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
     transition: ZoneWorkflowTransition,
     params?: BoardParams
   ) => void;
+
   private emitBoardCommentPatched?: (comment: BoardComment, params?: BoardParams) => void;
 
   constructor(db: TenantScopeAwareDatabase, events: BoardsServiceEvents = {}) {

@@ -910,6 +910,8 @@ describe('SessionCanvas zoom shortcuts', () => {
 
     expect(screen.getByRole('button', { name: 'Add Comment' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Add Zone' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Workflow transitions' })).toBeDisabled();
+    expect(reactFlowProps?.nodesConnectable).toBe(false);
     expect(reactFlowProps?.nodesDraggable).toBe(true);
   });
 
