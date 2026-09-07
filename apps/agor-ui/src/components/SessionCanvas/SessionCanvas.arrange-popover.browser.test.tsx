@@ -19,35 +19,17 @@ import SessionCanvas from './SessionCanvas';
 
 async function visibleSelectOption(label: string): Promise<HTMLElement> {
   let option: HTMLElement | undefined;
-  await waitFor(
-    () => {
-      option = screen
-        .getAllByText(label, { selector: '.ant-select-item-option-content' })
-        .find((candidate) => {
-          const dropdown = candidate.closest('.ant-select-dropdown');
-          const bounds = candidate.getBoundingClientRect();
-          // Ant retains old dropdown portals between openings. Chromium can
-          // preserve their last non-zero geometry even after an ancestor makes
-          // them non-rendered, so bounds plus the dropdown's hidden class are
-          // insufficient on slower CI runners. Use the browser's recursive
-          // visibility check to select only the currently interactive copy.
-          const rendered = candidate.checkVisibility({
-            checkOpacity: true,
-            checkVisibilityCSS: true,
-          });
-          return (
-            dropdown &&
-            !dropdown.classList.contains('ant-select-dropdown-hidden') &&
-            rendered &&
-            bounds.width > 0 &&
-            bounds.height > 0
-          );
-        });
-      expect(option).toBeDefined();
-    },
-    { timeout: 10_000 }
-  );
-  expect(option).toBeVisible();
+  await waitFor(() => {
+    option = screen
+      .getAllByText(label, { selector: '.ant-select-item-option-content' })
+      .find(
+        (candidate) =>
+          !candidate
+            .closest('.ant-select-dropdown')
+            ?.classList.contains('ant-select-dropdown-hidden')
+      );
+    expect(option).toBeDefined();
+  });
   return option!;
 }
 
@@ -69,6 +51,22 @@ async function visibleMenuItem(name: RegExp): Promise<HTMLElement> {
   );
   expect(menuItem).toBeVisible();
   return menuItem!;
+}
+
+async function visibleRole(
+  role: 'dialog' | 'tooltip',
+  name: string | RegExp
+): Promise<HTMLElement> {
+  let element: HTMLElement | undefined;
+  await waitFor(() => {
+    element = screen
+      .getAllByRole(role, { name, hidden: true })
+      .find((candidate) =>
+        candidate.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+      );
+    expect(element).toBeDefined();
+  });
+  return element!;
 }
 
 afterEach(cleanup);
@@ -95,6 +93,21 @@ const geometry = (payload: Record<string, unknown>) =>
         { x: value.x, y: value.y, width: value.width, height: value.height },
       ])
   );
+
+const translatedGeometry = (payload: Record<string, unknown>) => {
+  const values = geometry(payload) as Record<
+    string,
+    { x: number; y: number; width: number; height: number }
+  >;
+  const minX = Math.min(...Object.values(values).map((value) => value.x));
+  const minY = Math.min(...Object.values(values).map((value) => value.y));
+  return Object.fromEntries(
+    Object.entries(values).map(([id, value]) => [
+      id,
+      { ...value, x: value.x - minX, y: value.y - minY },
+    ])
+  );
+};
 
 describe('SessionCanvas Arrange Board popover (real browser)', () => {
   it('keeps legacy text and toolbar state changes free of product-owned style warnings', async () => {
@@ -219,6 +232,7 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
       for (const [id, update] of Object.entries(payload.objects as NonNullable<Board['objects']>)) {
         Object.assign(durableBoard.objects?.[id] ?? {}, update);
       }
+      durableBoard.layout_context = payload.layout_context as Board['layout_context'];
       return {
         board: durableBoard,
         placements: [],
@@ -285,14 +299,7 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     });
     const fitViewLabel = within(dialog).getByText('Fit view after arranging', { exact: true });
     const density = within(dialog).getByRole('combobox', { name: 'Content expansion' });
-    await act(async () => user.click(density));
-    const collapse = await visibleSelectOption('Collapse eligible contents');
-    expect(collapse.closest(`.${CANVAS_LAYOUT_CONTROLS_CLASS}`)).not.toBeNull();
-    // Ant owns this portaled option through a delegated click handler. A
-    // direct browser click keeps the assertion focused on that production
-    // boundary instead of vitest/browser's locator retargeting behavior.
-    fireEvent.click(collapse!);
-    await waitFor(() => expect(density).toHaveAttribute('aria-expanded', 'false'));
+    expect(density).toBeDisabled();
     expect(fitView).toBeChecked();
     await waitFor(() => expect(fitViewLabel).toBeVisible());
     await act(async () => user.click(fitViewLabel));
@@ -305,7 +312,7 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     expect(pack).not.toBeChecked();
     expect(density).toBeDisabled();
     expect(matchFrames).toBeDisabled();
-    expect(within(dialog).getByText(/existing zone frames are preserved/i)).toBeVisible();
+    expect(within(dialog).getByText(/no child presentation is changed/i)).toBeVisible();
     await act(async () =>
       user.click(within(dialog).getByText('Pack zone contents', { exact: true }))
     );
@@ -327,16 +334,10 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     await act(async () => user.click(within(dialog).getByText('Compact', { exact: true })));
     expect(within(dialog).getByRole('radio', { name: 'Compact' })).toBeChecked();
     expect(within(dialog).getByRole('checkbox', { name: 'Justify rows' })).toBeDisabled();
-    expect(
-      within(dialog).getByText(
-        'Unavailable in Compact, which minimizes cluster diameter instead of forming rows.'
-      )
-    ).toBeVisible();
+    expect(within(dialog).getByText(/dense two-dimensional cluster/i)).toBeVisible();
     expect(getSelectedZone()).toHaveClass('selected');
 
-    await act(async () =>
-      user.click(within(dialog).getByRole('button', { name: 'Arrange board' }))
-    );
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Arrange board' }));
     await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(getTrigger()).toHaveFocus());
     trigger = getTrigger();
@@ -355,14 +356,9 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     await act(async () => user.click(trigger));
     dialog = await screen.findByRole('dialog', { name: 'Arrange board options' });
     const reopenedDensity = within(dialog).getByRole('combobox', { name: 'Content expansion' });
-    await act(async () => user.click(reopenedDensity));
-    const preserve = await visibleSelectOption('Preserve current expansion');
-    expect(preserve.closest('.ant-select-item-option')).toHaveClass(
-      'ant-select-item-option-selected'
-    );
-    await act(async () =>
-      user.click(within(dialog).getByRole('button', { name: 'Arrange board' }))
-    );
+    expect(reopenedDensity).toBeDisabled();
+    expect(within(dialog).getByText('Preserve current expansion')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Arrange board' }));
     await new Promise((resolve) => setTimeout(resolve, 250));
     expect(patch).toHaveBeenCalledTimes(1);
     expect(getTrigger()).toHaveFocus();
@@ -418,4 +414,294 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
 
     expect(patch).toHaveBeenCalledTimes(2);
   }, 60_000);
+
+  it('uses one Grid plan for board and selection, then preserves cells for every visible action', async () => {
+    if (window.innerWidth < 900) return;
+
+    const originalObjects = {
+      'zone-a': {
+        type: 'zone' as const,
+        x: 80,
+        y: 80,
+        width: 650,
+        height: 260,
+        label: 'Fictional Alpha',
+      },
+      'zone-b': {
+        type: 'zone' as const,
+        x: 720,
+        y: 120,
+        width: 780,
+        height: 340,
+        label: 'Fictional Beta',
+      },
+      'zone-c': {
+        type: 'zone' as const,
+        x: 100,
+        y: 620,
+        width: 700,
+        height: 300,
+        label: 'Fictional Gamma',
+      },
+      'zone-d': {
+        type: 'zone' as const,
+        x: 760,
+        y: 680,
+        width: 900,
+        height: 420,
+        label: 'Fictional Delta',
+      },
+      'zone-e': {
+        type: 'zone' as const,
+        x: 1440,
+        y: 80,
+        width: 740,
+        height: 320,
+        label: 'Fictional Epsilon',
+      },
+      obstacle: {
+        type: 'zone' as const,
+        x: 580,
+        y: 470,
+        width: 280,
+        height: 180,
+        label: 'Fictional Locked Obstacle',
+        locked: true,
+      },
+    };
+
+    const renderProductionCanvas = (durableBoard: Board, patch: ReturnType<typeof vi.fn>) => {
+      const client = {
+        service: vi.fn(() => ({
+          patch,
+          find: vi.fn().mockResolvedValue({ capabilities: ['board.edit'] }),
+        })),
+      } as unknown as AgorClient;
+      return render(
+        <AntApp>
+          <ConnectionProvider
+            value={{
+              connected: true,
+              connecting: false,
+              outOfSync: false,
+              capturedSha: null,
+              currentSha: null,
+            }}
+          >
+            <SessionCanvas
+              board={durableBoard}
+              client={client}
+              branches={[]}
+              currentUserId={CURRENT_USER.user_id}
+              height={760}
+            />
+          </ConnectionProvider>
+        </AntApp>
+      );
+    };
+
+    const makeBoardAndPatch = () => {
+      const durableBoard = {
+        board_id: 'fictional-production-layout-board',
+        objects: structuredClone(originalObjects),
+      } as unknown as Board;
+      const writes: Record<string, unknown>[] = [];
+      const patch = vi.fn(async (_boardId: string, payload: Record<string, unknown>) => {
+        writes.push(payload);
+        for (const [id, update] of Object.entries(
+          payload.objects as NonNullable<Board['objects']>
+        )) {
+          Object.assign(durableBoard.objects?.[id] ?? {}, update);
+        }
+        durableBoard.layout_context = payload.layout_context as Board['layout_context'];
+        return {
+          board: durableBoard,
+          placements: [],
+          changed: true,
+          changed_object_ids: Object.keys(payload.objects as object),
+          changed_placement_ids: [],
+        };
+      });
+      return { durableBoard, patch, writes };
+    };
+
+    const configureVisibleGrid = async (surface: HTMLElement) => {
+      const user = userEvent.setup();
+      const grid = within(surface).getByRole('radio', { name: 'Grid' });
+      if (!grid.hasAttribute('checked')) await act(async () => user.click(grid));
+      const tracks = within(surface).getByText('Auto tracks', { exact: true });
+      fireEvent.mouseDown(tracks);
+      fireEvent.click(await visibleSelectOption('Columns'));
+      const count = within(surface).getByRole('spinbutton', { name: 'Number of columns' });
+      fireEvent.change(count, { target: { value: '2' } });
+      expect(within(surface).getByRole('spinbutton', { name: 'Layout gap' })).toHaveValue('40');
+      await act(async () =>
+        user.click(within(surface).getByRole('switch', { name: 'Match heights within rows' }))
+      );
+      await act(async () =>
+        user.click(within(surface).getByRole('switch', { name: 'Match widths within columns' }))
+      );
+      await act(async () =>
+        user.click(within(surface).getByRole('checkbox', { name: 'Match / resize zone frames' }))
+      );
+    };
+
+    // A. Arrange Board toolbar -> Grid -> Apply.
+    const boardRun = makeBoardAndPatch();
+    renderProductionCanvas(boardRun.durableBoard, boardRun.patch);
+    const user = userEvent.setup();
+    await act(async () => user.click(screen.getByRole('button', { name: 'Arrange board' })));
+    const boardDialog = await visibleRole('dialog', 'Arrange board options');
+    await configureVisibleGrid(boardDialog);
+    await act(async () =>
+      user.click(within(boardDialog).getByRole('checkbox', { name: 'Fit view after arranging' }))
+    );
+    await act(async () =>
+      user.click(within(boardDialog).getByRole('button', { name: 'Arrange board' }))
+    );
+    await waitFor(() => expect(boardRun.patch).toHaveBeenCalledTimes(1));
+    const boardPayload = boardRun.writes[0]!;
+    cleanup();
+
+    // B/C. Select the exact same eligible zones, use Layout selected items,
+    // then click the distinct zone-only Tidy action as a no-op repeat.
+    const selectionRun = makeBoardAndPatch();
+    renderProductionCanvas(selectionRun.durableBoard, selectionRun.patch);
+    const selectionUser = userEvent.setup();
+    const selectionNodes: HTMLElement[] = [];
+    for (const id of ['zone-a', 'zone-b', 'zone-c', 'zone-d', 'zone-e']) {
+      const node = await waitFor(() => {
+        const element = document.querySelector<HTMLElement>(`.react-flow__node[data-id="${id}"]`);
+        if (!element) throw new Error(`Missing fictional node ${id}`);
+        return element;
+      });
+      selectionNodes.push(node);
+    }
+    await act(async () => selectionUser.click(selectionNodes[0]!));
+    await waitFor(() => expect(selectionNodes[0]).toHaveClass('selected'));
+    await act(async () => selectionUser.keyboard('{Shift>}'));
+    for (const node of selectionNodes.slice(1)) {
+      await act(async () => selectionUser.click(node));
+    }
+    await act(async () => selectionUser.keyboard('{/Shift}'));
+    const toolbar = await screen.findByRole('toolbar', { name: 'Arrange selected items' });
+    expect(within(toolbar).getByRole('button', { name: 'Arrange zones' })).toBeVisible();
+    await act(async () =>
+      selectionUser.click(within(toolbar).getByRole('button', { name: 'Layout options' }))
+    );
+    const selectionSurface = await visibleRole('tooltip', /Layout selected items/);
+    await configureVisibleGrid(selectionSurface);
+    await act(async () =>
+      selectionUser.click(within(selectionSurface).getByRole('button', { name: 'Apply layout' }))
+    );
+    await waitFor(() => expect(selectionRun.patch).toHaveBeenCalledTimes(1));
+    const selectionPayload = selectionRun.writes[0]!;
+
+    expect((selectionPayload.layout_context as Board['layout_context'])?.settings).toEqual(
+      (boardPayload.layout_context as Board['layout_context'])?.settings
+    );
+    expect(translatedGeometry(selectionPayload)).toEqual(translatedGeometry(boardPayload));
+
+    const initialCells = selectionRun.durableBoard.layout_context?.cells;
+    expect(new Set(Object.values(initialCells ?? {}).map((cell) => cell.column)).size).toBe(2);
+    expect(new Set(Object.values(initialCells ?? {}).map((cell) => cell.row)).size).toBe(3);
+    const membership = Object.fromEntries(
+      Object.entries(initialCells ?? {}).map(([id, cell]) => [id, [cell.row, cell.column]])
+    );
+
+    await act(async () =>
+      selectionUser.click(within(toolbar).getByRole('button', { name: 'Arrange zones' }))
+    );
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(selectionRun.patch).toHaveBeenCalledTimes(1);
+
+    // D. All six actual alignment actions remain Grid-cell actions. Start/top
+    // can be changed-only no-ops; every other action must still retain tracks.
+    for (const action of [
+      /Left \/ start/,
+      /Horizontal center/,
+      /Right \/ end/,
+      /Top \/ start/,
+      /Vertical center/,
+      /Bottom \/ end/,
+    ]) {
+      fireEvent.click(within(toolbar).getByRole('button', { name: 'More alignment actions' }));
+      fireEvent.click(await visibleMenuItem(action));
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const cells = selectionRun.durableBoard.layout_context?.cells ?? {};
+      expect(
+        Object.fromEntries(Object.entries(cells).map(([id, cell]) => [id, [cell.row, cell.column]]))
+      ).toEqual(membership);
+      expect(new Set(Object.values(cells).map((cell) => cell.column)).size).toBe(2);
+      expect(new Set(Object.values(cells).map((cell) => cell.row)).size).toBe(3);
+    }
+    expect(selectionRun.durableBoard.layout_context?.settings).toMatchObject({
+      cellHorizontalAlignment: 'end',
+      cellVerticalAlignment: 'end',
+    });
+
+    // E. Match uses the maximum safe axis and performs its reflow in the same
+    // applyLayout payload; the repeat is a zero-write no-op.
+    const expectedWidth = Math.max(
+      ...Object.values(selectionRun.durableBoard.layout_context?.cells ?? {}).map(
+        (cell) => cell.width
+      )
+    );
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Match width' }));
+    await waitFor(() => {
+      const widths = Object.values(selectionRun.durableBoard.layout_context?.cells ?? {}).map(
+        (cell) => cell.width
+      );
+      expect(new Set(widths)).toEqual(new Set([expectedWidth]));
+    });
+    const afterWidthWrites = selectionRun.patch.mock.calls.length;
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Match width' }));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(selectionRun.patch).toHaveBeenCalledTimes(afterWidthWrites);
+
+    const expectedHeight = Math.max(
+      ...Object.values(selectionRun.durableBoard.layout_context?.cells ?? {}).map(
+        (cell) => cell.height
+      )
+    );
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Match height' }));
+    await waitFor(() => {
+      const heights = Object.values(selectionRun.durableBoard.layout_context?.cells ?? {}).map(
+        (cell) => cell.height
+      );
+      expect(new Set(heights)).toEqual(new Set([expectedHeight]));
+    });
+    expect(
+      Object.fromEntries(
+        Object.entries(selectionRun.durableBoard.layout_context?.cells ?? {}).map(([id, cell]) => [
+          id,
+          [cell.row, cell.column],
+        ])
+      )
+    ).toEqual(membership);
+
+    // The same selected-items surface also switches to Compact. Subsequent
+    // alignment remains a dense two-dimensional Compact replan rather than a
+    // generic same-x/same-y collapse.
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Layout options' }));
+    const compactSurface = await visibleRole('tooltip', /Layout selected items/);
+    fireEvent.click(within(compactSurface).getByRole('radio', { name: 'Compact' }));
+    fireEvent.click(within(compactSurface).getByRole('button', { name: 'Apply layout' }));
+    await waitFor(() =>
+      expect(selectionRun.durableBoard.layout_context?.settings.mode).toBe('compact')
+    );
+    const assertCompactCluster = () => {
+      const cells = Object.values(selectionRun.durableBoard.layout_context?.cells ?? {});
+      expect(new Set(cells.map((cell) => cell.x)).size).toBeGreaterThan(1);
+      expect(new Set(cells.map((cell) => cell.y)).size).toBeGreaterThan(1);
+      expect(selectionRun.durableBoard.layout_context?.settings.mode).toBe('compact');
+    };
+    assertCompactCluster();
+    for (const action of [/Right \/ end/, /Bottom \/ end/]) {
+      fireEvent.click(within(toolbar).getByRole('button', { name: 'More alignment actions' }));
+      fireEvent.click(await visibleMenuItem(action));
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      assertCompactCluster();
+    }
+  }, 90_000);
 });

@@ -21,7 +21,12 @@ import {
   type ZoneContentJustification,
   type ZoneLayoutSortItem,
 } from '@agor/core/layout/zone-layout';
-import type { BoardLayoutApplyResult, BoardLayoutBatch } from '@agor/core/types';
+import type {
+  BoardLayoutApplyResult,
+  BoardLayoutBatch,
+  BoardLayoutContext,
+  BoardLayoutSettings,
+} from '@agor/core/types';
 import type { AgorClient, Board, BoardEntityObject, BoardObject, Card } from '@agor-live/client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Node } from 'reactflow';
@@ -318,13 +323,31 @@ function getBoardArrangementCandidates(
       !blockedZoneIds.has(zoneId)
     );
   });
-  const looseNodes = currentNodes.filter(
-    (node) =>
-      isArrangeableTopLevelNode(node) &&
-      !zoneForCanvasNode.has(node.id) &&
-      (!requestedRootIds || requestedRootIds.has(node.id))
-  );
   const selectedZoneIds = new Set(selectedZones.map(([zoneId]) => zoneId));
+  const looseNodes = currentNodes.flatMap((node) => {
+    if (
+      node.hidden ||
+      node.data?.locked === true ||
+      !BOARD_ARRANGEABLE_NODE_TYPES.has(node.type ?? '') ||
+      selectedZoneIds.has(node.id)
+    )
+      return [];
+    if (requestedRootIds) {
+      if (!requestedRootIds.has(node.id)) return [];
+      // Selecting a zone already carries its descendants as one rigid/planned
+      // root. Do not also inject a selected child as a second outer root.
+      if (node.parentId && selectedZoneIds.has(node.parentId)) return [];
+      return [
+        {
+          ...node,
+          // The outer planner always consumes board-space roots. Persistence
+          // below converts entity children back to their zone-relative form.
+          position: getNodeAbsolutePosition(node, currentNodeList),
+        },
+      ];
+    }
+    return isArrangeableTopLevelNode(node) && !zoneForCanvasNode.has(node.id) ? [node] : [];
+  });
   const selectedLooseIds = new Set(looseNodes.map((node) => node.id));
   const fixedObstacles = [
     ...allZones.flatMap(([zoneId, zone]) => {
@@ -419,6 +442,8 @@ type ArrangeBoardZonesOptions = Omit<BoardZoneArrangementOptions, 'looseItems'> 
   layoutScope?: 'board' | 'selection';
   /** Selection-scoped top-level roots. Whole-board callers omit this. */
   selectedRootIds?: readonly string[];
+  /** Canonical product settings persisted with the atomic explicit plan. */
+  layoutSettings?: BoardLayoutSettings;
   /** Main-toolbar Arrange may explicitly fit or preserve; other layout surfaces stay smart. */
   viewportMode?: PostLayoutViewportMode;
   /** Invocation-order fence reserved before the first asynchronous boundary. */
@@ -1970,11 +1995,15 @@ export const useBoardObjects = ({
    * board mutation, so realtime cannot echo intermediate board snapshots.
    */
   const arrangeBoardZones = useCallback(
-    async (zoneIds: readonly string[], options: ArrangeBoardZonesOptions = {}) => {
+    async (
+      zoneIds: readonly string[],
+      options: ArrangeBoardZonesOptions = {}
+    ): Promise<BoardLayoutContext | undefined> => {
       const {
         userInitiated = false,
         layoutScope = 'board',
         selectedRootIds,
+        layoutSettings,
         viewportMode = 'smart',
         viewportIntentToken: suppliedViewportIntentToken,
         recovery,
@@ -2159,6 +2188,7 @@ export const useBoardObjects = ({
             ...plan.looseItems,
           ].map((item) => [item.id, item] as const)
         );
+        const looseItemIds = new Set(plan.looseItems.map((item) => item.id));
         const arrangedNodes = currentNodes.flatMap((node) => {
           const zone = arrangedZoneById.get(node.id);
           if (zone) {
@@ -2177,6 +2207,17 @@ export const useBoardObjects = ({
           }
           const item = arrangedItemById.get(node.id);
           if (!item) return [];
+          const parentNode = node.parentId
+            ? currentNodes.find((candidate) => candidate.id === node.parentId)
+            : undefined;
+          const arrangedParent = node.parentId ? arrangedZoneById.get(node.parentId) : undefined;
+          const parentPosition =
+            arrangedParent?.position ??
+            (parentNode ? getNodeAbsolutePosition(parentNode, currentNodes) : undefined);
+          const position =
+            looseItemIds.has(node.id) && parentPosition
+              ? { x: item.x - parentPosition.x, y: item.y - parentPosition.y }
+              : { x: item.x, y: item.y };
           return [
             {
               ...node,
@@ -2184,7 +2225,7 @@ export const useBoardObjects = ({
                 ?.split(' ')
                 .filter((name) => name !== 'auto-zone-stack-item')
                 .join(' '),
-              position: { x: item.x, y: item.y },
+              position,
               width: item.width,
               height: item.height,
               style: { ...node.style, width: item.width, height: item.height },
@@ -2195,6 +2236,49 @@ export const useBoardObjects = ({
             },
           ];
         });
+        const layoutContext: BoardLayoutContext | undefined = layoutSettings
+          ? {
+              scope: layoutScope,
+              root_ids: [
+                ...plan.zones.map((zone) => zone.id),
+                ...plan.looseItems.map((item) => item.id),
+              ],
+              settings: layoutSettings,
+              cells: Object.fromEntries([
+                ...plan.zones.map(
+                  (zone) =>
+                    [
+                      zone.id,
+                      {
+                        x: zone.position.x,
+                        y: zone.position.y,
+                        width: zone.width,
+                        height: zone.height,
+                        row: zone.row,
+                        column: zone.column,
+                      },
+                    ] as const
+                ),
+                ...plan.looseItems.map(
+                  (item) =>
+                    [
+                      item.id,
+                      {
+                        x: item.x,
+                        y: item.y,
+                        width: item.width,
+                        height: item.height,
+                        row: item.row,
+                        column: item.column,
+                      },
+                    ] as const
+                ),
+              ]),
+            }
+          : undefined;
+        const layoutContextChanged =
+          layoutContext !== undefined &&
+          JSON.stringify(currentBoard.layout_context) !== JSON.stringify(layoutContext);
         const geometryChanged = arrangedNodes.some((next) => {
           const current = currentNodes.find((node) => node.id === next.id);
           if (!current) return true;
@@ -2229,7 +2313,7 @@ export const useBoardObjects = ({
                 ]),
               ]
             : arrangedNodes.map((node) => node.id);
-        if (!geometryChanged && !densityChanged) {
+        if (!geometryChanged && !densityChanged && !layoutContextChanged) {
           if (viewportMode !== 'smart') {
             completeUserLayout({
               userInitiated,
@@ -2242,7 +2326,7 @@ export const useBoardObjects = ({
             });
           }
           showSuccess('Zones and their contents are already arranged.');
-          return;
+          return layoutContext;
         }
         for (const arrangedZone of plan.zones) {
           const zoneObject = currentBoard.objects?.[arrangedZone.id];
@@ -2337,11 +2421,25 @@ export const useBoardObjects = ({
           ].flatMap(({ item }) => {
             const placement = placementByNodeId.get(item.id);
             if (!placement) return [];
+            const sourceNode = currentNodes.find((node) => node.id === item.id);
+            const parentNode = sourceNode?.parentId
+              ? currentNodes.find((node) => node.id === sourceNode.parentId)
+              : undefined;
+            const arrangedParent = sourceNode?.parentId
+              ? arrangedZoneById.get(sourceNode.parentId)
+              : undefined;
+            const parentPosition =
+              arrangedParent?.position ??
+              (parentNode ? getNodeAbsolutePosition(parentNode, currentNodes) : undefined);
+            const position =
+              looseItemIds.has(item.id) && parentPosition
+                ? { x: item.x - parentPosition.x, y: item.y - parentPosition.y }
+                : { x: item.x, y: item.y };
             return [
               [
                 placement.object_id,
                 {
-                  position: { x: item.x, y: item.y },
+                  position,
                   size: { width: item.width, height: item.height },
                   ...(item.compact !== undefined && (placement.compact === true) !== item.compact
                     ? { compact: item.compact }
@@ -2355,6 +2453,7 @@ export const useBoardObjects = ({
         const batch: BoardLayoutBatch = {
           objects,
           placements,
+          ...(layoutContext ? { layout_context: layoutContext } : {}),
           expected: expectedLayoutSnapshot(
             currentBoard,
             new Map(sourcePlacements.map((placement) => [placement.object_id, placement]))
@@ -2384,6 +2483,7 @@ export const useBoardObjects = ({
         showSuccess(
           `Arranged ${plan.zones.length} zone${plan.zones.length === 1 ? '' : 's'}, ${plan.looseItems.length} free item${plan.looseItems.length === 1 ? '' : 's'}, and their contents.`
         );
+        return layoutContext;
       } catch (error) {
         clearExpectedAutoLayouts(explicitExpectationZoneIds);
         if (isBoardLayoutSnapshotStale(error)) {
@@ -2404,7 +2504,7 @@ export const useBoardObjects = ({
                 }
                 return;
               }
-              await arrangeBoardZones(zoneIds, {
+              return await arrangeBoardZones(zoneIds, {
                 ...options,
                 recovery: {
                   attempt: attempt + 1,

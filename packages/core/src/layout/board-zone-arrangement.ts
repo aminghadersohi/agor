@@ -362,7 +362,19 @@ export function planBoardZoneArrangement(
       )
     : undefined;
   const planningShapes = (entry: (typeof prepared)[number]) => {
-    let shapes = entry.shapes;
+    // Frame matching being off is a real planning constraint, not merely an
+    // output-time substitution.  If the grid is solved against the smaller
+    // packed-content shape and we restore the preserved manual frame only
+    // afterwards, that larger frame can overlap the next column and there is
+    // no cell slack for the alignment actions to operate on.  Carry the
+    // preserved/content-safe frame through the authoritative solve instead.
+    let shapes = resizeZoneFrames
+      ? entry.shapes
+      : entry.shapes.map((shape) => ({
+          ...shape,
+          width: Math.max(entry.zone.width, shape.width),
+          height: Math.max(entry.zone.height, shape.height),
+        }));
     if (matchedWidth !== undefined && eligibleZone(entry)) {
       const fitting = shapes.filter((shape) => shape.width <= matchedWidth);
       shapes = (fitting.length > 0 ? fitting : shapes).map((shape) => ({

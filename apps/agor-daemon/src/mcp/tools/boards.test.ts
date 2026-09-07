@@ -1918,6 +1918,7 @@ describe('board layout tools with branch entities present', () => {
     captureAtomicPlacements?: boolean;
   }) {
     const boardObjects = { ...(options.objects ?? {}) };
+    let boardLayoutContext: unknown;
     const entityState = options.entities.map((entity) => ({ ...entity }));
     const branchesFind = validatedBranchesFind((query) => ({
       data: (((query.branch_id as { $in?: string[] } | undefined)?.$in ?? []) as string[]).map(
@@ -1942,11 +1943,13 @@ describe('board layout tools with branch entities present', () => {
                 board_id: 'board-1',
                 name: 'Board',
                 objects: boardObjects,
+                layout_context: boardLayoutContext,
               })),
               patch: vi.fn(async (_id: string, data: Record<string, unknown>) => {
                 options.boardPatches?.push(data);
                 if (data._action === 'applyLayout') {
                   Object.assign(boardObjects, data.objects as Record<string, unknown>);
+                  boardLayoutContext = data.layout_context;
                   for (const [objectId, placement] of Object.entries(
                     (data.placements ?? {}) as Record<
                       string,
@@ -2685,6 +2688,19 @@ describe('board layout tools with branch entities present', () => {
       },
       placements: {},
       expected: expect.any(Object),
+      layout_context: expect.objectContaining({
+        scope: 'board',
+        settings: expect.objectContaining({
+          mode: 'grid',
+          trackAxis: 'columns',
+          trackCount: 2,
+          gap: 27,
+          density: 'preserve',
+          packZoneContents: false,
+          cellHorizontalAlignment: 'end',
+          cellVerticalAlignment: 'center',
+        }),
+      }),
     });
     expect((boardPatches[0]!.objects as Record<string, unknown>).locked).toBeUndefined();
 

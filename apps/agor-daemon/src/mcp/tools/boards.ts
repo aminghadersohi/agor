@@ -1,4 +1,9 @@
 import {
+  boardZoneArrangementOptions,
+  DEFAULT_BOARD_LAYOUT_SETTINGS,
+  normalizeBoardLayoutSettings,
+} from '@agor/core/layout/board-layout-options';
+import {
   type BoardZoneArrangementPlan,
   containingBoardZoneId,
   planBoardZoneArrangement,
@@ -38,6 +43,7 @@ import type {
   BoardEntityObject,
   BoardEntityType,
   BoardLayoutPlacementUpdate,
+  BoardLayoutSettings,
   BoardObject,
   BoardObjectType,
   Branch,
@@ -332,6 +338,7 @@ function filterBoardCanvasObjects(board: Board, objectTypes?: BoardObjectType[])
 }
 
 interface ArrangeBoardZonesOptions {
+  layoutSettings?: BoardLayoutSettings;
   mode?: 'grid' | 'compact';
   density?: LayoutDensityPolicy;
   targetWidth?: number;
@@ -631,6 +638,9 @@ async function arrangeBoardZones(
     minHeight: item.height,
   }));
   if (zones.length === 0 && looseItems.length === 0) return null;
+  const effectiveLayoutSettings = options.layoutSettings
+    ? normalizeBoardLayoutSettings(options.layoutSettings, zones.length + looseItems.length)
+    : undefined;
   const eligibleZoneIds = new Set(zones.map((zone) => zone.id));
   const fixedObstacles = [
     ...allZoneEntries.flatMap(([id, zone]) =>
@@ -790,7 +800,50 @@ async function arrangeBoardZones(
         densityChanged
       );
     });
-    if (canvasGeometryChanged || placementGeometryChanged) {
+    const layoutContext = effectiveLayoutSettings
+      ? {
+          scope: 'board' as const,
+          root_ids: [
+            ...plan.zones.map((zone) => zone.id),
+            ...plan.looseItems.map((item) => item.id),
+          ],
+          settings: effectiveLayoutSettings,
+          cells: Object.fromEntries([
+            ...plan.zones.map(
+              (zone) =>
+                [
+                  zone.id,
+                  {
+                    x: zone.position.x,
+                    y: zone.position.y,
+                    width: zone.width,
+                    height: zone.height,
+                    row: zone.row,
+                    column: zone.column,
+                  },
+                ] as const
+            ),
+            ...plan.looseItems.map(
+              (item) =>
+                [
+                  item.id,
+                  {
+                    x: item.x,
+                    y: item.y,
+                    width: item.width,
+                    height: item.height,
+                    row: item.row,
+                    column: item.column,
+                  },
+                ] as const
+            ),
+          ]),
+        }
+      : undefined;
+    const layoutContextChanged =
+      layoutContext !== undefined &&
+      JSON.stringify(board.layout_context) !== JSON.stringify(layoutContext);
+    if (canvasGeometryChanged || placementGeometryChanged || layoutContextChanged) {
       const sourcePlacementById = new Map(
         entityResult.data.map((entity) => [entity.object_id, entity])
       );
@@ -821,13 +874,17 @@ async function arrangeBoardZones(
           })
         ),
       };
-      await ctx.app
-        .service('boards')
-        .patch(
-          boardId,
-          { _action: 'applyLayout', objects, placements, expected } as unknown as Partial<Board>,
-          ctx.baseServiceParams
-        );
+      await ctx.app.service('boards').patch(
+        boardId,
+        {
+          _action: 'applyLayout',
+          objects,
+          placements,
+          expected,
+          ...(layoutContext ? { layout_context: layoutContext } : {}),
+        } as unknown as Partial<Board>,
+        ctx.baseServiceParams
+      );
     }
   }
 
@@ -2516,29 +2573,41 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const boardId = coerceString(args.boardId);
       if (!boardId) throw new Error('boardId is required');
       const density = args.packZoneContents === false ? 'preserve' : (args.density ?? 'preserve');
+      const sharedSettings = normalizeBoardLayoutSettings(
+        {
+          ...DEFAULT_BOARD_LAYOUT_SETTINGS,
+          mode: args.mode,
+          density,
+          trackAxis: args.columns === undefined ? 'auto' : 'columns',
+          trackCount: args.columns,
+          gap: args.gap,
+          packZoneContents: args.packZoneContents,
+          resizeZoneFrames: args.resizeZoneFrames,
+          justifyRows: args.justifyRows,
+          lastRow: args.justifyLastRow
+            ? 'justify'
+            : (args.lastRowAlignment ?? DEFAULT_BOARD_LAYOUT_SETTINGS.lastRow),
+          matchRowHeights: args.matchRowHeights,
+          matchColumnWidths: args.matchColumnWidths,
+          cellHorizontalAlignment: args.cellHorizontalAlignment,
+          cellVerticalAlignment: args.cellVerticalAlignment,
+        },
+        Number.MAX_SAFE_INTEGER
+      );
 
       const arranged = await arrangeBoardZones(ctx, boardId, {
-        mode: args.mode,
-        density,
+        ...boardZoneArrangementOptions(sharedSettings, Number.MAX_SAFE_INTEGER),
+        layoutSettings: sharedSettings,
         targetWidth: args.targetWidth,
         targetRowHeight: args.targetRowHeight,
-        gap: args.gap,
         startX: args.startX,
         startY: args.startY,
         maxPerRow: args.maxPerRow,
-        fixedItemsPerRow: args.columns,
         targetAspectRatio: args.targetAspectRatio,
-        justifyLastRow: args.justifyLastRow === true,
-        justifyRows: args.justifyRows !== false,
-        matchRowHeights: args.matchRowHeights,
-        matchColumnWidths: args.matchColumnWidths,
         matchWidth: args.matchWidth === true,
         matchHeight: args.matchHeight === true,
         cellHorizontalAlignment: args.cellHorizontalAlignment,
         cellVerticalAlignment: args.cellVerticalAlignment,
-        resizeZoneFrames: args.resizeZoneFrames !== false,
-        lastRowAlignment: args.lastRowAlignment,
-        packZoneContents: args.packZoneContents !== false,
         dryRun: args.dryRun === true,
       });
 

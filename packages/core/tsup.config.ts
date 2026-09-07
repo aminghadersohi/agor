@@ -10,6 +10,7 @@ export default defineConfig({
     'types/index': 'src/types/index.ts',
     'layout/justified-zones': 'src/layout/justified-zones.ts',
     'layout/board-zone-arrangement': 'src/layout/board-zone-arrangement.ts',
+    'layout/board-layout-options': 'src/layout/board-layout-options.ts',
     'layout/rectangle-packing': 'src/layout/rectangle-packing.ts',
     'layout/zone-layout': 'src/layout/zone-layout.ts',
     'layout/zone-growth-reflow': 'src/layout/zone-growth-reflow.ts',

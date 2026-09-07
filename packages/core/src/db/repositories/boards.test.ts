@@ -1710,6 +1710,50 @@ describe('BoardRepository.applyBoardLayout', () => {
     }
   );
 
+  dbTest('persists layout provenance atomically and filters its exact repeat', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const zone = { type: 'zone' as const, x: 80, y: 80, width: 540, height: 380, label: 'Zone' };
+    const board = await repo.create(createBoardData({ objects: { zone } }));
+    const layout_context = {
+      scope: 'selection' as const,
+      root_ids: ['zone'],
+      settings: {
+        mode: 'grid' as const,
+        density: 'preserve' as const,
+        trackAxis: 'columns' as const,
+        trackCount: 1,
+        gap: 40,
+        packZoneContents: true,
+        resizeZoneFrames: true,
+        justifyRows: true,
+        lastRow: 'start' as const,
+        matchRowHeights: true,
+        matchColumnWidths: true,
+      },
+      cells: { zone: { x: 80, y: 80, width: 540, height: 380, row: 0, column: 0 } },
+    };
+
+    const first = await repo.applyBoardLayout(board.board_id, {
+      objects: { zone },
+      placements: {},
+      layout_context,
+    });
+    expect(first.changed).toBe(true);
+    expect(first.changed_object_ids).toEqual([]);
+    expect(first.board.layout_context).toEqual(layout_context);
+    expect((await repo.findById(board.board_id))?.layout_context).toEqual(layout_context);
+
+    const lastUpdated = first.board.last_updated;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const repeated = await repo.applyBoardLayout(board.board_id, {
+      objects: { zone },
+      placements: {},
+      layout_context,
+    });
+    expect(repeated.changed).toBe(false);
+    expect((await repo.findById(board.board_id))?.last_updated).toBe(lastUpdated);
+  });
+
   dbTest('filters a byte-equivalent layout before any durable write', async ({ db }) => {
     const repo = new BoardRepository(db);
     const zone = { type: 'zone' as const, x: 80, y: 80, width: 540, height: 380, label: 'Zone' };

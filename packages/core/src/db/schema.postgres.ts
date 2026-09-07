@@ -629,6 +629,7 @@ export const boards = pgTable(
         custom_css?: string; // Custom CSS for animations, keyframes, etc. (rendered in scoped <style> tag)
         objects?: Record<string, import('@agor/core/types').BoardObject>; // Board objects (text, zone)
         zone_layout_defaults?: ZoneLayoutPolicy;
+        layout_context?: import('@agor/core/types').BoardLayoutContext;
         custom_context?: Record<string, unknown>; // Custom context for Handlebars templates
       }>()
       .notNull(),

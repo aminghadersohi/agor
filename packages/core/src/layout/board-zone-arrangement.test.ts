@@ -867,6 +867,66 @@ describe('planBoardZoneArrangement', () => {
     });
   });
 
+  it('plans preserved unequal zone frames as the Grid cell footprint', () => {
+    const source = [
+      { ...zone('a', 0, 0, []), width: 650, height: 260 },
+      { ...zone('b', 900, 0, []), width: 780, height: 340 },
+      { ...zone('c', 0, 700, []), width: 700, height: 300 },
+      { ...zone('d', 900, 700, []), width: 900, height: 420 },
+      { ...zone('e', 0, 1400, []), width: 740, height: 320 },
+    ];
+    const base = {
+      mode: 'grid' as const,
+      fixedItemsPerRow: 2,
+      compactFixedGrid: true,
+      gap: 30,
+      packZoneContents: true,
+      resizeZoneFrames: false,
+    };
+    const start = planBoardZoneArrangement(source, {
+      ...base,
+      cellHorizontalAlignment: 'start',
+      cellVerticalAlignment: 'start',
+    });
+    const end = planBoardZoneArrangement(source, {
+      ...base,
+      cellHorizontalAlignment: 'end',
+      cellVerticalAlignment: 'end',
+    });
+    const startById = new Map(start.zones.map((entry) => [entry.id, entry]));
+    const endById = new Map(end.zones.map((entry) => [entry.id, entry]));
+
+    expect(end.zones.map(({ id, row, column }) => ({ id, row, column }))).toEqual(
+      start.zones.map(({ id, row, column }) => ({ id, row, column }))
+    );
+    expect(
+      (endById.get('a')?.position.x ?? 0) - (startById.get('a')?.position.x ?? 0)
+    ).toBeGreaterThan(0);
+    expect(
+      (endById.get('a')?.position.y ?? 0) - (startById.get('a')?.position.y ?? 0)
+    ).toBeGreaterThan(0);
+    expect(
+      (endById.get('c')?.position.x ?? 0) - (startById.get('c')?.position.x ?? 0)
+    ).toBeGreaterThan(0);
+    expect(
+      startById.get('b')!.position.x - (startById.get('a')!.position.x + 650)
+    ).toBeGreaterThanOrEqual(30);
+    expect(
+      startById.get('c')!.position.y - (startById.get('b')!.position.y + 340)
+    ).toBeGreaterThanOrEqual(30);
+    for (const arranged of start.zones) {
+      for (const peer of start.zones) {
+        if (arranged.id >= peer.id) continue;
+        expect(
+          arranged.position.x + arranged.width <= peer.position.x ||
+            peer.position.x + peer.width <= arranged.position.x ||
+            arranged.position.y + arranged.height <= peer.position.y ||
+            peer.position.y + peer.height <= arranged.position.y
+        ).toBe(true);
+      }
+    }
+  });
+
   it('matches the largest eligible safe axis before one deterministic Grid reflow', () => {
     const looseItems = [
       { id: 'small-note', x: 0, y: 0, width: 240, height: 160, minWidth: 360 },

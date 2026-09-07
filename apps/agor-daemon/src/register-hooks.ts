@@ -3488,7 +3488,12 @@ export function registerHooks(ctx: RegisterHooksContext): void {
             if (!context.id) throw new Error('Board ID required');
             const result = await boardsService!.applyBoardLayout(
               context.id as string,
-              { objects, placements, expected } as unknown as BoardLayoutBatch
+              {
+                objects,
+                placements,
+                expected,
+                layout_context: (context.data as unknown as BoardLayoutBatch).layout_context,
+              } as unknown as BoardLayoutBatch
             );
             // This action returns a structured acknowledgement, not a Board.
             // Suppress Feathers' automatic `patched` event so that result can
