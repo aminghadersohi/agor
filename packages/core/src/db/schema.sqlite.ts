@@ -133,6 +133,14 @@ export const sessions = sqliteTable(
     // UI state (materialized for efficient highlighting queries)
     ready_for_prompt: t.bool('ready_for_prompt').notNull().default(false),
 
+    // UPS-aware dispatch priority. The dedicated API owns writes; the partial
+    // unique index below is the atomic V1 cap in static-tenant SQLite.
+    power_priority: text('power_priority', { enum: ['normal', 'essential'] })
+      .notNull()
+      .default('normal'),
+    power_priority_updated_at: t.timestamp('power_priority_updated_at'),
+    power_priority_updated_by: text('power_priority_updated_by', { length: 36 }),
+
     // Archive state (cascaded from branch archive)
     archived: t.bool('archived').notNull().default(false),
     archived_reason: text('archived_reason', {
@@ -237,6 +245,9 @@ export const sessions = sqliteTable(
     ),
     parentIdx: index('sessions_parent_idx').on(table.parent_session_id),
     forkedIdx: index('sessions_forked_idx').on(table.forked_from_session_id),
+    oneEssentialSession: uniqueIndex('sessions_one_essential_power_priority_uq')
+      .on(table.power_priority)
+      .where(sql`${table.power_priority} = 'essential'`),
     // Scheduler indexes — including the partial unique index below.
     scheduledFromBranchIdx: index('sessions_scheduled_flag_idx').on(table.scheduled_from_branch),
     // Partial unique index — covering for the scheduler's dedup lookup

@@ -29,6 +29,7 @@ import {
   materializeScheduleAgenticToolConfig,
   renderSchedulePrompt,
   type ScheduleNotReadyError,
+  SchedulePowerHeldError,
   SchedulerService,
 } from './scheduler';
 
@@ -152,6 +153,77 @@ function createSchedulerApp(db: SchedulerDb) {
   } as unknown as ConstructorParameters<typeof SchedulerService>[1];
   return { app, prompt, removeSession, sessionEvent, workIdentity };
 }
+
+describe('scheduler power admission', () => {
+  it('holds manual execution before occurrence materialization', async () => {
+    const { app } = createSchedulerApp({} as SchedulerDb);
+    const scheduler = new SchedulerService({} as SchedulerDb, app, {
+      powerPolicy: {
+        scheduleAdmission: () => ({
+          outcome: 'held',
+          hold: { state: 'critical', reason: 'low_battery', would_hold: true, held: true },
+        }),
+        withScheduleMaterializationPermit: vi.fn(),
+      },
+    });
+    await expect(
+      scheduler.executeScheduleNow({
+        scheduleId: 'sched-1' as Schedule['schedule_id'],
+        triggeredBy: 'u',
+      })
+    ).rejects.toBeInstanceOf(SchedulePowerHeldError);
+  });
+
+  it('materializes only the latest missed occurrence once after stable recovery', async () => {
+    const { app } = createSchedulerApp({} as SchedulerDb);
+    let held = true;
+    const scheduler = new SchedulerService({} as SchedulerDb, app, {
+      powerPolicy: {
+        scheduleAdmission: () =>
+          held
+            ? {
+                outcome: 'held' as const,
+                hold: {
+                  state: 'conserve' as const,
+                  reason: 'on_battery' as const,
+                  would_hold: true as const,
+                  held: true as const,
+                },
+              }
+            : { outcome: 'allowed' as const, wouldHold: false },
+        withScheduleMaterializationPermit: async <T>(materialize: () => Promise<T>) => ({
+          decision: { outcome: 'allowed' as const, wouldHold: false },
+          value: await materialize(),
+        }),
+      },
+    });
+    const scheduled = makeSchedule();
+    const processSchedule = (
+      scheduler as unknown as { processSchedule(schedule: Schedule, now: number): Promise<void> }
+    ).processSchedule.bind(scheduler);
+    const internalScheduler = scheduler as unknown as {
+      spawnScheduledSession(
+        schedule: Schedule,
+        scheduledRunAt: number,
+        now: number,
+        options: { source: 'cron' | 'manual'; triggeredBy?: string }
+      ): Promise<Session | null>;
+    };
+    const spawn = vi
+      .spyOn(internalScheduler, 'spawnScheduledSession')
+      .mockResolvedValue({ session_id: 'recovered' } as Session);
+    const afterMissed = Date.parse('2026-05-24T15:30:00Z');
+
+    await processSchedule(scheduled, afterMissed);
+    expect(spawn).not.toHaveBeenCalled();
+    held = false;
+    await processSchedule(scheduled, afterMissed);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(spawn.mock.calls[0]?.[1]).toBe(Date.parse('2026-05-24T15:00:00Z'));
+    await processSchedule(scheduled, afterMissed);
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('scheduler HA occurrence recovery', () => {
   const killStages = [

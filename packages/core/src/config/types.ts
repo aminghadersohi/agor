@@ -586,6 +586,8 @@ export interface AgorSandboxSettings {
  * Execution settings
  */
 export interface AgorExecutionSettings {
+  /** Host UPS-aware admission policy. Disabled unless mode is observe/enforce. */
+  power_management?: AgorPowerManagementSettings;
   /**
    * Lightweight heartbeat settings for long-running executor tasks.
    *
@@ -817,6 +819,33 @@ export interface AgorExecutionSettings {
    * default. Global, single-policy. See `context/explorations/executor-sandboxing.md`.
    */
   sandbox?: AgorSandboxSettings;
+}
+
+/** Read-only host power observation and Task dispatch admission policy. */
+export interface AgorPowerManagementSettings {
+  /** `off` is inert, `observe` reports would-hold, `enforce` gates dispatch. */
+  mode?: 'off' | 'observe' | 'enforce';
+  /** V1 supports only Apple's read-only `pmset -g ps` surface. */
+  provider?: 'macos';
+  poll_interval_ms?: number;
+  provider_timeout_ms?: number;
+  stale_after_ms?: number;
+  on_battery_debounce_ms?: number;
+  online_stable_ms?: number;
+  recovery_dispatch_interval_ms?: number;
+  /** V1 deliberately supports exactly one effective essential Session. */
+  max_essential_sessions?: number;
+  critical?: {
+    /** Optional battery percentage threshold, used only when reported. */
+    charge_percent?: number;
+    /** Optional remaining runtime threshold, used only when reported. */
+    runtime_seconds?: number;
+    consecutive_samples?: number;
+  };
+  communication_loss?: {
+    /** Escalate admission after last-known battery state; never terminates Tasks. */
+    last_on_battery_critical_after_ms?: number;
+  };
 }
 
 export interface AgorExecutorResponseSettings {

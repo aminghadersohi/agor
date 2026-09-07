@@ -112,4 +112,29 @@ describe('SessionQueueWorker', () => {
     });
     worker.stop();
   });
+
+  it('wakes immediately on stable power recovery and reports only a drained sweep', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const onSweepDrained = vi.fn();
+    const discover = vi.fn(async () => [] as QueuedSessionRef[]);
+    const worker = new SessionQueueWorker({} as never, {
+      workIdentity: { instanceId: 'daemon-a', bootId: 'boot-a' },
+      discover,
+      processSession: async () => undefined,
+      recoveryIntervalMs: 60_000,
+      random: () => 0.5,
+      onSweepDrained,
+    });
+
+    worker.start();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(discover).toHaveBeenCalledTimes(1);
+    expect(onSweepDrained).toHaveBeenCalledTimes(1);
+    worker.wake();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(onSweepDrained).toHaveBeenCalledTimes(2);
+    worker.stop();
+  });
 });

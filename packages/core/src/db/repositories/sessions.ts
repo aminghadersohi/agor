@@ -222,6 +222,10 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         scheduler_init_attempt_count: row.scheduler_init_attempt_count,
         scheduler_init_retry_at: row.scheduler_init_retry_at?.toISOString(),
         ready_for_prompt: row.ready_for_prompt ?? false,
+        power_priority: row.power_priority,
+        power_priority_updated_at: row.power_priority_updated_at?.toISOString(),
+        power_priority_updated_by:
+          (row.power_priority_updated_by as Session['power_priority_updated_by']) ?? undefined,
         archived: Boolean(row.archived), // Convert SQLite integer (0/1) to boolean
         archived_reason: row.archived_reason ?? undefined,
         auto_archive: row.auto_archive,
@@ -276,6 +280,11 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         ? new Date(session.scheduler_init_retry_at)
         : null,
       ready_for_prompt: session.ready_for_prompt ?? false,
+      power_priority: session.power_priority ?? 'normal',
+      power_priority_updated_at: session.power_priority_updated_at
+        ? new Date(session.power_priority_updated_at)
+        : null,
+      power_priority_updated_by: session.power_priority_updated_by ?? null,
       archived: session.archived ?? false, // Default false for new sessions
       archived_reason: session.archived_reason ?? null,
       auto_archive: session.auto_archive ?? 'never',

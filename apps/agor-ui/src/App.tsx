@@ -44,6 +44,7 @@ import { InitialLoadingScreen } from './components/InitialLoadingScreen';
 import { LoginPage } from './components/LoginPage';
 import { OnboardingBanners } from './components/OnboardingBanners';
 import { type OnboardingCompletionResult, OnboardingWizard } from './components/OnboardingWizard';
+import { PowerStatusBanner } from './components/PowerStatusBanner';
 import { buildPromptWithAttachments } from './components/SessionPanel/composerAttachments';
 import { SettingsModal } from './components/SettingsModal';
 import { StreamdownPortalApp } from './components/StreamdownPortalApp';
@@ -2167,21 +2168,26 @@ function AppContent() {
       onNewBranchModalClose={handleNewBranchModalClose}
       suppressLeftPanel={onboardingWizardOpen}
       topBanner={
-        <OnboardingBanners
-          user={currentUser}
-          mcpServerCount={mcpServerCount}
-          gatewayChannelCount={gatewayChannelCount}
-          integrationsHydrated={integrationsHydrated}
-          canManageMcp={canManageMcp}
-          onOpenUserSettings={(tab) => {
-            setUserSettingsInitialTab(tab);
-            setOpenUserSettings(true);
-          }}
-          onOpenWorkspaceSettings={(tab) => setSettingsTabToOpen(tab)}
-          onCheckAuth={handleCheckAuth}
-          credentialVersion={credentialVersion}
-          connectionReady={connected && !connecting}
-        />
+        <>
+          {currentUser && client && hasMinimumRole(currentUser.role, ROLES.ADMIN) && (
+            <PowerStatusBanner client={client} />
+          )}
+          <OnboardingBanners
+            user={currentUser}
+            mcpServerCount={mcpServerCount}
+            gatewayChannelCount={gatewayChannelCount}
+            integrationsHydrated={integrationsHydrated}
+            canManageMcp={canManageMcp}
+            onOpenUserSettings={(tab) => {
+              setUserSettingsInitialTab(tab);
+              setOpenUserSettings(true);
+            }}
+            onOpenWorkspaceSettings={(tab) => setSettingsTabToOpen(tab)}
+            onCheckAuth={handleCheckAuth}
+            credentialVersion={credentialVersion}
+            connectionReady={connected && !connecting}
+          />
+        </>
       }
       onCreateSession={handleCreateSession}
       onForkSession={handleForkSession}
