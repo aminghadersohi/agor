@@ -120,6 +120,7 @@ describe('SettingsModal navigation gating', () => {
   it('keeps the admin-only integrations gated the way they already were', () => {
     renderNav('member');
 
+    expect(menuLabels()).not.toContain('UPS Power');
     expect(menuLabels()).not.toContain('Agentic Tools');
     expect(menuLabels()).not.toContain('Gateway Channels');
     // MCP Servers stays: members may read the policy that constrains them.
@@ -150,7 +151,7 @@ describe('SettingsModal deep-linked sections', () => {
   it('renders nothing for a member deep-linked to an admin-only section', () => {
     // `groups`, `gateway` and `agentic-tools` already had this shape before the
     // users entry was gated; one predicate now covers all four.
-    for (const section of ['groups', 'gateway', 'agentic-tools']) {
+    for (const section of ['groups', 'gateway', 'agentic-tools', 'power']) {
       const { unmount } = renderDeepLink('member', section);
       expect(contentPane(), `${section} should not render for a member`).toBeNull();
       unmount();
