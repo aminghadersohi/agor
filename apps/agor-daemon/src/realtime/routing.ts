@@ -8,6 +8,7 @@ import {
   type PresenceLeftEvent,
   type PresenceUpdatedEvent,
   type RepoCloneError,
+  type SessionAttentionAcknowledgement,
 } from '@agor/core/types';
 
 /**
@@ -159,6 +160,7 @@ interface HaNativeSocketPayloads {
    * signal must not disclose which branch/server/credential changed.
    */
   'marketplace:invalidated': Record<string, never>;
+  'session-attention:acknowledged': SessionAttentionAcknowledgement;
 }
 
 /** Native Socket.IO packets intentionally permitted to cross the HA Redis adapter. */
@@ -168,6 +170,7 @@ export const HA_NATIVE_SOCKET_EVENT_INVENTORY = [
   'oauth:completed',
   'oauth:disconnected',
   'marketplace:invalidated',
+  'session-attention:acknowledged',
 ] as const satisfies readonly (keyof HaNativeSocketPayloads)[];
 
 type NativeSocketTarget = {

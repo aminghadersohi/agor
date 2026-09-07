@@ -1,4 +1,4 @@
-import type { Session } from '@agor/core/types';
+import { type Session, sessionHasUnseenAttention } from '@agor/core/types';
 import { PlusOutlined, UnorderedListOutlined } from '@ant-design/icons';
 import { Badge, Button, Empty, Popover, Typography, theme } from 'antd';
 import { useMemo, useState } from 'react';
@@ -49,6 +49,10 @@ export const CompactSessionPicker = ({
         return left - right;
       }),
     [sessions]
+  );
+  const unseenSessionCount = useMemo(
+    () => ordered.filter(sessionHasUnseenAttention).length,
+    [ordered]
   );
 
   const choose = (sessionId: string) => {
@@ -144,7 +148,7 @@ export const CompactSessionPicker = ({
         onOpenChange={setOpen}
         placement="bottomRight"
       >
-        <Badge count={ordered.length} size="small" offset={[-2, 2]} showZero={false}>
+        <Badge count={unseenSessionCount} size="small" offset={[-2, 2]} showZero={false}>
           <Button
             type="text"
             size="small"

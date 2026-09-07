@@ -38,6 +38,7 @@ export * from './mcp-servers';
 export * from './messages';
 export * from './repos';
 export * from './schedules';
+export * from './session-attention-states';
 export * from './session-env-selections';
 export * from './session-mcp-servers';
 export * from './session-relationships';

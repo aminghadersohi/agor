@@ -1469,6 +1469,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         .set({
           status: finalStatus === TaskStatus.FAILED ? SessionStatus.FAILED : SessionStatus.IDLE,
           ready_for_prompt: true,
+          attention_generation: sql`${sessions.attention_generation} + 1`,
           updated_at: settlementAt,
         })
         .where(eq(sessions.session_id, sessionRow.session_id))

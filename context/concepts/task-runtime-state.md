@@ -288,10 +288,14 @@ cross-tenant reconciliation of already-`dispatching`/running work remains the
 runtime-supervision contract; this queue layer deliberately does not redesign
 heartbeat, containment, or startup orphan ownership.
 
-`Session.ready_for_prompt` is also used as an attention/acknowledgement flag. It
-is not equivalent to promptability and must not be checked alone. Use the
-central session/task helpers at execution boundaries instead of inventing a
-second busy-state test.
+`Session.ready_for_prompt` is shared runtime promptability state and must not be
+used as read acknowledgement. A false→true settlement advances
+`Session.attention_generation`; authenticated session reads enrich the caller's
+persisted `viewer_seen_attention_generation`. Unseen-result badges are derived
+only from those generations. Failed/timed-out promptable sessions may retain a
+separate unresolved-attention halo after their result is read, while
+`ready_for_prompt` remains part of the central session/task helpers at execution
+boundaries and is never cleared as read acknowledgement.
 
 ## Change invariants
 
