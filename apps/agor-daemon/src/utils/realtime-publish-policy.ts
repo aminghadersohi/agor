@@ -117,6 +117,15 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: 'Selection names are credential metadata; there is no subscriber, and any future consumer needs an owner-aware disclosure decision.',
   },
+  'sessions/:id/power-priority': {
+    audience: 'none',
+    why: 'The dedicated mutation returns its projection; the canonical sessions.patched event refreshes viewers.',
+  },
+  'power-management': {
+    audience: 'tenant',
+    minimumRole: 'admin',
+    why: 'The admin power banner tracks the redacted host policy projection live.',
+  },
 
   // ---------------------------------------------------------------------------
   // Branch-scoped resources.

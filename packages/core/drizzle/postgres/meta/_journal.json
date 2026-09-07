@@ -715,6 +715,13 @@
       "when": 1788379200000,
       "tag": "0102_zone_workflow_transitions",
       "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1788800000000,
+      "tag": "0103_session_power_priority",
+      "breakpoints": true
     }
   ]
 }

@@ -8,6 +8,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { Transform } from 'node:stream';
+import { analyticsLogger } from '@agor/core/analytics';
 import type { SessionInitializationRequest } from '@agor/core/api';
 import {
   type AgorConfig,
@@ -20,6 +21,7 @@ import {
   resolveIdentityAuthority,
   resolveMultiTenancyConfig,
   resolvePasswordPolicyRequirements,
+  resolvePowerManagementConfig,
   resolveSdkWatchdogConfig,
   resolveTeammateFrameworkRepoUrl,
   resolveTenantContext,
@@ -33,6 +35,7 @@ import {
   generateId,
   getCurrentTenantId,
   getMCPEgressGatewayMode,
+  isDatabaseUniqueConstraintError,
   MCPCatalogCandidateRepository,
   MCPServerRepository,
   MessagesRepository,
@@ -84,7 +87,10 @@ import type {
   Session,
   SessionID,
   SessionMCPServer,
+  SessionPowerPriority,
+  SessionPowerPriorityView,
   SessionStopResult,
+  SetSessionPowerPriorityRequest,
   StreamingEventType,
   Task,
   TaskID,
@@ -104,6 +110,7 @@ import {
   MCP_MEMBER_POLICY_CHANGED_EVENT,
   MessageRole,
   ROLES,
+  SESSION_POWER_PRIORITIES,
   SessionStatus,
   TaskStatus,
 } from '@agor/core/types';
@@ -172,6 +179,7 @@ import {
   deliverPermissionDecision,
   type PermissionDecisionSubmission,
 } from './permissions/deliver-permission-decision.js';
+import type { PowerPolicyController } from './power-management/index.js';
 import { publicBoardCommentRepositionInput } from './services/board-comments.js';
 import type { GatewayService } from './services/gateway.js';
 import { createMCPCatalogConnectService } from './services/mcp-catalog-connect.js';
@@ -179,6 +187,7 @@ import { isMCPOAuthGrantAuthorizedForServer } from './services/mcp-oauth-grant-a
 import {
   ScheduleBusyError,
   ScheduleNotReadyError,
+  SchedulePowerHeldError,
   type SchedulerService,
 } from './services/scheduler.js';
 import { runSessionInitializationStages } from './services/session-initialization.js';
@@ -475,6 +484,7 @@ export interface RegisterRoutesContext {
     typeof import('./services/session-env-selections.js').createSessionEnvSelectionsService
   >;
   terminalsService: TerminalsService | null;
+  powerPolicyController: PowerPolicyController;
 }
 
 export async function authorizeTaskTerminalRoute(input: {
@@ -829,6 +839,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     sessionMCPServersService,
     sessionEnvSelectionsService,
     terminalsService: _terminalsService,
+    powerPolicyController,
   } = ctx;
 
   registerExecutorResponseRoutes(app);
@@ -900,6 +911,139 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     config,
     jwtSecret,
   });
+
+  // Host power state is system-local, but this first version is intentionally
+  // restricted to one static tenant. The service returns only the redacted
+  // policy projection and realtime uses the same admin role floor.
+  registerAuthenticatedRoute(
+    app,
+    '/power-management',
+    {
+      async find() {
+        return powerPolicyController.status();
+      },
+    },
+    { find: { role: ROLES.ADMIN, action: 'view host power policy' } },
+    requireAuth
+  );
+  powerPolicyController.subscribe((transition) => {
+    const tenantConfig = resolveMultiTenancyConfig(config);
+    if (tenantConfig.mode !== 'static') return;
+    const tenantId = tenantConfig.static_tenant_id;
+    emitServiceEvent(app, {
+      path: 'power-management',
+      event: 'patched',
+      data: transition.status,
+      params: { tenant: { tenant_id: tenantId, source: 'explicit' } },
+    });
+  });
+
+  const powerPriorityView = async (
+    session: Session,
+    params: RouteParams
+  ): Promise<SessionPowerPriorityView> => {
+    const userId = params.user?.user_id as UUID | undefined;
+    let canManage = !params.provider;
+    if (userId && session.branch_id) {
+      const branch = await branchRepository.findById(session.branch_id);
+      if (branch) {
+        const access = await branchRepository.resolveUserAccess(branch, userId);
+        canManage =
+          access.can === 'all' ||
+          (superadminOpts.allowSuperadmin && hasMinimumRole(params.user?.role, ROLES.SUPERADMIN));
+      }
+    }
+    const powerConfig = resolvePowerManagementConfig(config.execution?.power_management);
+    return {
+      session_id: session.session_id,
+      requested: session.power_priority ?? 'normal',
+      effective: session.power_priority === 'essential',
+      can_manage: canManage,
+      max_essential_sessions: powerConfig.maxEssentialSessions,
+      ...(session.power_priority_updated_at
+        ? { updated_at: session.power_priority_updated_at }
+        : {}),
+      ...(session.power_priority_updated_by
+        ? { updated_by: session.power_priority_updated_by }
+        : {}),
+    };
+  };
+
+  registerAuthenticatedRoute(
+    app,
+    '/sessions/:id/power-priority',
+    {
+      async find(params: RouteParams): Promise<SessionPowerPriorityView> {
+        const id = params.route?.id;
+        if (!id) throw new BadRequest('Session ID required');
+        const session = await app.service('sessions').get(id, params);
+        return powerPriorityView(session, params);
+      },
+      async create(
+        data: SetSessionPowerPriorityRequest,
+        params: RouteParams
+      ): Promise<SessionPowerPriorityView> {
+        const id = params.route?.id;
+        if (!id) throw new BadRequest('Session ID required');
+        if (!data || !SESSION_POWER_PRIORITIES.includes(data.priority as SessionPowerPriority)) {
+          throw new BadRequest('priority must be normal or essential');
+        }
+        const actorId = params.user?.user_id as UserID | undefined;
+        if (!actorId) throw new NotAuthenticated('Authentication required');
+        const session = await app.service('sessions').get(id, params);
+        const currentView = await powerPriorityView(session, params);
+        if (!currentView.can_manage) {
+          throw new Forbidden('Branch Manager access is required to change power priority');
+        }
+        if (session.power_priority === data.priority) return currentView;
+        try {
+          const updated = await powerPolicyController.withPriorityMutation(
+            async () =>
+              (await app.service('sessions').patch(
+                session.session_id,
+                {
+                  power_priority: data.priority as SessionPowerPriority,
+                  power_priority_updated_at: new Date().toISOString(),
+                  power_priority_updated_by: actorId,
+                },
+                { ...params, provider: undefined }
+              )) as unknown as Session
+          );
+          analyticsLogger.track(
+            'session.power_priority_changed',
+            {
+              session_id: updated.session_id,
+              branch_id: updated.branch_id,
+              previous_priority: session.power_priority ?? 'normal',
+              priority: updated.power_priority,
+            },
+            { userId: actorId }
+          );
+          console.info(
+            formatStructuredLog('[power-priority]', {
+              event: 'changed',
+              session_id: updated.session_id,
+              branch_id: updated.branch_id,
+              actor_id: actorId,
+              previous: session.power_priority ?? 'normal',
+              current: updated.power_priority,
+            })
+          );
+          return powerPriorityView(updated, params);
+        } catch (error) {
+          if (isDatabaseUniqueConstraintError(error)) {
+            throw new Conflict('The one essential Session slot is already in use');
+          }
+          throw error;
+        }
+      },
+    },
+    {
+      find: { role: ROLES.VIEWER, action: 'view session power priority' },
+      create: { role: ROLES.MEMBER, action: 'change session power priority' },
+    },
+    requireAuth
+  );
 
   const registerLongAuthenticatedRoute: typeof registerAuthenticatedRouteUnscoped = (
     routeApp,
@@ -1709,32 +1853,46 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     // Atomically claim queued/created → launch status. Process-local session
     // locks reduce contention, but this expected-state transition is the
     // cross-daemon fence that prevents duplicate executor launches.
-    const dispatchClaim = await runWithTenantDatabaseTransaction(db, tenantId, async (tenantDb) => {
-      await lockTenantAuthorizationFence(tenantDb, params);
-      await assertTenantWritable(tenantDb, tenantId);
-      return tasksService.claimDispatchAndProjectSession(
-        task.task_id,
-        task.status,
-        {
-          ...launchState,
-          ...(launchState.executor_mode
-            ? { sdk_watchdog_mode: resolveSdkWatchdogConfig(config.execution).mode }
-            : {}),
-          queue_position: undefined,
-          message_range: {
-            start_index: messageStartIndex,
-            end_index: messageStartIndex + 1,
-            start_timestamp: startTimestamp,
-            end_timestamp: startTimestamp,
-          },
-          git_state: {
-            ref_at_start: refAtStart,
-            sha_at_start: gitStateAtStart,
-          },
-        },
-        { ...params, provider: undefined }
-      );
-    });
+    const fencedClaim = await powerPolicyController.withDispatchPermit(
+      async () => {
+        const current = await runWithTenantDatabaseScope(db, tenantId, () =>
+          sessionsRepository.findById(session.session_id)
+        );
+        return current?.power_priority ?? 'normal';
+      },
+      () =>
+        runWithTenantDatabaseTransaction(db, tenantId, async (tenantDb) => {
+          await lockTenantAuthorizationFence(tenantDb, params);
+          await assertTenantWritable(tenantDb, tenantId);
+          return tasksService.claimDispatchAndProjectSession(
+            task.task_id,
+            task.status,
+            {
+              ...launchState,
+              ...(launchState.executor_mode
+                ? { sdk_watchdog_mode: resolveSdkWatchdogConfig(config.execution).mode }
+                : {}),
+              queue_position: undefined,
+              message_range: {
+                start_index: messageStartIndex,
+                end_index: messageStartIndex + 1,
+                start_timestamp: startTimestamp,
+                end_timestamp: startTimestamp,
+              },
+              git_state: {
+                ref_at_start: refAtStart,
+                sha_at_start: gitStateAtStart,
+              },
+            },
+            { ...params, provider: undefined }
+          );
+        })
+    );
+    if (fencedClaim.decision.outcome === 'held') {
+      return { ...task, power_hold: fencedClaim.decision.hold };
+    }
+    const dispatchClaim = fencedClaim.value;
+    if (!dispatchClaim) throw new Error('Power admission allowed without a dispatch result');
     if (dispatchClaim.outcome !== 'claimed') {
       const workIdentity = app.get('distributedWorkIdentity');
       console.info(
@@ -2409,6 +2567,21 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                 spawnFn: spawnTaskExecutor,
               }
             );
+            if (result.power_hold?.held) {
+              // Explicitly-triggered CREATED Tasks have no queue position yet.
+              // Convert the same durable row to QUEUED so recovery discovers
+              // it without asking the caller to retry or duplicating prompt
+              // content. createPending owns the Session-row queue sequencer.
+              const queued = await taskRepo.createPending({
+                task_id: result.task_id,
+                session_id: result.session_id,
+                full_prompt: result.full_prompt,
+                created_by: result.created_by,
+                status: TaskStatus.QUEUED,
+                metadata: result.metadata,
+              });
+              return { ...queued, power_hold: result.power_hold };
+            }
             if (result.status === TaskStatus.CREATED) {
               throw new Conflict(
                 `Cannot run task ${shortId(taskId)}: another Task or queued prompt owns the Session turn.`
@@ -4388,6 +4561,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         };
       } catch (err) {
         if (err instanceof ScheduleBusyError) {
+          throw new Conflict(err.message, { code: err.code });
+        }
+        if (err instanceof SchedulePowerHeldError) {
           throw new Conflict(err.message, { code: err.code });
         }
         if (err instanceof ScheduleNotReadyError) {

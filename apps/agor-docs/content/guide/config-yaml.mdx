@@ -104,6 +104,47 @@ packaged daemon fails before listening if any configured integration is missing 
 Tenant administrators may disable an installed tool but cannot install packages or enable a tool
 absent from this deployment list.
 
+## UPS-aware dispatch admission (macOS V1)
+
+Power management is off by default. On a standalone macOS host, start with `observe`, verify the
+redacted admin banner through several normal samples, and only then choose `enforce`:
+
+```yaml
+execution:
+  unix_user_mode: simple
+  power_management:
+    mode: observe # off | observe | enforce
+    provider: macos
+    poll_interval_ms: 5000
+    provider_timeout_ms: 2000
+    stale_after_ms: 20000
+    on_battery_debounce_ms: 10000
+    online_stable_ms: 60000
+    recovery_dispatch_interval_ms: 2000
+    max_essential_sessions: 1
+    critical:
+      charge_percent: 20
+      runtime_seconds: 300
+      consecutive_samples: 2
+```
+
+The provider invokes Apple's fixed, read-only `/usr/bin/pmset -g ps` command without a shell. It
+retains only normalized power condition, optional charge/runtime, freshness, and a bounded reason
+category. Device names and raw output are not stored, logged, or returned by the API.
+
+`observe` derives the complete policy but never gates. `enforce` holds ordinary Task dispatch while
+on UPS battery, while status is unknown, and during stable-online recovery. Existing running Tasks
+are never stopped. One Branch Manager-selected Essential Session may continue to dispatch while the
+policy is Conserving. Critical and stable recovery hold every new turn. Queued prompts stay durable;
+after 60 seconds of stable utility power they resume at a paced rate. Schedules do not materialize
+occurrences while held and materialize only the latest missed occurrence once after recovery.
+
+This first version rejects active configuration unless the deployment is macOS, standalone,
+static-tenant, SQLite, local-executor, and `unix_user_mode: simple`. It does not control host
+shutdown, suspend processes, use `SIGSTOP`/`SIGCONT`, stop running Tasks, or provide NUT/network UPS
+polling. Configuration changes require a daemon restart. To roll back the policy, restore `mode:
+off` and restart; queued Tasks and Session priority metadata remain intact.
+
 Fresh interactive init always writes `agentic_tools.installed` once, then installs the selected
 packages before returning. Fresh headless init requires `--agentic-tools` (or
 `AGOR_AGENTIC_TOOLS`); `all` and `none` are explicit shorthands.

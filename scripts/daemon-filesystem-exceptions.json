@@ -2042,5 +2042,19 @@
     "rationale": "Canonicalizes the trusted existing deployment-root ancestor so symlinked data roots resolve to one credential authority.",
     "reviewTarget": null,
     "reviewDate": null
+  },
+  {
+    "id": "DAEMON-FS-CAP-252",
+    "class": "A",
+    "file": "apps/agor-daemon/src/power-management/macos-provider.ts",
+    "import": "node:child_process",
+    "symbol": "execFile",
+    "local": "execFile",
+    "operation": "call:execFile@defaultRunner#1",
+    "owner": "daemon host/operator runtime",
+    "boundary": "fixed read-only macOS power observation",
+    "rationale": "Invokes only the absolute Apple utility path /usr/bin/pmset with fixed arguments -g ps, without a shell or caller-controlled input. Timeout and output bounds apply before strict parsing; raw output and device identity never cross the provider boundary.",
+    "reviewTarget": null,
+    "reviewDate": null
   }
 ]

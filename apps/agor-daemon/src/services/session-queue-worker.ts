@@ -27,6 +27,8 @@ export interface SessionQueueWorkerOptions {
   random?: () => number;
   /** Test seam; production discovery always uses the repository/RLS path. */
   discover?: (after?: QueuedSessionCursor) => Promise<QueuedSessionRef[]>;
+  /** Called only when a complete durable recovery sweep reaches its end. */
+  onSweepDrained?: () => void;
 }
 
 /**
@@ -44,6 +46,7 @@ export class SessionQueueWorker {
   private idleRounds = 0;
   private sweepComplete = false;
   private pagesInSweep = 0;
+  private wakeRequested = false;
   private readonly scanBatchSize: number;
   private readonly maxPagesPerSweep: number;
   private readonly recoveryIntervalMs: number;
@@ -79,6 +82,16 @@ export class SessionQueueWorker {
     );
   }
 
+  /** Wake a sleeping scanner after an admission fence opens. */
+  wake(delayMs = 0): void {
+    if (this.stopped) return;
+    this.wakeRequested = true;
+    if (this.running) return;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.schedule(delayMs);
+  }
+
   private schedule(delayMs: number): void {
     if (this.stopped) return;
     this.timer = setTimeout(() => {
@@ -104,15 +117,19 @@ export class SessionQueueWorker {
       this.running = false;
     }
 
-    const delay = this.sweepComplete
-      ? jitterDelay(this.recoveryIntervalMs, 0.1, this.random())
-      : found >= this.scanBatchSize
-        ? jitterDelay(150, 2 / 3, this.random())
-        : boundedBackoffDelay(
-            this.idleRounds,
-            { baseDelayMs: 1_000, maxDelayMs: 30_000, jitterRatio: 0.2 },
-            this.random()
-          );
+    const wakeRequested = this.wakeRequested;
+    this.wakeRequested = false;
+    const delay = wakeRequested
+      ? 0
+      : this.sweepComplete
+        ? jitterDelay(this.recoveryIntervalMs, 0.1, this.random())
+        : found >= this.scanBatchSize
+          ? jitterDelay(150, 2 / 3, this.random())
+          : boundedBackoffDelay(
+              this.idleRounds,
+              { baseDelayMs: 1_000, maxDelayMs: 30_000, jitterRatio: 0.2 },
+              this.random()
+            );
     this.schedule(delay);
   }
 
@@ -142,6 +159,7 @@ export class SessionQueueWorker {
       if (this.cursor) this.cursor = undefined;
       this.pagesInSweep = 0;
       this.sweepComplete = true;
+      this.options.onSweepDrained?.();
       return 0;
     }
     const last = refs.at(-1)!;
@@ -178,6 +196,7 @@ export class SessionQueueWorker {
       this.cursor = undefined;
       this.pagesInSweep = 0;
       this.sweepComplete = true;
+      this.options.onSweepDrained?.();
     } else if (this.pagesInSweep >= this.maxPagesPerSweep) {
       // Preserve the keyset cursor so the next bounded sweep resumes fairly.
       this.pagesInSweep = 0;

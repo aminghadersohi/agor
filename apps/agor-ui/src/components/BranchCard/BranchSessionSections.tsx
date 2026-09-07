@@ -17,6 +17,7 @@ import {
   MinusSquareOutlined,
   PlusOutlined,
   PlusSquareOutlined,
+  PoweroffOutlined,
   SettingOutlined,
 } from '@ant-design/icons';
 import {
@@ -758,6 +759,11 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
   ) => (
     <>
       {renderSessionFailureIcon(session)}
+      {session.power_priority === 'essential' && (
+        <Tooltip title="Essential power priority">
+          <PoweroffOutlined aria-label="Essential power priority" style={{ fontSize: 11 }} />
+        </Tooltip>
+      )}
       {renderSessionTitle(session, options)}
     </>
   );

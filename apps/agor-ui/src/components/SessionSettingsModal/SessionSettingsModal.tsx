@@ -33,6 +33,7 @@ import {
   ClockCircleOutlined,
   DownOutlined,
   KeyOutlined,
+  PoweroffOutlined,
   SettingOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
@@ -57,6 +58,7 @@ import { ErrorBoundary } from '../ErrorBoundary';
 import { SessionEnvVarsSelector } from '../SessionEnvVarsSelector';
 import { SessionIdsList } from '../SessionIds';
 import { SessionMetadataForm } from '../SessionMetadataForm';
+import { SessionPowerPriorityControl } from './SessionPowerPriorityControl';
 
 export interface SessionSettingsModalProps {
   open: boolean;
@@ -394,6 +396,24 @@ export const SessionSettingsModal: React.FC<SessionSettingsModalProps> = ({
           client={client}
           value={envSelections}
           onChange={setEnvSelections}
+        />
+      ),
+    });
+  }
+
+  if (client) {
+    secondaryItems.push({
+      key: 'power-priority',
+      label: (
+        <Typography.Text strong>
+          <PoweroffOutlined style={{ marginRight: 8 }} />
+          Power Priority
+        </Typography.Text>
+      ),
+      children: (
+        <SessionPowerPriorityControl
+          client={client}
+          sessionId={session.session_id as import('@agor-live/client').SessionID}
         />
       ),
     });

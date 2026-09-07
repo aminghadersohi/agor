@@ -73,6 +73,7 @@ import { reconcileTrackedExecutorGauge } from './executor-tracking.js';
 import { createHttpMetricsMiddleware } from './metrics/http.js';
 import { createDaemonMetrics, NOOP_METRICS, resolveMetricsWorkIdentity } from './metrics/index.js';
 import { type OwnStartupMetrics, runWithStartupMetricsOwner } from './metrics/startup-ownership.js';
+import { createPowerPolicyController } from './power-management/index.js';
 import { RedisRealtimeRuntime } from './realtime/redis-realtime.js';
 import { LOCAL_AUTHORIZATION_INVALIDATION_EVENT } from './realtime/routing.js';
 import { registerHooks } from './register-hooks.js';
@@ -401,6 +402,8 @@ async function startDaemonWithOwnedMetrics(
       });
   ownMetrics(metrics);
   app.set('metrics', metrics);
+  const powerPolicyController = createPowerPolicyController(effectiveConfig, metrics);
+  app.set('powerPolicyController', powerPolicyController);
   reconcileTrackedExecutorGauge(app);
   if (unsafeHaMetricsIdentity) {
     console.warn(
@@ -890,6 +893,7 @@ async function startDaemonWithOwnedMetrics(
     sessionMCPServersService: services.sessionMCPServersService,
     sessionEnvSelectionsService: services.sessionEnvSelectionsService,
     terminalsService: services.terminalsService,
+    powerPolicyController,
   });
 
   // --------------------------------------------------------------------------
@@ -924,5 +928,6 @@ async function startDaemonWithOwnedMetrics(
     environmentHealthMonitorSettings:
       deployment.mode === 'ha' ? deployment.environmentHealthMonitor : undefined,
     realtimeRuntime,
+    powerPolicyController,
   });
 }
