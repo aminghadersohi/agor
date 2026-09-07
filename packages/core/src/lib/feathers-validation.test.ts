@@ -99,6 +99,15 @@ describe('userQueryValidator', () => {
 });
 
 describe('sessionQueryValidator', () => {
+  it('preserves the Essential filter instead of silently broadening the inventory', async () => {
+    const context = { params: { query: { power_priority: 'essential', $limit: '1' } } };
+    await typedValidateQuery(sessionQueryValidator)(context);
+    expect(context.params.query).toEqual({ power_priority: 'essential', $limit: 1 });
+    await expect(
+      typedValidateQuery(sessionQueryValidator)({ params: { query: { power_priority: 'urgent' } } })
+    ).rejects.toThrow();
+  });
+
   it('preserves the _swapReplace marker so the switch-tool guard can see it', async () => {
     // Regression: `removeAdditional: 'all'` silently stripped `_swapReplace`
     // before it reached SessionsService.remove, making the swap-safety guard

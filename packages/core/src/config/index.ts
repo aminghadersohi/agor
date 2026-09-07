@@ -24,6 +24,7 @@ export * from './initial-deployment-config';
 export * from './key-resolver';
 export * from './multitenancy';
 export * from './password-policy';
+export * from './power-management';
 export * from './repo-list';
 export * from './repo-reference';
 export * from './resolved-config-slice';

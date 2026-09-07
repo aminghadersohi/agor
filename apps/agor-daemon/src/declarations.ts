@@ -45,6 +45,7 @@ import type {
   TaskPendingDispatchStatus,
 } from '@agor/core/types';
 import type { DaemonMetrics } from './metrics/index.js';
+import type { PowerPolicyController } from './power-management/index.js';
 import type { EnvironmentHealthCheckOptions } from './services/branches.js';
 import type {
   ExecuteTaskData,
@@ -71,6 +72,8 @@ export type Application = ExpressApplication & {
   set(name: 'distributedWorkIdentity', value: DistributedWorkIdentity): ExpressApplication;
   get(name: 'metrics'): DaemonMetrics | undefined;
   set(name: 'metrics', value: DaemonMetrics): ExpressApplication;
+  get(name: 'powerPolicyController'): PowerPolicyController | undefined;
+  set(name: 'powerPolicyController', value: PowerPolicyController): ExpressApplication;
 };
 
 /**

@@ -32,6 +32,10 @@ import { assertValidMultiTenancyConfig } from './multitenancy';
 import { AgorPasswordPolicyProfile } from './password-policy';
 import { isPlainConfigRecord } from './plain-record';
 import {
+  assertPowerManagementActivationSupported,
+  resolvePowerManagementConfig,
+} from './power-management';
+import {
   type AgorApmSettings,
   type AgorConfig,
   AgorExternalIdentityProvider,
@@ -817,6 +821,7 @@ function validateConfig(config: AgorConfig): void {
     ]);
   }
   only(config.execution, 'execution', [
+    'power_management',
     'executor_heartbeat',
     'executor_response',
     'sdk_watchdog',
@@ -840,6 +845,30 @@ function validateConfig(config: AgorConfig): void {
     'branch_storage',
     'sandbox',
   ]);
+  only(config.execution?.power_management, 'execution.power_management', [
+    'mode',
+    'provider',
+    'poll_interval_ms',
+    'provider_timeout_ms',
+    'stale_after_ms',
+    'on_battery_debounce_ms',
+    'online_stable_ms',
+    'recovery_dispatch_interval_ms',
+    'max_essential_sessions',
+    'critical',
+    'communication_loss',
+  ]);
+  only(config.execution?.power_management?.critical, 'execution.power_management.critical', [
+    'charge_percent',
+    'runtime_seconds',
+    'consecutive_samples',
+  ]);
+  only(
+    config.execution?.power_management?.communication_loss,
+    'execution.power_management.communication_loss',
+    ['last_on_battery_critical_after_ms']
+  );
+  resolvePowerManagementConfig(config.execution?.power_management);
   only(config.execution?.executor_heartbeat, 'execution.executor_heartbeat', [
     'enabled',
     'interval_ms',
@@ -1429,6 +1458,7 @@ export function getDefaultConfig(): AgorConfig {
       password_policy: AgorPasswordPolicyProfile.SECURE,
     },
     execution: {
+      power_management: { mode: 'off', provider: 'macos' },
       session_token_expiration_ms: 86400000, // 24 hours
       session_token_max_uses: 1, // Single-use tokens
       mcp_token_expiration_ms: MCP_TOKEN.DEFAULT_EXPIRATION_MS,
@@ -1636,6 +1666,8 @@ export function assertValidEffectiveExecutionConfig(config: AgorConfig): void {
   const execution = config.execution;
 
   if (!execution) return;
+
+  assertPowerManagementActivationSupported(config);
 
   const response = resolveExecutorResponseConfig(execution.executor_response);
 

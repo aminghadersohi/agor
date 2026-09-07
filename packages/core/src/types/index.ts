@@ -24,6 +24,7 @@ export * from './message';
 export * from './opencode-auth';
 export * from './opencode-models';
 export * from './opencode-ollama';
+export * from './power-management';
 export * from './presence';
 export * from './realtime';
 export * from './repo';
