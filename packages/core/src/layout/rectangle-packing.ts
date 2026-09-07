@@ -457,11 +457,11 @@ export function layoutRectangles(
   }
   const gridSize = finiteNonNegative(options.gridSize, 0);
   const items = normalizedItems(sourceItems, gridSize);
-  const padding = ceilToGrid(finiteNonNegative(options.padding, 0), gridSize);
-  const minPadding = Math.min(
-    padding,
-    ceilToGrid(finiteNonNegative(options.minPadding, Math.min(8, padding)), gridSize)
-  );
+  // Container insets are explicit visual geometry just like gaps. Keeping the
+  // exact value prevents 21px and 39px from both becoming a 40px inset merely
+  // because draggable item dimensions use a 20px board grid.
+  const padding = finiteNonNegative(options.padding, 0);
+  const minPadding = Math.min(padding, finiteNonNegative(options.minPadding, Math.min(8, padding)));
   // Gaps are an explicit visual-density input, not board-grid geometry. Item
   // sizes and the container frame remain grid-safe, but rounding a requested
   // 4/8/12px gap up to the 20px drag grid made several distinct UI values
@@ -589,7 +589,7 @@ export function layoutCompactRectangles(
   options: CompactRectangleLayoutOptions = {}
 ): CompactRectangleLayoutResult {
   const gridSize = finiteNonNegative(options.gridSize, 0);
-  const padding = ceilToGrid(finiteNonNegative(options.padding, 0), gridSize);
+  const padding = finiteNonNegative(options.padding, 0);
   const gapX = finiteNonNegative(options.gapX, 24);
   const gapY = finiteNonNegative(options.gapY, 24);
   const bounds = options.bounds;
@@ -916,8 +916,8 @@ export function placeLayoutAroundFixedObstacles<T extends RectanglePlacement>(
   const gridSize = finiteNonNegative(options.gridSize, 0);
   const snap = (value: number): number =>
     gridSize > 0 ? Math.round(value / gridSize) * gridSize : value;
-  const gapX = ceilToGrid(finiteNonNegative(options.gapX, 0), gridSize);
-  const gapY = ceilToGrid(finiteNonNegative(options.gapY, 0), gridSize);
+  const gapX = finiteNonNegative(options.gapX, 0);
+  const gapY = finiteNonNegative(options.gapY, 0);
   const desiredOrigin = {
     x: snap(options.desiredOrigin.x),
     y: snap(options.desiredOrigin.y),

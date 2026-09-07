@@ -1428,7 +1428,7 @@ describe('BoardRepository zone layout defaults', () => {
       expect(updated.objects?.legacy).not.toHaveProperty('layout_binding');
       expect(updated.objects?.['new-zone']).toMatchObject({
         layout_binding: 'inherit',
-        layout: { mode: 'auto', preset: 'compact_list', gap: 8 },
+        layout: { mode: 'auto', preset: 'compact_list', columnGap: 8, rowGap: 8 },
       });
       expect((await repo.findById(board.board_id))?.objects?.['new-zone']).toEqual(
         updated.objects?.['new-zone']
@@ -1449,7 +1449,7 @@ describe('BoardRepository zone layout defaults', () => {
       });
       expect(uiCreated.objects?.['ui-created-zone']).toMatchObject({
         layout_binding: 'inherit',
-        layout: { mode: 'auto', preset: 'compact_list', gap: 8 },
+        layout: { mode: 'auto', preset: 'compact_list', columnGap: 8, rowGap: 8 },
       });
     }
   );
@@ -1512,7 +1512,7 @@ describe('BoardRepository zone layout defaults', () => {
       });
       expect(preserved.board.objects?.follower).toMatchObject({
         layout_binding: 'inherit',
-        layout: { gap: 8 },
+        layout: { columnGap: 8, rowGap: 8 },
         locked: true,
         width: 640,
         height: 420,
@@ -1520,14 +1520,14 @@ describe('BoardRepository zone layout defaults', () => {
 
       const applied = await repo.setZoneLayoutDefaults(
         board.board_id,
-        { ...preserved.board.zone_layout_defaults, gap: 4 },
+        { ...preserved.board.zone_layout_defaults, columnGap: 4, rowGap: 4 },
         { applyToExisting: true }
       );
       expect(applied.changed_zone_ids).toEqual(['override', 'follower']);
       expect(applied.board.objects?.override).toMatchObject({
         label: 'Explicit',
         layout_binding: 'inherit',
-        layout: { gap: 4 },
+        layout: { columnGap: 4, rowGap: 4 },
       });
     }
   );
@@ -1722,7 +1722,9 @@ describe('BoardRepository.applyBoardLayout', () => {
         density: 'preserve' as const,
         trackAxis: 'columns' as const,
         trackCount: 1,
-        gap: 40,
+        columnGap: 40,
+        rowGap: 40,
+        outerMargin: 80,
         packZoneContents: true,
         resizeZoneFrames: true,
         justifyRows: true,

@@ -1182,7 +1182,19 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
             throw new RepositoryError('Zone layout defaults source snapshot is stale');
           }
 
-          const normalizedDefaults = normalizeZoneLayoutPolicy({ ...currentDefaults, ...defaults });
+          const normalizedDefaults = normalizeZoneLayoutPolicy({
+            ...currentDefaults,
+            ...defaults,
+            // Old clients still send one scalar. Apply it to both axes unless
+            // that same request names an axis explicitly; normalized stored
+            // state itself never depends on the ambiguous alias.
+            ...(defaults.gap === undefined || defaults.columnGap !== undefined
+              ? {}
+              : { columnGap: defaults.gap }),
+            ...(defaults.gap === undefined || defaults.rowGap !== undefined
+              ? {}
+              : { rowGap: defaults.gap }),
+          });
           const objects = { ...(current.objects ?? {}) };
           const changedZoneIds: string[] = [];
           for (const [objectId, object] of Object.entries(objects)) {

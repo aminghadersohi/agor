@@ -101,6 +101,27 @@ function expectNoOverlap(placements: RectanglePlacement[]): void {
 }
 
 describe('layoutRectangles', () => {
+  it('keeps exact decimal container insets and axis gaps independent of the drag grid', () => {
+    const result = layoutRectangles(
+      [
+        { id: 'a', width: 100, height: 80 },
+        { id: 'b', width: 100, height: 80 },
+      ],
+      {
+        exactColumns: 2,
+        padding: 31.5,
+        gapX: 37.25,
+        gapY: 53.75,
+        gridSize: BOARD_GRID_SIZE,
+      }
+    );
+
+    expect(result.padding).toBe(31.5);
+    expect(result.placements[0]).toMatchObject({ x: 31.5, y: 31.5 });
+    expect(result.placements[1]!.x - (result.placements[0]!.x + result.placements[0]!.width)).toBe(
+      37.25
+    );
+  });
   it('keeps item sizes on the manual grid while preserving an exact visual gap', () => {
     const result = layoutRectangles(
       [
@@ -115,10 +136,8 @@ describe('layoutRectangles', () => {
         expect(value % BOARD_GRID_SIZE).toBe(0);
       }
     }
-    expect(snapBoardGridPoint(result.placements[0]!)).toEqual({
-      x: result.placements[0]!.x,
-      y: result.placements[0]!.y,
-    });
+    expect(result.placements[0]).toMatchObject({ x: 24, y: 24 });
+    expect(snapBoardGridPoint(result.placements[0]!)).not.toEqual({ x: 24, y: 24 });
     expect(result.placements[1]!.x - (result.placements[0]!.x + result.placements[0]!.width)).toBe(
       27
     );

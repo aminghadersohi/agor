@@ -1158,8 +1158,8 @@ export const useBoardObjects = ({
         // two reload widths) persist competing child offsets. Explicit layout
         // still plans against the title the initiating user actually sees.
         fontScale,
+        padding: policy.padding,
       });
-      const exactGap = policy.gap ?? 24;
       const layoutItems = children.map(({ node, isCanvasObject }) => ({
         id: node.id,
         ...itemSize(node),
@@ -1233,8 +1233,8 @@ export const useBoardObjects = ({
         rows: new Set(packedZone.items.map((item) => item.row)).size,
         width: packedZone.width,
         height: packedZone.height - frame.headerInset,
-        gapX: exactGap,
-        gapY: exactGap,
+        gapX: policy.columnGap,
+        gapY: policy.rowGap,
         padding: frame.padding,
         fitsWithoutOverlap: true,
         stackCount: packedZone.items.length,
@@ -1407,7 +1407,7 @@ export const useBoardObjects = ({
                 width: nextZoneWidth,
                 height: nextZoneHeight,
               },
-              { gap: policy.gap }
+              { gapX: policy.columnGap, gapY: policy.rowGap }
             )
           : null;
       const movedZoneIds = new Set(reflowPlan?.movedZoneIds ?? []);
@@ -1833,11 +1833,16 @@ export const useBoardObjects = ({
         alignmentChildren.map(({ rect }) => rect),
         getZoneLayoutFrame(zone, {
           fontScale: renderedZoneFontScale(zoneId, zone.width),
+          padding: policy.padding,
         }),
         zone.height,
         justification,
         policy.preset === 'grid' && (policy.columns ?? 0) > 1
-          ? { columns: policy.columns ?? 1, gap: policy.gap ?? 24 }
+          ? {
+              columns: policy.columns ?? 1,
+              columnGap: policy.columnGap,
+              rowGap: policy.rowGap,
+            }
           : undefined
       );
       if (!justified.fits) {

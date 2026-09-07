@@ -1380,15 +1380,13 @@ describe('SessionCanvas zoom shortcuts', () => {
     const options = await screen.findByRole('dialog', { name: 'Arrange board options' });
     expect(within(options).getByRole('radio', { name: 'Grid' })).toBeChecked();
     expect(within(options).getByRole('checkbox', { name: 'Pack zone contents' })).toBeChecked();
+    fireEvent.click(within(options).getByRole('button', { name: /More layout options/ }));
     expect(within(options).getByText('Preserve current expansion')).toBeInTheDocument();
-    expect(
-      within(options).getByRole('checkbox', { name: 'Match / resize zone frames' })
-    ).toBeChecked();
-    expect(within(options).getByRole('checkbox', { name: 'Justify rows' })).toBeChecked();
+    expect(within(options).getByRole('checkbox', { name: 'Match zone frames' })).toBeChecked();
+    expect(within(options).getByRole('checkbox', { name: 'Justify complete rows' })).toBeChecked();
     expect(
       within(options).getByRole('checkbox', { name: 'Fit view after arranging' })
     ).toBeChecked();
-    expect(within(options).getByText(/preserve the current camera/i)).toBeInTheDocument();
     expect(within(options).getByRole('combobox', { name: 'Last row behavior' })).toBeEnabled();
     expect(within(options).getByText('Last row: left')).toBeInTheDocument();
     fireEvent.click(within(options).getByRole('button', { name: 'Arrange board' }));
@@ -1452,8 +1450,9 @@ describe('SessionCanvas zoom shortcuts', () => {
     expect(pack).toBeChecked();
     fireEvent.click(pack);
     expect(pack).not.toBeChecked();
+    fireEvent.click(within(options).getByRole('button', { name: /More layout options/ }));
     expect(within(options).getByRole('combobox', { name: 'Content expansion' })).toBeDisabled();
-    expect(within(options).getByText(/no child presentation is changed/i)).toBeInTheDocument();
+    expect(within(options).getByRole('checkbox', { name: 'Match zone frames' })).toBeDisabled();
     fireEvent.click(within(options).getByRole('button', { name: 'Arrange board' }));
 
     await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
@@ -1569,9 +1568,9 @@ describe('SessionCanvas zoom shortcuts', () => {
     expect(write).toMatchObject({ _action: 'applyLayout', placements: {} });
     expect(Object.keys(write.objects)).toEqual(['note-a', 'app-b', 'artifact-c']);
     expect(write.objects['fixed-note']).toBeUndefined();
-    expect(write.objects['note-a']).toMatchObject({ x: 140, y: 60 });
-    expect(write.objects['app-b']).toMatchObject({ x: 380, y: 60 });
-    expect(write.objects['artifact-c']).toMatchObject({ x: 720, y: 60 });
+    expect(write.objects['note-a']).toMatchObject({ x: 116, y: 52 });
+    expect(write.objects['app-b']).toMatchObject({ x: 380, y: 52 });
+    expect(write.objects['artifact-c']).toMatchObject({ x: 744, y: 52 });
 
     board = {
       ...board,
@@ -1921,6 +1920,7 @@ describe('SessionCanvas zoom shortcuts', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
     fireEvent.click(await screen.findByText('Grid', { exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: /More layout options/ }));
     expect(screen.getByRole('switch', { name: 'Match heights within rows' })).toBeChecked();
     expect(screen.getByRole('switch', { name: 'Match widths within columns' })).toBeChecked();
     fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Grid tracks' }));
@@ -1937,8 +1937,8 @@ describe('SessionCanvas zoom shortcuts', () => {
     const wide = write.objects['zone-wide'];
     expect(empty.width).toBe(wide.width);
     expect(empty.height).toBe(tall.height);
-    expect(tall.x - (empty.x + empty.width)).toBe(40);
-    expect(wide.y - (empty.y + empty.height)).toBe(40);
+    expect(tall.x - (empty.x + empty.width)).toBe(64);
+    expect(wide.y - (empty.y + empty.height)).toBe(48);
 
     board = {
       ...board,

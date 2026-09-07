@@ -44,6 +44,29 @@ it('quantizes frames and the cluster origin while preserving the exact requested
   expectNoOverlaps(result.placements);
 });
 
+it('uses independent exact horizontal and vertical track gaps', () => {
+  const result = layoutJustifiedZones(
+    [
+      { id: 'a', shapes: [shape(1, 400, 200)] },
+      { id: 'b', shapes: [shape(1, 400, 200)] },
+      { id: 'c', shapes: [shape(1, 400, 200)] },
+    ],
+    {
+      targetWidth: 900,
+      fixedItemsPerRow: 2,
+      gapX: 37.5,
+      gapY: 53.25,
+      startX: 0,
+      startY: 0,
+    }
+  );
+
+  const [a, b, c] = result.placements;
+  expect(b!.x - (a!.x + a!.width)).toBe(37.5);
+  expect(c!.y - (a!.y + a!.height)).toBe(53.25);
+  expect(result).toMatchObject({ gapX: 37.5, gapY: 53.25 });
+});
+
 describe('layoutJustifiedZones', () => {
   it('fills a row flush to the target width', () => {
     const result = layoutJustifiedZones(

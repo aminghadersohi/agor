@@ -1,8 +1,5 @@
-import {
-  BOARD_GRID_SIZE,
-  ceilBoardGridValue,
-  placeLayoutAroundFixedObstacles,
-} from './rectangle-packing';
+import { normalizeAxisSpacing } from './layout-spacing';
+import { BOARD_GRID_SIZE, placeLayoutAroundFixedObstacles } from './rectangle-packing';
 
 export interface ZoneGrowthRect {
   id: string;
@@ -48,7 +45,7 @@ export function planZoneGrowthReflow(
   sourceZones: readonly ZoneGrowthRect[],
   growingZoneId: string,
   nextGrowingRect: ZoneGrowthRect,
-  options: { gap?: number } = {}
+  options: { gap?: number; gapX?: number; gapY?: number } = {}
 ): ZoneGrowthReflowPlan {
   const sourceGrowing = sourceZones.find((zone) => zone.id === growingZoneId);
   if (!sourceGrowing) {
@@ -63,7 +60,10 @@ export function planZoneGrowthReflow(
     return { placements: sourceZones.map((zone) => ({ ...zone })), movedZoneIds: [] };
   }
 
-  const gap = Math.max(0, ceilBoardGridValue(options.gap ?? BOARD_GRID_SIZE));
+  const spacing = normalizeAxisSpacing(options.gapX, options.gapY, options.gap, {
+    columnGap: BOARD_GRID_SIZE,
+    rowGap: BOARD_GRID_SIZE,
+  });
   const lockedObstacles = sourceZones.filter(
     (zone) => zone.locked && !overlaps(sourceGrowing, zone)
   );
@@ -83,9 +83,9 @@ export function planZoneGrowthReflow(
           {
             desiredOrigin: { x: nextGrowingRect.x, y: nextGrowingRect.y },
             obstacles: lockedObstacles,
-            gapX: gap,
-            gapY: gap,
-            gridSize: BOARD_GRID_SIZE,
+            gapX: spacing.columnGap,
+            gapY: spacing.rowGap,
+            gridSize: 0,
           }
         ).placements[0];
   const positionedGrowing = {
@@ -123,10 +123,10 @@ export function planZoneGrowthReflow(
       if (candidate.locked) continue;
 
       const shiftRight = growsRight
-        ? ceilBoardGridValue(movement.after.x + movement.after.width + gap - candidate.x)
+        ? movement.after.x + movement.after.width + spacing.columnGap - candidate.x
         : Number.POSITIVE_INFINITY;
       const shiftDown = growsDown
-        ? ceilBoardGridValue(movement.after.y + movement.after.height + gap - candidate.y)
+        ? movement.after.y + movement.after.height + spacing.rowGap - candidate.y
         : Number.POSITIVE_INFINITY;
       const before = { ...candidate };
       const shifted =
@@ -144,9 +144,9 @@ export function planZoneGrowthReflow(
         {
           desiredOrigin: { x: shifted.x, y: shifted.y },
           obstacles: fixedObstacles,
-          gapX: gap,
-          gapY: gap,
-          gridSize: BOARD_GRID_SIZE,
+          gapX: spacing.columnGap,
+          gapY: spacing.rowGap,
+          gridSize: 0,
           // A cascade only advances roots along the positive axes. Without
           // this lower bound, an equidistant locked-obstacle detour could jump
           // above/left and invert the board's existing spatial order.

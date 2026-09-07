@@ -101,7 +101,7 @@ describe('BoardsService - Custom Methods', () => {
       expect(result.board.objects?.override).toMatchObject({ layout: { gap: 40 } });
       expect(result.board.objects?.follower).toMatchObject({
         layout_binding: 'inherit',
-        layout: { gap: 8 },
+        layout: { columnGap: 8, rowGap: 8, padding: 20 },
       });
     }
   );
@@ -224,7 +224,12 @@ describe('BoardsService - Custom Methods', () => {
     expect(imported.board_id).not.toBe(original.board_id);
     expect(imported.icon).toBe('🔷'); // Icon should be preserved
     expect(imported.custom_css).toBe('.board { color: rebeccapurple; }');
-    expect(imported.zone_layout_defaults).toMatchObject({ mode: 'auto', gap: 8 });
+    expect(imported.zone_layout_defaults).toMatchObject({
+      mode: 'auto',
+      columnGap: 8,
+      rowGap: 8,
+      padding: 20,
+    });
     const importedPolicy = await new CapabilityPolicyRepository(db).getBoardPolicies(
       imported.board_id
     );
@@ -305,7 +310,12 @@ describe('BoardsService - Custom Methods', () => {
     expect(cloned.icon).toBe(original.icon);
     expect(cloned.description).toBe(original.description);
     expect(cloned.custom_css).toBe('.clone { opacity: 0.9; }');
-    expect(cloned.zone_layout_defaults).toMatchObject({ preset: 'compact_list', gap: 4 });
+    expect(cloned.zone_layout_defaults).toMatchObject({
+      preset: 'compact_list',
+      columnGap: 4,
+      rowGap: 4,
+      padding: 20,
+    });
     const clonedPolicy = await new CapabilityPolicyRepository(db).getBoardPolicies(cloned.board_id);
     expect(clonedPolicy.board_access.sharing_mode).toBe('private');
     expect(clonedPolicy.branch_template.access.sharing_mode).toBe('private');

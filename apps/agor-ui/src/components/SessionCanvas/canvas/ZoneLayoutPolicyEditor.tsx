@@ -17,6 +17,7 @@ import type {
 } from '@agor-live/client';
 import { Flex, Form, InputNumber, Segmented, Select, Switch } from 'antd';
 import { LayoutDensityControl } from './LayoutDensityControl';
+import { LayoutSpacingFields } from './LayoutOptionsEditor';
 
 export interface ZoneLayoutPolicyEditorProps {
   value: ZoneLayoutPolicy;
@@ -140,20 +141,16 @@ export function ZoneLayoutPolicyEditor({
         )}
         <Form.Item
           label="Spacing"
-          help="Exact boundary space between arranged items."
-          style={{ flex: '1 1 160px' }}
+          help="Gaps separate items. Inset keeps content clear of all four edges; the title reserve is separate."
+          style={{ flex: '1 1 360px' }}
         >
-          <InputNumber
-            aria-label="Spacing"
-            min={0}
-            max={96}
-            precision={0}
-            step={4}
-            value={policy.gap}
+          <LayoutSpacingFields
+            columnGap={policy.columnGap}
+            rowGap={policy.rowGap}
+            padding={policy.padding}
             disabled={disabled}
-            suffix="px"
-            style={{ width: '100%' }}
-            onChange={(gap) => update({ gap: gap ?? 0 })}
+            onChange={(spacing) => update(spacing)}
+            onPaddingChange={(padding) => update({ padding })}
           />
         </Form.Item>
         <Form.Item

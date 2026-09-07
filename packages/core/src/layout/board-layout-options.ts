@@ -6,6 +6,11 @@ import type {
   LayoutDensityPolicy,
 } from '../types/board.js';
 import type { BoardZoneArrangementOptions } from './board-zone-arrangement.js';
+import {
+  LAYOUT_SPACING_DEFAULTS,
+  normalizeAxisSpacing,
+  normalizeLayoutSpacing,
+} from './layout-spacing.js';
 
 export type {
   BoardLayoutLastRow,
@@ -13,13 +18,21 @@ export type {
   BoardLayoutSettings,
   BoardLayoutTrackAxis,
 } from '../types/board.js';
+export {
+  LAYOUT_SPACING_DEFAULTS,
+  MAX_LAYOUT_SPACING,
+  normalizeAxisSpacing,
+  normalizeLayoutSpacing,
+} from './layout-spacing.js';
 
 export const DEFAULT_BOARD_LAYOUT_SETTINGS: Readonly<BoardLayoutSettings> = Object.freeze({
   mode: 'grid',
   density: 'preserve',
   trackAxis: 'auto',
   trackCount: 3,
-  gap: 40,
+  columnGap: LAYOUT_SPACING_DEFAULTS.boardColumnGap,
+  rowGap: LAYOUT_SPACING_DEFAULTS.boardRowGap,
+  outerMargin: LAYOUT_SPACING_DEFAULTS.boardOuterMargin,
   packZoneContents: true,
   resizeZoneFrames: true,
   justifyRows: true,
@@ -45,12 +58,20 @@ export function normalizeBoardLayoutSettings(
     value?.lastRow === 'center' || value?.lastRow === 'end' || value?.lastRow === 'justify'
       ? value.lastRow
       : 'start';
+  const spacing = normalizeAxisSpacing(value?.columnGap, value?.rowGap, value?.gap, {
+    columnGap: DEFAULT_BOARD_LAYOUT_SETTINGS.columnGap,
+    rowGap: DEFAULT_BOARD_LAYOUT_SETTINGS.rowGap,
+  });
   return {
     mode,
     density,
     trackAxis,
     trackCount: Math.max(1, Math.min(count, finiteInteger(value?.trackCount, 3))),
-    gap: Math.max(0, finiteInteger(value?.gap, DEFAULT_BOARD_LAYOUT_SETTINGS.gap)),
+    ...spacing,
+    outerMargin: normalizeLayoutSpacing(
+      value?.outerMargin,
+      DEFAULT_BOARD_LAYOUT_SETTINGS.outerMargin
+    ),
     packZoneContents: value?.packZoneContents !== false,
     resizeZoneFrames: value?.resizeZoneFrames !== false,
     justifyRows: value?.justifyRows !== false,
@@ -89,7 +110,9 @@ export function boardZoneArrangementOptions(
     return {
       mode: 'compact',
       density: normalized.density,
-      gap: normalized.gap,
+      gapX: normalized.columnGap,
+      gapY: normalized.rowGap,
+      outerMargin: normalized.outerMargin,
       packZoneContents: normalized.packZoneContents,
       resizeZoneFrames: normalized.resizeZoneFrames,
     };
@@ -98,7 +121,9 @@ export function boardZoneArrangementOptions(
   return {
     mode: 'grid',
     density: normalized.density,
-    gap: normalized.gap,
+    gapX: normalized.columnGap,
+    gapY: normalized.rowGap,
+    outerMargin: normalized.outerMargin,
     packZoneContents: normalized.packZoneContents,
     resizeZoneFrames: normalized.resizeZoneFrames,
     justifyRows: normalized.justifyRows,

@@ -8,7 +8,7 @@ import {
 import type { BoardZoneArrangementOptions } from '@agor/core/layout/board-zone-arrangement';
 import { SettingOutlined } from '@ant-design/icons';
 import { Button, Popover, Space } from 'antd';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { CANVAS_LAYOUT_CONTROLS_CLASS, LayoutOptionsEditor } from './LayoutOptionsEditor';
 
 export { CANVAS_LAYOUT_CONTROLS_CLASS };
@@ -52,6 +52,7 @@ export function SelectionLayoutPopover({
   onApply,
 }: SelectionLayoutPopoverProps) {
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const [localSettings, setLocalSettings] = useState(() =>
     normalizeBoardLayoutSettings(DEFAULT_BOARD_LAYOUT_SETTINGS, selectionCount)
   );
@@ -82,6 +83,7 @@ export function SelectionLayoutPopover({
             onClick={() => {
               void onApply(settings);
               setOpen(false);
+              triggerRef.current?.focus();
             }}
           >
             Apply layout
@@ -93,12 +95,14 @@ export function SelectionLayoutPopover({
       onOpenChange={(nextOpen) => {
         if (nextOpen) setSettings({ ...settings, density: 'preserve' });
         setOpen(nextOpen);
+        if (!nextOpen) requestAnimationFrame(() => triggerRef.current?.focus());
       }}
       destroyOnHidden
       placement="bottomRight"
       classNames={{ root: CANVAS_LAYOUT_CONTROLS_CLASS }}
     >
       <Button
+        ref={triggerRef}
         size="small"
         icon={<SettingOutlined />}
         aria-label="Layout options"

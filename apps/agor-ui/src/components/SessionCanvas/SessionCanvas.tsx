@@ -76,7 +76,6 @@ import React, {
   forwardRef,
   useCallback,
   useEffect,
-  useId,
   useImperativeHandle,
   useMemo,
   useRef,
@@ -916,7 +915,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       () => ({ ...DEFAULT_BOARD_LAYOUT_SETTINGS })
     );
     const [fitViewAfterArranging, setFitViewAfterArranging] = useState(true);
-    const fitViewAfterArrangingHelpId = useId();
     const arrangeBoardButtonWrapperRef = useRef<HTMLSpanElement>(null);
     const postLayoutViewportCoordinatorRef = useRef(new PostLayoutViewportCoordinator());
     const [queuedPostLayoutViewportToken, setQueuedPostLayoutViewportToken] = useState(0);
@@ -4290,6 +4288,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                         }));
                       }
                       setArrangeBoardPopoverOpen(open);
+                      if (!open) {
+                        requestAnimationFrame(() =>
+                          arrangeBoardButtonWrapperRef.current?.querySelector('button')?.focus()
+                        );
+                      }
                     }
                   }}
                   content={
@@ -4306,10 +4309,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                         display: 'flex',
                         flexDirection: 'column',
                         gap: 10,
-                        width: 320,
-                        maxHeight: 'calc(100vh - 32px)',
-                        overflowY: 'auto',
-                        paddingInlineEnd: 4,
+                        width: 'min(356px, calc(100vw - 36px))',
                       }}
                     >
                       <Typography.Text strong>Arrange board</Typography.Text>
@@ -4323,18 +4323,15 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                         densityAvailable={boardDensityAvailable}
                         disabled={arrangeBoardBusy}
                       />
-                      <Checkbox
-                        checked={fitViewAfterArranging}
-                        disabled={arrangeBoardBusy}
-                        aria-describedby={fitViewAfterArrangingHelpId}
-                        onChange={(event) => setFitViewAfterArranging(event.target.checked)}
-                      >
-                        Fit view after arranging
-                      </Checkbox>
-                      <Typography.Text id={fitViewAfterArrangingHelpId} type="secondary">
-                        Frame the complete arranged board once after its rendered geometry settles.
-                        Turn off to preserve the current camera.
-                      </Typography.Text>
+                      <Tooltip title="Frame the settled layout once. Turn off to keep the current camera.">
+                        <Checkbox
+                          checked={fitViewAfterArranging}
+                          disabled={arrangeBoardBusy}
+                          onChange={(event) => setFitViewAfterArranging(event.target.checked)}
+                        >
+                          Fit view after arranging
+                        </Checkbox>
+                      </Tooltip>
                       <Button
                         type="primary"
                         disabled={arrangeBoardDisabled}

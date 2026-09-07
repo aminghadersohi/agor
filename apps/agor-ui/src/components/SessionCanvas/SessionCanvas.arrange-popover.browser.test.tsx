@@ -290,9 +290,15 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     await act(async () => user.click(trigger));
     let dialog = await screen.findByRole('dialog', { name: 'Arrange board options' });
     expect(dialog.closest(`.${CANVAS_LAYOUT_CONTROLS_CLASS}`)).not.toBeNull();
+    expect(dialog.getBoundingClientRect().height).toBeLessThan(420);
+    expect(dialog.getBoundingClientRect().width).toBeLessThanOrEqual(356);
+    const spacingHelp = within(dialog).getByRole('button', { name: 'Spacing help' });
+    spacingHelp.focus();
+    expect(spacingHelp).toHaveFocus();
+    await act(async () => user.click(within(dialog).getByText('More layout options')));
     const pack = within(dialog).getByRole('checkbox', { name: 'Pack zone contents' });
     const matchFrames = within(dialog).getByRole('checkbox', {
-      name: 'Match / resize zone frames',
+      name: 'Match zone frames',
     });
     const fitView = within(dialog).getByRole('checkbox', {
       name: 'Fit view after arranging',
@@ -312,29 +318,32 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     expect(pack).not.toBeChecked();
     expect(density).toBeDisabled();
     expect(matchFrames).toBeDisabled();
-    expect(within(dialog).getByText(/no child presentation is changed/i)).toBeVisible();
+    expect(within(dialog).getByText(/unavailable while Pack contents is off/i)).toBeVisible();
     await act(async () =>
       user.click(within(dialog).getByText('Pack zone contents', { exact: true }))
     );
     expect(pack).toBeChecked();
     await act(async () =>
-      user.click(within(dialog).getByText('Match / resize zone frames', { exact: true }))
+      user.click(within(dialog).getByText('Match zone frames', { exact: true }))
     );
     expect(matchFrames).not.toBeChecked();
-    expect(within(dialog).getByRole('checkbox', { name: 'Justify rows' })).toBeDisabled();
+    expect(within(dialog).getByRole('checkbox', { name: 'Justify complete rows' })).toBeDisabled();
     await act(async () =>
-      user.click(within(dialog).getByText('Match / resize zone frames', { exact: true }))
+      user.click(within(dialog).getByText('Match zone frames', { exact: true }))
     );
     expect(matchFrames).toBeChecked();
-    const pointerJustify = within(dialog).getByRole('checkbox', { name: 'Justify rows' });
-    await act(async () => user.click(within(dialog).getByText('Justify rows', { exact: true })));
+    const pointerJustify = within(dialog).getByRole('checkbox', { name: 'Justify complete rows' });
+    await act(async () =>
+      user.click(within(dialog).getByText('Justify complete rows', { exact: true }))
+    );
     expect(pointerJustify).not.toBeChecked();
-    await act(async () => user.click(within(dialog).getByText('Justify rows', { exact: true })));
+    await act(async () =>
+      user.click(within(dialog).getByText('Justify complete rows', { exact: true }))
+    );
     expect(pointerJustify).toBeChecked();
     await act(async () => user.click(within(dialog).getByText('Compact', { exact: true })));
     expect(within(dialog).getByRole('radio', { name: 'Compact' })).toBeChecked();
-    expect(within(dialog).getByRole('checkbox', { name: 'Justify rows' })).toBeDisabled();
-    expect(within(dialog).getByText(/dense two-dimensional cluster/i)).toBeVisible();
+    expect(within(dialog).getByRole('checkbox', { name: 'Justify complete rows' })).toBeDisabled();
     expect(getSelectedZone()).toHaveClass('selected');
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Arrange board' }));
@@ -355,6 +364,7 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     });
     await act(async () => user.click(trigger));
     dialog = await screen.findByRole('dialog', { name: 'Arrange board options' });
+    await act(async () => user.click(within(dialog).getByText('More layout options')));
     const reopenedDensity = within(dialog).getByRole('combobox', { name: 'Content expansion' });
     expect(reopenedDensity).toBeDisabled();
     expect(within(dialog).getByText('Preserve current expansion')).toBeInTheDocument();
@@ -374,11 +384,12 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     trigger = getTrigger();
     await act(async () => user.click(trigger));
     dialog = await screen.findByRole('dialog', { name: 'Arrange board options' });
+    await act(async () => user.click(within(dialog).getByText('More layout options')));
     const grid = within(dialog).getByRole('radio', { name: 'Grid' });
     grid.focus();
     await act(async () => user.keyboard(' '));
     expect(grid).toBeChecked();
-    const justify = within(dialog).getByRole('checkbox', { name: 'Justify rows' });
+    const justify = within(dialog).getByRole('checkbox', { name: 'Justify complete rows' });
     justify.focus();
     await act(async () => user.keyboard(' '));
     expect(justify).not.toBeChecked();
@@ -392,11 +403,11 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     lastRow.focus();
     await act(async () => user.keyboard('{Enter}'));
     const keyboardCenterOption = await screen.findByRole('option', {
-      name: 'Last row: centered',
+      name: 'Last row: center',
     });
     expect(keyboardCenterOption.closest(`.${CANVAS_LAYOUT_CONTROLS_CLASS}`)).not.toBeNull();
     await act(async () => user.keyboard('{ArrowDown}{Enter}'));
-    expect(lastRow.closest('.ant-select-content')).toHaveTextContent('Last row: centered');
+    expect(lastRow.closest('.ant-select-content')).toHaveTextContent('Last row: center');
     const applyNaturalGrid = within(dialog).getByRole('button', { name: 'Arrange board' });
     applyNaturalGrid.focus();
     await act(async () => user.keyboard('{Enter}'));
@@ -534,15 +545,23 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
       fireEvent.click(await visibleSelectOption('Columns'));
       const count = within(surface).getByRole('spinbutton', { name: 'Number of columns' });
       fireEvent.change(count, { target: { value: '2' } });
-      expect(within(surface).getByRole('spinbutton', { name: 'Layout gap' })).toHaveValue('40');
-      await act(async () =>
-        user.click(within(surface).getByRole('switch', { name: 'Match heights within rows' }))
-      );
+      expect(within(surface).getByRole('spinbutton', { name: 'Horizontal gap' })).toHaveValue('64');
+      expect(within(surface).getByRole('spinbutton', { name: 'Vertical gap' })).toHaveValue('48');
+      await act(async () => user.click(within(surface).getByText('More layout options')));
+      const matchRows = within(surface).getByRole('switch', {
+        name: 'Match heights within rows',
+      });
+      await waitFor(() => expect(matchRows).toBeVisible());
+      // Ant's Collapse mounts its children before the height motion settles.
+      // Waiting for that real portal motion prevents a click intended for the
+      // first control from landing on the disclosure header instead.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      await act(async () => user.click(matchRows));
       await act(async () =>
         user.click(within(surface).getByRole('switch', { name: 'Match widths within columns' }))
       );
       await act(async () =>
-        user.click(within(surface).getByRole('checkbox', { name: 'Match / resize zone frames' }))
+        user.click(within(surface).getByRole('checkbox', { name: 'Match zone frames' }))
       );
     };
 
@@ -561,6 +580,28 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     );
     await waitFor(() => expect(boardRun.patch).toHaveBeenCalledTimes(1));
     const boardPayload = boardRun.writes[0]!;
+    await waitFor(() =>
+      expect(
+        document.querySelector('[role="dialog"][aria-label="Arrange board options"]')
+      ).toBeNull()
+    );
+    const boardArrangeTrigger = document.querySelector<HTMLButtonElement>(
+      'button.react-flow__controls-button[aria-label="Arrange board"]'
+    );
+    if (!boardArrangeTrigger) throw new Error('Arrange board toolbar trigger is unavailable.');
+    await waitFor(() => expect(boardArrangeTrigger).toHaveAttribute('aria-disabled', 'false'), {
+      timeout: 5_000,
+    });
+    await act(async () => user.click(boardArrangeTrigger));
+    const boardCompactDialog = await visibleRole('dialog', 'Arrange board options');
+    await act(async () =>
+      user.click(within(boardCompactDialog).getByText('Compact', { exact: true }))
+    );
+    await act(async () =>
+      user.click(within(boardCompactDialog).getByRole('button', { name: 'Arrange board' }))
+    );
+    await waitFor(() => expect(boardRun.patch).toHaveBeenCalledTimes(2));
+    const boardCompactPayload = boardRun.writes[1]!;
     cleanup();
 
     // B/C. Select the exact same eligible zones, use Layout selected items,
@@ -590,6 +631,7 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
       selectionUser.click(within(toolbar).getByRole('button', { name: 'Layout options' }))
     );
     const selectionSurface = await visibleRole('tooltip', /Layout selected items/);
+    expect(selectionSurface.getBoundingClientRect().height).toBeLessThan(390);
     await configureVisibleGrid(selectionSurface);
     await act(async () =>
       selectionUser.click(within(selectionSurface).getByRole('button', { name: 'Apply layout' }))
@@ -602,6 +644,30 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     );
     expect(translatedGeometry(selectionPayload)).toEqual(translatedGeometry(boardPayload));
 
+    // Both production editors feed Compact through the same settings and
+    // planner as well. Compare after the same Grid source state so only the
+    // intentional board-vs-selection anchor can differ.
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Layout options' }));
+    const firstCompactSurface = await visibleRole('tooltip', /Layout selected items/);
+    fireEvent.click(within(firstCompactSurface).getByText('Compact', { exact: true }));
+    fireEvent.click(within(firstCompactSurface).getByRole('button', { name: 'Apply layout' }));
+    await waitFor(() => expect(selectionRun.patch).toHaveBeenCalledTimes(2));
+    const selectionCompactPayload = selectionRun.writes[1]!;
+    expect((selectionCompactPayload.layout_context as Board['layout_context'])?.settings).toEqual(
+      (boardCompactPayload.layout_context as Board['layout_context'])?.settings
+    );
+    expect(translatedGeometry(selectionCompactPayload)).toEqual(
+      translatedGeometry(boardCompactPayload)
+    );
+
+    // Return to the exact prior Grid configuration before exercising its
+    // cell-specific alignment and match-size actions.
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Layout options' }));
+    const restoredGridSurface = await visibleRole('tooltip', /Layout selected items/);
+    fireEvent.click(within(restoredGridSurface).getByText('Grid', { exact: true }));
+    fireEvent.click(within(restoredGridSurface).getByRole('button', { name: 'Apply layout' }));
+    await waitFor(() => expect(selectionRun.patch).toHaveBeenCalledTimes(3));
+
     const initialCells = selectionRun.durableBoard.layout_context?.cells;
     expect(new Set(Object.values(initialCells ?? {}).map((cell) => cell.column)).size).toBe(2);
     expect(new Set(Object.values(initialCells ?? {}).map((cell) => cell.row)).size).toBe(3);
@@ -609,11 +675,12 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
       Object.entries(initialCells ?? {}).map(([id, cell]) => [id, [cell.row, cell.column]])
     );
 
-    await act(async () =>
-      selectionUser.click(within(toolbar).getByRole('button', { name: 'Arrange zones' }))
-    );
+    const beforeArrangeZones = selectionRun.patch.mock.calls.length;
+    const arrangeZonesButton = within(toolbar).getByRole('button', { name: 'Arrange zones' });
+    arrangeZonesButton.focus();
+    await act(async () => selectionUser.keyboard('{Enter}'));
     await new Promise((resolve) => setTimeout(resolve, 150));
-    expect(selectionRun.patch).toHaveBeenCalledTimes(1);
+    expect(selectionRun.patch).toHaveBeenCalledTimes(beforeArrangeZones);
 
     // D. All six actual alignment actions remain Grid-cell actions. Start/top
     // can be changed-only no-ops; every other action must still retain tracks.
@@ -685,7 +752,7 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     // generic same-x/same-y collapse.
     fireEvent.click(within(toolbar).getByRole('button', { name: 'Layout options' }));
     const compactSurface = await visibleRole('tooltip', /Layout selected items/);
-    fireEvent.click(within(compactSurface).getByRole('radio', { name: 'Compact' }));
+    fireEvent.click(within(compactSurface).getByText('Compact', { exact: true }));
     fireEvent.click(within(compactSurface).getByRole('button', { name: 'Apply layout' }));
     await waitFor(() =>
       expect(selectionRun.durableBoard.layout_context?.settings.mode).toBe('compact')

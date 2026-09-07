@@ -28,7 +28,14 @@ export interface BoardLayoutSettings {
   density: LayoutDensityPolicy;
   trackAxis: BoardLayoutTrackAxis;
   trackCount: number;
-  gap: number;
+  /** Exact horizontal distance between arranged roots in board pixels. */
+  columnGap: number;
+  /** Exact vertical distance between arranged roots in board pixels. */
+  rowGap: number;
+  /** Clear board-space inset around a board-scoped arranged cluster. */
+  outerMargin: number;
+  /** @deprecated Read-only compatibility alias for old persisted contexts. */
+  gap?: number;
   packZoneContents: boolean;
   resizeZoneFrames: boolean;
   justifyRows: boolean;
@@ -269,8 +276,14 @@ export interface ZoneLayoutPolicy {
   sortDirection: ZoneLayoutSortDirection;
   /** Preferred grid width. Compact lists always use one column. */
   columns?: number;
-  /** Exact spacing between arranged items in board pixels. */
+  /** @deprecated Scalar compatibility alias; new writers use both axis fields. */
   gap?: number;
+  /** Exact horizontal spacing between arranged items in board pixels. */
+  columnGap?: number;
+  /** Exact vertical spacing between arranged items in board pixels. */
+  rowGap?: number;
+  /** Exact left/right/top/bottom content inset; title reserve is separate. */
+  padding?: number;
   /**
    * Grow or shrink the zone vertically to contain the arranged rectangles.
    *

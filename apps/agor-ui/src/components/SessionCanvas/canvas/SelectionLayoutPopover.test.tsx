@@ -24,7 +24,9 @@ describe('selection grid compatibility helpers', () => {
         matchRowHeights: true,
         matchColumnWidths: false,
         density: 'collapse',
-        gap: 24,
+        columnGap: 24,
+        rowGap: 20,
+        outerMargin: 72,
         packZoneContents: true,
         resizeZoneFrames: true,
         justifyRows: true,
@@ -42,7 +44,9 @@ describe('selection grid compatibility helpers', () => {
       resizeZoneFrames: true,
       packZoneContents: true,
       density: 'collapse',
-      gap: 24,
+      gapX: 24,
+      gapY: 20,
+      outerMargin: 72,
     });
   });
 });
@@ -56,14 +60,17 @@ describe('SelectionLayoutPopover', () => {
       </AntApp>
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    const trigger = screen.getByRole('button', { name: 'Layout options' });
+    fireEvent.click(trigger);
     expect(screen.getByRole('radiogroup', { name: 'Layout mode' })).toBeInTheDocument();
     expect(screen.getByText('Grid').closest(`.${CANVAS_LAYOUT_CONTROLS_CLASS}`)).not.toBeNull();
-    expect(screen.getByText('Preserve current expansion')).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: 'Grid tracks' })).toBeInTheDocument();
-    expect(screen.getByRole('spinbutton', { name: 'Layout gap' })).toHaveValue('40');
+    expect(screen.getByRole('spinbutton', { name: 'Horizontal gap' })).toHaveValue('64');
+    expect(screen.getByRole('spinbutton', { name: 'Vertical gap' })).toHaveValue('48');
+    expect(screen.getByRole('spinbutton', { name: 'Outer cluster margin' })).toHaveValue('96');
     expect(screen.getByRole('checkbox', { name: 'Pack zone contents' })).toBeChecked();
-    expect(screen.getByRole('checkbox', { name: 'Match / resize zone frames' })).toBeChecked();
+    fireEvent.click(screen.getByText('More layout options'));
+    expect(screen.getByRole('checkbox', { name: 'Match zone frames' })).toBeChecked();
     expect(screen.getByRole('switch', { name: 'Match heights within rows' })).toBeChecked();
     expect(screen.getByRole('switch', { name: 'Match widths within columns' })).toBeChecked();
 
@@ -72,7 +79,7 @@ describe('SelectionLayoutPopover', () => {
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Number of columns' }), {
       target: { value: '2' },
     });
-    expect(screen.getByText('2 columns × 4 rows')).toBeInTheDocument();
+    expect(screen.getByText('2×4')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
 
     expect(onApply).toHaveBeenCalledWith(
@@ -81,9 +88,12 @@ describe('SelectionLayoutPopover', () => {
         trackAxis: 'columns',
         trackCount: 2,
         density: 'preserve',
-        gap: 40,
+        columnGap: 64,
+        rowGap: 48,
+        outerMargin: 96,
       })
     );
+    expect(trigger).toHaveFocus();
   });
 
   it('applies density and resets it to Preserve when reopened', () => {
@@ -94,12 +104,14 @@ describe('SelectionLayoutPopover', () => {
       </AntApp>
     );
     fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(screen.getByText('More layout options'));
     fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Content expansion' }));
     fireEvent.click(screen.getByText('Collapse eligible contents'));
     fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
     expect(onApply).toHaveBeenCalledWith(expect.objectContaining({ density: 'collapse' }));
 
     fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(screen.getByText('More layout options'));
     expect(screen.getByText('Preserve current expansion')).toBeInTheDocument();
   });
 
@@ -116,10 +128,8 @@ describe('SelectionLayoutPopover', () => {
       </AntApp>
     );
     fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(screen.getByText('More layout options'));
     expect(screen.getByRole('combobox', { name: 'Content expansion' })).toBeDisabled();
-    expect(
-      screen.getByText(/scope has no worktrees or cards with body content/i)
-    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
     expect(onApply).toHaveBeenCalledWith(expect.objectContaining({ density: 'preserve' }));
   });
@@ -132,7 +142,7 @@ describe('SelectionLayoutPopover', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
     fireEvent.click(screen.getByRole('radio', { name: 'Compact' }));
-    expect(screen.getByText(/dense two-dimensional cluster/i)).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Compact' })).toBeChecked();
     expect(screen.getByRole('combobox', { name: 'Grid tracks' })).toBeDisabled();
   });
 });

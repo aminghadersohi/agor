@@ -116,7 +116,7 @@ describe('planBoardZoneArrangement', () => {
     }
   });
 
-  it('is deterministic, grid aligned, and collision free', () => {
+  it('is deterministic, content-safe, and collision free with exact spacing', () => {
     const input = [
       zone('a', 0, 0, [item('a-1', 381, 101), item('a-2', 499, 199)]),
       zone('b', 700, 0, [item('b-1', 380, 160)]),
@@ -125,13 +125,10 @@ describe('planBoardZoneArrangement', () => {
     const first = planBoardZoneArrangement(input);
     expect(planBoardZoneArrangement(input)).toEqual(first);
     for (const arranged of first.zones) {
-      for (const value of [
-        arranged.position.x,
-        arranged.position.y,
-        arranged.width,
-        arranged.height,
-      ])
-        expect(value % 20).toBe(0);
+      for (const child of arranged.items) {
+        expect(child.x).toBeGreaterThanOrEqual(32);
+        expect(child.x + child.width).toBeLessThanOrEqual(arranged.width - 32);
+      }
     }
     for (const [index, left] of first.zones.entries()) {
       for (const right of first.zones.slice(index + 1)) {
@@ -331,7 +328,7 @@ describe('planBoardZoneArrangement', () => {
     expect(plan.zones[2]!.position.x - plan.zones[1]!.position.x).toBe(
       plan.zones[1]!.position.x - plan.zones[0]!.position.x
     );
-    expect(plan.zones[1]!.position.x - (plan.zones[0]!.position.x + plan.zones[0]!.width)).toBe(40);
+    expect(plan.zones[1]!.position.x - (plan.zones[0]!.position.x + plan.zones[0]!.width)).toBe(64);
 
     const twoColumns = planBoardZoneArrangement(source.slice(0, 2), {
       fixedItemsPerRow: 2,
@@ -340,7 +337,7 @@ describe('planBoardZoneArrangement', () => {
     expect(
       twoColumns.zones[1]!.position.x -
         (twoColumns.zones[0]!.position.x + twoColumns.zones[0]!.width)
-    ).toBe(40);
+    ).toBe(64);
   });
 
   it('keeps explicit selection rows rigid while minimally clearing fixed board obstacles', () => {
@@ -442,10 +439,10 @@ describe('planBoardZoneArrangement', () => {
           .slice(0, index)
           .some(
             (previous) =>
-              previous.position.x + previous.width + 40 === current.position.x ||
-              current.position.x + current.width + 40 === previous.position.x ||
-              previous.position.y + previous.height + 40 === current.position.y ||
-              current.position.y + current.height + 40 === previous.position.y
+              previous.position.x + previous.width + 64 === current.position.x ||
+              current.position.x + current.width + 64 === previous.position.x ||
+              previous.position.y + previous.height + 48 === current.position.y ||
+              current.position.y + current.height + 48 === previous.position.y
           )
       ).toBe(true);
     }
@@ -479,7 +476,7 @@ describe('planBoardZoneArrangement', () => {
         [
           {
             ...zone('density', 0, 0, [item('left', 380, 100), item('right', 380, 100)]),
-            layout: { preset: 'grid', columns: 2, gap },
+            layout: { preset: 'grid', columns: 2, columnGap: gap, rowGap: gap, padding: 32 },
           },
         ],
         { mode, packZoneContents: true, resizeZoneFrames: true, justifyRows: mode === 'grid' }
@@ -501,7 +498,7 @@ describe('planBoardZoneArrangement', () => {
         mode === 'grid'
           ? [roomy.width, medium.width, dense.width]
           : [roomy.height, medium.height, dense.height]
-      ).toEqual(mode === 'grid' ? [840, 820, 820] : [360, 340, 340]);
+      ).toEqual(mode === 'grid' ? [880, 860, 860] : [400, 380, 380]);
       expect(
         planBoardZoneArrangement(
           [
@@ -512,7 +509,7 @@ describe('planBoardZoneArrangement', () => {
               ]),
               width: dense.width,
               height: dense.height,
-              layout: { preset: 'grid', columns: 2, gap: 4 },
+              layout: { preset: 'grid', columns: 2, columnGap: 4, rowGap: 4, padding: 32 },
             },
           ],
           { mode, packZoneContents: true, resizeZoneFrames: true, justifyRows: mode === 'grid' }
@@ -558,8 +555,8 @@ describe('planBoardZoneArrangement', () => {
 
     expect(empty?.width).toBe(wide?.width);
     expect(empty?.height).toBe(tall?.height);
-    expect((tall?.position.x ?? 0) - ((empty?.position.x ?? 0) + (empty?.width ?? 0))).toBe(40);
-    expect((wide?.position.y ?? 0) - ((empty?.position.y ?? 0) + (empty?.height ?? 0))).toBe(40);
+    expect((tall?.position.x ?? 0) - ((empty?.position.x ?? 0) + (empty?.width ?? 0))).toBe(64);
+    expect((wide?.position.y ?? 0) - ((empty?.position.y ?? 0) + (empty?.height ?? 0))).toBe(48);
     for (const arranged of matched.zones) {
       for (const child of arranged.items) {
         expect(child.x + child.width).toBeLessThanOrEqual(arranged.width);
@@ -575,8 +572,8 @@ describe('planBoardZoneArrangement', () => {
     });
     expect(preserved.zones.map(({ width, height }) => ({ width, height }))).toEqual([
       { width: 600, height: 240 },
-      { width: 420, height: 620 },
-      { width: 800, height: 240 },
+      { width: 460, height: 660 },
+      { width: 840, height: 280 },
     ]);
     expect(preserved.zones[1]!.position.x - (preserved.zones[0]!.position.x + 600)).toBeGreaterThan(
       40

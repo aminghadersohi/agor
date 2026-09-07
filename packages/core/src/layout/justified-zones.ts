@@ -39,7 +39,10 @@ export interface JustifiedZoneInput {
 export interface JustifiedZoneOptions {
   /** Width each full row is stretched to. */
   targetWidth: number;
+  /** @deprecated Scalar compatibility alias; prefer explicit axes. */
   gap?: number;
+  gapX?: number;
+  gapY?: number;
   startX?: number;
   startY?: number;
   /** Upper bound on zones per row. */
@@ -103,6 +106,8 @@ export interface JustifiedZoneResult {
   width: number;
   height: number;
   gap: number;
+  gapX: number;
+  gapY: number;
   rowHeights: number[];
   /**
    * Rows that could not be squeezed into targetWidth even at every zone's
@@ -314,7 +319,9 @@ export function layoutJustifiedZones(
   // Gaps are an explicit visual contract, not a dimension to quantize. Item
   // frames and the cluster origin may remain board-grid aligned while the
   // distance between neighboring frames stays exactly what the user chose.
-  const gap = nonNegative(options.gap, 40);
+  const legacyGap = nonNegative(options.gap, 40);
+  const gapX = nonNegative(options.gapX, legacyGap);
+  const gapY = nonNegative(options.gapY, legacyGap);
   const startX = snap(Number.isFinite(options.startX) ? (options.startX as number) : 80);
   const startY = snap(Number.isFinite(options.startY) ? (options.startY as number) : 80);
   const targetWidth = Math.max(gridSize, floor(positive(options.targetWidth, 1600)));
@@ -343,7 +350,9 @@ export function layoutJustifiedZones(
       rows: 0,
       width: 0,
       height: 0,
-      gap,
+      gap: gapX,
+      gapX,
+      gapY,
       rowHeights: [],
       overflowingRows: [],
     };
@@ -388,7 +397,7 @@ export function layoutJustifiedZones(
       const candidate = [...current, zone];
       const naturalWidth =
         candidate.reduce((sum, entry) => sum + preferredWidth(entry), 0) +
-        gap * (candidate.length - 1);
+        gapX * (candidate.length - 1);
       if (current.length > 0 && (naturalWidth > targetWidth || candidate.length > maxPerRow)) {
         rows.push(current);
         current = [zone];
@@ -402,7 +411,7 @@ export function layoutJustifiedZones(
   const placements: JustifiedZonePlacement[] = [];
   const rowHeights: number[] = [];
   const overflowingRows: number[] = [];
-  const solvedRows = rows.map((row) => solveRow(row, targetWidth, gap, options.targetRowHeight));
+  const solvedRows = rows.map((row) => solveRow(row, targetWidth, gapX, options.targetRowHeight));
   const fixedColumnWidths =
     fixedItemsPerRow === undefined
       ? undefined
@@ -413,7 +422,7 @@ export function layoutJustifiedZones(
     fixedColumnWidths === undefined
       ? 0
       : fixedColumnWidths.reduce((sum, width) => sum + width, 0) +
-        gap * Math.max(0, fixedColumnWidths.length - 1);
+        gapX * Math.max(0, fixedColumnWidths.length - 1);
   const fixedTrackWidths =
     fixedColumnWidths !== undefined &&
     fixedNaturalWidth <= targetWidth &&
@@ -457,7 +466,8 @@ export function layoutJustifiedZones(
     const trackWidths = useFixedTracks
       ? solved.shapes.map((_shape, column) => fixedTrackWidths[column] ?? widths[column])
       : widths;
-    const actualWidth = trackWidths.reduce((sum, width) => sum + width, 0) + gap * (row.length - 1);
+    const actualWidth =
+      trackWidths.reduce((sum, width) => sum + width, 0) + gapX * (row.length - 1);
     const alignment = isLastRow ? (options.lastRowAlignment ?? 'start') : 'start';
     let x =
       startX +
@@ -488,21 +498,23 @@ export function layoutJustifiedZones(
         columns: shape.columns,
         slackY: height - shape.height,
       });
-      x += trackWidth + gap;
+      x += trackWidth + gapX;
       actualRowHeight = Math.max(actualRowHeight, rowTrackHeight, height);
     });
 
     widest = Math.max(widest, actualWidth);
     rowHeights.push(actualRowHeight);
-    y += actualRowHeight + gap;
+    y += actualRowHeight + gapY;
   });
 
   return {
     placements,
     rows: rows.length,
     width: widest,
-    height: rows.length === 0 ? 0 : y - gap - startY,
-    gap,
+    height: rows.length === 0 ? 0 : y - gapY - startY,
+    gap: gapX,
+    gapX,
+    gapY,
     rowHeights,
     overflowingRows,
   };

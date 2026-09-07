@@ -14,7 +14,9 @@ describe('shared board layout settings', () => {
     expect(selection).toMatchObject({
       mode: 'grid',
       density: 'preserve',
-      gap: 40,
+      gapX: 64,
+      gapY: 48,
+      outerMargin: 96,
       packZoneContents: true,
       resizeZoneFrames: true,
       justifyRows: true,
@@ -29,6 +31,17 @@ describe('shared board layout settings', () => {
         7
       )
     ).toMatchObject({ fixedItemsPerRow: 4, compactFixedGrid: true });
+  });
+
+  it('preserves exact axis spacing and reads the legacy scalar without persisting it', () => {
+    expect(
+      normalizeBoardLayoutSettings({ columnGap: 37.5, rowGap: 53.25, outerMargin: 91.5 }, 5)
+    ).toMatchObject({ columnGap: 37.5, rowGap: 53.25, outerMargin: 91.5 });
+    expect(normalizeBoardLayoutSettings({ gap: 27.75 }, 5)).toMatchObject({
+      columnGap: 27.75,
+      rowGap: 27.75,
+    });
+    expect(normalizeBoardLayoutSettings({ gap: 27.75 }, 5)).not.toHaveProperty('gap');
   });
 
   it('round-trips active cell alignment through the shared settings contract', () => {
