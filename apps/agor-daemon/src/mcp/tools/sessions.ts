@@ -824,18 +824,24 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         autoArchiveAfterSeconds: args.autoArchiveAfterSeconds,
       };
 
-      const childSession = await (
-        ctx.app.service('sessions') as unknown as SessionsServiceImpl
-      ).spawn(currentSessionId, spawnData, ctx.baseServiceParams);
+      // spawn/fork are custom methods, not Feathers transport methods. Scope
+      // only child admission/persistence; prompting must run after this unit
+      // commits, without holding a transaction across executor orchestration.
+      const sessionsService = ctx.app.service('sessions') as unknown as SessionsServiceImpl;
+      const childSession = await runWithMcpTenantDatabaseWrite(ctx, () =>
+        sessionsService.spawn(currentSessionId, spawnData, ctx.baseServiceParams)
+      );
 
       const task = await ctx.app.service('/sessions/:id/prompt').create(
         {
           prompt: args.prompt,
           permissionMode: childSession.permission_config?.mode || 'acceptEdits',
           stream: true,
+          metadata: { system_authored: true },
         },
         {
           ...ctx.baseServiceParams,
+          provider: undefined,
           route: { id: childSession.session_id },
         }
       );
@@ -935,8 +941,8 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         const task = await ctx.app
           .service('/sessions/:id/prompt')
           .create(
-            { prompt: args.prompt, stream: true },
-            { ...callbackParams, route: { id: sessionId } }
+            { prompt: args.prompt, stream: true, metadata: { system_authored: true } },
+            { ...callbackParams, provider: undefined, route: { id: sessionId } }
           );
 
         if (task.status === 'queued') {
@@ -995,9 +1001,10 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         const forkData: { prompt: string; task_id?: string } = { prompt: args.prompt };
         if (args.taskId) forkData.task_id = args.taskId;
 
-        const forkedSession = await (
-          ctx.app.service('sessions') as unknown as SessionsServiceImpl
-        ).fork(sessionId, forkData, ctx.baseServiceParams);
+        const sessionsService = ctx.app.service('sessions') as unknown as SessionsServiceImpl;
+        const forkedSession = await runWithMcpTenantDatabaseWrite(ctx, () =>
+          sessionsService.fork(sessionId, forkData, ctx.baseServiceParams)
+        );
 
         // Build patch for the fork — title for both modes, btw-specific metadata for btw
         const forkPatch: Record<string, unknown> = {};
@@ -1032,8 +1039,9 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             prompt: args.prompt,
             permissionMode: updatedSession.permission_config?.mode,
             stream: true,
+            metadata: { system_authored: true },
           },
-          { ...callbackParams, route: { id: forkedSession.session_id } }
+          { ...callbackParams, provider: undefined, route: { id: forkedSession.session_id } }
         );
 
         const note =
@@ -1060,17 +1068,19 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         if (args.agenticTool) spawnData.agent = args.agenticTool as AgenticToolName;
         if (args.taskId) spawnData.task_id = args.taskId;
 
-        const childSession = await (
-          ctx.app.service('sessions') as unknown as SessionsServiceImpl
-        ).spawn(sessionId, spawnData, ctx.baseServiceParams);
+        const sessionsService = ctx.app.service('sessions') as unknown as SessionsServiceImpl;
+        const childSession = await runWithMcpTenantDatabaseWrite(ctx, () =>
+          sessionsService.spawn(sessionId, spawnData, ctx.baseServiceParams)
+        );
 
         const task = await ctx.app.service('/sessions/:id/prompt').create(
           {
             prompt: args.prompt,
             permissionMode: childSession.permission_config?.mode,
             stream: true,
+            metadata: { system_authored: true },
           },
-          { ...callbackParams, route: { id: childSession.session_id } }
+          { ...callbackParams, provider: undefined, route: { id: childSession.session_id } }
         );
 
         return textResult({
@@ -1263,9 +1273,8 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       }
 
       if (termination.status === 'terminal' || termination.status === 'idle') {
-        await (
-          ctx.app.service('sessions') as unknown as SessionsServiceImpl
-        ).triggerQueueProcessing(targetSessionId, ctx.baseServiceParams);
+        const sessionsService = ctx.app.service('sessions') as unknown as SessionsServiceImpl;
+        await sessionsService.triggerQueueProcessing(targetSessionId, ctx.baseServiceParams);
       }
 
       return structuredResult({
@@ -1407,9 +1416,8 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             id: task.task_id,
           });
         }
-        await (
-          ctx.app.service('sessions') as unknown as SessionsServiceImpl
-        ).triggerQueueProcessing(targetSessionId, ctx.baseServiceParams);
+        const sessionsService = ctx.app.service('sessions') as unknown as SessionsServiceImpl;
+        await sessionsService.triggerQueueProcessing(targetSessionId, ctx.baseServiceParams);
       }
       return structuredResult({
         outcome: result.outcome,
@@ -1899,8 +1907,9 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             prompt: args.initialPrompt,
             permissionMode: session.permission_config?.mode,
             stream: true,
+            metadata: { system_authored: true },
           },
-          { ...ctx.baseServiceParams, route: { id: session.session_id } }
+          { ...ctx.baseServiceParams, provider: undefined, route: { id: session.session_id } }
         );
       }
 
@@ -2335,7 +2344,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         codex: {
           default: DEFAULT_CODEX_MODEL,
           models: codexModels,
-          note: 'Latest models are listed first; omit modelConfig to use the default. Current models are supported defaults; older entries marked provider-dependent may vary by Codex account and are checked by Codex at startup. This is Agor’s known-model registry, not a dynamic Codex CLI/provider listing. Provider-specific IDs absent from this list must be passed with mode "exact". Known unsupported legacy aliases are omitted.',
+          note: 'Latest models are listed first; omit modelConfig to use the default. Entries marked provider-dependent, including newly rolling-out models, may vary by Codex account and are checked by Codex at startup. This is Agor’s known-model registry, not a dynamic Codex CLI/provider listing. Provider-specific IDs absent from this list must be passed with mode "exact". Known unsupported legacy aliases are omitted.',
         },
         gemini: {
           default: DEFAULT_GEMINI_MODEL,

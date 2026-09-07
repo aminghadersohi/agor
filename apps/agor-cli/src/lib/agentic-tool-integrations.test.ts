@@ -365,6 +365,8 @@ describe('local selection persistence', () => {
     );
     await release();
     const releaseAgain = await acquireAgenticToolInstallLock();
+    await release();
+    await expect(acquireAgenticToolInstallLock()).rejects.toThrow('Another `agor install`');
     await releaseAgain();
   });
 

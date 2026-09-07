@@ -563,6 +563,8 @@ describe('CodexPromptService - prompt flow client initialization', () => {
       expect(mockInstanceConfigs).toEqual([
         {
           features: { goals: false, multi_agent: false },
+          // Agor always opts Codex into its sticky-task-list planning tool.
+          tools: { update_plan: { enabled: true } },
           model_instructions_file: '/tmp/agor-codex-instructions-flow.md',
           ...(expectedSandboxMode === 'workspace-write'
             ? {
@@ -1888,6 +1890,7 @@ describe('CodexPromptService - event_msg terminal handling (issue #1749)', () =>
         usage: {
           input_tokens: 8,
           cached_input_tokens: 2,
+          cache_write_input_tokens: 1,
           output_tokens: 3,
           reasoning_output_tokens: 1,
         },
@@ -1902,6 +1905,7 @@ describe('CodexPromptService - event_msg terminal handling (issue #1749)', () =>
       usage: {
         input_tokens: 8,
         cached_input_tokens: 2,
+        cache_write_input_tokens: 1,
         output_tokens: 3,
         reasoning_output_tokens: 1,
       },

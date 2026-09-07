@@ -88,7 +88,12 @@ describe('BoardRepository running Session counts', () => {
       await createSession(db, branch, owner, {
         status: SessionStatus.RUNNING,
         custom_context: {
-          gateway_source: { provider: 'slack', channel_name: 'fictional-test-channel' },
+          gateway_source: {
+            channel_type: 'slack',
+            channel_id: 'fictional-channel',
+            channel_name: 'fictional-test-channel',
+            thread_id: 'fictional-thread',
+          },
         },
       });
 
