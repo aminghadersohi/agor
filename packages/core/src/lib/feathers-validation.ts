@@ -9,6 +9,7 @@ import { Ajv } from '@feathersjs/schema';
 import type { TObject, TProperties } from '@feathersjs/typebox';
 import { getValidator, Type } from '@feathersjs/typebox';
 import { AGENTIC_TOOL_NAMES, PERSISTED_AGENTIC_TOOL_NAMES } from '../types/agentic-tool';
+import { SESSION_POWER_PRIORITIES } from '../types/power-management';
 
 /**
  * Query validator with type coercion enabled
@@ -107,6 +108,9 @@ export function createQuerySchema<T extends TProperties>(properties: TObject<T>)
  */
 export const sessionQuerySchema = createQuerySchema(
   Type.Object({
+    power_priority: Type.Optional(
+      Type.Union(SESSION_POWER_PRIORITIES.map((value) => Type.Literal(value)))
+    ),
     session_id: Type.Optional(CommonSchemas.uuid),
     status: Type.Optional(CommonSchemas.sessionStatus),
     agentic_tool: Type.Optional(CommonSchemas.persistedAgenticTool),

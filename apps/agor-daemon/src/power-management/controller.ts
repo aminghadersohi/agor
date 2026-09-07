@@ -1,4 +1,5 @@
 import type { ResolvedPowerManagementConfig } from '@agor/core/config';
+import { powerManagementSettingsFromResolved } from '@agor/core/config';
 import type { PowerManagementStatus, PowerTaskHold, SessionPowerPriority } from '@agor/core/types';
 import type { DaemonMetrics } from '../metrics/index.js';
 import { NOOP_METRICS } from '../metrics/index.js';
@@ -34,6 +35,7 @@ export class PowerPolicyController {
   private activePoll?: Promise<void>;
   private stopped = true;
   private draining = false;
+  private observation?: PowerManagementStatus['observation'];
   private recoveryPacing = false;
   private nextRecoveryDispatchAt = 0;
 
@@ -67,7 +69,12 @@ export class PowerPolicyController {
   }
 
   status(): PowerManagementStatus {
-    return this.stateMachine.snapshot();
+    return {
+      ...this.stateMachine.snapshot(),
+      configuration: powerManagementSettingsFromResolved(this.config),
+      ...(this.observation ? { observation: { ...this.observation } } : {}),
+      recovery_pacing: this.recoveryPacing,
+    };
   }
 
   subscribe(listener: (transition: PowerPolicyTransition) => void): () => void {
@@ -171,6 +178,7 @@ export class PowerPolicyController {
   ): Promise<void> {
     const release = await this.mutex.acquire();
     try {
+      this.recordObservation(observation);
       this.publishTransition(this.stateMachine.ingest(observation));
     } finally {
       release();
@@ -226,11 +234,32 @@ export class PowerPolicyController {
     if (this.stopped) return;
     const release = await this.mutex.acquire();
     try {
+      this.recordObservation(observation);
       this.publishTransition(this.stateMachine.ingest(observation));
       this.publishTransition(this.stateMachine.evaluateStaleness());
     } finally {
       release();
     }
+  }
+
+  private recordObservation(observation: Awaited<ReturnType<PowerSourceProvider['read']>>): void {
+    if (this.config.mode === 'off') return;
+    // Rebuild the allowlist: never spread provider data or retain old charge on failure.
+    this.observation = {
+      condition: observation.condition,
+      communication: observation.communication,
+      observed_at: this.clock.wallNow().toISOString(),
+      ...(observation.communication === 'ok' && observation.condition !== 'unknown'
+        ? {
+            ...(observation.chargePercent !== undefined
+              ? { charge_percent: observation.chargePercent }
+              : {}),
+            ...(observation.runtimeSeconds !== undefined
+              ? { runtime_seconds: observation.runtimeSeconds }
+              : {}),
+          }
+        : {}),
+    };
   }
 
   private publishTransition(transition: PowerPolicyTransition | null): void {

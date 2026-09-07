@@ -1,3 +1,4 @@
+import type { AgorPowerManagementSettings } from '../config/types';
 import type { SessionID, UserID } from './id';
 
 export const POWER_MANAGEMENT_MODES = ['off', 'observe', 'enforce'] as const;
@@ -33,6 +34,16 @@ export const SESSION_POWER_PRIORITIES = ['normal', 'essential'] as const;
 export type SessionPowerPriority = (typeof SESSION_POWER_PRIORITIES)[number];
 
 export interface PowerManagementStatus {
+  /** Admin-only allowlisted configuration; never contains host identity or credentials. */
+  configuration?: AgorPowerManagementSettings;
+  observation?: {
+    condition: 'online' | 'battery' | 'unknown';
+    communication: 'ok' | 'lost';
+    observed_at: string;
+    charge_percent?: number;
+    runtime_seconds?: number;
+  };
+  recovery_pacing?: boolean;
   mode: PowerManagementMode;
   state: PowerPolicyState;
   freshness: 'fresh' | 'stale' | 'unavailable';

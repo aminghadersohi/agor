@@ -107,7 +107,7 @@ absent from this deployment list.
 ## UPS-aware dispatch admission (macOS V1)
 
 Power management is off by default. On a standalone macOS host, start with `observe`, verify the
-redacted admin banner through several normal samples, and only then choose `enforce`:
+admin UPS indicator and monitoring workspace through several normal samples, and only then choose `enforce`:
 
 ```yaml
 execution:
@@ -144,6 +144,33 @@ static-tenant, SQLite, local-executor, and `unix_user_mode: simple`. It does not
 shutdown, suspend processes, use `SIGSTOP`/`SIGCONT`, stop running Tasks, or provide NUT/network UPS
 polling. Configuration changes require a daemon restart. To roll back the policy, restore `mode:
 off` and restart; queued Tasks and Session priority metadata remain intact.
+
+### Admin configuration and monitoring UI
+
+Admins can open **Settings → Admin → UPS Power**, or select the persistent **UPS** indicator in
+the app header. The indicator distinguishes Off, Online, Conserve, Critical, Recovery, and Error;
+Observe is explicitly labeled. Members and viewers cannot read host telemetry or open this pane.
+
+The workspace shows the active mode and supported provider, normalized source, provider health,
+optional charge/runtime, freshness, reason, UTC timestamps, ordinary and Essential admission, and
+stable-online recovery and queue pacing. Reads refresh every five seconds and on policy transitions.
+A failed refresh clears the displayed readings rather than presenting old telemetry as current.
+Missing telemetry is shown as **Not reported**, never zero. Held denotes an admission decision;
+there is no held-task count or inventory API.
+
+The configuration editor prepares a **draft**, initialized from the active configuration. It exposes
+all supported timing, critical-threshold, and communication-loss controls, validates the same bounds
+and timing relationships as startup, and generates only the `execution.power_management` YAML
+subtree. It does **not** save or apply configuration remotely. Merge that subtree into the existing
+operator-managed configuration without replacing unrelated execution settings, restart the daemon,
+and reopen the workspace to verify the active values. Reset restores the latest active configuration.
+No provider addresses, commands, device names, raw output, or credentials are exposed.
+
+The Essential Session selector lists authorized Sessions (with pagination, including archived
+Sessions) and identifies an existing Essential Session only if it is visible to the caller. It uses
+the existing Branch Manager-authorized priority API. Admin role alone does not grant foreign-branch
+access. Clear an existing Essential designation before choosing a replacement; the single-slot
+constraint remains atomic, and the UI never silently demotes an inaccessible Session.
 
 Fresh interactive init always writes `agentic_tools.installed` once, then installs the selected
 packages before returning. Fresh headless init requires `--agentic-tools` (or

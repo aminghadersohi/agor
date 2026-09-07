@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertPowerManagementActivationSupported,
+  powerManagementSettingsFromResolved,
   resolvePowerManagementConfig,
 } from './power-management';
 import type { AgorConfig } from './types';
@@ -65,4 +66,14 @@ describe('assertPowerManagementActivationSupported', () => {
       )
     ).toThrow(/database.dialect sqlite/);
   });
+});
+
+it('round-trips only supported power configuration into the admin YAML projection', () => {
+  const resolved = resolvePowerManagementConfig({ mode: 'observe' });
+  const projection = powerManagementSettingsFromResolved({
+    ...resolved,
+    privateValue: 'never expose',
+  } as typeof resolved);
+  expect(resolvePowerManagementConfig(projection)).toEqual(resolved);
+  expect(projection).not.toHaveProperty('privateValue');
 });

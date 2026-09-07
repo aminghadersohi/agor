@@ -106,10 +106,12 @@ describe('PowerPolicyController admission fence', () => {
       value: 'queued-prompt-preserved',
     });
     expect(Object.keys(observe.status()).sort()).toEqual([
+      'configuration',
       'freshness',
       'held',
       'mode',
       'reason',
+      'recovery_pacing',
       'state',
       'transitioned_at',
       'would_hold',
@@ -131,4 +133,35 @@ describe('PowerPolicyController admission fence', () => {
     expect(priorityRead).not.toHaveBeenCalled();
     expect(claim).toHaveBeenCalledOnce();
   });
+});
+
+it('exposes allowlisted current telemetry, clears charge on provider failure, and remains inert off', async () => {
+  const clock = new FakeClock();
+  const controller = new PowerPolicyController(config(), null, clock);
+  await controller.ingestForTest({
+    condition: 'battery',
+    communication: 'ok',
+    chargePercent: 72,
+    runtimeSeconds: 1200,
+  });
+  expect(controller.status()).toMatchObject({
+    configuration: { mode: 'enforce', critical: { charge_percent: 20 }, max_essential_sessions: 1 },
+    observation: {
+      condition: 'battery',
+      communication: 'ok',
+      charge_percent: 72,
+      runtime_seconds: 1200,
+      observed_at: clock.wallNow().toISOString(),
+    },
+    recovery_pacing: false,
+  });
+  await controller.ingestForTest({ condition: 'unknown', communication: 'lost' });
+  expect(controller.status().observation).toEqual({
+    condition: 'unknown',
+    communication: 'lost',
+    observed_at: clock.wallNow().toISOString(),
+  });
+  const disabled = new PowerPolicyController(resolvePowerManagementConfig(undefined), null, clock);
+  await disabled.ingestForTest({ condition: 'battery', communication: 'ok', chargePercent: 72 });
+  expect(disabled.status().observation).toBeUndefined();
 });

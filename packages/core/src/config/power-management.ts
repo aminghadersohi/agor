@@ -184,3 +184,28 @@ export function assertPowerManagementActivationSupported(
     );
   }
 }
+
+/** Explicit, credential-free configuration projection for the admin UI and YAML drafts. */
+export function powerManagementSettingsFromResolved(
+  config: ResolvedPowerManagementConfig
+): AgorPowerManagementSettings {
+  return {
+    mode: config.mode,
+    provider: config.provider,
+    poll_interval_ms: config.pollIntervalMs,
+    provider_timeout_ms: config.providerTimeoutMs,
+    stale_after_ms: config.staleAfterMs,
+    on_battery_debounce_ms: config.onBatteryDebounceMs,
+    online_stable_ms: config.onlineStableMs,
+    recovery_dispatch_interval_ms: config.recoveryDispatchIntervalMs,
+    max_essential_sessions: config.maxEssentialSessions,
+    critical: {
+      charge_percent: config.critical.chargePercent,
+      runtime_seconds: config.critical.runtimeSeconds,
+      consecutive_samples: config.critical.consecutiveSamples,
+    },
+    communication_loss: {
+      last_on_battery_critical_after_ms: config.communicationLoss.lastOnBatteryCriticalAfterMs,
+    },
+  };
+}

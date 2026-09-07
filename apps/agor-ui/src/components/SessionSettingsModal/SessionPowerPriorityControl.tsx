@@ -65,20 +65,20 @@ export function SessionPowerPriorityControl({
   if (!view)
     return <Typography.Text type="secondary">Power priority is unavailable.</Typography.Text>;
   return (
-    <Space direction="vertical" size="small" style={{ width: '100%' }}>
+    <Space orientation="vertical" size="small" style={{ width: '100%' }}>
       <Space wrap>
         <Typography.Text>Requested</Typography.Text>
         <Select
           aria-label="Power priority"
           value={view.requested}
-          disabled={!view.can_manage}
+          disabled={!view.can_manage || saving}
           loading={saving}
           onChange={changePriority}
           options={[
             { value: 'normal', label: 'Normal' },
             { value: 'essential', label: 'Essential — keep dispatching on UPS' },
           ]}
-          style={{ minWidth: 260 }}
+          style={{ width: '100%', maxWidth: 360 }}
         />
         <Tag color={view.effective ? 'green' : 'default'}>
           Effective: {view.effective ? 'Essential' : 'Normal'}

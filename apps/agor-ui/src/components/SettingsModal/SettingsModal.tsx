@@ -63,6 +63,7 @@ import { CardsTable } from './CardsTable';
 import { GatewayChannelsTable } from './GatewayChannelsTable';
 import { GroupsTable } from './GroupsTable';
 import { MCPServersTable } from './MCPServersTable';
+import { PowerManagementTab } from './PowerManagementTab';
 import { ReposTable } from './ReposTable';
 import { TeammatesTable } from './TeammatesTable';
 import { UsersTable } from './UsersTable';
@@ -257,6 +258,7 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
       switch (section) {
         case 'agentic-tools':
         case 'gateway':
+        case 'power':
         case 'groups':
           return isAdmin;
         case 'users':
@@ -374,6 +376,9 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
               label: 'Admin',
               type: 'group' as const,
               children: [
+                ...(isAdmin
+                  ? [{ key: 'power', label: 'UPS Power', icon: <ThunderboltOutlined /> }]
+                  : []),
                 ...(canSeeSection('groups')
                   ? [
                       {
@@ -430,6 +435,7 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
         : []),
       ...(canSeeSection('groups') ? [{ label: 'Admin · Groups', value: 'groups' }] : []),
       ...(canSeeSection('users') ? [{ label: 'Admin · Users', value: 'users' }] : []),
+      ...(isAdmin ? [{ label: 'Admin · UPS Power', value: 'power' }] : []),
       { label: 'System · About', value: 'about' },
     ],
     [canSeeSection, isAdmin]
@@ -442,6 +448,8 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
     if (!canSeeSection(activeTab)) return null;
 
     switch (activeTab) {
+      case 'power':
+        return <PowerManagementTab client={client} currentUser={currentUser} />;
       case 'boards':
         return (
           <BoardsTable
