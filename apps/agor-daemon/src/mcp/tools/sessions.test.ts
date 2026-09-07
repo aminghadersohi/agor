@@ -1797,8 +1797,9 @@ describe('agor_sessions_prompt task callback', () => {
     });
 
     expect(promptCreate).toHaveBeenCalledWith(
-      { prompt: 'continue the root work', stream: true },
+      { prompt: 'continue the root work', stream: true, metadata: { system_authored: true } },
       expect.objectContaining({
+        provider: undefined,
         route: { id: 'sess-child' },
         _completionContinuation: {
           subscription_id: 'subscription-root',

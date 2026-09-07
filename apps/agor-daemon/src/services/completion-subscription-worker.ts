@@ -272,14 +272,20 @@ export class CompletionSubscriptionWorker {
     const { subscriptions, tasks } = this.repositories();
     const subscription = await subscriptions.get(id);
     if (!subscription.active_task_id) {
-      await subscriptions.markMissingActive(id, null);
-      console.warn(`[completion-callback] event=downstream_missing subscription_id=${shortId(id)}`);
+      if (await subscriptions.markMissingActive(id, null)) {
+        console.warn(
+          `[completion-callback] event=downstream_missing subscription_id=${shortId(id)}`
+        );
+      }
       return;
     }
     const task = await tasks.findById(subscription.active_task_id);
     if (!task) {
-      await subscriptions.markMissingActive(id, subscription.active_task_id);
-      console.warn(`[completion-callback] event=downstream_missing subscription_id=${shortId(id)}`);
+      if (await subscriptions.markMissingActive(id, subscription.active_task_id)) {
+        console.warn(
+          `[completion-callback] event=downstream_missing subscription_id=${shortId(id)}`
+        );
+      }
       return;
     }
     if (!isTerminalTaskStatus(task.status)) {
@@ -289,7 +295,7 @@ export class CompletionSubscriptionWorker {
       return;
     }
     const terminalHop = subscription.path.at(-1);
-    await subscriptions.markTerminalForTask(task.task_id, {
+    const terminalized = await subscriptions.markTerminalForTask(task.task_id, {
       session_id: task.session_id,
       task_id: task.task_id,
       ...(terminalHop?.branch_id ? { branch_id: terminalHop.branch_id } : {}),
@@ -297,9 +303,14 @@ export class CompletionSubscriptionWorker {
       completed_at: task.completed_at ?? new Date().toISOString(),
       ...(task.error_message ? { reason: task.error_message.slice(0, 2_000) } : {}),
     });
-    console.log(
-      `[completion-callback] event=terminal_captured subscription_id=${shortId(id)} status=${completionTerminalStatusForTask(task)}`
-    );
+    // A concurrent reconciler or a continuation designated between the read
+    // above and this write can legitimately lose this race; only log capture
+    // when this call is the one that actually transitioned the subscription.
+    if (terminalized) {
+      console.log(
+        `[completion-callback] event=terminal_captured subscription_id=${shortId(id)} status=${completionTerminalStatusForTask(task)}`
+      );
+    }
   }
 
   private async deliver(id: CompletionSubscriptionID, tenantId: string): Promise<void> {
@@ -404,10 +415,12 @@ export class CompletionSubscriptionWorker {
       // transaction, under the same tenant authorization fence used by
       // /sessions/:id/prompt admission. This closes the gap where a branch
       // capability revocation commits between the fast-path check above and
-      // Task creation. A deterministic-insert collision with another worker
-      // is left to abort this transaction and surface through the outer
-      // catch below; recordDeliveryFailure's retry will observe the winner's
-      // already-committed row as `existing` on the next attempt.
+      // Task creation. Idempotency and identity-collision detection are
+      // TaskRepository.createPending's own contract (the same one
+      // register-routes.ts and TasksService's legacy callback path already
+      // rely on) — it row-locks and returns the existing Task unchanged when
+      // this deterministic ID was already admitted, so delivery does not
+      // reimplement that check.
       const { callbackTask, created } = await runWithTenantDatabaseTransaction(
         this.db,
         tenantId,
@@ -420,16 +433,7 @@ export class CompletionSubscriptionWorker {
             new BranchRepository(operationDb)
           );
           const operationTasks = new TaskRepository(operationDb);
-          const existing = await operationTasks.findById(deliveryTaskId);
-          if (existing) {
-            if (
-              existing.session_id !== callbackSession.session_id ||
-              existing.metadata?.completion_subscription_id !== subscription.subscription_id
-            ) {
-              throw new Error('Durable completion delivery key collision');
-            }
-            return { callbackTask: existing, created: false };
-          }
+          const before = await operationTasks.findById(deliveryTaskId);
           const admitted = await operationTasks.createPending({
             task_id: deliveryTaskId,
             session_id: callbackSession.session_id,
@@ -443,7 +447,7 @@ export class CompletionSubscriptionWorker {
               authorized,
             }),
           });
-          return { callbackTask: admitted, created: true };
+          return { callbackTask: admitted, created: !before };
         }
       );
       await subscriptions.recordDelivered(id, callbackTask.task_id);
