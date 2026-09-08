@@ -1357,8 +1357,14 @@ describe('isPromptFlowPatchOnly', () => {
       expect(isPromptFlowPatchOnly({ tasks: ['task-1', 'task-2'] })).toBe(true);
     });
 
-    it('accepts prompt admission cancelling a pending automatic archive', () => {
+    it('accepts the prompt-route auto-archive cancellation shape', () => {
+      // register-routes.ts: /sessions/:id/prompt cancels pending cleanup after
+      // restoring archive state through the dedicated lifecycle service.
       expect(isPromptFlowPatchOnly({ auto_archive_at: undefined })).toBe(true);
+    });
+
+    it('rejects direct archive-state mutation from prompt flow', () => {
+      expect(isPromptFlowPatchOnly({ archived: false, archived_reason: undefined })).toBe(false);
     });
 
     it('accepts the stop-route idle shape', () => {
