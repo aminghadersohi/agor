@@ -16,6 +16,11 @@ This file is intentionally high-level. There are three places to look:
 
 **Rule of thumb:** If a topic has a guide page, read the guide. `context/` is for orientation, not exposition.
 
+**Do not accumulate task reports in the repo.** Routine bug investigations, audit snapshots,
+before/after evidence, and validation receipts belong in the issue or PR, not new dated
+`docs/internal/` files. Update an existing guide or code comment for durable behavior changes;
+retain separate docs only for lasting design/security contracts or operational runbooks.
+
 ---
 
 ## Quick Start
@@ -411,9 +416,9 @@ probes the endpoint on every connect, whatever the entry says. A valid JSON-RPC
 `per_user` OAuth row; a non-OAuth challenge installs only when the entry carries
 a reviewed bearer-credential recipe and the caller supplies a key that passes a
 second `initialize`. When the probe contradicts the entry, the daemon logs it at
-`warn` with the stated and probed values; that log is the only thing that can
-catch a stale `auth_type`, because nothing else compares the file against the
-servers it describes.
+`warn` with the stated and probed values. The catalog health workflow repeats
+that comparison on curation pull requests and on a schedule, annotates
+transient reachability separately, and fails on actionable auth/OAuth drift.
 
 OAuth entries that omit `oauth.compatibility_mode` use an internal,
 non-persistable `marketplace` profile. This is not a general relaxed default: it
@@ -428,10 +433,13 @@ keeps Monday, Cloudflare, ClickUp, and Preset on `strict`. Preset is pinned
 defensively pending production OAuth validation, not asserted to have passed it;
 an edited/imported install, a removed entry, or any catalog configuration drift
 falls back to `strict`.
-GitHub, Prisma, MongoDB, Box, HubSpot, Slack, PagerDuty, and Kagi were removed
-from the shelf because the review could not establish a safely bound
-client-registration or issuer path; do not re-add one merely because its
-endpoint still challenges for OAuth.
+Prisma, MongoDB, Box, HubSpot, Slack, PagerDuty, and Kagi remain off the shelf
+because the review could not establish a safely bound client-registration or
+issuer path; do not re-add one merely because its endpoint challenges for
+OAuth. GitHub instead uses its documented PAT bearer route: the catalog marks
+the OAuth challenge as a reviewed exception, Connect verifies each supplied PAT
+against the pinned endpoint, and the health audit reports separately if the
+OAuth metadata later becomes usable so the exception can be retired.
 
 An endpoint the probe finds behind a non-OAuth challenge is installed with a key
 the user pastes into the marketplace drawer. The key never goes in
@@ -575,15 +583,3 @@ cd apps/agor-daemon && pnpm dev
 
 _For product vision: [`README.md`](README.md)_
 _For architecture: [`context/concepts/architecture.md`](context/concepts/architecture.md) and [`apps/agor-docs/pages/guide/architecture.mdx`](apps/agor-docs/pages/guide/architecture.mdx)_
-
----
-
-## Agor Session Context
-
-You are currently running within **Agor** (https://agor.live), a multiplayer canvas for orchestrating AI coding agents.
-
-**Your current Agor session ID is: `03b62447-f2c6-4259-997b-d38ed1ddafed`** (short: `03b62447`)
-
-When you see this ID referenced in prompts or tool calls, it refers to THIS session you're currently in.
-
-For more information about Agor, visit https://agor.live

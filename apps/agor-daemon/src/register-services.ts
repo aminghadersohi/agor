@@ -68,6 +68,7 @@ import {
   hasTemplateMarker,
   isMCPServerUsableBy,
   type MCPExternalErrorStage,
+  normalizeDiscoveredMCPCapabilities,
   sanitizeMCPExternalError,
 } from '@agor/core/mcp';
 import type {
@@ -81,6 +82,8 @@ import type {
   AuthenticatedParams,
   HookContext,
   MCPAuth,
+  MCPDiscoveryRequest,
+  MCPDiscoveryResult,
   MCPOAuthAttemptID,
   MCPOAuthBrowserEventRequest,
   MCPOAuthBrowserOperation,
@@ -311,6 +314,7 @@ import {
   isSessionMcpServerLinkVisibleToCaller,
   loadMcpServerForCaller,
   registerMcpCapabilityRoleFloor,
+  resolveMcpCaller,
 } from './utils/mcp-server-authorization.js';
 import { resolveOwnerHomeStore, resolveSandboxStoragePaths } from './utils/sandbox-context.js';
 import {
@@ -5179,42 +5183,27 @@ export async function registerMCPServices(
     server: MCPServer,
     params?: AuthenticatedParams
   ): { success: false; error: string } | null => {
-    if (!params?.provider || !params.user) return null;
-    if (hasMinimumRole(params.user.role?.toLowerCase(), ROLES.ADMIN)) return null;
-    if (server.owner_user_id && server.owner_user_id === params.user.user_id) return null;
-    return {
-      success: false,
+    const caller = resolveMcpCaller(params);
+    if (caller.kind === 'internal') return null;
+    const denial = {
+      success: false as const,
       error: 'Access denied: only an admin or the server owner can discover this MCP server',
     };
+    // Read visibility is not discovery authority: service accounts carry no
+    // membership or ownership and must not exercise a saved credential here.
+    if (caller.kind === 'anonymous' || caller.kind === 'service-account') return denial;
+    const user = caller.user;
+    if (hasMinimumRole(user.role?.toLowerCase(), ROLES.ADMIN)) return null;
+    if (server.owner_user_id && server.owner_user_id === user.user_id) return null;
+    return denial;
   };
 
   // Discover endpoint
   app.use('/mcp-servers/discover', {
     async create(
-      data: {
-        mcp_server_id?: string;
-        url?: string;
-        transport?: 'http' | 'sse';
-        auth?: {
-          type: 'none' | 'bearer' | 'jwt' | 'oauth';
-          token?: string;
-          api_url?: string;
-          api_token?: string;
-          api_secret?: string;
-          oauth_token_url?: string;
-          oauth_client_id?: string;
-          oauth_client_secret?: string;
-          oauth_scope?: string;
-          oauth_grant_type?: string;
-          oauth_mode?: 'per_user' | 'shared';
-          oauth_compatibility_mode?: 'strict' | 'legacy';
-          oauth_dcr_mode?: MCPOAuthDCRMode;
-        };
-        headers?: Record<string, string>;
-        oauth_browser_event?: MCPOAuthBrowserEventRequest;
-      },
+      data: MCPDiscoveryRequest,
       params?: AuthenticatedParams
-    ) {
+    ): Promise<MCPDiscoveryResult> {
       try {
         const browserReservation = consumeOAuthBrowserReservation(
           data.oauth_browser_event,
@@ -5240,7 +5229,7 @@ export async function registerMCPServices(
         const { mergeMCPRemoteHeaders } = await import('@agor/core/tools/mcp/http-headers');
         const tenantId = tenantIdFromParams(params);
 
-        const validateUrl = (url: string): { valid: boolean; error?: string } => {
+        const validateUrl = (url: string): { valid: true } | { valid: false; error: string } => {
           try {
             const parsed = new URL(url);
             if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -5768,35 +5757,38 @@ export async function registerMCPServices(
             listTimeout,
           ])) as PromptsResult;
 
+          const discovered = {
+            tools: toolsResult.tools.map((t) => ({
+              name: t.name,
+              description: t.description,
+              input_schema: t.inputSchema,
+            })),
+            resources: resourcesResult.resources.map((r) => ({
+              uri: r.uri,
+              name: r.name,
+              description: r.description,
+              mimeType: r.mimeType,
+            })),
+            prompts: promptsResult.prompts.map((p) => ({
+              name: p.name,
+              description: p.description,
+              arguments: p.arguments?.map((a) => ({
+                name: a.name,
+                description: a.description,
+                required: a.required,
+              })),
+            })),
+          };
+          let normalizedDiscovery: ReturnType<typeof normalizeDiscoveredMCPCapabilities>;
+
           if (serverId && discoveryAuthority) {
-            await runWithinOAuthAuthority(assertCurrentRequestAuthority, () =>
+            normalizedDiscovery = await runWithinOAuthAuthority(assertCurrentRequestAuthority, () =>
               runWithTenantDatabaseTransaction(db, tenantId, (scopedDb) =>
                 persistDiscoveredMCPCapabilities(
                   scopedDb,
                   tenantId,
                   discoveryAuthority as MCPDiscoveryAuthoritySnapshot,
-                  {
-                    tools: toolsResult.tools.map((t) => ({
-                      name: t.name,
-                      description: t.description,
-                      input_schema: t.inputSchema,
-                    })),
-                    resources: resourcesResult.resources.map((r) => ({
-                      uri: r.uri,
-                      name: r.name,
-                      description: r.description,
-                      mimeType: r.mimeType,
-                    })),
-                    prompts: promptsResult.prompts.map((p) => ({
-                      name: p.name,
-                      description: p.description,
-                      arguments: p.arguments?.map((a) => ({
-                        name: a.name,
-                        description: a.description,
-                        required: a.required,
-                      })),
-                    })),
-                  },
+                  discovered,
                   process.env.AGOR_MASTER_SECRET ?? ''
                 )
               )
@@ -5810,25 +5802,30 @@ export async function registerMCPServices(
               tenantId,
               [userId, authoritativeServer?.owner_user_id].filter(Boolean) as UserID[]
             );
+          } else {
+            normalizedDiscovery = normalizeDiscoveredMCPCapabilities(discovered);
           }
 
           return {
             success: true,
             capabilities: {
-              tools: toolsResult.tools.length,
-              resources: resourcesResult.resources.length,
-              prompts: promptsResult.prompts.length,
+              tools: normalizedDiscovery.capabilities.tools.length,
+              resources: normalizedDiscovery.capabilities.resources.length,
+              prompts: normalizedDiscovery.capabilities.prompts.length,
             },
-            tools: toolsResult.tools.map((t) => ({
+            metadata: {
+              descriptions_truncated: normalizedDiscovery.truncatedDescriptions,
+            },
+            tools: normalizedDiscovery.capabilities.tools.map((t) => ({
               name: t.name,
               description: t.description || '',
             })),
-            resources: resourcesResult.resources.map((r) => ({
+            resources: normalizedDiscovery.capabilities.resources.map((r) => ({
               name: r.name,
               uri: r.uri,
               mimeType: r.mimeType,
             })),
-            prompts: promptsResult.prompts.map((p) => ({
+            prompts: normalizedDiscovery.capabilities.prompts.map((p) => ({
               name: p.name,
               description: p.description || '',
             })),

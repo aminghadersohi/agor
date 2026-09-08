@@ -28,6 +28,7 @@ import { readCollapsedBranchNode } from '../../utils/collapsedBranchNodes';
 import {
   REACT_FLOW_DRAG_HANDLE_CLASS,
   REACT_FLOW_NO_DRAG_CLASS,
+  REACT_FLOW_NO_WHEEL_CLASS,
 } from '../../utils/reactFlowDragClasses';
 import { ensureColorVisible, isDarkTheme } from '../../utils/theme';
 import { ArchiveActionButton } from '../ArchiveButton';
@@ -126,6 +127,38 @@ const BranchCardComponent = ({
   const connectionDisabled = useConnectionDisabled();
 
   const branchBoardId = (branch as { board_id?: string | null }).board_id;
+  const cardRef = React.useRef<HTMLDivElement>(null);
+  const sessionSectionsRef = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const card = cardRef.current;
+    if (!card || inPopover || panelMode) return;
+
+    const onWheel = (event: WheelEvent) => {
+      if (!(event.target instanceof Element)) return;
+      const scrollArea = event.target.closest(`.${REACT_FLOW_NO_WHEEL_CLASS}`);
+      const renderer = card.closest('.react-flow__renderer');
+      if (!scrollArea || !card.contains(scrollArea) || !renderer) return;
+
+      // Session lists belong to the canvas gesture surface, even when virtual.
+      // Expanded descriptions/peeks retain ordinary scrolling only if they overflow.
+      const isSessionList = sessionSectionsRef.current?.contains(scrollArea);
+      const overflows =
+        scrollArea.scrollHeight > scrollArea.clientHeight ||
+        scrollArea.scrollWidth > scrollArea.clientWidth;
+      if (!event.ctrlKey && !event.metaKey && !isSessionList && overflows) return;
+
+      // Removing nowheel alone is insufficient: the virtual list still consumes
+      // wheel. Capture first, then let React Flow own pan/zoom and anchoring.
+      event.preventDefault();
+      event.stopPropagation();
+      renderer.dispatchEvent(new WheelEvent(event.type, event));
+    };
+
+    // React's delegated wheel listeners are passive; cancellation must be native.
+    card.addEventListener('wheel', onWheel, { capture: true, passive: false });
+    return () => card.removeEventListener('wheel', onWheel, { capture: true });
+  }, [inPopover, panelMode]);
 
   // Canvas cards hydrate their session sections in chunks after the board
   // shell commits (#1768); panel/popover surfaces render a single card, so
@@ -329,6 +362,7 @@ const BranchCardComponent = ({
 
   return (
     <Card
+      ref={cardRef}
       onClickCapture={() => onAutoZoneInteraction?.(branch.branch_id)}
       onPointerDownCapture={() => onAutoZoneInteraction?.(branch.branch_id)}
       onFocusCapture={() => onAutoZoneInteraction?.(branch.branch_id)}
@@ -594,6 +628,7 @@ const BranchCardComponent = ({
       {/* Sessions & Scheduled Runs - composable content shared with the teammate panel */}
       {!compact && (
         <div
+          ref={sessionSectionsRef}
           className={REACT_FLOW_NO_DRAG_CLASS}
           style={sectionsReady ? undefined : { minHeight: sessionShellMinHeight }}
         >
