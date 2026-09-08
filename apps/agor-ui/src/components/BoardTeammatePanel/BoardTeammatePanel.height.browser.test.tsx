@@ -16,6 +16,10 @@ const branch = {
 
 beforeEach(() => {
   localStorage.clear();
+  // Keep these allocation tests aligned with upstream's compact teammate
+  // header. The private integration defaults the configurable portrait to a
+  // larger size, which intentionally leaves less room for the session trees.
+  localStorage.setItem('agor:teammate-panel-portrait-size', 'tiny');
   agorStore.setState({ ...EMPTY_MAPS });
 });
 
