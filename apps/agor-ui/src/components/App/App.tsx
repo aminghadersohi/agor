@@ -71,12 +71,13 @@ import {
   selectFirstBoardId,
   selectSessionById,
 } from '../../store/selectors';
+import { SharedUserSettingsModal } from '../../surfaces/SharedUserSettingsModal';
 import type { AgenticToolOption, CreateRepoOptions } from '../../types';
 import { initializeAudioOnInteraction } from '../../utils/audio';
 import { useThemedMessage } from '../../utils/message';
 import type { OnboardingReopenMode } from '../../utils/onboardingLifecycle';
 import { resolveQuickStartMcpServerIds } from '../../utils/resolveQuickStartMcpServerIds';
-import { getSurfacePath, hasExplicitEntityRouteTarget } from '../../utils/routeTargets';
+import { getShellSurfacePath, hasExplicitEntityRouteTarget } from '../../utils/routeTargets';
 import { startTeammateBootstrapSession } from '../../utils/startTeammateBootstrapSession';
 import {
   buildTeammateBootstrapPrompt,
@@ -102,7 +103,7 @@ import { SessionCanvas, type SessionCanvasRef } from '../SessionCanvas';
 import { SessionPanel } from '../SessionPanel';
 import { PendingToolChoicePanel } from '../SessionPanel/PendingToolChoicePanel';
 import { SessionSettingsModal } from '../SessionSettingsModal';
-import { SettingsModal, UserSettingsModal } from '../SettingsModal';
+import { SettingsModal } from '../SettingsModal';
 import { TeammateChatCollectionsModal } from '../TeammateChatCollections';
 import { TerminalModal, WEB_TERMINAL_MIN_ROLE } from '../TerminalModal';
 import { ThemeEditorModal } from '../ThemeEditorModal';
@@ -247,6 +248,14 @@ export interface AppProps {
     updates: UpdateUserInput,
     shouldApply?: () => boolean
   ) => void | Promise<void>;
+  /**
+   * Re-syncs the authenticated user's own directory row after a self-edit.
+   * `onUpdateUser` only persists the patch; the caller's `useAuth()` snapshot
+   * (`user`/`currentUser` here) is a separate one-time-fetched copy that
+   * `onUpdateUser` never touches, so without this the Settings modal reverts
+   * to stale values on next open (e.g. a cleared API key still shows "Set").
+   */
+  onRefreshCurrentUser?: (shouldApply: () => boolean) => Promise<unknown>;
   onDeleteUser?: (userId: string, shouldApply?: () => boolean) => void | Promise<void>;
   onCreateMCPServer?: (
     data: CreateMCPServerInput,
@@ -368,6 +377,7 @@ export const App: React.FC<AppProps> = ({
   onExecuteScheduleNow,
   onCreateUser,
   onUpdateUser,
+  onRefreshCurrentUser,
   onDeleteUser,
   onCreateMCPServer,
   onDeleteMCPServer,
@@ -413,10 +423,9 @@ export const App: React.FC<AppProps> = ({
   // instead makes opening settings unmount Home (or the chat workspace)
   // and swap in the board canvas first, which is visible as a flash of the
   // "normal" view before the modal appears.
-  const surfacePath = getSurfacePath(location);
+  const surfacePath = getShellSurfacePath(location);
   const isRootHomePath = surfacePath === '/';
   const hasExplicitEntityTarget = hasExplicitEntityRouteTarget(routeParams);
-  const [pendingHomeNavigation, setPendingHomeNavigation] = useState(false);
   const sessionCanvasRef = useRef<SessionCanvasRef>(null);
   const [newSessionBranchId, setNewSessionBranchId] = useState<string | null>(null);
   // Set instead of creating a session immediately when quick-start can't
@@ -457,9 +466,7 @@ export const App: React.FC<AppProps> = ({
     useMemo(() => makeSessionExistsSelector(selectedSessionId), [selectedSessionId])
   );
   const effectiveSelectedSessionId =
-    !isRootHomePath && !pendingHomeNavigation && selectedSessionId && selectedSessionExists
-      ? selectedSessionId
-      : null;
+    !isRootHomePath && selectedSessionId && selectedSessionExists ? selectedSessionId : null;
 
   // A real selected session always wins; the pending tool-choice empty state
   // only matters when there's no real session to show yet (see
@@ -551,7 +558,7 @@ export const App: React.FC<AppProps> = ({
   const currentBoard = useAgorStore(
     useMemo(() => makeBoardSelector(currentBoardId), [currentBoardId])
   );
-  const isHomeSurface = (isRootHomePath || pendingHomeNavigation) && !hasExplicitEntityTarget;
+  const isHomeSurface = isRootHomePath && !hasExplicitEntityTarget;
   const isChatWorkspaceSurface =
     surfacePath === `/${CHAT_WORKSPACE_PATH_SEGMENT}` ||
     surfacePath.startsWith(`/${CHAT_WORKSPACE_PATH_SEGMENT}/`);
@@ -590,26 +597,17 @@ export const App: React.FC<AppProps> = ({
     setHomeExitPanelDetailsDeferred(false);
   }, []);
 
-  // Home is route-authoritative. Do not clear board/session state while the
-  // old `/b/...` URL is still active — that creates a transient no-board
-  // canvas render. Instead, render Home immediately via `pendingHomeNavigation`
-  // during the route transition, then clean stale board/session state only once
-  // the `/` route has committed. Layout timing keeps the header/board picker
-  // from painting stale board identity on Home.
+  // Let the committed route choose Home before clearing stale selection.
+  // Optimistically hiding the session at the OLD path lets URL self-healing
+  // cancel the Home navigation. A separate pending flag can also outlive a
+  // superseded navigation. Route-derived rendering avoids both races and a
+  // boardless canvas flash; layout cleanup keeps stale identity off Home.
   useLayoutEffect(() => {
     if (!isRootHomePath || hasExplicitEntityTarget) return;
     if (currentBoardId) setCurrentBoardIdInternal('');
     if (selectedSessionId) setSelectedSessionId(null);
     if (activeUrlTarget) setActiveUrlTarget(null);
-    if (pendingHomeNavigation) setPendingHomeNavigation(false);
-  }, [
-    activeUrlTarget,
-    currentBoardId,
-    hasExplicitEntityTarget,
-    isRootHomePath,
-    pendingHomeNavigation,
-    selectedSessionId,
-  ]);
+  }, [activeUrlTarget, currentBoardId, hasExplicitEntityTarget, isRootHomePath, selectedSessionId]);
 
   const leftPanelCollapsed =
     commentsPanelCollapsed ||
@@ -1458,10 +1456,7 @@ export const App: React.FC<AppProps> = ({
   // isn't defeated by a fresh inline-arrow identity on every App re-render. Each
   // delegates to the latest impl via useStableCallback, so they read current
   // state (selection, panel, board) at call time without re-rendering the header.
-  const handleHomeClick = useStableCallback(() => {
-    setPendingHomeNavigation(true);
-    navigation.goHome();
-  });
+  const handleHomeClick = useStableCallback(() => navigation.goHome());
   const handleEventStreamClick = useStableCallback(() => {
     // If a session is open, close it and reveal the event stream; otherwise
     // toggle the event stream panel.
@@ -1494,10 +1489,6 @@ export const App: React.FC<AppProps> = ({
       <UrlStateBridge
         currentBoardId={currentBoardId}
         currentSessionId={effectiveSelectedSessionId}
-        // While a Home navigation is in flight the pair above is
-        // transitional (the session is already suppressed, the `/` route
-        // has not committed) — see `suspendStateToUrlSync`.
-        suspendStateToUrlSync={pendingHomeNavigation}
         onBoardChange={handleUrlBoardChange}
         onSessionChange={setSelectedSessionId}
         onActiveUrlTargetChange={setActiveUrlTarget}
@@ -1978,7 +1969,7 @@ export const App: React.FC<AppProps> = ({
               : undefined
           }
         />
-        <UserSettingsModal
+        <SharedUserSettingsModal
           open={effectiveUserSettingsOpen}
           initialTab={userSettingsInitialTool ?? initialUserSettingsTab}
           onClose={() => {
@@ -1987,9 +1978,9 @@ export const App: React.FC<AppProps> = ({
             onUserSettingsClose?.();
           }}
           user={user || null}
-          currentUser={user || null}
           client={client}
-          onUpdate={onUpdateUser}
+          onUpdateUser={onUpdateUser}
+          onRefreshCurrentUser={onRefreshCurrentUser}
           onReopenOnboarding={async (mode, shouldApply) => {
             if (shouldApply && !shouldApply()) return;
             await onReopenOnboarding?.(mode, shouldApply);

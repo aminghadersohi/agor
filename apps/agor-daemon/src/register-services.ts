@@ -18,6 +18,7 @@ import {
   getBranchHomePath,
   isDeploymentAgenticToolAvailable,
   MESSAGE_PAGINATION,
+  PublicBaseUrlNotConfiguredError,
   type ResolvedDeploymentConfig,
   resolveDeploymentAgenticToolPolicy,
   resolveExecutionSecurityMode,
@@ -66,26 +67,39 @@ import { BadRequest, Conflict, Forbidden, NotAuthenticated } from '@agor/core/fe
 import {
   hasTemplateMarker,
   isMCPServerUsableBy,
+  isMCPServerWriteValidationError,
+  type MCPExternalErrorCategory,
+  type MCPExternalErrorReason,
   type MCPExternalErrorStage,
+  type MCPExternalErrorType,
   normalizeDiscoveredMCPCapabilities,
   sanitizeMCPExternalError,
 } from '@agor/core/mcp';
 import type {
+  MCPOAuthDynamicClientRegistrationRequest,
   OAuthFlowContext,
   OAuthTokenResponse,
 } from '@agor/core/tools/mcp/oauth-mcp-transport';
-import { OAuthConfigurationError } from '@agor/core/tools/mcp/oauth-mcp-transport';
+import {
+  OAuthCodeExchangeError,
+  OAuthConfigurationError,
+} from '@agor/core/tools/mcp/oauth-mcp-transport';
 import type { RefreshAndPersistDeps } from '@agor/core/tools/mcp/oauth-refresh';
 import type {
   AgenticToolName,
   AuthenticatedParams,
   HookContext,
   MCPAuth,
+  MCPAuthRecovery,
+  MCPDiscoveryRequest,
+  MCPDiscoveryResult,
   MCPOAuthAttemptID,
   MCPOAuthBrowserEventRequest,
   MCPOAuthBrowserOperation,
   MCPOAuthBrowserReservation,
   MCPOAuthBrowserReservationRequest,
+  MCPOAuthClientRegistrationResetRequest,
+  MCPOAuthClientRegistrationResetResult,
   MCPOAuthDCRMode,
   MCPOAuthPendingFlowStatus,
   MCPOAuthRuntimeCompatibilityMode,
@@ -241,6 +255,7 @@ import {
   MCPMarketplaceToolPermissionService,
 } from './services/mcp-marketplace-actions.js';
 import type { MCPOAuthCallbackHandler } from './services/mcp-oauth-callback-route.js';
+import { MCPOAuthClientRegistrationAuthority } from './services/mcp-oauth-client-registration-authority.js';
 import {
   logMCPOAuthCompatibilityPolicy,
   resolveMCPOAuthCompatibilityPolicy,
@@ -252,6 +267,7 @@ import {
 import {
   isCurrentMCPOAuthGrantAuthorized,
   isMCPOAuthGrantAuthorizedForServer,
+  resolveMCPMarketplaceOAuthGrantAuthority,
 } from './services/mcp-oauth-grant-authority.js';
 import {
   fingerprintMCPOAuthGrantConfiguration,
@@ -262,7 +278,6 @@ import {
   shouldVerifyMCPOAuthGrantBinding,
 } from './services/mcp-oauth-grant-binding.js';
 import { MCPOAuthPendingFlowAuthority } from './services/mcp-oauth-pending-flow-authority.js';
-import { resolveMCPOAuthRedirectUri as resolveRedirectUri } from './services/mcp-oauth-redirect-uri.js';
 import { resolveAuthenticatedServerIds } from './services/mcp-oauth-status.js';
 import {
   createMCPServersService,
@@ -303,12 +318,13 @@ import { appendSystemMessage } from './utils/append-system-message.js';
 import { requireMinimumRole } from './utils/authorization.js';
 import { emitServiceEvent } from './utils/emit-service-event.js';
 import { renderOAuthResultPage } from './utils/html.js';
-import { emitMarketplaceInvalidation } from './utils/marketplace-invalidation.js';
+import { emitMarketplaceChanged } from './utils/marketplace-invalidation.js';
 import { createAuthorityGuardedMCPFetch } from './utils/mcp-authority-fetch.js';
 import {
   bindMCPDiscoveryOAuthGrant,
   bindMCPDiscoveryResolvedConfiguration,
   captureMCPDiscoveryAuthority,
+  type DiscoveredMCPCapabilities,
   type MCPDiscoveryAuthoritySnapshot,
   persistDiscoveredMCPCapabilities,
 } from './utils/mcp-discovered-capabilities.js';
@@ -321,6 +337,7 @@ import {
   isSessionMcpServerLinkVisibleToCaller,
   loadMcpServerForCaller,
   registerMcpCapabilityRoleFloor,
+  resolveMcpCaller,
 } from './utils/mcp-server-authorization.js';
 import { resolveOwnerHomeStore, resolveSandboxStoragePaths } from './utils/sandbox-context.js';
 import {
@@ -347,12 +364,22 @@ export interface RegisterServicesContext {
   allowSuperadmin: boolean;
   requireAuth: (context: HookContext) => Promise<HookContext>;
   deployment: ResolvedDeploymentConfig;
+  /** Startup-resolved callback URL from the frozen effective configuration. */
+  mcpOAuthCallbackUrl?: string;
   /** Injectable durable authority for boundary tests; production derives it from PostgreSQL. */
   mcpOAuthPendingFlowAuthority?: MCPOAuthPendingFlowAuthority;
+  /** Injectable fleet-wide DCR authority paired with PostgreSQL pending flows. */
+  mcpOAuthClientRegistrationAuthority?: MCPOAuthClientRegistrationAuthority;
   /** Injectable transaction-lock boundary paired with the durable authority. */
   lockMcpOAuthGrantConfiguration?: typeof lockMCPOAuthGrantConfiguration;
   /** Injectable DNS boundary for adversarial Socket.io authority tests. */
   mcpOutboundDnsLookup?: OutboundDnsLookup;
+  /** Injectable provider boundary for service-level HA tests. Production uses pinned fetch. */
+  mcpOAuthFetch?: (
+    input: string | URL | Request,
+    init?: RequestInit,
+    assertCurrent?: () => void
+  ) => Promise<Response>;
 }
 
 /**
@@ -725,16 +752,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   // The OAuth callback middleware is registered in boot.ts; here we set the handler
   {
     const mcpResult = await registerMCPServices(ctx);
-    oauthCallbackHandler = isConstrainedHa(ctx.deployment)
-      ? (_req, res) => {
-          res.status(503).json({
-            code: 'HA_FEATURE_UNSUPPORTED',
-            feature: 'mcpOAuth',
-            message:
-              'MCP OAuth callbacks are unavailable in HA support profile constrained-active-active',
-          });
-        }
-      : mcpResult.oauthCallbackHandler;
+    oauthCallbackHandler = mcpResult.oauthCallbackHandler;
   }
 
   // ============================================================================
@@ -1852,17 +1870,57 @@ export async function registerMCPServices(
   const durableOAuthFlows =
     ctx.mcpOAuthPendingFlowAuthority ??
     (postgresOAuthDeployment ? new MCPOAuthPendingFlowAuthority(db) : null);
+  const durableOAuthClientRegistrations =
+    ctx.mcpOAuthClientRegistrationAuthority ??
+    (postgresOAuthDeployment ? new MCPOAuthClientRegistrationAuthority(db) : null);
   const lockOAuthGrantConfiguration =
     ctx.lockMcpOAuthGrantConfiguration ?? lockMCPOAuthGrantConfiguration;
-  const externalFailure = (event: string, stage: MCPExternalErrorStage, error: unknown) => {
-    const safe = sanitizeMCPExternalError(error, { stage });
-    const { type, code } = safe.diagnostic;
+  const externalFailure = (
+    event: string,
+    stage: MCPExternalErrorStage,
+    error: unknown,
+    options: {
+      category?: MCPExternalErrorCategory;
+      type?: MCPExternalErrorType;
+      reason?: MCPExternalErrorReason;
+    } = {}
+  ) => {
+    const safe = sanitizeMCPExternalError(error, { stage, ...options });
+    const { type, code, status, reason } = safe.diagnostic;
     console.error(
-      `[${event}] event=mcp_external_failure stage=${stage} category=${safe.category} type=${type}${code ? ` code=${code}` : ''}`
+      `[${event}] event=mcp_external_failure stage=${stage} category=${safe.category} type=${type}${status !== undefined ? ` status=${status}` : ''}${code ? ` code=${code}` : ''}${reason ? ` reason=${reason}` : ''}`
     );
     return safe;
   };
-  const oauthFetch = async (
+  const externalFailureOptionsForRecovery = (
+    recovery: MCPAuthRecovery
+  ): Parameters<typeof externalFailure>[3] => {
+    if (recovery.category === 'redirect_configuration_required') {
+      return {
+        category: 'configuration_required',
+        type: 'ConfigurationError',
+        reason: 'oauth_redirect_configuration_required',
+      };
+    }
+    if (recovery.category === 'metadata_incompatible') {
+      return {
+        category: 'configuration_required',
+        type: 'ConfigurationError',
+        reason: 'oauth_metadata_incompatible',
+      };
+    }
+    if (
+      recovery.category === 'provider_unavailable' ||
+      recovery.category === 'provider_rejected' ||
+      recovery.category === 'invalid_response' ||
+      recovery.category === 'storage_policy_rejected' ||
+      recovery.category === 'configuration_required'
+    ) {
+      return { category: recovery.category };
+    }
+    return {};
+  };
+  const pinnedOAuthFetch = async (
     input: string | URL | Request,
     init: RequestInit = {},
     assertCurrent?: () => void
@@ -1890,6 +1948,7 @@ export async function registerMCPServices(
       resolveDns: ctx.mcpOutboundDnsLookup,
     });
   };
+  const oauthFetch = ctx.mcpOAuthFetch ?? pinnedOAuthFetch;
   const refreshGrantValidator =
     (tenantId: string | undefined, serverId: MCPServerID) =>
     async (
@@ -2048,6 +2107,12 @@ export async function registerMCPServices(
         console.warn('[OAuth Maintenance] Pending-flow maintenance failed');
       });
     }
+    if (durableOAuthClientRegistrations) {
+      runWithoutTenantDatabaseScope(() => durableOAuthClientRegistrations.maintain()).catch(() => {
+        // Fleet maintenance is idempotent; retain no database/provider detail.
+        console.warn('[OAuth Maintenance] Client-registration maintenance failed');
+      });
+    }
   }, 60_000);
   oauthCleanupTimer.unref();
 
@@ -2089,10 +2154,12 @@ export async function registerMCPServices(
     '(4) /.well-known/openid-configuration at MCP origin (OIDC).';
 
   async function resolveMCPOAuthRedirectUri(): Promise<string> {
-    return resolveRedirectUri({
-      daemonPort: ctx.DAEMON_PORT,
-      usePublicHttps: ctx.config.daemon?.mcp_oauth_callback_mode === 'public',
-    });
+    if (!ctx.mcpOAuthCallbackUrl) {
+      throw new PublicBaseUrlNotConfiguredError(
+        'The effective startup configuration does not provide a safe browser-reachable OAuth callback URL.'
+      );
+    }
+    return ctx.mcpOAuthCallbackUrl;
   }
 
   type OAuthBrowserReservationClaim = {
@@ -2188,10 +2255,24 @@ export async function registerMCPServices(
     )) as StartTwoPhaseOAuthAndAwaitResult;
   }
 
+  const assertMcpOAuthCapability = (): void => {
+    if (
+      isConstrainedHa(ctx.deployment) &&
+      (!ctx.deployment.capabilities.mcpOAuth ||
+        !ctx.deployment.mcpOAuthCallbackUrl ||
+        ctx.deployment.mcpOAuthCallbackUrl !== ctx.mcpOAuthCallbackUrl)
+    ) {
+      throw new PublicBaseUrlNotConfiguredError(
+        'HA MCP OAuth requires an explicitly configured public HTTPS base URL.'
+      );
+    }
+  };
+
   async function startTwoPhaseMCPOAuthFlowInternal(
     opts: StartTwoPhaseOAuthOptions,
     awaitToken: boolean
   ): Promise<StartTwoPhaseOAuthResult | StartTwoPhaseOAuthAndAwaitResult> {
+    assertMcpOAuthCapability();
     const assertFlowAuthority =
       opts.requestAuthority || opts.browserReservation
         ? () => {
@@ -2349,6 +2430,30 @@ export async function registerMCPServices(
     // begin; consuming a valid A reservation is not enough if that same socket
     // has since authenticated as B.
     assertFlowAuthority?.();
+    const assertDurableClientRegistrationAuthority = durableBinding
+      ? async (): Promise<void> => {
+          await runInOAuthTenantScope(db, durableBinding.tenantId, async () => {
+            const currentServer = await new MCPServerRepository(db).findById(
+              durableBinding.mcpServerId
+            );
+            const currentUser = await new UsersRepository(db).findById(durableBinding.userId);
+            if (
+              !currentUser ||
+              !currentServer?.enabled ||
+              currentServer.auth?.type !== 'oauth' ||
+              !isMCPServerUsableBy(currentServer, durableBinding.userId) ||
+              (currentServer.config_version ?? 1) !== (savedServerAuthority?.config_version ?? 1) ||
+              hasMCPOAuthRelevantServerConfigurationChanged(savedServerAuthority, currentServer) ||
+              (durableBinding.oauthMode === 'shared' &&
+                !hasMinimumRole(currentUser.role, ROLES.ADMIN))
+            ) {
+              throw new Forbidden(
+                'MCP OAuth client-registration authority changed. Restart OAuth.'
+              );
+            }
+          });
+        }
+      : undefined;
     const context = await runWithinOAuthAuthority(assertFlowAuthority, () =>
       startMCPOAuthFlow(opts.wwwAuthenticate, effectiveClientId, redirectUri, {
         authorizationUrlOverride: effectiveAuthorizationUrlOverride,
@@ -2364,6 +2469,28 @@ export async function registerMCPServices(
         // Process-global DCR credentials are not a tenant/user/server namespace.
         // Daemon flows never share them, including in SQLite deployments.
         reuseDynamicClientRegistration: false,
+        resolveDynamicClientRegistration:
+          durableBinding && durableOAuthClientRegistrations && savedServerAuthority
+            ? (
+                request: MCPOAuthDynamicClientRegistrationRequest,
+                register: () => Promise<
+                  import('@agor/core/tools/mcp/oauth-mcp-transport').DynamicClientRegistrationResponse
+                >
+              ) =>
+                durableOAuthClientRegistrations.resolve(
+                  {
+                    ...request,
+                    tenantId: durableBinding.tenantId,
+                    mcpServerId: durableBinding.mcpServerId,
+                    serverConfigVersion: savedServerAuthority.config_version ?? 1,
+                  },
+                  register,
+                  {
+                    assertCurrent: assertFlowAuthority,
+                    assertServerCurrent: assertDurableClientRegistrationAuthority,
+                  }
+                )
+            : undefined,
         resourceUri: effectiveMcpUrl,
         compatibilityMode: effectiveCompatibilityMode,
         dcrMode: effectiveDcrMode,
@@ -2479,6 +2606,7 @@ export async function registerMCPServices(
             assertFlowAuthority?.();
             if (
               !currentServer ||
+              (currentServer.config_version ?? 1) !== (savedServerAuthority?.config_version ?? 1) ||
               hasMCPOAuthRelevantServerConfigurationChanged(savedServerAuthority, currentServer)
             ) {
               throw new Error(
@@ -2486,6 +2614,22 @@ export async function registerMCPServices(
               );
             }
             assertFlowAuthority?.();
+            if (context.clientRegistrationId) {
+              const exactRegistration = await runWithinOAuthAuthority(assertFlowAuthority, () =>
+                durableOAuthClientRegistrations!.lockExactCurrentForAttempt({
+                  tenantId: durableBinding.tenantId,
+                  serverId: durableBinding.mcpServerId,
+                  registrationId: context.clientRegistrationId!,
+                  serverConfigVersion: currentServer.config_version ?? 1,
+                })
+              );
+              assertFlowAuthority?.();
+              if (!exactRegistration) {
+                throw new Error(
+                  'The MCP OAuth client registration changed while OAuth was starting. Restart OAuth.'
+                );
+              }
+            }
             const createdAttempt = await runWithinOAuthAuthority(assertFlowAuthority, () =>
               durableOAuthFlows!.create({
                 context,
@@ -3257,6 +3401,30 @@ export async function registerMCPServices(
     return 'OAuth flow did not complete. Please start a new flow.';
   };
 
+  const invalidateTokenEndpointRejectedClient = async (
+    pendingFlow: PendingOAuthFlow,
+    error: unknown
+  ): Promise<void> => {
+    // OAuthCodeExchangeError's invalid-client bit is set only by the pinned
+    // token-endpoint response parser. Never feed browser query parameters into
+    // this boundary.
+    if (
+      !(error instanceof OAuthCodeExchangeError) ||
+      !error.invalidClientRegistration ||
+      !durableOAuthClientRegistrations ||
+      !pendingFlow.tenantId ||
+      !pendingFlow.mcpServerId ||
+      !pendingFlow.context.clientRegistrationId
+    ) {
+      return;
+    }
+    await durableOAuthClientRegistrations.invalidateRegistration(
+      pendingFlow.tenantId,
+      pendingFlow.mcpServerId as MCPServerID,
+      pendingFlow.context.clientRegistrationId
+    );
+  };
+
   const sendOAuthResultPage = (
     res: express.Response,
     success: boolean,
@@ -3286,6 +3454,11 @@ export async function registerMCPServices(
         // caller (discover / test-oauth) can surface the failure.
         if (state) {
           if (durableOAuthFlows) {
+            // This browser-controlled response is not authenticated evidence
+            // from the token endpoint. Even invalid_client/unauthorized_client
+            // may therefore consume only this exact state capability; fleet
+            // DCR authority is invalidated exclusively from the pinned
+            // server-to-server exchange path below.
             await durableOAuthFlows.failPendingCallback(state, 'authorization_denied');
           } else {
             const pending = pendingOAuthFlows.get(state);
@@ -3382,6 +3555,11 @@ export async function registerMCPServices(
         console.log('[OAuth Callback] Flow completed successfully');
         sendOAuthResultPage(res, true, 'OAuth authentication was successful.');
       } catch (innerErr) {
+        try {
+          await invalidateTokenEndpointRejectedClient(pendingFlow, innerErr);
+        } catch {
+          console.warn('[OAuth Callback] Client-registration invalidation could not be persisted');
+        }
         const classification = classifyMCPOAuthCompletionFailure(innerErr);
         const { ambiguous } = classification;
         if (pendingFlow.durableRecord) {
@@ -3562,6 +3740,7 @@ export async function registerMCPServices(
       await new UserMCPOAuthTokenRepository(scopedDb).deleteAllForServer(serverId);
       if (durableOAuthFlows && tenantId) {
         await durableOAuthFlows.invalidateForServer(tenantId, serverId);
+        await durableOAuthClientRegistrations?.invalidateForServer(tenantId, serverId);
       } else {
         const affectedLocalFlows = [...pendingOAuthFlows].filter(
           ([, flow]) => flow.mcpServerId === serverId
@@ -3608,26 +3787,43 @@ export async function registerMCPServices(
     }),
     { methods: ['get'] }
   );
-  app.use('/mcp-marketplace', new MCPMarketplaceService(new MCPMarketplaceRepository(db)), {
-    methods: ['find'],
-  });
+  const marketplaceServerRepository = new MCPServerRepository(db);
+  const marketplaceTokenRepository = new UserMCPOAuthTokenRepository(db);
+  app.use(
+    '/mcp-marketplace',
+    new MCPMarketplaceService(
+      new MCPMarketplaceRepository(db, async (userId, serverIds) => {
+        // Marketplace receives only this closed boolean map. The daemon reuses the same
+        // mode/binding authority as execution and refresh; no token, client,
+        // issuer, resource, or binding material crosses the service boundary.
+        return resolveMCPMarketplaceOAuthGrantAuthority({
+          db,
+          userId,
+          serverIds,
+          serverRepository: marketplaceServerRepository,
+          tokenRepository: marketplaceTokenRepository,
+        });
+      })
+    ),
+    { methods: ['find'] }
+  );
   app.use(
     '/mcp-marketplace/remove-unattached',
     new MCPMarketplaceRemoveServerService(db, (userIds, params) =>
-      emitMarketplaceInvalidation(app, params.tenant?.tenant_id, userIds)
+      emitMarketplaceChanged(app, params.tenant?.tenant_id, userIds)
     ),
     { methods: ['create'] }
   );
   app.use(
     '/mcp-marketplace/tool-permission',
     new MCPMarketplaceToolPermissionService(db, (userIds, params) =>
-      emitMarketplaceInvalidation(app, params.tenant?.tenant_id, userIds)
+      emitMarketplaceChanged(app, params.tenant?.tenant_id, userIds)
     ),
     { methods: ['create'] }
   );
   // Action replies are private acknowledgements. These services mutate through
   // repository transactions, so they explicitly emit the user-targeted empty
-  // Marketplace invalidation rather than pretending the ordinary MCP CRUD
+  // Marketplace freshness hint rather than pretending the ordinary MCP CRUD
   // service emitted a lifecycle event.
   for (const path of [
     'mcp-marketplace/remove-unattached',
@@ -4262,6 +4458,7 @@ export async function registerMCPServices(
       const assertRequestAuthority = requestAuthorityAssertion(params);
       try {
         assertRequestAuthority?.();
+        assertMcpOAuthCapability();
         console.log('[OAuth Start] Starting two-phase OAuth flow');
         const userId = params?.user?.user_id;
         const tenantId = tenantIdFromParams(params);
@@ -4375,6 +4572,13 @@ export async function registerMCPServices(
           }
         }
 
+        // Resolve the deployment-owned callback only after the saved row and
+        // caller have been authorized, but before entering provider metadata
+        // discovery. The flow helper validates it again at the side-effect
+        // boundary; this earlier check ensures a missing/unsafe deployment
+        // origin cannot trigger discovery or DCR first.
+        await runWithinOAuthAuthority(assertRequestAuthority, resolveMCPOAuthRedirectUri);
+
         let probeResponse = await oauthFetch(
           effectiveMcpUrl,
           {
@@ -4470,7 +4674,12 @@ export async function registerMCPServices(
             mcpServerId: data.mcp_server_id,
           });
           if (recovery.category === 'redirect_configuration_required') {
-            console.error('[OAuth Start] Failed category=PublicBaseUrlNotConfiguredError');
+            externalFailure(
+              'OAuth Start',
+              'oauth',
+              err,
+              externalFailureOptionsForRecovery(recovery)
+            );
             return {
               success: false,
               error: recovery.message,
@@ -4485,7 +4694,6 @@ export async function registerMCPServices(
           success: true,
           authorizationUrl: result.authorizationUrl,
           attempt_id: result.attemptId,
-          state: result.state,
           message:
             'Browser opened for authentication. After signing in, copy the callback URL and paste it below.',
         };
@@ -4520,7 +4728,7 @@ export async function registerMCPServices(
           : preliminaryRecovery;
         // This is deliberately the final consumer of the original unknown.
         // Response construction below uses only the closed recovery contract.
-        externalFailure('OAuth Start', 'oauth', error);
+        externalFailure('OAuth Start', 'oauth', error, externalFailureOptionsForRecovery(recovery));
         return {
           success: false,
           error: recovery.message,
@@ -4565,11 +4773,13 @@ export async function registerMCPServices(
         let code: string;
         let state: string;
         let issuer: string | undefined;
+        let authorizationRejected = false;
         if ('callback_url' in data) {
           const parsed = parseOAuthCallback(data.callback_url);
-          code = parsed.code;
+          code = parsed.code ?? '';
           state = parsed.state;
           issuer = parsed.issuer;
+          authorizationRejected = parsed.authorizationRejected;
         } else {
           code = data.code;
           state = data.state;
@@ -4622,6 +4832,21 @@ export async function registerMCPServices(
           markLocalOAuthAttempt(pendingFlow, 'exchanging');
         }
 
+        if (authorizationRejected) {
+          if (pendingFlow.durableRecord) {
+            await durableOAuthFlows!.finish(
+              pendingFlow.durableRecord,
+              'failed',
+              'authorization_denied'
+            );
+          } else {
+            markLocalOAuthAttempt(pendingFlow, 'failed', 'authorization_denied');
+          }
+          emitOAuthCompletion(pendingFlow, false);
+          pendingFlow.tokenReject?.(new Error('Authorization was not completed'));
+          return oauthCompletionFailure('authorization_denied', pendingFlow.mcpServerId);
+        }
+
         await assertPendingFlowStillAuthorized(pendingFlow);
         const tokenResponse = await completeMCPOAuthFlow(pendingFlow.context, code, state, {
           cacheToken: false,
@@ -4633,6 +4858,13 @@ export async function registerMCPServices(
         return { success: true, message: 'OAuth authentication successful!', tokenObtained: true };
       } catch (error) {
         if (pendingFlow) {
+          try {
+            await invalidateTokenEndpointRejectedClient(pendingFlow, error);
+          } catch {
+            console.warn(
+              '[OAuth Complete] Client-registration invalidation could not be persisted'
+            );
+          }
           const classification = classifyMCPOAuthCompletionFailure(error);
           const { ambiguous, failureCode } = classification;
           completionFailureCode = failureCode;
@@ -4675,6 +4907,68 @@ export async function registerMCPServices(
     },
   });
   app.service('mcp-servers/oauth-complete').hooks({ before: { create: [ctx.requireAuth] } });
+
+  // Admin recovery for providers that invalidate a DCR client before a usable
+  // callback can report the closed invalid_client/unauthorized_client error.
+  // Resetting also retires pending attempts and grants so the next reconnect
+  // must resolve a fresh client instead of continuing under stale material.
+  app.use('/mcp-servers/oauth-client-registration-reset', {
+    async create(
+      data: MCPOAuthClientRegistrationResetRequest,
+      params?: AuthenticatedParams
+    ): Promise<MCPOAuthClientRegistrationResetResult> {
+      const tenantId = tenantIdFromParams(params);
+      const userId = params?.user?.user_id as UserID | undefined;
+      if (!tenantId || !userId) throw new NotAuthenticated('OAuth reset requires authentication');
+      if (!durableOAuthClientRegistrations || !durableOAuthFlows) {
+        throw new BadRequest(
+          'Durable OAuth client-registration reset is available only on PostgreSQL deployments'
+        );
+      }
+      await runInOAuthTenantWriteScope(db, tenantId, async () => {
+        const currentUser = await new UsersRepository(db).findById(userId);
+        if (!hasMinimumRole(currentUser?.role, ROLES.ADMIN)) {
+          throw new Forbidden('OAuth client-registration reset requires an administrator');
+        }
+        const authorized = await loadMcpServerForCaller(db, data.mcp_server_id, params);
+        await lockOAuthGrantConfiguration(db, tenantId, authorized.mcp_server_id);
+        // The request claim is only an early rejection. Lock the users row and
+        // re-read role after grant-lock contention so a demotion cannot wait
+        // behind reset admission and then leave stale administrator authority
+        // in charge of credential destruction.
+        const lockedUser = await new UsersRepository(db).getWriteAuthorityProjectionForUpdate(
+          userId
+        );
+        if (!hasMinimumRole(lockedUser?.role, ROLES.ADMIN)) {
+          throw new Forbidden('OAuth client-registration reset requires an administrator');
+        }
+        const serverRepository = new MCPServerRepository(db);
+        const currentServer = await serverRepository.findById(authorized.mcp_server_id);
+        if (!currentServer) {
+          throw new Forbidden('MCP server authority changed before OAuth reset');
+        }
+        // config_version is the reset epoch shared by DCR resolution and
+        // pending-attempt publication. Advancing it under the grant lock means
+        // an older start can neither publish its resolved client nor make it
+        // reusable after this transaction commits. Admin authority is a
+        // same-tenant control-plane override; it intentionally does not apply
+        // the owner's private-server runtime usability rule.
+        await serverRepository.update(authorized.mcp_server_id, {
+          expected_config_version: currentServer.config_version ?? 1,
+        });
+        await new UserMCPOAuthTokenRepository(db).deleteAllForServer(authorized.mcp_server_id);
+        await durableOAuthFlows.invalidateForServer(tenantId, authorized.mcp_server_id);
+        await durableOAuthClientRegistrations.invalidateForServer(
+          tenantId,
+          authorized.mcp_server_id
+        );
+      });
+      return { success: true };
+    },
+  });
+  app.service('mcp-servers/oauth-client-registration-reset').hooks({
+    before: { create: [ctx.requireAuth] },
+  });
 
   // OAuth disconnect
   app.use('/mcp-servers/oauth-disconnect', {
@@ -5276,42 +5570,27 @@ export async function registerMCPServices(
     server: MCPServer,
     params?: AuthenticatedParams
   ): { success: false; error: string } | null => {
-    if (!params?.provider || !params.user) return null;
-    if (hasMinimumRole(params.user.role?.toLowerCase(), ROLES.ADMIN)) return null;
-    if (server.owner_user_id && server.owner_user_id === params.user.user_id) return null;
-    return {
-      success: false,
+    const caller = resolveMcpCaller(params);
+    if (caller.kind === 'internal') return null;
+    const denial = {
+      success: false as const,
       error: 'Access denied: only an admin or the server owner can discover this MCP server',
     };
+    // Read visibility is not discovery authority: service accounts carry no
+    // membership or ownership and must not exercise a saved credential here.
+    if (caller.kind === 'anonymous' || caller.kind === 'service-account') return denial;
+    const user = caller.user;
+    if (hasMinimumRole(user.role?.toLowerCase(), ROLES.ADMIN)) return null;
+    if (server.owner_user_id && server.owner_user_id === user.user_id) return null;
+    return denial;
   };
 
   // Discover endpoint
   app.use('/mcp-servers/discover', {
     async create(
-      data: {
-        mcp_server_id?: string;
-        url?: string;
-        transport?: 'http' | 'sse';
-        auth?: {
-          type: 'none' | 'bearer' | 'jwt' | 'oauth';
-          token?: string;
-          api_url?: string;
-          api_token?: string;
-          api_secret?: string;
-          oauth_token_url?: string;
-          oauth_client_id?: string;
-          oauth_client_secret?: string;
-          oauth_scope?: string;
-          oauth_grant_type?: string;
-          oauth_mode?: 'per_user' | 'shared';
-          oauth_compatibility_mode?: 'strict' | 'legacy';
-          oauth_dcr_mode?: MCPOAuthDCRMode;
-        };
-        headers?: Record<string, string>;
-        oauth_browser_event?: MCPOAuthBrowserEventRequest;
-      },
+      data: MCPDiscoveryRequest,
       params?: AuthenticatedParams
-    ) {
+    ): Promise<MCPDiscoveryResult> {
       try {
         const browserReservation = consumeOAuthBrowserReservation(
           data.oauth_browser_event,
@@ -5337,7 +5616,7 @@ export async function registerMCPServices(
         const { mergeMCPRemoteHeaders } = await import('@agor/core/tools/mcp/http-headers');
         const tenantId = tenantIdFromParams(params);
 
-        const validateUrl = (url: string): { valid: boolean; error?: string } => {
+        const validateUrl = (url: string): { valid: true } | { valid: false; error: string } => {
           try {
             const parsed = new URL(url);
             if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -5532,14 +5811,25 @@ export async function registerMCPServices(
         console.log('[MCP Discovery] Starting test for:', serverConfig.name || 'inline-config');
 
         assertBrowserReservation?.();
-        let authHeaders = await runWithinOAuthBrowserReservation(browserReservation, () =>
-          resolveMCPAuthHeaders(serverConfig.auth, serverConfig.url, {
-            allowLocalhostHttp: !postgresOAuthDeployment,
-            cacheNamespace: [tenantId ?? '<standalone>', serverId ?? '<unsaved>', userId].join(':'),
-            disableProcessTokenCache: !!durableOAuthFlows,
-            assertCurrent: assertRequestAuthority,
-          })
-        );
+        // In HA, only a caller-scoped durable grant may make an OAuth server
+        // usable for this capability probe. Do not let client-credentials
+        // compatibility code create an unpersisted token; the durable grant
+        // lookup/browser-attempt path below remains authoritative.
+        let authHeaders =
+          serverConfig.auth?.type === 'oauth' && isConstrainedHa(ctx.deployment)
+            ? undefined
+            : await runWithinOAuthBrowserReservation(browserReservation, () =>
+                resolveMCPAuthHeaders(serverConfig.auth, serverConfig.url, {
+                  allowLocalhostHttp: !postgresOAuthDeployment,
+                  cacheNamespace: [
+                    tenantId ?? '<standalone>',
+                    serverId ?? '<unsaved>',
+                    userId,
+                  ].join(':'),
+                  disableProcessTokenCache: !!durableOAuthFlows,
+                  assertCurrent: assertRequestAuthority,
+                })
+              );
 
         const probeAndAcquireOAuthToken = async (mcpUrl: string): Promise<string | undefined> => {
           try {
@@ -5558,6 +5848,8 @@ export async function registerMCPServices(
             );
             const wwwAuthenticate = probeResponse.headers.get('www-authenticate');
             if (probeResponse.status !== 401) return undefined;
+            // A 401 is the boundary where this probe may promote its one-shot
+            // browser reservation into the durable DCR + pending-attempt path.
             // Provider discovery and dynamic client registration can create
             // durable state outside Agor. Never begin either unless this
             // exact socket/caller/operation already consumed a server-issued
@@ -5671,7 +5963,12 @@ export async function registerMCPServices(
             ) {
               throw error;
             }
-            externalFailure('MCP Discovery OAuth token acquisition', 'discovery', error);
+            externalFailure(
+              'MCP Discovery OAuth token acquisition',
+              'discovery',
+              error,
+              externalFailureOptionsForRecovery(recovery)
+            );
             return undefined;
           }
         };
@@ -5782,7 +6079,15 @@ export async function registerMCPServices(
             mcpTransport: InstanceType<typeof StreamableHTTPClientTransport>
           ) => {
             const timeout = new Promise<never>((_, reject) => {
-              setTimeout(() => reject(new Error('Connection timeout after 10 seconds')), 10000);
+              setTimeout(
+                () =>
+                  reject(
+                    Object.assign(new Error('Connection timeout after 10 seconds'), {
+                      code: 'ETIMEDOUT' as const,
+                    })
+                  ),
+                10000
+              );
             });
             await runWithinOAuthAuthority(assertCurrentRequestAuthority, () =>
               Promise.race([mcpClient.connect(mcpTransport), timeout])
@@ -5820,7 +6125,12 @@ export async function registerMCPServices(
 
           const listTimeout = new Promise<never>((_, reject) => {
             setTimeout(
-              () => reject(new Error('List capabilities timeout after 10 seconds')),
+              () =>
+                reject(
+                  Object.assign(new Error('List capabilities timeout after 10 seconds'), {
+                    code: 'ETIMEDOUT' as const,
+                  })
+                ),
               10000
             );
           });
@@ -5865,7 +6175,7 @@ export async function registerMCPServices(
             listTimeout,
           ])) as PromptsResult;
 
-          const discovered = {
+          const discovered: DiscoveredMCPCapabilities = {
             tools: toolsResult.tools.map((t) => ({
               name: t.name,
               description: t.description,
@@ -5887,7 +6197,7 @@ export async function registerMCPServices(
               })),
             })),
           };
-          let normalizedDiscovery = normalizeDiscoveredMCPCapabilities(discovered);
+          let normalizedDiscovery: ReturnType<typeof normalizeDiscoveredMCPCapabilities>;
 
           if (serverId && discoveryAuthority) {
             normalizedDiscovery = await runWithinOAuthAuthority(assertCurrentRequestAuthority, () =>
@@ -5905,11 +6215,13 @@ export async function registerMCPServices(
             // than the generic MCP service. Refresh every device belonging to
             // the actor and durable owner with the same empty, tenant-targeted
             // control event used by Marketplace actions.
-            emitMarketplaceInvalidation(
+            emitMarketplaceChanged(
               app,
               tenantId,
               [userId, authoritativeServer?.owner_user_id].filter(Boolean) as UserID[]
             );
+          } else {
+            normalizedDiscovery = normalizeDiscoveredMCPCapabilities(discovered);
           }
 
           return {
@@ -5958,8 +6270,20 @@ export async function registerMCPServices(
         ) {
           return { success: false, error: recovery.message, recovery };
         }
-        const safe = externalFailure('MCP Discovery', 'discovery', error);
-        return { success: false, error: safe.message, category: safe.category };
+        const persistenceRejected = isMCPServerWriteValidationError(error);
+        const safe = externalFailure('MCP Discovery', 'discovery', error, {
+          ...externalFailureOptionsForRecovery(recovery),
+          ...(persistenceRejected ? { category: 'storage_policy_rejected' as const } : {}),
+          ...(persistenceRejected
+            ? { reason: 'capability_persistence_validation_rejected' as const }
+            : {}),
+        });
+        return {
+          success: false,
+          error: safe.message,
+          category: safe.category,
+          ...(persistenceRejected ? { action: safe.action } : {}),
+        };
       }
     },
   });

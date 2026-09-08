@@ -23,7 +23,7 @@ import type {
   UserID,
   UUID,
 } from '@agor/core/types';
-import { isTeammate, SessionStatus } from '@agor/core/types';
+import { EXECUTING_SESSION_STATUSES, isTeammate } from '@agor/core/types';
 import { and, asc, desc, eq, inArray, isNull, like, ne, type SQL, sql } from 'drizzle-orm';
 import * as yaml from 'js-yaml';
 import { getBaseUrl } from '../../config/config-manager';
@@ -241,9 +241,11 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
         url,
         archived: Boolean(row.archived),
         // Point reads and write responses have no caller-specific branch RBAC
-        // context. Board list reads replace this neutral default with the
-        // authoritative per-caller aggregate below.
-        running_session_count: 0,
+        // context. Board list reads replace these neutral defaults with the
+        // authoritative per-caller aggregates below.
+        worktree_count: 0,
+        total_session_count: 0,
+        active_session_count: 0,
         archived_at: row.archived_at ? new Date(row.archived_at).toISOString() : undefined,
         archived_by: row.archived_by ?? undefined,
         ...effectiveData,
@@ -497,8 +499,9 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
   }
 
   /**
-   * Attach the authoritative running-Session aggregate to an already-scoped
-   * board list in one query (never one request/query per board).
+   * Attach the authoritative worktree/Session aggregates to an already-scoped
+   * board list in one set-based query (never one request/query per board or
+   * worktree).
    *
    * Board visibility and Session visibility are intentionally separate:
    * callers may see a board while only seeing some of its branches. The same
@@ -507,7 +510,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
    * tenant RLS / the tenant-scoped database proxy remains the outer tenant
    * boundary for every joined row.
    */
-  private async attachRunningSessionCounts(
+  private async attachBoardListCounts(
     boardList: Board[],
     visibleToUserId?: UUID
   ): Promise<Board[]> {
@@ -518,8 +521,6 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
         branchesTable.board_id,
         boardList.map((board) => board.board_id)
       ),
-      eq(sessionsTable.status, SessionStatus.RUNNING),
-      eq(sessionsTable.archived, false),
       eq(branchesTable.archived, false),
     ];
     if (visibleToUserId) {
@@ -528,22 +529,45 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
 
     const rows = (await select(this.db, {
       board_id: branchesTable.board_id,
-      running_session_count: sql<number>`count(${sessionsTable.session_id})`,
+      worktree_count: sql<number>`count(distinct ${branchesTable.branch_id})`,
+      total_session_count: sql<number>`count(${sessionsTable.session_id})`,
+      active_session_count: sql<number>`count(case when ${inArray(sessionsTable.status, [
+        ...EXECUTING_SESSION_STATUSES,
+      ])} then 1 end)`,
     })
-      .from(sessionsTable)
-      .innerJoin(branchesTable, eq(sessionsTable.branch_id, branchesTable.branch_id))
+      .from(branchesTable)
+      .leftJoin(
+        sessionsTable,
+        and(eq(sessionsTable.branch_id, branchesTable.branch_id), eq(sessionsTable.archived, false))
+      )
       .where(and(...conditions))
       .groupBy(branchesTable.board_id)
-      .all()) as Array<{ board_id: string | null; running_session_count: number | string }>;
+      .all()) as Array<{
+      board_id: string | null;
+      worktree_count: number | string;
+      total_session_count: number | string;
+      active_session_count: number | string;
+    }>;
 
-    const counts = new Map<string, number>();
+    const counts = new Map<
+      string,
+      Pick<Board, 'worktree_count' | 'total_session_count' | 'active_session_count'>
+    >();
     for (const row of rows) {
-      if (row.board_id) counts.set(row.board_id, Number(row.running_session_count));
+      if (!row.board_id) continue;
+      counts.set(row.board_id, {
+        worktree_count: Number(row.worktree_count),
+        total_session_count: Number(row.total_session_count),
+        active_session_count: Number(row.active_session_count),
+      });
     }
     for (const board of boardList) {
       // Mutate only the fresh repository DTO so hidden tenant metadata attached
       // by rowToBoard stays non-enumerable; spreading would silently drop it.
-      board.running_session_count = counts.get(board.board_id) ?? 0;
+      const boardCounts = counts.get(board.board_id);
+      board.worktree_count = boardCounts?.worktree_count ?? 0;
+      board.total_session_count = boardCounts?.total_session_count ?? 0;
+      board.active_session_count = boardCounts?.active_session_count ?? 0;
     }
     return boardList;
   }
@@ -595,7 +619,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
       const query = select(this.db).from(boards);
       const rows =
         conditions.length > 0 ? await query.where(and(...conditions)).all() : await query.all();
-      return this.attachRunningSessionCounts(
+      return this.attachBoardListCounts(
         rows.map((row: BoardRow) => this.rowToBoard(row, baseUrl, { lean: filter?.lean })),
         filter?.visibleToUserId
       );
@@ -671,7 +695,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
     const baseUrl = await getBaseUrl();
     const rows = await dataQuery.all();
     return {
-      data: await this.attachRunningSessionCounts(
+      data: await this.attachBoardListCounts(
         (rows as BoardRow[]).map((row) => this.rowToBoard(row, baseUrl, { lean: opts.lean })),
         opts.visibleToUserId
       ),

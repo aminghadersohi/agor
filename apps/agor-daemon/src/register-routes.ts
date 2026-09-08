@@ -115,6 +115,7 @@ import {
   SESSION_POWER_PRIORITIES,
   SessionStatus,
   TaskStatus,
+  UPLOAD_REQUEST_ID_HEADER,
 } from '@agor/core/types';
 import { isNotFoundError } from '@agor/core/utils/errors';
 import type { NextFunction, Request, Response } from 'express';
@@ -279,9 +280,26 @@ import {
   getUploadLimits,
   type StagedMulterFile,
 } from './utils/upload.js';
+import { toUploadErrorResponse, type UploadFailureStage } from './utils/upload-http-error.js';
 import { getUploadStagingStore } from './utils/upload-staging.js';
 import { WidgetResolutionStore } from './widgets/resolution-store.js';
 import { resolveWidget } from './widgets/submissions.js';
+
+export function appendResponseHeaderValue(
+  existing: string | string[] | number | undefined,
+  value: string
+): string {
+  const existingValues = (
+    Array.isArray(existing) ? existing : existing === undefined ? [] : [existing]
+  )
+    .flatMap((headerValue) => String(headerValue).split(','))
+    .map((headerValue) => headerValue.trim())
+    .filter(Boolean);
+  if (existingValues.some((headerValue) => headerValue.toLowerCase() === value.toLowerCase())) {
+    return existingValues.join(', ');
+  }
+  return [...existingValues, value].join(', ');
+}
 
 const DEBUG_AUTH_EVENTS =
   process.env.AGOR_DEBUG_AUTH_EVENTS === '1' || process.env.DEBUG?.includes('auth-events');
@@ -678,24 +696,23 @@ export function createRegisteredMCPCatalogConnectService(
   app: Application,
   db: TenantScopeAwareDatabase
 ) {
+  const runInTenantDatabaseScope = <T>(params: AuthenticatedParams, work: () => Promise<T>) => {
+    const tenantId = params.tenant?.tenant_id ?? getCurrentTenantId();
+    return tenantId ? runWithTenantDatabaseScope(db, tenantId, work) : work();
+  };
   return createMCPCatalogConnectService(app, {
+    runInTenantDatabaseScope,
     async listCandidates(userId, params) {
-      const tenantId =
-        (params as { tenant?: { tenant_id?: string } }).tenant?.tenant_id ?? getCurrentTenantId();
       const read = async () => new MCPCatalogCandidateRepository(db).listForUser(userId);
-      return tenantId ? runWithTenantDatabaseScope(db, tenantId, read) : read();
+      return runInTenantDatabaseScope(params, read);
     },
     async getCandidate(userId, serverId, params) {
-      const tenantId =
-        (params as { tenant?: { tenant_id?: string } }).tenant?.tenant_id ?? getCurrentTenantId();
       const read = async () => new MCPCatalogCandidateRepository(db).getForUser(userId, serverId);
-      return tenantId ? runWithTenantDatabaseScope(db, tenantId, read) : read();
+      return runInTenantDatabaseScope(params, read);
     },
     async isGrantAuthorized(candidate, params) {
       const userId = params.user?.user_id as UserID | undefined;
       if (!userId) return false;
-      const tenantId =
-        (params as { tenant?: { tenant_id?: string } }).tenant?.tenant_id ?? getCurrentTenantId();
       const read = async () => {
         const grant = await new UserMCPOAuthTokenRepository(db).getCatalogGrantAuthority(
           userId,
@@ -706,7 +723,7 @@ export function createRegisteredMCPCatalogConnectService(
             (await isMCPOAuthGrantAuthorizedForServer(db, candidate.server, grant))
         );
       };
-      return tenantId ? runWithTenantDatabaseScope(db, tenantId, read) : read();
+      return runInTenantDatabaseScope(params, read);
     },
   });
 }
@@ -778,8 +795,7 @@ export function createUploadAuthMiddleware(input: {
         token,
       });
       next();
-    } catch (error) {
-      console.error('❌ [Upload Auth] Authentication failed:', error);
+    } catch {
       res.status(401).json({ error: 'Authentication required' });
     }
   };
@@ -2298,20 +2314,25 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           throw error;
         }
 
-        // Prompt admission authoritatively cancels a pending cleanup. If an
-        // automatic archive won the race first, the same patch restores it.
-        if (session.archived || session.auto_archive_at) {
-          if (session.archived) {
-            console.log(
-              `📦 [Prompt] Auto-unarchiving session ${shortId(id)} (was archived: ${session.archived_reason || 'unknown reason'})`
-            );
-          }
+        // Prompting is an explicit request to revive this Session only. Its
+        // archived local ancestors and descendants keep their own state, so
+        // the Session can intentionally appear as a root until they are
+        // restored separately.
+        if (session.archived) {
+          console.log(
+            `📦 [Prompt] Auto-unarchiving session ${shortId(id)} (was archived: ${session.archived_reason || 'unknown reason'})`
+          );
+          const restored = await runWithTenantDatabaseScope(db, promptTenantId, () =>
+            sessionsService.unarchive(id, { includeChildren: false }, params)
+          );
+          session = restored.session as typeof session;
+        }
+        // A new prompt also authoritatively cancels a pending automatic
+        // archive. This narrow scheduling write is separate from archive
+        // state, which remains owned by the dedicated lifecycle operation.
+        if (session.auto_archive_at) {
           session = (await runWithTenantDatabaseScope(db, promptTenantId, () =>
-            sessionsService.patch(
-              id,
-              { archived: false, archived_reason: undefined, auto_archive_at: undefined },
-              params
-            )
+            sessionsService.patch(id, { auto_archive_at: undefined }, params)
           )) as typeof session;
         }
 
@@ -2975,8 +2996,6 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       res.status(status).json({ error: error instanceof Error ? error.message : 'Upload failed' });
     }
   });
-  const DEBUG_UPLOAD = process.env.AGOR_DEBUG_UPLOAD === 'true';
-
   // biome-ignore lint/suspicious/noExplicitAny: Express 5 type compatibility
   const authorizeUpload: any = async (req: any, res: any, next: any) => {
     try {
@@ -2989,7 +3008,6 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         sessionsService.get(sessionId, params)
       );
       if (!session) {
-        console.error(`❌ [Upload Authz] Session not found: ${shortId(sessionId)}`);
         return res.status(404).json({ error: 'Session not found' });
       }
 
@@ -3012,9 +3030,6 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         return res.status(404).json({ error: 'Branch not found' });
       }
       if (!access.allowed) {
-        console.error(
-          `❌ [Upload Authz] User ${shortId(userId)} has '${access.effectiveLevel}' permission, cannot upload to branch ${shortId(session.branch_id)}`
-        );
         return res.status(403).json({ error: 'Not authorized to upload to this session' });
       }
 
@@ -3036,38 +3051,13 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   // biome-ignore lint/suspicious/noExplicitAny: Express 5 + multer type compatibility
   const uploadHandler: any = async (req: any, res: any, next: any) => {
     try {
-      if (DEBUG_UPLOAD) {
-        console.log('🚀 [Upload Handler] Request received');
-        console.log('   Headers:', {
-          contentType: req.headers['content-type'],
-          authorization: req.headers.authorization ? 'present' : 'missing',
-          cookie: req.headers.cookie ? 'present' : 'missing',
-        });
-      }
-
       const { sessionId } = req.params;
       const { notifyAgent, message } = req.body;
       const files = req.files as StagedMulterFile[];
 
-      if (DEBUG_UPLOAD) {
-        console.log(
-          `📎 [Upload Handler] Processing for session ${sessionId ? shortId(sessionId) : 'unknown'}`
-        );
-        console.log(`   Notify agent: ${notifyAgent === 'true' || notifyAgent === true}`);
-        console.log(`   Files received: ${files?.length || 0}`);
-      }
-
       const params = req.feathers as AuthenticatedParams;
-      if (DEBUG_UPLOAD) {
-        console.log(`   Auth params:`, {
-          hasUser: !!params?.user,
-          userId: params?.user?.user_id ? shortId(params.user.user_id) : undefined,
-          provider: params?.provider,
-        });
-      }
 
       if (!files || files.length === 0) {
-        console.error('❌ [Upload Handler] No files in request');
         return res.status(400).json({ error: 'No files uploaded' });
       }
 
@@ -3080,20 +3070,11 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         expiresAt: staged.expiresAt,
       }));
 
-      if (DEBUG_UPLOAD) {
-        console.log(`   Uploaded ${uploadedFiles.length} file(s):`);
-        console.log(`   Total bytes: ${uploadedFiles.reduce((sum, f) => sum + f.size, 0)}`);
-      }
-
       let notificationError: string | null = null;
       if ((notifyAgent === 'true' || notifyAgent === true) && message) {
         try {
           const handles = uploadedFiles.map((f) => f.ref).join(', ');
           const promptText = message.replace(/\{filepath\}/g, handles);
-
-          if (DEBUG_UPLOAD) {
-            console.log('   Sending upload notification to agent');
-          }
 
           const promptService = app.service('/sessions/:id/prompt');
           // biome-ignore lint/suspicious/noExplicitAny: Express 5 + FeathersJS type mismatch
@@ -3122,21 +3103,47 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     }
   };
 
+  type UploadRouteRequest = Request & {
+    _uploadRequestId?: string;
+    _uploadFailureStage?: UploadFailureStage;
+  };
+
   // biome-ignore lint/suspicious/noExplicitAny: Express 5 type compatibility
-  const uploadLogger: any = (req: any, res: any, next: any) => {
-    if (DEBUG_UPLOAD) {
-      console.log('📥 [Upload Route] Request received');
-      console.log('   Method:', req.method);
-      console.log('   Route: session upload');
-      console.log('   Content-Type:', req.headers['content-type']);
-      console.log('   Has auth header:', !!req.headers.authorization);
-      console.log(
-        '   Session ID param:',
-        req.params.sessionId ? shortId(req.params.sessionId) : 'unknown'
+  const uploadLogger: any = (req: UploadRouteRequest, res: Response, next: NextFunction) => {
+    const requestId = randomUUID();
+    req._uploadRequestId = requestId;
+    req._uploadFailureStage = 'authentication';
+    res.setHeader(UPLOAD_REQUEST_ID_HEADER, requestId);
+    res.setHeader(
+      'Access-Control-Expose-Headers',
+      appendResponseHeaderValue(
+        res.getHeader('Access-Control-Expose-Headers'),
+        UPLOAD_REQUEST_ID_HEADER
+      )
+    );
+    res.once('finish', () => {
+      if (res.statusCode < 400) return;
+      console.error(
+        formatStructuredLog('[upload]', {
+          event: 'upload.failed',
+          request_id: requestId,
+          stage: req._uploadFailureStage ?? 'authentication',
+          code: res.locals.uploadFailureCode ?? `HTTP_${res.statusCode}`,
+          status: res.statusCode,
+          type: res.locals.uploadFailureType ?? 'request',
+        })
       );
-    }
+    });
+
     next();
   };
+
+  const setUploadFailureStage =
+    (stage: UploadFailureStage) =>
+    (req: UploadRouteRequest, _res: Response, next: NextFunction) => {
+      req._uploadFailureStage = stage;
+      next();
+    };
 
   const uploadAuthMiddleware = createUploadAuthMiddleware({
     authentication: app.service('authentication'),
@@ -3155,41 +3162,31 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     '/sessions/:sessionId/upload',
     uploadLogger,
     uploadAuthMiddleware,
-    // biome-ignore lint/suspicious/noExplicitAny: Express 5 type compatibility
-    ((req: any, res: any, next: any) => {
-      if (DEBUG_UPLOAD) {
-        console.log('✅ [Upload Route] Authentication passed');
-        console.log(
-          '   User:',
-          req.feathers?.user?.user_id ? shortId(req.feathers.user.user_id) : 'unknown'
-        );
-      }
-      next();
-      // biome-ignore lint/suspicious/noExplicitAny: Express 5 type compatibility
-    }) as any,
+    setUploadFailureStage('request_size'),
     // Cheap pre-multer Content-Length check — short-circuits before we spend
     // time writing oversize uploads to disk.
     // biome-ignore lint/suspicious/noExplicitAny: Express 5 type compatibility
     enforceTotalUploadSize() as any,
+    setUploadFailureStage('authorization'),
     authorizeUpload,
+    setUploadFailureStage('multipart'),
     // biome-ignore lint/suspicious/noExplicitAny: Express 5 + multer type compatibility
     uploadMiddleware.array('files', 10) as any,
     // biome-ignore lint/suspicious/noExplicitAny: Express 5 type compatibility
     ((req: any, res: any, next: any) => {
-      if (DEBUG_UPLOAD) {
-        console.log('✅ [Upload Route] Multer processing complete');
-        console.log('   Files parsed:', req.files?.length || 0);
-      }
+      req._uploadFailureStage = 'handler';
       next();
       // biome-ignore lint/suspicious/noExplicitAny: Express 5 type compatibility
     }) as any,
     uploadHandler,
     // biome-ignore lint/suspicious/noExplicitAny: Express 5 type compatibility
     ((err: any, req: any, res: any, next: any) => {
-      console.error('❌ [Upload Route] Upload failed');
-      res.status(err.status || 500).json({
-        error: 'Upload failed',
-      });
+      const requestId = req._uploadRequestId ?? randomUUID();
+      const failure = toUploadErrorResponse(err, requestId);
+      res.setHeader(UPLOAD_REQUEST_ID_HEADER, requestId);
+      res.locals.uploadFailureCode = failure.body.code;
+      res.locals.uploadFailureType = failure.type;
+      res.status(failure.status).json(failure.body);
       // biome-ignore lint/suspicious/noExplicitAny: Express 5 type compatibility
     }) as any
   );
@@ -3575,6 +3572,179 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     } as any,
     {
       find: { role: ROLES.MEMBER, action: 'view queue' },
+    },
+    requireAuth
+  );
+
+  // Fork-only POC: edit/cancel one canonical ordinary prompt while it remains
+  // QUEUED. Apply uses the same tenant authorization fence and Session-row
+  // sequencer as admission/dispatch, plus queue+prompt CAS revisions.
+  registerAuthenticatedRoute(
+    app,
+    '/tasks/:id/queued-prompt',
+    {
+      async find(params: RouteParams) {
+        const taskId = params.route?.id;
+        const sessionId = params.query?.sessionId;
+        const authority = params.query?.authority ?? 'author';
+        if (!isCanonicalFullUuid(taskId)) throw new BadRequest('A full Task ID is required');
+        if (!isCanonicalFullUuid(sessionId)) throw new BadRequest('A full Session ID is required');
+        if (authority !== 'author' && authority !== 'parent' && authority !== 'coordinator') {
+          throw new BadRequest("authority must be 'author', 'parent', or 'coordinator'");
+        }
+        if (
+          !params.user?.user_id ||
+          (params.user as User & { _isServiceAccount?: boolean })._isServiceAccount
+        ) {
+          throw new Forbidden('Queued prompt amendments require an authenticated human actor');
+        }
+        const session = (await sessionsService.get(sessionId, params)) as Session;
+        if (session.branch_id) {
+          const branchRepository = new BranchRepository(db);
+          const branch = await branchRepository.findById(session.branch_id);
+          if (!branch) throw new NotFound(`Branch ${session.branch_id} not found`);
+          const access = await resolveSessionPromptAccess({
+            branchRepository,
+            branch,
+            session,
+            userId: params.user.user_id as UUID,
+          });
+          if (!access.allowed) {
+            throw new Forbidden(sessionPromptDeniedMessage({ denial_reason: access.denialReason }));
+          }
+        }
+        const resolvedAuthority =
+          authority === 'author'
+            ? undefined
+            : await sessionsService.resolveQueueBatchAuthority(
+                sessionId,
+                { relationship: authority },
+                params
+              );
+        return new TaskRepository(db).previewQueuedPromptAmendment({
+          session_id: sessionId,
+          task_id: taskId,
+          requested_by_user_id: params.user.user_id as UserID,
+          ...(resolvedAuthority
+            ? { requested_by_session_id: resolvedAuthority.caller_session_id }
+            : {}),
+          authority,
+        });
+      },
+      async create(
+        data: {
+          sessionId: string;
+          authority?: 'author' | 'parent' | 'coordinator';
+          action: 'update' | 'cancel';
+          expectedQueueRevision: string;
+          expectedPromptRevision: number;
+          idempotencyKey: string;
+          revisedPrompt?: string;
+        },
+        params: RouteParams
+      ) {
+        const taskId = params.route?.id;
+        const authority = data.authority ?? 'author';
+        if (!isCanonicalFullUuid(taskId)) throw new BadRequest('A full Task ID is required');
+        if (!isCanonicalFullUuid(data.sessionId)) {
+          throw new BadRequest('A full Session ID is required');
+        }
+        if (authority !== 'author' && authority !== 'parent' && authority !== 'coordinator') {
+          throw new BadRequest("authority must be 'author', 'parent', or 'coordinator'");
+        }
+        if (data.action !== 'update' && data.action !== 'cancel') {
+          throw new BadRequest("action must be 'update' or 'cancel'");
+        }
+        if (!data.expectedQueueRevision || !Number.isInteger(data.expectedPromptRevision)) {
+          throw new BadRequest('Expected queue and prompt revisions are required');
+        }
+        if (!data.idempotencyKey?.trim() || data.idempotencyKey.length > 128) {
+          throw new BadRequest('idempotencyKey must contain 1–128 characters');
+        }
+        if (data.action === 'update' && !data.revisedPrompt?.trim()) {
+          throw new BadRequest('revisedPrompt is required for update');
+        }
+        if (data.action === 'cancel' && data.revisedPrompt !== undefined) {
+          throw new BadRequest('cancel does not accept revisedPrompt');
+        }
+        const tenantId = getCurrentTenantId();
+        if (!tenantId) throw new Error('Missing active tenant context for queued prompt amendment');
+        try {
+          const result = await runWithTenantDatabaseTransaction(
+            db,
+            tenantId,
+            async (operationDb) => {
+              await lockTenantAuthorizationFence(operationDb, params);
+              const actor = await resolveCurrentTenantAuthorityActor(operationDb, params);
+              if (actor.service || !params.user?.user_id || actor.user_id !== params.user.user_id) {
+                throw new Forbidden(
+                  'Queued prompt amendments require the current authenticated human actor'
+                );
+              }
+              const session = (await sessionsService.get(data.sessionId, params)) as Session;
+              if (session.branch_id) {
+                const branchRepository = new BranchRepository(operationDb);
+                const branch = await branchRepository.findById(session.branch_id);
+                if (!branch) throw new NotFound(`Branch ${session.branch_id} not found`);
+                const access = await resolveSessionPromptAccess({
+                  branchRepository,
+                  branch,
+                  session,
+                  userId: actor.user_id as UUID,
+                });
+                if (!access.allowed) {
+                  throw new Forbidden(
+                    sessionPromptDeniedMessage({ denial_reason: access.denialReason })
+                  );
+                }
+              }
+              const resolvedAuthority =
+                authority === 'author'
+                  ? undefined
+                  : await sessionsService.resolveQueueBatchAuthority(
+                      data.sessionId,
+                      { relationship: authority },
+                      params
+                    );
+              return new TaskRepository(operationDb).applyQueuedPromptAmendment({
+                session_id: data.sessionId as SessionID,
+                task_id: taskId as TaskID,
+                requested_by_user_id: actor.user_id as UserID,
+                ...(resolvedAuthority
+                  ? { requested_by_session_id: resolvedAuthority.caller_session_id }
+                  : {}),
+                authority,
+                operation_id: data.idempotencyKey,
+                action: data.action,
+                expected_queue_revision: data.expectedQueueRevision,
+                expected_prompt_revision: data.expectedPromptRevision,
+                ...(data.action === 'update' ? { revised_prompt: data.revisedPrompt! } : {}),
+              });
+            }
+          );
+          if (result.outcome === 'amended' || result.outcome === 'cancelled') {
+            emitServiceEvent(app, {
+              path: 'tasks',
+              event: 'patched',
+              data: result.task,
+              params,
+              id: result.task.task_id,
+            });
+            deferInFreshTenantScope(params, async () => {
+              await sessionsService.triggerQueueProcessing(result.task.session_id, params);
+            });
+          }
+          return result;
+        } catch (error) {
+          if (error instanceof RepositoryError) throw new Conflict(error.message);
+          throw error;
+        }
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: Service type not compatible with Express
+    } as any,
+    {
+      find: { role: ROLES.MEMBER, action: 'preview queued prompt amendment' },
+      create: { role: ROLES.MEMBER, action: 'amend queued prompt' },
     },
     requireAuth
   );
@@ -4626,7 +4796,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   });
 
   app.service('/branches/:id/archive-or-delete').hooks({
-    around: { all: [tenantIdentityAround] },
+    around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
     before: {
       create: [
         requireAuth,
@@ -4652,7 +4822,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   });
 
   app.service('/branches/:id/unarchive').hooks({
-    around: { all: [tenantIdentityAround] },
+    around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
     before: {
       create: [
         requireAuth,

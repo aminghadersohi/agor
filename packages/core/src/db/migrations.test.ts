@@ -177,6 +177,30 @@ describe('Postgres migrations', () => {
     ).toEqual([]);
   });
 
+  it('enforces the PostgreSQL DCR authority as an offline cohort cutover after current main', () => {
+    expect(
+      pendingOfflineCutoverMigrations('postgresql', {
+        applied: ['0100_claude_oauth_attempts'],
+        pending: ['9015_mcp_oauth_client_registrations'],
+      })
+    ).toEqual(['9015_mcp_oauth_client_registrations']);
+    expect(
+      pendingOfflineCutoverMigrations('postgresql', {
+        applied: [],
+        pending: ['0000_cuddly_captain_america', '9015_mcp_oauth_client_registrations'],
+      })
+    ).toEqual([]);
+  });
+
+  it('enforces the old-PR OAuth authority collision repair as an offline cohort cutover', () => {
+    expect(
+      pendingOfflineCutoverMigrations('postgresql', {
+        applied: ['0099_shared_session_prompting'],
+        pending: ['9016_oauth_authority_watermark_reconciliation'],
+      })
+    ).toEqual(['9016_oauth_authority_watermark_reconciliation']);
+  });
+
   it('assigns GitHub install state unique post-HA migration watermarks', async () => {
     const [postgresJournal, sqliteJournal] = await readJournals();
 
@@ -1051,6 +1075,87 @@ describe('MCP OAuth pending-flow migrations', () => {
       client.close();
       await rm(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe('MCP OAuth client-registration migrations', () => {
+  it('does not advance SQLite schema history for PostgreSQL-only DCR authority', async () => {
+    const [, sqliteJournal] = await readJournals();
+    expect(sqliteJournal.entries.at(-1)).toMatchObject({
+      idx: 106,
+      tag: '0106_session_power_priority',
+    });
+    expect(sqliteJournal.entries.some(({ tag }) => tag.includes('client_registrations'))).toBe(
+      false
+    );
+    expect(await import('./schema.sqlite')).not.toHaveProperty('mcpOauthClientRegistrations');
+  });
+
+  it('follows current main and binds PostgreSQL authority to tenant/server UUID with forced RLS', async () => {
+    const [postgresJournal] = await readJournals();
+    expect(postgresJournal.entries.slice(-5)).toEqual([
+      expect.objectContaining({ idx: 103, tag: '0103_session_power_priority' }),
+      expect.objectContaining({ idx: 104, tag: '0104_environment_command_discovery' }),
+      expect.objectContaining({ idx: 9015, tag: '9015_mcp_oauth_client_registrations' }),
+      expect.objectContaining({
+        idx: 9016,
+        tag: '9016_oauth_authority_watermark_reconciliation',
+      }),
+      expect.objectContaining({ idx: 9017, tag: '9017_fork_migration_collision_repair' }),
+    ]);
+    expect(postgresJournal.entries.at(-1)!.when).toBeGreaterThan(
+      postgresJournal.entries.at(-2)!.when
+    );
+    const migration = await readFile(
+      new URL('../../drizzle/postgres/9015_mcp_oauth_client_registrations.sql', import.meta.url),
+      'utf8'
+    );
+    expect(migration).toContain('FOREIGN KEY ("tenant_id", "mcp_server_id")');
+    expect(migration).toContain('DEFERRABLE INITIALLY IMMEDIATE');
+    expect(migration).toContain(
+      'ALTER TABLE "mcp_oauth_client_registrations" FORCE ROW LEVEL SECURITY'
+    );
+    expect(migration).toContain("'mcp_oauth_client_registration_maintenance'");
+    expect(migration).toContain('"sealed_material" text');
+    expect(migration).toContain('"claim_generation" bigint');
+    expect(migration).toContain('"lease_expires_at" timestamp with time zone');
+    expect(migration).toContain('mcp_oauth_client_registrations_registering_maintenance_idx');
+    expect(migration).toContain('mcp_oauth_client_registrations_registered_maintenance_idx');
+    expect(migration).toContain('mcp_oauth_client_registrations_terminal_maintenance_idx');
+    expect(migration).not.toContain('CREATE SEQUENCE');
+    expect(migration).not.toContain('registration_generation');
+    expect(migration).not.toMatch(/"client_id"\s/);
+    expect(migration).not.toMatch(/"client_secret"\s/);
+
+    const reconciliation = await readFile(
+      new URL(
+        '../../drizzle/postgres/9016_oauth_authority_watermark_reconciliation.sql',
+        import.meta.url
+      ),
+      'utf8'
+    );
+    expect(reconciliation).toContain('agor_0102_relation_fingerprint');
+    expect(reconciliation).toContain('agor_0102_legacy_dcr_expected');
+    expect(reconciliation).toContain('agor_0102_final_dcr_expected');
+    expect(reconciliation).toContain('agor_0102_claude_expected');
+    expect(reconciliation).toContain('pg_temp.agor_0102_relation_matches');
+    expect(reconciliation).toContain(
+      'DROP SEQUENCE public.mcp_oauth_client_registration_generation_seq'
+    );
+    expect(reconciliation).not.toContain(
+      'DROP SEQUENCE IF EXISTS "mcp_oauth_client_registration_generation_seq"'
+    );
+    expect(reconciliation).toContain('CREATE TABLE IF NOT EXISTS "claude_oauth_attempts"');
+    expect(reconciliation).toContain('CREATE TABLE IF NOT EXISTS "mcp_oauth_client_registrations"');
+    expect(reconciliation).toContain('unrecognized mcp_oauth_client_registrations schema');
+
+    const forkCollisionRepair = await readFile(
+      new URL('../../drizzle/postgres/9017_fork_migration_collision_repair.sql', import.meta.url),
+      'utf8'
+    );
+    expect(forkCollisionRepair).toContain('unrecognized partial session auto-archive schema');
+    expect(forkCollisionRepair).toContain('unrecognized partial zone workflow schema');
+    expect(forkCollisionRepair).toContain('FORCE ROW LEVEL SECURITY');
   });
 });
 

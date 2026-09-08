@@ -217,7 +217,7 @@ export const ArtifactNode = ({
   const [error, setError] = useState<string | null>(null);
   const [consentOpen, setConsentOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  const [staticReady, setStaticReady] = useState(false);
+  const [staticReadyHash, setStaticReadyHash] = useState<string | null>(null);
   const staticIframeRef = useRef<HTMLIFrameElement | null>(null);
   const lastHashRef = useRef<string | null>(null);
   const sandpackConfig = payload?.sandpack_config;
@@ -259,10 +259,6 @@ export const ArtifactNode = ({
   useEffect(() => {
     fetchPayload();
   }, [fetchPayload]);
-
-  useEffect(() => {
-    if (payload?.content_hash) setStaticReady(false);
-  }, [payload?.content_hash]);
 
   useEffect(() => {
     if (!mutationGate.canMutate) setDeleteConfirmOpen(false);
@@ -791,7 +787,7 @@ export const ArtifactNode = ({
                     : undefined
                 }
                 title={`${payload.name} preview`}
-                onReady={() => setStaticReady(true)}
+                onReady={() => setStaticReadyHash(payload.content_hash)}
                 iframeRef={staticIframeRef}
               />
             ) : (
@@ -812,8 +808,8 @@ export const ArtifactNode = ({
             <ArtifactSandpackErrorReporter
               artifactId={data.artifactId}
               contentHash={payload.runtime_report_hash ?? payload.content_hash}
-              statusOverride={
-                sandpackInputs.template === 'static' && staticReady ? 'idle' : undefined
+              staticReady={
+                sandpackInputs.template === 'static' && staticReadyHash === payload.content_hash
               }
             />
             <ArtifactRuntimeBridge artifactId={data.artifactId} fallbackIframe={staticIframeRef} />
