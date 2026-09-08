@@ -417,6 +417,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: `${NO_CONSUMER} Lands as tasks.patched.`,
   },
+  'tasks/:id/queued-prompt': {
+    audience: 'none',
+    why: `${NO_CONSUMER} Canonical amendments and cancellation land as tasks.patched.`,
+  },
   'tasks/:id/run': { audience: 'none', why: `${NO_CONSUMER} Lands as tasks.patched.` },
   'tasks/:id/complete': { audience: 'none', why: `${NO_CONSUMER} Lands as tasks.patched.` },
   'tasks/:id/fail': { audience: 'none', why: `${NO_CONSUMER} Lands as tasks.patched.` },

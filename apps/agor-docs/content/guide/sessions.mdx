@@ -323,6 +323,26 @@ already dispatching or running, use `agor_sessions_interrupt_with_message`;
 that operation first goes through verified Stop/containment and then places one
 corrective Task at the front of the remaining queue.
 
+> **Personal-fork POC — edit before claim.** The queued-task drawer lets the
+> author reopen an ordinary text prompt while it is still unclaimed, replace
+> its canonical instruction, or cancel it safely. The editor says **Editable
+> until dispatch/claim** and uses queue and prompt revisions, so a save from a
+> stale tab is rejected instead of overwriting a newer edit. Other tabs update
+> from normal realtime Task events.
+>
+> The original text and every revision remain in Task audit metadata with the
+> author, authority, timestamp, and idempotency key. Cancellation settles the
+> Task as `STOPPED`; it does not erase history. Attachments, widgets, gateway,
+> slash/control, interrupt, callback-generated, internal-continuation, mixed-actor,
+> and otherwise unsafe prompts are not editable. Text and aggregate audit limits
+> are refused without truncation, and prompt contents are not added to logs.
+>
+> This is not an interruption: use `interrupt_with_message` after work has been
+> claimed. It is also not Combine/Replace: those tools collapse multiple
+> compatible queued Tasks into one turn. A later batch preview sees the latest
+> edited text and retains its amendment provenance. There is no compose delay;
+> idle prompts still dispatch immediately.
+
 ---
 
 ## Moving an existing Session

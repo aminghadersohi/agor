@@ -3485,6 +3485,179 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
+  // Fork-only POC: edit/cancel one canonical ordinary prompt while it remains
+  // QUEUED. Apply uses the same tenant authorization fence and Session-row
+  // sequencer as admission/dispatch, plus queue+prompt CAS revisions.
+  registerAuthenticatedRoute(
+    app,
+    '/tasks/:id/queued-prompt',
+    {
+      async find(params: RouteParams) {
+        const taskId = params.route?.id;
+        const sessionId = params.query?.sessionId;
+        const authority = params.query?.authority ?? 'author';
+        if (!isCanonicalFullUuid(taskId)) throw new BadRequest('A full Task ID is required');
+        if (!isCanonicalFullUuid(sessionId)) throw new BadRequest('A full Session ID is required');
+        if (authority !== 'author' && authority !== 'parent' && authority !== 'coordinator') {
+          throw new BadRequest("authority must be 'author', 'parent', or 'coordinator'");
+        }
+        if (
+          !params.user?.user_id ||
+          (params.user as User & { _isServiceAccount?: boolean })._isServiceAccount
+        ) {
+          throw new Forbidden('Queued prompt amendments require an authenticated human actor');
+        }
+        const session = (await sessionsService.get(sessionId, params)) as Session;
+        if (session.branch_id) {
+          const branchRepository = new BranchRepository(db);
+          const branch = await branchRepository.findById(session.branch_id);
+          if (!branch) throw new NotFound(`Branch ${session.branch_id} not found`);
+          const access = await resolveSessionPromptAccess({
+            branchRepository,
+            branch,
+            session,
+            userId: params.user.user_id as UUID,
+          });
+          if (!access.allowed) {
+            throw new Forbidden(sessionPromptDeniedMessage({ denial_reason: access.denialReason }));
+          }
+        }
+        const resolvedAuthority =
+          authority === 'author'
+            ? undefined
+            : await sessionsService.resolveQueueBatchAuthority(
+                sessionId,
+                { relationship: authority },
+                params
+              );
+        return new TaskRepository(db).previewQueuedPromptAmendment({
+          session_id: sessionId,
+          task_id: taskId,
+          requested_by_user_id: params.user.user_id as UserID,
+          ...(resolvedAuthority
+            ? { requested_by_session_id: resolvedAuthority.caller_session_id }
+            : {}),
+          authority,
+        });
+      },
+      async create(
+        data: {
+          sessionId: string;
+          authority?: 'author' | 'parent' | 'coordinator';
+          action: 'update' | 'cancel';
+          expectedQueueRevision: string;
+          expectedPromptRevision: number;
+          idempotencyKey: string;
+          revisedPrompt?: string;
+        },
+        params: RouteParams
+      ) {
+        const taskId = params.route?.id;
+        const authority = data.authority ?? 'author';
+        if (!isCanonicalFullUuid(taskId)) throw new BadRequest('A full Task ID is required');
+        if (!isCanonicalFullUuid(data.sessionId)) {
+          throw new BadRequest('A full Session ID is required');
+        }
+        if (authority !== 'author' && authority !== 'parent' && authority !== 'coordinator') {
+          throw new BadRequest("authority must be 'author', 'parent', or 'coordinator'");
+        }
+        if (data.action !== 'update' && data.action !== 'cancel') {
+          throw new BadRequest("action must be 'update' or 'cancel'");
+        }
+        if (!data.expectedQueueRevision || !Number.isInteger(data.expectedPromptRevision)) {
+          throw new BadRequest('Expected queue and prompt revisions are required');
+        }
+        if (!data.idempotencyKey?.trim() || data.idempotencyKey.length > 128) {
+          throw new BadRequest('idempotencyKey must contain 1–128 characters');
+        }
+        if (data.action === 'update' && !data.revisedPrompt?.trim()) {
+          throw new BadRequest('revisedPrompt is required for update');
+        }
+        if (data.action === 'cancel' && data.revisedPrompt !== undefined) {
+          throw new BadRequest('cancel does not accept revisedPrompt');
+        }
+        const tenantId = getCurrentTenantId();
+        if (!tenantId) throw new Error('Missing active tenant context for queued prompt amendment');
+        try {
+          const result = await runWithTenantDatabaseTransaction(
+            db,
+            tenantId,
+            async (operationDb) => {
+              await lockTenantAuthorizationFence(operationDb, params);
+              const actor = await resolveCurrentTenantAuthorityActor(operationDb, params);
+              if (actor.service || !params.user?.user_id || actor.user_id !== params.user.user_id) {
+                throw new Forbidden(
+                  'Queued prompt amendments require the current authenticated human actor'
+                );
+              }
+              const session = (await sessionsService.get(data.sessionId, params)) as Session;
+              if (session.branch_id) {
+                const branchRepository = new BranchRepository(operationDb);
+                const branch = await branchRepository.findById(session.branch_id);
+                if (!branch) throw new NotFound(`Branch ${session.branch_id} not found`);
+                const access = await resolveSessionPromptAccess({
+                  branchRepository,
+                  branch,
+                  session,
+                  userId: actor.user_id as UUID,
+                });
+                if (!access.allowed) {
+                  throw new Forbidden(
+                    sessionPromptDeniedMessage({ denial_reason: access.denialReason })
+                  );
+                }
+              }
+              const resolvedAuthority =
+                authority === 'author'
+                  ? undefined
+                  : await sessionsService.resolveQueueBatchAuthority(
+                      data.sessionId,
+                      { relationship: authority },
+                      params
+                    );
+              return new TaskRepository(operationDb).applyQueuedPromptAmendment({
+                session_id: data.sessionId as SessionID,
+                task_id: taskId as TaskID,
+                requested_by_user_id: actor.user_id as UserID,
+                ...(resolvedAuthority
+                  ? { requested_by_session_id: resolvedAuthority.caller_session_id }
+                  : {}),
+                authority,
+                operation_id: data.idempotencyKey,
+                action: data.action,
+                expected_queue_revision: data.expectedQueueRevision,
+                expected_prompt_revision: data.expectedPromptRevision,
+                ...(data.action === 'update' ? { revised_prompt: data.revisedPrompt! } : {}),
+              });
+            }
+          );
+          if (result.outcome === 'amended' || result.outcome === 'cancelled') {
+            emitServiceEvent(app, {
+              path: 'tasks',
+              event: 'patched',
+              data: result.task,
+              params,
+              id: result.task.task_id,
+            });
+            deferInFreshTenantScope(params, async () => {
+              await sessionsService.triggerQueueProcessing(result.task.session_id, params);
+            });
+          }
+          return result;
+        } catch (error) {
+          if (error instanceof RepositoryError) throw new Conflict(error.message);
+          throw error;
+        }
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: Service type not compatible with Express
+    } as any,
+    {
+      find: { role: ROLES.MEMBER, action: 'preview queued prompt amendment' },
+      create: { role: ROLES.MEMBER, action: 'amend queued prompt' },
+    },
+    requireAuth
+  );
+
   // Explicit coordinator queue batching. Unlike automatic ordinary-prompt
   // compaction, this path may cross a Session continuation fence only after a
   // current parent/direct coordinator is resolved and authorized. Preview

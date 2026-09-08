@@ -162,6 +162,17 @@ export interface SessionQueueBatchRequest {
   replacementPrompt?: string;
 }
 
+/** CAS mutation for one ordinary queued prompt, produced by its preview. */
+export interface QueuedPromptAmendmentRequest {
+  sessionId: string;
+  authority?: import('../types').QueuedPromptAmendmentAuthority;
+  expectedQueueRevision: string;
+  expectedPromptRevision: number;
+  idempotencyKey: string;
+  action: 'update' | 'cancel';
+  revisedPrompt?: string;
+}
+
 /** Required setup for an already-created session, applied before its first prompt. */
 export interface SessionInitializationRequest {
   /** Fence delayed calls to the identity that created the session. */
