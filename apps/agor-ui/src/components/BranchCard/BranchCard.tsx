@@ -377,10 +377,10 @@ const BranchCardComponent = ({
 
   return (
     <Card
+      ref={cardRef}
       onClickCapture={() => onAutoZoneInteraction?.(branch.branch_id)}
       onPointerDownCapture={() => onAutoZoneInteraction?.(branch.branch_id)}
       onFocusCapture={() => onAutoZoneInteraction?.(branch.branch_id)}
-      ref={cardRef}
       style={{
         width: panelMode ? '100%' : peekedSessions.length > 0 ? 880 : 500,
         cursor: 'default', // Override React Flow's drag cursor - only drag handles should show grab cursor
