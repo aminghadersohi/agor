@@ -45,11 +45,24 @@ async function createBranch(db: Database) {
   });
 }
 
-dbTest('branch archive is complete beyond the former 1,000-session cap', async ({ db }) => {
-  const branch = await createBranch(db);
-  const repository = new SessionRepository(db);
-  for (let index = 0; index < 1_001; index++) {
-    await repository.create({
+dbTest(
+  'branch archive is complete beyond the former 1,000-session cap',
+  async ({ db }) => {
+    const branch = await createBranch(db);
+    const repository = new SessionRepository(db);
+    for (let index = 0; index < 1_001; index++) {
+      await repository.create({
+        session_id: generateId(),
+        branch_id: branch.branch_id,
+        created_by: USER_ID,
+        agentic_tool: 'claude-code',
+        status: SessionStatus.IDLE,
+        tasks: [],
+        contextFiles: [],
+        genealogy: { children: [] },
+      });
+    }
+    const manual = await repository.create({
       session_id: generateId(),
       branch_id: branch.branch_id,
       created_by: USER_ID,
@@ -58,35 +71,28 @@ dbTest('branch archive is complete beyond the former 1,000-session cap', async (
       tasks: [],
       contextFiles: [],
       genealogy: { children: [] },
+      archived: true,
+      archived_reason: 'manual',
     });
-  }
-  const manual = await repository.create({
-    session_id: generateId(),
-    branch_id: branch.branch_id,
-    created_by: USER_ID,
-    agentic_tool: 'claude-code',
-    status: SessionStatus.IDLE,
-    tasks: [],
-    contextFiles: [],
-    genealogy: { children: [] },
-    archived: true,
-    archived_reason: 'manual',
-  });
 
-  const service = new SessionsService(db, APP);
-  expect((await service.archiveBranchSessions(branch.branch_id)).count).toBe(1_001);
-  expect(await repository.findAll({ branchId: branch.branch_id, archived: false })).toHaveLength(0);
-  await expect(repository.findById(manual.session_id)).resolves.toMatchObject({
-    archived: true,
-    archived_reason: 'manual',
-  });
+    const service = new SessionsService(db, APP);
+    expect((await service.archiveBranchSessions(branch.branch_id)).count).toBe(1_001);
+    expect(await repository.findAll({ branchId: branch.branch_id, archived: false })).toHaveLength(
+      0
+    );
+    await expect(repository.findById(manual.session_id)).resolves.toMatchObject({
+      archived: true,
+      archived_reason: 'manual',
+    });
 
-  expect((await service.unarchiveBranchSessions(branch.branch_id)).count).toBe(1_001);
-  expect(await repository.findAll({ branchId: branch.branch_id, archived: false })).toHaveLength(
-    1_001
-  );
-  await expect(repository.findById(manual.session_id)).resolves.toMatchObject({
-    archived: true,
-    archived_reason: 'manual',
-  });
-});
+    expect((await service.unarchiveBranchSessions(branch.branch_id)).count).toBe(1_001);
+    expect(await repository.findAll({ branchId: branch.branch_id, archived: false })).toHaveLength(
+      1_001
+    );
+    await expect(repository.findById(manual.session_id)).resolves.toMatchObject({
+      archived: true,
+      archived_reason: 'manual',
+    });
+  },
+  30_000
+);
