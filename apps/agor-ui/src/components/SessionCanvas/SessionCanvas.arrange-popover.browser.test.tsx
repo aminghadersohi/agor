@@ -356,7 +356,10 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     });
     await act(async () => user.click(trigger));
     dialog = await screen.findByRole('dialog', { name: 'Arrange board options' });
-    await act(async () => user.click(within(dialog).getByText('More layout options')));
+    // The first opening above already proves pointer actionability for this
+    // disclosure. Reopenings exercise persistence/no-op and keyboard contracts
+    // without waiting on Ant's portaled motion state under a loaded CI runner.
+    fireEvent.click(within(dialog).getByText('More layout options'));
     const reopenedDensity = within(dialog).getByRole('combobox', { name: 'Content expansion' });
     expect(reopenedDensity).toBeDisabled();
     expect(within(dialog).getByText('Preserve current expansion')).toBeInTheDocument();
@@ -376,7 +379,7 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     trigger = getTrigger();
     await act(async () => user.click(trigger));
     dialog = await screen.findByRole('dialog', { name: 'Arrange board options' });
-    await act(async () => user.click(within(dialog).getByText('More layout options')));
+    fireEvent.click(within(dialog).getByText('More layout options'));
     const grid = within(dialog).getByRole('radio', { name: 'Grid' });
     grid.focus();
     await act(async () => user.keyboard(' '));
@@ -416,7 +419,7 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     expect(getSelectedZone()).toHaveClass('selected');
 
     expect(patch).toHaveBeenCalledTimes(2);
-  }, 60_000);
+  }, 90_000);
 
   it('uses one Grid plan for board and selection, then preserves cells for every visible action', async () => {
     if (window.innerWidth < 900) return;

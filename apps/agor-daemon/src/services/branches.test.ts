@@ -234,6 +234,8 @@ function createServiceHarness() {
   const sessionsService = {
     find: vi.fn(async () => []),
     patch: vi.fn(async () => ({})),
+    archiveBranchSessions: vi.fn(async () => ({ affectedSessions: [], count: 0 })),
+    unarchiveBranchSessions: vi.fn(async () => ({ affectedSessions: [], count: 0 })),
   };
 
   const reposService = {
@@ -333,8 +335,11 @@ function createFindHarness(opts: {
     archived?: boolean;
     branchIds?: BranchID[];
     visibleToUserId?: string;
+    zone_id?: string;
   }) =>
     opts.branches.filter((branch) => {
+      if (filter?.zone_id && !opts.branchIdsInZone.includes(branch.branch_id as BranchID))
+        return false;
       if (filter?.repo_id !== undefined && branch.repo_id !== filter.repo_id) return false;
       if (filter?.board_id !== undefined && branch.board_id !== filter.board_id) return false;
       if (filter?.archived !== undefined && Boolean(branch.archived) !== filter.archived)
@@ -1427,8 +1432,10 @@ describe('BranchesService.unarchive', () => {
       position: { x: 111, y: 222 },
     });
 
-    expect(sessionsService.find).toHaveBeenCalledTimes(1);
-    expect(sessionsService.patch).not.toHaveBeenCalled();
+    expect(sessionsService.unarchiveBranchSessions).toHaveBeenCalledWith(
+      branchId,
+      expect.objectContaining({ provider: undefined })
+    );
   });
 
   it('does not create a new board object when one already exists', async () => {
@@ -1541,10 +1548,10 @@ describe('BranchesService.archiveOrDelete', () => {
       params
     );
 
-    expect(sessionsService.find).toHaveBeenCalledWith({
-      query: { branch_id: branchId, $limit: 1000 },
-      paginate: false,
-    });
+    expect(sessionsService.archiveBranchSessions).toHaveBeenCalledWith(
+      branchId,
+      expect.objectContaining({ provider: undefined })
+    );
     expect(boardObjectsService.findByBranchId).not.toHaveBeenCalled();
     expect(boardObjectsService.patch).not.toHaveBeenCalled();
     expect(branchesService.emit).toHaveBeenCalledTimes(1);
@@ -1823,7 +1830,7 @@ describe('BranchesService.find zone filtering', () => {
       query: { zone_id: 'zone-review', $limit: 1 },
     })) as { data: Array<Record<string, unknown>>; total: number; limit: number; skip: number };
 
-    expect(branchRepo.findBranchIdsByZone).toHaveBeenCalledWith('zone-review');
+    expect(branchRepo.findBranchIdsByZone).not.toHaveBeenCalled();
     expect(result.total).toBe(2);
     expect(result.limit).toBe(1);
     expect(result.data).toHaveLength(1);
@@ -1875,6 +1882,7 @@ describe('BranchesService.find SQL pushdown', () => {
 
     // Read is SQL-bounded: the scoped repo read runs, the whole-table read does not.
     expect(branchRepo.findPage).toHaveBeenCalledWith({
+      zone_id: undefined,
       repo_id: undefined,
       board_id: 'board-1',
       archived: false,
@@ -1907,6 +1915,7 @@ describe('BranchesService.find SQL pushdown', () => {
     })) as { data: Array<Record<string, unknown>>; total: number };
 
     expect(branchRepo.findPage).toHaveBeenCalledWith({
+      zone_id: undefined,
       repo_id: undefined,
       board_id: 'board-1',
       archived: false,
@@ -1934,10 +1943,11 @@ describe('BranchesService.find SQL pushdown', () => {
     })) as { data: Array<Record<string, unknown>>; total: number };
 
     expect(branchRepo.findPage).toHaveBeenCalledWith({
+      zone_id: 'zone-review',
       repo_id: undefined,
       board_id: 'board-1',
       archived: undefined,
-      branchIds: ['b1', 'b2'],
+      branchIds: undefined,
       visibleToUserId: undefined,
       limit: 1,
       offset: 1,
@@ -1959,6 +1969,7 @@ describe('BranchesService.find SQL pushdown', () => {
     })) as { data: Array<Record<string, unknown>>; total: number };
 
     expect(branchRepo.findPage).toHaveBeenCalledWith({
+      zone_id: undefined,
       repo_id: undefined,
       board_id: undefined,
       archived: undefined,
@@ -1983,6 +1994,7 @@ describe('BranchesService.find SQL pushdown', () => {
     })) as { data: Array<Record<string, unknown>>; total: number };
 
     expect(branchRepo.findPage).toHaveBeenCalledWith({
+      zone_id: undefined,
       repo_id: undefined,
       board_id: undefined,
       archived: undefined,
@@ -2008,6 +2020,7 @@ describe('BranchesService.find SQL pushdown', () => {
     } as BranchParams);
 
     expect(branchRepo.findPage).toHaveBeenCalledWith({
+      zone_id: undefined,
       repo_id: undefined,
       board_id: 'board-1',
       archived: undefined,

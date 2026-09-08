@@ -27,6 +27,7 @@ import {
   AGENTIC_TOOL_NAMES,
   type AgenticToolName,
   type Board,
+  type BranchID,
   CALLBACK_DELIVERIES,
   type CompletionSubscription,
   type CompletionSubscriptionID,
@@ -35,6 +36,7 @@ import {
   isTaskExecuting,
   SESSION_AUTO_ARCHIVE_POLICIES,
   type Session,
+  type SessionID,
   type SessionRelationship,
   type TaskID,
   type UserID,
@@ -43,7 +45,7 @@ import {
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { SessionsServiceImpl } from '../../declarations.js';
-import type { SessionParams } from '../../services/sessions.js';
+import type { SessionBulkArchiveResult, SessionParams } from '../../services/sessions.js';
 import {
   lockTenantAuthorizationFence,
   resolveCurrentTenantAuthorityActor,
@@ -533,7 +535,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_get_current',
     {
       description:
-        'Get information about the current session (the one making this MCP call). Returns session details, denormalized branch/repo/board context, and the MCP servers attached to this session (each with `oauth_authenticated` so callers can spot servers needing auth). To browse the broader catalog of servers eligible to attach, use `agor_mcp_servers_list`. The returned session_id is the value a remote orchestrator passes as callbackSessionId (agor_sessions_create) to self-target cross-branch completion callbacks; agor_sessions_get_current_context is the leaner way to fetch it.',
+        'Get information about the current session (the one making this MCP call). Returns session details, denormalized branch/repo/board context, and the MCP servers attached to this session (each with `oauth_authenticated` so callers can spot servers needing auth). To browse the broader catalog of servers eligible to attach, use `agor_mcp_servers_list`. For self callbacks with agor_sessions_create, set enableCallback: true and omit callbackSessionId to target the actual calling session, including cross-branch creation. Only set callbackSessionId for an intentional authorized alternate destination. When explicit current identity is needed, make a fresh call to this tool or the leaner agor_sessions_get_current_context and use its session_id rather than inherited IDs or earlier results.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({}),
     },
@@ -617,7 +619,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_get_current_context',
     {
       description:
-        'Get a lean orientation snapshot for the current session in ONE call. Returns deduplicated context: session identity, user, latest task Git boundaries, branch (zone, issue/PR, notes, environment), board (with zones), repo (slug, default branch), branch-local genealogy, immutable remote origins, the effective direct callback coordinator, and sibling sessions. Provenance and current routing are deliberately separate: remote_origins records who originally remote-created this Session, while effective_direct_callback_coordinator_session_id records the currently enabled report destination after any retarget. A remote-created root can use agor_session_relationships_report for an explicit follow-up.',
+        'Get a lean orientation snapshot for the current session in ONE call. Returns deduplicated context: session identity, user, latest task Git boundaries, branch (zone, issue/PR, notes, environment), board (with zones), repo (slug, default branch), branch-local genealogy, immutable remote origins, the effective direct callback coordinator, and sibling sessions. Provenance and current routing are deliberately separate: remote_origins records who originally remote-created this Session, while effective_direct_callback_coordinator_session_id records the currently enabled report destination after any retarget. For self callbacks with agor_sessions_create, set enableCallback: true and omit callbackSessionId to target the actual calling session, including cross-branch creation. Only set callbackSessionId for an intentional authorized alternate destination. When explicit current identity is needed, make a fresh call to this tool and use its session_id rather than inherited IDs or earlier results. A remote-created root can use agor_session_relationships_report for an explicit follow-up.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         includeSiblings: z
@@ -1986,7 +1988,8 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           'callbackSessionId',
           'Session',
           'Session ID to notify on completion (defaults to the current/creating session when enableCallback is true). ' +
-            'Not restricted to the target branch: this may be a session in a DIFFERENT branch — e.g. a remote orchestrator registering its own session (fetch that ID via agor_sessions_get_current_context) to be notified when cross-branch work finishes.'
+            'For callbacks to yourself, omit this field, including across branches or from a fork/nested coordinator. ' +
+            'Set it only for an intentional authorized alternate destination, which may be in a different branch.'
         ),
         includeLastMessage: z
           .boolean()
@@ -2409,7 +2412,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_update',
     {
       description:
-        'Update session metadata (title, description, status, archived, callback config, automatic archival). Useful for agents to self-document their work or manage lifecycle settings.',
+        'Update session metadata (title, description, status, callback config, automatic archival). Archive state is managed by agor_sessions_archive and agor_sessions_unarchive so descendant and permission rules cannot be bypassed.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         sessionId: mcpRequiredId(
@@ -2426,7 +2429,9 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         archived: z
           .boolean()
           .optional()
-          .describe('Set archive state. true to archive, false to unarchive (optional)'),
+          .describe(
+            'Deprecated and rejected. Use agor_sessions_archive or agor_sessions_unarchive.'
+          ),
         enableCallback: z
           .boolean()
           .optional()
@@ -2448,14 +2453,15 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       }),
     },
     async (args) => {
+      if (args.archived !== undefined) {
+        throw new Error(
+          'agor_sessions_update cannot change archive state. Use agor_sessions_archive or agor_sessions_unarchive.'
+        );
+      }
       const updates: Record<string, unknown> = {};
       if (args.title !== undefined) updates.title = args.title;
       if (args.description !== undefined) updates.description = args.description;
       if (args.status !== undefined) updates.status = args.status;
-      if (args.archived !== undefined) {
-        updates.archived = args.archived;
-        updates.archived_reason = args.archived ? 'manual' : undefined;
-      }
       if (args.autoArchive !== undefined) updates.auto_archive = args.autoArchive;
       if (args.autoArchiveAfterSeconds !== undefined) {
         updates.auto_archive_after_seconds = args.autoArchiveAfterSeconds;
@@ -2482,7 +2488,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
 
       if (Object.keys(updates).length === 0) {
         throw new Error(
-          'At least one field (title, description, status, archived, enableCallback, callbackMode, callbackDelivery, autoArchive, autoArchiveAfterSeconds) must be provided'
+          'At least one field (title, description, status, enableCallback, callbackMode, callbackDelivery, autoArchive, autoArchiveAfterSeconds) must be provided'
         );
       }
 
@@ -2501,7 +2507,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_archive',
     {
       description:
-        'Archive a session (soft delete). Archived sessions are hidden from listings by default but can be restored. By default, all child sessions (forks and subsessions) are also archived. Set includeChildren to false to archive only the target session.',
+        'Archive a session (soft delete). Archived sessions are hidden from listings by default but can be restored. By default, same-branch forked and spawned descendants are also archived. Remote-created sessions retain an independent lifecycle. Set includeChildren to false to archive only the target session.',
       annotations: { destructiveHint: true },
       inputSchema: z.object({
         sessionId: mcpRequiredId(
@@ -2512,7 +2518,9 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         includeChildren: z
           .boolean()
           .optional()
-          .describe('Also archive all child sessions (forks and subsessions). Default: true.'),
+          .describe(
+            'Also archive same-branch forked and spawned descendants. Remote-created sessions are excluded. Default: true.'
+          ),
       }),
     },
     async (args) => {
@@ -2539,7 +2547,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_unarchive',
     {
       description:
-        'Restore a previously archived session. By default, all child sessions are also unarchived. Set includeChildren to false to unarchive only the target session.',
+        'Restore a previously archived session. By default, same-branch descendants archived because of their parent are also restored. Remote-created sessions retain an independent lifecycle. Set includeChildren to false to restore only the target session.',
       inputSchema: z.object({
         sessionId: mcpRequiredId(
           'sessionId',
@@ -2549,7 +2557,9 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         includeChildren: z
           .boolean()
           .optional()
-          .describe('Also unarchive all child sessions (forks and subsessions). Default: true.'),
+          .describe(
+            'Also restore same-branch descendants archived because of their parent. Remote-created sessions are excluded. Default: true.'
+          ),
       }),
     },
     async (args) => {
@@ -2573,7 +2583,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_bulk_archive',
     {
       description:
-        'Archive multiple sessions matching filter criteria. Supports filtering by session type (gateway/scheduled/agent), age, status, board, and branch. Returns a dry-run preview by default — set dryRun to false to actually archive. Respects RBAC: sessions the current user cannot modify are skipped and reported as errors.',
+        'Archive multiple sessions matching filter criteria. Filters select roots only. Dry-run is the default and reports additional same-branch fork/spawn descendants, including executing descendants. Before execution, set includeChildren explicitly when descendants exist. Archiving hides sessions but does not stop their execution. Remote-created sessions have an independent lifecycle.',
       annotations: { destructiveHint: true },
       inputSchema: z.object({
         sessionType: z
@@ -2594,6 +2604,12 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .describe('Only archive sessions with this status'),
         boardId: mcpOptionalId('boardId', 'Board', 'Only archive sessions on this board'),
         branchId: mcpOptionalId('branchId', 'Branch', 'Only archive sessions in this branch'),
+        includeChildren: z
+          .boolean()
+          .optional()
+          .describe(
+            'true archives the complete same-branch fork/spawn trees; false intentionally archives matched roots only. Execution requires an explicit choice when additional descendants exist.'
+          ),
         dryRun: z
           .boolean()
           .optional()
@@ -2641,54 +2657,133 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         return true;
       });
 
+      const rootsByBranch = new Map<BranchID, SessionID[]>();
+      for (const session of toArchive) {
+        const branchId = session.branch_id as BranchID;
+        const roots = rootsByBranch.get(branchId) ?? [];
+        roots.push(session.session_id);
+        rootsByBranch.set(branchId, roots);
+      }
+
+      const sessionsService = ctx.app.service('sessions') as unknown as SessionsServiceImpl;
+      const previews: SessionBulkArchiveResult[] = [];
+      for (const [branchId, rootIds] of rootsByBranch) {
+        previews.push(
+          await runWithMcpTenantDatabaseScope(ctx, () =>
+            sessionsService.archiveRootsInBranch(
+              branchId,
+              rootIds,
+              { includeChildren: args.includeChildren, dryRun: true },
+              ctx.baseServiceParams
+            )
+          )
+        );
+      }
+
+      const matchedRootCount = previews.reduce((sum, preview) => sum + preview.matchedRootCount, 0);
+      const additionalDescendantCount = previews.reduce(
+        (sum, preview) => sum + preview.additionalDescendantCount,
+        0
+      );
+      const executingDescendantCount = previews.reduce(
+        (sum, preview) => sum + preview.executingDescendantCount,
+        0
+      );
+      const withChildrenTotal = previews.reduce(
+        (sum, preview) => sum + preview.withChildrenTotal,
+        0
+      );
+      const authorizedSessionCount = previews.reduce(
+        (sum, preview) => sum + preview.authorizedSessionCount,
+        0
+      );
+      const previewErrors = previews.flatMap((preview) => preview.skipped);
+      const rootSample = toArchive.slice(0, 20).map((session) => ({
+        session_id: session.session_id,
+        title: session.title,
+        status: session.status,
+        session_type: getSessionType(session),
+        last_updated: session.last_updated,
+        created_at: session.created_at,
+        branch_id: session.branch_id,
+      }));
+      const descendantSample = previews
+        .flatMap((preview) => preview.additionalDescendants)
+        .slice(0, 20)
+        .map((session) => ({
+          session_id: session.session_id,
+          title: session.title,
+          status: session.status,
+          branch_id: session.branch_id,
+        }));
+      const sampleTruncated = additionalDescendantCount > descendantSample.length;
+
       if (dryRun) {
         return textResult({
           dryRun: true,
-          wouldArchive: toArchive.length,
+          matchedRootCount,
           totalMatched: allSessions.length,
+          additionalDescendantCount,
+          executingDescendantCount,
+          rootOnlyTotal: matchedRootCount,
+          withChildrenTotal,
+          wouldArchive: authorizedSessionCount,
+          includeChildren: args.includeChildren,
+          sessions: rootSample,
+          rootSampleTruncated: matchedRootCount > rootSample.length,
+          descendantSample,
+          sampleTruncated,
+          failedCount: previewErrors.length,
+          errors: previewErrors.length > 0 ? previewErrors : undefined,
           ...(cutoffDate && { cutoffDate: cutoffDate.toISOString() }),
-          sessions: toArchive.map((s) => ({
-            session_id: s.session_id,
-            title: s.title,
-            status: s.status,
-            session_type: getSessionType(s),
-            last_updated: s.last_updated,
-            created_at: s.created_at,
-            branch_id: s.branch_id,
-          })),
-          message: `Would archive ${toArchive.length} session(s). Set dryRun=false to proceed.`,
+          message:
+            additionalDescendantCount > 0 && args.includeChildren === undefined
+              ? `Matched ${matchedRootCount} root session(s) plus ${additionalDescendantCount} active same-branch descendant(s). Set includeChildren explicitly before dryRun=false.`
+              : `Would archive ${authorizedSessionCount} session(s). Set dryRun=false to proceed.`,
+          warning:
+            executingDescendantCount > 0
+              ? `${executingDescendantCount} descendant session(s) are executing. Archiving hides sessions but does not stop execution.`
+              : undefined,
         });
       }
 
-      // Archive each session (through service layer for RBAC)
+      if (args.includeChildren === undefined && additionalDescendantCount > 0) {
+        throw new Error(
+          `Bulk archive matched ${matchedRootCount} root session(s) with ${additionalDescendantCount} additional active same-branch descendant(s), including ${executingDescendantCount} executing. Retry with includeChildren=true to archive complete trees or includeChildren=false for intentional root-only behavior.`
+        );
+      }
+
+      const includeChildren = args.includeChildren === true;
       let archivedCount = 0;
       const errors: { session_id: string; error: string }[] = [];
-
-      for (const session of toArchive) {
-        try {
-          await ctx.app
-            .service('sessions')
-            .patch(
-              session.session_id,
-              { archived: true, archived_reason: 'manual' },
-              ctx.baseServiceParams
-            );
-          archivedCount++;
-        } catch (error) {
-          errors.push({
-            session_id: session.session_id,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+      for (const [branchId, rootIds] of rootsByBranch) {
+        const result = await runWithMcpTenantDatabaseWrite(ctx, () =>
+          sessionsService.archiveRootsInBranch(
+            branchId,
+            rootIds,
+            { includeChildren: args.includeChildren },
+            ctx.baseServiceParams
+          )
+        );
+        archivedCount += result.count;
+        errors.push(...result.skipped);
       }
 
       return textResult({
         success: true,
         archivedCount,
+        matchedRootCount,
+        additionalDescendantCount,
+        executingDescendantCount,
+        includeChildren,
         failedCount: errors.length,
         ...(cutoffDate && { cutoffDate: cutoffDate.toISOString() }),
         errors: errors.length > 0 ? errors : undefined,
-        message: `Archived ${archivedCount} session(s).${errors.length > 0 ? ` ${errors.length} failed (insufficient permissions or other errors).` : ''}`,
+        warning:
+          includeChildren && executingDescendantCount > 0
+            ? `${executingDescendantCount} descendant session(s) were executing. They were hidden but their execution was not stopped.`
+            : undefined,
+        message: `Archived ${archivedCount} session(s).${errors.length > 0 ? ` ${errors.length} tree(s) were skipped.` : ''}`,
       });
     }
   );

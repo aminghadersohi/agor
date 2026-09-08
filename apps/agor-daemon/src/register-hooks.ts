@@ -136,6 +136,7 @@ import type { GatewayService } from './services/gateway.js';
 import { groupMembershipsHooks, groupsHooks } from './services/groups.js';
 import { presentMCPServerOAuthPolicies } from './services/mcp-server-presentation.js';
 import {
+  assertSessionArchiveStateUsesDedicatedOperation,
   isRemoteRelationshipsEnrichedResult,
   markRemoteRelationshipsEnrichedResult,
 } from './services/sessions.js';
@@ -182,7 +183,10 @@ import {
   redactMCPServerSecrets,
   shouldExposeMCPServerSecrets,
 } from './utils/mcp-header-secrets.js';
-import { createMcpServerWriteAuthorizationHook } from './utils/mcp-server-authorization.js';
+import {
+  createMcpServerWriteAuthorizationHook,
+  resolveMcpCaller,
+} from './utils/mcp-server-authorization.js';
 import { realignRepoOriginAfterPatchHook } from './utils/realign-repo-origin.js';
 import {
   bindRealtimeAccessCacheInvalidation,
@@ -341,7 +345,7 @@ export function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
  * session metadata (name, model_config, permission_config, callback_config).
  *
  * Sources:
- *   - `/sessions/:id/prompt`  → `tasks`, `archived`, `archived_reason`
+ *   - `/sessions/:id/prompt`  → `tasks`
  *   - `/sessions/:id/stop`    → `status`, `ready_for_prompt`
  *   - executor status updates → `status`, `ready_for_prompt`
  *     (claude/copilot permission-hooks, see packages/executor)
@@ -365,8 +369,8 @@ export function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
  */
 export const PROMPT_FLOW_PATCH_FIELDS: readonly string[] = [
   'tasks',
-  'archived',
-  'archived_reason',
+  // Prompt admission authoritatively cancels a pending automatic archive.
+  // Actual archive state is owned by the dedicated lifecycle operation.
   'auto_archive_at',
   'status',
   'ready_for_prompt',
@@ -2058,11 +2062,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       '/artifacts/:id/sandpack-error',
       {
         async create(
-          data: {
-            error: import('@agor/core/types').SandpackError | null;
-            status?: string;
-            content_hash?: string;
-          },
+          data: import('@agor/core/types').ArtifactSandpackReport,
           _params: RouteParams
         ) {
           const artifactId = _params.route?.id;
@@ -2079,7 +2079,8 @@ export function registerHooks(ctx: RegisterHooksContext): void {
             userId,
             data.error,
             data.status,
-            data.content_hash
+            data.content_hash,
+            data.compilation_status
           );
           return { success: true };
         },
@@ -2492,9 +2493,10 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   };
 
   const scopeMcpServerFindToUsable = async (context: HookContext): Promise<HookContext> => {
-    if (!context.params.provider) return context;
-    const user = context.params.user;
-    if (!user || (user as { _isServiceAccount?: boolean })._isServiceAccount) return context;
+    const caller = resolveMcpCaller(context.params);
+    if (caller.kind === 'internal' || caller.kind === 'service-account') return context;
+    if (caller.kind === 'anonymous') throw new NotAuthenticated('Authentication required');
+    const user = caller.user;
     if (!hasMinimumRole(user.role, ROLES.ADMIN)) {
       // Do not trust a caller-supplied usableByUserId; it is an internal
       // authorization filter, not a public query capability.
@@ -2509,15 +2511,11 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   const denyMcpServerGetOfAnotherUsersPrivate = async (
     context: HookContext
   ): Promise<HookContext> => {
-    if (!context.params.provider) return context;
-    const user = context.params.user;
-    if (
-      !user ||
-      (user as { _isServiceAccount?: boolean })._isServiceAccount ||
-      hasMinimumRole(user.role, ROLES.ADMIN)
-    ) {
-      return context;
-    }
+    const caller = resolveMcpCaller(context.params);
+    if (caller.kind === 'internal' || caller.kind === 'service-account') return context;
+    if (caller.kind === 'anonymous') throw new NotAuthenticated('Authentication required');
+    const user = caller.user;
+    if (hasMinimumRole(user.role, ROLES.ADMIN)) return context;
     if (!isMCPServerUsableBy(context.result as MCPServer, user.user_id)) {
       throw new NotFound(`MCP server not found: ${String(context.id)}`);
     }
@@ -3096,6 +3094,10 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   // SessionsService.update delegates straight to patch, so both verbs mutate a
   // session the same way and must clear the same authorization chain.
   const sessionWriteGuards = [
+    (context: HookContext) => {
+      assertSessionArchiveStateUsesDedicatedOperation(context.data ?? {});
+      return context;
+    },
     protectGatewaySourceMetadata,
     protectExternalSessionPowerPriority,
     // created_by and unix_username remain immutable identity/history stamps.

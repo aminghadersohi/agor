@@ -60,6 +60,20 @@ into SDK-private registration state.
    nothing. Exact Task IDs, a queue revision, and a stable idempotency key fence
    relationship/admission/dispatch races.
 
+Archive state is rejected by `agor_sessions_update`; use
+`agor_sessions_archive` or `agor_sessions_unarchive` so branch-local descendant
+and permission rules are applied.
+
+`agor_sessions_bulk_archive` is dry-run-first. Its filters select roots; callers
+must choose `includeChildren: true` or `false` before execution when active
+same-branch fork/spawn descendants would be added. Cross-branch
+`remote_create` relationships are provenance and retain an independent
+lifecycle.
+
+Prompting an archived Session restores only that explicit Session; archived
+local ancestors and descendants remain archived. Board archival changes Board
+visibility only and does not own Branch or Session lifecycle.
+
 All enforce the branch-centric model (every session references a branch). Permission modes map to each agent's native settings.
 
 `agor_sessions_prompt` also accepts `callback: true`. The daemon binds this

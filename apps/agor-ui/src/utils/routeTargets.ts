@@ -40,7 +40,7 @@ function isSettingsPath(pathname: string): boolean {
  * settings URL opened cold (shared link, hard refresh) has no prior
  * surface to preserve.
  */
-export function getSurfacePath(location: { pathname: string; state?: unknown }): string {
+export function getShellSurfacePath(location: { pathname: string; state?: unknown }): string {
   if (!isSettingsPath(location.pathname)) return location.pathname;
   const background = (location.state as { settingsBackgroundPath?: unknown } | null)
     ?.settingsBackgroundPath;

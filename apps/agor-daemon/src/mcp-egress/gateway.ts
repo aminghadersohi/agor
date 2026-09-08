@@ -299,9 +299,16 @@ function validateBufferedMCPResponse(
   const text = Buffer.from(body).toString('utf8');
   if (contentType === 'application/json' || contentType?.endsWith('+json')) {
     try {
-      const parsed = normalizeToolsListResponse(JSON.parse(text), requestBody);
+      const parsed = JSON.parse(text);
+      // Check the original decoded payload: shortening a description can cut
+      // through a reflected credential and hide the full match from the scan.
       assertNoDecodedSecret(parsed, secrets);
-      return new TextEncoder().encode(JSON.stringify(parsed));
+      // Unrelated JSON-RPC results are not metadata. Preserve their wire bytes
+      // (including numbers that a non-JavaScript client can decode losslessly).
+      if (toolsListRequestIds(requestBody).size === 0) return body;
+      return new TextEncoder().encode(
+        JSON.stringify(normalizeToolsListResponse(parsed, requestBody))
+      );
     } catch (error) {
       if (error instanceof MCPEgressGatewayError) throw error;
       throw new MCPEgressGatewayError(
@@ -322,9 +329,13 @@ function validateBufferedMCPResponse(
         .join('\n');
       if (!data || data === '[DONE]') continue;
       try {
-        const parsed = normalizeToolsListResponse(JSON.parse(data), requestBody);
+        const parsed = JSON.parse(data);
+        // Scan the original decoded event before metadata normalization can
+        // truncate a field through the middle of reflected secret material.
         assertNoDecodedSecret(parsed, secrets);
-        released.push(`data: ${JSON.stringify(parsed)}\n\n`);
+        released.push(
+          `data: ${JSON.stringify(normalizeToolsListResponse(parsed, requestBody))}\n\n`
+        );
       } catch (error) {
         if (error instanceof MCPEgressGatewayError) throw error;
         throw new MCPEgressGatewayError(
