@@ -202,9 +202,12 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       // legacy table to exact reconciliation in the same offline transaction.
       await expect(checkMigrationStatus(db)).resolves.toMatchObject({
         pending: [
-          '0101_environment_command_discovery',
+          '0102_zone_workflow_transitions',
+          '0103_session_power_priority',
+          '0104_environment_command_discovery',
           '9015_mcp_oauth_client_registrations',
           '9016_oauth_authority_watermark_reconciliation',
+          '9017_fork_migration_collision_repair',
         ],
         dbAheadOfBinary: false,
       });
@@ -275,6 +278,19 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
         hasPending: false,
         dbAheadOfBinary: false,
       });
+      expect(
+        rawRows(
+          await executeRaw(
+            db,
+            sql`SELECT to_regclass('public.zone_workflow_transitions') IS NOT NULL AS workflows,
+                       EXISTS (
+                         SELECT 1 FROM information_schema.columns
+                         WHERE table_schema = 'public' AND table_name = 'sessions'
+                           AND column_name = 'auto_archive'
+                       ) AS auto_archive`
+          )
+        )
+      ).toEqual([{ workflows: true, auto_archive: true }]);
     });
 
     it('preserves an exact final DCR schema and rows when upgrading the pre-rebase watermark', async () => {
@@ -317,6 +333,15 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
         );
       });
 
+      // The prior final watermark collides with this fork's zone migration;
+      // remove both fork schemas so the repair migration must restore them.
+      await executeRaw(db, sql`DROP TABLE zone_workflow_advances, zone_workflow_transitions`);
+      await executeRaw(db, sql`DROP POLICY session_auto_archive_discovery ON sessions`);
+      await executeRaw(db, sql`DROP INDEX sessions_auto_archive_due_idx`);
+      await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN auto_archive_at`);
+      await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN auto_archive_after_seconds`);
+      await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN auto_archive`);
+
       // Reproduce the previous reviewed head's timestamp-only final watermark.
       // Its authority schema is identical; the rebased bootstrap must not try
       // to CREATE it again or discard its rows before exact reconciliation.
@@ -331,15 +356,30 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       );
       await expect(checkMigrationStatus(db)).resolves.toMatchObject({
         pending: [
-          '0101_environment_command_discovery',
+          '0103_session_power_priority',
+          '0104_environment_command_discovery',
           '9015_mcp_oauth_client_registrations',
           '9016_oauth_authority_watermark_reconciliation',
+          '9017_fork_migration_collision_repair',
         ],
         dbAheadOfBinary: false,
       });
       await expect(runMigrations(db)).rejects.toThrow('Offline migration cutover required');
       await runMigrations(db, { allowOfflineCutover: true });
       await expect(checkMigrationStatus(db)).resolves.toMatchObject({ hasPending: false });
+      expect(
+        rawRows(
+          await executeRaw(
+            db,
+            sql`SELECT to_regclass('public.zone_workflow_transitions') IS NOT NULL AS workflows,
+                       EXISTS (
+                         SELECT 1 FROM information_schema.columns
+                         WHERE table_schema = 'public' AND table_name = 'sessions'
+                           AND column_name = 'auto_archive'
+                       ) AS auto_archive`
+          )
+        )
+      ).toEqual([{ workflows: true, auto_archive: true }]);
       expect(
         rawRows(
           await executeRaw(
