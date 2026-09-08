@@ -1,4 +1,13 @@
-import { act, cleanup, configure, render, screen, waitFor, within } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  configure,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { userEvent } from 'vitest/browser';
 import { checkBrowserSanity } from '../../test/browserSanity';
@@ -105,12 +114,17 @@ describe('MCP Catalog real Chromium flows', () => {
     const card = await screen.findByRole('button', { name: 'Open DeepWiki' });
     await userEvent.click(card);
     const drawer = await screen.findByRole('dialog', { name: /DeepWiki/ });
-    await userEvent.click(within(drawer).getByRole('checkbox', { name: /I understand/ }));
+    await waitFor(() =>
+      expect(drawer.getAnimations().some((animation) => animation.playState === 'running')).toBe(
+        false
+      )
+    );
+    fireEvent.click(within(drawer).getByRole('checkbox', { name: /I understand/ }));
     const connect = within(drawer).getByRole('button', { name: /Check & connect/ });
     await waitFor(() => expect(connect).toBeEnabled());
-    await userEvent.click(connect);
+    fireEvent.click(connect);
     const open = await screen.findByRole('button', { name: 'Open session' });
-    await userEvent.click(open);
+    fireEvent.click(open);
     await waitFor(() => expect(screen.getByTestId('route').textContent).toMatch(/^\/s\//));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(document.querySelector('.ant-drawer')).toBeNull();

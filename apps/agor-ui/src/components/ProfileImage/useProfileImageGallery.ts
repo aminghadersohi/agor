@@ -10,6 +10,14 @@ function subjectKey(subject: ProfileImageSubject): string {
   return `${subject.type}:${subject.id}`;
 }
 
+/** Seed known gallery state for provider-free fixtures before their first render. */
+export function seedProfileImageGallery(
+  subject: ProfileImageSubject,
+  result: ProfileImageListResult
+): void {
+  galleryCache.set(subjectKey(subject), result);
+}
+
 async function loadGallery(
   subject: ProfileImageSubject,
   force = false
