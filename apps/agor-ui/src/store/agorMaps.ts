@@ -116,22 +116,30 @@ export function replaceIfChanged<T extends object>(
 }
 
 /**
- * Merge only the caller-scoped running-Session projection from a fresh lean
- * boards list. Existing full board metadata (objects/custom_css) stays intact,
- * and unchanged counts preserve both entity and Map references.
+ * Merge only the caller-scoped Board-list aggregates from a fresh lean list.
+ * Existing full board metadata (objects/custom_css) stays intact, and
+ * unchanged counts preserve both entity and Map references.
  */
-export function applyBoardRunningSessionCounts(
+export function applyBoardListCounts(
   prev: Map<string, Board>,
   authoritativeBoards: readonly Board[]
 ): Map<string, Board> {
   let next = prev;
   for (const board of authoritativeBoards) {
     const existing = prev.get(board.board_id);
-    if (!existing || existing.running_session_count === board.running_session_count) continue;
+    if (
+      !existing ||
+      (existing.worktree_count === board.worktree_count &&
+        existing.total_session_count === board.total_session_count &&
+        existing.active_session_count === board.active_session_count)
+    )
+      continue;
     if (next === prev) next = new Map(prev);
     next.set(board.board_id, {
       ...existing,
-      running_session_count: board.running_session_count,
+      worktree_count: board.worktree_count,
+      total_session_count: board.total_session_count,
+      active_session_count: board.active_session_count,
     });
   }
   return next;

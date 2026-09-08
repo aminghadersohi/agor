@@ -147,11 +147,15 @@ export function boardPatched(board: Board) {
   bumpRevision('boards');
   setMap('boardById', (prev) => {
     const existing = prev.get(board.board_id);
-    // Generic board write responses are point reads, so their neutral count is
-    // not caller-scoped. Board metadata patches cannot change Session counts;
+    // Generic board write responses are point reads, so their neutral counts
+    // are not caller-scoped. Board metadata patches cannot change aggregates;
     // preserve the latest authoritative list projection until the dedicated
     // realtime refresh replaces it.
-    if (existing) board.running_session_count = existing.running_session_count;
+    if (existing) {
+      board.worktree_count = existing.worktree_count;
+      board.total_session_count = existing.total_session_count;
+      board.active_session_count = existing.active_session_count;
+    }
     return replaceIfChanged(prev, board.board_id, board);
   });
 }

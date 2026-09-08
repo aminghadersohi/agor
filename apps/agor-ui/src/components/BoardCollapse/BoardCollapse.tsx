@@ -11,6 +11,8 @@ export interface BoardCollapseItem {
   board: Board;
   /** Pre-resolved board emoji (see {@link getBoardEmoji}). */
   emoji?: string;
+  avatarSize?: number;
+  meta?: ReactNode;
   badge?: ReactNode;
   children: ReactNode;
 }
@@ -42,18 +44,23 @@ export const BoardCollapse: React.FC<BoardCollapseProps> = ({
         backgroundColor: 'transparent',
         width: '100%',
       }}
-      items={items.map(({ key, board, emoji, badge, children }) => ({
+      items={items.map(({ key, board, emoji, avatarSize = 20, meta, badge, children }) => ({
         key,
         // The header also contains board/comment action buttons. Restrict the
         // collapse affordance to its chevron so those controls are not nested
         // inside another interactive header target.
         collapsible: 'icon',
         label: (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <BoardTile emoji={emoji} size={20} />
-            <Text strong style={{ fontSize: 14 }}>
-              {board.name}
-            </Text>
+          <div
+            style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', minWidth: 0 }}
+          >
+            <BoardTile emoji={emoji} size={avatarSize} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <Text strong ellipsis style={{ display: 'block', fontSize: 14 }}>
+                {board.name}
+              </Text>
+              {meta}
+            </div>
             {badge}
           </div>
         ),
