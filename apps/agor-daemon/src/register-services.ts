@@ -67,6 +67,7 @@ import {
   hasTemplateMarker,
   isMCPServerUsableBy,
   type MCPExternalErrorStage,
+  normalizeDiscoveredMCPCapabilities,
   sanitizeMCPExternalError,
 } from '@agor/core/mcp';
 import type {
@@ -5864,35 +5865,38 @@ export async function registerMCPServices(
             listTimeout,
           ])) as PromptsResult;
 
+          const discovered = {
+            tools: toolsResult.tools.map((t) => ({
+              name: t.name,
+              description: t.description,
+              input_schema: t.inputSchema,
+            })),
+            resources: resourcesResult.resources.map((r) => ({
+              uri: r.uri,
+              name: r.name,
+              description: r.description,
+              mimeType: r.mimeType,
+            })),
+            prompts: promptsResult.prompts.map((p) => ({
+              name: p.name,
+              description: p.description,
+              arguments: p.arguments?.map((a) => ({
+                name: a.name,
+                description: a.description,
+                required: a.required,
+              })),
+            })),
+          };
+          let normalizedDiscovery = normalizeDiscoveredMCPCapabilities(discovered);
+
           if (serverId && discoveryAuthority) {
-            await runWithinOAuthAuthority(assertCurrentRequestAuthority, () =>
+            normalizedDiscovery = await runWithinOAuthAuthority(assertCurrentRequestAuthority, () =>
               runWithTenantDatabaseTransaction(db, tenantId, (scopedDb) =>
                 persistDiscoveredMCPCapabilities(
                   scopedDb,
                   tenantId,
                   discoveryAuthority as MCPDiscoveryAuthoritySnapshot,
-                  {
-                    tools: toolsResult.tools.map((t) => ({
-                      name: t.name,
-                      description: t.description,
-                      input_schema: t.inputSchema,
-                    })),
-                    resources: resourcesResult.resources.map((r) => ({
-                      uri: r.uri,
-                      name: r.name,
-                      description: r.description,
-                      mimeType: r.mimeType,
-                    })),
-                    prompts: promptsResult.prompts.map((p) => ({
-                      name: p.name,
-                      description: p.description,
-                      arguments: p.arguments?.map((a) => ({
-                        name: a.name,
-                        description: a.description,
-                        required: a.required,
-                      })),
-                    })),
-                  },
+                  discovered,
                   process.env.AGOR_MASTER_SECRET ?? ''
                 )
               )
@@ -5911,20 +5915,23 @@ export async function registerMCPServices(
           return {
             success: true,
             capabilities: {
-              tools: toolsResult.tools.length,
-              resources: resourcesResult.resources.length,
-              prompts: promptsResult.prompts.length,
+              tools: normalizedDiscovery.capabilities.tools.length,
+              resources: normalizedDiscovery.capabilities.resources.length,
+              prompts: normalizedDiscovery.capabilities.prompts.length,
             },
-            tools: toolsResult.tools.map((t) => ({
+            metadata: {
+              descriptions_truncated: normalizedDiscovery.truncatedDescriptions,
+            },
+            tools: normalizedDiscovery.capabilities.tools.map((t) => ({
               name: t.name,
               description: t.description || '',
             })),
-            resources: resourcesResult.resources.map((r) => ({
+            resources: normalizedDiscovery.capabilities.resources.map((r) => ({
               name: r.name,
               uri: r.uri,
               mimeType: r.mimeType,
             })),
-            prompts: promptsResult.prompts.map((p) => ({
+            prompts: normalizedDiscovery.capabilities.prompts.map((p) => ({
               name: p.name,
               description: p.description || '',
             })),

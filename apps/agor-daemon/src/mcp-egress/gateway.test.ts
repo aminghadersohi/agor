@@ -19,6 +19,10 @@ import {
   UsersRepository,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
+import {
+  MAX_MCP_CAPABILITY_DESCRIPTION_LENGTH,
+  MCP_DESCRIPTION_TRUNCATION_SUFFIX,
+} from '@agor/core/mcp';
 import { refreshAndPersistToken } from '@agor/core/tools/mcp/oauth-refresh';
 import {
   capabilityPolicyPresetCapabilities,
@@ -955,6 +959,65 @@ describe('authoritative MCP gateway real transport', () => {
     ).resolves.toMatchObject({
       result: 'DEBUG=1 initialize',
     });
+  });
+
+  it('normalizes overlong tools/list metadata on the mediated agent path', async () => {
+    const longDescription = `fictional provider ${'📬'.repeat(40_000)}`;
+    const url = await listen((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 7,
+          result: {
+            tools: [
+              {
+                name: 'fictional_mail_search',
+                description: longDescription,
+                inputSchema: { type: 'object', properties: { query: { type: 'string' } } },
+                annotations: { readOnlyHint: true },
+              },
+            ],
+          },
+        })
+      );
+    });
+    const h = await harness({ server: { transport: 'http', url, auth: { type: 'none' } } });
+    const result = await h.request(
+      'POST',
+      JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/list' })
+    );
+    const payload = (await result.response.json()) as {
+      result: { tools: Array<Record<string, unknown>> };
+    };
+    expect(String(payload.result.tools[0]?.description).length).toBeLessThanOrEqual(
+      MAX_MCP_CAPABILITY_DESCRIPTION_LENGTH
+    );
+    expect(
+      String(payload.result.tools[0]?.description).endsWith(MCP_DESCRIPTION_TRUNCATION_SUFFIX)
+    ).toBe(true);
+    expect(payload.result.tools[0]).toMatchObject({
+      name: 'fictional_mail_search',
+      inputSchema: { type: 'object' },
+      annotations: { readOnlyHint: true },
+    });
+  });
+
+  it('rejects malformed tools/list metadata with a targeted provider diagnostic', async () => {
+    const url = await listen((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 8,
+          result: { tools: [{ name: 'fictional_mail_search', description: { private: true } }] },
+        })
+      );
+    });
+    const h = await harness({ server: { transport: 'http', url, auth: { type: 'none' } } });
+    await expect(
+      h.request('POST', JSON.stringify({ jsonrpc: '2.0', id: 8, method: 'tools/list' }))
+    ).rejects.toMatchObject({ code: 'invalid_mcp_tool_metadata' });
   });
 
   it('uses a second SQLite connection to prove a commit before final admission prevents provider observation', async () => {
