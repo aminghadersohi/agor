@@ -1444,7 +1444,7 @@ describe('BoardRepository zone layout defaults', () => {
       expect(updated.objects?.legacy).not.toHaveProperty('layout_binding');
       expect(updated.objects?.['new-zone']).toMatchObject({
         layout_binding: 'inherit',
-        layout: { mode: 'auto', preset: 'compact_list', gap: 8 },
+        layout: { mode: 'auto', preset: 'compact_list', columnGap: 8, rowGap: 8 },
       });
       expect((await repo.findById(board.board_id))?.objects?.['new-zone']).toEqual(
         updated.objects?.['new-zone']
@@ -1465,7 +1465,7 @@ describe('BoardRepository zone layout defaults', () => {
       });
       expect(uiCreated.objects?.['ui-created-zone']).toMatchObject({
         layout_binding: 'inherit',
-        layout: { mode: 'auto', preset: 'compact_list', gap: 8 },
+        layout: { mode: 'auto', preset: 'compact_list', columnGap: 8, rowGap: 8 },
       });
     }
   );
@@ -1528,7 +1528,7 @@ describe('BoardRepository zone layout defaults', () => {
       });
       expect(preserved.board.objects?.follower).toMatchObject({
         layout_binding: 'inherit',
-        layout: { gap: 8 },
+        layout: { columnGap: 8, rowGap: 8 },
         locked: true,
         width: 640,
         height: 420,
@@ -1536,14 +1536,14 @@ describe('BoardRepository zone layout defaults', () => {
 
       const applied = await repo.setZoneLayoutDefaults(
         board.board_id,
-        { ...preserved.board.zone_layout_defaults, gap: 4 },
+        { ...preserved.board.zone_layout_defaults, columnGap: 4, rowGap: 4 },
         { applyToExisting: true }
       );
       expect(applied.changed_zone_ids).toEqual(['override', 'follower']);
       expect(applied.board.objects?.override).toMatchObject({
         label: 'Explicit',
         layout_binding: 'inherit',
-        layout: { gap: 4 },
+        layout: { columnGap: 4, rowGap: 4 },
       });
     }
   );
@@ -1725,6 +1725,52 @@ describe('BoardRepository.applyBoardLayout', () => {
       });
     }
   );
+
+  dbTest('persists layout provenance atomically and filters its exact repeat', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const zone = { type: 'zone' as const, x: 80, y: 80, width: 540, height: 380, label: 'Zone' };
+    const board = await repo.create(createBoardData({ objects: { zone } }));
+    const layout_context = {
+      scope: 'selection' as const,
+      root_ids: ['zone'],
+      settings: {
+        mode: 'grid' as const,
+        density: 'preserve' as const,
+        trackAxis: 'columns' as const,
+        trackCount: 1,
+        columnGap: 40,
+        rowGap: 40,
+        outerMargin: 80,
+        packZoneContents: true,
+        resizeZoneFrames: true,
+        justifyRows: true,
+        lastRow: 'start' as const,
+        matchRowHeights: true,
+        matchColumnWidths: true,
+      },
+      cells: { zone: { x: 80, y: 80, width: 540, height: 380, row: 0, column: 0 } },
+    };
+
+    const first = await repo.applyBoardLayout(board.board_id, {
+      objects: { zone },
+      placements: {},
+      layout_context,
+    });
+    expect(first.changed).toBe(true);
+    expect(first.changed_object_ids).toEqual([]);
+    expect(first.board.layout_context).toEqual(layout_context);
+    expect((await repo.findById(board.board_id))?.layout_context).toEqual(layout_context);
+
+    const lastUpdated = first.board.last_updated;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const repeated = await repo.applyBoardLayout(board.board_id, {
+      objects: { zone },
+      placements: {},
+      layout_context,
+    });
+    expect(repeated.changed).toBe(false);
+    expect((await repo.findById(board.board_id))?.last_updated).toBe(lastUpdated);
+  });
 
   dbTest('filters a byte-equivalent layout before any durable write', async ({ db }) => {
     const repo = new BoardRepository(db);

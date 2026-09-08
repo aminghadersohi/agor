@@ -52,6 +52,12 @@
       "import": "./dist/layout/board-zone-arrangement.js",
       "require": "./dist/layout/board-zone-arrangement.cjs"
     },
+    "./layout/board-layout-options": {
+      "source": "./src/layout/board-layout-options.ts",
+      "types": "./dist/layout/board-layout-options.d.ts",
+      "import": "./dist/layout/board-layout-options.js",
+      "require": "./dist/layout/board-layout-options.cjs"
+    },
     "./layout/rectangle-packing": {
       "source": "./src/layout/rectangle-packing.ts",
       "types": "./dist/layout/rectangle-packing.d.ts",

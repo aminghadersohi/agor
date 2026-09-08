@@ -1,4 +1,10 @@
 import {
+  boardZoneArrangementOptions,
+  DEFAULT_BOARD_LAYOUT_SETTINGS,
+  normalizeBoardLayoutSettings,
+  normalizeLayoutSpacing,
+} from '@agor/core/layout/board-layout-options';
+import {
   type BoardZoneArrangementPlan,
   containingBoardZoneId,
   planBoardZoneArrangement,
@@ -9,7 +15,6 @@ import {
   ceilBoardGridValue,
   layoutCompactRectangles,
   layoutRectangles,
-  snapBoardGridValue,
 } from '@agor/core/layout/rectangle-packing';
 import { planZoneGrowthReflow } from '@agor/core/layout/zone-growth-reflow';
 import {
@@ -38,6 +43,7 @@ import type {
   BoardEntityObject,
   BoardEntityType,
   BoardLayoutPlacementUpdate,
+  BoardLayoutSettings,
   BoardObject,
   BoardObjectType,
   Branch,
@@ -91,15 +97,13 @@ const ARRANGE_DIMENSIONS = {
 } as const;
 const DECK_OFFSET_X = 12;
 const DECK_OFFSET_Y = 48;
-const DEFAULT_ARRANGE_START_X = 80;
-const DEFAULT_ARRANGE_START_Y = 80;
-function boardGridSpacing(value: number): number {
-  return value === 0 ? 0 : Math.max(BOARD_GRID_SIZE, snapBoardGridValue(value));
-}
-
 /** Density inputs are independent of the coarser canvas drag grid. */
 function exactSpacing(value: number): number {
-  return Number.isFinite(value) ? Math.max(0, value) : 0;
+  return normalizeLayoutSpacing(value, 0);
+}
+
+function finiteCoordinate(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
 type EntityLayoutMetadata = ZoneLayoutSortItem & {
@@ -248,7 +252,7 @@ function resolveArrangeOrigin(options: {
     const blocking = obstacles.filter((zone) => rectanglesOverlap(grid, zone));
     if (blocking.length === 0) break;
     avoidedZoneIds.push(...blocking.map((zone) => zone.id));
-    y = ceilBoardGridValue(Math.max(...blocking.map((zone) => zone.y + zone.height))) + gapY;
+    y = Math.max(...blocking.map((zone) => zone.y + zone.height)) + gapY;
   }
   return { startX, startY: y, avoidedZoneIds };
 }
@@ -332,16 +336,28 @@ function filterBoardCanvasObjects(board: Board, objectTypes?: BoardObjectType[])
 }
 
 interface ArrangeBoardZonesOptions {
+  layoutSettings?: BoardLayoutSettings;
   mode?: 'grid' | 'compact';
   density?: LayoutDensityPolicy;
   targetWidth?: number;
   targetRowHeight?: number;
   gap?: number;
+  gapX?: number;
+  gapY?: number;
+  outerMargin?: number;
   startX?: number;
   startY?: number;
   maxPerRow?: number;
+  fixedItemsPerRow?: number;
+  targetAspectRatio?: number;
   justifyLastRow?: boolean;
   justifyRows?: boolean;
+  matchRowHeights?: boolean;
+  matchColumnWidths?: boolean;
+  matchWidth?: boolean;
+  matchHeight?: boolean;
+  cellHorizontalAlignment?: 'start' | 'center' | 'end';
+  cellVerticalAlignment?: 'start' | 'center' | 'end';
   resizeZoneFrames?: boolean;
   lastRowAlignment?: 'start' | 'center' | 'end';
   dryRun?: boolean;
@@ -535,6 +551,9 @@ async function arrangeBoardZones(
         fontSize: zone.fontSize,
         status: zone.status,
         layout: zonePolicy,
+        resizable: true,
+        minWidth: zone.width,
+        minHeight: zone.height,
         items: [...items, ...canvasItems],
       };
     })
@@ -613,8 +632,16 @@ async function arrangeBoardZones(
       y: object.y,
       ...getCanvasObjectDimensions(object),
     })),
-  ];
+  ].map((item) => ({
+    ...item,
+    resizable: true,
+    minWidth: item.width,
+    minHeight: item.height,
+  }));
   if (zones.length === 0 && looseItems.length === 0) return null;
+  const effectiveLayoutSettings = options.layoutSettings
+    ? normalizeBoardLayoutSettings(options.layoutSettings, zones.length + looseItems.length)
+    : undefined;
   const eligibleZoneIds = new Set(zones.map((zone) => zone.id));
   const fixedObstacles = [
     ...allZoneEntries.flatMap(([id, zone]) =>
@@ -635,11 +662,22 @@ async function arrangeBoardZones(
     targetWidth: options.targetWidth,
     targetRowHeight: options.targetRowHeight,
     gap: options.gap,
+    gapX: options.gapX,
+    gapY: options.gapY,
+    outerMargin: options.outerMargin,
     startX: options.startX,
     startY: options.startY,
     maxPerRow: options.maxPerRow,
+    fixedItemsPerRow: options.fixedItemsPerRow,
+    targetAspectRatio: options.targetAspectRatio,
     justifyLastRow: options.justifyLastRow,
     justifyRows: options.justifyRows,
+    matchRowHeights: options.matchRowHeights,
+    matchColumnWidths: options.matchColumnWidths,
+    matchWidth: options.matchWidth,
+    matchHeight: options.matchHeight,
+    cellHorizontalAlignment: options.cellHorizontalAlignment,
+    cellVerticalAlignment: options.cellVerticalAlignment,
     resizeZoneFrames: options.resizeZoneFrames,
     lastRowAlignment: options.lastRowAlignment,
     packZoneContents: options.packZoneContents,
@@ -766,7 +804,50 @@ async function arrangeBoardZones(
         densityChanged
       );
     });
-    if (canvasGeometryChanged || placementGeometryChanged) {
+    const layoutContext = effectiveLayoutSettings
+      ? {
+          scope: 'board' as const,
+          root_ids: [
+            ...plan.zones.map((zone) => zone.id),
+            ...plan.looseItems.map((item) => item.id),
+          ],
+          settings: effectiveLayoutSettings,
+          cells: Object.fromEntries([
+            ...plan.zones.map(
+              (zone) =>
+                [
+                  zone.id,
+                  {
+                    x: zone.position.x,
+                    y: zone.position.y,
+                    width: zone.width,
+                    height: zone.height,
+                    row: zone.row,
+                    column: zone.column,
+                  },
+                ] as const
+            ),
+            ...plan.looseItems.map(
+              (item) =>
+                [
+                  item.id,
+                  {
+                    x: item.x,
+                    y: item.y,
+                    width: item.width,
+                    height: item.height,
+                    row: item.row,
+                    column: item.column,
+                  },
+                ] as const
+            ),
+          ]),
+        }
+      : undefined;
+    const layoutContextChanged =
+      layoutContext !== undefined &&
+      JSON.stringify(board.layout_context) !== JSON.stringify(layoutContext);
+    if (canvasGeometryChanged || placementGeometryChanged || layoutContextChanged) {
       const sourcePlacementById = new Map(
         entityResult.data.map((entity) => [entity.object_id, entity])
       );
@@ -797,13 +878,17 @@ async function arrangeBoardZones(
           })
         ),
       };
-      await ctx.app
-        .service('boards')
-        .patch(
-          boardId,
-          { _action: 'applyLayout', objects, placements, expected } as unknown as Partial<Board>,
-          ctx.baseServiceParams
-        );
+      await ctx.app.service('boards').patch(
+        boardId,
+        {
+          _action: 'applyLayout',
+          objects,
+          placements,
+          expected,
+          ...(layoutContext ? { layout_context: layoutContext } : {}),
+        } as unknown as Partial<Board>,
+        ctx.baseServiceParams
+      );
     }
   }
 
@@ -1160,13 +1245,22 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           'columns',
           'Use an explicit row-major grid with exactly this many columns (default: compact cluster).'
         ),
-        startX: mcpOptionalNumber('startX', 'Canvas X origin (default: 80).'),
+        startX: mcpOptionalNumber(
+          'startX',
+          `Canvas X origin (default: ${DEFAULT_BOARD_LAYOUT_SETTINGS.outerMargin}).`
+        ),
         startY: mcpOptionalNumber(
           'startY',
-          'Canvas Y origin. When omitted, the grid starts at 80 unless that would place it over an existing zone, in which case it drops below every zone and reports avoidedZoneIds. Pass a value to place the grid exactly, including over a zone.'
+          `Canvas Y origin. When omitted, the grid starts at ${DEFAULT_BOARD_LAYOUT_SETTINGS.outerMargin} unless that would place it over an existing zone, in which case it drops below every zone and reports avoidedZoneIds. Pass a value to place the grid exactly, including over a zone.`
         ),
-        gapX: mcpOptionalNumber('gapX', 'Horizontal gap between cards (default: 40).'),
-        gapY: mcpOptionalNumber('gapY', 'Vertical gap between cards (default: 40).'),
+        gapX: mcpOptionalNumber(
+          'gapX',
+          `Exact horizontal gap between cards (default: ${DEFAULT_BOARD_LAYOUT_SETTINGS.columnGap}).`
+        ),
+        gapY: mcpOptionalNumber(
+          'gapY',
+          `Exact vertical gap between cards (default: ${DEFAULT_BOARD_LAYOUT_SETTINGS.rowGap}).`
+        ),
       }),
     },
     async (args) => {
@@ -1191,10 +1285,16 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           (a, b) =>
             a.created_at.localeCompare(b.created_at) || a.object_id.localeCompare(b.object_id)
         );
-      const requestedStartX = snapBoardGridValue(args.startX ?? DEFAULT_ARRANGE_START_X);
-      const requestedStartY = snapBoardGridValue(args.startY ?? DEFAULT_ARRANGE_START_Y);
-      const gapX = boardGridSpacing(args.gapX ?? 40);
-      const gapY = boardGridSpacing(args.gapY ?? 40);
+      const requestedStartX = finiteCoordinate(
+        args.startX,
+        DEFAULT_BOARD_LAYOUT_SETTINGS.outerMargin
+      );
+      const requestedStartY = finiteCoordinate(
+        args.startY,
+        DEFAULT_BOARD_LAYOUT_SETTINGS.outerMargin
+      );
+      const gapX = exactSpacing(args.gapX ?? DEFAULT_BOARD_LAYOUT_SETTINGS.columnGap);
+      const gapY = exactSpacing(args.gapY ?? DEFAULT_BOARD_LAYOUT_SETTINGS.rowGap);
       const items: Array<{
         id: string;
         kind: 'entity' | 'canvas';
@@ -1275,7 +1375,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         justifyRows: args.columns === undefined,
         resizeZoneFrames: false,
         packZoneContents: false,
-        gap: Math.max(gapX, gapY),
+        gapX,
+        gapY,
         startX: requestedStartX,
         startY: requestedStartY,
         fixedObstacles: [],
@@ -1285,7 +1386,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         startY: requestedStartY,
         explicitStartY: args.startY !== undefined,
         layout: plan.layout,
-        gapY: Math.max(gapX, gapY),
+        gapY,
         obstacles: fixedZones,
       });
       const placementById = new Map(
@@ -1458,9 +1559,18 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .describe(
             'What to do when a resize covers neighbouring zones: "report" names them, "reflow_board" re-justifies the board zones into rows so they move out of the way. Defaults to the zone policy, then report.'
           ),
-        padding: mcpOptionalNumber('padding', 'Padding from the zone edges (default: 24).'),
-        gapX: mcpOptionalNumber('gapX', 'Horizontal gap between items (default: 24).'),
-        gapY: mcpOptionalNumber('gapY', 'Vertical gap between items (default: 24).'),
+        padding: mcpOptionalNumber(
+          'padding',
+          'Exact padding from all four zone edges (default: the normalized zone policy).'
+        ),
+        gapX: mcpOptionalNumber(
+          'gapX',
+          'Exact horizontal gap between items (default: the normalized zone policy).'
+        ),
+        gapY: mcpOptionalNumber(
+          'gapY',
+          'Exact vertical gap between items (default: the normalized zone policy).'
+        ),
       }),
     },
     async (args) => {
@@ -1476,7 +1586,11 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       }
 
       const zonePolicy = normalizeZoneLayoutPolicy({
-        ...zone.layout,
+        // Normalize the persisted base first so an override supplied by this
+        // call cannot make an otherwise-unconfigured zone look like a sparse
+        // legacy policy. Explicit legacy policies still retain their implied
+        // inset, while an absent policy receives the current shared defaults.
+        ...normalizeZoneLayoutPolicy(zone.layout),
         ...(args.preset === undefined ? {} : { preset: args.preset }),
         ...(args.density === undefined ? {} : { density: args.density }),
         ...(args.sortBy === undefined ? {} : { sortBy: args.sortBy }),
@@ -1568,9 +1682,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           naturalDimensions.set(entity.object_id, ARRANGE_DIMENSIONS[entity.entity_type]);
         }
       }
-      const requestedPadding = boardGridSpacing(Math.max(0, args.padding ?? BOARD_GRID_SIZE));
-      const gapX = exactSpacing(Math.max(0, args.gapX ?? zonePolicy.gap ?? 24));
-      const gapY = exactSpacing(Math.max(0, args.gapY ?? zonePolicy.gap ?? 24));
+      const requestedPadding = exactSpacing(args.padding ?? zonePolicy.padding);
+      const gapX = exactSpacing(args.gapX ?? zonePolicy.columnGap);
+      const gapY = exactSpacing(args.gapY ?? zonePolicy.rowGap);
       const resizeMode = zonePolicy.resize ?? 'fixed';
       const autoResizeHeight = resizeMode !== 'fixed';
       // `both` also lets the zone widen. Height alone cannot rescue a zone that
@@ -1849,7 +1963,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
                 width: appliedZoneWidth,
                 height: appliedZoneHeight,
               },
-              { gap: zonePolicy.gap }
+              { gapX: zonePolicy.columnGap, gapY: zonePolicy.rowGap }
             )
           : null;
       const movedZoneIds = reflowPlan?.movedZoneIds ?? [];
@@ -2053,11 +2167,28 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .describe('Preferred grid columns. Use null to return to automatic column selection.'),
         gap: z
           .number()
-          .int()
           .min(0)
-          .max(96)
+          .max(320)
           .optional()
-          .describe('Spacing between arranged items in board pixels.'),
+          .describe('Deprecated scalar spacing alias applied to both axes.'),
+        columnGap: z
+          .number()
+          .min(0)
+          .max(320)
+          .optional()
+          .describe('Exact horizontal spacing between arranged items in board pixels.'),
+        rowGap: z
+          .number()
+          .min(0)
+          .max(320)
+          .optional()
+          .describe('Exact vertical spacing between arranged items in board pixels.'),
+        padding: z
+          .number()
+          .min(0)
+          .max(320)
+          .optional()
+          .describe('Exact content inset on every zone edge; title reserve remains separate.'),
         autoResizeHeight: z
           .boolean()
           .optional()
@@ -2095,7 +2226,13 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
               ...(args.sortBy === undefined ? {} : { sortBy: args.sortBy }),
               ...(args.sortDirection === undefined ? {} : { sortDirection: args.sortDirection }),
               ...(args.columns === undefined ? {} : { columns: args.columns ?? undefined }),
-              ...(args.gap === undefined ? {} : { gap: args.gap }),
+              ...(args.columnGap === undefined && args.gap === undefined
+                ? {}
+                : { columnGap: args.columnGap ?? args.gap }),
+              ...(args.rowGap === undefined && args.gap === undefined
+                ? {}
+                : { rowGap: args.rowGap ?? args.gap }),
+              ...(args.padding === undefined ? {} : { padding: args.padding }),
               ...(args.autoResizeHeight === undefined
                 ? {}
                 : { autoResizeHeight: args.autoResizeHeight }),
@@ -2144,7 +2281,10 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         resize: z.enum(ZONE_RESIZE_MODES).optional(),
         onOverflow: z.enum(ZONE_OVERFLOW_STRATEGIES).optional(),
         columns: z.number().int().positive().nullable().optional(),
-        gap: z.number().int().min(0).max(96).optional(),
+        gap: z.number().min(0).max(320).optional(),
+        columnGap: z.number().min(0).max(320).optional(),
+        rowGap: z.number().min(0).max(320).optional(),
+        padding: z.number().min(0).max(320).optional(),
         applyToExisting: z
           .boolean()
           .optional()
@@ -2167,7 +2307,13 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         ...(args.resize === undefined ? {} : { resize: args.resize }),
         ...(args.onOverflow === undefined ? {} : { onOverflow: args.onOverflow }),
         ...(args.columns === undefined ? {} : { columns: args.columns ?? undefined }),
-        ...(args.gap === undefined ? {} : { gap: args.gap }),
+        ...(args.columnGap === undefined && args.gap === undefined
+          ? {}
+          : { columnGap: args.columnGap ?? args.gap }),
+        ...(args.rowGap === undefined && args.gap === undefined
+          ? {}
+          : { rowGap: args.rowGap ?? args.gap }),
+        ...(args.padding === undefined ? {} : { padding: args.padding }),
       });
       const expected = {
         defaults: current,
@@ -2420,10 +2566,33 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           'targetRowHeight',
           'Preferred row height (default: 600).'
         ),
-        gap: mcpOptionalNonNegativeInt('gap', 'Space between zones (default: 40).'),
-        startX: mcpOptionalNumber('startX', 'Canvas X origin (default: 80).'),
-        startY: mcpOptionalNumber('startY', 'Canvas Y origin (default: 80).'),
+        gap: mcpOptionalNumber(
+          'gap',
+          'Deprecated scalar spacing alias applied to both axes when axis values are omitted.'
+        ),
+        columnGap: mcpOptionalNumber(
+          'columnGap',
+          `Exact horizontal space between roots (default: ${DEFAULT_BOARD_LAYOUT_SETTINGS.columnGap}).`
+        ),
+        rowGap: mcpOptionalNumber(
+          'rowGap',
+          `Exact vertical space between roots (default: ${DEFAULT_BOARD_LAYOUT_SETTINGS.rowGap}).`
+        ),
+        outerMargin: mcpOptionalNumber(
+          'outerMargin',
+          `Board-space cluster inset (default: ${DEFAULT_BOARD_LAYOUT_SETTINGS.outerMargin}).`
+        ),
+        startX: mcpOptionalNumber('startX', 'Explicit canvas X origin; overrides outerMargin.'),
+        startY: mcpOptionalNumber('startY', 'Explicit canvas Y origin; overrides outerMargin.'),
         maxPerRow: mcpOptionalPositiveInt('maxPerRow', 'Upper bound on zones per row.'),
+        columns: mcpOptionalPositiveInt(
+          'columns',
+          'Exact Grid column count. Row membership and partial final rows remain stable.'
+        ),
+        targetAspectRatio: mcpOptionalNumber(
+          'targetAspectRatio',
+          'Usable viewport aspect ratio used by smart Grid/Compact fitting.'
+        ),
         justifyLastRow: z
           .boolean()
           .optional()
@@ -2440,6 +2609,30 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           .describe(
             'Allow packed zone frames to match row tracks (default: true). False preserves safe frames; undersized frames still grow.'
           ),
+        matchRowHeights: z
+          .boolean()
+          .optional()
+          .describe('Match eligible zone frames to their Grid row height.'),
+        matchColumnWidths: z
+          .boolean()
+          .optional()
+          .describe('Match eligible zone frames to their Grid column width.'),
+        matchWidth: z
+          .boolean()
+          .optional()
+          .describe('Match every resize-capable root to the largest safe width before reflow.'),
+        matchHeight: z
+          .boolean()
+          .optional()
+          .describe('Match every resize-capable root to the largest safe height before reflow.'),
+        cellHorizontalAlignment: z
+          .enum(['start', 'center', 'end'])
+          .optional()
+          .describe('Align each Grid item within its assigned column track.'),
+        cellVerticalAlignment: z
+          .enum(['start', 'center', 'end'])
+          .optional()
+          .describe('Align each Grid item within its assigned row track.'),
         lastRowAlignment: z
           .enum(['start', 'center', 'end'])
           .optional()
@@ -2460,21 +2653,44 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const boardId = coerceString(args.boardId);
       if (!boardId) throw new Error('boardId is required');
       const density = args.packZoneContents === false ? 'preserve' : (args.density ?? 'preserve');
+      const sharedSettings = normalizeBoardLayoutSettings(
+        {
+          ...DEFAULT_BOARD_LAYOUT_SETTINGS,
+          mode: args.mode,
+          density,
+          trackAxis: args.columns === undefined ? 'auto' : 'columns',
+          trackCount: args.columns,
+          columnGap: args.columnGap ?? args.gap,
+          rowGap: args.rowGap ?? args.gap,
+          outerMargin: args.outerMargin,
+          packZoneContents: args.packZoneContents,
+          resizeZoneFrames: args.resizeZoneFrames,
+          justifyRows: args.justifyRows,
+          lastRow: args.justifyLastRow
+            ? 'justify'
+            : (args.lastRowAlignment ?? DEFAULT_BOARD_LAYOUT_SETTINGS.lastRow),
+          matchRowHeights: args.matchRowHeights,
+          matchColumnWidths: args.matchColumnWidths,
+          cellHorizontalAlignment: args.cellHorizontalAlignment,
+          cellVerticalAlignment: args.cellVerticalAlignment,
+        },
+        Number.MAX_SAFE_INTEGER
+      );
 
       const arranged = await arrangeBoardZones(ctx, boardId, {
-        mode: args.mode,
-        density,
+        ...boardZoneArrangementOptions(sharedSettings, Number.MAX_SAFE_INTEGER),
+        layoutSettings: sharedSettings,
         targetWidth: args.targetWidth,
         targetRowHeight: args.targetRowHeight,
-        gap: args.gap,
+        outerMargin: sharedSettings.outerMargin,
         startX: args.startX,
         startY: args.startY,
         maxPerRow: args.maxPerRow,
-        justifyLastRow: args.justifyLastRow === true,
-        justifyRows: args.justifyRows !== false,
-        resizeZoneFrames: args.resizeZoneFrames !== false,
-        lastRowAlignment: args.lastRowAlignment,
-        packZoneContents: args.packZoneContents !== false,
+        targetAspectRatio: args.targetAspectRatio,
+        matchWidth: args.matchWidth === true,
+        matchHeight: args.matchHeight === true,
+        cellHorizontalAlignment: args.cellHorizontalAlignment,
+        cellVerticalAlignment: args.cellVerticalAlignment,
         dryRun: args.dryRun === true,
       });
 
@@ -2497,6 +2713,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         width: layout.width,
         height: layout.height,
         gap: layout.gap,
+        columnGap: layout.gapX,
+        rowGap: layout.gapY,
+        outerMargin: sharedSettings.outerMargin,
         rowHeights: layout.rowHeights,
         dryRun: args.dryRun === true,
         packZoneContents: args.packZoneContents !== false,

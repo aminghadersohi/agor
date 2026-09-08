@@ -9,6 +9,7 @@ import {
   layoutJustifiedZones,
   zoneShapesForItems,
 } from './justified-zones.js';
+import { LAYOUT_SPACING_DEFAULTS, normalizeAxisSpacing } from './layout-spacing.js';
 import {
   BOARD_GRID_SIZE,
   type CompactRectangleLayoutResult,
@@ -31,9 +32,13 @@ import {
 export const DEFAULT_BOARD_ZONE_ARRANGEMENT = Object.freeze({
   targetWidth: 1600,
   targetRowHeight: 600,
-  gap: 40,
-  startX: 80,
-  startY: 80,
+  gapX: LAYOUT_SPACING_DEFAULTS.boardColumnGap,
+  gapY: LAYOUT_SPACING_DEFAULTS.boardRowGap,
+  outerMargin: LAYOUT_SPACING_DEFAULTS.boardOuterMargin,
+  /** @deprecated Compatibility aliases for callers predating axis spacing. */
+  gap: LAYOUT_SPACING_DEFAULTS.boardColumnGap,
+  startX: LAYOUT_SPACING_DEFAULTS.boardOuterMargin,
+  startY: LAYOUT_SPACING_DEFAULTS.boardOuterMargin,
   justifyLastRow: false,
 });
 
@@ -63,6 +68,11 @@ export interface BoardZoneArrangementInput {
   fontScale?: number;
   status?: string;
   layout?: Partial<ZoneLayoutPolicy>;
+  /** Capability-aware frame resizing. False keeps this root at its safe size. */
+  resizable?: boolean;
+  /** Persisted/manual frame floors which matching may never cross. */
+  minWidth?: number;
+  minHeight?: number;
   items: readonly BoardZoneArrangementItem[];
 }
 
@@ -76,6 +86,11 @@ export interface BoardZoneArrangementLooseItem {
   compact?: boolean;
   densityExpandable?: boolean;
   expandedSize?: { width: number; height: number };
+  /** Whether explicit Match width/height may resize this root. */
+  resizable?: boolean;
+  /** Render/content/manual floors which matching may never cross. */
+  minWidth?: number;
+  minHeight?: number;
 }
 
 export interface BoardZoneArrangementOptions {
@@ -88,7 +103,12 @@ export interface BoardZoneArrangementOptions {
   targetWidth?: number;
   targetHeight?: number;
   targetRowHeight?: number;
+  /** @deprecated Scalar compatibility alias; prefer the explicit axes. */
   gap?: number;
+  gapX?: number;
+  gapY?: number;
+  /** Board-scoped cluster inset. Selection-scoped layout keeps its source anchor. */
+  outerMargin?: number;
   startX?: number;
   startY?: number;
   maxPerRow?: number;
@@ -105,6 +125,14 @@ export interface BoardZoneArrangementOptions {
   matchRowHeights?: boolean;
   /** Give every zone in an outer column that column's widest final frame. */
   matchColumnWidths?: boolean;
+  /** Match every eligible root to the largest content-safe width in scope. */
+  matchWidth?: boolean;
+  /** Match every eligible root to the largest content-safe height in scope. */
+  matchHeight?: boolean;
+  /** CSS-grid-like alignment inside each fixed column track. */
+  cellHorizontalAlignment?: 'start' | 'center' | 'end';
+  /** CSS-grid-like alignment inside each row track. */
+  cellVerticalAlignment?: 'start' | 'center' | 'end';
   /** Master switch for changing zone frames. Pack still grows unsafe frames. */
   resizeZoneFrames?: boolean;
   /** Alignment for a short, non-justified final row. */
@@ -147,9 +175,6 @@ export interface BoardZoneArrangementPlan {
   /** Present when the operation also packed free top-level board nodes. */
   boardLayout?: CompactRectangleLayoutResult;
 }
-
-const gridGap = (value: number): number =>
-  value === 0 ? 0 : Math.max(BOARD_GRID_SIZE, ceilBoardGridValue(value));
 
 const exactGap = (value: number): number => (Number.isFinite(value) ? Math.max(0, value) : 0);
 
@@ -208,7 +233,12 @@ export function planBoardZoneArrangement(
   const packZoneContents = options.packZoneContents !== false;
   const mode = options.mode ?? (options.compactOuterLayout ? 'compact' : 'grid');
   const resizeZoneFrames = packZoneContents && options.resizeZoneFrames !== false;
-  const outerGap = gridGap(options.gap ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.gap);
+  const outerSpacing = normalizeAxisSpacing(options.gapX, options.gapY, options.gap, {
+    columnGap: DEFAULT_BOARD_ZONE_ARRANGEMENT.gapX,
+    rowGap: DEFAULT_BOARD_ZONE_ARRANGEMENT.gapY,
+  });
+  const outerGapX = exactGap(outerSpacing.columnGap);
+  const outerGapY = exactGap(outerSpacing.rowGap);
   // Callers provide the persisted logical order. Sorting it by the geometry
   // this function is about to replace makes row order feed back into the next
   // invocation (and lets Arrange oscillate between two valid grids).
@@ -222,7 +252,10 @@ export function planBoardZoneArrangement(
   const prepared = orderedZones.map((zone) => {
     const policy = normalizeZoneLayoutPolicy(zone.layout);
     const density = packZoneContents ? (options.density ?? policy.density) : 'preserve';
-    const frame = getZoneLayoutFrame(zone, { fontScale: zone.fontScale });
+    const frame = getZoneLayoutFrame(zone, {
+      fontScale: zone.fontScale,
+      padding: policy.padding,
+    });
     const orderedItems =
       policy.preset === 'grid' && policy.columns === undefined && policy.sortBy === 'position'
         ? [...zone.items]
@@ -257,13 +290,14 @@ export function planBoardZoneArrangement(
         sourceY: item.position.y - frame.headerInset,
       };
     });
-    const gap = exactGap(policy.gap ?? 24);
+    const gapX = exactGap(policy.columnGap);
+    const gapY = exactGap(policy.rowGap);
     const compact =
       packZoneContents && policy.preset === 'grid' && policy.columns === undefined
         ? layoutCompactRectangles(items, {
             padding: frame.padding,
-            gapX: gap,
-            gapY: gap,
+            gapX,
+            gapY,
             gridSize: BOARD_GRID_SIZE,
             preserveInputOrder: true,
           })
@@ -283,15 +317,15 @@ export function planBoardZoneArrangement(
           : zoneShapesForItems(items, {
               titleInset: frame.headerInset,
               padding: frame.padding,
-              gapX: gap,
-              gapY: gap,
+              gapX,
+              gapY,
               maxColumns: policy.preset === 'compact_list' ? 1 : policy.columns,
               gridSize: BOARD_GRID_SIZE,
             });
-    return { zone, policy, frame, orderedItems, items, shapes, gap, compact, compactById };
+    return { zone, policy, frame, orderedItems, items, shapes, gapX, gapY, compact, compactById };
   });
   const preparedById = new Map(prepared.map((entry) => [entry.zone.id, entry]));
-  const preparedLooseItems = orderedLooseItems.map((item) => {
+  const naturalLooseItems = orderedLooseItems.map((item) => {
     const densityExpandable = Boolean(
       item.entityType && (item.densityExpandable ?? isBoardEntityDensityExpandable(item.entityType))
     );
@@ -306,12 +340,85 @@ export function planBoardZoneArrangement(
         : compact === false && item.compact === true && item.expandedSize
           ? item.expandedSize
           : { width: item.width, height: item.height };
-    return { ...item, ...size, compact };
+    return {
+      ...item,
+      width: Math.max(size.width, item.minWidth ?? 0),
+      height: Math.max(size.height, item.minHeight ?? 0),
+      compact,
+    };
   });
+
+  const eligibleZone = (entry: (typeof prepared)[number]) => entry.zone.resizable !== false;
+  const eligibleLoose = (item: (typeof naturalLooseItems)[number]) => item.resizable !== false;
+  const matchedWidth = options.matchWidth
+    ? Math.max(
+        0,
+        ...prepared
+          .filter(eligibleZone)
+          .map((entry) =>
+            Math.max(
+              entry.zone.width,
+              entry.zone.minWidth ?? 0,
+              Math.min(...entry.shapes.map((shape) => shape.width))
+            )
+          ),
+        ...naturalLooseItems.filter(eligibleLoose).map((item) => item.width)
+      )
+    : undefined;
+  const matchedHeight = options.matchHeight
+    ? Math.max(
+        0,
+        ...prepared
+          .filter(eligibleZone)
+          .map((entry) =>
+            Math.max(
+              entry.zone.height,
+              entry.zone.minHeight ?? 0,
+              Math.min(...entry.shapes.map((shape) => shape.height))
+            )
+          ),
+        ...naturalLooseItems.filter(eligibleLoose).map((item) => item.height)
+      )
+    : undefined;
+  const planningShapes = (entry: (typeof prepared)[number]) => {
+    // Frame matching being off is a real planning constraint, not merely an
+    // output-time substitution.  If the grid is solved against the smaller
+    // packed-content shape and we restore the preserved manual frame only
+    // afterwards, that larger frame can overlap the next column and there is
+    // no cell slack for the alignment actions to operate on.  Carry the
+    // preserved/content-safe frame through the authoritative solve instead.
+    let shapes = resizeZoneFrames
+      ? entry.shapes
+      : entry.shapes.map((shape) => ({
+          ...shape,
+          width: Math.max(entry.zone.width, shape.width),
+          height: Math.max(entry.zone.height, shape.height),
+        }));
+    if (matchedWidth !== undefined && eligibleZone(entry)) {
+      const fitting = shapes.filter((shape) => shape.width <= matchedWidth);
+      shapes = (fitting.length > 0 ? fitting : shapes).map((shape) => ({
+        ...shape,
+        width: Math.max(matchedWidth, shape.width),
+      }));
+    }
+    if (matchedHeight !== undefined && eligibleZone(entry)) {
+      const fitting = shapes.filter((shape) => shape.height <= matchedHeight);
+      shapes = (fitting.length > 0 ? fitting : shapes).map((shape) => ({
+        ...shape,
+        height: Math.max(matchedHeight, shape.height),
+      }));
+    }
+    return shapes;
+  };
+  const preparedLooseItems = naturalLooseItems.map((item) => ({
+    ...item,
+    ...(matchedWidth !== undefined && eligibleLoose(item) ? { width: matchedWidth } : {}),
+    ...(matchedHeight !== undefined && eligibleLoose(item) ? { height: matchedHeight } : {}),
+  }));
 
   const compactShapeById = new Map(
     prepared.map((entry) => {
-      const shape = [...entry.shapes].sort(
+      const shape = [...planningShapes(entry)].sort(
         (left, right) =>
           Math.max(left.width, left.height) - Math.max(right.width, right.height) ||
           left.width * left.height - right.width * right.height ||
@@ -367,8 +474,16 @@ export function planBoardZoneArrangement(
             const entry = preparedById.get(root.id);
             return {
               id: root.id,
-              shapes: entry?.shapes ?? [{ columns: 1, width: root.width, height: root.height }],
-              resizable: Boolean(entry && resizeZoneFrames),
+              shapes: entry
+                ? planningShapes(entry)
+                : [{ columns: 1, width: root.width, height: root.height }],
+              resizable: Boolean(
+                entry &&
+                  resizeZoneFrames &&
+                  entry.zone.resizable !== false &&
+                  matchedWidth === undefined &&
+                  matchedHeight === undefined
+              ),
             };
           }),
           {
@@ -385,7 +500,8 @@ export function planBoardZoneArrangement(
                       )
                   )
                 : DEFAULT_BOARD_ZONE_ARRANGEMENT.targetRowHeight),
-            gap: outerGap,
+            gapX: outerGapX,
+            gapY: outerGapY,
             startX: 0,
             startY: 0,
             maxPerRow: options.maxPerRow,
@@ -395,6 +511,8 @@ export function planBoardZoneArrangement(
             justifyLastRow: options.justifyLastRow ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.justifyLastRow,
             lastRowAlignment: options.lastRowAlignment ?? 'start',
             matchRowHeights: resizeZoneFrames && options.matchRowHeights !== false,
+            cellHorizontalAlignment: options.cellHorizontalAlignment,
+            cellVerticalAlignment: options.cellVerticalAlignment,
             gridSize: BOARD_GRID_SIZE,
           }
         )
@@ -409,7 +527,7 @@ export function planBoardZoneArrangement(
       const preferred =
         gridPlacement === undefined
           ? compactShapeById.get(entry.zone.id)
-          : entry.shapes
+          : planningShapes(entry)
               .filter((shape) => shape.columns === gridPlacement.columns)
               .sort(
                 (left, right) =>
@@ -427,30 +545,27 @@ export function planBoardZoneArrangement(
       const shape = selectedShapeById.get(entry.zone.id);
       if (!shape) throw new Error(`Missing final shape for zone '${entry.zone.id}'.`);
       const placement = gridPlacementById.get(entry.zone.id);
+      let frame: { width: number; height: number };
       if (!packZoneContents) {
-        return [entry.zone.id, { width: entry.zone.width, height: entry.zone.height }] as const;
-      }
-      if (resizeZoneFrames && placement) {
-        return [
-          entry.zone.id,
-          {
-            width: options.matchColumnWidths === false ? shape.width : placement.width,
-            height: options.matchRowHeights === false ? shape.height : placement.height,
-          },
-        ] as const;
-      }
-      if (resizeZoneFrames) {
-        return [entry.zone.id, { width: shape.width, height: shape.height }] as const;
-      }
-      // The OFF control preserves a safe manual frame. A frame that is already
-      // too small still grows just enough; Pack may never leave protruding children.
-      return [
-        entry.zone.id,
-        {
+        frame = { width: entry.zone.width, height: entry.zone.height };
+      } else if (resizeZoneFrames && placement) {
+        frame = {
+          width: options.matchColumnWidths === false ? shape.width : placement.width,
+          height: options.matchRowHeights === false ? shape.height : placement.height,
+        };
+      } else if (resizeZoneFrames) {
+        frame = { width: shape.width, height: shape.height };
+      } else {
+        // The OFF control preserves a safe manual frame. A frame that is already
+        // too small still grows just enough; Pack may never leave protruding children.
+        frame = {
           width: Math.max(entry.zone.width, shape.width),
           height: Math.max(entry.zone.height, shape.height),
-        },
-      ] as const;
+        };
+      }
+      if (eligibleZone(entry) && matchedWidth !== undefined) frame.width = matchedWidth;
+      if (eligibleZone(entry) && matchedHeight !== undefined) frame.height = matchedHeight;
+      return [entry.zone.id, frame] as const;
     })
   );
 
@@ -468,7 +583,7 @@ export function planBoardZoneArrangement(
             sourceX: root.x,
             sourceY: root.y,
           })),
-          { gapX: outerGap, gapY: outerGap, gridSize: BOARD_GRID_SIZE }
+          { gapX: outerGapX, gapY: outerGapY, gridSize: BOARD_GRID_SIZE }
         )
       : undefined;
 
@@ -512,15 +627,15 @@ export function planBoardZoneArrangement(
         y: (sourceTop + sourceBottom - (targetBottom - targetTop)) / 2,
       }
     : {
-        x: options.startX ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.startX,
-        y: options.startY ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.startY,
+        x: options.startX ?? options.outerMargin ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.outerMargin,
+        y: options.startY ?? options.outerMargin ?? DEFAULT_BOARD_ZONE_ARRANGEMENT.outerMargin,
       };
   const positioned = placeLayoutAroundFixedObstacles(collisionFootprint, {
     desiredOrigin,
     obstacles: options.fixedObstacles,
-    gapX: outerGap,
-    gapY: outerGap,
-    gridSize: BOARD_GRID_SIZE,
+    gapX: outerGapX,
+    gapY: outerGapY,
+    gridSize: 0,
   });
   const rootPlacementById = new Map(
     positioned.placements.map((placement) => [placement.id, placement])
@@ -550,7 +665,9 @@ export function planBoardZoneArrangement(
         rows: compactLayout?.rows ?? 0,
         width: compactLayout?.width ?? 0,
         height: compactLayout?.height ?? 0,
-        gap: outerGap,
+        gap: outerGapX,
+        gapX: outerGapX,
+        gapY: outerGapY,
         rowHeights: [...new Set(positioned.placements.map((placement) => placement.y))]
           .sort((left, right) => left - right)
           .map((y) =>
@@ -572,7 +689,7 @@ export function planBoardZoneArrangement(
     }
     const frame = getZoneLayoutFrame(
       { ...entry.zone, width: finalFrame.width },
-      { fontScale: entry.zone.fontScale }
+      { fontScale: entry.zone.fontScale, padding: entry.policy.padding }
     );
     // Reuse the natural sizes prepared before outer-frame justification.
     // Recomputing compact-list widths from finalFrame would make child content
@@ -598,8 +715,8 @@ export function planBoardZoneArrangement(
         ? layoutCompactRectangles(items, {
             bounds: { width: finalFrame.width, height: finalFrame.height - frame.headerInset },
             padding: frame.padding,
-            gapX: entry.gap,
-            gapY: entry.gap,
+            gapX: entry.gapX,
+            gapY: entry.gapY,
             gridSize: BOARD_GRID_SIZE,
             preserveInputOrder: true,
           })
@@ -607,10 +724,10 @@ export function planBoardZoneArrangement(
             bounds: { width: finalFrame.width, height: finalFrame.height - frame.headerInset },
             padding: frame.padding,
             minPadding: frame.padding,
-            gapX: entry.gap,
-            gapY: entry.gap,
-            minGapX: entry.gap,
-            minGapY: entry.gap,
+            gapX: entry.gapX,
+            gapY: entry.gapY,
+            minGapX: entry.gapX,
+            minGapY: entry.gapY,
             exactColumns: Math.max(1, Math.min(items.length || 1, shape.columns)),
             allowDeck: false,
             gridSize: BOARD_GRID_SIZE,

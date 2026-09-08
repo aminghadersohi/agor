@@ -56,6 +56,11 @@ export function LayoutDensityControl({
                 : 'Collapses eligible worktrees and cards with body content as part of the same layout.'}
         </Typography.Text>
       )}
+      {compact && disabled && disabledReason && (
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {disabledReason}
+        </Typography.Text>
+      )}
     </div>
   );
 }
