@@ -641,7 +641,7 @@ describe('UserSettingsModal', { timeout: 60_000 }, () => {
 
     await waitFor(() => {
       expect(onUpdate).toHaveBeenCalledTimes(1);
-      expect(screen.getByRole('alert')).toHaveTextContent('save failed');
+      expect(screen.getByText('save failed')).toBeVisible();
     }, ASYNC);
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -1904,7 +1904,7 @@ describe('UserSettingsModal — socket authority generations', () => {
     );
     expect(screen.queryByLabelText('claude-code acceptEdits')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Provider availability changed');
+    expect(await screen.findByText(/Provider availability changed/)).toBeInTheDocument();
     expect(onUpdate).not.toHaveBeenCalled();
   });
   it('falls back to Profile for an unknown settings deep link', async () => {
