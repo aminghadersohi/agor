@@ -1,6 +1,6 @@
 import type { Board, Branch, Session, UserID, UUID } from '@agor/core/types';
 import { SessionStatus, TaskStatus } from '@agor/core/types';
-import { describe, expect } from 'vitest';
+import { describe, expect, vi } from 'vitest';
 import { generateId } from '../../lib/ids';
 import type { Database } from '../client';
 import { ownedDbTest as dbTest, setTestBranchUserRole } from '../test-helpers';
@@ -62,9 +62,9 @@ async function createSession(
   });
 }
 
-describe('BoardRepository running Session counts', () => {
+describe('BoardRepository Board list counts', () => {
   dbTest(
-    'counts exact running Sessions across agent, scheduled, and gateway origins without Task multiplication',
+    'reproduces the production list path across worktrees, origins, task lifecycles, and explicit zeroes',
     async ({ db }) => {
       const owner = 'test-user' as UUID;
       const boards = new BoardRepository(db);
@@ -78,15 +78,23 @@ describe('BoardRepository running Session counts', () => {
         created_by: owner,
       });
       const branch = await createBranch(db, repo.repo_id, countedBoard, owner, 'counted');
+      await createBranch(db, repo.repo_id, countedBoard, owner, 'empty-worktree');
 
-      const agent = await createSession(db, branch, owner, { status: SessionStatus.RUNNING });
-      await createSession(db, branch, owner, {
-        status: SessionStatus.RUNNING,
-        scheduled_from_branch: true,
-        scheduled_run_at: Date.now(),
+      const root = await createSession(db, branch, owner, { status: SessionStatus.RUNNING });
+      const child = await createSession(db, branch, owner, {
+        status: SessionStatus.STOPPING,
+        genealogy: { parent_session_id: root.session_id, children: [] },
       });
       await createSession(db, branch, owner, {
-        status: SessionStatus.RUNNING,
+        status: SessionStatus.AWAITING_PERMISSION,
+        callback_config: {
+          enabled: true,
+          callback_session_id: root.session_id,
+          callback_created_by: owner,
+        },
+      });
+      await createSession(db, branch, owner, {
+        status: SessionStatus.AWAITING_INPUT,
         custom_context: {
           gateway_source: {
             channel_type: 'slack',
@@ -96,18 +104,18 @@ describe('BoardRepository running Session counts', () => {
           },
         },
       });
-
-      for (const status of [
-        SessionStatus.IDLE,
-        SessionStatus.AWAITING_PERMISSION,
-        SessionStatus.AWAITING_INPUT,
-        SessionStatus.STOPPING,
-        SessionStatus.COMPLETED,
-        SessionStatus.FAILED,
-        SessionStatus.TIMED_OUT,
-      ]) {
-        await createSession(db, branch, owner, { status });
-      }
+      const queued = await createSession(db, branch, owner, { status: SessionStatus.IDLE });
+      const dispatching = await createSession(db, branch, owner, {
+        status: SessionStatus.RUNNING,
+      });
+      const completed = await createSession(db, branch, owner, {
+        status: SessionStatus.COMPLETED,
+      });
+      const failed = await createSession(db, branch, owner, { status: SessionStatus.FAILED });
+      await createSession(db, branch, owner, {
+        status: SessionStatus.IDLE,
+        title: 'Recovered fictional Session',
+      });
       await createSession(db, branch, owner, {
         status: SessionStatus.RUNNING,
         archived: true,
@@ -124,16 +132,27 @@ describe('BoardRepository running Session counts', () => {
       await createSession(db, archivedBranch, owner, { status: SessionStatus.RUNNING });
       await new BranchRepository(db).update(archivedBranch.branch_id, { archived: true });
 
-      // Mutation guard: joining Tasks into the aggregate would turn this one
-      // running Session into two. The board projection must remain Session-based.
+      // These Task states exercise the real lifecycle shapes visible beside
+      // Sessions. Counts remain Session-based: Task rows neither add Sessions
+      // nor redefine the shared isSessionExecuting classification.
       const tasks = new TaskRepository(db);
-      for (const prompt of ['first task', 'second task']) {
+      for (const [session, status] of [
+        [queued, TaskStatus.QUEUED],
+        [dispatching, TaskStatus.DISPATCHING],
+        [root, TaskStatus.RUNNING],
+        [child, TaskStatus.STOPPING],
+        [completed, TaskStatus.COMPLETED],
+        [failed, TaskStatus.FAILED],
+        // Mutation guard: a second Task on one Session must not multiply any
+        // Board aggregate if the query is later changed to join Tasks.
+        [root, TaskStatus.COMPLETED],
+      ] as const) {
         await tasks.create({
           task_id: generateId(),
-          session_id: agent.session_id,
+          session_id: session.session_id,
           created_by: owner,
-          full_prompt: prompt,
-          status: TaskStatus.CREATED,
+          full_prompt: `fictional ${status} task`,
+          status,
           message_range: {
             start_index: 0,
             end_index: 0,
@@ -145,18 +164,28 @@ describe('BoardRepository running Session counts', () => {
         });
       }
 
+      const aggregateSpy = vi.spyOn(
+        boards as unknown as { attachBoardListCounts: BoardRepository['findAll'] },
+        'attachBoardListCounts'
+      );
       const result = await boards.findAll();
       expect(result.find((board) => board.board_id === countedBoard.board_id))?.toMatchObject({
-        running_session_count: 3,
+        worktree_count: 2,
+        total_session_count: 9,
+        active_session_count: 5,
       });
       expect(result.find((board) => board.board_id === zeroBoard.board_id))?.toMatchObject({
-        running_session_count: 0,
+        worktree_count: 0,
+        total_session_count: 0,
+        active_session_count: 0,
       });
+      // One set-based aggregate invocation covers every board in the list.
+      expect(aggregateSpy).toHaveBeenCalledTimes(1);
     }
   );
 
   dbTest(
-    'applies distinct-owner branch RBAC before paging and follows running/archive transitions',
+    'applies branch RBAC before paging and follows active/archive/move/recovery transitions',
     async ({ db }) => {
       const owner = 'test-user' as UUID;
       const viewer = generateId() as UUID;
@@ -214,12 +243,14 @@ describe('BoardRepository running Session counts', () => {
       expect(firstPage.data).toHaveLength(1);
       expect(firstPage.data[0]).toMatchObject({
         board_id: alpha.board_id,
-        running_session_count: 1,
+        worktree_count: 1,
+        total_session_count: 1,
+        active_session_count: 1,
       });
 
       // Permission mutation guard: without visibleBranchAccessCondition this
       // would be 2 because the distinct owner's hidden branch is also running.
-      expect(firstPage.data[0].running_session_count).not.toBe(2);
+      expect(firstPage.data[0].active_session_count).not.toBe(2);
 
       const sessions = new SessionRepository(db);
       await sessions.update(transitioning.session_id, {
@@ -227,13 +258,21 @@ describe('BoardRepository running Session counts', () => {
       });
       expect(
         (await boards.findPage({ visibleToUserId: viewer, boardIds: [alpha.board_id] })).data[0]
-          .running_session_count
-      ).toBe(0);
+          .active_session_count
+      ).toBe(1);
 
-      await sessions.update(transitioning.session_id, { status: SessionStatus.RUNNING });
+      await sessions.update(transitioning.session_id, { status: SessionStatus.COMPLETED });
       expect(
         (await boards.findPage({ visibleToUserId: viewer, boardIds: [alpha.board_id] })).data[0]
-          .running_session_count
+          .active_session_count
+      ).toBe(0);
+
+      // Recovery into an executing state must restore the count even though
+      // the status is not exact RUNNING.
+      await sessions.update(transitioning.session_id, { status: SessionStatus.STOPPING });
+      expect(
+        (await boards.findPage({ visibleToUserId: viewer, boardIds: [alpha.board_id] })).data[0]
+          .active_session_count
       ).toBe(1);
 
       await sessions.update(transitioning.session_id, {
@@ -242,16 +281,27 @@ describe('BoardRepository running Session counts', () => {
       });
       expect(
         (await boards.findPage({ visibleToUserId: viewer, boardIds: [alpha.board_id] })).data[0]
-          .running_session_count
-      ).toBe(0);
+      ).toMatchObject({ total_session_count: 0, active_session_count: 0 });
 
       await sessions.update(transitioning.session_id, {
         archived: false,
       });
       expect(
         (await boards.findPage({ visibleToUserId: viewer, boardIds: [alpha.board_id] })).data[0]
-          .running_session_count
-      ).toBe(1);
+      ).toMatchObject({ total_session_count: 1, active_session_count: 1 });
+
+      await new BranchRepository(db).update(visible.branch_id, { board_id: beta.board_id });
+      expect(
+        (await boards.findPage({ visibleToUserId: viewer, boardIds: [alpha.board_id] })).data[0]
+      ).toMatchObject({ worktree_count: 0, total_session_count: 0, active_session_count: 0 });
+      expect(
+        (await boards.findPage({ visibleToUserId: viewer, boardIds: [beta.board_id] })).data[0]
+      ).toMatchObject({ worktree_count: 2, total_session_count: 2, active_session_count: 1 });
+
+      await new BranchRepository(db).update(visible.branch_id, { archived: true });
+      expect(
+        (await boards.findPage({ visibleToUserId: viewer, boardIds: [beta.board_id] })).data[0]
+      ).toMatchObject({ worktree_count: 1, total_session_count: 1, active_session_count: 0 });
     }
   );
 });

@@ -144,14 +144,18 @@ describe('HomeBoardsSection card re-render isolation', () => {
       name: 'Alpha',
       archived: false,
       last_updated: '2026-06-01T00:00:00.000Z',
-      running_session_count: 2,
+      worktree_count: 1,
+      total_session_count: 6,
+      active_session_count: 2,
     } as unknown as Board;
     const boardB = {
       board_id: 'b-B',
       name: 'Beta',
       archived: false,
       last_updated: '2026-06-01T00:00:00.000Z',
-      running_session_count: 0,
+      worktree_count: 1,
+      total_session_count: 1,
+      active_session_count: 0,
     } as unknown as Board;
     const branchA = {
       branch_id: 'br-A',
@@ -192,8 +196,9 @@ describe('HomeBoardsSection card re-render isolation', () => {
 
     // The board list aggregate is authoritative even though Home currently has
     // only one (completed) Session hydrated for Alpha.
-    expect(screen.getByLabelText('2 running sessions')).toBeInTheDocument();
-    expect(screen.queryByLabelText('0 running sessions')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('6 total sessions')).toBeInTheDocument();
+    expect(screen.getByLabelText('2 active sessions')).toBeInTheDocument();
+    expect(screen.getByLabelText('0 active sessions')).toBeInTheDocument();
 
     await waitFor(() => {
       expect(timeRendersWith(timeB)).toBeGreaterThanOrEqual(1);

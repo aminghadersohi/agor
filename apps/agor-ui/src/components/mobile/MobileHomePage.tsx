@@ -24,7 +24,8 @@ import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getSessionDisplayTitle } from '@/utils/sessionTitle';
 import { formatRelativeTime } from '@/utils/time';
-import { getBoardEmoji } from '../BoardTile';
+import { BoardListCounts } from '../BoardListCounts';
+import { BoardTile, getBoardEmoji } from '../BoardTile';
 import { MobileHeader } from './MobileHeader';
 
 const { Content } = Layout;
@@ -60,17 +61,13 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
         .sort((a, b) => new Date(b.last_updated).getTime() - new Date(a.last_updated).getTime()),
     [sessionById, user]
   );
-  const { activeBranches, branchCountByBoard } = useMemo(() => {
+  const activeBranches = useMemo(() => {
     let count = 0;
-    const byBoard = new Map<string, number>();
     for (const branch of branchById.values()) {
       if (branch.archived) continue;
       count += 1;
-      if (branch.board_id) {
-        byBoard.set(branch.board_id, (byBoard.get(branch.board_id) ?? 0) + 1);
-      }
     }
-    return { activeBranches: count, branchCountByBoard: byBoard };
+    return count;
   }, [branchById]);
   const running = sessions.filter((session) => session.status === 'running').length;
 
@@ -182,7 +179,6 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
             ) : (
               <Flex vertical gap={token.marginSM}>
                 {boards.map((board) => {
-                  const branchCount = branchCountByBoard.get(board.board_id) ?? 0;
                   return (
                     <Card
                       key={board.board_id}
@@ -197,16 +193,12 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
                         style={{ height: 'auto', padding: token.paddingSM, textAlign: 'start' }}
                       >
                         <Flex align="center" gap={token.marginSM}>
-                          <span aria-hidden style={{ fontSize: 28 }}>
-                            {getBoardEmoji(board, branchById)}
-                          </span>
+                          <BoardTile emoji={getBoardEmoji(board, branchById)} size={36} />
                           <div style={{ minWidth: 0, flex: 1 }}>
                             <Text strong ellipsis style={{ display: 'block' }}>
                               {board.name}
                             </Text>
-                            <Text type="secondary">
-                              {branchCount} {branchCount === 1 ? 'branch' : 'branches'}
-                            </Text>
+                            <BoardListCounts counts={board} wrap />
                           </div>
                         </Flex>
                       </Button>

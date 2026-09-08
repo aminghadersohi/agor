@@ -1,9 +1,9 @@
 /**
- * PostgreSQL/RLS proof for the caller-scoped Board running-Session aggregate.
+ * PostgreSQL/RLS proof for the caller-scoped Board-list aggregates.
  *
  * Run with:
  *   AGOR_DB_DIALECT=postgresql AGOR_TEST_POSTGRES_URL=... \
- *   pnpm exec vitest run src/db/repositories/boards-running-sessions.postgres.test.ts
+ *   pnpm exec vitest run src/db/repositories/boards-list-counts.postgres.test.ts
  */
 import type { UserID, UUID } from '@agor/core/types';
 import { SessionStatus } from '@agor/core/types';
@@ -23,7 +23,7 @@ const postgresUrl = process.env.AGOR_TEST_POSTGRES_URL;
 const usesPostgresSchema = process.env.AGOR_DB_DIALECT === 'postgresql';
 
 describe.skipIf(!postgresUrl || !usesPostgresSchema)(
-  'Board running Session counts (PostgreSQL RLS)',
+  'Board Board list counts (PostgreSQL RLS)',
   () => {
     let db: Database;
 
@@ -138,7 +138,11 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
         });
 
         expect(page.data.map((item) => item.board_id)).toEqual([board.board_id]);
-        expect(page.data[0].running_session_count).toBe(1);
+        expect(page.data[0]).toMatchObject({
+          worktree_count: 1,
+          total_session_count: 1,
+          active_session_count: 1,
+        });
         expect(page.data.map((item) => item.board_id)).not.toContain(foreignBoardId);
         // Removing the aggregate's branch permission predicate changes 1 → 2,
         // so this is a non-vacuous distinct-owner RBAC mutation guard.
