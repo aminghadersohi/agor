@@ -13,28 +13,35 @@ import {
   feathers,
   feathersExpress,
   rest,
+  socketio,
 } from '@agor/core/feathers';
 import type { HookContext, UserID } from '@agor/core/types';
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import { RuntimeJWTStrategy } from '../src/auth/runtime-jwt-strategy.js';
+import { setupMCPRoutes } from '../src/mcp/server.js';
 import { type RegisterHooksContext, registerHooks } from '../src/register-hooks.js';
+import { BoardObjectsService } from '../src/services/board-objects.js';
 import { createBoardsService } from '../src/services/boards.js';
+import { BranchesService } from '../src/services/branches.js';
 import { setupCapabilityPolicyServices } from '../src/services/capability-policies.js';
 import { setupBoardEffectiveAccessService } from '../src/services/groups.js';
 import { createUsersService } from '../src/services/users.js';
+import { configureChannels, createSocketIOConfig } from '../src/setup/socketio.js';
 
 const JWT_SECRET = 'board-metadata-disposable-test-secret';
 
 /** Real REST/auth/hooks/repositories; only unrelated daemon services are inert. */
 export async function boardMetadataTestApp(
   db: TenantScopeAwareDatabase,
-  config: RegisterHooksContext['config']
+  config: RegisterHooksContext['config'],
+  withSocketIO = false,
+  withMcp = false
 ) {
   const app = feathersExpress(feathers());
   app.use(express.json());
   app.configure(rest());
-  (app as unknown as { publish: () => void }).publish = () => undefined;
+  if (!withSocketIO) (app as unknown as { publish: () => void }).publish = () => undefined;
   app.set('config', config);
   app.set('authentication', {
     secret: JWT_SECRET,
@@ -50,15 +57,7 @@ export async function boardMetadataTestApp(
       expiresIn: '15m',
     },
   });
-  for (const path of [
-    'messages',
-    'repos',
-    'branches',
-    'sessions',
-    'leaderboard',
-    'schedules',
-    'tasks',
-  ]) {
+  for (const path of ['messages', 'repos', 'sessions', 'leaderboard', 'schedules', 'tasks']) {
     app.use(path, {
       async find() {
         return [];
@@ -66,14 +65,25 @@ export async function boardMetadataTestApp(
     });
   }
   app.use('users', createUsersService(db, app, config));
+  app.use('branches', new BranchesService(db, app));
   const authentication = new AuthenticationService(app);
   authentication.register(
     'jwt',
     new RuntimeJWTStrategy({ multiTenancy: resolveMultiTenancyConfig(config) })
   );
   app.use('authentication', authentication);
+  if (withSocketIO) {
+    const sockets = createSocketIOConfig(app, {
+      corsOrigin: '*',
+      credentialsAllowed: false,
+      multiTenancy: resolveMultiTenancyConfig(config),
+    });
+    app.configure(socketio(sockets.serverOptions, sockets.callback));
+    configureChannels(app);
+  }
   const boardsService = createBoardsService(db);
   app.use('boards', boardsService);
+  app.use('board-objects', new BoardObjectsService(db, app));
   setupBoardEffectiveAccessService(app, new BoardRepository(db), { allowSuperadmin: false });
   setupCapabilityPolicyServices(app, db, { allowSuperadmin: false });
   registerHooks({
@@ -94,6 +104,7 @@ export async function boardMetadataTestApp(
     usersRepository: new UsersRepository(db),
     sessionsRepository: {} as RegisterHooksContext['sessionsRepository'],
   });
+  if (withMcp) setupMCPRoutes(app, db, true, config);
   app.use(errorHandler());
   const server = (await app.listen(0)) as Server;
   const address = server.address();

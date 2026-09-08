@@ -305,6 +305,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: 'Signalled by the native oauth:disconnected packet.',
   },
+  'mcp-servers/oauth-client-registration-reset': {
+    audience: 'none',
+    why: 'Admin-only OAuth registration recovery control plane.',
+  },
   'mcp-servers/oauth-status': { audience: 'none', why: 'Per-user token status.' },
   'mcp-servers/oauth-attempt-status': {
     audience: 'none',
@@ -333,11 +337,11 @@ export const REALTIME_PUBLISH_POLICY = {
   },
   'mcp-marketplace/remove-unattached': {
     audience: 'none',
-    why: 'Caller-private acknowledgement; an explicit empty user-room invalidation refreshes every owner device.',
+    why: 'Caller-private acknowledgement; an explicit empty user-room freshness hint refreshes every owner device.',
   },
   'mcp-marketplace/tool-permission': {
     audience: 'none',
-    why: 'Caller-private acknowledgement; an explicit empty user-room invalidation refreshes every affected owner/admin device.',
+    why: 'Caller-private acknowledgement; an explicit empty user-room freshness hint refreshes every affected owner/admin device.',
   },
   'mcp-member-policy': { audience: 'none', why: 'Policy read for the caller.' },
   'mcp-egress/status': {

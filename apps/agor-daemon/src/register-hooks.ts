@@ -132,6 +132,7 @@ import type { GatewayService } from './services/gateway.js';
 import { groupMembershipsHooks, groupsHooks } from './services/groups.js';
 import { presentMCPServerOAuthPolicies } from './services/mcp-server-presentation.js';
 import {
+  assertSessionArchiveStateUsesDedicatedOperation,
   isRemoteRelationshipsEnrichedResult,
   markRemoteRelationshipsEnrichedResult,
 } from './services/sessions.js';
@@ -178,7 +179,10 @@ import {
   redactMCPServerSecrets,
   shouldExposeMCPServerSecrets,
 } from './utils/mcp-header-secrets.js';
-import { createMcpServerWriteAuthorizationHook } from './utils/mcp-server-authorization.js';
+import {
+  createMcpServerWriteAuthorizationHook,
+  resolveMcpCaller,
+} from './utils/mcp-server-authorization.js';
 import { realignRepoOriginAfterPatchHook } from './utils/realign-repo-origin.js';
 import {
   bindRealtimeAccessCacheInvalidation,
@@ -337,7 +341,7 @@ export function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
  * session metadata (name, model_config, permission_config, callback_config).
  *
  * Sources:
- *   - `/sessions/:id/prompt`  → `tasks`, `archived`, `archived_reason`
+ *   - `/sessions/:id/prompt`  → `tasks`
  *   - `/sessions/:id/stop`    → `status`, `ready_for_prompt`
  *   - executor status updates → `status`, `ready_for_prompt`
  *     (claude/copilot permission-hooks, see packages/executor)
@@ -361,8 +365,6 @@ export function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
  */
 export const PROMPT_FLOW_PATCH_FIELDS: readonly string[] = [
   'tasks',
-  'archived',
-  'archived_reason',
   'auto_archive_at',
   'status',
   'ready_for_prompt',
@@ -515,6 +517,7 @@ export const TENANT_OWNED_SERVICE_PATHS = [
   'mcp-servers',
   'mcp-servers/oauth-attempt-status',
   'mcp-servers/oauth-disconnect',
+  'mcp-servers/oauth-client-registration-reset',
   'mcp-servers/oauth-status',
   'mcp-catalog/readiness',
   'mcp-marketplace',
@@ -653,18 +656,11 @@ export function suppressKnowledgeCommandRealtimeEvent(context: HookContext): Hoo
  * Service endpoints whose implementation retains process-local credentials,
  * provider handshakes, or native runtime state. Keep this inventory exported
  * so the constrained HA fail-closed boundary has direct regression coverage.
- * `mcp-servers/discover` is included because an OAuth-protected probe can start
- * the same pending PKCE/callback flow as the explicit OAuth endpoints.
+ * MCP discovery is deliberately absent: its ordinary capability probe is HA
+ * safe, while its optional OAuth escalation is stopped inside the endpoint
+ * before provider discovery or flow creation.
  */
 export const CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES = [
-  ['mcp-servers/discover', 'mcpOAuth'],
-  ['mcp-servers/oauth-auth-headers', 'mcpOAuth'],
-  ['mcp-servers/oauth-complete', 'mcpOAuth'],
-  ['mcp-servers/oauth-disconnect', 'mcpOAuth'],
-  ['mcp-servers/oauth-refresh', 'mcpOAuth'],
-  ['mcp-servers/oauth-start', 'mcpOAuth'],
-  ['mcp-servers/oauth-status', 'mcpOAuth'],
-  ['mcp-servers/test-oauth', 'mcpOAuth'],
   ['codex-auth/device', 'codexDeviceAuth'],
   ['codex-auth/import', 'codexAuth'],
   ['codex-auth/logout', 'codexAuth'],
@@ -2004,11 +2000,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       '/artifacts/:id/sandpack-error',
       {
         async create(
-          data: {
-            error: import('@agor/core/types').SandpackError | null;
-            status?: string;
-            content_hash?: string;
-          },
+          data: import('@agor/core/types').ArtifactSandpackReport,
           _params: RouteParams
         ) {
           const artifactId = _params.route?.id;
@@ -2025,7 +2017,8 @@ export function registerHooks(ctx: RegisterHooksContext): void {
             userId,
             data.error,
             data.status,
-            data.content_hash
+            data.content_hash,
+            data.compilation_status
           );
           return { success: true };
         },
@@ -2438,9 +2431,10 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   };
 
   const scopeMcpServerFindToUsable = async (context: HookContext): Promise<HookContext> => {
-    if (!context.params.provider) return context;
-    const user = context.params.user;
-    if (!user || (user as { _isServiceAccount?: boolean })._isServiceAccount) return context;
+    const caller = resolveMcpCaller(context.params);
+    if (caller.kind === 'internal' || caller.kind === 'service-account') return context;
+    if (caller.kind === 'anonymous') throw new NotAuthenticated('Authentication required');
+    const user = caller.user;
     if (!hasMinimumRole(user.role, ROLES.ADMIN)) {
       // Do not trust a caller-supplied usableByUserId; it is an internal
       // authorization filter, not a public query capability.
@@ -2455,15 +2449,11 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   const denyMcpServerGetOfAnotherUsersPrivate = async (
     context: HookContext
   ): Promise<HookContext> => {
-    if (!context.params.provider) return context;
-    const user = context.params.user;
-    if (
-      !user ||
-      (user as { _isServiceAccount?: boolean })._isServiceAccount ||
-      hasMinimumRole(user.role, ROLES.ADMIN)
-    ) {
-      return context;
-    }
+    const caller = resolveMcpCaller(context.params);
+    if (caller.kind === 'internal' || caller.kind === 'service-account') return context;
+    if (caller.kind === 'anonymous') throw new NotAuthenticated('Authentication required');
+    const user = caller.user;
+    if (hasMinimumRole(user.role, ROLES.ADMIN)) return context;
     if (!isMCPServerUsableBy(context.result as MCPServer, user.user_id)) {
       throw new NotFound(`MCP server not found: ${String(context.id)}`);
     }
@@ -3042,6 +3032,10 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   // SessionsService.update delegates straight to patch, so both verbs mutate a
   // session the same way and must clear the same authorization chain.
   const sessionWriteGuards = [
+    (context: HookContext) => {
+      assertSessionArchiveStateUsesDedicatedOperation(context.data ?? {});
+      return context;
+    },
     protectGatewaySourceMetadata,
     protectExternalSessionPowerPriority,
     // created_by and unix_username remain immutable identity/history stamps.

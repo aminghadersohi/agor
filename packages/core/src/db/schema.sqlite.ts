@@ -1667,6 +1667,7 @@ export const mcpServers = sqliteTable(
             required?: boolean;
           }>;
         }>;
+        capabilities_discovered_at?: string;
 
         // Tool permissions configuration
         tool_permissions?: Record<string, 'ask' | 'allow' | 'deny'>;
