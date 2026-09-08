@@ -13,6 +13,7 @@ import type {
   User,
 } from '@agor-live/client';
 import { SessionStatus, shortId } from '@agor-live/client';
+import { seedProfileImageGallery } from '../../components/ProfileImage/useProfileImageGallery';
 import type { StaticRemoteCursor } from '../../components/SessionCanvas/canvas/RemoteCursorLayer';
 
 // Shared staging data for the marketing demo routes:
@@ -38,6 +39,13 @@ export const demoUsers = [
   { user_id: 'demo-user-omar', name: 'Omar', email: 'omar@example.com', emoji: '🔧' },
   { user_id: 'demo-user-ivy', name: 'Ivy', email: 'ivy@example.com', emoji: '🌿' },
 ] as User[];
+
+// Avatar components normally reconcile their projected primary against the
+// authoritative gallery. These fictional identities have known-empty galleries,
+// so seed that state and keep the provider-free marketing routes network-free.
+for (const user of demoUsers) {
+  seedProfileImageGallery({ type: 'user', id: user.user_id }, { images: [], max_images: 0 });
+}
 
 // Agent-labeled cursor identity for the demo videos. Deliberately NOT part of
 // demoUsers so the facepile count (and its "+7" overflow) stays unchanged.
@@ -282,6 +290,8 @@ export const demoBoard: Board = {
     },
   },
 };
+
+seedProfileImageGallery({ type: 'board', id: demoBoard.board_id }, { images: [], max_images: 0 });
 
 export const demoRepo: Repo = {
   repo_id: demoRepoId,

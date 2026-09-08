@@ -12,6 +12,7 @@ import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { MCPCatalogModalProvider } from '../../contexts/MCPCatalogModalContext';
 import { ThemeProvider } from '../../contexts/ThemeContext';
 import { AppHeader } from '../AppHeader';
+import { seedProfileImageGallery } from '../ProfileImage/useProfileImageGallery';
 import { SessionMcpFooterControl } from '../SessionPanel/SessionMcpFooterControl';
 import { MCPCatalogModalHost } from './MCPCatalogModalHost';
 
@@ -20,6 +21,7 @@ export const catalogUser = {
   email: 'alice@example.test',
   role: 'member',
 } as User;
+seedProfileImageGallery({ type: 'user', id: catalogUser.user_id }, { images: [], max_images: 0 });
 export const catalogEntry: MCPCatalogEntry = {
   name: 'com.deepwiki/mcp',
   title: 'DeepWiki',
