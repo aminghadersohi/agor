@@ -51,6 +51,28 @@ describe('prompt and widget transaction scopes', () => {
     expect(prompt).toContain('if (!isPromptServiceAccount && promptBranchId)');
   });
 
+  it('fences queued prompt amendments inside one tenant transaction', () => {
+    const start = source.indexOf("'/tasks/:id/queued-prompt'");
+    const end = source.indexOf('// Explicit coordinator queue batching', start);
+    const route = source.slice(start, end);
+
+    expect(start).toBeGreaterThan(0);
+    expect(route).toContain('isCanonicalFullUuid(taskId)');
+    expect(route).toContain('isCanonicalFullUuid(data.sessionId)');
+    const transaction = route.indexOf('runWithTenantDatabaseTransaction(');
+    const fence = route.indexOf('lockTenantAuthorizationFence(operationDb, params)', transaction);
+    const actor = route.indexOf('resolveCurrentTenantAuthorityActor(operationDb, params)', fence);
+    const promptAuthority = route.indexOf('resolveSessionPromptAccess({', actor);
+    const mutation = route.indexOf('applyQueuedPromptAmendment({', promptAuthority);
+    expect(transaction).toBeGreaterThan(0);
+    expect(fence).toBeGreaterThan(transaction);
+    expect(actor).toBeGreaterThan(fence);
+    expect(promptAuthority).toBeGreaterThan(actor);
+    expect(mutation).toBeGreaterThan(promptAuthority);
+    expect(route).toContain("event: 'patched'");
+    expect(route).not.toContain("service('tasks').remove");
+  });
+
   it('restores only the explicitly prompted archived session', () => {
     const promptStart = source.indexOf("'/sessions/:id/prompt'");
     const promptEnd = source.indexOf("'/tasks/:id/run'", promptStart);
