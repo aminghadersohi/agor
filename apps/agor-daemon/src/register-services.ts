@@ -67,7 +67,12 @@ import { BadRequest, Conflict, Forbidden, NotAuthenticated } from '@agor/core/fe
 import {
   hasTemplateMarker,
   isMCPServerUsableBy,
+  isMCPServerWriteValidationError,
+  type MCPExternalErrorCategory,
+  type MCPExternalErrorReason,
   type MCPExternalErrorStage,
+  type MCPExternalErrorType,
+  normalizeDiscoveredMCPCapabilities,
   sanitizeMCPExternalError,
 } from '@agor/core/mcp';
 import type {
@@ -81,6 +86,9 @@ import type {
   AuthenticatedParams,
   HookContext,
   MCPAuth,
+  MCPAuthRecovery,
+  MCPDiscoveryRequest,
+  MCPDiscoveryResult,
   MCPOAuthAttemptID,
   MCPOAuthBrowserEventRequest,
   MCPOAuthBrowserOperation,
@@ -318,6 +326,7 @@ import {
   isSessionMcpServerLinkVisibleToCaller,
   loadMcpServerForCaller,
   registerMcpCapabilityRoleFloor,
+  resolveMcpCaller,
 } from './utils/mcp-server-authorization.js';
 import { resolveOwnerHomeStore, resolveSandboxStoragePaths } from './utils/sandbox-context.js';
 import {
@@ -1851,13 +1860,50 @@ export async function registerMCPServices(
     (postgresOAuthDeployment ? new MCPOAuthPendingFlowAuthority(db) : null);
   const lockOAuthGrantConfiguration =
     ctx.lockMcpOAuthGrantConfiguration ?? lockMCPOAuthGrantConfiguration;
-  const externalFailure = (event: string, stage: MCPExternalErrorStage, error: unknown) => {
-    const safe = sanitizeMCPExternalError(error, { stage });
-    const { type, code } = safe.diagnostic;
+  const externalFailure = (
+    event: string,
+    stage: MCPExternalErrorStage,
+    error: unknown,
+    options: {
+      category?: MCPExternalErrorCategory;
+      type?: MCPExternalErrorType;
+      reason?: MCPExternalErrorReason;
+    } = {}
+  ) => {
+    const safe = sanitizeMCPExternalError(error, { stage, ...options });
+    const { type, code, status, reason } = safe.diagnostic;
     console.error(
-      `[${event}] event=mcp_external_failure stage=${stage} category=${safe.category} type=${type}${code ? ` code=${code}` : ''}`
+      `[${event}] event=mcp_external_failure stage=${stage} category=${safe.category} type=${type}${status !== undefined ? ` status=${status}` : ''}${code ? ` code=${code}` : ''}${reason ? ` reason=${reason}` : ''}`
     );
     return safe;
+  };
+  const externalFailureOptionsForRecovery = (
+    recovery: MCPAuthRecovery
+  ): Parameters<typeof externalFailure>[3] => {
+    if (recovery.category === 'redirect_configuration_required') {
+      return {
+        category: 'configuration_required',
+        type: 'ConfigurationError',
+        reason: 'oauth_redirect_configuration_required',
+      };
+    }
+    if (recovery.category === 'metadata_incompatible') {
+      return {
+        category: 'configuration_required',
+        type: 'ConfigurationError',
+        reason: 'oauth_metadata_incompatible',
+      };
+    }
+    if (
+      recovery.category === 'provider_unavailable' ||
+      recovery.category === 'provider_rejected' ||
+      recovery.category === 'invalid_response' ||
+      recovery.category === 'storage_policy_rejected' ||
+      recovery.category === 'configuration_required'
+    ) {
+      return { category: recovery.category };
+    }
+    return {};
   };
   const oauthFetch = async (
     input: string | URL | Request,
@@ -4424,7 +4470,12 @@ export async function registerMCPServices(
             mcpServerId: data.mcp_server_id,
           });
           if (recovery.category === 'redirect_configuration_required') {
-            console.error('[OAuth Start] Failed category=PublicBaseUrlNotConfiguredError');
+            externalFailure(
+              'OAuth Start',
+              'oauth',
+              err,
+              externalFailureOptionsForRecovery(recovery)
+            );
             return {
               success: false,
               error: recovery.message,
@@ -4474,7 +4525,7 @@ export async function registerMCPServices(
           : preliminaryRecovery;
         // This is deliberately the final consumer of the original unknown.
         // Response construction below uses only the closed recovery contract.
-        externalFailure('OAuth Start', 'oauth', error);
+        externalFailure('OAuth Start', 'oauth', error, externalFailureOptionsForRecovery(recovery));
         return {
           success: false,
           error: recovery.message,
@@ -5210,42 +5261,27 @@ export async function registerMCPServices(
     server: MCPServer,
     params?: AuthenticatedParams
   ): { success: false; error: string } | null => {
-    if (!params?.provider || !params.user) return null;
-    if (hasMinimumRole(params.user.role?.toLowerCase(), ROLES.ADMIN)) return null;
-    if (server.owner_user_id && server.owner_user_id === params.user.user_id) return null;
-    return {
-      success: false,
+    const caller = resolveMcpCaller(params);
+    if (caller.kind === 'internal') return null;
+    const denial = {
+      success: false as const,
       error: 'Access denied: only an admin or the server owner can discover this MCP server',
     };
+    // Read visibility is not discovery authority: service accounts carry no
+    // membership or ownership and must not exercise a saved credential here.
+    if (caller.kind === 'anonymous' || caller.kind === 'service-account') return denial;
+    const user = caller.user;
+    if (hasMinimumRole(user.role?.toLowerCase(), ROLES.ADMIN)) return null;
+    if (server.owner_user_id && server.owner_user_id === user.user_id) return null;
+    return denial;
   };
 
   // Discover endpoint
   app.use('/mcp-servers/discover', {
     async create(
-      data: {
-        mcp_server_id?: string;
-        url?: string;
-        transport?: 'http' | 'sse';
-        auth?: {
-          type: 'none' | 'bearer' | 'jwt' | 'oauth';
-          token?: string;
-          api_url?: string;
-          api_token?: string;
-          api_secret?: string;
-          oauth_token_url?: string;
-          oauth_client_id?: string;
-          oauth_client_secret?: string;
-          oauth_scope?: string;
-          oauth_grant_type?: string;
-          oauth_mode?: 'per_user' | 'shared';
-          oauth_compatibility_mode?: 'strict' | 'legacy';
-          oauth_dcr_mode?: MCPOAuthDCRMode;
-        };
-        headers?: Record<string, string>;
-        oauth_browser_event?: MCPOAuthBrowserEventRequest;
-      },
+      data: MCPDiscoveryRequest,
       params?: AuthenticatedParams
-    ) {
+    ): Promise<MCPDiscoveryResult> {
       try {
         const browserReservation = consumeOAuthBrowserReservation(
           data.oauth_browser_event,
@@ -5271,7 +5307,7 @@ export async function registerMCPServices(
         const { mergeMCPRemoteHeaders } = await import('@agor/core/tools/mcp/http-headers');
         const tenantId = tenantIdFromParams(params);
 
-        const validateUrl = (url: string): { valid: boolean; error?: string } => {
+        const validateUrl = (url: string): { valid: true } | { valid: false; error: string } => {
           try {
             const parsed = new URL(url);
             if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -5605,7 +5641,12 @@ export async function registerMCPServices(
             ) {
               throw error;
             }
-            externalFailure('MCP Discovery OAuth token acquisition', 'discovery', error);
+            externalFailure(
+              'MCP Discovery OAuth token acquisition',
+              'discovery',
+              error,
+              externalFailureOptionsForRecovery(recovery)
+            );
             return undefined;
           }
         };
@@ -5716,7 +5757,15 @@ export async function registerMCPServices(
             mcpTransport: InstanceType<typeof StreamableHTTPClientTransport>
           ) => {
             const timeout = new Promise<never>((_, reject) => {
-              setTimeout(() => reject(new Error('Connection timeout after 10 seconds')), 10000);
+              setTimeout(
+                () =>
+                  reject(
+                    Object.assign(new Error('Connection timeout after 10 seconds'), {
+                      code: 'ETIMEDOUT' as const,
+                    })
+                  ),
+                10000
+              );
             });
             await runWithinOAuthAuthority(assertCurrentRequestAuthority, () =>
               Promise.race([mcpClient.connect(mcpTransport), timeout])
@@ -5754,7 +5803,12 @@ export async function registerMCPServices(
 
           const listTimeout = new Promise<never>((_, reject) => {
             setTimeout(
-              () => reject(new Error('List capabilities timeout after 10 seconds')),
+              () =>
+                reject(
+                  Object.assign(new Error('List capabilities timeout after 10 seconds'), {
+                    code: 'ETIMEDOUT' as const,
+                  })
+                ),
               10000
             );
           });
@@ -5799,35 +5853,38 @@ export async function registerMCPServices(
             listTimeout,
           ])) as PromptsResult;
 
+          const discovered = {
+            tools: toolsResult.tools.map((t) => ({
+              name: t.name,
+              description: t.description,
+              input_schema: t.inputSchema,
+            })),
+            resources: resourcesResult.resources.map((r) => ({
+              uri: r.uri,
+              name: r.name,
+              description: r.description,
+              mimeType: r.mimeType,
+            })),
+            prompts: promptsResult.prompts.map((p) => ({
+              name: p.name,
+              description: p.description,
+              arguments: p.arguments?.map((a) => ({
+                name: a.name,
+                description: a.description,
+                required: a.required,
+              })),
+            })),
+          };
+          let normalizedDiscovery: ReturnType<typeof normalizeDiscoveredMCPCapabilities>;
+
           if (serverId && discoveryAuthority) {
-            await runWithinOAuthAuthority(assertCurrentRequestAuthority, () =>
+            normalizedDiscovery = await runWithinOAuthAuthority(assertCurrentRequestAuthority, () =>
               runWithTenantDatabaseTransaction(db, tenantId, (scopedDb) =>
                 persistDiscoveredMCPCapabilities(
                   scopedDb,
                   tenantId,
                   discoveryAuthority as MCPDiscoveryAuthoritySnapshot,
-                  {
-                    tools: toolsResult.tools.map((t) => ({
-                      name: t.name,
-                      description: t.description,
-                      input_schema: t.inputSchema,
-                    })),
-                    resources: resourcesResult.resources.map((r) => ({
-                      uri: r.uri,
-                      name: r.name,
-                      description: r.description,
-                      mimeType: r.mimeType,
-                    })),
-                    prompts: promptsResult.prompts.map((p) => ({
-                      name: p.name,
-                      description: p.description,
-                      arguments: p.arguments?.map((a) => ({
-                        name: a.name,
-                        description: a.description,
-                        required: a.required,
-                      })),
-                    })),
-                  },
+                  discovered,
                   process.env.AGOR_MASTER_SECRET ?? ''
                 )
               )
@@ -5841,25 +5898,30 @@ export async function registerMCPServices(
               tenantId,
               [userId, authoritativeServer?.owner_user_id].filter(Boolean) as UserID[]
             );
+          } else {
+            normalizedDiscovery = normalizeDiscoveredMCPCapabilities(discovered);
           }
 
           return {
             success: true,
             capabilities: {
-              tools: toolsResult.tools.length,
-              resources: resourcesResult.resources.length,
-              prompts: promptsResult.prompts.length,
+              tools: normalizedDiscovery.capabilities.tools.length,
+              resources: normalizedDiscovery.capabilities.resources.length,
+              prompts: normalizedDiscovery.capabilities.prompts.length,
             },
-            tools: toolsResult.tools.map((t) => ({
+            metadata: {
+              descriptions_truncated: normalizedDiscovery.truncatedDescriptions,
+            },
+            tools: normalizedDiscovery.capabilities.tools.map((t) => ({
               name: t.name,
               description: t.description || '',
             })),
-            resources: resourcesResult.resources.map((r) => ({
+            resources: normalizedDiscovery.capabilities.resources.map((r) => ({
               name: r.name,
               uri: r.uri,
               mimeType: r.mimeType,
             })),
-            prompts: promptsResult.prompts.map((p) => ({
+            prompts: normalizedDiscovery.capabilities.prompts.map((p) => ({
               name: p.name,
               description: p.description || '',
             })),
@@ -5886,8 +5948,20 @@ export async function registerMCPServices(
         ) {
           return { success: false, error: recovery.message, recovery };
         }
-        const safe = externalFailure('MCP Discovery', 'discovery', error);
-        return { success: false, error: safe.message, category: safe.category };
+        const persistenceRejected = isMCPServerWriteValidationError(error);
+        const safe = externalFailure('MCP Discovery', 'discovery', error, {
+          ...externalFailureOptionsForRecovery(recovery),
+          ...(persistenceRejected ? { category: 'storage_policy_rejected' as const } : {}),
+          ...(persistenceRejected
+            ? { reason: 'capability_persistence_validation_rejected' as const }
+            : {}),
+        });
+        return {
+          success: false,
+          error: safe.message,
+          category: safe.category,
+          ...(persistenceRejected ? { action: safe.action } : {}),
+        };
       }
     },
   });

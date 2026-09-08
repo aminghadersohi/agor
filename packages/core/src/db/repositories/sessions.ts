@@ -64,7 +64,7 @@ import {
   RepositoryError,
   resolveByShortIdPrefix,
 } from './base';
-import { visibleBranchAccessCondition } from './branch-access';
+import { inVisibleBranchSet } from './branch-access';
 import { deepMerge } from './merge-utils';
 import {
   extractMessageText,
@@ -228,7 +228,10 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         power_priority_updated_by:
           (row.power_priority_updated_by as Session['power_priority_updated_by']) ?? undefined,
         archived: Boolean(row.archived), // Convert SQLite integer (0/1) to boolean
-        archived_reason: row.archived_reason ?? undefined,
+        // Active rows have no semantic archive cause. Ignore stale values
+        // left by historical callers that cleared `archived` with undefined;
+        // the next write of this Session will normalize the column to NULL.
+        archived_reason: row.archived ? (row.archived_reason ?? undefined) : undefined,
         auto_archive: row.auto_archive,
         auto_archive_after_seconds: row.auto_archive_after_seconds ?? undefined,
         auto_archive_at: row.auto_archive_at?.toISOString(),
@@ -472,7 +475,9 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         conditions.push(eq(sessions.archived, filter.archived));
       }
       if (filter?.visibleToUserId) {
-        conditions.push(visibleBranchAccessCondition(this.db, filter.visibleToUserId));
+        conditions.push(
+          inVisibleBranchSet(this.db, filter.visibleToUserId, sessions.branch_id, filter)
+        );
       }
 
       // biome-ignore lint/suspicious/noExplicitAny: Conditional query builder shape differs with the RBAC join
@@ -556,7 +561,9 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
 
       const conditions = [eq(branches.board_id, boardId)];
       if (filter?.visibleToUserId) {
-        conditions.push(visibleBranchAccessCondition(this.db, filter.visibleToUserId));
+        conditions.push(
+          inVisibleBranchSet(this.db, filter.visibleToUserId, sessions.branch_id, { boardId })
+        );
       }
 
       // Filter on the branch's board_id via the JOIN (sessions.board_id is dead).
@@ -620,7 +627,9 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         conditions.push(inArray(sessions.branch_id, opts.branchIds));
       if (opts.archived !== undefined) conditions.push(eq(sessions.archived, opts.archived));
       if (opts.visibleToUserId) {
-        conditions.push(visibleBranchAccessCondition(this.db, opts.visibleToUserId));
+        conditions.push(
+          inVisibleBranchSet(this.db, opts.visibleToUserId, sessions.branch_id, opts)
+        );
       }
       const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
@@ -631,10 +640,11 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         .leftJoin(branches, eq(sessions.branch_id, branches.branch_id));
       const countRow = await (whereClause ? countQuery.where(whereClause) : countQuery).one();
       const total = Number(countRow?.count ?? 0);
+      if (opts.limit === 0) return { data: [], total };
 
       // Page of rows, recency-sorted in SQL on the real `updated_at` column.
       // biome-ignore lint/suspicious/noExplicitAny: Conditional query builder shape differs with the RBAC join
-      let dataQuery: any = select(this.db)
+      let dataQuery: any = select(this.db, { sessions, branches: { board_id: branches.board_id } })
         .from(sessions)
         .leftJoin(branches, eq(sessions.branch_id, branches.branch_id));
       if (whereClause) dataQuery = dataQuery.where(whereClause);
@@ -721,8 +731,29 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
    * materialized genealogy columns rather than JSON extraction.
    */
   async findBranchLocalDescendants(sessionId: string, branchId: BranchID): Promise<Session[]> {
+    const descendantsByRoot = await this.findBranchLocalDescendantsForRoots([sessionId], branchId);
+    return descendantsByRoot.get(sessionId) ?? [];
+  }
+
+  /**
+   * Find the branch-local descendant closure for multiple roots with one read.
+   *
+   * The returned map is keyed by the caller-provided root ID. Archive callers
+   * use this to plan overlapping trees without repeating a full branch read.
+   */
+  async findBranchLocalDescendantsForRoots(
+    sessionIds: string[],
+    branchId: BranchID
+  ): Promise<Map<string, Session[]>> {
+    if (sessionIds.length === 0) return new Map();
+
     try {
-      const fullId = await this.resolveId(sessionId);
+      const resolvedRoots = await Promise.all(
+        sessionIds.map(async (sessionId) => ({
+          requestedId: sessionId,
+          fullId: await this.resolveId(sessionId),
+        }))
+      );
       const baseUrl = await getBaseUrl();
       const results = await select(this.db)
         .from(sessions)
@@ -751,21 +782,28 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         }
       }
 
-      const descendants: Session[] = [];
-      const visited = new Set<string>([fullId]);
-      const queue = [...(childrenByParent.get(fullId) ?? [])];
-      while (queue.length > 0) {
-        const child = queue.shift();
-        if (!child || visited.has(child.session_id)) continue;
-        visited.add(child.session_id);
-        descendants.push(child);
-        queue.push(...(childrenByParent.get(child.session_id) ?? []));
+      const descendantsByRoot = new Map<string, Session[]>();
+      for (const { requestedId, fullId } of resolvedRoots) {
+        const descendants: Session[] = [];
+        const visited = new Set<string>([fullId]);
+        const queue = [...(childrenByParent.get(fullId) ?? [])];
+        for (let index = 0; index < queue.length; index++) {
+          const child = queue[index];
+          if (!child || visited.has(child.session_id)) continue;
+          visited.add(child.session_id);
+          descendants.push(child);
+          queue.push(...(childrenByParent.get(child.session_id) ?? []));
+        }
+        descendantsByRoot.set(
+          requestedId,
+          descendants.filter((session) => sessionById.has(session.session_id))
+        );
       }
 
-      return descendants.filter((session) => sessionById.has(session.session_id));
+      return descendantsByRoot;
     } catch (error) {
       throw new RepositoryError(
-        `Failed to find branch-local descendants: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to find branch-local descendants for roots: ${error instanceof Error ? error.message : String(error)}`,
         error
       );
     }
@@ -2097,7 +2135,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
 
     // Join branches for board_id (exposed as Session.branch_board_id).
     // No boards join needed — flat `/s/<short>/` URLs don't carry a slug.
-    const accessCondition = visibleBranchAccessCondition(this.db, userId);
+    const accessCondition = inVisibleBranchSet(this.db, userId, sessions.branch_id, { boardId });
     const whereCondition = boardId
       ? and(accessCondition, eq(branches.board_id, boardId))
       : accessCondition;
