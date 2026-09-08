@@ -229,7 +229,27 @@ export interface TeammateWelcomeNoteRequest {
 export type BoardAccessMode = 'private' | 'shared';
 export type BoardDefaultFsAccess = 'none' | 'read' | 'write';
 
-export interface Board {
+/**
+ * Caller-scoped aggregates returned by the authoritative Board list query.
+ *
+ * These are deliberately part of the list projection rather than inferred
+ * from a client's partially hydrated Branch/Session maps.
+ */
+export interface BoardListCounts {
+  /** Visible, non-archived worktrees currently associated with the Board. */
+  worktree_count: number;
+
+  /** Visible, non-archived Sessions on those worktrees. */
+  total_session_count: number;
+
+  /**
+   * Visible Sessions classified by {@link isSessionExecuting} as executing.
+   * Archived Sessions and Sessions on archived worktrees are excluded.
+   */
+  active_session_count: number;
+}
+
+export interface Board extends BoardListCounts {
   /** Unique board identifier (UUIDv7) */
   board_id: BoardID;
 
@@ -327,16 +347,6 @@ export interface Board {
 
   /** Whether this board is archived (soft deleted) */
   archived: boolean;
-
-  /**
-   * Number of non-archived Sessions whose exact durable Session status is
-   * `running`, on non-archived branches visible to the current caller.
-   *
-   * This is an authoritative, caller-scoped board-list projection. It counts
-   * Sessions rather than Tasks and deliberately excludes waiting/stopping
-   * states so the UI label "running" remains exact.
-   */
-  running_session_count: number;
 
   /** ISO 8601 timestamp when the board was archived */
   archived_at?: string;

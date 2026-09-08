@@ -25,6 +25,7 @@ import { useThemedMessage } from '@/utils/message';
 import { filterBySettingsSearch } from '@/utils/settingsSearch';
 import { ArchiveToggleButton } from '../ArchiveButton';
 import { BoardEditModal } from '../BoardEditModal';
+import { BoardListCounts } from '../BoardListCounts';
 import { BoardTile, getBoardEmoji } from '../BoardTile';
 import { BoardFormFields, extractBoardFormValues } from '../forms/BoardFormFields';
 import { HighlightMatch } from '../HighlightMatch';
@@ -49,7 +50,6 @@ interface BoardsTableProps {
 export const BoardsTable: React.FC<BoardsTableProps> = ({
   client,
   boardById,
-  sessionsByBranch,
   branchById,
   currentUser,
   onCreate,
@@ -65,27 +65,6 @@ export const BoardsTable: React.FC<BoardsTableProps> = ({
   const [archiveFilter, setArchiveFilter] = useState<'active' | 'archived' | 'all'>('active');
   const [searchTerm, setSearchTerm] = useState('');
   const [form] = Form.useForm();
-
-  // Calculate session count per board (branch-centric model). Build the
-  // board buckets once so opening Settings is O(branches + sessions) instead
-  // of O(boards × branches).
-  const boardSessionCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-
-    for (const branch of branchById.values()) {
-      if (!branch.board_id) continue;
-      counts.set(
-        branch.board_id,
-        (counts.get(branch.board_id) ?? 0) + (sessionsByBranch.get(branch.branch_id)?.length ?? 0)
-      );
-    }
-
-    for (const board of boardById.values()) {
-      if (!counts.has(board.board_id)) counts.set(board.board_id, 0);
-    }
-
-    return counts;
-  }, [boardById, sessionsByBranch, branchById]);
 
   const handleCreate = () => {
     // Validate all fields (not just 'name') so custom_context JSON rules run.
@@ -258,10 +237,10 @@ export const BoardsTable: React.FC<BoardsTableProps> = ({
       ),
     },
     {
-      title: 'Sessions',
-      key: 'sessions',
-      width: 100,
-      render: (_: unknown, board: Board) => boardSessionCounts.get(board.board_id) || 0,
+      title: 'Counts',
+      key: 'counts',
+      width: 170,
+      render: (_: unknown, board: Board) => <BoardListCounts counts={board} />,
     },
     {
       title: 'Actions',
