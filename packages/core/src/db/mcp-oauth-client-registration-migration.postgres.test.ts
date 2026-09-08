@@ -36,7 +36,7 @@ async function executeReconciliationTransaction(
   transaction: PostgresTestTransaction
 ): Promise<void> {
   const source = await readFile(
-    join(migrationsFolder, '0103_oauth_authority_watermark_reconciliation.sql'),
+    join(migrationsFolder, '9016_oauth_authority_watermark_reconciliation.sql'),
     'utf8'
   );
   for (const statement of source.split('--> statement-breakpoint')) {
@@ -67,8 +67,8 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       ).toBe(OLD_HEAD_MIGRATION_SHA256);
       await Promise.all([
         unlink(join(oldHeadFolder, '0100_claude_oauth_attempts.sql')),
-        unlink(join(oldHeadFolder, '0102_mcp_oauth_client_registrations.sql')),
-        unlink(join(oldHeadFolder, '0103_oauth_authority_watermark_reconciliation.sql')),
+        unlink(join(oldHeadFolder, '9015_mcp_oauth_client_registrations.sql')),
+        unlink(join(oldHeadFolder, '9016_oauth_authority_watermark_reconciliation.sql')),
       ]);
       await cp(oldHeadFixture, join(oldHeadFolder, '0100_mcp_oauth_client_registrations.sql'));
       const journalPath = join(oldHeadFolder, 'meta', '_journal.json');
@@ -203,8 +203,8 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await expect(checkMigrationStatus(db)).resolves.toMatchObject({
         pending: [
           '0101_environment_command_discovery',
-          '0102_mcp_oauth_client_registrations',
-          '0103_oauth_authority_watermark_reconciliation',
+          '9015_mcp_oauth_client_registrations',
+          '9016_oauth_authority_watermark_reconciliation',
         ],
         dbAheadOfBinary: false,
       });
@@ -332,8 +332,8 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await expect(checkMigrationStatus(db)).resolves.toMatchObject({
         pending: [
           '0101_environment_command_discovery',
-          '0102_mcp_oauth_client_registrations',
-          '0103_oauth_authority_watermark_reconciliation',
+          '9015_mcp_oauth_client_registrations',
+          '9016_oauth_authority_watermark_reconciliation',
         ],
         dbAheadOfBinary: false,
       });

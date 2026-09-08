@@ -141,7 +141,7 @@ describe('migration status introspection', () => {
   it('reports MCP DCR authority as an offline, rollback-incompatible cohort cutover', () => {
     const migration = introspectMigrationStatus('postgresql', {
       applied: ['0100_claude_oauth_attempts'],
-      pending: ['0102_mcp_oauth_client_registrations'],
+      pending: ['9015_mcp_oauth_client_registrations'],
       dbAheadOfBinary: false,
     }).pendingMigrations[0];
 
@@ -158,7 +158,7 @@ describe('migration status introspection', () => {
   it('reports the OAuth authority collision reconciliation as an offline incompatible cutover', () => {
     const migration = introspectMigrationStatus('postgresql', {
       applied: ['0099_shared_session_prompting'],
-      pending: ['0103_oauth_authority_watermark_reconciliation'],
+      pending: ['9016_oauth_authority_watermark_reconciliation'],
       dbAheadOfBinary: false,
     }).pendingMigrations[0];
 
@@ -191,8 +191,8 @@ describe('migration status introspection', () => {
         '0083_transcript_hydration_keysets',
         '0091_codex_device_auth_attempts',
         '0100_claude_oauth_attempts',
-        '0102_mcp_oauth_client_registrations',
-        '0103_oauth_authority_watermark_reconciliation',
+        '9015_mcp_oauth_client_registrations',
+        '9016_oauth_authority_watermark_reconciliation',
       ],
     });
 
@@ -227,8 +227,8 @@ describe('migration status introspection', () => {
       '0083_transcript_hydration_keysets',
       '0091_codex_device_auth_attempts',
       '0100_claude_oauth_attempts',
-      '0102_mcp_oauth_client_registrations',
-      '0103_oauth_authority_watermark_reconciliation',
+      '9015_mcp_oauth_client_registrations',
+      '9016_oauth_authority_watermark_reconciliation',
       'unregistered',
     ]) {
       expect(getMigrationImpact(name).summary.length).toBeLessThanOrEqual(
