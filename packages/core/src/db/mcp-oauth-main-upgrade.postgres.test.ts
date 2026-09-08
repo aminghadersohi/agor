@@ -49,8 +49,8 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       expect(beforePolicy[0]?.expression).toContain('stopping');
       await expect(checkMigrationStatus(db)).resolves.toMatchObject({
         pending: [
-          '0102_mcp_oauth_client_registrations',
-          '0103_oauth_authority_watermark_reconciliation',
+          '9015_mcp_oauth_client_registrations',
+          '9016_oauth_authority_watermark_reconciliation',
         ],
         dbAheadOfBinary: false,
       });
