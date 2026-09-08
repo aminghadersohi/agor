@@ -890,6 +890,73 @@ describe('authoritative MCP gateway real transport', () => {
     });
   });
 
+  it('does not reserialize non-metadata JSON responses', async () => {
+    const payload =
+      '{"jsonrpc":"2.0","id":79,"result":{"structuredContent":{"id":9007199254740993}}}';
+    const url = await listen((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(payload);
+    });
+    const h = await harness({ server: { transport: 'http', url, auth: { type: 'none' } } });
+    const result = await h.request(
+      'POST',
+      JSON.stringify({ jsonrpc: '2.0', id: 79, method: 'tools/call', params: { name: 'search' } })
+    );
+    expect(await result.response.text()).toBe(payload);
+  });
+
+  it.each(['application/json', 'text/event-stream'])(
+    'scans reflected credentials before truncation in %s tools/list',
+    async (contentType) => {
+      const token = 'fictional-provider-credential-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      const description =
+        'x'.repeat(
+          MAX_MCP_CAPABILITY_DESCRIPTION_LENGTH - MCP_DESCRIPTION_TRUNCATION_SUFFIX.length - 24
+        ) + token;
+      const url = await listen((_request, response) => {
+        const payload = JSON.stringify({
+          jsonrpc: '2.0',
+          id: 78,
+          result: {
+            tools: [{ name: 'search', description, inputSchema: { type: 'object' } }],
+          },
+        });
+        response.writeHead(200, { 'content-type': contentType });
+        response.end(contentType === 'application/json' ? payload : `data: ${payload}\n\n`);
+      });
+      const h = await harness({
+        server: { transport: 'http', url, auth: { type: 'bearer', token } },
+      });
+      await expect(
+        h.request('POST', JSON.stringify({ jsonrpc: '2.0', id: 78, method: 'tools/list' }))
+      ).rejects.toMatchObject({ code: 'credential_reflection_blocked' });
+    }
+  );
+
+  it('preserves multiline schema annotations and literal whitespace values on tools/list', async () => {
+    const tool = {
+      name: 'search',
+      description: 'Search mail',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'First line\nSecond line\tformatted' },
+          separator: { type: 'string', enum: ['\n', '\t'], default: '\n' },
+        },
+      },
+    };
+    const url = await listen((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ jsonrpc: '2.0', id: 77, result: { tools: [tool] } }));
+    });
+    const h = await harness({ server: { transport: 'http', url, auth: { type: 'none' } } });
+    const result = await h.request(
+      'POST',
+      JSON.stringify({ jsonrpc: '2.0', id: 77, method: 'tools/list' })
+    );
+    expect(await result.response.json()).toMatchObject({ result: { tools: [tool] } });
+  });
+
   it('rejects malformed tools/list metadata with a targeted provider diagnostic', async () => {
     const url = await listen((_request, response) => {
       response.writeHead(200, { 'content-type': 'application/json' });

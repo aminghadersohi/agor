@@ -91,10 +91,11 @@ function hasControlCharacter(value: string): boolean {
 }
 
 function hasUnsafeDescriptionControlCharacter(value: string): boolean {
-  return [...value].some((character) => {
+  for (const character of value) {
     const code = character.charCodeAt(0);
-    return (code <= 31 && code !== 9 && code !== 10 && code !== 13) || code === 127;
-  });
+    if ((code <= 31 && code !== 9 && code !== 10 && code !== 13) || code === 127) return true;
+  }
+  return false;
 }
 
 export interface MCPServerWriteValidationOptions {
@@ -291,7 +292,10 @@ function boundedJsonValue(value: unknown, label: string): void {
       return;
     }
     if (typeof nested === 'string') {
-      if (nested.length > MAX_VALUE_LENGTH || hasControlCharacter(nested)) {
+      // Schema annotations and literal enum/default values are JSON strings,
+      // not identifiers. Preserve whitespace and escaped control characters;
+      // only NUL is unrepresentable in PostgreSQL jsonb (keep SQLite parity).
+      if (nested.length > MAX_VALUE_LENGTH || nested.includes('\0')) {
         throw new Error(`${path} contains an invalid string`);
       }
       return;
