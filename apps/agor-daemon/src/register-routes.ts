@@ -13,6 +13,7 @@ import type { SessionInitializationRequest } from '@agor/core/api';
 import {
   type AgorConfig,
   ENV_VAR_CONSTRAINTS,
+  environmentCommandCapabilities,
   isEnvVarAllowed,
   type ResolvedDeploymentConfig,
   type ResolvedExternalLaunchProvider,
@@ -117,6 +118,7 @@ import {
 import { isNotFoundError } from '@agor/core/utils/errors';
 import type { NextFunction, Request, Response } from 'express';
 import { rateLimit } from 'express-rate-limit';
+import { z } from 'zod';
 import {
   gatewaySlackUploadExecutorCommandId,
   uploadMaterializeExecutorCommandId,
@@ -4045,7 +4047,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   // Repos custom routes
   // ============================================================================
 
-  registerAuthenticatedRoute(
+  registerLongAuthenticatedRoute(
     app,
     '/repos/local',
     {
@@ -4349,10 +4351,18 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     app,
     '/branches/:id/start',
     {
-      async create(_data: unknown, params: RouteParams) {
+      async create(data: unknown, params: RouteParams) {
         const id = params.route?.id;
         if (!id) throw new Error('Branch ID required');
-        return branchesService.startEnvironment(id as import('@agor/core/types').BranchID, params);
+        const input = z
+          .object({ confirmation_of: z.string().uuid().optional() })
+          .strict()
+          .parse(data ?? {});
+        return branchesService.startEnvironment(
+          id as import('@agor/core/types').BranchID,
+          params,
+          input.confirmation_of
+        );
       },
     },
     {
@@ -5746,6 +5756,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           ? { required: true, ready: realtimeRuntime.isReady() }
           : { required: false, ready: true },
         features: {
+          environmentDisclaimerMarkdown: config.environment_disclaimer_markdown,
+          environmentCommands: environmentCommandCapabilities(config),
           teammateFrameworkRepoUrl: resolveTeammateFrameworkRepoUrl(config),
           // Web terminal availability: UI should hide terminal buttons when false.
           // Server-side gate in register-hooks.ts is the source of truth; this

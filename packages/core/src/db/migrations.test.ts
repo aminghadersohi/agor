@@ -218,11 +218,15 @@ describe('Postgres migrations', () => {
 
   it('journals the matching power-priority migration slots after zone workflow', async () => {
     const [postgresJournal, sqliteJournal] = await readJournals();
-    expect(postgresJournal.entries.at(-1)).toMatchObject({
+    expect(
+      postgresJournal.entries.find(({ tag }) => tag === '0103_session_power_priority')
+    ).toMatchObject({
       idx: 103,
       tag: '0103_session_power_priority',
     });
-    expect(sqliteJournal.entries.at(-1)).toMatchObject({
+    expect(
+      sqliteJournal.entries.find(({ tag }) => tag === '0106_session_power_priority')
+    ).toMatchObject({
       idx: 106,
       tag: '0106_session_power_priority',
     });
