@@ -66,6 +66,7 @@ import type {
   OpenCodeProviderSettings,
   PatchAgenticToolPreset,
   PermissionMode,
+  PowerManagementStatus,
   Repo,
   RuntimeTelemetryInput,
   Schedule,
@@ -75,7 +76,9 @@ import type {
   Session,
   SessionAttentionAcknowledgement,
   SessionID,
+  SessionPowerPriorityView,
   SessionUpdate,
+  SetSessionPowerPriorityRequest,
   Task,
   TeammateWelcomeNoteRequest,
   TemplateRenderRequest,
@@ -286,6 +289,17 @@ export interface WorkspacePreferencesService {
     data: CapabilityPolicyWorkspacePreferences,
     params?: Params
   ): Promise<CapabilityPolicyWorkspacePreferences>;
+}
+
+export interface PowerManagementService {
+  find(params?: Params): Promise<PowerManagementStatus>;
+  on(event: 'patched', handler: (data: PowerManagementStatus) => void): void;
+  off(event: 'patched', handler: (data: PowerManagementStatus) => void): void;
+}
+
+export interface SessionPowerPriorityService {
+  find(params?: Params): Promise<SessionPowerPriorityView>;
+  create(data: SetSessionPowerPriorityRequest, params?: Params): Promise<SessionPowerPriorityView>;
 }
 
 /**
@@ -895,6 +909,8 @@ export interface AgorClient
   service(path: 'boards/:id/permissions'): BoardPermissionsService;
   service(path: 'branches/:id/permissions'): BranchPermissionsService;
   service(path: 'workspace-preferences'): WorkspacePreferencesService;
+  service(path: 'power-management'): PowerManagementService;
+  service(path: `sessions/${string}/power-priority`): SessionPowerPriorityService;
   service(path: 'zone-workflow-transitions'): ZoneWorkflowTransitionsService;
   service(path: 'zone-workflow-advances'): ZoneWorkflowAdvancesService;
   service(path: 'schedules'): SchedulesService;

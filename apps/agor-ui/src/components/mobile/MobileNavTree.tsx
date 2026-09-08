@@ -166,6 +166,7 @@ export const MobileNavTree: React.FC<MobileNavTreeProps> = ({
         ...(isAdmin
           ? [
               { key: 'settings:gateway', label: 'Gateway Channels', icon: <MessageOutlined /> },
+              { key: 'settings:power', label: 'UPS Power', icon: <ThunderboltOutlined /> },
               { key: 'settings:groups', label: 'Groups', icon: <TeamOutlined /> },
             ]
           : []),

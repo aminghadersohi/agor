@@ -1,4 +1,4 @@
-import type { UserRole } from '@agor/core/types';
+import { ENVIRONMENT_COMMAND_REPORT_SERVICE, type UserRole } from '@agor/core/types';
 
 /**
  * The allowlist that decides which services may fan out over the socket at all.
@@ -116,6 +116,15 @@ export const REALTIME_PUBLISH_POLICY = {
   'session-env-selections': {
     audience: 'none',
     why: 'Selection names are credential metadata; there is no subscriber, and any future consumer needs an owner-aware disclosure decision.',
+  },
+  'sessions/:id/power-priority': {
+    audience: 'none',
+    why: 'The dedicated mutation returns its projection; the canonical sessions.patched event refreshes viewers.',
+  },
+  'power-management': {
+    audience: 'tenant',
+    minimumRole: 'admin',
+    why: 'The admin power banner tracks the redacted host policy projection live.',
   },
 
   // ---------------------------------------------------------------------------
@@ -255,6 +264,10 @@ export const REALTIME_PUBLISH_POLICY = {
   'auth/launch': { audience: 'none', why: 'Exchanges a launch token for a session.' },
   'check-auth': { audience: 'none', why: 'Echoes back the API key it was asked to validate.' },
   'config/resolve-api-key': { audience: 'none', why: 'Returns a provider API key.' },
+  [ENVIRONMENT_COMMAND_REPORT_SERVICE]: {
+    audience: 'none',
+    why: 'Attempt-scoped executor RPC; persisted environment updates publish through branches.',
+  },
   'executor-git-environment': {
     audience: 'none',
     why: 'Returns a command-scoped Git credential DTO to one executor.',

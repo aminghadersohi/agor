@@ -74,6 +74,7 @@ import {
 } from './hooks';
 import { useAuthorityOperationGuard } from './hooks/useAuthorityOperationGuard';
 import { useEnsureFrameworkRepo } from './hooks/useEnsureFrameworkRepo';
+import { useEnvironmentStart } from './hooks/useEnvironmentStart';
 import { findFrameworkRepo } from './hooks/useFrameworkRepo';
 import { useMarketplaceOAuthAuthorityOwner } from './hooks/useMarketplaceOAuthAuthorityOwner';
 import {
@@ -418,6 +419,7 @@ function AppContent() {
     authorityGeneration: authenticationGeneration,
     onBeforeAuthGenerationChange: marketplaceOAuthAuthorityOwner.beforeAuthGenerationChange,
   });
+  const startEnvironmentWithConfirmation = useEnvironmentStart(client);
   // Ref-only observation keeps the central owner aligned across identity and
   // role renders without performing cleanup during React render.
   marketplaceOAuthAuthorityOwner.observeRenderedGeneration(authGeneration);
@@ -1842,7 +1844,11 @@ function AppContent() {
         requestedAt: Date.now(),
       });
       showLoading('Starting environment...', { key });
-      await client.service(`branches/${branchId}/start`).create({});
+      if (!(await startEnvironmentWithConfirmation(branchId))) {
+        pendingEnvironmentToastsRef.current.delete(branchId);
+        destroy(key);
+        return;
+      }
       showSuccess('Environment start requested', { key });
     } catch (error) {
       pendingEnvironmentToastsRef.current.delete(branchId);

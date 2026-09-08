@@ -127,6 +127,7 @@ export type SessionArchiveStateUpdate = {
 
 /** Options for the SQL-backed session list page used by board/branch views. */
 export interface SessionPageOptions {
+  status?: SessionStatus;
   boardId?: string;
   branchId?: BranchID;
   branchIds?: BranchID[];
@@ -209,6 +210,10 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         scheduler_init_retry_at: row.scheduler_init_retry_at?.toISOString(),
         ready_for_prompt: row.ready_for_prompt ?? false,
         attention_generation: row.attention_generation ?? 0,
+        power_priority: row.power_priority,
+        power_priority_updated_at: row.power_priority_updated_at?.toISOString(),
+        power_priority_updated_by:
+          (row.power_priority_updated_by as Session['power_priority_updated_by']) ?? undefined,
         archived: Boolean(row.archived), // Convert SQLite integer (0/1) to boolean
         archived_reason: row.archived_reason ?? undefined,
         auto_archive: row.auto_archive,
@@ -264,6 +269,11 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         : null,
       ready_for_prompt: session.ready_for_prompt ?? false,
       attention_generation: session.attention_generation ?? 0,
+      power_priority: session.power_priority ?? 'normal',
+      power_priority_updated_at: session.power_priority_updated_at
+        ? new Date(session.power_priority_updated_at)
+        : null,
+      power_priority_updated_by: session.power_priority_updated_by ?? null,
       archived: session.archived ?? false, // Default false for new sessions
       archived_reason: session.archived_reason ?? null,
       auto_archive: session.auto_archive ?? 'never',
@@ -596,6 +606,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
       const baseUrl = await getBaseUrl();
 
       const conditions = [];
+      if (opts.status !== undefined) conditions.push(eq(sessions.status, opts.status));
       if (opts.boardId !== undefined) conditions.push(eq(branches.board_id, opts.boardId));
       if (opts.branchId !== undefined) conditions.push(eq(sessions.branch_id, opts.branchId));
       if (opts.branchIds !== undefined)

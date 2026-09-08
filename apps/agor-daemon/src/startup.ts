@@ -39,6 +39,7 @@ import type {
 import { beginExecutorResponseDrain } from './executor-response-channel.js';
 import { clearTrackedExecutorGauge, containAllTrackedExecutors } from './executor-tracking.js';
 import { type DaemonMetrics, getDaemonMetrics, NOOP_METRICS } from './metrics/index.js';
+import type { PowerPolicyController } from './power-management/index.js';
 import { CompletionSubscriptionWorker } from './services/completion-subscription-worker.js';
 import { DiscordMessageDeliveryWorker } from './services/discord-message-delivery-worker.js';
 import { DistributedHealthMonitor } from './services/distributed-health-monitor.js';
@@ -105,6 +106,7 @@ export interface StartupContext {
   environmentHealthMonitorPolicy: EnvironmentHealthMonitorPolicy;
   /** Required worker tuning resolved and validated by the HA deployment config. */
   environmentHealthMonitorSettings?: ResolvedEnvironmentHealthMonitorSettings;
+  powerPolicyController: PowerPolicyController;
 }
 
 export type TaskRuntimePolicy = 'standalone' | 'shared_postgres';
@@ -668,6 +670,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
     safeService,
     getSocketServer,
     terminalsService,
+    powerPolicyController,
   } = ctx;
 
   // 1. Preserve the historical single-daemon active-runtime repair only
@@ -679,6 +682,10 @@ export async function startup(ctx: StartupContext): Promise<void> {
       '[startup] shared PostgreSQL task runtime: startup cleanup and restart notices disabled'
     );
   }
+
+  // Begin in UNKNOWN before the daemon can accept a dispatch. The read-only
+  // provider polls asynchronously; UNKNOWN is intentionally conservative.
+  powerPolicyController.start();
 
   // 2. Construct the topology-specific environment observer before serving.
   // HA still gates lifecycle control to webhooks; this worker observes only.
@@ -851,8 +858,14 @@ export async function startup(ctx: StartupContext): Promise<void> {
     workIdentity: ctx.distributedWorkIdentity,
     processSession: (sessionId, params) =>
       ctx.sessionsService.triggerQueueProcessing(sessionId, params as never),
+    onSweepDrained: () => powerPolicyController.markRecoveryQueueDrained(),
   });
   sessionQueueWorker.start();
+  const unsubscribePowerQueueWake = powerPolicyController.subscribe((transition) => {
+    if (transition.previous !== 'normal' && transition.current === 'normal') {
+      sessionQueueWorker.wake();
+    }
+  });
 
   // Completed child Sessions retain their transcripts but leave active trees
   // after a durable grace. Every replica may scan; the deadline-fenced update
@@ -878,6 +891,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
     tenantId:
       schedulerMultiTenancy.mode === 'static' ? schedulerMultiTenancy.static_tenant_id : undefined,
     workIdentity: ctx.distributedWorkIdentity,
+    powerPolicy: powerPolicyController,
   });
   app.set('scheduler', schedulerService);
   schedulerService.start();
@@ -943,6 +957,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
       beginExecutorResponseDrain();
 
       // Refuse new cost-bearing claims before any other shutdown work can wait.
+      await powerPolicyController.stop();
       // stop() also aborts the local provider wait and drains its active DB step.
       if (knowledgeEmbeddingIndexer) {
         console.log('🧠 Stopping Knowledge embedding indexer...');
@@ -998,6 +1013,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
       // Stop scheduler
       if (schedulerService) {
         schedulerService.stop();
+        unsubscribePowerQueueWake();
       }
 
       // Close Socket.io connections (this also closes the HTTP server)

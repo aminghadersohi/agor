@@ -764,6 +764,13 @@
       "when": 1788552000000,
       "tag": "9012_claude_oauth_attempts",
       "breakpoints": true
+    },
+    {
+      "idx": 9013,
+      "version": "6",
+      "when": 1788800000000,
+      "tag": "9013_session_power_priority",
+      "breakpoints": true
     }
   ]
 }

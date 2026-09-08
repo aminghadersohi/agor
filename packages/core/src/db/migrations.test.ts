@@ -310,8 +310,28 @@ describe('Postgres migrations', () => {
         tag: '9011_zone_workflow_transitions',
       })
     );
+    expect(
+      postgresJournal.entries.find(({ tag }) => tag === '9013_session_power_priority')
+    ).toMatchObject({
+      idx: 9013,
+      tag: '9013_session_power_priority',
+    });
+    expect(
+      sqliteJournal.entries.find(({ tag }) => tag === '9013_session_power_priority')
+    ).toMatchObject({
+      idx: 9013,
+      tag: '9013_session_power_priority',
+    });
 
-    const [postgres, sqlite] = await Promise.all([
+    const [postgres, sqlite, postgresZoneWorkflow, sqliteZoneWorkflow] = await Promise.all([
+      readFile(
+        new URL('../../drizzle/postgres/9013_session_power_priority.sql', import.meta.url),
+        'utf8'
+      ),
+      readFile(
+        new URL('../../drizzle/sqlite/9013_session_power_priority.sql', import.meta.url),
+        'utf8'
+      ),
       readFile(
         new URL('../../drizzle/postgres/9011_zone_workflow_transitions.sql', import.meta.url),
         'utf8'
@@ -321,11 +341,15 @@ describe('Postgres migrations', () => {
         'utf8'
       ),
     ]);
-    expect(postgres).toContain('FORCE ROW LEVEL SECURITY');
-    expect(postgres).toContain('"zone_workflow_advances_tenant_board_fk"');
-    expect(postgres).toContain('"zone_workflow_advances_tenant_idempotency_uq"');
-    expect(sqlite).toContain('REFERENCES `boards`(`board_id`) ON DELETE CASCADE');
-    expect(sqlite).toContain('`zone_workflow_advances_idempotency_uq`');
+    expect(postgres).toContain('"power_priority" text DEFAULT \'normal\' NOT NULL');
+    expect(postgres).toContain(
+      'ON "sessions" ("tenant_id") WHERE "power_priority" = \'essential\''
+    );
+    expect(sqlite).toContain("`power_priority` text DEFAULT 'normal' NOT NULL");
+    expect(sqlite).toContain("WHERE `power_priority` = 'essential'");
+    expect(postgresZoneWorkflow).toContain('FORCE ROW LEVEL SECURITY');
+    expect(postgresZoneWorkflow).toContain('"zone_workflow_advances_tenant_board_fk"');
+    expect(sqliteZoneWorkflow).toContain('`zone_workflow_advances_idempotency_uq`');
   });
 
   it('keeps Knowledge pgvector storage out of required base migrations', async () => {

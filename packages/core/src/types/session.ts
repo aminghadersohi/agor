@@ -29,6 +29,7 @@ import type {
   TaskID,
   UserID,
 } from './id';
+import type { SessionPowerPriority } from './power-management';
 import type { ScheduleID } from './schedule';
 import type { TaskStatus, TerminationCoordinationPendingCode } from './task';
 
@@ -546,6 +547,11 @@ export interface Session {
    * their last caller-scoped value while applying those shared patches.
    */
   viewer_seen_attention_generation?: number;
+  /** Requested UPS power priority. Only the dedicated manager-only API may mutate it. */
+  power_priority: SessionPowerPriority;
+  /** Durable attribution for the latest priority change. */
+  power_priority_updated_at?: string;
+  power_priority_updated_by?: UserID;
 
   // ===== Callback Configuration =====
 

@@ -40,6 +40,7 @@ import {
   isPromptFlowPatchOnly,
   PROMPT_FLOW_PATCH_FIELDS,
   projectExecutorTaskSdkResponse,
+  protectExternalSessionPowerPriority,
   protectExternalTaskCreate,
   protectFilesystemHomeWrite,
   protectServerManagedTaskWrites,
@@ -1417,6 +1418,31 @@ describe('isPromptFlowPatchOnly', () => {
       expect(isPromptFlowPatchOnly(42)).toBe(false);
       expect(isPromptFlowPatchOnly(true)).toBe(false);
     });
+  });
+});
+
+describe('protectExternalSessionPowerPriority', () => {
+  it('rejects every server-owned priority field on generic external writes', () => {
+    for (const field of [
+      'power_priority',
+      'power_priority_updated_at',
+      'power_priority_updated_by',
+    ]) {
+      expect(() =>
+        protectExternalSessionPowerPriority({
+          data: { [field]: 'forged' },
+          params: { provider: 'rest' },
+        } as HookContext)
+      ).toThrow(/dedicated endpoint/);
+    }
+  });
+
+  it('permits the dedicated route internal write', () => {
+    const context = {
+      data: { power_priority: 'essential' },
+      params: { provider: undefined },
+    } as HookContext;
+    expect(protectExternalSessionPowerPriority(context)).toBe(context);
   });
 });
 

@@ -96,6 +96,7 @@ import type {
 import {
   assertPublicMCPOAuthCompatibilityMode,
   BOARD_LAYOUT_APPLIED_EVENT,
+  ENVIRONMENT_COMMAND_REPORT_SERVICE,
   GATEWAY_CHANNEL_WRITE_FIELDS,
   GATEWAY_REDACTED_SENTINEL,
   hasMinimumRole,
@@ -379,6 +380,23 @@ export function isPromptFlowPatchOnly(data: unknown): boolean {
   return keys.every((key) => PROMPT_FLOW_PATCH_FIELDS.includes(key));
 }
 
+/** Power priority is writable only through the dedicated, manager-authorized route. */
+export function protectExternalSessionPowerPriority(context: HookContext): HookContext {
+  if (!context.params.provider) return context;
+  const writes = Array.isArray(context.data) ? context.data : [context.data];
+  for (const write of writes) {
+    if (!write || typeof write !== 'object') continue;
+    if (
+      Object.hasOwn(write, 'power_priority') ||
+      Object.hasOwn(write, 'power_priority_updated_at') ||
+      Object.hasOwn(write, 'power_priority_updated_by')
+    ) {
+      throw new Forbidden('Session power priority is managed by its dedicated endpoint');
+    }
+  }
+  return context;
+}
+
 export function shouldRunSessionPostTurnHooks(
   session: Pick<Session, 'status' | 'ready_for_prompt'>
 ): boolean {
@@ -483,6 +501,7 @@ export const AUTHENTICATED_RBAC_SERVICE_PATHS = [
  * Register all FeathersJS service hooks.
  */
 export const TENANT_OWNED_SERVICE_PATHS = [
+  ENVIRONMENT_COMMAND_REPORT_SERVICE,
   'sessions',
   'sessions/:id/mcp-servers',
   'session-relationships',
@@ -3052,6 +3071,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   safeService('executor-git-environment')?.hooks({
     before: { all: [requireAuth] },
   });
+  safeService(ENVIRONMENT_COMMAND_REPORT_SERVICE)?.hooks({ before: { all: [requireAuth] } });
 
   // ============================================================================
   // Publish service events
@@ -3077,6 +3097,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   // session the same way and must clear the same authorization chain.
   const sessionWriteGuards = [
     protectGatewaySourceMetadata,
+    protectExternalSessionPowerPriority,
     // created_by and unix_username remain immutable identity/history stamps.
     // unix_username is load-bearing for delegated execution-home Sessions;
     // branch-home Sessions deliberately use the current prompt actor instead.
@@ -3119,6 +3140,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       create: [
         requireMinimumRole(ROLES.MEMBER, 'create sessions'),
         protectGatewaySourceMetadata,
+        protectExternalSessionPowerPriority,
         // Stamp session with creator's unix_username (MUST run first). Also
         setSessionUnixUsername(usersRepository, executionMode.unixUserMode),
         async (context: HookContext) => {

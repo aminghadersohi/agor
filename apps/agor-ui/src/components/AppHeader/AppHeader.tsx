@@ -20,6 +20,7 @@ import { ConnectionStatus } from '../ConnectionStatus';
 import { GlobalUserMenu } from '../GlobalUserMenu';
 import { startIdleGlyphScreensaver } from '../IdleGlyphScreensaver';
 import { MarkdownRenderer } from '../MarkdownRenderer';
+import { PowerStatusIndicator } from '../PowerStatusIndicator';
 import { buildThemeMenuItems } from '../ThemeSwitcher';
 import { AppHeaderGlobalSearch } from './AppHeaderGlobalSearch';
 import { GlobalPresenceFacepile } from './GlobalPresenceFacepile';
@@ -296,6 +297,7 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
       </Space>
 
       <Space>
+        <PowerStatusIndicator client={presenceClient} user={user} />
         <ConnectionStatus
           connected={connected}
           connecting={connecting}

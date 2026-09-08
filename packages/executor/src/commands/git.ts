@@ -22,6 +22,7 @@ import { shortId } from '@agor/core/db';
 import { TEAMMATE_FRAMEWORK_REPO_URL } from '@agor/core/types';
 import { diagnoseGit } from '@agor/git';
 import type { UserGitEnvironment } from '@agor/git/pure';
+import { cloneDiagnostic } from '../git/clone-diagnostic.js';
 import { appendGitConfigParameterPairs } from '../git/config-parameters.js';
 import {
   categorizeGitError,
@@ -606,6 +607,7 @@ export async function handleGitClone(
     (payload.params.slug ? join(getReposDir(), payload.params.slug) : undefined);
 
   let client: AgorClient | null = null;
+  let env: UserGitEnvironment = {};
 
   try {
     // Connect to daemon
@@ -623,7 +625,7 @@ export async function handleGitClone(
     console.log(`[git.clone] Git ${git.version} is executable (${git.binary})`);
 
     // Fetch per-user git credentials via Feathers RPC
-    const env = await fetchUserGitEnvironment(client);
+    env = await fetchUserGitEnvironment(client);
     if (Object.keys(env).length > 0) {
       console.log('[git.clone] Resolved credentials:', Object.keys(env));
     }
@@ -765,7 +767,8 @@ export async function handleGitClone(
       },
     };
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = cloneDiagnostic(rawMessage, env);
     console.error('[git.clone] Failed:', errorMessage);
 
     // Persist failure on the pre-created repo row so MCP / REST callers can
@@ -775,8 +778,7 @@ export async function handleGitClone(
     // is the durable record for clients that connect later.
     if (payload.params.repoId && client) {
       try {
-        const category = categorizeGitError(errorMessage);
-        const firstLine = errorMessage.split('\n')[0]?.slice(0, 500) || errorMessage.slice(0, 500);
+        const category = categorizeGitError(rawMessage);
         await client.service('repos').patch(payload.params.repoId, {
           clone_status: 'failed',
           clone_error: {
@@ -785,7 +787,7 @@ export async function handleGitClone(
             // underlying call already failed.
             exit_code: 1,
             category,
-            message: firstLine,
+            message: errorMessage,
           },
         });
         console.log(

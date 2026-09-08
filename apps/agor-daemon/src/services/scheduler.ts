@@ -112,6 +112,7 @@ import {
   type SdkHomeMode,
 } from '../branch-sdk-home.js';
 import type { Application } from '../declarations';
+import type { PowerPolicyController } from '../power-management/index.js';
 import {
   materializedAgenticToolConfigurationToScheduleConfig,
   scheduleAgenticToolConfigToSource,
@@ -221,6 +222,15 @@ export class ScheduleBusyError extends Error {
   }
 }
 
+/** Manual schedule materialization was durably held by the host power fence. */
+export class SchedulePowerHeldError extends Error {
+  public readonly code = 'schedule_power_held';
+  constructor() {
+    super('This schedule is held by the current host power policy. No occurrence was created.');
+    this.name = 'SchedulePowerHeldError';
+  }
+}
+
 /**
  * Error thrown when execute-now is called on a schedule that is not
  * runnable (disabled, missing entity, etc.).
@@ -315,6 +325,11 @@ export interface SchedulerConfig {
   workIdentity?: DistributedWorkIdentity;
   /** Deterministic crash injection used only by kill-point tests. */
   testHooks?: SchedulerTestHooks;
+  /** Host-local pre-materialization fence. Omitted means admission is unchanged. */
+  powerPolicy?: Pick<
+    PowerPolicyController,
+    'scheduleAdmission' | 'withScheduleMaterializationPermit'
+  >;
 }
 
 export interface SchedulerTestHooks {
@@ -339,6 +354,10 @@ interface ResolvedSchedulerConfig {
   random: () => number;
   workIdentity: DistributedWorkIdentity;
   testHooks?: SchedulerTestHooks;
+  powerPolicy: Pick<
+    PowerPolicyController,
+    'scheduleAdmission' | 'withScheduleMaterializationPermit'
+  >;
 }
 
 interface SchedulerTickStats {
@@ -363,6 +382,7 @@ export class SchedulerService {
   private userRepo: UsersRepository;
   private sessionMCPRepo: SessionMCPServerRepository;
   private taskRepo: TaskRepository;
+  private readonly powerHeldScheduleIds = new Set<ScheduleID>();
 
   constructor(db: TenantScopeAwareDatabase, app: Application, config: SchedulerConfig = {}) {
     this.app = app;
@@ -390,6 +410,13 @@ export class SchedulerService {
       random: config.random ?? Math.random,
       workIdentity,
       testHooks: config.testHooks,
+      powerPolicy: config.powerPolicy ?? {
+        scheduleAdmission: () => ({ outcome: 'allowed', wouldHold: false }),
+        withScheduleMaterializationPermit: async <T>(materialize: () => Promise<T>) => ({
+          decision: { outcome: 'allowed', wouldHold: false },
+          value: await materialize(),
+        }),
+      },
     };
     // The HA scheduler is a system-discovered, tenant-reentered workflow rather
     // than a Feathers request. Bind its PostgreSQL repositories at the shared
@@ -685,6 +712,15 @@ export class SchedulerService {
    * rendering, and executor launch never run while that lock is held.
    */
   private async processSchedule(schedule: Schedule, now: number): Promise<void> {
+    const powerAdmission = this.config.powerPolicy.scheduleAdmission();
+    if (powerAdmission.outcome === 'held') {
+      this.powerHeldScheduleIds.add(schedule.schedule_id);
+      this.logWorkEvent('info', 'occurrence_power_held', {
+        schedule_id: schedule.schedule_id,
+        power_state: powerAdmission.hold.state,
+      });
+      return;
+    }
     const tz = resolveScheduleTz(schedule.timezone_mode, schedule.timezone);
     const nowDate = new Date(now);
 
@@ -695,7 +731,9 @@ export class SchedulerService {
     const nextRunAt = getNextRunTime(schedule.cron_expression, nowDate, tz);
 
     const timeSincePrev = now - prevRunAt;
-    const isPrevDue = timeSincePrev >= 0 && timeSincePrev < this.config.gracePeriod;
+    const recoveringPowerOccurrence = this.powerHeldScheduleIds.has(schedule.schedule_id);
+    const isPrevDue =
+      timeSincePrev >= 0 && (timeSincePrev < this.config.gracePeriod || recoveringPowerOccurrence);
     const timeSinceNext = now - nextRunAt;
     const isNextDue = timeSinceNext >= 0 && timeSinceNext < this.config.gracePeriod;
 
@@ -724,7 +762,10 @@ export class SchedulerService {
       return;
     }
 
-    await this.spawnScheduledSession(schedule, scheduledRunAt, now, { source: 'cron' });
+    const spawned = await this.spawnScheduledSession(schedule, scheduledRunAt, now, {
+      source: 'cron',
+    });
+    if (spawned) this.powerHeldScheduleIds.delete(schedule.schedule_id);
   }
 
   /**
@@ -742,6 +783,9 @@ export class SchedulerService {
    *   this schedule already has an active run.
    */
   async executeScheduleNow(opts: { scheduleId: ScheduleID; triggeredBy: UUID }): Promise<Session> {
+    if (this.config.powerPolicy.scheduleAdmission().outcome === 'held') {
+      throw new SchedulePowerHeldError();
+    }
     const { scheduleId, triggeredBy } = opts;
     const schedule = await this.withTenantDatabase(() => this.scheduleRepo.findById(scheduleId));
     if (!schedule) {
@@ -930,91 +974,100 @@ export class SchedulerService {
 
     let admission: Admission;
     try {
-      admission = await this.withTenantDatabase(async () => {
-        // PostgreSQL FOR UPDATE serializes the schedule-scoped concurrency
-        // decision. On SQLite occurrence uniqueness remains the race guard.
-        await this.scheduleRepo.lockForRunAdmission(schedule.schedule_id);
+      const powerAdmission = await this.config.powerPolicy.withScheduleMaterializationPermit(() =>
+        this.withTenantDatabase(async () => {
+          // PostgreSQL FOR UPDATE serializes the schedule-scoped concurrency
+          // decision. On SQLite occurrence uniqueness remains the race guard.
+          await this.scheduleRepo.lockForRunAdmission(schedule.schedule_id);
 
-        const existing = await this.sessionRepo.findScheduleRun(
-          schedule.schedule_id,
-          scheduledRunAt
-        );
-        if (existing) return { outcome: 'existing', session: existing } as const;
-
-        if (
-          !schedule.allow_concurrent_runs &&
-          (await this.sessionRepo.existsActiveOrInitializingInSchedule(
+          const existing = await this.sessionRepo.findScheduleRun(
             schedule.schedule_id,
-            EXECUTING_SESSION_STATUSES,
-            NONTERMINAL_TASK_STATUSES
-          ))
-        ) {
-          return { outcome: 'busy', session: null } as const;
-        }
+            scheduledRunAt
+          );
+          if (existing) return { outcome: 'existing', session: existing } as const;
 
-        const runIndex = (await this.sessionRepo.countByScheduleId(schedule.schedule_id)) + 1;
-        const currentBranch = await this.branchRepo.findById(branch.branch_id);
-        if (!currentBranch) {
-          throw new EntityNotFoundError('Branch', branch.branch_id);
-        }
-        const sdkHomeAdmission = resolveNewSessionSdkHomeScope({
-          branchSdkHomeIntent: currentBranch.sdk_home ?? null,
-          enabledForNewSessions: this.config.sdkHomeMode === 'per_branch',
-        });
-        if (sdkHomeAdmission.scope === 'branch') {
-          const unsupportedReason = branchSdkHomeIncompatibility;
-          if (unsupportedReason) {
-            throw new BadRequest(
-              `${resolvedConfig.activeTool} cannot use a branch SDK home because ${unsupportedReason}`
-            );
+          if (
+            !schedule.allow_concurrent_runs &&
+            (await this.sessionRepo.existsActiveOrInitializingInSchedule(
+              schedule.schedule_id,
+              EXECUTING_SESSION_STATUSES,
+              NONTERMINAL_TASK_STATUSES
+            ))
+          ) {
+            return { outcome: 'busy', session: null } as const;
           }
-        }
-        if (sdkHomeAdmission.adoptBranch) {
-          await this.branchRepo.adoptSdkHome(currentBranch.branch_id);
-        }
-        const session: Partial<Session> = {
-          session_id: candidateSessionId,
-          branch_id: branch.branch_id,
-          agentic_tool: resolvedConfig.activeTool,
-          agentic_tool_preset_id: resolvedConfig.sessionConfig.agentic_tool_preset_id ?? undefined,
-          status: SessionStatus.IDLE,
-          created_by: schedule.created_by,
-          unix_username: unixUsername,
-          sdk_home_scope: sdkHomeAdmission.scope,
-          scheduled_run_at: scheduledRunAt,
-          scheduled_from_branch: true,
-          schedule_id: schedule.schedule_id,
-          title: manual
-            ? `${schedule.name} — manual @ ${new Date(scheduledRunAt).toISOString()}`
-            : `${schedule.name} — ${new Date(scheduledRunAt).toISOString()}`,
-          contextFiles: cfg.context_files ?? [],
-          permission_config: resolvedConfig.sessionConfig.permission_config,
-          model_config: resolvedConfig.sessionConfig.model_config,
-          custom_context: {
-            scheduled_run: {
-              rendered_prompt: renderedPrompt,
-              run_index: runIndex,
-              initial_task_id: candidateTaskId,
-              triggered_manually: manual,
-              triggered_by: manual ? triggeredBy : undefined,
-              schedule_config_snapshot: {
-                schedule_id: schedule.schedule_id,
-                cron: schedule.cron_expression,
-                timezone: resolveScheduleTz(schedule.timezone_mode, schedule.timezone),
-                retention: schedule.retention,
-                allow_concurrent_runs: schedule.allow_concurrent_runs,
-                mcp_server_ids: effectiveMcpIds,
+
+          const runIndex = (await this.sessionRepo.countByScheduleId(schedule.schedule_id)) + 1;
+          const currentBranch = await this.branchRepo.findById(branch.branch_id);
+          if (!currentBranch) {
+            throw new EntityNotFoundError('Branch', branch.branch_id);
+          }
+          const sdkHomeAdmission = resolveNewSessionSdkHomeScope({
+            branchSdkHomeIntent: currentBranch.sdk_home ?? null,
+            enabledForNewSessions: this.config.sdkHomeMode === 'per_branch',
+          });
+          if (sdkHomeAdmission.scope === 'branch') {
+            const unsupportedReason = branchSdkHomeIncompatibility;
+            if (unsupportedReason) {
+              throw new BadRequest(
+                `${resolvedConfig.activeTool} cannot use a branch SDK home because ${unsupportedReason}`
+              );
+            }
+          }
+          if (sdkHomeAdmission.adoptBranch) {
+            await this.branchRepo.adoptSdkHome(currentBranch.branch_id);
+          }
+          const session: Partial<Session> = {
+            session_id: candidateSessionId,
+            branch_id: branch.branch_id,
+            agentic_tool: resolvedConfig.activeTool,
+            agentic_tool_preset_id:
+              resolvedConfig.sessionConfig.agentic_tool_preset_id ?? undefined,
+            status: SessionStatus.IDLE,
+            created_by: schedule.created_by,
+            unix_username: unixUsername,
+            sdk_home_scope: sdkHomeAdmission.scope,
+            scheduled_run_at: scheduledRunAt,
+            scheduled_from_branch: true,
+            schedule_id: schedule.schedule_id,
+            title: manual
+              ? `${schedule.name} — manual @ ${new Date(scheduledRunAt).toISOString()}`
+              : `${schedule.name} — ${new Date(scheduledRunAt).toISOString()}`,
+            contextFiles: cfg.context_files ?? [],
+            permission_config: resolvedConfig.sessionConfig.permission_config,
+            model_config: resolvedConfig.sessionConfig.model_config,
+            custom_context: {
+              scheduled_run: {
+                rendered_prompt: renderedPrompt,
+                run_index: runIndex,
+                initial_task_id: candidateTaskId,
+                triggered_manually: manual,
+                triggered_by: manual ? triggeredBy : undefined,
+                schedule_config_snapshot: {
+                  schedule_id: schedule.schedule_id,
+                  cron: schedule.cron_expression,
+                  timezone: resolveScheduleTz(schedule.timezone_mode, schedule.timezone),
+                  retention: schedule.retention,
+                  allow_concurrent_runs: schedule.allow_concurrent_runs,
+                  mcp_server_ids: effectiveMcpIds,
+                },
               },
             },
-          },
-        };
-        // This is an already-materialized internal occurrence admission, not a
-        // public Session create. Keep the schedule lock around only the row
-        // checks and repository insert; Feathers validation/hooks (including
-        // Unix process launch side effects) belong outside this critical path.
-        const created = await this.sessionRepo.create(session);
-        return { outcome: 'created', session: created } as const;
-      });
+          };
+          // This is an already-materialized internal occurrence admission, not a
+          // public Session create. Keep the schedule lock around only the row
+          // checks and repository insert; Feathers validation/hooks (including
+          // Unix process launch side effects) belong outside this critical path.
+          const created = await this.sessionRepo.create(session);
+          return { outcome: 'created', session: created } as const;
+        })
+      );
+      if (powerAdmission.decision.outcome === 'held' || !powerAdmission.value) {
+        this.powerHeldScheduleIds.add(schedule.schedule_id);
+        if (manual) throw new SchedulePowerHeldError();
+        return null;
+      }
+      admission = powerAdmission.value;
     } catch (error) {
       // SQLite has no row-level lock and may race between the lookup and insert.
       // PostgreSQL's corrected tenant-aware unique index is defense in depth.
