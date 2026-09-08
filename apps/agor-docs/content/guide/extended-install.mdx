@@ -97,6 +97,17 @@ but installs into Agor's private runtime directory rather than changing global n
 is staged and swapped into place only after the exact Agor package version is verified. It does not
 replace Claude, Codex, or other tools you may already use from your terminal.
 
+Run only one installer at a time, including across Agor versions. Installation uses a
+heartbeat lease and a short-lived `.install.acquire.lock` directory under the managed
+agentic-tools root to serialize acquisition and stale-lease recovery across processes.
+The acquisition guard never expires automatically: deleting it based on age could let
+two installers proceed together. If an installer is killed during acquisition, the next
+attempt reports the exact guard path. First verify that **no installer is running**,
+then remove only that empty directory with `rmdir` and retry. Do not remove an active
+guard or recursively delete the managed tools directory. Normal completion removes the
+guard before package installation starts; an expired installation lease is still
+recovered automatically.
+
 Inspect the managed integrations at any time:
 
 ```bash
@@ -436,10 +447,17 @@ authoritative; Legacy is the deliberately broader operator override. Entries tha
 strict boundary can require it in the catalog — Monday, Cloudflare, and ClickUp currently do — and an
 edited or imported connection, a removed entry, or catalog-configuration drift falls back to Strict.
 
-Agor removed GitHub, Prisma, MongoDB, Box, HubSpot, Slack, PagerDuty, and Kagi from the catalog. The
-review could not establish a safely bound client-registration or issuer path for those endpoints. Their
-absence is not the earlier state where OAuth cards were offered but failed after Connect; unsupported
-providers are removed from the shelf instead.
+GitHub is a narrow reviewed exception to that OAuth rule. Its remote endpoint challenges for OAuth but
+does not publish Dynamic Client Registration, so Marketplace requests a fine-grained personal access
+token through GitHub's documented bearer route and verifies it against the pinned catalog endpoint
+before storage. Scope the token to only the repositories and operations needed; organisation policy can
+restrict PATs, Enterprise Managed User PATs are disabled by default, and individual tools can still
+require paid GitHub or Copilot features.
+
+Prisma, MongoDB, Box, HubSpot, Slack, PagerDuty, and Kagi remain absent because review could not
+establish a safely bound client-registration or issuer path. Their absence is not the earlier state where
+OAuth cards were offered but failed after Connect; unsupported providers are removed from the shelf
+instead.
 
 Connect may reuse an OAuth credential the caller already holds when it is a live per-user grant for the
 same endpoint, protected resource, requested scope, and catalog OAuth policy. It never reuses another
