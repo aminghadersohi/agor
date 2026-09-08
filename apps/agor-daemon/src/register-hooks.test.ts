@@ -717,11 +717,12 @@ describe('tenant-owned service registration', () => {
     );
   });
 
-  it('fails closed for discovery that can enter the process-local MCP OAuth flow in HA', () => {
-    expect(CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES).toContainEqual([
-      'mcp-servers/discover',
-      'mcpOAuth',
-    ]);
+  it('admits durable MCP OAuth endpoints in the constrained HA profile', () => {
+    expect(
+      CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES.some(([, feature]) =>
+        String(feature).includes('mcpOAuth')
+      )
+    ).toBe(false);
   });
 
   // These remain in the capability-gate inventory, but a safe constrained-HA
@@ -1357,15 +1358,14 @@ describe('isPromptFlowPatchOnly', () => {
       expect(isPromptFlowPatchOnly({ tasks: ['task-1', 'task-2'] })).toBe(true);
     });
 
-    it('accepts the prompt-route auto-unarchive shape', () => {
-      // register-routes.ts: /sessions/:id/prompt auto-unarchives before sending
-      expect(
-        isPromptFlowPatchOnly({
-          archived: false,
-          archived_reason: undefined,
-          auto_archive_at: undefined,
-        })
-      ).toBe(true);
+    it('accepts the prompt-route auto-archive cancellation shape', () => {
+      // register-routes.ts: /sessions/:id/prompt cancels pending cleanup after
+      // restoring archive state through the dedicated lifecycle service.
+      expect(isPromptFlowPatchOnly({ auto_archive_at: undefined })).toBe(true);
+    });
+
+    it('rejects direct archive-state mutation from prompt flow', () => {
+      expect(isPromptFlowPatchOnly({ archived: false, archived_reason: undefined })).toBe(false);
     });
 
     it('accepts the stop-route idle shape', () => {
@@ -1381,6 +1381,10 @@ describe('isPromptFlowPatchOnly', () => {
   });
 
   describe('rejects mixed or metadata patches', () => {
+    it('rejects archive state so callers use the dedicated lifecycle operation', () => {
+      expect(isPromptFlowPatchOnly({ archived: false, archived_reason: undefined })).toBe(false);
+    });
+
     it('rejects a patch that mixes whitelist + metadata field', () => {
       // Prevents partial-trust escalation: if `tasks` is allowed at session-tier,
       // a caller must NOT be able to piggyback `name` (metadata) onto the same patch.
