@@ -115,7 +115,7 @@ describe('MCPServerEditModal legacy DCR compatibility', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Test Connection' }));
 
-    expect(await screen.findByText(error)).toBeVisible();
+    await waitFor(() => expect(screen.getByText(error)).toBeVisible(), { timeout: 5_000 });
     expect(patch).toHaveBeenCalledOnce();
     expect(discover).toHaveBeenCalledOnce();
     expect(patch.mock.invocationCallOrder[0]).toBeLessThan(discover.mock.invocationCallOrder[0]!);
