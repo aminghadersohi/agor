@@ -66,7 +66,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           .digest('hex')
       ).toBe(OLD_HEAD_MIGRATION_SHA256);
       await Promise.all([
-        unlink(join(oldHeadFolder, '0100_claude_oauth_attempts.sql')),
+        unlink(join(oldHeadFolder, '9012_claude_oauth_attempts.sql')),
         unlink(join(oldHeadFolder, '9015_mcp_oauth_client_registrations.sql')),
         unlink(join(oldHeadFolder, '9016_oauth_authority_watermark_reconciliation.sql')),
       ]);
@@ -81,7 +81,10 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           breakpoints: boolean;
         }>;
       };
-      journal.entries = journal.entries.filter((entry) => entry.idx <= 99);
+      // Preserve the already-applied private integration band through shared
+      // prompting. The archived DCR head then occupies 9009's exact timestamp,
+      // which reproduces the one private migration that Drizzle skips.
+      journal.entries = journal.entries.filter((entry) => entry.idx <= 9008);
       journal.entries.push({
         idx: 100,
         version: '7',
@@ -348,6 +351,11 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN auto_archive_at`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN auto_archive_after_seconds`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN auto_archive`);
+      await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority_updated_at`);
+      await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority_updated_by`);
+      await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority`);
+      await executeRaw(db, sql`DROP TABLE claude_oauth_attempts`);
+      await executeRaw(db, sql`DROP SEQUENCE claude_oauth_attempt_generation_seq`);
 
       // Reproduce the previous reviewed head's timestamp-only final watermark.
       // Its authority schema is identical; the rebased bootstrap must not try
