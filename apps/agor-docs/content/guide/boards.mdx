@@ -184,6 +184,24 @@ Common patterns:
 - **Per-pipeline boards**: A "PR review" board, a "Bug triage" board, a "Roadmap" board.
 - **Solo vs team boards**: Personal scratch board for experiments, team board for shipped work.
 
+### Board-list counts
+
+Board rows on Home, in navigation, and in workspace settings show the same
+three caller-scoped counts:
+
+- **Worktrees** are non-archived branches associated with the board that you
+  can currently view.
+- **Total Sessions** are non-archived Sessions on those visible worktrees.
+- **Active Sessions** are the subset in Agor's shared executing-Session
+  classification: `running`, `stopping`, `awaiting_permission`, or the legacy
+  `awaiting_input` state.
+
+Completed, failed, timed-out, idle, and archived Sessions are not active. A
+queued Task does not make an otherwise idle Session active; when dispatch
+claims the Session, its executing status does. Counts come from the same
+permission-filtered board-list query on every surface, so a partially loaded
+browser view never becomes the source of a board-wide total.
+
 ---
 
 ## Cards (Beta)

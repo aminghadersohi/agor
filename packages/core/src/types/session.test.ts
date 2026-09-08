@@ -53,10 +53,10 @@ describe('session promptability helpers', () => {
     expect(isSessionExecuting({ status: 'running' })).toBe(true);
     expect(isSessionExecuting({ status: 'stopping' })).toBe(true);
     expect(isSessionExecuting({ status: 'awaiting_permission' })).toBe(true);
-    expect(isSessionExecuting({ status: 'idle' })).toBe(false);
-    expect(isSessionExecuting({ status: 'completed' })).toBe(false);
-    expect(isSessionExecuting({ status: 'failed' })).toBe(false);
-    expect(isSessionExecuting({ status: 'timed_out' })).toBe(false);
+    expect(isSessionExecuting({ status: 'awaiting_input' })).toBe(true);
+    for (const status of ['idle', 'completed', 'failed', 'timed_out'] as const) {
+      expect(isSessionExecuting({ status })).toBe(false);
+    }
   });
 });
 

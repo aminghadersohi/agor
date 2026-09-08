@@ -739,37 +739,36 @@ describe('BoardsService.find SQL pushdown', () => {
     return { service, b1, b2, archived };
   }
 
-  dbTest(
-    'returns the authoritative running Session projection on each API page row',
-    async ({ db }) => {
-      const service = new BoardsService(db);
-      const repo = await new RepoRepository(db).create(createRepoData());
-      const board = (await service.create({
-        name: 'Running API board',
-        created_by: TEST_USER,
-      })) as Board;
-      const branch = await new BranchRepository(db).create({
-        ...createBranchData({ repo_id: repo.repo_id, name: 'running-api' }),
-        board_id: board.board_id,
-      });
-      await new SessionRepository(db).create({
-        branch_id: branch.branch_id,
-        created_by: TEST_USER,
-        agentic_tool: 'claude-code',
-        status: SessionStatus.RUNNING,
-      });
+  dbTest('returns the authoritative Board-list counts on each API page row', async ({ db }) => {
+    const service = new BoardsService(db);
+    const repo = await new RepoRepository(db).create(createRepoData());
+    const board = (await service.create({
+      name: 'Running API board',
+      created_by: TEST_USER,
+    })) as Board;
+    const branch = await new BranchRepository(db).create({
+      ...createBranchData({ repo_id: repo.repo_id, name: 'running-api' }),
+      board_id: board.board_id,
+    });
+    await new SessionRepository(db).create({
+      branch_id: branch.branch_id,
+      created_by: TEST_USER,
+      agentic_tool: 'claude-code',
+      status: SessionStatus.AWAITING_PERMISSION,
+    });
 
-      const result = (await service.find({
-        query: { archived: false, lean: true, $limit: 1 },
-      })) as { data: Board[]; total: number };
+    const result = (await service.find({
+      query: { archived: false, lean: true, $limit: 1 },
+    })) as { data: Board[]; total: number };
 
-      expect(result.total).toBe(1);
-      expect(result.data[0]).toMatchObject({
-        board_id: board.board_id,
-        running_session_count: 1,
-      });
-    }
-  );
+    expect(result.total).toBe(1);
+    expect(result.data[0]).toMatchObject({
+      board_id: board.board_id,
+      worktree_count: 1,
+      total_session_count: 1,
+      active_session_count: 1,
+    });
+  });
 
   dbTest(
     'pages the whole authorized tenant scope in SQL when no filter is present',

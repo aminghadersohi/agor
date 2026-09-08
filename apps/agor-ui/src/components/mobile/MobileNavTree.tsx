@@ -26,6 +26,7 @@ import { useNavigate } from 'react-router-dom';
 import { mapToArray } from '@/utils/mapHelpers';
 import { getSessionDisplayTitle } from '@/utils/sessionTitle';
 import { BoardCollapse } from '../BoardCollapse';
+import { BoardListCounts } from '../BoardListCounts';
 import { getBoardEmoji } from '../BoardTile';
 
 const { Text } = Typography;
@@ -197,13 +198,10 @@ export const MobileNavTree: React.FC<MobileNavTreeProps> = ({
             key: board.board_id,
             board,
             emoji: getBoardEmoji(board, branchById),
+            avatarSize: 32,
+            meta: <BoardListCounts counts={board} wrap />,
             badge: (
               <Space size={8}>
-                <Badge
-                  count={boardBranches.length}
-                  style={{ backgroundColor: token.colorPrimaryBg }}
-                  showZero
-                />
                 <Button
                   type="text"
                   aria-label={`Open ${board.name} board`}
