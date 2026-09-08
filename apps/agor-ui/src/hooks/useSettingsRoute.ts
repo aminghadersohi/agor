@@ -19,6 +19,7 @@ export const SETTINGS_SECTIONS = [
   'groups',
   'users',
   'about',
+  'power',
 ] as const;
 
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];

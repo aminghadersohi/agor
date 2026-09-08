@@ -3,6 +3,7 @@ import type { PersistedAgenticToolName } from './agentic-tool';
 import type { GatewayInboundEventID } from './gateway';
 import type { CompletionSubscriptionID, MessageID, SessionID, TaskID, UserID } from './id';
 import type { PersistedMessageSource } from './message';
+import type { PowerTaskHold } from './power-management';
 import type { ReportPath, ReportTemplate } from './report';
 
 export const TaskStatus = {
@@ -517,6 +518,9 @@ export interface Task {
    * Undefined for non-queued tasks.
    */
   queue_position?: number;
+
+  /** Response-only power-policy annotation; never persisted over the queued Task row. */
+  power_hold?: PowerTaskHold;
 
   /**
    * Structured metadata for the task. Fields here are load-bearing for

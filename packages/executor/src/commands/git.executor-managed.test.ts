@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { UserGitEnvironment } from '@agor/git/pure';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -109,6 +110,7 @@ const branchId = '550e8400-e29b-41d4-a716-446655440002';
 const deleteRoots = { reposRoot: '/safe/repos', branchesRoot: '/safe/worktrees' };
 
 function createClient(records: {
+  gitEnv?: UserGitEnvironment;
   repo?: Record<string, unknown>;
   repoPages?: Array<Array<Record<string, unknown>>>;
   branches?: Array<Record<string, unknown>>;
@@ -147,7 +149,7 @@ function createClient(records: {
         };
       }
       if (name === 'executor-git-environment') {
-        return { create: vi.fn(async () => ({})) };
+        return { create: vi.fn(async () => records.gitEnv ?? {}) };
       }
       if (name === 'branches') {
         const find = vi.fn(
@@ -240,6 +242,86 @@ beforeEach(() => {
 });
 
 describe('managed executor git/fs commands', () => {
+  it('redacts clone credentials consistently in persistence, logs and the executor result', async () => {
+    const token = 'ghp_test_only_12345678901234567890';
+    const patchedRepos: Array<Record<string, unknown>> = [];
+    createClient({ repo: { repo_id: repoId }, patchedRepos, gitEnv: { GITHUB_TOKEN: token } });
+    mocks.cloneRepo.mockRejectedValueOnce(
+      new Error(
+        `Cloning into 'repo'...\nremote: ${token}\nfatal: Authentication failed for https://user:password@example.com/repo.git`
+      )
+    );
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const result = await handleGitClone(
+        {
+          command: 'git.clone',
+          sessionToken: 'tenant-token',
+          params: {
+            url: 'https://example.com/repo.git',
+            outputPath: '/safe/repos/repo',
+            repoId,
+            createDbRecord: true,
+            importEnvironmentConfig: false,
+          },
+        },
+        {}
+      );
+      expect(result).toMatchObject({
+        success: false,
+        error: { message: expect.stringContaining('fatal: Authentication failed') },
+      });
+      expect(patchedRepos).toContainEqual({
+        clone_status: 'failed',
+        clone_error: { category: 'auth_failed', exit_code: 1, message: result.error?.message },
+      });
+      const surfaces = JSON.stringify({ result, patchedRepos, logs: log.mock.calls });
+      expect(surfaces).not.toContain(token);
+      expect(surfaces).not.toContain('password');
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it('persists the actual multiline clone failure rather than just the progress banner (#2642)', async () => {
+    const patchedRepos: Array<Record<string, unknown>> = [];
+    createClient({ repo: { repo_id: repoId }, patchedRepos });
+    mocks.cloneRepo.mockRejectedValueOnce(
+      new Error(
+        "Cloning into '/safe/repos/apache/superset'...\n" +
+          'remote: Repository not found.\n' +
+          "fatal: repository 'https://github.com/apache/superset.git/' not found\n"
+      )
+    );
+
+    const result = await handleGitClone(
+      {
+        command: 'git.clone',
+        sessionToken: 'tenant-token',
+        params: {
+          url: 'https://github.com/apache/superset.git',
+          slug: 'apache/superset',
+          outputPath: '/safe/repos/apache/superset',
+          repoId,
+          createDbRecord: true,
+          importEnvironmentConfig: false,
+        },
+      },
+      {}
+    );
+
+    expect(result.success).toBe(false);
+    expect(patchedRepos).toContainEqual({
+      clone_status: 'failed',
+      clone_error: {
+        exit_code: 1,
+        category: 'not_found',
+        message: expect.stringContaining('remote: Repository not found.\nfatal: repository'),
+      },
+    });
+    expect(mocks.cloneRepo).toHaveBeenCalledTimes(1);
+  });
+
   it('fails closed before clone when executor Git is unavailable', async () => {
     const patchedRepos: Array<Record<string, unknown>> = [];
     createClient({ repo: { repo_id: repoId }, patchedRepos });
@@ -257,6 +339,7 @@ describe('managed executor git/fs commands', () => {
           slug: 'repo',
           repoId,
           createDbRecord: false,
+          importEnvironmentConfig: false,
         },
       },
       {}
@@ -431,7 +514,7 @@ describe('managed executor git/fs commands', () => {
       {
         command: 'git.branch.add',
         sessionToken: 'tenant-token',
-        params: { branchId, repoId, restoreMode: true },
+        params: { branchId, repoId, restoreMode: true, useReference: false },
       },
       {}
     );
@@ -479,7 +562,7 @@ describe('managed executor git/fs commands', () => {
       {
         command: 'git.branch.add',
         sessionToken: 'tenant-token',
-        params: { branchId, repoId, restoreMode: true },
+        params: { branchId, repoId, restoreMode: true, useReference: false },
       },
       {}
     );
@@ -521,7 +604,7 @@ describe('managed executor git/fs commands', () => {
       {
         command: 'git.branch.add',
         sessionToken: 'tenant-token',
-        params: { branchId, repoId, restoreMode: true },
+        params: { branchId, repoId, restoreMode: true, useReference: false },
       },
       {}
     );
@@ -558,7 +641,7 @@ describe('managed executor git/fs commands', () => {
       {
         command: 'git.branch.add',
         sessionToken: 'tenant-token',
-        params: { branchId, repoId },
+        params: { branchId, repoId, useReference: false },
       },
       {}
     );
@@ -586,6 +669,7 @@ describe('managed executor git/fs commands', () => {
         params: {
           branchId,
           repoId,
+          useReference: false,
         },
       },
       {}
@@ -744,6 +828,7 @@ describe('managed executor git/fs commands', () => {
             branchPath,
             branchesRoot,
             storageMode: 'clone',
+            deleteBranch: false,
           },
         },
         {}
@@ -794,6 +879,7 @@ describe('managed executor git/fs commands', () => {
             slug: 'smoke/agor-assistant-pr1258',
             repoId,
             createDbRecord: true,
+            importEnvironmentConfig: false,
           },
         },
         {}
@@ -842,6 +928,7 @@ describe('managed executor git/fs commands', () => {
           slug: 'preset-io/agor-teammate',
           repoId,
           createDbRecord: true,
+          importEnvironmentConfig: false,
         },
       },
       {}

@@ -596,6 +596,8 @@ export interface AgorSandboxSettings {
  * Execution settings
  */
 export interface AgorExecutionSettings {
+  /** Host UPS-aware admission policy. Disabled unless mode is observe/enforce. */
+  power_management?: AgorPowerManagementSettings;
   /**
    * Opt-in recovery for Tasks interrupted by a standalone daemon restart.
    * Recovery creates a new, system-authored continuation Task; it never
@@ -806,6 +808,8 @@ export interface AgorExecutionSettings {
    * Default: `'hybrid'`.
    */
   managed_envs_execution_mode?: ManagedEnvsExecutionMode;
+  /** External Job lifetime INCLUDING forced cleanup, in ms. Required for HA hybrid commands. */
+  environment_command_job_deadline_ms?: number;
 
   /**
    * Branch storage configuration — operator gate for which storage modes a
@@ -844,6 +848,33 @@ export interface AgorExecutionSettings {
    * default. Global, single-policy. See `context/explorations/executor-sandboxing.md`.
    */
   sandbox?: AgorSandboxSettings;
+}
+
+/** Read-only host power observation and Task dispatch admission policy. */
+export interface AgorPowerManagementSettings {
+  /** `off` is inert, `observe` reports would-hold, `enforce` gates dispatch. */
+  mode?: 'off' | 'observe' | 'enforce';
+  /** V1 supports only Apple's read-only `pmset -g ps` surface. */
+  provider?: 'macos';
+  poll_interval_ms?: number;
+  provider_timeout_ms?: number;
+  stale_after_ms?: number;
+  on_battery_debounce_ms?: number;
+  online_stable_ms?: number;
+  recovery_dispatch_interval_ms?: number;
+  /** V1 deliberately supports exactly one effective essential Session. */
+  max_essential_sessions?: number;
+  critical?: {
+    /** Optional battery percentage threshold, used only when reported. */
+    charge_percent?: number;
+    /** Optional remaining runtime threshold, used only when reported. */
+    runtime_seconds?: number;
+    consecutive_samples?: number;
+  };
+  communication_loss?: {
+    /** Escalate admission after last-known battery state; never terminates Tasks. */
+    last_on_battery_critical_after_ms?: number;
+  };
 }
 
 export interface AgorExecutorResponseSettings {
@@ -1510,6 +1541,13 @@ export interface AgorDeploymentSettings {
  * Complete Agor configuration
  */
 export interface AgorConfig {
+  /**
+   * Instance-owned Environment-tab guidance (never read from repository config).
+   * At most 4000 UTF-16 code units. The UI permits only basic prose/list Markdown
+   * and absolute HTTP(S) documentation links; HTML, images, and plugins are disabled.
+   */
+  environment_disclaimer_markdown?: string;
+
   /** Deployment-owned agentic-tool package selection. */
   agentic_tools?: AgorAgenticToolsSettings;
 

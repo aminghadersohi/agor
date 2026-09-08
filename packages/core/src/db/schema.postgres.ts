@@ -8,6 +8,7 @@
 import type {
   AgorGrants,
   AgorRuntimeConfig,
+  BranchEnvironmentInstance,
   CodexApprovalPolicy,
   CodexSandboxMode,
   EffortLevel,
@@ -145,6 +146,13 @@ export const sessions = pgTable(
     ready_for_prompt: t.bool('ready_for_prompt').notNull().default(false),
     attention_generation: integer('attention_generation').notNull().default(0),
 
+    // Kept in schema parity even though V1 activation is standalone SQLite.
+    power_priority: text('power_priority', { enum: ['normal', 'essential'] })
+      .notNull()
+      .default('normal'),
+    power_priority_updated_at: t.timestamp('power_priority_updated_at'),
+    power_priority_updated_by: varchar('power_priority_updated_by', { length: 36 }),
+
     // Archive state (cascaded from branch archive)
     archived: t.bool('archived').notNull().default(false),
     archived_reason: text('archived_reason', {
@@ -262,6 +270,9 @@ export const sessions = pgTable(
     ),
     parentIdx: index('sessions_parent_idx').on(table.parent_session_id),
     forkedIdx: index('sessions_forked_idx').on(table.forked_from_session_id),
+    oneEssentialSessionPerTenant: uniqueIndex('sessions_one_essential_power_priority_uq')
+      .on(table.tenant_id)
+      .where(sql`${table.power_priority} = 'essential'`),
     // Scheduler indexes — including the partial unique index below.
     scheduledFromBranchIdx: index('sessions_scheduled_flag_idx').on(table.scheduled_from_branch),
     // Partial unique index — covering for the scheduler's dedup lookup
@@ -994,24 +1005,7 @@ export const branches = pgTable(
         provisioning_operation?: 'create' | 'retry' | 'restore';
 
         // Environment instance (runtime state only, no variables)
-        environment_instance?: {
-          status: 'stopped' | 'starting' | 'running' | 'stopping' | 'error';
-          process?: {
-            pid?: number;
-            started_at?: string;
-            uptime?: string;
-          };
-          last_health_check?: {
-            timestamp: string;
-            status: 'healthy' | 'unhealthy' | 'unknown';
-            message?: string;
-          };
-          access_urls?: Array<{
-            name: string;
-            url: string;
-          }>;
-          logs?: string[];
-        };
+        environment_instance?: BranchEnvironmentInstance;
 
         last_used: string; // ISO timestamp
 
@@ -1040,7 +1034,7 @@ export const branches = pgTable(
     environmentHealthDiscoveryIdx: index('branches_environment_health_discovery_idx')
       .on(table.tenant_id, table.branch_id)
       .where(
-        sql`${table.archived} = false AND (${table.data}->'environment_instance'->>'status') IN ('starting', 'running')`
+        sql`${table.archived} = false AND (${table.data}->'environment_instance'->>'status') IN ('starting', 'running', 'stopping')`
       ),
     // Composite unique constraint (repo + name)
     uniqueRepoName: index('branches_repo_name_unique').on(table.repo_id, table.name),

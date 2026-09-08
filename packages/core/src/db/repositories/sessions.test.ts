@@ -109,6 +109,9 @@ function createPostgresStyleSessionRow(overrides?: Partial<SessionRow> & { tenan
     auto_archive: 'never',
     auto_archive_after_seconds: null,
     auto_archive_at: null,
+    power_priority: overrides?.power_priority ?? 'normal',
+    power_priority_updated_at: overrides?.power_priority_updated_at ?? null,
+    power_priority_updated_by: overrides?.power_priority_updated_by ?? null,
     data: {
       genealogy: { children: [] },
       contextFiles: [],
@@ -613,6 +616,22 @@ describe('SessionRepository.findAll', () => {
       const page = await repo.findPage({ visibleToUserId: userId, limit: 10, skip: 0 });
       expect(page.total).toBe(1);
       expect(page.data.map((session) => session.session_id)).toEqual([visibleSession.session_id]);
+      const statusPage = await repo.findPage({
+        visibleToUserId: userId,
+        status: visibleSession.status,
+        limit: 1,
+      });
+      expect(statusPage.total).toBe(1);
+      expect(statusPage.data.map((session) => session.session_id)).toEqual([
+        visibleSession.session_id,
+      ]);
+      const hiddenStatusPage = await repo.findPage({
+        visibleToUserId: userId,
+        status: visibleSession.status,
+        branchId: hiddenBranch.branch_id,
+        limit: 1,
+      });
+      expect(hiddenStatusPage).toEqual({ data: [], total: 0 });
     }
   );
 });
@@ -1983,4 +2002,25 @@ describe('SessionRepository schedule-link queries', () => {
       ).resolves.toBeDefined();
     }
   );
+
+  dbTest('allows only one effective essential Session under concurrent updates', async ({ db }) => {
+    const repo = new SessionRepository(db);
+    const branch = await createTestBranch(db);
+    const first = await repo.create(createSessionData({ branch_id: branch.branch_id }));
+    const second = await repo.create(createSessionData({ branch_id: branch.branch_id }));
+    expect(first.power_priority).toBe('normal');
+    expect(second.power_priority).toBe('normal');
+
+    const outcomes = await Promise.allSettled([
+      repo.update(first.session_id, { power_priority: 'essential' }),
+      repo.update(second.session_id, { power_priority: 'essential' }),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+    expect(outcomes.filter((outcome) => outcome.status === 'rejected')).toHaveLength(1);
+    const sessions = await Promise.all([
+      repo.findById(first.session_id),
+      repo.findById(second.session_id),
+    ]);
+    expect(sessions.filter((session) => session?.power_priority === 'essential')).toHaveLength(1);
+  });
 });

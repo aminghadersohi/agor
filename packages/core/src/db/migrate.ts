@@ -152,6 +152,19 @@ export function createMigrationImpactRegistry(
 }
 
 const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
+  [
+    '9014_environment_command_discovery',
+    {
+      requiresOfflineCutover: false,
+      impact: defineMigrationImpact({
+        classification: 'protocol',
+        userAction: 'required',
+        rollbackCompatibility: 'compatible',
+        summary:
+          'Extends bounded environment discovery to stopping rows. Coordinate homogeneous daemon/executor rollout and external Job deadlines before enabling HA hybrid commands; disable hybrid before rollback.',
+      }),
+    },
+  ],
   ['0030_migrate_queued_messages', QUEUED_MESSAGES_MIGRATION_POLICY],
   ['0040_migrate_queued_messages', QUEUED_MESSAGES_MIGRATION_POLICY],
   ['9001_profile_image_galleries', PROFILE_IMAGE_GALLERIES_MIGRATION_POLICY],

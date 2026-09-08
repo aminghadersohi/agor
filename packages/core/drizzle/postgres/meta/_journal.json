@@ -750,6 +750,20 @@
       "when": 1788552000000,
       "tag": "9012_claude_oauth_attempts",
       "breakpoints": true
+    },
+    {
+      "idx": 9013,
+      "version": "7",
+      "when": 1788800000000,
+      "tag": "9013_session_power_priority",
+      "breakpoints": true
+    },
+    {
+      "idx": 9014,
+      "version": "7",
+      "when": 1788800000001,
+      "tag": "9014_environment_command_discovery",
+      "breakpoints": true
     }
   ]
 }

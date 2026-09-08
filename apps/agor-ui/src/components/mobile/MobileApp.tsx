@@ -23,9 +23,11 @@ import {
 } from '../../store/selectors';
 import { BranchModal, type BranchModalTab } from '../BranchModal';
 import type { BranchUpdate } from '../BranchModal/useBranchModalForm';
+import { PowerStatusIndicator } from '../PowerStatusIndicator';
 import { TeammateChatCollectionsModal } from '../TeammateChatCollections';
 import { MobileBoardPage } from './MobileBoardPage';
 import { MobileCommentsPage } from './MobileCommentsPage';
+import { MobileHeaderAccessory } from './MobileHeader';
 import { MobileHomePage } from './MobileHomePage';
 import { MobileNavTree } from './MobileNavTree';
 import { SessionPage } from './SessionPage';
@@ -106,140 +108,152 @@ export const MobileApp: React.FC<MobileAppProps> = ({
   const selectedRepo = selectedBranch ? (repoById.get(selectedBranch.repo_id) ?? null) : null;
 
   return (
-    <Layout style={{ height: '100vh' }}>
-      {/* Navigation Drawer - shared across all routes */}
-      <Drawer
-        title="Navigation"
-        placement="left"
-        onClose={() => setDrawerOpen(false)}
-        open={drawerOpen}
-        size="85%"
-        styles={{
-          body: { padding: 0 },
-        }}
-      >
-        <MobileNavTree
-          boardById={boardById}
-          branchById={branchById}
-          sessionsByBranch={sessionsByBranch}
-          commentById={commentById}
-          onNavigate={() => setDrawerOpen(false)}
-          onOpenWorkspaceSettings={onOpenWorkspaceSettings}
-          onOpenUserSettings={onOpenUserSettings}
-          onLogout={onLogout}
+    <MobileHeaderAccessory.Provider
+      value={
+        <PowerStatusIndicator
+          client={client}
+          user={user}
+          onOpen={() => onOpenWorkspaceSettings('power')}
+        />
+      }
+    >
+      <Layout style={{ height: '100vh' }}>
+        {/* Navigation Drawer - shared across all routes */}
+        <Drawer
+          title="Navigation"
+          placement="left"
+          onClose={() => setDrawerOpen(false)}
+          open={drawerOpen}
+          size="85%"
+          styles={{
+            body: { padding: 0 },
+          }}
+        >
+          <MobileNavTree
+            boardById={boardById}
+            branchById={branchById}
+            sessionsByBranch={sessionsByBranch}
+            commentById={commentById}
+            onNavigate={() => setDrawerOpen(false)}
+            onOpenWorkspaceSettings={onOpenWorkspaceSettings}
+            onOpenUserSettings={onOpenUserSettings}
+            onLogout={onLogout}
+            currentUser={user}
+          />
+        </Drawer>
+
+        <Routes>
+          {/* Home page - just shows header, drawer opened by hamburger */}
+          <Route
+            path="/"
+            element={
+              <MobileHomePage
+                client={client}
+                user={user}
+                boardById={boardById}
+                branchById={branchById}
+                sessionById={sessionById}
+                onMenuClick={() => setDrawerOpen(true)}
+                onOpenSettings={onOpenWorkspaceSettings}
+                onManageTeammateChats={() => openTeammateChats()}
+              />
+            }
+          />
+
+          <Route
+            path="/board/:boardId"
+            element={
+              <MobileBoardPage
+                boardById={boardById}
+                branchById={branchById}
+                repoById={repoById}
+                sessionsByBranch={sessionsByBranch}
+                boardObjectsByBoardId={boardObjectsByBoardId}
+                cardById={cardById}
+                artifactById={artifactById}
+                onMenuClick={() => setDrawerOpen(true)}
+                onOpenBranch={(branchId, tab) => setBranchEditor({ branchId, tab })}
+              />
+            }
+          />
+
+          {/* Session conversation page */}
+          <Route
+            path="/session/:sessionId"
+            element={
+              <SessionPage
+                client={client}
+                sessionById={sessionById}
+                branchById={branchById}
+                repoById={repoById}
+                userById={userById}
+                currentUser={user}
+                onSendPrompt={onSendPrompt}
+                onMenuClick={() => setDrawerOpen(true)}
+                onPinToChatCollection={openTeammateChats}
+              />
+            }
+          />
+
+          {/* Comments page */}
+          <Route
+            path="/comments/:boardId"
+            element={
+              <MobileCommentsPage
+                client={client}
+                boardById={boardById}
+                commentById={commentById}
+                branchById={branchById}
+                userById={userById}
+                currentUser={user}
+                onMenuClick={() => setDrawerOpen(true)}
+                onSendComment={onSendComment}
+                onReplyComment={onReplyComment}
+                onResolveComment={onResolveComment}
+                onToggleReaction={onToggleReaction}
+                onDeleteComment={onDeleteComment}
+              />
+            }
+          />
+        </Routes>
+        <BranchModal
+          open={branchEditor !== null}
+          onClose={() => setBranchEditor(null)}
+          branch={selectedBranch}
+          repo={selectedRepo}
+          sessions={selectedBranch ? (sessionsByBranch.get(selectedBranch.branch_id) ?? []) : []}
+          boardObjects={
+            selectedBranch?.board_id
+              ? (boardObjectsByBoardId.get(selectedBranch.board_id) ?? [])
+              : []
+          }
+          client={client}
           currentUser={user}
+          defaultTab={branchEditor?.tab}
+          presentation="bottom-sheet"
+          onUpdateBranch={onUpdateBranch}
+          onUpdateRepo={onUpdateRepo}
+          onArchiveOrDelete={onArchiveOrDeleteBranch}
+          onExecuteScheduleNow={onExecuteScheduleNow}
+          onSessionClick={(sessionId) => {
+            // Sessions live on their own mobile route, so this stays inside /m
+            // rather than reusing the desktop board-switching navigation.
+            setBranchEditor(null);
+            navigate(`/m/session/${sessionId}`);
+          }}
+          onOpenSettings={() => {
+            setBranchEditor(null);
+            onOpenWorkspaceSettings('repos');
+          }}
         />
-      </Drawer>
-
-      <Routes>
-        {/* Home page - just shows header, drawer opened by hamburger */}
-        <Route
-          path="/"
-          element={
-            <MobileHomePage
-              client={client}
-              user={user}
-              boardById={boardById}
-              branchById={branchById}
-              sessionById={sessionById}
-              onMenuClick={() => setDrawerOpen(true)}
-              onOpenSettings={onOpenWorkspaceSettings}
-              onManageTeammateChats={() => openTeammateChats()}
-            />
-          }
+        <TeammateChatCollectionsModal
+          open={teammateChatsOpen}
+          currentUser={user}
+          preselectedSessionId={teammateChatsSessionId}
+          onClose={closeTeammateChats}
+          onUpdateUser={onUpdateUser}
         />
-
-        <Route
-          path="/board/:boardId"
-          element={
-            <MobileBoardPage
-              boardById={boardById}
-              branchById={branchById}
-              repoById={repoById}
-              sessionsByBranch={sessionsByBranch}
-              boardObjectsByBoardId={boardObjectsByBoardId}
-              cardById={cardById}
-              artifactById={artifactById}
-              onMenuClick={() => setDrawerOpen(true)}
-              onOpenBranch={(branchId, tab) => setBranchEditor({ branchId, tab })}
-            />
-          }
-        />
-
-        {/* Session conversation page */}
-        <Route
-          path="/session/:sessionId"
-          element={
-            <SessionPage
-              client={client}
-              sessionById={sessionById}
-              branchById={branchById}
-              repoById={repoById}
-              userById={userById}
-              currentUser={user}
-              onSendPrompt={onSendPrompt}
-              onMenuClick={() => setDrawerOpen(true)}
-              onPinToChatCollection={openTeammateChats}
-            />
-          }
-        />
-
-        {/* Comments page */}
-        <Route
-          path="/comments/:boardId"
-          element={
-            <MobileCommentsPage
-              client={client}
-              boardById={boardById}
-              commentById={commentById}
-              branchById={branchById}
-              userById={userById}
-              currentUser={user}
-              onMenuClick={() => setDrawerOpen(true)}
-              onSendComment={onSendComment}
-              onReplyComment={onReplyComment}
-              onResolveComment={onResolveComment}
-              onToggleReaction={onToggleReaction}
-              onDeleteComment={onDeleteComment}
-            />
-          }
-        />
-      </Routes>
-      <BranchModal
-        open={branchEditor !== null}
-        onClose={() => setBranchEditor(null)}
-        branch={selectedBranch}
-        repo={selectedRepo}
-        sessions={selectedBranch ? (sessionsByBranch.get(selectedBranch.branch_id) ?? []) : []}
-        boardObjects={
-          selectedBranch?.board_id ? (boardObjectsByBoardId.get(selectedBranch.board_id) ?? []) : []
-        }
-        client={client}
-        currentUser={user}
-        defaultTab={branchEditor?.tab}
-        presentation="bottom-sheet"
-        onUpdateBranch={onUpdateBranch}
-        onUpdateRepo={onUpdateRepo}
-        onArchiveOrDelete={onArchiveOrDeleteBranch}
-        onExecuteScheduleNow={onExecuteScheduleNow}
-        onSessionClick={(sessionId) => {
-          // Sessions live on their own mobile route, so this stays inside /m
-          // rather than reusing the desktop board-switching navigation.
-          setBranchEditor(null);
-          navigate(`/m/session/${sessionId}`);
-        }}
-        onOpenSettings={() => {
-          setBranchEditor(null);
-          onOpenWorkspaceSettings('repos');
-        }}
-      />
-      <TeammateChatCollectionsModal
-        open={teammateChatsOpen}
-        currentUser={user}
-        preselectedSessionId={teammateChatsSessionId}
-        onClose={closeTeammateChats}
-        onUpdateUser={onUpdateUser}
-      />
-    </Layout>
+      </Layout>
+    </MobileHeaderAccessory.Provider>
   );
 };

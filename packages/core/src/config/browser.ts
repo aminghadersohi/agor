@@ -6,7 +6,12 @@
  */
 
 export * from './constants';
+export * from './environment-commands';
 export * from './password-policy-contract';
+export {
+  powerManagementSettingsFromResolved,
+  resolvePowerManagementConfig,
+} from './power-management';
 export * from './repo-list';
 export * from './repo-reference';
 export * from './types';
