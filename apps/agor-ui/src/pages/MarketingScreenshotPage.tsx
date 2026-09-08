@@ -4,6 +4,7 @@ import { App as AntdApp, ConfigProvider, Layout, theme } from 'antd';
 import { useEffect, useMemo } from 'react';
 import { ReactFlowProvider } from 'reactflow';
 import { AppHeader } from '../components/AppHeader';
+import { ProfileImageNetworkProvider } from '../components/ProfileImage/ProfileImageNetworkContext';
 import { SessionCanvas } from '../components/SessionCanvas';
 import { ConnectionProvider } from '../contexts/ConnectionContext';
 import { agorStore } from '../store/agorStore';
@@ -18,7 +19,13 @@ import {
 } from './marketing/fixtureData';
 import './MarketingScreenshotPage.css';
 
-export const MarketingScreenshotPage = () => {
+export const MarketingScreenshotPage = () => (
+  <ProfileImageNetworkProvider value={false}>
+    <MarketingScreenshotContent />
+  </ProfileImageNetworkProvider>
+);
+
+const MarketingScreenshotContent = () => {
   useEffect(() => {
     document.title = 'Launch board · Agor';
   }, []);

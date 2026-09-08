@@ -78,7 +78,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           .digest('hex')
       ).toBe(OLD_HEAD_MIGRATION_SHA256);
       await Promise.all([
-        unlink(join(oldHeadFolder, '0100_claude_oauth_attempts.sql')),
+        unlink(join(oldHeadFolder, '9012_claude_oauth_attempts.sql')),
         unlink(join(oldHeadFolder, '9015_mcp_oauth_client_registrations.sql')),
         unlink(join(oldHeadFolder, '9016_oauth_authority_watermark_reconciliation.sql')),
       ]);
@@ -93,7 +93,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           breakpoints: boolean;
         }>;
       };
-      journal.entries = journal.entries.filter((entry) => entry.idx <= 99);
+      journal.entries = journal.entries.filter((entry) => entry.when < OLD_HEAD_WATERMARK);
       journal.entries.push({
         idx: 100,
         version: '7',
@@ -214,9 +214,11 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       // legacy table to exact reconciliation in the same offline transaction.
       await expect(checkMigrationStatus(db)).resolves.toMatchObject({
         pending: [
-          '0102_zone_workflow_transitions',
-          '0103_session_power_priority',
-          '0104_environment_command_discovery',
+          '9010_session_auto_archive',
+          '9011_zone_workflow_transitions',
+          '9012_claude_oauth_attempts',
+          '9013_session_power_priority',
+          '9014_environment_command_discovery',
           '9015_mcp_oauth_client_registrations',
           '9016_oauth_authority_watermark_reconciliation',
           '9017_fork_migration_collision_repair',
@@ -305,7 +307,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       ).toEqual([{ workflows: true, auto_archive: true }]);
     });
 
-    it('preserves an exact final DCR schema and rows when upgrading the pre-rebase watermark', async () => {
+    it('preserves final DCR rows and applied Claude authority while repairing the fork watermark', async () => {
       if (!db) throw new Error('PostgreSQL test database was not initialized');
       const registrationId = generateId();
       const relationOid = rawRows(
@@ -357,22 +359,20 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority_updated_by`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority`);
 
-      // Reproduce the previous reviewed head's timestamp-only final watermark.
-      // Its authority schema is identical; the rebased bootstrap must not try
-      // to CREATE it again or discard its rows before exact reconciliation.
+      // This fork recorded Claude authority at 9012, later than upstream's
+      // old final watermark. Retain that real applied entry: erasing its ledger
+      // while keeping its table would invent an impossible upgrade fixture.
+      // Earlier missing fork schemas still need 9017's collision repair, and
+      // existing final DCR authority must retain its relation and rows.
       await executeRaw(
         db,
-        sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at >= 1788379200000`
-      );
-      await executeRaw(
-        db,
-        sql`INSERT INTO drizzle.__drizzle_migrations (hash, created_at)
-            VALUES ('pre-rebase-final-watermark', 1788379200000)`
+        sql`DELETE FROM drizzle.__drizzle_migrations
+            WHERE created_at >= 1788379200000 AND created_at <> 1788552000000`
       );
       await expect(checkMigrationStatus(db)).resolves.toMatchObject({
         pending: [
-          '0103_session_power_priority',
-          '0104_environment_command_discovery',
+          '9013_session_power_priority',
+          '9014_environment_command_discovery',
           '9015_mcp_oauth_client_registrations',
           '9016_oauth_authority_watermark_reconciliation',
           '9017_fork_migration_collision_repair',
