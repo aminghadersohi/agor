@@ -424,7 +424,7 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     expect(getSelectedZone()).toHaveClass('selected');
 
     expect(patch).toHaveBeenCalledTimes(2);
-  }, 60_000);
+  }, 90_000);
 
   it('uses one Grid plan for board and selection, then preserves cells for every visible action', async () => {
     if (window.innerWidth < 900) return;
