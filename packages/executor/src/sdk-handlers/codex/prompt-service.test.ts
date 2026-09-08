@@ -1065,7 +1065,7 @@ describe('CodexPromptService - forked sessions', () => {
         mockSessionsRepo,
         mockSessionMCPServerRepo,
         mockBranchesRepo,
-        undefined,
+        mockReposRepo,
         'test-api-key',
         mockDb
       );
