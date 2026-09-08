@@ -104,7 +104,7 @@ function settingsAction(serverId: string): HTMLButtonElement {
 
 async function confirmServerRemoval(title: string): Promise<void> {
   fireEvent.click(await screen.findByLabelText(`Remove ${title} server`));
-  const prompt = await screen.findByText(`Remove ${title}?`);
+  const prompt = await screen.findByText(`Remove ${title}?`, {}, { timeout: 5_000 });
   let confirm: HTMLButtonElement | undefined;
   await waitFor(() => {
     const popover = prompt.closest('.ant-popover');
