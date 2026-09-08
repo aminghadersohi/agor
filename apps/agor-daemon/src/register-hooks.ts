@@ -525,6 +525,7 @@ export const TENANT_OWNED_SERVICE_PATHS = [
   'mcp-servers',
   'mcp-servers/oauth-attempt-status',
   'mcp-servers/oauth-disconnect',
+  'mcp-servers/oauth-client-registration-reset',
   'mcp-servers/oauth-status',
   'mcp-catalog/readiness',
   'mcp-marketplace',
@@ -663,18 +664,11 @@ export function suppressKnowledgeCommandRealtimeEvent(context: HookContext): Hoo
  * Service endpoints whose implementation retains process-local credentials,
  * provider handshakes, or native runtime state. Keep this inventory exported
  * so the constrained HA fail-closed boundary has direct regression coverage.
- * `mcp-servers/discover` is included because an OAuth-protected probe can start
- * the same pending PKCE/callback flow as the explicit OAuth endpoints.
+ * MCP discovery is deliberately absent: its ordinary capability probe is HA
+ * safe, while its optional OAuth escalation is stopped inside the endpoint
+ * before provider discovery or flow creation.
  */
 export const CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES = [
-  ['mcp-servers/discover', 'mcpOAuth'],
-  ['mcp-servers/oauth-auth-headers', 'mcpOAuth'],
-  ['mcp-servers/oauth-complete', 'mcpOAuth'],
-  ['mcp-servers/oauth-disconnect', 'mcpOAuth'],
-  ['mcp-servers/oauth-refresh', 'mcpOAuth'],
-  ['mcp-servers/oauth-start', 'mcpOAuth'],
-  ['mcp-servers/oauth-status', 'mcpOAuth'],
-  ['mcp-servers/test-oauth', 'mcpOAuth'],
   ['codex-auth/device', 'codexDeviceAuth'],
   ['codex-auth/import', 'codexAuth'],
   ['codex-auth/logout', 'codexAuth'],

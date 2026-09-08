@@ -161,6 +161,8 @@ interface HaNativeSocketPayloads {
    */
   'marketplace:invalidated': Record<string, never>;
   'session-attention:acknowledged': SessionAttentionAcknowledgement;
+  /** Caller-private Marketplace freshness hint; recipients retain stale data while re-reading. */
+  'marketplace:changed': Record<string, never>;
 }
 
 /** Native Socket.IO packets intentionally permitted to cross the HA Redis adapter. */
@@ -171,6 +173,7 @@ export const HA_NATIVE_SOCKET_EVENT_INVENTORY = [
   'oauth:disconnected',
   'marketplace:invalidated',
   'session-attention:acknowledged',
+  'marketplace:changed',
 ] as const satisfies readonly (keyof HaNativeSocketPayloads)[];
 
 type NativeSocketTarget = {
