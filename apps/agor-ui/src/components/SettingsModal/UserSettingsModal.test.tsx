@@ -1904,7 +1904,11 @@ describe('UserSettingsModal — socket authority generations', () => {
     );
     expect(screen.queryByLabelText('claude-code acceptEdits')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Provider availability changed');
+    // Other retained panels can expose their own alerts. Pin this contract to
+    // the provider-authority diagnostic rather than requiring a single alert.
+    expect(
+      (await screen.findByText(/Provider availability changed/)).closest('[role="alert"]')
+    ).toBeInTheDocument();
     expect(onUpdate).not.toHaveBeenCalled();
   });
   it('falls back to Profile for an unknown settings deep link', async () => {
