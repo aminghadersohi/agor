@@ -19,7 +19,9 @@ const board = {
   primary_owner_user_id: 'owner-1',
   created_at: '',
   last_updated: '',
-  running_session_count: 12,
+  worktree_count: 3,
+  total_session_count: 12,
+  active_session_count: 4,
 } as Board;
 const owner = { user_id: 'owner-1', role: 'member' } as User;
 
@@ -53,7 +55,7 @@ function renderSwitcher(client = clientFor(), user: User = owner) {
 }
 
 describe('BoardSwitcher long-name layout', () => {
-  it('constrains every generated wrapper while keeping the name flexible and badge fixed', async () => {
+  it('constrains every generated wrapper while keeping the name flexible and counts fixed', async () => {
     const { container } = renderSwitcher();
     const trigger = container.querySelector<HTMLButtonElement>('button.ant-dropdown-trigger');
     expect(trigger).not.toBeNull();
@@ -69,8 +71,8 @@ describe('BoardSwitcher long-name layout', () => {
     const item = await screen.findByRole('menuitem');
     const itemContent = item.querySelector<HTMLElement>('.ant-dropdown-menu-title-content');
     const name = item.querySelector<HTMLElement>('[data-board-name]');
-    const badgeRoot = item.querySelector<HTMLElement>('[data-running-session-count-slot]');
-    const badgeIndicator = item.querySelector<HTMLElement>('.ant-badge-count');
+    const counts = item.querySelector<HTMLElement>('[data-board-list-counts]');
+    const avatar = item.querySelector<HTMLElement>('[data-board-list-avatar] > div');
     const popup = screen.getByTestId('board-switcher-popup');
 
     // jsdom has no layout engine: assert the durable semantic/style contracts,
@@ -79,11 +81,9 @@ describe('BoardSwitcher long-name layout', () => {
     expect(name).toHaveClass('ant-typography-ellipsis');
     expect(name).toHaveStyle({ flex: '1', minWidth: '0' });
     expect(name).toHaveTextContent(adversarialBoardName);
-    expect(badgeRoot).toHaveStyle({ flexShrink: '0' });
-    expect(badgeRoot).toHaveStyle({ width: '36px', minWidth: '36px', flexShrink: '0' });
-    expect(badgeIndicator?.style.flexShrink).toBe('');
-    expect(badgeIndicator?.style.backgroundColor).not.toBe('');
-    expect(popup).toHaveStyle({ width: '320px', maxWidth: 'calc(100vw - 48px)' });
+    expect(counts).toBeInTheDocument();
+    expect(avatar).toHaveStyle({ width: '36px', height: '36px', flexShrink: '0' });
+    expect(popup).toHaveStyle({ width: '360px', maxWidth: 'calc(100vw - 48px)' });
   });
 
   it('reveals a clipped name when its menu item receives keyboard focus', async () => {
@@ -113,12 +113,33 @@ describe('BoardSwitcher long-name layout', () => {
   });
 });
 
-describe('BoardSwitcher running Session counts', () => {
-  it('shows authoritative one/many copy and hides only the badge at zero', async () => {
+describe('BoardSwitcher Board-list counts', () => {
+  it('shows all authoritative counts with explicit zeroes and accessible labels', async () => {
     const boards = [
-      { ...board, board_id: 'board-zero', name: 'Zero', running_session_count: 0 },
-      { ...board, board_id: 'board-one', name: 'One', running_session_count: 1 },
-      { ...board, board_id: 'board-many', name: 'Many', running_session_count: 7 },
+      {
+        ...board,
+        board_id: 'board-zero',
+        name: 'Zero',
+        worktree_count: 0,
+        total_session_count: 0,
+        active_session_count: 0,
+      },
+      {
+        ...board,
+        board_id: 'board-one',
+        name: 'One',
+        worktree_count: 1,
+        total_session_count: 1,
+        active_session_count: 1,
+      },
+      {
+        ...board,
+        board_id: 'board-many',
+        name: 'Many',
+        worktree_count: 3,
+        total_session_count: 12,
+        active_session_count: 7,
+      },
     ] as Board[];
     const { container } = render(
       <BoardSwitcher
@@ -135,16 +156,17 @@ describe('BoardSwitcher running Session counts', () => {
 
     const items = await screen.findAllByRole('menuitem');
     expect(items).toHaveLength(3);
-    expect(items.find((item) => item.textContent?.includes('Zero'))).not.toHaveTextContent(
-      /running session/
-    );
-    expect(screen.getByLabelText('1 running session')).toBeInTheDocument();
-    expect(screen.getByLabelText('7 running sessions')).toBeInTheDocument();
-    expect(screen.queryByLabelText('0 running sessions')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('0 worktrees')).toBeInTheDocument();
+    expect(screen.getByLabelText('0 total sessions')).toBeInTheDocument();
+    expect(screen.getByLabelText('0 active sessions')).toBeInTheDocument();
+    expect(screen.getByLabelText('1 worktree')).toBeInTheDocument();
+    expect(screen.getByLabelText('1 total session')).toBeInTheDocument();
+    expect(screen.getByLabelText('1 active session')).toBeInTheDocument();
+    expect(screen.getByLabelText('3 worktrees')).toBeInTheDocument();
+    expect(screen.getByLabelText('12 total sessions')).toBeInTheDocument();
+    expect(screen.getByLabelText('7 active sessions')).toBeInTheDocument();
     for (const item of items) {
-      expect(item.querySelector('[data-running-session-count-slot]')).toHaveStyle({
-        width: '36px',
-      });
+      expect(item.querySelector('[data-board-list-counts]')).toBeInTheDocument();
     }
   });
 });

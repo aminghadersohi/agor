@@ -1,7 +1,7 @@
 import type { Board, Session } from '@agor-live/client';
 import { describe, expect, it } from 'vitest';
 import {
-  applyBoardRunningSessionCounts,
+  applyBoardListCounts,
   applySessionPatchToMaps,
   buildById,
   buildSessionMaps,
@@ -62,35 +62,54 @@ describe('reconcileByIdMap', () => {
   });
 });
 
-describe('applyBoardRunningSessionCounts', () => {
-  it('updates only the count while preserving full board metadata', () => {
+describe('applyBoardListCounts', () => {
+  it('updates only the three counts while preserving full board metadata', () => {
     const full = {
       ...makeBoard('a'),
-      running_session_count: 0,
+      worktree_count: 0,
+      total_session_count: 0,
+      active_session_count: 0,
       objects: { note: { type: 'markdown', x: 0, y: 0, width: 300, content: 'Keep me' } },
       custom_css: '.board { opacity: 1 }',
     } as Board;
     const prev = new Map([[full.board_id, full]]);
 
-    const result = applyBoardRunningSessionCounts(prev, [
-      { ...makeBoard('a'), running_session_count: 4 } as Board,
+    const result = applyBoardListCounts(prev, [
+      {
+        ...makeBoard('a'),
+        worktree_count: 2,
+        total_session_count: 7,
+        active_session_count: 4,
+      } as Board,
     ]);
 
     expect(result).not.toBe(prev);
     expect(result.get('a')).toMatchObject({
-      running_session_count: 4,
+      worktree_count: 2,
+      total_session_count: 7,
+      active_session_count: 4,
       objects: full.objects,
       custom_css: full.custom_css,
     });
   });
 
   it('is reference-stable when the authoritative count is unchanged', () => {
-    const full = { ...makeBoard('a'), running_session_count: 2 } as Board;
+    const full = {
+      ...makeBoard('a'),
+      worktree_count: 1,
+      total_session_count: 3,
+      active_session_count: 2,
+    } as Board;
     const prev = new Map([[full.board_id, full]]);
 
     expect(
-      applyBoardRunningSessionCounts(prev, [
-        { ...makeBoard('a'), running_session_count: 2 } as Board,
+      applyBoardListCounts(prev, [
+        {
+          ...makeBoard('a'),
+          worktree_count: 1,
+          total_session_count: 3,
+          active_session_count: 2,
+        } as Board,
       ])
     ).toBe(prev);
   });

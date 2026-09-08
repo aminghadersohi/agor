@@ -50,7 +50,7 @@ import {
   runHydration,
 } from '../store/agorHydration';
 import {
-  applyBoardRunningSessionCounts,
+  applyBoardListCounts,
   buildBoardObjectMaps,
   buildById,
   buildSessionMaps,
@@ -905,8 +905,10 @@ export function useAgorData(
         // visible canvas paints zones/text/markdown at first paint (no flash).
         // Other boards stay lean until the boards background hydration lands.
         if (displayedBoardFull) {
-          displayedBoardFull.running_session_count =
-            boardsMap.get(displayedBoardFull.board_id)?.running_session_count ?? 0;
+          const listProjection = boardsMap.get(displayedBoardFull.board_id);
+          displayedBoardFull.worktree_count = listProjection?.worktree_count ?? 0;
+          displayedBoardFull.total_session_count = listProjection?.total_session_count ?? 0;
+          displayedBoardFull.active_session_count = listProjection?.active_session_count ?? 0;
           boardsMap.set(displayedBoardFull.board_id, displayedBoardFull);
         }
 
@@ -1385,59 +1387,70 @@ export function useAgorData(
     ) as typeof realtime;
 
     const boardsService = client.service('boards');
-    let runningCountRefreshInFlight = false;
-    let runningCountRefreshQueued = false;
-    let runningCountRefreshCancelled = false;
-    const refreshRunningSessionCounts = () => {
-      if (!subscriptionIsCurrent() || runningCountRefreshCancelled) return;
-      if (runningCountRefreshInFlight) {
-        runningCountRefreshQueued = true;
+    let boardListCountRefreshInFlight = false;
+    let boardListCountRefreshQueued = false;
+    let boardListCountRefreshCancelled = false;
+    let boardListCountRevision = 0;
+    const refreshBoardListCounts = () => {
+      if (!subscriptionIsCurrent() || boardListCountRefreshCancelled) return;
+      boardListCountRevision += 1;
+      if (boardListCountRefreshInFlight) {
+        boardListCountRefreshQueued = true;
         return;
       }
-      runningCountRefreshInFlight = true;
+      const requestRevision = boardListCountRevision;
+      boardListCountRefreshInFlight = true;
       void boardsService
         .findAll({
           query: { archived: false, lean: true, $limit: PAGINATION.DEFAULT_LIMIT },
         })
         .then((freshBoards: Board[]) => {
-          if (!subscriptionIsCurrent() || runningCountRefreshCancelled) return;
+          if (
+            !subscriptionIsCurrent() ||
+            boardListCountRefreshCancelled ||
+            requestRevision !== boardListCountRevision
+          )
+            return;
           agorStore
             .getState()
-            .setMap('boardById', (prev) => applyBoardRunningSessionCounts(prev, freshBoards));
+            .setMap('boardById', (prev) => applyBoardListCounts(prev, freshBoards));
         })
         .catch((error: unknown) => {
           // A later Session/Branch event or normal reconnect resync retries the
           // authoritative read; never derive a fallback from partial UI maps.
-          console.warn('[useAgorData] running Session count refresh failed:', error);
+          console.warn('[useAgorData] Board list count refresh failed:', error);
         })
         .finally(() => {
-          runningCountRefreshInFlight = false;
-          if (runningCountRefreshQueued && !runningCountRefreshCancelled) {
-            runningCountRefreshQueued = false;
-            refreshRunningSessionCounts();
+          boardListCountRefreshInFlight = false;
+          if (boardListCountRefreshQueued && !boardListCountRefreshCancelled) {
+            boardListCountRefreshQueued = false;
+            refreshBoardListCounts();
           }
         });
     };
 
     type SessionCountState = Pick<Session, 'status' | 'archived' | 'branch_id' | 'branch_board_id'>;
     const realtimeSessionCountState = new Map<string, SessionCountState>();
-    const countsAsRunning = (session: SessionCountState | undefined) =>
-      session?.status === 'running' && session.archived !== true;
+    const countsAsVisible = (session: SessionCountState | undefined) =>
+      session !== undefined && session.archived !== true;
+    const countsAsActive = (session: SessionCountState | undefined) =>
+      countsAsVisible(session) && isSessionExecuting(session);
     const countMembershipChanged = (
       previous: SessionCountState | undefined,
       current: SessionCountState
     ) =>
       !previous ||
-      countsAsRunning(previous) !== countsAsRunning(current) ||
-      (countsAsRunning(current) &&
+      countsAsVisible(previous) !== countsAsVisible(current) ||
+      countsAsActive(previous) !== countsAsActive(current) ||
+      (countsAsVisible(current) &&
         (previous.branch_id !== current.branch_id ||
           previous.branch_board_id !== current.branch_board_id));
     const noteCountAffectingEvent = () => {
-      // A running-count refresh is an authoritative board-list write. Bump the
+      // A count refresh is an authoritative board-list write. Bump the
       // board revision synchronously so an older full-board hydration snapshot
       // cannot land over it while the count request is in flight.
       bumpRevision('boards');
-      refreshRunningSessionCounts();
+      refreshBoardListCounts();
     };
 
     // Subscribe to session events. `patched`/`updated` are the streaming hot
@@ -1520,7 +1533,7 @@ export function useAgorData(
     const sessionCreatedSync = (session: Session) => {
       if (!subscriptionIsCurrent()) return;
       realtimeSessionCountState.set(session.session_id, session);
-      if (countsAsRunning(session)) noteCountAffectingEvent();
+      if (countsAsVisible(session)) noteCountAffectingEvent();
       realtimeSessionLifecycleState.set(session.session_id, session);
       untombstoneSession(subscriptionAuthorityScope, session.session_id);
       scopedRealtime.sessionCreated(session);
@@ -1529,7 +1542,7 @@ export function useAgorData(
       if (!subscriptionIsCurrent()) return;
       const previous = realtimeSessionCountState.get(session.session_id) ?? session;
       realtimeSessionCountState.delete(session.session_id);
-      if (countsAsRunning(previous)) noteCountAffectingEvent();
+      if (countsAsVisible(previous)) noteCountAffectingEvent();
       realtimeSessionLifecycleState.delete(session.session_id);
       terminalReconciliations.delete(session.session_id);
       tombstoneSession(subscriptionAuthorityScope, session.session_id);
@@ -1580,7 +1593,7 @@ export function useAgorData(
       if (!subscriptionIsCurrent()) return;
       // branchRemoved already bumps the boards revision as part of its hard
       // delete cascade; only schedule the authoritative count read here.
-      refreshRunningSessionCounts();
+      refreshBoardListCounts();
       scopedRealtime.branchRemoved(branch);
       // Branch deletion cascades tasks/messages without child Feathers events.
       // Comments survive those cascades with task_id/message_id SET NULL, but
@@ -1781,7 +1794,7 @@ export function useAgorData(
 
     // Cleanup listeners on unmount
     return () => {
-      runningCountRefreshCancelled = true;
+      boardListCountRefreshCancelled = true;
       terminalReconciliationCancelled = true;
       terminalReconciliations.clear();
       realtimeSessionLifecycleState.clear();

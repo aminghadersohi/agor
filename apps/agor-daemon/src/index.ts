@@ -49,6 +49,7 @@ import {
   resolveEffectiveConfig,
   resolveGitConfigParameters,
   resolveIdentityAuthority,
+  resolveMcpOAuthCallbackOrigin,
   resolveMultiTenancyConfig,
   resolveSecurity,
   resolveValidExternalLaunchProvider,
@@ -80,6 +81,7 @@ import { registerHooks } from './register-hooks.js';
 import { registerRoutes } from './register-routes.js';
 import { registerServices } from './register-services.js';
 import { createMCPOAuthCallbackRoute } from './services/mcp-oauth-callback-route.js';
+import { resolveMCPOAuthRedirectUri } from './services/mcp-oauth-redirect-uri.js';
 import { loadBuildInfo } from './setup/build-info.js';
 import { createDynamicCompressionMiddleware } from './setup/compression.js';
 import { buildCorsConfig, isSandpackOrigin } from './setup/cors.js';
@@ -219,17 +221,6 @@ async function startDaemonWithOwnedMetrics(
     };
   }
 
-  // HA is an explicit, validated topology boundary. REDIS_URL alone never
-  // changes standalone behavior. Resolve this after immutable environment
-  // projection so every startup consumer observes one effective snapshot.
-  const deployment = resolveDeploymentConfig(config, process.env, databaseUrl);
-  console.log(`🌐 Deployment mode: ${deployment.mode}`);
-
-  const multiTenancy = resolveMultiTenancyConfig(config);
-  console.log(
-    `🏢 Multi-tenancy: mode=${multiTenancy.mode} tenant=${multiTenancy.mode === 'static' ? multiTenancy.static_tenant_id : 'auth-resolved'}`
-  );
-
   // Set GIT_CONFIG_PARAMETERS before any child-process spawn so every git
   // invocation under Agor's control inherits it. See @agor/core/config
   // (security-resolver) for the defaults + resolver semantics.
@@ -255,6 +246,22 @@ async function startDaemonWithOwnedMetrics(
   // Detach the snapshot before freezing so callers that supplied
   // DaemonStartOptions.config retain ownership of their object graph.
   const effectiveConfig = deepFreezeClone(config);
+  // Resolve the callback exactly once from the same frozen startup snapshot
+  // used by services. This prevents parameterless config reloads from reading
+  // a different ~/.agor/config.yaml than --config/AGOR_CONFIG_PATH/injection.
+  const mcpOAuthCallbackOrigin = resolveMcpOAuthCallbackOrigin(effectiveConfig, process.env);
+  const deployment = resolveDeploymentConfig(
+    effectiveConfig,
+    process.env,
+    databaseUrl,
+    mcpOAuthCallbackOrigin
+  );
+  console.log(`🌐 Deployment mode: ${deployment.mode}`);
+
+  const multiTenancy = resolveMultiTenancyConfig(effectiveConfig);
+  console.log(
+    `🏢 Multi-tenancy: mode=${multiTenancy.mode} tenant=${multiTenancy.mode === 'static' ? multiTenancy.static_tenant_id : 'auth-resolved'}`
+  );
   configureResolvedConfigSlice(effectiveConfig);
   configureOpenSourceTelemetryLogger(effectiveConfig);
   if (effectiveConfig.telemetry?.enabled === undefined) {
@@ -331,6 +338,14 @@ async function startDaemonWithOwnedMetrics(
   // --------------------------------------------------------------------------
   const envPort = process.env.PORT ? Number.parseInt(process.env.PORT, 10) : undefined;
   const DAEMON_PORT = envPort ?? effectiveConfig.daemon?.port ?? 3030;
+  // Freeze the fork's standalone loopback policy alongside upstream's public
+  // and HA callback authority. Request handlers never reload configuration.
+  const mcpOAuthCallbackUrl =
+    deployment.mode === 'ha'
+      ? (deployment.mcpOAuthCallbackUrl ?? undefined)
+      : effectiveConfig.daemon?.mcp_oauth_callback_mode !== 'public'
+        ? await resolveMCPOAuthRedirectUri({ daemonPort: DAEMON_PORT, usePublicHttps: false })
+        : (mcpOAuthCallbackOrigin.standaloneCallbackUrl ?? undefined);
   const DAEMON_HOST = process.env.DAEMON_HOST ?? effectiveConfig.daemon?.host ?? 'localhost';
 
   const envUiPort = process.env.UI_PORT ? Number.parseInt(process.env.UI_PORT, 10) : undefined;
@@ -831,6 +846,7 @@ async function startDaemonWithOwnedMetrics(
     allowSuperadmin,
     requireAuth,
     deployment,
+    mcpOAuthCallbackUrl,
   });
   mcpOAuthCallbackRoute.setHandler(services.oauthCallbackHandler);
 

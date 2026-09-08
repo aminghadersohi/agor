@@ -764,6 +764,27 @@
       "when": 1788800000001,
       "tag": "9014_environment_command_discovery",
       "breakpoints": true
+    },
+    {
+      "idx": 9015,
+      "version": "7",
+      "when": 1788800000002,
+      "tag": "9015_mcp_oauth_client_registrations",
+      "breakpoints": true
+    },
+    {
+      "idx": 9016,
+      "version": "7",
+      "when": 1788800000003,
+      "tag": "9016_oauth_authority_watermark_reconciliation",
+      "breakpoints": true
+    },
+    {
+      "idx": 9017,
+      "version": "7",
+      "when": 1788800000004,
+      "tag": "9017_fork_migration_collision_repair",
+      "breakpoints": true
     }
   ]
 }

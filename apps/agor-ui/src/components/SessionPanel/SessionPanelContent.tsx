@@ -3,6 +3,8 @@ import type {
   Branch,
   CoordinatorQueueBatchApplyResult,
   CoordinatorQueueBatchPreview,
+  QueuedPromptAmendmentApplyResult,
+  QueuedPromptAmendmentPreview,
   Session,
   SpawnConfig,
   Task,
@@ -11,6 +13,7 @@ import { getTeammateConfig, isTeammate, sessionPath } from '@agor-live/client';
 import {
   CopyOutlined,
   DeleteOutlined,
+  EditOutlined,
   VerticalAlignBottomOutlined,
   VerticalAlignTopOutlined,
 } from '@ant-design/icons';
@@ -38,6 +41,11 @@ import { BranchMetadataRow } from '../BranchMetadataRow';
 import { ConversationView } from '../ConversationView';
 import { ForkSpawnModal } from '../ForkSpawnModal';
 import { useTeammateProfileImageUrl } from '../ProfileImage';
+import {
+  EDITABLE_QUEUED_PROMPT_MAX_BYTES,
+  queuedPromptPreviewIsStale,
+  queuedPromptUnavailableReason,
+} from './queuedPromptEditorState';
 
 export interface SessionPanelContentProps {
   client: AgorClient | null;
@@ -97,6 +105,12 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
     const [batchPreview, setBatchPreview] = React.useState<CoordinatorQueueBatchPreview | null>(
       null
     );
+    const [editTask, setEditTask] = React.useState<Task | null>(null);
+    const [editPreview, setEditPreview] = React.useState<QueuedPromptAmendmentPreview | null>(null);
+    const [editText, setEditText] = React.useState('');
+    const [editLoading, setEditLoading] = React.useState(false);
+    const [editConflict, setEditConflict] = React.useState<string | null>(null);
+    const editOperationIdRef = React.useRef('');
     const availableBatchRelationships = React.useMemo(() => {
       const relationships: Array<'parent' | 'coordinator'> = [];
       if (session.genealogy?.parent_session_id) relationships.push('parent');
@@ -113,6 +127,135 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
     );
     const batchOperationIdRef = React.useRef<string>('');
     const isQueueHeldByFailure = queuedTasks.length > 0 && session.status === 'failed';
+    const editDirty = !!editPreview && editText !== editPreview.canonical_prompt;
+    const editBytes = React.useMemo(
+      () => new TextEncoder().encode(editText).byteLength,
+      [editText]
+    );
+
+    const loadEditPreview = React.useCallback(
+      async (task = editTask) => {
+        if (!client || !task) return;
+        setEditLoading(true);
+        try {
+          const preview = (await client.service(`/tasks/${task.task_id}/queued-prompt`).find({
+            query: { sessionId: session.session_id, authority: 'author' },
+          })) as unknown as QueuedPromptAmendmentPreview;
+          setEditPreview(preview);
+          setEditText(preview.canonical_prompt);
+          setEditConflict(null);
+          editOperationIdRef.current = crypto.randomUUID();
+        } catch (error) {
+          setEditConflict(error instanceof Error ? error.message : String(error));
+        } finally {
+          setEditLoading(false);
+        }
+      },
+      [client, editTask, session.session_id]
+    );
+
+    const openEditDialog = React.useCallback(
+      (task: Task) => {
+        setEditTask(task);
+        setEditPreview(null);
+        setEditText(task.full_prompt);
+        setEditConflict(null);
+        editOperationIdRef.current = crypto.randomUUID();
+        void loadEditPreview(task);
+      },
+      [loadEditPreview]
+    );
+
+    const closeEditDialog = React.useCallback(() => {
+      if (editDirty) {
+        Modal.confirm({
+          title: 'Discard unsaved changes?',
+          content: 'Your queued prompt has not been changed.',
+          okText: 'Discard',
+          okButtonProps: { danger: true },
+          onOk: () => setEditTask(null),
+        });
+        return;
+      }
+      setEditTask(null);
+    }, [editDirty]);
+
+    const mutateQueuedPrompt = React.useCallback(
+      async (action: 'update' | 'cancel') => {
+        if (!client || !editTask || !editPreview || editLoading) return;
+        setEditLoading(true);
+        setEditConflict(null);
+        try {
+          const result = (await client.service(`/tasks/${editTask.task_id}/queued-prompt`).create({
+            sessionId: session.session_id,
+            authority: 'author',
+            action,
+            expectedQueueRevision: editPreview.queue_revision,
+            expectedPromptRevision: editPreview.prompt_revision,
+            idempotencyKey: editOperationIdRef.current,
+            ...(action === 'update' ? { revisedPrompt: editText } : {}),
+          })) as QueuedPromptAmendmentApplyResult;
+          showSuccess(
+            action === 'update'
+              ? `Queued prompt saved as revision ${result.prompt_revision}`
+              : 'Queued prompt cancelled safely'
+          );
+          setEditTask(null);
+        } catch (error) {
+          setEditConflict(
+            `${error instanceof Error ? error.message : String(error)} Refresh the authoritative prompt before retrying.`
+          );
+        } finally {
+          setEditLoading(false);
+        }
+      },
+      [client, editLoading, editPreview, editTask, editText, session.session_id, showSuccess]
+    );
+
+    const refreshEditPreview = React.useCallback(() => {
+      if (!editDirty) {
+        void loadEditPreview();
+        return;
+      }
+      Modal.confirm({
+        title: 'Discard local changes and refresh?',
+        content: 'The authoritative queued prompt will replace the unsaved text in this editor.',
+        okText: 'Discard and refresh',
+        okButtonProps: { danger: true },
+        onOk: () => loadEditPreview(),
+      });
+    }, [editDirty, loadEditPreview]);
+
+    const requestQueuedPromptCancellation = React.useCallback(() => {
+      Modal.confirm({
+        title: 'Cancel this queued prompt?',
+        content:
+          'The Task will be settled as stopped and retained with its prompt and amendment audit. It will not be deleted.',
+        okText: 'Cancel queued prompt',
+        okButtonProps: { danger: true },
+        onOk: () => mutateQueuedPrompt('cancel'),
+      });
+    }, [mutateQueuedPrompt]);
+
+    React.useEffect(() => {
+      if (!client || !editTask || !editPreview) return;
+      const live = queuedTasks.find((task) => task.task_id === editTask.task_id);
+      if (!live) {
+        void client
+          .service('tasks')
+          .get(editTask.task_id)
+          .then((task) => {
+            setEditConflict(queuedPromptUnavailableReason((task as Task).status));
+          })
+          .catch(() =>
+            setEditConflict('This prompt left the editable queue. Refresh to continue.')
+          );
+        return;
+      }
+      if (queuedPromptPreviewIsStale(live, editPreview)) {
+        setEditConflict('Another tab changed this queued prompt. Refresh before saving.');
+      }
+    }, [client, editPreview, editTask, queuedTasks]);
 
     React.useEffect(() => {
       if (availableBatchRelationships.includes(batchRelationship)) return;
@@ -420,6 +563,12 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
                         one execution turn ({task.metadata.coordinator_queue_batch.strategy})
                       </Typography.Text>
                     )}
+                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                      Editable until dispatch/claim
+                      {task.metadata?.queued_prompt_amendment
+                        ? ` · revision ${task.metadata.queued_prompt_amendment.current_revision}`
+                        : ' · original'}
+                    </Typography.Text>
                   </div>
                   <Space size={4}>
                     {isQueueHeldByFailure && idx === 0 && (
@@ -442,41 +591,174 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
                         showSuccess('Message copied to clipboard');
                       }}
                     />
-                    <Button
-                      type="text"
-                      size="small"
-                      danger
-                      icon={<DeleteOutlined />}
-                      onClick={async () => {
-                        if (!client) return;
-
-                        try {
-                          // Optimistically remove from UI
-                          setQueuedTasks((prev) => prev.filter((t) => t.task_id !== task.task_id));
-
-                          // Delete the queued task — cascade removes the row
-                          // entirely; spawnTaskExecutor never gets a chance.
-                          await client.service('tasks').remove(task.task_id);
-                        } catch (error) {
-                          showError(
-                            `Failed to remove queued task: ${error instanceof Error ? error.message : String(error)}`
-                          );
-
-                          // Re-fetch queue to restore accurate state
-                          const response = await client
-                            .service(`sessions/${session.session_id}/tasks/queue`)
-                            .find();
-                          const data = (response as { data: Task[] }).data || [];
-                          setQueuedTasks(data);
-                        }
-                      }}
-                    />
+                    <Tooltip
+                      title={
+                        currentUserId === task.created_by
+                          ? 'Edit or cancel this queued prompt'
+                          : 'Only the prompt author can edit here; parent/coordinator access is available through the API/MCP contract.'
+                      }
+                    >
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<EditOutlined />}
+                        aria-label={`Edit queued prompt ${idx + 1}`}
+                        disabled={!client || currentUserId !== task.created_by}
+                        onClick={() => openEditDialog(task)}
+                      />
+                    </Tooltip>
                   </Space>
                 </div>
               ))}
             </Space>
           </div>
         )}
+
+        <Modal
+          open={!!editTask}
+          title="Edit queued prompt"
+          onCancel={closeEditDialog}
+          maskClosable={false}
+          destroyOnHidden
+          footer={
+            <Space wrap style={{ width: '100%', justifyContent: 'space-between' }}>
+              <Button
+                danger
+                icon={<DeleteOutlined />}
+                disabled={!editPreview?.editable || editLoading || !!editConflict}
+                onClick={requestQueuedPromptCancellation}
+              >
+                Cancel queued prompt
+              </Button>
+              <Space>
+                <Button onClick={closeEditDialog}>Close</Button>
+                <Button
+                  type="primary"
+                  loading={editLoading}
+                  disabled={
+                    !editPreview?.editable ||
+                    !editDirty ||
+                    !!editConflict ||
+                    !editText.trim() ||
+                    editBytes > EDITABLE_QUEUED_PROMPT_MAX_BYTES
+                  }
+                  onClick={() => void mutateQueuedPrompt('update')}
+                >
+                  Save revision
+                </Button>
+              </Space>
+            </Space>
+          }
+        >
+          <Space orientation="vertical" size={12} style={{ width: '100%' }}>
+            <Alert
+              type="info"
+              showIcon
+              message="Editable until dispatch/claim"
+              description="Saving changes the canonical instruction for this Task only. Original text, authorship, timestamps, and every revision remain in its audit trail. Running work is never rewritten."
+            />
+            {editConflict && (
+              <Alert
+                type="error"
+                showIcon
+                message="Authoritative queue changed"
+                description={editConflict}
+                action={
+                  <Button size="small" loading={editLoading} onClick={refreshEditPreview}>
+                    Refresh
+                  </Button>
+                }
+              />
+            )}
+            {editPreview && !editPreview.editable && (
+              <Alert
+                type="warning"
+                showIcon
+                message="Not editable"
+                description={editPreview.refusal_reason}
+              />
+            )}
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                justifyContent: 'space-between',
+                gap: token.sizeUnit,
+              }}
+            >
+              <Typography.Text type="secondary">
+                Revision {editPreview?.prompt_revision ?? 0} · authored{' '}
+                {editPreview?.created_at ? new Date(editPreview.created_at).toLocaleString() : '—'}
+              </Typography.Text>
+              <Typography.Text
+                type={editBytes > 32 * 1024 ? 'danger' : 'secondary'}
+                aria-live="polite"
+              >
+                {editBytes.toLocaleString()} / {EDITABLE_QUEUED_PROMPT_MAX_BYTES.toLocaleString()}{' '}
+                bytes
+              </Typography.Text>
+            </div>
+            <Input.TextArea
+              autoFocus
+              value={editText}
+              disabled={!editPreview?.editable || editLoading}
+              onChange={(event) => setEditText(event.target.value)}
+              onKeyDown={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                  event.preventDefault();
+                  if (
+                    editPreview?.editable &&
+                    editDirty &&
+                    !editConflict &&
+                    editText.trim() &&
+                    editBytes <= EDITABLE_QUEUED_PROMPT_MAX_BYTES
+                  ) {
+                    void mutateQueuedPrompt('update');
+                  }
+                }
+              }}
+              autoSize={{ minRows: 8, maxRows: 18 }}
+              aria-label="Canonical queued prompt"
+              aria-describedby="queued-prompt-editor-help"
+            />
+            <Typography.Text id="queued-prompt-editor-help" type="secondary">
+              Press ⌘/Ctrl+Enter to save. Escape or Close preserves unsaved-change protection.
+            </Typography.Text>
+            {(editPreview?.amendment?.revisions.length ?? 0) > 0 && (
+              <details>
+                <summary>
+                  Provenance: original plus {editPreview!.amendment!.revisions.length} durable{' '}
+                  {editPreview!.amendment!.revisions.length === 1 ? 'revision' : 'revisions'}
+                </summary>
+                <Space orientation="vertical" size={8} style={{ width: '100%', marginTop: 8 }}>
+                  <Typography.Text strong>
+                    Original · {editPreview!.created_at} · {editPreview!.created_by}
+                  </Typography.Text>
+                  <Typography.Paragraph
+                    copyable
+                    style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}
+                  >
+                    {editPreview!.amendment!.original_prompt}
+                  </Typography.Paragraph>
+                  {editPreview!.amendment!.revisions.map((revision) => (
+                    <div key={revision.operation_id}>
+                      <Typography.Text strong>
+                        Revision {revision.revision} · {revision.amended_at} ·{' '}
+                        {revision.amended_by_user_id} via {revision.authority}
+                      </Typography.Text>
+                      <Typography.Paragraph
+                        copyable
+                        style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}
+                      >
+                        {revision.text}
+                      </Typography.Paragraph>
+                    </div>
+                  ))}
+                </Space>
+              </details>
+            )}
+          </Space>
+        </Modal>
 
         <Modal
           open={batchOpen}

@@ -10,6 +10,18 @@ import { MCP_CAPABILITY_ISSUING_SERVICE_PATHS } from './utils/mcp-server-authori
  * operator-aware: standalone defaults to a stable loopback callback like
  * native developer tools, while a remote-browser deployment can explicitly
  * select its configured public HTTPS origin.
+ * Background: a previous bug had `apps/agor-daemon/src/register-services.ts`
+ * routing some OAuth flows (Settings UI Discover, Test OAuth → Start Browser
+ * Flow) through `performMCPOAuthFlow()` from `@agor/core/tools/mcp/...`. That
+ * helper spins up a `127.0.0.1:<random>` HTTP listener and uses it as the
+ * OAuth `redirect_uri`. Upstream OAuth providers (Notion, Linear, etc.) then
+ * send the redirect to the END USER'S BROWSER, which generally cannot reach
+ * the daemon's `127.0.0.1` — symptom: per-user "OAuth login redirected me to
+ * localhost" failures for any user not running on the daemon host.
+ *
+ * The fix funnels every daemon OAuth path through `startTwoPhaseMCPOAuthFlow`,
+ * which receives the callback URL resolved once from the daemon's frozen
+ * effective startup configuration — never from a runtime config reload.
  *
  * These structural assertions are intentionally coarse: they prevent the
  * specific regression of any new daemon code re-introducing
@@ -35,11 +47,13 @@ describe('register-services OAuth callback URL regression', () => {
     expect(codeOnly).not.toMatch(/\bperformMCPOAuthFlow\s*\(/);
   });
 
-  it('delegates redirect selection to the deployment-aware resolver', () => {
-    expect(codeOnly).toMatch(/resolveRedirectUri\s*\(/);
-    expect(codeOnly).toMatch(
-      /usePublicHttps:\s*ctx\.config\.daemon\?\.mcp_oauth_callback_mode\s*===\s*['"]public['"]/
+  it('freezes standalone loopback selection at startup, separate from HA public callbacks', () => {
+    const startup = readFileSync(new URL('./index.ts', import.meta.url), 'utf8');
+    expect(startup).toContain("effectiveConfig.daemon?.mcp_oauth_callback_mode !== 'public'");
+    expect(startup).toContain(
+      'resolveMCPOAuthRedirectUri({ daemonPort: DAEMON_PORT, usePublicHttps: false })'
     );
+    expect(startup).toContain('deployment.mcpOAuthCallbackUrl');
   });
 
   it('keeps loopback callback permission independent from provider endpoint egress', () => {
@@ -47,6 +61,12 @@ describe('register-services OAuth callback URL regression', () => {
       /allowLoopbackRedirectUri:\s*ctx\.config\.daemon\?\.mcp_oauth_callback_mode\s*!==\s*['"]public['"]/
     );
     expect(codeOnly).toMatch(/allowLocalhostHttp:\s*!postgresOAuthDeployment/);
+  });
+
+  it('uses only the startup-injected OAuth callback URL', () => {
+    expect(codeOnly).toMatch(/return\s+ctx\.mcpOAuthCallbackUrl/);
+    expect(codeOnly).not.toMatch(/\brequirePublicBaseUrl\s*\(/);
+    expect(codeOnly).not.toMatch(/\bloadConfig(?:FromFile)?\s*\(/);
   });
 
   it('preserves tenant scope across unauthenticated OAuth callbacks', () => {
@@ -174,6 +194,7 @@ describe('register-services OAuth callback URL regression', () => {
       'mcp-servers/oauth-status',
       'mcp-servers/oauth-attempt-status',
       'mcp-servers/oauth-auth-headers',
+      'mcp-servers/oauth-client-registration-reset',
     ] as const;
     const registeredAuthServices = new Set(
       Array.from(
@@ -252,6 +273,23 @@ describe('register-services OAuth callback URL regression', () => {
     expect(callbackBody).toMatch(
       /if\s*\(\s*!code\s*\|\|\s*!state\s*\)[\s\S]*sendOAuthResultPage\s*\(\s*res\s*,\s*false/
     );
+  });
+
+  it('never treats a browser error parameter as DCR invalidation evidence', () => {
+    const callbackBody = codeOnly.slice(
+      codeOnly.indexOf('const oauthCallbackHandler'),
+      codeOnly.indexOf("app.use('/mcp-servers',")
+    );
+    const frontChannelErrorBranch = callbackBody.slice(
+      callbackBody.indexOf('if (error)'),
+      callbackBody.indexOf('if (!code || !state)')
+    );
+
+    expect(frontChannelErrorBranch).toMatch(
+      /durableOAuthFlows\.failPendingCallback\s*\(\s*state\s*,\s*['"]authorization_denied['"]/
+    );
+    expect(frontChannelErrorBranch).not.toMatch(/invalidateTokenEndpointRejectedClient/);
+    expect(frontChannelErrorBranch).not.toMatch(/client_registration_invalidated/);
   });
 
   it('uses one phase-aware failure classifier for callback and manual completion', () => {

@@ -28,6 +28,8 @@ const interruptMocks = vi.hoisted(() => ({
   terminate: vi.fn(),
   previewBatch: vi.fn(),
   applyBatch: vi.fn(),
+  previewAmendment: vi.fn(),
+  applyAmendment: vi.fn(),
 }));
 
 vi.mock('../resolve-ids.js', () => ({
@@ -35,6 +37,7 @@ vi.mock('../resolve-ids.js', () => ({
   resolveSessionId: async (_ctx: unknown, id: string) => id,
   resolveBranchId: async (_ctx: unknown, id: string) => id,
   resolveMcpServerId: async (_ctx: unknown, id: string) => `full-${id}`,
+  resolveTaskId: async (_ctx: unknown, id: string) => id,
 }));
 
 vi.mock('../../utils/branch-authorization.js', () => ({
@@ -101,6 +104,8 @@ vi.mock('@agor/core/db', () => ({
     admitInterruptCorrection = interruptMocks.admit;
     previewCoordinatorQueueBatch = interruptMocks.previewBatch;
     applyCoordinatorQueueBatch = interruptMocks.applyBatch;
+    previewQueuedPromptAmendment = interruptMocks.previewAmendment;
+    applyQueuedPromptAmendment = interruptMocks.applyAmendment;
   },
   shortId: (id: string) => id,
 }));
@@ -145,7 +150,10 @@ type ToolHandler = (args: Record<string, unknown>) => Promise<{
  * exercise Zod validation/coercion (the fake server below bypasses the SDK's
  * automatic schema parsing). */
 type CapturedTool = {
-  cfg: { inputSchema?: z.ZodType };
+  cfg: {
+    description?: string;
+    inputSchema?: z.ZodType;
+  };
   cb: ToolHandler;
 };
 
@@ -402,6 +410,85 @@ describe('session transfer MCP tools', () => {
     });
   });
 
+  it('previews and amends one author-owned queued prompt with both CAS revisions', async () => {
+    const preview = {
+      session_id: 'sess-child',
+      task_id: 'task-2',
+      queue_revision: 'sha256:queue-edit-1',
+      prompt_revision: 0,
+      canonical_prompt: 'old instruction',
+      canonical_prompt_bytes: 15,
+      editable: true,
+      editable_until: 'dispatch_claim',
+      created_by: 'user-1',
+      created_at: new Date(0).toISOString(),
+    };
+    interruptMocks.previewAmendment.mockResolvedValueOnce(preview);
+    interruptMocks.applyAmendment.mockResolvedValueOnce({
+      outcome: 'amended',
+      task: { task_id: 'task-2', session_id: 'sess-child', status: 'queued' },
+      prompt_revision: 1,
+    });
+    const triggerQueueProcessing = vi.fn(async () => undefined);
+    const emit = vi.fn();
+    const app = makeFakeApp({
+      sessions: { triggerQueueProcessing },
+      tasks: { emit },
+    });
+    const { agor_sessions_edit_queued_prompt } = await registerAndCaptureHandlers(
+      {
+        app,
+        userId: 'user-1',
+        sessionId: 'sess-caller',
+        baseServiceParams: { provider: 'mcp', user: { user_id: 'user-1' } },
+      },
+      ['agor_sessions_edit_queued_prompt']
+    );
+
+    const previewResponse = await agor_sessions_edit_queued_prompt({
+      targetSessionId: 'sess-child',
+      taskId: 'task-2',
+      authority: 'author',
+      action: 'preview',
+    });
+    expect(previewResponse.structuredContent).toMatchObject({ outcome: 'preview', preview });
+
+    const updateResponse = await agor_sessions_edit_queued_prompt({
+      targetSessionId: 'sess-child',
+      taskId: 'task-2',
+      authority: 'author',
+      action: 'update',
+      queueRevision: preview.queue_revision,
+      promptRevision: preview.prompt_revision,
+      revisedPrompt: 'final instruction',
+      idempotencyKey: 'edit-1',
+    });
+    expect(interruptMocks.applyAmendment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session_id: 'sess-child',
+        task_id: 'task-2',
+        requested_by_user_id: 'user-1',
+        authority: 'author',
+        operation_id: 'edit-1',
+        expected_queue_revision: preview.queue_revision,
+        expected_prompt_revision: 0,
+        revised_prompt: 'final instruction',
+      })
+    );
+    expect(emit).toHaveBeenCalledWith(
+      'patched',
+      expect.objectContaining({ task_id: 'task-2' }),
+      expect.any(Object)
+    );
+    expect(triggerQueueProcessing).toHaveBeenCalledWith('sess-child', expect.any(Object));
+    expect(updateResponse.structuredContent).toMatchObject({
+      outcome: 'amended',
+      task_id: 'task-2',
+      prompt_revision: 1,
+      task_status: 'queued',
+    });
+  });
+
   it('returns resolved direct-callback route IDs and the unchanged task-subscription contract', async () => {
     const retargetCallback = vi.fn(async () => ({
       session_id: 'sess-source',
@@ -606,6 +693,23 @@ describe('session transfer MCP tools', () => {
 });
 
 describe('agor_sessions_get_current_context', () => {
+  it.each(['agor_sessions_get_current', 'agor_sessions_get_current_context'])(
+    '%s metadata recommends omission-first self callbacks and fresh explicit identity',
+    async (toolName) => {
+      const tools = await registerAndCaptureTools(
+        { app: makeFakeApp({}), userId: 'user-1', sessionId: 'sess-current' },
+        [toolName]
+      );
+      const { description } = tools[toolName].cfg;
+
+      expect(description).toMatch(/enableCallback:\s*true/);
+      expect(description).toMatch(/omit\s+`?callbackSessionId`?/i);
+      expect(description).toMatch(/actual calling session.*cross-branch/i);
+      expect(description).toMatch(/fresh call.*session_id.*inherited/i);
+      expect(description).toMatch(/only.*intentional authorized alternate destination/i);
+    }
+  );
+
   it('returns coherent latest-task Git boundary snapshots', async () => {
     const app = makeFakeApp({
       sessions: {
@@ -2988,5 +3092,131 @@ describe('agor_sessions_archive tools', () => {
     );
     expect(JSON.parse(archiveResult.content[0].text)).toMatchObject({ archivedCount: 3 });
     expect(JSON.parse(unarchiveResult.content[0].text)).toMatchObject({ unarchivedCount: 2 });
+  });
+
+  it('rejects archive state through the generic update tool', async () => {
+    const patch = vi.fn();
+    const app = makeFakeApp({ sessions: { patch } });
+    const { agor_sessions_update } = await registerAndCaptureHandlers({ app, userId: 'user-1' }, [
+      'agor_sessions_update',
+    ]);
+
+    await expect(
+      agor_sessions_update({ sessionId: 'sess-parent', archived: true })
+    ).rejects.toThrow(/agor_sessions_archive or agor_sessions_unarchive/);
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it('requires an explicit bulk descendant choice before mutation', async () => {
+    const archiveRootsInBranch = vi.fn(async () => ({
+      affectedSessions: [],
+      count: 0,
+      authorizedSessionCount: 2,
+      matchedRootCount: 1,
+      additionalDescendantCount: 1,
+      executingDescendantCount: 1,
+      rootOnlyTotal: 1,
+      withChildrenTotal: 2,
+      additionalDescendants: [
+        {
+          session_id: 'sess-child',
+          branch_id: 'branch-1',
+          title: 'Running child',
+          status: 'running',
+        },
+      ],
+      skipped: [],
+    }));
+    const app = makeFakeApp({
+      sessions: {
+        find: vi.fn(async () => ({
+          data: [
+            {
+              session_id: 'sess-root',
+              branch_id: 'branch-1',
+              status: 'idle',
+              archived: false,
+              created_at: '2026-01-01T00:00:00.000Z',
+              last_updated: '2026-01-01T00:00:00.000Z',
+              genealogy: { children: [] },
+            },
+          ],
+        })),
+        archiveRootsInBranch,
+      },
+    });
+    const { agor_sessions_bulk_archive } = await registerAndCaptureHandlers(
+      { app, userId: 'user-1' },
+      ['agor_sessions_bulk_archive']
+    );
+
+    await expect(agor_sessions_bulk_archive({ dryRun: false })).rejects.toThrow(
+      /includeChildren=true.*includeChildren=false/
+    );
+    expect(archiveRootsInBranch).toHaveBeenCalledTimes(1);
+    expect(archiveRootsInBranch).toHaveBeenCalledWith(
+      'branch-1',
+      ['sess-root'],
+      { includeChildren: undefined, dryRun: true },
+      {}
+    );
+  });
+
+  it('previews and applies complete local bulk trees when explicitly requested', async () => {
+    const preview = {
+      affectedSessions: [],
+      count: 0,
+      authorizedSessionCount: 2,
+      matchedRootCount: 1,
+      additionalDescendantCount: 1,
+      executingDescendantCount: 0,
+      rootOnlyTotal: 1,
+      withChildrenTotal: 2,
+      additionalDescendants: [],
+      skipped: [],
+    };
+    const archiveRootsInBranch = vi
+      .fn()
+      .mockResolvedValueOnce(preview)
+      .mockResolvedValueOnce({ ...preview, count: 2 });
+    const app = makeFakeApp({
+      sessions: {
+        find: vi.fn(async () => ({
+          data: [
+            {
+              session_id: 'sess-root',
+              branch_id: 'branch-1',
+              status: 'idle',
+              archived: false,
+              created_at: '2026-01-01T00:00:00.000Z',
+              last_updated: '2026-01-01T00:00:00.000Z',
+              genealogy: { children: [] },
+            },
+          ],
+        })),
+        archiveRootsInBranch,
+      },
+    });
+    const { agor_sessions_bulk_archive } = await registerAndCaptureHandlers(
+      { app, userId: 'user-1' },
+      ['agor_sessions_bulk_archive']
+    );
+
+    const result = await agor_sessions_bulk_archive({
+      dryRun: false,
+      includeChildren: true,
+    });
+
+    expect(archiveRootsInBranch).toHaveBeenLastCalledWith(
+      'branch-1',
+      ['sess-root'],
+      { includeChildren: true },
+      {}
+    );
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      archivedCount: 2,
+      includeChildren: true,
+      additionalDescendantCount: 1,
+    });
   });
 });

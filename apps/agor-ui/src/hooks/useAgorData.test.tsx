@@ -19,6 +19,7 @@
 import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import { describe, expect, it, vi } from 'vitest';
+import { BoardListCounts } from '../components/BoardListCounts';
 import { BranchSessionSections } from '../components/BranchCard/BranchSessionSections';
 import { ConnectionProvider } from '../contexts/ConnectionContext';
 import { getRevision } from '../store/agorHydration';
@@ -55,6 +56,11 @@ const VisibleProductionSessionIndicator = ({ sessionId }: { sessionId: string })
       </AntApp>
     </ConnectionProvider>
   );
+};
+
+const VisibleBoardCounts = ({ boardId }: { boardId: string }) => {
+  const board = useAgorStore((state) => state.boardById.get(boardId));
+  return board ? <BoardListCounts counts={board} /> : null;
 };
 
 /**
@@ -261,6 +267,176 @@ function deferred() {
 }
 
 describe('useAgorData — socket-event bailouts', () => {
+  it('refreshes authoritative visible board counts on active-classifier and archive events', async () => {
+    const board = {
+      board_id: 'board-list-count',
+      name: 'Realtime board',
+      archived: false,
+      worktree_count: 1,
+      total_session_count: 1,
+      active_session_count: 0,
+    };
+    const idle = makeSession({
+      session_id: 'session-list-count',
+      branch_id: 'branch-list-count',
+      branch_board_id: board.board_id,
+      status: 'idle',
+    });
+    const seed: Record<string, unknown[]> = {
+      sessions: [idle],
+      'sessions:findAll': [idle],
+      boards: [board],
+      'boards:findAll': [board],
+      branches: [makeBranch({ branch_id: 'branch-list-count', board_id: board.board_id })],
+    };
+    const { client, emit, fetchArguments, fetchCount } = makeMockClient(seed);
+    const { result } = renderHook(() => useAgorData(client));
+    await waitForInitialLoad(result);
+    render(<VisibleBoardCounts boardId={board.board_id} />);
+    expect(screen.getByLabelText('0 active sessions')).toBeInTheDocument();
+    const initialBoardFetches = fetchCount('boards', 'findAll');
+
+    // Awaiting permission is visibly active in BranchSessionSections and is
+    // classified centrally by isSessionExecuting. The old exact-RUNNING query
+    // omitted it, reproducing the production missing-number report.
+    seed['boards:findAll'] = [{ ...board, active_session_count: 1 }];
+    act(() => emit('sessions', 'patched', { ...idle, status: 'awaiting_permission' }));
+
+    await waitFor(() =>
+      expect(agorStore.getState().boardById.get(board.board_id)?.active_session_count).toBe(1)
+    );
+    expect(screen.getByLabelText('1 active session')).toBeVisible();
+    expect(fetchCount('boards', 'findAll')).toBeGreaterThan(initialBoardFetches);
+    expect(fetchArguments('boards', 'findAll')).toContainEqual({
+      query: { archived: false, lean: true, $limit: 10_000 },
+    });
+
+    // Archive is a count transition even when the durable status remains
+    // active; a prop-only implementation would miss this production event.
+    seed['boards:findAll'] = [{ ...board, total_session_count: 0, active_session_count: 0 }];
+    act(() =>
+      emit('sessions', 'patched', {
+        ...idle,
+        status: 'awaiting_permission',
+        archived: true,
+      })
+    );
+
+    await waitFor(() =>
+      expect(agorStore.getState().boardById.get(board.board_id)?.active_session_count).toBe(0)
+    );
+    expect(screen.getByLabelText('0 total sessions')).toBeInTheDocument();
+    expect(screen.getByLabelText('0 active sessions')).toBeInTheDocument();
+  });
+
+  it('refreshes both affected boards after worktree create, move, and archive events', async () => {
+    const alpha = {
+      board_id: 'board-count-alpha',
+      name: 'Alpha',
+      archived: false,
+      worktree_count: 0,
+      total_session_count: 0,
+      active_session_count: 0,
+    };
+    const beta = { ...alpha, board_id: 'board-count-beta', name: 'Beta' };
+    const branch = makeBranch({ branch_id: 'branch-count-events', board_id: alpha.board_id });
+    const seed: Record<string, unknown[]> = {
+      boards: [alpha, beta],
+      'boards:findAll': [alpha, beta],
+      branches: [],
+      sessions: [],
+      'sessions:findAll': [],
+    };
+    const { client, emit } = makeMockClient(seed);
+    const { result } = renderHook(() => useAgorData(client));
+    await waitForInitialLoad(result);
+
+    seed['boards:findAll'] = [{ ...alpha, worktree_count: 1 }, beta];
+    act(() => emit('branches', 'created', branch));
+    await waitFor(() =>
+      expect(agorStore.getState().boardById.get(alpha.board_id)?.worktree_count).toBe(1)
+    );
+
+    // An idle Session changes Total Sessions but not Active Sessions.
+    const idle = makeSession({
+      session_id: 'session-count-created',
+      branch_id: branch.branch_id,
+      branch_board_id: alpha.board_id,
+      status: 'idle',
+    });
+    seed['boards:findAll'] = [{ ...alpha, worktree_count: 1, total_session_count: 1 }, beta];
+    act(() => emit('sessions', 'created', idle));
+    await waitFor(() =>
+      expect(agorStore.getState().boardById.get(alpha.board_id)?.total_session_count).toBe(1)
+    );
+    expect(agorStore.getState().boardById.get(alpha.board_id)?.active_session_count).toBe(0);
+
+    seed['boards:findAll'] = [alpha, { ...beta, worktree_count: 1, total_session_count: 1 }];
+    act(() => emit('branches', 'patched', { ...branch, board_id: beta.board_id }));
+    await waitFor(() => {
+      expect(agorStore.getState().boardById.get(alpha.board_id)?.worktree_count).toBe(0);
+      expect(agorStore.getState().boardById.get(beta.board_id)?.total_session_count).toBe(1);
+    });
+
+    seed['boards:findAll'] = [alpha, beta];
+    act(() => emit('branches', 'patched', { ...branch, board_id: beta.board_id, archived: true }));
+    await waitFor(() =>
+      expect(agorStore.getState().boardById.get(beta.board_id)?.worktree_count).toBe(0)
+    );
+  });
+
+  it('never applies an older aggregate response after a newer lifecycle event', async () => {
+    const board = {
+      board_id: 'board-stale-count',
+      name: 'Stale-safe board',
+      archived: false,
+      worktree_count: 1,
+      total_session_count: 1,
+      active_session_count: 1,
+    };
+    const running = makeSession({
+      session_id: 'session-stale-count',
+      branch_id: 'branch-stale-count',
+      branch_board_id: board.board_id,
+      status: 'running',
+    });
+    const seed: Record<string, unknown[]> = {
+      sessions: [running],
+      'sessions:findAll': [running],
+      boards: [board],
+      'boards:findAll': [board],
+      branches: [makeBranch({ branch_id: 'branch-stale-count', board_id: board.board_id })],
+    };
+    const { client, emit, fetchCount, onFetch } = makeMockClient(seed);
+    const { result } = renderHook(() => useAgorData(client));
+    await waitForInitialLoad(result);
+
+    const first = deferred();
+    const second = deferred();
+    const baselineCalls = fetchCount('boards', 'findAll');
+    onFetch('boards', 'findAll', (call) => {
+      if (call === baselineCalls + 1) return first.promise;
+      if (call === baselineCalls + 2) return second.promise;
+    });
+
+    // The first refresh captures the now-terminal projection but is delayed.
+    seed['boards:findAll'] = [{ ...board, active_session_count: 0 }];
+    act(() => emit('sessions', 'patched', { ...running, status: 'completed' }));
+    await waitFor(() => expect(fetchCount('boards', 'findAll')).toBe(baselineCalls + 1));
+
+    // Recovery becomes the newer durable truth while the older response is in
+    // flight. Its event queues a second authoritative read.
+    seed['boards:findAll'] = [{ ...board, active_session_count: 1 }];
+    act(() => emit('sessions', 'patched', { ...running, status: 'awaiting_permission' }));
+    act(() => first.resolve());
+
+    await waitFor(() => expect(fetchCount('boards', 'findAll')).toBe(baselineCalls + 2));
+    expect(agorStore.getState().boardById.get(board.board_id)?.active_session_count).toBe(1);
+
+    act(() => second.resolve());
+    await flush();
+    expect(agorStore.getState().boardById.get(board.board_id)?.active_session_count).toBe(1);
+  });
   it('scopes the real cold mobile board load before fetching board entities', async () => {
     const boardId = '01a012d8-1b9b-7909-b6f4-2024dfc7c51e';
     const { client, fetchArguments } = makeMockClient({

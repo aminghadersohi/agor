@@ -189,7 +189,7 @@ export function ArtifactFullscreenPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [consentOpen, setConsentOpen] = useState(false);
-  const [staticReady, setStaticReady] = useState(false);
+  const [staticReadyHash, setStaticReadyHash] = useState<string | null>(null);
   const staticIframeRef = useRef<HTMLIFrameElement | null>(null);
   const lastHashRef = useRef<string | null>(null);
 
@@ -232,10 +232,6 @@ export function ArtifactFullscreenPage({
   useEffect(() => {
     fetchArtifact();
   }, [fetchArtifact]);
-
-  useEffect(() => {
-    if (payload?.content_hash) setStaticReady(false);
-  }, [payload?.content_hash]);
 
   // Lightweight equivalent of useAgorData's artifact runtime bridge wiring.
   // The fullscreen surface intentionally does not hydrate Workspace data, but
@@ -363,7 +359,7 @@ export function ArtifactFullscreenPage({
                     : undefined
                 }
                 title={`${title} preview`}
-                onReady={() => setStaticReady(true)}
+                onReady={() => setStaticReadyHash(payload.content_hash)}
                 iframeRef={staticIframeRef}
               />
             ) : (
@@ -381,8 +377,8 @@ export function ArtifactFullscreenPage({
             <ArtifactSandpackErrorReporter
               artifactId={payload.artifact_id}
               contentHash={payload.runtime_report_hash ?? payload.content_hash}
-              statusOverride={
-                sandpackInputs.template === 'static' && staticReady ? 'idle' : undefined
+              staticReady={
+                sandpackInputs.template === 'static' && staticReadyHash === payload.content_hash
               }
             />
             <ArtifactRuntimeBridge

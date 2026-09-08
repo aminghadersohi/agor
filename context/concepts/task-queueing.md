@@ -170,6 +170,51 @@ inserted ahead of ordinary queued work while the active Task and Session are
 atomically moved to STOPPING. It cannot dispatch until the existing termination
 coordinator verifies quiescence/absence and settles the stopped Task.
 
+## Fork POC: editable ordinary prompts before claim
+
+The personal fork exposes a deliberately narrow editable-queue proof of
+concept. The author of an ordinary prompt can open its queued Task, preview its
+authoritative queue/prompt revisions, and replace its canonical text or cancel
+the Task while it is still `QUEUED`. A current branch-local parent or enabled
+direct callback coordinator can do the same through the MCP/API contract when
+that actor still has prompt authority.
+
+Apply holds the same Session row lock used by admission and dispatch. It checks
+the full Task and Session IDs, current tenant/RLS scope, human actor, derived
+authority, exact queue revision, exact prompt revision, and `QUEUED` state in
+one transaction. Dispatch and edit/cancel therefore serialize: if dispatch
+wins, the mutation refuses; if the mutation wins, dispatch sees exactly the
+new canonical text or the terminal `STOPPED` cancellation. Stable operation
+IDs make transport/HA retries converge without another revision.
+
+Edits do not rewrite history. `Task.full_prompt` is the current executor input,
+while `Task.metadata.queued_prompt_amendment` retains the original text and
+every complete revision with actor, authority, operation ID, and time.
+Cancellation adds audit and settles through `STOPPED`; it never deletes the
+Task. Realtime `tasks.patched` events update other tabs. No prompt text is
+copied to logs or analytics by this feature.
+
+Only ordinary text is eligible. Callback/internal continuation Tasks,
+attachments, widgets, gateways, slash/control/interrupt prompts, mixed actors,
+unsafe provenance, and changed delivery contracts are refused. A compatible
+exact-Task completion callback on an otherwise ordinary prompt is left byte-for-byte
+unchanged. Each revision is capped at 32 KiB UTF-8; the append-only audit is
+capped at 50 revisions and 256 KiB and is never truncated.
+
+After an edit, coordinator batch previews invalidate because the queue revision
+includes canonical text and amendment audit. COMBINE consumes the latest text
+while retaining original requests and amendment provenance. This differs from:
+
+- `interrupt_with_message`, which corrects work that already owns the executor
+  through verified Stop/containment; and
+- Combine/Replace, which intentionally turns multiple compatible queued Tasks
+  into one future executor turn.
+
+No compose grace period is included. The existing idle path keeps zero added
+latency; only work already queued behind a busy turn is editable. A grace delay
+would change ordinary prompt latency and urgent-work ordering without evidence
+that editing an already-visible durable queue is insufficient.
+
 ## Invariants
 
 1. At most one Task is in an executing state for a Session.

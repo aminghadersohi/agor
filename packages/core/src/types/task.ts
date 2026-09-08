@@ -31,6 +31,68 @@ export type CoordinatorQueueBatchStrategy = 'combine' | 'replace';
 /** Relationship that currently grants a Session authority over a worker queue. */
 export type CoordinatorQueueBatchRelationship = 'parent' | 'coordinator';
 
+/** Authority used to amend one ordinary prompt before its dispatch claim. */
+export type QueuedPromptAmendmentAuthority = 'author' | CoordinatorQueueBatchRelationship;
+
+export interface QueuedPromptAmendmentRevision {
+  revision: number;
+  operation_id: string;
+  amended_at: string;
+  amended_by_user_id: UserID;
+  authority: QueuedPromptAmendmentAuthority;
+  /** Complete canonical text for this revision; revisions are never diffs or truncations. */
+  text: string;
+}
+
+/** Append-only provenance for edits/cancellation of one unclaimed ordinary prompt. */
+export interface QueuedPromptAmendmentAudit {
+  version: 1;
+  original_prompt: string;
+  current_revision: number;
+  revisions: QueuedPromptAmendmentRevision[];
+  cancellation?: {
+    operation_id: string;
+    cancelled_at: string;
+    cancelled_by_user_id: UserID;
+    authority: QueuedPromptAmendmentAuthority;
+    revision: number;
+  };
+}
+
+export interface QueuedPromptAmendmentPreview {
+  session_id: SessionID;
+  task_id: TaskID;
+  queue_revision: string;
+  prompt_revision: number;
+  canonical_prompt: string;
+  canonical_prompt_bytes: number;
+  editable: boolean;
+  refusal_reason?: string;
+  editable_until: 'dispatch_claim';
+  created_by: UserID;
+  created_at: string;
+  amendment?: QueuedPromptAmendmentAudit;
+}
+
+export interface QueuedPromptAmendmentApplyInput {
+  session_id: SessionID;
+  task_id: TaskID;
+  requested_by_user_id: UserID;
+  requested_by_session_id?: SessionID;
+  authority: QueuedPromptAmendmentAuthority;
+  operation_id: string;
+  action: 'update' | 'cancel';
+  expected_queue_revision: string;
+  expected_prompt_revision: number;
+  revised_prompt?: string;
+}
+
+export interface QueuedPromptAmendmentApplyResult {
+  outcome: 'amended' | 'already_amended' | 'cancelled' | 'already_cancelled';
+  task: Task;
+  prompt_revision: number;
+}
+
 export interface CoordinatorQueueBatchRequestAudit {
   request_id: TaskID;
   submitted_at: string;
@@ -47,6 +109,8 @@ export interface CoordinatorQueueBatchSourceAudit {
   created_by: UserID;
   /** Complete request provenance, including earlier automatic compaction. */
   requests: CoordinatorQueueBatchRequestAudit[];
+  /** Amendment trail captured when batching; original requests remain above. */
+  amendment?: QueuedPromptAmendmentAudit;
 }
 
 /** Durable audit on the one Task that will execute for a coordinator batch. */
@@ -393,6 +457,9 @@ export interface TaskMetadata {
     execution_task_id: TaskID;
     batched_at: string;
   };
+
+  /** Append-only edit/cancel trail for one ordinary prompt before dispatch claim. */
+  queued_prompt_amendment?: QueuedPromptAmendmentAudit;
 
   /**
    * Audit written to an active Task when a parent/coordinator interrupts it.

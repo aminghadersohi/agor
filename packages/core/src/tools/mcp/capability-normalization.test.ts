@@ -86,6 +86,32 @@ describe('normalizeDiscoveredMCPCapabilities', () => {
     ).toThrow(/tools\[0\]\.name/);
   });
 
+  it('preserves JSON schema text while retaining storage and structural bounds', () => {
+    const input_schema = {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'First line\nSecond line' },
+        separator: { type: 'string', enum: ['\n', '\t', '\b'], default: '\t' },
+      },
+    };
+    const discovered = { tools: [{ name: 'search', input_schema }], resources: [], prompts: [] };
+    expect(
+      normalizeDiscoveredMCPCapabilities(discovered).capabilities.tools[0]?.input_schema
+    ).toEqual(input_schema);
+    for (const invalid of [
+      null,
+      'not a schema',
+      { description: 'bad\0text' },
+      { enum: Array(257).fill('x') },
+    ]) {
+      expect(() =>
+        normalizeDiscoveredMCPCapabilities({
+          ...discovered,
+          tools: [{ name: 'search', input_schema: invalid }],
+        })
+      ).toThrow(/tools\[0\]\.input_schema/);
+    }
+  });
   it('allows protocol free text line breaks but rejects unsafe control characters', () => {
     expect(
       normalizeDiscoveredMCPCapabilities(capabilities('line one\nline two\tformatted')).capabilities

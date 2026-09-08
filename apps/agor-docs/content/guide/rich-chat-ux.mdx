@@ -145,6 +145,14 @@ When a todo list shows up half-done at the end of a turn, that's a strong signal
 
 You don't have to wait for a long-running prompt to finish before you start writing the next instruction.
 
+In the personal-fork editable-queue POC, the prompt author can select the edit
+control beside an ordinary queued Task. The focused editor shows its current
+revision and provenance, supports <kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>Enter</kbd>
+to save, protects unsaved changes, and can cancel the Task without deleting its
+history. It is editable only until the durable dispatch claim. Realtime updates
+warn a stale editor in another tab and require an explicit refresh; Agor never
+uses last-write-wins for queued instructions.
+
 For a worker that reports to a parent/coordinator, the queue drawer also offers
 **Combine queue**. Preview a deterministic all-instructions prompt, or choose
 **Replace queued instructions** to send one corrected canonical prompt while
