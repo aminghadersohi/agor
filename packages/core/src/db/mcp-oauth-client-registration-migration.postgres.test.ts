@@ -24,7 +24,7 @@ const oldHeadFixture = resolve(
   'test-fixtures/b0585d76/0100_mcp_oauth_client_registrations.sql'
 );
 const OLD_HEAD_WATERMARK = 1_788_292_800_000;
-const FINAL_RECONCILIATION_WATERMARK = 1_788_728_664_647;
+const FINAL_REPAIR_WATERMARK = 1_788_800_000_004;
 const OLD_HEAD_MIGRATION_SHA256 =
   'f1e964942fd61182d564cf45dfcf5b13218b1eee242a3927a7fc9fba168fe7c5';
 
@@ -37,6 +37,18 @@ async function executeReconciliationTransaction(
 ): Promise<void> {
   const source = await readFile(
     join(migrationsFolder, '9016_oauth_authority_watermark_reconciliation.sql'),
+    'utf8'
+  );
+  for (const statement of source.split('--> statement-breakpoint')) {
+    if (statement.trim()) await transaction.unsafe(statement);
+  }
+}
+
+async function executeForkCollisionRepairTransaction(
+  transaction: PostgresTestTransaction
+): Promise<void> {
+  const source = await readFile(
+    join(migrationsFolder, '9017_fork_migration_collision_repair.sql'),
     'utf8'
   );
   for (const statement of source.split('--> statement-breakpoint')) {
@@ -264,7 +276,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
         )
       );
       const finalWatermark = Number(ledger[0]?.max_ts);
-      expect(finalWatermark).toBe(FINAL_RECONCILIATION_WATERMARK);
+      expect(finalWatermark).toBe(FINAL_REPAIR_WATERMARK);
       const oldHeadJournal = JSON.parse(
         await readFile(join(oldHeadFolder!, 'meta', '_journal.json'), 'utf8')
       ) as { entries: Array<{ tag: string; when: number }> };
@@ -341,6 +353,10 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN auto_archive_at`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN auto_archive_after_seconds`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN auto_archive`);
+      await executeRaw(db, sql`DROP INDEX sessions_one_essential_power_priority_uq`);
+      await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority_updated_by`);
+      await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority_updated_at`);
+      await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority`);
 
       // Reproduce the previous reviewed head's timestamp-only final watermark.
       // Its authority schema is identical; the rebased bootstrap must not try
@@ -399,6 +415,59 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           )
         )
       ).resolves.toEqual([expect.objectContaining({ registration_id: registrationId })]);
+    });
+
+    it.each([
+      [
+        'a partial session auto-archive schema',
+        'ALTER TABLE sessions DROP COLUMN auto_archive_at CASCADE',
+        /unrecognized partial session auto-archive schema/,
+      ],
+      [
+        'a partial zone-workflow schema',
+        'DROP TABLE zone_workflow_advances',
+        /unrecognized partial zone workflow schema/,
+      ],
+      [
+        'zone-workflow RLS without FORCE',
+        'ALTER TABLE zone_workflow_transitions NO FORCE ROW LEVEL SECURITY',
+        /zone workflow relations must retain forced row-level security/,
+      ],
+    ])('fails closed for %s without persisting the mutation', async (_label, mutation, error) => {
+      if (!db || !isPostgresDatabase(db)) {
+        throw new Error('PostgreSQL test database was not initialized');
+      }
+      const fingerprint = async () =>
+        rawRows(
+          await executeRaw(
+            db!,
+            sql`SELECT
+                  (SELECT COUNT(*)::integer FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'sessions'
+                     AND column_name IN (
+                       'auto_archive', 'auto_archive_after_seconds', 'auto_archive_at'
+                     )) AS auto_archive_columns,
+                  to_regclass('public.zone_workflow_transitions')::oid AS transitions_oid,
+                  to_regclass('public.zone_workflow_advances')::oid AS advances_oid,
+                  (SELECT relrowsecurity AND relforcerowsecurity
+                   FROM pg_class WHERE oid = 'public.zone_workflow_transitions'::regclass)
+                    AS transitions_forced_rls`
+          )
+        );
+      const before = await fingerprint();
+      await expect(
+        (
+          db as Database & {
+            $client: {
+              begin: (body: (tx: PostgresTestTransaction) => Promise<void>) => Promise<void>;
+            };
+          }
+        ).$client.begin(async (transaction) => {
+          await transaction.unsafe(mutation);
+          await executeForkCollisionRepairTransaction(transaction);
+        })
+      ).rejects.toThrow(error);
+      expect(await fingerprint()).toEqual(before);
     });
 
     it.each([
