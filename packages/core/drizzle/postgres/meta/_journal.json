@@ -722,6 +722,13 @@
       "when": 1788800000000,
       "tag": "0103_session_power_priority",
       "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1788800000001,
+      "tag": "0104_environment_command_discovery",
+      "breakpoints": true
     }
   ]
 }
