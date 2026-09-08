@@ -23,6 +23,10 @@ A single daemon used from a browser on another machine can explicitly select a p
 
 Google Gmail and Calendar require a pre-registered OAuth client; Google does not advertise Dynamic Client Registration for these endpoints. For standalone Agor, create a Desktop OAuth client that permits the loopback redirect, then enter its Client ID and provider-required Client Secret in the MCP server's advanced OAuth settings. An API key is not a substitute unless the MCP provider explicitly supports API-key authentication.
 
+### Capability metadata
+
+Remote tool, resource, and prompt descriptions are untrusted optional free text. Agor keeps every valid capability name and schema, but deterministically shortens descriptions that exceed the per-field or aggregate safe metadata budget. **Test Authentication** reports when this happened. Malformed names, schemas, or non-string descriptions still fail with the affected capability path instead of being silently repaired. The same bounded tool descriptions are stored for display and applied by the mediated MCP egress path used in `compatibility` and `enforced` gateway modes.
+
 ### Local stdio servers
 
 An stdio configuration uses only its command, arguments, and environment. HTTP/SSE authentication, URL, and custom-header fields do not apply. Agor does not download the command: it must already be available in the actual executor environment, which may differ from the daemon host. Store a per-user token in **Settings → Environment Variables**, then reference it from the server environment, for example `{"SHORTCUT_API_TOKEN":"{{ user.env.SHORTCUT_API_TOKEN }}"}`. The managed value is encrypted and resolved only for the authenticated user whose task is running; do not paste the token directly into the MCP server definition.

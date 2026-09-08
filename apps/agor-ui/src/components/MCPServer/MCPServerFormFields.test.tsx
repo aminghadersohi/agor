@@ -7,10 +7,11 @@ import { MCPServerFormFields } from './MCPServerFormFields';
 import { useFormRevision } from './mcp-form-requirements';
 
 const showError = vi.fn();
+const showSuccess = vi.fn();
 
 vi.mock('@/utils/message', () => ({
   useThemedMessage: () => ({
-    showSuccess: vi.fn(),
+    showSuccess,
     showError,
     showInfo: vi.fn(),
     showWarning: vi.fn(),
@@ -32,6 +33,48 @@ const oauthButton = (name = 'Start OAuth Flow') => buttonLabeled(name);
 
 describe('MCPServerFormFields OAuth start', () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it('surfaces when valid provider descriptions were shortened safely', async () => {
+    const testOAuth = vi.fn().mockResolvedValue({
+      success: true,
+      oauthType: 'oauth',
+      metadata: { descriptions_truncated: 2 },
+    });
+    const client = {
+      service: vi.fn((path: string) =>
+        path === 'mcp-servers/test-oauth' ? { create: testOAuth } : {}
+      ),
+    } as unknown as AgorClient;
+    const Harness = () => {
+      const [form] = Form.useForm();
+      useEffect(() => {
+        form.setFieldsValue({ url: 'https://fictional.example/mcp', auth_type: 'oauth' });
+      }, [form]);
+      return (
+        <Form form={form}>
+          <MCPServerFormFields
+            mode="create"
+            transport="http"
+            authType="oauth"
+            form={form}
+            client={client}
+            authorityKey="fictional-user:member:1"
+            onPrepareOAuthStart={vi.fn().mockResolvedValue('fictional-server')}
+          />
+        </Form>
+      );
+    };
+
+    render(<Harness />);
+    fireEvent.click(buttonLabeled('Test Authentication'));
+    await waitFor(() =>
+      expect(showSuccess).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "2 provider description(s) shortened to Agor's safe metadata budget"
+        )
+      )
+    );
+  });
 
   it('uses an explicit visible control to clear a saved bearer secret', async () => {
     let capturedForm: FormInstance | undefined;
