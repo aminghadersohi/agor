@@ -1841,7 +1841,7 @@ describe('board layout tools with branch entities present', () => {
     ['mixed with a card', [branchEntity({ zone_id: 'zone-1' }), cardEntity({ zone_id: 'zone-1' })]],
     ['branch only', [branchEntity({ zone_id: 'zone-1' })]],
   ])('agor_boards_get returns positioned branch entities (%s)', async (_label, entities) => {
-    const { app, branchesFind } = makeApp({ entities });
+    const { app, boardObjectsFind, branchesFind } = makeApp({ entities });
     const getBoard = registerAndCaptureHandler('agor_boards_get', {
       app,
       userId: 'user-1',
@@ -1852,7 +1852,12 @@ describe('board layout tools with branch entities present', () => {
     const parsed = JSON.parse(result.content[0].text);
 
     expect(result.isError).toBeFalsy();
-    expect(branchesFind).toHaveBeenCalled();
+    expect(boardObjectsFind).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: expect.objectContaining({ exclude_archived_branches: true }),
+      })
+    );
+    expect(branchesFind).not.toHaveBeenCalled();
     expect(parsed.entities).toHaveLength(entities.length);
     expect(parsed.entities).toContainEqual(expect.objectContaining({ branch_id: branchId }));
   });
