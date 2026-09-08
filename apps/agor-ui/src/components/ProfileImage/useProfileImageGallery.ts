@@ -1,6 +1,7 @@
 import type { ProfileImage, ProfileImageListResult } from '@agor-live/client';
 import { useEffect, useMemo, useState } from 'react';
 import { TOKENS_REFRESHED_EVENT } from '../../utils/singleFlightRefresh';
+import { useProfileImageNetworkEnabled } from './ProfileImageNetworkContext';
 import { listProfileImages, type ProfileImageSubject } from './profileImageApi';
 
 const galleryCache = new Map<string, ProfileImageListResult>();
@@ -69,6 +70,8 @@ export function useProfileImageGallery(
   subject: ProfileImageSubject | null | undefined,
   enabled = true
 ): ProfileImage[] {
+  const networkEnabled = useProfileImageNetworkEnabled();
+  enabled = enabled && networkEnabled;
   const subjectType = subject?.type;
   const subjectId = subject?.id;
   const stableSubject = useMemo(
@@ -120,5 +123,8 @@ export function useProfileImageGallery(
     };
   }, [enabled, stableSubject]);
 
-  return useMemo(() => images.slice().sort((a, b) => a.position - b.position), [images]);
+  return useMemo(
+    () => (enabled ? images.slice().sort((a, b) => a.position - b.position) : []),
+    [images, enabled]
+  );
 }

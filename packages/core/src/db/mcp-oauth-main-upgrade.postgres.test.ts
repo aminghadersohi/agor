@@ -25,9 +25,9 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       const journal = JSON.parse(await readFile(journalPath, 'utf8')) as {
         entries: Array<{ idx: number; tag: string; when: number }>;
       };
-      journal.entries = journal.entries.filter(({ idx }) => idx <= 104);
+      journal.entries = journal.entries.filter(({ when }) => when <= 1788800000001);
       expect(journal.entries.at(-1)).toMatchObject({
-        tag: '0104_environment_command_discovery',
+        tag: '9014_environment_command_discovery',
         when: 1788800000001,
       });
       await writeFile(journalPath, JSON.stringify(journal));

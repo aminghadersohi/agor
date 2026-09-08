@@ -1,5 +1,6 @@
 import type { ProfileImageVariant } from '@agor-live/client';
 import { useEffect, useState } from 'react';
+import { useProfileImageNetworkEnabled } from './ProfileImageNetworkContext';
 import { fetchProfileImageBlob } from './profileImageApi';
 
 interface CachedImage {
@@ -64,6 +65,7 @@ export function useProfileImageUrl(
   variant: ProfileImageVariant,
   continuityKey?: string
 ): string | undefined {
+  const networkEnabled = useProfileImageNetworkEnabled();
   const [loaded, setLoaded] = useState<{
     imageId: string;
     continuityKey?: string;
@@ -71,7 +73,7 @@ export function useProfileImageUrl(
   }>();
 
   useEffect(() => {
-    if (!imageId) {
+    if (!imageId || !networkEnabled) {
       setLoaded(undefined);
       return;
     }
@@ -87,9 +89,9 @@ export function useProfileImageUrl(
       active = false;
       releaseImageUrl(imageId, variant);
     };
-  }, [continuityKey, imageId, variant]);
+  }, [continuityKey, imageId, variant, networkEnabled]);
 
-  if (!imageId || !loaded) return undefined;
+  if (!networkEnabled || !imageId || !loaded) return undefined;
   if (loaded.imageId === imageId) return loaded.url;
   return continuityKey && loaded.continuityKey === continuityKey ? loaded.url : undefined;
 }
