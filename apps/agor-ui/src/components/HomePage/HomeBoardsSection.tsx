@@ -7,8 +7,8 @@ import { useAgorStore } from '../../store/agorStore';
 import { selectBoardById, selectBranchById, selectSessionsByBranch } from '../../store/selectors';
 import { getTimeMs } from '../../utils/entityTime';
 import { formatRelativeTime } from '../../utils/time';
+import { BoardListCounts } from '../BoardListCounts';
 import { BoardTile, getBoardEmoji } from '../BoardTile';
-import { RunningSessionCount } from '../RunningSessionCount';
 import { glassSurfaceStyle, withAlpha } from './homeStyles';
 import type { HomePageProps } from './types';
 
@@ -26,8 +26,6 @@ const BOARDS_PER_PAGE = 4;
 interface BoardHomeRow {
   board: Board;
   emoji: string | undefined;
-  branchCount: number;
-  runningCount: number;
   latestSessionAt: Session['last_updated'] | null;
   latest: number;
   visitRank: number;
@@ -72,15 +70,11 @@ const groupVisibleSessionsByBranch = (
 const BoardHomeCard = memo(function BoardHomeCard({
   board,
   emoji,
-  branchCount,
-  runningCount,
   latestSessionAt,
   onBoardClick,
 }: {
   board: Board;
   emoji: string | undefined;
-  branchCount: number;
-  runningCount: number;
   latestSessionAt: Session['last_updated'] | null;
   onBoardClick: (boardId: string) => void;
 }) {
@@ -149,12 +143,7 @@ const BoardHomeCard = memo(function BoardHomeCard({
                 {board.name}
               </Text>
             </Tooltip>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {branchCount} branch{branchCount !== 1 ? 'es' : ''}
-              </Text>
-              <RunningSessionCount count={runningCount} />
-            </div>
+            <BoardListCounts counts={board} wrap />
             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
               <ClockCircleOutlined style={{ fontSize: 11, color: token.colorTextSecondary }} />
               <Text type="secondary" style={{ fontSize: 12 }}>
@@ -209,11 +198,6 @@ export const HomeBoardsSection: React.FC<
         return {
           board,
           emoji: getBoardEmoji(board, branchById),
-          branchCount: branches.length,
-          // This caller-scoped aggregate comes from boards.find; the Home
-          // session buckets are deliberately partial during first paint and
-          // must never be used to infer a board-wide count.
-          runningCount: board.running_session_count,
           latestSessionAt,
           latest: Number.isFinite(latest) ? latest : 0,
           visitRank: visitRank.get(board.board_id) ?? Number.POSITIVE_INFINITY,
@@ -301,13 +285,11 @@ export const HomeBoardsSection: React.FC<
             gap: 12,
           }}
         >
-          {visibleRows.map(({ board, emoji, branchCount, runningCount, latestSessionAt }) => (
+          {visibleRows.map(({ board, emoji, latestSessionAt }) => (
             <BoardHomeCard
               key={board.board_id}
               board={board}
               emoji={emoji}
-              branchCount={branchCount}
-              runningCount={runningCount}
               latestSessionAt={latestSessionAt}
               onBoardClick={onBoardClick}
             />

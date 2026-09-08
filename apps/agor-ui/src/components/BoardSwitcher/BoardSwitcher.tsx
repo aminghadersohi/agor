@@ -17,8 +17,8 @@ import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useCanManageBoard } from '../../hooks/useCanManageBoard';
 import { BoardEditModal } from '../BoardEditModal';
+import { BoardListCounts } from '../BoardListCounts';
 import { BoardTile, getBoardEmoji } from '../BoardTile';
-import { RunningSessionCount } from '../RunningSessionCount';
 
 const { Text } = Typography;
 const { useToken } = theme;
@@ -125,9 +125,11 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
       return {
         key: board.board_id,
         label: (
-          <Flex align="center" gap={8} style={{ padding: '4px 0' }}>
-            <Flex align="center" gap={8} style={{ flex: 1, minWidth: 0 }}>
-              <BoardTile emoji={getBoardEmoji(board, branchById)} size={24} />
+          <Flex align="center" gap={12} style={{ padding: '6px 0', minWidth: 0 }}>
+            <span data-board-list-avatar style={{ display: 'inline-flex', flexShrink: 0 }}>
+              <BoardTile emoji={getBoardEmoji(board, branchById)} size={36} />
+            </span>
+            <Flex vertical gap={6} style={{ flex: 1, minWidth: 0 }}>
               <Text
                 strong={isActive}
                 ellipsis={{
@@ -141,8 +143,8 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
               >
                 {board.name}
               </Text>
+              <BoardListCounts counts={board} />
             </Flex>
-            <RunningSessionCount count={board.running_session_count} />
           </Flex>
         ),
         onClick: () => handleBoardClick(board.board_id),
@@ -254,7 +256,7 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
                 backgroundColor: token.colorBgElevated,
                 borderRadius: token.borderRadiusLG,
                 boxShadow: token.boxShadowSecondary,
-                width: 320,
+                width: 360,
                 maxWidth: `calc(100vw - ${token.marginLG * 2}px)`,
               }}
             >
@@ -311,7 +313,7 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
               style={{ flex: 1, minWidth: 0, marginRight: editActionReserve }}
             >
               {currentBoard ? (
-                <BoardTile emoji={getBoardEmoji(currentBoard, branchById)} size={24} />
+                <BoardTile emoji={getBoardEmoji(currentBoard, branchById)} size={28} />
               ) : (
                 <HomeOutlined style={{ fontSize: 18 }} />
               )}
