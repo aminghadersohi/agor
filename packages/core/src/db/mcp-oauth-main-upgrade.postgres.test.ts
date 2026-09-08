@@ -25,10 +25,10 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       const journal = JSON.parse(await readFile(journalPath, 'utf8')) as {
         entries: Array<{ idx: number; tag: string; when: number }>;
       };
-      journal.entries = journal.entries.filter(({ idx }) => idx <= 101);
+      journal.entries = journal.entries.filter(({ idx }) => idx <= 9014);
       expect(journal.entries.at(-1)).toMatchObject({
-        tag: '0101_environment_command_discovery',
-        when: 1788728664645,
+        tag: '9014_environment_command_discovery',
+        when: 1788800000001,
       });
       await writeFile(journalPath, JSON.stringify(journal));
       await migratePostgres(db as never, { migrationsFolder: mainFolder });
@@ -51,6 +51,8 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
         pending: [
           '9015_mcp_oauth_client_registrations',
           '9016_oauth_authority_watermark_reconciliation',
+          '9017_fork_migration_collision_repair',
+          '9018_attention_watermark_collision_repair',
         ],
         dbAheadOfBinary: false,
       });
