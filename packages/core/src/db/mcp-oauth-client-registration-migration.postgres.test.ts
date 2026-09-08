@@ -24,7 +24,7 @@ const oldHeadFixture = resolve(
   'test-fixtures/b0585d76/0100_mcp_oauth_client_registrations.sql'
 );
 const OLD_HEAD_WATERMARK = 1_788_292_800_000;
-const FINAL_RECONCILIATION_WATERMARK = 1_788_728_664_647;
+const FINAL_INTEGRATION_WATERMARK = 1_788_800_000_004;
 const OLD_HEAD_MIGRATION_SHA256 =
   'f1e964942fd61182d564cf45dfcf5b13218b1eee242a3927a7fc9fba168fe7c5';
 
@@ -264,7 +264,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
         )
       );
       const finalWatermark = Number(ledger[0]?.max_ts);
-      expect(finalWatermark).toBe(FINAL_RECONCILIATION_WATERMARK);
+      expect(finalWatermark).toBe(FINAL_INTEGRATION_WATERMARK);
       const oldHeadJournal = JSON.parse(
         await readFile(join(oldHeadFolder!, 'meta', '_journal.json'), 'utf8')
       ) as { entries: Array<{ tag: string; when: number }> };
@@ -341,6 +341,9 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN auto_archive_at`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN auto_archive_after_seconds`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN auto_archive`);
+      await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority_updated_at`);
+      await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority_updated_by`);
+      await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority`);
 
       // Reproduce the previous reviewed head's timestamp-only final watermark.
       // Its authority schema is identical; the rebased bootstrap must not try
