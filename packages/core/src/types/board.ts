@@ -19,6 +19,47 @@ export type BoardObjectType = 'text' | 'zone' | 'markdown' | 'app' | 'artifact';
  */
 export type BoardEntityType = 'branch' | 'card';
 
+export type BoardLayoutMode = 'grid' | 'compact';
+export type BoardLayoutTrackAxis = 'auto' | 'columns' | 'rows';
+export type BoardLayoutLastRow = 'start' | 'center' | 'end' | 'justify';
+
+/** Canonical product settings shared by board, selection, daemon, and MCP callers. */
+export interface BoardLayoutSettings {
+  mode: BoardLayoutMode;
+  density: LayoutDensityPolicy;
+  trackAxis: BoardLayoutTrackAxis;
+  trackCount: number;
+  /** Exact horizontal distance between arranged roots in board pixels. */
+  columnGap: number;
+  /** Exact vertical distance between arranged roots in board pixels. */
+  rowGap: number;
+  /** Clear board-space inset around a board-scoped arranged cluster. */
+  outerMargin: number;
+  /** @deprecated Read-only compatibility alias for old persisted contexts. */
+  gap?: number;
+  packZoneContents: boolean;
+  resizeZoneFrames: boolean;
+  justifyRows: boolean;
+  lastRow: BoardLayoutLastRow;
+  matchRowHeights: boolean;
+  matchColumnWidths: boolean;
+  /** Last explicit item alignment inside its assigned Grid column. */
+  cellHorizontalAlignment?: 'start' | 'center' | 'end';
+  /** Last explicit item alignment inside its assigned Grid row. */
+  cellVerticalAlignment?: 'start' | 'center' | 'end';
+}
+
+/** Persisted provenance for later alignment/match actions and observer tabs. */
+export interface BoardLayoutContext {
+  scope: 'board' | 'selection';
+  root_ids: string[];
+  settings: BoardLayoutSettings;
+  cells: Record<
+    string,
+    { x: number; y: number; width: number; height: number; row: number; column: number }
+  >;
+}
+
 /**
  * Positioned entity on a board (branch or card)
  *
@@ -83,6 +124,8 @@ export interface BoardLayoutObjectUpdate {
 export interface BoardLayoutBatch {
   objects: Record<string, BoardLayoutObjectUpdate>;
   placements: Record<string, BoardLayoutPlacementUpdate>;
+  /** Replaces the active explicit-layout provenance in the same transaction. */
+  layout_context?: BoardLayoutContext;
   /**
    * Optional pre-plan geometry snapshot. It must cover every submitted id and
    * may include unchanged obstacles/peers so the repository can reject any
@@ -234,8 +277,14 @@ export interface ZoneLayoutPolicy {
   sortDirection: ZoneLayoutSortDirection;
   /** Preferred grid width. Compact lists always use one column. */
   columns?: number;
-  /** Exact spacing between arranged items in board pixels. */
+  /** @deprecated Scalar compatibility alias; new writers use both axis fields. */
   gap?: number;
+  /** Exact horizontal spacing between arranged items in board pixels. */
+  columnGap?: number;
+  /** Exact vertical spacing between arranged items in board pixels. */
+  rowGap?: number;
+  /** Exact left/right/top/bottom content inset; title reserve is separate. */
+  padding?: number;
   /**
    * Grow or shrink the zone vertically to contain the arranged rectangles.
    *
@@ -484,6 +533,9 @@ export interface Board {
 
   /** Authoritative layout policy inherited by newly-created/reset zones. */
   zone_layout_defaults?: ZoneLayoutPolicy;
+
+  /** Last explicit Grid/Compact plan, used only while its geometry still matches. */
+  layout_context?: BoardLayoutContext;
 
   /**
    * External/user-facing URL for viewing this board in the UI.

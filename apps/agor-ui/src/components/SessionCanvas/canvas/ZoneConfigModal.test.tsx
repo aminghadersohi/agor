@@ -105,7 +105,7 @@ describe('ZoneConfigModal historical tool migration', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: 'Layout' }));
     const inherit = await screen.findByRole('switch', { name: 'Use board defaults' });
-    const spacing = screen.getByRole('spinbutton', { name: 'Spacing' });
+    const spacing = screen.getByRole('spinbutton', { name: 'Horizontal gap' });
     expect(inherit).toBeChecked();
     expect(spacing).toBeDisabled();
     expect(spacing).toHaveValue('8');
@@ -117,7 +117,13 @@ describe('ZoneConfigModal historical tool migration', () => {
     await waitFor(() => expect(onUpdate).toHaveBeenCalledOnce());
     expect(onUpdate.mock.calls[0][1]).toMatchObject({
       layout_binding: 'override',
-      layout: { mode: 'auto', preset: 'compact_list', density: 'preserve', gap: 4 },
+      layout: {
+        mode: 'auto',
+        preset: 'compact_list',
+        density: 'preserve',
+        columnGap: 4,
+        rowGap: 8,
+      },
     });
   });
 
@@ -148,7 +154,7 @@ describe('ZoneConfigModal historical tool migration', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Layout' }));
     const inherit = await screen.findByRole('switch', { name: 'Use board defaults' });
     expect(inherit).not.toBeChecked();
-    expect(screen.getByRole('spinbutton', { name: 'Spacing' })).toHaveValue('40');
+    expect(screen.getByRole('spinbutton', { name: 'Horizontal gap' })).toHaveValue('40');
     fireEvent.click(inherit);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(onUpdate).toHaveBeenCalledOnce());
@@ -156,7 +162,13 @@ describe('ZoneConfigModal historical tool migration', () => {
       label: 'Review',
       locked: false,
       layout_binding: 'inherit',
-      layout: { mode: 'manual', preset: 'grid', density: 'preserve', gap: 4 },
+      layout: {
+        mode: 'manual',
+        preset: 'grid',
+        density: 'preserve',
+        columnGap: 4,
+        rowGap: 4,
+      },
     });
   });
 
@@ -185,7 +197,7 @@ describe('ZoneConfigModal historical tool migration', () => {
     );
 
     fireEvent.click(screen.getByRole('tab', { name: 'Layout' }));
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Spacing' }), {
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Horizontal gap' }), {
       target: { value: '8' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -194,7 +206,7 @@ describe('ZoneConfigModal historical tool migration', () => {
     expect(onUpdate.mock.calls[0][1]).toMatchObject({
       label: 'Planning',
       locked: true,
-      layout: { gap: 8 },
+      layout: { columnGap: 8, rowGap: 24 },
     });
   });
 

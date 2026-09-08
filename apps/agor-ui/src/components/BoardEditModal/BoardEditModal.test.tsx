@@ -238,7 +238,9 @@ describe('BoardEditModal', () => {
       'data-value',
       'false'
     );
-    expect(screen.getByRole('spinbutton', { name: 'Spacing' })).toBeDisabled();
+    expect(screen.getByRole('spinbutton', { name: 'Horizontal gap' })).toBeDisabled();
+    expect(screen.getByRole('spinbutton', { name: 'Vertical gap' })).toBeDisabled();
+    expect(screen.getByRole('spinbutton', { name: 'Zone inner padding' })).toBeDisabled();
     expect(screen.getByRole('checkbox', { name: 'Apply to existing zones' })).toBeDisabled();
   });
 
@@ -296,7 +298,7 @@ describe('BoardEditModal', () => {
       />
     );
 
-    const spacing = await screen.findByRole('spinbutton', { name: 'Spacing' });
+    const spacing = await screen.findByRole('spinbutton', { name: 'Horizontal gap' });
     fireEvent.change(spacing, { target: { value: '8' } });
     fireEvent.click(screen.getByRole('checkbox', { name: 'Apply to existing zones' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -306,7 +308,7 @@ describe('BoardEditModal', () => {
       listedBoard.board_id,
       expect.objectContaining({
         _action: 'setZoneLayoutDefaults',
-        defaults: expect.objectContaining({ gap: 8 }),
+        defaults: expect.objectContaining({ columnGap: 8, rowGap: 24, padding: 20 }),
         applyToExisting: true,
         expected: expect.objectContaining({
           zones: {

@@ -65,10 +65,14 @@ describe('ZoneLayoutPolicyEditor (real browser)', () => {
       )
     );
 
-    const spacing = screen.getByRole('spinbutton', { name: 'Spacing' });
+    const spacing = screen.getByRole('spinbutton', { name: 'Horizontal gap' });
     await act(async () => user.clear(spacing));
-    await act(async () => user.type(spacing, '4'));
-    expect(screen.getByRole('status', { name: 'Policy state' })).toHaveTextContent('"gap":4');
+    await act(async () => user.type(spacing, '37.5'));
+    expect(screen.getByRole('status', { name: 'Policy state' })).toHaveTextContent(
+      '"columnGap":37.5'
+    );
+    expect(screen.getByRole('spinbutton', { name: 'Vertical gap' })).toHaveValue('24');
+    expect(screen.getByRole('spinbutton', { name: 'Zone inner padding' })).toHaveValue('20');
 
     const autoZone = screen.getByRole('switch', { name: 'Auto Zone' });
     autoZone.focus();

@@ -10,6 +10,16 @@ const zone = (id: string, x: number, y: number, width = 300, height = 200): Zone
 });
 
 describe('planZoneGrowthReflow', () => {
+  it('preserves independent exact gaps while cascading around grown zones', () => {
+    const vertical = planZoneGrowthReflow(
+      [zone('grow', 0, 0), zone('peer', 0, 240)],
+      'grow',
+      zone('grow', 0, 0, 300, 300),
+      { gapX: 37.5, gapY: 53.25 }
+    );
+    expect(vertical.placements.find(({ id }) => id === 'peer')?.y).toBe(353.25);
+  });
+
   it('pushes only newly covered zones down by the minimum grid-aligned distance', () => {
     const zones = [zone('grow', 0, 0), zone('near', 0, 240), zone('side', 400, 240)];
     const plan = planZoneGrowthReflow(zones, 'grow', zone('grow', 0, 0, 300, 360));

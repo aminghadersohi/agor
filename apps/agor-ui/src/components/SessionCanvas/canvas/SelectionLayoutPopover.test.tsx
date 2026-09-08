@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -8,37 +8,14 @@ import {
   selectionGridTracks,
 } from './SelectionLayoutPopover';
 
-describe('selectionGridTracks', () => {
-  it('derives the opposite track count without creating empty required tracks', () => {
+describe('selection grid compatibility helpers', () => {
+  it('derives the opposite track count without empty tracks', () => {
     expect(selectionGridTracks(7, 'columns', 3)).toEqual({ columns: 3, rows: 3 });
     expect(selectionGridTracks(7, 'rows', 2)).toEqual({ columns: 4, rows: 2 });
     expect(selectionGridTracks(2, 'columns', 20)).toEqual({ columns: 2, rows: 1 });
   });
-});
 
-describe('selectionBoardZoneArrangementOptions', () => {
-  it('maps columns, rows, and final-row distribution into the shared zone planner', () => {
-    expect(
-      selectionBoardZoneArrangementOptions(7, {
-        mode: 'grid',
-        trackAxis: 'columns',
-        trackCount: 2,
-        matchRowHeights: false,
-        matchColumnWidths: true,
-        rowDistribution: 'packed',
-        density: 'preserve',
-      })
-    ).toEqual({
-      mode: 'grid',
-      fixedItemsPerRow: 2,
-      compactFixedGrid: true,
-      justifyRows: false,
-      justifyLastRow: false,
-      matchRowHeights: false,
-      matchColumnWidths: true,
-      resizeZoneFrames: true,
-      density: 'preserve',
-    });
+  it('routes every setting through the shared core translator', () => {
     expect(
       selectionBoardZoneArrangementOptions(7, {
         mode: 'grid',
@@ -46,8 +23,14 @@ describe('selectionBoardZoneArrangementOptions', () => {
         trackCount: 2,
         matchRowHeights: true,
         matchColumnWidths: false,
-        rowDistribution: 'justify',
         density: 'collapse',
+        columnGap: 24,
+        rowGap: 20,
+        outerMargin: 72,
+        packZoneContents: true,
+        resizeZoneFrames: true,
+        justifyRows: true,
+        lastRow: 'justify',
       })
     ).toEqual({
       mode: 'grid',
@@ -55,38 +38,21 @@ describe('selectionBoardZoneArrangementOptions', () => {
       compactFixedGrid: true,
       justifyRows: true,
       justifyLastRow: true,
+      lastRowAlignment: 'start',
       matchRowHeights: true,
       matchColumnWidths: false,
       resizeZoneFrames: true,
+      packZoneContents: true,
       density: 'collapse',
+      gapX: 24,
+      gapY: 20,
+      outerMargin: 72,
     });
-  });
-
-  it('uses the exact ordinary Arrange options for compact or toolbar arrange', () => {
-    expect(selectionBoardZoneArrangementOptions(3)).toEqual({
-      mode: 'grid',
-      justifyRows: true,
-      resizeZoneFrames: true,
-      matchRowHeights: true,
-      matchColumnWidths: true,
-      density: 'preserve',
-    });
-    expect(
-      selectionBoardZoneArrangementOptions(3, {
-        mode: 'compact',
-        trackAxis: 'columns',
-        trackCount: 2,
-        matchRowHeights: false,
-        matchColumnWidths: false,
-        rowDistribution: 'packed',
-        density: 'expand',
-      })
-    ).toEqual({ mode: 'compact', density: 'expand' });
   });
 });
 
 describe('SelectionLayoutPopover', () => {
-  it('keeps the shared justified grid as the ordinary default and exposes compact controls', async () => {
+  it('renders the shared production editor and submits its normalized payload', () => {
     const onApply = vi.fn();
     render(
       <AntApp>
@@ -94,33 +60,43 @@ describe('SelectionLayoutPopover', () => {
       </AntApp>
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
-    expect(await screen.findByLabelText('Fixed grid axis')).toBeInTheDocument();
-    const gridControl = screen.getByText('Grid');
-    expect(gridControl.closest(`.${CANVAS_LAYOUT_CONTROLS_CLASS}`)).not.toBeNull();
-    expect(screen.getByText('3 columns × 3 rows')).toBeInTheDocument();
-    expect(screen.getByText('Preserve current expansion')).toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText('Match heights within rows'));
-    fireEvent.click(screen.getByRole('button', { name: 'Apply layout', hidden: true }));
+    const trigger = screen.getByRole('button', { name: 'Layout options' });
+    fireEvent.click(trigger);
+    expect(screen.getByRole('radiogroup', { name: 'Layout mode' })).toBeInTheDocument();
+    expect(screen.getByText('Grid').closest(`.${CANVAS_LAYOUT_CONTROLS_CLASS}`)).not.toBeNull();
+    expect(screen.getByRole('combobox', { name: 'Grid tracks' })).toBeInTheDocument();
+    expect(screen.getByRole('spinbutton', { name: 'Horizontal gap' })).toHaveValue('64');
+    expect(screen.getByRole('spinbutton', { name: 'Vertical gap' })).toHaveValue('48');
+    expect(screen.getByRole('spinbutton', { name: 'Outer cluster margin' })).toHaveValue('96');
+    expect(screen.getByRole('checkbox', { name: 'Pack zone contents' })).toBeChecked();
+    fireEvent.click(screen.getByText('More layout options'));
+    expect(screen.getByRole('checkbox', { name: 'Match zone frames' })).toBeChecked();
+    expect(screen.getByRole('switch', { name: 'Match heights within rows' })).toBeChecked();
+    expect(screen.getByRole('switch', { name: 'Match widths within columns' })).toBeChecked();
 
-    await waitFor(() =>
-      expect(onApply).toHaveBeenCalledWith({
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Grid tracks' }));
+    fireEvent.click(screen.getByText('Columns'));
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Number of columns' }), {
+      target: { value: '2' },
+    });
+    expect(screen.getByText('2×4')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
+
+    expect(onApply).toHaveBeenCalledWith(
+      expect.objectContaining({
         mode: 'grid',
         trackAxis: 'columns',
-        trackCount: 3,
-        matchRowHeights: true,
-        matchColumnWidths: false,
-        rowDistribution: 'packed',
+        trackCount: 2,
         density: 'preserve',
+        columnGap: 64,
+        rowGap: 48,
+        outerMargin: 96,
       })
     );
-
-    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
-    fireEvent.click(screen.getByText('Compact'));
-    expect(await screen.findByText(/smallest stable, collision-free cluster/i)).toBeInTheDocument();
+    expect(trigger).toHaveFocus();
   });
 
-  it('applies an explicit density choice and resets to Preserve when reopened', async () => {
+  it('applies density and resets it to Preserve when reopened', () => {
     const onApply = vi.fn();
     render(
       <AntApp>
@@ -128,16 +104,18 @@ describe('SelectionLayoutPopover', () => {
       </AntApp>
     );
     fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(screen.getByText('More layout options'));
     fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Content expansion' }));
-    fireEvent.click(await screen.findByText('Collapse eligible contents'));
-    fireEvent.click(screen.getByRole('button', { name: 'Apply layout', hidden: true }));
+    fireEvent.click(screen.getByText('Collapse eligible contents'));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
     expect(onApply).toHaveBeenCalledWith(expect.objectContaining({ density: 'collapse' }));
 
     fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(screen.getByText('More layout options'));
     expect(screen.getByText('Preserve current expansion')).toBeInTheDocument();
   });
 
-  it('explains an ineligible selection and can only submit Preserve', async () => {
+  it('keeps only Preserve available when density is ineligible', () => {
     const onApply = vi.fn();
     render(
       <AntApp>
@@ -150,61 +128,21 @@ describe('SelectionLayoutPopover', () => {
       </AntApp>
     );
     fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.click(screen.getByText('More layout options'));
     expect(screen.getByRole('combobox', { name: 'Content expansion' })).toBeDisabled();
-    expect(
-      screen.getByText(/selection has no worktrees or cards with body content/i)
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Apply layout', hidden: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
     expect(onApply).toHaveBeenCalledWith(expect.objectContaining({ density: 'preserve' }));
   });
 
-  it('tracks the compact three-column default as a selection grows without overriding edits', async () => {
-    const onApply = vi.fn();
-    const view = render(
-      <AntApp>
-        <SelectionLayoutPopover selectionCount={2} zoneOnlySelection={false} onApply={onApply} />
-      </AntApp>
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
-    fireEvent.click(screen.getByText('Grid'));
-    expect(screen.getByText('2 columns × 1 row')).toBeInTheDocument();
-
-    view.rerender(
-      <AntApp>
-        <SelectionLayoutPopover selectionCount={9} zoneOnlySelection={false} onApply={onApply} />
-      </AntApp>
-    );
-    expect(await screen.findByText('3 columns × 3 rows')).toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText('Number of columns'), { target: { value: '4' } });
-    view.rerender(
-      <AntApp>
-        <SelectionLayoutPopover selectionCount={10} zoneOnlySelection={false} onApply={onApply} />
-      </AntApp>
-    );
-    expect(await screen.findByText('4 columns × 3 rows')).toBeInTheDocument();
-  });
-
-  it('defaults honest zone-only grid frame matching on and explains the preserved-size option', async () => {
-    const onApply = vi.fn();
+  it('exposes compact semantics without a second option contract', () => {
     render(
       <AntApp>
-        <SelectionLayoutPopover selectionCount={3} zoneOnlySelection onApply={onApply} />
+        <SelectionLayoutPopover selectionCount={3} zoneOnlySelection onApply={vi.fn()} />
       </AntApp>
     );
-
     fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
-    fireEvent.click(screen.getByText('Grid', { exact: true }));
-    const matching = screen.getByRole('switch', { name: 'Match zone frames to grid' });
-    expect(matching).toBeChecked();
-    expect(screen.getByText(/can leave extra space inside larger tracks/i)).toBeInTheDocument();
-    fireEvent.click(matching);
-    fireEvent.click(screen.getByRole('button', { name: 'Apply layout', hidden: true }));
-
-    await waitFor(() =>
-      expect(onApply).toHaveBeenCalledWith(
-        expect.objectContaining({ matchRowHeights: false, matchColumnWidths: false })
-      )
-    );
+    fireEvent.click(screen.getByRole('radio', { name: 'Compact' }));
+    expect(screen.getByRole('radio', { name: 'Compact' })).toBeChecked();
+    expect(screen.getByRole('combobox', { name: 'Grid tracks' })).toBeDisabled();
   });
 });

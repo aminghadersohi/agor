@@ -210,6 +210,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
       default_others_can?: BranchPermissionLevel;
       default_others_fs_access?: 'none' | 'read' | 'write';
       zone_layout_defaults?: Board['zone_layout_defaults'];
+      layout_context?: Board['layout_context'];
     };
 
     const boardId = row.board_id as UUID;
@@ -293,6 +294,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
           board.zone_layout_defaults === undefined
             ? undefined
             : normalizeZoneLayoutPolicy(board.zone_layout_defaults),
+        layout_context: board.layout_context,
       },
     };
   }
@@ -1256,7 +1258,19 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
             throw new RepositoryError('Zone layout defaults source snapshot is stale');
           }
 
-          const normalizedDefaults = normalizeZoneLayoutPolicy({ ...currentDefaults, ...defaults });
+          const normalizedDefaults = normalizeZoneLayoutPolicy({
+            ...currentDefaults,
+            ...defaults,
+            // Old clients still send one scalar. Apply it to both axes unless
+            // that same request names an axis explicitly; normalized stored
+            // state itself never depends on the ambiguous alias.
+            ...(defaults.gap === undefined || defaults.columnGap !== undefined
+              ? {}
+              : { columnGap: defaults.gap }),
+            ...(defaults.gap === undefined || defaults.rowGap !== undefined
+              ? {}
+              : { rowGap: defaults.gap }),
+          });
           const objects = { ...(current.objects ?? {}) };
           const changedZoneIds: string[] = [];
           for (const [objectId, object] of Object.entries(objects)) {
@@ -1416,10 +1430,18 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
             changedObjects[objectId] = { ...currentObject, ...geometry } as BoardObject;
             changedObjectIds.push(objectId);
           }
+          const layoutContextChanged =
+            batch.layout_context !== undefined &&
+            !isDeepStrictEqual(current.layout_context ?? null, batch.layout_context);
           const board =
-            Object.keys(changedObjects).length > 0
+            Object.keys(changedObjects).length > 0 || layoutContextChanged
               ? await boardRepo.update(fullId, {
-                  objects: { ...currentObjects, ...changedObjects },
+                  ...(Object.keys(changedObjects).length > 0
+                    ? { objects: { ...currentObjects, ...changedObjects } }
+                    : {}),
+                  ...(batch.layout_context === undefined
+                    ? {}
+                    : { layout_context: batch.layout_context }),
                 })
               : current;
           const placementRepo = new BoardObjectRepository(tx);
@@ -1454,7 +1476,8 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
           return {
             board,
             placements,
-            changed: changedObjectIds.length > 0 || changedPlacementIds.length > 0,
+            changed:
+              changedObjectIds.length > 0 || changedPlacementIds.length > 0 || layoutContextChanged,
             changed_object_ids: changedObjectIds,
             changed_placement_ids: changedPlacementIds,
           };

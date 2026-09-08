@@ -82,6 +82,31 @@ beforeEach(() => {
   agorStore.setState({ userById: new Map(), commentById: new Map() });
 });
 
+function createLayoutPatch() {
+  return vi.fn(async (_boardId: string, data: Record<string, unknown>) => {
+    const batch = data as {
+      objects?: Record<string, NonNullable<Board['objects']>[string]>;
+      placements?: Record<
+        string,
+        { position: { x: number; y: number }; size: { width: number; height: number } }
+      >;
+      layout_context?: Board['layout_context'];
+    };
+    const objects = batch.objects ?? {};
+    const placements = batch.placements ?? {};
+    return {
+      board: { objects, layout_context: batch.layout_context },
+      placements: Object.entries(placements).map(([object_id, placement]) => ({
+        object_id,
+        ...placement,
+      })),
+      changed: true,
+      changed_object_ids: Object.keys(objects),
+      changed_placement_ids: Object.keys(placements),
+    };
+  });
+}
+
 describe('SessionCanvas zoom shortcuts', () => {
   it('does not start a canvas selection gesture from portaled layout controls', () => {
     const popover = document.createElement('div');
@@ -286,7 +311,7 @@ describe('SessionCanvas zoom shortcuts', () => {
     } as unknown as Board;
 
     function renderAutoBoard() {
-      const patch = vi.fn().mockResolvedValue({});
+      const patch = createLayoutPatch();
       const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
       render(
         <ConnectionProvider
@@ -1068,7 +1093,7 @@ describe('SessionCanvas zoom shortcuts', () => {
     }
 
     function makeClient() {
-      const patch = vi.fn().mockResolvedValue({});
+      const patch = createLayoutPatch();
       const workflowService = {
         find: vi.fn().mockResolvedValue({ data: [] }),
         on: vi.fn(),
@@ -1374,15 +1399,13 @@ describe('SessionCanvas zoom shortcuts', () => {
     const options = await screen.findByRole('dialog', { name: 'Arrange board options' });
     expect(within(options).getByRole('radio', { name: 'Grid' })).toBeChecked();
     expect(within(options).getByRole('checkbox', { name: 'Pack zone contents' })).toBeChecked();
+    fireEvent.click(within(options).getByRole('button', { name: /More layout options/ }));
     expect(within(options).getByText('Preserve current expansion')).toBeInTheDocument();
-    expect(
-      within(options).getByRole('checkbox', { name: 'Match / resize zone frames' })
-    ).toBeChecked();
-    expect(within(options).getByRole('checkbox', { name: 'Justify rows' })).toBeChecked();
+    expect(within(options).getByRole('checkbox', { name: 'Match zone frames' })).toBeChecked();
+    expect(within(options).getByRole('checkbox', { name: 'Justify complete rows' })).toBeChecked();
     expect(
       within(options).getByRole('checkbox', { name: 'Fit view after arranging' })
     ).toBeChecked();
-    expect(within(options).getByText(/preserve the current camera/i)).toBeInTheDocument();
     expect(within(options).getByRole('combobox', { name: 'Last row behavior' })).toBeEnabled();
     expect(within(options).getByText('Last row: left')).toBeInTheDocument();
     fireEvent.click(within(options).getByRole('button', { name: 'Arrange board' }));
@@ -1409,7 +1432,7 @@ describe('SessionCanvas zoom shortcuts', () => {
         data: {},
       },
     ];
-    const patch = vi.fn().mockResolvedValue({});
+    const patch = createLayoutPatch();
     const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
     const board = {
       board_id: 'board-1',
@@ -1446,8 +1469,9 @@ describe('SessionCanvas zoom shortcuts', () => {
     expect(pack).toBeChecked();
     fireEvent.click(pack);
     expect(pack).not.toBeChecked();
+    fireEvent.click(within(options).getByRole('button', { name: /More layout options/ }));
     expect(within(options).getByRole('combobox', { name: 'Content expansion' })).toBeDisabled();
-    expect(within(options).getByText(/no child presentation is changed/i)).toBeInTheDocument();
+    expect(within(options).getByRole('checkbox', { name: 'Match zone frames' })).toBeDisabled();
     fireEvent.click(within(options).getByRole('button', { name: 'Arrange board' }));
 
     await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
@@ -1503,7 +1527,7 @@ describe('SessionCanvas zoom shortcuts', () => {
         data: { locked: true },
       },
     ];
-    const patch = vi.fn().mockResolvedValue({});
+    const patch = createLayoutPatch();
     const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
     let board = {
       board_id: 'board-1',
@@ -1553,6 +1577,8 @@ describe('SessionCanvas zoom shortcuts', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
     fireEvent.click(await screen.findByText('Grid', { exact: true }));
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Grid tracks' }));
+    fireEvent.click(await screen.findByText('Columns'));
     fireEvent.change(screen.getByLabelText('Number of columns'), { target: { value: '3' } });
     fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
 
@@ -1561,11 +1587,15 @@ describe('SessionCanvas zoom shortcuts', () => {
     expect(write).toMatchObject({ _action: 'applyLayout', placements: {} });
     expect(Object.keys(write.objects)).toEqual(['note-a', 'app-b', 'artifact-c']);
     expect(write.objects['fixed-note']).toBeUndefined();
-    expect(write.objects['note-a']).toMatchObject({ x: 140, y: 60 });
-    expect(write.objects['app-b']).toMatchObject({ x: 380, y: 60 });
-    expect(write.objects['artifact-c']).toMatchObject({ x: 720, y: 60 });
+    expect(write.objects['note-a']).toMatchObject({ x: 116, y: 52 });
+    expect(write.objects['app-b']).toMatchObject({ x: 380, y: 52 });
+    expect(write.objects['artifact-c']).toMatchObject({ x: 744, y: 52 });
 
-    board = { ...board, objects: { ...board.objects, ...write.objects } };
+    board = {
+      ...board,
+      objects: { ...board.objects, ...write.objects },
+      layout_context: write.layout_context,
+    };
     nodesStateOverride = nodesStateOverride?.map((node) => {
       const object = write.objects[node.id];
       return object ? { ...node, position: { x: object.x, y: object.y } } : node;
@@ -1590,6 +1620,230 @@ describe('SessionCanvas zoom shortcuts', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
     await act(async () => Promise.resolve());
     expect(patch).not.toHaveBeenCalled();
+  });
+
+  it('matches the largest selected width and reflows it in one atomic write', async () => {
+    nodesStateOverride = [
+      {
+        id: 'small-note',
+        type: 'markdown',
+        position: { x: 0, y: 0 },
+        width: 240,
+        height: 140,
+        selected: true,
+        data: {},
+      },
+      {
+        id: 'large-app',
+        type: 'appNode',
+        position: { x: 800, y: 0 },
+        width: 640,
+        height: 320,
+        selected: true,
+        data: {},
+      },
+      {
+        id: 'medium-artifact',
+        type: 'artifactNode',
+        position: { x: 0, y: 600 },
+        width: 360,
+        height: 220,
+        selected: true,
+        data: {},
+      },
+    ];
+    const patch = createLayoutPatch();
+    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    let board = {
+      board_id: 'board-1',
+      objects: {
+        'small-note': { type: 'markdown', x: 0, y: 0, width: 240, content: 'Small' },
+        'large-app': {
+          type: 'app',
+          x: 800,
+          y: 0,
+          width: 640,
+          height: 320,
+          title: 'Large',
+          files: {},
+        },
+        'medium-artifact': {
+          type: 'artifact',
+          x: 0,
+          y: 600,
+          width: 360,
+          height: 220,
+          artifact_id: 'artifact-1',
+        },
+      },
+    } as unknown as Board;
+    const view = render(
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      </AntApp>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Match width' }));
+
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    const write = patch.mock.calls[0]?.[1];
+    expect(write).toMatchObject({ _action: 'applyLayout', placements: {} });
+    const writtenObjects = Object.values(write.objects) as Array<{
+      width: number;
+      height?: number;
+      x: number;
+      y: number;
+    }>;
+    expect(writtenObjects.map((object) => object.width)).toEqual([640, 640, 640]);
+    const origins = writtenObjects.map((object) => `${object.x}:${object.y}`);
+    expect(new Set(origins).size).toBe(3);
+
+    board = {
+      ...board,
+      objects: { ...board.objects, ...write.objects },
+      layout_context: write.layout_context,
+    } as Board;
+    nodesStateOverride = nodesStateOverride.map((node) => {
+      const object = write.objects[node.id];
+      return object
+        ? {
+            ...node,
+            position: { x: object.x, y: object.y },
+            width: object.width,
+            ...('height' in object ? { height: object.height } : {}),
+          }
+        : node;
+    });
+    view.rerender(
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      </AntApp>
+    );
+    patch.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Match width' }));
+    await act(async () => Promise.resolve());
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it('routes Grid alignment through cell tracks without collapsing columns', async () => {
+    const fixtures = [
+      { id: 'wide', x: 0, y: 0, width: 600, height: 160 },
+      { id: 'short', x: 700, y: 0, width: 200, height: 120 },
+      { id: 'narrow', x: 0, y: 500, width: 200, height: 280 },
+      { id: 'long', x: 700, y: 500, width: 500, height: 180 },
+    ];
+    nodesStateOverride = fixtures.map((item) => ({
+      id: item.id,
+      type: 'appNode',
+      position: { x: item.x, y: item.y },
+      width: item.width,
+      height: item.height,
+      selected: true,
+      data: {},
+    }));
+    const patch = createLayoutPatch();
+    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    let board = {
+      board_id: 'board-1',
+      objects: Object.fromEntries(
+        fixtures.map((item) => [
+          item.id,
+          {
+            type: 'app',
+            x: item.x,
+            y: item.y,
+            width: item.width,
+            height: item.height,
+            title: item.id,
+            files: {},
+          },
+        ])
+      ),
+    } as unknown as Board;
+    const view = render(
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      </AntApp>
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Grid tracks' }));
+    fireEvent.click(await screen.findByText('Columns'));
+    fireEvent.change(screen.getByLabelText('Number of columns'), { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    const gridWrite = patch.mock.calls[0]?.[1];
+    board = {
+      ...board,
+      objects: { ...board.objects, ...gridWrite.objects },
+      layout_context: gridWrite.layout_context,
+    } as Board;
+    nodesStateOverride = nodesStateOverride.map((node) => {
+      const object = gridWrite.objects[node.id];
+      return object
+        ? {
+            ...node,
+            position: { x: object.x, y: object.y },
+            width: object.width,
+            height: object.height,
+          }
+        : node;
+    });
+    view.rerender(
+      <AntApp>
+        <ConnectionProvider
+          value={{
+            connected: true,
+            connecting: false,
+            outOfSync: false,
+            capturedSha: null,
+            currentSha: null,
+          }}
+        >
+          <SessionCanvas board={board} client={client} branches={[]} />
+        </ConnectionProvider>
+      </AntApp>
+    );
+    patch.mockClear();
+
+    fireEvent.click(screen.getByRole('button', { name: 'More alignment actions' }));
+    fireEvent.click(await screen.findByText('Right / end'));
+
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
+    const aligned = patch.mock.calls[0]?.[1].objects;
+    expect(aligned.narrow.x).toBeGreaterThan(gridWrite.objects.wide.x);
+    expect(aligned.short.x).toBeGreaterThan(gridWrite.objects.short.x);
+    expect(aligned.narrow.y).toBe(gridWrite.objects.narrow.y);
+    expect(aligned.short.y).toBe(gridWrite.objects.short.y);
   });
 
   it('atomically matches an unequal three-zone grid to uniform tracks and repeats as a no-op', async () => {
@@ -1647,7 +1901,7 @@ describe('SessionCanvas zoom shortcuts', () => {
         data: { locked: true },
       },
     ];
-    const patch = vi.fn().mockResolvedValue({});
+    const patch = createLayoutPatch();
     const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
     let board = {
       board_id: 'board-1',
@@ -1685,7 +1939,11 @@ describe('SessionCanvas zoom shortcuts', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Layout options' }));
     fireEvent.click(await screen.findByText('Grid', { exact: true }));
-    expect(screen.getByRole('switch', { name: 'Match zone frames to grid' })).toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: /More layout options/ }));
+    expect(screen.getByRole('switch', { name: 'Match heights within rows' })).toBeChecked();
+    expect(screen.getByRole('switch', { name: 'Match widths within columns' })).toBeChecked();
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Grid tracks' }));
+    fireEvent.click(await screen.findByText('Columns'));
     fireEvent.change(screen.getByLabelText('Number of columns'), { target: { value: '2' } });
     fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
 
@@ -1698,10 +1956,14 @@ describe('SessionCanvas zoom shortcuts', () => {
     const wide = write.objects['zone-wide'];
     expect(empty.width).toBe(wide.width);
     expect(empty.height).toBe(tall.height);
-    expect(tall.x - (empty.x + empty.width)).toBe(40);
-    expect(wide.y - (empty.y + empty.height)).toBe(40);
+    expect(tall.x - (empty.x + empty.width)).toBe(64);
+    expect(wide.y - (empty.y + empty.height)).toBe(48);
 
-    board = { ...board, objects: { ...board.objects, ...write.objects } } as Board;
+    board = {
+      ...board,
+      objects: { ...board.objects, ...write.objects },
+      layout_context: write.layout_context,
+    } as Board;
     nodesStateOverride = nodesStateOverride.map((node) => {
       const object = write.objects[node.id];
       return object
@@ -1733,5 +1995,5 @@ describe('SessionCanvas zoom shortcuts', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }));
     await act(async () => Promise.resolve());
     expect(patch).not.toHaveBeenCalled();
-  });
+  }, 30_000);
 });

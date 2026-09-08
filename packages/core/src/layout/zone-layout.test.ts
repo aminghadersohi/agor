@@ -35,10 +35,10 @@ describe('zone content justification', () => {
   ];
 
   it.each([
-    ['left', { left: 20, top: 180, right: 440, bottom: 440 }],
-    ['right', { left: 180, top: 180, right: 600, bottom: 440 }],
-    ['top', { left: 100, top: 100, right: 520, bottom: 360 }],
-    ['bottom', { left: 100, top: 620, right: 520, bottom: 880 }],
+    ['left', { left: 40, top: 180, right: 460, bottom: 440 }],
+    ['right', { left: 160, top: 180, right: 580, bottom: 440 }],
+    ['top', { left: 100, top: 120, right: 520, bottom: 380 }],
+    ['bottom', { left: 100, top: 600, right: 520, bottom: 860 }],
     ['middle', { left: 100, top: 180, right: 520, bottom: 440 }],
     ['vertical_middle', { left: 100, top: 320, right: 520, bottom: 580 }],
   ] as const)('justifies collision-independent components to %s', (justification, expected) => {
@@ -77,18 +77,18 @@ describe('zone content justification', () => {
   });
 
   it('centers the seeded Review rows independently without changing their vertical order', () => {
-    const reviewFrame = getZoneLayoutFrame({ width: 540 });
+    const reviewFrame = getZoneLayoutFrame({ width: 580 });
     const review = [
-      { id: 'worktree', x: 20, y: 100, width: 500, height: 240 },
-      { id: 'card', x: 20, y: 380, width: 380, height: 100 },
+      { id: 'worktree', x: 40, y: 100, width: 500, height: 240 },
+      { id: 'card', x: 40, y: 380, width: 380, height: 100 },
     ];
 
     const centered = justifyZoneContentCluster(review, reviewFrame, 500, 'middle');
     expect(centered).toEqual({
       fits: true,
       placements: [
-        { id: 'worktree', x: 20, y: 100, width: 500, height: 240 },
-        { id: 'card', x: 80, y: 380, width: 380, height: 100 },
+        { id: 'worktree', x: 40, y: 100, width: 500, height: 240 },
+        { id: 'card', x: 100, y: 380, width: 380, height: 100 },
       ],
     });
     expect(justifyZoneContentCluster(centered.placements, reviewFrame, 500, 'middle')).toEqual(
@@ -109,8 +109,8 @@ describe('zone content justification', () => {
       { id: 'short-right', x: 300, y: 100, width: 200, height: 100 },
     ];
     expect(justifyZoneContentCluster(columns, frame, 900, 'bottom').placements).toEqual([
-      { ...columns[0], y: 680 },
-      { ...columns[1], y: 780 },
+      { ...columns[0], y: 660 },
+      { ...columns[1], y: 760 },
     ]);
   });
 
@@ -125,6 +125,37 @@ describe('zone content justification', () => {
     expect(byId(permuted.placements)).toEqual(byId(first.placements));
     expect(first.placements[1].x - first.placements[0].x).toBe(mixed[1].x - mixed[0].x);
     expect(first.placements.map(({ y }) => y)).toEqual(mixed.map(({ y }) => y));
+  });
+
+  it('uses Grid alignment as justify-self/align-self without collapsing columns', () => {
+    const grid = [
+      { id: 'wide', x: 20, y: 100, width: 360, height: 120 },
+      { id: 'tall', x: 420, y: 100, width: 180, height: 300 },
+      { id: 'narrow', x: 20, y: 440, width: 160, height: 180 },
+      { id: 'partial', x: 420, y: 440, width: 320, height: 100 },
+    ];
+    const gridFrame = getZoneLayoutFrame({ width: 800 });
+    const right = justifyZoneContentCluster(grid, gridFrame, 760, 'right', {
+      columns: 2,
+      columnGap: 40,
+      rowGap: 40,
+    });
+    const bottom = justifyZoneContentCluster(grid, gridFrame, 760, 'bottom', {
+      columns: 2,
+      columnGap: 40,
+      rowGap: 40,
+    });
+    const rightById = new Map(right.placements.map((item) => [item.id, item]));
+    const bottomById = new Map(bottom.placements.map((item) => [item.id, item]));
+
+    expect(right.fits).toBe(true);
+    expect(rightById.get('wide')?.x).toBe(32);
+    expect(rightById.get('narrow')?.x).toBe(232);
+    expect(rightById.get('tall')?.x).toBe(572);
+    expect(rightById.get('partial')?.x).toBe(432);
+    expect(bottomById.get('wide')?.y).toBe(292);
+    expect(bottomById.get('tall')?.y).toBe(112);
+    expect(bottomById.get('partial')?.y).toBe(532);
   });
 
   it('refuses an axis that cannot fit instead of clipping or distorting the cluster', () => {
@@ -142,7 +173,7 @@ describe('zone layout frame', () => {
     const card = compactZoneItemSize('card', frame.usableWidth);
     const branch = compactZoneItemSize('branch', frame.usableWidth);
 
-    expect(frame).toEqual({ width: 620, padding: 20, headerInset: 80, usableWidth: 580 });
+    expect(frame).toEqual({ width: 620, padding: 32, headerInset: 80, usableWidth: 556 });
     expect(card.width).toBe(frame.usableWidth);
     expect(branch.width).toBe(frame.usableWidth);
     expect(frame.width - frame.padding - card.width).toBe(frame.padding);
@@ -152,7 +183,9 @@ describe('zone layout frame', () => {
   it('keeps custom header reserves and the full frame on the board grid', () => {
     const frame = getZoneLayoutFrame({ width: 613, fontSize: 31, status: 'Active' });
 
-    for (const value of Object.values(frame)) expect(value % 20).toBe(0);
+    expect(frame.width % 20).toBe(0);
+    expect(frame.headerInset % 20).toBe(0);
+    expect(frame.padding).toBe(32);
     expect(frame.headerInset).toBeGreaterThan(80);
   });
 
@@ -182,14 +215,25 @@ describe('normalizeZoneLayoutPolicy', () => {
       sortBy: 'position',
       sortDirection: 'asc',
       autoResizeHeight: false,
-      gap: 24,
+      columnGap: 40,
+      rowGap: 32,
+      padding: 32,
     });
     expect(normalizeZoneLayoutPolicy({ mode: 'auto', columns: 2.9 })).toMatchObject({
       mode: 'auto',
       columns: 2,
+      columnGap: 24,
+      rowGap: 24,
+      padding: 20,
     });
-    expect(normalizeZoneLayoutPolicy({ gap: -4 })).toMatchObject({ gap: 0 });
-    expect(normalizeZoneLayoutPolicy({ gap: 200 })).toMatchObject({ gap: 96 });
+    expect(normalizeZoneLayoutPolicy({ gap: -4 })).toMatchObject({ columnGap: 0, rowGap: 0 });
+    expect(normalizeZoneLayoutPolicy({ gap: 200.5 })).toMatchObject({
+      columnGap: 200.5,
+      rowGap: 200.5,
+    });
+    expect(
+      normalizeZoneLayoutPolicy({ columnGap: 37.5, rowGap: 53.25, padding: 31.75 })
+    ).toMatchObject({ columnGap: 37.5, rowGap: 53.25, padding: 31.75 });
     expect(normalizeZoneLayoutPolicy({ preset: 'compact_list' })).toMatchObject({
       preset: 'compact_list',
       density: 'preserve',
@@ -215,7 +259,8 @@ describe('normalizeZoneLayoutPolicy', () => {
       sortBy: 'title',
       sortDirection: 'desc',
       columns: 2,
-      gap: 12,
+      columnGap: 12,
+      rowGap: 12,
     });
     expect(setZoneLayoutMode(configured, 'auto')).toEqual(configured);
     expect(setZoneLayoutMode(configured, 'manual')).toEqual({ ...configured, mode: 'manual' });
@@ -223,10 +268,13 @@ describe('normalizeZoneLayoutPolicy', () => {
 
   it('treats legacy zones as overrides and resolves explicit inheritance through board defaults', () => {
     expect(zoneLayoutBinding({})).toBe('override');
-    expect(resolveZoneLayoutPolicy({ layout: { gap: 40 } }, { gap: 4 })).toMatchObject({ gap: 40 });
+    expect(resolveZoneLayoutPolicy({ layout: { gap: 40 } }, { gap: 4 })).toMatchObject({
+      columnGap: 40,
+      rowGap: 40,
+    });
     expect(
       resolveZoneLayoutPolicy({ layout_binding: 'inherit', layout: { gap: 40 } }, { gap: 4 })
-    ).toMatchObject({ gap: 4 });
+    ).toMatchObject({ columnGap: 4, rowGap: 4 });
   });
 
   it('owns the direction labels used by every Configure Zone sort key', () => {

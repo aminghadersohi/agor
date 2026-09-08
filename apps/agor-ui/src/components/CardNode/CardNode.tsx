@@ -215,7 +215,14 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
                 borderBottom: card.note ? `1px solid ${token.colorBorderSecondary}` : 'none',
               }}
             >
-              <MarkdownPreview key={card.card_id} content={card.description} />
+              <MarkdownPreview
+                key={card.card_id}
+                content={card.description}
+                // When a note follows, the density body remains the only
+                // bounded scroll container. Description-only cards retain the
+                // shared preview's bounded expanded viewport from main.
+                boundExpandedHeight={!card.note}
+              />
             </div>
           )}
 

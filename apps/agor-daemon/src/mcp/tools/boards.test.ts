@@ -1,8 +1,4 @@
-import {
-  BOARD_GRID_SIZE,
-  ceilBoardGridValue,
-  snapBoardGridPoint,
-} from '@agor/core/layout/rectangle-packing';
+import { BOARD_GRID_SIZE, ceilBoardGridValue } from '@agor/core/layout/rectangle-packing';
 import { GENERIC_BOARD_CARD_LAYOUT } from '@agor/core/layout/zone-layout';
 import { branchQueryValidator, typedValidateQuery } from '@agor/core/lib/feathers-validation';
 import type { McpServer } from '@modelcontextprotocol/server';
@@ -565,17 +561,6 @@ describe('agor_boards_create schema', () => {
   });
 });
 
-function expectBoardGridRect(rect: {
-  position: { x: number; y: number };
-  size: { width: number; height: number };
-}) {
-  expect(rect.position.x % BOARD_GRID_SIZE).toBe(0);
-  expect(rect.position.y % BOARD_GRID_SIZE).toBe(0);
-  expect(rect.size.width % BOARD_GRID_SIZE).toBe(0);
-  expect(rect.size.height % BOARD_GRID_SIZE).toBe(0);
-  expect(snapBoardGridPoint(rect.position)).toEqual(rect.position);
-}
-
 function captureAtomicLayout(
   capture: (objectId: string, data: Record<string, unknown>) => void = () => {}
 ) {
@@ -832,10 +817,10 @@ describe('agor_boards_auto_arrange_zone', () => {
 
     expect(parsed).toMatchObject({ layoutMode: 'grid', columns: 2, rows: 2 });
     expect(patches.map((update) => update.position)).toEqual([
-      { x: 20, y: 100 },
-      { x: 424, y: 100 },
-      { x: 20, y: 184 },
-      { x: 424, y: 184 },
+      { x: 32, y: 112 },
+      { x: 452, y: 112 },
+      { x: 32, y: 204 },
+      { x: 452, y: 204 },
     ]);
   });
 
@@ -1074,7 +1059,7 @@ describe('agor_boards_auto_arrange_zone', () => {
           return {
             get: vi.fn(async () => ({
               board_id: 'board-1',
-              objects: { 'zone-1': { type: 'zone', x: 0, y: 0, width: 620, height: 2200 } },
+              objects: { 'zone-1': { type: 'zone', x: 0, y: 0, width: 620, height: 3000 } },
             })),
             patch: captureAtomicLayout((_id, data) =>
               patches.push(data as { position: { x: number; y: number } })
@@ -1120,8 +1105,8 @@ describe('agor_boards_auto_arrange_zone', () => {
     expect(patches).toHaveLength(20);
     for (const [index, patch] of patches.entries()) {
       const entity = entities[index];
-      expect(patch.position.x + (entity?.size.width ?? 0)).toBeLessThanOrEqual(620 - 24);
-      expect(patch.position.y + (entity?.size.height ?? 0)).toBeLessThanOrEqual(2200 - 20);
+      expect(patch.position.x + (entity?.size.width ?? 0)).toBeLessThanOrEqual(620 - 32);
+      expect(patch.position.y + (entity?.size.height ?? 0)).toBeLessThanOrEqual(3000 - 32);
     }
   });
 
@@ -1364,7 +1349,9 @@ describe('agor_boards_set_zone_layout', () => {
       sortBy: 'priority',
       sortDirection: 'asc',
       columns: 2,
-      gap: 16,
+      columnGap: 16,
+      rowGap: 16,
+      padding: 32,
       // The legacy boolean normalizes into `resize` and is echoed back beside
       // it, so a policy written by an older client reads correctly to both.
       resize: 'height',
@@ -1461,7 +1448,10 @@ describe('agor_boards_set_zone_layout', () => {
       (await setLayout({ boardId: 'board-1', zoneId: 'zone-1', useBoardDefaults: true })).content[0]
         .text
     );
-    expect(reset).toMatchObject({ layoutBinding: 'inherit', layout: { gap: 4 } });
+    expect(reset).toMatchObject({
+      layoutBinding: 'inherit',
+      layout: { columnGap: 4, rowGap: 4, padding: 20 },
+    });
     expect(patch).toHaveBeenCalledOnce();
 
     zone = patch.mock.calls[0]![1].objectData;
@@ -1516,7 +1506,7 @@ describe('agor_boards_set_zone_defaults', () => {
       'board-1',
       expect.objectContaining({
         _action: 'setZoneLayoutDefaults',
-        defaults: expect.objectContaining({ gap: 8 }),
+        defaults: expect.objectContaining({ columnGap: 8, rowGap: 8, padding: 20 }),
         applyToExisting: false,
         expected: expect.objectContaining({
           zones: {
@@ -1614,11 +1604,14 @@ describe('agor_boards_auto_arrange', () => {
 
     expect(parsed).toMatchObject({ columns: 2, rows: 2 });
     expect(patches.map((update) => update.position)).toEqual([
-      { x: 80, y: 80 },
-      { x: 620, y: 80 },
-      { x: 80, y: 320 },
+      { x: 83, y: 87 },
+      { x: 616, y: 87 },
+      { x: 83, y: 320 },
     ]);
-    for (const patch of patches) expectBoardGridRect(patch);
+    for (const patch of patches) {
+      expect(patch.size.width % BOARD_GRID_SIZE).toBe(0);
+      expect(patch.size.height % BOARD_GRID_SIZE).toBe(0);
+    }
   });
 
   it('includes artifacts by default and falls back for unmeasured rectangles', async () => {
@@ -1690,13 +1683,13 @@ describe('agor_boards_auto_arrange', () => {
       layoutMode: 'cluster',
     });
     expect(entityPatches).toEqual([
-      { position: { x: 80, y: 80 }, size: { width: 500, height: 200 } },
+      { position: { x: 96, y: 96 }, size: { width: 500, height: 200 } },
     ]);
     expect(boardPatches).toHaveLength(1);
     expect(boardPatches[0]).toMatchObject({
       _action: 'batchUpsertObjects',
       objects: {
-        'artifact-1': { x: 80, y: 320, width: 600, height: 400 },
+        'artifact-1': { x: 96, y: 344, width: 600, height: 400 },
       },
     });
   });
@@ -1786,14 +1779,14 @@ describe('agor_boards_auto_arrange', () => {
       // zone-1 occupies y 0..800, so the default y=80 grid origin moved below it
       // rather than laying the annotations over a zone it is not arranging.
       avoidedZoneIds: ['zone-1'],
-      appliedStartY: 840,
+      appliedStartY: 848,
     });
     expect(boardPatches).toHaveLength(1);
     expect(boardPatches[0]).toMatchObject({
       _action: 'batchUpsertObjects',
       objects: {
-        'text-1': expect.objectContaining({ x: 80, y: 840 }),
-        'note-1': expect.objectContaining({ x: 320, y: 840 }),
+        'text-1': expect.objectContaining({ x: 96, y: 848 }),
+        'note-1': expect.objectContaining({ x: 360, y: 848 }),
       },
     });
   });
@@ -1918,6 +1911,7 @@ describe('board layout tools with branch entities present', () => {
     captureAtomicPlacements?: boolean;
   }) {
     const boardObjects = { ...(options.objects ?? {}) };
+    let boardLayoutContext: unknown;
     const entityState = options.entities.map((entity) => ({ ...entity }));
     const branchesFind = validatedBranchesFind((query) => ({
       data: (((query.branch_id as { $in?: string[] } | undefined)?.$in ?? []) as string[]).map(
@@ -1942,11 +1936,13 @@ describe('board layout tools with branch entities present', () => {
                 board_id: 'board-1',
                 name: 'Board',
                 objects: boardObjects,
+                layout_context: boardLayoutContext,
               })),
               patch: vi.fn(async (_id: string, data: Record<string, unknown>) => {
                 options.boardPatches?.push(data);
                 if (data._action === 'applyLayout') {
                   Object.assign(boardObjects, data.objects as Record<string, unknown>);
+                  boardLayoutContext = data.layout_context;
                   for (const [objectId, placement] of Object.entries(
                     (data.placements ?? {}) as Record<
                       string,
@@ -2083,7 +2079,7 @@ describe('board layout tools with branch entities present', () => {
     expect(entityPatches).toEqual([
       {
         objectId: 'obj-branch',
-        data: { position: { x: 80, y: 80 }, size: { width: 500, height: 200 } },
+        data: { position: { x: 96, y: 96 }, size: { width: 500, height: 200 } },
       },
     ]);
   });
@@ -2524,7 +2520,7 @@ describe('board layout tools with branch entities present', () => {
     });
   });
 
-  it('places and sizes zones on the manual board grid', async () => {
+  it('grid-aligns frames while preserving exact MCP axis gaps and outer margin', async () => {
     const { app } = makeApp({
       entities: [],
       objects: {
@@ -2543,16 +2539,29 @@ describe('board layout tools with branch entities present', () => {
         await arrangeZones({
           boardId: 'board-1',
           targetWidth: 913,
-          gap: 31,
-          startX: 83,
-          startY: 87,
+          columnGap: 31.5,
+          rowGap: 47.25,
+          outerMargin: 83.75,
           dryRun: true,
         })
       ).content[0].text
     );
 
     expect(parsed.updates).toHaveLength(2);
-    for (const update of parsed.updates) expectBoardGridRect(update);
+    expect(parsed).toMatchObject({
+      gap: 31.5,
+      columnGap: 31.5,
+      rowGap: 47.25,
+      outerMargin: 83.75,
+    });
+    for (const update of parsed.updates) {
+      expect(update.size.width % BOARD_GRID_SIZE).toBe(0);
+      expect(update.size.height % BOARD_GRID_SIZE).toBe(0);
+    }
+    expect(parsed.updates[0].position).toEqual({ x: 83.75, y: 83.75 });
+    expect(
+      parsed.updates[1].position.y - (parsed.updates[0].position.y + parsed.updates[0].size.height)
+    ).toBe(47.25);
   });
 
   it('persists one container batch and re-packs each visible child in the same call', async () => {
@@ -2615,6 +2624,90 @@ describe('board layout tools with branch entities present', () => {
     );
   });
 
+  it('shares exact Grid, match, and cell-alignment options in one idempotent MCP batch', async () => {
+    const boardPatches: Array<Record<string, unknown>> = [];
+    const { app } = makeApp({
+      entities: [],
+      objects: {
+        note: { type: 'markdown', x: 120, y: 140, width: 300, height: 180, content: '# Brief' },
+        app: {
+          type: 'app',
+          x: 900,
+          y: 160,
+          width: 640,
+          height: 260,
+          title: 'Fictional metrics',
+          template: 'react',
+          files: {},
+        },
+        locked: {
+          type: 'artifact',
+          artifact_id: 'artifact-locked',
+          x: 1900,
+          y: 800,
+          width: 920,
+          height: 420,
+          locked: true,
+        },
+      },
+      boardPatches,
+    });
+    const arrange = registerAndCaptureHandler('agor_boards_arrange_zones', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    const args = {
+      boardId: 'board-1',
+      mode: 'grid' as const,
+      columns: 2,
+      gap: 27,
+      justifyRows: false,
+      matchWidth: true,
+      cellHorizontalAlignment: 'end' as const,
+      cellVerticalAlignment: 'center' as const,
+      packZoneContents: false,
+    };
+    const first = JSON.parse((await arrange(args)).content[0].text);
+
+    expect(first.gap).toBe(27);
+    expect(first.looseUpdates).toHaveLength(2);
+    expect(
+      first.looseUpdates.map((update: { size: { width: number } }) => update.size.width)
+    ).toEqual([640, 640]);
+    expect(boardPatches).toHaveLength(1);
+    expect(boardPatches[0]).toMatchObject({
+      _action: 'applyLayout',
+      objects: {
+        note: expect.objectContaining({ width: 640 }),
+        app: expect.objectContaining({ width: 640 }),
+      },
+      placements: {},
+      expected: expect.any(Object),
+      layout_context: expect.objectContaining({
+        scope: 'board',
+        settings: expect.objectContaining({
+          mode: 'grid',
+          trackAxis: 'columns',
+          trackCount: 2,
+          columnGap: 27,
+          rowGap: 27,
+          outerMargin: 96,
+          density: 'preserve',
+          packZoneContents: false,
+          cellHorizontalAlignment: 'end',
+          cellVerticalAlignment: 'center',
+        }),
+      }),
+    });
+    expect((boardPatches[0]!.objects as Record<string, unknown>).locked).toBeUndefined();
+
+    const second = JSON.parse((await arrange(args)).content[0].text);
+    expect(second.looseUpdates).toEqual(first.looseUpdates);
+    expect(boardPatches).toHaveLength(1);
+  });
+
   it('defaults Pack zone contents on, repairs anchored protrusion, compacts waste, and is idempotent', async () => {
     const boardPatches: Array<Record<string, unknown>> = [];
     const { app } = makeApp({
@@ -2645,14 +2738,14 @@ describe('board layout tools with branch entities present', () => {
     expect(first.packZoneContents).toBe(true);
     expect(tiny.arrangedItems).toBe(1);
     expect(tiny.size.width).toBeGreaterThanOrEqual(900);
-    expect(empty.size).toEqual({ width: 600, height: tiny.size.height });
+    expect(empty.size).toEqual({ width: 600, height: 240 });
     expect(boardPatches).toHaveLength(1);
     expect(boardPatches[0]).toMatchObject({
       _action: 'applyLayout',
       objects: {
         tiny: expect.objectContaining({ width: tiny.size.width, height: tiny.size.height }),
         protruding: expect.any(Object),
-        empty: expect.objectContaining({ width: 600, height: tiny.size.height }),
+        empty: expect.objectContaining({ width: 600, height: 240 }),
       },
       placements: {},
     });
@@ -3000,10 +3093,10 @@ describe('agor_boards_auto_arrange zone avoidance', () => {
 
     const parsed = JSON.parse((await arrange({ boardId: 'board-1', columns: 1 })).content[0].text);
 
-    // Zone spans y 40..460, so the default y=80 origin was inside it.
+    // Zone spans y 40..460, so the shared default margin origin was inside it.
     expect(parsed).toMatchObject({
-      appliedStartX: 80,
-      appliedStartY: 500,
+      appliedStartX: 96,
+      appliedStartY: 508,
       avoidedZoneIds: ['zone-1'],
     });
     expect(patches.every(({ position }) => position.y >= 460)).toBe(true);
@@ -3026,10 +3119,10 @@ describe('agor_boards_auto_arrange zone avoidance', () => {
     // Clears zone-1 (ends 460) then zone-2 (ends 680) and stops — the zone
     // parked at y=40000 never blocked, so it must not drag the grid down.
     expect(parsed).toMatchObject({
-      appliedStartY: 720,
+      appliedStartY: 728,
       avoidedZoneIds: ['zone-1', 'zone-2'],
     });
-    expect(patches[0].position).toEqual({ x: 80, y: 720 });
+    expect(patches[0].position).toEqual({ x: 96, y: 728 });
   });
 
   it('leaves the default origin alone when no zone is in the way', async () => {
@@ -3044,8 +3137,8 @@ describe('agor_boards_auto_arrange zone avoidance', () => {
 
     const parsed = JSON.parse((await arrange({ boardId: 'board-1', columns: 1 })).content[0].text);
 
-    expect(parsed).toMatchObject({ appliedStartY: 80, avoidedZoneIds: [] });
-    expect(patches[0].position).toEqual({ x: 80, y: 80 });
+    expect(parsed).toMatchObject({ appliedStartY: 96, avoidedZoneIds: [] });
+    expect(patches[0].position).toEqual({ x: 96, y: 96 });
   });
 
   it('honors an explicit startY even when it lands on a zone', async () => {
@@ -3061,7 +3154,7 @@ describe('agor_boards_auto_arrange zone avoidance', () => {
     );
 
     expect(parsed).toMatchObject({ appliedStartY: 100, avoidedZoneIds: [] });
-    expect(patches[0].position).toEqual({ x: 80, y: 100 });
+    expect(patches[0].position).toEqual({ x: 96, y: 100 });
   });
 
   it('does not dodge zones it is arranging as containers', async () => {
@@ -3076,7 +3169,7 @@ describe('agor_boards_auto_arrange zone avoidance', () => {
       (await arrange({ boardId: 'board-1', includeZones: true })).content[0].text
     );
 
-    expect(parsed).toMatchObject({ appliedStartY: 80, avoidedZoneIds: [] });
+    expect(parsed).toMatchObject({ appliedStartY: 96, avoidedZoneIds: [] });
   });
 });
 
