@@ -729,6 +729,20 @@
       "when": 1788800000001,
       "tag": "0104_environment_command_discovery",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1788728664646,
+      "tag": "0102_mcp_oauth_client_registrations",
+      "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1788728664647,
+      "tag": "0103_oauth_authority_watermark_reconciliation",
+      "breakpoints": true
     }
   ]
 }
