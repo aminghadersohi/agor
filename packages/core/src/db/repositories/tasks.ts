@@ -15,6 +15,10 @@ import type {
   CoordinatorQueueBatchSourceAudit,
   ExecutorPulse,
   ExecutorTerminationCompleteInput,
+  QueuedPromptAmendmentApplyInput,
+  QueuedPromptAmendmentApplyResult,
+  QueuedPromptAmendmentAuthority,
+  QueuedPromptAmendmentPreview,
   SdkFailure,
   SessionID,
   Task,
@@ -23,6 +27,7 @@ import type {
   TaskPendingDispatchStatus,
   TerminationCause,
   TerminationCoordinationClaim,
+  UserID,
   UUID,
 } from '@agor/core/types';
 import {
@@ -79,6 +84,9 @@ import { ExecutorSessionTokenAuthorityRepository } from './executor-session-toke
 import { deepMerge } from './merge-utils';
 
 export const MAX_COMPACTED_PROMPT_BYTES = 32 * 1024;
+export const MAX_EDITABLE_QUEUED_PROMPT_BYTES = 32 * 1024;
+export const MAX_QUEUED_PROMPT_AMENDMENTS = 50;
+export const MAX_QUEUED_PROMPT_AMENDMENT_AUDIT_BYTES = 256 * 1024;
 const COMPACTED_PROMPT_HEADER =
   'Several queued requests were compacted into this turn. Follow each distinct instruction in first-occurrence order.';
 export const COORDINATOR_COMBINED_PROMPT_HEADER =
@@ -169,11 +177,27 @@ function coordinatorBatchSource(tasksInQueue: Task[]): {
       created_at: task.created_at,
       created_by: task.created_by as import('@agor/core/types').UserID,
       requests,
+      ...(task.metadata?.queued_prompt_amendment
+        ? { amendment: task.metadata.queued_prompt_amendment }
+        : {}),
     };
   });
   const firstByNormalizedText = new Map<string, TaskID>();
   const requests = sources.flatMap((source) =>
-    source.requests.map((request) => {
+    (source.amendment
+      ? [
+          {
+            request_id: source.task_id,
+            submitted_at: source.created_at,
+            created_by: source.created_by,
+            text: source.amendment.revisions.at(-1)?.text ?? source.amendment.original_prompt,
+            normalized_text: normalizePromptForDeduplication(
+              source.amendment.revisions.at(-1)?.text ?? source.amendment.original_prompt
+            ),
+          },
+        ]
+      : source.requests
+    ).map((request) => {
       const { duplicate_of_request_id: _priorDuplicate, ...base } = request;
       const first = firstByNormalizedText.get(request.normalized_text);
       if (first) return { ...base, duplicate_of_request_id: first };
@@ -224,6 +248,7 @@ function ordinaryCoordinatorBatchRefusalReasons(tasksInQueue: Task[]): string[] 
       'prompt_compaction',
       'prompt_control',
       'completion_callback',
+      'queued_prompt_amendment',
     ]);
     if (Object.keys(task.metadata ?? {}).some((key) => !permittedMetadata.has(key))) {
       reasons.add(
@@ -260,6 +285,127 @@ function coordinatorQueueRevision(sessionRow: SessionRow, tasksInQueue: Task[]):
     })),
   };
   return `sha256:${createHash('sha256').update(stableJson(material)).digest('hex')}`;
+}
+
+function queuedPromptStateRefusal(task: Task): string | undefined {
+  if (task.status === TaskStatus.DISPATCHING) return 'This prompt was claimed for dispatch.';
+  if (task.status === TaskStatus.RUNNING) return 'This prompt is already running.';
+  if (task.status === TaskStatus.STOPPING) return 'This prompt is stopping and cannot be edited.';
+  if (task.status === TaskStatus.STOPPED) return 'This prompt is stopped or cancelled.';
+  if (isTerminalTaskStatus(task.status)) return `This prompt is terminal (${task.status}).`;
+  if (task.status !== TaskStatus.QUEUED) {
+    return `This prompt is not an unclaimed queued Task (${task.status}).`;
+  }
+  return undefined;
+}
+
+function ordinaryQueuedPromptRefusal(task: Task): string | undefined {
+  const state = queuedPromptStateRefusal(task);
+  if (state) return state;
+  const metadata = task.metadata;
+  const permittedMetadata = new Set([
+    'queued_by_user_id',
+    'source',
+    'prompt_compaction',
+    'prompt_control',
+    'completion_callback',
+    'queued_prompt_amendment',
+  ]);
+  if (Object.keys(metadata ?? {}).some((key) => !permittedMetadata.has(key))) {
+    return 'This Task has callback, continuation, attachment, widget, gateway, interrupt, control, or other internal delivery semantics.';
+  }
+  if (metadata?.source === 'gateway' || metadata?.system_authored || metadata?.is_agor_callback) {
+    return 'Gateway, callback, continuation, and other system-authored prompts cannot be edited.';
+  }
+  if (metadata?.queued_by_user_id && metadata.queued_by_user_id !== task.created_by) {
+    return 'This queued prompt has mixed actor attribution.';
+  }
+  const amendment = metadata?.queued_prompt_amendment;
+  if (
+    amendment &&
+    (amendment.current_revision !== amendment.revisions.length ||
+      amendment.revisions.some((revision, index) => revision.revision !== index + 1) ||
+      (amendment.revisions.at(-1)?.text ?? amendment.original_prompt) !== task.full_prompt ||
+      !!amendment.cancellation)
+  ) {
+    return 'This queued prompt has an inconsistent amendment provenance contract.';
+  }
+  if (
+    metadata?.prompt_compaction?.requests.some((request) => request.created_by !== task.created_by)
+  ) {
+    return 'This compacted queued prompt contains requests from mixed actors.';
+  }
+  if (
+    task.full_prompt.trimStart().startsWith('/') ||
+    task.full_prompt.includes('Attachments — use `agor_upload_materialize` to access:') ||
+    task.full_prompt.includes('/_uploads/')
+  ) {
+    return 'Slash controls and attachment-bearing prompts cannot be edited.';
+  }
+  if (task.message_range.start_index !== -1 || task.git_state.sha_at_start !== '') {
+    return 'This Task no longer has the untouched queued-delivery contract.';
+  }
+  return undefined;
+}
+
+function queuedPromptRelationshipMatches(
+  sessionRow: SessionRow,
+  callerRow: SessionRow | undefined,
+  authority: QueuedPromptAmendmentAuthority,
+  requestedBySessionId: SessionID | undefined
+): boolean {
+  if (authority === 'author') return true;
+  if (!requestedBySessionId || !callerRow || callerRow.archived) return false;
+  if (authority === 'parent') {
+    return (
+      sessionRow.parent_session_id === requestedBySessionId &&
+      callerRow.branch_id === sessionRow.branch_id
+    );
+  }
+  const callback = (
+    sessionRow.data as SessionRow['data'] & {
+      callback_config?: { enabled?: boolean; callback_session_id?: SessionID };
+    }
+  ).callback_config;
+  return callback?.enabled !== false && callback?.callback_session_id === requestedBySessionId;
+}
+
+function buildQueuedPromptAmendmentPreview(
+  sessionRow: SessionRow,
+  task: Task,
+  tasksInQueue: Task[],
+  input: {
+    requested_by_user_id: UserID;
+    requested_by_session_id?: SessionID;
+    authority: QueuedPromptAmendmentAuthority;
+  },
+  relationshipMatches: boolean
+): QueuedPromptAmendmentPreview {
+  const authorityRefusal =
+    input.authority === 'author'
+      ? task.created_by === input.requested_by_user_id
+        ? undefined
+        : 'Only the prompt author may use author authority.'
+      : relationshipMatches
+        ? undefined
+        : `The current ${input.authority} relationship no longer authorizes this amendment.`;
+  const refusalReason = authorityRefusal ?? ordinaryQueuedPromptRefusal(task);
+  return {
+    session_id: sessionRow.session_id as SessionID,
+    task_id: task.task_id,
+    queue_revision: coordinatorQueueRevision(sessionRow, tasksInQueue),
+    prompt_revision: task.metadata?.queued_prompt_amendment?.current_revision ?? 0,
+    canonical_prompt: task.full_prompt,
+    canonical_prompt_bytes: utf8Bytes(task.full_prompt),
+    editable: !refusalReason,
+    ...(refusalReason ? { refusal_reason: refusalReason } : {}),
+    editable_until: 'dispatch_claim',
+    created_by: task.created_by as UserID,
+    created_at: task.created_at,
+    ...(task.metadata?.queued_prompt_amendment
+      ? { amendment: task.metadata.queued_prompt_amendment }
+      : {}),
+  };
 }
 
 function buildCoordinatorQueueBatchPreview(
@@ -2272,6 +2418,271 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
               status: TaskStatus.STOPPING,
               data: targetData,
             }),
+          };
+        },
+        { sqliteImmediate: true }
+      )
+    );
+  }
+
+  /**
+   * Preview one Task's canonical queued instruction. The returned queue and
+   * prompt revisions are both required by applyQueuedPromptAmendment.
+   */
+  async previewQueuedPromptAmendment(input: {
+    session_id: SessionID;
+    task_id: TaskID;
+    requested_by_user_id: UserID;
+    requested_by_session_id?: SessionID;
+    authority: QueuedPromptAmendmentAuthority;
+  }): Promise<QueuedPromptAmendmentPreview> {
+    const sessionRow = await select(this.db)
+      .from(sessions)
+      .where(eq(sessions.session_id, input.session_id))
+      .one();
+    if (!sessionRow) throw new EntityNotFoundError('Session', input.session_id);
+    const taskRow = await select(this.db)
+      .from(tasks)
+      .where(and(eq(tasks.task_id, input.task_id), eq(tasks.session_id, input.session_id)))
+      .one();
+    if (!taskRow) throw new EntityNotFoundError('Task', input.task_id);
+    const callerRow = input.requested_by_session_id
+      ? await select(this.db)
+          .from(sessions)
+          .where(eq(sessions.session_id, input.requested_by_session_id))
+          .one()
+      : undefined;
+    const queueRows = (await select(this.db)
+      .from(tasks)
+      .where(and(eq(tasks.session_id, input.session_id), eq(tasks.status, TaskStatus.QUEUED)))
+      .orderBy(asc(tasks.queue_position), asc(tasks.created_at), asc(tasks.task_id))
+      .all()) as TaskRow[];
+    return buildQueuedPromptAmendmentPreview(
+      sessionRow,
+      this.rowToTask(taskRow),
+      queueRows.map((row) => this.rowToTask(row)),
+      input,
+      queuedPromptRelationshipMatches(
+        sessionRow,
+        callerRow,
+        input.authority,
+        input.requested_by_session_id
+      )
+    );
+  }
+
+  /**
+   * Amend or cancel one ordinary queued prompt under the Session sequencer.
+   * The shared Session-first lock makes dispatch-vs-edit/cancel a one-winner
+   * race. Operation IDs converge retries without appending duplicate audit.
+   */
+  async applyQueuedPromptAmendment(
+    input: QueuedPromptAmendmentApplyInput
+  ): Promise<QueuedPromptAmendmentApplyResult> {
+    if (!input.operation_id.trim() || input.operation_id.length > 128) {
+      throw new RepositoryError('Amendment operation ID must contain 1–128 characters');
+    }
+    if (!Number.isInteger(input.expected_prompt_revision) || input.expected_prompt_revision < 0) {
+      throw new RepositoryError('Expected prompt revision must be a non-negative integer');
+    }
+    if (input.action === 'update' && !input.revised_prompt?.trim()) {
+      throw new RepositoryError('A non-empty revised prompt is required');
+    }
+    if (input.action === 'cancel' && input.revised_prompt !== undefined) {
+      throw new RepositoryError('Cancellation does not accept revised prompt text');
+    }
+    return this.runTaskMutation(() =>
+      runDatabaseTransaction(
+        this.db,
+        async (txDb) => {
+          await lockRowForUpdate(
+            txDb,
+            this.db,
+            sessions,
+            eq(sessions.session_id, input.session_id)
+          );
+          const sessionRow = await select(txDb)
+            .from(sessions)
+            .where(eq(sessions.session_id, input.session_id))
+            .one();
+          if (!sessionRow) throw new EntityNotFoundError('Session', input.session_id);
+          await lockRowForUpdate(txDb, this.db, tasks, eq(tasks.task_id, input.task_id));
+          const taskRow = await select(txDb)
+            .from(tasks)
+            .where(and(eq(tasks.task_id, input.task_id), eq(tasks.session_id, input.session_id)))
+            .one();
+          if (!taskRow) throw new EntityNotFoundError('Task', input.task_id);
+          const task = this.rowToTask(taskRow);
+          const existingAudit = task.metadata?.queued_prompt_amendment;
+          const priorRevision = existingAudit?.revisions.find(
+            (revision) => revision.operation_id === input.operation_id
+          );
+          const priorCancellation =
+            existingAudit?.cancellation?.operation_id === input.operation_id
+              ? existingAudit.cancellation
+              : undefined;
+          if (priorRevision || priorCancellation) {
+            const retryMatches = priorRevision
+              ? input.action === 'update' &&
+                priorRevision.text === input.revised_prompt &&
+                priorRevision.amended_by_user_id === input.requested_by_user_id &&
+                priorRevision.authority === input.authority
+              : input.action === 'cancel' &&
+                priorCancellation!.cancelled_by_user_id === input.requested_by_user_id &&
+                priorCancellation!.authority === input.authority;
+            if (!retryMatches) {
+              throw new RepositoryError(
+                `Queued prompt amendment operation ${input.operation_id} was already used with different input`
+              );
+            }
+            return {
+              outcome: priorRevision ? 'already_amended' : 'already_cancelled',
+              task,
+              prompt_revision: priorRevision?.revision ?? priorCancellation!.revision,
+            };
+          }
+
+          const callerRow = input.requested_by_session_id
+            ? await select(txDb)
+                .from(sessions)
+                .where(eq(sessions.session_id, input.requested_by_session_id))
+                .one()
+            : undefined;
+          const relationshipMatches = queuedPromptRelationshipMatches(
+            sessionRow,
+            callerRow,
+            input.authority,
+            input.requested_by_session_id
+          );
+          const authorityRefusal =
+            input.authority === 'author'
+              ? task.created_by === input.requested_by_user_id
+                ? undefined
+                : 'Only the prompt author may amend this queued prompt.'
+              : relationshipMatches
+                ? undefined
+                : `The current ${input.authority} relationship no longer authorizes this amendment.`;
+          const refusal = authorityRefusal ?? ordinaryQueuedPromptRefusal(task);
+          if (refusal) throw new RepositoryError(refusal);
+
+          const queueRows = (await select(txDb)
+            .from(tasks)
+            .where(and(eq(tasks.session_id, input.session_id), eq(tasks.status, TaskStatus.QUEUED)))
+            .orderBy(asc(tasks.queue_position), asc(tasks.created_at), asc(tasks.task_id))
+            .all()) as TaskRow[];
+          const queueTasks = queueRows.map((row) => this.rowToTask(row));
+          const currentQueueRevision = coordinatorQueueRevision(sessionRow, queueTasks);
+          const currentPromptRevision = existingAudit?.current_revision ?? 0;
+          if (
+            currentQueueRevision !== input.expected_queue_revision ||
+            currentPromptRevision !== input.expected_prompt_revision
+          ) {
+            throw new RepositoryError(
+              'Queued prompt changed after preview; refresh before saving this revision'
+            );
+          }
+
+          const mutationAt = new Date().toISOString();
+          const auditBase = existingAudit ?? {
+            version: 1 as const,
+            original_prompt: task.full_prompt,
+            current_revision: 0,
+            revisions: [],
+          };
+          if (input.action === 'update') {
+            const revisedPrompt = input.revised_prompt!;
+            if (revisedPrompt === task.full_prompt) {
+              throw new RepositoryError('Revised prompt is unchanged');
+            }
+            const promptBytes = utf8Bytes(revisedPrompt);
+            if (promptBytes > MAX_EDITABLE_QUEUED_PROMPT_BYTES) {
+              throw new RepositoryError(
+                `Revised prompt is ${promptBytes} bytes; the ${MAX_EDITABLE_QUEUED_PROMPT_BYTES}-byte limit is never truncated`
+              );
+            }
+            if (auditBase.revisions.length >= MAX_QUEUED_PROMPT_AMENDMENTS) {
+              throw new RepositoryError(
+                `Queued prompts support at most ${MAX_QUEUED_PROMPT_AMENDMENTS} amendments`
+              );
+            }
+            const nextRevision = currentPromptRevision + 1;
+            const audit = {
+              ...auditBase,
+              current_revision: nextRevision,
+              revisions: [
+                ...auditBase.revisions,
+                {
+                  revision: nextRevision,
+                  operation_id: input.operation_id,
+                  amended_at: mutationAt,
+                  amended_by_user_id: input.requested_by_user_id,
+                  authority: input.authority,
+                  text: revisedPrompt,
+                },
+              ],
+            };
+            const auditBytes = utf8Bytes(stableJson(audit));
+            if (auditBytes > MAX_QUEUED_PROMPT_AMENDMENT_AUDIT_BYTES) {
+              throw new RepositoryError(
+                `Amendment history is ${auditBytes} bytes; the ${MAX_QUEUED_PROMPT_AMENDMENT_AUDIT_BYTES}-byte aggregate limit is never truncated`
+              );
+            }
+            const data = {
+              ...taskRow.data,
+              full_prompt: revisedPrompt,
+              metadata: { ...(task.metadata ?? {}), queued_prompt_amendment: audit },
+            };
+            await update(txDb, tasks)
+              .set({ data })
+              .where(and(eq(tasks.task_id, input.task_id), eq(tasks.status, TaskStatus.QUEUED)))
+              .run();
+            return {
+              outcome: 'amended',
+              task: this.rowToTask({ ...taskRow, data }),
+              prompt_revision: nextRevision,
+            };
+          }
+
+          const audit = {
+            ...auditBase,
+            cancellation: {
+              operation_id: input.operation_id,
+              cancelled_at: mutationAt,
+              cancelled_by_user_id: input.requested_by_user_id,
+              authority: input.authority,
+              revision: currentPromptRevision,
+            },
+          };
+          const auditBytes = utf8Bytes(stableJson(audit));
+          if (auditBytes > MAX_QUEUED_PROMPT_AMENDMENT_AUDIT_BYTES) {
+            throw new RepositoryError(
+              `Amendment history is ${auditBytes} bytes; the ${MAX_QUEUED_PROMPT_AMENDMENT_AUDIT_BYTES}-byte aggregate limit is never truncated`
+            );
+          }
+          const data = {
+            ...taskRow.data,
+            metadata: { ...(task.metadata ?? {}), queued_prompt_amendment: audit },
+          };
+          const completedAt = new Date(mutationAt);
+          await update(txDb, tasks)
+            .set({
+              status: TaskStatus.STOPPED,
+              queue_position: null,
+              completed_at: completedAt,
+              data,
+            })
+            .where(and(eq(tasks.task_id, input.task_id), eq(tasks.status, TaskStatus.QUEUED)))
+            .run();
+          return {
+            outcome: 'cancelled',
+            task: this.rowToTask({
+              ...taskRow,
+              status: TaskStatus.STOPPED,
+              queue_position: null,
+              completed_at: completedAt,
+              data,
+            }),
+            prompt_revision: currentPromptRevision,
           };
         },
         { sqliteImmediate: true }

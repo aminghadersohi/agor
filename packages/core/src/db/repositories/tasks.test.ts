@@ -3384,6 +3384,389 @@ describe('TaskRepository.createPending', () => {
   });
 });
 
+describe('TaskRepository editable queued prompts', () => {
+  dbTest(
+    'edits the middle prompt repeatedly, retains provenance, cancels another, and batches latest text',
+    async ({ db }) => {
+      const tasks = new TaskRepository(db);
+      const sessions = new SessionRepository(db);
+      const sessionId = await createSessionWithDeps(db);
+      const coordinatorId = await createSessionWithDeps(db);
+      await sessions.update(sessionId, {
+        callback_config: { enabled: true, callback_session_id: coordinatorId },
+      });
+      const queued = [];
+      for (const prompt of [
+        'Keep the public API small.',
+        'Use an in-memory queue; skip race tests.',
+        'Add an obsolete migration.',
+      ]) {
+        queued.push(
+          await tasks.createPending(
+            createPendingInput({
+              session_id: sessionId,
+              status: TaskStatus.QUEUED,
+              full_prompt: prompt,
+              metadata: { prompt_control: { stream: true } },
+            })
+          )
+        );
+      }
+
+      const originalPreview = await tasks.previewQueuedPromptAmendment({
+        session_id: sessionId,
+        task_id: queued[1]!.task_id,
+        requested_by_user_id: 'test-user' as UserID,
+        authority: 'author',
+      });
+      const first = await tasks.applyQueuedPromptAmendment({
+        session_id: sessionId,
+        task_id: queued[1]!.task_id,
+        requested_by_user_id: 'test-user' as UserID,
+        authority: 'author',
+        action: 'update',
+        operation_id: 'middle-edit-1',
+        expected_queue_revision: originalPreview.queue_revision,
+        expected_prompt_revision: originalPreview.prompt_revision,
+        revised_prompt: 'Use the durable queue. Keep the race tests.',
+      });
+      expect(first.outcome).toBe('amended');
+      await expect(
+        tasks.applyQueuedPromptAmendment({
+          session_id: sessionId,
+          task_id: queued[1]!.task_id,
+          requested_by_user_id: 'test-user' as UserID,
+          authority: 'author',
+          action: 'update',
+          operation_id: 'stale-editor',
+          expected_queue_revision: originalPreview.queue_revision,
+          expected_prompt_revision: 0,
+          revised_prompt: 'stale contradiction',
+        })
+      ).rejects.toThrow(/refresh/);
+
+      const secondPreview = await tasks.previewQueuedPromptAmendment({
+        session_id: sessionId,
+        task_id: queued[1]!.task_id,
+        requested_by_user_id: 'test-user' as UserID,
+        authority: 'author',
+      });
+      const secondInput = {
+        session_id: sessionId,
+        task_id: queued[1]!.task_id,
+        requested_by_user_id: 'test-user' as UserID,
+        authority: 'author' as const,
+        action: 'update' as const,
+        operation_id: 'middle-edit-2',
+        expected_queue_revision: secondPreview.queue_revision,
+        expected_prompt_revision: secondPreview.prompt_revision,
+        revised_prompt: 'Use the durable queue. Keep race and callback tests.',
+      };
+      const [second, retry] = await Promise.all([
+        tasks.applyQueuedPromptAmendment(secondInput),
+        tasks.applyQueuedPromptAmendment(secondInput),
+      ]);
+      expect([second.outcome, retry.outcome].sort()).toEqual(['already_amended', 'amended']);
+
+      const cancelPreview = await tasks.previewQueuedPromptAmendment({
+        session_id: sessionId,
+        task_id: queued[2]!.task_id,
+        requested_by_user_id: 'test-user' as UserID,
+        authority: 'author',
+      });
+      const cancelled = await tasks.applyQueuedPromptAmendment({
+        session_id: sessionId,
+        task_id: queued[2]!.task_id,
+        requested_by_user_id: 'test-user' as UserID,
+        authority: 'author',
+        action: 'cancel',
+        operation_id: 'cancel-third',
+        expected_queue_revision: cancelPreview.queue_revision,
+        expected_prompt_revision: cancelPreview.prompt_revision,
+      });
+      expect(cancelled).toMatchObject({ outcome: 'cancelled', task: { status: 'stopped' } });
+
+      const batchPreview = await tasks.previewCoordinatorQueueBatch({
+        session_id: sessionId,
+        relationship: 'coordinator',
+        requested_by_session_id: coordinatorId,
+      });
+      if ('outcome' in batchPreview) throw new Error('relationship changed');
+      expect(batchPreview.combined_prompt).toContain(secondInput.revised_prompt);
+      expect(batchPreview.combined_prompt).not.toContain('in-memory queue');
+      expect(batchPreview.combined_prompt).not.toContain('obsolete migration');
+      const amended = await tasks.findById(queued[1]!.task_id);
+      expect(amended?.metadata?.queued_prompt_amendment).toMatchObject({
+        original_prompt: 'Use an in-memory queue; skip race tests.',
+        current_revision: 2,
+      });
+      expect(amended?.metadata?.queued_prompt_amendment?.revisions.map((r) => r.text)).toEqual([
+        'Use the durable queue. Keep the race tests.',
+        secondInput.revised_prompt,
+      ]);
+
+      await sessions.update(sessionId, { status: SessionStatus.IDLE, ready_for_prompt: true });
+      const firstClaim = await tasks.claimDispatchAndProjectSession(
+        queued[0]!.task_id,
+        TaskStatus.QUEUED,
+        { status: TaskStatus.DISPATCHING }
+      );
+      expect(firstClaim.outcome).toBe('claimed');
+      await tasks.update(queued[0]!.task_id, { status: TaskStatus.COMPLETED });
+      await sessions.update(sessionId, { status: SessionStatus.IDLE, ready_for_prompt: true });
+      const finalClaim = await tasks.claimDispatchAndProjectSession(
+        queued[1]!.task_id,
+        TaskStatus.QUEUED,
+        { status: TaskStatus.DISPATCHING }
+      );
+      expect(finalClaim).toMatchObject({
+        outcome: 'claimed',
+        task: { full_prompt: secondInput.revised_prompt },
+      });
+      expect(finalClaim.task.full_prompt).not.toContain('in-memory queue');
+    }
+  );
+
+  dbTest(
+    'preserves compatible callback identity and refuses unsafe prompt classes',
+    async ({ db }) => {
+      const tasks = new TaskRepository(db);
+      const sessionId = await createSessionWithDeps(db);
+      const callbackSessionId = await createSessionWithDeps(db);
+      const callback = {
+        target_session_id: callbackSessionId,
+        requested_from_session_id: callbackSessionId,
+        requested_by_user_id: 'test-user',
+      };
+      const compatible = await tasks.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          full_prompt: 'Original callback-bound instruction',
+          metadata: { completion_callback: callback, prompt_control: { stream: true } },
+        })
+      );
+      const preview = await tasks.previewQueuedPromptAmendment({
+        session_id: sessionId,
+        task_id: compatible.task_id,
+        requested_by_user_id: 'test-user' as UserID,
+        authority: 'author',
+      });
+      const amended = await tasks.applyQueuedPromptAmendment({
+        session_id: sessionId,
+        task_id: compatible.task_id,
+        requested_by_user_id: 'test-user' as UserID,
+        authority: 'author',
+        action: 'update',
+        operation_id: 'callback-compatible',
+        expected_queue_revision: preview.queue_revision,
+        expected_prompt_revision: 0,
+        revised_prompt: 'Final callback-bound instruction',
+      });
+      expect(amended.task.metadata?.completion_callback).toEqual(callback);
+
+      for (const metadata of [
+        { is_agor_callback: true },
+        { system_authored: true },
+        { widget_id: generateId() as MessageID },
+        { gateway_inbound_event_id: generateId() as never },
+        { interrupt_correction: {} as never },
+      ]) {
+        const task = await tasks.createPending(
+          createPendingInput({
+            session_id: sessionId,
+            status: TaskStatus.QUEUED,
+            metadata,
+          })
+        );
+        const refused = await tasks.previewQueuedPromptAmendment({
+          session_id: sessionId,
+          task_id: task.task_id,
+          requested_by_user_id: 'test-user' as UserID,
+          authority: 'author',
+        });
+        expect(refused.editable).toBe(false);
+        expect(refused.refusal_reason).toMatch(/callback|continuation|widget|gateway|internal/);
+      }
+    }
+  );
+
+  dbTest(
+    'allows only the current derived coordinator to amend another author prompt',
+    async ({ db }) => {
+      const tasks = new TaskRepository(db);
+      const sessions = new SessionRepository(db);
+      const sessionId = await createSessionWithDeps(db);
+      const coordinatorId = await createSessionWithDeps(db);
+      await sessions.update(sessionId, {
+        callback_config: { enabled: true, callback_session_id: coordinatorId },
+      });
+      const queued = await tasks.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          created_by: 'another-author',
+        })
+      );
+      const preview = await tasks.previewQueuedPromptAmendment({
+        session_id: sessionId,
+        task_id: queued.task_id,
+        requested_by_user_id: 'test-user' as UserID,
+        requested_by_session_id: coordinatorId,
+        authority: 'coordinator',
+      });
+      expect(preview.editable).toBe(true);
+      const result = await tasks.applyQueuedPromptAmendment({
+        session_id: sessionId,
+        task_id: queued.task_id,
+        requested_by_user_id: 'test-user' as UserID,
+        requested_by_session_id: coordinatorId,
+        authority: 'coordinator',
+        action: 'update',
+        operation_id: 'coordinator-edit',
+        expected_queue_revision: preview.queue_revision,
+        expected_prompt_revision: 0,
+        revised_prompt: 'Coordinator-safe canonical text',
+      });
+      expect(result.task).toMatchObject({
+        created_by: 'another-author',
+        full_prompt: 'Coordinator-safe canonical text',
+      });
+
+      const nextPreview = await tasks.previewQueuedPromptAmendment({
+        session_id: sessionId,
+        task_id: queued.task_id,
+        requested_by_user_id: 'test-user' as UserID,
+        requested_by_session_id: coordinatorId,
+        authority: 'coordinator',
+      });
+      await sessions.update(sessionId, {
+        callback_config: { enabled: true, callback_session_id: generateId() },
+      });
+      await expect(
+        tasks.applyQueuedPromptAmendment({
+          session_id: sessionId,
+          task_id: queued.task_id,
+          requested_by_user_id: 'test-user' as UserID,
+          requested_by_session_id: coordinatorId,
+          authority: 'coordinator',
+          action: 'update',
+          operation_id: 'stale-coordinator',
+          expected_queue_revision: nextPreview.queue_revision,
+          expected_prompt_revision: 1,
+          revised_prompt: 'must not apply',
+        })
+      ).rejects.toThrow(/no longer authorizes/);
+    }
+  );
+
+  dbTest('dispatch and cancellation share a one-winner Session fence', async ({ db }) => {
+    const tasks = new TaskRepository(db);
+    const sessions = new SessionRepository(db);
+    const sessionId = await createSessionWithDeps(db);
+    await sessions.update(sessionId, { status: SessionStatus.IDLE, ready_for_prompt: true });
+    const queued = await tasks.createPending(
+      createPendingInput({ session_id: sessionId, status: TaskStatus.QUEUED })
+    );
+    const preview = await tasks.previewQueuedPromptAmendment({
+      session_id: sessionId,
+      task_id: queued.task_id,
+      requested_by_user_id: 'test-user' as UserID,
+      authority: 'author',
+    });
+    const [claim, cancellation] = await Promise.allSettled([
+      tasks.claimDispatchAndProjectSession(queued.task_id, TaskStatus.QUEUED, {
+        status: TaskStatus.DISPATCHING,
+      }),
+      tasks.applyQueuedPromptAmendment({
+        session_id: sessionId,
+        task_id: queued.task_id,
+        requested_by_user_id: 'test-user' as UserID,
+        authority: 'author',
+        action: 'cancel',
+        operation_id: 'cancel-race',
+        expected_queue_revision: preview.queue_revision,
+        expected_prompt_revision: 0,
+      }),
+    ]);
+    const final = await tasks.findById(queued.task_id);
+    expect(['dispatching', 'stopped']).toContain(final?.status);
+    if (final?.status === TaskStatus.DISPATCHING) {
+      expect(claim.status).toBe('fulfilled');
+      expect(cancellation.status).toBe('rejected');
+    } else {
+      expect(cancellation.status).toBe('fulfilled');
+      expect(claim.status).toBe('fulfilled');
+      if (claim.status === 'fulfilled') expect(claim.value.outcome).toBe('condition_changed');
+    }
+  });
+
+  dbTest(
+    'fails closed for wrong actor, destination, state, and over-limit revisions',
+    async ({ db }) => {
+      const tasks = new TaskRepository(db);
+      const sessions = new SessionRepository(db);
+      const sessionId = await createSessionWithDeps(db);
+      const otherSessionId = await createSessionWithDeps(db);
+      const queued = await tasks.createPending(
+        createPendingInput({ session_id: sessionId, status: TaskStatus.QUEUED })
+      );
+      const denied = await tasks.previewQueuedPromptAmendment({
+        session_id: sessionId,
+        task_id: queued.task_id,
+        requested_by_user_id: 'different-user' as UserID,
+        authority: 'author',
+      });
+      expect(denied).toMatchObject({
+        editable: false,
+        refusal_reason: expect.stringMatching(/author/),
+      });
+      await expect(
+        tasks.previewQueuedPromptAmendment({
+          session_id: otherSessionId,
+          task_id: queued.task_id,
+          requested_by_user_id: 'test-user' as UserID,
+          authority: 'author',
+        })
+      ).rejects.toThrow(/Task.*not found/);
+
+      const preview = await tasks.previewQueuedPromptAmendment({
+        session_id: sessionId,
+        task_id: queued.task_id,
+        requested_by_user_id: 'test-user' as UserID,
+        authority: 'author',
+      });
+      await expect(
+        tasks.applyQueuedPromptAmendment({
+          session_id: sessionId,
+          task_id: queued.task_id,
+          requested_by_user_id: 'test-user' as UserID,
+          authority: 'author',
+          action: 'update',
+          operation_id: 'too-large',
+          expected_queue_revision: preview.queue_revision,
+          expected_prompt_revision: 0,
+          revised_prompt: 'x'.repeat(32 * 1024 + 1),
+        })
+      ).rejects.toThrow(/never truncated/);
+      expect((await tasks.findById(queued.task_id))?.full_prompt).toBe(queued.full_prompt);
+
+      await sessions.update(sessionId, { status: SessionStatus.IDLE, ready_for_prompt: true });
+      await tasks.claimDispatchAndProjectSession(queued.task_id, TaskStatus.QUEUED, {
+        status: TaskStatus.DISPATCHING,
+      });
+      const claimed = await tasks.previewQueuedPromptAmendment({
+        session_id: sessionId,
+        task_id: queued.task_id,
+        requested_by_user_id: 'test-user' as UserID,
+        authority: 'author',
+      });
+      expect(claimed.editable).toBe(false);
+      expect(claimed.refusal_reason).toMatch(/claimed for dispatch/);
+    }
+  );
+});
+
 describe('TaskRepository coordinator queue batching', () => {
   dbTest(
     'reproduces a five-prompt callback queue and combines it with provenance and later-wins wording',

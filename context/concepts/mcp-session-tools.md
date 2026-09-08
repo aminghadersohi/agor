@@ -59,6 +59,13 @@ into SDK-private registration state.
    REPLACE turn. The MCP Session is the caller identity; naming a target grants
    nothing. Exact Task IDs, a queue revision, and a stable idempotency key fence
    relationship/admission/dispatch races.
+9. **`agor_sessions_edit_queued_prompt`** _(personal-fork POC)_ — an ordinary
+   prompt author, current parent, or enabled direct coordinator previews and
+   compare-and-swaps one unclaimed Task's canonical text, or settles it as a
+   durable `STOPPED` cancellation. Exact Session/Task IDs, queue and prompt
+   revisions, derived authority, and a stable idempotency key are checked under
+   the dispatch Session lock. Unsafe delivery classes and over-limit text or
+   audit history are refused without truncation.
 
 All enforce the branch-centric model (every session references a branch). Permission modes map to each agent's native settings.
 

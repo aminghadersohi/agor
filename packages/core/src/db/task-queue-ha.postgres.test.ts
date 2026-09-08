@@ -325,6 +325,66 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)('Session Task queue HA (Pos
     });
   });
 
+  it('converges queued-prompt amendment retries and hides the Task across tenants', async () => {
+    const a = await seedTenant(db, `queue-edit-a-${generateId()}`);
+    const b = await seedTenant(db, `queue-edit-b-${generateId()}`);
+    const sessionA = await createSession(db, a);
+    const task = await runWithTenantDatabaseScope(db, a.tenantId, (scoped) =>
+      new TaskRepository(scoped).createPending({
+        session_id: sessionA,
+        created_by: a.userId,
+        full_prompt: 'original instruction',
+        status: TaskStatus.QUEUED,
+      })
+    );
+    const preview = await runWithTenantDatabaseScope(db, a.tenantId, (scoped) =>
+      new TaskRepository(scoped).previewQueuedPromptAmendment({
+        session_id: sessionA,
+        task_id: task.task_id,
+        requested_by_user_id: a.userId,
+        authority: 'author',
+      })
+    );
+    const input = {
+      session_id: sessionA,
+      task_id: task.task_id,
+      requested_by_user_id: a.userId,
+      authority: 'author' as const,
+      action: 'update' as const,
+      operation_id: 'postgres-ha-amendment',
+      expected_queue_revision: preview.queue_revision,
+      expected_prompt_revision: preview.prompt_revision,
+      revised_prompt: 'one final canonical instruction',
+    };
+    const results = await Promise.all(
+      Array.from({ length: 2 }, () =>
+        runWithTenantDatabaseScope(db, a.tenantId, (scoped) =>
+          new TaskRepository(scoped).applyQueuedPromptAmendment(input)
+        )
+      )
+    );
+    expect(results.map((result) => result.outcome).sort()).toEqual(['already_amended', 'amended']);
+    await runWithTenantDatabaseScope(db, a.tenantId, async (scoped) => {
+      const persisted = await new TaskRepository(scoped).findById(task.task_id);
+      expect(persisted?.full_prompt).toBe(input.revised_prompt);
+      expect(persisted?.metadata?.queued_prompt_amendment?.revisions).toHaveLength(1);
+    });
+    await runWithTenantDatabaseScope(db, b.tenantId, async (scoped) => {
+      const tasks = new TaskRepository(scoped);
+      await expect(
+        tasks.previewQueuedPromptAmendment({
+          session_id: sessionA,
+          task_id: task.task_id,
+          requested_by_user_id: b.userId,
+          authority: 'author',
+        })
+      ).rejects.toThrow(/not found/);
+      await expect(
+        tasks.applyQueuedPromptAmendment({ ...input, requested_by_user_id: b.userId })
+      ).rejects.toThrow(/not found/);
+    });
+  });
+
   it('keeps discovery routing-only and refuses cross-tenant claim/inference', async () => {
     const a = await seedTenant(db, `queue-tenant-a-${generateId()}`);
     const b = await seedTenant(db, `queue-tenant-b-${generateId()}`);

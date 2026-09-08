@@ -367,6 +367,19 @@ attachment/widget/gateway/internal semantics. A queue or relationship change
 invalidates the preview. This tool never stops running work; use
 `agor_sessions_interrupt_with_message` for that case.
 
+The personal fork POC also exposes
+`agor_sessions_edit_queued_prompt(targetSessionId, taskId, authority, action,
+...)`. Call `preview` first, then pass its exact `queue_revision` and
+`prompt_revision` to `update` or `cancel` with a stable `idempotencyKey`.
+`author` authority requires the Task's immutable creator. `parent` and
+`coordinator` derive authority from the calling MCP Session and recheck that
+relationship at commit. Update appends a complete durable revision and changes
+only the Task's canonical executor text; cancel records audit and settles it as
+`STOPPED`. Once dispatch claims the Task, the operation refuses and callers
+must use `interrupt_with_message` for running work. Unsafe delivery classes,
+attachments, controls, and over-limit text/history are refused without
+truncation or copying prompt text into operational logs.
+
 ## Best Practices
 
 - **Keep permission policies tight.** MCP calls respect Agor’s permission system. Configure approvals so agents only do what the team expects.

@@ -53,6 +53,7 @@ import {
   resolveBranchId,
   resolveMcpServerId,
   resolveSessionId,
+  resolveTaskId,
 } from '../resolve-ids.js';
 import {
   mcpListLimit,
@@ -218,6 +219,29 @@ const coordinatorQueueBatchOutputSchema = z.object({
   preview: coordinatorQueueBatchPreviewSchema,
   execution_task_id: z.string().optional(),
   superseded_task_ids: z.array(z.string()).optional(),
+});
+
+const queuedPromptAmendmentPreviewSchema = z.object({
+  session_id: z.string(),
+  task_id: z.string(),
+  queue_revision: z.string(),
+  prompt_revision: z.number(),
+  canonical_prompt: z.string(),
+  canonical_prompt_bytes: z.number(),
+  editable: z.boolean(),
+  refusal_reason: z.string().optional(),
+  editable_until: z.literal('dispatch_claim'),
+  created_by: z.string(),
+  created_at: z.string(),
+  amendment: z.unknown().optional(),
+});
+
+const queuedPromptAmendmentOutputSchema = z.object({
+  outcome: z.enum(['preview', 'amended', 'already_amended', 'cancelled', 'already_cancelled']),
+  preview: queuedPromptAmendmentPreviewSchema.optional(),
+  task_id: z.string(),
+  prompt_revision: z.number(),
+  task_status: z.string(),
 });
 
 /**
@@ -1255,7 +1279,141 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  // Tool 5e: preview/apply one coordinator-owned queue-batching contract.
+  // Tool 5e: preview/amend/cancel one author's ordinary unclaimed queued prompt.
+  server.registerTool(
+    'agor_sessions_edit_queued_prompt',
+    {
+      description:
+        'Preview, edit, or cancel one ordinary queued prompt before dispatch claim. Edits replace only that Task canonical text and append immutable revision provenance; cancellation settles it as STOPPED. Preview first, then pass both exact revisions and one stable idempotency key. Callback/internal/attachment/widget/gateway/slash/interrupt/control prompts are refused. Author authority is scoped to the Task creator; parent/coordinator authority is derived from this MCP Session.',
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        targetSessionId: mcpRequiredId('targetSessionId', 'Session', 'Destination Session'),
+        taskId: mcpRequiredId('taskId', 'Task', 'Exact queued Task to amend'),
+        authority: z.enum(['author', 'parent', 'coordinator']),
+        action: z.enum(['preview', 'update', 'cancel']),
+        queueRevision: z.string().min(1).optional(),
+        promptRevision: z.number().int().nonnegative().optional(),
+        revisedPrompt: z.string().min(1).optional(),
+        idempotencyKey: z.string().min(1).max(128).optional(),
+      }),
+      outputSchema: queuedPromptAmendmentOutputSchema,
+    },
+    async (args) => {
+      const authorityMode = args.authority;
+      const targetSessionId = await resolveSessionId(ctx, args.targetSessionId);
+      const taskId = await resolveTaskId(ctx, args.taskId);
+      await runWithMcpTenantDatabaseScope(ctx, (db) =>
+        ensureCanPromptTargetSession(targetSessionId, ctx.userId, ctx.app, new BranchRepository(db))
+      );
+      const resolveAuthority = async () => {
+        if (authorityMode === 'author') return undefined;
+        if (!ctx.sessionId)
+          throw new Error('Parent/coordinator authority requires Session context.');
+        const relationship = authorityMode === 'parent' ? 'parent' : 'coordinator';
+        return runWithMcpTenantDatabaseScope(ctx, () =>
+          (
+            ctx.app.service('sessions') as unknown as SessionsServiceImpl
+          ).resolveQueueBatchAuthority(
+            targetSessionId,
+            { callerSessionId: ctx.sessionId!, relationship },
+            ctx.baseServiceParams
+          )
+        );
+      };
+      const authority = await resolveAuthority();
+      if (args.action === 'preview') {
+        const preview = await runWithMcpTenantDatabaseScope(ctx, (db) =>
+          new TaskRepository(db).previewQueuedPromptAmendment({
+            session_id: targetSessionId,
+            task_id: taskId,
+            requested_by_user_id: ctx.userId as UserID,
+            ...(authority ? { requested_by_session_id: authority.caller_session_id } : {}),
+            authority: authorityMode,
+          })
+        );
+        return structuredResult({
+          outcome: 'preview',
+          preview,
+          task_id: preview.task_id,
+          prompt_revision: preview.prompt_revision,
+          task_status: preview.editable ? 'queued' : 'not_editable',
+        });
+      }
+      if (!args.queueRevision || args.promptRevision === undefined || !args.idempotencyKey) {
+        throw new Error('update/cancel require queueRevision, promptRevision, and idempotencyKey.');
+      }
+      if (args.action === 'update' && !args.revisedPrompt?.trim()) {
+        throw new Error('update requires a non-empty revisedPrompt.');
+      }
+      const mutationAction: 'update' | 'cancel' = args.action;
+      const tenantId = ctx.baseServiceParams.tenant?.tenant_id ?? getCurrentTenantId();
+      const result = await runWithMcpTenantDatabaseWrite(ctx, (db) =>
+        runWithTenantDatabaseTransaction(db, tenantId, async (operationDb) => {
+          await lockTenantAuthorizationFence(operationDb, ctx.baseServiceParams);
+          const actor = await resolveCurrentTenantAuthorityActor(
+            operationDb,
+            ctx.baseServiceParams
+          );
+          if (actor.service || actor.user_id !== ctx.userId) {
+            throw new Error('Queued prompt amendments require the current human actor.');
+          }
+          await ensureCanPromptTargetSession(
+            targetSessionId,
+            ctx.userId,
+            ctx.app,
+            new BranchRepository(operationDb)
+          );
+          const currentAuthority =
+            authorityMode === 'author'
+              ? undefined
+              : await (
+                  ctx.app.service('sessions') as unknown as SessionsServiceImpl
+                ).resolveQueueBatchAuthority(
+                  targetSessionId,
+                  {
+                    callerSessionId: ctx.sessionId!,
+                    relationship: authorityMode === 'parent' ? 'parent' : 'coordinator',
+                  },
+                  ctx.baseServiceParams
+                );
+          return new TaskRepository(operationDb).applyQueuedPromptAmendment({
+            session_id: targetSessionId,
+            task_id: taskId,
+            requested_by_user_id: actor.user_id as UserID,
+            ...(currentAuthority
+              ? { requested_by_session_id: currentAuthority.caller_session_id }
+              : {}),
+            authority: authorityMode,
+            operation_id: args.idempotencyKey!,
+            action: mutationAction,
+            expected_queue_revision: args.queueRevision!,
+            expected_prompt_revision: args.promptRevision!,
+            ...(mutationAction === 'update' ? { revised_prompt: args.revisedPrompt! } : {}),
+          });
+        })
+      );
+      if (result.outcome === 'amended' || result.outcome === 'cancelled') {
+        emitServiceEvent(ctx.app, {
+          path: 'tasks',
+          event: 'patched',
+          data: result.task,
+          params: ctx.baseServiceParams,
+          id: result.task.task_id,
+        });
+        await (
+          ctx.app.service('sessions') as unknown as SessionsServiceImpl
+        ).triggerQueueProcessing(targetSessionId, ctx.baseServiceParams);
+      }
+      return structuredResult({
+        outcome: result.outcome,
+        task_id: result.task.task_id,
+        prompt_revision: result.prompt_revision,
+        task_status: result.task.status,
+      });
+    }
+  );
+
+  // Tool 5f: preview/apply one coordinator-owned queue-batching contract.
   server.registerTool(
     'agor_sessions_batch_queue',
     {

@@ -23,6 +23,8 @@ const interruptMocks = vi.hoisted(() => ({
   terminate: vi.fn(),
   previewBatch: vi.fn(),
   applyBatch: vi.fn(),
+  previewAmendment: vi.fn(),
+  applyAmendment: vi.fn(),
 }));
 
 vi.mock('../resolve-ids.js', () => ({
@@ -30,6 +32,7 @@ vi.mock('../resolve-ids.js', () => ({
   resolveSessionId: async (_ctx: unknown, id: string) => id,
   resolveBranchId: async (_ctx: unknown, id: string) => id,
   resolveMcpServerId: async (_ctx: unknown, id: string) => `full-${id}`,
+  resolveTaskId: async (_ctx: unknown, id: string) => id,
 }));
 
 vi.mock('../../utils/branch-authorization.js', () => ({
@@ -81,6 +84,8 @@ vi.mock('@agor/core/db', () => ({
     admitInterruptCorrection = interruptMocks.admit;
     previewCoordinatorQueueBatch = interruptMocks.previewBatch;
     applyCoordinatorQueueBatch = interruptMocks.applyBatch;
+    previewQueuedPromptAmendment = interruptMocks.previewAmendment;
+    applyQueuedPromptAmendment = interruptMocks.applyAmendment;
   },
   shortId: (id: string) => id,
 }));
@@ -379,6 +384,85 @@ describe('session transfer MCP tools', () => {
       outcome: 'batched',
       execution_task_id: 'task-1',
       superseded_task_ids: ['task-2'],
+    });
+  });
+
+  it('previews and amends one author-owned queued prompt with both CAS revisions', async () => {
+    const preview = {
+      session_id: 'sess-child',
+      task_id: 'task-2',
+      queue_revision: 'sha256:queue-edit-1',
+      prompt_revision: 0,
+      canonical_prompt: 'old instruction',
+      canonical_prompt_bytes: 15,
+      editable: true,
+      editable_until: 'dispatch_claim',
+      created_by: 'user-1',
+      created_at: new Date(0).toISOString(),
+    };
+    interruptMocks.previewAmendment.mockResolvedValueOnce(preview);
+    interruptMocks.applyAmendment.mockResolvedValueOnce({
+      outcome: 'amended',
+      task: { task_id: 'task-2', session_id: 'sess-child', status: 'queued' },
+      prompt_revision: 1,
+    });
+    const triggerQueueProcessing = vi.fn(async () => undefined);
+    const emit = vi.fn();
+    const app = makeFakeApp({
+      sessions: { triggerQueueProcessing },
+      tasks: { emit },
+    });
+    const { agor_sessions_edit_queued_prompt } = await registerAndCaptureHandlers(
+      {
+        app,
+        userId: 'user-1',
+        sessionId: 'sess-caller',
+        baseServiceParams: { provider: 'mcp', user: { user_id: 'user-1' } },
+      },
+      ['agor_sessions_edit_queued_prompt']
+    );
+
+    const previewResponse = await agor_sessions_edit_queued_prompt({
+      targetSessionId: 'sess-child',
+      taskId: 'task-2',
+      authority: 'author',
+      action: 'preview',
+    });
+    expect(previewResponse.structuredContent).toMatchObject({ outcome: 'preview', preview });
+
+    const updateResponse = await agor_sessions_edit_queued_prompt({
+      targetSessionId: 'sess-child',
+      taskId: 'task-2',
+      authority: 'author',
+      action: 'update',
+      queueRevision: preview.queue_revision,
+      promptRevision: preview.prompt_revision,
+      revisedPrompt: 'final instruction',
+      idempotencyKey: 'edit-1',
+    });
+    expect(interruptMocks.applyAmendment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session_id: 'sess-child',
+        task_id: 'task-2',
+        requested_by_user_id: 'user-1',
+        authority: 'author',
+        operation_id: 'edit-1',
+        expected_queue_revision: preview.queue_revision,
+        expected_prompt_revision: 0,
+        revised_prompt: 'final instruction',
+      })
+    );
+    expect(emit).toHaveBeenCalledWith(
+      'patched',
+      expect.objectContaining({ task_id: 'task-2' }),
+      expect.any(Object)
+    );
+    expect(triggerQueueProcessing).toHaveBeenCalledWith('sess-child', expect.any(Object));
+    expect(updateResponse.structuredContent).toMatchObject({
+      outcome: 'amended',
+      task_id: 'task-2',
+      prompt_revision: 1,
+      task_status: 'queued',
     });
   });
 
