@@ -62,7 +62,9 @@ describe.skipIf(!enabled)('zone workflow PostgreSQL 0101 -> 0102 upgrade', () =>
   });
 
   it('preserves existing tenant data and installs usable forced-RLS workflow tables', async () => {
-    await runMigrations(db);
+    // Later authority and collision-repair migrations require the same
+    // isolated offline acknowledgement in this upgrade fixture.
+    await runMigrations(db, { allowOfflineCutover: true });
     await runWithTenantDatabaseScope(db, tenantId, async (scoped) => {
       const board = await new BoardRepository(scoped).findById(boardId);
       expect(board?.name).toBe('Pre-workflow board');

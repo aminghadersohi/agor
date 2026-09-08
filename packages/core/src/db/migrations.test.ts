@@ -987,7 +987,7 @@ describe('MCP OAuth client-registration migrations', () => {
 
   it('follows current main and binds PostgreSQL authority to tenant/server UUID with forced RLS', async () => {
     const [postgresJournal] = await readJournals();
-    expect(postgresJournal.entries.slice(-4)).toEqual([
+    expect(postgresJournal.entries.slice(-5)).toEqual([
       expect.objectContaining({ idx: 103, tag: '0103_session_power_priority' }),
       expect.objectContaining({ idx: 104, tag: '0104_environment_command_discovery' }),
       expect.objectContaining({ idx: 9015, tag: '9015_mcp_oauth_client_registrations' }),
@@ -995,6 +995,7 @@ describe('MCP OAuth client-registration migrations', () => {
         idx: 9016,
         tag: '9016_oauth_authority_watermark_reconciliation',
       }),
+      expect.objectContaining({ idx: 9017, tag: '9017_fork_migration_collision_repair' }),
     ]);
     expect(postgresJournal.entries.at(-1)!.when).toBeGreaterThan(
       postgresJournal.entries.at(-2)!.when
@@ -1041,6 +1042,14 @@ describe('MCP OAuth client-registration migrations', () => {
     expect(reconciliation).toContain('CREATE TABLE IF NOT EXISTS "claude_oauth_attempts"');
     expect(reconciliation).toContain('CREATE TABLE IF NOT EXISTS "mcp_oauth_client_registrations"');
     expect(reconciliation).toContain('unrecognized mcp_oauth_client_registrations schema');
+
+    const forkCollisionRepair = await readFile(
+      new URL('../../drizzle/postgres/9017_fork_migration_collision_repair.sql', import.meta.url),
+      'utf8'
+    );
+    expect(forkCollisionRepair).toContain('unrecognized partial session auto-archive schema');
+    expect(forkCollisionRepair).toContain('unrecognized partial zone workflow schema');
+    expect(forkCollisionRepair).toContain('FORCE ROW LEVEL SECURITY');
   });
 });
 
