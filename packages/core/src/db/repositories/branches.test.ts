@@ -1204,9 +1204,10 @@ describe('BranchRepository.delete', () => {
   dbTest('retains the provisioning guard alongside environment-command locking', async ({ db }) => {
     const repo = await new RepoRepository(db).create(createRepoData());
     const branches = new BranchRepository(db);
-    const branch = await branches.create(
-      createBranchData({ repo_id: repo.repo_id, filesystem_status: 'creating' })
-    );
+    const branch = await branches.create({
+      ...createBranchData({ repo_id: repo.repo_id }),
+      filesystem_status: 'creating',
+    });
     await expect(branches.delete(branch.branch_id)).rejects.toThrow(
       'Cannot delete a branch while filesystem provisioning is in progress'
     );
