@@ -778,6 +778,20 @@
       "when": 1788800000003,
       "tag": "9016_oauth_authority_watermark_reconciliation",
       "breakpoints": true
+    },
+    {
+      "idx": 9017,
+      "version": "7",
+      "when": 1788800000004,
+      "tag": "9017_fork_migration_collision_repair",
+      "breakpoints": true
+    },
+    {
+      "idx": 9018,
+      "version": "7",
+      "when": 1788800000005,
+      "tag": "9018_attention_watermark_collision_repair",
+      "breakpoints": true
     }
   ]
 }

@@ -218,6 +218,40 @@ describe('migration status introspection', () => {
     });
   });
 
+  it('reports the fork watermark collision repair as an offline incompatible cutover', () => {
+    const migration = introspectMigrationStatus('postgresql', {
+      applied: ['9016_oauth_authority_watermark_reconciliation'],
+      pending: ['9017_fork_migration_collision_repair'],
+      dbAheadOfBinary: false,
+    }).pendingMigrations[0];
+
+    expect(migration).toMatchObject({
+      requiresOfflineCutover: true,
+      impact: {
+        classification: 'protocol',
+        userAction: 'required',
+        rollbackCompatibility: 'incompatible',
+      },
+    });
+  });
+
+  it('reports the attention watermark collision repair as an offline incompatible cutover', () => {
+    const migration = introspectMigrationStatus('postgresql', {
+      applied: ['9017_fork_migration_collision_repair'],
+      pending: ['9018_attention_watermark_collision_repair'],
+      dbAheadOfBinary: false,
+    }).pendingMigrations[0];
+
+    expect(migration).toMatchObject({
+      requiresOfflineCutover: true,
+      impact: {
+        classification: 'protocol',
+        userAction: 'required',
+        rollbackCompatibility: 'incompatible',
+      },
+    });
+  });
+
   it('uses an explicit conservative representation for absent impact metadata', () => {
     expect(getMigrationImpact('9999_unregistered')).toEqual({
       classification: 'unknown',
@@ -239,10 +273,12 @@ describe('migration status introspection', () => {
         '9012_claude_oauth_attempts',
         '9015_mcp_oauth_client_registrations',
         '9016_oauth_authority_watermark_reconciliation',
+        '9017_fork_migration_collision_repair',
+        '9018_attention_watermark_collision_repair',
       ],
     });
 
-    expect(offlineMigrations).toHaveLength(8);
+    expect(offlineMigrations).toHaveLength(10);
     for (const name of offlineMigrations) {
       expect(getMigrationImpact(name).classification).not.toBe('unknown');
     }
@@ -275,6 +311,8 @@ describe('migration status introspection', () => {
       '9012_claude_oauth_attempts',
       '9015_mcp_oauth_client_registrations',
       '9016_oauth_authority_watermark_reconciliation',
+      '9017_fork_migration_collision_repair',
+      '9018_attention_watermark_collision_repair',
       'unregistered',
     ]) {
       expect(getMigrationImpact(name).summary.length).toBeLessThanOrEqual(
