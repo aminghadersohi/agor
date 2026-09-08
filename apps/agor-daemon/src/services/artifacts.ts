@@ -46,6 +46,7 @@ import type {
   ArtifactActionEffect,
   ArtifactBindingBase,
   ArtifactBuildStatus,
+  ArtifactCompilationStatus,
   ArtifactConsoleEntry,
   ArtifactDataBinding,
   ArtifactDataResult,
@@ -72,6 +73,7 @@ import type {
   UUID,
 } from '@agor/core/types';
 import {
+  ARTIFACT_COMPILATION_STATUSES,
   ARTIFACT_LIST_FIELDS_WITHOUT_FILES,
   ARTIFACT_METADATA_LIST_FIELDS,
   canonicalizeAgorGrants,
@@ -393,6 +395,8 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
 
   /** In-memory Sandpack status, keyed by `${artifactId}:${userId}`. */
   private sandpackStatuses: Map<string, string> = new Map();
+
+  private compilationStatuses: Map<string, ArtifactCompilationStatus> = new Map();
 
   /** Latest browser runtime report time, keyed by `${artifactId}:${userId}`. */
   private runtimeObservedAt: Map<string, string> = new Map();
@@ -2429,6 +2433,9 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     for (const key of this.sandpackStatuses.keys()) {
       if (key.startsWith(prefix)) this.sandpackStatuses.delete(key);
     }
+    for (const key of this.compilationStatuses.keys()) {
+      if (key.startsWith(prefix)) this.compilationStatuses.delete(key);
+    }
     for (const key of this.runtimeObservedAt.keys()) {
       if (key.startsWith(prefix)) this.runtimeObservedAt.delete(key);
     }
@@ -2461,14 +2468,24 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     userId: string,
     error: SandpackError | null,
     status?: string,
-    contentHash?: string
+    contentHash?: string,
+    compilationStatus?: ArtifactCompilationStatus
   ): Promise<void> {
+    if (
+      compilationStatus !== undefined &&
+      !ARTIFACT_COMPILATION_STATUSES.includes(compilationStatus)
+    ) {
+      throw new BadRequest('Invalid artifact compilation status');
+    }
     if (!(await this.isCurrentRuntimeReportHash(artifactId, contentHash))) return;
     const key = this.viewerKey(artifactId, userId);
     this.sandpackErrors.set(key, error);
     if (status !== undefined) {
       this.sandpackStatuses.set(key, status);
     }
+    // A legacy report must not inherit readiness from a newer client's render.
+    if (compilationStatus === undefined) this.compilationStatuses.delete(key);
+    else this.compilationStatuses.set(key, compilationStatus);
     this.runtimeObservedAt.set(key, new Date().toISOString());
     this.notifyRuntimeStatusWaiters(key);
   }
@@ -2544,6 +2561,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     const key = userId ? this.viewerKey(artifactId, userId) : null;
     const sandpackError = key ? (this.sandpackErrors.get(key) ?? null) : null;
     const sandpackStatus = key ? this.sandpackStatuses.get(key) : undefined;
+    const compilationStatus = key ? this.compilationStatuses.get(key) : undefined;
     const runtimeObservedAt = key ? this.runtimeObservedAt.get(key) : undefined;
     const consoleLogs = key ? (this.consoleLogs.get(key) ?? []) : [];
 
@@ -2554,6 +2572,9 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       buildStatus = 'error';
       const sandpackMsg = `[Sandpack] ${sandpackError.message}`;
       buildErrors = [...(buildErrors ?? []), sandpackMsg];
+    } else if (compilationStatus === 'error') {
+      buildStatus = 'error';
+      buildErrors = [...(buildErrors ?? []), '[Sandpack] Compilation failed'];
     }
 
     return {
@@ -2562,6 +2583,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       build_errors: buildErrors ?? [],
       sandpack_error: sandpackError,
       sandpack_status: sandpackStatus,
+      compilation_status: compilationStatus,
       runtime_observed_at: runtimeObservedAt,
       console_logs: consoleLogs,
       content_hash: artifact.content_hash,
@@ -2600,6 +2622,14 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
           'If the missing specifier starts with ./ or ../, create that file or fix the import path. Otherwise add the package to package.json dependencies or sandpackConfig.customSetup.dependencies.',
       };
     }
+    if (/JSON/i.test(primary) && /<!doctype|<html|unexpected token\s+['"]?</i.test(primary)) {
+      return {
+        diagnosis: 'html_instead_of_json',
+        primary_error: primary,
+        suggested_fix:
+          "A JSON parser appears to have received HTML or other '<'-prefixed input. Inspect the first failing request in your browser Network panel (URL without credentials, status, content type, redirects, and CSP/CORS messages). This may be an app/API, ingress, proxy, or Sandpack/CDN response; the error alone does not identify the endpoint. Do not share tokens, cookies, env values, or an unredacted HAR.",
+      };
+    }
     if (/package\.json|JSON|Unexpected token/i.test(primary)) {
       return {
         diagnosis: 'malformed_package_json_or_syntax',
@@ -2630,10 +2660,10 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
    * contain secret-derived values.
    *
    * Resolution states:
-   * - observed + ok=true: Sandpack reached a non-running status and no quick
+   * - observed + ok=true: Sandpack explicitly completed compilation and no quick
    *   console.error arrived during the settle window.
-   * - observed + ok=false: Sandpack reported an error/timeout, or the app
-   *   emitted console.error.
+   * - observed + ok=false: Sandpack reported an error/timeout, the app emitted
+   *   console.error, or completion/settling was not confirmed before the deadline.
    * - observed=false: no browser for this user reported status before timeout.
    */
   async waitForRuntimeStatus(
@@ -2668,7 +2698,12 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     > => {
       const status = await this.getStatus(artifactId, userId);
       const errorLogs = status.console_logs.filter((entry) => entry.level === 'error');
-      if (status.sandpack_error || status.sandpack_status === 'timeout' || errorLogs.length > 0) {
+      if (
+        status.sandpack_error ||
+        status.sandpack_status === 'timeout' ||
+        status.compilation_status === 'error' ||
+        errorLogs.length > 0
+      ) {
         return {
           ...status,
           build_status: 'error',
@@ -2681,7 +2716,11 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
           timed_out: false,
           note: status.sandpack_error
             ? 'Sandpack reported a bundler/runtime error in your browser render.'
-            : 'The artifact emitted console.error during boot/render.',
+            : status.sandpack_status === 'timeout'
+              ? 'Sandpack timed out in your browser render.'
+              : status.compilation_status === 'error'
+                ? 'Sandpack reported a compilation failure in your browser render.'
+                : 'The artifact emitted console.error during boot/render.',
         };
       }
       if (status.build_status === 'error' && (status.build_errors?.length ?? 0) > 0) {
@@ -2693,7 +2732,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
           note: 'Server-side file validation failed before browser runtime validation.',
         };
       }
-      if (status.sandpack_status && status.sandpack_status !== 'running') {
+      if (status.compilation_status === 'success') {
         return { ...status, ok: true, observed: true, timed_out: false };
       }
       return null;
@@ -2726,7 +2765,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
         resolve(result);
       };
 
-      const scheduleSuccess = (status: ArtifactStatus) => {
+      const scheduleSuccess = () => {
         if (settleTimer) return;
         settleTimer = setTimeout(async () => {
           settleTimer = null;
@@ -2738,7 +2777,11 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       const onUpdate = () => {
         void (async () => {
           const latest = await classify();
-          if (!latest) return;
+          if (!latest) {
+            if (settleTimer) clearTimeout(settleTimer);
+            settleTimer = null;
+            return;
+          }
           if (!latest.ok) {
             finish(latest);
             return;
@@ -2746,7 +2789,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
           if (settleMs === 0) {
             finish(latest);
           } else {
-            scheduleSuccess(latest);
+            scheduleSuccess();
           }
         })();
       };
@@ -2757,7 +2800,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
 
       timeoutTimer = setTimeout(async () => {
         const latest = await classify();
-        if (latest) {
+        if (latest && (!latest.ok || settleMs === 0)) {
           finish(latest);
           return;
         }
@@ -2765,9 +2808,11 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
         finish({
           ...status,
           ok: false,
-          observed: false,
+          observed: !!status.runtime_observed_at,
           timed_out: true,
-          note: `No Sandpack status was reported by your browser within ${timeoutMs}ms. Open the artifact on the board/fullscreen as this user and retry, or use agor_artifacts_status after viewing it. Server-side publish can only validate the file map; Sandpack boot happens in the browser.`,
+          note: status.runtime_observed_at
+            ? `Your browser reported activity, but compilation completion and its settle window were not confirmed within ${timeoutMs}ms. Inspect the preview and browser Network/Console panels; reload an older Agor tab to enable completion reporting. This timeout does not prove the app is broken.`
+            : `No Sandpack status was reported by your browser within ${timeoutMs}ms. Open the artifact on the board/fullscreen as this user and retry, or use agor_artifacts_status after viewing it. Server-side publish can only validate the file map; Sandpack boot happens in the browser.`,
         });
       }, timeoutMs);
 
@@ -2775,7 +2820,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       // registration: a browser POST may have updated the in-memory status
       // just before we subscribed. Re-read once now that the waiter exists.
       onUpdate();
-      if (initial?.ok) scheduleSuccess(initial);
+      if (initial?.ok) scheduleSuccess();
     });
   }
 

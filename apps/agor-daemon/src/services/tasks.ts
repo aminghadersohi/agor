@@ -101,7 +101,7 @@ import {
 } from '../utils/executor-heartbeat-callback.js';
 import { ensureRepoOriginAlignedById } from '../utils/realign-repo-origin';
 import { deferWithTenantContext, withFreshTenantWrite } from '../utils/tenant-db-scope.js';
-import type { SessionsService } from './sessions';
+import type { SessionParams, SessionsService } from './sessions';
 
 export interface TaskExecutorCredentialRevoker {
   revokeTaskTokens(taskId: string): Promise<number>;
@@ -775,6 +775,28 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       }
 
       if (session.fork_origin === 'btw') {
+        if (!suppressBtwCleanup) {
+          try {
+            const tenantId = getCurrentTenantId() ?? params?.tenant?.tenant_id;
+            if (!tenantId) throw new Error('Missing tenant context for BTW archive cleanup');
+            await runWithTenantDatabaseScope(this.db, tenantId, async (tenantDb) => {
+              await assertTenantWritable(tenantDb, tenantId);
+              const sessionsService = this.app.service('sessions') as unknown as SessionsService;
+              const archiveParams: SessionParams = {
+                ...params,
+                query: undefined,
+                provider: undefined,
+              };
+              await sessionsService.archiveBtwSession(session.session_id, archiveParams);
+            });
+            console.log(
+              `📦 [TasksService] Auto-archived btw fork session ${shortId(session.session_id)}`
+            );
+          } catch (error) {
+            console.warn(`⚠️  [TasksService] Failed to auto-archive btw fork:`, error);
+          }
+        }
+
         if (!isStop && !isTermination) {
           await this.injectBtwResultMessage(task, session, params);
         }

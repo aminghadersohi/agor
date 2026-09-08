@@ -51,6 +51,7 @@ import {
   resolveMCPOAuthDiscovery,
   resolveResourceMetadataUrl,
   startMCPOAuthFlow,
+  validateMCPOAuthMetadata,
 } from './oauth-mcp-transport';
 
 describe('Google authorization endpoint classification', () => {
@@ -1607,7 +1608,7 @@ describe('marketplace oauth-start production boundary', () => {
     ).resolves.toMatchObject({ access_token: 'linear-access-token' });
   });
 
-  it('allows strict mode when the optional RFC 9207 capability flag is absent', async () => {
+  it('rejects strict mode when the RFC 9207 callback issuer capability is absent', async () => {
     const fixture = linearFetch();
     globalThis.fetch = fixture.fetch as unknown as typeof fetch;
     await expect(
@@ -1617,11 +1618,8 @@ describe('marketplace oauth-start production boundary', () => {
         redirectUri,
         { resourceUri: fixture.mcpUrl, compatibilityMode: 'strict' }
       )
-    ).resolves.toMatchObject({
-      compatibilityMode: 'strict',
-      authorizationResponseIssuerParameterSupported: false,
-    });
-    expect(fixture.fetch).toHaveBeenCalledWith(
+    ).rejects.toMatchObject({ failureCode: 'metadata_incompatible' });
+    expect(fixture.fetch).not.toHaveBeenCalledWith(
       `${fixture.issuer}/register`,
       expect.objectContaining({ method: 'POST' })
     );
@@ -1788,7 +1786,17 @@ describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
       expect(fetchMock).toHaveBeenCalledWith(metadataUrl, expect.any(Object));
       expect(fetchMock).not.toHaveBeenCalledWith(rootMetadataUrl, expect.any(Object));
 
-      for (const compatibilityMode of ['strict', 'legacy'] as const) {
+      await expect(
+        startMCPOAuthFlow(wwwAuthenticate, undefined, redirectUri, {
+          resourceMetadataUrl: metadataUrl,
+          resourceUri: mcpUrl,
+          compatibilityMode: 'strict',
+          dcrMode: 'advertised',
+          allowLocalhostHttp: true,
+        })
+      ).rejects.toMatchObject({ failureCode: 'issuer_mismatch' });
+
+      for (const compatibilityMode of ['marketplace', 'legacy'] as const) {
         await expect(
           startMCPOAuthFlow(wwwAuthenticate, undefined, redirectUri, {
             resourceMetadataUrl: metadataUrl,
@@ -1804,7 +1812,7 @@ describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
         startMCPOAuthFlow(wwwAuthenticate, 'google-desktop-client', redirectUri, {
           resourceMetadataUrl: metadataUrl,
           resourceUri: mcpUrl,
-          compatibilityMode: 'strict',
+          compatibilityMode: 'marketplace',
           allowLocalhostHttp: true,
         })
       ).resolves.toMatchObject({
@@ -1815,7 +1823,7 @@ describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
     }
   );
 
-  it('Sentry completes strict OAuth without advertising the optional RFC 9207 flag', async () => {
+  it('Sentry completes marketplace OAuth without advertising the optional RFC 9207 flag', async () => {
     const mcpUrl = 'https://mcp.sentry.dev/mcp';
     const metadataUrl = 'https://mcp.sentry.dev/.well-known/oauth-protected-resource/mcp';
     const issuer = 'https://mcp.sentry.dev';
@@ -1856,7 +1864,7 @@ describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
     }) as unknown as typeof fetch;
 
     const discovery = await resolveMCPOAuthDiscovery('Bearer', mcpUrl, {
-      compatibilityMode: 'strict',
+      compatibilityMode: 'marketplace',
       allowLocalhostHttp: true,
     });
     expect(discovery).toEqual({
@@ -1867,7 +1875,7 @@ describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
     const context = await startMCPOAuthFlow('Bearer', undefined, redirectUri, {
       resourceMetadataUrl: metadataUrl,
       resourceUri: mcpUrl,
-      compatibilityMode: 'strict',
+      compatibilityMode: 'marketplace',
       allowLocalhostHttp: true,
     });
     expect(context.authorizationResponseIssuerParameterSupported).toBe(false);
@@ -1882,6 +1890,131 @@ describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
         issuer,
       })
     ).resolves.toMatchObject({ access_token: 'sentry-access-token' });
+  });
+});
+
+describe('side-effect-free production OAuth metadata validation', () => {
+  const originalFetch = globalThis.fetch;
+  const resourceUri = 'https://mcp.example.com/mcp';
+  const metadataUrl = 'https://mcp.example.com/.well-known/oauth-protected-resource/mcp';
+  const issuer = 'https://auth.example.com';
+  const discovery = {
+    kind: 'resource-metadata' as const,
+    metadataUrl,
+    source: 'header' as const,
+  };
+  const json = (body: unknown) =>
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  function fetchMetadata(resource: unknown, metadataDocumentUrl = metadataUrl) {
+    globalThis.fetch = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url === metadataDocumentUrl) {
+        return json({
+          ...(resource === undefined ? {} : { resource }),
+          authorization_servers: [issuer],
+        });
+      }
+      if (url === `${issuer}/.well-known/oauth-authorization-server`) {
+        return json({
+          issuer,
+          authorization_endpoint: `${issuer}/authorize`,
+          token_endpoint: `${issuer}/token`,
+          registration_endpoint: `${issuer}/register`,
+          code_challenge_methods_supported: ['S256'],
+        });
+      }
+      return new Response(null, { status: 404 });
+    }) as unknown as typeof fetch;
+  }
+
+  it.each([
+    ['an omitted resource', undefined],
+    ['multiple resource alternatives', [resourceUri, 'https://mcp.example.com/other']],
+    ['an empty resource', ''],
+    ['a parent resource carrying a query', 'https://mcp.example.com?tenant=other'],
+  ])('rejects %s under the marketplace production contract', async (_label, resource) => {
+    fetchMetadata(resource);
+    await expect(
+      validateMCPOAuthMetadata(discovery, resourceUri, { compatibilityMode: 'marketplace' })
+    ).rejects.toMatchObject({ failureCode: 'metadata_incompatible' });
+  });
+
+  it('binds a marketplace protected-resource metadata document to the MCP origin', async () => {
+    const crossOriginMetadataUrl =
+      'https://attacker.example/.well-known/oauth-protected-resource/mcp';
+    fetchMetadata('https://mcp.example.com', crossOriginMetadataUrl);
+    await expect(
+      validateMCPOAuthMetadata({ ...discovery, metadataUrl: crossOriginMetadataUrl }, resourceUri, {
+        compatibilityMode: 'marketplace',
+      })
+    ).rejects.toMatchObject({ failureCode: 'metadata_incompatible' });
+  });
+
+  it('keeps strict resource equality exact, including a trailing slash', async () => {
+    fetchMetadata(`${resourceUri}/`);
+    await expect(
+      validateMCPOAuthMetadata(discovery, resourceUri, { compatibilityMode: 'strict' })
+    ).rejects.toMatchObject({ failureCode: 'metadata_incompatible' });
+  });
+
+  it('requires authorization and token endpoints in direct metadata', async () => {
+    await expect(
+      validateMCPOAuthMetadata(
+        {
+          kind: 'authorization-server',
+          discoveredAt: 'https://mcp.example.com/.well-known/oauth-authorization-server',
+          authServerMetadata: {
+            issuer: 'https://mcp.example.com',
+            authorization_endpoint: '',
+            token_endpoint: '',
+            registration_endpoint: 'https://mcp.example.com/register',
+            code_challenge_methods_supported: ['S256'],
+          },
+        },
+        resourceUri,
+        { compatibilityMode: 'marketplace' }
+      )
+    ).rejects.toMatchObject({ failureCode: 'metadata_incompatible' });
+  });
+
+  it('rejects a cross-origin issuer from direct marketplace discovery', async () => {
+    await expect(
+      validateMCPOAuthMetadata(
+        {
+          kind: 'authorization-server',
+          discoveredAt: 'https://mcp.example.com/.well-known/oauth-authorization-server',
+          authServerMetadata: {
+            issuer: 'https://attacker.example',
+            authorization_endpoint: 'https://attacker.example/authorize',
+            token_endpoint: 'https://attacker.example/token',
+            registration_endpoint: 'https://attacker.example/register',
+            code_challenge_methods_supported: ['S256'],
+          },
+        },
+        resourceUri,
+        { compatibilityMode: 'marketplace' }
+      )
+    ).rejects.toMatchObject({ failureCode: 'issuer_mismatch' });
+  });
+
+  it('returns DCR readiness without registering a client', async () => {
+    fetchMetadata('https://mcp.example.com');
+    await expect(
+      validateMCPOAuthMetadata(discovery, resourceUri, { compatibilityMode: 'marketplace' })
+    ).resolves.toMatchObject({ registrationEndpoint: `${issuer}/register` });
+    expect(globalThis.fetch).not.toHaveBeenCalledWith(
+      `${issuer}/register`,
+      expect.objectContaining({ method: 'POST' })
+    );
   });
 });
 
@@ -2010,14 +2143,12 @@ describe('strict current MCP OAuth profile', () => {
     await expect(startStrict()).rejects.toThrow('Failed to fetch authorization server metadata');
   });
 
-  it('rejects missing S256 but accepts omitted optional RFC 9207 metadata', async () => {
+  it('rejects missing S256 and omitted RFC 9207 callback issuer metadata', async () => {
     globalThis.fetch = strictFetch({ s256: false });
     await expect(startStrict()).rejects.toThrow('required PKCE S256');
 
     globalThis.fetch = strictFetch({ responseIssuer: false });
-    await expect(startStrict()).resolves.toMatchObject({
-      authorizationResponseIssuerParameterSupported: false,
-    });
+    await expect(startStrict()).rejects.toMatchObject({ failureCode: 'metadata_incompatible' });
   });
 
   it('validates strict metadata before creating a dynamic client', async () => {

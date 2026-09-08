@@ -101,6 +101,7 @@ import { readTeammateChatPreferences } from '../TeammateChatCollections/preferen
 import { ToolIcon } from '../ToolIcon';
 import {
   buildPromptWithAttachments,
+  getComposerAttachmentFailureMessage,
   getComposerUploadAccept,
   getLatestComposerPromptText,
   isBlockingComposerAttachment,
@@ -1160,14 +1161,15 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     }
 
     modal.confirm({
-      title: 'Archive session and child sessions?',
-      content: 'Are you sure you want to archive this session and its child sessions?',
+      title: 'Archive session and same-branch children?',
+      content:
+        'This archives the session and its same-branch forked or spawned descendants. Remote-created sessions remain active.',
       okText: 'Archive',
       cancelText: 'Cancel',
       onOk: async () => {
         const archived = await archiveSession(session.session_id);
         if (archived) {
-          showSuccess('Session and child sessions archived');
+          showSuccess('Session and same-branch children archived');
           onClose();
         } else {
           showError('Failed to archive session');
@@ -1303,7 +1305,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       const blockingAttachment = attachmentsAtSendStart.find(isBlockingComposerAttachment);
       if (blockingAttachment) {
         showError(
-          `${blockingAttachment.file.name} failed or cannot be uploaded. Remove failed files before sending.`
+          `${getComposerAttachmentFailureMessage(blockingAttachment)}. Remove failed files before sending.`
         );
         return;
       }
