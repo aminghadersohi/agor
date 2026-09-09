@@ -1381,7 +1381,7 @@ describe('agor_branches_set_zone placement', () => {
     expect(patched[0].data.position).toEqual({ x: 24, y: 24 });
   });
 
-  it('parks below the occupants rather than overlapping when the zone is full', async () => {
+  it('rejects an overflowing placement without creating a board object', async () => {
     const occupants = [occupant({ position: { x: 0, y: 0 } })];
     const { app, created } = makeApp({
       // Too small to fit a 500x200 branch anywhere free.
@@ -1395,11 +1395,8 @@ describe('agor_branches_set_zone placement', () => {
       baseServiceParams,
     });
 
-    await setZone({ branchId: 'branch-1', zoneId: 'zone-1' });
-
-    const placed = { ...(created[0].position as { x: number; y: number }), ...BRANCH };
-    expect(overlaps(placed, { x: 0, y: 0, width: 400, height: 150 })).toBe(false);
-    expect(placed.y).toBeGreaterThanOrEqual(150);
+    await expect(setZone({ branchId: 'branch-1', zoneId: 'zone-1' })).rejects.toThrow(/zone/i);
+    expect(created).toHaveLength(0);
   });
 });
 
@@ -1536,8 +1533,8 @@ describe('agor_branches_set_zone', () => {
       type: 'zone',
       x: 0,
       y: 0,
-      width: 400,
-      height: 200,
+      width: 650,
+      height: 500,
       label: 'Evidence/QA',
       trigger: {
         behavior: 'show_picker',

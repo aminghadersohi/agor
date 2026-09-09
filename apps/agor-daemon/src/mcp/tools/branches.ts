@@ -227,7 +227,11 @@ async function collectZoneOccupantRectangles(
   options: { boardId: BoardID; zoneId: string; excludeObjectId?: string }
 ): Promise<ZoneOccupantRectangle[]> {
   const result = (await ctx.app.service('board-objects').find({
-    query: { board_id: options.boardId, zone_id: options.zoneId },
+    query: {
+      board_id: options.boardId,
+      zone_id: options.zoneId,
+      exclude_archived_branches: true,
+    },
     ...ctx.baseServiceParams,
   })) as { data: Array<import('@agor/core/types').BoardEntityObject> };
 
@@ -1280,7 +1284,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     'agor_branches_set_zone',
     {
       description:
-        "Pin a branch to a zone on a board, clear its current zone pin with zoneId:null, and optionally trigger the zone's prompt template. Calculates zone center position automatically and creates board association. If the zone has an 'always_new' trigger, a new session is automatically created and the prompt template is executed (matching UI drag-drop behavior). For 'show_picker' zones, use triggerTemplate + targetSessionId to send to an existing session on the branch being moved (targetSessionId must live on that branch — cross-branch targets are rejected, since the trigger prompt acts on the moved branch's files). A remote orchestrator on a different branch does NOT target itself here; to be notified when the work finishes, register a completion callback instead (agor_sessions_create with enableCallback:true and omit callbackSessionId for the current caller, or agor_sessions_prompt callback). Only supply callbackSessionId for an intentional authorized alternate destination.",
+        "Pin a branch to a zone on a board, clear its current zone pin with zoneId:null, and optionally trigger the zone's prompt template. Finds a contained free position among non-archived branches and existing card placements and creates board association. If the branch cannot fit, rejects without changing its current placement; resize or arrange the zone first. If the zone has an 'always_new' trigger, a new session is automatically created and the prompt template is executed (matching UI drag-drop behavior). For 'show_picker' zones, use triggerTemplate + targetSessionId to send to an existing session on the branch being moved (targetSessionId must live on that branch — cross-branch targets are rejected, since the trigger prompt acts on the moved branch's files). A remote orchestrator on a different branch does NOT target itself here; to be notified when the work finishes, register a completion callback instead (agor_sessions_create with enableCallback:true and omit callbackSessionId for the current caller, or agor_sessions_prompt callback). Only supply callbackSessionId for an intentional authorized alternate destination.",
       inputSchema: z.object({
         branchId: mcpRequiredId(
           'branchId',
@@ -1434,8 +1438,17 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
         excludeObjectId: boardObject?.object_id,
       });
       const { x: relativeX, y: relativeY } = findFreeZoneSlot(zone as ZoneBoardObject, occupants, {
-        entityWidth: BRANCH_CARD_WIDTH,
-        entityHeight: BRANCH_CARD_HEIGHT,
+        entityWidth:
+          boardObject?.size && Number.isFinite(boardObject.size.width) && boardObject.size.width > 0
+            ? boardObject.size.width
+            : BRANCH_CARD_WIDTH,
+        entityHeight:
+          boardObject?.size &&
+          Number.isFinite(boardObject.size.height) &&
+          boardObject.size.height > 0
+            ? boardObject.size.height
+            : BRANCH_CARD_HEIGHT,
+        overflow: 'reject',
       });
 
       if (!boardObject) {

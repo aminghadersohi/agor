@@ -63,6 +63,19 @@ describe('findFreeZoneSlot', () => {
     expect(slot.y).toBe(204);
   });
 
+  it.each([
+    { width: 400, height: 500, occupants: [] },
+    { width: 650, height: 180, occupants: [] },
+    { width: 650, height: 500, occupants: [{ x: 0, y: 0, width: 650, height: 500 }] },
+  ])('rejects a non-contained pin in a $width by $height frame', ({ width, height, occupants }) => {
+    expect(() =>
+      findFreeZoneSlot(zone(width, height), occupants, {
+        ...branch,
+        overflow: 'reject',
+      })
+    ).toThrow(/zone/i);
+  });
+
   it('reserves the zone title band when a title inset is given', () => {
     const slot = findFreeZoneSlot(zone(1200, 900), [], { ...branch, padding: 24, titleInset: 64 });
 
