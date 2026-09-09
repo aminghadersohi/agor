@@ -23,6 +23,7 @@ import {
   resolveMultiTenancyConfig,
   resolvePasswordPolicyRequirements,
   resolvePowerManagementConfig,
+  resolvePowerManagementRuntimeOverlay,
   resolveSdkWatchdogConfig,
   resolveTeammateFrameworkRepoUrl,
   resolveTenantContext,
@@ -41,6 +42,8 @@ import {
   MCPServerRepository,
   MessagesRepository,
   MISSING_TASK_ACTOR_ERROR,
+  PowerPolicyRuntimeRevisionConflictError,
+  type PowerPolicyRuntimeSettingsRepository,
   RepositoryError,
   resolveMcpMemberPolicy,
   runWithTenantDatabaseScope,
@@ -84,6 +87,8 @@ import type {
   MessageID,
   MessageSource,
   Params,
+  PowerEssentialSessionSearchResult,
+  PowerManagementMutableSettings,
   ScheduleID,
   Session,
   SessionID,
@@ -505,6 +510,7 @@ export interface RegisterRoutesContext {
   >;
   terminalsService: TerminalsService | null;
   powerPolicyController: PowerPolicyController;
+  powerPolicyRuntimeSettingsRepository: PowerPolicyRuntimeSettingsRepository;
 }
 
 export async function authorizeTaskTerminalRoute(input: {
@@ -858,6 +864,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     sessionEnvSelectionsService,
     terminalsService: _terminalsService,
     powerPolicyController,
+    powerPolicyRuntimeSettingsRepository,
   } = ctx;
 
   registerExecutorResponseRoutes(app);
@@ -933,6 +940,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   // Host power state is system-local, but this first version is intentionally
   // restricted to one static tenant. The service returns only the redacted
   // policy projection and realtime uses the same admin role floor.
+  const operatorPowerDefaults = resolvePowerManagementConfig(config.execution?.power_management);
   registerAuthenticatedRoute(
     app,
     '/power-management',
@@ -940,8 +948,145 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       async find() {
         return powerPolicyController.status();
       },
+      async patch(_id: null, data: unknown, params: RouteParams) {
+        const tenantConfig = resolveMultiTenancyConfig(config);
+        if (tenantConfig.mode !== 'static') {
+          throw new BadRequest(
+            'Live power policy changes require the supported standalone static-tenant topology'
+          );
+        }
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+          throw new BadRequest('Power policy update must be an object');
+        }
+        const request = data as {
+          expected_revision?: unknown;
+          configuration?: unknown;
+          reset_to_operator_defaults?: unknown;
+          rollback_last_change?: unknown;
+        };
+        const requestKeys = Object.keys(request);
+        if (
+          requestKeys.some(
+            (key) =>
+              ![
+                'expected_revision',
+                'configuration',
+                'reset_to_operator_defaults',
+                'rollback_last_change',
+              ].includes(key)
+          )
+        ) {
+          throw new BadRequest('Power policy update contains an unsupported field');
+        }
+        if (
+          !Number.isSafeInteger(request.expected_revision) ||
+          Number(request.expected_revision) < 0
+        ) {
+          throw new BadRequest('expected_revision must be a non-negative integer');
+        }
+        const reset = request.reset_to_operator_defaults === true;
+        const rollback = request.rollback_last_change === true;
+        if (
+          (reset && rollback) ||
+          ('reset_to_operator_defaults' in request && !reset) ||
+          ('rollback_last_change' in request && !rollback) ||
+          ((reset || rollback) && request.configuration !== undefined) ||
+          (!reset &&
+            !rollback &&
+            (!request.configuration ||
+              typeof request.configuration !== 'object' ||
+              Array.isArray(request.configuration)))
+        ) {
+          throw new BadRequest(
+            'Provide exactly one of configuration, reset_to_operator_defaults, or rollback_last_change'
+          );
+        }
+        const runtimeOverride =
+          reset || rollback ? null : (request.configuration as PowerManagementMutableSettings);
+        try {
+          if (!rollback) {
+            if (runtimeOverride) {
+              const mutableKeys = [
+                'mode',
+                'poll_interval_ms',
+                'provider_timeout_ms',
+                'stale_after_ms',
+                'on_battery_debounce_ms',
+                'online_stable_ms',
+                'recovery_dispatch_interval_ms',
+                'critical',
+                'communication_loss',
+              ];
+              if (Object.keys(runtimeOverride).some((key) => !mutableKeys.includes(key))) {
+                throw new Error(
+                  'Only mutable policy fields may be applied; provider and Essential limit remain operator-controlled'
+                );
+              }
+              for (const [field, allowed] of [
+                ['critical', ['charge_percent', 'runtime_seconds', 'consecutive_samples']],
+                ['communication_loss', ['last_on_battery_critical_after_ms']],
+              ] as const) {
+                const nested = runtimeOverride[field];
+                if (
+                  nested !== undefined &&
+                  (!nested ||
+                    typeof nested !== 'object' ||
+                    Array.isArray(nested) ||
+                    Object.keys(nested).some(
+                      (key) => !(allowed as readonly string[]).includes(key)
+                    ))
+                ) {
+                  throw new Error(`${field} contains an unsupported field or value`);
+                }
+              }
+            }
+            const proposed = resolvePowerManagementRuntimeOverlay(
+              operatorPowerDefaults,
+              runtimeOverride ?? undefined
+            );
+            powerPolicyController.assertCanApply(proposed);
+          }
+        } catch (error) {
+          throw new BadRequest(error instanceof Error ? error.message : 'Invalid power policy');
+        }
+        const actorId = params.user?.user_id as UserID | undefined;
+        if (!actorId) throw new NotAuthenticated('Authentication required');
+        try {
+          return await powerPolicyController.applyRuntimeMutation(() =>
+            powerPolicyRuntimeSettingsRepository.compareAndSwap({
+              expectedRevision: Number(request.expected_revision),
+              operation: rollback
+                ? 'rollback_last_change'
+                : reset
+                  ? 'reset_to_operator_defaults'
+                  : 'apply',
+              ...(runtimeOverride ? { runtimeOverride } : {}),
+              operatorDefaults: operatorPowerDefaults,
+              updatedBy: actorId,
+              validateEffective: (effective) => powerPolicyController.assertCanApply(effective),
+            })
+          );
+        } catch (error) {
+          if (error instanceof PowerPolicyRuntimeRevisionConflictError) {
+            throw new Conflict(error.message, {
+              expected_revision: error.expectedRevision,
+              current_revision: error.actualRevision,
+            });
+          }
+          if (
+            error instanceof Error &&
+            error.message === 'Power conservation cannot be activated on this deployment topology'
+          ) {
+            throw new BadRequest(error.message);
+          }
+          throw error;
+        }
+      },
     },
-    { find: { role: ROLES.ADMIN, action: 'view host power policy' } },
+    {
+      find: { role: ROLES.ADMIN, action: 'view host power policy' },
+      patch: { role: ROLES.ADMIN, action: 'apply host power policy' },
+    },
     requireAuth
   );
   powerPolicyController.subscribe((transition) => {
@@ -955,6 +1100,49 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       params: { tenant: { tenant_id: tenantId, source: 'explicit' } },
     });
   });
+
+  registerAuthenticatedRoute(
+    app,
+    '/power-management/essential-sessions',
+    {
+      async find(params: RouteParams): Promise<PowerEssentialSessionSearchResult> {
+        const actorId = params.user?.user_id as UUID | undefined;
+        if (!actorId) throw new NotAuthenticated('Authentication required');
+        const query = (params.query ?? {}) as Record<string, unknown>;
+        const unknownKeys = Object.keys(query).filter((key) => key !== 'search');
+        if (unknownKeys.length > 0) throw new BadRequest('Only the search query is supported');
+        if (query.search !== undefined && typeof query.search !== 'string') {
+          throw new BadRequest('search must be a string');
+        }
+        const search = (query.search as string | undefined)?.trim();
+        if (search && search.length > 120) {
+          throw new BadRequest('search must be at most 120 characters');
+        }
+        const allowAllBranches =
+          superadminOpts.allowSuperadmin && hasMinimumRole(params.user?.role, ROLES.SUPERADMIN);
+        const [data, current] = await Promise.all([
+          sessionsRepository.findPowerEssentialCandidates({
+            userId: actorId,
+            search,
+            limit: 30,
+            allowAllBranches,
+          }),
+          sessionsRepository.findVisiblePowerEssential({
+            userId: actorId,
+            allowAllBranches,
+          }),
+        ]);
+        return {
+          data,
+          limit: 30,
+          slot_occupied: current.slotOccupied,
+          ...(current.selected ? { selected: current.selected } : {}),
+        };
+      },
+    },
+    { find: { role: ROLES.ADMIN, action: 'search Essential Sessions' } },
+    requireAuth
+  );
 
   const powerPriorityView = async (
     session: Session,

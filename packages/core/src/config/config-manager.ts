@@ -1686,12 +1686,17 @@ export function resolveEffectiveConfig(
  * selected deployment contract. Call this on the resolved effective config so
  * environment-derived settings are covered as well as YAML settings.
  */
-export function assertValidEffectiveExecutionConfig(config: AgorConfig): void {
+export function assertValidEffectiveExecutionConfig(
+  config: AgorConfig,
+  options: { deferPowerManagementActivationValidation?: boolean } = {}
+): void {
   const execution = config.execution;
 
   if (!execution) return;
 
-  assertPowerManagementActivationSupported(config);
+  if (!options.deferPowerManagementActivationValidation) {
+    assertPowerManagementActivationSupported(config);
+  }
 
   const response = resolveExecutorResponseConfig(execution.executor_response);
 

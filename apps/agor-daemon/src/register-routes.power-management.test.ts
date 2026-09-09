@@ -4,9 +4,11 @@ import { describe, expect, it } from 'vitest';
 describe('power-management API boundaries', () => {
   const source = readFileSync(new URL('./register-routes.ts', import.meta.url), 'utf8');
   const statusStart = source.indexOf("'/power-management'");
+  const pickerStart = source.indexOf("'/power-management/essential-sessions'");
   const priorityStart = source.indexOf('const powerPriorityView');
   const priorityEnd = source.indexOf('const registerLongAuthenticatedRoute', priorityStart);
   const status = source.slice(statusStart, priorityStart);
+  const picker = source.slice(pickerStart, priorityStart);
   const priority = source.slice(priorityStart, priorityEnd);
 
   it('keeps host status admin-only and emits only the redacted controller projection', () => {
@@ -15,6 +17,23 @@ describe('power-management API boundaries', () => {
     expect(status).toContain("role: ROLES.ADMIN, action: 'view host power policy'");
     expect(status).toContain('data: transition.status');
     expect(status).not.toMatch(/device_name|hostname|raw_output|provider_output/);
+  });
+
+  it('applies only revisioned mutable policy through the tenant-owned repository', () => {
+    expect(status).toContain("patch: { role: ROLES.ADMIN, action: 'apply host power policy' }");
+    expect(status).toContain('powerPolicyController.applyRuntimeMutation(');
+    expect(status).toContain('powerPolicyRuntimeSettingsRepository.compareAndSwap({');
+    expect(status).toContain('expected_revision');
+    expect(status).toContain('Only mutable policy fields may be applied');
+    expect(status).not.toMatch(/writeFile|configPath|formatConfigYaml/);
+  });
+
+  it('keeps the Essential picker bounded, manager-filtered, and projection-only', () => {
+    expect(pickerStart).toBeGreaterThan(statusStart);
+    expect(picker).toContain('sessionsRepository.findPowerEssentialCandidates({');
+    expect(picker).toContain('sessionsRepository.findVisiblePowerEssential({');
+    expect(picker).toContain('limit: 30');
+    expect(picker).not.toMatch(/\$skip|findPage|\.status|total:/);
   });
 
   it('composes tenant-scoped Session lookup, branch-all authority, and the atomic cap', () => {
