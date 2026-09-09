@@ -19,7 +19,18 @@ export default defineConfig({
     alias: { '@': path.resolve(import.meta.dirname, './src') },
   },
   optimizeDeps: {
-    include: ['antd/es/color-picker/color'],
+    include: [
+      '@ant-design/icons',
+      '@testing-library/jest-dom',
+      '@testing-library/react',
+      'antd',
+      'antd/es/color-picker/color',
+      'react',
+      'react-dom',
+      'react/jsx-runtime',
+      'three',
+      'three/examples/jsm/controls/OrbitControls.js',
+    ],
   },
   test: {
     globals: true,
