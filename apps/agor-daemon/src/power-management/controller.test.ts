@@ -110,6 +110,7 @@ describe('PowerPolicyController admission fence', () => {
       'freshness',
       'held',
       'mode',
+      'provider_supported',
       'reason',
       'recovery_pacing',
       'state',
@@ -123,7 +124,7 @@ describe('PowerPolicyController admission fence', () => {
     expect(clock.sleep).not.toHaveBeenCalled();
   });
 
-  it('keeps off mode on the legacy zero-observation admission path', async () => {
+  it('keeps off mode on the legacy admission path', async () => {
     const off = new PowerPolicyController({ ...config(), mode: 'off' }, null, new FakeClock());
     const priorityRead = vi.fn(async () => 'normal' as const);
     const claim = vi.fn(async () => 'claimed');
@@ -135,7 +136,7 @@ describe('PowerPolicyController admission fence', () => {
   });
 });
 
-it('exposes allowlisted current telemetry, clears charge on provider failure, and remains inert off', async () => {
+it('exposes allowlisted current telemetry and clears charge on provider failure', async () => {
   const clock = new FakeClock();
   const controller = new PowerPolicyController(config(), null, clock);
   await controller.ingestForTest({
@@ -163,5 +164,63 @@ it('exposes allowlisted current telemetry, clears charge on provider failure, an
   });
   const disabled = new PowerPolicyController(resolvePowerManagementConfig(undefined), null, clock);
   await disabled.ingestForTest({ condition: 'battery', communication: 'ok', chargePercent: 72 });
-  expect(disabled.status().observation).toBeUndefined();
+  expect(disabled.status()).toMatchObject({
+    mode: 'off',
+    state: 'disabled',
+    reason: 'disabled',
+    freshness: 'fresh',
+    provider_supported: true,
+    held: false,
+    would_hold: false,
+    observation: { condition: 'battery', communication: 'ok', charge_percent: 72 },
+  });
+});
+
+it('polls the privacy-filtered provider while policy is off without gating work', async () => {
+  vi.useFakeTimers();
+  const clock = new FakeClock();
+  const provider = {
+    read: vi.fn(async () => ({ condition: 'online' as const, communication: 'ok' as const })),
+    close: vi.fn(async () => undefined),
+  };
+  const disabled = new PowerPolicyController(
+    resolvePowerManagementConfig(undefined),
+    provider,
+    clock
+  );
+  disabled.start();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(disabled.status()).toMatchObject({
+    mode: 'off',
+    state: 'disabled',
+    provider_supported: true,
+    freshness: 'fresh',
+    observation: { condition: 'online', communication: 'ok' },
+  });
+  await disabled.stop();
+  expect(provider.close).toHaveBeenCalledOnce();
+  vi.useRealTimers();
+});
+
+it('reports unsupported observation without probing or weakening off-mode admission', async () => {
+  const disabled = new PowerPolicyController(
+    resolvePowerManagementConfig(undefined),
+    null,
+    new FakeClock(),
+    undefined,
+    false
+  );
+  disabled.start();
+  expect(disabled.status()).toMatchObject({
+    mode: 'off',
+    state: 'disabled',
+    provider_supported: false,
+    freshness: 'unavailable',
+  });
+  const claim = vi.fn(async () => 'claimed');
+  await expect(disabled.withDispatchPermit('normal', claim)).resolves.toMatchObject({
+    value: 'claimed',
+  });
+  expect(claim).toHaveBeenCalledOnce();
+  await disabled.stop();
 });

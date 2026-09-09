@@ -36,6 +36,11 @@ export type SessionPowerPriority = (typeof SESSION_POWER_PRIORITIES)[number];
 export interface PowerManagementStatus {
   /** Admin-only allowlisted configuration; never contains host identity or credentials. */
   configuration?: AgorPowerManagementSettings;
+  /**
+   * Whether this deployment topology can safely use the configured host provider.
+   * Older daemons omit this field; consumers must treat omission as unknown.
+   */
+  provider_supported?: boolean;
   observation?: {
     condition: 'online' | 'battery' | 'unknown';
     communication: 'ok' | 'lost';

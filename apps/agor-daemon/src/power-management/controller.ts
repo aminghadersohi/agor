@@ -43,13 +43,14 @@ export class PowerPolicyController {
     private readonly config: ResolvedPowerManagementConfig,
     private readonly provider: PowerSourceProvider | null,
     private readonly clock: PowerPolicyClock = systemPowerPolicyClock,
-    private readonly metrics: DaemonMetrics = NOOP_METRICS
+    private readonly metrics: DaemonMetrics = NOOP_METRICS,
+    private readonly providerSupported = true
   ) {
     this.stateMachine = new PowerPolicyStateMachine(config, clock);
   }
 
   start(): void {
-    if (!this.stopped || this.config.mode === 'off') return;
+    if (!this.stopped) return;
     this.stopped = false;
     this.draining = false;
     this.schedulePoll(0);
@@ -72,6 +73,7 @@ export class PowerPolicyController {
     return {
       ...this.stateMachine.snapshot(),
       configuration: powerManagementSettingsFromResolved(this.config),
+      provider_supported: this.providerSupported,
       ...(this.observation ? { observation: { ...this.observation } } : {}),
       recovery_pacing: this.recoveryPacing,
     };
@@ -243,7 +245,6 @@ export class PowerPolicyController {
   }
 
   private recordObservation(observation: Awaited<ReturnType<PowerSourceProvider['read']>>): void {
-    if (this.config.mode === 'off') return;
     // Rebuild the allowlist: never spread provider data or retain old charge on failure.
     this.observation = {
       condition: observation.condition,
