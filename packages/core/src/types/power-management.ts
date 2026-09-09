@@ -60,6 +60,61 @@ export interface PowerManagementStatus {
   would_hold: boolean;
   /** Whether ordinary work is actually held in the current mode. */
   held: boolean;
+  /** Durable mutable-policy precedence and CAS metadata for the admin editor. */
+  runtime_settings?: PowerManagementRuntimeSettingsView;
+}
+
+/** Provider identity/topology stay operator-owned; only these policy values are live-mutable. */
+export type PowerManagementMutableSettings = Omit<
+  AgorPowerManagementSettings,
+  'provider' | 'max_essential_sessions'
+>;
+
+export interface PowerManagementRuntimeSettingsView {
+  /** Monotonic tenant-owned compare-and-swap revision. Zero means no mutation has occurred. */
+  revision: number;
+  source: 'operator_defaults' | 'runtime_override';
+  operator_defaults: AgorPowerManagementSettings;
+  runtime_override?: PowerManagementMutableSettings;
+  updated_at?: string;
+  updated_by?: UserID;
+  can_rollback: boolean;
+  rollback_target?: 'operator_defaults' | 'runtime_override';
+}
+
+export type UpdatePowerManagementRuntimeSettingsRequest =
+  | {
+      expected_revision: number;
+      configuration: PowerManagementMutableSettings;
+      reset_to_operator_defaults?: never;
+      rollback_last_change?: never;
+    }
+  | {
+      expected_revision: number;
+      reset_to_operator_defaults: true;
+      configuration?: never;
+      rollback_last_change?: never;
+    }
+  | {
+      expected_revision: number;
+      rollback_last_change: true;
+      configuration?: never;
+      reset_to_operator_defaults?: never;
+    };
+
+export interface PowerEssentialSessionOption {
+  session_id: SessionID;
+  title?: string;
+  power_priority: SessionPowerPriority;
+}
+
+/** Bounded, authorization-filtered picker projection; no statuses or tenant metadata. */
+export interface PowerEssentialSessionSearchResult {
+  data: PowerEssentialSessionOption[];
+  limit: number;
+  /** True when an Essential row exists but is not eligible/visible to this caller. */
+  slot_occupied: boolean;
+  selected?: PowerEssentialSessionOption;
 }
 
 /** Transient response annotation. The durable Task itself remains queued. */

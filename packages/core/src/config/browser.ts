@@ -9,6 +9,7 @@ export * from './constants';
 export * from './environment-commands';
 export * from './password-policy-contract';
 export {
+  powerManagementMutableSettingsFromResolved,
   powerManagementSettingsFromResolved,
   resolvePowerManagementConfig,
 } from './power-management';

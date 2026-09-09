@@ -63,6 +63,7 @@ import type {
   OpenCodeProviderSettings,
   PatchAgenticToolPreset,
   PermissionMode,
+  PowerEssentialSessionSearchResult,
   PowerManagementStatus,
   Repo,
   RuntimeTelemetryInput,
@@ -82,6 +83,7 @@ import type {
   TenantAgenticToolSettings,
   TenantAgenticToolSettingsPatch,
   UpdateMCPServerInput,
+  UpdatePowerManagementRuntimeSettingsRequest,
   User,
   UserAvatarSettings,
   UserAvatarSyncRequest,
@@ -289,8 +291,19 @@ export interface WorkspacePreferencesService {
 
 export interface PowerManagementService {
   find(params?: Params): Promise<PowerManagementStatus>;
+  patch(
+    id: null,
+    data: UpdatePowerManagementRuntimeSettingsRequest,
+    params?: Params
+  ): Promise<PowerManagementStatus>;
   on(event: 'patched', handler: (data: PowerManagementStatus) => void): void;
   off(event: 'patched', handler: (data: PowerManagementStatus) => void): void;
+}
+
+export interface PowerEssentialSessionsService {
+  find(
+    params?: Params & { query?: { search?: string } }
+  ): Promise<PowerEssentialSessionSearchResult>;
 }
 
 export interface SessionPowerPriorityService {
@@ -318,6 +331,8 @@ export interface ServiceTypes {
   'boards/:id/permissions': BoardCapabilityPolicies;
   'branches/:id/permissions': BranchCapabilityPolicy;
   'workspace-preferences': CapabilityPolicyWorkspacePreferences;
+  'power-management': PowerManagementStatus;
+  'power-management/essential-sessions': PowerEssentialSessionSearchResult;
   cards: CardWithType;
   'card-types': CardType; // CardType CRUD
   artifacts: Artifact;
@@ -905,6 +920,7 @@ export interface AgorClient
   service(path: 'branches/:id/permissions'): BranchPermissionsService;
   service(path: 'workspace-preferences'): WorkspacePreferencesService;
   service(path: 'power-management'): PowerManagementService;
+  service(path: 'power-management/essential-sessions'): PowerEssentialSessionsService;
   service(path: `sessions/${string}/power-priority`): SessionPowerPriorityService;
   service(path: 'zone-workflow-transitions'): ZoneWorkflowTransitionsService;
   service(path: 'zone-workflow-advances'): ZoneWorkflowAdvancesService;

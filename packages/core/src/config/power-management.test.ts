@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   assertPowerManagementActivationSupported,
   isPowerManagementObservationSupported,
+  powerManagementMutableSettingsFromResolved,
   powerManagementSettingsFromResolved,
   resolvePowerManagementConfig,
+  resolvePowerManagementRuntimeOverlay,
 } from './power-management';
 import type { AgorConfig } from './types';
 
@@ -94,4 +96,23 @@ it('round-trips only supported power configuration into the admin YAML projectio
   } as typeof resolved);
   expect(resolvePowerManagementConfig(projection)).toEqual(resolved);
   expect(projection).not.toHaveProperty('privateValue');
+});
+
+it('gives a normalized runtime policy explicit precedence without making provider mutable', () => {
+  const operator = resolvePowerManagementConfig({
+    mode: 'off',
+    provider: 'macos',
+    online_stable_ms: 60_000,
+  });
+  const effective = resolvePowerManagementRuntimeOverlay(operator, {
+    mode: 'enforce',
+    online_stable_ms: 90_000,
+  });
+  expect(effective).toMatchObject({
+    mode: 'enforce',
+    provider: 'macos',
+    onlineStableMs: 90_000,
+    maxEssentialSessions: 1,
+  });
+  expect(powerManagementMutableSettingsFromResolved(effective)).not.toHaveProperty('provider');
 });

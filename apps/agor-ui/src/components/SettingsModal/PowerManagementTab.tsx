@@ -165,7 +165,7 @@ function AdminPowerManagement({ client, user }: { client: AgorClient; user: User
                 type="info"
                 showIcon
                 title="Power conservation is Off — Sessions and schedules are unaffected by UPS conditions"
-                description="An authorized deployment admin can prepare an Observe or Enforce draft below, merge the execution.power_management settings into the operator-managed config.yaml, and restart the daemon. Start with Observe and validate normal samples before choosing Enforce. This page never changes live configuration."
+                description="An authorized deployment admin can apply Observe or Enforce below without restarting the daemon on supported topology. Start with Observe and validate normal samples before choosing Enforce. Operator config.yaml is never rewritten."
               />
             )}
             {status.mode === 'observe' && (
@@ -179,7 +179,7 @@ function AdminPowerManagement({ client, user }: { client: AgorClient; user: User
           </Card>
           <Card title="Configure power policy">
             {status.configuration ? (
-              <PowerConfigurationEditor configuration={status.configuration} />
+              <PowerConfigurationEditor client={client} status={status} />
             ) : (
               <Alert
                 type="warning"

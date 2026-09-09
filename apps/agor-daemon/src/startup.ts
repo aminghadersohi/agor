@@ -820,10 +820,12 @@ export async function startup(ctx: StartupContext): Promise<void> {
     onSweepDrained: () => powerPolicyController.markRecoveryQueueDrained(),
   });
   sessionQueueWorker.start();
+  let queueWasPowerHeld = powerPolicyController.status().held;
   const unsubscribePowerQueueWake = powerPolicyController.subscribe((transition) => {
-    if (transition.previous !== 'normal' && transition.current === 'normal') {
+    if (queueWasPowerHeld && !transition.status.held) {
       sessionQueueWorker.wake();
     }
+    queueWasPowerHeld = transition.status.held;
   });
 
   // Completed child Sessions retain their transcripts but leave active trees
@@ -854,6 +856,11 @@ export async function startup(ctx: StartupContext): Promise<void> {
   });
   app.set('scheduler', schedulerService);
   schedulerService.start();
+  let schedulerWasPowerHeld = powerPolicyController.status().held;
+  const unsubscribePowerSchedulerWake = powerPolicyController.subscribe((transition) => {
+    if (schedulerWasPowerHeld && !transition.status.held) schedulerService.wake();
+    schedulerWasPowerHeld = transition.status.held;
+  });
 
   // 8. Start Knowledge embedding indexer (no-op unless semantic search is configured)
   const knowledgeEmbeddingIndexer = new KnowledgeEmbeddingIndexer(db, {
@@ -962,6 +969,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
       if (schedulerService) {
         schedulerService.stop();
         unsubscribePowerQueueWake();
+        unsubscribePowerSchedulerWake();
       }
 
       // Close Socket.io connections (this also closes the HTTP server)
