@@ -2,7 +2,11 @@ import type { AgorClient, PowerManagementStatus, User } from '@agor-live/client'
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PowerStatusIndicator, powerStatusLabel } from './PowerStatusIndicator';
+import {
+  PowerStatusIndicator,
+  powerPolicyLabel,
+  powerSourcePresentation,
+} from './PowerStatusIndicator';
 
 const status = (overrides: Partial<PowerManagementStatus> = {}): PowerManagementStatus => ({
   mode: 'enforce',
@@ -12,6 +16,12 @@ const status = (overrides: Partial<PowerManagementStatus> = {}): PowerManagement
   transitioned_at: '2026-01-01T00:00:00.000Z',
   would_hold: false,
   held: false,
+  provider_supported: true,
+  observation: {
+    condition: 'online',
+    communication: 'ok',
+    observed_at: '2026-01-01T00:00:00.000Z',
+  },
   ...overrides,
 });
 const admin = { user_id: 'fictional-admin', role: 'admin' } as User;
@@ -26,18 +36,43 @@ function fixture(find = vi.fn(async () => status())) {
 afterEach(() => vi.useRealTimers());
 describe('UPS header indicator', () => {
   it.each([
-    [{ mode: 'off', state: 'disabled', freshness: 'unavailable' }, 'OFF'],
-    [{}, 'ONLINE'],
-    [{ state: 'conserve' }, 'CONSERVE'],
-    [{ state: 'critical' }, 'CRITICAL'],
-    [{ state: 'recovering' }, 'RECOVERY'],
-    [{ recovery_pacing: true }, 'RECOVERY'],
-    [{ freshness: 'stale' }, 'ERROR'],
-    [{ state: 'unknown' }, 'ERROR'],
-  ] as Array<[Partial<PowerManagementStatus>, string]>)(
-    'labels %j accessibly as %s',
-    (value, expected) => {
-      expect(powerStatusLabel(status(value), false).label).toBe(expected);
+    [{ mode: 'off', state: 'disabled' }, { label: 'Utility power', detected: true }, 'Off'],
+    [
+      { mode: 'observe', observation: { ...status().observation!, condition: 'battery' } },
+      { label: 'Battery power', detected: true },
+      'Observe',
+    ],
+    [
+      {
+        mode: 'enforce',
+        state: 'critical',
+        observation: { ...status().observation!, condition: 'battery' },
+      },
+      { label: 'Battery power (critical)', detected: true },
+      'Enforce',
+    ],
+    [{ freshness: 'stale' }, { label: 'Provider stale', detected: false }, 'Enforce'],
+    [
+      { observation: { ...status().observation!, communication: 'lost' } },
+      { label: 'Provider unavailable', detected: false },
+      'Enforce',
+    ],
+    [
+      { provider_supported: false, observation: undefined },
+      { label: 'Unsupported topology', detected: false },
+      'Enforce',
+    ],
+  ] as Array<
+    [
+      Partial<PowerManagementStatus>,
+      { label: string; detected: boolean },
+      'Off' | 'Observe' | 'Enforce' | 'Unknown',
+    ]
+  >)(
+    'separates provider facts from policy mode for %j',
+    (value, expectedSource, expectedPolicy) => {
+      expect(powerSourcePresentation(status(value), false)).toMatchObject(expectedSource);
+      expect(powerPolicyLabel(status(value))).toBe(expectedPolicy);
     }
   );
   it('never reads host telemetry for a member', () => {
@@ -60,7 +95,11 @@ describe('UPS header indicator', () => {
       </MemoryRouter>
     );
     await act(async () => {});
-    fireEvent.click(screen.getByRole('button', { name: 'UPS ONLINE' }));
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Power source: Utility power. Power conservation: Enforce.',
+      })
+    );
     expect(screen.getByText('/settings/power/')).toBeInTheDocument();
     service.find.mockResolvedValue(
       status({ state: 'conserve', mode: 'observe', would_hold: true })
@@ -68,12 +107,20 @@ describe('UPS header indicator', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
-    expect(screen.getByRole('button', { name: 'UPS CONSERVE · Observe' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', {
+        name: 'Power source: Utility power. Power conservation: Observe.',
+      })
+    ).toBeInTheDocument();
     service.find.mockRejectedValue(new Error('private backend details'));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
-    expect(screen.getByRole('button', { name: 'UPS ERROR' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', {
+        name: 'Power source: Provider unavailable. Power conservation: Unknown.',
+      })
+    ).toBeInTheDocument();
     expect(document.body.textContent).not.toContain('private backend details');
     view.unmount();
     expect(service.off).toHaveBeenCalledWith('patched', expect.any(Function));
@@ -92,7 +139,11 @@ describe('UPS header indicator', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15000);
     });
-    expect(screen.getByRole('button', { name: 'UPS ERROR' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', {
+        name: 'Power source: Provider unavailable. Power conservation: Unknown.',
+      })
+    ).toBeInTheDocument();
     rendered.unmount();
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -118,6 +169,10 @@ describe('UPS header indicator', () => {
     await act(async () => {
       oldComplete(status({ state: 'critical' }));
     });
-    expect(screen.getByRole('button', { name: 'UPS OFF' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', {
+        name: 'Power source: Utility power. Power conservation: Off.',
+      })
+    ).toBeInTheDocument();
   });
 });

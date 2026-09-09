@@ -8,6 +8,8 @@ import {
 } from '../../hooks/useAuthorityOperationGuard';
 import { SessionPowerPriorityControl } from '../SessionSettingsModal/SessionPowerPriorityControl';
 
+const PAGE_SIZE = 50;
+
 export function PowerEssentialSessions({ client, user }: { client: AgorClient; user: User }) {
   const scope = useAuthenticatedAuthorityScope(client, `${user.user_id}:${user.role}`);
   const guard = useAuthorityOperationGuard(scope.operationScope);
@@ -30,13 +32,25 @@ export function PowerEssentialSessions({ client, user }: { client: AgorClient; u
         const service = client.service('sessions');
         const [list, priority] = await Promise.all([
           service.find({
-            query: { $sort: { updated_at: -1 }, $limit: 50, $skip: (page - 1) * 50 },
+            query: {
+              $sort: { updated_at: -1 },
+              $limit: PAGE_SIZE,
+              $skip: (page - 1) * PAGE_SIZE,
+            },
           }),
           service.find({ query: { power_priority: 'essential', $limit: 1 } }),
         ]);
         if (!operation.isCurrent()) return;
-        setSessions(Array.isArray(list) ? list : list.data);
-        setTotal(Array.isArray(list) ? list.length : list.total);
+        const nextSessions = Array.isArray(list) ? list : list.data;
+        const nextTotal = Array.isArray(list) ? list.length : list.total;
+        const lastPage = Math.max(1, Math.ceil(nextTotal / PAGE_SIZE));
+        if (page > lastPage) {
+          setPage(lastPage);
+          setSelected(undefined);
+          return;
+        }
+        setSessions(nextSessions);
+        setTotal(nextTotal);
         setEssential(
           (Array.isArray(priority) ? priority : priority.data).filter(
             (session) => session.power_priority === 'essential'
@@ -111,16 +125,22 @@ export function PowerEssentialSessions({ client, user }: { client: AgorClient; u
           label: `${session.title || 'Untitled'} · ${shortId(session.session_id)}${session.archived ? ' (archived)' : ''}${session.power_priority === 'essential' ? ' · Essential' : ''}`,
         }))}
       />
-      <Pagination
-        current={page}
-        pageSize={50}
-        total={total}
-        showSizeChanger={false}
-        onChange={(value) => {
-          setPage(value);
-          setSelected(undefined);
-        }}
-      />
+      {total > PAGE_SIZE && (
+        <Pagination
+          aria-label="Authorized Sessions pages"
+          current={page}
+          pageSize={PAGE_SIZE}
+          total={total}
+          size="small"
+          responsive
+          showLessItems
+          showSizeChanger={false}
+          onChange={(value) => {
+            setPage(value);
+            setSelected(undefined);
+          }}
+        />
+      )}
       {selected && (
         <SessionPowerPriorityControl
           key={`${selected}:${scope.authGeneration}`}

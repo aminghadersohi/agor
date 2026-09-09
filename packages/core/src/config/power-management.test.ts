@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertPowerManagementActivationSupported,
+  isPowerManagementObservationSupported,
   powerManagementSettingsFromResolved,
   resolvePowerManagementConfig,
 } from './power-management';
@@ -49,6 +50,23 @@ describe('assertPowerManagementActivationSupported', () => {
         'linux'
       )
     ).not.toThrow();
+  });
+
+  it('marks read-only observation unsupported outside the complete V1 topology', () => {
+    expect(isPowerManagementObservationSupported(base, 'darwin')).toBe(true);
+    expect(isPowerManagementObservationSupported(base, 'linux')).toBe(false);
+    expect(
+      isPowerManagementObservationSupported(
+        { ...base, multi_tenancy: { mode: 'required_from_auth' } },
+        'darwin'
+      )
+    ).toBe(false);
+    expect(
+      isPowerManagementObservationSupported(
+        { ...base, execution: { ...base.execution, executor_command_template: 'remote' } },
+        'darwin'
+      )
+    ).toBe(false);
   });
 
   it('rejects unsupported platform and executor/topology activation explicitly', () => {

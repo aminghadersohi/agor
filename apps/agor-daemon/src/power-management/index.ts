@@ -1,5 +1,6 @@
 import type { AgorConfig } from '@agor/core/config';
 import {
+  isPowerManagementObservationSupported,
   type ResolvedPowerManagementConfig,
   resolvePowerManagementConfig,
 } from '@agor/core/config';
@@ -9,14 +10,17 @@ import { MacOSPowerSourceProvider } from './macos-provider.js';
 
 export function createPowerPolicyController(
   config: AgorConfig,
-  metrics?: DaemonMetrics
+  metrics?: DaemonMetrics,
+  platform: NodeJS.Platform = process.platform
 ): PowerPolicyController {
   const resolved: ResolvedPowerManagementConfig = resolvePowerManagementConfig(
     config.execution?.power_management
   );
-  const provider =
-    resolved.mode === 'off' ? null : new MacOSPowerSourceProvider(resolved.providerTimeoutMs);
-  return new PowerPolicyController(resolved, provider, undefined, metrics);
+  const providerSupported = isPowerManagementObservationSupported(config, platform);
+  const provider = providerSupported
+    ? new MacOSPowerSourceProvider(resolved.providerTimeoutMs, undefined, platform)
+    : null;
+  return new PowerPolicyController(resolved, provider, undefined, metrics, providerSupported);
 }
 
 export * from './controller.js';

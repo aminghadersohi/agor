@@ -4,24 +4,88 @@ import { Button, Tag, Tooltip } from 'antd';
 import { usePowerManagementStatus } from '../hooks/usePowerManagementStatus';
 import { useSettingsRoute } from '../hooks/useSettingsRoute';
 
-export function powerStatusLabel(status: PowerManagementStatus | null, error: boolean) {
-  if (error) return { label: 'ERROR', color: 'error' };
-  if (!status) return { label: 'LOADING', color: 'default' };
-  if (status.mode === 'off') return { label: 'OFF', color: 'default' };
-  if (status.freshness !== 'fresh' || status.observation?.communication === 'lost') {
-    return { label: status.state === 'critical' ? 'CRITICAL · ERROR' : 'ERROR', color: 'error' };
+export interface PowerPresentation {
+  label: string;
+  shortLabel: string;
+  color: 'default' | 'error' | 'processing' | 'success' | 'warning';
+  detected: boolean;
+}
+
+/** Present provider facts independently from the Agor admission-policy mode. */
+export function powerSourcePresentation(
+  status: PowerManagementStatus | null,
+  error: boolean
+): PowerPresentation {
+  if (error) {
+    return {
+      label: 'Provider unavailable',
+      shortLabel: 'Unavailable',
+      color: 'error',
+      detected: false,
+    };
   }
-  if (status.reason === 'on_battery_debounce')
-    return { label: 'BATTERY · CHECKING', color: 'warning' };
-  if (status.recovery_pacing) return { label: 'RECOVERY', color: 'processing' };
-  return {
-    disabled: { label: 'OFF', color: 'default' },
-    unknown: { label: 'ERROR', color: 'error' },
-    normal: { label: 'ONLINE', color: 'success' },
-    conserve: { label: 'CONSERVE', color: 'warning' },
-    critical: { label: 'CRITICAL', color: 'error' },
-    recovering: { label: 'RECOVERY', color: 'processing' },
-  }[status.state];
+  if (!status) {
+    return {
+      label: 'Reading provider',
+      shortLabel: 'Loading',
+      color: 'default',
+      detected: false,
+    };
+  }
+  if (status.provider_supported === false) {
+    return {
+      label: 'Unsupported topology',
+      shortLabel: 'Unsupported',
+      color: 'error',
+      detected: false,
+    };
+  }
+  if (status.freshness === 'stale') {
+    return { label: 'Provider stale', shortLabel: 'Stale', color: 'error', detected: false };
+  }
+  const observation = status.observation;
+  if (!observation && status.mode === 'off' && status.provider_supported === undefined) {
+    return {
+      label: 'Not monitored by this daemon',
+      shortLabel: 'Not monitored',
+      color: 'default',
+      detected: false,
+    };
+  }
+  if (
+    status.freshness !== 'fresh' ||
+    !observation ||
+    observation.communication === 'lost' ||
+    observation.condition === 'unknown'
+  ) {
+    return {
+      label: 'Provider unavailable',
+      shortLabel: 'Unavailable',
+      color: 'error',
+      detected: false,
+    };
+  }
+  if (observation.condition === 'battery') {
+    if (status.state === 'critical') {
+      return {
+        label: 'Battery power (critical)',
+        shortLabel: 'Battery critical',
+        color: 'error',
+        detected: true,
+      };
+    }
+    return { label: 'Battery power', shortLabel: 'Battery', color: 'warning', detected: true };
+  }
+  return { label: 'Utility power', shortLabel: 'Utility', color: 'success', detected: true };
+}
+
+export function powerPolicyLabel(
+  status: PowerManagementStatus | null
+): 'Off' | 'Observe' | 'Enforce' | 'Unknown' {
+  if (!status) return 'Unknown';
+  if (status?.mode === 'observe') return 'Observe';
+  if (status?.mode === 'enforce') return 'Enforce';
+  return 'Off';
 }
 
 function AdminIndicator({
@@ -35,20 +99,22 @@ function AdminIndicator({
 }) {
   const { status, error } = usePowerManagementStatus(client, `${user.user_id}:${user.role}`);
   const { openSettings } = useSettingsRoute();
-  const presentation = powerStatusLabel(status, error);
-  const label = `UPS ${presentation.label}${status?.mode === 'observe' ? ' · Observe' : ''}`;
+  const source = powerSourcePresentation(status, error);
+  const policy = powerPolicyLabel(status);
+  // Keep the header chip compact on phone widths; the accessible name and
+  // tooltip spell out which value is the source and which is the policy.
+  const visibleLabel = `${source.shortLabel} · ${policy}`;
+  const accessibleLabel = `Power source: ${source.label}. Power conservation: ${policy}.`;
   return (
-    <Tooltip
-      title={`${label}. ${error ? 'Status cannot be refreshed.' : (status?.reason.replaceAll('_', ' ') ?? 'Reading status.')} Open UPS configuration and monitoring.`}
-    >
+    <Tooltip title={`${accessibleLabel} Open power configuration and monitoring.`}>
       <Button
         type="text"
         size="small"
-        aria-label={label}
+        aria-label={accessibleLabel}
         onClick={() => (onOpen ? onOpen() : openSettings('power'))}
       >
-        <Tag color={presentation.color} style={{ marginInlineEnd: 0 }}>
-          {label}
+        <Tag color={source.color} style={{ marginInlineEnd: 0 }}>
+          {visibleLabel}
         </Tag>
       </Button>
     </Tooltip>

@@ -2,13 +2,13 @@ import type { AgorClient, User } from '@agor-live/client';
 import { hasMinimumRole, ROLES } from '@agor-live/client';
 import { Alert, Card, Descriptions, Flex, Spin, Tag, Typography } from 'antd';
 import { usePowerManagementStatus } from '../../hooks/usePowerManagementStatus';
-import { powerStatusLabel } from '../PowerStatusIndicator';
+import { powerPolicyLabel, powerSourcePresentation } from '../PowerStatusIndicator';
 import { PowerConfigurationEditor } from './PowerConfigurationEditor';
 import { PowerEssentialSessions } from './PowerEssentialSessions';
 
 function AdminPowerManagement({ client, user }: { client: AgorClient; user: User }) {
   const { status, error } = usePowerManagementStatus(client, `${user.user_id}:${user.role}`);
-  const presentation = powerStatusLabel(status, error);
+  const source = powerSourcePresentation(status, error);
   return (
     <Flex vertical gap="middle">
       <Typography.Title level={3}>UPS power management</Typography.Title>
@@ -26,12 +26,8 @@ function AdminPowerManagement({ client, user }: { client: AgorClient; user: User
       ) : (
         <>
           <Card
-            title="Live monitoring"
-            extra={
-              <Tag color={presentation.color}>
-                {presentation.label} · {status.mode}
-              </Tag>
-            }
+            title="Power source monitoring"
+            extra={<Tag color={source.color}>{source.label}</Tag>}
           >
             <Descriptions
               column={1}
@@ -39,22 +35,26 @@ function AdminPowerManagement({ client, user }: { client: AgorClient; user: User
               items={[
                 {
                   key: 'provider',
-                  label: 'Provider',
-                  children: status.configuration?.provider ?? 'Not reported',
+                  label: 'Configured provider',
+                  children:
+                    status.configuration?.provider === 'macos'
+                      ? 'macOS native power source'
+                      : 'Not reported',
                 },
                 {
                   key: 'health',
                   label: 'Provider health',
-                  children:
-                    status.mode === 'off'
-                      ? 'Not polled (Off)'
-                      : `${status.observation?.communication ?? 'Not reported'} · ${status.freshness}`,
+                  children: source.detected ? 'Available' : source.label,
                 },
-                { key: 'state', label: 'Policy state', children: status.state },
+                {
+                  key: 'ups',
+                  label: 'UPS',
+                  children: source.detected ? 'Detected' : 'Detection unavailable',
+                },
                 {
                   key: 'source',
                   label: 'Power source',
-                  children: status.observation?.condition ?? 'Not reported',
+                  children: source.detected ? source.label : 'Unavailable',
                 },
                 {
                   key: 'charge',
@@ -72,12 +72,6 @@ function AdminPowerManagement({ client, user }: { client: AgorClient; user: User
                       ? 'Not reported'
                       : `${status.observation.runtime_seconds} seconds`,
                 },
-                { key: 'reason', label: 'Reason', children: status.reason.replaceAll('_', ' ') },
-                {
-                  key: 'transition',
-                  label: 'State changed (UTC)',
-                  children: status.transitioned_at,
-                },
                 {
                   key: 'observed',
                   label: 'Provider read (UTC)',
@@ -90,6 +84,35 @@ function AdminPowerManagement({ client, user }: { client: AgorClient; user: User
                     status.observation_age_ms === undefined
                       ? 'Not reported'
                       : `${Math.ceil(status.observation_age_ms / 1000)} seconds`,
+                },
+              ]}
+            />
+            <Typography.Paragraph type="secondary">
+              Refreshes every 5 seconds. Values are the latest privacy-filtered provider read, not a
+              battery estimate. Missing values are not zero. Unavailable or stale readings never
+              claim that a UPS is healthy or currently detected.
+            </Typography.Paragraph>
+          </Card>
+          <Card title="Power conservation policy" extra={<Tag>{powerPolicyLabel(status)}</Tag>}>
+            <Descriptions
+              column={1}
+              size="small"
+              items={[
+                {
+                  key: 'mode',
+                  label: 'Power conservation',
+                  children: powerPolicyLabel(status),
+                },
+                { key: 'state', label: 'Policy state', children: status.state },
+                {
+                  key: 'reason',
+                  label: 'Policy reason',
+                  children: status.reason.replaceAll('_', ' '),
+                },
+                {
+                  key: 'transition',
+                  label: 'Policy state changed (UTC)',
+                  children: status.transitioned_at,
                 },
                 {
                   key: 'admission',
@@ -133,16 +156,24 @@ function AdminPowerManagement({ client, user }: { client: AgorClient; user: User
               ]}
             />
             <Typography.Paragraph type="secondary">
-              Refreshes every 5 seconds and on policy transitions. Values are the latest provider
-              read, not a battery estimate. Missing values are not zero. Held is an admission
-              decision, not a queued-task count; the API does not expose a held-work inventory.
-              Other admission rules still apply. Running Tasks are never stopped.
+              Held is an admission decision, not a queued-task count; the API does not expose a
+              held-work inventory. Other admission rules still apply. Running Tasks are never
+              stopped.
             </Typography.Paragraph>
+            {status.mode === 'off' && (
+              <Alert
+                type="info"
+                showIcon
+                title="Power conservation is Off — Sessions and schedules are unaffected by UPS conditions"
+                description="An authorized deployment admin can prepare an Observe or Enforce draft below, merge the execution.power_management settings into the operator-managed config.yaml, and restart the daemon. Start with Observe and validate normal samples before choosing Enforce. This page never changes live configuration."
+              />
+            )}
             {status.mode === 'observe' && (
               <Alert
                 type="info"
                 showIcon
-                title="Observe only — power policy does not gate dispatch"
+                title="Power conservation is Observe — Sessions are not gated"
+                description="Agor calculates what Enforce would hold, but does not hold dispatch or schedules."
               />
             )}
           </Card>
