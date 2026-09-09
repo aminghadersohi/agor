@@ -373,6 +373,8 @@ export class SchedulerService {
   private db: TenantScopeAwareDatabase;
   private config: ResolvedSchedulerConfig;
   private timerHandle?: NodeJS.Timeout;
+  private tickInFlight = false;
+  private wakeAfterTick = false;
   private isRunning = false;
   private idleRounds = 0;
   private recoveryCursor?: { created_at: number; session_id: SessionID };
@@ -501,12 +503,28 @@ export class SchedulerService {
       clearTimeout(this.timerHandle);
       this.timerHandle = undefined;
     }
+    this.wakeAfterTick = false;
     this.logWorkEvent('info', 'loop_stopped');
+  }
+
+  /** Promptly reconcile due/coalesced occurrences after an admission hold lifts. */
+  wake(): void {
+    if (!this.isRunning) return;
+    this.idleRounds = 0;
+    if (this.tickInFlight) {
+      this.wakeAfterTick = true;
+      return;
+    }
+    if (this.timerHandle) clearTimeout(this.timerHandle);
+    this.timerHandle = undefined;
+    this.scheduleNextTick(0);
   }
 
   private scheduleNextTick(delayMs: number): void {
     if (!this.isRunning) return;
     this.timerHandle = setTimeout(async () => {
+      this.timerHandle = undefined;
+      this.tickInFlight = true;
       let stats: SchedulerTickStats | null = null;
       try {
         stats = await this.tick();
@@ -514,6 +532,8 @@ export class SchedulerService {
         this.logWorkEvent('error', 'scan_failed', {
           error_code: structuredLogErrorCode(error),
         });
+      } finally {
+        this.tickInFlight = false;
       }
       if (!this.isRunning) return;
       const candidates = stats?.candidates ?? 0;
@@ -530,7 +550,9 @@ export class SchedulerService {
             },
             this.config.random()
           );
-      this.scheduleNextTick(nextDelay);
+      const delay = this.wakeAfterTick ? 0 : nextDelay;
+      this.wakeAfterTick = false;
+      this.scheduleNextTick(delay);
     }, delayMs);
   }
 

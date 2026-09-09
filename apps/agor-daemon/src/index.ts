@@ -36,12 +36,14 @@ import {
 } from '@agor/core/agentic-integrations';
 import type { AgorConfig, ResolvedSecurity } from '@agor/core/config';
 import {
+  assertPowerManagementActivationSupported,
   assertValidEffectiveExecutionConfig,
   assertValidEffectiveIdentityConfig,
   assertValidRawConfig,
   getConfigPath,
   loadConfig,
   loadConfigFromFile,
+  powerManagementSettingsFromResolved,
   renderGitConfigParametersForLog,
   requireDeploymentId,
   resolveDataHomeFromConfig,
@@ -51,10 +53,16 @@ import {
   resolveIdentityAuthority,
   resolveMcpOAuthCallbackOrigin,
   resolveMultiTenancyConfig,
+  resolvePowerManagementConfig,
   resolveSecurity,
   resolveValidExternalLaunchProvider,
 } from '@agor/core/config';
-import { generateId, resolveDatabaseUrl } from '@agor/core/db';
+import {
+  generateId,
+  PowerPolicyRuntimeSettingsRepository,
+  resolveDatabaseUrl,
+  runWithTenantDatabaseScope,
+} from '@agor/core/db';
 import {
   authenticate,
   Forbidden,
@@ -201,7 +209,12 @@ async function startDaemonWithOwnedMetrics(
   // Kubernetes entrypoints must never materialize them back into config.yaml.
   config = resolveEffectiveConfig(config);
   const deploymentId = requireDeploymentId(config);
-  assertValidEffectiveExecutionConfig(config);
+  // Mutable power-policy precedence is resolved only after the durable
+  // tenant-owned overlay is available. Every other execution check still runs
+  // here before database initialization.
+  assertValidEffectiveExecutionConfig(config, {
+    deferPowerManagementActivationValidation: true,
+  });
   const externalLaunchProvider = resolveValidExternalLaunchProvider(config);
   assertValidEffectiveIdentityConfig(config);
   const databaseUrl = resolveDatabaseUrl({ config, env: process.env });
@@ -777,6 +790,33 @@ async function startDaemonWithOwnedMetrics(
   });
   configureUploadStagingStoreFromConfig(effectiveConfig, undefined, db);
 
+  const operatorPowerDefaults = resolvePowerManagementConfig(
+    effectiveConfig.execution?.power_management
+  );
+  const powerPolicyRuntimeSettingsRepository = new PowerPolicyRuntimeSettingsRepository(db);
+  const runtimePowerState =
+    multiTenancy.mode === 'static'
+      ? await runWithTenantDatabaseScope(db, multiTenancy.static_tenant_id, () =>
+          powerPolicyRuntimeSettingsRepository.load(operatorPowerDefaults)
+        )
+      : {
+          effective: operatorPowerDefaults,
+          view: {
+            revision: 0,
+            source: 'operator_defaults' as const,
+            operator_defaults: powerManagementSettingsFromResolved(operatorPowerDefaults),
+            can_rollback: false,
+          },
+        };
+  assertPowerManagementActivationSupported({
+    ...effectiveConfig,
+    execution: {
+      ...effectiveConfig.execution,
+      power_management: powerManagementSettingsFromResolved(runtimePowerState.effective),
+    },
+  });
+  powerPolicyController.configureBeforeStart(runtimePowerState.effective, runtimePowerState.view);
+
   // --------------------------------------------------------------------------
   // Authorization settings
   // --------------------------------------------------------------------------
@@ -905,6 +945,7 @@ async function startDaemonWithOwnedMetrics(
     sessionEnvSelectionsService: services.sessionEnvSelectionsService,
     terminalsService: services.terminalsService,
     powerPolicyController,
+    powerPolicyRuntimeSettingsRepository,
   });
 
   // --------------------------------------------------------------------------

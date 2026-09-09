@@ -384,6 +384,28 @@ export async function exerciseSessionInventory(db: Database) {
     sdk_home_scope: 'branch',
     custom_context: { inventory: true },
   });
+  // The power picker is a manager-only, projection-only bounded search. A
+  // viewer cannot infer titles, while the occupied bit still prevents an
+  // impossible replacement flow from being presented as empty.
+  const ownerCandidates = await sessions.findPowerEssentialCandidates({
+    userId: owner,
+    search: 'group-',
+    limit: 2,
+  });
+  expect(ownerCandidates).toHaveLength(2);
+  expect(ownerCandidates.every((candidate) => candidate.title?.startsWith('group-'))).toBe(true);
+  expect(Object.keys(ownerCandidates[0]).sort()).toEqual(['power_priority', 'session_id', 'title']);
+  await sessions.update(ownerCandidates[0].session_id, { power_priority: 'essential' });
+  await expect(sessions.findVisiblePowerEssential({ userId: owner })).resolves.toMatchObject({
+    slotOccupied: true,
+    selected: { ...ownerCandidates[0], power_priority: 'essential' },
+  });
+  await expect(
+    sessions.findPowerEssentialCandidates({ userId: viewer, search: 'group-', limit: 30 })
+  ).resolves.toEqual([]);
+  await expect(sessions.findVisiblePowerEssential({ userId: viewer })).resolves.toEqual({
+    slotOccupied: true,
+  });
   // Revocation/fallback is read anew; no process-local allowed-branch cache.
   await groups.update(group.group_id, { archived: true });
   await verifyPrimitiveParity(viewer);

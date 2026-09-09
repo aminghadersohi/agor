@@ -6,6 +6,7 @@
 
 import type {
   BranchID,
+  PowerEssentialSessionOption,
   SchedulerInitializationFailureCode,
   SchedulerInitializationStage,
   Session,
@@ -64,7 +65,7 @@ import {
   RepositoryError,
   resolveByShortIdPrefix,
 } from './base';
-import { inVisibleBranchSet } from './branch-access';
+import { branchCapabilityCondition, inVisibleBranchSet } from './branch-access';
 import { deepMerge } from './merge-utils';
 import {
   extractMessageText,
@@ -153,11 +154,106 @@ export interface SessionPageOptions {
   visibleToUserId?: UUID;
 }
 
+export interface PowerEssentialSessionSearchOptions {
+  userId: UUID;
+  search?: string;
+  limit: number;
+  /** Mirrors the narrowly configured superadmin branch-management bypass. */
+  allowAllBranches?: boolean;
+}
+
+export interface VisiblePowerEssentialSession {
+  slotOccupied: boolean;
+  selected?: PowerEssentialSessionOption;
+}
+
 /**
  * Session repository implementation
  */
 export class SessionRepository implements BaseRepository<Session, Partial<Session>> {
   constructor(private db: Database) {}
+
+  /**
+   * One bounded SQL query for the Essential picker. It returns only the three
+   * allowlisted display fields and evaluates Branch Manager authority before
+   * title matching, so neither counts nor rows cross an RBAC/tenant boundary.
+   */
+  async findPowerEssentialCandidates(
+    opts: PowerEssentialSessionSearchOptions
+  ): Promise<PowerEssentialSessionOption[]> {
+    if (!Number.isInteger(opts.limit) || opts.limit < 1 || opts.limit > 50) {
+      throw new RepositoryError('Power Essential Session search limit must be between 1 and 50');
+    }
+    const titleExpression = isPostgresDatabase(this.db)
+      ? sql<string>`COALESCE(${sessions.data}->>'title', '')`
+      : sql<string>`COALESCE(json_extract(${sessions.data}, '$.title'), '')`;
+    const conditions = [eq(sessions.archived, false), eq(branches.archived, false)];
+    if (!opts.allowAllBranches) {
+      conditions.push(branchCapabilityCondition(this.db, opts.userId, 'branch.manage'));
+    }
+    const search = opts.search?.trim().toLowerCase();
+    if (search) {
+      const escaped = search.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
+      const pattern = `%${escaped}%`;
+      conditions.push(
+        or(
+          sql`LOWER(${titleExpression}) LIKE ${pattern} ESCAPE '\\'`,
+          sql`LOWER(${sessions.session_id}) LIKE ${pattern} ESCAPE '\\'`
+        )!
+      );
+    }
+    const logicalUpdatedAt = sql`COALESCE(${sessions.updated_at}, ${sessions.created_at})`;
+    const rows = await select(this.db, {
+      session_id: sessions.session_id,
+      title: titleExpression,
+      power_priority: sessions.power_priority,
+    })
+      .from(sessions)
+      .innerJoin(branches, eq(sessions.branch_id, branches.branch_id))
+      .where(and(...conditions))
+      .orderBy(desc(logicalUpdatedAt), asc(sessions.session_id))
+      .limit(opts.limit)
+      .all();
+    return rows.map((row: { session_id: string; title: string; power_priority: string }) => ({
+      session_id: row.session_id as SessionID,
+      ...(row.title ? { title: row.title } : {}),
+      power_priority: row.power_priority === 'essential' ? 'essential' : 'normal',
+    }));
+  }
+
+  /** Constant-shape current-slot probe. Ineligible rows become only an occupied bit. */
+  async findVisiblePowerEssential(
+    opts: Pick<PowerEssentialSessionSearchOptions, 'userId' | 'allowAllBranches'>
+  ): Promise<VisiblePowerEssentialSession> {
+    const titleExpression = isPostgresDatabase(this.db)
+      ? sql<string>`COALESCE(${sessions.data}->>'title', '')`
+      : sql<string>`COALESCE(json_extract(${sessions.data}, '$.title'), '')`;
+    const manageable = opts.allowAllBranches
+      ? sql`true`
+      : branchCapabilityCondition(this.db, opts.userId, 'branch.manage');
+    const eligible = and(eq(sessions.archived, false), eq(branches.archived, false), manageable)!;
+    const row = await select(this.db, {
+      session_id: sql<
+        string | null
+      >`CASE WHEN ${eligible} THEN ${sessions.session_id} ELSE NULL END`,
+      title: sql<string | null>`CASE WHEN ${eligible} THEN ${titleExpression} ELSE NULL END`,
+    })
+      .from(sessions)
+      .innerJoin(branches, eq(sessions.branch_id, branches.branch_id))
+      .where(eq(sessions.power_priority, 'essential'))
+      .limit(1)
+      .one();
+    if (!row) return { slotOccupied: false };
+    if (!row.session_id) return { slotOccupied: true };
+    return {
+      slotOccupied: true,
+      selected: {
+        session_id: row.session_id as SessionID,
+        ...(row.title ? { title: row.title } : {}),
+        power_priority: 'essential',
+      },
+    };
+  }
 
   /**
    * Convert database row to Session type.

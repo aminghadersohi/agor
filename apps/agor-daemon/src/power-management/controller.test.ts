@@ -113,6 +113,7 @@ describe('PowerPolicyController admission fence', () => {
       'provider_supported',
       'reason',
       'recovery_pacing',
+      'runtime_settings',
       'state',
       'transitioned_at',
       'would_hold',
@@ -134,6 +135,103 @@ describe('PowerPolicyController admission fence', () => {
     expect(priorityRead).not.toHaveBeenCalled();
     expect(claim).toHaveBeenCalledOnce();
   });
+});
+
+it('applies Off → Observe → Enforce → Off behind the admission fence without restart', async () => {
+  const clock = new FakeClock();
+  const controller = new PowerPolicyController(
+    resolvePowerManagementConfig({ mode: 'off' }),
+    null,
+    clock
+  );
+  let revision = 0;
+  const apply = (mode: 'off' | 'observe' | 'enforce') => {
+    const effective = resolvePowerManagementConfig({
+      mode,
+      poll_interval_ms: 2_000,
+      provider_timeout_ms: 500,
+      stale_after_ms: 10_000,
+      on_battery_debounce_ms: 1_000,
+      online_stable_ms: 10_000,
+    });
+    revision += 1;
+    return controller.applyRuntimeMutation(async () => ({
+      effective,
+      view: {
+        revision,
+        source: 'runtime_override',
+        operator_defaults: { mode: 'off', provider: 'macos' },
+        runtime_override: { mode },
+        can_rollback: true,
+        rollback_target: revision === 1 ? 'operator_defaults' : 'runtime_override',
+      },
+    }));
+  };
+
+  expect((await apply('observe')).mode).toBe('observe');
+  expect((await controller.withDispatchPermit('normal', async () => 'observe')).value).toBe(
+    'observe'
+  );
+  expect((await apply('enforce')).mode).toBe('enforce');
+  expect((await controller.withDispatchPermit('normal', async () => 'held')).decision.outcome).toBe(
+    'held'
+  );
+  const off = await apply('off');
+  expect(off).toMatchObject({ mode: 'off', state: 'disabled', held: false });
+  expect((await controller.withDispatchPermit('normal', async () => 'resumed')).value).toBe(
+    'resumed'
+  );
+});
+
+it('does not admit work between a durable Enforce commit and its in-memory swap', async () => {
+  const controller = new PowerPolicyController(
+    resolvePowerManagementConfig({ mode: 'off' }),
+    null,
+    new FakeClock()
+  );
+  let committed = false;
+  let releasePersistence!: () => void;
+  const persistenceBlocked = new Promise<void>((resolve) => {
+    releasePersistence = resolve;
+  });
+  const mutation = controller.applyRuntimeMutation(async () => {
+    committed = true;
+    await persistenceBlocked;
+    return {
+      effective: config(),
+      view: {
+        revision: 1,
+        source: 'runtime_override',
+        operator_defaults: { mode: 'off', provider: 'macos' },
+        runtime_override: { mode: 'enforce' },
+        can_rollback: true,
+        rollback_target: 'operator_defaults',
+      },
+    };
+  });
+  await vi.waitFor(() => expect(committed).toBe(true));
+
+  const claim = vi.fn(async () => 'must-not-run');
+  const dispatch = controller.withDispatchPermit('normal', claim);
+  await Promise.resolve();
+  expect(claim).not.toHaveBeenCalled();
+  releasePersistence();
+  await mutation;
+  await expect(dispatch).resolves.toMatchObject({ decision: { outcome: 'held' } });
+  expect(claim).not.toHaveBeenCalled();
+});
+
+it('refuses active runtime policy when provider topology is unsupported', () => {
+  const controller = new PowerPolicyController(
+    resolvePowerManagementConfig({ mode: 'off' }),
+    null,
+    new FakeClock(),
+    undefined,
+    false
+  );
+  expect(() =>
+    controller.assertCanApply(resolvePowerManagementConfig({ mode: 'enforce' }))
+  ).toThrow(/cannot be activated/);
 });
 
 it('exposes allowlisted current telemetry and clears charge on provider failure', async () => {

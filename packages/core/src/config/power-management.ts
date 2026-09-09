@@ -1,4 +1,7 @@
-import type { PowerManagementMode } from '../types/power-management';
+import type {
+  PowerManagementMode,
+  PowerManagementMutableSettings,
+} from '../types/power-management';
 import type { AgorConfig, AgorPowerManagementSettings } from './types';
 
 export interface ResolvedPowerManagementConfig {
@@ -223,4 +226,36 @@ export function powerManagementSettingsFromResolved(
       last_on_battery_critical_after_ms: config.communicationLoss.lastOnBatteryCriticalAfterMs,
     },
   };
+}
+
+/** Project the live-mutable policy fields while keeping provider identity operator-owned. */
+export function powerManagementMutableSettingsFromResolved(
+  config: ResolvedPowerManagementConfig
+): PowerManagementMutableSettings {
+  const {
+    provider: _provider,
+    max_essential_sessions: _maxEssentialSessions,
+    ...mutable
+  } = powerManagementSettingsFromResolved(config);
+  return mutable;
+}
+
+/** Runtime policy values take explicit precedence over operator defaults. */
+export function resolvePowerManagementRuntimeOverlay(
+  operatorDefaults: ResolvedPowerManagementConfig,
+  runtimeOverride?: PowerManagementMutableSettings
+): ResolvedPowerManagementConfig {
+  if (!runtimeOverride) return operatorDefaults;
+  const operator = powerManagementSettingsFromResolved(operatorDefaults);
+  return resolvePowerManagementConfig({
+    ...operator,
+    ...runtimeOverride,
+    critical: { ...operator.critical, ...runtimeOverride.critical },
+    communication_loss: {
+      ...operator.communication_loss,
+      ...runtimeOverride.communication_loss,
+    },
+    provider: operatorDefaults.provider,
+    max_essential_sessions: operatorDefaults.maxEssentialSessions,
+  });
 }
