@@ -77,8 +77,8 @@ vi.mock('../BranchCard', () => ({
   default: () => <div />,
 }));
 
-const BOARD_ID = 'board-frink-fixture';
-const BRANCH_ID = 'branch-compliance-calendar';
+const BOARD_ID = 'board-placement-fixture';
+const BRANCH_ID = 'branch-example-feature';
 const IMPLEMENTING_ZONE_ID = 'zone-implementing';
 const REVIEWING_ZONE_ID = 'zone-reviewing';
 
@@ -86,19 +86,19 @@ const branch = {
   branch_id: BRANCH_ID,
   repo_id: 'repo-1',
   board_id: BOARD_ID,
-  name: 'compliance-calendar-crud',
+  name: 'example-feature',
   archived: false,
 } as unknown as Branch;
 
 const repo = {
   repo_id: 'repo-1',
-  name: 'agor',
-  slug: 'preset-io/agor',
+  name: 'example',
+  slug: 'example/project',
 } as unknown as Repo;
 
 const board = {
   board_id: BOARD_ID,
-  name: 'Disposable Frink geometry fixture',
+  name: 'Disposable placement geometry fixture',
   objects: {
     [IMPLEMENTING_ZONE_ID]: {
       type: 'zone',
@@ -128,7 +128,7 @@ const board = {
   created_at: '2026-09-01T00:00:00.000Z',
   last_updated: '2026-09-01T00:00:00.000Z',
   created_by: 'user-1',
-  url: 'http://localhost/ui/b/frink/',
+  url: 'http://localhost/ui/b/example/',
   archived: false,
 } as unknown as Board;
 
@@ -162,6 +162,7 @@ const reviewingCardPlacement = {
 } as unknown as BoardEntityObject;
 
 const connected = {
+  authGeneration: 1,
   connected: true,
   connecting: false,
   outOfSync: false,
@@ -252,6 +253,109 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
       zone_id: REVIEWING_ZONE_ID,
     });
     expect(patch).not.toHaveBeenCalledWith('board-object-branch', expect.anything());
+  });
+
+  it.each([IMPLEMENTING_ZONE_ID, REVIEWING_ZONE_ID, 'context-replaced'])(
+    'discards a drained branch write when authority advances to %s while another PATCH awaits',
+    async (zoneId) => {
+      vi.useFakeTimers();
+      let releaseCard!: () => void;
+      const cardPending = new Promise<void>((resolve) => {
+        releaseCard = resolve;
+      });
+      const patch = vi.fn((id: string) =>
+        id === reviewingCardPlacement.object_id ? cardPending : Promise.resolve()
+      );
+      const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+      render(
+        <ConnectionProvider value={connected}>
+          <SessionCanvas board={board} client={client} branches={[branch]} />
+        </ConnectionProvider>
+      );
+      await act(async () => {});
+      for (const node of [
+        {
+          ...currentNode(BRANCH_ID),
+          positionAbsolute: { x: 1800, y: 200 },
+        },
+        {
+          ...currentNode(`card-${card.card_id}`),
+          positionAbsolute: { x: 3010, y: 480 },
+        },
+      ]) {
+        act(() => {
+          flowProps?.onNodeDragStart?.({}, node);
+          flowProps?.onNodeDrag?.({}, node);
+          flowProps?.onNodeDragStop?.({}, node);
+        });
+      }
+      // The timer has drained its ref into a private batch. The card PATCH
+      // suspends that batch before the accumulated branch PATCH is sent.
+      await act(async () => {
+        vi.advanceTimersByTime(501);
+      });
+      expect(patch).toHaveBeenCalledTimes(1);
+      act(() => {
+        if (zoneId === 'context-replaced') {
+          // A new tenant/board context has no authority for this old object.
+          agorStore.setState({ boardObjectsByBoardId: new Map() });
+        } else {
+          boardObjectPatched({
+            ...implementingPlacement,
+            zone_id: zoneId,
+            position: { x: 40, y: 260 },
+          });
+        }
+      });
+      await act(async () => {
+        releaseCard();
+      });
+      expect(patch).toHaveBeenCalledTimes(1);
+      if (zoneId !== 'context-replaced') {
+        expect(currentNode(BRANCH_ID)).toMatchObject({
+          parentId: zoneId,
+          position: { x: 40, y: 260 },
+        });
+      }
+    }
+  );
+
+  it('preserves relative placement when the parent zone moves during a queued drag', async () => {
+    vi.useFakeTimers();
+    const patch = vi.fn().mockResolvedValue({});
+    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    const view = render(
+      <ConnectionProvider value={connected}>
+        <SessionCanvas board={board} client={client} branches={[branch]} />
+      </ConnectionProvider>
+    );
+    await act(async () => {});
+    const node = { ...currentNode(BRANCH_ID), positionAbsolute: { x: 1800, y: 200 } };
+    act(() => {
+      flowProps?.onNodeDragStart?.({}, node);
+      flowProps?.onNodeDrag?.({}, node);
+      flowProps?.onNodeDragStop?.({}, node);
+    });
+    const movedBoard = {
+      ...board,
+      objects: {
+        ...board.objects,
+        [IMPLEMENTING_ZONE_ID]: { ...board.objects?.[IMPLEMENTING_ZONE_ID], x: 2100, y: 400 },
+      },
+    } as Board;
+    view.rerender(
+      <ConnectionProvider value={connected}>
+        <SessionCanvas board={movedBoard} client={client} branches={[branch]} />
+      </ConnectionProvider>
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(501);
+    });
+    expect(patch).not.toHaveBeenCalled();
+    expect(currentNode(BRANCH_ID)).toMatchObject({
+      parentId: IMPLEMENTING_ZONE_ID,
+      position: implementingPlacement.position,
+    });
   });
 
   it('does not persist a stale drag after same-zone auto-arrange advances', async () => {

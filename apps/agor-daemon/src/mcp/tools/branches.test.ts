@@ -1335,7 +1335,7 @@ describe('agor_branches_set_zone', () => {
     expect(findByBranchId).not.toHaveBeenCalled();
   });
 
-  it('replaces an observed out-of-bounds placement before the set_zone to auto-arrange sequence', async () => {
+  it('replaces a synthetic out-of-bounds placement with contained zone-relative coordinates', async () => {
     const baseServiceParams = {
       authenticated: true,
       provider: 'mcp',
@@ -1348,7 +1348,7 @@ describe('agor_branches_set_zone', () => {
     };
     const zone = {
       type: 'zone',
-      x: 2890,
+      x: 2400,
       y: 80,
       width: 740,
       height: 720,
@@ -1359,7 +1359,7 @@ describe('agor_branches_set_zone', () => {
       board_id: 'board-1',
       branch_id: 'branch-1',
       zone_id: 'zone-review',
-      position: { x: 24, y: 1562.814299097225 },
+      position: { x: 24, y: 1600 },
     };
     const boardObjectsPatch = vi.fn(
       async (
@@ -1402,11 +1402,8 @@ describe('agor_branches_set_zone', () => {
     const result = await setZone({ branchId: 'branch-1', zoneId: 'zone-review' });
     const parsed = JSON.parse(result.content[0].text);
 
-    // Production evidence showed set_zone returning {24, 1562.814299097225}
-    // before auto-arrange normalized the same child to {20, 100}. Those two
-    // operations may choose different slots, but both consume zone-relative
-    // coordinates. A non-zero canvas origin must never be added here, and the
-    // stale out-of-bounds y must never survive the ordinary upstream path.
+    // Placement and auto-arrange may choose different slots, but both use
+    // zone-relative coordinates. The non-zero origin is never added here.
     expect(boardObjectsPatch).toHaveBeenCalledWith(
       'obj-branch-1',
       { position: { x: 80, y: 80 }, zone_id: 'zone-review' },
@@ -1414,7 +1411,7 @@ describe('agor_branches_set_zone', () => {
     );
     expect(persistedBoardObject.position).toEqual({ x: 80, y: 80 });
     expect(parsed.position).toEqual({ x: 80, y: 80 });
-    expect(parsed.position).not.toEqual({ x: 24, y: 1562.814299097225 });
+    expect(parsed.position).not.toEqual({ x: 24, y: 1600 });
     expect(parsed.position.x + 500).toBeLessThanOrEqual(zone.width);
     expect(parsed.position.y + 200).toBeLessThanOrEqual(zone.height);
   });
@@ -1438,7 +1435,7 @@ describe('agor_branches_set_zone', () => {
     };
     const zone = {
       type: 'zone',
-      x: 2890,
+      x: 2400,
       y: 80,
       width: 740,
       height: 720,

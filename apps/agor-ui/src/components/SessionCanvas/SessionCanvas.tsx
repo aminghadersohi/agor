@@ -662,6 +662,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
     // Debounce timer ref for position updates
     const layoutUpdateTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const placementBoardRef = useRef(board);
+    placementBoardRef.current = board;
+
     const pendingLayoutUpdatesRef = useRef<Record<string, { x: number; y: number }>>({});
     const isDraggingRef = useRef(false);
 
@@ -1396,7 +1399,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               : newNode.type === 'cardNode'
                 ? boardObjectByCard.get(newNode.id.replace('card-', ''))
                 : undefined;
-          const currentAuthoritativePlacement = snapshotBoardEntityPlacement(placement);
+          const currentAuthoritativePlacement = snapshotBoardEntityPlacement(placement, board);
           const observedAuthoritativePlacement = authoritativeEntityPlacementsRef.current;
           const hadPreviousAuthoritativePlacement = observedAuthoritativePlacement.has(newNode.id);
           const previousAuthoritativePlacement =
@@ -1474,7 +1477,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           };
         });
       },
-      [boardObjectByBranch, boardObjectByCard]
+      [boardObjectByBranch, boardObjectByCard, board]
     );
 
     // Memoized MiniMap nodeColor callback to prevent MiniMap canvas repaints on every render
@@ -1912,6 +1915,21 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               parentType?: 'zone' | 'branch';
             }> = [];
 
+            // A batch may suspend on another entity's PATCH after draining the
+            // pending ref. Recheck the store immediately before each dispatch;
+            // clearing that ref during reconciliation cannot cancel this batch.
+            const placementIsCurrent = (placement: BoardEntityObject | undefined) => {
+              if (!placement) return true;
+              const current = agorStore
+                .getState()
+                .boardObjectsByBoardId.get(placement.board_id)
+                ?.find((candidate) => candidate.object_id === placement.object_id);
+              return sameBoardEntityPlacement(
+                snapshotBoardEntityPlacement(placement, board),
+                snapshotBoardEntityPlacement(current, placementBoardRef.current)
+              );
+            };
+
             // Find all current nodes to check types
             const currentNodes = nodes;
 
@@ -1999,6 +2017,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 // Find existing board_object for this card
                 const existingBoardObject = boardObjectByCard.get(cardId);
                 if (existingBoardObject) {
+                  if (!placementIsCurrent(existingBoardObject)) continue;
                   // zone_id: null clears zone membership; string sets it
                   const updateData: {
                     position: { x: number; y: number };
@@ -2117,6 +2136,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 const existingBoardObject = boardObjectByBranch.get(branch_id);
 
                 if (existingBoardObject) {
+                  if (!placementIsCurrent(existingBoardObject)) continue;
                   // Update existing board_object (position and zone_id)
                   // zone_id: null clears zone membership; string sets it
                   const updateData: {
