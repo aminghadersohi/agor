@@ -249,6 +249,10 @@ export function findByShortIdPrefix<T extends { id: AnyShortId }>(
  * const sessionId: SessionID = "01933e4a-7b89-7c35-a8f3-9d2e1c4b5a6f";
  */
 export type SessionID = UUID;
+/** Durable memory entry owned by exactly one Session. */
+export type SessionMemoryID = UUID;
+/** One-shot reminder owned by exactly one Session. */
+export type SessionReminderID = UUID;
 export type SessionRelationshipID = UUID;
 export type CompletionSubscriptionID = UUID;
 

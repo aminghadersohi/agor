@@ -24,7 +24,19 @@ import type {
   UUID,
 } from '@agor/core/types';
 import { EXECUTING_SESSION_STATUSES, isTeammate } from '@agor/core/types';
-import { and, asc, desc, eq, inArray, isNull, like, ne, type SQL, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  getTableColumns,
+  inArray,
+  isNull,
+  like,
+  ne,
+  type SQL,
+  sql,
+} from 'drizzle-orm';
 import * as yaml from 'js-yaml';
 import { getBaseUrl } from '../../config/config-manager';
 import { normalizeZoneLayoutPolicy, zoneLayoutBinding } from '../../layout/zone-layout.js';
@@ -36,6 +48,7 @@ import type { Database } from '../client';
 import {
   deleteFrom,
   insert,
+  isPostgresDatabase,
   lockRowForUpdate,
   runDatabaseTransaction,
   select,
@@ -187,6 +200,19 @@ export function mapBoardExportBlobToCreateData(
  */
 export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
   constructor(private db: Database) {}
+
+  /** Keep every column (including hidden tenant identity), projecting only lean annotations.
+   * Use the column decoder: SQLite returns JSON text; PostgreSQL returns JSONB.
+   * Non-object JSON is left alone to preserve legacy conversion/error behavior.
+   */
+  private listSelection(lean?: boolean) {
+    if (!lean) return getTableColumns(boards);
+    const data = isPostgresDatabase(this.db)
+      ? sql`CASE WHEN jsonb_typeof(${boards.data}) = 'object'
+          THEN ${boards.data} - 'objects' - 'custom_css' ELSE ${boards.data} END`
+      : sql`json_remove(${boards.data}, '$.objects', '$.custom_css')`;
+    return { ...getTableColumns(boards), data: data.mapWith(boards.data) };
+  }
 
   /**
    * Convert database row to Board type
@@ -616,7 +642,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
       }
 
       const baseUrl = await getBaseUrl();
-      const query = select(this.db).from(boards);
+      const query = select(this.db, this.listSelection(filter?.lean)).from(boards);
       const rows =
         conditions.length > 0 ? await query.where(and(...conditions)).all() : await query.all();
       return this.attachBoardListCounts(
@@ -686,7 +712,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
     if (orderBy.length === 0) orderBy.push(asc(boards.created_at));
     if (!Object.hasOwn(opts.sort ?? {}, 'board_id')) orderBy.push(asc(boards.board_id));
 
-    let dataQuery = select(this.db).from(boards);
+    let dataQuery = select(this.db, this.listSelection(opts.lean)).from(boards);
     if (whereClause) dataQuery = dataQuery.where(whereClause);
     dataQuery = dataQuery.orderBy(...orderBy);
     if (opts.limit !== undefined) dataQuery = dataQuery.limit(opts.limit);

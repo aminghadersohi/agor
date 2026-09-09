@@ -4,6 +4,7 @@ import type {
   GatewayInboundEventID,
   MessageID,
   SessionID,
+  SessionReminderID,
   TaskID,
 } from '@agor/core/types';
 
@@ -92,4 +93,9 @@ export function gatewayInboundTaskId(eventId: GatewayInboundEventID): TaskID {
 /** Stable first-Session identity if listener recovery repeats initial admission. */
 export function gatewayInboundSessionId(eventId: GatewayInboundEventID): SessionID {
   return stableTaskId(eventId, 'gateway_inbound_session') as unknown as SessionID;
+}
+
+/** One immutable queued prompt for one one-shot Session reminder. */
+export function sessionReminderTaskId(reminderId: SessionReminderID): TaskID {
+  return stableTaskId(reminderId, 'session_reminder');
 }

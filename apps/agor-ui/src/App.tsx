@@ -91,6 +91,7 @@ import type { RouteSurfaceId } from './surfaces/surfaceRegistry';
 import {
   ARTIFACT_FULLSCREEN_ROUTE_PATHS,
   KNOWLEDGE_ROUTE_PATHS,
+  MCP_RECOVERY_ROUTE_PATHS,
   RBAC_POLICY_PROTOTYPE_ROUTE_PATH,
   routeUsesDeviceRouter,
 } from './surfaces/surfaceRegistry';
@@ -213,6 +214,11 @@ const loadArtifactFullscreenPage = cacheRouteLoader(
   () => import('./pages/ArtifactFullscreenPage'),
   (module) => ({ default: module.ArtifactFullscreenPage })
 );
+const loadMcpRecoveryPage = cacheRouteLoader(
+  'mcp-recovery',
+  () => import('./pages/MCPSlackRecoveryPage'),
+  (module) => ({ default: module.MCPSlackRecoveryPage })
+);
 const loadMobileApp = cacheRouteLoader(
   'mobile',
   () => import('./components/mobile/MobileApp'),
@@ -244,6 +250,7 @@ const RbacPolicyPrototypePage = import.meta.env.DEV
 const AgorApp = lazy(loadAgorApp);
 const KnowledgePage = lazy(loadKnowledgePage);
 const ArtifactFullscreenPage = lazy(loadArtifactFullscreenPage);
+const MCPSlackRecoveryPage = lazy(loadMcpRecoveryPage);
 const MobileApp = lazy(loadMobileApp);
 const StreamdownDemoPage = lazy(loadStreamdownDemoPage);
 
@@ -251,6 +258,7 @@ const routeModuleLoaders = {
   workspace: loadAgorApp,
   knowledge: loadKnowledgePage,
   'artifact-fullscreen': loadArtifactFullscreenPage,
+  'mcp-recovery': loadMcpRecoveryPage,
   demo: loadStreamdownDemoPage,
   mobile: loadMobileApp,
 } satisfies Record<RouteModuleKey, () => Promise<unknown>>;
@@ -2146,6 +2154,8 @@ function AppContent() {
     />
   );
 
+  const mcpRecoveryElement = <MCPSlackRecoveryPage client={client} />;
+
   // All desktop entity URLs (/b/, /s/, /w/, /a/) render the same
   // AgorApp — the multiple routes exist so react-router's useParams
   // (read inside useUrlState) populates the right named params for
@@ -2389,6 +2399,10 @@ function AppContent() {
             {/* Knowledge route shell. `/kb` is a short alias for the same surface. */}
             {KNOWLEDGE_ROUTE_PATHS.map((path) => (
               <Route key={path} path={path} element={knowledgePageElement} />
+            ))}
+
+            {MCP_RECOVERY_ROUTE_PATHS.map((path) => (
+              <Route key={path} path={path} element={mcpRecoveryElement} />
             ))}
 
             {/* Lightweight artifact fullscreen surface. Uses the shared auth shell,

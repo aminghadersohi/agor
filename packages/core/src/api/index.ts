@@ -66,6 +66,7 @@ import type {
   OpenCodeProviderSettings,
   PatchAgenticToolPreset,
   PermissionMode,
+  PowerEssentialSessionSearchResult,
   PowerManagementStatus,
   Repo,
   RuntimeTelemetryInput,
@@ -76,7 +77,13 @@ import type {
   Session,
   SessionAttentionAcknowledgement,
   SessionID,
+  SessionMemory,
+  SessionMemoryCreateData,
+  SessionMemoryPatchData,
   SessionPowerPriorityView,
+  SessionReminder,
+  SessionReminderCreateData,
+  SessionReminderPatchData,
   SessionUpdate,
   SetSessionPowerPriorityRequest,
   Task,
@@ -86,6 +93,7 @@ import type {
   TenantAgenticToolSettings,
   TenantAgenticToolSettingsPatch,
   UpdateMCPServerInput,
+  UpdatePowerManagementRuntimeSettingsRequest,
   User,
   UserAvatarSettings,
   UserAvatarSyncRequest,
@@ -222,6 +230,24 @@ export interface TaskRunOptions extends TaskRunRequest {
   params?: Params;
 }
 
+export type SessionMemoriesService = Omit<AgorService<SessionMemory>, 'create' | 'patch'> & {
+  create(data: ClientInput<SessionMemoryCreateData>, params?: Params): Promise<SessionMemory>;
+  patch(
+    id: string,
+    data: ClientInput<SessionMemoryPatchData>,
+    params?: Params
+  ): Promise<SessionMemory>;
+};
+
+export type SessionRemindersService = Omit<AgorService<SessionReminder>, 'create' | 'patch'> & {
+  create(data: ClientInput<SessionReminderCreateData>, params?: Params): Promise<SessionReminder>;
+  patch(
+    id: string,
+    data: ClientInput<SessionReminderPatchData>,
+    params?: Params
+  ): Promise<SessionReminder>;
+};
+
 export interface TasksClientHelpers {
   /**
    * Trigger executor pickup for an already-created task. Pure-REST harnesses
@@ -304,8 +330,19 @@ export interface WorkspacePreferencesService {
 
 export interface PowerManagementService {
   find(params?: Params): Promise<PowerManagementStatus>;
+  patch(
+    id: null,
+    data: UpdatePowerManagementRuntimeSettingsRequest,
+    params?: Params
+  ): Promise<PowerManagementStatus>;
   on(event: 'patched', handler: (data: PowerManagementStatus) => void): void;
   off(event: 'patched', handler: (data: PowerManagementStatus) => void): void;
+}
+
+export interface PowerEssentialSessionsService {
+  find(
+    params?: Params & { query?: { search?: string } }
+  ): Promise<PowerEssentialSessionSearchResult>;
 }
 
 export interface SessionPowerPriorityService {
@@ -326,6 +363,8 @@ export interface ServiceTypes {
   'repos/local': Repo;
   branches: Branch;
   schedules: Schedule;
+  'session-memories': SessionMemory;
+  'session-reminders': SessionReminder;
   'gateway-channels': GatewayChannel;
   file: FileDetail;
   users: User;
@@ -334,6 +373,8 @@ export interface ServiceTypes {
   'boards/:id/permissions': BoardCapabilityPolicies;
   'branches/:id/permissions': BranchCapabilityPolicy;
   'workspace-preferences': CapabilityPolicyWorkspacePreferences;
+  'power-management': PowerManagementStatus;
+  'power-management/essential-sessions': PowerEssentialSessionSearchResult;
   cards: CardWithType;
   'card-types': CardType; // CardType CRUD
   artifacts: Artifact;
@@ -911,6 +952,8 @@ export interface AgorClient
   service(path: 'sessions'): SessionsService;
   service(path: 'tasks'): TasksService;
   service(path: 'messages'): MessagesService;
+  service(path: 'session-memories'): SessionMemoriesService;
+  service(path: 'session-reminders'): SessionRemindersService;
   service(path: 'board-comments'): BoardCommentsService;
   service(path: 'repos'): ReposService;
   service(path: 'repos/clone'): ReposCloneService;
@@ -921,6 +964,7 @@ export interface AgorClient
   service(path: 'branches/:id/permissions'): BranchPermissionsService;
   service(path: 'workspace-preferences'): WorkspacePreferencesService;
   service(path: 'power-management'): PowerManagementService;
+  service(path: 'power-management/essential-sessions'): PowerEssentialSessionsService;
   service(path: `sessions/${string}/power-priority`): SessionPowerPriorityService;
   service(path: 'zone-workflow-transitions'): ZoneWorkflowTransitionsService;
   service(path: 'zone-workflow-advances'): ZoneWorkflowAdvancesService;

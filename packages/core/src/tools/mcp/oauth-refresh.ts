@@ -32,12 +32,12 @@ export function oauthGrantCanAuthenticate(
   token: Pick<
     UserMCPOAuthToken,
     'oauth_token_expires_at' | 'oauth_refresh_token' | 'refresh_status'
-  >,
+  > & { has_refresh_token?: boolean },
   now = new Date()
 ): boolean {
   if (token.refresh_status === 'ambiguous') return false;
   if (!token.oauth_token_expires_at || token.oauth_token_expires_at > now) return true;
-  return Boolean(token.oauth_refresh_token);
+  return Boolean(token.oauth_refresh_token || token.has_refresh_token);
 }
 
 /**

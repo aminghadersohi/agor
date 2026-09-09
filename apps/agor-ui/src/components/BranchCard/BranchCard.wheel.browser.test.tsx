@@ -214,6 +214,9 @@ it('pans and zooms the canvas over scheduled lists while preserving pagination',
   expect(flow.getZoom()).toBeGreaterThan(before.zoom);
   const nextPage = screen.getByTitle('Next Page');
   expect(wheel(nextPage, { ctrlKey: true }).defaultPrevented).toBe(true);
+  // The wheel assertions intentionally pan/zoom the card out of view. Restore
+  // the viewport before testing real pointer access to pagination and rows.
+  await act(async () => flow.setViewport(before));
   await act(async () => userEvent.click(nextPage));
   // The preceding pan/zoom intentionally moves the card outside the browser
   // viewport. Pagination state is a DOM contract here; pointer actionability

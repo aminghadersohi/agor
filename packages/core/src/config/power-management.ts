@@ -1,4 +1,7 @@
-import type { PowerManagementMode } from '../types/power-management';
+import type {
+  PowerManagementMode,
+  PowerManagementMutableSettings,
+} from '../types/power-management';
 import type { AgorConfig, AgorPowerManagementSettings } from './types';
 
 export interface ResolvedPowerManagementConfig {
@@ -185,6 +188,21 @@ export function assertPowerManagementActivationSupported(
   }
 }
 
+/** Whether read-only host observation is truthful for the V1 process-local topology. */
+export function isPowerManagementObservationSupported(
+  config: AgorConfig,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  return (
+    platform === 'darwin' &&
+    (config.deployment?.mode ?? 'standalone') === 'standalone' &&
+    (config.multi_tenancy?.mode ?? 'static') === 'static' &&
+    (config.database?.dialect ?? 'sqlite') === 'sqlite' &&
+    (config.execution?.unix_user_mode ?? 'simple') === 'simple' &&
+    !config.execution?.executor_command_template
+  );
+}
+
 /** Explicit, credential-free configuration projection for the admin UI and YAML drafts. */
 export function powerManagementSettingsFromResolved(
   config: ResolvedPowerManagementConfig
@@ -208,4 +226,36 @@ export function powerManagementSettingsFromResolved(
       last_on_battery_critical_after_ms: config.communicationLoss.lastOnBatteryCriticalAfterMs,
     },
   };
+}
+
+/** Project the live-mutable policy fields while keeping provider identity operator-owned. */
+export function powerManagementMutableSettingsFromResolved(
+  config: ResolvedPowerManagementConfig
+): PowerManagementMutableSettings {
+  const {
+    provider: _provider,
+    max_essential_sessions: _maxEssentialSessions,
+    ...mutable
+  } = powerManagementSettingsFromResolved(config);
+  return mutable;
+}
+
+/** Runtime policy values take explicit precedence over operator defaults. */
+export function resolvePowerManagementRuntimeOverlay(
+  operatorDefaults: ResolvedPowerManagementConfig,
+  runtimeOverride?: PowerManagementMutableSettings
+): ResolvedPowerManagementConfig {
+  if (!runtimeOverride) return operatorDefaults;
+  const operator = powerManagementSettingsFromResolved(operatorDefaults);
+  return resolvePowerManagementConfig({
+    ...operator,
+    ...runtimeOverride,
+    critical: { ...operator.critical, ...runtimeOverride.critical },
+    communication_loss: {
+      ...operator.communication_loss,
+      ...runtimeOverride.communication_loss,
+    },
+    provider: operatorDefaults.provider,
+    max_essential_sessions: operatorDefaults.maxEssentialSessions,
+  });
 }

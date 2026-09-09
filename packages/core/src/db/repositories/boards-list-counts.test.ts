@@ -181,6 +181,8 @@ describe('BoardRepository Board list counts', () => {
       });
       // One set-based aggregate invocation covers every board in the list.
       expect(aggregateSpy).toHaveBeenCalledTimes(1);
+      expect(await boards.findAll({ lean: true })).toEqual(result);
+      expect((await boards.findPage({ lean: true })).data).toEqual(result);
     }
   );
 
@@ -251,6 +253,15 @@ describe('BoardRepository Board list counts', () => {
       // Permission mutation guard: without visibleBranchAccessCondition this
       // would be 2 because the distinct owner's hidden branch is also running.
       expect(firstPage.data[0].active_session_count).not.toBe(2);
+      expect(
+        await boards.findPage({
+          visibleToUserId: viewer,
+          sort: { name: 1 },
+          limit: 1,
+          offset: 0,
+          lean: true,
+        })
+      ).toEqual(firstPage);
 
       const sessions = new SessionRepository(db);
       await sessions.update(transitioning.session_id, {

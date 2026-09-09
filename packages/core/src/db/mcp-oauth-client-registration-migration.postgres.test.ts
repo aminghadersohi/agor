@@ -24,7 +24,6 @@ const oldHeadFixture = resolve(
   'test-fixtures/b0585d76/0100_mcp_oauth_client_registrations.sql'
 );
 const OLD_HEAD_WATERMARK = 1_788_292_800_000;
-const FINAL_INTEGRATION_WATERMARK = 1_788_800_000_004;
 const OLD_HEAD_MIGRATION_SHA256 =
   'f1e964942fd61182d564cf45dfcf5b13218b1eee242a3927a7fc9fba168fe7c5';
 
@@ -222,6 +221,8 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           '9015_mcp_oauth_client_registrations',
           '9016_oauth_authority_watermark_reconciliation',
           '9017_fork_migration_collision_repair',
+          '9018_session_memory_reminders',
+          '9019_mcp_slack_recovery_due',
         ],
         dbAheadOfBinary: false,
       });
@@ -278,7 +279,10 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
         )
       );
       const finalWatermark = Number(ledger[0]?.max_ts);
-      expect(finalWatermark).toBe(FINAL_INTEGRATION_WATERMARK);
+      const currentJournal = JSON.parse(
+        await readFile(join(migrationsFolder, 'meta', '_journal.json'), 'utf8')
+      ) as { entries: Array<{ when: number }> };
+      expect(finalWatermark).toBe(Math.max(...currentJournal.entries.map(({ when }) => when)));
       const oldHeadJournal = JSON.parse(
         await readFile(join(oldHeadFolder!, 'meta', '_journal.json'), 'utf8')
       ) as { entries: Array<{ tag: string; when: number }> };
@@ -358,6 +362,18 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority_updated_at`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority_updated_by`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority`);
+      // This fixture reuses the database upgraded by the preceding test. Remove
+      // the later Slack recovery addition as well as rewinding the ledger so
+      // the simulated old head has its actual schema, not a future column.
+      await executeRaw(db, sql`ALTER TABLE tasks DROP COLUMN mcp_slack_recovery_due_at`);
+
+      // This fixture rewinds the journal to the previous fork watermark. Keep
+      // the physical schema aligned with that watermark so the later Session
+      // memory/reminder migration is exercised as a real upgrade rather than
+      // replayed over objects it already created in the prior test.
+      await executeRaw(db, sql`DROP TABLE session_reminders, session_memories`);
+      await executeRaw(db, sql`DROP INDEX sessions_tenant_session_id_unique`);
+      await executeRaw(db, sql`DROP INDEX tasks_tenant_task_id_unique`);
 
       // This fork recorded Claude authority at 9012, later than upstream's
       // old final watermark. Retain that real applied entry: erasing its ledger
@@ -376,6 +392,8 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           '9015_mcp_oauth_client_registrations',
           '9016_oauth_authority_watermark_reconciliation',
           '9017_fork_migration_collision_repair',
+          '9018_session_memory_reminders',
+          '9019_mcp_slack_recovery_due',
         ],
         dbAheadOfBinary: false,
       });

@@ -108,13 +108,17 @@ export class MacOSPowerSourceProvider implements PowerSourceProvider {
   private closed = false;
 
   constructor(
-    private readonly timeoutMs: number,
+    private timeoutMs: number,
     private readonly runner: MacOSPowerCommandRunner = defaultRunner,
     platform: NodeJS.Platform = process.platform
   ) {
     if (platform !== 'darwin') {
       throw new Error('The macos power provider requires macOS');
     }
+  }
+
+  setTimeoutMs(timeoutMs: number): void {
+    this.timeoutMs = timeoutMs;
   }
 
   async read(): Promise<PowerObservation> {

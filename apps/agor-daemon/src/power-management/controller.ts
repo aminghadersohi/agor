@@ -1,6 +1,11 @@
 import type { ResolvedPowerManagementConfig } from '@agor/core/config';
 import { powerManagementSettingsFromResolved } from '@agor/core/config';
-import type { PowerManagementStatus, PowerTaskHold, SessionPowerPriority } from '@agor/core/types';
+import type {
+  PowerManagementRuntimeSettingsView,
+  PowerManagementStatus,
+  PowerTaskHold,
+  SessionPowerPriority,
+} from '@agor/core/types';
 import type { DaemonMetrics } from '../metrics/index.js';
 import { NOOP_METRICS } from '../metrics/index.js';
 import { formatStructuredLog } from '../utils/structured-log.js';
@@ -28,7 +33,7 @@ export type PowerDispatchDecision =
   | { outcome: 'held'; hold: PowerTaskHold };
 
 export class PowerPolicyController {
-  private readonly stateMachine: PowerPolicyStateMachine;
+  private stateMachine: PowerPolicyStateMachine;
   private readonly mutex = new AsyncMutex();
   private readonly listeners = new Set<(transition: PowerPolicyTransition) => void>();
   private timer?: NodeJS.Timeout;
@@ -38,18 +43,76 @@ export class PowerPolicyController {
   private observation?: PowerManagementStatus['observation'];
   private recoveryPacing = false;
   private nextRecoveryDispatchAt = 0;
+  private lastProviderObservation?: Awaited<ReturnType<PowerSourceProvider['read']>>;
+  private runtimeSettings: PowerManagementRuntimeSettingsView;
 
   constructor(
-    private readonly config: ResolvedPowerManagementConfig,
+    private config: ResolvedPowerManagementConfig,
     private readonly provider: PowerSourceProvider | null,
     private readonly clock: PowerPolicyClock = systemPowerPolicyClock,
-    private readonly metrics: DaemonMetrics = NOOP_METRICS
+    private readonly metrics: DaemonMetrics = NOOP_METRICS,
+    private readonly providerSupported = true,
+    runtimeSettings?: PowerManagementRuntimeSettingsView
   ) {
     this.stateMachine = new PowerPolicyStateMachine(config, clock);
+    this.runtimeSettings =
+      runtimeSettings ??
+      ({
+        revision: 0,
+        source: 'operator_defaults',
+        operator_defaults: powerManagementSettingsFromResolved(config),
+        can_rollback: false,
+      } satisfies PowerManagementRuntimeSettingsView);
+  }
+
+  /** Load the durable overlay before admission workers or provider polling start. */
+  configureBeforeStart(
+    config: ResolvedPowerManagementConfig,
+    runtimeSettings: PowerManagementRuntimeSettingsView
+  ): void {
+    if (!this.stopped || this.activePoll || this.timer) {
+      throw new Error('Initial power policy configuration must be loaded before controller start');
+    }
+    this.assertActivationSupported(config);
+    this.replaceConfiguration(config, runtimeSettings);
+  }
+
+  assertCanApply(config: ResolvedPowerManagementConfig): void {
+    this.assertActivationSupported(config);
+  }
+
+  /**
+   * Hold the same mutex as Task/schedule claims across durable CAS and the
+   * in-memory swap. Once the database commit is visible, no admission can
+   * observe the old policy in this process.
+   */
+  async applyRuntimeMutation(
+    persist: () => Promise<{
+      effective: ResolvedPowerManagementConfig;
+      view: PowerManagementRuntimeSettingsView;
+    }>
+  ): Promise<PowerManagementStatus> {
+    const release = await this.mutex.acquire();
+    try {
+      const next = await persist();
+      this.assertActivationSupported(next.effective);
+      const previous = this.stateMachine.snapshot();
+      this.replaceConfiguration(next.effective, next.view);
+      const current = this.stateMachine.snapshot();
+      this.publishTransition({
+        previous: previous.state,
+        current: current.state,
+        reason: current.reason,
+        status: current,
+      });
+      return this.status();
+    } finally {
+      release();
+    }
   }
 
   start(): void {
-    if (!this.stopped || this.config.mode === 'off') return;
+    if (!this.stopped) return;
     this.stopped = false;
     this.draining = false;
     this.schedulePoll(0);
@@ -72,6 +135,8 @@ export class PowerPolicyController {
     return {
       ...this.stateMachine.snapshot(),
       configuration: powerManagementSettingsFromResolved(this.config),
+      provider_supported: this.providerSupported,
+      runtime_settings: this.runtimeSettings,
       ...(this.observation ? { observation: { ...this.observation } } : {}),
       recovery_pacing: this.recoveryPacing,
     };
@@ -91,10 +156,14 @@ export class PowerPolicyController {
   async withScheduleMaterializationPermit<T>(
     materialize: () => Promise<T>
   ): Promise<{ decision: PowerDispatchDecision; value?: T }> {
-    if (this.config.mode === 'off') {
-      return { decision: { outcome: 'allowed', wouldHold: false }, value: await materialize() };
-    }
     const release = await this.mutex.acquire();
+    if (this.config.mode === 'off') {
+      try {
+        return { decision: { outcome: 'allowed', wouldHold: false }, value: await materialize() };
+      } finally {
+        release();
+      }
+    }
     const decision = this.decisionFor('normal');
     if (decision.outcome === 'held') {
       release();
@@ -116,11 +185,15 @@ export class PowerPolicyController {
     priorityInput: SessionPowerPriority | (() => Promise<SessionPowerPriority>),
     claim: () => Promise<T>
   ): Promise<{ decision: PowerDispatchDecision; value?: T }> {
-    if (this.config.mode === 'off') {
-      return { decision: { outcome: 'allowed', wouldHold: false }, value: await claim() };
-    }
     for (;;) {
       const release = await this.mutex.acquire();
+      if (this.config.mode === 'off') {
+        try {
+          return { decision: { outcome: 'allowed', wouldHold: false }, value: await claim() };
+        } finally {
+          release();
+        }
+      }
       let priority: SessionPowerPriority;
       try {
         priority = typeof priorityInput === 'function' ? await priorityInput() : priorityInput;
@@ -243,7 +316,7 @@ export class PowerPolicyController {
   }
 
   private recordObservation(observation: Awaited<ReturnType<PowerSourceProvider['read']>>): void {
-    if (this.config.mode === 'off') return;
+    this.lastProviderObservation = observation;
     // Rebuild the allowlist: never spread provider data or retain old charge on failure.
     this.observation = {
       condition: observation.condition,
@@ -272,20 +345,49 @@ export class PowerPolicyController {
       this.recoveryPacing = true;
       this.nextRecoveryDispatchAt = this.clock.monotonicMs();
     }
+    const published = { ...transition, status: this.status() };
     this.metrics.increment('power.policy_transitions', 1, {
-      from: transition.previous,
-      to: transition.current,
-      reason: transition.reason,
+      from: published.previous,
+      to: published.current,
+      reason: published.reason,
     });
     console.info(
       formatStructuredLog('[power-policy]', {
         event: 'transition',
-        previous: transition.previous,
-        current: transition.current,
-        reason: transition.reason,
-        mode: transition.status.mode,
+        previous: published.previous,
+        current: published.current,
+        reason: published.reason,
+        mode: published.status.mode,
       })
     );
-    for (const listener of this.listeners) listener(transition);
+    for (const listener of this.listeners) listener(published);
+  }
+
+  private assertActivationSupported(config: ResolvedPowerManagementConfig): void {
+    if (config.mode !== 'off' && !this.providerSupported) {
+      throw new Error('Power conservation cannot be activated on this deployment topology');
+    }
+  }
+
+  private replaceConfiguration(
+    config: ResolvedPowerManagementConfig,
+    runtimeSettings: PowerManagementRuntimeSettingsView
+  ): void {
+    this.config = config;
+    this.runtimeSettings = runtimeSettings;
+    this.provider?.setTimeoutMs?.(config.providerTimeoutMs);
+    this.stateMachine = new PowerPolicyStateMachine(config, this.clock);
+    if (this.lastProviderObservation) {
+      // A policy swap intentionally discards debounce/recovery history. Reusing
+      // only the last allowlisted observation is conservative: online enters
+      // stable recovery and battery re-enters debounce before Enforce admits.
+      this.stateMachine.ingest(this.lastProviderObservation);
+    }
+    this.draining = false;
+    this.recoveryPacing = false;
+    this.nextRecoveryDispatchAt = 0;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+    if (!this.stopped && !this.activePoll) this.schedulePoll(0);
   }
 }
