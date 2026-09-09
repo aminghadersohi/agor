@@ -64,7 +64,14 @@ describe('board entity placement reconciliation', () => {
   });
 
   it('invalidates absolute drag geometry after a parent frame moves or resizes', () => {
-    const zone = { type: 'zone' as const, x: 1000, y: 500, width: 800, height: 600 };
+    const zone = {
+      type: 'zone' as const,
+      label: 'Example',
+      x: 1000,
+      y: 500,
+      width: 800,
+      height: 600,
+    };
     const snapshot = (frame: typeof zone) =>
       snapshotBoardEntityPlacement(placement(), { objects: { 'zone-reviewing': frame } });
     for (const change of [{ x: 1100 }, { y: 600 }, { width: 900 }, { height: 700 }]) {
