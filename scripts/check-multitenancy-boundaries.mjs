@@ -214,6 +214,10 @@ const checks = [
       // semantics. They never access a database; the real PostgreSQL tracing
       // test goes through runWithTenantDatabaseScope instead.
       'packages/core/src/db/postgres-transaction-tracing.test.ts': 3,
+      // Disposable migration fixture only: temporarily install an incompatible
+      // global schema index and prove fail-closed compensation rolls it back.
+      // No tenant data is read or written and no application path uses this.
+      'packages/core/src/db/mcp-oauth-main-upgrade.postgres.test.ts': 1,
       // Test-only security harness deliberately invokes every direct libsql
       // and Drizzle transaction surface to prove the literal-memory client
       // coordinator cannot be bypassed. No application database access lives
