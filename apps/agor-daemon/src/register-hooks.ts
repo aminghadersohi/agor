@@ -523,6 +523,8 @@ export const TENANT_OWNED_SERVICE_PATHS = [
   'session-relationships',
   'tasks',
   'messages',
+  'session-memories',
+  'session-reminders',
   'boards',
   'boards/:id/archive',
   'boards/:id/unarchive',
@@ -3484,6 +3486,10 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       all: [requireAuth],
     },
   });
+
+  for (const path of ['session-memories', 'session-reminders'] as const) {
+    safeService(path)?.hooks({ before: { all: [requireAuth] } });
+  }
 
   // ============================================================================
   // Schedules hooks

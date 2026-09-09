@@ -219,7 +219,8 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           '9015_mcp_oauth_client_registrations',
           '9016_oauth_authority_watermark_reconciliation',
           '9017_fork_migration_collision_repair',
-          '9018_mcp_slack_recovery_due',
+          '9018_session_memory_reminders',
+          '9019_mcp_slack_recovery_due',
         ],
         dbAheadOfBinary: false,
       });
@@ -364,6 +365,14 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       // the simulated old head has its actual schema, not a future column.
       await executeRaw(db, sql`ALTER TABLE tasks DROP COLUMN mcp_slack_recovery_due_at`);
 
+      // This fixture rewinds the journal to the previous fork watermark. Keep
+      // the physical schema aligned with that watermark so the later Session
+      // memory/reminder migration is exercised as a real upgrade rather than
+      // replayed over objects it already created in the prior test.
+      await executeRaw(db, sql`DROP TABLE session_reminders, session_memories`);
+      await executeRaw(db, sql`DROP INDEX sessions_tenant_session_id_unique`);
+      await executeRaw(db, sql`DROP INDEX tasks_tenant_task_id_unique`);
+
       // Reproduce the previous reviewed head's timestamp-only final watermark.
       // Its authority schema is identical; the rebased bootstrap must not try
       // to CREATE it again or discard its rows before exact reconciliation.
@@ -383,7 +392,8 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           '9015_mcp_oauth_client_registrations',
           '9016_oauth_authority_watermark_reconciliation',
           '9017_fork_migration_collision_repair',
-          '9018_mcp_slack_recovery_due',
+          '9018_session_memory_reminders',
+          '9019_mcp_slack_recovery_due',
         ],
         dbAheadOfBinary: false,
       });
