@@ -45,7 +45,7 @@ CREATE TABLE "session_reminders" (
 	"failure_code" text,
 	CONSTRAINT "session_reminders_tenant_session_fk" FOREIGN KEY ("tenant_id","session_id") REFERENCES "public"."sessions"("tenant_id","session_id") ON DELETE cascade DEFERRABLE INITIALLY IMMEDIATE,
 	CONSTRAINT "session_reminders_tenant_creator_fk" FOREIGN KEY ("tenant_id","created_by") REFERENCES "public"."users"("tenant_id","user_id") DEFERRABLE INITIALLY IMMEDIATE,
-	CONSTRAINT "session_reminders_tenant_task_fk" FOREIGN KEY ("tenant_id","task_id") REFERENCES "public"."tasks"("tenant_id","task_id") ON DELETE set null DEFERRABLE INITIALLY IMMEDIATE
+	CONSTRAINT "session_reminders_tenant_task_fk" FOREIGN KEY ("tenant_id","task_id") REFERENCES "public"."tasks"("tenant_id","task_id") DEFERRABLE INITIALLY IMMEDIATE
 );
 --> statement-breakpoint
 CREATE INDEX "session_reminders_tenant_id_idx" ON "session_reminders" ("tenant_id");

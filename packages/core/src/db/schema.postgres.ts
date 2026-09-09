@@ -480,9 +480,7 @@ export const sessionMemories = pgTable(
   {
     tenant_id: text('tenant_id').notNull().default('default'),
     memory_id: varchar('memory_id', { length: 36 }).primaryKey(),
-    session_id: varchar('session_id', { length: 36 })
-      .notNull()
-      .references(() => sessions.session_id, { onDelete: 'cascade' }),
+    session_id: varchar('session_id', { length: 36 }).notNull(),
     title: text('title'),
     text: text('text').notNull(),
     tags: t.json<string[]>('tags').notNull(),
@@ -574,7 +572,7 @@ export const sessionReminders = pgTable(
       columns: [table.tenant_id, table.task_id],
       foreignColumns: [tasks.tenant_id, tasks.task_id],
       name: 'session_reminders_tenant_task_fk',
-    }).onDelete('set null'),
+    }),
   })
 );
 
