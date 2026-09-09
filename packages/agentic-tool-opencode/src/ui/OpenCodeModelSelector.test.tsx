@@ -130,7 +130,7 @@ describe('OpenCodeModelSelector', () => {
     expect(onCommit).not.toHaveBeenCalled();
   });
 
-  it('omits unavailable providers and their models from normal selection', async () => {
+  it('shows unavailable provider status without making its models selectable', async () => {
     const onChange = vi.fn();
     const { client } = clientWithCatalog({
       ...catalog,
@@ -149,7 +149,7 @@ describe('OpenCodeModelSelector', () => {
     const providerSelect = await screen.findByLabelText('OpenCode provider');
     await waitFor(() => expect(client.service).toHaveBeenCalled());
     fireEvent.mouseDown(providerSelect);
-    expect(screen.queryByText(/catalog only/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Catalog only (unavailable)')).toBeInTheDocument();
     expect(screen.queryByText(/manual model/i)).not.toBeInTheDocument();
 
     expect(onChange).not.toHaveBeenCalled();
@@ -287,6 +287,31 @@ describe('OpenCodeModelSelector', () => {
     expect(screen.getByLabelText('OpenCode model warning')).toBeInTheDocument();
   });
 
+  it('preserves a stored pair and renders only its provider-scoped safe failure', async () => {
+    const { client } = clientWithCatalog({
+      ...catalog,
+      providers: catalog.providers.map((provider) => ({
+        ...provider,
+        availableForSelection: false,
+        availabilityStatus: 'discovery-failed' as const,
+        availabilityMessage:
+          'Configured provider availability could not be inspected. Exact provider/model entry remains available.',
+      })),
+    });
+
+    render(
+      <OpenCodeModelSelector
+        value={{ provider: 'openai', model: 'gpt-5' }}
+        client={client as never}
+      />
+    );
+
+    expect(await screen.findByText('openai/gpt-5 is not currently available')).toBeInTheDocument();
+    expect(screen.getByText(/exact provider\/model entry remains available/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('OpenCode provider ID')).toHaveValue('openai');
+    expect(screen.getByLabelText('OpenCode model ID')).toHaveValue('gpt-5');
+  });
+
   it('does not open exact entry while saved-provider evidence is still loading', async () => {
     const resolvedCatalog = {
       ...catalog,
@@ -320,7 +345,9 @@ describe('OpenCodeModelSelector', () => {
     const client = { service: vi.fn(() => ({ find })) };
     render(<OpenCodeModelSelector client={client as never} onChange={onChange} />);
 
-    expect(await screen.findByText(/could not load configured opencode providers/i)).toBeTruthy();
+    expect(
+      await screen.findByText(/could not refresh opencode provider availability/i)
+    ).toBeTruthy();
     expect(screen.queryByText(/private path|secret/i)).toBeNull();
 
     expect(screen.queryByRole('button', { name: /use opencode default/i })).toBeNull();
@@ -475,7 +502,9 @@ describe('OpenCodeModelSelector', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /switch user/i }));
 
-    expect(await screen.findByText(/could not load configured opencode providers/i)).toBeTruthy();
+    expect(
+      await screen.findByText(/could not refresh opencode provider availability/i)
+    ).toBeTruthy();
     expect(screen.queryByText('OpenAI')).toBeNull();
     expect(first.find).toHaveBeenCalledTimes(1);
     expect(second.find).toHaveBeenCalledTimes(1);
