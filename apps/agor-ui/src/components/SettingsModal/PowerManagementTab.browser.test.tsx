@@ -1,5 +1,6 @@
 import type { AgorClient, PowerManagementStatus, Session, User } from '@agor-live/client';
 import {
+  powerManagementMutableSettingsFromResolved,
   powerManagementSettingsFromResolved,
   resolvePowerManagementConfig,
 } from '@agor-live/client';
@@ -30,6 +31,18 @@ const status: PowerManagementStatus = {
   configuration: powerManagementSettingsFromResolved(
     resolvePowerManagementConfig({ mode: 'observe' })
   ),
+  runtime_settings: {
+    revision: 4,
+    source: 'runtime_override',
+    operator_defaults: powerManagementSettingsFromResolved(
+      resolvePowerManagementConfig({ mode: 'off' })
+    ),
+    runtime_override: powerManagementMutableSettingsFromResolved(
+      resolvePowerManagementConfig({ mode: 'observe' })
+    ),
+    can_rollback: true,
+    rollback_target: 'runtime_override',
+  },
   observation: {
     condition: 'battery',
     communication: 'ok',
@@ -76,15 +89,17 @@ describe('UPS admin workspace (browser)', () => {
         find: async () =>
           path === 'power-management'
             ? status
-            : path === 'sessions'
-              ? { data: [session], total: 1 }
-              : {
-                  session_id: session.session_id,
-                  requested: 'essential',
-                  effective: true,
-                  can_manage: false,
-                  max_essential_sessions: 1,
-                },
+            : path === 'power-management/essential-sessions'
+              ? { data: [session], selected: session, slot_occupied: true, limit: 30 }
+              : path === 'sessions'
+                ? { data: [], total: 0 }
+                : {
+                    session_id: session.session_id,
+                    requested: 'essential',
+                    effective: true,
+                    can_manage: false,
+                    max_essential_sessions: 1,
+                  },
         on: vi.fn(),
         off: vi.fn(),
       }),
@@ -104,11 +119,10 @@ describe('UPS admin workspace (browser)', () => {
       screen.getByText('Power conservation is Observe — Sessions are not gated')
     ).toBeInTheDocument();
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Session to manage' }));
-    fireEvent.click(await screen.findByText(/Demo outage checklist · .* · Essential/));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage current Session' }));
     expect(await screen.findByRole('combobox', { name: 'Power priority' })).toBeDisabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Validate and generate YAML' }));
-    expect(await screen.findByText(/Validated draft only/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Apply live' }));
+    expect(await screen.findByText(/Apply observe live/i)).toBeInTheDocument();
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
   });
 
@@ -140,8 +154,47 @@ describe('UPS admin workspace (browser)', () => {
         'Power conservation is Off — Sessions and schedules are unaffected by UPS conditions'
       )
     ).toBeInTheDocument();
-    expect(screen.getByText(/This page never changes live configuration/)).toBeInTheDocument();
+    expect(screen.getByText(/without restarting the daemon/)).toBeInTheDocument();
     expect(screen.queryByText(/^UPS OFF$/i)).not.toBeInTheDocument();
+  });
+
+  it('converges another admin tab directly from the complete realtime policy event', async () => {
+    let onPatched: ((next: PowerManagementStatus) => void) | undefined;
+    const powerService = {
+      find: async () => status,
+      on: (event: string, handler: (next: PowerManagementStatus) => void) => {
+        if (event === 'patched') onPatched = handler;
+      },
+      off: vi.fn(),
+    };
+    const client = {
+      service: (path: string) =>
+        path === 'power-management'
+          ? powerService
+          : {
+              find: async () => ({ data: [], slot_occupied: false, limit: 30 }),
+              on: vi.fn(),
+              off: vi.fn(),
+            },
+    } as unknown as AgorClient;
+    render(<PowerManagementTab client={client} currentUser={user} />);
+    expect(await screen.findByText('Live mutable policy · revision 4')).toBeInTheDocument();
+
+    const next: PowerManagementStatus = {
+      ...status,
+      mode: 'off',
+      state: 'disabled',
+      reason: 'disabled',
+      held: false,
+      would_hold: false,
+      configuration: powerManagementSettingsFromResolved(
+        resolvePowerManagementConfig({ mode: 'off' })
+      ),
+      runtime_settings: { ...status.runtime_settings!, revision: 5 },
+    };
+    await act(async () => onPatched?.(next));
+    expect(await screen.findByText('Live mutable policy · revision 5')).toBeInTheDocument();
+    expect(screen.getByText('Active mode: off.', { exact: false })).toBeInTheDocument();
   });
 
   it.each([
@@ -201,20 +254,27 @@ describe('UPS admin workspace (browser)', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('keeps the multi-page Session pager compact and keyboard operable', async () => {
-    const authorizedSessions = Array.from({ length: 51 }, (_, index) => ({
+  it('keeps 850-Session selection bounded, searchable, keyboard operable, and pager-free', async () => {
+    const authorizedSessions = Array.from({ length: 850 }, (_, index) => ({
       session_id: `018f0000-0000-7000-8000-${String(index).padStart(12, '0')}`,
       title: `Fictional Session ${index + 1}`,
       power_priority: 'normal',
     })) as Session[];
     const sessionFind = vi.fn(async (params?: { query?: Record<string, unknown> }) => {
-      if (params?.query?.power_priority === 'essential') return { data: [], total: 0 };
-      const skip = Number(params?.query?.$skip ?? 0);
-      return { data: authorizedSessions.slice(skip, skip + 50), total: authorizedSessions.length };
+      const search = String(params?.query?.search ?? '').toLowerCase();
+      const matches = search
+        ? authorizedSessions.filter((candidate) => candidate.title.toLowerCase().includes(search))
+        : authorizedSessions;
+      return { data: matches.slice(0, 30), slot_occupied: false, limit: 30 };
     });
     const client = {
       service: (path: string) => ({
-        find: path === 'power-management' ? async () => status : sessionFind,
+        find:
+          path === 'power-management'
+            ? async () => status
+            : path === 'power-management/essential-sessions'
+              ? sessionFind
+              : async () => ({ data: [], total: 0 }),
         on: vi.fn(),
         off: vi.fn(),
       }),
@@ -222,16 +282,15 @@ describe('UPS admin workspace (browser)', () => {
 
     render(<PowerManagementTab client={client} currentUser={user} />);
 
-    const pager = await screen.findByLabelText('Authorized Sessions pages');
-    expect(pager.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth + 1);
-    const pageTwo = screen.getByTitle('2');
-    pageTwo.focus();
-    expect(pageTwo).toHaveFocus();
-    await act(async () => userEvent.keyboard('{Enter}'));
+    const picker = await screen.findByRole('combobox', { name: 'Session to manage' });
+    picker.focus();
+    expect(picker).toHaveFocus();
+    await act(async () => userEvent.keyboard('Session 850'));
     await waitFor(() =>
-      expect(sessionFind).toHaveBeenCalledWith({
-        query: { $sort: { updated_at: -1 }, $limit: 50, $skip: 50 },
-      })
+      expect(sessionFind).toHaveBeenLastCalledWith({ query: { search: 'Session 850' } })
     );
+    expect(document.querySelector('.ant-pagination')).not.toBeInTheDocument();
+    expect(JSON.stringify(sessionFind.mock.calls)).not.toContain('$skip');
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
   });
 });

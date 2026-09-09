@@ -50,6 +50,17 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       await runWithTenantDatabaseScope(db, tenantA, async (scoped) => {
         const local = await exerciseSessionInventory(scoped);
         const repository = new SessionRepository(scoped);
+        expect(
+          await repository.findPowerEssentialCandidates({
+            userId: local.owner,
+            search: foreign.sessionId,
+            limit: 30,
+          })
+        ).toEqual([]);
+        expect(await repository.findVisiblePowerEssential({ userId: local.owner })).toMatchObject({
+          slotOccupied: true,
+          selected: { session_id: expect.not.stringMatching(foreign.sessionId) },
+        });
         for (const visibleToUserId of [undefined, local.owner, local.viewer]) {
           expect(
             await repository.findPage({ visibleToUserId, branchId: foreign.branchId, limit: 1 })

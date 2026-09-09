@@ -39,6 +39,7 @@ export * from './mcp-oauth-client-registrations';
 export * from './mcp-oauth-pending-flows';
 export * from './mcp-servers';
 export * from './messages';
+export * from './power-policy-runtime-settings';
 export * from './repos';
 export * from './schedules';
 export * from './session-env-selections';

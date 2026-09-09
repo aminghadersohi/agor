@@ -145,8 +145,11 @@ occurrences while held and materialize only the latest missed occurrence once af
 This first version rejects active configuration unless the deployment is macOS, standalone,
 static-tenant, SQLite, local-executor, and `unix_user_mode: simple`. It does not control host
 shutdown, suspend processes, use `SIGSTOP`/`SIGCONT`, stop running Tasks, or provide NUT/network UPS
-polling. Configuration changes require a daemon restart. To roll back the policy, restore `mode:
-off` and restart; queued Tasks and Session priority metadata remain intact.
+polling. Provider identity and deployment topology remain operator-managed in `config.yaml`.
+Mutable policy values—mode, thresholds, timing, and recovery pacing—can be applied live from the
+admin workspace. Queued Tasks and Session priority metadata remain intact through every policy
+change. A provider/topology change still requires an operator edit and daemon restart because those
+values determine whether host observation is safe to construct at startup.
 
 ### Admin configuration and monitoring UI
 
@@ -164,21 +167,26 @@ A failed refresh clears the displayed readings rather than presenting old teleme
 Missing telemetry is shown as **Not reported**, never zero. Held denotes an admission decision;
 there is no held-task count or inventory API.
 
-The configuration editor prepares a **draft**, initialized from the active configuration. It exposes
-all supported timing, critical-threshold, and communication-loss controls, validates the same bounds
-and timing relationships as startup, and generates only the `execution.power_management` YAML
-subtree. It does **not** save or apply configuration remotely. Merge that subtree into the existing
-operator-managed configuration without replacing unrelated execution settings, restart the daemon,
-and reopen the workspace to verify the active values. Reset restores the latest active configuration.
-No provider addresses, commands, device names, raw output, or credentials are exposed.
+The configuration editor is initialized from the active policy and applies valid mutable values
+without a daemon restart. An admin update uses an exact revision compare-and-swap: if another tab
+or administrator has already changed the policy, the stale update is rejected and realtime status
+converges both tabs on the newer revision. The durable, tenant-owned runtime override is loaded on
+every daemon start and takes explicit precedence over mutable operator defaults. Agor never rewrites
+`config.yaml`. **Reset to operator defaults** removes the override as a new audited revision;
+**Roll back last change** restores the immediately preceding policy as another audited revision.
+Rollback stores an exact policy snapshot, so a later operator-default edit cannot change its
+meaning. Unsupported active topology is rejected before persistence. No provider addresses,
+commands, device names, raw output, or credentials are exposed.
 
-The Essential Session selector lists authorized Sessions, including archived Sessions, and
-identifies an existing Essential Session only if it is visible to the caller. The selector keeps
-server-side pages bounded at 50 records and shows its compact pager only when more than one page
-exists. It uses
-the existing Branch Manager-authorized priority API. Admin role alone does not grant foreign-branch
-access. Clear an existing Essential designation before choosing a replacement; the single-slot
-constraint remains atomic, and the UI never silently demotes an inaccessible Session.
+The Essential Session browser has no pager and does not fetch an unbounded inventory. It shows the
+current selection separately, then offers up to 30 recent eligible Sessions and a debounced,
+server-side title or Session-ID search for older Sessions. Archived Sessions and Sessions on
+archived Branches are excluded. Results contain only the minimal Session projection after tenant and
+Branch Manager authorization; an inaccessible existing selection is reported only as an occupied
+slot, without revealing its title or status. The browser does not poll, count, traverse hidden
+pages, or issue per-result lookups. It uses the existing atomic priority API for changes. Admin role
+alone does not grant foreign-branch access. Clear an existing Essential designation before choosing
+a replacement; the UI never silently demotes an inaccessible Session.
 
 Fresh interactive init always writes `agentic_tools.installed` once, then installs the selected
 packages before returning. Fresh headless init requires `--agentic-tools` (or

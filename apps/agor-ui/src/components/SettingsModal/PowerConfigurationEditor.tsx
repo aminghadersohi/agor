@@ -1,12 +1,15 @@
-import type { AgorPowerManagementSettings } from '@agor-live/client';
+import type {
+  AgorClient,
+  AgorPowerManagementSettings,
+  PowerManagementStatus,
+} from '@agor-live/client';
 import {
   POWER_MANAGEMENT_MODES,
-  powerManagementSettingsFromResolved,
+  powerManagementMutableSettingsFromResolved,
   resolvePowerManagementConfig,
 } from '@agor-live/client';
-import { dump } from '@agor-live/client/yaml';
-import { Alert, Button, Flex, Form, InputNumber, Select, Typography } from 'antd';
-import { useState } from 'react';
+import { Alert, Button, Flex, Form, InputNumber, Popconfirm, Select, Typography } from 'antd';
+import { useEffect, useRef, useState } from 'react';
 
 const fields = [
   ['poll_interval_ms', 'Poll interval (ms)', 1000, 60000],
@@ -27,55 +30,128 @@ const fields = [
 ] as const;
 
 export function PowerConfigurationEditor({
-  configuration,
+  client,
+  status,
 }: {
-  configuration: AgorPowerManagementSettings;
+  client: AgorClient;
+  status: PowerManagementStatus;
 }) {
   const [form] = Form.useForm<AgorPowerManagementSettings>();
-  const [yaml, setYaml] = useState('');
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const generate = (values: AgorPowerManagementSettings) => {
+  const [notice, setNotice] = useState('');
+  const previousRevision = useRef(status.runtime_settings?.revision);
+  const currentRevision = useRef(status.runtime_settings?.revision);
+  const configuration = status.configuration;
+  const runtime = status.runtime_settings;
+  const draftMode = Form.useWatch('mode', form);
+
+  useEffect(() => {
+    if (!configuration) return;
+    form.setFieldsValue(configuration);
+    if (
+      previousRevision.current !== undefined &&
+      runtime?.revision !== undefined &&
+      runtime.revision !== previousRevision.current
+    ) {
+      setNotice('Active policy changed. This form now shows the converged runtime revision.');
+      setError('');
+    }
+    previousRevision.current = runtime?.revision;
+    currentRevision.current = runtime?.revision;
+  }, [configuration, form, runtime?.revision]);
+
+  if (!configuration || !runtime) {
+    return (
+      <Alert
+        type="warning"
+        title="This daemon does not support live power-policy settings. Upgrade before applying changes."
+      />
+    );
+  }
+
+  const mutate = async (
+    request:
+      | { configuration: ReturnType<typeof powerManagementMutableSettingsFromResolved> }
+      | { reset_to_operator_defaults: true }
+      | { rollback_last_change: true },
+    success: string
+  ) => {
+    setSaving(true);
+    setError('');
+    setNotice('');
+    try {
+      const updated = await client.service('power-management').patch(null, {
+        expected_revision: currentRevision.current ?? runtime.revision,
+        ...request,
+      });
+      if (updated.configuration) form.setFieldsValue(updated.configuration);
+      setNotice(success);
+      previousRevision.current = updated.runtime_settings?.revision;
+      currentRevision.current = updated.runtime_settings?.revision;
+    } catch (cause) {
+      const code = (cause as { code?: unknown } | null)?.code;
+      setError(
+        code === 409
+          ? 'Another administrator applied a newer revision. The live status will refresh; review it before retrying.'
+          : cause instanceof Error
+            ? cause.message
+            : 'Power policy could not be applied'
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const apply = (values: AgorPowerManagementSettings) => {
     try {
       const resolved = resolvePowerManagementConfig({
         ...values,
         provider: 'macos',
         max_essential_sessions: 1,
       });
-      setYaml(
-        dump({ execution: { power_management: powerManagementSettingsFromResolved(resolved) } })
+      void mutate(
+        { configuration: powerManagementMutableSettingsFromResolved(resolved) },
+        `Revision ${runtime.revision + 1} is active without a daemon restart.`
       );
-      setError('');
     } catch (cause) {
-      setYaml('');
       setError(cause instanceof Error ? cause.message : 'Invalid power configuration');
     }
   };
+
   return (
     <Flex vertical gap="middle">
       <Alert
         type="info"
         showIcon
-        title="Configuration draft — not applied"
-        description="This daemon has no configuration-write API. Generate the supported YAML, merge only execution.power_management into the operator-managed configuration, then restart the daemon. Reopen this page to verify the active values. No changes here affect admission."
+        title={`Live mutable policy · revision ${runtime.revision}`}
+        description={
+          runtime.source === 'runtime_override'
+            ? 'The durable runtime override is active and takes precedence over operator defaults. Agor never rewrites config.yaml.'
+            : 'Operator defaults are active. Applying creates a durable runtime override; config.yaml remains unchanged.'
+        }
       />
       <Typography.Text>
-        Active mode: {configuration.mode}. Only macOS, standalone, static-tenant, SQLite and simple
-        local execution are supported when active. Start with Observe; Enforce may hold new work.
-        Off disables the policy. Running work is never stopped.
+        Active mode: {configuration.mode}. Provider identity and supported deployment topology
+        remain operator-controlled. Off, Observe, thresholds, timing, and recovery pacing apply
+        live. Running Tasks are never suspended or stopped.
       </Typography.Text>
       <Form
         form={form}
         layout="vertical"
         initialValues={configuration}
-        onFinish={generate}
+        onFinish={apply}
         onValuesChange={() => {
-          setYaml('');
           setError('');
+          setNotice('');
         }}
       >
-        <Form.Item name="mode" label="Draft mode" rules={[{ required: true }]}>
+        <Form.Item name="mode" label="Mode" rules={[{ required: true }]}>
           <Select
-            options={POWER_MANAGEMENT_MODES.map((value) => ({ value, label: value.toUpperCase() }))}
+            options={POWER_MANAGEMENT_MODES.map((value) => ({
+              value,
+              label: value.toUpperCase(),
+            }))}
           />
         </Form.Item>
         <Form.Item label="Provider">
@@ -98,37 +174,69 @@ export function PowerConfigurationEditor({
           ))}
         </Flex>
         <Typography.Paragraph type="secondary">
-          Essential Session limit: 1. Thresholds use charge or runtime only when the provider
-          reports them. Timeout must be less than polling; stale age must allow two polls; stable
-          recovery must be at least the battery debounce.
+          Essential Session limit: 1. Timeout must be less than polling; stale age must allow two
+          polls; stable recovery must be at least the battery debounce. Switching to Enforce starts
+          from a conservative state and may immediately hold new work. Queued work stays durable.
         </Typography.Paragraph>
         <Flex gap="small" wrap>
-          <Button type="primary" htmlType="submit">
-            Validate and generate YAML
-          </Button>
+          <Popconfirm
+            title={
+              draftMode === 'enforce'
+                ? 'Apply Enforce live? New ordinary work may be held immediately.'
+                : `Apply ${draftMode ?? 'this policy'} live?`
+            }
+            okText="Apply live"
+            onConfirm={() => form.submit()}
+          >
+            <Button type="primary" loading={saving} disabled={saving}>
+              Apply live
+            </Button>
+          </Popconfirm>
           <Button
+            disabled={saving}
             onClick={() => {
               form.setFieldsValue(configuration);
-              setYaml('');
               setError('');
+              setNotice('Unsaved edits discarded.');
             }}
           >
-            Reset draft to active configuration
+            Discard unsaved edits
           </Button>
+          <Popconfirm
+            title="Remove the runtime override and apply current operator defaults live?"
+            okText="Reset and apply"
+            onConfirm={() =>
+              void mutate(
+                { reset_to_operator_defaults: true },
+                'Operator defaults are active. config.yaml was not changed.'
+              )
+            }
+          >
+            <Button disabled={saving || runtime.source === 'operator_defaults'}>
+              Reset to operator defaults
+            </Button>
+          </Popconfirm>
+          <Popconfirm
+            title="Apply the policy from immediately before this revision? Rollback creates a new audited revision."
+            okText="Roll back live"
+            onConfirm={() =>
+              void mutate(
+                { rollback_last_change: true },
+                'The prior policy was restored as a new audited revision.'
+              )
+            }
+          >
+            <Button disabled={saving || !runtime.can_rollback}>Roll back last change</Button>
+          </Popconfirm>
         </Flex>
       </Form>
       {error && <Alert type="error" showIcon title={error} />}
-      {yaml && (
-        <>
-          <Alert
-            type="warning"
-            title="Validated draft only — restart required after operator installation"
-          />
-          <Typography.Paragraph copyable={{ text: yaml }}>
-            <pre>{yaml}</pre>
-          </Typography.Paragraph>
-        </>
-      )}
+      {notice && <Alert type="success" showIcon title={notice} aria-live="polite" />}
+      <Typography.Text type="secondary">
+        Operator defaults: {(runtime.operator_defaults.mode ?? 'off').toUpperCase()}. Reset and
+        rollback use the same revision check as Apply, so stale tabs cannot overwrite a newer
+        decision.
+      </Typography.Text>
     </Flex>
   );
 }

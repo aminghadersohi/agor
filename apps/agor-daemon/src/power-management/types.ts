@@ -16,6 +16,8 @@ export interface PowerObservation {
 export interface PowerSourceProvider {
   read(): Promise<PowerObservation>;
   close(): Promise<void>;
+  /** Applies to the next read; an already-running read keeps its original timeout. */
+  setTimeoutMs?(timeoutMs: number): void;
 }
 
 export interface PowerPolicyClock {
