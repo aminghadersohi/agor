@@ -22,6 +22,18 @@ const readJournals = () =>
   );
 
 describe('Postgres migrations', () => {
+  it('appends MCP recovery after the fork repair band without duplicate tags or indices', async () => {
+    for (const journal of await readJournals()) {
+      const added = journal.entries.at(-1)!;
+      expect(added).toMatchObject({ idx: 9018, tag: '9018_mcp_slack_recovery_due' });
+      expect(added.when).toBeGreaterThan(
+        Math.max(...journal.entries.slice(0, -1).map(({ when }) => when))
+      );
+      expect(new Set(journal.entries.map(({ idx }) => idx)).size).toBe(journal.entries.length);
+      expect(new Set(journal.entries.map(({ tag }) => tag)).size).toBe(journal.entries.length);
+    }
+  });
+
   it('starts the Discord hybrid migration with its transaction-local lock timeout', async () => {
     const migration = await readFile(
       new URL('../../drizzle/postgres/0094_discord_gateway_hybrid.sql', import.meta.url),
@@ -975,7 +987,7 @@ describe('MCP OAuth pending-flow migrations', () => {
 describe('MCP OAuth client-registration migrations', () => {
   it('does not advance SQLite schema history for PostgreSQL-only DCR authority', async () => {
     const [, sqliteJournal] = await readJournals();
-    expect(sqliteJournal.entries.at(-1)).toMatchObject({
+    expect(sqliteJournal.entries.find(({ idx }) => idx === 106)).toMatchObject({
       idx: 106,
       tag: '0106_session_power_priority',
     });
@@ -987,7 +999,7 @@ describe('MCP OAuth client-registration migrations', () => {
 
   it('follows current main and binds PostgreSQL authority to tenant/server UUID with forced RLS', async () => {
     const [postgresJournal] = await readJournals();
-    expect(postgresJournal.entries.slice(-5)).toEqual([
+    expect(postgresJournal.entries.slice(-6)).toEqual([
       expect.objectContaining({ idx: 103, tag: '0103_session_power_priority' }),
       expect.objectContaining({ idx: 104, tag: '0104_environment_command_discovery' }),
       expect.objectContaining({ idx: 9015, tag: '9015_mcp_oauth_client_registrations' }),
@@ -996,9 +1008,10 @@ describe('MCP OAuth client-registration migrations', () => {
         tag: '9016_oauth_authority_watermark_reconciliation',
       }),
       expect.objectContaining({ idx: 9017, tag: '9017_fork_migration_collision_repair' }),
+      expect.objectContaining({ idx: 9018, tag: '9018_mcp_slack_recovery_due' }),
     ]);
-    expect(postgresJournal.entries.at(-1)!.when).toBeGreaterThan(
-      postgresJournal.entries.at(-2)!.when
+    expect(postgresJournal.entries.find(({ idx }) => idx === 103)!.when).toBeGreaterThan(
+      postgresJournal.entries.find(({ idx }) => idx === 102)!.when
     );
     const migration = await readFile(
       new URL('../../drizzle/postgres/9015_mcp_oauth_client_registrations.sql', import.meta.url),
