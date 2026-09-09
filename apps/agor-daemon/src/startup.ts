@@ -50,6 +50,7 @@ import { drainRestartRecoveries } from './services/restart-recovery-worker.js';
 import { SchedulerService } from './services/scheduler.js';
 import { SessionAutoArchiveWorker } from './services/session-auto-archive-worker.js';
 import { SessionQueueWorker } from './services/session-queue-worker.js';
+import { SessionReminderWorker } from './services/session-reminder-worker.js';
 import { TaskRuntimeReconciler } from './services/task-runtime-reconciler.js';
 import type { TerminalsService } from './services/terminals.js';
 import { appendSystemMessage } from './utils/append-system-message.js';
@@ -861,10 +862,12 @@ export async function startup(ctx: StartupContext): Promise<void> {
     onSweepDrained: () => powerPolicyController.markRecoveryQueueDrained(),
   });
   sessionQueueWorker.start();
+  let queueWasPowerHeld = powerPolicyController.status().held;
   const unsubscribePowerQueueWake = powerPolicyController.subscribe((transition) => {
-    if (transition.previous !== 'normal' && transition.current === 'normal') {
+    if (queueWasPowerHeld && !transition.status.held) {
       sessionQueueWorker.wake();
     }
+    queueWasPowerHeld = transition.status.held;
   });
 
   // Completed child Sessions retain their transcripts but leave active trees
@@ -875,6 +878,14 @@ export async function startup(ctx: StartupContext): Promise<void> {
     tenantId: queueMultiTenancy.mode === 'static' ? queueMultiTenancy.static_tenant_id : undefined,
   });
   sessionAutoArchiveWorker.start();
+
+  // One-shot Session reminders reuse the ordinary durable Task queue. Every
+  // replica may discover due rows; reminder claim CAS + stable Task IDs fence
+  // concurrent and restart delivery.
+  const sessionReminderWorker = new SessionReminderWorker(db, app, {
+    tenantId: queueMultiTenancy.mode === 'static' ? queueMultiTenancy.static_tenant_id : undefined,
+  });
+  sessionReminderWorker.start();
 
   // 7. Start scheduler service (background worker)
   const schedulerMultiTenancy = resolveMultiTenancyConfig(config);
@@ -895,6 +906,11 @@ export async function startup(ctx: StartupContext): Promise<void> {
   });
   app.set('scheduler', schedulerService);
   schedulerService.start();
+  let schedulerWasPowerHeld = powerPolicyController.status().held;
+  const unsubscribePowerSchedulerWake = powerPolicyController.subscribe((transition) => {
+    if (schedulerWasPowerHeld && !transition.status.held) schedulerService.wake();
+    schedulerWasPowerHeld = transition.status.held;
+  });
 
   // 8. Start Knowledge embedding indexer (no-op unless semantic search is configured)
   const knowledgeEmbeddingIndexer = new KnowledgeEmbeddingIndexer(db, {
@@ -980,6 +996,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
       // still safe; stop only prevents the next local scan.
       sessionQueueWorker?.stop();
       sessionAutoArchiveWorker?.stop();
+      sessionReminderWorker?.stop();
 
       if (shouldContainLocalExecutorsOnShutdown(ctx.taskRuntimePolicy)) {
         // Preserve the historical standalone shutdown contract.
@@ -1014,6 +1031,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
       if (schedulerService) {
         schedulerService.stop();
         unsubscribePowerQueueWake();
+        unsubscribePowerSchedulerWake();
       }
 
       // Close Socket.io connections (this also closes the HTTP server)

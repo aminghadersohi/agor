@@ -771,6 +771,20 @@
       "when": 1788800000000,
       "tag": "9013_session_power_priority",
       "breakpoints": true
+    },
+    {
+      "idx": 9014,
+      "version": "6",
+      "when": 1788800000005,
+      "tag": "9014_session_memory_reminders",
+      "breakpoints": true
+    },
+    {
+      "idx": 9015,
+      "version": "6",
+      "when": 1788800000006,
+      "tag": "9015_mcp_slack_recovery_due",
+      "breakpoints": true
     }
   ]
 }

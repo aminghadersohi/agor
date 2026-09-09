@@ -5,7 +5,7 @@ import {
   useAuthorityOperationGuard,
 } from './useAuthorityOperationGuard';
 
-/** Polling refreshes unchanged observations; realtime transitions trigger an immediate read. */
+/** Polling refreshes unchanged observations; realtime carries the complete allowlisted status. */
 export function usePowerManagementStatus(client: AgorClient, identityKey: string) {
   const scope = useAuthenticatedAuthorityScope(client, identityKey);
   const guard = useAuthorityOperationGuard(scope.operationScope);
@@ -44,14 +44,19 @@ export function usePowerManagementStatus(client: AgorClient, identityKey: string
         pending = false;
       }
     };
+    const onPatched = (status: PowerManagementStatus) => {
+      if (operation.isCurrent()) {
+        setResult({ scope: scope.operationScope, status, error: false });
+      }
+    };
     void load();
-    service.on('patched', load);
+    service.on('patched', onPatched);
     const timer = window.setInterval(() => void load(), 5_000);
     return () => {
       operation.cancel();
       window.clearTimeout(requestTimeout);
       window.clearInterval(timer);
-      service.off('patched', load);
+      service.off('patched', onPatched);
     };
   }, [client, guard, scope.operationScope]);
 

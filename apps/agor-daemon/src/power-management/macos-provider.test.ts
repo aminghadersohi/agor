@@ -67,6 +67,14 @@ describe('MacOSPowerSourceProvider', () => {
     );
   });
 
+  it('uses a live-updated timeout on the next read', async () => {
+    const runner = vi.fn(async () => "Now drawing from 'AC Power'\n present: true\n");
+    const provider = new MacOSPowerSourceProvider(1_500, runner, 'darwin');
+    provider.setTimeoutMs(750);
+    await provider.read();
+    expect(runner).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 750 }));
+  });
+
   it('redacts command errors and rejects unsupported platforms', async () => {
     const provider = new MacOSPowerSourceProvider(
       500,

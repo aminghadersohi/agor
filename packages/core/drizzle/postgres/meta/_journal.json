@@ -785,6 +785,20 @@
       "when": 1788800000004,
       "tag": "9017_fork_migration_collision_repair",
       "breakpoints": true
+    },
+    {
+      "idx": 9018,
+      "version": "7",
+      "when": 1788800000005,
+      "tag": "9018_session_memory_reminders",
+      "breakpoints": true
+    },
+    {
+      "idx": 9019,
+      "version": "7",
+      "when": 1788800000006,
+      "tag": "9019_mcp_slack_recovery_due",
+      "breakpoints": true
     }
   ]
 }

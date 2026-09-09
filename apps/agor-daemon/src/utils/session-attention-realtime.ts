@@ -17,11 +17,12 @@ export function emitSessionAttentionAcknowledged(
   acknowledgement: SessionAttentionAcknowledgement
 ): void {
   if (!tenantId || !app.io) return;
-  const emit = () =>
+  const emit = (): void => {
     emitHaNativeSocketEvent(
       app.io!.to(tenantUserChannelName(tenantId, userId)),
       'session-attention:acknowledged',
       acknowledgement
     );
+  };
   if (!enqueueAfterTenantDatabaseCommit(emit)) emit();
 }

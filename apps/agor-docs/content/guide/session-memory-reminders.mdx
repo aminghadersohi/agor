@@ -1,0 +1,80 @@
+# Session memory and reminders
+
+> This is a fork-only proof of concept. It is intentionally not an upstream
+> compatibility commitment yet.
+
+Agor Sessions can keep private working notes and schedule one-shot prompts for
+themselves. Both resources belong to one **Session** in the database. They are
+not files in its branch, and another Session on the same branch cannot recall
+them through the self tools.
+
+Open **Session settings → Memory & reminders** to search recent notes, add or
+archive a note, and create, edit, or cancel a one-shot reminder. Updates use a
+revision check: when another tab changed the same item first, reload before
+retrying.
+
+## Memory
+
+Memory is meant for bounded facts and decisions that should survive transcript
+compaction, Session completion, and daemon restart. The system prompt only says
+that memory is available; it never injects all note text into every turn. Agents
+recall it explicitly with `agor_session_memory_list` or
+`agor_session_memory_search`.
+
+Do not put passwords, tokens, private keys, or other secrets in memory. Session
+memory is private working memory for this conversation. **Knowledge** is the
+separate, ACL-controlled home for shared and long-lived documents. V1 never
+promotes memory automatically; copying a note to Knowledge must be an explicit,
+authorized action.
+
+Archived Sessions retain inspectable memories. Agent self-mutation is disabled
+until the Session is restored.
+
+## One-shot reminders
+
+A reminder stores an exact UTC `due_at` instant plus the IANA timezone used to
+display it. The UI converts the chosen local time to UTC, preventing ambiguous
+local timestamps from entering the API.
+
+When due, a worker atomically claims the reminder and submits one structured,
+immutable prompt to the **same Session** through the ordinary durable Task
+queue. Busy Sessions preserve queue order. Power holds and other dispatch
+admission policies remain in force; reminders do not interrupt or fork work.
+After claim, edit and cancel are unavailable and the reminder records its Task
+provenance.
+
+The Session must still be active and its existing branch/worktree must be
+executable. An archived or missing Session, archived branch, revoked author, or
+unavailable filesystem leaves a visible blocked reminder. Agor never creates a
+replacement Session or worktree.
+
+Reminders differ from [branch schedules](/guide/scheduler): schedules are cron
+templates that create fresh Sessions on a branch, while reminders are one-shot
+prompts to their exact owning Session.
+
+## Agent tools
+
+- `agor_session_memory_create`
+- `agor_session_memory_list`
+- `agor_session_memory_search`
+- `agor_session_memory_update`
+- `agor_session_memory_archive`
+- `agor_session_reminders_create`
+- `agor_session_reminders_list`
+- `agor_session_reminders_update`
+- `agor_session_reminders_cancel`
+
+These self tools accept no target Session ID. The daemon derives Session, user,
+and tenant from the authenticated MCP request. User-facing REST/Socket services
+are `session-memories` and `session-reminders`; they require an explicit parent
+`session_id` and apply existing Session view/prompt authorization.
+
+## Limits
+
+- Memory: 8 KiB text, 120-character optional title, up to eight 32-character
+  tags, 5,000 durable rows per Session, and at most 100 results per page.
+- Reminders: 4 KiB prompt, at most 100 pending per Session, at least 60 seconds
+  lead time, and no more than one year ahead.
+
+Search and scheduler discovery are indexed and bounded. Memory/reminder content
+is not emitted to board cards, callbacks, analytics, public artifacts, or logs.

@@ -23,6 +23,7 @@ import {
   resolveMultiTenancyConfig,
   resolvePasswordPolicyRequirements,
   resolvePowerManagementConfig,
+  resolvePowerManagementRuntimeOverlay,
   resolveSdkWatchdogConfig,
   resolveTeammateFrameworkRepoUrl,
   resolveTenantContext,
@@ -42,6 +43,8 @@ import {
   MCPServerRepository,
   MessagesRepository,
   MISSING_TASK_ACTOR_ERROR,
+  PowerPolicyRuntimeRevisionConflictError,
+  type PowerPolicyRuntimeSettingsRepository,
   RepositoryError,
   resolveMcpMemberPolicy,
   runWithTenantDatabaseScope,
@@ -70,7 +73,12 @@ import {
   NotAuthenticated,
   NotFound,
 } from '@agor/core/feathers';
-import { isMCPServerUsableBy, MCPServerNotUsableError } from '@agor/core/mcp';
+import {
+  isMCPServerUsableBy,
+  MCP_RUNTIME_PROVIDER_CAPABILITIES,
+  MCPServerNotUsableError,
+  mcpRuntimeProviderCapability,
+} from '@agor/core/mcp';
 import type {
   AuthenticatedParams,
   BoardComment,
@@ -79,12 +87,18 @@ import type {
   HookContext,
   MCPMemberPolicy,
   MCPMemberPolicySetting,
+  MCPRuntimeRecovery,
+  MCPRuntimeRefreshRequest,
+  MCPRuntimeRefreshResultRequest,
+  MCPRuntimeReprojection,
   MCPServer,
   MCPServerID,
   Message,
   MessageID,
   MessageSource,
   Params,
+  PowerEssentialSessionSearchResult,
+  PowerManagementMutableSettings,
   ScheduleID,
   Session,
   SessionID,
@@ -161,16 +175,19 @@ import {
   publicHealthDb,
 } from './health/payload.js';
 import { registerHealthProbeRoutes } from './health/routes.js';
-import { issueMCPEgressCapability } from './mcp-egress/capability.js';
+import { issueMCPEgressCapability, verifyMCPEgressCapability } from './mcp-egress/capability.js';
 import {
   coordinateMCPEgressRolloutChange,
   coordinateSessionMCPRevocation,
 } from './mcp-egress/coordination.js';
 import {
+  classifyMCPRuntimeProjection,
   MCPEgressGateway,
+  mcpAuthorityFingerprint,
   mcpEgressEligibility,
   mcpEgressMaterialHash,
   mcpOAuthGrantIdentity,
+  mcpToolPolicyHash,
   projectMCPServerForExecutor,
   resolveMCPEgressEnvironment,
 } from './mcp-egress/gateway.js';
@@ -238,7 +255,19 @@ import {
   redactMCPServerSecrets,
   shouldExposeMCPServerSecrets,
 } from './utils/mcp-header-secrets.js';
+import { redactMcpRecoveryTopology } from './utils/mcp-recovery-redaction.js';
+import {
+  consumeMcpRefreshAttempt,
+  MCP_RUNTIME_HINT_TASK_BUDGET,
+  type MCPRefreshAttemptState,
+} from './utils/mcp-refresh-limiter.js';
+import {
+  degradeMcpRuntimeRecoveryForDirectMode,
+  isMcpRuntimeRecoveryEnabled,
+  scheduleMcpRuntimeHint,
+} from './utils/mcp-runtime-hints.js';
 import { canConfigureMcpServers } from './utils/mcp-server-authorization.js';
+import { authorizeMcpSessionConfigAccess } from './utils/mcp-session-config-authorization.js';
 import { patchUnlessRemoved } from './utils/patch-unless-removed.js';
 import { resolvePromptOrigin } from './utils/prompt-origin.js';
 import {
@@ -522,6 +551,7 @@ export interface RegisterRoutesContext {
   >;
   terminalsService: TerminalsService | null;
   powerPolicyController: PowerPolicyController;
+  powerPolicyRuntimeSettingsRepository: PowerPolicyRuntimeSettingsRepository;
 }
 
 export async function authorizeTaskTerminalRoute(input: {
@@ -538,6 +568,39 @@ export async function authorizeTaskTerminalRoute(input: {
     throw new Forbidden('Only the task creator or an admin can update this task');
   }
   return internalParams;
+}
+
+/** Reconnect authorization deliberately makes a missing and foreign Task indistinguishable. */
+export async function authorizeMcpReconnectRoute(
+  input: Parameters<typeof authorizeTaskTerminalRoute>[0]
+): Promise<RouteParams> {
+  try {
+    return await authorizeTaskTerminalRoute(input);
+  } catch (error) {
+    if (error instanceof NotFound) {
+      throw new Forbidden('Only the task creator or an admin can reconnect MCP for this task');
+    }
+    throw error;
+  }
+}
+
+/** Apply the same topology boundary to custom reconnect responses as Task reads/events. */
+export function projectMcpReconnectRecoveryForViewer(input: {
+  recovery: MCPRuntimeRecovery;
+  task: Task;
+  session: Session;
+  params: RouteParams;
+}): MCPRuntimeRecovery {
+  if (
+    hasMinimumRole(input.params.user?.role, ROLES.ADMIN) ||
+    input.params.user?.user_id === input.session.created_by
+  ) {
+    return input.recovery;
+  }
+  return redactMcpRecoveryTopology({
+    ...input.task,
+    metadata: { ...input.task.metadata, mcp_recovery: input.recovery },
+  }).metadata!.mcp_recovery!;
 }
 
 export function findMatchingUnverifiedTerminationTask(
@@ -875,6 +938,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     sessionEnvSelectionsService,
     terminalsService: _terminalsService,
     powerPolicyController,
+    powerPolicyRuntimeSettingsRepository,
   } = ctx;
 
   registerExecutorResponseRoutes(app);
@@ -950,6 +1014,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   // Host power state is system-local, but this first version is intentionally
   // restricted to one static tenant. The service returns only the redacted
   // policy projection and realtime uses the same admin role floor.
+  const operatorPowerDefaults = resolvePowerManagementConfig(config.execution?.power_management);
   registerAuthenticatedRoute(
     app,
     '/power-management',
@@ -957,8 +1022,145 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       async find() {
         return powerPolicyController.status();
       },
+      async patch(_id: null, data: unknown, params: RouteParams) {
+        const tenantConfig = resolveMultiTenancyConfig(config);
+        if (tenantConfig.mode !== 'static') {
+          throw new BadRequest(
+            'Live power policy changes require the supported standalone static-tenant topology'
+          );
+        }
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+          throw new BadRequest('Power policy update must be an object');
+        }
+        const request = data as {
+          expected_revision?: unknown;
+          configuration?: unknown;
+          reset_to_operator_defaults?: unknown;
+          rollback_last_change?: unknown;
+        };
+        const requestKeys = Object.keys(request);
+        if (
+          requestKeys.some(
+            (key) =>
+              ![
+                'expected_revision',
+                'configuration',
+                'reset_to_operator_defaults',
+                'rollback_last_change',
+              ].includes(key)
+          )
+        ) {
+          throw new BadRequest('Power policy update contains an unsupported field');
+        }
+        if (
+          !Number.isSafeInteger(request.expected_revision) ||
+          Number(request.expected_revision) < 0
+        ) {
+          throw new BadRequest('expected_revision must be a non-negative integer');
+        }
+        const reset = request.reset_to_operator_defaults === true;
+        const rollback = request.rollback_last_change === true;
+        if (
+          (reset && rollback) ||
+          ('reset_to_operator_defaults' in request && !reset) ||
+          ('rollback_last_change' in request && !rollback) ||
+          ((reset || rollback) && request.configuration !== undefined) ||
+          (!reset &&
+            !rollback &&
+            (!request.configuration ||
+              typeof request.configuration !== 'object' ||
+              Array.isArray(request.configuration)))
+        ) {
+          throw new BadRequest(
+            'Provide exactly one of configuration, reset_to_operator_defaults, or rollback_last_change'
+          );
+        }
+        const runtimeOverride =
+          reset || rollback ? null : (request.configuration as PowerManagementMutableSettings);
+        try {
+          if (!rollback) {
+            if (runtimeOverride) {
+              const mutableKeys = [
+                'mode',
+                'poll_interval_ms',
+                'provider_timeout_ms',
+                'stale_after_ms',
+                'on_battery_debounce_ms',
+                'online_stable_ms',
+                'recovery_dispatch_interval_ms',
+                'critical',
+                'communication_loss',
+              ];
+              if (Object.keys(runtimeOverride).some((key) => !mutableKeys.includes(key))) {
+                throw new Error(
+                  'Only mutable policy fields may be applied; provider and Essential limit remain operator-controlled'
+                );
+              }
+              for (const [field, allowed] of [
+                ['critical', ['charge_percent', 'runtime_seconds', 'consecutive_samples']],
+                ['communication_loss', ['last_on_battery_critical_after_ms']],
+              ] as const) {
+                const nested = runtimeOverride[field];
+                if (
+                  nested !== undefined &&
+                  (!nested ||
+                    typeof nested !== 'object' ||
+                    Array.isArray(nested) ||
+                    Object.keys(nested).some(
+                      (key) => !(allowed as readonly string[]).includes(key)
+                    ))
+                ) {
+                  throw new Error(`${field} contains an unsupported field or value`);
+                }
+              }
+            }
+            const proposed = resolvePowerManagementRuntimeOverlay(
+              operatorPowerDefaults,
+              runtimeOverride ?? undefined
+            );
+            powerPolicyController.assertCanApply(proposed);
+          }
+        } catch (error) {
+          throw new BadRequest(error instanceof Error ? error.message : 'Invalid power policy');
+        }
+        const actorId = params.user?.user_id as UserID | undefined;
+        if (!actorId) throw new NotAuthenticated('Authentication required');
+        try {
+          return await powerPolicyController.applyRuntimeMutation(() =>
+            powerPolicyRuntimeSettingsRepository.compareAndSwap({
+              expectedRevision: Number(request.expected_revision),
+              operation: rollback
+                ? 'rollback_last_change'
+                : reset
+                  ? 'reset_to_operator_defaults'
+                  : 'apply',
+              ...(runtimeOverride ? { runtimeOverride } : {}),
+              operatorDefaults: operatorPowerDefaults,
+              updatedBy: actorId,
+              validateEffective: (effective) => powerPolicyController.assertCanApply(effective),
+            })
+          );
+        } catch (error) {
+          if (error instanceof PowerPolicyRuntimeRevisionConflictError) {
+            throw new Conflict(error.message, {
+              expected_revision: error.expectedRevision,
+              current_revision: error.actualRevision,
+            });
+          }
+          if (
+            error instanceof Error &&
+            error.message === 'Power conservation cannot be activated on this deployment topology'
+          ) {
+            throw new BadRequest(error.message);
+          }
+          throw error;
+        }
+      },
     },
-    { find: { role: ROLES.ADMIN, action: 'view host power policy' } },
+    {
+      find: { role: ROLES.ADMIN, action: 'view host power policy' },
+      patch: { role: ROLES.ADMIN, action: 'apply host power policy' },
+    },
     requireAuth
   );
   powerPolicyController.subscribe((transition) => {
@@ -972,6 +1174,49 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       params: { tenant: { tenant_id: tenantId, source: 'explicit' } },
     });
   });
+
+  registerAuthenticatedRoute(
+    app,
+    '/power-management/essential-sessions',
+    {
+      async find(params: RouteParams): Promise<PowerEssentialSessionSearchResult> {
+        const actorId = params.user?.user_id as UUID | undefined;
+        if (!actorId) throw new NotAuthenticated('Authentication required');
+        const query = (params.query ?? {}) as Record<string, unknown>;
+        const unknownKeys = Object.keys(query).filter((key) => key !== 'search');
+        if (unknownKeys.length > 0) throw new BadRequest('Only the search query is supported');
+        if (query.search !== undefined && typeof query.search !== 'string') {
+          throw new BadRequest('search must be a string');
+        }
+        const search = (query.search as string | undefined)?.trim();
+        if (search && search.length > 120) {
+          throw new BadRequest('search must be at most 120 characters');
+        }
+        const allowAllBranches =
+          superadminOpts.allowSuperadmin && hasMinimumRole(params.user?.role, ROLES.SUPERADMIN);
+        const [data, current] = await Promise.all([
+          sessionsRepository.findPowerEssentialCandidates({
+            userId: actorId,
+            search,
+            limit: 30,
+            allowAllBranches,
+          }),
+          sessionsRepository.findVisiblePowerEssential({
+            userId: actorId,
+            allowAllBranches,
+          }),
+        ]);
+        return {
+          data,
+          limit: 30,
+          slot_occupied: current.slotOccupied,
+          ...(current.selected ? { selected: current.selected } : {}),
+        };
+      },
+    },
+    { find: { role: ROLES.ADMIN, action: 'search Essential Sessions' } },
+    requireAuth
+  );
 
   const powerPriorityView = async (
     session: Session,
@@ -2166,6 +2411,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
            * as the scheduler. External callers may not set this field.
            */
           idempotencyTaskId?: UUID;
+          /** Internal producer guard: reject archived Sessions instead of reviving them. */
+          requireActiveSession?: boolean;
         },
         params: RouteParams
       ) {
@@ -2184,6 +2431,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         }
         if (data.metadata !== undefined && params.provider) {
           throw new Forbidden('Task metadata is internal-only');
+        }
+        if (data.requireActiveSession !== undefined && params.provider) {
+          throw new Forbidden('requireActiveSession is internal-only');
         }
         const promptTenantId = getCurrentTenantId();
         if (!promptTenantId) throw new Error('Missing active tenant context for prompt admission');
@@ -2319,6 +2569,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         // the Session can intentionally appear as a root until they are
         // restored separately.
         if (session.archived) {
+          if (data.requireActiveSession) {
+            throw new Conflict('Cannot deliver to an archived Session');
+          }
           console.log(
             `📦 [Prompt] Auto-unarchiving session ${shortId(id)} (was archived: ${session.archived_reason || 'unknown reason'})`
           );
@@ -2426,6 +2679,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                   }
                 }
                 const admissionSession = (await sessionsService.get(id, params)) as Session;
+                if (data.requireActiveSession && admissionSession.archived) {
+                  throw new Conflict('Cannot deliver to an archived Session');
+                }
                 await assertCurrentPromptAuthority(operationDb, admissionSession);
                 const admitted = await new TaskRepository(operationDb).createPending({
                   task_id: compactionRequestId,
@@ -5102,7 +5358,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   const authorizeAndLoadSessionForMcpConfig = async (
     sessionId: string,
     // biome-ignore lint/suspicious/noExplicitAny: FeathersJS params type
-    params: any
+    params: any,
+    options: { allowExecutorProjection?: boolean } = {}
   ): Promise<Session> => {
     const user = params?.user;
     if (!user) throw new NotAuthenticated('Authentication required');
@@ -5110,21 +5367,30 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       | Session
       | undefined;
     if (!session) throw new NotFound(`Session not found: ${sessionId}`);
-    const tenantId = (params as AuthenticatedParams).tenant?.tenant_id ?? getCurrentTenantId();
-    const executorAuthorized = await authorizeTaskExecutorSessionMcpRead(
-      params,
+    const executorScope = authenticatedTaskExecutorRuntimeScope(params);
+    authorizeMcpSessionConfigAccess({
+      user,
       session,
-      async (taskId) => {
-        if (!tenantId) throw new NotAuthenticated('Executor MCP read requires tenant identity');
-        return runWithTenantDatabaseScope(db, tenantId, (tenantDb) =>
-          new TaskRepository(tenantDb).findById(taskId)
-        );
+      executorScope,
+      operation: options.allowExecutorProjection ? 'projection' : 'mutation',
+      allowSuperadmin: superadminOpts.allowSuperadmin,
+    });
+    if (executorScope) {
+      const tenantId = (params as AuthenticatedParams).tenant?.tenant_id ?? getCurrentTenantId();
+      const executorAuthorized = await authorizeTaskExecutorSessionMcpRead(
+        params,
+        session,
+        async (taskId) => {
+          if (!tenantId) throw new NotAuthenticated('Executor MCP read requires tenant identity');
+          return runWithTenantDatabaseScope(db, tenantId, (tenantDb) =>
+            new TaskRepository(tenantDb).findById(taskId)
+          );
+        }
+      );
+      if (!executorAuthorized) {
+        throw new Forbidden('Executor task scope is no longer current');
       }
-    );
-    if (executorAuthorized) {
-      return session;
     }
-    if (!user._isServiceAccount) checkSessionOwnerOrAdmin(user, session, superadminOpts);
     return session;
   };
 
@@ -5164,9 +5430,13 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         !task ||
         executorScope.sessionId !== session.session_id ||
         task.session_id !== session.session_id ||
-        task.created_by !== params.user?.user_id
+        task.created_by !== params.user?.user_id ||
+        !isLiveMcpTaskStatus(task.status)
       ) {
         throw new Forbidden('Executor task scope is no longer current');
+      }
+      if (await currentMcpReprojectionAuthority(task, session)) {
+        throw new Forbidden('Executor MCP authority is no longer current');
       }
       // The native conversation/home belongs to the Session owner, but every
       // credential projection belongs to the actor who created this Task.
@@ -5199,6 +5469,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             continue;
           }
         }
+        const materialHash = mcpEgressMaterialHash(server, resolvedEnv, jwtSecret);
+        const toolPolicyHash = mcpToolPolicyHash(server.tool_permissions, jwtSecret);
         const capability = issueMCPEgressCapability(
           {
             tid: tenantId,
@@ -5208,9 +5480,28 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             credential_user_id: credentialUserId,
             mcp_server_id: server.mcp_server_id,
             config_version: server.config_version ?? 1,
-            material_hash: mcpEgressMaterialHash(server, resolvedEnv, jwtSecret),
+            material_hash: materialHash,
+            tool_policy_hash: toolPolicyHash,
+            authority_fingerprint: mcpAuthorityFingerprint(
+              {
+                serverId: server.mcp_server_id,
+                rolloutMode: mode,
+                configVersion: server.config_version ?? 1,
+                materialHash,
+                toolPolicyHash,
+                grantIdentity,
+              },
+              jwtSecret
+            ),
             grant_identity: grantIdentity,
             rollout_mode: mode,
+            recovery_generation:
+              task.metadata?.mcp_recovery?.generation ??
+              task.metadata?.mcp_recovery_generation ??
+              0,
+            ...(task.metadata?.mcp_recovery?.request_id
+              ? { recovery_request_id: task.metadata.mcp_recovery.request_id }
+              : {}),
             jti: randomUUID(),
           },
           jwtSecret
@@ -5244,9 +5535,332 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       db,
       gateway: mcpEgressGateway,
       tenantId,
+      sessionId: _sessionId,
       serverIds,
       mutate,
     });
+  };
+
+  const isLiveMcpTaskStatus = (status: TaskStatus): boolean =>
+    status === TaskStatus.RUNNING ||
+    status === TaskStatus.AWAITING_PERMISSION ||
+    status === TaskStatus.AWAITING_INPUT;
+
+  const currentMcpReprojectionAuthority = async (
+    task: Task,
+    session: Session
+  ): Promise<'principal_revoked' | 'branch_revoked' | null> => {
+    const users = new UsersRepository(db);
+    const principal = await users.findById(task.created_by);
+    if (!principal || !hasMinimumRole(principal.role, ROLES.MEMBER)) {
+      return 'principal_revoked';
+    }
+    const branch = await branchRepository.findById(session.branch_id);
+    if (!branch) return 'branch_revoked';
+    return (
+      await resolveSessionPromptAccess({
+        branchRepository,
+        branch,
+        session,
+        userId: task.created_by as UserID,
+      })
+    ).allowed
+      ? null
+      : 'branch_revoked';
+  };
+
+  const MCP_RUNTIME_HINT_PAGE_SIZE = 100;
+  const MCP_REFRESH_REQUEST_TIMEOUT_MS = 30_000;
+
+  const visitActiveMcpTasks = async (
+    code: string,
+    visitor: (task: Task) => Promise<void>,
+    filters: {
+      sessionId?: SessionID;
+      attachedServerId?: MCPServerID;
+      authorityUserId?: UserID;
+      credentialUserId?: UserID;
+    } = {},
+    tenantId = getCurrentTenantId()
+  ): Promise<void> => {
+    if (!tenantId) {
+      console.warn(`[MCP Runtime] event=fanout_skipped code=${code} reason=missing_tenant`);
+      return;
+    }
+    let beforeTaskId: TaskID | undefined;
+    let visited = 0;
+    while (visited < MCP_RUNTIME_HINT_TASK_BUDGET) {
+      // Do not retain a PG tenant transaction (or any task row locks acquired
+      // by visitors) across the bounded 500-task fanout. Each page read and
+      // each task write is one independent, short tenant unit of work.
+      const page = await withFreshTenantWrite(db, tenantId, () =>
+        new TaskRepository(db).findActiveMCPRefreshPage({
+          beforeTaskId,
+          ...filters,
+          limit: Math.min(MCP_RUNTIME_HINT_PAGE_SIZE, MCP_RUNTIME_HINT_TASK_BUDGET - visited),
+        })
+      ).catch(() => null);
+      if (!page) {
+        console.warn(
+          `[MCP Runtime] event=fanout_page_failed code=${code} continuation_task_id=${beforeTaskId ? shortId(beforeTaskId) : 'start'}`
+        );
+        return;
+      }
+      for (const task of page.tasks) {
+        try {
+          await withFreshTenantWrite(db, tenantId, () => visitor(task));
+        } catch {
+          console.warn(
+            `[MCP Runtime] event=fanout_task_failed task_id=${shortId(task.task_id)} code=${code}`
+          );
+        }
+      }
+      visited += page.tasks.length;
+      if (!page.nextTaskId) return;
+      beforeTaskId = page.nextTaskId;
+    }
+    console.warn(
+      `[MCP Runtime] event=fanout_truncated code=${code} limit=${MCP_RUNTIME_HINT_TASK_BUDGET} continuation_task_id=${beforeTaskId ? shortId(beforeTaskId) : 'none'}`
+    );
+  };
+
+  const signalTaskMcpAuthorityChange = async (
+    task: Task,
+    session: Session,
+    params: RouteParams,
+    code: 'stale_capability' | 'server_detached' | 'tool_permission_changed',
+    serverId?: string
+  ): Promise<void> => {
+    const provider = mcpRuntimeProviderCapability(session.agentic_tool);
+    const requestId = randomUUID();
+    const updated = await new TaskRepository(db).recordMCPRecovery(
+      task.task_id,
+      (current, lockedTask) => {
+        if (!isLiveMcpTaskStatus(lockedTask.status)) return null;
+        const observedAt = new Date();
+        return {
+          generation: (current?.generation ?? 0) + 1,
+          code,
+          status: provider.transport_reload ? 'refresh_requested' : 'action_required',
+          task_id: lockedTask.task_id,
+          session_id: lockedTask.session_id,
+          ...(serverId ? { mcp_server_id: serverId as MCPServerID } : {}),
+          provider,
+          action: provider.transport_reload ? 'reconnect_mcp' : 'retry_next_turn',
+          message: provider.transport_reload
+            ? 'MCP configuration changed. Rebuilding only this task’s MCP transport with current authority.'
+            : 'MCP configuration changed. This provider can apply it only on the next turn; the conversation handle is preserved.',
+          observed_at: observedAt.toISOString(),
+          ...(provider.transport_reload
+            ? {
+                request_id: requestId,
+                refresh_deadline_at: new Date(
+                  observedAt.getTime() + MCP_REFRESH_REQUEST_TIMEOUT_MS
+                ).toISOString(),
+              }
+            : {}),
+          provider_dispatch: 'not_started',
+        };
+      }
+    );
+    const recovery = updated.metadata?.mcp_recovery;
+    if (!isLiveMcpTaskStatus(updated.status) || !recovery || recovery.code !== code) return;
+    emitServiceEvent(app, {
+      path: 'tasks',
+      event: 'patched',
+      data: updated,
+      id: updated.task_id,
+      params,
+    });
+    if (provider.transport_reload) {
+      if (recovery.request_id !== requestId) return;
+      emitServiceEvent(app, {
+        path: 'tasks',
+        event: 'mcp_refresh_requested',
+        data: {
+          task_id: task.task_id,
+          session_id: task.session_id,
+          request_id: requestId,
+          generation: recovery.generation,
+          reason: 'authority_changed',
+        },
+        id: task.task_id,
+        params,
+      });
+    }
+  };
+
+  const degradeTaskMcpRecoveryForDirectMode = async (
+    task: Task,
+    session: Session,
+    params: RouteParams
+  ): Promise<MCPRuntimeRecovery | undefined> => {
+    const { task: updated, changed } = await degradeMcpRuntimeRecoveryForDirectMode(
+      db,
+      task.task_id,
+      mcpRuntimeProviderCapability(session.agentic_tool)
+    );
+    const recovery = updated.metadata?.mcp_recovery;
+    if (!changed) return recovery;
+    emitServiceEvent(app, {
+      path: 'tasks',
+      event: 'patched',
+      data: updated,
+      id: updated.task_id,
+      params,
+    });
+    return recovery;
+  };
+
+  const degradeActiveMcpRecoveryForDirectMode = async (params: RouteParams): Promise<void> => {
+    const sessions = new Map<string, Session | null>();
+    await visitActiveMcpTasks('rollout_direct_mode', async (task) => {
+      const recovery = task.metadata?.mcp_recovery;
+      if (recovery?.status !== 'refresh_requested' && recovery?.action !== 'reconnect_mcp') return;
+      if (!sessions.has(task.session_id)) {
+        sessions.set(task.session_id, await sessionsRepository.findById(task.session_id));
+      }
+      const session = sessions.get(task.session_id);
+      if (session) await degradeTaskMcpRecoveryForDirectMode(task, session, params);
+    });
+  };
+
+  /** Targeted availability hint; gateway admission remains authoritative. */
+  const signalSessionMcpAuthorityChange = async (
+    sessionId: string,
+    params: RouteParams,
+    code: 'stale_capability' | 'server_detached',
+    serverId?: string
+  ): Promise<void> => {
+    const tenantId = (params as AuthenticatedParams).tenant?.tenant_id ?? getCurrentTenantId();
+    if (!tenantId) return;
+    if (!(await withFreshTenantWrite(db, tenantId, () => isMcpRuntimeRecoveryEnabled(db)))) return;
+    const session = await withFreshTenantWrite(db, tenantId, () =>
+      sessionsRepository.findById(sessionId).catch(() => null)
+    );
+    if (!session) {
+      console.warn(
+        `[MCP Runtime] event=fanout_session_unavailable code=${code} session_id=${shortId(sessionId)}`
+      );
+      return;
+    }
+    await visitActiveMcpTasks(
+      code,
+      (task) => signalTaskMcpAuthorityChange(task, session, params, code, serverId),
+      { sessionId: session.session_id },
+      tenantId
+    );
+  };
+
+  // Hooks are installed before routes, so expose a late-bound, tenant-scoped
+  // callback for authoritative server/auth/tool-policy writes. It targets only
+  // Sessions that currently reference the server (or can use a global one).
+  (
+    app as unknown as {
+      signalMcpServerAuthorityChange?: (
+        serverId: string,
+        params: RouteParams,
+        affectedCredentialUserId?: string,
+        exactTasks?: Task[],
+        code?: 'stale_capability' | 'tool_permission_changed'
+      ) => Promise<void>;
+    }
+  ).signalMcpServerAuthorityChange = async (
+    serverId,
+    params,
+    affectedCredentialUserId,
+    exactTasks,
+    recoveryCode = 'stale_capability'
+  ) => {
+    const tenantId = (params as AuthenticatedParams).tenant?.tenant_id ?? getCurrentTenantId();
+    if (!tenantId) return;
+    if (!(await withFreshTenantWrite(db, tenantId, () => isMcpRuntimeRecoveryEnabled(db)))) return;
+    const server = await withFreshTenantWrite(db, tenantId, () =>
+      new MCPServerRepository(db).findById(serverId).catch(() => null)
+    );
+    const sessions = new Map<string, Session | null>();
+    const attached = new Map<string, boolean>();
+    if (exactTasks) {
+      const tenantId = (params as AuthenticatedParams).tenant?.tenant_id ?? getCurrentTenantId();
+      if (!tenantId) {
+        console.warn(
+          '[MCP Runtime] event=fanout_skipped code=server_authority_changed reason=missing_tenant'
+        );
+        return;
+      }
+      for (const task of exactTasks) {
+        try {
+          await withFreshTenantWrite(db, tenantId, async () => {
+            if (!sessions.has(task.session_id)) {
+              sessions.set(task.session_id, await sessionsRepository.findById(task.session_id));
+            }
+            const session = sessions.get(task.session_id);
+            if (session) {
+              await signalTaskMcpAuthorityChange(task, session, params, recoveryCode, serverId);
+            }
+          });
+        } catch {
+          console.warn(
+            `[MCP Runtime] event=fanout_task_failed task_id=${shortId(task.task_id)} code=server_authority_changed`
+          );
+        }
+      }
+      return;
+    }
+    await visitActiveMcpTasks(
+      'server_authority_changed',
+      async (task) => {
+        if (!sessions.has(task.session_id)) {
+          sessions.set(task.session_id, await sessionsRepository.findById(task.session_id));
+        }
+        const session = sessions.get(task.session_id);
+        if (!session) return;
+        if (affectedCredentialUserId && task.created_by !== affectedCredentialUserId) return;
+        if (!attached.has(task.session_id)) {
+          attached.set(
+            task.session_id,
+            await sessionMCPServersService
+              .listServers(task.session_id, false, { ...params, provider: undefined })
+              .then((refs) => refs.some((item) => item.mcp_server_id === serverId))
+          );
+        }
+        const global = Boolean(
+          server?.scope === 'global' && isMCPServerUsableBy(server, task.created_by)
+        );
+        if (attached.get(task.session_id) || global) {
+          await signalTaskMcpAuthorityChange(task, session, params, recoveryCode, serverId);
+        }
+      },
+      server?.scope === 'global'
+        ? (affectedCredentialUserId ?? server.owner_user_id)
+          ? { credentialUserId: (affectedCredentialUserId ?? server.owner_user_id) as UserID }
+          : {}
+        : { attachedServerId: serverId as MCPServerID },
+      tenantId
+    );
+  };
+  (
+    app as unknown as {
+      signalMcpPrincipalAuthorityChange?: (userId: string, params: RouteParams) => Promise<void>;
+    }
+  ).signalMcpPrincipalAuthorityChange = async (userId, params) => {
+    const tenantId = (params as AuthenticatedParams).tenant?.tenant_id ?? getCurrentTenantId();
+    if (!tenantId) return;
+    if (!(await withFreshTenantWrite(db, tenantId, () => isMcpRuntimeRecoveryEnabled(db)))) return;
+    const sessions = new Map<string, Session | null>();
+    await visitActiveMcpTasks(
+      'principal_authority_changed',
+      async (task) => {
+        if (task.created_by !== userId) return;
+        if (!sessions.has(task.session_id)) {
+          sessions.set(task.session_id, await sessionsRepository.findById(task.session_id));
+        }
+        const session = sessions.get(task.session_id);
+        if (session) await signalTaskMcpAuthorityChange(task, session, params, 'stale_capability');
+      },
+      { authorityUserId: userId as UserID },
+      tenantId
+    );
   };
 
   registerAuthenticatedRoute(
@@ -5256,7 +5870,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       async find(params: RouteParams) {
         const id = params.route?.id;
         if (!id) throw new Error('Session ID required');
-        const session = await authorizeAndLoadSessionForMcpConfig(id, params);
+        const session = await authorizeAndLoadSessionForMcpConfig(id, params, {
+          allowExecutorProjection: true,
+        });
         const enabledOnly =
           params.query?.enabledOnly === 'true' || params.query?.enabledOnly === true;
         const includeGlobal =
@@ -5319,6 +5935,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             )
             .filter((entry) => isMCPServerUsableBy(entry.server, credentialUserId));
           if (
+            !(params as RouteParams & { _forceMcpRuntimeRedaction?: boolean })
+              ._forceMcpRuntimeRedaction &&
             shouldExposeMCPServerSecrets(params, {
               allowSessionToken: true,
               sessionId: id,
@@ -5388,10 +6006,12 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
               ]
             : sessionServers
         ).filter((server) => isMCPServerUsableBy(server, credentialUserId));
-        return shouldExposeMCPServerSecrets(params, {
-          allowSessionToken: true,
-          sessionId: id,
-        })
+        return !(params as RouteParams & { _forceMcpRuntimeRedaction?: boolean })
+          ._forceMcpRuntimeRedaction &&
+          shouldExposeMCPServerSecrets(params, {
+            allowSessionToken: true,
+            sessionId: id,
+          })
           ? projectMcpServersForExecutor(servers, session, params)
           : servers.map(redactMCPServerSecrets);
       },
@@ -5399,7 +6019,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         const id = params.route?.id;
         if (!id) throw new Error('Session ID required');
         if (!data.mcpServerId) throw new Error('MCP Server ID required');
-        await requireSessionScopedConfigOwnerOrAdmin(id, params);
+        await authorizeAndLoadSessionForMcpConfig(id, params);
 
         try {
           await sessionMCPServersService.addServer(
@@ -5427,6 +6047,13 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           params,
         });
 
+        scheduleMcpRuntimeHint(
+          db,
+          (params as AuthenticatedParams).tenant?.tenant_id,
+          'session_server_attached',
+          () => signalSessionMcpAuthorityChange(id, params, 'stale_capability', data.mcpServerId)
+        );
+
         return relationship;
       },
       async update(_id: string | null, data: { mcpServerIds?: unknown }, params: RouteParams) {
@@ -5441,7 +6068,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           throw new BadRequest('mcpServerIds must contain strings');
         }
 
-        await requireSessionScopedConfigOwnerOrAdmin(id, params);
+        await authorizeAndLoadSessionForMcpConfig(id, params);
         const serverIds = [...new Set(data.mcpServerIds)] as Array<
           import('@agor/core/types').MCPServerID
         >;
@@ -5478,13 +6105,19 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           data: replacement,
           params,
         });
+        scheduleMcpRuntimeHint(
+          db,
+          (params as AuthenticatedParams).tenant?.tenant_id,
+          'session_servers_replaced',
+          () => signalSessionMcpAuthorityChange(id, params, 'stale_capability')
+        );
         return replacement;
       },
       async remove(mcpId: string, params: RouteParams) {
         const id = params.route?.id;
         if (!id) throw new Error('Session ID required');
         if (!mcpId) throw new Error('MCP Server ID required');
-        await requireSessionScopedConfigOwnerOrAdmin(id, params);
+        await authorizeAndLoadSessionForMcpConfig(id, params);
 
         await coordinateSessionMcpRevocation(id, [mcpId], params, () =>
           sessionMCPServersService.removeServer(
@@ -5505,6 +6138,13 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           params,
         });
 
+        scheduleMcpRuntimeHint(
+          db,
+          (params as AuthenticatedParams).tenant?.tenant_id,
+          'session_server_detached',
+          () => signalSessionMcpAuthorityChange(id, params, 'server_detached', mcpId)
+        );
+
         return relationship;
       },
       async patch(mcpId: string, data: { enabled: boolean }, params: RouteParams) {
@@ -5512,7 +6152,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         if (!id) throw new Error('Session ID required');
         if (!mcpId) throw new Error('MCP Server ID required');
         if (typeof data.enabled !== 'boolean') throw new Error('enabled field required');
-        await requireSessionScopedConfigOwnerOrAdmin(id, params);
+        await authorizeAndLoadSessionForMcpConfig(id, params);
         const toggle = () =>
           sessionMCPServersService.toggleServer(
             id as import('@agor/core/types').SessionID,
@@ -5520,9 +6160,22 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             data.enabled,
             params
           );
-        return data.enabled
+        const result = await (data.enabled
           ? toggle()
-          : coordinateSessionMcpRevocation(id, [mcpId], params, toggle);
+          : coordinateSessionMcpRevocation(id, [mcpId], params, toggle));
+        scheduleMcpRuntimeHint(
+          db,
+          (params as AuthenticatedParams).tenant?.tenant_id,
+          'session_server_toggled',
+          () =>
+            signalSessionMcpAuthorityChange(
+              id,
+              params,
+              data.enabled ? 'stale_capability' : 'server_detached',
+              mcpId
+            )
+        );
+        return result;
       },
       // biome-ignore lint/suspicious/noExplicitAny: Service type not compatible with Express
     } as any,
@@ -5533,6 +6186,541 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       remove: { role: ROLES.MEMBER, action: 'modify session MCP servers' },
       patch: { role: ROLES.MEMBER, action: 'modify session MCP servers' },
     },
+    requireAuth
+  );
+
+  // Availability protection is deliberately local, but capacity is partitioned
+  // by tenant so one tenant cannot evict or exhaust another tenant's bucket.
+  const mcpRefreshAttempts: MCPRefreshAttemptState = new Map();
+
+  /** Executor-only reprojection. Browser callers can request a hint, never capabilities. */
+  registerAuthenticatedRoute(
+    app,
+    '/tasks/:id/mcp-reprojection',
+    {
+      async create(data: MCPRuntimeRefreshRequest, params: RouteParams) {
+        const id = params.route?.id;
+        const scope = authenticatedTaskExecutorRuntimeScope(params);
+        if (!id || !scope || scope.taskId !== id) {
+          throw new Forbidden('A token scoped to this active executor Task is required');
+        }
+        if (
+          !data ||
+          typeof data.request_id !== 'string' ||
+          !data.request_id ||
+          data.request_id.length > 128 ||
+          !Number.isSafeInteger(data.expected_generation) ||
+          data.expected_generation < 0
+        ) {
+          throw new BadRequest('A bounded request_id and recovery generation are required');
+        }
+        const task = await new TaskRepository(db).findById(id);
+        if (
+          !task ||
+          task.session_id !== scope.sessionId ||
+          task.created_by !== params.user?.user_id ||
+          !isLiveMcpTaskStatus(task.status)
+        ) {
+          throw new Conflict('MCP reprojection requires the exact live Task and principal');
+        }
+        const tenantId = (params as AuthenticatedParams).tenant?.tenant_id;
+        if (!tenantId || !params.user?.user_id) {
+          throw new Forbidden('MCP reprojection requires exact tenant and principal identity');
+        }
+        const authorityKey = `${params.user.user_id}:${id}`;
+        const fingerprint = JSON.stringify({
+          reason: data.reason,
+          expected_generation: data.expected_generation,
+        });
+        const now = Date.now();
+        const durableClaim = task.metadata?.mcp_reprojection_claim;
+        const isExactDurableRetry =
+          durableClaim?.request_id === data.request_id &&
+          durableClaim.recovery_generation === data.expected_generation &&
+          durableClaim.fingerprint === fingerprint;
+        const limitOutcome = consumeMcpRefreshAttempt(mcpRefreshAttempts, {
+          tenantId,
+          authorityKey,
+          now,
+          isExactDurableRetry,
+        });
+        if (limitOutcome === 'tenant_capacity') {
+          throw new Conflict('MCP refresh tenant limiter capacity exceeded');
+        }
+        if (limitOutcome === 'key_capacity') {
+          throw new Conflict('MCP refresh limiter capacity exceeded');
+        }
+        if (limitOutcome === 'rate_limited') {
+          throw new Conflict('MCP refresh rate limit exceeded');
+        }
+
+        const session = await authorizeAndLoadSessionForMcpConfig(scope.sessionId, params, {
+          allowExecutorProjection: true,
+        });
+        const revoked = await currentMcpReprojectionAuthority(task, session);
+        if (revoked) {
+          const updated = await new TaskRepository(db).recordMCPRecovery(
+            task.task_id,
+            (current, lockedTask) =>
+              current?.status === 'refresh_requested' &&
+              current.generation === data.expected_generation &&
+              current.request_id === data.request_id &&
+              lockedTask.session_id === scope.sessionId &&
+              lockedTask.created_by === params.user?.user_id &&
+              isLiveMcpTaskStatus(lockedTask.status)
+                ? {
+                    generation: (current?.generation ?? 0) + 1,
+                    code: revoked,
+                    status: 'action_required',
+                    task_id: lockedTask.task_id,
+                    session_id: lockedTask.session_id,
+                    provider: mcpRuntimeProviderCapability(session.agentic_tool),
+                    action: 'contact_admin',
+                    message:
+                      revoked === 'branch_revoked'
+                        ? 'Branch prompt authority changed. Contact an administrator.'
+                        : 'Task or credential-owner authority changed. Contact an administrator.',
+                    observed_at: new Date().toISOString(),
+                    request_id: data.request_id,
+                    provider_dispatch: 'not_started',
+                  }
+                : null
+          );
+          if (
+            !isLiveMcpTaskStatus(updated.status) ||
+            updated.metadata?.mcp_recovery?.request_id !== data.request_id ||
+            updated.metadata.mcp_recovery.code !== revoked
+          ) {
+            throw new Conflict('MCP reprojection requires the exact live Task and principal');
+          }
+          emitServiceEvent(app, {
+            path: 'tasks',
+            event: 'patched',
+            data: updated,
+            id: task.task_id,
+            params,
+          });
+          throw new Forbidden('MCP reprojection authority changed; contact an administrator');
+        }
+        const provider = mcpRuntimeProviderCapability(session.agentic_tool);
+        const mode = await getMCPEgressGatewayMode(db);
+        if (mode !== 'compatibility' && mode !== 'enforced') {
+          await degradeTaskMcpRecoveryForDirectMode(task, session, params);
+          throw new Conflict(
+            'MCP gateway mediation is not active; current direct configuration applies next turn'
+          );
+        }
+
+        const claim = await new TaskRepository(db).claimMCPReprojection(task.task_id, {
+          sessionId: scope.sessionId as SessionID,
+          principalUserId: params.user.user_id,
+          requestId: data.request_id,
+          expectedGeneration: data.expected_generation,
+          fingerprint,
+        });
+        if (claim.outcome === 'stale') {
+          throw new Conflict('MCP recovery state changed; reload before reconnecting');
+        }
+        // A duplicate exact claim is re-derived for restart/cache-miss safety,
+        // but its first bound authority projection is immutable: authority
+        // drift below fails closed instead of rebinding this durable identity.
+
+        const mcpRoute = app.service(
+          `/sessions/${scope.sessionId}/mcp-servers` as never
+        ) as unknown as { find(params: RouteParams): Promise<MCPServer[]> };
+        const commonParams: RouteParams = {
+          ...params,
+          route: { id: scope.sessionId },
+          query: { includeGlobal: true, enabledOnly: true },
+        };
+        const projected = await mcpRoute.find(commonParams);
+        const authorityFingerprints = projected.flatMap((server) => {
+          const token = server.headers?.['X-Agor-Mcp-Capability'];
+          if (!token) return [];
+          const authorityFingerprint = verifyMCPEgressCapability(
+            token,
+            jwtSecret
+          ).authority_fingerprint;
+          return authorityFingerprint ? [authorityFingerprint] : [];
+        });
+        const boundClaim = await new TaskRepository(db).bindMCPReprojectionAuthority(task.task_id, {
+          sessionId: scope.sessionId as SessionID,
+          principalUserId: params.user.user_id,
+          requestId: data.request_id,
+          expectedGeneration: data.expected_generation,
+          fingerprint,
+          authorityFingerprints,
+        });
+        if (boundClaim.outcome !== 'bound') {
+          throw new Conflict('MCP recovery authority changed during reprojection');
+        }
+        const visible = await mcpRoute.find({
+          ...commonParams,
+          _forceMcpRuntimeRedaction: true,
+        } as RouteParams);
+        const states = classifyMCPRuntimeProjection(projected, visible, provider);
+        const actionable = states.find((state) => state.code !== 'ready');
+        if (actionable) {
+          const nonReadyStates = states.filter((state) => state.code !== 'ready');
+          const action =
+            actionable.action === 'reauthenticate'
+              ? ('reauthenticate' as const)
+              : actionable.action === 'reconnect_next_turn'
+                ? ('retry_next_turn' as const)
+                : ('review_configuration' as const);
+          const recovery = await new TaskRepository(db).recordMCPRecovery(
+            task.task_id,
+            (current, lockedTask) => {
+              if (
+                !isLiveMcpTaskStatus(lockedTask.status) ||
+                current?.status !== 'refresh_requested' ||
+                current.generation !== data.expected_generation ||
+                current.request_id !== data.request_id
+              ) {
+                return null;
+              }
+              return {
+                generation: current.generation,
+                code:
+                  actionable.code === 'oauth_reauth_required'
+                    ? 'oauth_reauth_required'
+                    : 'stale_capability',
+                status: 'action_required',
+                task_id: lockedTask.task_id,
+                session_id: lockedTask.session_id,
+                mcp_server_id: actionable.mcp_server_id,
+                mcp_server_name: actionable.name,
+                server_states: nonReadyStates,
+                provider,
+                action,
+                message: actionable.message,
+                observed_at: new Date().toISOString(),
+                request_id: data.request_id,
+                provider_dispatch: 'not_started',
+              };
+            }
+          );
+          if (
+            !isLiveMcpTaskStatus(recovery.status) ||
+            recovery.metadata?.mcp_recovery?.request_id !== data.request_id ||
+            recovery.metadata.mcp_recovery.generation !== data.expected_generation
+          ) {
+            throw new Conflict('MCP reprojection requires the exact live Task and principal');
+          }
+          emitServiceEvent(app, {
+            path: 'tasks',
+            event: 'patched',
+            data: recovery,
+            id: task.task_id,
+            params,
+          });
+        } else if (claim.task.metadata?.mcp_recovery?.code === 'tool_permission_changed') {
+          // Claude's current SDK can replace MCP transports, but it cannot
+          // replace the query's immutable disallowedTools option. Gateway
+          // admission enforces the new policy immediately; tool visibility is
+          // therefore reported truthfully as next-turn instead of cleared as a
+          // complete current-turn refresh.
+          const permissionRecovery = await new TaskRepository(db).recordMCPRecovery(
+            task.task_id,
+            (current, lockedTask) =>
+              current?.status === 'refresh_requested' &&
+              current.generation === data.expected_generation &&
+              current.request_id === data.request_id &&
+              isLiveMcpTaskStatus(lockedTask.status)
+                ? {
+                    ...current,
+                    status: 'action_required',
+                    action: 'retry_next_turn',
+                    message:
+                      'MCP transport was refreshed and gateway policy is current. Claude tool visibility updates on the next turn because this SDK cannot replace disallowedTools in place.',
+                    observed_at: new Date().toISOString(),
+                    refresh_deadline_at: undefined,
+                  }
+                : null
+          );
+          emitServiceEvent(app, {
+            path: 'tasks',
+            event: 'patched',
+            data: permissionRecovery,
+            id: task.task_id,
+            params,
+          });
+        }
+        const finalTask = await new TaskRepository(db).findById(task.task_id);
+        const finalAuthorityRevoked = finalTask
+          ? await currentMcpReprojectionAuthority(finalTask, session)
+          : null;
+        if (
+          !finalTask ||
+          finalTask.session_id !== scope.sessionId ||
+          finalTask.created_by !== params.user?.user_id ||
+          !isLiveMcpTaskStatus(finalTask.status) ||
+          finalAuthorityRevoked ||
+          finalTask.metadata?.mcp_recovery?.generation !== data.expected_generation ||
+          finalTask.metadata.mcp_recovery.request_id !== data.request_id
+        ) {
+          throw new Conflict('MCP recovery authority changed during reprojection');
+        }
+        return {
+          task_id: task.task_id,
+          session_id: session.session_id,
+          request_id: data.request_id,
+          recovery_generation: data.expected_generation,
+          provider,
+          servers: projected,
+          states,
+        } satisfies MCPRuntimeReprojection;
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: custom route service
+    } as any,
+    { create: { role: ROLES.MEMBER, action: 'reproject live MCP configuration' } },
+    requireAuth
+  );
+
+  /** Durable executor-only fence checked immediately before provider transport apply. */
+  registerAuthenticatedRoute(
+    app,
+    '/tasks/:id/mcp-reprojection-validate',
+    {
+      async create(data: MCPRuntimeRefreshRequest, params: RouteParams) {
+        const id = params.route?.id;
+        const scope = authenticatedTaskExecutorRuntimeScope(params);
+        if (!id || !scope || scope.taskId !== id) {
+          throw new Forbidden('A token scoped to this active executor Task is required');
+        }
+        if (
+          !data ||
+          typeof data.request_id !== 'string' ||
+          !data.request_id ||
+          data.request_id.length > 128 ||
+          !Number.isSafeInteger(data.expected_generation) ||
+          data.expected_generation < 0
+        ) {
+          throw new BadRequest('A bounded request_id and recovery generation are required');
+        }
+        const tenantId = (params as AuthenticatedParams).tenant?.tenant_id;
+        const principalUserId = params.user?.user_id;
+        if (!tenantId || !principalUserId) {
+          throw new Forbidden('MCP reprojection requires exact tenant and principal identity');
+        }
+        const session = await authorizeAndLoadSessionForMcpConfig(scope.sessionId, params, {
+          allowExecutorProjection: true,
+        });
+        const mode = await getMCPEgressGatewayMode(db);
+        if (mode !== 'compatibility' && mode !== 'enforced') {
+          const task = await new TaskRepository(db).findById(id);
+          if (task) await degradeTaskMcpRecoveryForDirectMode(task, session, params);
+          throw new Conflict(
+            'MCP gateway mediation is not active; current direct configuration applies next turn'
+          );
+        }
+        const fingerprint = JSON.stringify({
+          reason: data.reason,
+          expected_generation: data.expected_generation,
+        });
+        const validation = await new TaskRepository(db).validateMCPReprojectionClaim(id, {
+          sessionId: scope.sessionId as SessionID,
+          principalUserId,
+          requestId: data.request_id,
+          expectedGeneration: data.expected_generation,
+          fingerprint,
+        });
+        if (validation.outcome !== 'current') {
+          throw new Conflict('MCP recovery authority changed before transport apply');
+        }
+        const revoked = await currentMcpReprojectionAuthority(validation.task, session);
+        if (revoked) {
+          throw new Forbidden('MCP reprojection authority changed; contact an administrator');
+        }
+        return { ok: true };
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: custom route service
+    } as any,
+    { create: { role: ROLES.MEMBER, action: 'validate live MCP reprojection' } },
+    requireAuth
+  );
+
+  registerAuthenticatedRoute(
+    app,
+    '/tasks/:id/mcp-refresh-result',
+    {
+      async create(data: MCPRuntimeRefreshResultRequest, params: RouteParams) {
+        const id = params.route?.id;
+        const scope = authenticatedTaskExecutorRuntimeScope(params);
+        if (!id || !scope || scope.taskId !== id) {
+          throw new Forbidden('A token scoped to this active executor Task is required');
+        }
+        if (
+          !data ||
+          typeof data.request_id !== 'string' ||
+          !data.request_id ||
+          data.request_id.length > 128 ||
+          !Number.isSafeInteger(data.expected_generation) ||
+          data.expected_generation < 0 ||
+          typeof data.ok !== 'boolean' ||
+          (data.failure !== undefined && data.failure !== 'transport_outcome_uncertain') ||
+          (data.ok && data.failure !== undefined)
+        ) {
+          throw new BadRequest(
+            'A bounded request_id, recovery generation, and boolean ok are required'
+          );
+        }
+        const repo = new TaskRepository(db);
+        const task = await repo.findById(id);
+        if (
+          !task ||
+          task.session_id !== scope.sessionId ||
+          task.created_by !== params.user?.user_id ||
+          !isLiveMcpTaskStatus(task.status)
+        ) {
+          throw new Conflict('MCP refresh result requires the exact live Task and principal');
+        }
+        const settlement = await repo.settleMCPReprojection(id, {
+          sessionId: scope.sessionId as SessionID,
+          principalUserId: params.user.user_id,
+          requestId: data.request_id,
+          expectedGeneration: data.expected_generation,
+          ok: data.ok,
+          failure: data.failure,
+        });
+        if (settlement.outcome !== 'settled') {
+          throw new Conflict('MCP refresh result no longer matches the active reprojection');
+        }
+        const updated = settlement.task;
+        if (!isLiveMcpTaskStatus(updated.status)) {
+          throw new Conflict('MCP refresh result requires the exact live Task and principal');
+        }
+        emitServiceEvent(app, {
+          path: 'tasks',
+          event: 'patched',
+          data: updated,
+          id: updated.task_id,
+          params,
+        });
+        return { ok: true };
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: custom route service
+    } as any,
+    { create: { role: ROLES.MEMBER, action: 'report live MCP refresh result' } },
+    requireAuth
+  );
+
+  registerAuthenticatedRoute(
+    app,
+    '/tasks/:id/mcp-reconnect',
+    {
+      async create(data: { generation?: unknown }, params: RouteParams) {
+        const id = params.route?.id;
+        if (!id) throw new BadRequest('Task ID required');
+        await authorizeMcpReconnectRoute({ id, params, tasksService });
+        const task = await new TaskRepository(db).findById(id);
+        if (!task) throw new NotFound(`Task not found: ${id}`);
+        const session = await sessionsRepository.findById(task.session_id);
+        if (!session) throw new NotFound(`Session not found: ${task.session_id}`);
+        const forViewer = (recovery: MCPRuntimeRecovery) =>
+          projectMcpReconnectRecoveryForViewer({ recovery, task, session, params });
+        const current = task.metadata?.mcp_recovery;
+        if (
+          typeof data?.generation !== 'number' ||
+          !current ||
+          current.generation !== data.generation
+        ) {
+          throw new Conflict('MCP recovery state changed; reload before reconnecting');
+        }
+        if (!isLiveMcpTaskStatus(task.status)) {
+          throw new Conflict('Only the current live Task can reconnect MCP');
+        }
+        const mode = await getMCPEgressGatewayMode(db);
+        if (mode !== 'compatibility' && mode !== 'enforced') {
+          return forViewer(
+            (await degradeTaskMcpRecoveryForDirectMode(task, session, params)) ?? {
+              ...current,
+              action: 'retry_next_turn' as const,
+              message:
+                'MCP gateway mediation is not active. Current direct-mode MCP configuration applies on the next turn; this conversation is unchanged.',
+            }
+          );
+        }
+        const provider = mcpRuntimeProviderCapability(session.agentic_tool);
+        if (!provider.transport_reload) {
+          return forViewer({
+            ...current,
+            action: 'retry_next_turn' as const,
+            message:
+              'This provider cannot rebuild MCP transport during a turn. The next turn will use current MCP authority without changing the conversation handle.',
+          });
+        }
+        const now = new Date();
+        const pendingIsCurrent =
+          current.status === 'refresh_requested' &&
+          current.request_id &&
+          current.refresh_deadline_at &&
+          new Date(current.refresh_deadline_at).getTime() > now.getTime();
+        const requestId = pendingIsCurrent ? current.request_id! : randomUUID();
+        const updated = await new TaskRepository(db).recordMCPRecovery(
+          task.task_id,
+          (lockedCurrent, lockedTask) => {
+            if (
+              !lockedCurrent ||
+              lockedCurrent.generation !== data.generation ||
+              !isLiveMcpTaskStatus(lockedTask.status)
+            ) {
+              return null;
+            }
+            const lockedPendingIsCurrent =
+              lockedCurrent.status === 'refresh_requested' &&
+              lockedCurrent.request_id === requestId &&
+              lockedCurrent.refresh_deadline_at &&
+              new Date(lockedCurrent.refresh_deadline_at).getTime() > Date.now();
+            if (lockedPendingIsCurrent) {
+              return lockedCurrent;
+            }
+            return {
+              ...lockedCurrent,
+              generation: lockedCurrent.generation + 1,
+              status: 'refresh_requested',
+              action: 'reconnect_mcp',
+              request_id: requestId,
+              observed_at: now.toISOString(),
+              refresh_deadline_at: new Date(
+                now.getTime() + MCP_REFRESH_REQUEST_TIMEOUT_MS
+              ).toISOString(),
+            };
+          }
+        );
+        const recovery = updated.metadata?.mcp_recovery;
+        if (
+          !isLiveMcpTaskStatus(updated.status) ||
+          !recovery ||
+          recovery.request_id !== requestId
+        ) {
+          throw new Conflict('MCP recovery state changed; reload before reconnecting');
+        }
+        emitServiceEvent(app, {
+          path: 'tasks',
+          event: 'patched',
+          data: updated,
+          id: task.task_id,
+          params,
+        });
+        emitServiceEvent(app, {
+          path: 'tasks',
+          event: 'mcp_refresh_requested',
+          data: {
+            task_id: task.task_id,
+            session_id: task.session_id,
+            request_id: requestId,
+            generation: recovery.generation,
+            reason: 'user_reconnect',
+          },
+          id: task.task_id,
+          params,
+        });
+        return forViewer(recovery);
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: custom route service
+    } as any,
+    { create: { role: ROLES.MEMBER, action: 'request live MCP reconnect' } },
     requireAuth
   );
 
@@ -5629,7 +6817,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                   reason: eligibility.reason,
                   recovery:
                     eligibility.reason === 'approval_not_mediated'
-                      ? 'Change ask rules to allow/deny, or wait for task-bound approval receipts.'
+                      ? 'Change ask rules to allow or deny. Interactive ask is not mediated in compatibility or enforced mode.'
                       : eligibility.reason === 'template_configuration'
                         ? 'Use only static user.env.KEY references with balanced supported helpers; relative, lookup, and scoped templates are excluded.'
                         : 'Configure bounded Streamable HTTP; stdio, legacy SSE, and WebSocket are unavailable in mediated modes.',
@@ -5667,6 +6855,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             'unbounded-streaming-response',
             'servers-requiring-ask-approval',
           ],
+          provider_capabilities: MCP_RUNTIME_PROVIDER_CAPABILITIES,
           in_flight_requests: runtime.activeRequests,
           provider_in_flight_requests: runtime.providerInFlightRequests,
           reserved_requests: runtime.reservedRequests,
@@ -5726,6 +6915,14 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             );
           },
         });
+        if (
+          (currentMode === 'compatibility' || currentMode === 'enforced') &&
+          (nextMode === 'off' || nextMode === 'observe')
+        ) {
+          scheduleMcpRuntimeHint(db, tenantId, 'rollout_direct_mode', () =>
+            degradeActiveMcpRecoveryForDirectMode(params)
+          );
+        }
         return { mode: nextMode };
       },
       // biome-ignore lint/suspicious/noExplicitAny: custom Feathers route method shape
@@ -5943,10 +7140,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           throw new Forbidden('Session initialization caller changed');
         }
         const session = await inCurrentTenantDatabaseScope(async () => {
-          await requireSessionScopedConfigOwnerOrAdmin(id, params);
-          const current = await sessionsService.get(id, { provider: undefined });
-          if (!current) throw new NotFound(`Session not found: ${id}`);
-          return current as Session;
+          return authorizeAndLoadSessionForMcpConfig(id, params);
         });
         let configuredMcpServerIds: MCPServerID[] | undefined;
         let configuredEnvVarNames: string[] | undefined;

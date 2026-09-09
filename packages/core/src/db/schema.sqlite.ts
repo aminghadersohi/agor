@@ -16,6 +16,7 @@ import type {
   PermissionMode,
   SandpackConfig,
   Session,
+  SessionReminder,
   Task,
   UserExternalIdentity,
   ZoneLayoutPolicy,
@@ -365,6 +366,9 @@ export const tasks = sqliteTable(
     // User attribution
     created_by: text('created_by', { length: 36 }).notNull(),
 
+    // Indexed due-work projection for bounded Slack MCP recovery repair.
+    mcp_slack_recovery_due_at: t.timestamp('mcp_slack_recovery_due_at'),
+
     data: t
       .json<unknown>('data')
       .$type<{
@@ -418,6 +422,9 @@ export const tasks = sqliteTable(
     sessionTaskIdIdx: index('tasks_session_task_id_idx').on(table.session_id, table.task_id),
     statusIdx: index('tasks_status_idx').on(table.status),
     createdIdx: index('tasks_created_idx').on(table.created_at),
+    mcpSlackRecoveryDueIdx: index('tasks_mcp_slack_recovery_due_idx')
+      .on(table.mcp_slack_recovery_due_at, table.task_id)
+      .where(sql`${table.mcp_slack_recovery_due_at} IS NOT NULL`),
     queueIdx: index('tasks_queue_idx').on(table.session_id, table.status, table.queue_position),
     runtimeDispatchIdx: index('tasks_runtime_dispatch_idx')
       .on(table.started_at, table.task_id)
@@ -443,6 +450,86 @@ export const tasks = sqliteTable(
     queueScanIdx: index('tasks_queue_scan_idx')
       .on(table.session_id, table.created_at)
       .where(sql`${table.status} = 'queued'`),
+  })
+);
+
+/** Private, durable working memory scoped to one Session. */
+export const sessionMemories = sqliteTable(
+  'session_memories',
+  {
+    memory_id: text('memory_id', { length: 36 }).primaryKey(),
+    session_id: text('session_id', { length: 36 })
+      .notNull()
+      .references(() => sessions.session_id, { onDelete: 'cascade' }),
+    title: text('title'),
+    text: text('text').notNull(),
+    tags: t.json<string[]>('tags').notNull(),
+    archived: t.bool('archived').notNull().default(false),
+    created_by: text('created_by', { length: 36 })
+      .notNull()
+      .references(() => users.user_id),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+    revision: integer('revision').notNull().default(1),
+  },
+  (table) => ({
+    sessionStateUpdatedIdx: index('session_memories_session_state_updated_idx').on(
+      table.session_id,
+      table.archived,
+      table.updated_at,
+      table.memory_id
+    ),
+  })
+);
+
+/** One-shot prompts which resume the exact owning Session when due. */
+export const sessionReminders = sqliteTable(
+  'session_reminders',
+  {
+    reminder_id: text('reminder_id', { length: 36 }).primaryKey(),
+    session_id: text('session_id', { length: 36 })
+      .notNull()
+      .references(() => sessions.session_id, { onDelete: 'cascade' }),
+    text: text('text').notNull(),
+    due_at: t.timestamp('due_at').notNull(),
+    display_timezone: text('display_timezone').notNull(),
+    status: text('status', {
+      enum: ['scheduled', 'claimed', 'queued', 'cancelled', 'blocked'],
+    })
+      .notNull()
+      .default('scheduled'),
+    created_by: text('created_by', { length: 36 })
+      .notNull()
+      .references(() => users.user_id),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+    revision: integer('revision').notNull().default(1),
+    claim_token: text('claim_token'),
+    claimed_at: t.timestamp('claimed_at'),
+    claim_expires_at: t.timestamp('claim_expires_at'),
+    attempt_count: integer('attempt_count').notNull().default(0),
+    queued_at: t.timestamp('queued_at'),
+    // Keep immutable queued provenance. Session deletion removes both rows;
+    // deleting the referenced Task alone must not silently erase attribution.
+    task_id: text('task_id', { length: 36 }).references(() => tasks.task_id),
+    failure_code: text('failure_code').$type<SessionReminder['failure_code']>(),
+  },
+  (table) => ({
+    sessionStatusDueIdx: index('session_reminders_session_status_due_idx').on(
+      table.session_id,
+      table.status,
+      table.due_at,
+      table.reminder_id
+    ),
+    dueClaimIdx: index('session_reminders_due_claim_idx').on(
+      table.status,
+      table.due_at,
+      table.claim_expires_at,
+      table.reminder_id
+    ),
+    taskUnique: uniqueIndex('session_reminders_task_unique')
+      .on(table.task_id)
+      .where(sql`${table.task_id} IS NOT NULL`),
   })
 );
 
@@ -3285,6 +3372,10 @@ export type MCPServerRow = typeof mcpServers.$inferSelect;
 export type MCPServerInsert = typeof mcpServers.$inferInsert;
 export type SessionMCPServerRow = typeof sessionMcpServers.$inferSelect;
 export type SessionMCPServerInsert = typeof sessionMcpServers.$inferInsert;
+export type SessionMemoryRow = typeof sessionMemories.$inferSelect;
+export type SessionMemoryInsert = typeof sessionMemories.$inferInsert;
+export type SessionReminderRow = typeof sessionReminders.$inferSelect;
+export type SessionReminderInsert = typeof sessionReminders.$inferInsert;
 export type SessionEnvSelectionRow = typeof sessionEnvSelections.$inferSelect;
 export type SessionEnvSelectionInsert = typeof sessionEnvSelections.$inferInsert;
 export type UserMCPOAuthTokenRow = typeof userMcpOauthTokens.$inferSelect;
@@ -3357,6 +3448,23 @@ export const sessionsRelations = relations(sessions, ({ one, many }) => ({
   }),
   outboundRelationships: many(sessionRelationships, { relationName: 'relationshipSource' }),
   inboundRelationships: many(sessionRelationships, { relationName: 'relationshipTarget' }),
+  memories: many(sessionMemories),
+  reminders: many(sessionReminders),
+}));
+
+export const sessionMemoriesRelations = relations(sessionMemories, ({ one }) => ({
+  session: one(sessions, {
+    fields: [sessionMemories.session_id],
+    references: [sessions.session_id],
+  }),
+}));
+
+export const sessionRemindersRelations = relations(sessionReminders, ({ one }) => ({
+  session: one(sessions, {
+    fields: [sessionReminders.session_id],
+    references: [sessions.session_id],
+  }),
+  task: one(tasks, { fields: [sessionReminders.task_id], references: [tasks.task_id] }),
 }));
 
 export const sessionRelationshipsRelations = relations(sessionRelationships, ({ one }) => ({

@@ -16,6 +16,7 @@ import type { AgenticToolName } from '../types';
 import { normalizeHttpBaseUrl } from '../utils/url';
 import { ensureAgorHome, ensureAgorHomeSync, getAgorHome, getConfigPath } from './agor-home';
 import { getDefaultAnalyticsConfig } from './analytics-defaults.js';
+import { validateAnalyticsHeaders, validateAnalyticsMetadata } from './analytics-validation.js';
 import { DAEMON, ENVIRONMENT, MCP_TOKEN } from './constants';
 import { validateRedisKeyPrefix, validateRedisUrl } from './deployment';
 import {
@@ -1053,9 +1054,10 @@ function validateConfig(config: AgorConfig): void {
   only(legacyConfig.branches, 'branches', RETIRED_CONFIG_KEYS.branches);
   only(config.teammates, 'teammates', ['framework_repo_url']);
   only(config.paths, 'paths', ['data_home']);
-  only(config.analytics, 'analytics', ['enabled', 'client', 'filters', 'plugins']);
+  only(config.analytics, 'analytics', ['enabled', 'client', 'extras', 'filters', 'plugins']);
   only(config.analytics?.client, 'analytics.client', ['app', 'version', 'debug']);
   only(config.analytics?.filters, 'analytics.filters', ['exclude_events']);
+  if (config.analytics) validateAnalyticsMetadata(config.analytics);
   for (const [index, plugin] of (config.analytics?.plugins ?? []).entries()) {
     only(plugin, `analytics.plugins[${index}]`, ['type', 'enabled', 'options']);
     switch (plugin.type) {
@@ -1069,7 +1071,9 @@ function validateConfig(config: AgorConfig): void {
           'max_batch_size',
           'timeout_ms',
           'headers',
+          'headers_from_env',
         ]);
+        validateAnalyticsHeaders(plugin.options);
         break;
       default: {
         const unsupported: never = plugin;
@@ -1704,12 +1708,17 @@ export function resolveEffectiveConfig(
  * selected deployment contract. Call this on the resolved effective config so
  * environment-derived settings are covered as well as YAML settings.
  */
-export function assertValidEffectiveExecutionConfig(config: AgorConfig): void {
+export function assertValidEffectiveExecutionConfig(
+  config: AgorConfig,
+  options: { deferPowerManagementActivationValidation?: boolean } = {}
+): void {
   const execution = config.execution;
 
   if (!execution) return;
 
-  assertPowerManagementActivationSupported(config);
+  if (!options.deferPowerManagementActivationValidation) {
+    assertPowerManagementActivationSupported(config);
+  }
 
   const response = resolveExecutorResponseConfig(execution.executor_response);
 
