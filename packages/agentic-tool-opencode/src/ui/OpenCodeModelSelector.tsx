@@ -290,13 +290,13 @@ export const OpenCodeModelSelector: React.FC<OpenCodeModelSelectorProps> = ({
 
   const selectedCatalogProvider = catalog?.providers.find((entry) => entry.id === provider);
   const providerOptions =
-    (availabilityResolved ? catalog?.providers : undefined)
-      ?.filter((entry) => entry.availableForSelection)
-      .map((entry) => ({
-        value: entry.id,
-        label: entry.name,
-        searchText: `${entry.name} ${entry.id}`.toLowerCase(),
-      })) ?? [];
+    (availabilityResolved ? catalog?.providers : undefined)?.map((entry) => ({
+      value: entry.id,
+      label: entry.availableForSelection ? entry.name : `${entry.name} (unavailable)`,
+      disabled: !entry.availableForSelection,
+      title: entry.availabilityMessage,
+      searchText: `${entry.name} ${entry.id}`.toLowerCase(),
+    })) ?? [];
   const modelOptions =
     availabilityResolved && selectedCatalogProvider?.availableForSelection
       ? selectedCatalogProvider.models.map((candidate) => ({
@@ -386,7 +386,7 @@ export const OpenCodeModelSelector: React.FC<OpenCodeModelSelectorProps> = ({
         <Alert
           type="warning"
           showIcon
-          title="Could not load configured OpenCode providers"
+          title="Could not refresh OpenCode provider availability"
           description="The stored selection was not changed. Retry or enter an exact provider/model pair manually."
           action={
             <Button size="small" loading={loading} onClick={() => void refresh()}>
@@ -457,7 +457,10 @@ export const OpenCodeModelSelector: React.FC<OpenCodeModelSelectorProps> = ({
           showIcon
           icon={<WarningOutlined />}
           title={`${value.provider}/${value.model} is not currently available`}
-          description="The stored pair is preserved. Connect the provider, choose an available model, or edit the exact IDs below."
+          description={
+            selectedCatalogProvider?.availabilityMessage ??
+            'The stored pair is preserved. Connect the provider, choose an available model, or edit the exact IDs below.'
+          }
         />
       )}
 

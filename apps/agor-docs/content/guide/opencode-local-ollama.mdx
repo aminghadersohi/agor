@@ -53,3 +53,11 @@ reports a conflict instead of silently overwriting either definition.
 
 Cloud Codex is unaffected: the preset does not set `OPENAI_BASE_URL`, alter
 Codex settings, or replace any cloud provider.
+
+Model selection loads saved OpenCode credential presence and this local preset
+as independent, bounded sources. If one source is unavailable, Agor keeps the
+server-free cloud catalog and every stored exact provider/model pair intact,
+shows a provider-scoped status, and leaves exact manual entry available. A
+discovery result is advisory: session startup still checks the pinned OpenCode
+binary/version and validates the exact provider, model, and capabilities in the
+invocation-scoped configuration before running a prompt.
