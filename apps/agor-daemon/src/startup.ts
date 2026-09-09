@@ -42,6 +42,7 @@ import { KnowledgeEmbeddingIndexer } from './services/knowledge-embedding-indexe
 import { SchedulerService } from './services/scheduler.js';
 import { SessionAutoArchiveWorker } from './services/session-auto-archive-worker.js';
 import { SessionQueueWorker } from './services/session-queue-worker.js';
+import { SessionReminderWorker } from './services/session-reminder-worker.js';
 import { TaskRuntimeReconciler } from './services/task-runtime-reconciler.js';
 import type { TerminalsService } from './services/terminals.js';
 import { appendSystemMessage } from './utils/append-system-message.js';
@@ -837,6 +838,14 @@ export async function startup(ctx: StartupContext): Promise<void> {
   });
   sessionAutoArchiveWorker.start();
 
+  // One-shot Session reminders reuse the ordinary durable Task queue. Every
+  // replica may discover due rows; reminder claim CAS + stable Task IDs fence
+  // concurrent and restart delivery.
+  const sessionReminderWorker = new SessionReminderWorker(db, app, {
+    tenantId: queueMultiTenancy.mode === 'static' ? queueMultiTenancy.static_tenant_id : undefined,
+  });
+  sessionReminderWorker.start();
+
   // 7. Start scheduler service (background worker)
   const schedulerMultiTenancy = resolveMultiTenancyConfig(config);
   const schedulerService = new SchedulerService(db, app, {
@@ -937,6 +946,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
       // still safe; stop only prevents the next local scan.
       sessionQueueWorker?.stop();
       sessionAutoArchiveWorker?.stop();
+      sessionReminderWorker?.stop();
 
       if (shouldContainLocalExecutorsOnShutdown(ctx.taskRuntimePolicy)) {
         // Preserve the historical standalone shutdown contract.

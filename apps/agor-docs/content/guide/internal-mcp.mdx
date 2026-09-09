@@ -6,6 +6,15 @@ heroImage: '/mcp_self_aware.png'
 
 # Agor MCP Server
 
+## Session self-memory and reminders
+
+The fork POC adds `agor_session_memory_create/list/search/update/archive` and
+`agor_session_reminders_create/list/update/cancel`. These tools are deliberately
+self-scoped: their schemas contain no target Session ID, and the authenticated
+MCP invocation supplies Session, user, and tenant identity. See
+[Session memory and reminders](/guide/session-memory-reminders) for limits and
+delivery semantics.
+
 <div style={{ marginTop: '20px', marginBottom: '30px', display: 'flex', justifyContent: 'center' }}>
   <img
     src="/mcp_self_aware.png"

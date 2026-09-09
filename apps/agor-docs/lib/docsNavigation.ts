@@ -20,6 +20,7 @@ export const guideNavigation: Record<string, NavigationItem> = {
   'features-overview': 'Feature Map',
   branches: 'Branches',
   sessions: 'Sessions & Trees',
+  'session-memory-reminders': 'Session Memory & Reminders',
   boards: 'Boards & Zones',
   teammates: 'Teammates',
   assistants: { title: 'Assistants', display: 'hidden' },
