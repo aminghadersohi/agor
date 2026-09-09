@@ -185,6 +185,21 @@ export function assertPowerManagementActivationSupported(
   }
 }
 
+/** Whether read-only host observation is truthful for the V1 process-local topology. */
+export function isPowerManagementObservationSupported(
+  config: AgorConfig,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  return (
+    platform === 'darwin' &&
+    (config.deployment?.mode ?? 'standalone') === 'standalone' &&
+    (config.multi_tenancy?.mode ?? 'static') === 'static' &&
+    (config.database?.dialect ?? 'sqlite') === 'sqlite' &&
+    (config.execution?.unix_user_mode ?? 'simple') === 'simple' &&
+    !config.execution?.executor_command_template
+  );
+}
+
 /** Explicit, credential-free configuration projection for the admin UI and YAML drafts. */
 export function powerManagementSettingsFromResolved(
   config: ResolvedPowerManagementConfig

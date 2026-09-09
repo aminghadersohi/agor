@@ -35,7 +35,12 @@ export class PowerPolicyStateMachine {
     const now = this.clock.monotonicMs();
     this.handleClockDiscontinuity(now);
     this.lastNow = now;
-    if (this.config.mode === 'off') return null;
+    if (this.config.mode === 'off') {
+      // Policy Off still permits privacy-bounded, read-only provider monitoring on
+      // supported topologies. It never changes policy state or admission behavior.
+      if (observation.communication === 'ok') this.lastObservationAt = now;
+      return null;
+    }
 
     if (observation.communication !== 'ok') {
       this.criticalSamples = 0;
