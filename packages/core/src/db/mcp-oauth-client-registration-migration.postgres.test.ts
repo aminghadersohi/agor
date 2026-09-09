@@ -358,6 +358,14 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority_updated_by`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority`);
 
+      // This fixture rewinds the journal to the previous fork watermark. Keep
+      // the physical schema aligned with that watermark so the later Session
+      // memory/reminder migration is exercised as a real upgrade rather than
+      // replayed over objects it already created in the prior test.
+      await executeRaw(db, sql`DROP TABLE session_reminders, session_memories`);
+      await executeRaw(db, sql`DROP INDEX sessions_tenant_session_id_unique`);
+      await executeRaw(db, sql`DROP INDEX tasks_tenant_task_id_unique`);
+
       // Reproduce the previous reviewed head's timestamp-only final watermark.
       // Its authority schema is identical; the rebased bootstrap must not try
       // to CREATE it again or discard its rows before exact reconciliation.

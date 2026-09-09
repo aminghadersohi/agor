@@ -412,7 +412,7 @@ const CANONICAL_TENANT_POLICY_EXPRESSION =
 const STRICT_TENANT_POLICY_EXPRESSION =
   "tenant_id=nullif(current_setting('agor.tenant_id',true),'')";
 const SESSION_REMINDER_TENANT_POLICY_EXPRESSION =
-  "coalesce(current_setting('agor.system_scope',true),'')=''andtenant_id=coalesce(nullif(current_setting('agor.tenant_id',true),''),'default')";
+  "(coalesce(current_setting('agor.system_scope',true),'')='')and(tenant_id=coalesce(nullif(current_setting('agor.tenant_id',true),''),'default'))";
 // The pending OAuth table also exposes two narrow transaction-local system
 // capabilities for an unauthenticated provider callback and bounded cleanup.
 // Its ordinary tenant policy must be disabled while either capability is
