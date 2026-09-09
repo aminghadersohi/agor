@@ -23,6 +23,7 @@ import {
   OPENCODE_OLLAMA_DEFAULT_ENDPOINT,
   OPENCODE_OLLAMA_PROVIDER_ID,
 } from '@agor/core/types';
+import type { AuthenticatedOpenCodeSubjectContext } from './credential-namespace.js';
 import { resolveAuthenticatedOpenCodeSubjectContext } from './credential-namespace.js';
 
 const REQUEST_TIMEOUT_MS = 3_000;
@@ -382,10 +383,23 @@ export async function discoverOpenCodeOllamaForSubject(input: {
     input.config,
     input.params
   );
+  return discoverOpenCodeOllamaForContext({
+    db: input.db,
+    context,
+    fetch: input.fetch,
+  });
+}
+
+/** Reuses a caller context already resolved at the authenticated tenant boundary. */
+export async function discoverOpenCodeOllamaForContext(input: {
+  db: TenantScopeAwareDatabase;
+  context: AuthenticatedOpenCodeSubjectContext;
+  fetch?: Fetch;
+}): Promise<OpenCodeOllamaDiscovery> {
   const configuration = await readUserConfiguration(
     input.db,
-    context.tenantId,
-    context.subjectUserId
+    input.context.tenantId,
+    input.context.subjectUserId
   );
   return probeOpenCodeOllama({ configuration, fetch: input.fetch });
 }
