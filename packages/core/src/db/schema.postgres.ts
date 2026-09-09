@@ -350,7 +350,9 @@ export const tasks = pgTable(
   {
     tenant_id: text('tenant_id').notNull().default('default'),
     task_id: varchar('task_id', { length: 36 }).primaryKey(),
-    session_id: varchar('session_id', { length: 36 }).notNull(),
+    session_id: varchar('session_id', { length: 36 })
+      .notNull()
+      .references(() => sessions.session_id, { onDelete: 'cascade' }),
     created_at: t.timestamp('created_at').notNull(),
     started_at: t.timestamp('started_at'),
     executor_connected_at: t.timestamp('executor_connected_at'),
