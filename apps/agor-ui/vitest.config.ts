@@ -26,8 +26,9 @@ export default defineConfig({
     // jsdom can't model.
     exclude: [...configDefaults.exclude, 'src/utils/theme.test.ts', 'src/**/*.browser.test.tsx'],
     // Ant Design Form / Select first-mount cost (CSS parse + JSDOM
-    // getComputedStyle stubs) blows past vitest's 5s default on CI cold
-    // start, even though the same test runs in <300ms warm. Bump to 15s.
-    testTimeout: 15_000,
+    // getComputedStyle stubs) can blow past short defaults on a saturated CI
+    // shard, even though the same test runs in <300ms warm. Keep enough room
+    // for cold Ant Design confirmation portals without weakening assertions.
+    testTimeout: 30_000,
   },
 });

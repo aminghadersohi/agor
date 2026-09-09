@@ -65,7 +65,7 @@ describe('buildTenantInsertOrder', () => {
 describe('tenantPortabilityForeignKeys', () => {
   it('freezes the exact schema-derived movable FK set', () => {
     const foreignKeys = tenantPortabilityForeignKeys();
-    expect(foreignKeys).toHaveLength(111);
+    expect(foreignKeys).toHaveLength(116);
     expect(Object.isFrozen(foreignKeys)).toBe(true);
     const structuralKeys = foreignKeys.map((foreignKey) =>
       [
@@ -81,6 +81,25 @@ describe('tenantPortabilityForeignKeys', () => {
       expect(Object.isFrozen(foreignKey.childColumns)).toBe(true);
       expect(Object.isFrozen(foreignKey.parentColumns)).toBe(true);
     }
+  });
+
+  it('moves Session memory and reminders with their owning Session', () => {
+    expect(tenantPortabilityForeignKeys()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          childTable: 'session_memories',
+          childColumns: ['tenant_id', 'session_id'],
+          parentTable: 'sessions',
+          onDelete: 'cascade',
+        }),
+        expect.objectContaining({
+          childTable: 'session_reminders',
+          childColumns: ['tenant_id', 'session_id'],
+          parentTable: 'sessions',
+          onDelete: 'cascade',
+        }),
+      ])
+    );
   });
 
   it('moves workflow definitions and audit history with their board', () => {

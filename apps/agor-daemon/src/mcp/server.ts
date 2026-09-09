@@ -55,6 +55,7 @@ import { registerMessageTools } from './tools/messages.js';
 import { registerRepoTools } from './tools/repos.js';
 import { registerScheduleTools } from './tools/schedules.js';
 import { registerSearchTools } from './tools/search.js';
+import { registerSessionMemoryTools } from './tools/session-memory.js';
 import { registerSessionTools } from './tools/sessions.js';
 import { registerTaskTools } from './tools/tasks.js';
 import { registerUserTools } from './tools/users.js';
@@ -217,6 +218,7 @@ const DOMAIN_TOOL_REGISTRARS: DomainToolRegistrar[] = [
     domain: 'sessions',
     register: (server, ctx) => {
       registerSessionTools(server, ctx);
+      registerSessionMemoryTools(server, ctx);
       registerTaskTools(server, ctx);
       registerMessageTools(server, ctx);
     },

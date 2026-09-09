@@ -2316,6 +2316,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
            * as the scheduler. External callers may not set this field.
            */
           idempotencyTaskId?: UUID;
+          /** Internal producer guard: reject archived Sessions instead of reviving them. */
+          requireActiveSession?: boolean;
         },
         params: RouteParams
       ) {
@@ -2334,6 +2336,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         }
         if (data.metadata !== undefined && params.provider) {
           throw new Forbidden('Task metadata is internal-only');
+        }
+        if (data.requireActiveSession !== undefined && params.provider) {
+          throw new Forbidden('requireActiveSession is internal-only');
         }
         const promptTenantId = getCurrentTenantId();
         if (!promptTenantId) throw new Error('Missing active tenant context for prompt admission');
@@ -2455,6 +2460,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         // the Session can intentionally appear as a root until they are
         // restored separately.
         if (session.archived) {
+          if (data.requireActiveSession) {
+            throw new Conflict('Cannot deliver to an archived Session');
+          }
           console.log(
             `📦 [Prompt] Auto-unarchiving session ${shortId(id)} (was archived: ${session.archived_reason || 'unknown reason'})`
           );
@@ -2546,6 +2554,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                   }
                 }
                 const admissionSession = (await sessionsService.get(id, params)) as Session;
+                if (data.requireActiveSession && admissionSession.archived) {
+                  throw new Conflict('Cannot deliver to an archived Session');
+                }
                 await assertCurrentPromptAuthority(operationDb, admissionSession);
                 return new TaskRepository(operationDb).createPending({
                   task_id: compactionRequestId,
