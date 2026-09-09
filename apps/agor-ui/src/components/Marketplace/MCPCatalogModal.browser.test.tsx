@@ -105,7 +105,13 @@ describe('MCP Catalog real Chromium flows', () => {
     const card = await screen.findByRole('button', { name: 'Open DeepWiki' });
     await userEvent.click(card);
     const drawer = await screen.findByRole('dialog', { name: /DeepWiki/ });
-    await userEvent.click(within(drawer).getByRole('checkbox', { name: /I understand/ }));
+    // The drawer can still be translating when its portal becomes queryable.
+    // Give consent through native keyboard input and prove the state changed
+    // before testing the connect/handoff contract.
+    const consent = within(drawer).getByRole('checkbox', { name: /I understand/ });
+    act(() => consent.focus());
+    await userEvent.keyboard(' ');
+    await waitFor(() => expect(consent).toBeChecked());
     const connect = within(drawer).getByRole('button', { name: /Check & connect/ });
     await waitFor(() => expect(connect).toBeEnabled());
     await userEvent.click(connect);

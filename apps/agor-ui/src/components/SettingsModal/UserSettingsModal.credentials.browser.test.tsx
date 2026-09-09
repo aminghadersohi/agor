@@ -123,6 +123,9 @@ describe('Own settings persistence (real browser)', () => {
       );
     }
     render(<Harness />);
+    // Portal presence precedes visible modal layout; the pending-close test
+    // starts only once the settings surface is actually open.
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Claude Code' })).toBeVisible());
     fireEvent.click(await screen.findByRole('button', { name: /Clear$/ }));
     await waitFor(() => expect(patch).toHaveBeenCalledOnce());
     expect(screen.getByRole('button', { name: 'Done' })).toBeDisabled();
