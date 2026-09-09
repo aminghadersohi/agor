@@ -31,6 +31,7 @@ export type SystemDatabaseCapability =
   | 'task_queue_discovery'
   | 'task_runtime_discovery'
   | 'session_auto_archive_discovery'
+  | 'session_reminder_discovery'
   | 'executor_token_maintenance'
   | 'mcp_oauth_callback'
   | 'mcp_oauth_maintenance'

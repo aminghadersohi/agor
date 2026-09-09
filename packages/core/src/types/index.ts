@@ -33,6 +33,7 @@ export * from './report';
 export * from './schedule';
 export type { ClaudeCodePermissionMode, CodexPermissionMode, PermissionMode } from './session';
 export * from './session';
+export * from './session-memory';
 export * from './task';
 export * from './template';
 export * from './tenant';

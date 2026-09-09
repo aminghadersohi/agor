@@ -359,6 +359,16 @@ export interface TaskMetadata {
    */
   system_authored?: boolean;
   /**
+   * Immutable provenance for a one-shot Session reminder. Generic queued-prompt
+   * amendment/batching treats this as an internal semantic barrier.
+   */
+  session_reminder?: {
+    reminder_id: import('./id').SessionReminderID;
+    due_at: string;
+    created_at: string;
+    one_shot: true;
+  };
+  /**
    * For tasks queued by widget resolution, the widget message that fired
    * this prompt. Links the task back to the originating widget for audit.
    */

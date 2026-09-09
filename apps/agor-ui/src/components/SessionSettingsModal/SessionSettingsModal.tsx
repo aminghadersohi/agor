@@ -31,6 +31,7 @@ import {
 } from '@agor-live/client';
 import {
   ClockCircleOutlined,
+  DatabaseOutlined,
   DownOutlined,
   KeyOutlined,
   PoweroffOutlined,
@@ -58,6 +59,7 @@ import { ErrorBoundary } from '../ErrorBoundary';
 import { SessionEnvVarsSelector } from '../SessionEnvVarsSelector';
 import { SessionIdsList } from '../SessionIds';
 import { SessionMetadataForm } from '../SessionMetadataForm';
+import { SessionMemoryReminders } from './SessionMemoryReminders';
 import { SessionPowerPriorityControl } from './SessionPowerPriorityControl';
 
 export interface SessionSettingsModalProps {
@@ -402,6 +404,23 @@ export const SessionSettingsModal: React.FC<SessionSettingsModalProps> = ({
   }
 
   if (client) {
+    secondaryItems.push({
+      key: 'memory-reminders',
+      label: (
+        <Typography.Text strong>
+          <DatabaseOutlined style={{ marginRight: 8 }} />
+          Memory &amp; reminders
+        </Typography.Text>
+      ),
+      children: (
+        <SessionMemoryReminders
+          client={client}
+          sessionId={session.session_id}
+          sessionArchived={session.archived}
+        />
+      ),
+    });
+
     secondaryItems.push({
       key: 'power-priority',
       label: (

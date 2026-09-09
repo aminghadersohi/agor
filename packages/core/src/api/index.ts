@@ -73,7 +73,13 @@ import type {
   SdkHealthFailureInput,
   Session,
   SessionID,
+  SessionMemory,
+  SessionMemoryCreateData,
+  SessionMemoryPatchData,
   SessionPowerPriorityView,
+  SessionReminder,
+  SessionReminderCreateData,
+  SessionReminderPatchData,
   SessionUpdate,
   SetSessionPowerPriorityRequest,
   Task,
@@ -216,6 +222,24 @@ export interface TaskRunOptions extends TaskRunRequest {
   params?: Params;
 }
 
+export type SessionMemoriesService = Omit<AgorService<SessionMemory>, 'create' | 'patch'> & {
+  create(data: ClientInput<SessionMemoryCreateData>, params?: Params): Promise<SessionMemory>;
+  patch(
+    id: string,
+    data: ClientInput<SessionMemoryPatchData>,
+    params?: Params
+  ): Promise<SessionMemory>;
+};
+
+export type SessionRemindersService = Omit<AgorService<SessionReminder>, 'create' | 'patch'> & {
+  create(data: ClientInput<SessionReminderCreateData>, params?: Params): Promise<SessionReminder>;
+  patch(
+    id: string,
+    data: ClientInput<SessionReminderPatchData>,
+    params?: Params
+  ): Promise<SessionReminder>;
+};
+
 export interface TasksClientHelpers {
   /**
    * Trigger executor pickup for an already-created task. Pure-REST harnesses
@@ -324,6 +348,8 @@ export interface ServiceTypes {
   'repos/local': Repo;
   branches: Branch;
   schedules: Schedule;
+  'session-memories': SessionMemory;
+  'session-reminders': SessionReminder;
   'gateway-channels': GatewayChannel;
   users: User;
   groups: Group;
@@ -910,6 +936,8 @@ export interface AgorClient
   service(path: 'sessions'): SessionsService;
   service(path: 'tasks'): TasksService;
   service(path: 'messages'): MessagesService;
+  service(path: 'session-memories'): SessionMemoriesService;
+  service(path: 'session-reminders'): SessionRemindersService;
   service(path: 'board-comments'): BoardCommentsService;
   service(path: 'repos'): ReposService;
   service(path: 'repos/clone'): ReposCloneService;
