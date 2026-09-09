@@ -498,9 +498,9 @@ export const sessionReminders = sqliteTable(
     claim_expires_at: t.timestamp('claim_expires_at'),
     attempt_count: integer('attempt_count').notNull().default(0),
     queued_at: t.timestamp('queued_at'),
-    task_id: text('task_id', { length: 36 }).references(() => tasks.task_id, {
-      onDelete: 'set null',
-    }),
+    // Keep immutable queued provenance. Session deletion removes both rows;
+    // deleting the referenced Task alone must not silently erase attribution.
+    task_id: text('task_id', { length: 36 }).references(() => tasks.task_id),
     failure_code: text('failure_code').$type<SessionReminder['failure_code']>(),
   },
   (table) => ({

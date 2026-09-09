@@ -127,6 +127,10 @@ describe('SessionReminderRepository', () => {
         new Date()
       );
       expect(queued).toMatchObject({ status: 'queued', task_id: task.task_id, attempt_count: 1 });
+      await expect(new TaskRepository(db).delete(task.task_id)).rejects.toThrow();
+      await expect(
+        reminders.findPage({ session_id: ctx.first.session_id, limit: 10, skip: 0 })
+      ).resolves.toMatchObject({ data: [expect.objectContaining({ task_id: task.task_id })] });
       await expect(
         reminders.updateScheduledInSession(
           ctx.first.session_id,
