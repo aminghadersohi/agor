@@ -106,8 +106,11 @@ absent from this deployment list.
 
 ## UPS-aware dispatch admission (macOS V1)
 
-Power management is off by default. On a standalone macOS host, start with `observe`, verify the
-admin UPS indicator and monitoring workspace through several normal samples, and only then choose `enforce`:
+Power conservation is off by default. On a supported standalone macOS host, the privacy-filtered,
+read-only provider continues to report whether a UPS is detected and whether the host is on utility
+or battery power; **Off** means only that Agor does not gate Sessions or schedules. Start with
+`observe`, verify the admin power-source indicator and monitoring workspace through several normal
+samples, and only then choose `enforce`:
 
 ```yaml
 execution:
@@ -147,9 +150,12 @@ off` and restart; queued Tasks and Session priority metadata remain intact.
 
 ### Admin configuration and monitoring UI
 
-Admins can open **Settings → Admin → UPS Power**, or select the persistent **UPS** indicator in
-the app header. The indicator distinguishes Off, Online, Conserve, Critical, Recovery, and Error;
-Observe is explicitly labeled. Members and viewers cannot read host telemetry or open this pane.
+Admins can open **Settings → Admin → UPS Power**, or select the persistent power indicator in the
+app header. Provider facts and policy mode are always separate: the workspace reports **UPS
+detected**, **Utility power**, **Battery power**, **Provider unavailable**, **Provider stale**, or
+**Unsupported topology**, while Power conservation independently reports **Off**, **Observe**, or
+**Enforce**. Off never means that a UPS is disconnected. Members and viewers cannot read host
+telemetry or open this pane.
 
 The workspace shows the active mode and supported provider, normalized source, provider health,
 optional charge/runtime, freshness, reason, UTC timestamps, ordinary and Essential admission, and
@@ -166,8 +172,10 @@ operator-managed configuration without replacing unrelated execution settings, r
 and reopen the workspace to verify the active values. Reset restores the latest active configuration.
 No provider addresses, commands, device names, raw output, or credentials are exposed.
 
-The Essential Session selector lists authorized Sessions (with pagination, including archived
-Sessions) and identifies an existing Essential Session only if it is visible to the caller. It uses
+The Essential Session selector lists authorized Sessions, including archived Sessions, and
+identifies an existing Essential Session only if it is visible to the caller. The selector keeps
+server-side pages bounded at 50 records and shows its compact pager only when more than one page
+exists. It uses
 the existing Branch Manager-authorized priority API. Admin role alone does not grant foreign-branch
 access. Clear an existing Essential designation before choosing a replacement; the single-slot
 constraint remains atomic, and the UI never silently demotes an inaccessible Session.
