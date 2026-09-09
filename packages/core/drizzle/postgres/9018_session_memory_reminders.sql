@@ -61,16 +61,16 @@ ALTER TABLE "session_memories" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "session_memories" FORCE ROW LEVEL SECURITY;
 --> statement-breakpoint
 CREATE POLICY "tenant_isolation_session_memories" ON "session_memories"
-	USING (COALESCE(current_setting('agor.system_scope', true), '') = '' AND "tenant_id" = NULLIF(current_setting('agor.tenant_id', true), ''))
-	WITH CHECK (COALESCE(current_setting('agor.system_scope', true), '') = '' AND "tenant_id" = NULLIF(current_setting('agor.tenant_id', true), ''));
+	USING ("tenant_id" = COALESCE(NULLIF(current_setting('agor.tenant_id', true), ''), 'default'))
+	WITH CHECK ("tenant_id" = COALESCE(NULLIF(current_setting('agor.tenant_id', true), ''), 'default'));
 --> statement-breakpoint
 ALTER TABLE "session_reminders" ENABLE ROW LEVEL SECURITY;
 --> statement-breakpoint
 ALTER TABLE "session_reminders" FORCE ROW LEVEL SECURITY;
 --> statement-breakpoint
 CREATE POLICY "tenant_isolation_session_reminders" ON "session_reminders"
-	USING (COALESCE(current_setting('agor.system_scope', true), '') = '' AND "tenant_id" = NULLIF(current_setting('agor.tenant_id', true), ''))
-	WITH CHECK (COALESCE(current_setting('agor.system_scope', true), '') = '' AND "tenant_id" = NULLIF(current_setting('agor.tenant_id', true), ''));
+	USING (COALESCE(current_setting('agor.system_scope', true), '') = '' AND "tenant_id" = COALESCE(NULLIF(current_setting('agor.tenant_id', true), ''), 'default'))
+	WITH CHECK (COALESCE(current_setting('agor.system_scope', true), '') = '' AND "tenant_id" = COALESCE(NULLIF(current_setting('agor.tenant_id', true), ''), 'default'));
 --> statement-breakpoint
 -- System discovery exposes only overdue routing identities. Workers re-enter
 -- tenant scope before loading content, claiming, or dispatching.

@@ -93,7 +93,12 @@ describe.skipIf(!postgresUrl || !enabled)('Session memory/reminder RLS (PostgreS
           skip: 0,
         })
       ).resolves.toEqual({ total: 0, data: [] });
-      await expect(
+    });
+    // Let the tenant unit of work own the rejected transaction. Catching a
+    // constraint error inside its callback would leave PostgreSQL's current
+    // transaction aborted and obscure the intended assertion at COMMIT.
+    await expect(
+      runWithTenantDatabaseScope(db, tenantA, (scoped) =>
         insert(scoped, sessionMemories)
           .values({
             memory_id: generateId(),
@@ -107,8 +112,8 @@ describe.skipIf(!postgresUrl || !enabled)('Session memory/reminder RLS (PostgreS
             revision: 1,
           })
           .run()
-      ).rejects.toThrow();
-    });
+      )
+    ).rejects.toThrow();
   });
 
   it('system discovery returns only overdue routing refs and tenant CAS elects one claimant', async () => {

@@ -24,7 +24,7 @@ const oldHeadFixture = resolve(
   'test-fixtures/b0585d76/0100_mcp_oauth_client_registrations.sql'
 );
 const OLD_HEAD_WATERMARK = 1_788_292_800_000;
-const FINAL_INTEGRATION_WATERMARK = 1_788_800_000_004;
+const FINAL_INTEGRATION_WATERMARK = 1_788_800_000_005;
 const OLD_HEAD_MIGRATION_SHA256 =
   'f1e964942fd61182d564cf45dfcf5b13218b1eee242a3927a7fc9fba168fe7c5';
 
@@ -220,6 +220,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           '9015_mcp_oauth_client_registrations',
           '9016_oauth_authority_watermark_reconciliation',
           '9017_fork_migration_collision_repair',
+          '9018_session_memory_reminders',
         ],
         dbAheadOfBinary: false,
       });
@@ -376,6 +377,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           '9015_mcp_oauth_client_registrations',
           '9016_oauth_authority_watermark_reconciliation',
           '9017_fork_migration_collision_repair',
+          '9018_session_memory_reminders',
         ],
         dbAheadOfBinary: false,
       });
