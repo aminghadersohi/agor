@@ -44,6 +44,7 @@ export * from './repos';
 export * from './schedules';
 export * from './session-env-selections';
 export * from './session-mcp-servers';
+export * from './session-memory';
 export * from './session-relationships';
 export * from './sessions';
 export * from './tasks';

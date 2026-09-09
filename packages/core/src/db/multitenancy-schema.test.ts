@@ -68,6 +68,9 @@ function migrationTenantTables(): string[] {
   const zoneWorkflowMigration = readRepoFile(
     'packages/core/drizzle/postgres/0102_zone_workflow_transitions.sql'
   );
+  const sessionMemoryMigration = readRepoFile(
+    'packages/core/drizzle/postgres/9018_session_memory_reminders.sql'
+  );
   const retiredTables = retiredTenantTables();
   return [
     ...new Set(
@@ -88,6 +91,7 @@ function migrationTenantTables(): string[] {
         ...claudeOauthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...capabilityPoliciesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...zoneWorkflowMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...sessionMemoryMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
       ]
         .map((m) => m[1])
         .filter((table) => !retiredTables.has(table))
@@ -111,6 +115,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0100_claude_oauth_attempts.sql'),
     readRepoFile('packages/core/drizzle/postgres/0095_board_branch_capability_policies.sql'),
     readRepoFile('packages/core/drizzle/postgres/0102_zone_workflow_transitions.sql'),
+    readRepoFile('packages/core/drizzle/postgres/9018_session_memory_reminders.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
   return [
@@ -136,6 +141,29 @@ describe('Postgres multitenancy schema coverage', () => {
     const sqliteSchema = readRepoFile('packages/core/src/db/schema.sqlite.ts');
     expect(sqliteSchema).not.toContain('tenant_id');
     expect(sqliteSchema).not.toContain("tenant_id'");
+  });
+
+  it('limits global reminder discovery to overdue routing rows', () => {
+    const migration = readRepoFile(
+      'packages/core/drizzle/postgres/9018_session_memory_reminders.sql'
+    );
+    expect(migration).toContain('CREATE POLICY "session_reminder_discovery"');
+    expect(migration).toContain('FOR SELECT');
+    expect(migration).toContain("= 'session_reminder_discovery'");
+    expect(migration).toContain('"due_at" <= CURRENT_TIMESTAMP');
+    expect(migration).not.toMatch(/CREATE POLICY "session_reminder_discovery"[\s\S]*?WITH CHECK/);
+  });
+
+  it('binds Session-owned memory and reminders to tenant-matching parents under forced RLS', () => {
+    const migration = readRepoFile(
+      'packages/core/drizzle/postgres/9018_session_memory_reminders.sql'
+    );
+    for (const table of ['session_memories', 'session_reminders']) {
+      expect(migration).toContain(`ALTER TABLE "${table}" FORCE ROW LEVEL SECURITY`);
+      expect(migration).toContain(`CREATE POLICY "tenant_isolation_${table}"`);
+      expect(migration).toContain(`FOREIGN KEY ("tenant_id","session_id")`);
+    }
+    expect(migration.match(/DEFERRABLE INITIALLY IMMEDIATE/g)).toHaveLength(5);
   });
 
   it('limits cross-tenant gateway discovery to enabled rows and an explicit capability', () => {

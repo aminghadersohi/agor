@@ -297,6 +297,12 @@ import {
 } from './services/schedules.js';
 import { createSessionEnvSelectionsService } from './services/session-env-selections.js';
 import { createSessionMCPServersService } from './services/session-mcp-servers.js';
+import {
+  createSessionMemoriesService,
+  createSessionRemindersService,
+  SESSION_MEMORIES_SERVICE_TRANSPORT_METHODS,
+  SESSION_REMINDERS_SERVICE_TRANSPORT_METHODS,
+} from './services/session-memory.js';
 import { createSessionStreamsService } from './services/session-streams.js';
 import { createSessionsService } from './services/sessions.js';
 import {
@@ -536,6 +542,12 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
     //   - 'tool:start' / 'tool:complete' / 'thinking:chunk': forwarded from
     //      the executor for live tool/thinking visualization.
     events: [...TASKS_SERVICE_CUSTOM_EVENTS],
+  });
+  app.use('/session-memories', createSessionMemoriesService(db, app), {
+    methods: [...SESSION_MEMORIES_SERVICE_TRANSPORT_METHODS],
+  });
+  app.use('/session-reminders', createSessionRemindersService(db, app), {
+    methods: [...SESSION_REMINDERS_SERVICE_TRANSPORT_METHODS],
   });
   app.use('/leaderboard', createLeaderboardService(db));
   const deliveryRepository = new DiscordMessageDeliveryRepository(db);

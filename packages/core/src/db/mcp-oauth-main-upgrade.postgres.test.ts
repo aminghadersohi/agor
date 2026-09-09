@@ -52,7 +52,8 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
           '9015_mcp_oauth_client_registrations',
           '9016_oauth_authority_watermark_reconciliation',
           '9017_fork_migration_collision_repair',
-          '9018_mcp_slack_recovery_due',
+          '9018_session_memory_reminders',
+          '9019_mcp_slack_recovery_due',
         ],
         dbAheadOfBinary: false,
       });

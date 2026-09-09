@@ -109,6 +109,14 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'branch-or-session',
     why: 'useMessages renders the transcript from these; also carries streaming chunks and permission_resolved.',
   },
+  'session-memories': {
+    audience: 'branch-or-session',
+    why: 'The Session Memory & reminders panel converges create and CAS patch changes across authorized tabs.',
+  },
+  'session-reminders': {
+    audience: 'branch-or-session',
+    why: 'The Session Memory & reminders panel tracks edits, cancellation, dispatch claims, and terminal states.',
+  },
   'session-mcp-servers': {
     audience: 'branch-or-session',
     why: 'useAgorData tracks per-session MCP attachment.',

@@ -1,5 +1,11 @@
 import { createHash } from 'node:crypto';
-import type { GatewayInboundEventID, MessageID, SessionID, TaskID } from '@agor/core/types';
+import type {
+  GatewayInboundEventID,
+  MessageID,
+  SessionID,
+  SessionReminderID,
+  TaskID,
+} from '@agor/core/types';
 
 function stableTaskId(sourceId: string, domain: string, discriminator = ''): TaskID {
   const digest = createHash('sha256')
@@ -73,4 +79,9 @@ export function gatewayInboundTaskId(eventId: GatewayInboundEventID): TaskID {
 /** Stable first-Session identity if listener recovery repeats initial admission. */
 export function gatewayInboundSessionId(eventId: GatewayInboundEventID): SessionID {
   return stableTaskId(eventId, 'gateway_inbound_session') as unknown as SessionID;
+}
+
+/** One immutable queued prompt for one one-shot Session reminder. */
+export function sessionReminderTaskId(reminderId: SessionReminderID): TaskID {
+  return stableTaskId(reminderId, 'session_reminder');
 }
