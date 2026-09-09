@@ -16,6 +16,7 @@ import type {
   PermissionMode,
   SandpackConfig,
   Session,
+  SessionReminder,
   Task,
   UserExternalIdentity,
 } from '@agor/core/types';
@@ -238,6 +239,10 @@ export const sessions = pgTable(
   },
   (table) => ({
     tenantIdx: index('sessions_tenant_id_idx').on(table.tenant_id),
+    tenantIdentityUnique: uniqueIndex('sessions_tenant_session_id_unique').on(
+      table.tenant_id,
+      table.session_id
+    ),
     agenticToolPresetIdx: index('sessions_agentic_tool_preset_idx').on(
       table.agentic_tool_preset_id
     ),
@@ -345,9 +350,7 @@ export const tasks = pgTable(
   {
     tenant_id: text('tenant_id').notNull().default('default'),
     task_id: varchar('task_id', { length: 36 }).primaryKey(),
-    session_id: varchar('session_id', { length: 36 })
-      .notNull()
-      .references(() => sessions.session_id, { onDelete: 'cascade' }),
+    session_id: varchar('session_id', { length: 36 }).notNull(),
     created_at: t.timestamp('created_at').notNull(),
     started_at: t.timestamp('started_at'),
     executor_connected_at: t.timestamp('executor_connected_at'),
@@ -464,6 +467,114 @@ export const tasks = pgTable(
     queueScanIdx: index('tasks_queue_scan_idx')
       .on(table.tenant_id, table.session_id, table.created_at)
       .where(sql`${table.status} = 'queued'`),
+    tenantIdentityUnique: uniqueIndex('tasks_tenant_task_id_unique').on(
+      table.tenant_id,
+      table.task_id
+    ),
+  })
+);
+
+/** Private, durable working memory scoped to one Session. */
+export const sessionMemories = pgTable(
+  'session_memories',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    memory_id: varchar('memory_id', { length: 36 }).primaryKey(),
+    session_id: varchar('session_id', { length: 36 })
+      .notNull()
+      .references(() => sessions.session_id, { onDelete: 'cascade' }),
+    title: text('title'),
+    text: text('text').notNull(),
+    tags: t.json<string[]>('tags').notNull(),
+    archived: t.bool('archived').notNull().default(false),
+    created_by: varchar('created_by', { length: 36 }).notNull(),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+    revision: integer('revision').notNull().default(1),
+  },
+  (table) => ({
+    tenantIdx: index('session_memories_tenant_id_idx').on(table.tenant_id),
+    sessionStateUpdatedIdx: index('session_memories_session_state_updated_idx').on(
+      table.tenant_id,
+      table.session_id,
+      table.archived,
+      table.updated_at,
+      table.memory_id
+    ),
+    sessionFk: foreignKey({
+      columns: [table.tenant_id, table.session_id],
+      foreignColumns: [sessions.tenant_id, sessions.session_id],
+      name: 'session_memories_tenant_session_fk',
+    }).onDelete('cascade'),
+    creatorFk: foreignKey({
+      columns: [table.tenant_id, table.created_by],
+      foreignColumns: [users.tenant_id, users.user_id],
+      name: 'session_memories_tenant_creator_fk',
+    }),
+  })
+);
+
+/** One-shot prompts which resume the exact owning Session when due. */
+export const sessionReminders = pgTable(
+  'session_reminders',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    reminder_id: varchar('reminder_id', { length: 36 }).primaryKey(),
+    session_id: varchar('session_id', { length: 36 }).notNull(),
+    text: text('text').notNull(),
+    due_at: t.timestamp('due_at').notNull(),
+    display_timezone: text('display_timezone').notNull(),
+    status: text('status', {
+      enum: ['scheduled', 'claimed', 'queued', 'cancelled', 'blocked'],
+    })
+      .notNull()
+      .default('scheduled'),
+    created_by: varchar('created_by', { length: 36 }).notNull(),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+    revision: integer('revision').notNull().default(1),
+    claim_token: text('claim_token'),
+    claimed_at: t.timestamp('claimed_at'),
+    claim_expires_at: t.timestamp('claim_expires_at'),
+    attempt_count: integer('attempt_count').notNull().default(0),
+    queued_at: t.timestamp('queued_at'),
+    task_id: varchar('task_id', { length: 36 }),
+    failure_code: text('failure_code').$type<SessionReminder['failure_code']>(),
+  },
+  (table) => ({
+    tenantIdx: index('session_reminders_tenant_id_idx').on(table.tenant_id),
+    sessionStatusDueIdx: index('session_reminders_session_status_due_idx').on(
+      table.tenant_id,
+      table.session_id,
+      table.status,
+      table.due_at,
+      table.reminder_id
+    ),
+    dueClaimIdx: index('session_reminders_due_claim_idx').on(
+      table.status,
+      table.due_at,
+      table.claim_expires_at,
+      table.tenant_id,
+      table.reminder_id
+    ),
+    taskUnique: uniqueIndex('session_reminders_task_unique')
+      .on(table.tenant_id, table.task_id)
+      .where(sql`${table.task_id} IS NOT NULL`),
+    sessionFk: foreignKey({
+      columns: [table.tenant_id, table.session_id],
+      foreignColumns: [sessions.tenant_id, sessions.session_id],
+      name: 'session_reminders_tenant_session_fk',
+    }).onDelete('cascade'),
+    creatorFk: foreignKey({
+      columns: [table.tenant_id, table.created_by],
+      foreignColumns: [users.tenant_id, users.user_id],
+      name: 'session_reminders_tenant_creator_fk',
+    }),
+    taskFk: foreignKey({
+      columns: [table.tenant_id, table.task_id],
+      foreignColumns: [tasks.tenant_id, tasks.task_id],
+      name: 'session_reminders_tenant_task_fk',
+    }).onDelete('set null'),
   })
 );
 
@@ -3511,6 +3622,10 @@ export type MCPServerRow = typeof mcpServers.$inferSelect;
 export type MCPServerInsert = typeof mcpServers.$inferInsert;
 export type SessionMCPServerRow = typeof sessionMcpServers.$inferSelect;
 export type SessionMCPServerInsert = typeof sessionMcpServers.$inferInsert;
+export type SessionMemoryRow = typeof sessionMemories.$inferSelect;
+export type SessionMemoryInsert = typeof sessionMemories.$inferInsert;
+export type SessionReminderRow = typeof sessionReminders.$inferSelect;
+export type SessionReminderInsert = typeof sessionReminders.$inferInsert;
 export type SessionEnvSelectionRow = typeof sessionEnvSelections.$inferSelect;
 export type SessionEnvSelectionInsert = typeof sessionEnvSelections.$inferInsert;
 export type UserMCPOAuthTokenRow = typeof userMcpOauthTokens.$inferSelect;
@@ -3581,6 +3696,23 @@ export const sessionsRelations = relations(sessions, ({ one, many }) => ({
   }),
   outboundRelationships: many(sessionRelationships, { relationName: 'relationshipSource' }),
   inboundRelationships: many(sessionRelationships, { relationName: 'relationshipTarget' }),
+  memories: many(sessionMemories),
+  reminders: many(sessionReminders),
+}));
+
+export const sessionMemoriesRelations = relations(sessionMemories, ({ one }) => ({
+  session: one(sessions, {
+    fields: [sessionMemories.session_id],
+    references: [sessions.session_id],
+  }),
+}));
+
+export const sessionRemindersRelations = relations(sessionReminders, ({ one }) => ({
+  session: one(sessions, {
+    fields: [sessionReminders.session_id],
+    references: [sessions.session_id],
+  }),
+  task: one(tasks, { fields: [sessionReminders.task_id], references: [tasks.task_id] }),
 }));
 
 export const sessionRelationshipsRelations = relations(sessionRelationships, ({ one }) => ({

@@ -973,11 +973,11 @@ describe('MCP OAuth pending-flow migrations', () => {
 });
 
 describe('MCP OAuth client-registration migrations', () => {
-  it('does not advance SQLite schema history for PostgreSQL-only DCR authority', async () => {
+  it('keeps PostgreSQL-only DCR authority out of SQLite while accepting later portable migrations', async () => {
     const [, sqliteJournal] = await readJournals();
     expect(sqliteJournal.entries.at(-1)).toMatchObject({
-      idx: 106,
-      tag: '0106_session_power_priority',
+      idx: 107,
+      tag: '0107_session_memory_reminders',
     });
     expect(sqliteJournal.entries.some(({ tag }) => tag.includes('client_registrations'))).toBe(
       false
@@ -988,7 +988,6 @@ describe('MCP OAuth client-registration migrations', () => {
   it('follows current main and binds PostgreSQL authority to tenant/server UUID with forced RLS', async () => {
     const [postgresJournal] = await readJournals();
     expect(postgresJournal.entries.slice(-5)).toEqual([
-      expect.objectContaining({ idx: 103, tag: '0103_session_power_priority' }),
       expect.objectContaining({ idx: 104, tag: '0104_environment_command_discovery' }),
       expect.objectContaining({ idx: 9015, tag: '9015_mcp_oauth_client_registrations' }),
       expect.objectContaining({
@@ -996,6 +995,7 @@ describe('MCP OAuth client-registration migrations', () => {
         tag: '9016_oauth_authority_watermark_reconciliation',
       }),
       expect.objectContaining({ idx: 9017, tag: '9017_fork_migration_collision_repair' }),
+      expect.objectContaining({ idx: 9018, tag: '9018_session_memory_reminders' }),
     ]);
     expect(postgresJournal.entries.at(-1)!.when).toBeGreaterThan(
       postgresJournal.entries.at(-2)!.when
