@@ -10,6 +10,7 @@ import {
   SessionRepository,
   TaskRepository,
 } from '@agor/core/db';
+import type { DatadogTracer } from '@agor/core/tracing/datadog';
 import { SessionStatus } from '@agor/core/types';
 import { Server as SdkServer } from '@modelcontextprotocol/server';
 import type { Request, Response } from 'express';
@@ -274,8 +275,8 @@ describe('POST /mcp token source', () => {
   });
 
   it('attributes admission failures without recording the credential or arbitrary method', async () => {
-    const { resolveTracerModule } = await import('../tracing/feathers.js');
-    const tracingModule = await import('../tracing/feathers.js');
+    const { resolveTracerModule } = await import('../tracing/datadog.js');
+    const tracingModule = await import('../tracing/datadog.js');
     const calls: unknown[] = [];
     vi.spyOn(tracingModule, 'resolveTracerModule').mockReturnValue({
       trace(name, options, work) {
@@ -547,7 +548,7 @@ describe('POST /mcp with personal API keys', () => {
     'traces the registered tool with search=$search facade=$facade',
     async ({ search, facade }) => {
       await mockPersonalApiKeyUser();
-      const tracingModule = await import('../tracing/feathers.js');
+      const tracingModule = await import('../tracing/datadog.js');
       const calls: { name: string; resource?: string }[] = [];
       vi.spyOn(tracingModule, 'resolveTracerModule').mockReturnValue({
         trace(name, options, work) {
@@ -595,7 +596,6 @@ describe('POST /mcp with personal API keys', () => {
       );
       expect(calls).toEqual([
         { name: 'mcp.request', resource: 'tools/call' },
-        ...(facade ? [{ name: 'mcp.tool', resource: 'agor_execute_tool' }] : []),
         { name: 'mcp.tool', resource: 'agor_users_get_current' },
       ]);
     }
@@ -1569,6 +1569,14 @@ describe('POST /mcp with personal API keys', () => {
   });
 
   it('interoperates end-to-end with the v2 TypeScript client in modern auto-negotiation mode', async () => {
+    const tracingModule = await import('../tracing/datadog.js');
+    const trace = vi.fn<(name: string, options: Parameters<DatadogTracer['trace']>[1]) => void>();
+    vi.spyOn(tracingModule, 'resolveTracerModule').mockReturnValue({
+      trace(name, options, work) {
+        trace(name, options);
+        return work();
+      },
+    });
     await mockPersonalApiKeyUser();
     const getUser = vi.fn(async () => ({
       user_id: 'user-1',
@@ -1707,9 +1715,16 @@ describe('POST /mcp with personal API keys', () => {
           user_id: 'user-1',
         });
       },
-      { multi_tenancy: undefined },
+      { multi_tenancy: undefined, metrics: { apm: { trace_services: 'entrypoint' } } },
       /* toolSearchEnabled */ true
     );
+    const toolCalls = trace.mock.calls.filter(([name]) => name === 'mcp.tool');
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls[0]?.[1]).toEqual({
+      resource: 'agor_users_get_current',
+      measured: true,
+      tags: { 'mcp.tool': 'agor_users_get_current', 'span.kind': 'server' },
+    });
   });
 
   it('rejects a modern request that omits the required per-request metadata envelope', async () => {
@@ -1981,6 +1996,14 @@ describe('POST /mcp with personal API keys', () => {
   });
 
   it('rejects cross-tenant Agor session context on a fresh stateless request', async () => {
+    const tracingModule = await import('../tracing/datadog.js');
+    const trace = vi.fn<(name: string, options: Parameters<DatadogTracer['trace']>[1]) => void>();
+    vi.spyOn(tracingModule, 'resolveTracerModule').mockReturnValue({
+      trace(name, options, work) {
+        trace(name, options);
+        return work();
+      },
+    });
     await mockPersonalApiKeyUser();
     const getUser = vi.fn(async (_userId: string, params: { tenant: { tenant_id: string } }) => ({
       user_id: 'user-1',
@@ -2017,12 +2040,14 @@ describe('POST /mcp with personal API keys', () => {
         );
       },
       {
+        metrics: { apm: { trace_services: 'entrypoint' } },
         multi_tenancy: {
           mode: 'required_from_auth',
           trusted_header: 'x-agor-tenant-id',
         },
       }
     );
+    expect(trace).toHaveBeenCalled();
   });
 
   it('re-authorizes a signed token Session binding on every stateless POST', async () => {
@@ -2094,6 +2119,14 @@ describe('POST /mcp with personal API keys', () => {
   });
 
   it('keeps authenticated user, tenant, and Agor session context isolated under concurrency', async () => {
+    const tracingModule = await import('../tracing/datadog.js');
+    const trace = vi.fn<(name: string, options: Parameters<DatadogTracer['trace']>[1]) => void>();
+    vi.spyOn(tracingModule, 'resolveTracerModule').mockReturnValue({
+      trace(name, options, work) {
+        trace(name, options);
+        return work();
+      },
+    });
     await mockPersonalApiKeyUser();
     const getUser = vi.fn(async (userId: string, params: { tenant: { tenant_id: string } }) => ({
       user_id: userId,
@@ -2154,11 +2187,13 @@ describe('POST /mcp with personal API keys', () => {
         expect(getSession).toHaveBeenCalledTimes(expected.length);
       },
       {
+        metrics: { apm: { trace_services: 'entrypoint' } },
         multi_tenancy: {
           mode: 'required_from_auth',
           trusted_header: 'x-agor-tenant-id',
         },
       }
     );
+    expect(trace).toHaveBeenCalled();
   });
 });
