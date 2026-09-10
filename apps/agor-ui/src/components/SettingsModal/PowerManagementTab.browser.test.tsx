@@ -53,6 +53,48 @@ const status: PowerManagementStatus = {
 };
 
 describe('UPS admin workspace (browser)', () => {
+  it('separates lost PostgreSQL ownership from Off telemetry and disables Apply accessibly', async () => {
+    const lostStatus: PowerManagementStatus = {
+      ...status,
+      ownership: 'lost',
+      mode: 'off',
+      state: 'disabled',
+      reason: 'disabled',
+      held: false,
+      would_hold: false,
+      configuration: { ...status.configuration, mode: 'off' },
+      observation: { ...status.observation!, condition: 'online' },
+    };
+    const client = {
+      service: (path: string) => ({
+        find: async () =>
+          path === 'power-management' ? lostStatus : { data: [], slot_occupied: false, limit: 30 },
+        on: vi.fn(),
+        off: vi.fn(),
+      }),
+    } as unknown as AgorClient;
+    render(
+      <MemoryRouter>
+        <PowerStatusIndicator client={client} user={user} onOpen={vi.fn()} />
+        <PowerManagementTab client={client} currentUser={user} />
+      </MemoryRouter>
+    );
+    expect(
+      await screen.findByText('Host ownership lost — new admissions blocked, including Off')
+    ).toBeInTheDocument();
+    expect(screen.getAllByText('Utility power').length).toBeGreaterThan(0);
+    expect(
+      await screen.findByRole('button', {
+        name: 'Power source: Utility power. Power conservation: Off. Host ownership lost; new admissions blocked.',
+      })
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply live' })).toBeDisabled();
+    expect(
+      screen.getByText(/there is no automatic reacquisition or cross-host takeover/)
+    ).toBeInTheDocument();
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
+  });
+
   it('keeps a critical Observe indicator visible in the mobile header with long page titles', async () => {
     const onOpen = vi.fn();
     const client = {
@@ -116,7 +158,7 @@ describe('UPS admin workspace (browser)', () => {
     expect(screen.getByText('Power conservation policy')).toBeInTheDocument();
     expect(await screen.findByText('72%')).toBeInTheDocument();
     expect(
-      screen.getByText('Power conservation is Observe — Sessions are not gated')
+      screen.getByText('Power conservation is Observe — UPS conditions do not gate Sessions')
     ).toBeInTheDocument();
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
     fireEvent.click(screen.getByRole('button', { name: 'Manage current Session' }));
@@ -250,7 +292,7 @@ describe('UPS admin workspace (browser)', () => {
     expect(screen.getAllByText('Enforce')).not.toHaveLength(0);
     expect(screen.getByText('Held by power policy')).toBeInTheDocument();
     expect(
-      screen.queryByText('Power conservation is Observe — Sessions are not gated')
+      screen.queryByText('Power conservation is Observe — UPS conditions do not gate Sessions')
     ).not.toBeInTheDocument();
   });
 

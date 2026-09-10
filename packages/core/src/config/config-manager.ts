@@ -616,7 +616,7 @@ function validateConfig(config: AgorConfig): void {
   // dedicated deprecation guidance before ignoring them. `display` is not
   // part of AgorConfig anymore: all three settings were retired.
   only(legacyConfig.display, 'display', RETIRED_CONFIG_KEYS.display);
-  only(config.deployment, 'deployment', ['mode', 'redis', 'ha']);
+  only(config.deployment, 'deployment', ['mode', 'redis', 'ha', 'standalone_power_host_id']);
   only(config.deployment?.redis, 'deployment.redis', [
     'url',
     'key_prefix',
