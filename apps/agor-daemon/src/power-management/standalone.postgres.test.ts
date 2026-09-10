@@ -192,6 +192,8 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       const child = spawn(
         process.execPath,
         [
+          // Match Vitest's workspace source resolution in an unbuilt CI checkout.
+          '--conditions=source',
           '--import',
           'tsx',
           '--input-type=module',
