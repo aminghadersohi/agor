@@ -658,7 +658,10 @@ export async function prepareTaskRuntimeStartup(
   ctx: StartupContext
 ): Promise<OrphanCleanupResult | null> {
   if (ctx.taskRuntimePolicy !== 'standalone') return null;
-  return cleanupOrphanStatuses(ctx);
+  return runStartupTenantDatabaseScope(ctx, async () => {
+    await ctx.powerPolicyController.assertOwnershipInTransaction(ctx.db);
+    return cleanupOrphanStatuses(ctx);
+  });
 }
 
 export async function startup(ctx: StartupContext): Promise<void> {
@@ -1088,6 +1091,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
       console.error('❌ Error during shutdown:', error);
       exitCode = 1;
     } finally {
+      await powerPolicyController.closeOwnership();
       try {
         // A DogStatsD gauge is last-value, so explicitly overwrite this
         // instance's process-local executor count before closing the socket.

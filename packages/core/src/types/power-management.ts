@@ -34,6 +34,8 @@ export const SESSION_POWER_PRIORITIES = ['normal', 'essential'] as const;
 export type SessionPowerPriority = (typeof SESSION_POWER_PRIORITIES)[number];
 
 export interface PowerManagementStatus {
+  /** Deployment authority, independent of UPS policy. Omitted outside the owned topology. */
+  ownership?: 'owned' | 'lost';
   /** Admin-only allowlisted configuration; never contains host identity or credentials. */
   configuration?: AgorPowerManagementSettings;
   /**
@@ -41,6 +43,8 @@ export interface PowerManagementStatus {
    * Older daemons omit this field; consumers must treat omission as unknown.
    */
   provider_supported?: boolean;
+  /** Bounded capability explanation; never operator identities or configuration values. */
+  provider_support_reason?: string;
   observation?: {
     condition: 'online' | 'battery' | 'unknown';
     communication: 'ok' | 'lost';

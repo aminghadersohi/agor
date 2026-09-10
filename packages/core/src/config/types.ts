@@ -1538,6 +1538,9 @@ export interface AgorHaEnvironmentHealthMonitorSettings {
 export interface AgorDeploymentSettings {
   /** Defaults to standalone. REDIS_URL alone never changes this value. */
   mode?: AgorDeploymentMode;
+  /** Immutable, operator-provisioned UUID unique to this Mac; never copy to another host.
+   * Opts the supported standalone PostgreSQL topology into exclusive admission ownership. */
+  standalone_power_host_id?: string;
   redis?: AgorRedisSettings;
   ha?: AgorHaTopologySettings;
 }
