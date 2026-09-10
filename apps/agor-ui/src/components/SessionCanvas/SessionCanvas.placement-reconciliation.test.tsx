@@ -7,7 +7,7 @@ import type {
   Repo,
   Session,
 } from '@agor-live/client';
-import { act, render } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
@@ -75,6 +75,11 @@ vi.mock('reactflow', async () => {
 vi.mock('../BranchCard', () => ({
   __esModule: true,
   default: () => <div />,
+}));
+
+vi.mock('./canvas/ZoneTriggerModal', () => ({
+  ZoneTriggerModal: ({ open }: { open: boolean }) =>
+    open ? <div data-testid="zone-trigger-picker" /> : null,
 }));
 
 const BOARD_ID = 'board-placement-fixture';
@@ -255,10 +260,16 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
     expect(patch).not.toHaveBeenCalledWith('board-object-branch', expect.anything());
   });
 
-  it.each([IMPLEMENTING_ZONE_ID, REVIEWING_ZONE_ID, 'context-replaced'])(
+  it.each([IMPLEMENTING_ZONE_ID, REVIEWING_ZONE_ID, 'context-replaced', 'new-placement'])(
     'discards a drained branch write when authority advances to %s while another PATCH awaits',
     async (zoneId) => {
       vi.useFakeTimers();
+      if (zoneId === 'new-placement') {
+        agorStore.setState({
+          boardObjectsByBoardId: new Map([[BOARD_ID, [reviewingCardPlacement]]]),
+        });
+      }
+      const expectedZoneId = zoneId === 'new-placement' ? REVIEWING_ZONE_ID : zoneId;
       let releaseCard!: () => void;
       const cardPending = new Promise<void>((resolve) => {
         releaseCard = resolve;
@@ -266,7 +277,8 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
       const patch = vi.fn((id: string) =>
         id === reviewingCardPlacement.object_id ? cardPending : Promise.resolve()
       );
-      const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+      const create = vi.fn().mockResolvedValue({});
+      const client = { service: vi.fn(() => ({ patch, create })) } as unknown as AgorClient;
       render(
         <ConnectionProvider value={connected}>
           <SessionCanvas board={board} client={client} branches={[branch]} />
@@ -302,7 +314,7 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
         } else {
           boardObjectPatched({
             ...implementingPlacement,
-            zone_id: zoneId,
+            zone_id: expectedZoneId,
             position: { x: 40, y: 260 },
           });
         }
@@ -311,12 +323,111 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
         releaseCard();
       });
       expect(patch).toHaveBeenCalledTimes(1);
+      expect(create).not.toHaveBeenCalled();
       if (zoneId !== 'context-replaced') {
         expect(currentNode(BRANCH_ID)).toMatchObject({
-          parentId: zoneId,
+          parentId: expectedZoneId,
           position: { x: 40, y: 260 },
         });
       }
+    }
+  );
+
+  it.each(
+    (['always_new', 'show_picker'] as const).flatMap((behavior) =>
+      ['board-switch', 'placement-changed', 'new-placement', 'unchanged'].map((change) => ({
+        behavior,
+        change,
+      }))
+    )
+  )(
+    'rechecks $behavior trigger and placement authority after $change while a batch suspends',
+    async ({ behavior, change }) => {
+      vi.useFakeTimers();
+      const initiallyPlaced = change !== 'new-placement';
+      const unpinned = { ...implementingPlacement, zone_id: null };
+      agorStore.setState({
+        boardObjectsByBoardId: new Map([
+          [BOARD_ID, [reviewingCardPlacement, ...(initiallyPlaced ? [unpinned] : [])]],
+        ]),
+      });
+      const triggerBoard = {
+        ...board,
+        objects: {
+          ...board.objects,
+          [IMPLEMENTING_ZONE_ID]: {
+            ...board.objects?.[IMPLEMENTING_ZONE_ID],
+            trigger: { behavior, prompt_template: 'Review this fictional fixture.' },
+          },
+        },
+      } as Board;
+      let releaseCard!: () => void;
+      const cardPending = new Promise<void>((resolve) => {
+        releaseCard = resolve;
+      });
+      const patch = vi.fn((id: string) =>
+        id === reviewingCardPlacement.object_id ? cardPending : Promise.resolve()
+      );
+      const create = vi.fn().mockResolvedValue({});
+      const client = { service: vi.fn(() => ({ patch, create })) } as unknown as AgorClient;
+      const view = render(
+        <ConnectionProvider value={connected}>
+          <SessionCanvas board={triggerBoard} client={client} branches={[branch]} />
+        </ConnectionProvider>
+      );
+      await act(async () => {});
+      // Put the card first, so its PATCH suspends before branch trigger handling.
+      for (const node of [
+        { ...currentNode(`card-${card.card_id}`), positionAbsolute: { x: 3010, y: 480 } },
+        { ...currentNode(BRANCH_ID), positionAbsolute: { x: 1800, y: 200 } },
+      ]) {
+        act(() => {
+          flowProps?.onNodeDragStart?.({}, node);
+          flowProps?.onNodeDrag?.({}, node);
+          flowProps?.onNodeDragStop?.({}, node);
+        });
+      }
+      await act(async () => {
+        vi.advanceTimersByTime(501);
+      });
+      expect(patch).toHaveBeenCalledTimes(1);
+      expect(create).not.toHaveBeenCalled();
+      if (change === 'board-switch') {
+        // The old unpinned row remains cached and compares equal unless board
+        // identity is explicitly checked. No zone frame can detect this.
+        view.rerender(
+          <ConnectionProvider value={connected}>
+            <SessionCanvas
+              board={{ ...triggerBoard, board_id: 'board-other' } as Board}
+              client={client}
+              branches={[branch]}
+            />
+          </ConnectionProvider>
+        );
+      } else if (change !== 'unchanged') {
+        act(() =>
+          boardObjectPatched({
+            ...implementingPlacement,
+            zone_id: REVIEWING_ZONE_ID,
+            position: { x: 40, y: 260 },
+          })
+        );
+      }
+      await act(async () => {
+        releaseCard();
+      });
+      if (change === 'unchanged') {
+        expect(patch).toHaveBeenCalledTimes(2);
+        if (behavior === 'always_new') expect(create).toHaveBeenCalledTimes(1);
+        else expect(screen.getByTestId('zone-trigger-picker')).toBeTruthy();
+      } else {
+        expect(patch, change).toHaveBeenCalledTimes(1);
+        expect(create, change).not.toHaveBeenCalled();
+        expect(screen.queryByTestId('zone-trigger-picker'), change).toBeNull();
+      }
+      view.unmount();
+      vi.clearAllTimers();
+      vi.useRealTimers();
     }
   );
 

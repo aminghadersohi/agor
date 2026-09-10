@@ -1918,12 +1918,21 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // A batch may suspend on another entity's PATCH after draining the
             // pending ref. Recheck the store immediately before each dispatch;
             // clearing that ref during reconciliation cannot cancel this batch.
-            const placementIsCurrent = (placement: BoardEntityObject | undefined) => {
-              if (!placement) return true;
+            const placementIsCurrent = (
+              placement: BoardEntityObject | undefined,
+              branchId?: string
+            ) => {
+              // Cached rows on the previous board can still compare equal,
+              // especially when unpinned (there is no parent zone frame).
+              if (placementBoardRef.current?.board_id !== board.board_id) return false;
               const current = agorStore
                 .getState()
-                .boardObjectsByBoardId.get(placement.board_id)
-                ?.find((candidate) => candidate.object_id === placement.object_id);
+                .boardObjectsByBoardId.get(board.board_id)
+                ?.find((candidate) =>
+                  placement
+                    ? candidate.object_id === placement.object_id
+                    : candidate.branch_id === branchId
+                );
               return sameBoardEntityPlacement(
                 snapshotBoardEntityPlacement(placement, board),
                 snapshotBoardEntityPlacement(current, placementBoardRef.current)
@@ -2067,6 +2076,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 // Check if branch was already pinned to a zone before this drag
                 // Use direct Map lookup instead of array conversion for better performance
                 const existingBoardObject = boardObjectByBranch.get(nodeId);
+                // A stale drop must not fire a prompt/open the picker even if
+                // the later placement PATCH would be suppressed. Absence is
+                // also an authority snapshot: another caller may have placed
+                // this previously unplaced branch while the batch awaited.
+                if (!placementIsCurrent(existingBoardObject, nodeId)) continue;
                 const oldZoneId = existingBoardObject?.zone_id;
 
                 // Calculate position to store based on new parent
@@ -2134,9 +2148,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 // Find existing board_object or create new one
                 // Use direct Map lookup instead of array conversion for better performance
                 const existingBoardObject = boardObjectByBranch.get(branch_id);
+                if (!placementIsCurrent(existingBoardObject, branch_id)) continue;
 
                 if (existingBoardObject) {
-                  if (!placementIsCurrent(existingBoardObject)) continue;
                   // Update existing board_object (position and zone_id)
                   // zone_id: null clears zone membership; string sets it
                   const updateData: {
