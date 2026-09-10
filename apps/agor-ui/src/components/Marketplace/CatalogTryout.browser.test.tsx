@@ -158,8 +158,17 @@ describe('recovered Catalog tryout flow in Chromium', () => {
     );
     expect(drawer.queryByRole('combobox')).not.toBeInTheDocument();
     expect(api.candidates).not.toHaveBeenCalled();
-    await userEvent.click(drawer.getByRole('checkbox'));
-    await userEvent.click(drawer.getByRole('button', { name: 'Connect', exact: true }));
+    const consent = drawer.getByRole('checkbox');
+    const connect = drawer.getByRole('button', { name: 'Connect', exact: true });
+    // Ant's native input is transparent; its label is the visible target.
+    await waitFor(() => expect(consent.closest('label')).toBeVisible());
+    expect(consent).not.toBeChecked();
+    expect(connect).toBeDisabled();
+    consent.focus();
+    await userEvent.keyboard(' ');
+    await waitFor(() => expect(consent).toBeChecked());
+    await waitFor(() => expect(connect).toBeEnabled());
+    await userEvent.click(connect);
     expect(api.connect).toHaveBeenCalledWith({
       catalog_key: entry.name,
       acknowledged_disclosure: entry.permission_disclosure,
