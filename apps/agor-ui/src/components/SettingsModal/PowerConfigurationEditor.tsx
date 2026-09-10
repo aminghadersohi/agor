@@ -136,6 +136,13 @@ export function PowerConfigurationEditor({
         remain operator-controlled. Off, Observe, thresholds, timing, and recovery pacing apply
         live. Running Tasks are never suspended or stopped.
       </Typography.Text>
+      {status.ownership === 'lost' && (
+        <Alert
+          type="error"
+          showIcon
+          title="Apply unavailable until host ownership is restored by an operator restart"
+        />
+      )}
       <Form
         form={form}
         layout="vertical"
@@ -188,12 +195,16 @@ export function PowerConfigurationEditor({
             okText="Apply live"
             onConfirm={() => form.submit()}
           >
-            <Button type="primary" loading={saving} disabled={saving}>
+            <Button
+              type="primary"
+              loading={saving}
+              disabled={saving || status.ownership === 'lost'}
+            >
               Apply live
             </Button>
           </Popconfirm>
           <Button
-            disabled={saving}
+            disabled={saving || status.ownership === 'lost'}
             onClick={() => {
               form.setFieldsValue(configuration);
               setError('');
@@ -212,7 +223,11 @@ export function PowerConfigurationEditor({
               )
             }
           >
-            <Button disabled={saving || runtime.source === 'operator_defaults'}>
+            <Button
+              disabled={
+                saving || status.ownership === 'lost' || runtime.source === 'operator_defaults'
+              }
+            >
               Reset to operator defaults
             </Button>
           </Popconfirm>

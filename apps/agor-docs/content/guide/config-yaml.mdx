@@ -143,13 +143,113 @@ after 60 seconds of stable utility power they resume at a paced rate. Schedules 
 occurrences while held and materialize only the latest missed occurrence once after recovery.
 
 This first version rejects active configuration unless the deployment is macOS, standalone,
-static-tenant, SQLite, local-executor, and `unix_user_mode: simple`. It does not control host
+static-tenant, local-executor, and `unix_user_mode: simple`, with either SQLite or
+explicitly owned standalone PostgreSQL (see below). It does not control host
 shutdown, suspend processes, use `SIGSTOP`/`SIGCONT`, stop running Tasks, or provide NUT/network UPS
 polling. Provider identity and deployment topology remain operator-managed in `config.yaml`.
 Mutable policy values—mode, thresholds, timing, and recovery pacing—can be applied live from the
 admin workspace. Queued Tasks and Session priority metadata remain intact through every policy
 change. A provider/topology change still requires an operator edit and daemon restart because those
 values determine whether host observation is safe to construct at startup.
+
+### Standalone PostgreSQL: exclusive host ownership
+
+This is **not HA**. It supports one static tenant's local execution on one Mac.
+It does not support dynamic tenants, multiple execution hosts, sandbox/delegated
+execution, executor command templates, nonmacOS providers, or transaction-pooling
+proxies. Use a direct PostgreSQL connection (including the extra dedicated ownership
+connection) and an application role with `NOSUPERUSER NOBYPASSRLS`.
+
+The operator must provision a new UUID, for example with `uuidgen`, and retain it
+in the host's operator-owned configuration:
+
+```yaml
+deployment:
+  mode: standalone
+  standalone_power_host_id: "00000000-0000-4000-8000-000000000001" # fictional; generate your own
+database:
+  dialect: postgresql
+multi_tenancy:
+  mode: static
+execution:
+  unix_user_mode: simple
+  power_management:
+    mode: off
+```
+
+The UUID is an **operator assertion of host identity**, not hardware attestation or
+a hostname. Never copy it to a different machine or provision different identities
+for competing daemons on the same deployment. The database durably binds the tenant
+to its hash. Losing that configuration does not authorize an automatic replacement;
+retain it in the operator's recovery inventory. Cross-host migration/rebinding is
+not supplied by this feature, including after a crash or database restore. Importing
+or copying the tenant archive also copies this binding; it is not a host-transfer
+procedure. Only normalized `owned`/`lost` status is exposed to the UI—never the UUID,
+hash, boot identifier, or backend identifier.
+
+Ownership is established before initial data setup or runtime startup. An exclusive
+acquisition lock rejects competitors; the owning dedicated PostgreSQL session then
+holds a shared lock. Each durable Task dispatch, schedule occurrence admission, and
+policy mutation holds its own shared **transaction** lock and checks both the durable
+boot binding and the owning backend's live lock. A replacement cannot overtake an
+in-flight admission, even if the ownership connection disconnects. The mutation uses
+the actual tenant transaction, not an unrelated pool checkout. Existing unbound
+PostgreSQL deployments are not silently opted in, but upgraded claimers without the
+matching owner cannot admit against an already-bound tenant.
+
+**Ownership is independent of conservation.** Loss blocks new admissions and policy
+Apply even in Off or Observe. Ordinary reads and running Tasks are not stopped or
+suspended by this mechanism. The failed controller never reacquires automatically.
+The UI refreshes ownership separately from the UPS source and policy mode; an
+`owned` display is only a recent observation, never the authority used by a claim.
+
+For an intended same-host restart, stop the old daemon first and wait for its ownership
+connection and in-flight admission transactions to close, then start the new daemon
+with the **same identity**. A new boot is accepted only when the old lock is gone.
+There is no lease expiry or automatic cross-host takeover. If a severed connection
+remains alive at PostgreSQL, restart refuses rather than assuming the old owner died.
+The owned topology uses the existing non-destructive PostgreSQL Task startup/shutdown
+policy: it does not rewrite running Tasks as restart orphans, intentionally terminate
+executors at daemon shutdown, retry prompts, or replay a committed dispatch. Executor
+survival still depends on the operator's process supervisor; ownership does not prove
+external work stopped. Ordinary Task runtime supervision remains separate.
+
+#### Offline upgrade, verification, and rollback
+
+PostgreSQL migration `9020_standalone_power_ownership` is a protocol-only cutover.
+It reuses forced-RLS `app_variables` and the existing tenant-scoped unique Essential
+index; there are **no new schema columns or tables**, and no SQLite migration.
+Both migration journals retain their independent ordering. Old binaries do not
+participate in this protocol, so mixed-version operation is unsupported.
+
+1. Back up the database and operator configuration. Stop **every** daemon/claimer
+   using that database; do not rely on the power mode to drain or stop running work.
+2. Using the target release's CLI and its normal operator database configuration,
+   inspect `agor db status --json`, then run `agor db migrate --offline-cutover`.
+   From a source checkout these commands are `pnpm agor db status --json` and
+   `pnpm agor db migrate --offline-cutover`. The command implementation lives in
+   `apps/agor-cli/src/commands/db/`; cutover policy is owned by
+   `packages/core/src/db/migrate.ts`. No credentials belong in command history.
+3. Provision the immutable identity only on the intended Mac and start **one**
+   upgraded daemon. Verify exclusive ownership and the actual effective policy:
+   a pre-existing durable override takes precedence over YAML, including `mode`.
+   Do not assume a YAML `off` value reset the runtime policy.
+4. In the admin workspace, inspect the revision/source, then Apply **Observe**.
+   Verify normal, read-only UPS samples, freshness, and ownership without inducing
+   an outage. Confirm ordinary scheduling/admission remains available. Enforce is
+   a separate, deliberate operator action after Observe verification.
+5. For policy rollback, Apply Off or reset the override to known-safe operator
+   defaults while ownership is healthy. This does not release host ownership.
+   After ownership loss, stop and restart on the bound host before policy changes.
+   Removing the identity or choosing Off does not unbind the database.
+
+Binary rollback to a pre-ownership release is incompatible with the new protocol
+marker: do **not** edit migration history or delete ownership rows to make an old
+binary start. Restore the pre-cutover database/configuration backup offline only
+with all daemons stopped and previously running external work accounted for; a
+restore is not authorization to replay prompts. Otherwise stay on the upgraded
+binary with conservation Off. This feature provides no live rebind, takeover,
+shutdown, or rollout automation.
 
 ### Admin configuration and monitoring UI
 
@@ -168,7 +268,9 @@ Missing telemetry is shown as **Not reported**, never zero. Held denotes an admi
 there is no held-task count or inventory API.
 
 The configuration editor is initialized from the active policy and applies valid mutable values
-without a daemon restart. An admin update uses an exact revision compare-and-swap: if another tab
+without a daemon restart. A policy change starts fresh policy evaluation rather than treating an
+old provider sample as newly observed; Enforce remains conservative until a new sample and any
+required stable-online recovery interval complete. An admin update uses an exact revision compare-and-swap: if another tab
 or administrator has already changed the policy, the stale update is rejected and realtime status
 converges both tabs on the newer revision. The durable, tenant-owned runtime override is loaded on
 every daemon start and takes explicit precedence over mutable operator defaults. Agor never rewrites

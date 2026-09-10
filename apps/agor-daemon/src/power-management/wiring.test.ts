@@ -12,6 +12,31 @@ describe('power admission safety wiring', () => {
     expect(claim).toBeGreaterThan(fenceStart);
     expect(heldOutcome).toBeGreaterThan(claim);
     expect(source.slice(fenceStart, heldOutcome)).toContain('runWithTenantDatabaseTransaction');
+    expect(source.slice(fenceStart, heldOutcome)).toContain(
+      'assertOwnershipInTransaction(tenantDb)'
+    );
+  });
+
+  it('acquires ownership before initial data setup and uses non-destructive Task startup for owned PG', async () => {
+    const index = await readFile(new URL('../index.ts', import.meta.url), 'utf8');
+    const setup = await readFile(new URL('../setup/database.ts', import.meta.url), 'utf8');
+    expect(setup.indexOf('await options.beforeInitialDataSetup?.(scopedDb)')).toBeLessThan(
+      setup.indexOf('const runInitialDataSetup')
+    );
+    const acquisition = index.indexOf('StandalonePowerOwner.acquire(');
+    expect(acquisition).toBeGreaterThan(index.indexOf('beforeInitialDataSetup:'));
+    expect(acquisition).toBeLessThan(index.indexOf('powerPolicyRuntimeSettingsRepository.load('));
+    expect(
+      index.slice(
+        index.indexOf('taskRuntimePolicy:'),
+        index.indexOf('environmentHealthMonitorPolicy:')
+      )
+    ).toContain('standalone_power_host_id');
+    const scheduler = await readFile(new URL('../services/scheduler.ts', import.meta.url), 'utf8');
+    const materialize = scheduler.indexOf('withScheduleMaterializationPermit(() =>');
+    const fence = scheduler.indexOf('assertOwnershipInTransaction?.(this.db)', materialize);
+    expect(fence).toBeGreaterThan(materialize);
+    expect(fence).toBeLessThan(scheduler.indexOf('lockForRunAdmission(', materialize));
   });
 
   it('turns a power-held explicit manual Task into durable queued work', async () => {

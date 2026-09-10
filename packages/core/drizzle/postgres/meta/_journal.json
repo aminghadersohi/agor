@@ -764,6 +764,13 @@
       "when": 1788800000006,
       "tag": "9019_mcp_slack_recovery_due",
       "breakpoints": true
+    },
+    {
+      "idx": 9020,
+      "version": "7",
+      "when": 1788800000007,
+      "tag": "9020_standalone_power_ownership",
+      "breakpoints": true
     }
   ]
 }

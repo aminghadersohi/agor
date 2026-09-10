@@ -175,8 +175,10 @@ export function assertPowerManagementActivationSupported(
   if ((config.multi_tenancy?.mode ?? 'static') !== 'static') {
     throw new Error('Config error: execution.power_management requires multi_tenancy.mode static');
   }
-  if ((config.database?.dialect ?? 'sqlite') !== 'sqlite') {
-    throw new Error('Config error: execution.power_management V1 requires database.dialect sqlite');
+  if (config.database?.dialect === 'postgresql' && !config.deployment?.standalone_power_host_id) {
+    throw new Error(
+      'Config error: PostgreSQL power admission requires deployment.standalone_power_host_id and exclusive ownership'
+    );
   }
   if ((config.execution?.unix_user_mode ?? 'simple') !== 'simple') {
     throw new Error('Config error: execution.power_management V1 requires unix_user_mode simple');
@@ -197,7 +199,9 @@ export function isPowerManagementObservationSupported(
     platform === 'darwin' &&
     (config.deployment?.mode ?? 'standalone') === 'standalone' &&
     (config.multi_tenancy?.mode ?? 'static') === 'static' &&
-    (config.database?.dialect ?? 'sqlite') === 'sqlite' &&
+    ((config.database?.dialect ?? 'sqlite') === 'sqlite' ||
+      (config.database?.dialect === 'postgresql' &&
+        !!config.deployment?.standalone_power_host_id)) &&
     (config.execution?.unix_user_mode ?? 'simple') === 'simple' &&
     !config.execution?.executor_command_template
   );
@@ -258,4 +262,29 @@ export function resolvePowerManagementRuntimeOverlay(
     provider: operatorDefaults.provider,
     max_essential_sessions: operatorDefaults.maxEssentialSessions,
   });
+}
+
+/** Opt-in topology is immutable and checked even with conservation Off. */
+export function assertStandalonePowerOwnershipConfig(
+  config: AgorConfig,
+  platform: NodeJS.Platform = process.platform
+): void {
+  const id = config.deployment?.standalone_power_host_id;
+  if (id === undefined) return;
+  if (
+    typeof id !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
+  ) {
+    throw new Error(
+      'Config error: deployment.standalone_power_host_id must be an operator-provisioned UUID unique to this host'
+    );
+  }
+  if (
+    config.database?.dialect !== 'postgresql' ||
+    !isPowerManagementObservationSupported(config, platform)
+  ) {
+    throw new Error(
+      'Config error: standalone power ownership requires macOS, PostgreSQL, standalone, static tenant, simple local execution without an executor template'
+    );
+  }
 }
