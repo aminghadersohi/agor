@@ -159,7 +159,7 @@ export type RepoCloneErrorCategory =
 export interface RepoCloneError {
   exit_code: number;
   category: RepoCloneErrorCategory;
-  /** Short, user-facing first-line message (stderr excerpt or wrapper message). */
+  /** Bounded, credential-redacted diagnostic (possibly multiline stderr or wrapper message). */
   message: string;
 }
 
