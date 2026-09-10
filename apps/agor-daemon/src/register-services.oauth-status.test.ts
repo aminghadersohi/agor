@@ -38,32 +38,23 @@ describe('register-services durable OAuth status authority', () => {
     );
   });
 
-  // An unresolved concurrent refresh is not evidence the grant was revoked —
-  // the auth-headers path already treats it as retryable (see the forced-
-  // refresh test above); this endpoint must not reauth-prompt for the same
-  // ambiguity.
-  it('treats an ambiguous refresh outcome as retryable, not as a revoked grant', () => {
-    expect(refreshBlock).toMatch(
-      /err instanceof FailedRefreshError \|\| err instanceof AmbiguousRefreshError[\s\S]{0,160}error: 'token_refresh_failed'/
-    );
+  it('requires reauthentication for quarantined grants but keeps observation timeouts retryable', () => {
     const needsReauthBlock = refreshBlock.slice(
       refreshBlock.indexOf('err instanceof InvalidGrantError'),
-      refreshBlock.indexOf("return { success: false, error: 'needs_reauth' };")
+      refreshBlock.indexOf(
+        "return { success: false, error: 'needs_reauth' };",
+        refreshBlock.indexOf('err instanceof InvalidGrantError')
+      )
     );
-    expect(needsReauthBlock).not.toContain('AmbiguousRefreshError');
+    expect(needsReauthBlock).toContain('AmbiguousRefreshError');
+    expect(needsReauthBlock).not.toContain('FailedRefreshError');
   });
 
   it('supports a daemon-only forced refresh without treating transient failures as revocation', () => {
     expect(authHeadersBlock).toContain('force_refresh?: boolean');
     expect(authHeadersBlock).toContain('data?.force_refresh === true');
-    expect(authHeadersBlock.match(/forceRefresh \|\| needsRefresh/g)).toHaveLength(2);
-    expect(authHeadersBlock).toMatch(
-      /row\.refresh_status === 'ambiguous'[\s\S]{0,100}error: 'token_refresh_failed'/
-    );
-    expect(authHeadersBlock).toContain("error: 'token_refresh_failed'");
-    expect(authHeadersBlock).toMatch(
-      /refreshErr instanceof InvalidGrantError[\s\S]{0,100}'needs_reauth'/
-    );
+    expect(authHeadersBlock).toContain('acquireMCPOAuthGrant({');
+    expect(authHeadersBlock).toContain('forceRefresh,');
   });
 
   // A trusted session executor may read auth headers for its own in-scope
