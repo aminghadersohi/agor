@@ -260,6 +260,24 @@ function deferred() {
   return { promise, resolve };
 }
 
+it('does not rescan OAuth grants on an idle 60-second timer', async () => {
+  const { client, fetchCount } = makeMockClient();
+  const { result, unmount } = renderHook(() => useAgorData(client));
+  try {
+    await waitForInitialLoad(result);
+    await waitFor(() => expect(fetchCount('mcp-servers/oauth-status', 'find')).toBeGreaterThan(0));
+    const initial = fetchCount('mcp-servers/oauth-status', 'find');
+    vi.useFakeTimers();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(180_000);
+    });
+    expect(fetchCount('mcp-servers/oauth-status', 'find')).toBe(initial);
+  } finally {
+    unmount();
+    vi.useRealTimers();
+  }
+});
+
 describe('useAgorData — socket-event bailouts', () => {
   it('scopes the real cold mobile board load before fetching board entities', async () => {
     const boardId = '01a012d8-1b9b-7909-b6f4-2024dfc7c51e';
@@ -283,7 +301,7 @@ describe('useAgorData — socket-event bailouts', () => {
     }
   });
 
-  it('heals a cold mobile session outside the recent slice before resolving board scope', async () => {
+  it('opens a cold mobile session without waiting for a stalled branch get', async () => {
     const boardId = '01a012d8-1b9b-7909-b6f4-2024dfc7c51e';
     const sessionId = '01a012d8-4f50-7c32-9daa-6e3f70819b2c';
     const branchId = '01a012d8-3e4f-7b21-8c99-5d2e6f708a1b';
@@ -294,24 +312,43 @@ describe('useAgorData — socket-event bailouts', () => {
     });
     const directBranch = makeBranch({ branch_id: branchId, board_id: boardId });
     const boardObject = makeBoardObject({ board_id: boardId, branch_id: branchId });
-    const { client, fetchArguments } = makeMockClient({
+    const { client, fetchArguments, fetchCount, onFetch } = makeMockClient({
       sessions: [],
       boards: [{ board_id: boardId, slug: 'delivery' }],
+      branches: [directBranch],
       'sessions:get': directSession,
       'branches:get': directBranch,
       'board-objects': [boardObject],
     });
+    onFetch('branches', 'get', () => new Promise(() => {}));
     window.history.pushState({}, '', `/m/session/${sessionId}`);
 
     const { result } = renderHook(() => useAgorData(client, { directSessionId: sessionId }));
     await waitForInitialLoad(result);
 
     expect(agorStore.getState().sessionById.get(sessionId)).toMatchObject({ branch_id: branchId });
+    expect(fetchCount('branches', 'get')).toBe(0);
+    expect(agorStore.getState().branchById.get(branchId)).toMatchObject({ board_id: boardId });
     expect(agorStore.getState().boardObjectById.get('bo-1')).toMatchObject({ board_id: boardId });
     expect(fetchArguments('board-objects', 'findAll')).toContainEqual({
       query: expect.objectContaining({ board_id: boardId }),
     });
     window.history.pushState({}, '', '/');
+  });
+
+  it('opens a legacy session without board metadata or granting access to its missing branch', async () => {
+    const session = makeSession({ session_id: 'legacy-session', branch_id: 'hidden-branch' });
+    const { client, onFetch, fetchCount } = makeMockClient({
+      sessions: [],
+      branches: [],
+      'sessions:get': session,
+    });
+    onFetch('branches', 'get', () => new Promise(() => {}));
+    const { result } = renderHook(() => useAgorData(client, { directSessionId: 'legacy-session' }));
+    await waitForInitialLoad(result);
+    expect(agorStore.getState().sessionById.has('legacy-session')).toBe(true);
+    expect(agorStore.getState().branchById.has('hidden-branch')).toBe(false);
+    expect(fetchCount('branches', 'get')).toBe(0);
   });
 
   it('hydrates a direct archived session by id without broadening active board lists', async () => {
