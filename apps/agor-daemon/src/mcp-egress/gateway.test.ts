@@ -5,6 +5,7 @@ import {
   BranchRepository,
   CapabilityPolicyRepository,
   createDatabaseAsync,
+  executeRaw,
   generateId,
   MCPServerRepository,
   RepoRepository,
@@ -1653,6 +1654,9 @@ describe('authoritative MCP gateway real transport', () => {
     });
     const dbB = await createDatabaseAsync({ dialect: 'sqlite', url: `file:${file}` });
     databases.push(dbB as typeof dbB & { $client?: { close?: () => void } });
+    // This test deliberately holds the writer lock until rejection. Avoid
+    // spending the production five-second busy wait on an expected conflict.
+    await executeRaw(dbB, 'PRAGMA busy_timeout = 50');
     const pending = h.request('POST', initialize);
     await snapshotObserved;
     const mutate = () =>

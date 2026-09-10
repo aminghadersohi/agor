@@ -42,27 +42,21 @@ describe('register-services durable OAuth status authority', () => {
   // the auth-headers path already treats it as retryable (see the forced-
   // refresh test above); this endpoint must not reauth-prompt for the same
   // ambiguity.
-  it('treats an ambiguous refresh outcome as retryable, not as a revoked grant', () => {
+  it('distinguishes a quarantined grant from a retryable observer timeout', () => {
     expect(refreshBlock).toMatch(
       /err instanceof FailedRefreshError \|\| err instanceof AmbiguousRefreshError[\s\S]{0,160}error: 'token_refresh_failed'/
     );
-    const needsReauthBlock = refreshBlock.slice(
-      refreshBlock.indexOf('err instanceof InvalidGrantError'),
-      refreshBlock.indexOf("return { success: false, error: 'needs_reauth' };")
+    expect(refreshBlock).toMatch(
+      /err instanceof AmbiguousRefreshError[\s\S]*?saved.refresh_status === 'ambiguous'[\s\S]*?error: 'needs_reauth'/
     );
-    expect(needsReauthBlock).not.toContain('AmbiguousRefreshError');
   });
 
   it('supports a daemon-only forced refresh without treating transient failures as revocation', () => {
     expect(authHeadersBlock).toContain('force_refresh?: boolean');
     expect(authHeadersBlock).toContain('data?.force_refresh === true');
-    expect(authHeadersBlock.match(/forceRefresh \|\| needsRefresh/g)).toHaveLength(2);
+    expect(authHeadersBlock).toMatch(/acquireMCPOAuthGrant\([\s\S]*?forceRefresh/);
     expect(authHeadersBlock).toMatch(
-      /row\.refresh_status === 'ambiguous'[\s\S]{0,100}error: 'token_refresh_failed'/
-    );
-    expect(authHeadersBlock).toContain("error: 'token_refresh_failed'");
-    expect(authHeadersBlock).toMatch(
-      /refreshErr instanceof InvalidGrantError[\s\S]{0,100}'needs_reauth'/
+      /error instanceof FailedRefreshError[\s\S]*?error instanceof AmbiguousRefreshError[\s\S]*?error instanceof OAuthRefreshExchangeError[\s\S]*?error: 'token_refresh_failed'/
     );
   });
 
