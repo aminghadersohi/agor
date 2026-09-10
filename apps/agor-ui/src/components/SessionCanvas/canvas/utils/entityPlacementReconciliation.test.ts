@@ -38,7 +38,9 @@ describe('board entity placement reconciliation', () => {
     expect(
       sameBoardEntityPlacement(
         baseline,
-        snapshotBoardEntityPlacement(placement({ board_id: 'replacement-board' }))
+        snapshotBoardEntityPlacement(
+          placement({ board_id: 'replacement-board' as BoardEntityObject['board_id'] })
+        )
       )
     ).toBe(false);
     expect(
@@ -59,6 +61,25 @@ describe('board entity placement reconciliation', () => {
         snapshotBoardEntityPlacement(placement({ position: { x: 20, y: 120 } }))
       )
     ).toBe(false);
+  });
+
+  it('invalidates absolute drag geometry after a parent frame moves or resizes', () => {
+    const zone = {
+      type: 'zone' as const,
+      label: 'Example',
+      x: 1000,
+      y: 500,
+      width: 800,
+      height: 600,
+    };
+    const snapshot = (frame: typeof zone) =>
+      snapshotBoardEntityPlacement(placement(), { objects: { 'zone-reviewing': frame } });
+    for (const change of [{ x: 1100 }, { y: 600 }, { width: 900 }, { height: 700 }]) {
+      expect(sameBoardEntityPlacement(snapshot(zone), snapshot({ ...zone, ...change }))).toBe(
+        false
+      );
+    }
+    expect(sameBoardEntityPlacement(snapshot(zone), snapshot({ ...zone }))).toBe(true);
   });
 
   it('treats creation and removal as authority changes and normalizes an unpinned zone', () => {
