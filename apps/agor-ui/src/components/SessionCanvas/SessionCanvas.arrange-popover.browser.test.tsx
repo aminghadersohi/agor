@@ -293,6 +293,17 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     expect(dialog.getBoundingClientRect().height).toBeLessThan(420);
     expect(dialog.getBoundingClientRect().width).toBeLessThanOrEqual(356);
     const spacingHelp = within(dialog).getByRole('button', { name: 'Spacing help' });
+    // Presence precedes the portaled enter transition. Focus only after the
+    // help control is actually painted at its clickable position.
+    await waitFor(() => {
+      expect(dialog).toBeVisible();
+      const bounds = spacingHelp.getBoundingClientRect();
+      expect(
+        spacingHelp.contains(
+          document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)
+        )
+      ).toBe(true);
+    });
     spacingHelp.focus();
     expect(spacingHelp).toHaveFocus();
     await act(async () => user.click(within(dialog).getByText('More layout options')));

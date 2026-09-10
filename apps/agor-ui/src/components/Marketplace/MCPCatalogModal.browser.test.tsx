@@ -102,10 +102,27 @@ describe('MCP Catalog real Chromium flows', () => {
     const api = makeCatalogClient();
     render(<CatalogHarness client={api.client} />);
     await userEvent.click(screen.getByRole('button', { name: 'Open MCP Catalog' }));
+    const modal = await findCatalogModal();
+    // Finish the outer modal's opening/focus transition before opening its
+    // portaled drawer; otherwise two overlays are still moving during input.
+    await waitFor(() =>
+      expect(modal.getAnimations().some((animation) => animation.playState === 'running')).toBe(
+        false
+      )
+    );
     const card = await screen.findByRole('button', { name: 'Open DeepWiki' });
     await userEvent.click(card);
     const drawer = await screen.findByRole('dialog', { name: /DeepWiki/ });
-    await userEvent.click(within(drawer).getByRole('checkbox', { name: /I understand/ }));
+    await waitFor(() => {
+      expect(drawer).toBeVisible();
+      const bounds = drawer.getBoundingClientRect();
+      expect(bounds.right).toBeLessThanOrEqual(window.innerWidth);
+      expect(bounds.left).toBeGreaterThanOrEqual(0);
+    });
+    const consent = within(drawer).getByRole('checkbox', { name: /I understand/ });
+    expect(within(drawer).getByRole('button', { name: /Check & connect/ })).toBeDisabled();
+    await userEvent.click(consent);
+    await waitFor(() => expect(consent).toBeChecked());
     const connect = within(drawer).getByRole('button', { name: /Check & connect/ });
     await waitFor(() => expect(connect).toBeEnabled());
     await userEvent.click(connect);
