@@ -7,7 +7,16 @@
  * can update, which makes the controls look inert and clears node selection.
  */
 import type { AgorClient, Board, User } from '@agor-live/client';
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  configure,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { userEvent } from 'vitest/browser';
@@ -69,6 +78,11 @@ async function visibleRole(
   return element!;
 }
 
+// Hosted Chromium can complete the layout write and focus restoration before
+// rc-motion removes the closing portal. Keep the strict visibility/teardown
+// assertions, but do not mistake Testing Library's 1s DOM budget for a failure
+// of the 90s real-input scenario (the Catalog browser flows use the same budget).
+configure({ asyncUtilTimeout: 10_000 });
 afterEach(cleanup);
 
 const CURRENT_USER = {
