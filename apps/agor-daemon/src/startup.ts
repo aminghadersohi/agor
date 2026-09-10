@@ -141,7 +141,9 @@ export function shouldReconnectSocketClientsOnShutdown(policy: TaskRuntimePolicy
 
 /**
  * Construction boundary for standalone timers versus PostgreSQL-coordinated
- * all-daemon observation. A mismatched Task/environment policy fails closed.
+ * all-daemon observation. Owned standalone PostgreSQL retains local environment
+ * observation while using non-destructive shared Task startup/shutdown semantics.
+ * Every other mismatched Task/environment policy fails closed.
  */
 export function createEnvironmentHealthMonitor(
   ctx: StartupContext,
@@ -164,7 +166,15 @@ export function createEnvironmentHealthMonitor(
     });
   }
 ): EnvironmentHealthMonitor | null {
-  if (ctx.taskRuntimePolicy !== ctx.environmentHealthMonitorPolicy) {
+  const ownedStandalonePostgres =
+    ctx.taskRuntimePolicy === 'shared_postgres' &&
+    ctx.environmentHealthMonitorPolicy === 'standalone' &&
+    ctx.config.database?.dialect === 'postgresql' &&
+    ctx.config.deployment?.mode !== 'ha' &&
+    Boolean(ctx.config.deployment?.standalone_power_host_id) &&
+    resolveMultiTenancyConfig(ctx.config).mode === 'static' &&
+    ctx.powerPolicyController?.status().ownership === 'owned';
+  if (ctx.taskRuntimePolicy !== ctx.environmentHealthMonitorPolicy && !ownedStandalonePostgres) {
     return null;
   }
   return factory(ctx.environmentHealthMonitorPolicy, ctx.app, ctx);

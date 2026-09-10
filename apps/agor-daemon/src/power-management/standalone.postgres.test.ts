@@ -31,7 +31,11 @@ import {
 import { type Schedule, type SessionID, TaskStatus } from '@agor/core/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { SchedulerService } from '../services/scheduler.js';
-import { prepareTaskRuntimeStartup, type StartupContext } from '../startup.js';
+import {
+  createEnvironmentHealthMonitor,
+  prepareTaskRuntimeStartup,
+  type StartupContext,
+} from '../startup.js';
 import { PowerPolicyController } from './controller.js';
 
 const url = process.env.AGOR_TEST_POSTGRES_URL;
@@ -231,6 +235,27 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       await expect(
         inTenant(tenant, (tx) => StandalonePowerOwner.assertAdmission(tx, replacement))
       ).resolves.toBeUndefined();
+    });
+
+    it('admits the local environment monitor only while the real standalone PostgreSQL owner is healthy', async () => {
+      const s = await seed();
+      const owner = await acquire(s.tenant);
+      const c = await controller(s.tenant, owner);
+      const ctx = {
+        config: {
+          database: { dialect: 'postgresql' },
+          deployment: { mode: 'standalone', standalone_power_host_id: HOST_A },
+          multi_tenancy: { mode: 'static', static_tenant_id: s.tenant },
+        },
+        db,
+        taskRuntimePolicy: 'shared_postgres',
+        environmentHealthMonitorPolicy: 'standalone',
+        powerPolicyController: c,
+      } as StartupContext;
+      const monitor = { initialize: async () => undefined, cleanup: () => undefined };
+      expect(createEnvironmentHealthMonitor(ctx, () => monitor)).toBe(monitor);
+      await owner.close();
+      expect(createEnvironmentHealthMonitor(ctx, () => monitor)).toBeNull();
     });
 
     it('binds checks to the actual scoped transaction, not a raw pool handle', async () => {
