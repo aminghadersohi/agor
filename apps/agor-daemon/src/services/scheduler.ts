@@ -329,7 +329,8 @@ export interface SchedulerConfig {
   powerPolicy?: Pick<
     PowerPolicyController,
     'scheduleAdmission' | 'withScheduleMaterializationPermit'
-  >;
+  > &
+    Partial<Pick<PowerPolicyController, 'assertOwnershipInTransaction'>>;
 }
 
 export interface SchedulerTestHooks {
@@ -357,7 +358,8 @@ interface ResolvedSchedulerConfig {
   powerPolicy: Pick<
     PowerPolicyController,
     'scheduleAdmission' | 'withScheduleMaterializationPermit'
-  >;
+  > &
+    Partial<Pick<PowerPolicyController, 'assertOwnershipInTransaction'>>;
 }
 
 interface SchedulerTickStats {
@@ -998,6 +1000,7 @@ export class SchedulerService {
     try {
       const powerAdmission = await this.config.powerPolicy.withScheduleMaterializationPermit(() =>
         this.withTenantDatabase(async () => {
+          await this.config.powerPolicy.assertOwnershipInTransaction?.(this.db);
           // PostgreSQL FOR UPDATE serializes the schedule-scoped concurrency
           // decision. On SQLite occurrence uniqueness remains the race guard.
           await this.scheduleRepo.lockForRunAdmission(schedule.schedule_id);

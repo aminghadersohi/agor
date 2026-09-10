@@ -19,6 +19,8 @@ export function createTenantScopedAuthenticatedRouteRegistrar(options: {
   db: TenantScopeAwareDatabase;
   config: AgorConfig;
   jwtSecret: string;
+  /** Long orchestration owns short, explicitly fenced database units itself. */
+  transaction?: boolean;
 }): typeof registerAuthenticatedRouteUnscoped {
   const tenantDatabaseScopeAround = createTenantDatabaseScopeAroundHook(options);
   const tenantWriteGateAround = createTenantWriteGateAroundHook(options.db);

@@ -322,3 +322,16 @@ it('reports unsupported observation without probing or weakening off-mode admiss
   expect(claim).toHaveBeenCalledOnce();
   await disabled.stop();
 });
+
+it('evaluates staleness at admission even when no provider poll has run', async () => {
+  const clock = new FakeClock();
+  const controller = new PowerPolicyController(config(), null, clock);
+  await controller.ingestForTest({ condition: 'online', communication: 'ok' });
+  clock.monotonic += 10_000;
+  await controller.ingestForTest({ condition: 'online', communication: 'ok' });
+  expect((await controller.withDispatchPermit('normal', async () => 'fresh')).value).toBe('fresh');
+  clock.monotonic += 10_001;
+  const claim = vi.fn(async () => 'must not run');
+  expect((await controller.withDispatchPermit('normal', claim)).decision.outcome).toBe('held');
+  expect(claim).not.toHaveBeenCalled();
+});

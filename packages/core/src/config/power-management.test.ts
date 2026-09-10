@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertPowerManagementActivationSupported,
+  assertStandalonePowerOwnershipConfig,
   isPowerManagementObservationSupported,
   powerManagementMutableSettingsFromResolved,
   powerManagementSettingsFromResolved,
@@ -84,7 +85,7 @@ describe('assertPowerManagementActivationSupported', () => {
         { ...base, database: { dialect: 'postgresql' } } as AgorConfig,
         'darwin'
       )
-    ).toThrow(/database.dialect sqlite/);
+    ).toThrow(/standalone_power_host_id/);
   });
 });
 
@@ -115,4 +116,60 @@ it('gives a normalized runtime policy explicit precedence without making provide
     maxEssentialSessions: 1,
   });
   expect(powerManagementMutableSettingsFromResolved(effective)).not.toHaveProperty('provider');
+});
+
+describe('standalone PostgreSQL ownership topology', () => {
+  const supported = {
+    deployment: {
+      mode: 'standalone',
+      standalone_power_host_id: '00000000-0000-4000-8000-000000000001',
+    },
+    database: { dialect: 'postgresql' },
+    multi_tenancy: { mode: 'static' },
+    execution: { unix_user_mode: 'simple', power_management: { mode: 'off' } },
+  } as AgorConfig;
+  it.each(['off', 'observe', 'enforce'] as const)(
+    'supports %s only with the full immutable topology',
+    (mode) => {
+      const config = {
+        ...supported,
+        execution: { ...supported.execution, power_management: { mode } },
+      };
+      expect(() => assertStandalonePowerOwnershipConfig(config, 'darwin')).not.toThrow();
+      expect(() => assertPowerManagementActivationSupported(config, 'darwin')).not.toThrow();
+      expect(isPowerManagementObservationSupported(config, 'darwin')).toBe(true);
+    }
+  );
+  it.each([
+    { deployment: { ...supported.deployment, mode: 'ha' } },
+    { multi_tenancy: { mode: 'required_from_auth' } },
+    { database: { dialect: 'sqlite' } },
+    { execution: { ...supported.execution, unix_user_mode: 'sandbox' } },
+    { execution: { ...supported.execution, unix_user_mode: 'delegated' } },
+    { execution: { ...supported.execution, executor_command_template: 'fictional-remote' } },
+  ])('rejects unsupported topology even while Off: %j', (override) => {
+    expect(() =>
+      assertStandalonePowerOwnershipConfig({ ...supported, ...override } as AgorConfig, 'darwin')
+    ).toThrow(/requires macOS/);
+  });
+  it('rejects nonmacOS and invalid or absent operator identity for active PG policy', () => {
+    expect(() => assertStandalonePowerOwnershipConfig(supported, 'linux')).toThrow(
+      /requires macOS/
+    );
+    expect(() =>
+      assertStandalonePowerOwnershipConfig(
+        { ...supported, deployment: { standalone_power_host_id: 'copied-hostname' } },
+        'darwin'
+      )
+    ).toThrow(/UUID/);
+    const missing = {
+      ...supported,
+      deployment: { mode: 'standalone' as const },
+      execution: { power_management: { mode: 'observe' as const } },
+    };
+    expect(isPowerManagementObservationSupported(missing, 'darwin')).toBe(false);
+    expect(() => assertPowerManagementActivationSupported(missing, 'darwin')).toThrow(
+      /standalone_power_host_id/
+    );
+  });
 });

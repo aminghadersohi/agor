@@ -56,6 +56,7 @@ export { type DatabaseDialect, detectDialectFromUrl, getDatabaseDialect } from '
 export { configureSecretKeyDerivationTracing } from './secret-key-derivation';
 // Session guard utilities (defensive programming for deleted sessions)
 export * from './session-guard';
+export * from './standalone-power-owner';
 // Tenant database lifecycle primitives. Filesystem-backed portability operations
 // live at @agor/core/tenant-portability so importing the daemon's database
 // surface does not implicitly grant host-filesystem capabilities.

@@ -25,6 +25,29 @@ function AdminPowerManagement({ client, user }: { client: AgorClient; user: User
         </Spin>
       ) : (
         <>
+          {status.provider_supported === false && (
+            <Alert
+              type="warning"
+              showIcon
+              title="Unsupported power-management topology"
+              description={
+                status.provider_support_reason ??
+                'Provider and topology are operator-managed. Active policies cannot be applied on this deployment.'
+              }
+            />
+          )}
+          {status.ownership && (
+            <Alert
+              type={status.ownership === 'owned' ? 'info' : 'error'}
+              showIcon
+              title={
+                status.ownership === 'owned'
+                  ? 'Exclusive PostgreSQL host ownership held'
+                  : 'Host ownership lost — new admissions blocked, including Off'
+              }
+              description="Deployment ownership is separate from UPS telemetry and conservation. Running Tasks are untouched. After loss, stop this daemon and restart only on the bound host; there is no automatic reacquisition or cross-host takeover. Host identity is operator-managed and cannot be changed with Apply."
+            />
+          )}
           <Card
             title="Power source monitoring"
             extra={<Tag color={source.color}>{source.label}</Tag>}
@@ -172,7 +195,7 @@ function AdminPowerManagement({ client, user }: { client: AgorClient; user: User
               <Alert
                 type="info"
                 showIcon
-                title="Power conservation is Observe — Sessions are not gated"
+                title="Power conservation is Observe — UPS conditions do not gate Sessions"
                 description="Agor calculates what Enforce would hold, but does not hold dispatch or schedules."
               />
             )}

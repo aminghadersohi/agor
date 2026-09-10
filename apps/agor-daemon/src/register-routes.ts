@@ -45,6 +45,7 @@ import {
   PowerPolicyRuntimeRevisionConflictError,
   type PowerPolicyRuntimeSettingsRepository,
   RepositoryError,
+  requireCurrentTenantId,
   resolveMcpMemberPolicy,
   runWithTenantDatabaseScope,
   runWithTenantDatabaseTransaction,
@@ -999,11 +1000,18 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   // restricted to one static tenant. The service returns only the redacted
   // policy projection and realtime uses the same admin role floor.
   const operatorPowerDefaults = resolvePowerManagementConfig(config.execution?.power_management);
-  registerAuthenticatedRoute(
+  const registerPowerAuthenticatedRoute = createTenantScopedAuthenticatedRouteRegistrar({
+    db,
+    config,
+    jwtSecret,
+    transaction: false,
+  });
+  registerPowerAuthenticatedRoute(
     app,
     '/power-management',
     {
       async find() {
+        await powerPolicyController.refreshOwnership();
         return powerPolicyController.status();
       },
       async patch(_id: null, data: unknown, params: RouteParams) {
@@ -1111,18 +1119,26 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         if (!actorId) throw new NotAuthenticated('Authentication required');
         try {
           return await powerPolicyController.applyRuntimeMutation(() =>
-            powerPolicyRuntimeSettingsRepository.compareAndSwap({
-              expectedRevision: Number(request.expected_revision),
-              operation: rollback
-                ? 'rollback_last_change'
-                : reset
-                  ? 'reset_to_operator_defaults'
-                  : 'apply',
-              ...(runtimeOverride ? { runtimeOverride } : {}),
-              operatorDefaults: operatorPowerDefaults,
-              updatedBy: actorId,
-              validateEffective: (effective) => powerPolicyController.assertCanApply(effective),
-            })
+            runWithTenantDatabaseTransaction(
+              db,
+              tenantConfig.static_tenant_id,
+              async (tenantDb) => {
+                await powerPolicyController.assertOwnershipInTransaction(tenantDb);
+                await assertTenantWritable(tenantDb, tenantConfig.static_tenant_id);
+                return powerPolicyRuntimeSettingsRepository.compareAndSwap({
+                  expectedRevision: Number(request.expected_revision),
+                  operation: rollback
+                    ? 'rollback_last_change'
+                    : reset
+                      ? 'reset_to_operator_defaults'
+                      : 'apply',
+                  ...(runtimeOverride ? { runtimeOverride } : {}),
+                  operatorDefaults: operatorPowerDefaults,
+                  updatedBy: actorId,
+                  validateEffective: (effective) => powerPolicyController.assertCanApply(effective),
+                });
+              }
+            )
           );
         } catch (error) {
           if (error instanceof PowerPolicyRuntimeRevisionConflictError) {
@@ -1233,37 +1249,44 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     };
   };
 
-  registerAuthenticatedRoute(
+  registerPowerAuthenticatedRoute(
     app,
     '/sessions/:id/power-priority',
     {
       async find(params: RouteParams): Promise<SessionPowerPriorityView> {
         const id = params.route?.id;
         if (!id) throw new BadRequest('Session ID required');
-        const session = await app.service('sessions').get(id, params);
-        return powerPriorityView(session, params);
+        return runWithTenantDatabaseScope(db, requireCurrentTenantId(), async () => {
+          const session = await app.service('sessions').get(id, params);
+          return powerPriorityView(session, params);
+        });
       },
       async create(
         data: SetSessionPowerPriorityRequest,
         params: RouteParams
       ): Promise<SessionPowerPriorityView> {
-        const id = params.route?.id;
-        if (!id) throw new BadRequest('Session ID required');
-        if (!data || !SESSION_POWER_PRIORITIES.includes(data.priority as SessionPowerPriority)) {
-          throw new BadRequest('priority must be normal or essential');
-        }
-        const actorId = params.user?.user_id as UserID | undefined;
-        if (!actorId) throw new NotAuthenticated('Authentication required');
-        const session = await app.service('sessions').get(id, params);
-        const currentView = await powerPriorityView(session, params);
-        if (!currentView.can_manage) {
-          throw new Forbidden('Branch Manager access is required to change power priority');
-        }
-        if (session.power_priority === data.priority) return currentView;
-        try {
-          const updated = await powerPolicyController.withPriorityMutation(
-            async () =>
-              (await app.service('sessions').patch(
+        return powerPolicyController.withPriorityMutation(() =>
+          runWithTenantDatabaseTransaction(db, requireCurrentTenantId(), async (tenantDb) => {
+            await powerPolicyController.assertOwnershipInTransaction(tenantDb);
+            await assertTenantWritable(tenantDb, requireCurrentTenantId());
+            const id = params.route?.id;
+            if (!id) throw new BadRequest('Session ID required');
+            if (
+              !data ||
+              !SESSION_POWER_PRIORITIES.includes(data.priority as SessionPowerPriority)
+            ) {
+              throw new BadRequest('priority must be normal or essential');
+            }
+            const actorId = params.user?.user_id as UserID | undefined;
+            if (!actorId) throw new NotAuthenticated('Authentication required');
+            const session = await app.service('sessions').get(id, params);
+            const currentView = await powerPriorityView(session, params);
+            if (!currentView.can_manage) {
+              throw new Forbidden('Branch Manager access is required to change power priority');
+            }
+            if (session.power_priority === data.priority) return currentView;
+            try {
+              const updated = (await app.service('sessions').patch(
                 session.session_id,
                 {
                   power_priority: data.priority as SessionPowerPriority,
@@ -1271,35 +1294,36 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                   power_priority_updated_by: actorId,
                 },
                 { ...params, provider: undefined }
-              )) as unknown as Session
-          );
-          analyticsLogger.track(
-            'session.power_priority_changed',
-            {
-              session_id: updated.session_id,
-              branch_id: updated.branch_id,
-              previous_priority: session.power_priority ?? 'normal',
-              priority: updated.power_priority,
-            },
-            { userId: actorId }
-          );
-          console.info(
-            formatStructuredLog('[power-priority]', {
-              event: 'changed',
-              session_id: updated.session_id,
-              branch_id: updated.branch_id,
-              actor_id: actorId,
-              previous: session.power_priority ?? 'normal',
-              current: updated.power_priority,
-            })
-          );
-          return powerPriorityView(updated, params);
-        } catch (error) {
-          if (isDatabaseUniqueConstraintError(error)) {
-            throw new Conflict('The one essential Session slot is already in use');
-          }
-          throw error;
-        }
+              )) as unknown as Session;
+              analyticsLogger.track(
+                'session.power_priority_changed',
+                {
+                  session_id: updated.session_id,
+                  branch_id: updated.branch_id,
+                  previous_priority: session.power_priority ?? 'normal',
+                  priority: updated.power_priority,
+                },
+                { userId: actorId }
+              );
+              console.info(
+                formatStructuredLog('[power-priority]', {
+                  event: 'changed',
+                  session_id: updated.session_id,
+                  branch_id: updated.branch_id,
+                  actor_id: actorId,
+                  previous: session.power_priority ?? 'normal',
+                  current: updated.power_priority,
+                })
+              );
+              return powerPriorityView(updated, params);
+            } catch (error) {
+              if (isDatabaseUniqueConstraintError(error)) {
+                throw new Conflict('The one essential Session slot is already in use');
+              }
+              throw error;
+            }
+          })
+        );
       },
     },
     {
@@ -2126,6 +2150,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       },
       () =>
         runWithTenantDatabaseTransaction(db, tenantId, async (tenantDb) => {
+          await powerPolicyController.assertOwnershipInTransaction(tenantDb);
           await lockTenantAuthorizationFence(tenantDb, params);
           await assertTenantWritable(tenantDb, tenantId);
           return tasksService.claimDispatchAndProjectSession(

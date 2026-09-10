@@ -24,14 +24,38 @@ const readJournals = () =>
 describe('Postgres migrations', () => {
   it('appends MCP recovery after the fork repair band without duplicate tags or indices', async () => {
     for (const journal of await readJournals()) {
-      const added = journal.entries.at(-1)!;
+      const index = journal.entries.findIndex(({ tag }) => tag === '9019_mcp_slack_recovery_due');
+      const added = journal.entries[index]!;
       expect(added).toMatchObject({ idx: 9019, tag: '9019_mcp_slack_recovery_due' });
       expect(added.when).toBeGreaterThan(
-        Math.max(...journal.entries.slice(0, -1).map(({ when }) => when))
+        Math.max(...journal.entries.slice(0, index).map(({ when }) => when))
       );
       expect(new Set(journal.entries.map(({ idx }) => idx)).size).toBe(journal.entries.length);
       expect(new Set(journal.entries.map(({ tag }) => tag)).size).toBe(journal.entries.length);
     }
+  });
+
+  it('marks the PostgreSQL-only ownership protocol as offline with a monotonic append', async () => {
+    const [pg, sqlite] = await readJournals();
+    expect(pg.entries.at(-1)?.tag).toBe('9020_standalone_power_ownership');
+    expect(sqlite.entries.some((e) => e.tag === '9020_standalone_power_ownership')).toBe(false);
+    // Historical journals contain legacy ordering repairs. Never rewrite them:
+    // this append must exceed EVERY old watermark, not only its predecessor.
+    expect(pg.entries.at(-1)!.when).toBeGreaterThan(
+      Math.max(...pg.entries.slice(0, -1).map((e) => e.when))
+    );
+    expect(sqlite.entries.at(-1)?.tag).toBe('9019_mcp_slack_recovery_due');
+    expect(
+      pendingOfflineCutoverMigrations('postgresql', {
+        applied: ['9019_mcp_slack_recovery_due'],
+        pending: ['9020_standalone_power_ownership'],
+      })
+    ).toEqual(['9020_standalone_power_ownership']);
+    const migration = await readFile(
+      new URL('../../drizzle/postgres/9020_standalone_power_ownership.sql', import.meta.url),
+      'utf8'
+    );
+    expect(migration).not.toMatch(/CREATE TABLE|ALTER TABLE|DROP TABLE/);
   });
 
   it('starts the Discord hybrid migration with its transaction-local lock timeout', async () => {
@@ -999,7 +1023,7 @@ describe('MCP OAuth client-registration migrations', () => {
 
   it('follows current main and binds PostgreSQL authority to tenant/server UUID with forced RLS', async () => {
     const [postgresJournal] = await readJournals();
-    expect(postgresJournal.entries.slice(-7)).toEqual([
+    expect(postgresJournal.entries.slice(-8)).toEqual([
       expect.objectContaining({ idx: 103, tag: '0103_session_power_priority' }),
       expect.objectContaining({ idx: 104, tag: '0104_environment_command_discovery' }),
       expect.objectContaining({ idx: 9015, tag: '9015_mcp_oauth_client_registrations' }),
@@ -1010,6 +1034,7 @@ describe('MCP OAuth client-registration migrations', () => {
       expect.objectContaining({ idx: 9017, tag: '9017_fork_migration_collision_repair' }),
       expect.objectContaining({ idx: 9018, tag: '9018_session_memory_reminders' }),
       expect.objectContaining({ idx: 9019, tag: '9019_mcp_slack_recovery_due' }),
+      expect.objectContaining({ idx: 9020, tag: '9020_standalone_power_ownership' }),
     ]);
     expect(postgresJournal.entries.find(({ idx }) => idx === 103)!.when).toBeGreaterThan(
       postgresJournal.entries.find(({ idx }) => idx === 102)!.when
