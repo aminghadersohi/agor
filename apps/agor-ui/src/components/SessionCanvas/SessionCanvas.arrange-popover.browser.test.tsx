@@ -7,7 +7,16 @@
  * can update, which makes the controls look inert and clears node selection.
  */
 import type { AgorClient, Board, User } from '@agor-live/client';
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  configure,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { userEvent } from 'vitest/browser';
@@ -69,6 +78,11 @@ async function visibleRole(
   return element!;
 }
 
+// Hosted Chromium can complete the layout write and focus restoration before
+// rc-motion removes the closing portal. Keep the strict visibility/teardown
+// assertions, but do not mistake Testing Library's 1s DOM budget for a failure
+// of the 90s real-input scenario (the Catalog browser flows use the same budget).
+configure({ asyncUtilTimeout: 10_000 });
 afterEach(cleanup);
 
 const CURRENT_USER = {
@@ -285,6 +299,17 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     expect(dialog.getBoundingClientRect().height).toBeLessThan(420);
     expect(dialog.getBoundingClientRect().width).toBeLessThanOrEqual(356);
     const spacingHelp = within(dialog).getByRole('button', { name: 'Spacing help' });
+    // Presence precedes the portaled enter transition. Focus only after the
+    // help control is actually painted at its clickable position.
+    await waitFor(() => {
+      expect(dialog).toBeVisible();
+      const bounds = spacingHelp.getBoundingClientRect();
+      expect(
+        spacingHelp.contains(
+          document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)
+        )
+      ).toBe(true);
+    });
     spacingHelp.focus();
     expect(spacingHelp).toHaveFocus();
     await act(async () => user.click(within(dialog).getByText('More layout options')));

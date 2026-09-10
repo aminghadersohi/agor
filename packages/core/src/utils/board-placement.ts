@@ -185,7 +185,9 @@ function overlapsAnyOccupant(
  * When nothing inside the zone is free the entity is parked directly below the
  * lowest occupant. That can exceed the zone's current height, which is both
  * visible and fixable (resize the zone, or arrange it with autoResizeHeight) —
- * unlike a silent overlap, which reads as data loss.
+ * unlike a silent overlap, which reads as data loss. Callers requiring a zone
+ * pin to imply containment must use `overflow: 'reject'` instead; that path
+ * never returns an out-of-frame slot, including for an empty undersized zone.
  */
 export function findFreeZoneSlot(
   zone: Pick<ZoneBoardObject, 'width' | 'height'>,
@@ -196,6 +198,8 @@ export function findFreeZoneSlot(
     padding?: number;
     gap?: number;
     titleInset?: number;
+    /** Reject instead of parking outside the frame when no contained slot fits. */
+    overflow?: 'below' | 'reject';
   }
 ): BoardPosition {
   const entityWidth = options?.entityWidth ?? BRANCH_CARD_WIDTH;
@@ -204,6 +208,12 @@ export function findFreeZoneSlot(
   const gap = Math.max(0, options?.gap ?? 24);
   const top = padding + Math.max(0, options?.titleInset ?? 0);
 
+  const requireContainment = options?.overflow === 'reject';
+  const fitsFrame =
+    padding + entityWidth <= zone.width - padding && top + entityHeight <= zone.height - padding;
+  if (requireContainment && !fitsFrame) {
+    throw new Error('Zone is too small for this entity; resize the zone before placing it');
+  }
   if (occupants.length === 0) return { x: padding, y: top };
 
   const stepX = entityWidth + gap;
@@ -218,6 +228,9 @@ export function findFreeZoneSlot(
     }
   }
 
+  if (requireContainment) {
+    throw new Error('No free slot inside this zone; resize or arrange its contents before placing');
+  }
   const lowestOccupiedEdge = Math.max(...occupants.map((occupant) => occupant.y + occupant.height));
   return { x: padding, y: lowestOccupiedEdge + gap };
 }
