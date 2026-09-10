@@ -37,6 +37,7 @@ import {
 import type { AgorConfig, ResolvedSecurity } from '@agor/core/config';
 import {
   assertPowerManagementActivationSupported,
+  assertStandalonePowerOwnershipConfig,
   assertValidEffectiveExecutionConfig,
   assertValidEffectiveIdentityConfig,
   assertValidRawConfig,
@@ -58,10 +59,12 @@ import {
   resolveValidExternalLaunchProvider,
 } from '@agor/core/config';
 import {
+  detectDialectFromUrl,
   generateId,
   PowerPolicyRuntimeSettingsRepository,
   resolveDatabaseUrl,
   runWithTenantDatabaseScope,
+  StandalonePowerOwner,
 } from '@agor/core/db';
 import {
   authenticate,
@@ -218,10 +221,24 @@ async function startDaemonWithOwnedMetrics(
   const externalLaunchProvider = resolveValidExternalLaunchProvider(config);
   assertValidEffectiveIdentityConfig(config);
   const databaseUrl = resolveDatabaseUrl({ config, env: process.env });
+  config = {
+    ...config,
+    database: {
+      ...config.database,
+      dialect: detectDialectFromUrl(databaseUrl) ?? config.database?.dialect,
+    },
+  };
 
   // Deployment package availability is instance-global. Validate it before
   // database or tenant initialization so no tenant can expand the daemon's
   // installed-code surface and a broken upgrade never starts listening.
+  assertStandalonePowerOwnershipConfig({
+    ...config,
+    database: {
+      ...config.database,
+      dialect: detectDialectFromUrl(databaseUrl) ?? config.database?.dialect,
+    },
+  });
   const resolvedAgenticTools = await assertConfiguredAgenticToolsReady(config);
   if (resolvedAgenticTools) {
     // In-memory projection only: config.yaml remains immutable while every
@@ -775,211 +792,234 @@ async function startDaemonWithOwnedMetrics(
   configureChannels(app);
   configureSwagger(app, { version: DAEMON_VERSION, port: DAEMON_PORT });
 
-  const { db } = await initializeDatabase(databaseUrl, {
-    tenantId: multiTenancy.mode === 'static' ? multiTenancy.static_tenant_id : undefined,
-    skipFirstRunAdminBootstrap:
-      !resolveIdentityAuthority(effectiveConfig).capabilities.users.create,
-    // The URL may come from DATABASE_URL, but operators still need to size the
-    // per-replica pool from config.yaml. Keep this deliberately limited to max:
-    // the public idleTimeout setting is documented in milliseconds while the
-    // postgres.js client boundary uses seconds, and `min` is not implemented.
-    pool: effectiveConfig.database?.postgresql?.pool?.max
-      ? { max: effectiveConfig.database.postgresql.pool.max }
-      : undefined,
-    traceServices: effectiveConfig.metrics?.apm?.trace_services ?? 'off',
-  });
-  configureUploadStagingStoreFromConfig(effectiveConfig, undefined, db);
+  try {
+    const { db } = await initializeDatabase(databaseUrl, {
+      tenantId: multiTenancy.mode === 'static' ? multiTenancy.static_tenant_id : undefined,
+      beforeInitialDataSetup: async (db) => {
+        if (effectiveConfig.deployment?.standalone_power_host_id) {
+          const owner = await StandalonePowerOwner.acquire(
+            databaseUrl,
+            multiTenancy.static_tenant_id,
+            effectiveConfig.deployment.standalone_power_host_id
+          );
+          powerPolicyController.setOwnership(owner);
+        }
+        if (multiTenancy.mode === 'static') {
+          await runWithTenantDatabaseScope(db, multiTenancy.static_tenant_id, (scoped) =>
+            powerPolicyController.assertOwnershipInTransaction(scoped)
+          );
+        }
+      },
+      skipFirstRunAdminBootstrap:
+        !resolveIdentityAuthority(effectiveConfig).capabilities.users.create,
+      // The URL may come from DATABASE_URL, but operators still need to size the
+      // per-replica pool from config.yaml. Keep this deliberately limited to max:
+      // the public idleTimeout setting is documented in milliseconds while the
+      // postgres.js client boundary uses seconds, and `min` is not implemented.
+      pool: effectiveConfig.database?.postgresql?.pool?.max
+        ? { max: effectiveConfig.database.postgresql.pool.max }
+        : undefined,
+      traceServices: effectiveConfig.metrics?.apm?.trace_services ?? 'off',
+    });
+    configureUploadStagingStoreFromConfig(effectiveConfig, undefined, db);
 
-  const operatorPowerDefaults = resolvePowerManagementConfig(
-    effectiveConfig.execution?.power_management
-  );
-  const powerPolicyRuntimeSettingsRepository = new PowerPolicyRuntimeSettingsRepository(db);
-  const runtimePowerState =
-    multiTenancy.mode === 'static'
-      ? await runWithTenantDatabaseScope(db, multiTenancy.static_tenant_id, () =>
-          powerPolicyRuntimeSettingsRepository.load(operatorPowerDefaults)
-        )
-      : {
-          effective: operatorPowerDefaults,
-          view: {
-            revision: 0,
-            source: 'operator_defaults' as const,
-            operator_defaults: powerManagementSettingsFromResolved(operatorPowerDefaults),
-            can_rollback: false,
+    const operatorPowerDefaults = resolvePowerManagementConfig(
+      effectiveConfig.execution?.power_management
+    );
+    const powerPolicyRuntimeSettingsRepository = new PowerPolicyRuntimeSettingsRepository(db);
+    const runtimePowerState =
+      multiTenancy.mode === 'static'
+        ? await runWithTenantDatabaseScope(db, multiTenancy.static_tenant_id, () =>
+            powerPolicyRuntimeSettingsRepository.load(operatorPowerDefaults)
+          )
+        : {
+            effective: operatorPowerDefaults,
+            view: {
+              revision: 0,
+              source: 'operator_defaults' as const,
+              operator_defaults: powerManagementSettingsFromResolved(operatorPowerDefaults),
+              can_rollback: false,
+            },
+          };
+    assertPowerManagementActivationSupported({
+      ...effectiveConfig,
+      execution: {
+        ...effectiveConfig.execution,
+        power_management: powerManagementSettingsFromResolved(runtimePowerState.effective),
+      },
+    });
+    powerPolicyController.configureBeforeStart(runtimePowerState.effective, runtimePowerState.view);
+
+    // --------------------------------------------------------------------------
+    // Authorization settings
+    // --------------------------------------------------------------------------
+    const allowSuperadmin = effectiveConfig.execution?.allow_superadmin === true;
+    const superadminOpts = { allowSuperadmin };
+
+    // Stash the shared Drizzle handle on the Feathers app so lifecycle
+    // utilities that are not constructed with a database argument can resolve
+    // it via `getDb(app)`. Services using constructor injection are unaffected.
+    app.set('database', db);
+    app.set('config', effectiveConfig);
+
+    if (openSourceTelemetryLogger.isEnabled()) {
+      const startupTelemetryProperties = {
+        agor_version: AGOR_VERSION,
+        deployment_kind: process.env.KUBERNETES_SERVICE_HOST
+          ? 'k8s'
+          : process.env.container || process.env.AGOR_DOCKER
+            ? 'docker'
+            : 'local',
+        db_backend: process.env.AGOR_DB_DIALECT === 'postgresql' ? 'postgresql' : 'sqlite',
+        os_family: platform(),
+        node_major: Number.parseInt(process.versions.node.split('.')[0] ?? '0', 10),
+        branch_rbac: true,
+        unix_user_mode: effectiveConfig.execution?.unix_user_mode ?? 'simple',
+      };
+
+      openSourceTelemetryLogger.track({
+        event: 'daemon.start',
+        properties: startupTelemetryProperties,
+      });
+
+      const daemonActive = shouldEmitOpenSourceTelemetryDaemonActive(effectiveConfig);
+      if (daemonActive.shouldEmit) {
+        openSourceTelemetryLogger.track({
+          event: 'daemon.active',
+          properties: {
+            ...startupTelemetryProperties,
+            day: daemonActive.day,
           },
-        };
-  assertPowerManagementActivationSupported({
-    ...effectiveConfig,
-    execution: {
-      ...effectiveConfig.execution,
-      power_management: powerManagementSettingsFromResolved(runtimePowerState.effective),
-    },
-  });
-  powerPolicyController.configureBeforeStart(runtimePowerState.effective, runtimePowerState.view);
+        });
+      }
 
-  // --------------------------------------------------------------------------
-  // Authorization settings
-  // --------------------------------------------------------------------------
-  const allowSuperadmin = effectiveConfig.execution?.allow_superadmin === true;
-  const superadminOpts = { allowSuperadmin };
-
-  // Stash the shared Drizzle handle on the Feathers app so lifecycle
-  // utilities that are not constructed with a database argument can resolve
-  // it via `getDb(app)`. Services using constructor injection are unaffected.
-  app.set('database', db);
-  app.set('config', effectiveConfig);
-
-  if (openSourceTelemetryLogger.isEnabled()) {
-    const startupTelemetryProperties = {
-      agor_version: AGOR_VERSION,
-      deployment_kind: process.env.KUBERNETES_SERVICE_HOST
-        ? 'k8s'
-        : process.env.container || process.env.AGOR_DOCKER
-          ? 'docker'
-          : 'local',
-      db_backend: process.env.AGOR_DB_DIALECT === 'postgresql' ? 'postgresql' : 'sqlite',
-      os_family: platform(),
-      node_major: Number.parseInt(process.versions.node.split('.')[0] ?? '0', 10),
-      branch_rbac: true,
-      unix_user_mode: effectiveConfig.execution?.unix_user_mode ?? 'simple',
-    };
-
-    openSourceTelemetryLogger.track({
-      event: 'daemon.start',
-      properties: startupTelemetryProperties,
-    });
-
-    const daemonActive = shouldEmitOpenSourceTelemetryDaemonActive(effectiveConfig);
-    if (daemonActive.shouldEmit) {
-      openSourceTelemetryLogger.track({
-        event: 'daemon.active',
-        properties: {
-          ...startupTelemetryProperties,
-          day: daemonActive.day,
-        },
+      if (
+        effectiveConfig.telemetry?.last_reported_version &&
+        effectiveConfig.telemetry.last_reported_version !== AGOR_VERSION
+      ) {
+        openSourceTelemetryLogger.track({
+          event: 'daemon.upgraded',
+          properties: {
+            from_version: effectiveConfig.telemetry.last_reported_version,
+            to_version: AGOR_VERSION,
+          },
+        });
+      }
+      startOpenSourceTelemetryUsageSummaryInterval(db, effectiveConfig, {
+        tenantId: multiTenancy.static_tenant_id,
       });
     }
 
-    if (
-      effectiveConfig.telemetry?.last_reported_version &&
-      effectiveConfig.telemetry.last_reported_version !== AGOR_VERSION
-    ) {
-      openSourceTelemetryLogger.track({
-        event: 'daemon.upgraded',
-        properties: {
-          from_version: effectiveConfig.telemetry.last_reported_version,
-          to_version: AGOR_VERSION,
-        },
-      });
-    }
-    startOpenSourceTelemetryUsageSummaryInterval(db, effectiveConfig, {
-      tenantId: multiTenancy.static_tenant_id,
+    // --------------------------------------------------------------------------
+    // Phase 1: Register services
+    // --------------------------------------------------------------------------
+    const services = await registerServices({
+      db,
+      app,
+      config: effectiveConfig,
+      jwtSecret,
+      daemonUrl,
+      bundledUiAvailable,
+      DAEMON_PORT,
+      UI_PORT,
+      allowSuperadmin,
+      requireAuth,
+      deployment,
+      mcpOAuthCallbackUrl,
     });
+
+    // --------------------------------------------------------------------------
+    // Phase 2: Register hooks
+    // --------------------------------------------------------------------------
+    registerHooks({
+      db,
+      app,
+      config: effectiveConfig,
+      jwtSecret,
+      requireAuth,
+      superadminOpts,
+      sessionsService: services.sessionsService,
+      messagesService: services.messagesService,
+      boardsService: services.boardsService,
+      branchRepository: services.branchRepository,
+      usersRepository: services.usersRepository,
+      sessionsRepository: services.sessionsRepository,
+      realtimeRelay: realtimeRuntime,
+      deployment,
+    });
+
+    // --------------------------------------------------------------------------
+    // Phase 3: Register routes (auth, REST, tier hooks, error handler)
+    // --------------------------------------------------------------------------
+    await registerRoutes({
+      db,
+      app,
+      config: effectiveConfig,
+      externalLaunchProvider,
+      jwtSecret,
+      requireAuth,
+      enforcePasswordChange,
+      superadminOpts,
+      DB_PATH: databaseUrl,
+      DAEMON_PORT,
+      DAEMON_VERSION,
+      AGOR_VERSION,
+      DAEMON_BUILD_INFO,
+      resolvedSecurity,
+      realtimeRuntime,
+      distributedWorkIdentity,
+      deployment,
+      sessionsService: services.sessionsService,
+      boardsService: services.boardsService,
+      branchRepository: services.branchRepository,
+      usersRepository: services.usersRepository,
+      sessionsRepository: services.sessionsRepository,
+      sessionMCPServersService: services.sessionMCPServersService,
+      sessionEnvSelectionsService: services.sessionEnvSelectionsService,
+      terminalsService: services.terminalsService,
+      powerPolicyController,
+      powerPolicyRuntimeSettingsRepository,
+    });
+
+    // --------------------------------------------------------------------------
+    // Phase 3.5: Every registered service must have declared its realtime
+    // audience. Undeclared services publish to nobody, which is the safe failure
+    // but an invisible one — so refuse to boot rather than let realtime for a new
+    // service quietly do nothing. Deterministic: it reads the registration table,
+    // not request data.
+    // --------------------------------------------------------------------------
+    assertRealtimePublishPolicyCoverage(app);
+
+    // --------------------------------------------------------------------------
+    // Phase 4: Startup (orphan cleanup, health, scheduler, listen, shutdown)
+    // --------------------------------------------------------------------------
+    await startup({
+      app,
+      db,
+      config: effectiveConfig,
+      DAEMON_PORT,
+      DAEMON_HOST,
+      safeService,
+      getSocketServer: socketIOConfig.getSocketServer,
+      sessionsService: services.sessionsService,
+      terminalsService: services.terminalsService,
+      distributedWorkIdentity,
+      // PostgreSQL leases/claims and executor-token authority make the merged
+      // runtime workers replica-independent. Agor-managed permission callbacks
+      // use the transient task-private realtime control path; unsupported
+      // provider-native confirmation modes remain separately fail-closed.
+      taskRuntimePolicy:
+        deployment.mode === 'ha' || effectiveConfig.deployment?.standalone_power_host_id
+          ? 'shared_postgres'
+          : 'standalone',
+      environmentHealthMonitorPolicy: deployment.mode === 'ha' ? 'shared_postgres' : 'standalone',
+      environmentHealthMonitorSettings:
+        deployment.mode === 'ha' ? deployment.environmentHealthMonitor : undefined,
+      realtimeRuntime,
+      powerPolicyController,
+    });
+  } catch (error) {
+    await powerPolicyController.closeOwnership();
+    throw error;
   }
-
-  // --------------------------------------------------------------------------
-  // Phase 1: Register services
-  // --------------------------------------------------------------------------
-  const services = await registerServices({
-    db,
-    app,
-    config: effectiveConfig,
-    jwtSecret,
-    daemonUrl,
-    bundledUiAvailable,
-    DAEMON_PORT,
-    UI_PORT,
-    allowSuperadmin,
-    requireAuth,
-    deployment,
-    mcpOAuthCallbackUrl,
-  });
-
-  // --------------------------------------------------------------------------
-  // Phase 2: Register hooks
-  // --------------------------------------------------------------------------
-  registerHooks({
-    db,
-    app,
-    config: effectiveConfig,
-    jwtSecret,
-    requireAuth,
-    superadminOpts,
-    sessionsService: services.sessionsService,
-    messagesService: services.messagesService,
-    boardsService: services.boardsService,
-    branchRepository: services.branchRepository,
-    usersRepository: services.usersRepository,
-    sessionsRepository: services.sessionsRepository,
-    realtimeRelay: realtimeRuntime,
-    deployment,
-  });
-
-  // --------------------------------------------------------------------------
-  // Phase 3: Register routes (auth, REST, tier hooks, error handler)
-  // --------------------------------------------------------------------------
-  await registerRoutes({
-    db,
-    app,
-    config: effectiveConfig,
-    externalLaunchProvider,
-    jwtSecret,
-    requireAuth,
-    enforcePasswordChange,
-    superadminOpts,
-    DB_PATH: databaseUrl,
-    DAEMON_PORT,
-    DAEMON_VERSION,
-    AGOR_VERSION,
-    DAEMON_BUILD_INFO,
-    resolvedSecurity,
-    realtimeRuntime,
-    distributedWorkIdentity,
-    deployment,
-    sessionsService: services.sessionsService,
-    boardsService: services.boardsService,
-    branchRepository: services.branchRepository,
-    usersRepository: services.usersRepository,
-    sessionsRepository: services.sessionsRepository,
-    sessionMCPServersService: services.sessionMCPServersService,
-    sessionEnvSelectionsService: services.sessionEnvSelectionsService,
-    terminalsService: services.terminalsService,
-    powerPolicyController,
-    powerPolicyRuntimeSettingsRepository,
-  });
-
-  // --------------------------------------------------------------------------
-  // Phase 3.5: Every registered service must have declared its realtime
-  // audience. Undeclared services publish to nobody, which is the safe failure
-  // but an invisible one — so refuse to boot rather than let realtime for a new
-  // service quietly do nothing. Deterministic: it reads the registration table,
-  // not request data.
-  // --------------------------------------------------------------------------
-  assertRealtimePublishPolicyCoverage(app);
-
-  // --------------------------------------------------------------------------
-  // Phase 4: Startup (orphan cleanup, health, scheduler, listen, shutdown)
-  // --------------------------------------------------------------------------
-  await startup({
-    app,
-    db,
-    config: effectiveConfig,
-    DAEMON_PORT,
-    DAEMON_HOST,
-    safeService,
-    getSocketServer: socketIOConfig.getSocketServer,
-    sessionsService: services.sessionsService,
-    terminalsService: services.terminalsService,
-    distributedWorkIdentity,
-    // PostgreSQL leases/claims and executor-token authority make the merged
-    // runtime workers replica-independent. Agor-managed permission callbacks
-    // use the transient task-private realtime control path; unsupported
-    // provider-native confirmation modes remain separately fail-closed.
-    taskRuntimePolicy: deployment.mode === 'ha' ? 'shared_postgres' : 'standalone',
-    environmentHealthMonitorPolicy: deployment.mode === 'ha' ? 'shared_postgres' : 'standalone',
-    environmentHealthMonitorSettings:
-      deployment.mode === 'ha' ? deployment.environmentHealthMonitor : undefined,
-    realtimeRuntime,
-    powerPolicyController,
-  });
 }

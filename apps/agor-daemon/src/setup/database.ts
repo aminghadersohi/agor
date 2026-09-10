@@ -127,6 +127,8 @@ export async function initializeDatabase(
   dbPath: string,
   options: {
     tenantId?: TenantID | string;
+    /** Ownership must precede bootstrap writes, service construction, and startup repair. */
+    beforeInitialDataSetup?: (db: TenantScopeAwareDatabase) => Promise<void>;
     skipFirstRunAdminBootstrap?: boolean;
     /** PostgreSQL per-replica connection limit. PostgreSQL only. */
     pool?: { max: number };
@@ -166,6 +168,8 @@ export async function initializeDatabase(
 
   // Check migrations (exits if pending)
   await checkAndReportMigrations(db, dbPath);
+
+  await options.beforeInitialDataSetup?.(scopedDb);
 
   const runInitialDataSetup = async () => {
     // First-run admin bootstrap: create a default admin if no users exist in

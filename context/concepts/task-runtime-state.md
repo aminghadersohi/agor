@@ -279,6 +279,13 @@ does not guarantee that process survival. If it does not reconnect, a non-owner 
 resume the durable request after the owner grace/lease, but without an
 authoritative handle it must leave containment unverified.
 
+The explicitly owned standalone macOS PostgreSQL power topology also uses the
+non-destructive `shared_postgres` Task startup/shutdown policy. Its exclusive host
+ownership is acquired before bootstrap and new admissions are transactionally
+fenced; owner disconnect never settles or retries running Tasks. This does not
+make its deployment HA. See the UPS section of the configuration guide and
+`packages/core/src/db/standalone-power-owner.ts`.
+
 Standalone graceful shutdown preserves historical local executor
 containment. Shared-replica shutdown instead avoids intentionally killing
 detached executors so an independently surviving substrate can reconnect and

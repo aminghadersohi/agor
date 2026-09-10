@@ -103,8 +103,11 @@ function AdminIndicator({
   const policy = powerPolicyLabel(status);
   // Keep the header chip compact on phone widths; the accessible name and
   // tooltip spell out which value is the source and which is the policy.
-  const visibleLabel = `${source.shortLabel} · ${policy}`;
-  const accessibleLabel = `Power source: ${source.label}. Power conservation: ${policy}.`;
+  const ownershipLost = status?.ownership === 'lost';
+  const visibleLabel = ownershipLost
+    ? `Admission blocked · ${policy}`
+    : `${source.shortLabel} · ${policy}`;
+  const accessibleLabel = `Power source: ${source.label}. Power conservation: ${policy}.${ownershipLost ? ' Host ownership lost; new admissions blocked.' : ''}`;
   return (
     <Tooltip title={`${accessibleLabel} Open power configuration and monitoring.`}>
       <Button
@@ -113,7 +116,7 @@ function AdminIndicator({
         aria-label={accessibleLabel}
         onClick={() => (onOpen ? onOpen() : openSettings('power'))}
       >
-        <Tag color={source.color} style={{ marginInlineEnd: 0 }}>
+        <Tag color={ownershipLost ? 'error' : source.color} style={{ marginInlineEnd: 0 }}>
           {visibleLabel}
         </Tag>
       </Button>
