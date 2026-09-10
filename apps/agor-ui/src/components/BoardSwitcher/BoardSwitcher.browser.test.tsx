@@ -65,6 +65,12 @@ describe('BoardSwitcher responsive list (real browser)', () => {
     const items = await screen.findAllByRole('menuitem');
     expect(items).toHaveLength(2);
 
+    // Portal rows can exist before rc-trigger finishes aligning the popup,
+    // even with motion disabled. Measure only the visibly opened surface.
+    const popup = screen.getByTestId('board-switcher-popup');
+    await waitFor(() => expect(popup).toBeVisible());
+    await waitFor(() => expect(popup.getBoundingClientRect().width).toBeGreaterThan(0));
+
     expect(within(items[0]).getByLabelText('3 worktrees')).toBeVisible();
     expect(within(items[0]).getByLabelText('12 total sessions')).toBeVisible();
     expect(within(items[0]).getByLabelText('4 active sessions')).toBeVisible();
@@ -72,8 +78,6 @@ describe('BoardSwitcher responsive list (real browser)', () => {
     expect(within(items[1]).getByLabelText('0 total sessions')).toBeVisible();
     expect(within(items[1]).getByLabelText('0 active sessions')).toBeVisible();
 
-    const popup = screen.getByTestId('board-switcher-popup');
-    await waitFor(() => expect(popup.getBoundingClientRect().width).toBeGreaterThan(0));
     const popupRect = popup.getBoundingClientRect();
     expect(popupRect.width).toBeLessThanOrEqual(Math.min(360, window.innerWidth - 48) + 1);
     expect(popupRect.left).toBeGreaterThanOrEqual(-1);
