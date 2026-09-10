@@ -133,6 +133,19 @@ export function createMigrationImpactRegistry(
 
 const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
   [
+    '9020_standalone_power_ownership',
+    {
+      requiresOfflineCutover: true,
+      impact: defineMigrationImpact({
+        classification: 'protocol',
+        userAction: 'required',
+        rollbackCompatibility: 'incompatible',
+        summary:
+          'Stop all old daemons before migration. Bound hosts retain their identity. Older binaries cannot enforce standalone admission ownership and must not share this database.',
+      }),
+    },
+  ],
+  [
     '0104_environment_command_discovery',
     {
       requiresOfflineCutover: false,

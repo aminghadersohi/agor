@@ -1,5 +1,11 @@
 import type { ResolvedPowerManagementConfig } from '@agor/core/config';
 import { powerManagementSettingsFromResolved } from '@agor/core/config';
+import {
+  StandalonePowerOwner,
+  StandalonePowerOwnershipError,
+  type TenantScopeAwareDatabase,
+  type TenantScopedDatabase,
+} from '@agor/core/db';
 import type {
   PowerManagementRuntimeSettingsView,
   PowerManagementStatus,
@@ -33,6 +39,7 @@ export type PowerDispatchDecision =
   | { outcome: 'held'; hold: PowerTaskHold };
 
 export class PowerPolicyController {
+  private owner?: StandalonePowerOwner;
   private stateMachine: PowerPolicyStateMachine;
   private readonly mutex = new AsyncMutex();
   private readonly listeners = new Set<(transition: PowerPolicyTransition) => void>();
@@ -43,7 +50,6 @@ export class PowerPolicyController {
   private observation?: PowerManagementStatus['observation'];
   private recoveryPacing = false;
   private nextRecoveryDispatchAt = 0;
-  private lastProviderObservation?: Awaited<ReturnType<PowerSourceProvider['read']>>;
   private runtimeSettings: PowerManagementRuntimeSettingsView;
 
   constructor(
@@ -63,6 +69,25 @@ export class PowerPolicyController {
         operator_defaults: powerManagementSettingsFromResolved(config),
         can_rollback: false,
       } satisfies PowerManagementRuntimeSettingsView);
+  }
+
+  setOwnership(owner: StandalonePowerOwner): void {
+    if (this.owner || !this.stopped)
+      throw new Error('Host ownership may only be attached once before controller startup');
+    this.owner = owner;
+  }
+
+  async assertOwnershipInTransaction(
+    db: TenantScopeAwareDatabase | TenantScopedDatabase
+  ): Promise<void> {
+    await StandalonePowerOwner.assertAdmission(db, this.owner);
+  }
+
+  async refreshOwnership(): Promise<void> {
+    await this.owner?.refresh();
+  }
+  async closeOwnership(): Promise<void> {
+    await this.owner?.close();
   }
 
   /** Load the durable overlay before admission workers or provider polling start. */
@@ -94,6 +119,7 @@ export class PowerPolicyController {
   ): Promise<PowerManagementStatus> {
     const release = await this.mutex.acquire();
     try {
+      this.assertOwnerAvailable();
       const next = await persist();
       this.assertActivationSupported(next.effective);
       const previous = this.stateMachine.snapshot();
@@ -120,6 +146,7 @@ export class PowerPolicyController {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.owner?.stopAdmissions();
     if (this.config.mode !== 'off') this.draining = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
@@ -134,8 +161,15 @@ export class PowerPolicyController {
   status(): PowerManagementStatus {
     return {
       ...this.stateMachine.snapshot(),
+      ...(this.owner ? { ownership: this.owner.status } : {}),
       configuration: powerManagementSettingsFromResolved(this.config),
       provider_supported: this.providerSupported,
+      ...(!this.providerSupported
+        ? {
+            provider_support_reason:
+              'Requires macOS, standalone, static tenant, simple local execution without an executor template. PostgreSQL additionally requires operator-provisioned exclusive host ownership.',
+          }
+        : {}),
       runtime_settings: this.runtimeSettings,
       ...(this.observation ? { observation: { ...this.observation } } : {}),
       recovery_pacing: this.recoveryPacing,
@@ -157,20 +191,13 @@ export class PowerPolicyController {
     materialize: () => Promise<T>
   ): Promise<{ decision: PowerDispatchDecision; value?: T }> {
     const release = await this.mutex.acquire();
-    if (this.config.mode === 'off') {
-      try {
-        return { decision: { outcome: 'allowed', wouldHold: false }, value: await materialize() };
-      } finally {
-        release();
-      }
-    }
-    const decision = this.decisionFor('normal');
-    if (decision.outcome === 'held') {
-      release();
-      this.metrics.increment('power.schedule_held', 1, { state: decision.hold.state });
-      return { decision };
-    }
     try {
+      this.publishTransition(this.stateMachine.evaluateStaleness());
+      const decision = this.decisionFor('normal');
+      if (decision.outcome === 'held') {
+        this.metrics.increment('power.schedule_held', 1, { state: decision.hold.state });
+        return { decision };
+      }
       return { decision, value: await materialize() };
     } finally {
       release();
@@ -187,46 +214,36 @@ export class PowerPolicyController {
   ): Promise<{ decision: PowerDispatchDecision; value?: T }> {
     for (;;) {
       const release = await this.mutex.acquire();
-      if (this.config.mode === 'off') {
-        try {
+      let delay = 0;
+      try {
+        this.assertOwnerAvailable();
+        if (this.config.mode === 'off') {
           return { decision: { outcome: 'allowed', wouldHold: false }, value: await claim() };
-        } finally {
-          release();
         }
-      }
-      let priority: SessionPowerPriority;
-      try {
-        priority = typeof priorityInput === 'function' ? await priorityInput() : priorityInput;
-      } catch (error) {
-        release();
-        throw error;
-      }
-      const decision = this.decisionFor(priority);
-      if (decision.outcome === 'held') {
-        release();
-        this.metrics.increment('power.dispatch_held', 1, {
-          state: decision.hold.state,
-          priority,
-        });
-        return { decision };
-      }
-
-      const now = this.clock.monotonicMs();
-      if (this.recoveryPacing && priority === 'normal' && now < this.nextRecoveryDispatchAt) {
-        const delay = this.nextRecoveryDispatchAt - now;
-        release();
-        await this.clock.sleep(delay);
-        continue;
-      }
-
-      if (this.recoveryPacing && priority === 'normal') {
-        this.nextRecoveryDispatchAt = now + this.config.recoveryDispatchIntervalMs;
-      }
-      try {
-        return { decision, value: await claim() };
+        const priority =
+          typeof priorityInput === 'function' ? await priorityInput() : priorityInput;
+        this.publishTransition(this.stateMachine.evaluateStaleness());
+        const decision = this.decisionFor(priority);
+        if (decision.outcome === 'held') {
+          this.metrics.increment('power.dispatch_held', 1, {
+            state: decision.hold.state,
+            priority,
+          });
+          return { decision };
+        }
+        const now = this.clock.monotonicMs();
+        if (this.recoveryPacing && priority === 'normal' && now < this.nextRecoveryDispatchAt) {
+          delay = this.nextRecoveryDispatchAt - now;
+        } else {
+          if (this.recoveryPacing && priority === 'normal') {
+            this.nextRecoveryDispatchAt = now + this.config.recoveryDispatchIntervalMs;
+          }
+          return { decision, value: await claim() };
+        }
       } finally {
         release();
       }
+      await this.clock.sleep(delay);
     }
   }
 
@@ -234,6 +251,7 @@ export class PowerPolicyController {
   async withPriorityMutation<T>(mutate: () => Promise<T>): Promise<T> {
     const release = await this.mutex.acquire();
     try {
+      this.assertOwnerAvailable();
       return await mutate();
     } finally {
       release();
@@ -259,8 +277,9 @@ export class PowerPolicyController {
   }
 
   private decisionFor(priority: SessionPowerPriority): PowerDispatchDecision {
+    this.assertOwnerAvailable();
     const status = this.stateMachine.snapshot();
-    if (this.draining && this.config.mode !== 'off') {
+    if (this.draining && this.config.mode === 'enforce') {
       return {
         outcome: 'held',
         hold: {
@@ -303,6 +322,7 @@ export class PowerPolicyController {
 
   private async pollOnce(): Promise<void> {
     if (this.stopped || !this.provider) return;
+    await this.refreshOwnership();
     const observation = await this.provider.read();
     if (this.stopped) return;
     const release = await this.mutex.acquire();
@@ -316,7 +336,6 @@ export class PowerPolicyController {
   }
 
   private recordObservation(observation: Awaited<ReturnType<PowerSourceProvider['read']>>): void {
-    this.lastProviderObservation = observation;
     // Rebuild the allowlist: never spread provider data or retain old charge on failure.
     this.observation = {
       condition: observation.condition,
@@ -363,6 +382,10 @@ export class PowerPolicyController {
     for (const listener of this.listeners) listener(published);
   }
 
+  private assertOwnerAvailable(): void {
+    if (this.owner?.status === 'lost') throw new StandalonePowerOwnershipError();
+  }
+
   private assertActivationSupported(config: ResolvedPowerManagementConfig): void {
     if (config.mode !== 'off' && !this.providerSupported) {
       throw new Error('Power conservation cannot be activated on this deployment topology');
@@ -376,13 +399,10 @@ export class PowerPolicyController {
     this.config = config;
     this.runtimeSettings = runtimeSettings;
     this.provider?.setTimeoutMs?.(config.providerTimeoutMs);
+    // A mutable policy change never re-stamps an old sample as fresh (including
+    // when the new stale threshold is shorter). Enforce begins UNKNOWN until
+    // a fresh poll; online must then satisfy the complete recovery interval.
     this.stateMachine = new PowerPolicyStateMachine(config, this.clock);
-    if (this.lastProviderObservation) {
-      // A policy swap intentionally discards debounce/recovery history. Reusing
-      // only the last allowlisted observation is conservative: online enters
-      // stable recovery and battery re-enters debounce before Enforce admits.
-      this.stateMachine.ingest(this.lastProviderObservation);
-    }
     this.draining = false;
     this.recoveryPacing = false;
     this.nextRecoveryDispatchAt = 0;
