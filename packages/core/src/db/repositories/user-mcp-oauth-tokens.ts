@@ -103,8 +103,8 @@ type MCPOAuthGrantAuthorityRow = Pick<
 /** Status authority excludes access and refresh token plaintext. */
 export type MCPOAuthGrantStatusRecord = MCPOAuthGrantAuthorityRecord &
   Pick<UserMCPOAuthToken, 'oauth_token_expires_at' | 'refresh_status'> & {
-    /** Presence only; access and refresh token plaintext never leaves this read. */
-    has_refresh_token?: boolean;
+    /** Presence only: status reads never select/decrypt refresh-token material. */
+    has_refresh_token: boolean;
   };
 
 /** Input shape for `saveToken`. */

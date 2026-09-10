@@ -3,6 +3,7 @@
 import { getCurrentTenantId, isPostgresDatabaseHandle, runWithTenantDatabaseScope } from '../../db';
 import type { Database, TenantScopeAwareDatabase } from '../../db/client';
 import {
+  type MCPOAuthGrantStatusRecord,
   type MCPOAuthRefreshVersion,
   MCPServerRepository,
   type UserMCPOAuthToken,
@@ -32,17 +33,18 @@ export function oauthGrantCanAuthenticate(
   token: Pick<
     UserMCPOAuthToken,
     'oauth_token_expires_at' | 'oauth_refresh_token' | 'refresh_status'
-  > & { has_refresh_token?: boolean },
+  > &
+    Partial<Pick<MCPOAuthGrantStatusRecord, 'has_refresh_token'>>,
   now = new Date()
 ): boolean {
   if (token.refresh_status === 'ambiguous') return false;
   // An in-flight rotation cannot advertise the superseded access token.
   // A durable renewable grant remains connected without hydrating its secret.
   if (token.refresh_status === 'refreshing') {
-    return Boolean(token.oauth_refresh_token || token.has_refresh_token);
+    return token.has_refresh_token ?? Boolean(token.oauth_refresh_token);
   }
   if (!token.oauth_token_expires_at || token.oauth_token_expires_at > now) return true;
-  return Boolean(token.oauth_refresh_token || token.has_refresh_token);
+  return token.has_refresh_token ?? Boolean(token.oauth_refresh_token);
 }
 
 /**

@@ -101,7 +101,26 @@ describe('OAuth status grant read integrity and cost', () => {
     expect(open).toHaveBeenCalledTimes(2);
   });
 
-  it('status filters expired and ambiguous grants before opening client material', async () => {
+  it.each([userId, null])(
+    'retains renewable expired status for subject %s without token plaintext',
+    async (subject) => {
+      query.rows = [{ ...grant(subject), oauth_token_expires_at: new Date('2000-01-01') }];
+      const open = vi.spyOn(envelope, 'openBoundSecretAsync');
+      const records = await new UserMCPOAuthTokenRepository(
+        {} as Database,
+        master
+      ).listStatusForSubject(subject);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({ has_refresh_token: true });
+      expect(records[0]).not.toHaveProperty('oauth_refresh_token');
+      expect(records[0]).not.toHaveProperty('oauth_access_token');
+      expect(query.projections[0]).not.toHaveProperty('oauth_refresh_token');
+      expect(query.projections[0]).not.toHaveProperty('oauth_access_token');
+      expect(open.mock.calls.map((call) => call[2])).toEqual(['client-id', 'client-secret']);
+    }
+  );
+
+  it('status filters expired nonrenewable and ambiguous grants before opening client material', async () => {
     query.rows = [
       {
         ...grant(),

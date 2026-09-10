@@ -1807,7 +1807,6 @@ describe('SQLite saved-row OAuth authority', () => {
       `Basic ${Buffer.from('resolved-google-client:resolved-google-secret').toString('base64')}`
     );
   });
-
   it('requires reauthorization when a daemon-owned forced refresh has no refresh token', async () => {
     const provider = await createTestProvider();
     providers.push(provider);
