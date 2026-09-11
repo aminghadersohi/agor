@@ -91,15 +91,12 @@ describe('MCP Slack recovery tokens', () => {
     expect(() => verifyMCPSlackRecoveryToken(issue(), SECRET, EXPIRES)).toThrow(/expired/i);
     expect(() => verifyMCPSlackRecoveryToken(issue(), 'different-secret')).toThrow();
     const token = issue();
-    // Mutating the last base64url character can change only unused padding
-    // bits and decode to identical ciphertext. Flip an authenticated byte so
-    // this is always a forgery, not an alternate encoding of the same token.
-    const ciphertextStart = token.lastIndexOf(':') + 1;
-    const ciphertext = Buffer.from(token.slice(ciphertextStart), 'base64url');
-    const changedCiphertext = Buffer.from(ciphertext);
-    changedCiphertext[0] ^= 1;
-    expect(changedCiphertext.equals(ciphertext)).toBe(false);
-    const forged = `${token.slice(0, ciphertextStart)}${changedCiphertext.toString('base64url')}`;
+    const ciphertextOffset = token.lastIndexOf(':') + 1;
+    const ciphertext = Buffer.from(token.slice(ciphertextOffset), 'base64url');
+    // Flip an actual ciphertext bit: changing the last base64url character can
+    // change only unused padding bits and leave the authenticated bytes intact.
+    ciphertext[0] ^= 1;
+    const forged = `${token.slice(0, ciphertextOffset)}${ciphertext.toString('base64url')}`;
     expect(() => verifyMCPSlackRecoveryToken(forged, SECRET)).toThrow();
     expect(() => verifyMCPSlackRecoveryToken('not-an-envelope', SECRET)).toThrow();
   });
