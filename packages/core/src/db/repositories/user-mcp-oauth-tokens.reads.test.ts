@@ -101,10 +101,15 @@ dbTest(
       refreshToken: 'fictional-refresh',
       expiresAt: new Date('2000-01-01T00:00:00Z'),
     });
-    await repo.saveToken(null, server.mcp_server_id, {
-      accessToken: 'expired-shared-access',
-      expiresAt: new Date('2000-01-01T00:00:00Z'),
-    });
+    await repo.saveToken(
+      null,
+      server.mcp_server_id,
+      {
+        accessToken: 'expired-shared-access',
+        expiresAt: new Date('2000-01-01T00:00:00Z'),
+      },
+      owner
+    );
     const status = await repo.listStatusForSubject(owner);
     expect(status).toHaveLength(1);
     expect(status[0]).toMatchObject({ has_refresh_token: true });
