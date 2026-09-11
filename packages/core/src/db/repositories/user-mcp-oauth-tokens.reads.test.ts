@@ -27,7 +27,12 @@ dbTest(
       clientSecret: 'secret',
       expiresAt: new Date('2030-01-01T00:00:00Z'),
     });
-    await repo.saveToken(null, server.mcp_server_id, { accessToken: 'shared', expiresAt: null });
+    await repo.saveToken(
+      null,
+      server.mcp_server_id,
+      { accessToken: 'shared', expiresAt: null },
+      owner
+    );
     const [personal, shared] = await Promise.all([repo.listForUser(owner), repo.listShared()]);
     expect(personal).toHaveLength(1);
     expect(personal[0]).toMatchObject({
@@ -63,6 +68,12 @@ dbTest(
     expect(
       await repo.listAuthorityForUserAndSharedByServerIds(other, [server.mcp_server_id])
     ).toHaveLength(1);
+    await expect(repo.listStatusForSubject(other)).resolves.toEqual([]);
+    const status = await repo.listStatusForSubject(owner);
+    expect(status).toHaveLength(1);
+    expect(status[0]).not.toHaveProperty('oauth_access_token');
+    expect(status[0]).not.toHaveProperty('oauth_refresh_token');
+    expect(await repo.listStatusForSubject(null)).toHaveLength(1);
     await repo.deleteToken(owner, server.mcp_server_id);
     await expect(repo.listForUser(owner)).resolves.toEqual([]);
     await expect(repo.getCatalogGrantAuthority(owner, server.mcp_server_id)).resolves.toBeNull();
