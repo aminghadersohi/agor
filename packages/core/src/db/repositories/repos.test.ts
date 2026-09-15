@@ -14,6 +14,24 @@ import { dbTest } from '../test-helpers';
 import { AmbiguousIdError, EntityNotFoundError, RepositoryError } from './base';
 import { RepoRepository } from './repos';
 
+dbTest('cleanup defaults are disabled and updates replace the complete policy', async ({ db }) => {
+  const repository = new RepoRepository(db);
+  const created = await repository.create(createRepoData());
+  expect(created.cleanup_policy).toEqual({
+    enabled: false,
+    command: 'git clean -fdX',
+    allow_branch_protection: true,
+  });
+  const policy = { enabled: true, command: './scripts/cleanup.sh', allow_branch_protection: false };
+  await repository.update(created.repo_id, { cleanup_policy: policy });
+  await repository.update(created.repo_id, { name: 'Renamed' });
+  expect((await repository.findById(created.repo_id))?.cleanup_policy).toEqual(policy);
+  await expect(
+    repository.update(created.repo_id, { cleanup_policy: { enabled: true } as never })
+  ).rejects.toThrow();
+  expect((await repository.findById(created.repo_id))?.cleanup_policy).toEqual(policy);
+});
+
 /**
  * Create test repo data
  */
@@ -935,7 +953,7 @@ describe('RepoRepository deprecated methods', () => {
     const repo = new RepoRepository(db);
 
     await expect((repo as any).removeBranch()).rejects.toThrow('deprecated');
-    await expect((repo as any).removeBranch()).rejects.toThrow('BranchRepository');
+    await expect((repo as any).removeBranch()).rejects.toThrow('permanent deletion service');
   });
 });
 

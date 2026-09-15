@@ -110,6 +110,7 @@ import {
   isOnboardingDeferred,
   type OnboardingReopenMode,
 } from './utils/onboardingLifecycle';
+import { resolveOnboardingSlackIntent } from './utils/onboardingSlack';
 import { savePromptDraft } from './utils/promptDrafts';
 import { seedOnboardingTeammate } from './utils/seedOnboardingTeammate';
 import { updateSessionMcpServers } from './utils/sessionMcpServers';
@@ -614,11 +615,8 @@ function AppContent() {
   const integrationsHydrated = useAgorStore(
     (s) => s.mcpServersHydrated && s.gatewayChannelsHydrated
   );
-  // The "Connect tools" banner asks for workspace-wide setup — MCP servers and
-  // Slack/GitHub channels — so it is offered to the role that can complete it.
-  // Members reach the MCP settings tab without it, to read the policy that
-  // governs them.
-  const canManageMcp = hasMinimumRole(currentUser?.role, ROLES.ADMIN);
+  // Members can browse Catalog; its existing policy gate owns connection authority.
+  const canManageMcp = hasMinimumRole(currentUser?.role, ROLES.MEMBER);
   // Onboarding provisions boards, repos, branches and sessions. A viewer is a
   // read-only role, so its first login must enter the workspace without opening
   // a flow the daemon will correctly refuse at every write boundary.
@@ -928,8 +926,16 @@ function AppContent() {
     }
     if (!isCurrentUser()) return;
 
+    const slackGatewayIntent = await resolveOnboardingSlackIntent(
+      client,
+      currentUser,
+      result.slackGatewayIntent
+    );
+    if (!isCurrentUser()) return;
     const retainedSeed = onboardingSeedResultRef.current.get(result.boardId);
     const seeded = await seedOnboardingTeammate({
+      slackGatewayIntent,
+      connectedMcpServerIds: result.connectedMcpServerIds,
       frameworkRepo: readyFrameworkRepo,
       boardId: result.boardId,
       teammateName: result.teammateName,
@@ -1711,12 +1717,20 @@ function AppContent() {
       throw new Error('Not connected to daemon');
     }
     try {
-      const action = options.metadataAction === 'archive' ? 'archived' : 'deleted';
       showLoading(`${options.metadataAction === 'archive' ? 'Archiving' : 'Deleting'} branch...`, {
         key: 'archive-delete',
       });
-      await client.service(`branches/${branchId}/archive-or-delete`).create(options);
-      showSuccess(`Branch ${action} successfully!`, { key: 'archive-delete' });
+      const result = (await client
+        .service(`branches/${branchId}/archive-or-delete`)
+        .create(options)) as Branch;
+      if (result.deletion_status === 'deletion_failed')
+        throw new Error(result.deletion_error || 'Deletion requires reconciliation');
+      showSuccess(
+        options.metadataAction === 'archive'
+          ? 'Branch archived successfully!'
+          : 'Deletion requested. The branch remains visible until cleanup finishes.',
+        { key: 'archive-delete' }
+      );
     } catch (error) {
       showError(
         `Failed to ${options.metadataAction} branch: ${error instanceof Error ? error.message : String(error)}`,
@@ -2325,7 +2339,11 @@ function AppContent() {
             onComplete={(result, attempt) => {
               if (!onboardingWizardOwner || !isOnboardingOwnerCurrent(onboardingWizardOwner))
                 return;
-              return handleOnboardingComplete(onboardingWizardOwner, result, attempt.isCurrent);
+              return handleOnboardingComplete(
+                onboardingWizardOwner,
+                result,
+                attempt.isCurrent
+              ).then(() => undefined);
             }}
             onDismiss={(progress) => {
               if (!onboardingWizardOwner || !isOnboardingOwnerCurrent(onboardingWizardOwner))

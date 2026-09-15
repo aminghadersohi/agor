@@ -224,6 +224,35 @@ describe('startup tenant database scope', () => {
     expect(factory).not.toHaveBeenCalled();
   });
 
+  it.each(['owned', 'lost', undefined] as const)(
+    'keeps local environment observation only for a healthy standalone PostgreSQL owner (%s)',
+    (ownership) => {
+      const { ctx } = makeStartupContextWithGuardedDb();
+      ctx.taskRuntimePolicy = 'shared_postgres';
+      ctx.environmentHealthMonitorPolicy = 'standalone';
+      ctx.config.database = { dialect: 'postgresql' };
+      ctx.config.deployment = {
+        mode: 'standalone',
+        standalone_power_host_id: '00000000-0000-4000-8000-000000000001',
+      };
+      ctx.config.multi_tenancy = { mode: 'static', static_tenant_id: 'startup-tenant' };
+      ctx.powerPolicyController = {
+        status: () => ({ ownership }),
+      } as StartupContext['powerPolicyController'];
+      const factory = vi.fn(() => ({ initialize: vi.fn(), cleanup: vi.fn() }));
+      const result = createEnvironmentHealthMonitor(ctx, factory);
+      if (ownership === 'owned') {
+        expect(result).not.toBeNull();
+        expect(factory).toHaveBeenCalledWith('standalone', ctx.app, ctx);
+      } else {
+        expect(result).toBeNull();
+        expect(factory).not.toHaveBeenCalled();
+      }
+      ctx.config.deployment.mode = 'ha';
+      expect(createEnvironmentHealthMonitor(ctx, factory)).toBeNull();
+    }
+  );
+
   it('runs orphan cleanup inside an explicit startup tenant DB scope', async () => {
     const { ctx, baseDb } = makeStartupContextWithGuardedDb();
 

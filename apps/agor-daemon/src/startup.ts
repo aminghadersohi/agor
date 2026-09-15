@@ -34,6 +34,7 @@ import { beginExecutorResponseDrain } from './executor-response-channel.js';
 import { clearTrackedExecutorGauge, containAllTrackedExecutors } from './executor-tracking.js';
 import { type DaemonMetrics, getDaemonMetrics, NOOP_METRICS } from './metrics/index.js';
 import type { PowerPolicyController } from './power-management/index.js';
+import { BranchDeletionReconciler } from './services/branch-deletion-reconciler.js';
 import { DiscordMessageDeliveryWorker } from './services/discord-message-delivery-worker.js';
 import { DistributedHealthMonitor } from './services/distributed-health-monitor.js';
 import type { GatewayService } from './services/gateway.js';
@@ -156,7 +157,15 @@ export function createEnvironmentHealthMonitor(
     });
   }
 ): EnvironmentHealthMonitor | null {
-  if (ctx.taskRuntimePolicy !== ctx.environmentHealthMonitorPolicy) {
+  const ownedStandalonePostgres =
+    ctx.taskRuntimePolicy === 'shared_postgres' &&
+    ctx.environmentHealthMonitorPolicy === 'standalone' &&
+    ctx.config.database?.dialect === 'postgresql' &&
+    ctx.config.deployment?.mode !== 'ha' &&
+    Boolean(ctx.config.deployment?.standalone_power_host_id) &&
+    resolveMultiTenancyConfig(ctx.config).mode === 'static' &&
+    ctx.powerPolicyController?.status().ownership === 'owned';
+  if (ctx.taskRuntimePolicy !== ctx.environmentHealthMonitorPolicy && !ownedStandalonePostgres) {
     return null;
   }
   return factory(ctx.environmentHealthMonitorPolicy, ctx.app, ctx);
@@ -796,7 +805,13 @@ export async function startup(ctx: StartupContext): Promise<void> {
   // 5. Start the Task-owned runtime reconciler. In shared mode every daemon
   // may discover the same routing refs; repository fences choose the winner.
   const heartbeatConfig = resolveExecutorHeartbeatConfig(config.execution);
+  const branchDeletionReconciler = new BranchDeletionReconciler(
+    db,
+    app,
+    startupMultiTenancy.mode === 'static' ? startupMultiTenancy.static_tenant_id : undefined
+  );
   const taskRuntimeReconciler = new TaskRuntimeReconciler({
+    observeMaintenance: () => branchDeletionReconciler.checkOnce(),
     app,
     db,
     config: heartbeatConfig,
