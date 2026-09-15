@@ -313,7 +313,12 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
         );
         const binding = JSON.parse(raw!);
         // The NOSUPERUSER role may terminate its own disposable backend only.
-        await tx.execute(sql`SELECT pg_terminate_backend(${binding.pid})`);
+        // A zero/default timeout acknowledges the signal, not termination. Wait
+        // for server acknowledgement before asserting admission after loss.
+        const terminated = rawRows<{ terminated: boolean }>(
+          await tx.execute(sql`SELECT pg_terminate_backend(${binding.pid}, 5000) AS terminated`)
+        );
+        expect(terminated).toEqual([{ terminated: true }]);
       });
       await expect(claim(s, c)).rejects.toThrow(/ownership unavailable/);
       expect(c.status()).toMatchObject({ mode: 'off', ownership: 'lost', held: false });
@@ -476,7 +481,10 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
         const binding = JSON.parse(
           (await new AppVariableRepository(tx).getPlain(OWNER_NAMESPACE, OWNER_KEY))!
         );
-        await tx.execute(sql`SELECT pg_terminate_backend(${binding.pid})`);
+        const terminated = rawRows<{ terminated: boolean }>(
+          await tx.execute(sql`SELECT pg_terminate_backend(${binding.pid}, 5000) AS terminated`)
+        );
+        expect(terminated).toEqual([{ terminated: true }]);
       });
       await expect(tick(now + 3600000)).rejects.toThrow(/ownership unavailable/);
       expect(
