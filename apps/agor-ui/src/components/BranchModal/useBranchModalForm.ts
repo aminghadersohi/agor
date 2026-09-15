@@ -44,6 +44,7 @@ export type BranchUpdate = Omit<
 
 /** Derive directly from Branch so the union stays in sync with core. */
 export interface GeneralFormState {
+  cleanupProtected: boolean;
   boardId: string | undefined;
   issueUrl: string;
   prUrl: string;
@@ -110,6 +111,7 @@ interface UseBranchModalFormOptions {
 }
 
 const buildGeneralDefaults = (branch: Branch | null): GeneralFormState => ({
+  cleanupProtected: branch?.cleanup_protected ?? false,
   boardId: branch?.board_id || undefined,
   issueUrl: branch?.issue_url || '',
   prUrl: branch?.pull_request_url || '',
@@ -325,6 +327,7 @@ export function useBranchModalForm({
       general.issueUrl !== (branch.issue_url || '') ||
       general.prUrl !== (branch.pull_request_url || '') ||
       notesChanged ||
+      general.cleanupProtected !== (branch.cleanup_protected ?? false) ||
       sortedJson(general.mcpServerIds) !== sortedJson(branch.mcp_server_ids || [])
     );
   }, [branch, general, isTeammateBranch]);
@@ -384,6 +387,9 @@ export function useBranchModalForm({
     try {
       const updates: BranchUpdate = {};
       if (generalChanged && canEditGeneral) {
+        if (general.cleanupProtected !== (branch.cleanup_protected ?? false)) {
+          updates.cleanup_protected = general.cleanupProtected;
+        }
         updates.board_id = general.boardId || undefined;
         updates.issue_url = general.issueUrl.trim() === '' ? null : general.issueUrl;
         updates.pull_request_url = general.prUrl.trim() === '' ? null : general.prUrl;
@@ -405,10 +411,8 @@ export function useBranchModalForm({
           updates.notes = teammate.description.trim() || null;
         }
       }
-      // Persist a policy transition first. Moving an inherited branch is
-      // intentionally rejected by the server until its current complete
-      // package has been materialized as an override, so this ordering lets a
-      // user choose Override and a new board in one explicit Save.
+      // Persist an intentional policy edit first. A board-only move needs no
+      // policy write: inheritance follows the destination, overrides stay intact.
       if (permissionsChanged && capabilityPolicy) {
         const saved = await client
           .service('branches/:id/permissions')
