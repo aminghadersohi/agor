@@ -191,6 +191,12 @@ export class BoardObjectsService {
     data: Partial<BoardEntityObject>,
     params?: BoardObjectParams
   ): Promise<BoardEntityObject> {
+    // Correlation is response-only and carries no tenant/access authority. Only
+    // copy this bounded field, never arbitrary caller metadata onto a row.
+    const acknowledge = (row: BoardEntityObject): BoardEntityObject =>
+      typeof data.placement_write_id === 'string' && data.placement_write_id.length <= 100
+        ? { ...row, placement_write_id: data.placement_write_id }
+        : row;
     if (typeof data.compact === 'boolean') {
       // Reuse the tenant/access-scoped read path rather than bypassing the
       // trusted SQL visibility context for this capability check.
@@ -210,7 +216,7 @@ export class BoardObjectsService {
         !data.size &&
         !('zone_id' in data)
       )
-        return existing;
+        return acknowledge(existing);
     }
 
     if (data.position && (!Number.isFinite(data.position.x) || !Number.isFinite(data.position.y))) {
@@ -230,40 +236,41 @@ export class BoardObjectsService {
         throw new Error('size must be patched separately from zone_id');
       }
       if (!data.position && typeof data.compact !== 'boolean') {
-        return this.boardObjectRepo.updateSize(id, data.size);
+        return acknowledge(await this.boardObjectRepo.updateSize(id, data.size));
       }
     }
 
     // Auto-layout changes these fields as one visual operation. Persist them
     // together so realtime subscribers never observe a half-applied layout.
     if (data.size || (data.position && typeof data.compact === 'boolean')) {
-      return this.boardObjectRepo.updateLayout(id, {
-        ...(data.position ? { position: data.position } : {}),
-        ...(data.size ? { size: data.size } : {}),
-        ...(typeof data.compact === 'boolean' ? { compact: data.compact } : {}),
-      });
+      return acknowledge(
+        await this.boardObjectRepo.updateLayout(id, {
+          ...(data.position ? { position: data.position } : {}),
+          ...(data.size ? { size: data.size } : {}),
+          ...(typeof data.compact === 'boolean' ? { compact: data.compact } : {}),
+        })
+      );
     }
-
     // Handle simultaneous position + zone_id update
     if (data.position && 'zone_id' in data) {
       // Update both atomically without emitting intermediate events
       await this.boardObjectRepo.updatePosition(id, data.position);
       const boardObject = await this.boardObjectRepo.updateZone(id, data.zone_id);
 
-      return toBoardObjectPatchedEventPayload(boardObject) as BoardEntityObject;
+      return acknowledge(toBoardObjectPatchedEventPayload(boardObject) as BoardEntityObject);
     }
 
     if (data.position) {
-      return this.boardObjectRepo.updatePosition(id, data.position);
+      return acknowledge(await this.boardObjectRepo.updatePosition(id, data.position));
     }
 
     if ('zone_id' in data) {
       const boardObject = await this.boardObjectRepo.updateZone(id, data.zone_id);
-      return toBoardObjectPatchedEventPayload(boardObject) as BoardEntityObject;
+      return acknowledge(toBoardObjectPatchedEventPayload(boardObject) as BoardEntityObject);
     }
 
     if (typeof data.compact === 'boolean') {
-      return this.boardObjectRepo.updateCompact(id, data.compact);
+      return acknowledge(await this.boardObjectRepo.updateCompact(id, data.compact));
     }
 
     throw new Error('Only position, size, zone_id, and compact updates are supported via patch');
