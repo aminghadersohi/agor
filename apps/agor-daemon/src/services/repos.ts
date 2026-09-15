@@ -1237,32 +1237,21 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
   /**
    * Explicit, authorized repair for a branch whose provisioning FAILED.
    *
-   * The only automatic transition is out of `creating` (the crash/onExit/
-   * watchdog safety nets, which mark an interrupted attempt `failed`). Recovery
-   * is deliberately human-triggered from there:
+   * This endpoint never decides that a `creating` attempt is orphaned:
    *
-   * - `ready`                              → no-op (idempotent).
-   * - `creating`, live attempt             → 409 in-progress (never spawn a 2nd
-   *                                          materializer for a live attempt).
-   * - `creating`, orphaned by a daemon
-   *   restart                              → surfaced as `failed` first, then
-   *                                          retried like any other failure.
-   * - `failed`                             → atomically claim `failed → creating`
-   *                                          and re-dispatch the executor.
-   * - preserved/cleaned/deleted/other      → 409 not-retryable; those have their
-   *                                          own restore/unarchive lifecycle.
+   * - `ready`                         → no-op (idempotent).
+   * - `creating`                      → 409 in-progress, even after a restart.
+   * - `failed`                        → atomically claim `failed → creating`
+   *                                     and re-dispatch the executor.
+   * - preserved/cleaned/deleted/other → 409; use restore/unarchive instead.
    *
-   * The `failed → creating` claim is a row-locked compare-and-swap, so a
-   * double-click on Retry (or two clients racing) can only ever dispatch one
-   * executor — the loser sees the branch already `creating` and no-ops. The
-   * executor is idempotent against an already-materialized worktree, so the
-   * "died after materialize" case recovers without the daemon probing `.git`.
-   *
-   * The orphaned-`creating` branch above is what keeps recovery reachable in a
-   * multi-tenant deployment: the startup watchdog only reconciles the daemon's
-   * own startup tenant scope, but this path runs inside the *caller's* tenant
-   * context, so a tenant whose branch was stranded by a restart can still repair
-   * it. Both routes converge on the same CAS, so neither can double-dispatch.
+   * The row-locked claim allows only one dispatcher across concurrent retries.
+   * Generation-fenced exit/ack handling can establish a known failure; the
+   * standalone startup reconciler is a separate, tenant-scoped safety net.
+   * HA startup deliberately does not run that reconciler. A stranded `creating`
+   * row needs separately established containment/recovery authority, not an
+   * age-based takeover through this endpoint. This is failed-attempt retry,
+   * not multi-tenant or HA orphan recovery.
    */
   async retryBranchProvisioning(branchId: string, params?: RepoParams): Promise<Branch> {
     const branchesService = this.app.service('branches');
@@ -1361,22 +1350,17 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
   }
 
   /**
-   * Startup watchdog: a branch left `creating` means the daemon (and its
-   * fire-and-forget executor) died mid-provision. Conservatively transition
-   * each such branch to `failed` with an actionable message — we do NOT
-   * re-dispatch a materializer or infer success from a local `.git` path.
-   * Recovery is an explicit, human-triggered `retryBranchProvisioning`. Safe to
-   * run on every boot (idempotent). Returns a summary for logging.
+   * Legacy standalone-startup reconciliation of interrupted provisioning.
+   * The caller must establish that no other materializer can still own these
+   * attempts; a `creating` row alone is not evidence of owner death. HA startup
+   * does not call this method. It marks eligible rows `failed` without checking
+   * local `.git` paths or automatically dispatching replacements.
    *
-   * Tenant scope (deliberate, not incidental): this runs under the caller's
-   * scope, which for the startup job is the daemon's static/bootstrap tenant.
-   * It is NOT a cross-tenant sweep — there is no tenant registry to enumerate,
-   * and reading other tenants' rows would require a new RLS system capability.
-   * In a `required_from_auth` deployment it therefore only reconciles the
-   * startup tenant. That is not a dead end: `retryBranchProvisioning` detects an
-   * interrupted `creating` attempt on its own, inside the requesting tenant's
-   * context, so a stranded branch stays repairable in every tenant without this
-   * job having to see it.
+   * This operates only in the caller's trusted tenant scope (the bootstrap
+   * tenant at standalone startup), never as a cross-tenant sweep. Other tenants'
+   * stranded `creating` rows are not recovered here, and retryBranchProvisioning
+   * refuses them. The bounded scan is a safety net, not a guarantee that all
+   * interrupted provisioning becomes retryable.
    */
   async reconcileStuckCreatingBranches(
     params?: RepoParams

@@ -906,8 +906,9 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
    * retry has already claimed `creating`, and would otherwise mark the new,
    * healthy attempt `failed`. Pass the id the caller dispatched with and the
    * write applies only while that attempt still owns the row. Omit it for
-   * callers that legitimately target whatever attempt is current (the startup
-   * watchdog, which by definition runs when no attempt can still be live).
+   * callers that have independently established exclusive recovery authority
+   * and containment. The standalone startup reconciler uses that path; HA
+   * startup must not infer owner death from a `creating` row or restart alone.
    */
   async markProvisioningFailedIfCreating(
     id: string,
