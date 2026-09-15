@@ -1,4 +1,9 @@
-import { ENVIRONMENT_COMMAND_REPORT_SERVICE, type UserRole } from '@agor/core/types';
+import {
+  BRANCH_CLEANUP_REPORT_SERVICE,
+  BRANCH_DELETION_REPORT_SERVICE,
+  ENVIRONMENT_COMMAND_REPORT_SERVICE,
+  type UserRole,
+} from '@agor/core/types';
 
 /**
  * The allowlist that decides which services may fan out over the socket at all.
@@ -243,6 +248,18 @@ export const REALTIME_PUBLISH_POLICY = {
   'auth/launch': { audience: 'none', why: 'Exchanges a launch token for a session.' },
   'check-auth': { audience: 'none', why: 'Echoes back the API key it was asked to validate.' },
   'config/resolve-api-key': { audience: 'none', why: 'Returns a provider API key.' },
+  [BRANCH_CLEANUP_REPORT_SERVICE]: {
+    audience: 'none',
+    why: 'Invocation-scoped workspace reports; branch state publishes through branches.',
+  },
+  'branches/:id/clean': {
+    audience: 'none',
+    why: 'Cleanup admission response; status publishes through branches.',
+  },
+  [BRANCH_DELETION_REPORT_SERVICE]: {
+    audience: 'none',
+    why: 'Invocation-scoped deletion RPC replies may carry renewed executor credentials; never broadcast them.',
+  },
   [ENVIRONMENT_COMMAND_REPORT_SERVICE]: {
     audience: 'none',
     why: 'Attempt-scoped executor RPC; persisted environment updates publish through branches.',
