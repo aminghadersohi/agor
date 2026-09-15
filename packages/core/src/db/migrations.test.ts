@@ -37,14 +37,15 @@ describe('Postgres migrations', () => {
 
   it('marks the PostgreSQL-only ownership protocol as offline with a monotonic append', async () => {
     const [pg, sqlite] = await readJournals();
-    expect(pg.entries.at(-1)?.tag).toBe('9020_standalone_power_ownership');
+    const ownershipIndex = pg.entries.findIndex((e) => e.tag === '9020_standalone_power_ownership');
+    expect(ownershipIndex).toBeGreaterThan(0);
     expect(sqlite.entries.some((e) => e.tag === '9020_standalone_power_ownership')).toBe(false);
     // Historical journals contain legacy ordering repairs. Never rewrite them:
     // this append must exceed EVERY old watermark, not only its predecessor.
-    expect(pg.entries.at(-1)!.when).toBeGreaterThan(
-      Math.max(...pg.entries.slice(0, -1).map((e) => e.when))
+    expect(pg.entries[ownershipIndex]!.when).toBeGreaterThan(
+      Math.max(...pg.entries.slice(0, ownershipIndex).map((e) => e.when))
     );
-    expect(sqlite.entries.at(-1)?.tag).toBe('9019_mcp_slack_recovery_due');
+    expect(sqlite.entries.some((e) => e.tag === '9019_mcp_slack_recovery_due')).toBe(true);
     expect(
       pendingOfflineCutoverMigrations('postgresql', {
         applied: ['9019_mcp_slack_recovery_due'],
@@ -58,6 +59,16 @@ describe('Postgres migrations', () => {
     expect(migration).not.toMatch(/CREATE TABLE|ALTER TABLE|DROP TABLE/);
   });
 
+  it('keeps branch-local deletion pending after the previously published ledger migration', async () => {
+    // Development environments may already have applied the earlier PR revision.
+    // Drizzle uses timestamps, not tags or hashes, to decide what to apply.
+    const publishedLedgerTimestamp = 1789344000000;
+    for (const journal of await readJournals()) {
+      const entry = journal.entries.find(({ tag }) => tag === '0107_branch_permanent_deletion');
+      expect(entry).toBeDefined();
+      expect(entry!.when).toBeGreaterThan(publishedLedgerTimestamp);
+    }
+  });
   it('starts the Discord hybrid migration with its transaction-local lock timeout', async () => {
     const migration = await readFile(
       new URL('../../drizzle/postgres/0094_discord_gateway_hybrid.sql', import.meta.url),
@@ -1023,7 +1034,7 @@ describe('MCP OAuth client-registration migrations', () => {
 
   it('follows current main and binds PostgreSQL authority to tenant/server UUID with forced RLS', async () => {
     const [postgresJournal] = await readJournals();
-    expect(postgresJournal.entries.slice(-8)).toEqual([
+    expect(postgresJournal.entries.filter(({ idx }) => idx >= 103 && idx <= 9020)).toEqual([
       expect.objectContaining({ idx: 103, tag: '0103_session_power_priority' }),
       expect.objectContaining({ idx: 104, tag: '0104_environment_command_discovery' }),
       expect.objectContaining({ idx: 9015, tag: '9015_mcp_oauth_client_registrations' }),

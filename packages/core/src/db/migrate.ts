@@ -146,6 +146,32 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
     },
   ],
   [
+    '0107_branch_permanent_deletion',
+    {
+      requiresOfflineCutover: true,
+      impact: defineMigrationImpact({
+        classification: 'protocol',
+        userAction: 'required',
+        rollbackCompatibility: 'incompatible',
+        summary:
+          'Adds sticky branch deletion admission. Stop old writers before enabling permanent deletion; older binaries do not honor the fence.',
+      }),
+    },
+  ],
+  [
+    '0105_mcp_oauth_grant_attribution',
+    {
+      requiresOfflineCutover: true,
+      impact: defineMigrationImpact({
+        classification: 'protocol',
+        userAction: 'required',
+        rollbackCompatibility: 'incompatible',
+        summary:
+          'Retires unattributed shared MCP OAuth grants; current admins must consent again. Preserves per-user grants. Stop all daemons before migration; older writers cannot supply required attribution.',
+      }),
+    },
+  ],
+  [
     '0104_environment_command_discovery',
     {
       requiresOfflineCutover: false,

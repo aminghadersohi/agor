@@ -4608,7 +4608,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
-  registerAuthenticatedRoute(
+  registerLongAuthenticatedRoute(
     app,
     '/repos/:id/export-agor-yml',
     {
@@ -4917,6 +4917,27 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     },
     requireAuth
   );
+
+  app.use('/branches/:id/clean', {
+    async create(data: unknown, params: RouteParams) {
+      if (
+        !params.route?.id ||
+        !data ||
+        typeof data !== 'object' ||
+        Array.isArray(data) ||
+        Object.keys(data).length
+      )
+        throw new BadRequest('Cleanup accepts an empty body and branch route ID only');
+      return branchesService.clean(
+        { branchId: params.route.id as import('@agor/core/types').BranchID },
+        params
+      );
+    },
+  });
+  app.service('/branches/:id/clean').hooks({
+    around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
+    before: { create: [requireAuth, requireMinimumRole(ROLES.MEMBER, 'clean branches')] },
+  });
 
   // Archive/delete branch
   app.use('/branches/:id/archive-or-delete', {

@@ -17,6 +17,7 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
   () => {
     let db: Database;
     let mainFolder: string;
+    let pendingMigrations: string[];
     beforeAll(async () => {
       db = createDatabase({ dialect: 'postgresql', url: url! });
       mainFolder = await mkdtemp(join(tmpdir(), 'agor-oauth-main-upgrade-'));
@@ -25,6 +26,15 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       const journal = JSON.parse(await readFile(journalPath, 'utf8')) as {
         entries: Array<{ idx: number; tag: string; when: number }>;
       };
+      pendingMigrations = journal.entries.filter(({ idx }) => idx > 104).map(({ tag }) => tag);
+      expect(pendingMigrations.slice(0, 6)).toEqual([
+        '9015_mcp_oauth_client_registrations',
+        '9016_oauth_authority_watermark_reconciliation',
+        '9017_fork_migration_collision_repair',
+        '9018_session_memory_reminders',
+        '9019_mcp_slack_recovery_due',
+        '9020_standalone_power_ownership',
+      ]);
       journal.entries = journal.entries.filter(({ idx }) => idx <= 104);
       expect(journal.entries.at(-1)).toMatchObject({
         tag: '0104_environment_command_discovery',
@@ -48,14 +58,7 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       const beforePolicy = await policy();
       expect(beforePolicy[0]?.expression).toContain('stopping');
       await expect(checkMigrationStatus(db)).resolves.toMatchObject({
-        pending: [
-          '9015_mcp_oauth_client_registrations',
-          '9016_oauth_authority_watermark_reconciliation',
-          '9017_fork_migration_collision_repair',
-          '9018_session_memory_reminders',
-          '9019_mcp_slack_recovery_due',
-          '9020_standalone_power_ownership',
-        ],
+        pending: pendingMigrations,
         dbAheadOfBinary: false,
       });
       await expect(runMigrations(db)).rejects.toThrow('Offline migration cutover required');

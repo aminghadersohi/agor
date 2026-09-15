@@ -3,6 +3,7 @@ import {
   type Database,
   generateId,
   RepoRepository,
+  runDatabaseTransaction,
   SessionRepository,
   UsersRepository,
 } from '@agor/core/db';
@@ -50,18 +51,23 @@ dbTest(
   async ({ db }) => {
     const branch = await createBranch(db);
     const repository = new SessionRepository(db);
-    for (let index = 0; index < 1_001; index++) {
-      await repository.create({
-        session_id: generateId(),
-        branch_id: branch.branch_id,
-        created_by: USER_ID,
-        agentic_tool: 'claude-code',
-        status: SessionStatus.IDLE,
-        tasks: [],
-        contextFiles: [],
-        genealogy: { children: [] },
-      });
-    }
+    // Seed in one transaction: this file-backed fixture otherwise commits 1,001
+    // separate writes before exercising the archive behavior under test.
+    await runDatabaseTransaction(db, async (tx) => {
+      const seedRepository = new SessionRepository(tx);
+      for (let index = 0; index < 1_001; index++) {
+        await seedRepository.create({
+          session_id: generateId(),
+          branch_id: branch.branch_id,
+          created_by: USER_ID,
+          agentic_tool: 'claude-code',
+          status: SessionStatus.IDLE,
+          tasks: [],
+          contextFiles: [],
+          genealogy: { children: [] },
+        });
+      }
+    });
     const manual = await repository.create({
       session_id: generateId(),
       branch_id: branch.branch_id,
