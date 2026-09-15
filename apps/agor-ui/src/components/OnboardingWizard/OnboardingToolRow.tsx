@@ -89,13 +89,33 @@ export function OnboardingToolRow({
       listItem
       // Keep refresh/error status in the header too: window-focus invalidation
       // must not insert a row above the action during a native pointer click.
+      // Keep text and bordered tags at the same heading line height too:
+      // small per-row shifts accumulate in a scrolled recommendation list.
       titleExtra={
         state === 'Token required' || state === 'Sign in required' ? (
-          <Tag id={statusId} color="default" style={{ marginInlineEnd: 0 }}>
+          <Tag
+            id={statusId}
+            color="default"
+            style={{
+              marginInlineEnd: 0,
+              display: 'inline-flex',
+              alignItems: 'center',
+              minHeight: token.fontSize * token.lineHeight,
+            }}
+          >
             {state}
           </Tag>
         ) : (
-          <Typography.Text id={statusId} type="secondary" style={{ fontSize: token.fontSizeSM }}>
+          <Typography.Text
+            id={statusId}
+            type="secondary"
+            style={{
+              fontSize: token.fontSizeSM,
+              display: 'inline-flex',
+              alignItems: 'center',
+              minHeight: token.fontSize * token.lineHeight,
+            }}
+          >
             {state}
           </Typography.Text>
         )
