@@ -162,6 +162,21 @@ coordinator interrupt action when the current turn itself must stop.
 
 ---
 
+## Reading long conversations
+
+Conversations initially display the newest 30 non-queued task sections, with
+the latest task expanded. **Show older tasks** reveals 30 more sections while
+preserving your reading position. Scroll upward after revealing them to read
+the earlier sections. The top-navigation button reveals all task sections and
+jumps to the beginning; in-session search also includes the full conversation.
+
+This is a rendering limit, not a retention or API limit. All task records are
+still loaded; older tasks' messages load when expanded. Search, top navigation,
+or repeatedly revealing history can therefore still be expensive. Queued
+prompts remain in the queue drawer.
+
+---
+
 ## 💬 Autocomplete (`@`)
 
 **Type `@` to reference files or users.** Path autocomplete inside a branch, user autocomplete for `@mentions` in comments and prompts.
