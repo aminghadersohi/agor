@@ -31,6 +31,34 @@ type PostgresTestTransaction = {
   unsafe: (statement: string) => Promise<unknown>;
 };
 
+function withPostgresTestTransaction(
+  db: Database,
+  work: (transaction: PostgresTestTransaction) => Promise<void>
+): Promise<void> {
+  return (
+    db as Database & {
+      $client: { begin: (body: typeof work) => Promise<void> };
+    }
+  ).$client.begin(work);
+}
+
+/**
+ * Recreate the empty historical Claude fixture from its shipped DDL. DROP COLUMN
+ * cannot rewind 0110: PostgreSQL retains relnatts/dropped attribute slots, which
+ * the destructive reconciliation correctly rejects as a non-exact schema.
+ * This is test-only; the DCR relation and seeded rows must remain untouched.
+ */
+async function recreateHistoricalClaudeAuthority(
+  transaction: PostgresTestTransaction
+): Promise<void> {
+  await transaction.unsafe('DROP TABLE claude_oauth_attempts');
+  await transaction.unsafe('DROP SEQUENCE claude_oauth_attempt_generation_seq');
+  const source = await readFile(join(migrationsFolder, '0100_claude_oauth_attempts.sql'), 'utf8');
+  for (const statement of source.split('--> statement-breakpoint')) {
+    if (statement.trim()) await transaction.unsafe(statement);
+  }
+}
+
 async function executeReconciliationTransaction(
   transaction: PostgresTestTransaction
 ): Promise<void> {
@@ -48,6 +76,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
   () => {
     let db: Database | null = null;
     let oldHeadFolder: string | null = null;
+    let pendingMigrations: string[];
 
     beforeAll(async () => {
       db = createDatabase({ dialect: 'postgresql', url: postgresUrl! });
@@ -80,6 +109,17 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           breakpoints: boolean;
         }>;
       };
+      // Pin the historical cutover while allowing independent later migrations.
+      pendingMigrations = journal.entries
+        .filter(({ when }) => when > OLD_HEAD_WATERMARK)
+        .map(({ tag }) => tag);
+      expect(pendingMigrations.slice(0, 5)).toEqual([
+        '0101_environment_command_discovery',
+        '0102_mcp_oauth_client_registrations',
+        '0103_oauth_authority_watermark_reconciliation',
+        '0104_mcp_slack_recovery_due',
+        '0105_mcp_oauth_grant_attribution',
+      ]);
       journal.entries = journal.entries.filter((entry) => entry.idx <= 99);
       journal.entries.push({
         idx: 100,
@@ -200,13 +240,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       // later than the archived timestamp. Bootstrap defers this existing
       // legacy table to exact reconciliation in the same offline transaction.
       await expect(checkMigrationStatus(db)).resolves.toMatchObject({
-        pending: [
-          '0101_environment_command_discovery',
-          '0102_mcp_oauth_client_registrations',
-          '0103_oauth_authority_watermark_reconciliation',
-          '0104_mcp_slack_recovery_due',
-          '0105_mcp_oauth_grant_attribution',
-        ],
+        pending: pendingMigrations,
         dbAheadOfBinary: false,
       });
       await expect(runMigrations(db)).rejects.toThrow('Offline migration cutover required');
@@ -282,7 +316,8 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
     });
 
     it('preserves an exact final DCR schema and rows when upgrading the pre-rebase watermark', async () => {
-      if (!db) throw new Error('PostgreSQL test database was not initialized');
+      if (!db || !isPostgresDatabase(db))
+        throw new Error('PostgreSQL test database was not initialized');
       const registrationId = generateId();
       const relationOid = rawRows(
         await executeRaw(
@@ -322,10 +357,19 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       });
 
       // This fixture reuses the database upgraded by the preceding test. Remove
-      // later Slack recovery and consent-attribution additions as well as
+      // later Slack recovery, consent-attribution, and cleanup policy additions as well as
       // rewinding the ledger: the old head did not have these future columns.
       await executeRaw(db, sql`ALTER TABLE tasks DROP COLUMN mcp_slack_recovery_due_at`);
       await executeRaw(db, sql`ALTER TABLE user_mcp_oauth_tokens DROP COLUMN granted_by_user_id`);
+      await executeRaw(db, sql`DROP POLICY IF EXISTS branch_maintenance_discovery ON branches`);
+      await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN deletion_status`);
+      await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN deletion_error`);
+      await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN deletion_updated_at`);
+      await executeRaw(db, sql`ALTER TABLE repos DROP COLUMN cleanup_policy`);
+      await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN cleanup_protected`);
+
+      await executeRaw(db, sql`DROP TABLE user_provider_oauth_grants`);
+      await withPostgresTestTransaction(db, recreateHistoricalClaudeAuthority);
 
       // Reproduce the previous reviewed head's timestamp-only final watermark.
       // Its authority schema is identical; the rebased bootstrap must not try
@@ -340,13 +384,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
             VALUES ('pre-rebase-final-watermark', 1788379200000)`
       );
       await expect(checkMigrationStatus(db)).resolves.toMatchObject({
-        pending: [
-          '0101_environment_command_discovery',
-          '0102_mcp_oauth_client_registrations',
-          '0103_oauth_authority_watermark_reconciliation',
-          '0104_mcp_slack_recovery_due',
-          '0105_mcp_oauth_grant_attribution',
-        ],
+        pending: pendingMigrations,
         dbAheadOfBinary: false,
       });
       await expect(runMigrations(db)).rejects.toThrow('Offline migration cutover required');
@@ -371,6 +409,18 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           )
         )
       ).resolves.toEqual([expect.objectContaining({ registration_id: registrationId })]);
+    });
+
+    it('accepts the exact historical fixture before applying adversarial mutations', async () => {
+      if (!db || !isPostgresDatabase(db)) throw new Error('PostgreSQL test requires PostgreSQL');
+      const rollback = new Error('rollback exact historical fixture');
+      await expect(
+        withPostgresTestTransaction(db, async (transaction) => {
+          await recreateHistoricalClaudeAuthority(transaction);
+          await executeReconciliationTransaction(transaction);
+          throw rollback;
+        })
+      ).rejects.toBe(rollback);
     });
 
     it.each([
@@ -410,13 +460,9 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
         )
       )[0]?.relation_oid;
       await expect(
-        (
-          db as Database & {
-            $client: {
-              begin: (body: (tx: PostgresTestTransaction) => Promise<void>) => Promise<void>;
-            };
-          }
-        ).$client.begin(async (transaction) => {
+        withPostgresTestTransaction(db, async (transaction) => {
+          // Prove the named mutation, not a mismatch caused by later migrations.
+          await recreateHistoricalClaudeAuthority(transaction);
           await transaction.unsafe(mutation);
           await executeReconciliationTransaction(transaction);
         })
@@ -447,13 +493,9 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
         throw new Error('PostgreSQL test database was not initialized');
       }
       await expect(
-        (
-          db as Database & {
-            $client: {
-              begin: (body: (tx: PostgresTestTransaction) => Promise<void>) => Promise<void>;
-            };
-          }
-        ).$client.begin(async (transaction) => {
+        withPostgresTestTransaction(db, async (transaction) => {
+          // Prove the named mutation, not a mismatch caused by later migrations.
+          await recreateHistoricalClaudeAuthority(transaction);
           await transaction.unsafe(mutation);
           await executeReconciliationTransaction(transaction);
         })
