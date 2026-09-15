@@ -9,6 +9,22 @@ export type BranchMetadataAction = (typeof BRANCH_METADATA_ACTIONS)[number];
 export const BRANCH_FILESYSTEM_ACTIONS = ['preserved', 'cleaned', 'deleted'] as const;
 export type BranchFilesystemAction = (typeof BRANCH_FILESYSTEM_ACTIONS)[number];
 
+/** Only terminal filesystem outcome belongs in the fenced provisioning CAS. */
+export interface BranchProvisioningOutcome {
+  filesystem_status: 'ready' | 'failed';
+  error_message?: string;
+}
+
+export function isBranchProvisioningOutcome(value: unknown): value is BranchProvisioningOutcome {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const outcome = value as Record<string, unknown>;
+  return (
+    (outcome.filesystem_status === 'ready' || outcome.filesystem_status === 'failed') &&
+    (outcome.error_message === undefined || typeof outcome.error_message === 'string') &&
+    Object.keys(outcome).every((key) => key === 'filesystem_status' || key === 'error_message')
+  );
+}
+
 /** Canonical request contract for the hooked branch archive/delete boundary. */
 export interface BranchArchiveOrDeleteOptions {
   metadataAction: BranchMetadataAction;

@@ -1008,8 +1008,8 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
 
   /**
    * Spawn the `git.branch.add` executor that materializes a branch's working
-   * directory, with a daemon-side safety net so the branch never gets stuck in
-   * `filesystem_status='creating'`.
+   * directory, with a daemon-side safety net for observed executor failures.
+   * HA orphan recovery after owner loss requires a separate ownership protocol.
    *
    * The executor itself patches `ready`/`failed` when it can, but only if its
    * own error handler runs AND it still holds a daemon connection. When the
@@ -1021,8 +1021,8 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
    * returned, so `createBranch` still hands its caller the failed
    * representation rather than a stale `creating` one.
    *
-   * Idempotent and reusable: `retryBranchProvisioning()` and the startup
-   * watchdog call this for existing rows too. Structured logs are emitted at
+   * Reusable for explicit `retryBranchProvisioning()` calls. The standalone
+   * startup watchdog only marks interrupted attempts failed; it never dispatches. Structured logs are emitted at
    * enqueue / exit / reconcile so the lifecycle is traceable.
    *
    * `delegatedHomeKey` is pre-resolved by `createBranch` on purpose — routing
@@ -1123,7 +1123,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       // with no signal at all. Returned so callers surface the failed row.
       const message = error instanceof Error ? error.message : String(error);
       console.error(`${logPrefix} failed to spawn executor: ${message}`);
-      const { branch: failedBranch } = await new BranchRepository(
+      const { applied, branch: failedBranch } = await new BranchRepository(
         this.db
       ).acknowledgeProvisioningAttempt(
         branch.branch_id,
@@ -1133,6 +1133,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
         },
         attemptId
       );
+      if (applied) this.emitBranchPatched(failedBranch, params);
       return failedBranch;
     }
   }

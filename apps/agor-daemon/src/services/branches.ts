@@ -83,6 +83,7 @@ import {
   environmentCommandTokenId,
   getTeammateConfig,
   hasMinimumRole,
+  isBranchProvisioningOutcome,
   isTeammate,
   ROLES,
   TEAMMATE_FRAMEWORK_REPO_URL,
@@ -1351,6 +1352,14 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
     if (data.filesystem_status === 'ready' || data.filesystem_status === 'failed') {
       const expectedAttemptId = data.provisioning_attempt_id;
       const { provisioning_attempt_id: _attempt, ...acknowledgement } = data;
+      if (
+        !isBranchProvisioningOutcome(acknowledgement) ||
+        (expectedAttemptId !== undefined && typeof expectedAttemptId !== 'string')
+      ) {
+        throw new BadRequest(
+          'Provisioning acknowledgement must contain only a terminal outcome. Patch metadata separately.'
+        );
+      }
       const result = await this.branchRepo.acknowledgeProvisioningAttempt(
         id,
         acknowledgement,
@@ -2210,7 +2219,7 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
         );
         // Mark as failed so the UI can show the error state
         const errMsg = error instanceof Error ? error.message : String(error);
-        await this.withTenantDatabase(params, () =>
+        const result = await this.withTenantDatabase(params, () =>
           this.branchRepo.acknowledgeProvisioningAttempt(
             id,
             {
@@ -2220,6 +2229,15 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
             provisioningAttemptId
           )
         );
+        if (result.applied) {
+          emitServiceEvent(this.app, {
+            path: 'branches',
+            event: 'patched',
+            data: result.branch,
+            params,
+            id: result.branch.branch_id,
+          });
+        }
       }
     }
 

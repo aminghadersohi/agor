@@ -251,6 +251,22 @@ describe('BranchRepository provisioning CAS', () => {
     }
   );
 
+  dbTest('terminal acknowledgements cannot mutate branch metadata', async ({ db }) => {
+    const { branchRepo, branchId } = await seedFailedBranch(db);
+    await branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-B');
+    const before = await branchRepo.findById(branchId);
+    for (const extra of [{ name: 'moved' }, { board_id: generateId() }, { archived: true }]) {
+      await expect(
+        branchRepo.acknowledgeProvisioningAttempt(
+          branchId,
+          { filesystem_status: 'ready', ...extra },
+          'attempt-B'
+        )
+      ).rejects.toThrow(/terminal outcome/);
+      expect(await branchRepo.findById(branchId)).toEqual(before);
+    }
+  });
+
   dbTest('archive cannot race an in-flight provisioning attempt', async ({ db }) => {
     const { branchRepo, branchId } = await seedFailedBranch(db);
     await branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-B');

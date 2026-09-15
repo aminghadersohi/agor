@@ -9,6 +9,7 @@ import type {
   BoardID,
   Branch,
   BranchID,
+  BranchProvisioningOutcome,
   EffectiveBranchAccess,
   GroupID,
   SessionPromptAuthority,
@@ -22,6 +23,7 @@ import { generateId } from '../../lib/ids';
 import {
   BRANCH_ENVIRONMENT_CLEARABLE_FIELDS,
   BRANCH_ENVIRONMENT_SNAPSHOT_FIELDS,
+  isBranchProvisioningOutcome,
 } from '../../types/branch';
 import { hasActiveEnvironmentCommand } from '../../types/environment-command';
 import { getBranchUrl } from '../../utils/url';
@@ -903,9 +905,14 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
 
   async acknowledgeProvisioningAttempt(
     id: string,
-    acknowledgement: Partial<Branch>,
+    acknowledgement: BranchProvisioningOutcome,
     expectedAttemptId?: string
   ): Promise<{ applied: boolean; branch: Branch }> {
+    if (!isBranchProvisioningOutcome(acknowledgement)) {
+      throw new RepositoryError(
+        'Provisioning acknowledgement must contain only a terminal outcome'
+      );
+    }
     const existing = await this.findById(id);
     if (!existing) throw new EntityNotFoundError('Branch', id);
     const baseUrl = await getBaseUrl();
