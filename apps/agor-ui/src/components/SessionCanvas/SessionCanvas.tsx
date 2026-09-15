@@ -107,6 +107,10 @@ import {
   useEdgesState,
   useNodesState,
 } from 'reactflow';
+import {
+  type EntityPlacementIntent,
+  EntityPlacementWrites,
+} from './canvas/utils/entityPlacementWrites';
 import 'reactflow/dist/style.css';
 import './SessionCanvas.css';
 import { boardCommentZoneParentObjectKey, hasMinimumRole, ROLES, shortId } from '@agor-live/client';
@@ -116,7 +120,7 @@ import {
   useConsumePendingRecenter,
   useRegisterRecenter,
 } from '../../contexts/CanvasNavigationContext';
-import { useMutationGate } from '../../contexts/ConnectionContext';
+import { useConnectionState, useMutationGate } from '../../contexts/ConnectionContext';
 import { useCanManageBoard } from '../../hooks/useCanManageBoard';
 import { useCursorTracking } from '../../hooks/useCursorTracking';
 import { useStableCallback } from '../../hooks/useStableCallback';
@@ -594,6 +598,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
   ) => {
     const { token } = theme.useToken();
     const mutationGate = useMutationGate();
+    const connection = useConnectionState();
     const { showError, showSuccess, showWarning } = useThemedMessage();
 
     // Entity state via narrow store subscriptions. Each whole-map selector is a
@@ -817,7 +822,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const placementBoardRef = useRef(board);
     placementBoardRef.current = board;
 
-    const pendingLayoutUpdatesRef = useRef<Record<string, { x: number; y: number }>>({});
+    const pendingLayoutUpdatesRef = useRef<
+      Record<string, { x: number; y: number; intent?: EntityPlacementIntent }>
+    >({});
     // Serialize rapid debounced writes so an older request can never commit
     // after the geometry from a newer drop.
     const layoutPersistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -887,6 +894,36 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const authoritativeEntityPlacementsRef = useRef<
       Map<string, BoardEntityPlacementSnapshot | null>
     >(new Map());
+    // biome-ignore lint/correctness/useExhaustiveDependencies: ownership must reset on board/client/auth identity changes
+    const placementWrites = useMemo(
+      () =>
+        new EntityPlacementWrites((nodeId) => {
+          delete localPositionsRef.current[nodeId];
+          delete pendingLayoutUpdatesRef.current[nodeId];
+        }),
+      [board?.board_id, client, connection.authGeneration, currentUserId]
+    );
+    const placementWritesRef = useRef(placementWrites);
+    placementWritesRef.current = placementWrites;
+    useEffect(() => {
+      placementWrites.activate();
+      const unsubscribe = agorStore.subscribe((state, previous) => {
+        if (state.boardObjectsByBoardId === previous.boardObjectsByBoardId) return;
+        placementWrites.observeAll(
+          state.boardObjectsByBoardId.get(board?.board_id ?? '') ?? [],
+          placementBoardRef.current
+        );
+      });
+      return () => {
+        unsubscribe();
+        placementWrites.dispose();
+        if (layoutUpdateTimerRef.current) clearTimeout(layoutUpdateTimerRef.current);
+        layoutUpdateTimerRef.current = null;
+        pendingLayoutUpdatesRef.current = {};
+        activeDragNodeIdsRef.current.clear();
+        activeDragPositionsRef.current = {};
+      };
+    }, [placementWrites, board?.board_id]);
     // Track objects we've deleted locally (to prevent them from reappearing during WebSocket updates)
     const deletedObjectsRef = useRef<Set<string>>(new Set());
 
@@ -1946,7 +1983,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               currentAuthoritativePlacement
             );
 
-          if (localPosition && authoritativePlacementChanged) {
+          placementWrites.observe(newNode.id, placement, board);
+          if (
+            localPosition &&
+            authoritativePlacementChanged &&
+            !placementWrites.preserves(newNode.id)
+          ) {
             // A board-object placement event advanced independently of the
             // local absolute override. set_zone and auto-arrange own both the
             // React Flow parent and the relative position, so never translate
@@ -2010,7 +2052,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           };
         });
       },
-      [boardObjectByBranch, boardObjectByCard, board]
+      [boardObjectByBranch, boardObjectByCard, board, placementWrites]
     );
 
     // Memoized MiniMap nodeColor callback to prevent MiniMap canvas repaints on every render
@@ -2650,6 +2692,13 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         // Populate every group member's optimistic guard before board sync is
         // re-enabled. Otherwise the old board snapshot can snap secondary
         // selected zones back during the 500ms debounce.
+        const getLivePlacement = (nodeId: string) =>
+          agorStore
+            .getState()
+            .boardObjectsByBoardId.get(board.board_id)
+            ?.find(
+              (row) => row.branch_id === nodeId || (row.card_id && `card-${row.card_id}` === nodeId)
+            );
         for (const nodeId of activeDragNodeIdsRef.current) {
           const draggedNode = callbackNodeById.get(nodeId) ?? currentNodeById.get(nodeId);
           if (!draggedNode) continue;
@@ -2660,7 +2709,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             activeDragPositionsRef.current
           );
           localPositionsRef.current[nodeId] = absolutePos;
-          pendingLayoutUpdatesRef.current[nodeId] = absolutePos;
+          pendingLayoutUpdatesRef.current[nodeId] = {
+            ...absolutePos,
+            ...(draggedNode.type === 'branchNode' || draggedNode.type === 'cardNode'
+              ? { intent: placementWrites.queue(nodeId, getLivePlacement(nodeId), board) }
+              : {}),
+          };
 
           if (draggedNode.type === 'zone') {
             const objectData = board.objects?.[nodeId];
@@ -2693,6 +2747,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
         // Debounce: wait 500ms after last drag before persisting
         layoutUpdateTimerRef.current = setTimeout(async () => {
+          const ownsBoard = () =>
+            placementBoardRef.current?.board_id === board.board_id &&
+            placementWritesRef.current === placementWrites;
+          if (!ownsBoard()) return;
           const updates = pendingLayoutUpdatesRef.current;
           pendingLayoutUpdatesRef.current = {};
 
@@ -2707,6 +2765,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           await previousWrite;
 
           try {
+            if (!ownsBoard()) return;
             // Separate updates for branches vs zones vs markdown vs comments
             const branchUpdates: Array<{
               branch_id: string;
@@ -2739,17 +2798,56 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                     ? candidate.object_id === placement.object_id
                     : candidate.branch_id === branchId
                 );
+              if (placementWritesRef.current !== placementWrites) return false;
+              const nodeId =
+                branchId ??
+                (placement?.card_id ? `card-${placement.card_id}` : placement?.branch_id);
+              const intent = nodeId ? updates[nodeId]?.intent : undefined;
+              if (intent) {
+                placementWrites.observe(intent.nodeId, current, placementBoardRef.current);
+                return placementWrites.current(intent);
+              }
               return sameBoardEntityPlacement(
                 snapshotBoardEntityPlacement(placement, board),
                 snapshotBoardEntityPlacement(current, placementBoardRef.current)
               );
             };
 
+            const patchPlacement = async (
+              nodeId: string,
+              placement: BoardEntityObject,
+              position: BoardEntityObject['position'],
+              zoneId: string | null | undefined
+            ) => {
+              const intent = updates[nodeId]?.intent;
+              if (!intent) return;
+              const data = { position, zone_id: zoneId ?? null };
+              await placementWrites.dispatch(
+                intent,
+                { ...placement, ...data } as BoardEntityObject,
+                board,
+                (placement_write_id) =>
+                  client
+                    .service('board-objects')
+                    .patch(placement.object_id, { ...data, placement_write_id })
+              );
+            };
+
             // Find all current nodes to check types
             const currentNodes = reactFlowInstanceRef.current?.getNodes() ?? nodes;
 
-            for (const [nodeId, position] of Object.entries(updates)) {
+            for (const [nodeId, update] of Object.entries(updates)) {
+              if (!ownsBoard()) return;
+              const position = { x: update.x, y: update.y };
               const draggedNode = currentNodes.find((n) => n.id === nodeId);
+              if (update.intent) {
+                await placementWrites.wait(nodeId)?.catch(() => {});
+                if (
+                  placementWritesRef.current !== placementWrites ||
+                  !placementWrites.current(update.intent)
+                )
+                  continue;
+              }
 
               if (
                 draggedNode?.type === 'zone' ||
@@ -2810,8 +2908,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                   parentType,
                 });
               } else if (draggedNode?.type === 'cardNode') {
-                // Card node moved - extract card_id from node id
-                const cardId = nodeId.replace('card-', '');
+                // Card node moved.
                 const absolutePosition = position;
 
                 // Check zone collision (same logic as branches)
@@ -2844,20 +2941,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 const positionToStore = calculateStoragePosition(absolutePosition, newParent);
 
                 // Find existing board_object for this card
-                const existingBoardObject = boardObjectByCard.get(cardId);
+                const existingBoardObject = getLivePlacement(nodeId);
                 if (existingBoardObject) {
                   if (!placementIsCurrent(existingBoardObject)) continue;
-                  // zone_id: null clears zone membership; string sets it
-                  const updateData: {
-                    position: { x: number; y: number };
-                    zone_id?: string | null;
-                  } = {
-                    position: positionToStore,
-                    zone_id: droppedZoneId ?? null,
-                  };
-                  await client
-                    .service('board-objects')
-                    .patch(existingBoardObject.object_id, updateData);
+                  await patchPlacement(nodeId, existingBoardObject, positionToStore, droppedZoneId);
                 }
                 // Cards don't fire zone triggers (V1: cards are inert in zones)
               } else if (draggedNode?.type === 'branchNode') {
@@ -2894,8 +2981,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 }
 
                 // Check if branch was already pinned to a zone before this drag
-                // Use direct Map lookup instead of array conversion for better performance
-                const existingBoardObject = boardObjectByBranch.get(nodeId);
+                const existingBoardObject = getLivePlacement(nodeId);
                 // A stale drop must not fire a prompt/open the picker even if
                 // the later placement PATCH would be suppressed. Absence is
                 // also an authority snapshot: another caller may have placed
@@ -2966,23 +3052,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             if (branchUpdates.length > 0) {
               for (const { branch_id, position, zone_id } of branchUpdates) {
                 // Find existing board_object or create new one
-                // Use direct Map lookup instead of array conversion for better performance
-                const existingBoardObject = boardObjectByBranch.get(branch_id);
+                const existingBoardObject = getLivePlacement(branch_id);
                 if (!placementIsCurrent(existingBoardObject, branch_id)) continue;
 
                 if (existingBoardObject) {
-                  // Update existing board_object (position and zone_id)
-                  // zone_id: null clears zone membership; string sets it
-                  const updateData: {
-                    position: { x: number; y: number };
-                    zone_id?: string | null;
-                  } = {
-                    position,
-                    zone_id,
-                  };
-                  await client
-                    .service('board-objects')
-                    .patch(existingBoardObject.object_id, updateData);
+                  await patchPlacement(branch_id, existingBoardObject, position, zone_id);
                 } else {
                   // Create new board_object (with zone_id if dropped on zone)
                   await client.service('board-objects').create({
@@ -2999,6 +3073,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // Persist every changed canvas object from the gesture as one
             // authoritative geometry transaction/realtime batch.
             if (Object.keys(canvasObjectUpdates).length > 0) {
+              if (!ownsBoard()) return;
               const batch: BoardLayoutBatch = { objects: canvasObjectUpdates, placements: {} };
               const result = (await client.service('boards').patch(board.board_id, {
                 _action: 'applyLayout',
@@ -3011,6 +3086,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
             // Update comment positions
             for (const { comment, position, parentId, parentType } of commentUpdates) {
+              if (!ownsBoard()) return;
               const reactFlowParentId =
                 parentId && parentType === 'zone'
                   ? boardCommentZoneParentObjectKey(parentId)
@@ -3037,6 +3113,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 .service(`board-comments/${comment.comment_id}/reposition`)
                 .create(plan.data);
 
+              if (!ownsBoard()) return;
               // Clear localPositionsRef immediately after patching
               // We've saved the correct position to DB, no need to keep overriding
               delete localPositionsRef.current[`comment-${comment.comment_id}`];
@@ -3068,7 +3145,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           }
         }, 500);
       },
-      [board, client, nodes, boardObjectByBranch, boardObjectByCard, commentById, setNodes]
+      [board, client, nodes, placementWrites, commentById, setNodes]
     );
 
     const selectedLayoutNodes = useMemo(() => getSelectedLayoutNodes(nodes), [nodes]);
