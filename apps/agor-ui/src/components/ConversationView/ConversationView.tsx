@@ -28,6 +28,7 @@ import { useStreamingMessagesByTask } from '../../hooks/useStreamingMessagesByTa
 import { useCopyToClipboard } from '../../utils/clipboard';
 import { BrandMark } from '../BrandMark';
 import { TaskBlock } from '../TaskBlock';
+import { CONVERSATION_TASK_PAGE_SIZE, useConversationHistory } from './useConversationHistory';
 
 const { Text } = Typography;
 const EMPTY_STREAMING_MESSAGES = new Map();
@@ -224,25 +225,6 @@ export const ConversationView = React.memo<ConversationViewProps>(
       scrollToBottom();
     }, [state, scrollToBottom]);
 
-    // Scroll to top. While content is still streaming/growing, the library's
-    // persistent observer can re-pin to the bottom before our scrollTop write
-    // takes effect, snapping the user right back down. `stopScroll()`
-    // synchronously releases the bottom lock (and cancels any in-flight scroll
-    // animation) so the scrollTop = 0 sticks.
-    const scrollToTop = useCallback(() => {
-      stopScroll();
-      if (scrollRef.current) {
-        scrollRef.current.scrollTop = 0;
-      }
-    }, [scrollRef, stopScroll]);
-
-    // Expose scroll functions to parent
-    useEffect(() => {
-      if (onScrollRef) {
-        onScrollRef(handleScrollToBottom, scrollToTop);
-      }
-    }, [onScrollRef, handleScrollToBottom, scrollToTop]);
-
     const { handle: reactiveSession, state: reactiveState } = useSharedReactiveSession(
       client,
       sessionId,
@@ -262,10 +244,35 @@ export const ConversationView = React.memo<ConversationViewProps>(
     // when the underlying reactive `tasks` list hasn't changed. Without this,
     // every streaming chunk produced a fresh array → every downstream useMemo
     // depending on `tasks` would invalidate and rebuild.
-    const tasks = useMemo(
+    const allTasks = useMemo(
       () => (currentReactiveState?.tasks || []).filter((t) => t.status !== TaskStatus.QUEUED),
       [currentReactiveState?.tasks]
     );
+
+    const taskPageSize = simple
+      ? SIMPLE_CHAT_TASK_PAGE_SIZE
+      : compact
+        ? COMPACT_TASK_PAGE_SIZE
+        : CONVERSATION_TASK_PAGE_SIZE;
+    const {
+      visibleTasks: tasks,
+      olderCount,
+      revealOlder,
+      revealAllAtTop,
+    } = useConversationHistory(
+      sessionId,
+      allTasks,
+      forceExpandAll,
+      scrollRef,
+      stopScroll,
+      taskPageSize
+    );
+
+    // Explicit top navigation and in-session search still reach the complete
+    // conversation. Normal opens mount only a bounded tail of task headers.
+    useEffect(() => {
+      onScrollRef?.(handleScrollToBottom, revealAllAtTop);
+    }, [onScrollRef, handleScrollToBottom, revealAllAtTop]);
 
     // Land at the bottom on panel open / session switch — but only once real
     // content is mounted. On a cold open ConversationView early-returns <Spin/>
@@ -273,48 +280,7 @@ export const ConversationView = React.memo<ConversationViewProps>(
     // that never re-runs; gating on tasks.length>0 fires it when the container
     // mounts. handleScrollToBottom also clears the escape so the library's
     // persistent observer reliably follows lazy/streamed growth from there.
-    const hasContent = tasks.length > 0;
-    const [olderTaskReveal, setOlderTaskReveal] = useState<{
-      sessionId: SessionID | null;
-      count: number;
-    }>({ sessionId: null, count: 0 });
-    const pendingPrependScrollHeightRef = React.useRef<{
-      sessionId: SessionID | null;
-      height: number;
-    } | null>(null);
-    const revealedOlderTaskCount =
-      olderTaskReveal.sessionId === sessionId ? olderTaskReveal.count : 0;
-    const taskPageSize = simple
-      ? SIMPLE_CHAT_TASK_PAGE_SIZE
-      : compact
-        ? COMPACT_TASK_PAGE_SIZE
-        : null;
-    const visibleTaskStartIndex = taskPageSize
-      ? Math.max(0, tasks.length - taskPageSize - revealedOlderTaskCount)
-      : 0;
-    const visibleTasks = taskPageSize ? tasks.slice(visibleTaskStartIndex) : tasks;
-
-    const revealEarlierTasks = useCallback(() => {
-      const scroller = scrollRef.current;
-      pendingPrependScrollHeightRef.current = scroller
-        ? { sessionId, height: scroller.scrollHeight }
-        : null;
-      stopScroll();
-      setOlderTaskReveal((current) => ({
-        sessionId,
-        count: (current.sessionId === sessionId ? current.count : 0) + (taskPageSize ?? 0),
-      }));
-    }, [scrollRef, sessionId, stopScroll, taskPageSize]);
-
-    useLayoutEffect(() => {
-      const pending = pendingPrependScrollHeightRef.current;
-      const scroller = scrollRef.current;
-      if (!pending || !scroller) return;
-      if (pending.sessionId === sessionId) {
-        scroller.scrollTop += scroller.scrollHeight - pending.height;
-      }
-      pendingPrependScrollHeightRef.current = null;
-    });
+    const hasContent = allTasks.length > 0;
 
     // Capture the outgoing chat before React swaps its transcript DOM. We keep
     // only in-memory viewport state: chats left at the tail reopen at the new
@@ -484,7 +450,7 @@ export const ConversationView = React.memo<ConversationViewProps>(
       );
     }
 
-    if (loading && tasks.length === 0) {
+    if (loading && allTasks.length === 0) {
       return (
         <div
           style={{
@@ -500,7 +466,7 @@ export const ConversationView = React.memo<ConversationViewProps>(
       );
     }
 
-    if (tasks.length === 0) {
+    if (allTasks.length === 0) {
       return (
         <div
           style={{
@@ -593,20 +559,16 @@ export const ConversationView = React.memo<ConversationViewProps>(
           {/* Genealogy Banner */}
           {!simple && <GenealogyBanner />}
 
-          {visibleTaskStartIndex > 0 && taskPageSize && (
-            <div style={{ display: 'flex', justifyContent: 'center', padding: token.sizeUnit * 2 }}>
-              <Button size="small" onClick={revealEarlierTasks}>
-                Show {Math.min(taskPageSize, visibleTaskStartIndex)} earlier tasks
-              </Button>
-            </div>
+          {olderCount > 0 && (
+            <Button onClick={revealOlder} block>
+              {simple || compact
+                ? `Show ${Math.min(taskPageSize, olderCount)} earlier tasks`
+                : `Show older tasks (${olderCount} remaining)`}
+            </Button>
           )}
 
-          {/* Task-organized conversation. Compact/mobile and focused-chat views
-              render the newest page first so very long sessions do not create
-              an enormous initial DOM/paint surface or hydrate every expanded
-              task at once. Older tasks remain available in stable,
-              scroll-preserving batches. */}
-          {visibleTasks.map((task, taskIndex) => (
+          {/* Task-organized conversation */}
+          {tasks.map((task, taskIndex) => (
             <TaskBlock
               key={task.task_id}
               task={task}
@@ -630,7 +592,7 @@ export const ConversationView = React.memo<ConversationViewProps>(
               onUnloadTaskMessages={handleUnloadTaskMessages}
               teammateEmoji={teammateEmoji}
               teammateAvatarUrl={teammateAvatarUrl}
-              isLatestTask={visibleTaskStartIndex + taskIndex === tasks.length - 1}
+              isLatestTask={taskIndex === tasks.length - 1}
               client={client}
               onOpenAgenticToolSettings={onOpenAgenticToolSettings}
               compact={compact}
