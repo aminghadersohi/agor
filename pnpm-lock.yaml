@@ -20941,6 +20941,7 @@ snapshots:
       '@img/sharp-win32-ia32': 0.35.4
       '@img/sharp-win32-x64': 0.35.4
       '@types/node': 24.13.3
+    optional: true
 
   sharp@0.35.4(@types/node@26.1.1):
     dependencies:

@@ -45,7 +45,10 @@ export function missingMCPOAuthGrantError(auth: MCPAuth): Error {
  * row is the exact committed grant (needed by discovery's publication fence).
  */
 export async function acquireMCPOAuthGrant(
-  deps: Omit<RefreshAndPersistDeps, 'observedRefreshVersion'> & { forceRefresh?: boolean }
+  deps: Omit<RefreshAndPersistDeps, 'observedRefreshVersion'> & {
+    /** Daemon-owned post-401 retry only; callers must authorize this accelerator. */
+    forceRefresh?: boolean;
+  }
 ) {
   const read = () =>
     runWithTenantDatabaseScope(deps.db, deps.tenantId, async (db) => {

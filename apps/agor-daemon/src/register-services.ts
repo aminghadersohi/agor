@@ -6016,8 +6016,12 @@ export async function registerMCPServices(
           }
         }
       }
-      const { OAuthRefreshAuthorityCancelledError, FailedRefreshError, OAuthRefreshExchangeError } =
-        await import('@agor/core/tools/mcp/oauth-refresh');
+      const {
+        AmbiguousRefreshError,
+        FailedRefreshError,
+        OAuthRefreshExchangeError,
+        OAuthRefreshAuthorityCancelledError,
+      } = await import('@agor/core/tools/mcp/oauth-refresh');
 
       await Promise.all(
         serverIds.map(async (serverId) => {
@@ -6074,7 +6078,11 @@ export async function registerMCPServices(
                           : 'client_credentials_configuration_required',
                       recovery: classifyMCPAuthRecovery(error, { mcpServerId: serverId }),
                     }
-                  : { error: 'needs_reauth' };
+                  : error instanceof FailedRefreshError ||
+                      error instanceof AmbiguousRefreshError ||
+                      error instanceof OAuthRefreshExchangeError
+                    ? { error: 'token_refresh_failed' }
+                    : { error: 'needs_reauth' };
             }
           } catch (err) {
             if (err instanceof OAuthRefreshAuthorityCancelledError) throw err;
@@ -6134,6 +6142,7 @@ export async function registerMCPServices(
         GrantConfigurationChangedError,
       } = await import('@agor/core/tools/mcp/oauth-refresh');
 
+      let refreshSubject: { userId: UserID | null } | undefined;
       try {
         // Shared refresh is authorized by server access and the caller's role;
         // it retains the original consenter attribution rather than adopting
@@ -6153,6 +6162,7 @@ export async function registerMCPServices(
           }
         }
         const tokenUserId: UserID | null = mode === 'per_user' ? (userId as UserID) : null;
+        refreshSubject = { userId: tokenUserId };
 
         const currentGrant = await runInOAuthTenantScope(db, tenantId, () =>
           new UserMCPOAuthTokenRepository(db).getToken(tokenUserId, serverId as MCPServerID)
@@ -6198,17 +6208,27 @@ export async function registerMCPServices(
           if (
             err instanceof InvalidGrantError ||
             err instanceof MissingRefreshTokenError ||
-            err instanceof AmbiguousRefreshError ||
             err instanceof GrantConfigurationChangedError
           ) {
             return { success: false, error: 'needs_reauth' };
+          }
+          if (err instanceof AmbiguousRefreshError && refreshSubject) {
+            // A still-running observer timeout is retryable, but main's durable
+            // rotating-token quarantine cannot recover by replaying the grant.
+            const { userId: subjectUserId } = refreshSubject;
+            const saved = await runInOAuthTenantScope(db, tenantId, () =>
+              new UserMCPOAuthTokenRepository(db).getToken(subjectUserId, serverId as MCPServerID)
+            );
+            if (!saved || saved.refresh_status === 'ambiguous') {
+              return { success: false, error: 'needs_reauth' };
+            }
           }
           // A peer observed a known, non-ambiguous owner failure, or the
           // outcome of a concurrent refresh could not be observed in time.
           // Neither means the grant itself is invalid, so match the
           // auth-headers path's retryable response rather than forcing the
           // caller to reconnect for the same refresh generation.
-          if (err instanceof FailedRefreshError) {
+          if (err instanceof FailedRefreshError || err instanceof AmbiguousRefreshError) {
             return { success: false, error: 'token_refresh_failed' };
           }
           if (err instanceof MissingTokenEndpointError) {
