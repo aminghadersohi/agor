@@ -1765,7 +1765,7 @@ describe('marketplace oauth-start production boundary', () => {
     ).resolves.toMatchObject({ access_token: 'linear-access-token' });
   });
 
-  it('allows strict mode when the optional RFC 9207 capability flag is absent', async () => {
+  it('requires the callback issuer capability in strict mode before registration', async () => {
     const fixture = linearFetch();
     globalThis.fetch = fixture.fetch as unknown as typeof fetch;
     await expect(
@@ -1775,11 +1775,8 @@ describe('marketplace oauth-start production boundary', () => {
         redirectUri,
         { resourceUri: fixture.mcpUrl, compatibilityMode: 'strict' }
       )
-    ).resolves.toMatchObject({
-      compatibilityMode: 'strict',
-      authorizationResponseIssuerParameterSupported: false,
-    });
-    expect(fixture.fetch).toHaveBeenCalledWith(
+    ).rejects.toMatchObject({ failureCode: 'metadata_incompatible' });
+    expect(fixture.fetch).not.toHaveBeenCalledWith(
       `${fixture.issuer}/register`,
       expect.objectContaining({ method: 'POST' })
     );
@@ -1946,7 +1943,15 @@ describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
       expect(fetchMock).toHaveBeenCalledWith(metadataUrl, expect.any(Object));
       expect(fetchMock).not.toHaveBeenCalledWith(rootMetadataUrl, expect.any(Object));
 
-      for (const compatibilityMode of ['strict', 'legacy'] as const) {
+      await expect(
+        startMCPOAuthFlow(wwwAuthenticate, undefined, redirectUri, {
+          resourceMetadataUrl: metadataUrl,
+          resourceUri: mcpUrl,
+          compatibilityMode: 'strict',
+          allowLocalhostHttp: true,
+        })
+      ).rejects.toMatchObject({ failureCode: 'issuer_mismatch' });
+      for (const compatibilityMode of ['marketplace', 'legacy'] as const) {
         await expect(
           startMCPOAuthFlow(wwwAuthenticate, undefined, redirectUri, {
             resourceMetadataUrl: metadataUrl,
@@ -1962,7 +1967,7 @@ describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
         startMCPOAuthFlow(wwwAuthenticate, 'google-desktop-client', redirectUri, {
           resourceMetadataUrl: metadataUrl,
           resourceUri: mcpUrl,
-          compatibilityMode: 'strict',
+          compatibilityMode: 'marketplace',
           allowLocalhostHttp: true,
         })
       ).resolves.toMatchObject({
@@ -1973,7 +1978,7 @@ describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
     }
   );
 
-  it('Sentry completes strict OAuth without advertising the optional RFC 9207 flag', async () => {
+  it('Sentry completes reviewed marketplace OAuth without advertising the optional RFC 9207 flag', async () => {
     const mcpUrl = 'https://mcp.sentry.dev/mcp';
     const metadataUrl = 'https://mcp.sentry.dev/.well-known/oauth-protected-resource/mcp';
     const issuer = 'https://mcp.sentry.dev';
@@ -2025,7 +2030,7 @@ describe('Gmail, Calendar, and Sentry OAuth metadata fixtures', () => {
     const context = await startMCPOAuthFlow('Bearer', undefined, redirectUri, {
       resourceMetadataUrl: metadataUrl,
       resourceUri: mcpUrl,
-      compatibilityMode: 'strict',
+      compatibilityMode: 'marketplace',
       allowLocalhostHttp: true,
     });
     expect(context.authorizationResponseIssuerParameterSupported).toBe(false);
@@ -2283,6 +2288,51 @@ describe('strict current MCP OAuth profile', () => {
     );
   });
 
+  it.each([
+    [
+      { resource: 'https://other.example/mcp' },
+      'metadata_incompatible',
+      'protected_resource_mismatch',
+    ],
+    [{ metadataIssuer: 'https://other.example' }, 'issuer_mismatch', undefined],
+    [{ s256: false }, 'pkce_required', undefined],
+    [{ responseIssuer: false }, 'metadata_incompatible', undefined],
+  ] as const)(
+    'retains closed local failure evidence for %j without registration',
+    async (overrides, failureCode, failureReason) => {
+      globalThis.fetch = strictFetch({ ...overrides, registrationEndpoint: true });
+      await expect(startStrict()).rejects.toMatchObject({ failureCode, failureReason });
+      expect(
+        vi
+          .mocked(globalThis.fetch)
+          .mock.calls.every(([, init]) => !init?.method || init.method === 'GET')
+      ).toBe(true);
+    }
+  );
+
+  it('distinguishes disabled DCR from missing advertised registration without POSTs', async () => {
+    for (const dcrMode of ['disabled', 'advertised'] as const) {
+      globalThis.fetch = strictFetch();
+      await expect(
+        startMCPOAuthFlow(
+          `Bearer resource_metadata="${metadataUri}"`,
+          undefined,
+          'https://agor.example.com/mcp-servers/oauth-callback',
+          { resourceUri, dcrMode }
+        )
+      ).rejects.toMatchObject(
+        dcrMode === 'disabled'
+          ? { failureCode: 'client_registration_required', failureReason: 'dcr_disabled' }
+          : { diagnostic: { stage: 'dcr_endpoint_discovery' } }
+      );
+      expect(
+        vi
+          .mocked(globalThis.fetch)
+          .mock.calls.every(([, init]) => !init?.method || init.method === 'GET')
+      ).toBe(true);
+    }
+  });
+
   it('rejects protected-resource metadata for a different resource', async () => {
     globalThis.fetch = strictFetch({ resource: 'https://other-resource.example.com' });
     await expect(startStrict()).rejects.toThrow('Protected resource metadata does not match');
@@ -2293,14 +2343,12 @@ describe('strict current MCP OAuth profile', () => {
     await expect(startStrict()).rejects.toThrow('Failed to fetch authorization server metadata');
   });
 
-  it('rejects missing S256 but accepts omitted optional RFC 9207 metadata', async () => {
+  it('rejects missing S256 and omitted callback issuer support in strict mode', async () => {
     globalThis.fetch = strictFetch({ s256: false });
     await expect(startStrict()).rejects.toThrow('required PKCE S256');
 
     globalThis.fetch = strictFetch({ responseIssuer: false });
-    await expect(startStrict()).resolves.toMatchObject({
-      authorizationResponseIssuerParameterSupported: false,
-    });
+    await expect(startStrict()).rejects.toMatchObject({ failureCode: 'metadata_incompatible' });
   });
 
   it('validates strict metadata before creating a dynamic client', async () => {

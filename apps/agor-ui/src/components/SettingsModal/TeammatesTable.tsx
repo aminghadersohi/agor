@@ -1,4 +1,5 @@
 import type {
+  AgorClient,
   Board,
   Branch,
   BranchArchiveOrDeleteOptions,
@@ -21,6 +22,8 @@ import { ResponsiveSettingsHeader } from './ResponsiveSettingsHeader';
 import { SettingsActionGroup } from './SettingsActionGroup';
 
 interface TeammatesTableProps {
+  client?: AgorClient | null;
+  currentUser?: User | null;
   branchById: Map<string, Branch>;
   repoById: Map<string, Repo>;
   boardById: Map<string, Board>;
@@ -35,6 +38,8 @@ interface TeammatesTableProps {
 }
 
 export const TeammatesTable: React.FC<TeammatesTableProps> = ({
+  client,
+  currentUser,
   branchById,
   repoById,
   boardById,
@@ -291,6 +296,8 @@ export const TeammatesTable: React.FC<TeammatesTableProps> = ({
       {/* Archive/Delete Modal */}
       {selectedBranch && (
         <ArchiveDeleteBranchModal
+          client={client}
+          currentUser={currentUser}
           open={archiveDeleteModalOpen}
           branch={selectedBranch}
           sessionCount={(sessionsByBranch.get(selectedBranch.branch_id) || []).length}

@@ -396,6 +396,7 @@ describe('GitBranchRemovePayloadSchema', () => {
         branchId: '550e8400-e29b-41d4-a716-446655440002',
         branchPath: '/data/agor/worktrees/user/repo/feature-x',
         branchesRoot: '/data/agor/worktrees',
+        repoPath: '/data/agor/repos/repo',
       },
     };
 
@@ -413,6 +414,7 @@ describe('GitBranchRemovePayloadSchema', () => {
         branchId: '550e8400-e29b-41d4-a716-446655440002',
         branchPath: '/data/agor/worktrees/user/repo/feature-x',
         branchesRoot: '/data/agor/worktrees',
+        repoPath: '/data/agor/repos/repo',
         force: true,
       },
     };
@@ -742,6 +744,8 @@ describe('getSupportedCommands', () => {
     expect(commands).toContain('agentic-tool.invoke');
     expect(commands).toContain('codex.auth-file');
     expect(commands).toContain('claude.auth-file');
-    expect(commands.length).toBe(31);
+    expect(commands).toContain('branch.clean');
+    expect(commands).toContain('branch.archive');
+    expect(commands.length).toBe(33);
   });
 });

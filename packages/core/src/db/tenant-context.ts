@@ -33,6 +33,7 @@ export type SystemDatabaseCapability =
   | 'task_runtime_discovery'
   | 'session_auto_archive_discovery'
   | 'session_reminder_discovery'
+  | 'branch_maintenance_discovery'
   | 'executor_token_maintenance'
   | 'mcp_oauth_callback'
   | 'mcp_oauth_maintenance'

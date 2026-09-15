@@ -13,8 +13,10 @@ import type {
   MCPOAuthClientRegistrationID,
   MCPOAuthDCRDiagnostic,
   MCPOAuthDCRMode,
+  MCPOAuthFailureReason,
   MCPOAuthRuntimeCompatibilityMode,
 } from '../../types/mcp.js';
+import { MCP_OAUTH_DEFAULT_DCR_MODE } from '../../types/mcp.js';
 import { assertSafeOAuthUrl, safeOutboundFetch } from '../../utils/safe-outbound-fetch';
 import { asMCPExternalError } from './external-error.js';
 import type { OAuthTokenResponse } from './oauth-auth.js';
@@ -182,7 +184,12 @@ export class OAuthConfigurationError extends Error {
       | 'issuer_mismatch'
       | 'pkce_required'
       | 'client_registration_required',
-    message = `OAuth configuration failed (${failureCode})`
+    message = `OAuth configuration failed (${failureCode})`,
+    /** Specific local predicate, without changing the broad external-error category. */
+    readonly failureReason?: Extract<
+      MCPOAuthFailureReason,
+      'dcr_disabled' | 'protected_resource_mismatch'
+    >
   ) {
     super(message);
     this.name = 'OAuthConfigurationError';
@@ -395,7 +402,8 @@ export async function resolveResourceMetadataUrl(
   if (mismatchedHint) {
     throw new OAuthConfigurationError(
       'metadata_incompatible',
-      'Protected resource metadata does not match the MCP resource URI'
+      'Protected resource metadata does not match the MCP resource URI',
+      'protected_resource_mismatch'
     );
   }
 
@@ -950,6 +958,7 @@ export async function fetchAuthorizationServerMetadata(
   }
 
   const errors: string[] = [];
+  let issuerMismatch = false;
   for (const { url, label } of urlsToTry) {
     options.assertCurrent?.();
     let response: Response;
@@ -983,6 +992,7 @@ export async function fetchAuthorizationServerMetadata(
       compatibilityMode !== 'legacy' &&
       !oauthIssuerIdentifiersMatch(metadata.issuer, authServerUrl)
     ) {
+      issuerMismatch = true;
       errors.push(`${label}: request failed`);
       continue;
     }
@@ -992,7 +1002,7 @@ export async function fetchAuthorizationServerMetadata(
 
   options.assertCurrent?.();
   throw new OAuthConfigurationError(
-    'metadata_unavailable',
+    issuerMismatch ? 'issuer_mismatch' : 'metadata_unavailable',
     'Failed to fetch authorization server metadata.\n' +
       `Tried:\n${errors.map((e) => `  - ${e}`).join('\n')}\n\n` +
       'The authorization server may not support RFC 8414 or OIDC metadata discovery.\n' +
@@ -1676,7 +1686,8 @@ async function resolveOAuthClient(options: {
   if (options.dcrMode === 'disabled') {
     throw new OAuthConfigurationError(
       'client_registration_required',
-      'OAuth client_id is required because Dynamic Client Registration is disabled for this server.'
+      'OAuth client_id is required because Dynamic Client Registration is disabled for this server.',
+      'dcr_disabled'
     );
   }
 
@@ -1833,7 +1844,8 @@ function assertOAuthProtectedResourceMetadata(
   ) {
     throw new OAuthConfigurationError(
       'metadata_incompatible',
-      'Protected resource metadata does not match the MCP resource URI'
+      'Protected resource metadata does not match the MCP resource URI',
+      'protected_resource_mismatch'
     );
   }
 }
@@ -1914,7 +1926,10 @@ function resolveOAuthAuthorizationContract(options: OAuthAuthorizationContractOp
       );
     }
     assertSafeOAuthUrl(authServerMetadata.issuer, { allowLocalhostHttp });
-    const issuerMatches = oauthIssuerIdentifiersMatch(authServerMetadata.issuer, issuer);
+    const issuerMatches =
+      compatibilityMode === 'strict'
+        ? authServerMetadata.issuer === issuer
+        : oauthIssuerIdentifiersMatch(authServerMetadata.issuer, issuer);
     if (!issuerMatches) {
       throw new OAuthConfigurationError('issuer_mismatch', 'Authorization server issuer mismatch');
     }
@@ -1927,6 +1942,15 @@ function resolveOAuthAuthorizationContract(options: OAuthAuthorizationContractOp
       throw new OAuthConfigurationError(
         'pkce_required',
         'Authorization server does not advertise required PKCE S256 support'
+      );
+    }
+    if (
+      compatibilityMode === 'strict' &&
+      authServerMetadata.authorization_response_iss_parameter_supported !== true
+    ) {
+      throw new OAuthConfigurationError(
+        'metadata_incompatible',
+        'Authorization server does not advertise the required callback issuer parameter'
       );
     }
     if (
@@ -2255,7 +2279,7 @@ export async function startMCPOAuthFlow(
 ): Promise<OAuthFlowContext> {
   console.log('[MCP OAuth] Starting two-phase OAuth 2.1 flow');
   const compatibilityMode = options?.compatibilityMode ?? 'strict';
-  const dcrMode = options?.dcrMode ?? 'advertised';
+  const dcrMode = options?.dcrMode ?? MCP_OAUTH_DEFAULT_DCR_MODE;
   const allowLocalhostHttp = options?.allowLocalhostHttp === true;
   // Preserve the legacy standalone helper contract while allowing daemons to
   // grant only the redirect exception. This distinction matters for local

@@ -60,6 +60,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
   () => {
     let db: Database | null = null;
     let oldHeadFolder: string | null = null;
+    let pendingMigrations: string[];
 
     beforeAll(async () => {
       db = createDatabase({ dialect: 'postgresql', url: postgresUrl! });
@@ -92,6 +93,22 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           breakpoints: boolean;
         }>;
       };
+      pendingMigrations = journal.entries
+        .filter(({ when }) => when > OLD_HEAD_WATERMARK)
+        .map(({ tag }) => tag);
+      expect(pendingMigrations.slice(0, 11)).toEqual([
+        '9010_session_auto_archive',
+        '9011_zone_workflow_transitions',
+        '9012_claude_oauth_attempts',
+        '9013_session_power_priority',
+        '9014_environment_command_discovery',
+        '9015_mcp_oauth_client_registrations',
+        '9016_oauth_authority_watermark_reconciliation',
+        '9017_fork_migration_collision_repair',
+        '9018_session_memory_reminders',
+        '9019_mcp_slack_recovery_due',
+        '9020_standalone_power_ownership',
+      ]);
       journal.entries = journal.entries.filter((entry) => entry.when < OLD_HEAD_WATERMARK);
       journal.entries.push({
         idx: 100,
@@ -212,19 +229,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       // later than the archived timestamp. Bootstrap defers this existing
       // legacy table to exact reconciliation in the same offline transaction.
       await expect(checkMigrationStatus(db)).resolves.toMatchObject({
-        pending: [
-          '9010_session_auto_archive',
-          '9011_zone_workflow_transitions',
-          '9012_claude_oauth_attempts',
-          '9013_session_power_priority',
-          '9014_environment_command_discovery',
-          '9015_mcp_oauth_client_registrations',
-          '9016_oauth_authority_watermark_reconciliation',
-          '9017_fork_migration_collision_repair',
-          '9018_session_memory_reminders',
-          '9019_mcp_slack_recovery_due',
-          '9020_standalone_power_ownership',
-        ],
+        pending: pendingMigrations,
         dbAheadOfBinary: false,
       });
       await expect(runMigrations(db)).rejects.toThrow('Offline migration cutover required');
@@ -364,9 +369,16 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority_updated_by`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority`);
       // This fixture reuses the database upgraded by the preceding test. Remove
-      // the later Slack recovery addition as well as rewinding the ledger so
-      // the simulated old head has its actual schema, not a future column.
+      // later Slack recovery, consent-attribution, and cleanup policy additions as well as
+      // rewinding the ledger: the old head did not have these future columns.
       await executeRaw(db, sql`ALTER TABLE tasks DROP COLUMN mcp_slack_recovery_due_at`);
+      await executeRaw(db, sql`ALTER TABLE user_mcp_oauth_tokens DROP COLUMN granted_by_user_id`);
+      await executeRaw(db, sql`DROP POLICY IF EXISTS branch_maintenance_discovery ON branches`);
+      await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN deletion_status`);
+      await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN deletion_error`);
+      await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN deletion_updated_at`);
+      await executeRaw(db, sql`ALTER TABLE repos DROP COLUMN cleanup_policy`);
+      await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN cleanup_protected`);
 
       // This fixture rewinds the journal to the previous fork watermark. Keep
       // the physical schema aligned with that watermark so the later Session
@@ -387,16 +399,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
             WHERE created_at >= 1788379200000 AND created_at <> 1788552000000`
       );
       await expect(checkMigrationStatus(db)).resolves.toMatchObject({
-        pending: [
-          '9013_session_power_priority',
-          '9014_environment_command_discovery',
-          '9015_mcp_oauth_client_registrations',
-          '9016_oauth_authority_watermark_reconciliation',
-          '9017_fork_migration_collision_repair',
-          '9018_session_memory_reminders',
-          '9019_mcp_slack_recovery_due',
-          '9020_standalone_power_ownership',
-        ],
+        pending: pendingMigrations.slice(3),
         dbAheadOfBinary: false,
       });
       await expect(runMigrations(db)).rejects.toThrow('Offline migration cutover required');
