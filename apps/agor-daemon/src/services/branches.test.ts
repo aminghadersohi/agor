@@ -1,4 +1,5 @@
 import {
+  BoardObjectRepository,
   BoardRepository,
   BranchRepository,
   CapabilityPolicyRepository,
@@ -23,10 +24,9 @@ import {
   type UserID,
   type UUID,
 } from '@agor/core/types';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dbTest } from '../../../../packages/core/src/db/test-helpers';
 import { markBranchArchiveDeleteAuthorized } from '../utils/branch-archive-delete-authorization.js';
-import { BRANCH_REMOVAL_VISIBILITY_PARAM } from '../utils/realtime-publish.js';
 import { requestExecutor, spawnExecutor } from '../utils/spawn-executor.js';
 import { BranchesService } from './branches';
 
@@ -145,6 +145,15 @@ function createPatchHarness(opts: {
     remove: vi.fn(async () => ({})),
     patch: vi.fn(async () => ({})),
   };
+  vi.spyOn(BoardObjectRepository.prototype, 'findByBranchId').mockImplementation(
+    boardObjectsService.findByBranchId
+  );
+  vi.spyOn(BoardObjectRepository.prototype, 'create').mockImplementation(
+    boardObjectsService.create as never
+  );
+  vi.spyOn(BoardObjectRepository.prototype, 'remove').mockImplementation(
+    boardObjectsService.remove as never
+  );
   const boardsService = {
     get: vi.fn(async () => ({ objects: {} })),
     emit: vi.fn(),
@@ -174,6 +183,7 @@ function createPatchHarness(opts: {
     delete: vi.fn(),
   };
   const boardRepo = {
+    findById: vi.fn(async (boardId: string) => ({ board_id: boardId })),
     clearPrimaryTeammateIfMatches: vi.fn(async () => ({
       board_id: opts.current.board_id,
       primary_teammate_id: undefined,
@@ -220,6 +230,8 @@ function createServiceHarness() {
   const sessionsService = {
     find: vi.fn(async () => []),
     patch: vi.fn(async () => ({})),
+    archiveBranchSessions: vi.fn(async () => ({ affectedSessions: [], count: 0 })),
+    unarchiveBranchSessions: vi.fn(async () => ({ affectedSessions: [], count: 0 })),
   };
 
   const reposService = {
@@ -262,16 +274,9 @@ function createServiceHarness() {
     is_owner: true,
     source: 'owner',
   });
-  const taskRepo = (
-    service as unknown as {
-      taskRepo: { hasNonterminalForBranch: ReturnType<typeof vi.fn> };
-    }
-  ).taskRepo;
-  taskRepo.hasNonterminalForBranch = vi.fn(async () => false);
   return {
     service,
     branchRepo,
-    taskRepo,
     boardObjectsService,
     sessionsService,
     branchesService,
@@ -289,6 +294,7 @@ function waitForDeferredWork(): Promise<void> {
 
 const mockedSpawnExecutor = vi.mocked(spawnExecutor);
 const mockedRequestExecutor = vi.mocked(requestExecutor);
+afterEach(() => vi.restoreAllMocks());
 
 beforeEach(() => {
   mockedSpawnExecutor.mockReset();
@@ -319,8 +325,11 @@ function createFindHarness(opts: {
     archived?: boolean;
     branchIds?: BranchID[];
     visibleToUserId?: string;
+    zone_id?: string;
   }) =>
     opts.branches.filter((branch) => {
+      if (filter?.zone_id && !opts.branchIdsInZone.includes(branch.branch_id as BranchID))
+        return false;
       if (filter?.repo_id !== undefined && branch.repo_id !== filter.repo_id) return false;
       if (filter?.board_id !== undefined && branch.board_id !== filter.board_id) return false;
       if (filter?.archived !== undefined && Boolean(branch.archived) !== filter.archived)
@@ -1147,7 +1156,7 @@ describe('BranchesService.patch primary teammate invariants', () => {
     expect(repository.update).not.toHaveBeenCalled();
   });
 
-  it('requires an inherited branch to materialize an override before moving boards', async () => {
+  it('moves an inherited branch without requiring a permission override', async () => {
     const branchId = 'inherited-board-move' as BranchID;
     const { service, repository } = createPatchHarness({
       current: {
@@ -1162,10 +1171,13 @@ describe('BranchesService.patch primary teammate invariants', () => {
       },
     });
 
-    await expect(service.patch(branchId, { board_id: 'board-b' as BoardID })).rejects.toThrow(
-      /explicit permission override/
-    );
-    expect(repository.update).not.toHaveBeenCalled();
+    await expect(
+      service.patch(branchId, { board_id: 'board-b' as BoardID })
+    ).resolves.toMatchObject({
+      board_id: 'board-b',
+      permission_binding: 'inherit',
+    });
+    expect(repository.update).toHaveBeenCalled();
   });
 
   it('clears the old primary and sets the new board primary when a teammate moves boards', async () => {
@@ -1413,8 +1425,10 @@ describe('BranchesService.unarchive', () => {
       position: { x: 111, y: 222 },
     });
 
-    expect(sessionsService.find).toHaveBeenCalledTimes(1);
-    expect(sessionsService.patch).not.toHaveBeenCalled();
+    expect(sessionsService.unarchiveBranchSessions).toHaveBeenCalledWith(
+      branchId,
+      expect.objectContaining({ provider: undefined })
+    );
   });
 
   it('does not create a new board object when one already exists', async () => {
@@ -1488,120 +1502,33 @@ describe('BranchesService.unarchive', () => {
 });
 
 describe('BranchesService.archiveOrDelete', () => {
-  it('preserves placement and manually emits the tenant-aware archive transition', async () => {
-    const { service, boardObjectsService, sessionsService, branchesService } =
-      createServiceHarness();
-    const branchId = 'wt-archive-op' as BranchID;
-    const userId = 'user-1' as UUID;
-
-    vi.spyOn(service, 'get').mockResolvedValue({
-      branch_id: branchId,
-      name: 'WT Archive Op',
-      path: '/tmp/wt-archive-op',
-      archived: false,
-      board_id: 'board-a',
-      filesystem_status: 'ready',
-      environment_instance: { status: 'stopped' },
-    } as never);
-    vi.spyOn(service, 'patch').mockResolvedValue({
-      branch_id: branchId,
-      name: 'WT Archive Op',
-      path: '/tmp/wt-archive-op',
-      archived: true,
-      board_id: 'board-a',
-    } as never);
-    boardObjectsService.findByBranchId.mockResolvedValue({
-      object_id: 'obj-branch',
-      zone_id: 'zone-review',
-    });
-
-    const params = {
-      user: { user_id: userId },
-      tenant: { tenant_id: 'tenant-a', source: 'auth_claim' },
-    } as never;
-    markBranchArchiveDeleteAuthorized(params, branchId, 'archive');
-
-    await service.archiveOrDelete(
-      branchId,
-      { metadataAction: 'archive', filesystemAction: 'preserved' },
-      params
-    );
-
-    expect(sessionsService.find).toHaveBeenCalledWith({
-      query: { branch_id: branchId, $limit: 1000 },
-      paginate: false,
-    });
-    expect(boardObjectsService.findByBranchId).not.toHaveBeenCalled();
-    expect(boardObjectsService.patch).not.toHaveBeenCalled();
-    expect(branchesService.emit).toHaveBeenCalledTimes(1);
-    expect(branchesService.emit).toHaveBeenCalledWith(
-      'patched',
-      expect.objectContaining({ branch_id: branchId, archived: true }),
-      expect.objectContaining({
-        path: 'branches',
-        method: 'patch',
-        event: 'patched',
-        id: branchId,
-        params: expect.objectContaining({
-          tenant: { tenant_id: 'tenant-a', source: 'auth_claim' },
-        }),
-      })
-    );
-  });
-
-  it('delegates filesystem deletion with authoritative paths and no daemon bearer', async () => {
-    const { service, sessionTokenService } = createServiceHarness();
-    const removeSdkHome = vi
-      .spyOn(service as never, 'removeBranchSdkHomeAfterDelete')
-      .mockImplementation(() => undefined);
-    const branchId = 'wt-delete-files' as BranchID;
-    const branch = {
-      branch_id: branchId,
-      name: 'WT Delete Files',
-      path: '/safe/worktrees/repo/feature',
-      archived: false,
-      board_id: 'board-a',
-      storage_mode: 'clone',
-      environment_instance: { status: 'stopped' },
-    } as never;
-    vi.spyOn(service, 'get').mockResolvedValue(branch);
-    vi.spyOn(service, 'patch').mockResolvedValue({ ...branch, archived: true });
-    const params = {
-      user: { user_id: 'user-1' as UUID },
-      tenant: { tenant_id: 'tenant-a', source: 'auth_claim' },
-    } as never;
-    markBranchArchiveDeleteAuthorized(params, branchId, 'archive');
-
-    await service.archiveOrDelete(
-      branchId,
-      { metadataAction: 'archive', filesystemAction: 'deleted' },
-      params
-    );
-
-    expect(mockedSpawnExecutor).toHaveBeenCalledWith(
-      expect.objectContaining({
-        command: 'git.branch.remove',
-        params: expect.objectContaining({
+  it.each(['preserved', 'cleaned', 'deleted'] as const)(
+    'routes archive %s through the shared maintenance workflow',
+    async (filesystemAction) => {
+      const { service } = createServiceHarness();
+      const branchId = 'wt-archive-op' as BranchID;
+      const branch = { branch_id: branchId, archived: true };
+      vi.spyOn(service, 'get').mockResolvedValue(branch as never);
+      const request = vi
+        .spyOn(service as never, 'requestWorkspaceOperation')
+        .mockResolvedValue({ status: 'accepted' } as never);
+      const params = { user: { user_id: 'user-1' } } as never;
+      markBranchArchiveDeleteAuthorized(params, branchId, 'archive');
+      expect(
+        await service.archiveOrDelete(
           branchId,
-          branchPath: branch.path,
-          storageMode: 'clone',
-        }),
-      }),
-      expect.objectContaining({
-        logPrefix: `[BranchesService.delete ${branch.name}]`,
-        templateVariables: {
-          branch_id: branchId,
-          user_id: 'user-1',
-          branch_fs_access: 'write',
-        },
-      })
-    );
-    const payload = mockedSpawnExecutor.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(payload).not.toHaveProperty('sessionToken');
-    expect(payload).not.toHaveProperty('daemonUrl');
-    expect(sessionTokenService.generateCommandToken).not.toHaveBeenCalled();
-    expect(removeSdkHome).not.toHaveBeenCalled();
-  });
+          { metadataAction: 'archive', filesystemAction },
+          params
+        )
+      ).toEqual(branch);
+      expect(request).toHaveBeenCalledWith(
+        branchId,
+        { action: 'archive', filesystemAction },
+        params
+      );
+      expect(mockedSpawnExecutor).not.toHaveBeenCalled();
+    }
+  );
 
   it('rejects filesystem cleanup when a Manager has no write grant', async () => {
     const { service, branchRepo } = createServiceHarness();
@@ -1637,136 +1564,51 @@ describe('BranchesService.archiveOrDelete', () => {
     expect(mockedSpawnExecutor).not.toHaveBeenCalled();
   });
 
-  it('deletes metadata without re-entering unrelated remove hooks and emits one tombstone', async () => {
+  it('rejects metadata-only permanent deletion before dispatch or metadata mutation', async () => {
     const { service, branchRepo, branchesService } = createServiceHarness();
     const branchId = 'wt-delete-op' as BranchID;
     const params = {
-      user: { user_id: 'user-1' as UUID },
+      user: { user_id: 'user-1' },
       tenant: { tenant_id: 'tenant-a', source: 'auth_claim' },
     } as never;
-    const removedBranch = {
-      branch_id: branchId,
-      name: 'WT Delete Op',
-      path: '/tmp/wt-delete-op',
-      archived: false,
-      environment_instance: { status: 'stopped' },
-    } as never;
-    vi.spyOn(service, 'get').mockResolvedValue(removedBranch);
-    const wrappedRemove = vi.spyOn(service, 'remove');
-    vi.spyOn(branchRepo, 'findById').mockResolvedValue(removedBranch);
-    vi.spyOn(branchRepo, 'findRealtimeVisibilityBranch').mockResolvedValue({
-      branch_id: branchId,
-      others_can: 'none',
-    } as never);
-    vi.spyOn(branchRepo, 'findRealtimeViewUserIds').mockResolvedValue(['user-1' as UUID]);
-    const repositoryDelete = vi.spyOn(branchRepo, 'delete').mockResolvedValue();
-    const removeSdkHome = vi
-      .spyOn(service as never, 'removeBranchSdkHomeAfterDelete')
-      .mockImplementation(() => undefined);
-    markBranchArchiveDeleteAuthorized(params, branchId, 'delete');
-
-    await service.archiveOrDelete(
-      branchId,
-      { metadataAction: 'delete', filesystemAction: 'preserved' },
-      params
-    );
-
-    expect(branchesService.remove).not.toHaveBeenCalled();
-    expect(wrappedRemove).not.toHaveBeenCalled();
-    expect(repositoryDelete).toHaveBeenCalledOnce();
-    expect(repositoryDelete).toHaveBeenCalledWith(branchId);
-    expect(branchesService.emit).toHaveBeenCalledOnce();
-    expect(branchesService.emit).toHaveBeenCalledWith(
-      'removed',
-      removedBranch,
-      expect.objectContaining({
-        path: 'branches',
-        method: 'remove',
-        event: 'removed',
-        id: branchId,
-        params,
-      })
-    );
-    expect(removeSdkHome).toHaveBeenCalledOnce();
-    expect(removeSdkHome).toHaveBeenCalledWith(removedBranch, 'tenant-a');
-  });
-
-  it('refuses metadata deletion while a descendant task is unfinished', async () => {
-    const { service, branchRepo, taskRepo, branchesService } = createServiceHarness();
-    const branchId = 'wt-delete-running' as BranchID;
-    const params = {
-      user: { user_id: 'user-1' as UUID },
-      tenant: { tenant_id: 'tenant-a', source: 'auth_claim' },
-    } as never;
-    const branch = {
-      branch_id: branchId,
-      name: 'WT Delete Running',
-      path: '/tmp/wt-delete-running',
-      archived: false,
-      environment_instance: { status: 'stopped' },
-    } as never;
-    vi.spyOn(branchRepo, 'findById').mockResolvedValue(branch);
-    vi.spyOn(service, 'get').mockResolvedValue(branch);
-    taskRepo.hasNonterminalForBranch.mockResolvedValue(true);
     const repositoryDelete = vi.spyOn(branchRepo, 'delete');
     markBranchArchiveDeleteAuthorized(params, branchId, 'delete');
-
     await expect(
       service.archiveOrDelete(
         branchId,
-        { metadataAction: 'delete', filesystemAction: 'deleted' },
+        { metadataAction: 'delete', filesystemAction: 'preserved' },
         params
       )
-    ).rejects.toThrow(/unfinished tasks/i);
-
+    ).rejects.toThrow('Permanent deletion');
     expect(repositoryDelete).not.toHaveBeenCalled();
     expect(branchesService.emit).not.toHaveBeenCalled();
     expect(mockedSpawnExecutor).not.toHaveBeenCalled();
   });
 
-  it('captures hard-delete visibility after authorization, inside the metadata transaction', async () => {
+  it('routes permanent deletion and legacy internal removal through the same workflow without immediate tombstones', async () => {
     const { service, branchRepo, branchesService } = createServiceHarness();
-    const branchId = 'wt-delete-acl-race' as BranchID;
-    const oldViewer = '00000000-0000-7000-8000-000000000001' as UUID;
-    const newViewer = '00000000-0000-7000-8000-000000000002' as UUID;
-    const removedBranch = {
-      branch_id: branchId,
-      name: 'WT Delete ACL Race',
-      path: '/tmp/wt-delete-acl-race',
-      archived: false,
-      others_can: 'none',
-      environment_instance: { status: 'stopped' },
-    } as never;
+    const branchId = 'wt-delete-op' as BranchID;
     const params = {
-      user: { user_id: 'user-1' as UUID },
+      user: { user_id: 'user-1' },
       tenant: { tenant_id: 'tenant-a', source: 'auth_claim' },
     } as never;
-    vi.spyOn(service, 'get').mockResolvedValue(removedBranch);
-    vi.spyOn(branchRepo, 'findById').mockResolvedValue(removedBranch);
-    vi.spyOn(branchRepo, 'findRealtimeVisibilityBranch').mockResolvedValue(removedBranch);
-    let currentViewers = [oldViewer];
-    vi.spyOn(branchRepo, 'findRealtimeViewUserIds').mockImplementation(async () => currentViewers);
-    vi.spyOn(branchRepo, 'delete').mockResolvedValue();
-
+    const pending = { branch_id: branchId, deletion_status: 'deleting' };
+    const request = vi
+      .spyOn(service as never, 'requestPermanentDeletion')
+      .mockResolvedValue(pending as never);
+    const repositoryDelete = vi.spyOn(branchRepo, 'delete');
     markBranchArchiveDeleteAuthorized(params, branchId, 'delete');
-    // Simulate an ACL update after the route granted control but before the
-    // long-running archive/delete operation reaches its metadata transaction.
-    currentViewers = [newViewer];
-
-    await service.archiveOrDelete(
-      branchId,
-      { metadataAction: 'delete', filesystemAction: 'preserved' },
-      params
-    );
-
-    const eventHook = branchesService.emit.mock.calls[0][2] as {
-      params: Record<string, unknown>;
-    };
-    expect(eventHook.params[BRANCH_REMOVAL_VISIBILITY_PARAM]).toEqual({
-      branchId,
-      mode: 'explicitUsers',
-      userIds: [newViewer],
-    });
+    expect(
+      await service.archiveOrDelete(
+        branchId,
+        { metadataAction: 'delete', filesystemAction: 'deleted' },
+        params
+      )
+    ).toBe(pending);
+    expect(await service.removeMetadataWithRealtime(branchId, params)).toBe(pending);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(repositoryDelete).not.toHaveBeenCalled();
+    expect(branchesService.emit).not.toHaveBeenCalled();
   });
 
   it('rejects direct callers before any environment, token, executor, or metadata work', async () => {
@@ -1809,7 +1651,7 @@ describe('BranchesService.find zone filtering', () => {
       query: { zone_id: 'zone-review', $limit: 1 },
     })) as { data: Array<Record<string, unknown>>; total: number; limit: number; skip: number };
 
-    expect(branchRepo.findBranchIdsByZone).toHaveBeenCalledWith('zone-review');
+    expect(branchRepo.findBranchIdsByZone).not.toHaveBeenCalled();
     expect(result.total).toBe(2);
     expect(result.limit).toBe(1);
     expect(result.data).toHaveLength(1);
@@ -1861,6 +1703,7 @@ describe('BranchesService.find SQL pushdown', () => {
 
     // Read is SQL-bounded: the scoped repo read runs, the whole-table read does not.
     expect(branchRepo.findPage).toHaveBeenCalledWith({
+      zone_id: undefined,
       repo_id: undefined,
       board_id: 'board-1',
       archived: false,
@@ -1893,6 +1736,7 @@ describe('BranchesService.find SQL pushdown', () => {
     })) as { data: Array<Record<string, unknown>>; total: number };
 
     expect(branchRepo.findPage).toHaveBeenCalledWith({
+      zone_id: undefined,
       repo_id: undefined,
       board_id: 'board-1',
       archived: false,
@@ -1920,10 +1764,11 @@ describe('BranchesService.find SQL pushdown', () => {
     })) as { data: Array<Record<string, unknown>>; total: number };
 
     expect(branchRepo.findPage).toHaveBeenCalledWith({
+      zone_id: 'zone-review',
       repo_id: undefined,
       board_id: 'board-1',
       archived: undefined,
-      branchIds: ['b1', 'b2'],
+      branchIds: undefined,
       visibleToUserId: undefined,
       limit: 1,
       offset: 1,
@@ -1945,6 +1790,7 @@ describe('BranchesService.find SQL pushdown', () => {
     })) as { data: Array<Record<string, unknown>>; total: number };
 
     expect(branchRepo.findPage).toHaveBeenCalledWith({
+      zone_id: undefined,
       repo_id: undefined,
       board_id: undefined,
       archived: undefined,
@@ -1969,6 +1815,7 @@ describe('BranchesService.find SQL pushdown', () => {
     })) as { data: Array<Record<string, unknown>>; total: number };
 
     expect(branchRepo.findPage).toHaveBeenCalledWith({
+      zone_id: undefined,
       repo_id: undefined,
       board_id: undefined,
       archived: undefined,
@@ -1994,6 +1841,7 @@ describe('BranchesService.find SQL pushdown', () => {
     } as BranchParams);
 
     expect(branchRepo.findPage).toHaveBeenCalledWith({
+      zone_id: undefined,
       repo_id: undefined,
       board_id: 'board-1',
       archived: undefined,

@@ -36,6 +36,7 @@ type ToolHandler = (
 }>;
 
 type ToolConfig = {
+  description?: string;
   inputSchema?: {
     safeParse: (
       value: unknown
@@ -1236,6 +1237,19 @@ describe('branch MCP input schemas', () => {
 });
 
 describe('agor_branches_set_zone', () => {
+  it('recommends omitted-target self callbacks while preserving alternate destinations', () => {
+    const config = registerAndCaptureConfig('agor_branches_set_zone', {
+      app: {},
+      userId: 'user-1',
+    });
+
+    expect(config.description).toContain(
+      'agor_sessions_create with enableCallback:true and omit callbackSessionId for the current caller'
+    );
+    expect(config.description).toContain('agor_sessions_prompt callback');
+    expect(config.description).toContain('intentional authorized alternate destination');
+  });
+
   it('accepts zoneId null and clears the existing board object zone pin', async () => {
     const baseServiceParams = {
       authenticated: true,
@@ -2230,5 +2244,26 @@ describe('agor_teammates_list', () => {
       limit: 26,
       offset: 0,
     });
+  });
+});
+
+describe('agor_branches_clean', () => {
+  it('uses the authenticated clean route and returns acceptance without claiming completion', async () => {
+    const branchId = '01900000-0000-7000-8000-000000000001';
+    const accepted = { branch_id: branchId, operation_id: 'operation', status: 'accepted' };
+    const create = vi.fn().mockResolvedValue(accepted);
+    const baseServiceParams = { provider: 'mcp', user: { user_id: 'manager', role: 'member' } };
+    const app = {
+      service: (path: string) => {
+        if (path === 'branches') return { get: vi.fn().mockResolvedValue({ branch_id: branchId }) };
+        if (path === '/branches/:id/clean') return { create };
+        throw new Error(path);
+      },
+    };
+    const clean = registerAndCaptureHandler('agor_branches_clean', { app, baseServiceParams });
+    const result = await clean({ branchId });
+    expect(create).toHaveBeenCalledWith({}, { ...baseServiceParams, route: { id: branchId } });
+    expect(JSON.stringify(result)).toContain('accepted');
+    expect(JSON.stringify(result)).not.toContain('cleaned successfully');
   });
 });

@@ -220,7 +220,12 @@ export type AgenticAuthMethods = Partial<Record<'claude-code' | 'codex', Agentic
  * particular, `none` is a durable opt-out: an old `.credentials.json` must not
  * become active merely because a pasted token was cleared.
  */
-export type ClaudeCredentialSource = 'api_key' | 'subscription_token' | 'managed_file' | 'none';
+export type ClaudeCredentialSource =
+  | 'api_key'
+  | 'subscription_token'
+  | 'managed_file'
+  | 'managed_oauth'
+  | 'none';
 export type AgenticCredentialSources = Partial<Record<'claude-code', ClaudeCredentialSource>>;
 
 export interface GeminiConfig {
@@ -363,10 +368,10 @@ export type AgenticToolsPublicValues = {
  * The caller is responsible for the self-only authorization check — this
  * helper assumes the requester is already authorized to see the values.
  */
-export function extractAgenticToolsPublicValues(
+export async function extractAgenticToolsPublicValuesAsync(
   stored: StoredAgenticTools | undefined,
-  decrypt: (ciphertext: string) => string
-): AgenticToolsPublicValues | undefined {
+  decrypt: (ciphertext: string) => Promise<string>
+): Promise<AgenticToolsPublicValues | undefined> {
   if (!stored) return undefined;
   const out: Record<string, Record<string, string>> = {};
   for (const [tool, fields] of Object.entries(stored) as Array<
@@ -380,7 +385,7 @@ export function extractAgenticToolsPublicValues(
       const ciphertext = fields[field as string];
       if (!ciphertext) continue;
       try {
-        plaintext[field as string] = decrypt(ciphertext);
+        plaintext[field as string] = await decrypt(ciphertext);
       } catch {
         // Silently skip undecryptable values; the boolean status flag will
         // still indicate presence so the user can clear and re-set.

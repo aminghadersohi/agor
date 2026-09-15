@@ -14,12 +14,13 @@ import type {
   EffortLevel,
   Message,
   PermissionMode,
+  RepoCleanupPolicy,
   SandpackConfig,
   Session,
   Task,
   UserExternalIdentity,
 } from '@agor/core/types';
-import { BRANCH_PERMISSION_LEVELS } from '@agor/core/types';
+import { BRANCH_PERMISSION_LEVELS, DEFAULT_REPO_CLEANUP_POLICY } from '@agor/core/types';
 import { relations, sql } from 'drizzle-orm';
 import {
   type AnyPgColumn,
@@ -360,6 +361,9 @@ export const tasks = pgTable(
     // User attribution
     created_by: varchar('created_by', { length: 36 }).notNull(),
 
+    // Indexed due-work projection for bounded Slack MCP recovery repair.
+    mcp_slack_recovery_due_at: t.timestamp('mcp_slack_recovery_due_at'),
+
     data: t
       .json<unknown>('data')
       .$type<{
@@ -414,6 +418,9 @@ export const tasks = pgTable(
     sessionTaskIdIdx: index('tasks_session_task_id_idx').on(table.session_id, table.task_id),
     statusIdx: index('tasks_status_idx').on(table.status),
     createdIdx: index('tasks_created_idx').on(table.created_at),
+    mcpSlackRecoveryDueIdx: index('tasks_mcp_slack_recovery_due_idx')
+      .on(table.tenant_id, table.mcp_slack_recovery_due_at, table.task_id)
+      .where(sql`${table.mcp_slack_recovery_due_at} IS NOT NULL`),
     // Composite for "latest task for session" queries (ORDER BY created_at DESC LIMIT 1).
     sessionCreatedIdx: index('tasks_session_created_idx').on(table.session_id, table.created_at),
     queueIdx: index('tasks_queue_idx').on(table.session_id, table.status, table.queue_position),
@@ -769,6 +776,11 @@ export const repos = pgTable(
     // Retired nullable compatibility stamp retained for rollback/audit only.
     unix_group: text('unix_group'), // retired nullable compatibility stamp; runtime ignores it
 
+    cleanup_policy: t
+      .json<RepoCleanupPolicy>('cleanup_policy')
+      .notNull()
+      .default(DEFAULT_REPO_CLEANUP_POLICY),
+
     data: t
       .json<unknown>('data')
       .$type<{
@@ -850,6 +862,8 @@ export const branches = pgTable(
     created_at: t.timestamp('created_at').notNull(),
     updated_at: t.timestamp('updated_at'),
 
+    cleanup_protected: t.bool('cleanup_protected').notNull().default(false),
+
     // User attribution
     created_by: varchar('created_by', { length: 36 }).notNull(),
     primary_owner_user_id: varchar('primary_owner_user_id', { length: 36 }).notNull(),
@@ -897,6 +911,11 @@ export const branches = pgTable(
     archived: t.bool('archived').notNull().default(false),
     archived_at: t.timestamp('archived_at'),
     archived_by: varchar('archived_by', { length: 36 }),
+    // Permanent deletion retains this row and its authority through partial failure.
+    deletion_status: text('deletion_status', { enum: ['deleting', 'deletion_failed'] }),
+    deletion_error: text('deletion_error'),
+    deletion_updated_at: t.timestamp('deletion_updated_at'),
+
     filesystem_status: text('filesystem_status', {
       enum: ['creating', 'ready', 'failed', 'preserved', 'cleaned', 'deleted'],
     }),
@@ -951,6 +970,14 @@ export const branches = pgTable(
       .json<unknown>('data')
       .$type<{
         // File system
+        // Daemon-private shared maintenance authority. Never accept through generic patches.
+        maintenance?: import('../types/branch-deletion').BranchMaintenanceClaim;
+        maintenance_generation?: number;
+        workspace_snapshot?: import('../types/branch-cleanup').BranchWorkspaceSnapshot;
+        workspace_operation?: import('../types/branch-cleanup').BranchWorkspaceOperation;
+        cleanup_last_error?: import('../types/branch-cleanup').BranchWorkspaceError;
+        last_cleanup_succeeded_at?: string;
+        last_cleanup_operation_id?: import('../types/id').UUID;
         path: string; // Absolute path to branch directory
 
         // Git state (current)
@@ -988,6 +1015,9 @@ export const branches = pgTable(
       table.tenant_id,
       table.branch_id
     ),
+    deletionDiscoveryIdx: index('branches_deletion_discovery_idx')
+      .on(table.tenant_id, table.branch_id)
+      .where(sql`${table.deletion_status} = 'deleting'`),
     repoIdx: index('branches_repo_idx').on(table.repo_id),
     nameIdx: index('branches_name_idx').on(table.name),
     refIdx: index('branches_ref_idx').on(table.ref),
@@ -1906,6 +1936,7 @@ export const mcpServers = pgTable(
             required?: boolean;
           }>;
         }>;
+        capabilities_discovered_at?: string;
 
         // Tool permissions configuration
         tool_permissions?: Record<string, 'ask' | 'allow' | 'deny'>;
@@ -2174,6 +2205,9 @@ export const userMcpOauthTokens = pgTable(
     mcp_server_id: varchar('mcp_server_id', { length: 36 })
       .notNull()
       .references(() => mcpServers.mcp_server_id, { onDelete: 'cascade' }),
+    // Trusted flow/caller attribution, independent of the shared NULL subject
+    // and server ownership. Hard deletion retires the local grant via CASCADE.
+    granted_by_user_id: varchar('granted_by_user_id', { length: 36 }).notNull(),
     oauth_access_token: text('oauth_access_token').notNull(),
     oauth_token_expires_at: t.timestamp('oauth_token_expires_at'), // Unix timestamp in milliseconds
     oauth_refresh_token: text('oauth_refresh_token'),
@@ -2215,6 +2249,16 @@ export const userMcpOauthTokens = pgTable(
       foreignColumns: [mcpServers.tenant_id, mcpServers.mcp_server_id],
     }).onDelete('cascade'),
     tenantIdx: index('user_mcp_oauth_tokens_tenant_id_idx').on(table.tenant_id),
+    tenantGrantedByFk: foreignKey({
+      name: 'user_mcp_oauth_tokens_tenant_granted_by_fk',
+      columns: [table.tenant_id, table.granted_by_user_id],
+      foreignColumns: [users.tenant_id, users.user_id],
+    }).onDelete('cascade'),
+    consenterSubjectCheck: check(
+      'user_mcp_oauth_tokens_consenter_subject_check',
+      sql`${table.user_id} IS NULL OR ${table.user_id} = ${table.granted_by_user_id}`
+    ),
+    grantedByIdx: index('user_mcp_oauth_tokens_granted_by_idx').on(table.granted_by_user_id),
     // Composite lookup indexes. Uniqueness enforced via partial unique indexes
     // created in the migration (one for per-user rows, one for the shared row).
     pk: index('user_mcp_oauth_tokens_pk').on(table.user_id, table.mcp_server_id),
@@ -2300,6 +2344,98 @@ export const mcpOauthPendingFlows = pgTable(
 );
 
 /**
+ * Fleet-wide Dynamic Client Registration authority for saved MCP servers.
+ *
+ * Client identifiers and secrets are stored only in `sealed_material`. A
+ * database-clock lease owns the provider POST, while registration ID + claim CAS
+ * prevents a late replica from publishing credentials after supersession.
+ */
+export const mcpOauthClientRegistrations = pgTable(
+  'mcp_oauth_client_registrations',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    registration_id: varchar('registration_id', { length: 36 }).primaryKey(),
+    mcp_server_id: varchar('mcp_server_id', { length: 36 }).notNull(),
+    binding_version: integer('binding_version').notNull(),
+    binding_fingerprint: varchar('binding_fingerprint', { length: 64 }).notNull(),
+    server_config_version: integer('server_config_version').notNull(),
+    envelope_version: integer('envelope_version').notNull(),
+    is_current: boolean('is_current').notNull().default(true),
+    status: text('status', {
+      enum: ['registering', 'registered', 'failed', 'ambiguous', 'superseded', 'expired'],
+    })
+      .notNull()
+      .default('registering'),
+    sealed_material: text('sealed_material'),
+    claim_id: varchar('claim_id', { length: 36 }),
+    claim_generation: bigint('claim_generation', { mode: 'number' }).notNull().default(0),
+    lease_expires_at: t.timestamp('lease_expires_at'),
+    dispatched_at: t.timestamp('dispatched_at'),
+    client_secret_expires_at: t.timestamp('client_secret_expires_at'),
+    failure_code: text('failure_code'),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+    finished_at: t.timestamp('finished_at'),
+  },
+  (table) => ({
+    currentServerUnique: uniqueIndex('mcp_oauth_client_registrations_current_server_uq')
+      .on(table.tenant_id, table.mcp_server_id)
+      .where(sql`${table.is_current} = true`),
+    versionsCheck: check(
+      'mcp_oauth_client_registrations_versions_check',
+      sql`${table.binding_version} = 1 AND ${table.server_config_version} > 0
+          AND ${table.envelope_version} > 0
+          AND ${table.claim_generation} >= 0`
+    ),
+    lifecycleCheck: check(
+      'mcp_oauth_client_registrations_lifecycle_check',
+      sql`(
+        (${table.status} = 'registering' AND ${table.is_current} = true
+          AND ${table.sealed_material} IS NULL AND ${table.claim_id} IS NOT NULL
+          AND ${table.lease_expires_at} IS NOT NULL AND ${table.finished_at} IS NULL)
+        OR
+        (${table.status} = 'registered' AND ${table.is_current} = true
+          AND ${table.sealed_material} IS NOT NULL AND ${table.claim_id} IS NULL
+          AND ${table.lease_expires_at} IS NULL AND ${table.dispatched_at} IS NOT NULL
+          AND ${table.finished_at} IS NULL)
+        OR
+        (${table.status} IN ('failed','ambiguous','superseded','expired')
+          AND ${table.is_current} = false AND ${table.sealed_material} IS NULL
+          AND ${table.claim_id} IS NULL AND ${table.lease_expires_at} IS NULL
+          AND ${table.finished_at} IS NOT NULL)
+      )`
+    ),
+    tenantServerFk: foreignKey({
+      name: 'mcp_oauth_client_registrations_tenant_server_fk',
+      columns: [table.tenant_id, table.mcp_server_id],
+      foreignColumns: [mcpServers.tenant_id, mcpServers.mcp_server_id],
+    }).onDelete('cascade'),
+    tenantServerIdx: index('mcp_oauth_client_registrations_tenant_server_idx').on(
+      table.tenant_id,
+      table.mcp_server_id,
+      table.created_at
+    ),
+    bindingIdx: index('mcp_oauth_client_registrations_binding_idx').on(
+      table.tenant_id,
+      table.mcp_server_id,
+      table.binding_fingerprint
+    ),
+    registeringMaintenanceIdx: index('mcp_oauth_client_registrations_registering_maintenance_idx')
+      .on(table.lease_expires_at)
+      .where(sql`${table.status} = 'registering' AND ${table.is_current} = true`),
+    registeredMaintenanceIdx: index('mcp_oauth_client_registrations_registered_maintenance_idx')
+      .on(table.client_secret_expires_at)
+      .where(
+        sql`${table.status} = 'registered' AND ${table.is_current} = true
+            AND ${table.client_secret_expires_at} IS NOT NULL`
+      ),
+    terminalMaintenanceIdx: index('mcp_oauth_client_registrations_terminal_maintenance_idx')
+      .on(table.finished_at)
+      .where(sql`${table.status} IN ('failed','ambiguous','superseded','expired')`),
+  })
+);
+
+/**
  * Durable, short-lived authority for Claude subscription OAuth sign-in attempts.
  *
  * The provider `state` value is represented only by `state_hash`. The PKCE
@@ -2311,11 +2447,53 @@ export const mcpOauthPendingFlows = pgTable(
  * callback: the user pastes the authorization code back into an already
  * authenticated session, so no state-hash capability policy exists.
  */
+/** Deployment-bound personal provider grants; SQLite is an inert schema mirror. */
+export const userProviderOauthGrants = pgTable(
+  'user_provider_oauth_grants',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    user_id: varchar('user_id', { length: 36 }).notNull(),
+    provider: text('provider', { enum: ['claude-code'] }).notNull(),
+    grant_generation: bigint('grant_generation', { mode: 'number' }).notNull(),
+    binding_version: integer('binding_version').notNull(),
+    binding_fingerprint: text('binding_fingerprint').notNull(),
+    established_attempt_id: text('established_attempt_id').notNull(),
+    sealed_access_token: text('sealed_access_token'),
+    sealed_refresh_token: text('sealed_refresh_token'),
+    expires_at: t.timestamp('expires_at'),
+    scopes: text('scopes').notNull().default(''),
+    subscription_type: text('subscription_type'),
+    refresh_generation: bigint('refresh_generation', { mode: 'number' }).notNull().default(0),
+    refresh_success_generation: bigint('refresh_success_generation', { mode: 'number' })
+      .notNull()
+      .default(0),
+    refresh_claim_id: text('refresh_claim_id'),
+    refresh_claimed_at: t.timestamp('refresh_claimed_at'),
+    state: text('state', {
+      enum: ['idle', 'refreshing', 'ambiguous', 'reauth_required', 'disconnected'],
+    })
+      .notNull()
+      .default('idle'),
+    failure_code: text('failure_code'),
+    retry_not_before: t.timestamp('retry_not_before'),
+    updated_at: t.timestamp('updated_at').notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.tenant_id, table.user_id, table.provider] }),
+    tenantUserFk: foreignKey({
+      name: 'user_provider_oauth_grants_tenant_user_fk',
+      columns: [table.tenant_id, table.user_id],
+      foreignColumns: [users.tenant_id, users.user_id],
+    }).onDelete('cascade'),
+  })
+);
+
 export const claudeOauthAttempts = pgTable(
   'claude_oauth_attempts',
   {
     tenant_id: text('tenant_id').notNull().default('default'),
     attempt_id: varchar('attempt_id', { length: 36 }).primaryKey(),
+    submission_count: integer('submission_count').notNull().default(0),
     state_hash: varchar('state_hash', { length: 64 }).notNull(),
     user_id: varchar('user_id', { length: 36 }).notNull(),
     attempt_generation: bigint('attempt_generation', { mode: 'number' }).notNull(),
@@ -3425,6 +3603,8 @@ export type UserMCPOAuthTokenRow = typeof userMcpOauthTokens.$inferSelect;
 export type UserMCPOAuthTokenInsert = typeof userMcpOauthTokens.$inferInsert;
 export type MCPOAuthPendingFlowRow = typeof mcpOauthPendingFlows.$inferSelect;
 export type MCPOAuthPendingFlowInsert = typeof mcpOauthPendingFlows.$inferInsert;
+export type MCPOAuthClientRegistrationRow = typeof mcpOauthClientRegistrations.$inferSelect;
+export type MCPOAuthClientRegistrationInsert = typeof mcpOauthClientRegistrations.$inferInsert;
 export type ClaudeOAuthAttemptRow = typeof claudeOauthAttempts.$inferSelect;
 export type ClaudeOAuthAttemptInsert = typeof claudeOauthAttempts.$inferInsert;
 export type CodexDeviceAuthAttemptRow = typeof codexDeviceAuthAttempts.$inferSelect;

@@ -1,9 +1,4 @@
-import {
-  type AgorConfig,
-  hasContainedClaudeRuntimeCredentials,
-  isClaudeSubscriptionOAuthEnabled,
-  type ResolvedDeploymentConfig,
-} from '@agor/core/config';
+import type { ResolvedDeploymentConfig } from '@agor/core/config';
 import { Unavailable } from '@agor/core/feathers';
 import type { HookContext, PermissionMode, Session } from '@agor/core/types';
 import { mapPermissionMode } from '@agor/core/utils/permission-mode-mapper';
@@ -13,7 +8,6 @@ export const HA_CONSTRAINED_PROFILE = 'constrained-active-active' as const;
 export const HA_UNSUPPORTED_FEATURES = {
   providerNativeInteractivePermissions:
     'provider-native interactive permission modes without Agor realtime decision routing',
-  mcpOAuth: 'MCP OAuth flows',
   codexAuth:
     'Codex credential-file import/logout without a consistent executor user home and execution.executor_storage.user_home_locking: cross-replica-flock',
   codexDeviceAuth:
@@ -51,18 +45,6 @@ export function isHaFeatureUnavailable(
   if (feature === 'claudeAuth') return !deployment.capabilities.claudeAuth;
   if (feature === 'claudeOAuth') return !deployment.capabilities.claudeOAuth;
   return true;
-}
-
-/** Effective UI/runtime capability: provider authorization AND topology support. */
-export function hasClaudeSubscriptionOAuthCapability(
-  config: AgorConfig,
-  deployment: ResolvedDeploymentConfig
-): boolean {
-  return (
-    isClaudeSubscriptionOAuthEnabled(config) &&
-    hasContainedClaudeRuntimeCredentials(config) &&
-    !isHaFeatureUnavailable(deployment, 'claudeOAuth')
-  );
 }
 
 export function rejectInConstrainedHa(

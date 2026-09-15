@@ -4,10 +4,15 @@
  * Type-safe CRUD operations for tasks with short ID support.
  */
 
+import { createHash } from 'node:crypto';
+
 import type {
   CapabilityPolicyFsAccess,
   ExecutorPulse,
   ExecutorTerminationCompleteInput,
+  MCPRuntimeRecovery,
+  MCPServerID,
+  MCPSlackRecoveryNotice,
   SdkFailure,
   SessionID,
   Task,
@@ -16,6 +21,7 @@ import type {
   TaskPendingDispatchStatus,
   TerminationCause,
   TerminationCoordinationClaim,
+  UserID,
   UUID,
 } from '@agor/core/types';
 import {
@@ -32,10 +38,12 @@ import {
   desc,
   eq,
   gt,
+  gte,
   inArray,
   isNotNull,
   isNull,
   like,
+  lt,
   lte,
   ne,
   or,
@@ -43,6 +51,7 @@ import {
   sql,
 } from 'drizzle-orm';
 import { generateId, shortId } from '../../lib/ids';
+import { lockSessionBranchForAdmission } from '../branch-admission';
 import type { Database } from '../client';
 import {
   deleteFrom,
@@ -54,7 +63,15 @@ import {
   select,
   update,
 } from '../database-wrapper';
-import { type SessionRow, sessions, type TaskInsert, type TaskRow, tasks, users } from '../schema';
+import {
+  type SessionRow,
+  sessionMcpServers,
+  sessions,
+  type TaskInsert,
+  type TaskRow,
+  tasks,
+  users,
+} from '../schema';
 import { getCurrentTenantId } from '../tenant-context';
 import {
   AmbiguousIdError,
@@ -78,6 +95,17 @@ function executorOwnsTask(row: Pick<TaskRow, 'status' | 'executor_connected_at'>
       row.status === TaskStatus.AWAITING_PERMISSION ||
       row.status === TaskStatus.AWAITING_INPUT)
   );
+}
+
+function mcpReprojectionAuthorityDigest(authorityFingerprints: readonly string[]): string {
+  return createHash('sha256')
+    .update('agor:mcp-reprojection-authority:v1\0')
+    .update(
+      JSON.stringify(
+        [...new Set(authorityFingerprints)].sort((left, right) => left.localeCompare(right))
+      )
+    )
+    .digest('base64url');
 }
 
 function executorMayReportTelemetry(
@@ -285,6 +313,15 @@ export interface TaskRuntimeDiscoveryOptions {
   after?: TaskRuntimeDiscoveryCursor;
   /** Deterministic test clock. PostgreSQL uses database time when omitted. */
   now?: Date;
+  /**
+   * Stranded-termination discovery only: leave a STOPPING templated row whose
+   * executor has neither connected nor reported quiescence out of the scan
+   * until this long after dispatch (database time). Such a stop is pending,
+   * not stranded, during the remote startup window; local rows and rows with
+   * durable quiescence evidence stay discoverable so crash recovery is not
+   * delayed.
+   */
+  unconnectedGraceMs?: number;
 }
 
 export interface TaskFindPageOptions {
@@ -338,7 +375,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           if (!row) throw new EntityNotFoundError('Task', id);
           return mutation(txDb, row, fullId);
         },
-        { sqliteImmediate: true }
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
       )
     );
   }
@@ -358,7 +395,8 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       taskRow: TaskRow,
       sessionRow: SessionRow,
       fullId: string
-    ) => Promise<T>
+    ) => Promise<T>,
+    admission = false
   ): Promise<T> {
     const fullId = await this.resolveId(id);
     const routing = await select(this.db, { session_id: tasks.session_id })
@@ -371,6 +409,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       runDatabaseTransaction(
         this.db,
         async (txDb) => {
+          if (admission) await lockSessionBranchForAdmission(txDb, routing.session_id);
           await lockRowForUpdate(
             txDb,
             this.db,
@@ -391,7 +430,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           }
           return mutation(txDb, taskRow, sessionRow, fullId);
         },
-        { sqliteImmediate: true }
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
       )
     );
   }
@@ -512,6 +551,9 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       status: task.status ?? TaskStatus.CREATED,
       queue_position: task.queue_position ?? null,
       created_by: task.created_by,
+      mcp_slack_recovery_due_at: task.metadata?.mcp_slack_recovery_notice?.next_repair_at
+        ? new Date(task.metadata.mcp_slack_recovery_notice.next_repair_at)
+        : undefined,
       data: {
         full_prompt: task.full_prompt ?? '',
         message_range: task.message_range ?? {
@@ -561,7 +603,14 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
   async create(data: Partial<Task>): Promise<Task> {
     try {
       const insertData = this.taskToInsert(data);
-      await insert(this.db, tasks).values(insertData).run();
+      await runDatabaseTransaction(
+        this.db,
+        async (tx) => {
+          await lockSessionBranchForAdmission(tx, insertData.session_id);
+          await insert(tx, tasks).values(insertData).run();
+        },
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
+      );
 
       const row = await select(this.db)
         .from(tasks)
@@ -832,6 +881,101 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
   }
 
   /**
+   * Bounded newest-first deterministic page for live MCP authority fanout. Unlike
+   * `findOrphaned`, this excludes dispatching/stopping and bounds returned work
+   * and continuation state. The database may still scan/sort active rows using
+   * existing status/task indexes; the application never materializes an
+   * unbounded tenant result.
+   */
+  async findActiveMCPRefreshPage(
+    options: {
+      beforeTaskId?: TaskID;
+      sessionId?: SessionID;
+      attachedServerId?: MCPServerID;
+      authorityUserId?: UserID;
+      credentialUserId?: UserID;
+      limit?: number;
+    } = {}
+  ): Promise<{ tasks: Task[]; nextTaskId?: TaskID }> {
+    const limit = options.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new RepositoryError('MCP refresh fanout limit must be between 1 and 100');
+    }
+    try {
+      const rows = await select(this.db)
+        .from(tasks)
+        .where(
+          and(
+            sql`${tasks.status} IN ('running', 'awaiting_permission', 'awaiting_input')`,
+            options.beforeTaskId ? lt(tasks.task_id, options.beforeTaskId) : undefined,
+            options.sessionId ? eq(tasks.session_id, options.sessionId) : undefined,
+            options.attachedServerId
+              ? sql`EXISTS (
+                  SELECT 1 FROM ${sessionMcpServers}
+                  WHERE ${sessionMcpServers.session_id} = ${tasks.session_id}
+                    AND ${sessionMcpServers.mcp_server_id} = ${options.attachedServerId}
+                    AND ${sessionMcpServers.enabled} = ${true}
+                )`
+              : undefined,
+            options.authorityUserId ? eq(tasks.created_by, options.authorityUserId) : undefined,
+            options.credentialUserId ? eq(tasks.created_by, options.credentialUserId) : undefined
+          )
+        )
+        .orderBy(desc(tasks.task_id))
+        .limit(limit + 1)
+        .all();
+      const page = rows.slice(0, limit);
+      return {
+        tasks: page.map((row: TaskRow) => this.rowToTask(row)),
+        ...(rows.length > limit && page.length
+          ? { nextTaskId: page[page.length - 1]!.task_id as TaskID }
+          : {}),
+      };
+    } catch (error) {
+      if (error instanceof RepositoryError) throw error;
+      throw new RepositoryError(
+        `Failed to page active MCP Tasks: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /** One hard-bounded due-work batch backed by a tenant-aware partial index. */
+  async findMcpSlackRecoveryNoticePage(
+    options: { now?: Date; horizon?: Date; limit?: number } = {}
+  ): Promise<{ tasks: Task[] }> {
+    const limit = options.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new RepositoryError('MCP Slack recovery repair limit must be between 1 and 100');
+    }
+    try {
+      const now = options.now ?? new Date();
+      const horizon = options.horizon ?? new Date(now.getTime() - 24 * 60 * 60_000);
+      const rows = await select(this.db)
+        .from(tasks)
+        .where(
+          and(
+            isNotNull(tasks.mcp_slack_recovery_due_at),
+            lte(tasks.mcp_slack_recovery_due_at, now),
+            gte(tasks.mcp_slack_recovery_due_at, horizon)
+          )
+        )
+        .orderBy(asc(tasks.mcp_slack_recovery_due_at), asc(tasks.task_id))
+        .limit(limit)
+        .all();
+      return {
+        tasks: rows.map((row: TaskRow) => this.rowToTask(row)),
+      };
+    } catch (error) {
+      if (error instanceof RepositoryError) throw error;
+      throw new RepositoryError(
+        `Failed to page MCP Slack recovery notices: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /**
    * Find active tasks that have emitted at least one executor heartbeat.
    *
    * Tasks with a null heartbeat are intentionally skipped so enabling the
@@ -854,6 +998,20 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         error
       );
     }
+  }
+
+  /** `data.executor_mode` is absent for local executors; only 'templated' waits for a remote pod. */
+  private executorModeIsNotTemplated() {
+    return isSQLiteDatabase(this.db)
+      ? sql`coalesce(json_extract(${tasks.data}, '$.executor_mode'), 'local') <> 'templated'`
+      : sql`coalesce(${tasks.data}->>'executor_mode', 'local') <> 'templated'`;
+  }
+
+  /** A fenced executor quiescence report is durable proof that must not wait for the startup deadline. */
+  private executorQuiescenceRecorded() {
+    return isSQLiteDatabase(this.db)
+      ? sql`json_extract(${tasks.data}, '$.termination_request.executor_quiesced_at') IS NOT NULL`
+      : sql`${tasks.data}->'termination_request'->>'executor_quiesced_at' IS NOT NULL`;
   }
 
   private runtimeDiscoveryColumns() {
@@ -1031,6 +1189,15 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
             isNull(tasks.termination_coordination_expires_at),
             lte(tasks.termination_coordination_expires_at, this.databaseNow(options.now))
           ),
+          options.unconnectedGraceMs !== undefined
+            ? or(
+                isNotNull(tasks.executor_connected_at),
+                this.executorModeIsNotTemplated(),
+                this.executorQuiescenceRecorded(),
+                isNull(tasks.started_at),
+                lte(tasks.started_at, this.databaseCutoff(options.unconnectedGraceMs, options.now))
+              )
+            : undefined,
           after
         )
       )
@@ -1180,6 +1347,92 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
     });
   }
 
+  /** Read-only authorization shared by telemetry and sensitive credential delivery. */
+  private async inspectRuntimeAuthority(
+    txDb: Database,
+    row: TaskRow,
+    fullId: string,
+    authority: TaskRuntimeAuthorityScope
+  ) {
+    const current = this.rowToTask(row);
+    const access = await resolveSessionRuntimeBranchAccess(txDb, {
+      sessionId: row.session_id,
+      principalUserId: row.created_by,
+    });
+    if (
+      authority.principal_user_id !== row.created_by ||
+      authority.session_id !== row.session_id ||
+      !access ||
+      authority.branch_id !== access.branch_id
+    ) {
+      return { outcome: 'scope_mismatch' as const, task: current };
+    }
+
+    const floor = row.data.executor_launch_fs_access_floor;
+    if (!floor) {
+      return {
+        outcome: 'authorization_revoked' as const,
+        task: current,
+        reason: 'launch_authority_missing' as const,
+      };
+    }
+    if (!access.principal_available) {
+      return {
+        outcome: 'authorization_revoked' as const,
+        task: current,
+        reason: 'principal_unavailable' as const,
+      };
+    }
+    if (!access.can_prompt_session) {
+      return {
+        outcome: 'authorization_revoked' as const,
+        task: current,
+        reason: 'branch_capability_revoked' as const,
+      };
+    }
+    if (fsAccessRank(access.fs_access) < fsAccessRank(floor)) {
+      return {
+        outcome: 'authorization_revoked' as const,
+        task: current,
+        reason: 'filesystem_access_revoked' as const,
+      };
+    }
+
+    const tokenCurrent = isPostgresDatabase(txDb)
+      ? await new ExecutorSessionTokenAuthorityRepository(txDb).isCurrent({
+          tenantId: requireRuntimeTenantId(),
+          tokenFingerprint: authority.token_fingerprint,
+          sessionId: authority.session_id,
+          taskId: fullId,
+          branchId: authority.branch_id,
+          userId: authority.principal_user_id,
+        })
+      : authority.standalone_token_current === true;
+    if (!tokenCurrent) {
+      return {
+        outcome: 'authorization_revoked' as const,
+        task: current,
+        reason: 'token_revoked' as const,
+      };
+    }
+
+    return { outcome: 'authorized' as const, observedAt: access.observed_at };
+  }
+
+  /** No heartbeat/lease write can be used to authorize retrieval of a provider bearer. */
+  async assertRuntimeCredentialAuthority(
+    id: TaskID,
+    authority: TaskRuntimeAuthorityScope
+  ): Promise<void> {
+    const row = await select(this.db).from(tasks).where(eq(tasks.task_id, id)).one();
+    if (!row || !executorOwnsTask(row) || row.data.termination_request) {
+      throw new RepositoryError('Task credential authority unavailable');
+    }
+    const result = await this.inspectRuntimeAuthority(this.db, row, id, authority);
+    if (result.outcome !== 'authorized')
+      throw new RepositoryError('Task credential authority unavailable');
+  }
+
   /**
    * Revalidate exact runtime authority, then atomically stamp heartbeat/pulse.
    * Explicit denial returns the unchanged Task so the service can claim the
@@ -1200,68 +1453,10 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       // eventually recover the request with a late task/request-fenced ack.
       if (!executorMayReportTelemetry(row)) return { outcome: 'control', task: current };
 
-      const access = await resolveSessionRuntimeBranchAccess(txDb, {
-        sessionId: row.session_id,
-        principalUserId: row.created_by,
-      });
-      if (
-        authority.principal_user_id !== row.created_by ||
-        authority.session_id !== row.session_id ||
-        !access ||
-        authority.branch_id !== access.branch_id
-      ) {
-        return { outcome: 'scope_mismatch', task: current };
-      }
+      const authorityResult = await this.inspectRuntimeAuthority(txDb, row, fullId, authority);
+      if (authorityResult.outcome !== 'authorized') return authorityResult;
 
-      const floor = row.data.executor_launch_fs_access_floor;
-      if (!floor) {
-        return {
-          outcome: 'authorization_revoked',
-          task: current,
-          reason: 'launch_authority_missing',
-        };
-      }
-      if (!access.principal_available) {
-        return {
-          outcome: 'authorization_revoked',
-          task: current,
-          reason: 'principal_unavailable',
-        };
-      }
-      if (!access.can_prompt_session) {
-        return {
-          outcome: 'authorization_revoked',
-          task: current,
-          reason: 'branch_capability_revoked',
-        };
-      }
-      if (fsAccessRank(access.fs_access) < fsAccessRank(floor)) {
-        return {
-          outcome: 'authorization_revoked',
-          task: current,
-          reason: 'filesystem_access_revoked',
-        };
-      }
-
-      const tokenCurrent = isPostgresDatabase(this.db)
-        ? await new ExecutorSessionTokenAuthorityRepository(txDb).isCurrent({
-            tenantId: requireRuntimeTenantId(),
-            tokenFingerprint: authority.token_fingerprint,
-            sessionId: authority.session_id,
-            taskId: fullId,
-            branchId: authority.branch_id,
-            userId: authority.principal_user_id,
-          })
-        : authority.standalone_token_current === true;
-      if (!tokenCurrent) {
-        return {
-          outcome: 'authorization_revoked',
-          task: current,
-          reason: 'token_revoked',
-        };
-      }
-
-      const heartbeatAt = observedAt ?? access.observed_at;
+      const heartbeatAt = observedAt ?? authorityResult.observedAt;
       if (!Number.isFinite(heartbeatAt.getTime())) {
         throw new RepositoryError('Runtime authority observation time is invalid');
       }
@@ -1785,6 +1980,437 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
     return this.updateTask(id, updates, false);
   }
 
+  /** Serialize the latest MCP recovery projection and its stale-tab generation. */
+  async recordMCPRecovery(
+    id: string,
+    build: (
+      current: MCPRuntimeRecovery | undefined,
+      task: Task,
+      txDb: Database
+    ) => MCPRuntimeRecovery | null | Promise<MCPRuntimeRecovery | null>
+  ): Promise<Task> {
+    return this.runTaskMutation(() =>
+      runDatabaseTransaction(
+        this.db,
+        async (txDb) => {
+          const fullId = await this.resolveId(id);
+          await lockRowForUpdate(txDb, this.db, tasks, eq(tasks.task_id, fullId));
+          const row = await select(txDb).from(tasks).where(eq(tasks.task_id, fullId)).one();
+          if (!row) throw new EntityNotFoundError('Task', id);
+          const currentTask = this.rowToTask(row);
+          const requestedRecovery = await build(
+            currentTask.metadata?.mcp_recovery,
+            currentTask,
+            txDb
+          );
+          if (!requestedRecovery) return currentTask;
+          const tombstone = currentTask.metadata?.mcp_recovery_generation ?? 0;
+          const generationFloor = currentTask.metadata?.mcp_recovery
+            ? Math.max(currentTask.metadata.mcp_recovery.generation, tombstone)
+            : tombstone + 1;
+          const recovery = {
+            ...requestedRecovery,
+            generation: Math.max(requestedRecovery.generation, generationFloor),
+          };
+          const data = {
+            ...row.data,
+            metadata: { ...currentTask.metadata, mcp_recovery: recovery },
+          };
+          const updated = await update(txDb, tasks)
+            .set({ data })
+            .where(eq(tasks.task_id, fullId))
+            .returning()
+            .one();
+          return this.rowToTask(updated);
+        },
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
+      )
+    );
+  }
+
+  /**
+   * Serialize internal Slack notice delivery against the same Task row that
+   * owns authoritative MCP recovery. Callers must perform provider I/O only
+   * after this short transaction returns.
+   */
+  async mutateMCPSlackRecoveryNotice(
+    id: string,
+    build: (
+      current: MCPSlackRecoveryNotice | undefined,
+      task: Task,
+      txDb: Database
+    ) => MCPSlackRecoveryNotice | null | Promise<MCPSlackRecoveryNotice | null>
+  ): Promise<{ task: Task; changed: boolean }> {
+    return this.runTaskMutation(() =>
+      runDatabaseTransaction(
+        this.db,
+        async (txDb) => {
+          const fullId = await this.resolveId(id);
+          await lockRowForUpdate(txDb, this.db, tasks, eq(tasks.task_id, fullId));
+          const row = await select(txDb).from(tasks).where(eq(tasks.task_id, fullId)).one();
+          if (!row) throw new EntityNotFoundError('Task', id);
+          const task = this.rowToTask(row);
+          const next = await build(task.metadata?.mcp_slack_recovery_notice, task, txDb);
+          if (!next) return { task, changed: false };
+          const updated = await update(txDb, tasks)
+            .set({
+              mcp_slack_recovery_due_at: next.next_repair_at ? new Date(next.next_repair_at) : null,
+              data: {
+                ...row.data,
+                metadata: { ...task.metadata, mcp_slack_recovery_notice: next },
+              },
+            })
+            .where(eq(tasks.task_id, fullId))
+            .returning()
+            .one();
+          return { task: this.rowToTask(updated), changed: true };
+        },
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
+      )
+    );
+  }
+
+  /** Atomically fence one exact recovery request before capabilities are reprojected. */
+  async claimMCPReprojection(
+    id: string,
+    input: {
+      sessionId: SessionID;
+      principalUserId: string;
+      requestId: string;
+      expectedGeneration: number;
+      fingerprint: string;
+    }
+  ): Promise<{ task: Task; outcome: 'claimed' | 'duplicate' | 'stale' }> {
+    return this.runTaskMutation(() =>
+      runDatabaseTransaction(
+        this.db,
+        async (txDb) => {
+          const fullId = await this.resolveId(id);
+          await lockRowForUpdate(txDb, this.db, tasks, eq(tasks.task_id, fullId));
+          const row = await select(txDb).from(tasks).where(eq(tasks.task_id, fullId)).one();
+          if (!row) throw new EntityNotFoundError('Task', id);
+          const task = this.rowToTask(row);
+          const recovery = task.metadata?.mcp_recovery;
+          if (
+            task.session_id !== input.sessionId ||
+            task.created_by !== input.principalUserId ||
+            !executorOwnsTask({
+              status: task.status,
+              executor_connected_at: task.executor_connected_at
+                ? new Date(task.executor_connected_at)
+                : null,
+            }) ||
+            !recovery ||
+            recovery.generation !== input.expectedGeneration ||
+            recovery.request_id !== input.requestId
+          ) {
+            return { task, outcome: 'stale' as const };
+          }
+          const existing = task.metadata?.mcp_reprojection_claim;
+          if (
+            existing?.request_id === input.requestId &&
+            existing.recovery_generation === input.expectedGeneration &&
+            existing.fingerprint === input.fingerprint &&
+            (recovery.status === 'refresh_requested' || recovery.status === 'action_required')
+          ) {
+            return { task, outcome: 'duplicate' as const };
+          }
+          if (recovery.status !== 'refresh_requested') {
+            return { task, outcome: 'stale' as const };
+          }
+          if (existing && existing.recovery_generation >= input.expectedGeneration) {
+            return { task, outcome: 'stale' as const };
+          }
+          const data = {
+            ...row.data,
+            metadata: {
+              ...task.metadata,
+              mcp_reprojection_claim: {
+                request_id: input.requestId,
+                recovery_generation: input.expectedGeneration,
+                fingerprint: input.fingerprint,
+                claimed_at: new Date().toISOString(),
+              },
+            },
+          };
+          const updated = await update(txDb, tasks)
+            .set({ data })
+            .where(eq(tasks.task_id, fullId))
+            .returning()
+            .one();
+          return { task: this.rowToTask(updated), outcome: 'claimed' as const };
+        },
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
+      )
+    );
+  }
+
+  /**
+   * Revalidate an exact durable reprojection claim immediately before the
+   * provider transport is changed. This deliberately returns no projection:
+   * callers can survive daemon restarts without relying on a process cache or
+   * minting a second capability set.
+   */
+  async validateMCPReprojectionClaim(
+    id: string,
+    input: {
+      sessionId: SessionID;
+      principalUserId: string;
+      requestId: string;
+      expectedGeneration: number;
+      fingerprint: string;
+    }
+  ): Promise<{ task: Task; outcome: 'current' | 'stale' }> {
+    return this.runTaskMutation(() =>
+      runDatabaseTransaction(
+        this.db,
+        async (txDb) => {
+          const fullId = await this.resolveId(id);
+          await lockRowForUpdate(txDb, this.db, tasks, eq(tasks.task_id, fullId));
+          const row = await select(txDb).from(tasks).where(eq(tasks.task_id, fullId)).one();
+          if (!row) throw new EntityNotFoundError('Task', id);
+          const task = this.rowToTask(row);
+          const recovery = task.metadata?.mcp_recovery;
+          const claim = task.metadata?.mcp_reprojection_claim;
+          const current =
+            task.session_id === input.sessionId &&
+            task.created_by === input.principalUserId &&
+            executorOwnsTask({
+              status: task.status,
+              executor_connected_at: task.executor_connected_at
+                ? new Date(task.executor_connected_at)
+                : null,
+            }) &&
+            !!recovery &&
+            (recovery.status === 'refresh_requested' || recovery.status === 'action_required') &&
+            recovery.generation === input.expectedGeneration &&
+            recovery.request_id === input.requestId &&
+            claim?.request_id === input.requestId &&
+            claim.recovery_generation === input.expectedGeneration &&
+            claim.fingerprint === input.fingerprint;
+          return { task, outcome: current ? ('current' as const) : ('stale' as const) };
+        },
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
+      )
+    );
+  }
+
+  /** Bind the exact authority projection once; duplicate claims may attest only that projection. */
+  async bindMCPReprojectionAuthority(
+    id: string,
+    input: {
+      sessionId: SessionID;
+      principalUserId: string;
+      requestId: string;
+      expectedGeneration: number;
+      fingerprint: string;
+      authorityFingerprints: string[];
+    }
+  ): Promise<{ task: Task; outcome: 'bound' | 'stale' }> {
+    return this.runTaskMutation(() =>
+      runDatabaseTransaction(
+        this.db,
+        async (txDb) => {
+          const fullId = await this.resolveId(id);
+          await lockRowForUpdate(txDb, this.db, tasks, eq(tasks.task_id, fullId));
+          const row = await select(txDb).from(tasks).where(eq(tasks.task_id, fullId)).one();
+          if (!row) throw new EntityNotFoundError('Task', id);
+          const task = this.rowToTask(row);
+          const recovery = task.metadata?.mcp_recovery;
+          const claim = task.metadata?.mcp_reprojection_claim;
+          if (
+            task.session_id !== input.sessionId ||
+            task.created_by !== input.principalUserId ||
+            !executorOwnsTask({
+              status: task.status,
+              executor_connected_at: task.executor_connected_at
+                ? new Date(task.executor_connected_at)
+                : null,
+            }) ||
+            !recovery ||
+            recovery.generation !== input.expectedGeneration ||
+            recovery.request_id !== input.requestId ||
+            claim?.request_id !== input.requestId ||
+            claim.recovery_generation !== input.expectedGeneration ||
+            claim.fingerprint !== input.fingerprint
+          ) {
+            return { task, outcome: 'stale' as const };
+          }
+          const projectionFingerprint = mcpReprojectionAuthorityDigest(input.authorityFingerprints);
+          const existingProjectionFingerprint =
+            claim.projection_fingerprint ??
+            (claim.authority_fingerprints !== undefined
+              ? mcpReprojectionAuthorityDigest(claim.authority_fingerprints)
+              : undefined);
+          if (existingProjectionFingerprint !== undefined) {
+            return existingProjectionFingerprint === projectionFingerprint
+              ? { task, outcome: 'bound' as const }
+              : { task, outcome: 'stale' as const };
+          }
+          const authorityFingerprints = [...new Set(input.authorityFingerprints)]
+            .sort((left, right) => left.localeCompare(right))
+            .slice(0, 256);
+          const updated = await update(txDb, tasks)
+            .set({
+              data: {
+                ...row.data,
+                metadata: {
+                  ...task.metadata,
+                  mcp_reprojection_claim: {
+                    ...claim,
+                    projection_fingerprint: projectionFingerprint,
+                    authority_fingerprints: authorityFingerprints,
+                  },
+                },
+              },
+            })
+            .where(eq(tasks.task_id, fullId))
+            .returning()
+            .one();
+          return { task: this.rowToTask(updated), outcome: 'bound' as const };
+        },
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
+      )
+    );
+  }
+
+  /**
+   * Settle an exact claimed refresh. A fully ready projection is cleared and
+   * leaves its monotonic tombstone; a partial projection keeps its actionable
+   * per-server state but releases the one-shot apply claim.
+   */
+  async settleMCPReprojection(
+    id: string,
+    input: {
+      sessionId: SessionID;
+      principalUserId: string;
+      requestId: string;
+      expectedGeneration: number;
+      ok: boolean;
+      failure?: 'transport_outcome_uncertain';
+    }
+  ): Promise<{ task: Task; outcome: 'settled' | 'stale' }> {
+    return this.runTaskMutation(() =>
+      runDatabaseTransaction(
+        this.db,
+        async (txDb) => {
+          const fullId = await this.resolveId(id);
+          await lockRowForUpdate(txDb, this.db, tasks, eq(tasks.task_id, fullId));
+          const row = await select(txDb).from(tasks).where(eq(tasks.task_id, fullId)).one();
+          if (!row) throw new EntityNotFoundError('Task', id);
+          const task = this.rowToTask(row);
+          const recovery = task.metadata?.mcp_recovery;
+          const claim = task.metadata?.mcp_reprojection_claim;
+          if (
+            task.session_id !== input.sessionId ||
+            task.created_by !== input.principalUserId ||
+            !executorOwnsTask({
+              status: task.status,
+              executor_connected_at: task.executor_connected_at
+                ? new Date(task.executor_connected_at)
+                : null,
+            }) ||
+            !recovery ||
+            (recovery.status !== 'refresh_requested' && recovery.status !== 'action_required') ||
+            recovery.generation !== input.expectedGeneration ||
+            recovery.request_id !== input.requestId ||
+            claim?.request_id !== input.requestId ||
+            claim.recovery_generation !== input.expectedGeneration ||
+            (claim.projection_fingerprint === undefined &&
+              claim.authority_fingerprints === undefined)
+          ) {
+            return { task, outcome: 'stale' as const };
+          }
+
+          const metadata = { ...task.metadata };
+          delete metadata.mcp_reprojection_claim;
+          if (input.ok && recovery.status === 'refresh_requested') {
+            delete metadata.mcp_recovery;
+            metadata.mcp_recovery_generation = Math.max(
+              metadata.mcp_recovery_generation ?? 0,
+              recovery.generation
+            );
+            metadata.mcp_recovery_settled_request_id = recovery.request_id;
+            metadata.mcp_recovery_settled_at = new Date().toISOString();
+            metadata.mcp_recovery_settled_authority_fingerprints =
+              claim.authority_fingerprints ?? [];
+            metadata.mcp_recovery_settled_projection_fingerprint =
+              claim.projection_fingerprint ??
+              mcpReprojectionAuthorityDigest(claim.authority_fingerprints ?? []);
+          } else if (!input.ok) {
+            const uncertain = input.failure === 'transport_outcome_uncertain';
+            metadata.mcp_recovery = {
+              ...recovery,
+              generation: recovery.generation + 1,
+              code: uncertain ? 'transport_refresh_uncertain' : 'provider_refresh_failed',
+              status: uncertain ? 'action_required' : 'failed',
+              action: uncertain ? 'retry_next_turn' : 'reconnect_mcp',
+              message: uncertain
+                ? 'The provider did not confirm whether MCP transport refresh completed. No MCP call was retried, and this task will not attempt another live transport change; current authority applies on the next turn.'
+                : 'The provider could not rebuild MCP transport safely. No tool call was retried; reconnect MCP to try again.',
+              observed_at: new Date().toISOString(),
+              refresh_deadline_at: undefined,
+            };
+          }
+          const updated = await update(txDb, tasks)
+            .set({ data: { ...row.data, metadata } })
+            .where(eq(tasks.task_id, fullId))
+            .returning()
+            .one();
+          return { task: this.rowToTask(updated), outcome: 'settled' as const };
+        },
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
+      )
+    );
+  }
+
+  /** Clear a matching recovery projection after a successful transport rebuild. */
+  async clearMCPRecovery(
+    id: string,
+    matches: (current: MCPRuntimeRecovery, task: Task) => boolean
+  ): Promise<Task> {
+    return this.runTaskMutation(() =>
+      runDatabaseTransaction(
+        this.db,
+        async (txDb) => {
+          const fullId = await this.resolveId(id);
+          await lockRowForUpdate(txDb, this.db, tasks, eq(tasks.task_id, fullId));
+          const row = await select(txDb).from(tasks).where(eq(tasks.task_id, fullId)).one();
+          if (!row) throw new EntityNotFoundError('Task', id);
+          const currentTask = this.rowToTask(row);
+          const current = currentTask.metadata?.mcp_recovery;
+          if (!current || !matches(current, currentTask)) return currentTask;
+          const claim = currentTask.metadata?.mcp_reprojection_claim;
+          const metadata = { ...currentTask.metadata };
+          delete metadata.mcp_recovery;
+          delete metadata.mcp_reprojection_claim;
+          metadata.mcp_recovery_generation = Math.max(
+            metadata.mcp_recovery_generation ?? 0,
+            current.generation
+          );
+          metadata.mcp_recovery_settled_request_id = current.request_id;
+          metadata.mcp_recovery_settled_at = new Date().toISOString();
+          metadata.mcp_recovery_settled_authority_fingerprints =
+            claim?.authority_fingerprints ?? [];
+          if (claim) {
+            metadata.mcp_recovery_settled_projection_fingerprint =
+              claim.projection_fingerprint ??
+              mcpReprojectionAuthorityDigest(claim.authority_fingerprints ?? []);
+          } else {
+            delete metadata.mcp_recovery_settled_projection_fingerprint;
+          }
+          const updated = await update(txDb, tasks)
+            .set({ data: { ...row.data, metadata } })
+            .where(eq(tasks.task_id, fullId))
+            .returning()
+            .one();
+          return this.rowToTask(updated);
+        },
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
+      )
+    );
+  }
+
   /** Apply executor-owned result fields only while the executor still owns the locked row. */
   async updateFromExecutor(id: string, updates: Partial<Task>): Promise<Task> {
     return this.updateTask(id, updates, true);
@@ -1869,7 +2495,14 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
 
     if (input.status === TaskStatus.CREATED) {
       const insertData = this.taskToInsert(taskBase);
-      await insert(this.db, tasks).values(insertData).onConflictDoNothing().run();
+      await runDatabaseTransaction(
+        this.db,
+        async (tx) => {
+          await lockSessionBranchForAdmission(tx, insertData.session_id);
+          await insert(tx, tasks).values(insertData).onConflictDoNothing().run();
+        },
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
+      );
       const row = await select(this.db).from(tasks).where(eq(tasks.task_id, input.task_id!)).one();
       if (!row) throw new RepositoryError('Failed to retrieve idempotent pending task');
       const existing = this.rowToTask(row);
@@ -1891,6 +2524,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       runDatabaseTransaction(
         this.db,
         async (txDb) => {
+          await lockSessionBranchForAdmission(txDb, input.session_id);
           await lockRowForUpdate(
             txDb,
             this.db,
@@ -1969,7 +2603,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           if (!row) throw new RepositoryError('Failed to retrieve created queued task');
           return this.rowToTask(row);
         },
-        { sqliteImmediate: true }
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
       )
     );
   }
@@ -1988,118 +2622,122 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
     expectedStatus: TaskPendingDispatchStatus,
     updates: Partial<Task>
   ): Promise<TaskDispatchClaimResult> {
-    return this.mutateLockedSessionTask(id, async (txDb, currentRow, sessionRow, fullId) => {
-      const current = this.rowToTask(currentRow);
-      if (current.status !== expectedStatus) {
-        return {
-          outcome:
-            current.status === TaskStatus.DISPATCHING || current.status === TaskStatus.RUNNING
-              ? 'already_claimed'
-              : 'condition_changed',
-          task: current,
-        };
-      }
-      if (updates.status !== TaskStatus.DISPATCHING) {
-        throw new RepositoryError('Dispatch claim must transition to dispatching');
-      }
+    return this.mutateLockedSessionTask(
+      id,
+      async (txDb, currentRow, sessionRow, fullId) => {
+        const current = this.rowToTask(currentRow);
+        if (current.status !== expectedStatus) {
+          return {
+            outcome:
+              current.status === TaskStatus.DISPATCHING || current.status === TaskStatus.RUNNING
+                ? 'already_claimed'
+                : 'condition_changed',
+            task: current,
+          };
+        }
+        if (updates.status !== TaskStatus.DISPATCHING) {
+          throw new RepositoryError('Dispatch claim must transition to dispatching');
+        }
 
-      // A queue claimant may only take the durable head. An explicit CREATED
-      // task may not jump an existing prompt queue. Both checks run under the
-      // same Session lock that serializes enqueue position assignment.
-      const queuedHead = await select(txDb, { task_id: tasks.task_id })
-        .from(tasks)
-        .where(and(eq(tasks.session_id, current.session_id), eq(tasks.status, TaskStatus.QUEUED)))
-        .orderBy(asc(tasks.queue_position), asc(tasks.created_at), asc(tasks.task_id))
-        .limit(1)
-        .one();
-      if (
-        (expectedStatus === TaskStatus.QUEUED && queuedHead?.task_id !== fullId) ||
-        (expectedStatus === TaskStatus.CREATED && queuedHead != null)
-      ) {
-        return { outcome: 'condition_changed', task: current };
-      }
+        // A queue claimant may only take the durable head. An explicit CREATED
+        // task may not jump an existing prompt queue. Both checks run under the
+        // same Session lock that serializes enqueue position assignment.
+        const queuedHead = await select(txDb, { task_id: tasks.task_id })
+          .from(tasks)
+          .where(and(eq(tasks.session_id, current.session_id), eq(tasks.status, TaskStatus.QUEUED)))
+          .orderBy(asc(tasks.queue_position), asc(tasks.created_at), asc(tasks.task_id))
+          .limit(1)
+          .one();
+        if (
+          (expectedStatus === TaskStatus.QUEUED && queuedHead?.task_id !== fullId) ||
+          (expectedStatus === TaskStatus.CREATED && queuedHead != null)
+        ) {
+          return { outcome: 'condition_changed', task: current };
+        }
 
-      const actor = await select(txDb, { user_id: users.user_id })
-        .from(users)
-        .where(eq(users.user_id, current.created_by))
-        .one();
-      if (!actor) {
-        return {
-          outcome: 'actor_missing',
-          task: await this.terminalizeMissingDispatchActor(txDb, current, fullId),
-        };
-      }
+        const actor = await select(txDb, { user_id: users.user_id })
+          .from(users)
+          .where(eq(users.user_id, current.created_by))
+          .one();
+        if (!actor) {
+          return {
+            outcome: 'actor_missing',
+            task: await this.terminalizeMissingDispatchActor(txDb, current, fullId),
+          };
+        }
 
-      const competingExecution = await select(txDb, { task_id: tasks.task_id })
-        .from(tasks)
-        .where(
-          and(
-            eq(tasks.session_id, current.session_id),
-            ne(tasks.task_id, fullId),
-            inArray(tasks.status, [...EXECUTING_TASK_STATUSES])
+        const competingExecution = await select(txDb, { task_id: tasks.task_id })
+          .from(tasks)
+          .where(
+            and(
+              eq(tasks.session_id, current.session_id),
+              ne(tasks.task_id, fullId),
+              inArray(tasks.status, [...EXECUTING_TASK_STATUSES])
+            )
           )
-        )
-        .limit(1)
-        .one();
-      if (
-        competingExecution ||
-        !sessionCanStartTask(sessionRow.status, sessionRow.ready_for_prompt)
-      ) {
-        return { outcome: 'condition_changed', task: current };
-      }
+          .limit(1)
+          .one();
+        if (
+          competingExecution ||
+          !sessionCanStartTask(sessionRow.status, sessionRow.ready_for_prompt)
+        ) {
+          return { outcome: 'condition_changed', task: current };
+        }
 
-      const requestedStartedAt = updates.started_at ? new Date(updates.started_at) : undefined;
-      const dispatchAt = await this.mutationNow(
-        txDb,
-        fullId,
-        // Standalone SQLite retains injected/process time for deterministic
-        // compatibility. PostgreSQL launch deadlines use the database clock.
-        isSQLiteDatabase(this.db) ? requestedStartedAt : undefined
-      );
+        const requestedStartedAt = updates.started_at ? new Date(updates.started_at) : undefined;
+        const dispatchAt = await this.mutationNow(
+          txDb,
+          fullId,
+          // Standalone SQLite retains injected/process time for deterministic
+          // compatibility. PostgreSQL launch deadlines use the database clock.
+          isSQLiteDatabase(this.db) ? requestedStartedAt : undefined
+        );
 
-      const merged: Task = {
-        ...deepMerge(current, { ...updates, started_at: dispatchAt.toISOString() }),
-        task_id: current.task_id,
-        session_id: current.session_id,
-        created_by: current.created_by,
-        created_at: current.created_at,
-        // Queue ownership ends at the durable launch-intent transition.
-        queue_position: undefined,
-      };
-      const insertData = this.taskToInsert(merged);
-      await update(txDb, tasks)
-        .set({
-          status: insertData.status,
-          queue_position: insertData.queue_position,
-          started_at: insertData.started_at,
-          executor_connected_at: insertData.executor_connected_at,
-          completed_at: insertData.completed_at,
-          last_executor_heartbeat_at: insertData.last_executor_heartbeat_at,
-          data: insertData.data,
-        })
-        .where(eq(tasks.task_id, fullId))
-        .run();
+        const merged: Task = {
+          ...deepMerge(current, { ...updates, started_at: dispatchAt.toISOString() }),
+          task_id: current.task_id,
+          session_id: current.session_id,
+          created_by: current.created_by,
+          created_at: current.created_at,
+          // Queue ownership ends at the durable launch-intent transition.
+          queue_position: undefined,
+        };
+        const insertData = this.taskToInsert(merged);
+        await update(txDb, tasks)
+          .set({
+            status: insertData.status,
+            queue_position: insertData.queue_position,
+            started_at: insertData.started_at,
+            executor_connected_at: insertData.executor_connected_at,
+            completed_at: insertData.completed_at,
+            last_executor_heartbeat_at: insertData.last_executor_heartbeat_at,
+            data: insertData.data,
+          })
+          .where(eq(tasks.task_id, fullId))
+          .run();
 
-      // The launch-intent transition and its Session projection are one
-      // durable state change. Keeping this write inside the task-claim
-      // transaction (independent of any request-scope policy) closes the kill
-      // point where a Task could be DISPATCHING while its Session remained
-      // IDLE and omitted the task from data.tasks. The Session row is already
-      // locked by mutateLockedSessionTask.
-      const sessionTasks = sessionRow.data.tasks.includes(current.task_id)
-        ? sessionRow.data.tasks
-        : [...sessionRow.data.tasks, current.task_id];
-      await update(txDb, sessions)
-        .set({
-          status: SessionStatus.RUNNING,
-          ready_for_prompt: false,
-          updated_at: dispatchAt,
-          data: { ...sessionRow.data, tasks: sessionTasks },
-        })
-        .where(eq(sessions.session_id, current.session_id))
-        .run();
-      return { outcome: 'claimed', task: merged };
-    });
+        // The launch-intent transition and its Session projection are one
+        // durable state change. Keeping this write inside the task-claim
+        // transaction (independent of any request-scope policy) closes the kill
+        // point where a Task could be DISPATCHING while its Session remained
+        // IDLE and omitted the task from data.tasks. The Session row is already
+        // locked by mutateLockedSessionTask.
+        const sessionTasks = sessionRow.data.tasks.includes(current.task_id)
+          ? sessionRow.data.tasks
+          : [...sessionRow.data.tasks, current.task_id];
+        await update(txDb, sessions)
+          .set({
+            status: SessionStatus.RUNNING,
+            ready_for_prompt: false,
+            updated_at: dispatchAt,
+            data: { ...sessionRow.data, tasks: sessionTasks },
+          })
+          .where(eq(sessions.session_id, current.session_id))
+          .run();
+        return { outcome: 'claimed', task: merged };
+      },
+      true
+    );
   }
 
   /**

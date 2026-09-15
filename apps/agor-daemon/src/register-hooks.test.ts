@@ -716,24 +716,23 @@ describe('tenant-owned service registration', () => {
     );
   });
 
-  it('fails closed for discovery that can enter the process-local MCP OAuth flow in HA', () => {
-    expect(CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES).toContainEqual([
-      'mcp-servers/discover',
-      'mcpOAuth',
-    ]);
+  it('admits durable MCP OAuth endpoints in the constrained HA profile', () => {
+    expect(
+      CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES.some(([, feature]) =>
+        String(feature).includes('mcpOAuth')
+      )
+    ).toBe(false);
   });
 
-  // These remain in the capability-gate inventory, but a safe constrained-HA
-  // deployment resolves both capabilities true and admits the durable paths.
-  it('capability-gates the Claude OAuth attempt flow and credential-file logout in HA', () => {
+  it('gates Claude OAuth start but leaves mode-aware logout available after a downgrade', () => {
     expect(CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES).toContainEqual([
       'claude-auth/oauth',
       'claudeOAuth',
     ]);
-    expect(CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES).toContainEqual([
-      'claude-auth/logout',
-      'claudeAuth',
-    ]);
+    expect(
+      CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES.some(([path]) => path === 'claude-auth/logout')
+    ).toBe(false);
+    expect(TENANT_IDENTITY_ONLY_SERVICE_PATHS).toContain('claude-auth/logout');
   });
 
   it('wraps Knowledge policy and indexing admin services in tenant database scope', () => {
@@ -1347,11 +1346,6 @@ describe('isPromptFlowPatchOnly', () => {
       expect(isPromptFlowPatchOnly({ tasks: ['task-1', 'task-2'] })).toBe(true);
     });
 
-    it('accepts the prompt-route auto-unarchive shape', () => {
-      // register-routes.ts: /sessions/:id/prompt auto-unarchives before sending
-      expect(isPromptFlowPatchOnly({ archived: false, archived_reason: undefined })).toBe(true);
-    });
-
     it('accepts the stop-route idle shape', () => {
       // register-routes.ts: /sessions/:id/stop sets status + ready_for_prompt
       // (ready_for_prompt: true so the post-patch hook drains any QUEUED tasks)
@@ -1365,6 +1359,10 @@ describe('isPromptFlowPatchOnly', () => {
   });
 
   describe('rejects mixed or metadata patches', () => {
+    it('rejects archive state so callers use the dedicated lifecycle operation', () => {
+      expect(isPromptFlowPatchOnly({ archived: false, archived_reason: undefined })).toBe(false);
+    });
+
     it('rejects a patch that mixes whitelist + metadata field', () => {
       // Prevents partial-trust escalation: if `tasks` is allowed at session-tier,
       // a caller must NOT be able to piggyback `name` (metadata) onto the same patch.

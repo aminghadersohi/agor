@@ -43,6 +43,8 @@ import type {
   MCPCatalogConnectResult,
   MCPCatalogEntry,
   MCPCatalogReadiness,
+  MCPCatalogStartSessionData,
+  MCPCatalogStartSessionResult,
   MCPMarketplaceOverview,
   MCPMarketplaceRemoveServerData,
   MCPMarketplaceRemoveServerResult,
@@ -282,6 +284,7 @@ export interface ServiceTypes {
   'mcp-catalog': MCPCatalogEntry;
   'mcp-catalog/readiness': MCPCatalogReadiness;
   'mcp-catalog/connect': MCPCatalogConnectResult;
+  'mcp-catalog/start-session': MCPCatalogStartSessionResult;
   'mcp-marketplace': MCPMarketplaceOverview;
   'mcp-marketplace/remove-unattached': MCPMarketplaceRemoveServerResult;
   'mcp-marketplace/tool-permission': MCPMarketplaceToolPermissionResult;
@@ -450,11 +453,16 @@ export interface OpenCodeModelsService {
 /**
  * Marketplace connect command endpoint.
  *
- * Create-only: it installs one catalog entry and returns the session that can
- * use it. There is nothing to read back, so it exposes no find/get.
+ * Create-only: it installs one catalog entry for the caller. There is nothing
+ * to read back, so it exposes no find/get.
  */
 export interface MCPCatalogConnectService {
   create(data: MCPCatalogConnectData, params?: Params): Promise<MCPCatalogConnectResult>;
+}
+
+/** Create-only next step that starts a session with an added Catalog server. */
+export interface MCPCatalogStartSessionService {
+  create(data: MCPCatalogStartSessionData, params?: Params): Promise<MCPCatalogStartSessionResult>;
 }
 
 /**
@@ -787,16 +795,18 @@ export interface BranchesService extends AgorService<Branch> {
    */
   archiveOrDelete(
     id: string,
-    options: {
-      metadataAction: 'archive' | 'delete';
-      filesystemAction: 'preserved' | 'cleaned' | 'deleted';
-    },
+    options: import('../types').BranchArchiveOrDeleteOptions,
     params?: Params
   ): Promise<Branch | { deleted: true; branch_id: string }>;
 
   /**
    * Unarchive a branch
    */
+  clean(
+    input: { branchId: import('../types').BranchID },
+    params?: Params
+  ): Promise<import('../types').BranchCleanAccepted>;
+
   unarchive(id: string, options?: { boardId?: string }, params?: Params): Promise<Branch>;
 }
 
@@ -856,6 +866,7 @@ export interface AgorClient
   service(path: 'mcp-catalog'): AgorService<MCPCatalogEntry>;
   service(path: 'mcp-catalog/readiness'): AgorService<MCPCatalogReadiness>;
   service(path: 'mcp-catalog/connect'): MCPCatalogConnectService;
+  service(path: 'mcp-catalog/start-session'): MCPCatalogStartSessionService;
   service(path: 'mcp-marketplace'): MCPMarketplaceService;
   service(path: 'mcp-marketplace/remove-unattached'): MCPMarketplaceRemoveServerService;
   service(path: 'mcp-marketplace/tool-permission'): MCPMarketplaceToolPermissionService;
@@ -1333,7 +1344,7 @@ function extendBranchesService(client: AgorClient): void {
   };
   if (branchesService[BRANCHES_SERVICE_EXTENDED]) return;
   if (typeof branchesService.methods === 'function') {
-    branchesService.methods('updateEnvironment', 'ensureTeammateKnowledgeNamespace');
+    branchesService.methods('updateEnvironment', 'ensureTeammateKnowledgeNamespace', 'clean');
   }
   branchesService[BRANCHES_SERVICE_EXTENDED] = true;
 }

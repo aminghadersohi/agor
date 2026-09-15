@@ -2,12 +2,12 @@ import { readFileSync } from 'node:fs';
 import type { AgorConfig } from '@agor/core/config';
 import {
   createTenantScopedDatabaseProxy,
+  type Database,
   getCurrentTenantDatabaseScope,
   getCurrentTenantId,
   RepoRepository,
   runWithTenantContext,
   runWithTenantDatabaseScope,
-  type TenantScopeAwareDatabase,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
 import type { McpServer, ServerContext } from '@modelcontextprotocol/server';
@@ -38,13 +38,10 @@ beforeEach(() => {
 
 type Handler = (args: Record<string, unknown>, context: ServerContext) => Promise<unknown>;
 const args = { path: '/submitted/fixture', slug: 'local/scope-fixture' };
-const context = { signal: new AbortController().signal, request: { id: 1 } } as ServerContext;
+// This handler does not read the SDK request context.
+const context = {} as ServerContext;
 
-function fixture(
-  db: TenantScopeAwareDatabase,
-  tenantId: string | null = 'default',
-  hosted = false
-) {
+function fixture(db: Database, tenantId: string | null = 'default', hosted = false) {
   const guarded = createTenantScopedDatabaseProxy(db, { label: 'daemon database' });
   const config = {
     execution: { unix_user_mode: 'simple' },

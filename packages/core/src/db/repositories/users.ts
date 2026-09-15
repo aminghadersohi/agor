@@ -23,7 +23,7 @@ import { generateId, shortId } from '../../lib/ids';
 import { isValidExecutionHomeKey } from '../../types/user';
 import type { Database } from '../client';
 import { deleteFrom, insert, lockRowForUpdate, select, update } from '../database-wrapper';
-import { decryptApiKey, encryptApiKey } from '../encryption';
+import { decryptApiKeyAsync, encryptApiKey } from '../encryption';
 import { type UserInsert as SchemaUserInsert, type UserRow, users } from '../schema';
 import { isExecutionHomeKeyAvailable } from '../user-execution-home';
 import {
@@ -571,7 +571,11 @@ export class UsersRepository
   }
 
   /**
-   * Delete user by ID
+   * Delete user by ID. The grant consenter FK retires shared MCP OAuth grants
+   * alongside per-user grants. Do not acquire MCP config/grant locks here:
+   * persistence locks the consenting user before the token row, while this
+   * delete locks the user before FK cascades. Local retirement is not provider
+   * revocation, and a newer grant attributed to someone else is unaffected.
    */
   async delete(id: string): Promise<void> {
     const fullId = await this.resolveId(id);
@@ -620,7 +624,7 @@ export class UsersRepository
     for (const [field, encrypted] of Object.entries(fields)) {
       if (!encrypted) continue;
       try {
-        out[field] = decryptApiKey(encrypted);
+        out[field] = await decryptApiKeyAsync(encrypted);
       } catch (error) {
         console.error(
           `[users] Failed to decrypt ${tool}.${field} for user ${shortId(userId)}: ${
@@ -652,7 +656,7 @@ export class UsersRepository
     if (!encrypted) return null;
 
     try {
-      return decryptApiKey(encrypted);
+      return await decryptApiKeyAsync(encrypted);
     } catch (error) {
       console.error(
         `[users] Failed to decrypt ${tool}.${field} for user ${shortId(userId)}: ${

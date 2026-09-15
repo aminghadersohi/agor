@@ -26,10 +26,12 @@ import { readCollapsedBranchNode } from '../../utils/collapsedBranchNodes';
 import {
   REACT_FLOW_DRAG_HANDLE_CLASS,
   REACT_FLOW_NO_DRAG_CLASS,
+  REACT_FLOW_NO_WHEEL_CLASS,
 } from '../../utils/reactFlowDragClasses';
 import { ensureColorVisible, isDarkTheme } from '../../utils/theme';
 import { ArchiveActionButton } from '../ArchiveButton';
 import { ArchiveDeleteBranchModal } from '../ArchiveDeleteBranchModal';
+import { BranchWorkspaceStatus } from '../BranchWorkspaceStatus';
 import { EnvironmentPill } from '../EnvironmentPill';
 import { MarkdownPreview } from '../MarkdownRenderer';
 import { CreatedByTag } from '../metadata';
@@ -111,6 +113,38 @@ const BranchCardComponent = ({
   const connectionDisabled = useConnectionDisabled();
 
   const branchBoardId = (branch as { board_id?: string | null }).board_id;
+  const cardRef = React.useRef<HTMLDivElement>(null);
+  const sessionSectionsRef = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const card = cardRef.current;
+    if (!card || inPopover || panelMode) return;
+
+    const onWheel = (event: WheelEvent) => {
+      if (!(event.target instanceof Element)) return;
+      const scrollArea = event.target.closest(`.${REACT_FLOW_NO_WHEEL_CLASS}`);
+      const renderer = card.closest('.react-flow__renderer');
+      if (!scrollArea || !card.contains(scrollArea) || !renderer) return;
+
+      // Session lists belong to the canvas gesture surface, even when virtual.
+      // Expanded descriptions/peeks retain ordinary scrolling only if they overflow.
+      const isSessionList = sessionSectionsRef.current?.contains(scrollArea);
+      const overflows =
+        scrollArea.scrollHeight > scrollArea.clientHeight ||
+        scrollArea.scrollWidth > scrollArea.clientWidth;
+      if (!event.ctrlKey && !event.metaKey && !isSessionList && overflows) return;
+
+      // Removing nowheel alone is insufficient: the virtual list still consumes
+      // wheel. Capture first, then let React Flow own pan/zoom and anchoring.
+      event.preventDefault();
+      event.stopPropagation();
+      renderer.dispatchEvent(new WheelEvent(event.type, event));
+    };
+
+    // React's delegated wheel listeners are passive; cancellation must be native.
+    card.addEventListener('wheel', onWheel, { capture: true, passive: false });
+    return () => card.removeEventListener('wheel', onWheel, { capture: true });
+  }, [inPopover, panelMode]);
 
   // Canvas cards hydrate their session sections in chunks after the board
   // shell commits (#1768); panel/popover surfaces render a single card, so
@@ -209,7 +243,8 @@ const BranchCardComponent = ({
 
   // Check if branch is still being created on filesystem
   const isCreating = branch.filesystem_status === 'creating';
-  const isFailed = branch.filesystem_status === 'failed';
+  const isFailed =
+    branch.filesystem_status === 'failed' || branch.deletion_status === 'deletion_failed';
 
   // Check if this branch is a persisted agent
   const teammateConfig = useMemo(() => getTeammateConfig(branch), [branch]);
@@ -314,6 +349,7 @@ const BranchCardComponent = ({
 
   return (
     <Card
+      ref={cardRef}
       style={{
         width: panelMode ? '100%' : peekedSessions.length > 0 ? 880 : 500,
         cursor: 'default', // Override React Flow's drag cursor - only drag handles should show grab cursor
@@ -368,7 +404,7 @@ const BranchCardComponent = ({
                 flexShrink: 0,
               }}
             >
-              {isCreating || hasRunningSession ? (
+              {isCreating || branch.deletion_status === 'deleting' || hasRunningSession ? (
                 <Spin size="large" />
               ) : isAgent && teammateConfig?.emoji ? (
                 <span style={{ fontSize: 32 }}>{teammateConfig.emoji}</span>
@@ -484,7 +520,11 @@ const BranchCardComponent = ({
             )}
             {!inPopover && !panelMode && onArchiveOrDelete && (
               <ArchiveActionButton
-                tooltip="Archive or delete branch"
+                tooltip={
+                  branch.deletion_status
+                    ? 'View deletion status or retry'
+                    : 'Archive or delete branch'
+                }
                 disabled={connectionDisabled}
                 onClick={() => {
                   setArchiveDeleteModalMounted(true);
@@ -496,6 +536,16 @@ const BranchCardComponent = ({
         </Space>
       </div>
 
+      <BranchWorkspaceStatus branch={branch} />
+      {branch.deletion_status && (
+        <div
+          role="status"
+          style={{ color: isFailed ? token.colorError : token.colorTextSecondary, marginBottom: 8 }}
+        >
+          {branch.deletion_status === 'deletion_failed' ? 'Deletion failed' : 'Deleting…'}
+          {branch.deletion_error && <div>{branch.deletion_error}</div>}
+        </div>
+      )}
       {/* Branch metadata - all pills on one row with wrapping */}
       <div className={REACT_FLOW_NO_DRAG_CLASS} style={{ marginBottom: 8 }}>
         <Space size={4} wrap>
@@ -540,6 +590,7 @@ const BranchCardComponent = ({
 
       {/* Sessions & Scheduled Runs - composable content shared with the teammate panel */}
       <div
+        ref={sessionSectionsRef}
         className={REACT_FLOW_NO_DRAG_CLASS}
         style={sectionsReady ? undefined : { minHeight: sessionShellMinHeight }}
       >
@@ -586,6 +637,8 @@ const BranchCardComponent = ({
       {/* Branch cards are repeated across the canvas, so mount this only on demand. */}
       {archiveDeleteModalMounted && (
         <ArchiveDeleteBranchModal
+          client={client}
+          currentUser={currentUserId ? userById.get(currentUserId) : null}
           open={archiveDeleteModalOpen}
           branch={branch}
           sessionCount={sessions.length}
