@@ -69,6 +69,7 @@ vi.mock('../TaskBlock', () => ({
   TaskBlock: ({ task, isExpanded, onExpandChange, taskMessagesLoaded, simple }: any) => (
     <section
       data-testid={`task-${task.task_id}`}
+      data-task-block={task.task_id}
       data-expanded={String(isExpanded)}
       data-simple={String(Boolean(simple))}
     >
@@ -209,6 +210,24 @@ describe('ConversationView auto-scroll integration', () => {
       get: () => screen.queryAllByTestId(/^task-task-/).length * 100,
     });
     scroller.scrollTop = 200;
+    // jsdom has no layout. Model the same surviving task element's viewport
+    // geometry before and after prepending, as the real renderer exposes it.
+    const anchor = screen.getByTestId('task-task-26');
+    vi.spyOn(anchor, 'getBoundingClientRect').mockImplementation(() => {
+      const sections = screen.queryAllByTestId(/^task-task-/);
+      const top = sections.indexOf(anchor) * 100 - scroller.scrollTop;
+      return {
+        top,
+        bottom: top + 100,
+        left: 0,
+        right: 100,
+        width: 100,
+        height: 100,
+        x: 0,
+        y: top,
+        toJSON: () => ({}),
+      };
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Show 25 earlier tasks' }));
     expect(screen.getByTestId('task-task-1')).toBeInTheDocument();
     expect(scroller.scrollTop).toBe(2700);
