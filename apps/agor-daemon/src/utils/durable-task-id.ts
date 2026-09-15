@@ -74,7 +74,6 @@ export function completionCallbackBtwResultMessageId(
 ): MessageID {
   return stableTaskId(sourceTaskId, 'session_completion_btw_result', targetSessionId) as MessageID;
 }
-
 /** One durable auto-resume Task per widget message. */
 export function widgetAutoResumeTaskId(widgetId: MessageID): TaskID {
   return stableTaskId(widgetId, 'widget_auto_resume');
