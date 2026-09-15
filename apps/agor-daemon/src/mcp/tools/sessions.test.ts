@@ -31,7 +31,6 @@ const interruptMocks = vi.hoisted(() => ({
   previewAmendment: vi.fn(),
   applyAmendment: vi.fn(),
 }));
-
 vi.mock('../resolve-ids.js', () => ({
   resolveBoardId: async (_ctx: unknown, id: string) => id,
   resolveSessionId: async (_ctx: unknown, id: string) => id,

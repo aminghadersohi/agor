@@ -242,8 +242,8 @@ export class CompletionSubscriptionRepository {
     return this.get(current.subscription_id);
   }
 
-  async markRunningForTask(taskId: TaskID): Promise<void> {
-    await update(this.db, completionSubscriptions)
+  async markRunningForTask(taskId: TaskID): Promise<CompletionSubscription | null> {
+    const result = await update(this.db, completionSubscriptions)
       .set({ state: 'running_downstream', updated_at: new Date() })
       .where(
         and(
@@ -252,6 +252,8 @@ export class CompletionSubscriptionRepository {
         )
       )
       .run();
+    if (result.rowsAffected === 0) return null;
+    return this.findActiveForTask(taskId);
   }
 
   async markTerminalForTask(
@@ -291,10 +293,10 @@ export class CompletionSubscriptionRepository {
     id: CompletionSubscriptionID,
     expectedActiveTaskId: TaskID | null,
     completedAt = new Date()
-  ): Promise<void> {
+  ): Promise<CompletionSubscription | null> {
     const current = await this.get(id);
-    if (!ACTIVE_STATES.includes(current.state as (typeof ACTIVE_STATES)[number])) return;
-    if (current.active_task_id !== expectedActiveTaskId) return;
+    if (!ACTIVE_STATES.includes(current.state as (typeof ACTIVE_STATES)[number])) return null;
+    if (current.active_task_id !== expectedActiveTaskId) return null;
     const terminal = current.path.at(-1);
     if (!terminal) throw new RepositoryError('Completion subscription has no delegation path');
     const snapshot: CompletionTerminalSnapshot = {
@@ -305,7 +307,7 @@ export class CompletionSubscriptionRepository {
       completed_at: completedAt.toISOString(),
       reason: 'The designated downstream task or session was deleted before completion.',
     };
-    await update(this.db, completionSubscriptions)
+    const result = await update(this.db, completionSubscriptions)
       .set({
         state: 'terminal_pending',
         terminal_status: 'failed',
@@ -324,6 +326,8 @@ export class CompletionSubscriptionRepository {
         )
       )
       .run();
+    if (result.rowsAffected === 0) return null;
+    return this.get(id);
   }
 
   private async findByTerminalTask(taskId: TaskID): Promise<CompletionSubscription | null> {
@@ -423,8 +427,11 @@ export class CompletionSubscriptionRepository {
     }));
   }
 
-  async recordDelivered(id: CompletionSubscriptionID, deliveryTaskId: TaskID): Promise<void> {
-    await update(this.db, completionSubscriptions)
+  async recordDelivered(
+    id: CompletionSubscriptionID,
+    deliveryTaskId: TaskID
+  ): Promise<CompletionSubscription | null> {
+    const result = await update(this.db, completionSubscriptions)
       .set({
         state: 'delivered',
         delivery_task_id: deliveryTaskId,
@@ -440,6 +447,8 @@ export class CompletionSubscriptionRepository {
         )
       )
       .run();
+    if (result.rowsAffected === 0) return null;
+    return this.get(id);
   }
 
   async recordDeliveryFailure(

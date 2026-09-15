@@ -2110,7 +2110,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       return structuredResult(result as unknown as Record<string, unknown>);
     }
   );
-
   // Tool 6: agor_sessions_create
   server.registerTool(
     'agor_sessions_create',

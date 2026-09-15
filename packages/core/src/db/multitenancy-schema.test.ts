@@ -308,7 +308,6 @@ describe('Postgres multitenancy schema coverage', () => {
     expect(migration).toContain('DROP POLICY "session_auto_archive_migration_0100"');
     expect(migration).toContain("SELECT set_config('agor.system_scope', '', true)");
   });
-
   it('limits Knowledge embedding discovery to routing-only candidate rows', () => {
     const migration = readRepoFile(
       'packages/core/drizzle/postgres/0074_knowledge_embedding_claims.sql'

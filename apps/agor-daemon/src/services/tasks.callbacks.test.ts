@@ -540,7 +540,6 @@ describe('TasksService completion callbacks', () => {
       expect.objectContaining({ archived: true })
     );
   });
-
   it('includeOriginalPrompt=false queues one templated callback without an original prompt section', async () => {
     const { service, createPending } = makeService({
       childSession: {
