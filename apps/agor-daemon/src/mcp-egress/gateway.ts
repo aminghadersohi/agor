@@ -1300,6 +1300,11 @@ export class MCPEgressGateway {
     };
     let { requestHeaders: headers, secretHeaders: finalHeaders } =
       buildOutboundHeaders(credentials);
+    // A 401 does not prove the first credential was revoked. Retain reflection
+    // candidates from every attempt, including when the provider rotates it.
+    const secrets = new Set(
+      this.responseSecrets(admitted.unresolvedServer, admitted.server, admitted.env, finalHeaders)
+    );
     const requestId = randomUUID();
     const tracked: InFlight = {
       tenantId: claims.tid,
@@ -1342,21 +1347,23 @@ export class MCPEgressGateway {
         });
         ({ requestHeaders: headers, secretHeaders: finalHeaders } =
           buildOutboundHeaders(credentials));
+        for (const secret of this.responseSecrets(
+          admitted.unresolvedServer,
+          admitted.server,
+          admitted.env,
+          finalHeaders
+        ))
+          secrets.add(secret);
         response = await dispatch(headers);
       }
       const body = new Uint8Array(await response.arrayBuffer());
-      const secrets = this.responseSecrets(
-        admitted.unresolvedServer,
-        admitted.server,
-        admitted.env,
-        finalHeaders
-      );
-      const releasedBody = validateBufferedMCPResponse(response, body, secrets, input.body);
+      const responseSecrets = [...secrets];
+      const releasedBody = validateBufferedMCPResponse(response, body, responseSecrets, input.body);
       timer({ outcome: 'complete' });
       return {
         response: new Response(releasedBody, {
           status: response.status,
-          headers: publicResponseHeaders(response.headers, secrets),
+          headers: publicResponseHeaders(response.headers, responseSecrets),
         }),
         claims,
       };

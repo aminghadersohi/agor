@@ -5955,6 +5955,17 @@ export async function registerMCPServices(
               headers[serverId] = { authorization: `Bearer ${grant.oauth_access_token}` };
             } catch (error) {
               if (error instanceof OAuthRefreshAuthorityCancelledError) throw error;
+              if (error instanceof AmbiguousRefreshError) {
+                // Match manual refresh: durable quarantine cannot recover by
+                // replay, whereas a still-running observer can retry later.
+                const saved = await runInOAuthTenantScope(db, tenantId, () =>
+                  new UserMCPOAuthTokenRepository(db).getToken(tokenUserId, serverId as MCPServerID)
+                );
+                if (!saved || saved.refresh_status === 'ambiguous') {
+                  headers[serverId] = { error: 'needs_reauth' };
+                  return;
+                }
+              }
               headers[serverId] =
                 error instanceof MCPOAuthRefreshBusyError ||
                 error instanceof MCPClientCredentialsConfigurationError

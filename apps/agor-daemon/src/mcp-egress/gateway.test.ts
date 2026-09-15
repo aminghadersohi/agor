@@ -1010,6 +1010,60 @@ describe('authoritative MCP gateway real transport', () => {
     ]);
   });
 
+  it.each([
+    ['access-before-refresh', 'body'],
+    ['access-after-refresh', 'body'],
+    ['access-before-refresh', 'header'],
+    ['access-after-refresh', 'header'],
+  ] as const)(
+    'filters a retry response reflecting either attempt credential: %s in %s',
+    async (reflected, location) => {
+      let attempts = 0;
+      const url = await listen((_request, response) => {
+        attempts += 1;
+        response.writeHead(attempts === 1 ? 401 : 200, {
+          'content-type': 'application/json',
+          ...(location === 'header' ? { 'mcp-session-id': reflected } : {}),
+        });
+        response.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            result: location === 'body' ? reflected : 'safe',
+          })
+        );
+      });
+      const h = await harness({
+        server: {
+          transport: 'http',
+          url: `${url}/mcp`,
+          auth: { type: 'oauth', oauth_client_id: 'configured-client' },
+        },
+        oauthAccessToken: 'access-before-refresh',
+        oauthRefreshToken: 'refresh-token-never-exposed',
+        oauthAuthHeadersCreate: async (data) => ({
+          headers: {
+            [h.server.mcp_server_id]: {
+              authorization: data.force_refresh
+                ? 'Bearer access-after-refresh'
+                : 'Bearer access-before-refresh',
+            },
+          },
+        }),
+      });
+      if (location === 'body') {
+        await expect(h.request('POST', initialize)).rejects.toMatchObject({
+          code: 'credential_reflection_blocked',
+        });
+      } else {
+        const { response } = await h.request('POST', initialize);
+        expect(response.headers.has('mcp-session-id')).toBe(false);
+        expect(await response.text()).toContain('safe');
+      }
+      expect(attempts).toBe(2);
+    }
+  );
+
   it('returns the second OAuth 401 without refreshing or dispatching a third time', async () => {
     const authorizationHeaders: Array<string | undefined> = [];
     const url = await listen((request, response) => {

@@ -4062,6 +4062,38 @@ describe('SQLite saved-row OAuth authority', () => {
     }
   );
 
+  it.each(['per_user', 'shared'] as const)(
+    'auth headers require reauthorization for a quarantined %s grant without replay',
+    async (mode) => {
+      const provider = await createTestProvider({ gitlab: true });
+      providers.push(provider);
+      const harness = await createHarness(provider, mode);
+      databases.push(harness.rawDb);
+      await authorizeSavedServer(harness);
+      await update(harness.rawDb, userMcpOauthTokens)
+        .set({ refresh_status: 'ambiguous', oauth_token_expires_at: new Date(1) })
+        .where(eq(userMcpOauthTokens.mcp_server_id, harness.server.mcp_server_id))
+        .run();
+      const before = provider.requests.length;
+      const result = await harness.app
+        .service('mcp-servers/oauth-auth-headers')
+        .create(
+          { mcp_server_ids: [harness.server.mcp_server_id] },
+          { ...paramsFor(harness), provider: undefined }
+        );
+      expect(result.headers[harness.server.mcp_server_id]).toEqual({ error: 'needs_reauth' });
+      expect(provider.requests).toHaveLength(before);
+      expect(
+        (
+          await new UserMCPOAuthTokenRepository(harness.rawDb).getToken(
+            mode === 'shared' ? null : (harness.user.user_id as UserID),
+            harness.server.mcp_server_id as MCPServerID
+          )
+        )?.refresh_status
+      ).toBe('ambiguous');
+    }
+  );
+
   it('coalesces concurrent GitLab refreshes and quarantines a dispatch left by a dead SQLite daemon', async () => {
     const provider = await createTestProvider({ gitlab: true, holdRefresh: true });
     providers.push(provider);
