@@ -219,6 +219,7 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
     '9015_mcp_oauth_client_registrations',
     '9016_oauth_authority_watermark_reconciliation',
     '9017_fork_migration_collision_repair',
+    '0110_user_provider_oauth_grants',
   ].map(
     (name) =>
       [
