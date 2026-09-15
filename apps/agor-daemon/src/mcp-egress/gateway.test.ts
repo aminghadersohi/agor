@@ -1064,6 +1064,71 @@ describe('authoritative MCP gateway real transport', () => {
     }
   );
 
+  it.each([204, 205, 304].flatMap((status) => [false, true].map((retry) => ({ status, retry }))))(
+    'preserves null-body DELETE status $status (OAuth retry: $retry) and filters reflected headers',
+    async ({ status, retry }) => {
+      const received: Array<{
+        method: string | undefined;
+        body: string;
+        auth: string | undefined;
+      }> = [];
+      const url = await listen(async (request, response) => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) chunks.push(Buffer.from(chunk));
+        received.push({
+          method: request.method,
+          body: Buffer.concat(chunks).toString(),
+          auth: request.headers.authorization,
+        });
+        if (retry && received.length === 1) {
+          response.writeHead(401);
+          response.end();
+          return;
+        }
+        response.writeHead(status, {
+          'mcp-session-id': 'access-before-refresh',
+          'retry-after': retry ? 'access-after-refresh' : 'access-before-refresh',
+          'mcp-protocol-version': '2025-03-26',
+        });
+        response.end();
+      });
+      const refreshes: boolean[] = [];
+      const h = await harness({
+        server: {
+          transport: 'http',
+          url,
+          auth: { type: 'oauth', oauth_client_id: 'configured-client' },
+        },
+        oauthAccessToken: 'access-before-refresh',
+        oauthRefreshToken: 'refresh-token-never-exposed',
+        oauthAuthHeadersCreate: async (data) => {
+          refreshes.push(data.force_refresh === true);
+          return {
+            headers: {
+              [h.server.mcp_server_id]: {
+                authorization: data.force_refresh
+                  ? 'Bearer access-after-refresh'
+                  : 'Bearer access-before-refresh',
+              },
+            },
+          };
+        },
+      });
+      const { response } = await h.request('DELETE');
+      expect(response.status).toBe(status);
+      expect(response.body).toBeNull();
+      expect(await response.text()).toBe('');
+      expect(response.headers.has('mcp-session-id')).toBe(false);
+      expect(response.headers.has('retry-after')).toBe(false);
+      expect(response.headers.get('mcp-protocol-version')).toBe('2025-03-26');
+      expect(refreshes).toEqual(retry ? [false, true] : [false]);
+      expect(received).toEqual([
+        { method: 'DELETE', body: '', auth: 'Bearer access-before-refresh' },
+        ...(retry ? [{ method: 'DELETE', body: '', auth: 'Bearer access-after-refresh' }] : []),
+      ]);
+    }
+  );
+
   it('returns the second OAuth 401 without refreshing or dispatching a third time', async () => {
     const authorizationHeaders: Array<string | undefined> = [];
     const url = await listen((request, response) => {

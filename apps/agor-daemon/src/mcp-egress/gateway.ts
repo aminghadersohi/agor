@@ -1361,7 +1361,8 @@ export class MCPEgressGateway {
       const releasedBody = validateBufferedMCPResponse(response, body, responseSecrets, input.body);
       timer({ outcome: 'complete' });
       return {
-        response: new Response(releasedBody, {
+        // Fetch forbids even an empty byte array for null-body HTTP statuses.
+        response: new Response([204, 205, 304].includes(response.status) ? null : releasedBody, {
           status: response.status,
           headers: publicResponseHeaders(response.headers, responseSecrets),
         }),
