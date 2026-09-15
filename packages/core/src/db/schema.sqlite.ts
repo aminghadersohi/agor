@@ -14,13 +14,14 @@ import type {
   EffortLevel,
   Message,
   PermissionMode,
+  RepoCleanupPolicy,
   SandpackConfig,
   Session,
   Task,
   UserExternalIdentity,
   ZoneLayoutPolicy,
 } from '@agor/core/types';
-import { BRANCH_PERMISSION_LEVELS } from '@agor/core/types';
+import { BRANCH_PERMISSION_LEVELS, DEFAULT_REPO_CLEANUP_POLICY } from '@agor/core/types';
 import { relations, sql } from 'drizzle-orm';
 import {
   type AnySQLiteColumn,
@@ -643,6 +644,11 @@ export const repos = sqliteTable(
     // Retired nullable compatibility stamp retained for rollback/audit only.
     unix_group: text('unix_group'), // retired nullable compatibility stamp; runtime ignores it
 
+    cleanup_policy: t
+      .json<RepoCleanupPolicy>('cleanup_policy')
+      .notNull()
+      .default(DEFAULT_REPO_CLEANUP_POLICY),
+
     data: t
       .json<unknown>('data')
       .$type<{
@@ -721,6 +727,8 @@ export const branches = sqliteTable(
     created_at: t.timestamp('created_at').notNull(),
     updated_at: t.timestamp('updated_at'),
 
+    cleanup_protected: t.bool('cleanup_protected').notNull().default(false),
+
     // User attribution
     created_by: text('created_by', { length: 36 }).notNull(),
     primary_owner_user_id: text('primary_owner_user_id', { length: 36 }).notNull(),
@@ -767,6 +775,11 @@ export const branches = sqliteTable(
     archived: t.bool('archived').notNull().default(false),
     archived_at: t.timestamp('archived_at'),
     archived_by: text('archived_by', { length: 36 }),
+    // Permanent deletion retains this row and its authority through partial failure.
+    deletion_status: text('deletion_status', { enum: ['deleting', 'deletion_failed'] }),
+    deletion_error: text('deletion_error'),
+    deletion_updated_at: t.timestamp('deletion_updated_at'),
+
     filesystem_status: text('filesystem_status', {
       enum: ['creating', 'ready', 'failed', 'preserved', 'cleaned', 'deleted'],
     }),
@@ -822,6 +835,14 @@ export const branches = sqliteTable(
       .json<unknown>('data')
       .$type<{
         // File system
+        // Daemon-private shared maintenance authority. Never accept through generic patches.
+        maintenance?: import('../types/branch-deletion').BranchMaintenanceClaim;
+        maintenance_generation?: number;
+        workspace_snapshot?: import('../types/branch-cleanup').BranchWorkspaceSnapshot;
+        workspace_operation?: import('../types/branch-cleanup').BranchWorkspaceOperation;
+        cleanup_last_error?: import('../types/branch-cleanup').BranchWorkspaceError;
+        last_cleanup_succeeded_at?: string;
+        last_cleanup_operation_id?: import('../types/id').UUID;
         path: string; // Absolute path to branch directory
 
         // Git state (current)
@@ -854,6 +875,9 @@ export const branches = sqliteTable(
       .notNull(),
   },
   (table) => ({
+    deletionDiscoveryIdx: index('branches_deletion_discovery_idx')
+      .on(table.branch_id)
+      .where(sql`${table.deletion_status} = 'deleting'`),
     repoIdx: index('branches_repo_idx').on(table.repo_id),
     nameIdx: index('branches_name_idx').on(table.name),
     refIdx: index('branches_ref_idx').on(table.ref),
@@ -2018,10 +2042,46 @@ export const mcpOauthPendingFlows = sqliteTable(
  * Standalone SQLite deliberately keeps its existing process-local sign-in state;
  * this table is unused at runtime and exists for cross-dialect compatibility.
  */
+/** Deployment-bound personal provider grants; SQLite is an inert schema mirror. */
+export const userProviderOauthGrants = sqliteTable(
+  'user_provider_oauth_grants',
+  {
+    user_id: text('user_id', { length: 36 })
+      .notNull()
+      .references(() => users.user_id, { onDelete: 'cascade' }),
+    provider: text('provider', { enum: ['claude-code'] }).notNull(),
+    grant_generation: integer('grant_generation').notNull(),
+    binding_version: integer('binding_version').notNull(),
+    binding_fingerprint: text('binding_fingerprint').notNull(),
+    established_attempt_id: text('established_attempt_id').notNull(),
+    sealed_access_token: text('sealed_access_token'),
+    sealed_refresh_token: text('sealed_refresh_token'),
+    expires_at: t.timestamp('expires_at'),
+    scopes: text('scopes').notNull().default(''),
+    subscription_type: text('subscription_type'),
+    refresh_generation: integer('refresh_generation').notNull().default(0),
+    refresh_success_generation: integer('refresh_success_generation').notNull().default(0),
+    refresh_claim_id: text('refresh_claim_id'),
+    refresh_claimed_at: t.timestamp('refresh_claimed_at'),
+    state: text('state', {
+      enum: ['idle', 'refreshing', 'ambiguous', 'reauth_required', 'disconnected'],
+    })
+      .notNull()
+      .default('idle'),
+    failure_code: text('failure_code'),
+    retry_not_before: t.timestamp('retry_not_before'),
+    updated_at: t.timestamp('updated_at').notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.user_id, table.provider] }),
+  })
+);
+
 export const claudeOauthAttempts = sqliteTable(
   'claude_oauth_attempts',
   {
     attempt_id: text('attempt_id', { length: 36 }).primaryKey(),
+    submission_count: integer('submission_count').notNull().default(0),
     state_hash: text('state_hash', { length: 64 }).notNull(),
     user_id: text('user_id', { length: 36 })
       .notNull()

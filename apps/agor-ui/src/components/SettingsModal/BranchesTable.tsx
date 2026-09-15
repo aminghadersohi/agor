@@ -5,6 +5,7 @@ import type {
   BranchArchiveOrDeleteOptions,
   Repo,
   Session,
+  User,
 } from '@agor-live/client';
 import { isTeammate } from '@agor-live/client';
 import {
@@ -32,6 +33,7 @@ import { ResponsiveSettingsHeader } from './ResponsiveSettingsHeader';
 import { SettingsActionGroup } from './SettingsActionGroup';
 
 interface BranchesTableProps {
+  currentUser?: User | null;
   client: AgorClient | null;
   branchById: Map<string, Branch>;
   repoById: Map<string, Repo>;
@@ -65,6 +67,7 @@ interface BranchesTableProps {
 }
 
 export const BranchesTable: React.FC<BranchesTableProps> = ({
+  currentUser,
   client,
   branchById,
   repoById,
@@ -152,6 +155,26 @@ export const BranchesTable: React.FC<BranchesTableProps> = ({
       cancelled = true;
     };
   }, [archiveFilter, archivedLoaded, client]);
+
+  useEffect(() => {
+    if (!client) return;
+    const service = client.service('branches');
+    const patched = (branch: Branch) =>
+      setArchivedBranches((previous) => {
+        if (!previous.some((item) => item.branch_id === branch.branch_id)) return previous;
+        return previous.map((item) => (item.branch_id === branch.branch_id ? branch : item));
+      });
+    const removed = (branch: Branch) =>
+      setArchivedBranches((previous) =>
+        previous.filter((item) => item.branch_id !== branch.branch_id)
+      );
+    service.on('patched', patched);
+    service.on('removed', removed);
+    return () => {
+      service.off('patched', patched);
+      service.off('removed', removed);
+    };
+  }, [client]);
 
   // Validate form fields to enable/disable Create button
   const validateForm = useCallback(() => {
@@ -257,8 +280,16 @@ export const BranchesTable: React.FC<BranchesTableProps> = ({
       return;
     }
 
-    // Hard-delete should disappear from both active + archived local sets
-    setArchivedBranches((prev) => prev.filter((branch) => branch.branch_id !== branchId));
+    // Acceptance is not removal. Refresh this row while waiting for the
+    // authoritative patched/removed events (archived rows have a local cache).
+    const pending = await client
+      ?.service('branches')
+      .get(branchId)
+      .catch(() => undefined);
+    if (pending)
+      setArchivedBranches((prev) =>
+        prev.map((branch) => (branch.branch_id === branchId ? pending : branch))
+      );
   };
 
   const handleCreate = async () => {
@@ -326,6 +357,16 @@ export const BranchesTable: React.FC<BranchesTableProps> = ({
               >
                 <HighlightMatch text={name} query={searchTerm} />
               </Typography.Text>
+              {record.deletion_status && (
+                <Typography.Text
+                  type={record.deletion_status === 'deletion_failed' ? 'danger' : 'secondary'}
+                  title={record.deletion_error}
+                >
+                  {record.deletion_status === 'deletion_failed'
+                    ? 'Deletion failed — open deletion to retry'
+                    : 'Deleting…'}
+                </Typography.Text>
+              )}
               {!nameMatchesRef && (
                 <Typography.Text
                   code
@@ -348,6 +389,8 @@ export const BranchesTable: React.FC<BranchesTableProps> = ({
       align: 'center' as const,
       render: (_: unknown, record: Branch) => {
         const repo = repos.find((r: Repo) => r.repo_id === record.repo_id);
+        if (record.deletion_status)
+          return <Typography.Text type="secondary">Unavailable</Typography.Text>;
         return renderEnvCell(record, repo, token, { onStartEnvironment, onStopEnvironment });
       },
     },
@@ -641,6 +684,8 @@ export const BranchesTable: React.FC<BranchesTableProps> = ({
 
       {selectedBranch && (
         <ArchiveDeleteBranchModal
+          client={client}
+          currentUser={currentUser}
           open={archiveDeleteModalOpen}
           branch={selectedBranch}
           sessionCount={(sessionsByBranch.get(selectedBranch.branch_id) || []).length}

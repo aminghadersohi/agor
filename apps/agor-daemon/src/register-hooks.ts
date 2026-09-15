@@ -100,6 +100,8 @@ import type {
 import {
   assertPublicMCPOAuthCompatibilityMode,
   BOARD_LAYOUT_APPLIED_EVENT,
+  BRANCH_CLEANUP_REPORT_SERVICE,
+  BRANCH_DELETION_REPORT_SERVICE,
   ENVIRONMENT_COMMAND_REPORT_SERVICE,
   GATEWAY_CHANNEL_WRITE_FIELDS,
   GATEWAY_REDACTED_SENTINEL,
@@ -497,6 +499,8 @@ export const AUTHENTICATED_RBAC_SERVICE_PATHS = [
  * Register all FeathersJS service hooks.
  */
 export const TENANT_OWNED_SERVICE_PATHS = [
+  BRANCH_DELETION_REPORT_SERVICE,
+  BRANCH_CLEANUP_REPORT_SERVICE,
   ENVIRONMENT_COMMAND_REPORT_SERVICE,
   'sessions',
   'sessions/:id/mcp-servers',
@@ -668,7 +672,7 @@ export const CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES = [
   // Claude is admitted only when the resolved HA capability proves its durable
   // attempt authority plus exact-user generation-fenced writer route.
   ['claude-auth/oauth', 'claudeOAuth'],
-  ['claude-auth/logout', 'claudeAuth'],
+  // Claude logout enforces mode-aware cleanup internally, including unavailable backend grants.
   ['opencode-auth', 'openCodeAuth'],
   ['opencode-models', 'openCodeAuth'],
 ] as const satisfies ReadonlyArray<readonly [string, Parameters<typeof rejectInConstrainedHa>[1]]>;
@@ -1416,7 +1420,18 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       const service = safeService(path);
       if (!service) continue;
       service.hooks({
-        around: { all: [path === 'gateway' ? tenantIdentityAround : tenantDatabaseScopeAround] },
+        around: {
+          all: [
+            async (context: HookContext, next: () => Promise<void>) => {
+              const external =
+                path === 'gateway' ||
+                path === BRANCH_DELETION_REPORT_SERVICE ||
+                path === BRANCH_CLEANUP_REPORT_SERVICE ||
+                (path === 'branches' && context.method === 'clean');
+              return (external ? tenantIdentityAround : tenantDatabaseScopeAround)(context, next);
+            },
+          ],
+        },
         before: { all: [scopeTenantBefore, writeGateBefore] },
         after: { all: [assertTenantAfter] },
       });
@@ -2360,20 +2375,28 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       create: [invalidateRealtimeBranchFromResult],
       update: [invalidateRealtimeBranchFromResult, publishMarketplaceInvalidation],
       patch: [invalidateRealtimeBranchFromResult, publishMarketplaceInvalidation],
-      remove: [invalidateRealtimeBranchFromResult, publishMarketplaceInvalidation],
+      remove: [
+        invalidateRealtimeBranchFromResult,
+        publishMarketplaceInvalidation,
+        (context: HookContext) => {
+          if ((context.result as Branch | undefined)?.deletion_status) context.event = null;
+          return context;
+        },
+      ],
     },
   });
 
   type BranchCustomHookRegistrar = {
     hooks(options: {
       before: Record<
-        'updateEnvironment' | 'ensureTeammateKnowledgeNamespace',
+        'updateEnvironment' | 'ensureTeammateKnowledgeNamespace' | 'clean',
         Array<(context: HookContext) => HookContext>
       >;
     }): void;
   };
   (app.service('branches') as unknown as BranchCustomHookRegistrar).hooks({
     before: {
+      clean: [requireMinimumRole(ROLES.MEMBER, 'clean branches')],
       updateEnvironment: [requireMinimumRole(ROLES.MEMBER, 'update branch environments')],
       ensureTeammateKnowledgeNamespace: [
         requireMinimumRole(ROLES.MEMBER, 'create teammate knowledge namespaces'),
@@ -3076,8 +3099,8 @@ export function registerHooks(ctx: RegisterHooksContext): void {
           };
           if (!params[CODEX_AUTH_DEFER_USER_REALTIME]) return context;
 
-          // Codex HA completion/import/logout runs the users patch inside the
-          // same generation-fenced transaction as its credential mutation.
+          // Codex PostgreSQL completion/import/logout runs the users patch
+          // inside the same route-authority transaction as its credential mutation.
           // Suppress Feathers' pre-commit automatic event and enqueue one
           // redacted event that can be observed only after commit.
           context.event = null;
@@ -3121,6 +3144,8 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     before: { all: [requireAuth] },
   });
   safeService(ENVIRONMENT_COMMAND_REPORT_SERVICE)?.hooks({ before: { all: [requireAuth] } });
+  safeService(BRANCH_CLEANUP_REPORT_SERVICE)?.hooks({ before: { all: [requireAuth] } });
+  safeService(BRANCH_DELETION_REPORT_SERVICE)?.hooks({ before: { all: [requireAuth] } });
 
   // ============================================================================
   // Publish service events
