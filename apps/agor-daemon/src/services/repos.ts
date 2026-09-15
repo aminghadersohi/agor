@@ -25,6 +25,7 @@ import {
   resolveMultiTenancyConfig,
 } from '@agor/core/config';
 import {
+  BranchMaintenanceRepository,
   BranchRepository,
   generateId,
   getCurrentTenantId,
@@ -56,7 +57,12 @@ import type {
   UserRole,
   UUID,
 } from '@agor/core/types';
-import { hasMinimumRole, ROLES, TEAMMATE_FRAMEWORK_REPO_URL } from '@agor/core/types';
+import {
+  hasMinimumRole,
+  ROLES,
+  TEAMMATE_FRAMEWORK_REPO_URL,
+  validateRepoCleanupPolicy,
+} from '@agor/core/types';
 import { DrizzleService } from '../adapters/drizzle';
 import type { BranchesServiceImpl } from '../declarations.js';
 import { emitHaNativeSocketEvent, tenantChannelName } from '../realtime/routing.js';
@@ -69,6 +75,7 @@ import {
   getDaemonUrl,
   requestExecutor,
   spawnExecutorFireAndForget,
+  startContainedExecutorCommand,
 } from '../utils/spawn-executor.js';
 import { withFreshTenantWrite } from '../utils/tenant-db-scope.js';
 import { issueExecutorCommandToken } from './session-token-service.js';
@@ -182,6 +189,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     params?: RepoParams
   ): Promise<Repo | Repo[]> {
     const rows = Array.isArray(data) ? data : [data];
+    for (const row of rows) this.validateCleanupPolicyWrite(row, params);
     if (
       resolveMultiTenancyConfig(this.app.get('config')).mode === 'required_from_auth' &&
       rows.some((row) => row.repo_type === 'local')
@@ -198,6 +206,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     data: Partial<Repo>,
     params?: RepoParams
   ): Promise<Repo | Repo[]> {
+    this.validateCleanupPolicyWrite(data, params);
     if (
       data.repo_type === 'local' &&
       resolveMultiTenancyConfig(this.app.get('config')).mode === 'required_from_auth'
@@ -215,6 +224,28 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       }
     }
     return super.patch(id, data, params);
+  }
+
+  override async update(id: string, data: Partial<Repo>, params?: RepoParams): Promise<Repo> {
+    this.validateCleanupPolicyWrite(data, params);
+    return super.update(id, data, params);
+  }
+
+  private validateCleanupPolicyWrite(data: Partial<Repo>, params?: RepoParams): void {
+    if (!Object.hasOwn(data, 'cleanup_policy')) return;
+    // Executable repo configuration uses the existing admin boundary, even
+    // for direct in-process service callers. Branch management is insufficient.
+    const user = (params as AuthenticatedParams | undefined)?.user;
+    if (!user || !hasMinimumRole(user.role, ROLES.ADMIN)) {
+      throw new Forbidden('Admin access is required to configure repository workspace cleanup');
+    }
+    try {
+      data.cleanup_policy = validateRepoCleanupPolicy(data.cleanup_policy);
+    } catch {
+      throw new BadRequest(
+        'Invalid cleanup policy: supply boolean settings and a command of at most 4096 characters, nonempty when enabled, with no NUL'
+      );
+    }
   }
 
   /**
@@ -1465,29 +1496,63 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       this.app.get('config')
     );
 
-    return requestExecutor(
-      {
-        command,
-        sessionToken,
-        daemonUrl: getDaemonUrl(),
-        params: {
-          repoId: repo.repo_id,
-          branchId: branch.branch_id,
-          ...params,
-          cwd: branch.path,
-          principalBranchAccess: branchFsAccess,
-        },
+    const payload = {
+      command,
+      sessionToken,
+      daemonUrl: getDaemonUrl(),
+      params: {
+        repoId: repo.repo_id,
+        branchId: branch.branch_id,
+        ...params,
+        cwd: branch.path,
+        principalBranchAccess: branchFsAccess,
       },
-      {
-        logPrefix: `[${command} ${repo.slug}/${branch.name}]`,
-        delegatedHomeKey: delegatedHomeKey,
-        templateVariables: {
-          branch_id: branch.branch_id,
-          user_id: userId,
-          branch_fs_access: branchFsAccess,
-        },
-      }
+    };
+    const options = {
+      logPrefix: `[${command} ${repo.slug}/${branch.name}]`,
+      delegatedHomeKey: delegatedHomeKey,
+      templateVariables: {
+        branch_id: branch.branch_id,
+        user_id: userId,
+        branch_fs_access: branchFsAccess,
+      },
+    };
+    if (command !== 'branch.agor-yml.export') return requestExecutor(payload, options);
+    const tenantId = getCurrentTenantId();
+    if (!tenantId) throw new NotAuthenticated('Trusted tenant context is required');
+    const scoped = <T>(work: (repository: BranchMaintenanceRepository) => Promise<T>) =>
+      withFreshTenantWrite(this.db, tenantId, () => work(new BranchMaintenanceRepository(this.db)));
+    const admitted = await scoped((repository) =>
+      repository.claim(branch.branch_id, 'workspace_write', userId, async (tx) => {
+        const branches = new BranchRepository(tx);
+        const current = await branches.findById(branch.branch_id);
+        if (!current) throw new BadRequest('Branch no longer exists');
+        await ensureBranchWorkspaceAccess(
+          branches,
+          current,
+          userId,
+          (serviceParams as Partial<AuthenticatedParams> | undefined)?.user?.role as
+            | UserRole
+            | undefined,
+          'session',
+          'write',
+          this.app.get('config').execution?.allow_superadmin === true
+        );
+      })
     );
+    if (!admitted.acquired) throw new Error('Branch workspace maintenance is already in progress');
+    const invocation = await scoped((repository) => repository.beginExecution(admitted.claim));
+    // The existing contained request executor owns this short taskless write.
+    // Lost ownership never permits deletion to race an unknown writer.
+    const handle = startContainedExecutorCommand(payload, options);
+    const result = await handle.result;
+    if (!(await handle.verifyAbsence()))
+      throw new Error('Workspace write outcome requires containment reconciliation');
+    await scoped(async (repository) => {
+      await repository.settleExecution(admitted.claim, invocation);
+      await repository.release(admitted.claim);
+    });
+    return result;
   }
 
   /**
@@ -1696,6 +1761,10 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       return found;
     };
     const branches = await findRepoBranches(repo.repo_id as UUID);
+    if (branches.length)
+      throw new Error(
+        'Permanently delete this repository’s branches first and wait for completion before removing the repository.'
+      );
 
     console.log(
       `🗑️  Repo deletion: Found ${branches.length} branch(s) for repo ${repo.slug} (${repo.repo_id})`

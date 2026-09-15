@@ -54,14 +54,15 @@ describe('Postgres migrations', () => {
 
   it('marks the PostgreSQL-only ownership protocol as offline with a monotonic append', async () => {
     const [pg, sqlite] = await readJournals();
-    expect(pg.entries.at(-1)?.tag).toBe('9020_standalone_power_ownership');
+    const ownershipIndex = pg.entries.findIndex((e) => e.tag === '9020_standalone_power_ownership');
+    expect(ownershipIndex).toBeGreaterThan(0);
     expect(sqlite.entries.some((e) => e.tag === '9020_standalone_power_ownership')).toBe(false);
     // Historical journals contain legacy ordering repairs. Never rewrite them:
     // this append must exceed EVERY old watermark, not only its predecessor.
-    expect(pg.entries.at(-1)!.when).toBeGreaterThan(
-      Math.max(...pg.entries.slice(0, -1).map((e) => e.when))
+    expect(pg.entries[ownershipIndex]!.when).toBeGreaterThan(
+      Math.max(...pg.entries.slice(0, ownershipIndex).map((e) => e.when))
     );
-    expect(sqlite.entries.at(-1)?.tag).toBe('9015_mcp_slack_recovery_due');
+    expect(sqlite.entries.some((e) => e.tag === '9015_mcp_slack_recovery_due')).toBe(true);
     expect(
       pendingOfflineCutoverMigrations('postgresql', {
         applied: ['9019_mcp_slack_recovery_due'],
@@ -75,6 +76,16 @@ describe('Postgres migrations', () => {
     expect(migration).not.toMatch(/CREATE TABLE|ALTER TABLE|DROP TABLE/);
   });
 
+  it('keeps branch-local deletion pending after the previously published ledger migration', async () => {
+    // Development environments may already have applied the earlier PR revision.
+    // Drizzle uses timestamps, not tags or hashes, to decide what to apply.
+    const publishedLedgerTimestamp = 1789344000000;
+    for (const journal of await readJournals()) {
+      const entry = journal.entries.find(({ tag }) => tag === '0107_branch_permanent_deletion');
+      expect(entry).toBeDefined();
+      expect(entry!.when).toBeGreaterThan(publishedLedgerTimestamp);
+    }
+  });
   it('starts the Discord hybrid migration with its transaction-local lock timeout', async () => {
     const migration = await readFile(
       new URL('../../drizzle/postgres/0094_discord_gateway_hybrid.sql', import.meta.url),
@@ -312,13 +323,28 @@ describe('Postgres migrations', () => {
       // Once this integration lineage enters its private band, every later
       // entry stays there. An upstream journal append with a low idx must fail
       // here and be renumbered during the merge instead of colliding silently.
-      expect(entries.slice(bandStart).map((entry) => entry.idx)).toEqual(
-        entries.slice(bandStart).map((_, offset) => INTEGRATION_MIGRATION_BAND_START + offset)
+      const historicalBand = entries.slice(bandStart).filter((entry) => entry.idx < 9021);
+      expect(historicalBand.map((entry) => entry.idx)).toEqual(
+        historicalBand.map((_, offset) => INTEGRATION_MIGRATION_BAND_START + offset)
       );
+      // SQLite has fewer historical authority migrations. Align only the new
+      // append across dialects; never fill that gap by inventing applied SQL.
+      expect(entries.filter((entry) => entry.idx >= 9021).map((entry) => entry.idx)).toEqual([
+        9021, 9022, 9023, 9024,
+      ]);
 
       for (const [position, entry] of entries.entries()) {
         if (position >= bandStart) {
-          expect(entry.tag.startsWith(`${String(entry.idx).padStart(4, '0')}_`)).toBe(true);
+          // Newly integrated upstream SQL retains its canonical name and bytes.
+          // Only the journal index moves into our reserved authoring band.
+          const upstreamAppends: Record<number, string> = {
+            9021: '0105_mcp_oauth_grant_attribution',
+            9022: '0107_branch_permanent_deletion',
+            9023: '0108_branch_deletion_recovery',
+            9024: '0109_branch_cleanup_policy',
+          };
+          if (upstreamAppends[entry.idx]) expect(entry.tag).toBe(upstreamAppends[entry.idx]);
+          else expect(entry.tag.startsWith(`${String(entry.idx).padStart(4, '0')}_`)).toBe(true);
         }
         if (position > 0) expect(entry.idx).toBeGreaterThan(entries[position - 1]?.idx ?? -1);
       }
@@ -1130,7 +1156,7 @@ describe('MCP OAuth client-registration migrations', () => {
 
   it('follows current main and binds PostgreSQL authority to tenant/server UUID with forced RLS', async () => {
     const [postgresJournal] = await readJournals();
-    expect(postgresJournal.entries.slice(-8)).toEqual([
+    expect(postgresJournal.entries.filter(({ idx }) => idx >= 9013 && idx <= 9020)).toEqual([
       expect.objectContaining({ idx: 9013, tag: '9013_session_power_priority' }),
       expect.objectContaining({ idx: 9014, tag: '9014_environment_command_discovery' }),
       expect.objectContaining({ idx: 9015, tag: '9015_mcp_oauth_client_registrations' }),

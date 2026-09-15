@@ -14,6 +14,7 @@ import type {
   EffortLevel,
   Message,
   PermissionMode,
+  RepoCleanupPolicy,
   SandpackConfig,
   Session,
   SessionReminder,
@@ -21,7 +22,7 @@ import type {
   UserExternalIdentity,
   ZoneLayoutPolicy,
 } from '@agor/core/types';
-import { BRANCH_PERMISSION_LEVELS } from '@agor/core/types';
+import { BRANCH_PERMISSION_LEVELS, DEFAULT_REPO_CLEANUP_POLICY } from '@agor/core/types';
 import { relations, sql } from 'drizzle-orm';
 import {
   type AnySQLiteColumn,
@@ -837,6 +838,11 @@ export const repos = sqliteTable(
     // Retired nullable compatibility stamp retained for rollback/audit only.
     unix_group: text('unix_group'), // retired nullable compatibility stamp; runtime ignores it
 
+    cleanup_policy: t
+      .json<RepoCleanupPolicy>('cleanup_policy')
+      .notNull()
+      .default(DEFAULT_REPO_CLEANUP_POLICY),
+
     data: t
       .json<unknown>('data')
       .$type<{
@@ -915,6 +921,8 @@ export const branches = sqliteTable(
     created_at: t.timestamp('created_at').notNull(),
     updated_at: t.timestamp('updated_at'),
 
+    cleanup_protected: t.bool('cleanup_protected').notNull().default(false),
+
     // User attribution
     created_by: text('created_by', { length: 36 }).notNull(),
     primary_owner_user_id: text('primary_owner_user_id', { length: 36 }).notNull(),
@@ -961,6 +969,11 @@ export const branches = sqliteTable(
     archived: t.bool('archived').notNull().default(false),
     archived_at: t.timestamp('archived_at'),
     archived_by: text('archived_by', { length: 36 }),
+    // Permanent deletion retains this row and its authority through partial failure.
+    deletion_status: text('deletion_status', { enum: ['deleting', 'deletion_failed'] }),
+    deletion_error: text('deletion_error'),
+    deletion_updated_at: t.timestamp('deletion_updated_at'),
+
     filesystem_status: text('filesystem_status', {
       enum: ['creating', 'ready', 'failed', 'preserved', 'cleaned', 'deleted'],
     }),
@@ -1016,6 +1029,14 @@ export const branches = sqliteTable(
       .json<unknown>('data')
       .$type<{
         // File system
+        // Daemon-private shared maintenance authority. Never accept through generic patches.
+        maintenance?: import('../types/branch-deletion').BranchMaintenanceClaim;
+        maintenance_generation?: number;
+        workspace_snapshot?: import('../types/branch-cleanup').BranchWorkspaceSnapshot;
+        workspace_operation?: import('../types/branch-cleanup').BranchWorkspaceOperation;
+        cleanup_last_error?: import('../types/branch-cleanup').BranchWorkspaceError;
+        last_cleanup_succeeded_at?: string;
+        last_cleanup_operation_id?: import('../types/id').UUID;
         path: string; // Absolute path to branch directory
 
         // Git state (current)
@@ -1052,6 +1073,9 @@ export const branches = sqliteTable(
       .notNull(),
   },
   (table) => ({
+    deletionDiscoveryIdx: index('branches_deletion_discovery_idx')
+      .on(table.branch_id)
+      .where(sql`${table.deletion_status} = 'deleting'`),
     repoIdx: index('branches_repo_idx').on(table.repo_id),
     nameIdx: index('branches_name_idx').on(table.name),
     refIdx: index('branches_ref_idx').on(table.ref),
@@ -2188,6 +2212,11 @@ export const userMcpOauthTokens = sqliteTable(
     mcp_server_id: text('mcp_server_id', { length: 36 })
       .notNull()
       .references(() => mcpServers.mcp_server_id, { onDelete: 'cascade' }),
+    // Trusted flow/caller attribution, independent of the shared NULL subject
+    // and server ownership. Hard deletion retires the local grant via CASCADE.
+    granted_by_user_id: text('granted_by_user_id', { length: 36 })
+      .notNull()
+      .references(() => users.user_id, { onDelete: 'cascade' }),
     oauth_access_token: text('oauth_access_token').notNull(),
     oauth_token_expires_at: t.timestamp('oauth_token_expires_at'), // Unix timestamp in milliseconds
     oauth_refresh_token: text('oauth_refresh_token'),
@@ -2213,6 +2242,11 @@ export const userMcpOauthTokens = sqliteTable(
     updated_at: t.timestamp('updated_at'),
   },
   (table) => ({
+    consenterSubjectCheck: check(
+      'user_mcp_oauth_tokens_consenter_subject_check',
+      sql`${table.user_id} IS NULL OR ${table.user_id} = ${table.granted_by_user_id}`
+    ),
+    grantedByIdx: index('user_mcp_oauth_tokens_granted_by_idx').on(table.granted_by_user_id),
     // Composite lookup indexes. Uniqueness enforced via partial unique indexes
     // created in the migration (one for per-user rows, one for the shared row).
     pk: index('user_mcp_oauth_tokens_pk').on(table.user_id, table.mcp_server_id),

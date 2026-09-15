@@ -60,6 +60,7 @@ import {
   sql,
 } from 'drizzle-orm';
 import { generateId, shortId } from '../../lib/ids';
+import { lockSessionBranchForAdmission } from '../branch-admission';
 import type { Database } from '../client';
 import {
   deleteFrom,
@@ -805,6 +806,15 @@ export interface TaskRuntimeDiscoveryOptions {
   after?: TaskRuntimeDiscoveryCursor;
   /** Deterministic test clock. PostgreSQL uses database time when omitted. */
   now?: Date;
+  /**
+   * Stranded-termination discovery only: leave a STOPPING templated row whose
+   * executor has neither connected nor reported quiescence out of the scan
+   * until this long after dispatch (database time). Such a stop is pending,
+   * not stranded, during the remote startup window; local rows and rows with
+   * durable quiescence evidence stay discoverable so crash recovery is not
+   * delayed.
+   */
+  unconnectedGraceMs?: number;
 }
 
 export interface TaskFindPageOptions {
@@ -858,7 +868,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           if (!row) throw new EntityNotFoundError('Task', id);
           return mutation(txDb, row, fullId);
         },
-        { sqliteImmediate: true }
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
       )
     );
   }
@@ -878,7 +888,8 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       taskRow: TaskRow,
       sessionRow: SessionRow,
       fullId: string
-    ) => Promise<T>
+    ) => Promise<T>,
+    admission = false
   ): Promise<T> {
     const fullId = await this.resolveId(id);
     const routing = await select(this.db, { session_id: tasks.session_id })
@@ -891,6 +902,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       runDatabaseTransaction(
         this.db,
         async (txDb) => {
+          if (admission) await lockSessionBranchForAdmission(txDb, routing.session_id);
           await lockRowForUpdate(
             txDb,
             this.db,
@@ -911,7 +923,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           }
           return mutation(txDb, taskRow, sessionRow, fullId);
         },
-        { sqliteImmediate: true }
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
       )
     );
   }
@@ -1084,7 +1096,14 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
   async create(data: Partial<Task>): Promise<Task> {
     try {
       const insertData = this.taskToInsert(data);
-      await insert(this.db, tasks).values(insertData).run();
+      await runDatabaseTransaction(
+        this.db,
+        async (tx) => {
+          await lockSessionBranchForAdmission(tx, insertData.session_id);
+          await insert(tx, tasks).values(insertData).run();
+        },
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
+      );
 
       const row = await select(this.db)
         .from(tasks)
@@ -1474,6 +1493,20 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
     }
   }
 
+  /** `data.executor_mode` is absent for local executors; only 'templated' waits for a remote pod. */
+  private executorModeIsNotTemplated() {
+    return isSQLiteDatabase(this.db)
+      ? sql`coalesce(json_extract(${tasks.data}, '$.executor_mode'), 'local') <> 'templated'`
+      : sql`coalesce(${tasks.data}->>'executor_mode', 'local') <> 'templated'`;
+  }
+
+  /** A fenced executor quiescence report is durable proof that must not wait for the startup deadline. */
+  private executorQuiescenceRecorded() {
+    return isSQLiteDatabase(this.db)
+      ? sql`json_extract(${tasks.data}, '$.termination_request.executor_quiesced_at') IS NOT NULL`
+      : sql`${tasks.data}->'termination_request'->>'executor_quiesced_at' IS NOT NULL`;
+  }
+
   private runtimeDiscoveryColumns() {
     const tenantColumn = (tasks as unknown as { tenant_id?: unknown }).tenant_id;
     return {
@@ -1649,6 +1682,15 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
             isNull(tasks.termination_coordination_expires_at),
             lte(tasks.termination_coordination_expires_at, this.databaseNow(options.now))
           ),
+          options.unconnectedGraceMs !== undefined
+            ? or(
+                isNotNull(tasks.executor_connected_at),
+                this.executorModeIsNotTemplated(),
+                this.executorQuiescenceRecorded(),
+                isNull(tasks.started_at),
+                lte(tasks.started_at, this.databaseCutoff(options.unconnectedGraceMs, options.now))
+              )
+            : undefined,
           after
         )
       )
@@ -2524,7 +2566,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
             .one();
           return this.rowToTask(updated);
         },
-        { sqliteImmediate: true }
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
       )
     );
   }
@@ -2566,7 +2608,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
             .one();
           return { task: this.rowToTask(updated), changed: true };
         },
-        { sqliteImmediate: true }
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
       )
     );
   }
@@ -2641,7 +2683,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
             .one();
           return { task: this.rowToTask(updated), outcome: 'claimed' as const };
         },
-        { sqliteImmediate: true }
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
       )
     );
   }
@@ -2691,7 +2733,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
             claim.fingerprint === input.fingerprint;
           return { task, outcome: current ? ('current' as const) : ('stale' as const) };
         },
-        { sqliteImmediate: true }
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
       )
     );
   }
@@ -2770,7 +2812,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
             .one();
           return { task: this.rowToTask(updated), outcome: 'bound' as const };
         },
-        { sqliteImmediate: true }
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
       )
     );
   }
@@ -2860,7 +2902,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
             .one();
           return { task: this.rowToTask(updated), outcome: 'settled' as const };
         },
-        { sqliteImmediate: true }
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
       )
     );
   }
@@ -2907,7 +2949,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
             .one();
           return this.rowToTask(updated);
         },
-        { sqliteImmediate: true }
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
       )
     );
   }
@@ -3832,7 +3874,14 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
 
     if (input.status === TaskStatus.CREATED) {
       const insertData = this.taskToInsert(taskBase);
-      await insert(this.db, tasks).values(insertData).onConflictDoNothing().run();
+      await runDatabaseTransaction(
+        this.db,
+        async (tx) => {
+          await lockSessionBranchForAdmission(tx, insertData.session_id);
+          await insert(tx, tasks).values(insertData).onConflictDoNothing().run();
+        },
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
+      );
       const row = await select(this.db).from(tasks).where(eq(tasks.task_id, input.task_id!)).one();
       if (!row) throw new RepositoryError('Failed to retrieve idempotent pending task');
       const existing = this.rowToTask(row);
@@ -3854,6 +3903,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       runDatabaseTransaction(
         this.db,
         async (txDb) => {
+          await lockSessionBranchForAdmission(txDb, input.session_id);
           await lockRowForUpdate(
             txDb,
             this.db,
@@ -4016,7 +4066,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           if (!row) throw new RepositoryError('Failed to retrieve created queued task');
           return this.rowToTask(row);
         },
-        { sqliteImmediate: true }
+        { sqliteImmediate: true, sqliteBusyRetries: 9 }
       )
     );
   }
@@ -4035,200 +4085,208 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
     expectedStatus: TaskPendingDispatchStatus,
     updates: Partial<Task>
   ): Promise<TaskDispatchClaimResult> {
-    return this.mutateLockedSessionTask(id, async (txDb, currentRow, sessionRow, fullId) => {
-      const current = this.rowToTask(currentRow);
-      if (current.status !== expectedStatus) {
-        return {
-          outcome:
-            current.status === TaskStatus.DISPATCHING || current.status === TaskStatus.RUNNING
-              ? 'already_claimed'
-              : 'condition_changed',
-          task: current,
-        };
-      }
-      if (updates.status !== TaskStatus.DISPATCHING) {
-        throw new RepositoryError('Dispatch claim must transition to dispatching');
-      }
+    return this.mutateLockedSessionTask(
+      id,
+      async (txDb, currentRow, sessionRow, fullId) => {
+        const current = this.rowToTask(currentRow);
+        if (current.status !== expectedStatus) {
+          return {
+            outcome:
+              current.status === TaskStatus.DISPATCHING || current.status === TaskStatus.RUNNING
+                ? 'already_claimed'
+                : 'condition_changed',
+            task: current,
+          };
+        }
+        if (updates.status !== TaskStatus.DISPATCHING) {
+          throw new RepositoryError('Dispatch claim must transition to dispatching');
+        }
 
-      // A queue claimant may only take the durable head. An explicit CREATED
-      // task may not jump an existing prompt queue. Both checks run under the
-      // same Session lock that serializes enqueue position assignment.
-      const queuedHead = await select(txDb, { task_id: tasks.task_id })
-        .from(tasks)
-        .where(and(eq(tasks.session_id, current.session_id), eq(tasks.status, TaskStatus.QUEUED)))
-        .orderBy(asc(tasks.queue_position), asc(tasks.created_at), asc(tasks.task_id))
-        .limit(1)
-        .one();
-      if (
-        (expectedStatus === TaskStatus.QUEUED && queuedHead?.task_id !== fullId) ||
-        (expectedStatus === TaskStatus.CREATED && queuedHead != null)
-      ) {
-        return { outcome: 'condition_changed', task: current };
-      }
-
-      const actor = await select(txDb, { user_id: users.user_id })
-        .from(users)
-        .where(eq(users.user_id, current.created_by))
-        .one();
-      if (!actor) {
-        return {
-          outcome: 'actor_missing',
-          task: await this.terminalizeMissingDispatchActor(txDb, current, fullId),
-        };
-      }
-
-      const competingExecution = await select(txDb, { task_id: tasks.task_id })
-        .from(tasks)
-        .where(
-          and(
-            eq(tasks.session_id, current.session_id),
-            ne(tasks.task_id, fullId),
-            inArray(tasks.status, [...EXECUTING_TASK_STATUSES])
-          )
-        )
-        .limit(1)
-        .one();
-      if (
-        competingExecution ||
-        !sessionCanStartTask(sessionRow.status, sessionRow.ready_for_prompt)
-      ) {
-        return { outcome: 'condition_changed', task: current };
-      }
-
-      const requestedStartedAt = updates.started_at ? new Date(updates.started_at) : undefined;
-      const dispatchAt = await this.mutationNow(
-        txDb,
-        fullId,
-        // Standalone SQLite retains injected/process time for deterministic
-        // compatibility. PostgreSQL launch deadlines use the database clock.
-        isSQLiteDatabase(this.db) ? requestedStartedAt : undefined
-      );
-
-      let dispatchTask = current;
-      const coalescedTasks: Task[] = [];
-      if (
-        expectedStatus === TaskStatus.QUEUED &&
-        sessionRow.data.queue_config?.coalesce_system_updates === true
-      ) {
-        // Session admission/dispatch paths share the Session lock. Locking the
-        // queued Task rows as well prevents an administrator delete from
-        // racing the exact prefix that is about to become one model turn.
-        await lockRowForUpdate(
-          txDb,
-          this.db,
-          tasks,
-          and(eq(tasks.session_id, current.session_id), eq(tasks.status, TaskStatus.QUEUED))!
-        );
-        const maximum = resolvedMaxCoalescedUpdates(
-          sessionRow.data.queue_config.max_coalesced_updates
-        );
-        const queuedRows = await select(txDb)
+        // A queue claimant may only take the durable head. An explicit CREATED
+        // task may not jump an existing prompt queue. Both checks run under the
+        // same Session lock that serializes enqueue position assignment.
+        const queuedHead = await select(txDb, { task_id: tasks.task_id })
           .from(tasks)
           .where(and(eq(tasks.session_id, current.session_id), eq(tasks.status, TaskStatus.QUEUED)))
           .orderBy(asc(tasks.queue_position), asc(tasks.created_at), asc(tasks.task_id))
-          .limit(maximum)
-          .all();
-        const batch = compatibleCoalescedPrefix(
-          queuedRows.map((row: TaskRow) => this.rowToTask(row)),
-          maximum
+          .limit(1)
+          .one();
+        if (
+          (expectedStatus === TaskStatus.QUEUED && queuedHead?.task_id !== fullId) ||
+          (expectedStatus === TaskStatus.CREATED && queuedHead != null)
+        ) {
+          return { outcome: 'condition_changed', task: current };
+        }
+
+        const actor = await select(txDb, { user_id: users.user_id })
+          .from(users)
+          .where(eq(users.user_id, current.created_by))
+          .one();
+        if (!actor) {
+          return {
+            outcome: 'actor_missing',
+            task: await this.terminalizeMissingDispatchActor(txDb, current, fullId),
+          };
+        }
+
+        const competingExecution = await select(txDb, { task_id: tasks.task_id })
+          .from(tasks)
+          .where(
+            and(
+              eq(tasks.session_id, current.session_id),
+              ne(tasks.task_id, fullId),
+              inArray(tasks.status, [...EXECUTING_TASK_STATUSES])
+            )
+          )
+          .limit(1)
+          .one();
+        if (
+          competingExecution ||
+          !sessionCanStartTask(sessionRow.status, sessionRow.ready_for_prompt)
+        ) {
+          return { outcome: 'condition_changed', task: current };
+        }
+
+        const requestedStartedAt = updates.started_at ? new Date(updates.started_at) : undefined;
+        const dispatchAt = await this.mutationNow(
+          txDb,
+          fullId,
+          // Standalone SQLite retains injected/process time for deterministic
+          // compatibility. PostgreSQL launch deadlines use the database clock.
+          isSQLiteDatabase(this.db) ? requestedStartedAt : undefined
         );
 
-        if (batch.length > 1 && batch[0]?.task_id === current.task_id) {
-          const followers = batch.slice(1);
-          const sourceKinds = new Set(batch.map((item) => item.metadata?.queue_coalescing?.kind));
-          const containsGatewayUpdate = sourceKinds.has('gateway');
-          const allCallbacks = sourceKinds.size === 1 && sourceKinds.has('callback');
-          dispatchTask = {
-            ...current,
-            full_prompt: renderCoalescedSystemUpdatePrompt(batch),
-            metadata: {
-              ...current.metadata,
-              ...(containsGatewayUpdate ? { source: 'gateway' as const } : {}),
-              ...(allCallbacks ? { is_agor_callback: true } : { is_agor_callback: false }),
-              queue_coalescing: {
-                ...current.metadata!.queue_coalescing!,
-                item_count: batch.length,
-                coalesced_task_ids: followers.map((item) => item.task_id),
-              },
-            },
-          };
+        let dispatchTask = current;
+        const coalescedTasks: Task[] = [];
+        if (
+          expectedStatus === TaskStatus.QUEUED &&
+          sessionRow.data.queue_config?.coalesce_system_updates === true
+        ) {
+          // Session admission/dispatch paths share the Session lock. Locking the
+          // queued Task rows as well prevents an administrator delete from
+          // racing the exact prefix that is about to become one model turn.
+          await lockRowForUpdate(
+            txDb,
+            this.db,
+            tasks,
+            and(eq(tasks.session_id, current.session_id), eq(tasks.status, TaskStatus.QUEUED))!
+          );
+          const maximum = resolvedMaxCoalescedUpdates(
+            sessionRow.data.queue_config.max_coalesced_updates
+          );
+          const queuedRows = await select(txDb)
+            .from(tasks)
+            .where(
+              and(eq(tasks.session_id, current.session_id), eq(tasks.status, TaskStatus.QUEUED))
+            )
+            .orderBy(asc(tasks.queue_position), asc(tasks.created_at), asc(tasks.task_id))
+            .limit(maximum)
+            .all();
+          const batch = compatibleCoalescedPrefix(
+            queuedRows.map((row: TaskRow) => this.rowToTask(row)),
+            maximum
+          );
 
-          for (const follower of followers) {
-            const coalesced: Task = {
-              ...follower,
-              status: TaskStatus.STOPPED,
-              queue_position: undefined,
-              completed_at: dispatchAt.toISOString(),
+          if (batch.length > 1 && batch[0]?.task_id === current.task_id) {
+            const followers = batch.slice(1);
+            const sourceKinds = new Set(batch.map((item) => item.metadata?.queue_coalescing?.kind));
+            const containsGatewayUpdate = sourceKinds.has('gateway');
+            const allCallbacks = sourceKinds.size === 1 && sourceKinds.has('callback');
+            dispatchTask = {
+              ...current,
+              full_prompt: renderCoalescedSystemUpdatePrompt(batch),
               metadata: {
-                ...follower.metadata,
+                ...current.metadata,
+                ...(containsGatewayUpdate ? { source: 'gateway' as const } : {}),
+                ...(allCallbacks ? { is_agor_callback: true } : { is_agor_callback: false }),
                 queue_coalescing: {
-                  ...follower.metadata!.queue_coalescing!,
-                  coalesced_into_task_id: current.task_id,
+                  ...current.metadata!.queue_coalescing!,
+                  item_count: batch.length,
+                  coalesced_task_ids: followers.map((item) => item.task_id),
                 },
               },
             };
-            const followerData = this.taskToInsert(coalesced);
-            await update(txDb, tasks)
-              .set({
-                status: followerData.status,
-                queue_position: followerData.queue_position,
-                completed_at: followerData.completed_at,
-                data: followerData.data,
-              })
-              .where(and(eq(tasks.task_id, follower.task_id), eq(tasks.status, TaskStatus.QUEUED)))
-              .run();
-            coalescedTasks.push(coalesced);
+
+            for (const follower of followers) {
+              const coalesced: Task = {
+                ...follower,
+                status: TaskStatus.STOPPED,
+                queue_position: undefined,
+                completed_at: dispatchAt.toISOString(),
+                metadata: {
+                  ...follower.metadata,
+                  queue_coalescing: {
+                    ...follower.metadata!.queue_coalescing!,
+                    coalesced_into_task_id: current.task_id,
+                  },
+                },
+              };
+              const followerData = this.taskToInsert(coalesced);
+              await update(txDb, tasks)
+                .set({
+                  status: followerData.status,
+                  queue_position: followerData.queue_position,
+                  completed_at: followerData.completed_at,
+                  data: followerData.data,
+                })
+                .where(
+                  and(eq(tasks.task_id, follower.task_id), eq(tasks.status, TaskStatus.QUEUED))
+                )
+                .run();
+              coalescedTasks.push(coalesced);
+            }
           }
         }
-      }
 
-      const merged: Task = {
-        ...deepMerge(dispatchTask, { ...updates, started_at: dispatchAt.toISOString() }),
-        task_id: current.task_id,
-        session_id: current.session_id,
-        created_by: current.created_by,
-        created_at: current.created_at,
-        // Queue ownership ends at the durable launch-intent transition.
-        queue_position: undefined,
-      };
-      const insertData = this.taskToInsert(merged);
-      await update(txDb, tasks)
-        .set({
-          status: insertData.status,
-          queue_position: insertData.queue_position,
-          started_at: insertData.started_at,
-          executor_connected_at: insertData.executor_connected_at,
-          completed_at: insertData.completed_at,
-          last_executor_heartbeat_at: insertData.last_executor_heartbeat_at,
-          data: insertData.data,
-        })
-        .where(eq(tasks.task_id, fullId))
-        .run();
+        const merged: Task = {
+          ...deepMerge(dispatchTask, { ...updates, started_at: dispatchAt.toISOString() }),
+          task_id: current.task_id,
+          session_id: current.session_id,
+          created_by: current.created_by,
+          created_at: current.created_at,
+          // Queue ownership ends at the durable launch-intent transition.
+          queue_position: undefined,
+        };
+        const insertData = this.taskToInsert(merged);
+        await update(txDb, tasks)
+          .set({
+            status: insertData.status,
+            queue_position: insertData.queue_position,
+            started_at: insertData.started_at,
+            executor_connected_at: insertData.executor_connected_at,
+            completed_at: insertData.completed_at,
+            last_executor_heartbeat_at: insertData.last_executor_heartbeat_at,
+            data: insertData.data,
+          })
+          .where(eq(tasks.task_id, fullId))
+          .run();
 
-      // The launch-intent transition and its Session projection are one
-      // durable state change. Keeping this write inside the task-claim
-      // transaction (independent of any request-scope policy) closes the kill
-      // point where a Task could be DISPATCHING while its Session remained
-      // IDLE and omitted the task from data.tasks. The Session row is already
-      // locked by mutateLockedSessionTask.
-      const sessionTasks = sessionRow.data.tasks.includes(current.task_id)
-        ? sessionRow.data.tasks
-        : [...sessionRow.data.tasks, current.task_id];
-      await update(txDb, sessions)
-        .set({
-          status: SessionStatus.RUNNING,
-          ready_for_prompt: false,
-          updated_at: dispatchAt,
-          data: { ...sessionRow.data, tasks: sessionTasks },
-        })
-        .where(eq(sessions.session_id, current.session_id))
-        .run();
-      return {
-        outcome: 'claimed',
-        task: merged,
-        ...(coalescedTasks.length > 0 ? { coalesced_tasks: coalescedTasks } : {}),
-      };
-    });
+        // The launch-intent transition and its Session projection are one
+        // durable state change. Keeping this write inside the task-claim
+        // transaction (independent of any request-scope policy) closes the kill
+        // point where a Task could be DISPATCHING while its Session remained
+        // IDLE and omitted the task from data.tasks. The Session row is already
+        // locked by mutateLockedSessionTask.
+        const sessionTasks = sessionRow.data.tasks.includes(current.task_id)
+          ? sessionRow.data.tasks
+          : [...sessionRow.data.tasks, current.task_id];
+        await update(txDb, sessions)
+          .set({
+            status: SessionStatus.RUNNING,
+            ready_for_prompt: false,
+            updated_at: dispatchAt,
+            data: { ...sessionRow.data, tasks: sessionTasks },
+          })
+          .where(eq(sessions.session_id, current.session_id))
+          .run();
+        return {
+          outcome: 'claimed',
+          task: merged,
+          ...(coalescedTasks.length > 0 ? { coalesced_tasks: coalescedTasks } : {}),
+        };
+      },
+      true
+    );
   }
 
   /**

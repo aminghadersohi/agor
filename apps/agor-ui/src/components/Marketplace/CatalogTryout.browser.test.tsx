@@ -164,6 +164,17 @@ describe('recovered Catalog tryout flow in Chromium', () => {
     );
     expect(drawer.queryByRole('combobox')).not.toBeInTheDocument();
     expect(api.candidates).not.toHaveBeenCalled();
+    const dialog = screen
+      .getByText('What this can access')
+      .closest<HTMLElement>('[role="dialog"]')!;
+    const wrapper = dialog.closest<HTMLElement>('.ant-drawer-content-wrapper')!;
+    // Native pointer input must wait for the shared drawer's slide-in motion.
+    await waitFor(() => {
+      expect(dialog.getBoundingClientRect().right).toBeCloseTo(window.innerWidth, 1);
+      expect(wrapper.getAnimations().some((animation) => animation.playState === 'running')).toBe(
+        false
+      );
+    });
     await drawer.findByText(
       'Catalog and saved connection data indicate no account is needed. Agor checks the endpoint when you connect.'
     );

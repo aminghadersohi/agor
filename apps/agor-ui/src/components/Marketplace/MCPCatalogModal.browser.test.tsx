@@ -46,6 +46,15 @@ describe('MCP Catalog real Chromium flows', () => {
     const trigger = screen.getByRole('button', { name: 'Open MCP Catalog' });
     // Header may horizontally overflow on phone; scroll the actual entry into view.
     trigger.scrollIntoView();
+    // Normalize inherited pointer/tooltip state before the keyboard flow:
+    // a hovered header tooltip can consume Escape instead of the modal.
+    // Start hovered to cover that race, then wait for the tooltip's exit motion.
+    await userEvent.hover(trigger);
+    await screen.findByRole('tooltip', { name: 'Open MCP Catalog' });
+    await userEvent.unhover(trigger);
+    await waitFor(() =>
+      expect(screen.queryByRole('tooltip', { name: 'Open MCP Catalog' })).not.toBeInTheDocument()
+    );
     act(() => trigger.focus());
     await userEvent.keyboard('{Enter}');
     const modal = await findCatalogModal();
@@ -113,6 +122,15 @@ describe('MCP Catalog real Chromium flows', () => {
     const card = await screen.findByRole('button', { name: 'Open DeepWiki' });
     await userEvent.click(card);
     const drawer = await screen.findByRole('dialog', { name: /DeepWiki/ });
+    const wrapper = drawer.closest('.ant-drawer-content-wrapper');
+    if (!wrapper) throw new Error('Drawer content wrapper not found');
+    // Let the real slide-in motion finish before interacting with the drawer.
+    await waitFor(() => {
+      expect(drawer.getBoundingClientRect().right).toBeCloseTo(window.innerWidth, 1);
+      expect(wrapper.getAnimations().some((animation) => animation.playState === 'running')).toBe(
+        false
+      );
+    });
     await waitFor(() => {
       expect(drawer).toBeVisible();
       const bounds = drawer.getBoundingClientRect();
@@ -131,7 +149,7 @@ describe('MCP Catalog real Chromium flows', () => {
     await waitFor(() => expect(connect).toBeEnabled());
     await userEvent.click(connect);
     await userEvent.click(await screen.findByRole('button', { name: 'Start new session' }));
-    const open = await screen.findByRole('button', { name: 'Start session', exact: true });
+    const open = await screen.findByRole('button', { name: /^Start session$/ });
     await waitFor(() => expect(open).toBeEnabled());
     await userEvent.click(open);
     await waitFor(() => expect(screen.getByTestId('route').textContent).toMatch(/^\/s\//));

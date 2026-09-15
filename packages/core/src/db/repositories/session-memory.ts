@@ -19,14 +19,9 @@ import {
 } from '@agor/core/types';
 import { and, asc, count, desc, eq, lte, or, sql } from 'drizzle-orm';
 import { generateId } from '../../lib/ids';
+import { lockSessionBranchForAdmission } from '../branch-admission';
 import type { Database } from '../client';
-import {
-  insert,
-  lockRowForUpdate,
-  runDatabaseTransaction,
-  select,
-  update,
-} from '../database-wrapper';
+import { insert, runDatabaseTransaction, select, update } from '../database-wrapper';
 import {
   type SessionMemoryInsert,
   type SessionMemoryRow,
@@ -121,7 +116,7 @@ export class SessionMemoryRepository {
     return runDatabaseTransaction(
       this.db,
       async (tx) => {
-        await lockRowForUpdate(tx, this.db, sessions, eq(sessions.session_id, input.session_id));
+        await lockSessionBranchForAdmission(tx, input.session_id);
         const parent = await select(tx)
           .from(sessions)
           .where(eq(sessions.session_id, input.session_id))
@@ -250,7 +245,7 @@ export class SessionReminderRepository {
     return runDatabaseTransaction(
       this.db,
       async (tx) => {
-        await lockRowForUpdate(tx, this.db, sessions, eq(sessions.session_id, input.session_id));
+        await lockSessionBranchForAdmission(tx, input.session_id);
         const parent = await select(tx)
           .from(sessions)
           .where(eq(sessions.session_id, input.session_id))
