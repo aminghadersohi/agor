@@ -1,3 +1,4 @@
+import { BranchCleanupStepsService } from './services/branch-cleanup-steps.js';
 /**
  * Service Registration
  *
@@ -123,6 +124,8 @@ import type {
 } from '@agor/core/types';
 import {
   assertPublicMCPOAuthCompatibilityMode,
+  BRANCH_CLEANUP_REPORT_SERVICE,
+  BRANCH_DELETION_REPORT_SERVICE,
   ENVIRONMENT_COMMAND_REPORT_SERVICE,
   hasMinimumRole,
   isMCPOAuthGrantBindingVersion,
@@ -179,9 +182,11 @@ import {
   ARTIFACTS_SERVICE_TRANSPORT_METHODS,
   createArtifactsService,
 } from './services/artifacts.js';
+import { createBoardBranchMover } from './services/board-branch-move.js';
 import { createBoardCommentsService } from './services/board-comments.js';
 import { createBoardObjectsService } from './services/board-objects.js';
 import { createBoardsService } from './services/boards.js';
+import { BranchDeletionStepsService } from './services/branch-deletion-steps.js';
 import { createBranchesService } from './services/branches.js';
 import { setupCapabilityPolicyServices } from './services/capability-policies.js';
 import { createCardTypesService } from './services/card-types.js';
@@ -622,9 +627,11 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
     },
     // biome-ignore lint/suspicious/noExplicitAny: feathers-swagger docs option not typed in FeathersJS
   } as any);
+  const branchesService = createBranchesService(db, app);
   app.use(
     '/boards',
     createBoardsService(db, {
+      moveBranch: createBoardBranchMover(app, branchesService),
       emitBoardObjectPatched: (boardObject, params) => {
         emitServiceEvent(app, {
           path: 'board-objects',
@@ -689,7 +696,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   // Branches, repos
   // ============================================================================
 
-  app.use('/branches', createBranchesService(db, app), {
+  app.use('/branches', branchesService, {
     methods: [
       'find',
       'get',
@@ -699,6 +706,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
       'remove',
       'updateEnvironment',
       'ensureTeammateKnowledgeNamespace',
+      'clean',
     ],
   });
 
@@ -1163,6 +1171,14 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
     methods: ['create'],
   });
   app.use(ENVIRONMENT_COMMAND_REPORT_SERVICE, new EnvironmentCommandReportsService(db, app), {
+    methods: ['create'],
+    events: [],
+  });
+  app.use(BRANCH_CLEANUP_REPORT_SERVICE, new BranchCleanupStepsService(db, app), {
+    methods: ['create'],
+    events: [],
+  });
+  app.use(BRANCH_DELETION_REPORT_SERVICE, new BranchDeletionStepsService(db, app), {
     methods: ['create'],
     events: [],
   });
