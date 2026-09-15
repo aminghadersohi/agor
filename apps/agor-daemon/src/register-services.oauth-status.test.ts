@@ -38,16 +38,17 @@ describe('register-services durable OAuth status authority', () => {
     );
   });
 
-  it('requires reauthentication for quarantined grants but keeps observation timeouts retryable', () => {
-    const needsReauthBlock = refreshBlock.slice(
-      refreshBlock.indexOf('err instanceof InvalidGrantError'),
-      refreshBlock.indexOf(
-        "return { success: false, error: 'needs_reauth' };",
-        refreshBlock.indexOf('err instanceof InvalidGrantError')
-      )
+  // An unresolved concurrent refresh is not evidence the grant was revoked —
+  // the auth-headers path already treats it as retryable (see the forced-
+  // refresh test above); this endpoint must not reauth-prompt for the same
+  // ambiguity.
+  it('distinguishes a quarantined grant from a retryable observer timeout', () => {
+    expect(refreshBlock).toMatch(
+      /err instanceof FailedRefreshError \|\| err instanceof AmbiguousRefreshError[\s\S]{0,160}error: 'token_refresh_failed'/
     );
-    expect(needsReauthBlock).toContain('AmbiguousRefreshError');
-    expect(needsReauthBlock).not.toContain('FailedRefreshError');
+    expect(refreshBlock).toMatch(
+      /err instanceof AmbiguousRefreshError[\s\S]*?saved.refresh_status === 'ambiguous'[\s\S]*?error: 'needs_reauth'/
+    );
   });
 
   it('supports a daemon-only forced refresh without treating transient failures as revocation', () => {
@@ -55,6 +56,10 @@ describe('register-services durable OAuth status authority', () => {
     expect(authHeadersBlock).toContain('data?.force_refresh === true');
     expect(authHeadersBlock).toContain('acquireMCPOAuthGrant({');
     expect(authHeadersBlock).toContain('forceRefresh,');
+    expect(authHeadersBlock).toMatch(/acquireMCPOAuthGrant\([\s\S]*?forceRefresh/);
+    expect(authHeadersBlock).toMatch(
+      /error instanceof FailedRefreshError[\s\S]*?error instanceof AmbiguousRefreshError[\s\S]*?error instanceof OAuthRefreshExchangeError[\s\S]*?error: 'token_refresh_failed'/
+    );
   });
 
   // A trusted session executor may read auth headers for its own in-scope

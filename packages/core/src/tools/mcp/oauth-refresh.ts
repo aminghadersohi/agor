@@ -44,13 +44,10 @@ export function oauthGrantCanAuthenticate(
   now = new Date()
 ): boolean {
   if (token.refresh_status === 'ambiguous') return false;
-  // An in-flight rotation cannot advertise the superseded access token.
-  // A durable renewable grant remains connected without hydrating its secret.
-  if (token.refresh_status === 'refreshing') {
-    return token.has_refresh_token ?? Boolean(token.oauth_refresh_token);
-  }
+  const hasRefreshToken = token.has_refresh_token ?? Boolean(token.oauth_refresh_token);
+  if (token.refresh_status === 'refreshing') return hasRefreshToken;
   if (!token.oauth_token_expires_at || token.oauth_token_expires_at > now) return true;
-  return token.has_refresh_token ?? Boolean(token.oauth_refresh_token);
+  return hasRefreshToken;
 }
 
 /**

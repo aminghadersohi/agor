@@ -34,6 +34,12 @@ import {
   socketioClient,
 } from '@agor/core/feathers';
 import { loadCatalog } from '@agor/core/mcp-catalog';
+import {
+  AmbiguousRefreshError,
+  FailedRefreshError,
+  InvalidGrantError,
+  OAuthRefreshExchangeError,
+} from '@agor/core/tools/mcp/oauth-refresh';
 import type {
   AuthenticatedParams,
   MCPCatalogEntry,
@@ -1756,6 +1762,46 @@ describe('real Feathers Socket.IO request authority', () => {
 });
 
 describe('SQLite saved-row OAuth authority', () => {
+  it.each([
+    [new FailedRefreshError(), 'token_refresh_failed'],
+    [new AmbiguousRefreshError(), 'token_refresh_failed'],
+    [new OAuthRefreshExchangeError('transport_ambiguous', true), 'token_refresh_failed'],
+    [new InvalidGrantError(), 'needs_reauth'],
+  ] as const)(
+    'preserves auth-header recovery for %s after centralized grant acquisition',
+    async (error, expected) => {
+      const provider = await createTestProvider();
+      providers.push(provider);
+      const harness = await createHarness(provider, 'per_user');
+      databases.push(harness.rawDb);
+      await authorizeSavedServer(harness);
+      const acquire = vi.spyOn(oauthUse, 'acquireMCPOAuthGrant').mockRejectedValueOnce(error);
+      try {
+        const result = await harness.app
+          .service('mcp-servers/oauth-auth-headers')
+          .create({ mcp_server_ids: [harness.server.mcp_server_id], force_refresh: true }, {
+            user: harness.user,
+            tenant: { tenant_id: 'default', source: 'static' },
+            authentication: { _isServiceAccount: true },
+          } as unknown as AuthenticatedParams);
+        expect(result).toEqual({
+          headers: { [harness.server.mcp_server_id]: { error: expected } },
+        });
+        expect(acquire).toHaveBeenCalledWith(
+          expect.objectContaining({
+            tenantId: 'default',
+            userId: harness.user.user_id,
+            mcpServerId: harness.server.mcp_server_id,
+            forceRefresh: true,
+          })
+        );
+        expect(provider.requests.filter((entry) => entry.path === '/token')).toHaveLength(1);
+      } finally {
+        acquire.mockRestore();
+      }
+    }
+  );
+
   it('forces one JIT refresh for a daemon-owned retry even before recorded expiry', async () => {
     const provider = await createTestProvider();
     providers.push(provider);
