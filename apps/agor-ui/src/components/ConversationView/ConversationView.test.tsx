@@ -189,6 +189,7 @@ describe('ConversationView auto-scroll integration', () => {
     render(<ConversationView client={null} sessionId={'session-1' as any} sessionModel="loaded" />);
 
     expect(mockScrollToBottom).toHaveBeenCalledTimes(1);
+    expect(mockScrollToBottom).toHaveBeenCalledWith({ animation: 'instant' });
   });
 
   it('bounds the initial mobile transcript and reveals older tasks on demand', () => {

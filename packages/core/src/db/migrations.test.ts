@@ -349,7 +349,7 @@ describe('Postgres migrations', () => {
       // SQLite has fewer historical authority migrations. Align only the new
       // append across dialects; never fill that gap by inventing applied SQL.
       expect(entries.filter((entry) => entry.idx >= 9021).map((entry) => entry.idx)).toEqual([
-        9021, 9022, 9023, 9024,
+        9021, 9022, 9023, 9024, 9025,
       ]);
 
       for (const [position, entry] of entries.entries()) {
@@ -361,6 +361,7 @@ describe('Postgres migrations', () => {
             9022: '0107_branch_permanent_deletion',
             9023: '0108_branch_deletion_recovery',
             9024: '0109_branch_cleanup_policy',
+            9025: '0110_user_provider_oauth_grants',
           };
           if (upstreamAppends[entry.idx]) expect(entry.tag).toBe(upstreamAppends[entry.idx]);
           else expect(entry.tag.startsWith(`${String(entry.idx).padStart(4, '0')}_`)).toBe(true);

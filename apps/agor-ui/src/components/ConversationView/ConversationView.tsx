@@ -309,14 +309,18 @@ export const ConversationView = React.memo<ConversationViewProps>(
         if (scrollRef.current) scrollRef.current.scrollTop = remembered.scrollTop;
         return;
       }
-      handleScrollToBottom();
+      // Initial/restored layout must settle before paint. The imperative
+      // button's default spring animation is not the initial-layout policy.
+      state.escapedFromLock = false;
+      scrollToBottom({ animation: 'instant' });
     }, [
-      handleScrollToBottom,
       hasContent,
       isActive,
       rememberScrollPosition,
       scrollRef,
+      scrollToBottom,
       sessionId,
+      state,
       stopScroll,
     ]);
 
