@@ -31,6 +31,7 @@ import {
 import { ensureColorVisible, isDarkTheme } from '../../utils/theme';
 import { ArchiveActionButton } from '../ArchiveButton';
 import { ArchiveDeleteBranchModal } from '../ArchiveDeleteBranchModal';
+import { BranchWorkspaceStatus } from '../BranchWorkspaceStatus';
 import { EnvironmentPill } from '../EnvironmentPill';
 import { MarkdownPreview } from '../MarkdownRenderer';
 import { CreatedByTag } from '../metadata';
@@ -242,7 +243,8 @@ const BranchCardComponent = ({
 
   // Check if branch is still being created on filesystem
   const isCreating = branch.filesystem_status === 'creating';
-  const isFailed = branch.filesystem_status === 'failed';
+  const isFailed =
+    branch.filesystem_status === 'failed' || branch.deletion_status === 'deletion_failed';
 
   // Check if this branch is a persisted agent
   const teammateConfig = useMemo(() => getTeammateConfig(branch), [branch]);
@@ -402,7 +404,7 @@ const BranchCardComponent = ({
                 flexShrink: 0,
               }}
             >
-              {isCreating || hasRunningSession ? (
+              {isCreating || branch.deletion_status === 'deleting' || hasRunningSession ? (
                 <Spin size="large" />
               ) : isAgent && teammateConfig?.emoji ? (
                 <span style={{ fontSize: 32 }}>{teammateConfig.emoji}</span>
@@ -518,7 +520,11 @@ const BranchCardComponent = ({
             )}
             {!inPopover && !panelMode && onArchiveOrDelete && (
               <ArchiveActionButton
-                tooltip="Archive or delete branch"
+                tooltip={
+                  branch.deletion_status
+                    ? 'View deletion status or retry'
+                    : 'Archive or delete branch'
+                }
                 disabled={connectionDisabled}
                 onClick={() => {
                   setArchiveDeleteModalMounted(true);
@@ -530,6 +536,16 @@ const BranchCardComponent = ({
         </Space>
       </div>
 
+      <BranchWorkspaceStatus branch={branch} />
+      {branch.deletion_status && (
+        <div
+          role="status"
+          style={{ color: isFailed ? token.colorError : token.colorTextSecondary, marginBottom: 8 }}
+        >
+          {branch.deletion_status === 'deletion_failed' ? 'Deletion failed' : 'Deleting…'}
+          {branch.deletion_error && <div>{branch.deletion_error}</div>}
+        </div>
+      )}
       {/* Branch metadata - all pills on one row with wrapping */}
       <div className={REACT_FLOW_NO_DRAG_CLASS} style={{ marginBottom: 8 }}>
         <Space size={4} wrap>
@@ -621,6 +637,8 @@ const BranchCardComponent = ({
       {/* Branch cards are repeated across the canvas, so mount this only on demand. */}
       {archiveDeleteModalMounted && (
         <ArchiveDeleteBranchModal
+          client={client}
+          currentUser={currentUserId ? userById.get(currentUserId) : null}
           open={archiveDeleteModalOpen}
           branch={branch}
           sessionCount={sessions.length}
