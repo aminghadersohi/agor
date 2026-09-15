@@ -1,3 +1,7 @@
+import {
+  BRANCH_WORKSPACE_SERVER_FIELDS,
+  projectBranchWorkspaceOperation,
+} from '../../types/branch-cleanup';
 /**
  * Branch Repository
  *
@@ -27,9 +31,9 @@ import {
 } from '../../types/branch';
 import { hasActiveEnvironmentCommand } from '../../types/environment-command';
 import { getBranchUrl } from '../../utils/url';
+import { admitTeammateKnowledgeReferences } from '../branch-reference-admission';
 import type { Database } from '../client';
 import {
-  deleteFrom,
   insert,
   isPostgresDatabase,
   jsonExtract,
@@ -42,6 +46,7 @@ import {
 import {
   type BranchInsert,
   type BranchRow,
+  boardObjects,
   branches,
   branchPermissionConfigs,
   branchPermissionEntries,
@@ -127,6 +132,12 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
    * resolve the branch but have nowhere to switch the canvas to.
    */
   private rowToBranch(row: BranchRow, baseUrl?: string): Branch {
+    const {
+      maintenance: _maintenance,
+      maintenance_generation: _maintenanceGeneration,
+      workspace_snapshot: _workspaceSnapshot,
+      ...publicData
+    } = row.data;
     const branchId = row.branch_id as BranchID;
     const url = baseUrl && row.board_id ? getBranchUrl(branchId, baseUrl) : null;
     return attachHiddenTenant(
@@ -166,7 +177,13 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
         clone_depth: row.clone_depth ?? undefined,
         // Per-branch SDK home intent (design §9.2)
         sdk_home: row.sdk_home ?? undefined,
-        ...row.data,
+        ...publicData,
+        workspace_operation: projectBranchWorkspaceOperation(publicData.workspace_operation),
+        // Authoritative columns cannot be overridden by historical JSON.
+        deletion_status: row.deletion_status ?? undefined,
+        deletion_error: row.deletion_error ?? undefined,
+        deletion_updated_at: row.deletion_updated_at?.toISOString(),
+        cleanup_protected: row.cleanup_protected ?? false,
         url,
       },
       row
@@ -199,6 +216,7 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
       repo_id: branch.repo_id!,
       created_at: branch.created_at ? new Date(branch.created_at) : new Date(now),
       updated_at: new Date(now),
+      cleanup_protected: branch.cleanup_protected ?? false,
       created_by: branch.created_by,
       primary_owner_user_id: branch.primary_owner_user_id ?? branch.created_by,
       name: branch.name!,
@@ -255,11 +273,14 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
    * Create a new branch
    */
   async create(branch: Partial<Branch>): Promise<Branch> {
+    if (BRANCH_WORKSPACE_SERVER_FIELDS.some((key) => Object.hasOwn(branch, key)))
+      throw new RepositoryError('Workspace operation state is server-managed');
     const insertData = this.branchToInsert(branch);
     try {
       const row = await runDatabaseTransaction(
         this.db,
         async (tx) => {
+          await admitTeammateKnowledgeReferences(tx, branch.custom_context);
           const owner = await select(tx, { user_id: users.user_id })
             .from(users)
             .where(eq(users.user_id, insertData.primary_owner_user_id))
@@ -439,6 +460,7 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
   async findPage(opts: {
     repo_id?: UUID;
     board_id?: BoardID;
+    zone_id?: string;
     archived?: boolean;
     branchIds?: BranchID[];
     visibleToUserId?: UUID;
@@ -451,6 +473,13 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
     const conditions: SQL[] = [];
     if (opts.repo_id) conditions.push(eq(branches.repo_id, opts.repo_id));
     if (opts.board_id) conditions.push(eq(branches.board_id, opts.board_id));
+    if (opts.zone_id) {
+      conditions.push(
+        sql`exists (select 1 from ${boardObjects}
+          where ${boardObjects.branch_id} = ${branches.branch_id}
+            and ${jsonExtract(this.db, boardObjects.data, 'zone_id')} = ${opts.zone_id})`
+      );
+    }
     if (opts.archived !== undefined) conditions.push(eq(branches.archived, opts.archived));
     if (opts.branchIds) conditions.push(inArray(branches.branch_id, opts.branchIds));
     if (opts.visibleToUserId) {
@@ -608,6 +637,8 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
       invalidateEnvironmentObservation?: boolean;
     }
   ): Promise<Branch> {
+    if (BRANCH_WORKSPACE_SERVER_FIELDS.some((key) => Object.hasOwn(updates, key)))
+      throw new RepositoryError('Workspace operation state is server-managed');
     if (Object.hasOwn(updates, 'primary_owner_user_id')) {
       throw new RepositoryError('Primary ownership is immutable');
     }
@@ -635,6 +666,7 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
 
     // Use transaction to make read-merge-write atomic
     return await this.db.transaction(async (tx) => {
+      await admitTeammateKnowledgeReferences(txAsDb(tx), updates.custom_context);
       // Acquire row-level lock on PostgreSQL to prevent lost updates
       await lockRowForUpdate(
         txAsDb(tx),
@@ -652,14 +684,22 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
       if (!currentRow) {
         throw new EntityNotFoundError('Branch', id);
       }
+      if (currentRow.deletion_status) {
+        throw new RepositoryError(
+          'Branch deletion is irreversible; normal edits and unarchive are disabled'
+        );
+      }
+      if (currentRow.data.maintenance) {
+        throw new RepositoryError('Branch maintenance is in progress; normal edits are disabled');
+      }
 
       if (
         Object.hasOwn(updates, 'board_id') &&
-        currentRow.board_id !== (updates.board_id ?? null) &&
+        !updates.board_id &&
         currentRow.permission_binding === 'inherit'
       ) {
         throw new RepositoryError(
-          'Switch this branch to an explicit permission override before moving it to another board.'
+          'An inherited branch must belong to a board. Choose a destination board.'
         );
       }
 
@@ -735,6 +775,13 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
       }
 
       const insertData = this.branchToInsert(merged);
+      insertData.data.maintenance = currentRow.data.maintenance;
+      insertData.data.maintenance_generation = currentRow.data.maintenance_generation;
+      insertData.data.workspace_snapshot = currentRow.data.workspace_snapshot;
+      insertData.data.workspace_operation = currentRow.data.workspace_operation;
+      insertData.data.cleanup_last_error = currentRow.data.cleanup_last_error;
+      insertData.data.last_cleanup_succeeded_at = currentRow.data.last_cleanup_succeeded_at;
+      insertData.data.last_cleanup_operation_id = currentRow.data.last_cleanup_operation_id;
       if (options?.preserveUpdatedAt) {
         insertData.updated_at = new Date(current.updated_at);
       }
@@ -810,18 +857,27 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
           throw new EntityNotFoundError('Branch', id);
         }
         const current = this.rowToBranch(currentRow, baseUrl);
-        if (current.archived || current.filesystem_status !== 'failed') {
+        if (
+          current.archived ||
+          currentRow.deletion_status ||
+          currentRow.data.maintenance ||
+          hasActiveEnvironmentCommand(current.environment_instance) ||
+          current.filesystem_status !== 'failed'
+        ) {
           // Lost the race (or never eligible) — do not write, do not re-dispatch.
           return { claimed: false, branch: current };
         }
-        const insertData = this.branchToInsert({
-          ...current,
+        const insertData = {
           filesystem_status: 'creating',
-          error_message: undefined,
-          provisioning_attempt_id: attemptId,
-          provisioning_operation:
-            current.provisioning_operation === 'restore' ? 'restore' : 'retry',
-        });
+          updated_at: new Date(),
+          data: {
+            ...currentRow.data,
+            error_message: undefined,
+            provisioning_attempt_id: attemptId,
+            provisioning_operation:
+              current.provisioning_operation === 'restore' ? 'restore' : 'retry',
+          },
+        };
         const row = await update(tx, branches)
           .set(insertData)
           .where(eq(branches.branch_id, current.branch_id))
@@ -875,7 +931,12 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
           throw new EntityNotFoundError('Branch', id);
         }
         const current = this.rowToBranch(currentRow, baseUrl);
-        if (current.filesystem_status !== 'creating') {
+        if (
+          current.archived ||
+          currentRow.deletion_status ||
+          currentRow.data.maintenance ||
+          current.filesystem_status !== 'creating'
+        ) {
           return { changed: false, branch: current };
         }
         if (
@@ -885,11 +946,11 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
           // A newer attempt owns `creating` now — this acknowledgement is stale.
           return { changed: false, branch: current };
         }
-        const insertData = this.branchToInsert({
-          ...current,
+        const insertData = {
           filesystem_status: 'failed',
-          error_message: message,
-        });
+          updated_at: new Date(),
+          data: { ...currentRow.data, error_message: message },
+        };
         const row = await update(tx, branches)
           .set(insertData)
           .where(eq(branches.branch_id, current.branch_id))
@@ -929,19 +990,27 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
         const generationMatches = expectedAttemptId
           ? current.provisioning_attempt_id === expectedAttemptId
           : current.provisioning_attempt_id === undefined;
-        if (current.archived || current.filesystem_status !== 'creating' || !generationMatches) {
+        if (
+          current.archived ||
+          currentRow.deletion_status ||
+          currentRow.data.maintenance ||
+          current.filesystem_status !== 'creating' ||
+          !generationMatches
+        ) {
           return { applied: false, branch: current };
         }
-        const merged = deepMerge(current, {
-          ...acknowledgement,
-          branch_id: current.branch_id,
-          repo_id: current.repo_id,
-          created_at: current.created_at,
-          updated_at: new Date().toISOString(),
-        });
-        if (acknowledgement.filesystem_status !== 'failed') delete merged.error_message;
         const row = await update(tx, branches)
-          .set(this.branchToInsert(merged))
+          .set({
+            filesystem_status: acknowledgement.filesystem_status,
+            updated_at: new Date(),
+            data: {
+              ...currentRow.data,
+              error_message:
+                acknowledgement.filesystem_status === 'failed'
+                  ? acknowledgement.error_message
+                  : undefined,
+            },
+          })
           .where(eq(branches.branch_id, current.branch_id))
           .returning()
           .one();
@@ -1022,7 +1091,9 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
             'Wait for the active environment command before deleting its branch'
           );
         }
-        await deleteFrom(tx, branches).where(eq(branches.branch_id, existing.branch_id)).run();
+        throw new RepositoryError(
+          'Metadata-only branch deletion is prohibited; use the permanent deletion lifecycle'
+        );
       },
       { sqliteImmediate: true }
     );

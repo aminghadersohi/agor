@@ -708,6 +708,55 @@
       "when": 1788728664645,
       "tag": "0101_environment_command_discovery",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1788728664646,
+      "tag": "0102_mcp_oauth_client_registrations",
+      "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1788728664647,
+      "tag": "0103_oauth_authority_watermark_reconciliation",
+      "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1788728664648,
+      "tag": "0104_mcp_slack_recovery_due",
+      "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1788940800000,
+      "tag": "0105_mcp_oauth_grant_attribution",
+      "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1789344000001,
+      "tag": "0107_branch_permanent_deletion",
+      "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1789344000002,
+      "tag": "0108_branch_deletion_recovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 108,
+      "version": "7",
+      "when": 1789344000003,
+      "tag": "0109_branch_cleanup_policy",
+      "breakpoints": true
     }
   ]
 }

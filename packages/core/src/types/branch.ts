@@ -1,4 +1,5 @@
 // src/types/branch.ts
+import type { BranchDeletionStatus } from './branch-deletion';
 import type { BoardID, BranchID, UUID } from './id';
 import type { KnowledgeNamespaceID, KnowledgeVisibility } from './knowledge';
 import type { BranchName } from './repo';
@@ -26,10 +27,9 @@ export function isBranchProvisioningOutcome(value: unknown): value is BranchProv
 }
 
 /** Canonical request contract for the hooked branch archive/delete boundary. */
-export interface BranchArchiveOrDeleteOptions {
-  metadataAction: BranchMetadataAction;
-  filesystemAction: BranchFilesystemAction;
-}
+export type BranchArchiveOrDeleteOptions =
+  | { metadataAction: 'archive'; filesystemAction: BranchFilesystemAction }
+  | { metadataAction: 'delete'; filesystemAction: 'deleted' };
 
 export function isBranchArchiveOrDeleteOptions(
   value: unknown
@@ -38,7 +38,8 @@ export function isBranchArchiveOrDeleteOptions(
   const options = value as Record<string, unknown>;
   return (
     BRANCH_METADATA_ACTIONS.some((candidate) => candidate === options.metadataAction) &&
-    BRANCH_FILESYSTEM_ACTIONS.some((candidate) => candidate === options.filesystemAction)
+    BRANCH_FILESYSTEM_ACTIONS.some((candidate) => candidate === options.filesystemAction) &&
+    (options.metadataAction !== 'delete' || options.filesystemAction === 'deleted')
   );
 }
 
@@ -74,6 +75,13 @@ export const BRANCH_ENVIRONMENT_SNAPSHOT_FIELDS = [
  * - Multiple sessions can work on the same branch over time
  */
 export interface Branch {
+  /** Stored preference; effective only when the repo allows branch protection. */
+  cleanup_protected?: boolean;
+  workspace_operation?: import('./branch-cleanup').BranchWorkspaceOperation;
+  cleanup_last_error?: import('./branch-cleanup').BranchWorkspaceError;
+  last_cleanup_succeeded_at?: string;
+  last_cleanup_operation_id?: UUID;
+
   // ===== Identity =====
 
   /** Unique branch identifier (UUIDv7) */
@@ -372,6 +380,12 @@ export interface Branch {
    */
   filesystem_status?: 'creating' | 'ready' | 'failed' | 'preserved' | 'cleaned' | 'deleted';
 
+  /** Set only by permanent deletion; remains fenced after partial failure. */
+  deletion_status?: BranchDeletionStatus;
+  /** Bounded, sanitized latest error; never used to decide recovery. */
+  deletion_error?: string;
+  deletion_updated_at?: string;
+
   /**
    * Error message when filesystem_status is 'failed'
    *
@@ -500,9 +514,9 @@ export type BranchFilesystemReadinessState = 'pending' | 'ready' | 'failed' | 'u
  * are terminal and unavailable.
  */
 export function classifyBranchFilesystemReadiness(
-  branch: Pick<Branch, 'archived' | 'filesystem_status'>
+  branch: Pick<Branch, 'archived' | 'filesystem_status' | 'deletion_status'>
 ): BranchFilesystemReadinessState {
-  if (branch.archived) return 'unavailable';
+  if (branch.archived || branch.deletion_status) return 'unavailable';
 
   switch (branch.filesystem_status) {
     case undefined:
