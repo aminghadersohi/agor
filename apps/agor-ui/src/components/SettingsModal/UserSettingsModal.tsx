@@ -1126,7 +1126,9 @@ const UserSettingsModalForIdentity: React.FC<UserSettingsModalProps> = ({
         tool === 'claude-code' ? agenticCredentialSources['claude-code'] : undefined;
       const authMethod =
         tool === 'claude-code'
-          ? claudeSource === 'managed_file' || claudeSource === 'subscription_token'
+          ? claudeSource === 'managed_file' ||
+            claudeSource === 'managed_oauth' ||
+            claudeSource === 'subscription_token'
             ? 'subscription'
             : claudeSource === 'api_key' || claudeSource === 'none'
               ? 'api_key'
@@ -1148,6 +1150,7 @@ const UserSettingsModalForIdentity: React.FC<UserSettingsModalProps> = ({
       const personalConfigured =
         tool === 'claude-code'
           ? claudeSource === 'managed_file' ||
+            claudeSource === 'managed_oauth' ||
             (claudeSource === 'subscription_token' && !!fieldStatus.CLAUDE_CODE_OAUTH_TOKEN) ||
             (claudeSource === 'api_key' &&
               (!!fieldStatus.ANTHROPIC_API_KEY || !!fieldStatus.ANTHROPIC_AUTH_TOKEN)) ||
@@ -2217,7 +2220,9 @@ const UserSettingsModalForIdentity: React.FC<UserSettingsModalProps> = ({
         </Typography.Paragraph>
       ) : null;
 
-    const nativeClaudeLogin = tool === 'claude-code' && claudeSource === 'managed_file';
+    const nativeClaudeLogin =
+      tool === 'claude-code' &&
+      (claudeSource === 'managed_file' || claudeSource === 'managed_oauth');
 
     const authPane = (
       <>
@@ -2287,6 +2292,7 @@ const UserSettingsModalForIdentity: React.FC<UserSettingsModalProps> = ({
             credentialSource={claudeSource}
             allowSubscriptionLogin={isSelf}
             allowOAuthSignIn={featuresConfig?.claudeSubscriptionOAuth === true}
+            oauthCapability={featuresConfig?.claudeOAuthCapability}
             apiKeyFields={allToolFields}
             fieldStatus={fieldStatus}
             onSaveField={(field, value) => handleToolFieldSave(tool, field, value)}
