@@ -1394,9 +1394,14 @@ describe('BranchesService one-shot teammate creation wiring', () => {
 describe('BranchesService.unarchive', () => {
   const userParams = { user: { user_id: 'user-1' as UUID, role: 'member' } } as never;
 
-  it.each([true, false])(
-    'publishes restore spawn failure only after an applied CAS (%s)',
-    async (applied) => {
+  it.each([
+    [true, 'spawn'],
+    [false, 'spawn'],
+    [true, 'missing-remote'],
+    [false, 'missing-remote'],
+  ] as const)(
+    'publishes restore failure only after an applied CAS (%s, %s)',
+    async (applied, failure) => {
       const { service, branchRepo, branchesService } = createServiceHarness();
       const branchId = 'restore-failure' as BranchID;
       const current = {
@@ -1405,6 +1410,7 @@ describe('BranchesService.unarchive', () => {
         name: 'Restore',
         path: '/tmp/restore',
         archived: true,
+        storage_mode: failure === 'missing-remote' ? 'clone' : 'worktree',
       };
       vi.spyOn(service, 'get').mockResolvedValue(current as never);
       vi.spyOn(service, 'patch').mockImplementation(
@@ -1422,7 +1428,15 @@ describe('BranchesService.unarchive', () => {
           filesystem_status: applied ? 'failed' : 'ready',
         } as never,
       });
+      vi.spyOn(branchRepo, 'enrichWithZoneInfo').mockImplementation(
+        async (branch) => branch as never
+      );
       await service.unarchive(branchId, undefined, userParams);
+      expect(branchRepo.acknowledgeProvisioningAttempt).toHaveBeenCalledWith(
+        branchId,
+        expect.objectContaining({ filesystem_status: 'failed' }),
+        expect.any(String)
+      );
       const failures = branchesService.emit.mock.calls.filter(
         (args) => args[1]?.filesystem_status === 'failed'
       );

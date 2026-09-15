@@ -2324,14 +2324,25 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
           `Cannot unarchive clone-mode branch '${branch.name}' for repo '${repo.slug}': ` +
           `repo has no remote_url. The clone source URL is unknown.`;
         console.error(`⚠️  ${errMsg}`);
-        await this.withTenantDatabase(params, () =>
-          this.patch(
+        const result = await this.withTenantDatabase(params, () =>
+          this.branchRepo.acknowledgeProvisioningAttempt(
             id,
             { filesystem_status: 'failed', error_message: errMsg },
-            { ...params, provider: undefined }
+            provisioningAttemptId
           )
         );
-        return unarchivedBranch;
+        if (result.applied) {
+          emitServiceEvent(this.app, {
+            path: 'branches',
+            event: 'patched',
+            data: result.branch,
+            params,
+            id: result.branch.branch_id,
+          });
+        }
+        return this.withTenantDatabase(params, () =>
+          this.branchRepo.enrichWithZoneInfo(result.branch)
+        );
       }
 
       try {
