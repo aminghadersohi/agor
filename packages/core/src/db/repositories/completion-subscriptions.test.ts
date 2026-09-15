@@ -345,10 +345,16 @@ describe('CompletionSubscriptionRepository', () => {
       expect(await subscriptions.get(created.subscription_id)).toMatchObject({
         origin_session_id: origin.session.session_id,
         origin_task_id: originTask.task_id,
+        root_session_id: null,
+        root_task_id: null,
+        active_session_id: null,
         active_task_id: null,
+        callback_session_id: origin.session.session_id,
         state: 'terminal_pending',
         terminal_status: 'failed',
       });
+      expect(await new SessionRepository(db).findById(origin.session.session_id)).not.toBeNull();
+      expect(await new TaskRepository(db).findById(originTask.task_id)).not.toBeNull();
     }
   );
 
