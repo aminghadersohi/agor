@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import type {
-  CompletionSubscriptionID,
   GatewayInboundEventID,
   MessageID,
   SessionID,
@@ -41,14 +40,6 @@ export function interruptCorrectionTaskId(
 /** One durable Task per source completion event and callback target. */
 export function completionCallbackTaskId(sourceTaskId: TaskID, targetSessionId: SessionID): TaskID {
   return stableTaskId(sourceTaskId, 'session_completion', targetSessionId);
-}
-
-/** One recipient-visible terminal callback per durable requested-work subscription. */
-export function propagatedCompletionCallbackTaskId(
-  subscriptionId: CompletionSubscriptionID,
-  targetSessionId: SessionID
-): TaskID {
-  return stableTaskId(subscriptionId, 'root_completion', targetSessionId);
 }
 
 /** One ephemeral digest Session per source completion event and standing destination. */

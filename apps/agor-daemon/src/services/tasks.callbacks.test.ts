@@ -10,7 +10,6 @@ const taskId = '018f0000-0000-7000-8000-000000000201';
 const callbackTaskId = '018f0000-0000-7000-8000-000000000301';
 const relationshipId = '018f0000-0000-7000-8000-000000000302';
 const userId = '018f0000-0000-7000-8000-000000000401';
-const completionSubscriptionId = '018f0000-0000-7000-8000-000000000501';
 const durableCallbackTaskId = completionCallbackTaskId(
   taskId as Task['task_id'],
   parentSessionId as Session['session_id']
@@ -463,33 +462,16 @@ describe('TasksService completion callbacks', () => {
     );
   });
 
-  it('does not report an intermediary as terminal to the root completion requester', async () => {
-    const { service, createPending, triggerQueueProcessing, childSession } = makeService();
-    const intermediaryTask = makeTask({
-      status: TaskStatus.COMPLETED,
-      completed_at: '2026-01-01T00:00:05.000Z',
-      metadata: {
-        completion_subscription_id: completionSubscriptionId,
-      },
-    });
-    (service as any).resolveRootCompletionRoute = vi
-      .fn()
-      .mockResolvedValue({ targetSessionId: parentSessionId });
-
-    await (service as any).dispatchCompletionCallbacks(intermediaryTask, childSession, {});
-
-    expect(createPending).not.toHaveBeenCalled();
-    expect(triggerQueueProcessing).not.toHaveBeenCalled();
-  });
-
-  it('preserves a direct intermediary callback while suppressing the premature root callback', async () => {
+  it('reports an intermediary completion to both its coordinator and its exact-task requester', async () => {
+    // One-hop composition: C completes -> B processes -> B completes -> A.
+    // Every hop reports its own completion; nothing suppresses an
+    // intermediary's callback on the theory that a descendant will report.
     const intermediarySessionId = '018f0000-0000-7000-8000-000000000778';
     const { service, createPending, childSession } = makeService();
     const terminalTask = makeTask({
       status: TaskStatus.COMPLETED,
       completed_at: '2026-01-01T00:00:05.000Z',
       metadata: {
-        completion_subscription_id: completionSubscriptionId,
         completion_callback: {
           target_session_id: intermediarySessionId as Task['session_id'],
           requested_from_session_id: intermediarySessionId as Task['session_id'],
@@ -497,17 +479,14 @@ describe('TasksService completion callbacks', () => {
         },
       },
     });
-    (service as any).resolveRootCompletionRoute = vi
-      .fn()
-      .mockResolvedValue({ targetSessionId: parentSessionId });
 
     await (service as any).dispatchCompletionCallbacks(terminalTask, childSession, {});
 
-    expect(createPending).toHaveBeenCalledTimes(1);
+    expect(createPending).toHaveBeenCalledTimes(2);
     expect(createPending).toHaveBeenCalledWith(
       expect.objectContaining({ session_id: intermediarySessionId })
     );
-    expect(createPending).not.toHaveBeenCalledWith(
+    expect(createPending).toHaveBeenCalledWith(
       expect.objectContaining({ session_id: parentSessionId })
     );
   });

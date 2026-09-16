@@ -41,7 +41,6 @@ import { clearTrackedExecutorGauge, containAllTrackedExecutors } from './executo
 import { type DaemonMetrics, getDaemonMetrics, NOOP_METRICS } from './metrics/index.js';
 import type { PowerPolicyController } from './power-management/index.js';
 import { BranchDeletionReconciler } from './services/branch-deletion-reconciler.js';
-import { CompletionSubscriptionWorker } from './services/completion-subscription-worker.js';
 import { DiscordMessageDeliveryWorker } from './services/discord-message-delivery-worker.js';
 import { DistributedHealthMonitor } from './services/distributed-health-monitor.js';
 import type { GatewayService } from './services/gateway.js';
@@ -956,16 +955,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
     });
   }
 
-  // 10. Reconcile durable transitive completion subscriptions and their
-  // deterministic callback outbox. This is independent from executor ownership.
-  const completionSubscriptionWorker = new CompletionSubscriptionWorker(db, app, {
-    tenantId:
-      startupMultiTenancy.mode === 'static' ? startupMultiTenancy.static_tenant_id : undefined,
-  });
-  app.set('completionSubscriptionWorker', completionSubscriptionWorker);
-  completionSubscriptionWorker.start();
-
-  // 11. Start final Discord delivery independently from listener ownership and
+  // 10. Start final Discord delivery independently from listener ownership and
   // inbound Task processing. Claims and provider effects are recoverable across
   // daemon replicas; this loop is deliberately a separate lifecycle.
   const discordMessageDeliveryWorker = new DiscordMessageDeliveryWorker(db, {
@@ -976,7 +966,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
   discordMessageDeliveryWorker.start();
   console.log('📨 Discord message delivery worker started');
 
-  // 12. Graceful shutdown handler
+  // 11. Graceful shutdown handler
   let shutdownStarted = false;
   const shutdown = async (signal: string) => {
     if (shutdownStarted) return;
@@ -1032,9 +1022,6 @@ export async function startup(ctx: StartupContext): Promise<void> {
         console.log('🖥️  Cleaning up terminal sessions...');
         terminalsService.cleanup();
       }
-
-      // Stop gateway listeners
-      completionSubscriptionWorker.stop();
 
       console.log('📨 Stopping discord message delivery worker...');
       await discordMessageDeliveryWorker.stop();

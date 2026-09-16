@@ -841,6 +841,13 @@
       "when": 1789344000004,
       "tag": "0110_user_provider_oauth_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 9026,
+      "version": "7",
+      "when": 1789344000005,
+      "tag": "9026_retire_completion_discovery",
+      "breakpoints": true
     }
   ]
 }

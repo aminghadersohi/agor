@@ -1,7 +1,7 @@
 // src/types/task.ts
 import type { PersistedAgenticToolName } from './agentic-tool';
 import type { GatewayInboundEventID } from './gateway';
-import type { CompletionSubscriptionID, MessageID, SessionID, TaskID, UserID } from './id';
+import type { MessageID, SessionID, TaskID, UserID } from './id';
 import type { PersistedMessageSource } from './message';
 import type { PowerTaskHold } from './power-management';
 import type { ReportPath, ReportTemplate } from './report';
@@ -461,9 +461,6 @@ export interface TaskMetadata {
     requested_from_session_id: SessionID;
     requested_by_user_id: string;
   };
-  /** Durable root-propagation request currently associated with this Task. */
-  completion_subscription_id?: CompletionSubscriptionID;
-
   /**
    * Durable queue-coalescing provenance for trusted system updates.
    *

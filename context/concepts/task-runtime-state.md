@@ -379,9 +379,11 @@ Preserve these invariants:
     external effects.
 11. Daemon startup is non-destructive in shared PostgreSQL policy; queues and
     Session projection change only from authoritative Task outcomes.
-12. Completion subscriptions project terminal Task truth into durable callback
-    delivery; they never become a second execution lifecycle or infer
-    completion from genealogy alone.
+12. Completion callbacks are one hop. A terminal Task notifies its own
+    configured destination; multi-hop coordination is composed by each
+    coordinator completing in turn (C completes → B processes → B completes →
+    A), never by a second execution lifecycle that infers completion from
+    genealogy.
 
 ## Code map
 
