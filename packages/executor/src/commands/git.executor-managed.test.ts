@@ -441,7 +441,7 @@ describe('managed executor git/fs commands', () => {
       {
         command: 'git.branch.add',
         sessionToken: 'tenant-token',
-        params: { branchId, repoId },
+        params: { branchId, repoId, useReference: false },
       },
       {}
     );
@@ -1064,4 +1064,88 @@ describe('managed executor git/fs commands', () => {
       environment
     );
   });
+});
+
+describe('local teammate materialization', () => {
+  it.each([false, true])(
+    'derives independent clone from the trusted row, restore=%s',
+    async (restoreMode) => {
+      const root = await mkdtemp(join(tmpdir(), 'local-teammate-executor-'));
+      const path = join(root, 'home');
+      try {
+        const patchedBranches: Array<Record<string, unknown>> = [];
+        createClient({
+          repo: {
+            repo_id: repoId,
+            remote_url: 'https://github.com/preset-io/agor-teammate.git',
+            local_path: '/unmounted/cache',
+          },
+          branch: {
+            branch_id: branchId,
+            repo_id: repoId,
+            name: 'private-builder',
+            path,
+            storage_mode: 'clone',
+            new_branch: true,
+            base_ref: 'template/builder',
+            custom_context: {
+              teammate: { kind: 'teammate', displayName: 'Builder', localHome: true },
+            },
+          },
+          patchedBranches,
+        });
+        mocks.createBranchAsClone.mockImplementationOnce(async (options) => {
+          expect(options).toMatchObject({
+            localHome: true,
+            ref: 'template/builder',
+            newBranchName: 'private-builder',
+          });
+          expect(options.referencePath).toBeUndefined();
+          expect(options.depth).toBeUndefined();
+          expect(options.remoteUrl).toBe('https://github.com/preset-io/agor-teammate.git');
+          expect(options.originRemoteUrl).toBeUndefined();
+          expect(options.expectedSha).toBe('0123456789abcdef0123456789abcdef01234567');
+          expect(mocks.resolveGitRef).toHaveBeenCalledWith(
+            '/unmounted/cache',
+            'template/builder',
+            expect.objectContaining({
+              remote: { url: 'https://github.com/preset-io/agor-teammate.git' },
+              remoteOnly: true,
+            })
+          );
+          // Provenance is persisted before I/O, but readiness must wait until
+          // independent clone creation and removal of all remotes settle.
+          expect(patchedBranches).toEqual([
+            {
+              base_ref: 'template/builder',
+              base_sha: '0123456789abcdef0123456789abcdef01234567',
+            },
+          ]);
+        });
+        const result = await handleGitBranchAdd(
+          {
+            command: 'git.branch.add',
+            sessionToken: 'tenant-token',
+            params: { branchId, repoId, useReference: true, restoreMode },
+          },
+          {}
+        );
+        expect(result.success).toBe(!restoreMode);
+        if (restoreMode) {
+          expect(mocks.resolveGitRef).not.toHaveBeenCalled();
+          expect(mocks.createBranchAsClone).not.toHaveBeenCalled();
+          await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+          expect(patchedBranches).toContainEqual(
+            expect.objectContaining({ filesystem_status: 'failed' })
+          );
+        } else {
+          expect(patchedBranches).toContainEqual(
+            expect.objectContaining({ filesystem_status: 'ready' })
+          );
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  );
 });

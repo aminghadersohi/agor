@@ -19,7 +19,11 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { getReposDir } from '@agor/core/config';
 import { parseAgorYml, writeAgorYml } from '@agor/core/config/node';
 import { shortId } from '@agor/core/db';
-import { TEAMMATE_FRAMEWORK_REPO_URL } from '@agor/core/types';
+import {
+  getTeammateConfig,
+  isCanonicalTeammateFrameworkRepo,
+  TEAMMATE_FRAMEWORK_REPO_URL,
+} from '@agor/core/types';
 import { diagnoseGit } from '@agor/git';
 import type { UserGitEnvironment } from '@agor/git/pure';
 import { cloneDiagnostic } from '../git/clone-diagnostic.js';
@@ -831,6 +835,7 @@ export async function handleGitBranchAdd(
 
   let client: AgorClient | null = null;
   let materializationWritesSettled = false;
+  let localHome = false;
 
   try {
     // Connect to daemon
@@ -875,7 +880,19 @@ export async function handleGitBranchAdd(
         'Refusing untrusted base_remote_url: only the canonical Agor teammate template repository is allowed.'
       );
     }
-    const referencePath = payload.params.useReference ? repo.local_path : undefined;
+    localHome = getTeammateConfig(branchRecord)?.localHome === true;
+    if (
+      localHome &&
+      (restoreMode ||
+        storageMode !== 'clone' ||
+        cloneDepth != null ||
+        !isCanonicalTeammateFrameworkRepo(repo))
+    ) {
+      throw new Error(
+        'Local teammate home cannot be reconstructed from the public template. Restore its files from your own backup.'
+      );
+    }
+    const referencePath = !localHome && payload.params.useReference ? repo.local_path : undefined;
 
     if (!repoPath && storageMode === 'worktree') {
       throw new Error(`Repository ${repoId} has no local_path for worktree materialization`);
@@ -890,11 +907,14 @@ export async function handleGitBranchAdd(
     // dispatch. Worktree and clone materializers consume this concrete result
     // and must not independently guess or qualify the ref.
     const requestedStartingRef = shouldCreateBranch ? sourceBranch : branch;
+    // A local home is sourced from the canonical template, never cached refs
+    // or remotes belonging to an existing repository workspace.
+    const sourceRemoteUrl = localHome ? TEAMMATE_FRAMEWORK_REPO_URL : baseRemoteUrl;
     const resolveStartingRef = () =>
       resolveGitRef(repoPath, requestedStartingRef, {
         refType: refType || 'branch',
-        ...(baseRemoteUrl
-          ? { remote: { url: baseRemoteUrl }, remoteOnly: true }
+        ...(sourceRemoteUrl
+          ? { remote: { url: sourceRemoteUrl }, remoteOnly: true }
           : remoteUrl
             ? { remote: { url: remoteUrl, name: 'origin' } }
             : {}),
@@ -930,7 +950,7 @@ export async function handleGitBranchAdd(
       // branch, just clone the ref directly. The helper owns both flows so
       // the executor handler doesn't have to orchestrate post-clone git ops.
       let cloneRef = resolvedStartingRef?.name ?? branch;
-      let cloneRemoteUrl = remoteUrl;
+      let cloneRemoteUrl = localHome ? TEAMMATE_FRAMEWORK_REPO_URL : remoteUrl;
       let newBranchName: string | undefined;
       const detached = resolvedStartingRef?.kind === 'commit';
 
@@ -946,23 +966,25 @@ export async function handleGitBranchAdd(
 
         if (!restoreFromDestination) {
           cloneRef = resolvedStartingRef?.name ?? sourceBranch ?? branch;
-          cloneRemoteUrl =
-            resolvedStartingRef?.remoteUrl ??
-            (resolvedStartingRef?.kind === 'local_branch' ||
-            resolvedStartingRef?.kind === 'commit' ||
-            (resolvedStartingRef?.kind === 'tag' && !resolvedStartingRef.remoteUrl)
-              ? repoPath
-              : baseRemoteUrl || remoteUrl);
+          cloneRemoteUrl = localHome
+            ? TEAMMATE_FRAMEWORK_REPO_URL
+            : (resolvedStartingRef?.remoteUrl ??
+              (resolvedStartingRef?.kind === 'local_branch' ||
+              resolvedStartingRef?.kind === 'commit' ||
+              (resolvedStartingRef?.kind === 'tag' && !resolvedStartingRef.remoteUrl)
+                ? repoPath
+                : baseRemoteUrl || remoteUrl));
           newBranchName = branch !== cloneRef ? branch : undefined;
         }
       } else if (resolvedStartingRef) {
-        cloneRemoteUrl =
-          resolvedStartingRef.remoteUrl ??
-          (resolvedStartingRef.kind === 'local_branch' ||
-          resolvedStartingRef.kind === 'commit' ||
-          resolvedStartingRef.kind === 'tag'
-            ? repoPath
-            : remoteUrl);
+        cloneRemoteUrl = localHome
+          ? TEAMMATE_FRAMEWORK_REPO_URL
+          : (resolvedStartingRef.remoteUrl ??
+            (resolvedStartingRef.kind === 'local_branch' ||
+            resolvedStartingRef.kind === 'commit' ||
+            resolvedStartingRef.kind === 'tag'
+              ? repoPath
+              : remoteUrl));
       }
       if (!cloneRemoteUrl) {
         throw new Error(`Cannot materialize resolved ref '${requestedStartingRef}': no source URL`);
@@ -975,7 +997,8 @@ export async function handleGitBranchAdd(
       );
       await createBranchAsClone({
         remoteUrl: cloneRemoteUrl,
-        ...(remoteUrl && cloneRemoteUrl !== remoteUrl ? { originRemoteUrl: remoteUrl } : {}),
+        localHome,
+        ...(!localHome && cloneRemoteUrl !== remoteUrl ? { originRemoteUrl: remoteUrl } : {}),
         targetPath: branchPath,
         ref: cloneRef,
         ...(newBranchName ? { newBranchName } : {}),
@@ -1073,7 +1096,7 @@ export async function handleGitBranchAdd(
     // when git worktree add fails. No host permission repair is attempted.
     const fallbackPath = resolvedBranchPath;
     let fallbackCreated = false;
-    if (fallbackPath && !materializationWritesSettled) {
+    if (fallbackPath && !materializationWritesSettled && !localHome) {
       // Step 1: Ensure directory exists
       if (!existsSync(fallbackPath)) {
         try {
