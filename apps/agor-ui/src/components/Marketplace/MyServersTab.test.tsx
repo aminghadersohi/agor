@@ -906,7 +906,7 @@ describe('Marketplace server inventory and settings', () => {
     const remove = await screen.findByRole('button', { name: 'Remove GitHub server' });
     await waitFor(() => expect(remove).toBeEnabled());
     fireEvent.click(remove);
-    await waitFor(() => expect(remove).toHaveClass('ant-popover-open'), { timeout: 5_000 });
+    await waitFor(() => expect(remove).toHaveClass('ant-popover-open'));
 
     view.rerender(
       <MyServersTab

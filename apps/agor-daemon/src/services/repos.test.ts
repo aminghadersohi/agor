@@ -1315,6 +1315,34 @@ describe('ReposService branch provisioning lifecycle', () => {
     expect(result.error_message).toMatch(/failed to spawn executor/i);
   });
 
+  it.each([true, false])(
+    'publishes synchronous failure only for an applied CAS (%s)',
+    async (applied) => {
+      const emit = vi.fn();
+      const failed = branch({ filesystem_status: 'failed', error_message: 'spawn failed' });
+      const params = { tenant: { tenant_id: 'tenant-a', source: 'auth_claim' } };
+      const { service } = makeService({ get: vi.fn(), patch: vi.fn(), emit });
+      branchRepoMock.acknowledgeProvisioningAttempt.mockResolvedValue({ applied, branch: failed });
+      executorMocks.spawnExecutorFireAndForget.mockImplementation(() => {
+        throw new Error('boom');
+      });
+      for (const reason of ['create', 'retry', 'restore']) {
+        emit.mockClear();
+        await (
+          service as unknown as {
+            dispatchBranchProvisioning: (...args: unknown[]) => Promise<unknown>;
+          }
+        ).dispatchBranchProvisioning(branch(), repo, 'user-1', params, reason);
+        expect(emit).toHaveBeenCalledTimes(applied ? 1 : 0);
+        if (applied) {
+          expect(emit.mock.calls[0][0]).toBe('patched');
+          expect(emit.mock.calls[0][1]).toMatchObject({ filesystem_status: 'failed' });
+          expect(emit.mock.calls[0][2].params.tenant).toEqual(params.tenant);
+        }
+      }
+    }
+  );
+
   it("retry runs its CAS inside the caller's tenant database scope", async () => {
     // retryBranchProvisioning is a custom method: no Feathers hook opens a
     // tenant scope for it. In `required_from_auth` the daemon handle is a

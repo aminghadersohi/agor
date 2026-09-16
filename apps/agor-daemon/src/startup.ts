@@ -736,13 +736,10 @@ export async function startup(ctx: StartupContext): Promise<void> {
     );
   }
 
-  // Recover branches whose filesystem provisioning was interrupted by the
-  // previous process exit (the git.branch.add executor is fire-and-forget, so a
-  // daemon kill mid-provision would otherwise leave the row stuck in
-  // 'creating' forever). Conservatively transition any interrupted 'creating'
-  // branch to 'failed' with an actionable message — recovery is an explicit,
-  // human-triggered retry, not an automatic re-dispatch. Never deletes refs or
-  // worktrees.
+  // Standalone-only, bootstrap-tenant provisioning safety net. This is not HA
+  // owner-death detection or a cross-tenant sweep: another daemon may still own
+  // a `creating` attempt, so HA startup must leave it alone. Failed rows require
+  // explicit retry; this job never re-dispatches or inspects local worktrees.
   if (ctx.taskRuntimePolicy === 'standalone') {
     runPostStartJob('branch-provisioning-watchdog', () =>
       runStartupTenantDatabaseScope(ctx, async () => {

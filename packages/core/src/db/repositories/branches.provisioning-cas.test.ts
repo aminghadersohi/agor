@@ -8,8 +8,11 @@
  * that contract against a real database. Privacy: generic placeholder names.
  */
 import type { UUID } from '@agor/core/types';
+import { eq } from 'drizzle-orm';
 import { describe, expect } from 'vitest';
 import { generateId } from '../../lib/ids';
+import { select, update } from '../database-wrapper';
+import { branches } from '../schema';
 import { dbTest, ensureTestUser } from '../test-helpers';
 import { BranchRepository } from './branches';
 import { RepoRepository } from './repos';
@@ -248,6 +251,93 @@ describe('BranchRepository provisioning CAS', () => {
       );
       expect(current.applied).toBe(true);
       expect(current.branch.filesystem_status).toBe('ready');
+    }
+  );
+
+  dbTest('terminal acknowledgements cannot mutate branch metadata', async ({ db }) => {
+    const { branchRepo, branchId } = await seedFailedBranch(db);
+    await branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-B');
+    const before = await branchRepo.findById(branchId);
+    for (const extra of [{ name: 'moved' }, { board_id: generateId() }, { archived: true }]) {
+      await expect(
+        branchRepo.acknowledgeProvisioningAttempt(
+          branchId,
+          { filesystem_status: 'ready', ...extra },
+          'attempt-B'
+        )
+      ).rejects.toThrow(/terminal outcome/);
+      expect(await branchRepo.findById(branchId)).toEqual(before);
+    }
+  });
+
+  dbTest(
+    'provisioning respects maintenance/deletion fences and retains unrelated persisted data',
+    async ({ db }) => {
+      const { branchRepo, branchId } = await seedFailedBranch(db);
+      const row = await select(db).from(branches).where(eq(branches.branch_id, branchId)).one();
+      if (!row) throw new Error('Missing fixture');
+      const maintenance = {
+        branch_id: branchId,
+        operation_id: generateId(),
+        generation: 1,
+        kind: 'cleanup' as const,
+      };
+      for (const fence of ['maintenance', 'deletion'] as const) {
+        await update(db, branches)
+          .set({
+            deletion_status: fence === 'deletion' ? 'deleting' : null,
+            data: { ...row.data, maintenance: fence === 'maintenance' ? maintenance : undefined },
+            filesystem_status: 'failed',
+          })
+          .where(eq(branches.branch_id, branchId))
+          .run();
+        expect(
+          (await branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-B')).claimed
+        ).toBe(false);
+        await update(db, branches)
+          .set({ filesystem_status: 'creating' })
+          .where(eq(branches.branch_id, branchId))
+          .run();
+        expect(
+          (
+            await branchRepo.acknowledgeProvisioningAttempt(branchId, {
+              filesystem_status: 'ready',
+            })
+          ).applied
+        ).toBe(false);
+        expect(
+          (await branchRepo.markProvisioningFailedIfCreating(branchId, 'late failure')).changed
+        ).toBe(false);
+      }
+      await update(db, branches)
+        .set({
+          deletion_status: null,
+          filesystem_status: 'failed',
+          data: {
+            ...row.data,
+            maintenance_generation: 7,
+            cleanup_last_error: 'retained diagnostic',
+          },
+        })
+        .where(eq(branches.branch_id, branchId))
+        .run();
+      expect(
+        (await branchRepo.claimFailedForProvisioningRetry(branchId, 'attempt-B')).claimed
+      ).toBe(true);
+      expect(
+        (
+          await branchRepo.acknowledgeProvisioningAttempt(
+            branchId,
+            { filesystem_status: 'failed', error_message: 'failed' },
+            'attempt-B'
+          )
+        ).applied
+      ).toBe(true);
+      const saved = await select(db).from(branches).where(eq(branches.branch_id, branchId)).one();
+      expect(saved?.data).toMatchObject({
+        maintenance_generation: 7,
+        cleanup_last_error: 'retained diagnostic',
+      });
     }
   );
 
