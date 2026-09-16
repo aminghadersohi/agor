@@ -210,21 +210,17 @@ describe('Postgres multitenancy schema coverage', () => {
     expect(migration).not.toContain('WITH CHECK');
   });
 
-  it('limits completion recovery to active subscription routing Tasks', () => {
+  it('retires root discovery without deleting compatibility rows or tenant isolation', () => {
     const migration = readRepoFile(
-      'packages/core/drizzle/postgres/0111_transitive_completion_subscriptions.sql'
+      'packages/core/drizzle/postgres/0112_retire_completion_discovery.sql'
     );
-
-    expect(migration).toContain('CREATE POLICY "completion_callback_discovery"');
-    expect(migration).toContain('CREATE POLICY "completion_callback_task_discovery"');
-    expect(migration).toContain('FOR SELECT');
-    expect(migration).toContain("= 'completion_callback_discovery'");
-    expect(migration).toContain('AND EXISTS');
-    expect(migration).toContain('"completion_subscriptions"."active_task_id" = "tasks"."task_id"');
-    expect(migration).toContain("IN ('pending', 'delegated', 'running_downstream')");
-    expect(migration).not.toMatch(
-      /CREATE POLICY "completion_callback_(?:task_)?discovery"[\s\S]*WITH CHECK/
+    expect(migration).toContain(
+      'DROP POLICY IF EXISTS "completion_callback_task_discovery" ON "tasks"'
     );
+    expect(migration).toContain(
+      'DROP POLICY IF EXISTS "completion_callback_discovery" ON "completion_subscriptions"'
+    );
+    expect(migration).not.toMatch(/DROP TABLE|DELETE FROM|tenant_isolation/);
   });
 
   it('limits Knowledge embedding discovery to routing-only candidate rows', () => {

@@ -12,7 +12,6 @@ export * from './branch-cleanup';
 export * from './branch-deletion';
 export * from './capability-policy';
 export * from './card';
-export * from './completion-subscription';
 export * from './context';
 export * from './environment-command';
 export * from './feathers';

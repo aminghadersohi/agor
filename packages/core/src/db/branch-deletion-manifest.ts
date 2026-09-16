@@ -25,22 +25,22 @@ export const BRANCH_DELETION_RELATIONS: Readonly<Record<string, BranchDeletionRe
   ),
   'tasks.session_id': owned('Settle runtime containment before deleting tasks in bounded chunks.'),
   'completion_subscriptions.callback_session_id': clear(
-    'Retain the cross-branch subscription; a missing callback target fails delivery rather than rerouting it.'
+    'Retain inert draft rows; clear the deleted callback reference.'
   ),
   'completion_subscriptions.root_session_id': clear(
-    'Root provenance does not own the surviving chain.'
+    'Historical root provenance does not own other branches.'
   ),
   'completion_subscriptions.root_task_id': clear(
-    'Root provenance does not own the surviving chain.'
+    'Historical root provenance does not own other branches.'
   ),
   'completion_subscriptions.active_session_id': clear(
-    'Preserve the outbox; deleted active work is reconciled as missing.'
+    'Preserve inert draft rows; clear deleted work references.'
   ),
   'completion_subscriptions.active_task_id': clear(
-    'Preserve the outbox; deleted active work is reconciled as missing.'
+    'Preserve inert draft rows; clear deleted work references.'
   ),
   'completion_subscriptions.delivery_task_id': clear(
-    'Clear deleted delivery provenance without deleting a foreign subscription.'
+    'Clear deleted delivery provenance without deleting a foreign draft row.'
   ),
   'messages.session_id': owned('Batch by session, including messages without a task.'),
   'messages.task_id': classify(

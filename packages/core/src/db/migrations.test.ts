@@ -26,16 +26,18 @@ const readJournals = () =>
   );
 
 describe('Postgres migrations', () => {
-  it('keeps completion subscriptions pending after the current upstream watermark', async () => {
-    for (const journal of await readJournals()) {
-      const entries = journal.entries;
-      expect(entries.at(-1)).toMatchObject({
+  it('preserves the draft completion watermark and appends PostgreSQL retirement', async () => {
+    const journals = await readJournals();
+    for (const [index, journal] of journals.entries()) {
+      expect(
+        journal.entries.find((entry) => entry.tag === '0111_transitive_completion_subscriptions')
+      ).toMatchObject({
         idx: 110,
         when: 1789344000005,
-        tag: '0111_transitive_completion_subscriptions',
       });
-      expect(classifyMigrationWatermark(entries, 1789344000004).pending).toEqual([
+      expect(classifyMigrationWatermark(journal.entries, 1789344000004).pending).toEqual([
         '0111_transitive_completion_subscriptions',
+        ...(index === 0 ? ['0112_retire_completion_discovery'] : []),
       ]);
     }
   });

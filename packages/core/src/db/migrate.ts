@@ -226,7 +226,7 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
       }),
     },
   ],
-  ...['0111_transitive_completion_subscriptions'].map(
+  ...['0111_transitive_completion_subscriptions', '0112_retire_completion_discovery'].map(
     (name) =>
       [
         name,
@@ -237,7 +237,7 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
             userAction: 'none',
             rollbackCompatibility: 'compatible',
             summary:
-              'Adds a dormant completion-subscription outbox; direct callbacks remain unchanged unless root propagation is requested.',
+              'Retains inert storage from the withdrawn root-propagation draft; no completion subscriptions are created or delivered.',
           }),
         },
       ] as const

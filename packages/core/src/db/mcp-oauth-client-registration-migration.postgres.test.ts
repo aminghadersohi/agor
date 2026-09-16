@@ -370,7 +370,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
 
       // Rewind the later completion schema too, not just its ledger entry.
       // The policy on tasks references the outbox and must be removed first.
-      await executeRaw(db, sql`DROP POLICY completion_callback_task_discovery ON tasks`);
+      await executeRaw(db, sql`DROP POLICY IF EXISTS completion_callback_task_discovery ON tasks`);
       await executeRaw(db, sql`DROP TABLE completion_subscriptions`);
       await executeRaw(db, sql`DROP TABLE user_provider_oauth_grants`);
       await withPostgresTestTransaction(db, recreateHistoricalClaudeAuthority);

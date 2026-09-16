@@ -2,11 +2,8 @@ import { AGENTIC_TOOL_CAPABILITIES } from '@agor/agentic-tools';
 import {
   BranchRepository,
   type BranchWithZoneAndSessions,
-  CompletionSubscriptionRepository,
-  generateId,
   SessionRelationshipRepository,
   shortId,
-  TaskRepository,
 } from '@agor/core/db';
 import {
   AVAILABLE_CLAUDE_MODEL_ALIASES,
@@ -26,10 +23,7 @@ import {
   type AgenticToolName,
   type Board,
   type BranchID,
-  type CompletionSubscription,
-  type CompletionSubscriptionID,
   getSessionType,
-  isTaskExecuting,
   type Session,
   type SessionID,
   type ZoneBoardObject,
@@ -62,49 +56,6 @@ import type { McpContext } from '../server.js';
 import { sessionContextRequiredResult, textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
 import { listAttachedMcpServers } from './mcp-servers.js';
-
-async function currentCompletionContext(ctx: McpContext): Promise<{
-  session: Session;
-  task: import('@agor/core/types').Task;
-}> {
-  if (!ctx.sessionId) throw new Error('A current Agor session is required');
-  const session = (await ctx.app
-    .service('sessions')
-    .get(ctx.sessionId, ctx.baseServiceParams)) as Session;
-  const sessionTasks = await runWithMcpTenantDatabaseScope(ctx, (db) =>
-    new TaskRepository(db).findBySession(session.session_id)
-  );
-  let task: (typeof sessionTasks)[number] | undefined;
-  for (let index = sessionTasks.length - 1; index >= 0; index -= 1) {
-    const candidate = sessionTasks[index];
-    if (candidate && isTaskExecuting(candidate)) {
-      task = candidate;
-      break;
-    }
-  }
-  if (!task) {
-    throw new Error(
-      'The current session has no executing task to associate with completion propagation'
-    );
-  }
-  return { session, task };
-}
-
-async function activeCompletionContinuation(ctx: McpContext): Promise<{
-  subscription: CompletionSubscription;
-  fromTaskId: import('@agor/core/types').TaskID;
-}> {
-  const { task } = await currentCompletionContext(ctx);
-  const subscription = await runWithMcpTenantDatabaseScope(ctx, (db) =>
-    new CompletionSubscriptionRepository(db).findActiveForTask(task.task_id)
-  );
-  if (!subscription || subscription.active_session_id !== ctx.sessionId) {
-    throw new Error(
-      'The current task is not the designated owner of an active root completion request'
-    );
-  }
-  return { subscription, fromTaskId: task.task_id };
-}
 
 /**
  * Shared Zod schema for specifying a model override at session-create / spawn /
@@ -666,12 +617,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .boolean()
           .optional()
           .describe('Enable callback to parent on completion (default: true)'),
-        continueCompletion: z
-          .boolean()
-          .optional()
-          .describe(
-            'Designate this child as the sole continuation of the current root-propagated completion request. Requires the current task to own one.'
-          ),
         includeLastMessage: z
           .boolean()
           .optional()
@@ -697,9 +642,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     async (args) => {
       if (!ctx.sessionId) return sessionContextRequiredResult();
       const currentSessionId = ctx.sessionId;
-      const continuation = args.continueCompletion
-        ? await activeCompletionContinuation(ctx)
-        : undefined;
       const spawnData: Partial<import('@agor/core/types').SpawnConfig> = {
         prompt: args.prompt,
         title: args.title,
@@ -731,14 +673,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         {
           ...ctx.baseServiceParams,
           provider: undefined,
-          ...(continuation
-            ? {
-                _completionContinuation: {
-                  subscription_id: continuation.subscription.subscription_id,
-                  from_task_id: continuation.fromTaskId,
-                },
-              }
-            : {}),
           route: { id: childSession.session_id },
         }
       );
@@ -746,9 +680,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       return textResult({
         session: redactSessionForMcp(childSession),
         taskId: task.task_id,
-        ...(continuation && {
-          completionSubscriptionId: continuation.subscription.subscription_id,
-        }),
         status: task.status,
         note: 'Subsession created and prompt execution started in background.',
       });
@@ -794,48 +725,13 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .describe(
             'Send a one-shot completion report for the exact prompted task back to the current calling Agor session.'
           ),
-        callbackPropagation: z
-          .enum(['direct', 'root'])
-          .optional()
-          .describe(
-            'Completion routing. "direct" preserves the existing exact-task callback. "root" creates a durable requested-work subscription that a downstream agent can transfer with continueCompletion.'
-          ),
-        continueCompletion: z
-          .boolean()
-          .optional()
-          .describe(
-            'Designate the prompted task as the sole continuation of the current root-propagated completion request.'
-          ),
-        maxPropagationDepth: z
-          .number()
-          .int()
-          .min(1)
-          .max(32)
-          .optional()
-          .describe('Maximum designated delegation hops for a new root request (default: 8).'),
       }),
     },
     async (args) => {
       const mode = args.mode;
       const sessionId = await resolveSessionId(ctx, args.sessionId);
-      const rootPropagation = args.callbackPropagation === 'root';
-      const directCallback = args.callback || args.callbackPropagation === 'direct';
-      if (rootPropagation && args.continueCompletion) {
-        throw new Error('Cannot create and continue a root completion request in the same prompt');
-      }
-      if (rootPropagation && directCallback) {
-        throw new Error('Root and direct completion callbacks cannot be requested together');
-      }
-      if (args.maxPropagationDepth !== undefined && !rootPropagation) {
-        throw new Error('maxPropagationDepth is only valid with callbackPropagation "root"');
-      }
-      if ((directCallback || rootPropagation || args.continueCompletion) && !ctx.sessionId) {
-        return sessionContextRequiredResult();
-      }
-      if ((rootPropagation || args.continueCompletion) && mode === 'btw') {
-        throw new Error('Root completion propagation is not supported for ephemeral btw forks');
-      }
-      if (directCallback || rootPropagation) {
+      if (args.callback && !ctx.sessionId) return sessionContextRequiredResult();
+      if (args.callback) {
         await runWithMcpTenantDatabaseScope(ctx, (db) =>
           ensureCanPromptTargetSession(
             ctx.sessionId!,
@@ -845,45 +741,16 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           )
         );
       }
-      const rootOrigin = rootPropagation ? await currentCompletionContext(ctx) : undefined;
-      const continuation = args.continueCompletion
-        ? await activeCompletionContinuation(ctx)
-        : undefined;
-      const completionSubscriptionId = rootPropagation
-        ? (generateId() as CompletionSubscriptionID)
-        : continuation?.subscription.subscription_id;
-      const callbackParams = {
-        ...ctx.baseServiceParams,
-        ...(rootOrigin
-          ? {
-              _completionSubscriptionRequest: {
-                subscription_id: completionSubscriptionId!,
-                origin_session_id: rootOrigin.session.session_id,
-                origin_task_id: rootOrigin.task.task_id,
-                callback_session_id: rootOrigin.session.session_id,
-                requested_by_user_id: ctx.userId,
-                max_depth: args.maxPropagationDepth,
-              },
-            }
-          : {}),
-        ...(continuation
-          ? {
-              _completionContinuation: {
-                subscription_id: continuation.subscription.subscription_id,
-                from_task_id: continuation.fromTaskId,
-              },
-            }
-          : {}),
-        ...(directCallback
-          ? {
-              _taskCompletionCallback: {
-                target_session_id: ctx.sessionId!,
-                requested_from_session_id: ctx.sessionId!,
-                requested_by_user_id: ctx.userId,
-              },
-            }
-          : {}),
-      };
+      const callbackParams = args.callback
+        ? {
+            ...ctx.baseServiceParams,
+            _taskCompletionCallback: {
+              target_session_id: ctx.sessionId!,
+              requested_from_session_id: ctx.sessionId!,
+              requested_by_user_id: ctx.userId,
+            },
+          }
+        : ctx.baseServiceParams;
 
       if (mode === 'continue') {
         // The prompt route returns the Task entity directly. Whether it ran
@@ -901,7 +768,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             success: true,
             queued: true,
             taskId: task.task_id,
-            ...(completionSubscriptionId && { completionSubscriptionId }),
             queue_position: task.queue_position,
             note: 'Session is busy. Prompt has been queued and will execute automatically when the session becomes idle.',
           });
@@ -909,7 +775,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         return textResult({
           success: true,
           taskId: task.task_id,
-          ...(completionSubscriptionId && { completionSubscriptionId }),
           status: task.status,
           note: 'Prompt added to existing session and execution started.',
         });
@@ -982,7 +847,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         return textResult({
           session: redactSessionForMcp(updatedSession),
           taskId: task.task_id,
-          ...(completionSubscriptionId && { completionSubscriptionId }),
           status: task.status,
           note,
         });
@@ -1014,7 +878,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         return textResult({
           session: redactSessionForMcp(childSession),
           taskId: task.task_id,
-          ...(completionSubscriptionId && { completionSubscriptionId }),
           status: task.status,
           note: 'Subsession created and prompt execution started.',
         });
@@ -1113,67 +976,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     }
   );
 
-  server.registerTool(
-    'agor_completion_subscriptions_get',
-    {
-      description:
-        'Get the authoritative state of one durable root-propagated completion request. The returned subscription ID comes from agor_sessions_prompt/create when callbackPropagation is "root"; callers never need to discover descendant task IDs.',
-      inputSchema: z.object({
-        subscriptionId: mcpRequiredId(
-          'subscriptionId',
-          'Completion subscription',
-          'Completion subscription UUIDv7 or unambiguous short ID'
-        ),
-      }),
-    },
-    async (args) => {
-      const subscription = await runWithMcpTenantDatabaseScope(ctx, async (db) => {
-        const repo = new CompletionSubscriptionRepository(db);
-        return repo.get(await repo.resolveId(args.subscriptionId));
-      });
-      if (subscription.requested_by_user_id !== ctx.userId) {
-        throw new Error('Only the original requesting user may inspect this completion request');
-      }
-      let downstreamAuthorized = false;
-      const downstreamSessionId =
-        subscription.terminal_snapshot?.session_id ?? subscription.active_session_id;
-      if (downstreamSessionId) {
-        try {
-          await ctx.app.service('sessions').get(downstreamSessionId, ctx.baseServiceParams);
-          downstreamAuthorized = true;
-        } catch {
-          // Preserve aggregate status while redacting inaccessible descendant identity.
-        }
-      }
-      return textResult({
-        subscription_id: subscription.subscription_id,
-        state: subscription.state,
-        terminal_status: subscription.terminal_status,
-        origin_session_id: subscription.origin_session_id,
-        origin_task_id: subscription.origin_task_id,
-        join_policy: subscription.join_policy,
-        propagation_mode: subscription.propagation_mode,
-        max_depth: subscription.max_depth,
-        delivery_attempt_count: subscription.delivery_attempt_count,
-        last_delivery_error_code: subscription.last_delivery_error_code,
-        created_at: subscription.created_at,
-        updated_at: subscription.updated_at,
-        terminal_at: subscription.terminal_at,
-        delivered_at: subscription.delivered_at,
-        ...(downstreamAuthorized
-          ? {
-              active_session_id: subscription.active_session_id,
-              active_task_id: subscription.active_task_id,
-              path: subscription.path,
-              terminal: subscription.terminal_snapshot,
-            }
-          : downstreamSessionId
-            ? { downstream_details_redacted: true }
-            : {}),
-      });
-    }
-  );
-
   // Tool 6: agor_sessions_create
   server.registerTool(
     'agor_sessions_create',
@@ -1226,27 +1028,8 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .enum(['once', 'persistent'])
           .optional()
           .describe(
-            'Callback firing mode: "persistent" (default) fires on every completion until unlinked, "once" fires on the first completion then auto-disables'
+            'Callback firing mode: "persistent" (default) fires on every completion until unlinked, including turns processing child results. Use it for coordinators: C completes -> B processes -> B completes -> A. "once" is consumed by the first completion, which may only be the delegation turn. No descendant ownership transfer.'
           ),
-        callbackPropagation: z
-          .enum(['direct', 'root'])
-          .optional()
-          .describe(
-            'Use "root" with initialPrompt to create a durable requested-work subscription instead of a session-level direct callback.'
-          ),
-        continueCompletion: z
-          .boolean()
-          .optional()
-          .describe(
-            'Designate this new session initial task as the sole continuation of the current root-propagated completion request.'
-          ),
-        maxPropagationDepth: z
-          .number()
-          .int()
-          .min(1)
-          .max(32)
-          .optional()
-          .describe('Maximum designated delegation hops for a new root request (default: 8).'),
         parentSessionId: z
           .string()
           .min(1, 'parentSessionId cannot be empty when provided.')
@@ -1265,35 +1048,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     },
     async (args) => {
       const agenticTool = args.agenticTool as AgenticToolName;
-      const rootPropagation = args.callbackPropagation === 'root';
-      const directCallbackRequested = Boolean(
-        args.enableCallback || args.callbackSessionId || args.callbackPropagation === 'direct'
-      );
-      if ((rootPropagation || args.continueCompletion) && !ctx.sessionId) {
-        return sessionContextRequiredResult();
-      }
-      if ((rootPropagation || args.continueCompletion) && !args.initialPrompt) {
-        throw new Error('Completion propagation requires initialPrompt');
-      }
-      if (rootPropagation && args.continueCompletion) {
-        throw new Error('Cannot create and continue a root completion request in one operation');
-      }
-      if (rootPropagation && directCallbackRequested) {
-        throw new Error('Root and direct completion callbacks cannot be requested together');
-      }
-      if (args.maxPropagationDepth !== undefined && !rootPropagation) {
-        throw new Error('maxPropagationDepth is only valid with callbackPropagation "root"');
-      }
-      if (rootPropagation && args.callbackSessionId && args.callbackSessionId !== ctx.sessionId) {
-        throw new Error('Root completion callbacks must return to the current requesting session');
-      }
-      const rootOrigin = rootPropagation ? await currentCompletionContext(ctx) : undefined;
-      const continuation = args.continueCompletion
-        ? await activeCompletionContinuation(ctx)
-        : undefined;
-      const completionSubscriptionId = rootPropagation
-        ? (generateId() as CompletionSubscriptionID)
-        : continuation?.subscription.subscription_id;
 
       // Fetch user data to get unix_username
       const user = await ctx.app.service('users').get(ctx.userId, ctx.baseServiceParams);
@@ -1327,7 +1081,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
 
       // Determine the effective callback target session ID
       const effectiveCallbackSessionId = args.callbackSessionId || ctx.sessionId;
-      const wantsCallback = !rootPropagation && directCallbackRequested;
+      const wantsCallback = args.enableCallback || args.callbackSessionId;
       if (wantsCallback && !effectiveCallbackSessionId) return sessionContextRequiredResult();
 
       // Validate user has prompt permission on the callback target session's branch
@@ -1342,7 +1096,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         );
       }
 
-      if (!rootPropagation && args.enableCallback !== undefined) {
+      if (args.enableCallback !== undefined) {
         callbackConfig.enabled = args.enableCallback;
       }
       if (wantsCallback) {
@@ -1551,31 +1305,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             stream: true,
             metadata: { system_authored: true },
           },
-          {
-            ...ctx.baseServiceParams,
-            provider: undefined,
-            ...(rootOrigin
-              ? {
-                  _completionSubscriptionRequest: {
-                    subscription_id: completionSubscriptionId!,
-                    origin_session_id: rootOrigin.session.session_id,
-                    origin_task_id: rootOrigin.task.task_id,
-                    callback_session_id: rootOrigin.session.session_id,
-                    requested_by_user_id: ctx.userId,
-                    max_depth: args.maxPropagationDepth,
-                  },
-                }
-              : {}),
-            ...(continuation
-              ? {
-                  _completionContinuation: {
-                    subscription_id: continuation.subscription.subscription_id,
-                    from_task_id: continuation.fromTaskId,
-                  },
-                }
-              : {}),
-            route: { id: session.session_id },
-          }
+          { ...ctx.baseServiceParams, provider: undefined, route: { id: session.session_id } }
         );
       }
 
@@ -1597,7 +1327,6 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       return textResult({
         session: redactSessionForMcp(session),
         taskId: initialTask?.task_id,
-        ...(completionSubscriptionId && { completionSubscriptionId }),
         note: args.initialPrompt
           ? `Session created and initial prompt execution started.${parentNote}${callbackNote}${mcpFailureNote}`
           : `Session created successfully.${parentNote}${callbackNote}${mcpFailureNote}`,
@@ -1640,7 +1369,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .enum(['once', 'persistent'])
           .optional()
           .describe(
-            'Callback mode: "once" fires once then auto-disables, "persistent" fires every time (optional)'
+            'Callback mode: "persistent" fires on every completion, including processing child results; use for multi-hop coordinators. "once" auto-disables after the first completion (even an initial delegation turn). Does not change exact-task callback scope (optional)'
           ),
       }),
     },

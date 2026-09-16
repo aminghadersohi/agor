@@ -77,7 +77,7 @@ describe('branch deletion ownership review coverage', () => {
     expect(IMPERATIVE_TENANT_TABLES.map((table) => table.name)).toEqual(['kb_unit_embeddings']);
   });
 
-  it('preserves cross-branch completion outboxes while clearing live deleted references', () => {
+  it('preserves inert completion rows while clearing deleted references', () => {
     for (const field of [
       'callback_session_id',
       'root_session_id',
