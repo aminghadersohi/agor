@@ -254,7 +254,6 @@ export type SessionMemoryID = UUID;
 /** One-shot reminder owned by exactly one Session. */
 export type SessionReminderID = UUID;
 export type SessionRelationshipID = UUID;
-export type CompletionSubscriptionID = UUID;
 
 /**
  * Task identifier

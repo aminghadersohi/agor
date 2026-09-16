@@ -328,7 +328,8 @@ describe('Postgres migrations', () => {
   });
 
   it('keeps integration-only migrations and their successors in the reserved band', async () => {
-    for (const { entries } of await readJournals()) {
+    for (const [dialectIndex, { entries }] of (await readJournals()).entries()) {
+      const isPostgres = dialectIndex === 0;
       const localEntries = entries.filter((entry) =>
         LOCAL_MIGRATION_SUFFIXES.some((suffix) => entry.tag.endsWith(`_${suffix}`))
       );
@@ -352,8 +353,15 @@ describe('Postgres migrations', () => {
       );
       // SQLite has fewer historical authority migrations. Align only the new
       // append across dialects; never fill that gap by inventing applied SQL.
+      // 9026 retires PostgreSQL-only RLS discovery policies, so it has no
+      // SQLite counterpart — exactly like 9020_standalone_power_ownership.
       expect(entries.filter((entry) => entry.idx >= 9021).map((entry) => entry.idx)).toEqual([
-        9021, 9022, 9023, 9024, 9025,
+        9021,
+        9022,
+        9023,
+        9024,
+        9025,
+        ...(isPostgres ? [9026] : []),
       ]);
 
       for (const [position, entry] of entries.entries()) {

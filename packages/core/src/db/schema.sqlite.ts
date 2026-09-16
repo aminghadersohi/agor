@@ -582,17 +582,14 @@ export const completionSubscriptions = sqliteTable(
     active_task_id: text('active_task_id', { length: 36 }).references(() => tasks.task_id, {
       onDelete: 'set null',
     }),
-    path: t
-      .json<import('../types/completion-subscription').CompletionDelegationHop[]>('path')
-      .notNull(),
+    // Inert compatibility storage: no subscription API or delivery worker
+    // reads these rows, so the payload shapes are deliberately untyped.
+    path: t.json<unknown[]>('path').notNull(),
     max_depth: integer('max_depth').notNull().default(8),
     terminal_status: text('terminal_status', {
       enum: ['completed', 'failed', 'cancelled', 'timed_out'],
     }),
-    terminal_snapshot:
-      t.json<import('../types/completion-subscription').CompletionTerminalSnapshot>(
-        'terminal_snapshot'
-      ),
+    terminal_snapshot: t.json<unknown>('terminal_snapshot'),
     delivery_task_id: text('delivery_task_id', { length: 36 }).references(() => tasks.task_id, {
       onDelete: 'set null',
     }),

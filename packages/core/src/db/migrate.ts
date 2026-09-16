@@ -265,19 +265,22 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
       }),
     },
   ],
-  [
-    '9000_transitive_completion_subscriptions',
-    {
-      requiresOfflineCutover: false,
-      impact: defineMigrationImpact({
-        classification: 'schema',
-        userAction: 'none',
-        rollbackCompatibility: 'compatible',
-        summary:
-          'Adds a dormant completion-subscription outbox; direct callbacks remain unchanged unless root propagation is requested.',
-      }),
-    },
-  ],
+  ...['9000_transitive_completion_subscriptions', '9026_retire_completion_discovery'].map(
+    (name) =>
+      [
+        name,
+        {
+          requiresOfflineCutover: false,
+          impact: defineMigrationImpact({
+            classification: 'schema',
+            userAction: 'none',
+            rollbackCompatibility: 'compatible',
+            summary:
+              'Retains inert storage from the withdrawn root-propagation draft; no completion subscriptions are created or delivered.',
+          }),
+        },
+      ] as const
+  ),
 ]);
 
 const NO_OFFLINE_ACTION_SUMMARY =

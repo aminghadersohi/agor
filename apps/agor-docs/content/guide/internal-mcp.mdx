@@ -346,7 +346,7 @@ deterministic direct Task with an audited reason; it does not drop the callback.
 The digest answer is hard-capped at 4 KiB, and deterministic side Session/Task
 and final Message IDs fence HA retries. Digest Sessions cannot recursively
 deliver callbacks. Exact-Task `callback:true` subscriptions remain direct and
-outside this policy, as do root-propagated variants.
+outside this policy.
 
 `agor_sessions_get_current_context` exposes three intentionally distinct
 relationships: current branch-local `parent_session_id`, immutable
