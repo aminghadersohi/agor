@@ -20,7 +20,6 @@ export * from './card-types';
 export * from './cards';
 export * from './claude-oauth-attempts';
 export * from './codex-device-auth-attempts';
-export * from './completion-subscriptions';
 export * from './discord-message-deliveries';
 export * from './environment-commands';
 export * from './environment-health';
