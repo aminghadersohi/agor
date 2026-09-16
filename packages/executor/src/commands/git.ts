@@ -989,7 +989,13 @@ export async function handleGitBranchAdd(
               : {}),
         env,
       });
-    const resolvedStartingRef = restoreMode ? undefined : await resolveStartingRef();
+    // A local teammate home is a hard-gated flow: it must clone the canonical
+    // template with no origin override, no `--reference`, and no depth
+    // (createBranchAsClone throws otherwise). Resolving a user-requested
+    // starting ref here would redirect the clone source at `repoPath` and
+    // record a base_sha from a repository the template clone never reads, so
+    // the starting ref is deliberately not resolved on this path.
+    const resolvedStartingRef = restoreMode || localHome ? undefined : await resolveStartingRef();
 
     if (resolvedStartingRef) {
       await client.service('branches').patch(branchId, {
