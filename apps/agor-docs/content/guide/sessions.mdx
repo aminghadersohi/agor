@@ -229,44 +229,29 @@ queues behind any newer input in the requesting session. Final messages and
 downstream links are included only while the requesting user remains authorized
 to see them.
 
-### Persistent one-hop coordination
+### Completion that follows delegation
 
-In **Session Settings → Callbacks → Callback mode**, choose **Persistent** for a
-coordinator that expects later child results. Each session reports its own task
-completion to its configured target:
+An ordinary callback reports when the exact child task finishes. For an
+orchestrator that may hand the requested work to another session, agents can
+request durable root propagation:
 
 ```text
-C completes → callback prompts B → B processes the result and completes → callback prompts A
+A prompts B with callbackPropagation: "root"
+B prompts or creates C with continueCompletion: true
+C finishes -> A receives one terminal callback
 ```
 
-B's initial delegation turn can also notify A. Persistent mode keeps B's callback
-linked for the later processing turn; it does not wait for descendants or send
-C's outcome directly to A. Configure each hop explicitly.
+The handoff is tracked as `delegated`, not completed. Only one child is the
+designated continuation at each hop; other parallel children are helpers. The
+designated child can hand off again, up to the request's maximum depth. Failure,
+cancellation, and timeout propagate as distinct terminal outcomes.
 
-With MCP, use `agor_sessions_create` with `enableCallback: true` and
-`callbackMode: "persistent"` (the remote-create default), or
-`agor_sessions_update` with `callbackMode: "persistent"` to change an existing
-registration. Omit `callbackSessionId` on create to target the current caller.
-Spawned subsessions remain one-shot by default; explicitly change their mode
-when they need to report more than one turn.
-
-**Once** is consumed by the next completion, which may only be B's initial
-delegation turn. A `callback: true` on `agor_sessions_prompt` covers that exact
-task, not a later task processing a child's callback. Neither follows descendants.
-Unlinking disables session callbacks without deleting the relationship; exact-task
-callbacks have their own scope. `btw` retains its separate one-shot behavior.
-
-Callbacks are admitted after the completed task commits. This is not an
-exactly-once or crash-recovery guarantee: a daemon loss before callback admission
-can leave a terminal task without a queued callback. Once admitted, the callback
-is a durable queued task. Do not infer aggregate completion from genealogy.
-
-The withdrawn root-propagation draft's `callbackPropagation`, `continueCompletion`,
-and completion-subscription lookup tool are not supported. Its migration ledger
-and tenant-isolated stored rows are retained only for compatibility and portability;
-no worker creates or delivers subscriptions. PostgreSQL retirement removes the old
-cross-tenant discovery policies without deleting rows. Do not run mixed versions
-or expect an older draft binary to leave those rows inert.
+The initial tool response includes a `completionSubscriptionId`. Use
+`agor_completion_subscriptions_get` for one authoritative aggregate status
+without walking the descendant tree. Delivery survives daemon restarts and
+queues behind any newer input in the requesting session. Final messages and
+downstream links are included only while the requesting user remains authorized
+to see them.
 
 ### Comparison with Claude Code's native subagents
 

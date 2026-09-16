@@ -582,12 +582,17 @@ export const completionSubscriptions = sqliteTable(
     active_task_id: text('active_task_id', { length: 36 }).references(() => tasks.task_id, {
       onDelete: 'set null',
     }),
-    path: t.json<unknown[]>('path').notNull(),
+    path: t
+      .json<import('../types/completion-subscription').CompletionDelegationHop[]>('path')
+      .notNull(),
     max_depth: integer('max_depth').notNull().default(8),
     terminal_status: text('terminal_status', {
       enum: ['completed', 'failed', 'cancelled', 'timed_out'],
     }),
-    terminal_snapshot: t.json<unknown>('terminal_snapshot'),
+    terminal_snapshot:
+      t.json<import('../types/completion-subscription').CompletionTerminalSnapshot>(
+        'terminal_snapshot'
+      ),
     delivery_task_id: text('delivery_task_id', { length: 36 }).references(() => tasks.task_id, {
       onDelete: 'set null',
     }),
@@ -3470,6 +3475,8 @@ export type ThreadSessionMapRow = typeof threadSessionMap.$inferSelect;
 export type ThreadSessionMapInsert = typeof threadSessionMap.$inferInsert;
 export type DiscordMessageDeliveryRow = typeof discordMessageDeliveries.$inferSelect;
 export type DiscordMessageDeliveryInsert = typeof discordMessageDeliveries.$inferInsert;
+export type CompletionSubscriptionRow = typeof completionSubscriptions.$inferSelect;
+export type CompletionSubscriptionInsert = typeof completionSubscriptions.$inferInsert;
 export type GatewayOutboundMessageRow = typeof gatewayOutboundMessages.$inferSelect;
 export type GatewayOutboundMessageInsert = typeof gatewayOutboundMessages.$inferInsert;
 export type GatewayInboundEventRow = typeof gatewayInboundEvents.$inferSelect;
