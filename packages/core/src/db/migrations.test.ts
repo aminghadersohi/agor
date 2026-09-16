@@ -4,7 +4,11 @@ import { join } from 'node:path';
 import { createClient } from '@libsql/client';
 import { describe, expect, it } from 'vitest';
 import { createDatabase } from './client';
-import { pendingOfflineCutoverMigrations, preflightSQLiteCapabilityPolicyOwners } from './migrate';
+import {
+  classifyMigrationWatermark,
+  pendingOfflineCutoverMigrations,
+  preflightSQLiteCapabilityPolicyOwners,
+} from './migrate';
 
 interface JournalEntry {
   idx: number;
@@ -57,6 +61,25 @@ describe('Postgres migrations', () => {
       'utf8'
     );
     expect(migration).not.toMatch(/CREATE TABLE|ALTER TABLE|DROP TABLE/);
+  });
+
+  // Upstream ships this at idx 108; the fork's append-only reconciliation
+  // renumbers adopted upstream entries into its 9xxx band (105→9021 … 108→9024)
+  // while preserving tag and `when`. Assert the fork's idx, not upstream's.
+  it('keeps provider grants pending and offline after the shipped branch-cleanup watermark', async () => {
+    const journals = await readJournals();
+    for (const [index, dialect] of (['postgresql', 'sqlite'] as const).entries()) {
+      const entries = journals[index]!.entries;
+      expect(entries.find(({ tag }) => tag === '0109_branch_cleanup_policy')).toMatchObject({
+        idx: 9024,
+        when: 1789344000003,
+      });
+      const status = classifyMigrationWatermark(entries, 1789344000003);
+      expect(status.pending[0]).toBe('0110_user_provider_oauth_grants');
+      expect(pendingOfflineCutoverMigrations(dialect, status)).toContain(
+        '0110_user_provider_oauth_grants'
+      );
+    }
   });
 
   it('keeps branch-local deletion pending after the previously published ledger migration', async () => {
