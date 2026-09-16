@@ -977,16 +977,17 @@ export async function handleGitBranchAdd(
     // dispatch. Worktree and clone materializers consume this concrete result
     // and must not independently guess or qualify the ref.
     const requestedStartingRef = shouldCreateBranch ? sourceBranch : branch;
+    // A local home is sourced from the canonical template, never cached refs
+    // or remotes belonging to an existing repository workspace.
+    const sourceRemoteUrl = localHome ? TEAMMATE_FRAMEWORK_REPO_URL : baseRemoteUrl;
     const resolveStartingRef = () =>
       resolveGitRef(repoPath, requestedStartingRef, {
         refType: refType || 'branch',
-        ...(localHome
-          ? { remote: { url: TEAMMATE_FRAMEWORK_REPO_URL }, remoteOnly: true }
-          : baseRemoteUrl
-            ? { remote: { url: baseRemoteUrl }, remoteOnly: true }
-            : remoteUrl
-              ? { remote: { url: remoteUrl, name: 'origin' } }
-              : {}),
+        ...(sourceRemoteUrl
+          ? { remote: { url: sourceRemoteUrl }, remoteOnly: true }
+          : remoteUrl
+            ? { remote: { url: remoteUrl, name: 'origin' } }
+            : {}),
         env,
       });
     // A local teammate home is a hard-gated flow: it must clone the canonical
@@ -1060,13 +1061,14 @@ export async function handleGitBranchAdd(
           newBranchName = branch !== cloneRef ? branch : undefined;
         }
       } else if (resolvedStartingRef) {
-        cloneRemoteUrl =
-          resolvedStartingRef.remoteUrl ??
-          (resolvedStartingRef.kind === 'local_branch' ||
-          resolvedStartingRef.kind === 'commit' ||
-          resolvedStartingRef.kind === 'tag'
-            ? repoPath
-            : remoteUrl);
+        cloneRemoteUrl = localHome
+          ? TEAMMATE_FRAMEWORK_REPO_URL
+          : (resolvedStartingRef.remoteUrl ??
+            (resolvedStartingRef.kind === 'local_branch' ||
+            resolvedStartingRef.kind === 'commit' ||
+            resolvedStartingRef.kind === 'tag'
+              ? repoPath
+              : remoteUrl));
       }
       if (!cloneRemoteUrl) {
         throw new Error(`Cannot materialize resolved ref '${requestedStartingRef}': no source URL`);

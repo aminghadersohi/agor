@@ -82,6 +82,24 @@ describe('resolveGitRef', () => {
     });
   });
 
+  it('pins a remote-only template without borrowing conflicting local cache refs', async () => {
+    const git = simpleGit(repoPath);
+    const remoteUrl = join(root, 'personal.git');
+    await git.push('personal', 'different:refs/heads/local-only');
+    await git.raw(['update-ref', 'refs/remotes/origin/local-only', firstSha]);
+
+    await expect(
+      resolveGitRef(repoPath, 'local-only', { remote: { url: remoteUrl }, remoteOnly: true })
+    ).resolves.toMatchObject({
+      ref: 'local-only',
+      name: 'local-only',
+      sha: secondSha,
+      kind: 'remote_branch',
+      remoteUrl,
+    });
+    expect((await git.revparse(['local-only'])).trim()).toBe(firstSha);
+  });
+
   it('refuses a bare name when local and remote candidates disagree', async () => {
     const git = simpleGit(repoPath);
     await git.branch(['shared', firstSha]);

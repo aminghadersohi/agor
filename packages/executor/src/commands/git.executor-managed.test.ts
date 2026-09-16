@@ -470,7 +470,7 @@ describe('managed executor git/fs commands', () => {
       {
         command: 'git.branch.add',
         sessionToken: 'tenant-token',
-        params: { branchId, repoId },
+        params: { branchId, repoId, useReference: false },
       },
       {}
     );
@@ -1172,6 +1172,7 @@ describe('local teammate materialization', () => {
         );
         expect(result.success).toBe(!restoreMode);
         if (restoreMode) {
+          expect(mocks.resolveGitRef).not.toHaveBeenCalled();
           expect(mocks.createBranchAsClone).not.toHaveBeenCalled();
           await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
           expect(patchedBranches).toContainEqual(
