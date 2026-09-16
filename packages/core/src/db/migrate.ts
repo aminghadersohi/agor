@@ -213,6 +213,10 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
     '0078_mcp_oauth_pending_flows',
     '0082_github_install_state',
     '0091_codex_device_auth_attempts',
+    '0095_board_branch_capability_policies',
+    '0098_board_branch_capability_policies',
+    '0099_shared_session_prompting',
+    '0100_claude_oauth_attempts',
     '9004_board_branch_capability_policies',
     '9008_shared_session_prompting',
     '9012_claude_oauth_attempts',
@@ -220,6 +224,7 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
     '9016_oauth_authority_watermark_reconciliation',
     '9017_fork_migration_collision_repair',
     '0110_user_provider_oauth_grants',
+    '0102_shared_session_prompting',
   ].map(
     (name) =>
       [

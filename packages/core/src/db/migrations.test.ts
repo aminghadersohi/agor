@@ -80,6 +80,9 @@ describe('Postgres migrations', () => {
     expect(migration).not.toMatch(/CREATE TABLE|ALTER TABLE|DROP TABLE/);
   });
 
+  // Upstream ships this at idx 108; the fork's append-only reconciliation
+  // renumbers adopted upstream entries into its 9xxx band (105→9021 … 108→9024)
+  // while preserving tag and `when`. Assert the fork's idx, not upstream's.
   it('keeps provider grants pending and offline after the shipped branch-cleanup watermark', async () => {
     const journals = await readJournals();
     for (const [index, dialect] of (['postgresql', 'sqlite'] as const).entries()) {
@@ -95,6 +98,7 @@ describe('Postgres migrations', () => {
       );
     }
   });
+
   it('keeps branch-local deletion pending after the previously published ledger migration', async () => {
     // Development environments may already have applied the earlier PR revision.
     // Drizzle uses timestamps, not tags or hashes, to decide what to apply.

@@ -422,8 +422,10 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       // while keeping its table would invent an impossible upgrade fixture.
       // Earlier missing fork schemas still need 9017's collision repair, and
       // existing final DCR authority must retain its relation and rows.
+      // Upstream's provider-grant table is likewise newer than this watermark.
       await executeRaw(db, sql`DROP TABLE user_provider_oauth_grants`);
       await withPostgresTestTransaction(db, recreateHistoricalClaudeAuthority);
+
       await executeRaw(
         db,
         sql`DELETE FROM drizzle.__drizzle_migrations
