@@ -31,6 +31,34 @@ type PostgresTestTransaction = {
   unsafe: (statement: string) => Promise<unknown>;
 };
 
+function withPostgresTestTransaction(
+  db: Database,
+  work: (transaction: PostgresTestTransaction) => Promise<void>
+): Promise<void> {
+  return (
+    db as Database & {
+      $client: { begin: (body: typeof work) => Promise<void> };
+    }
+  ).$client.begin(work);
+}
+
+/**
+ * Recreate the empty historical Claude fixture from its shipped DDL. DROP COLUMN
+ * cannot rewind 0110: PostgreSQL retains relnatts/dropped attribute slots, which
+ * the destructive reconciliation correctly rejects as a non-exact schema.
+ * This is test-only; the DCR relation and seeded rows must remain untouched.
+ */
+async function recreateHistoricalClaudeAuthority(
+  transaction: PostgresTestTransaction
+): Promise<void> {
+  await transaction.unsafe('DROP TABLE claude_oauth_attempts');
+  await transaction.unsafe('DROP SEQUENCE claude_oauth_attempt_generation_seq');
+  const source = await readFile(join(migrationsFolder, '0100_claude_oauth_attempts.sql'), 'utf8');
+  for (const statement of source.split('--> statement-breakpoint')) {
+    if (statement.trim()) await transaction.unsafe(statement);
+  }
+}
+
 async function executeReconciliationTransaction(
   transaction: PostgresTestTransaction
 ): Promise<void> {
@@ -317,7 +345,8 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
     });
 
     it('preserves an exact final DCR schema and rows when upgrading the pre-rebase watermark', async () => {
-      if (!db) throw new Error('PostgreSQL test database was not initialized');
+      if (!db || !isPostgresDatabase(db))
+        throw new Error('PostgreSQL test database was not initialized');
       const registrationId = generateId();
       const relationOid = rawRows(
         await executeRaw(
@@ -386,6 +415,9 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`DROP TABLE session_reminders, session_memories`);
       await executeRaw(db, sql`DROP INDEX sessions_tenant_session_id_unique`);
       await executeRaw(db, sql`DROP INDEX tasks_tenant_task_id_unique`);
+      // Upstream's provider-grant table is likewise newer than this watermark.
+      await executeRaw(db, sql`DROP TABLE user_provider_oauth_grants`);
+      await withPostgresTestTransaction(db, recreateHistoricalClaudeAuthority);
 
       // Reproduce the previous reviewed head's timestamp-only final watermark.
       // Its authority schema is identical; the rebased bootstrap must not try
@@ -438,6 +470,18 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           )
         )
       ).resolves.toEqual([expect.objectContaining({ registration_id: registrationId })]);
+    });
+
+    it('accepts the exact historical fixture before applying adversarial mutations', async () => {
+      if (!db || !isPostgresDatabase(db)) throw new Error('PostgreSQL test requires PostgreSQL');
+      const rollback = new Error('rollback exact historical fixture');
+      await expect(
+        withPostgresTestTransaction(db, async (transaction) => {
+          await recreateHistoricalClaudeAuthority(transaction);
+          await executeReconciliationTransaction(transaction);
+          throw rollback;
+        })
+      ).rejects.toBe(rollback);
     });
 
     it.each([
@@ -530,13 +574,9 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
         )
       )[0]?.relation_oid;
       await expect(
-        (
-          db as Database & {
-            $client: {
-              begin: (body: (tx: PostgresTestTransaction) => Promise<void>) => Promise<void>;
-            };
-          }
-        ).$client.begin(async (transaction) => {
+        withPostgresTestTransaction(db, async (transaction) => {
+          // Prove the named mutation, not a mismatch caused by later migrations.
+          await recreateHistoricalClaudeAuthority(transaction);
           await transaction.unsafe(mutation);
           await executeReconciliationTransaction(transaction);
         })
@@ -567,13 +607,9 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
         throw new Error('PostgreSQL test database was not initialized');
       }
       await expect(
-        (
-          db as Database & {
-            $client: {
-              begin: (body: (tx: PostgresTestTransaction) => Promise<void>) => Promise<void>;
-            };
-          }
-        ).$client.begin(async (transaction) => {
+        withPostgresTestTransaction(db, async (transaction) => {
+          // Prove the named mutation, not a mismatch caused by later migrations.
+          await recreateHistoricalClaudeAuthority(transaction);
           await transaction.unsafe(mutation);
           await executeReconciliationTransaction(transaction);
         })

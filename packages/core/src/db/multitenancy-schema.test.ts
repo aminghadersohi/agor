@@ -59,9 +59,10 @@ function migrationTenantTables(): string[] {
   const codexDeviceAuthMigration = readRepoFile(
     'packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'
   );
-  const claudeOauthMigration = readRepoFile(
-    'packages/core/drizzle/postgres/0100_claude_oauth_attempts.sql'
-  );
+  const claudeOauthMigration =
+    readRepoFile('packages/core/drizzle/postgres/0100_claude_oauth_attempts.sql') +
+    '\n' +
+    readRepoFile('packages/core/drizzle/postgres/0110_user_provider_oauth_grants.sql');
   const capabilityPoliciesMigration = readRepoFile(
     'packages/core/drizzle/postgres/0095_board_branch_capability_policies.sql'
   );
@@ -113,6 +114,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0090_external_user_identities.sql'),
     readRepoFile('packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'),
     readRepoFile('packages/core/drizzle/postgres/0100_claude_oauth_attempts.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0110_user_provider_oauth_grants.sql'),
     readRepoFile('packages/core/drizzle/postgres/0095_board_branch_capability_policies.sql'),
     readRepoFile('packages/core/drizzle/postgres/0102_zone_workflow_transitions.sql'),
     readRepoFile('packages/core/drizzle/postgres/9018_session_memory_reminders.sql'),
