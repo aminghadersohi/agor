@@ -1155,11 +1155,10 @@ describe('local teammate materialization', () => {
           });
           expect(options.referencePath).toBeUndefined();
           expect(options.depth).toBeUndefined();
-          // Ref provenance is persisted before materialization; readiness must
-          // still wait for the clone, remote removal and ownership marker.
-          expect(patchedBranches).toEqual([
-            { base_ref: 'template/builder', base_sha: '0123456789abcdef0123456789abcdef01234567' },
-          ]);
+          // A local home never resolves a starting ref, so no provenance is
+          // written before materialization, and readiness must still wait for
+          // the clone, remote removal and ownership marker.
+          expect(patchedBranches).toEqual([]);
           await mkdir(path, { recursive: true });
         });
         const result = await handleGitBranchAdd(
