@@ -416,6 +416,7 @@ describe('authoritative MCP gateway real transport', () => {
       fetch.mockRestore();
     }
   });
+
   it('rejects a new hop after the shared consenter is deleted while the task caller remains active', async () => {
     let providerRequests = 0;
     const provider = await listen((_request, response) => {
@@ -434,6 +435,7 @@ describe('authoritative MCP gateway real transport', () => {
     expect(providerRequests).toBe(1);
     expect(await new UsersRepository(h.rawDb).findById(h.principal.user_id)).not.toBeNull();
   });
+
   it('returns the fixed JSON-RPC failure when request headers are malformed', async () => {
     const forward = vi.fn();
     const recordRejectedRequest = vi.fn();
