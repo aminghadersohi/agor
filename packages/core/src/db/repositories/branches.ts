@@ -13,6 +13,7 @@ import type {
   BoardID,
   Branch,
   BranchID,
+  BranchProvisioningOutcome,
   EffectiveBranchAccess,
   GroupID,
   SessionPromptAuthority,
@@ -26,6 +27,7 @@ import { generateId } from '../../lib/ids';
 import {
   BRANCH_ENVIRONMENT_CLEARABLE_FIELDS,
   BRANCH_ENVIRONMENT_SNAPSHOT_FIELDS,
+  isBranchProvisioningOutcome,
 } from '../../types/branch';
 import { hasActiveEnvironmentCommand } from '../../types/environment-command';
 import { getBranchUrl } from '../../utils/url';
@@ -855,18 +857,27 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
           throw new EntityNotFoundError('Branch', id);
         }
         const current = this.rowToBranch(currentRow, baseUrl);
-        if (current.archived || current.filesystem_status !== 'failed') {
+        if (
+          current.archived ||
+          currentRow.deletion_status ||
+          currentRow.data.maintenance ||
+          hasActiveEnvironmentCommand(current.environment_instance) ||
+          current.filesystem_status !== 'failed'
+        ) {
           // Lost the race (or never eligible) — do not write, do not re-dispatch.
           return { claimed: false, branch: current };
         }
-        const insertData = this.branchToInsert({
-          ...current,
+        const insertData = {
           filesystem_status: 'creating',
-          error_message: undefined,
-          provisioning_attempt_id: attemptId,
-          provisioning_operation:
-            current.provisioning_operation === 'restore' ? 'restore' : 'retry',
-        });
+          updated_at: new Date(),
+          data: {
+            ...currentRow.data,
+            error_message: undefined,
+            provisioning_attempt_id: attemptId,
+            provisioning_operation:
+              current.provisioning_operation === 'restore' ? 'restore' : 'retry',
+          },
+        };
         const row = await update(tx, branches)
           .set(insertData)
           .where(eq(branches.branch_id, current.branch_id))
@@ -895,8 +906,9 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
    * retry has already claimed `creating`, and would otherwise mark the new,
    * healthy attempt `failed`. Pass the id the caller dispatched with and the
    * write applies only while that attempt still owns the row. Omit it for
-   * callers that legitimately target whatever attempt is current (the startup
-   * watchdog, which by definition runs when no attempt can still be live).
+   * callers that have independently established exclusive recovery authority
+   * and containment. The standalone startup reconciler uses that path; HA
+   * startup must not infer owner death from a `creating` row or restart alone.
    */
   async markProvisioningFailedIfCreating(
     id: string,
@@ -920,7 +932,12 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
           throw new EntityNotFoundError('Branch', id);
         }
         const current = this.rowToBranch(currentRow, baseUrl);
-        if (current.filesystem_status !== 'creating') {
+        if (
+          current.archived ||
+          currentRow.deletion_status ||
+          currentRow.data.maintenance ||
+          current.filesystem_status !== 'creating'
+        ) {
           return { changed: false, branch: current };
         }
         if (
@@ -930,11 +947,11 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
           // A newer attempt owns `creating` now — this acknowledgement is stale.
           return { changed: false, branch: current };
         }
-        const insertData = this.branchToInsert({
-          ...current,
+        const insertData = {
           filesystem_status: 'failed',
-          error_message: message,
-        });
+          updated_at: new Date(),
+          data: { ...currentRow.data, error_message: message },
+        };
         const row = await update(tx, branches)
           .set(insertData)
           .where(eq(branches.branch_id, current.branch_id))
@@ -950,9 +967,14 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
 
   async acknowledgeProvisioningAttempt(
     id: string,
-    acknowledgement: Partial<Branch>,
+    acknowledgement: BranchProvisioningOutcome,
     expectedAttemptId?: string
   ): Promise<{ applied: boolean; branch: Branch }> {
+    if (!isBranchProvisioningOutcome(acknowledgement)) {
+      throw new RepositoryError(
+        'Provisioning acknowledgement must contain only a terminal outcome'
+      );
+    }
     const existing = await this.findById(id);
     if (!existing) throw new EntityNotFoundError('Branch', id);
     const baseUrl = await getBaseUrl();
@@ -969,19 +991,27 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
         const generationMatches = expectedAttemptId
           ? current.provisioning_attempt_id === expectedAttemptId
           : current.provisioning_attempt_id === undefined;
-        if (current.archived || current.filesystem_status !== 'creating' || !generationMatches) {
+        if (
+          current.archived ||
+          currentRow.deletion_status ||
+          currentRow.data.maintenance ||
+          current.filesystem_status !== 'creating' ||
+          !generationMatches
+        ) {
           return { applied: false, branch: current };
         }
-        const merged = deepMerge(current, {
-          ...acknowledgement,
-          branch_id: current.branch_id,
-          repo_id: current.repo_id,
-          created_at: current.created_at,
-          updated_at: new Date().toISOString(),
-        });
-        if (acknowledgement.filesystem_status !== 'failed') delete merged.error_message;
         const row = await update(tx, branches)
-          .set(this.branchToInsert(merged))
+          .set({
+            filesystem_status: acknowledgement.filesystem_status,
+            updated_at: new Date(),
+            data: {
+              ...currentRow.data,
+              error_message:
+                acknowledgement.filesystem_status === 'failed'
+                  ? acknowledgement.error_message
+                  : undefined,
+            },
+          })
           .where(eq(branches.branch_id, current.branch_id))
           .returning()
           .one();

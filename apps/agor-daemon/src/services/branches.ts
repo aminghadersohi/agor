@@ -97,6 +97,7 @@ import {
   getBranchCleanupBlockReason,
   getTeammateConfig,
   hasMinimumRole,
+  isBranchProvisioningOutcome,
   isCanonicalTeammateFrameworkRepo,
   isTeammate,
   ROLES,
@@ -1496,6 +1497,14 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
     if (data.filesystem_status === 'ready' || data.filesystem_status === 'failed') {
       const expectedAttemptId = data.provisioning_attempt_id;
       const { provisioning_attempt_id: _attempt, ...acknowledgement } = data;
+      if (
+        !isBranchProvisioningOutcome(acknowledgement) ||
+        (expectedAttemptId !== undefined && typeof expectedAttemptId !== 'string')
+      ) {
+        throw new BadRequest(
+          'Provisioning acknowledgement must contain only a terminal outcome. Patch metadata separately.'
+        );
+      }
       const result = await this.branchRepo.acknowledgeProvisioningAttempt(
         id,
         acknowledgement,
@@ -2348,19 +2357,6 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
       typeof statusResult.data === 'object' &&
       (statusResult.data as { exists?: unknown }).exists === true;
 
-    if (!branchPathExists && getTeammateConfig(branch)?.localHome) {
-      return this.withTenantDatabase(params, () =>
-        this.patch(
-          id,
-          {
-            filesystem_status: 'failed',
-            error_message:
-              'Local teammate home is missing. Restore its files from your own backup; the public template cannot recover personal state.',
-          },
-          { ...params, provider: undefined }
-        )
-      );
-    }
     if (!branchPathExists) {
       console.log(`📂 Branch directory missing, spawning executor to recreate: ${branch.path}`);
 
@@ -2387,19 +2383,31 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
 
       // The executor derives the materialization mode from this persisted row.
       const storageMode = branch.storage_mode ?? 'worktree';
-      if (storageMode === 'clone' && !repo.remote_url) {
-        const errMsg =
-          `Cannot unarchive clone-mode branch '${branch.name}' for repo '${repo.slug}': ` +
-          `repo has no remote_url. The clone source URL is unknown.`;
+      if (getTeammateConfig(branch)?.localHome || (storageMode === 'clone' && !repo.remote_url)) {
+        const errMsg = getTeammateConfig(branch)?.localHome
+          ? 'Local teammate home is missing. Restore its files from your own backup; the public template cannot recover personal state.'
+          : `Cannot unarchive clone-mode branch '${branch.name}' for repo '${repo.slug}': ` +
+            `repo has no remote_url. The clone source URL is unknown.`;
         console.error(`⚠️  ${errMsg}`);
-        await this.withTenantDatabase(params, () =>
-          this.patch(
+        const result = await this.withTenantDatabase(params, () =>
+          this.branchRepo.acknowledgeProvisioningAttempt(
             id,
             { filesystem_status: 'failed', error_message: errMsg },
-            { ...params, provider: undefined }
+            provisioningAttemptId
           )
         );
-        return unarchivedBranch;
+        if (result.applied) {
+          emitServiceEvent(this.app, {
+            path: 'branches',
+            event: 'patched',
+            data: result.branch,
+            params,
+            id: result.branch.branch_id,
+          });
+        }
+        return this.withTenantDatabase(params, () =>
+          this.branchRepo.enrichWithZoneInfo(result.branch)
+        );
       }
 
       try {
@@ -2473,7 +2481,7 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
         );
         // Mark as failed so the UI can show the error state
         const errMsg = error instanceof Error ? error.message : String(error);
-        await this.withTenantDatabase(params, () =>
+        const result = await this.withTenantDatabase(params, () =>
           this.branchRepo.acknowledgeProvisioningAttempt(
             id,
             {
@@ -2483,6 +2491,15 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
             provisioningAttemptId
           )
         );
+        if (result.applied) {
+          emitServiceEvent(this.app, {
+            path: 'branches',
+            event: 'patched',
+            data: result.branch,
+            params,
+            id: result.branch.branch_id,
+          });
+        }
       }
     }
 
