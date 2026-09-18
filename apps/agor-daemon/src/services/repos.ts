@@ -671,6 +671,8 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       position?: { x: number; y: number };
       zoneId?: string;
       environment_variant?: string;
+      /** User-chosen organisational color for the branch's board card (hex). */
+      color_override?: string;
       /**
        * Branch storage model — see context/explorations/clone-redesign.md.
        * The deployment configuration selects the default. 'worktree' uses
@@ -868,6 +870,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
         // always align with their board defaults. Overrides are a deliberate
         // post-create action from the Branch permissions tab.
         ...(data.environment_variant ? { environment_variant: data.environment_variant } : {}),
+        ...(data.color_override ? { color_override: data.color_override } : {}),
         storage_mode: storageMode,
         ...(cloneDepth !== undefined ? { clone_depth: cloneDepth } : {}),
         sessions: [],

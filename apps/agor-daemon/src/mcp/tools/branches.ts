@@ -21,6 +21,7 @@ import {
   getBranchCleanupBlockReason,
   getTeammateConfig,
   isTeammate,
+  normalizeEntityColor,
   resolveRepoCleanupPolicy,
 } from '@agor/core/types';
 import { computeZoneRelativePosition } from '@agor/core/utils/board-placement';
@@ -90,6 +91,24 @@ const CLEANUP_CANDIDATE_FILESYSTEM_STATUSES = [
   'deleted',
 ] as const satisfies readonly CleanupCandidateFilesystemStatus[];
 const CLEANUP_CANDIDATE_STORAGE_MODES = ['worktree', 'clone'] as const;
+
+const BRANCH_COLOR_OVERRIDE_DESCRIPTION =
+  "User-chosen organisational color for this branch's board card, as hex " +
+  '(#rgb, #rrggbb, or #rrggbbaa). This is a human grouping/priority label in the ' +
+  'Trello sense — do not derive it from CI, PR, or environment state.';
+
+/** Reject a non-hex color loudly rather than silently dropping an agent's value. */
+function parseBranchColorOverride(value: unknown): string | null {
+  const raw = coerceString(value);
+  if (!raw) return null;
+  const normalized = normalizeEntityColor(raw);
+  if (!normalized) {
+    throw new Error(
+      `colorOverride must be a hex color like #ff5630 (received ${JSON.stringify(raw)})`
+    );
+  }
+  return normalized;
+}
 
 function containsTeammateKnowledgeConfigMutation(customContext: unknown): boolean {
   if (!customContext || typeof customContext !== 'object' || Array.isArray(customContext)) {
@@ -718,6 +737,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
             'For zone trigger behavior (prompt templates), use agor_branches_set_zone after creation.'
         ),
         issueUrl: mcpOptionalString('issueUrl', 'Issue URL to associate with the branch.'),
+        colorOverride: mcpOptionalString('colorOverride', BRANCH_COLOR_OVERRIDE_DESCRIPTION),
         pullRequestUrl: mcpOptionalString(
           'pullRequestUrl',
           'Pull request URL to associate with the branch.'
@@ -977,6 +997,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       }
 
       const issueUrl = normalizeOptionalHttpUrl(args.issueUrl, 'issueUrl');
+      const colorOverride = parseBranchColorOverride(args.colorOverride);
       const pullRequestUrl = normalizeOptionalHttpUrl(args.pullRequestUrl, 'pullRequestUrl');
 
       // If auto-suffix changed the ref (branch name defaults to branchName), update it
@@ -1009,6 +1030,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
             ...(pullLatest !== undefined ? { pullLatest } : {}),
             ...(sourceBranch ? { sourceBranch } : {}),
             ...(issueUrl ? { issue_url: issueUrl } : {}),
+            ...(colorOverride ? { color_override: colorOverride } : {}),
             ...(pullRequestUrl ? { pull_request_url: pullRequestUrl } : {}),
             boardId,
             ...(zoneId ? { zoneId } : {}),
@@ -1116,7 +1138,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     'agor_branches_update',
     {
       description:
-        'Update metadata for an existing branch (issue/PR URLs, notes, board placement, attention state, and custom context). Use agor_branches_permissions_update for access.',
+        'Update metadata for an existing branch (issue/PR URLs, notes, board placement, card color, attention state, and custom context). Use agor_branches_permissions_update for access.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         branchId: mcpOptionalId(
@@ -1170,6 +1192,11 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
           .describe(
             'Branch/card attention highlight state. Pass true to mark the branch as needing attention, or false to clear it.'
           ),
+        colorOverride: z
+          .string({ error: 'colorOverride must be a string or null when provided.' })
+          .nullable()
+          .optional()
+          .describe(`${BRANCH_COLOR_OVERRIDE_DESCRIPTION} Pass null to clear.`),
       }),
     },
     async (args) => {
@@ -1237,6 +1264,11 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       if (args.needsAttention !== undefined) {
         fieldsProvided++;
         updates.needs_attention = args.needsAttention;
+      }
+      if (args.colorOverride !== undefined) {
+        fieldsProvided++;
+        updates.color_override =
+          args.colorOverride === null ? null : parseBranchColorOverride(args.colorOverride);
       }
       if (fieldsProvided === 0) throw new Error('provide at least one field to update');
 

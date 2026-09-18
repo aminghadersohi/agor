@@ -10,6 +10,7 @@ import type {
   Branch,
   BranchArchiveOrDeleteOptions,
   BranchID,
+  Card,
   CardWithType,
   Repo,
   Session,
@@ -1028,6 +1029,27 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       });
     });
 
+    // Card color is a user-chosen organisational label, so it persists
+    // immediately rather than waiting for a Save in the card modal — the same
+    // way unpinning a card writes straight through.
+    const handleSetCardColor = useStableCallback(async (cardId: string, color: string | null) => {
+      if (!client) return;
+      try {
+        // `null` clears the column; `Card['color_override']` is `string |
+        // undefined`, so the clearing patch widens at the call site.
+        const patch: Omit<Partial<Card>, 'color_override'> & { color_override?: string | null } = {
+          color_override: color,
+        };
+        await client.service('cards').patch(cardId, patch as Partial<Card>);
+      } catch (error) {
+        showError(
+          error instanceof Error && error.message
+            ? `Could not set card color: ${error.message}`
+            : 'Could not set card color.'
+        );
+      }
+    });
+
     // Build card nodes from board_objects that have card_id set
     const cardNodes: Node[] = useMemo(() => {
       const nodes: Node[] = [];
@@ -1066,6 +1088,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             zoneColor,
             onClick: handleCardClick,
             onUnpin: handleUnpinCard,
+            onSetColor: handleSetCardColor,
+            canEdit: canMutateBoard,
           } satisfies CardNodeData,
         });
       }
@@ -1078,6 +1102,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       zoneLabels,
       handleCardClick,
       handleUnpinCard,
+      handleSetCardColor,
       warnInvalidZoneRef,
       canMutateBoard,
     ]);
@@ -1533,6 +1558,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         if (node.type === 'cardNode') {
           const cardData = node.data as CardNodeData;
           return cardData.card?.effective_color || token.colorPrimaryBorder;
+        }
+        if (node.type === 'branchNode') {
+          // The minimap is where colour-as-grouping pays off most: it's the
+          // only view of the whole board at once.
+          const branchData = node.data as BranchNodeData;
+          return branchData.branch?.color_override || token.colorPrimaryBorder;
         }
         const session = node.data.session as Session;
         if (!session) return token.colorPrimaryBorder;

@@ -946,6 +946,11 @@ export const branches = pgTable(
 
     // UI state (materialized for efficient highlighting queries)
     needs_attention: t.bool('needs_attention').notNull().default(true), // Default true for new branches
+    // User-chosen organisational color for this branch's board card (Trello-style
+    // label). NULL = no color. Mirrors `cards.color_override`; never derived from
+    // CI/PR/environment state. Validated as hex at the app layer (no DB CHECK,
+    // per context/guides/creating-database-migrations.md).
+    color_override: text('color_override'),
 
     // Archive state (for soft deletes)
     archived: t.bool('archived').notNull().default(false),
