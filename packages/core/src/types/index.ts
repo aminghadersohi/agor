@@ -13,6 +13,7 @@ export * from './branch-deletion';
 export * from './capability-policy';
 export * from './card';
 export * from './context';
+export * from './entity-color';
 export * from './environment-command';
 export * from './feathers';
 export * from './file';

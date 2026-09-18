@@ -2,6 +2,7 @@ import {
   BRANCH_WORKSPACE_SERVER_FIELDS,
   projectBranchWorkspaceOperation,
 } from '../../types/branch-cleanup';
+import { normalizeEntityColor } from '../../types/entity-color';
 /**
  * Branch Repository
  *
@@ -161,6 +162,7 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
         environment_variant: row.environment_variant ?? undefined,
         board_id: (row.board_id as BoardID | null) ?? undefined, // Top-level column
         needs_attention: Boolean(row.needs_attention), // Convert SQLite integer (0/1) to boolean
+        color_override: row.color_override ?? undefined,
         archived: Boolean(row.archived), // Convert SQLite integer (0/1) to boolean
         archived_at: row.archived_at ? new Date(row.archived_at).toISOString() : undefined,
         archived_by: (row.archived_by as UUID | null) ?? undefined,
@@ -232,6 +234,9 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
       // Explicitly convert undefined to null for Drizzle (undefined values are ignored in set())
       board_id: branch.board_id === undefined ? null : branch.board_id || null,
       needs_attention: branch.needs_attention ?? true, // Default true for new branches
+      // Reject anything that isn't a hex color rather than persisting it
+      // unchecked, the same way `url` is sanitized on cards.
+      color_override: normalizeEntityColor(branch.color_override),
       archived: branch.archived ?? false, // Default false for new branches
       archived_at: branch.archived_at ? new Date(branch.archived_at) : null,
       archived_by: branch.archived_by ?? null,

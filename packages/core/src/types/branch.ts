@@ -314,6 +314,17 @@ export interface Branch {
   // ===== UI State =====
 
   /**
+   * User-chosen organisational color for this branch's board card.
+   *
+   * Purely a human grouping/priority signal (Trello-style labels) — never
+   * derived from CI, PR, environment, or any other computed state. Mirrors
+   * `Card.color_override`: optional, cleared by patching `null`, and stored
+   * as a `#rgb` / `#rrggbb` / `#rrggbbaa` hex string. Anything else is
+   * rejected at the repository boundary.
+   */
+  color_override?: string;
+
+  /**
    * Whether this branch needs attention (highlighted state)
    *
    * Set to true when:
