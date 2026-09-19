@@ -364,7 +364,7 @@ export function useAgorClient(options: UseAgorClientOptions): UseAgorClientResul
           // Only show error on initial connection failure, not during reconnection attempts
           // If we've connected before, keep showing "reconnecting" state instead of error
           if (!hasConnectedOnce) {
-            setError('Daemon is not running. Start it with: cd apps/agor-daemon && pnpm dev');
+            setError('Failed to connect to Agor daemon');
             setConnecting(false);
             setConnected(false);
           } else {
