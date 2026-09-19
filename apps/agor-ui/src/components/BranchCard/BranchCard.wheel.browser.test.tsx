@@ -215,10 +215,13 @@ it('pans and zooms the canvas over scheduled lists while preserving pagination',
   const nextPage = screen.getByTitle('Next Page');
   expect(wheel(nextPage, { ctrlKey: true }).defaultPrevented).toBe(true);
   await act(async () => userEvent.click(nextPage));
-  // The preceding pan/zoom intentionally moves the card outside the browser
-  // viewport. Pagination state is a DOM contract here; pointer actionability
-  // is covered by the dedicated bounded-session browser suite.
-  fireEvent.click(screen.getByRole('button', { name: 'Open session Conversation 20' }));
+  // The wheel assertions intentionally pan the card outside the viewport.
+  // Restore a visible canvas position before testing a real pointer click.
+  await act(async () => flow.setViewport(before));
+  await settle();
+  await act(async () =>
+    userEvent.click(screen.getByRole('button', { name: 'Open session Conversation 20' }))
+  );
   expect(onSessionClick).toHaveBeenCalledWith('session-20');
 });
 

@@ -215,8 +215,10 @@ describe('BoardObjectsService.patch', () => {
         size: { width: 486, height: 237 },
         position: { x: 20, y: 30 },
         compact: true,
+        placement_write_id: 'layout-write-1',
       })
     ).resolves.toMatchObject({
+      placement_write_id: 'layout-write-1',
       position: { x: 20, y: 30 },
       size: { width: 486, height: 237 },
       compact: true,
