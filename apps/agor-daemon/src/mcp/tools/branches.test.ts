@@ -1605,6 +1605,8 @@ describe('agor_branches_set_zone', () => {
       userId: 'user-1',
       baseServiceParams,
     });
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+
     const result = await setZone({ branchId: 'branch-1', zoneId: 'zone-review' });
     const parsed = JSON.parse(result.content[0].text);
 
@@ -1697,6 +1699,7 @@ describe('agor_branches_set_zone', () => {
       baseServiceParams,
     });
 
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
     const result = await setZone({
       branchId: 'branch-1',
       zoneId: 'zone-validate',
@@ -1726,6 +1729,7 @@ describe('agor_branches_set_zone', () => {
       { ...baseServiceParams, provider: undefined, route: { id: 'session-1' } }
     );
     expect(parsed.trigger.sessionId).toBe('session-1');
+    random.mockRestore();
   });
 
   it('rejects show_picker zone triggers when the target session belongs to another branch', async () => {

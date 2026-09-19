@@ -13,6 +13,7 @@ import {
   SOCKET_IO_MAX_BUFFER_SIZE_BYTES,
 } from '@agor/core/config';
 import { isTerminalTaskStatus } from '@agor/core/types';
+import { projectTranscriptData } from './tool-result-truncator.js';
 
 // Re-export AgorClient type for use in other executor files
 export type { AgorClient } from '@agor/core/api';
@@ -60,6 +61,11 @@ export function registerExecutorRequestSizeGuard(client: AgorClient): void {
           const isTranscriptWrite =
             path === 'messages' && (context.method === 'create' || context.method === 'patch');
           if (!isTranscriptWrite) return context;
+          // Project after provider enrichment and wrapper construction, on a copy.
+          // The budget assertion below remains the final transport postcondition.
+          if (context.data && typeof context.data === 'object') {
+            context.data = projectTranscriptData(context.data, EXECUTOR_REQUEST_DATA_BUDGET_BYTES);
+          }
           assertExecutorRequestDataWithinBudget(path, context.method, context.data);
           return context;
         },

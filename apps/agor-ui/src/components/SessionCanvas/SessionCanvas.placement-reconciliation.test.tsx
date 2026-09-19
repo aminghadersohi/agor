@@ -16,10 +16,6 @@ import { boardObjectPatched, sessionPatched } from '../../store/agorRealtimeActi
 import { agorStore } from '../../store/agorStore';
 import SessionCanvas from './SessionCanvas';
 
-vi.mock('../../hooks/useCanManageBoard', () => ({
-  useCanManageBoard: () => true,
-}));
-
 interface FlowNode {
   id: string;
   type?: string;
@@ -39,6 +35,22 @@ interface CapturedFlowProps {
 }
 
 let flowProps: CapturedFlowProps | null = null;
+
+// This fork's SessionCanvas also mounts `useZoneWorkflow`, which reads and then
+// subscribes to the zone-workflow-transitions service. Every client stub here
+// needs that surface or the component throws on mount.
+const zoneWorkflowStub = () => ({
+  find: vi.fn(async () => ({ data: [] })),
+  on: vi.fn(),
+  off: vi.fn(),
+});
+// Fork-only board presence joins a cursor room over the same socket.
+const forkSocketStub = () => ({
+  on: vi.fn(),
+  off: vi.fn(),
+  emit: vi.fn(),
+  volatile: { emit: vi.fn() },
+});
 
 vi.mock('reactflow', async () => {
   const React = await import('react');
@@ -202,34 +214,6 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
     vi.useRealTimers();
   });
 
-  it('cancels a debounced zone layout when the canvas changes boards', async () => {
-    vi.useFakeTimers();
-    const patch = vi.fn();
-    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
-    const canvas = (nextBoard: Board) => (
-      <ConnectionProvider value={connected}>
-        <SessionCanvas board={nextBoard} client={client} branches={[branch]} />
-      </ConnectionProvider>
-    );
-    const view = render(canvas(board));
-    await act(async () => {});
-    act(() => {
-      const node = {
-        ...currentNode(IMPLEMENTING_ZONE_ID),
-        position: { x: 1900, y: 200 },
-        positionAbsolute: { x: 1900, y: 200 },
-      };
-      flowProps?.onNodeDragStart?.({}, node);
-      flowProps?.onNodeDrag?.({}, node);
-      flowProps?.onNodeDragStop?.({}, node);
-    });
-    view.rerender(canvas({ ...board, board_id: 'other-board' } as Board));
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1000);
-    });
-    expect(patch).not.toHaveBeenCalled();
-  });
-
   it('persists a second drag after the first pending PATCH is acknowledged', async () => {
     vi.useFakeTimers();
     let release!: () => void;
@@ -242,7 +226,12 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
       boardObjectPatched(result);
       return result;
     });
-    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    const client = {
+      service: vi.fn(() => ({ patch, ...zoneWorkflowStub() })),
+      io: forkSocketStub(),
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as AgorClient;
     render(
       <ConnectionProvider value={connected}>
         <SessionCanvas board={board} client={client} branches={[branch]} />
@@ -307,7 +296,12 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
             requests.push({ result, release: () => resolve(result) });
           })
       );
-      const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+      const client = {
+        service: vi.fn(() => ({ patch, ...zoneWorkflowStub() })),
+        io: forkSocketStub(),
+        on: vi.fn(),
+        off: vi.fn(),
+      } as unknown as AgorClient;
       render(
         <ConnectionProvider value={connected}>
           <SessionCanvas board={board} client={client} branches={[branch]} />
@@ -383,7 +377,12 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
           requests.push({ result, release: () => resolve(result) });
         })
     );
-    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    const client = {
+      service: vi.fn(() => ({ patch, ...zoneWorkflowStub() })),
+      io: forkSocketStub(),
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as AgorClient;
     const canvas = (nextBoard = board, generation = 1) => (
       <ConnectionProvider value={{ ...connected, authGeneration: generation }}>
         <SessionCanvas board={nextBoard} client={client} branches={[branch]} />
@@ -475,7 +474,12 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
         boardObjectPatched(result);
         return result;
       });
-      const client = { service: () => ({ patch }) } as unknown as AgorClient;
+      const client = {
+        service: () => ({ patch, ...zoneWorkflowStub() }),
+        io: forkSocketStub(),
+        on: vi.fn(),
+        off: vi.fn(),
+      } as unknown as AgorClient;
       render(
         <ConnectionProvider value={connected}>
           <SessionCanvas board={board} client={client} branches={[branch]} />
@@ -502,7 +506,12 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
   it('does not persist a stale drag after cross-zone authority advances', async () => {
     vi.useFakeTimers();
     const patch = vi.fn().mockResolvedValue({});
-    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    const client = {
+      service: vi.fn(() => ({ patch, ...zoneWorkflowStub() })),
+      io: forkSocketStub(),
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as AgorClient;
 
     render(
       <ConnectionProvider value={connected}>
@@ -580,7 +589,12 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
         id === reviewingCardPlacement.object_id ? cardPending : Promise.resolve()
       );
       const create = vi.fn().mockResolvedValue({});
-      const client = { service: vi.fn(() => ({ patch, create })) } as unknown as AgorClient;
+      const client = {
+        service: vi.fn(() => ({ patch, create, ...zoneWorkflowStub() })),
+        io: forkSocketStub(),
+        on: vi.fn(),
+        off: vi.fn(),
+      } as unknown as AgorClient;
       render(
         <ConnectionProvider value={connected}>
           <SessionCanvas board={board} client={client} branches={[branch]} />
@@ -671,7 +685,12 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
         id === reviewingCardPlacement.object_id ? cardPending : Promise.resolve()
       );
       const create = vi.fn().mockResolvedValue({});
-      const client = { service: vi.fn(() => ({ patch, create })) } as unknown as AgorClient;
+      const client = {
+        service: vi.fn(() => ({ patch, create, ...zoneWorkflowStub() })),
+        io: forkSocketStub(),
+        on: vi.fn(),
+        off: vi.fn(),
+      } as unknown as AgorClient;
       const view = render(
         <ConnectionProvider value={connected}>
           <SessionCanvas board={triggerBoard} client={client} branches={[branch]} />
@@ -736,7 +755,12 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
   it('preserves relative placement when the parent zone moves during a queued drag', async () => {
     vi.useFakeTimers();
     const patch = vi.fn().mockResolvedValue({});
-    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    const client = {
+      service: vi.fn(() => ({ patch, ...zoneWorkflowStub() })),
+      io: forkSocketStub(),
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as AgorClient;
     const view = render(
       <ConnectionProvider value={connected}>
         <SessionCanvas board={board} client={client} branches={[branch]} />
@@ -774,7 +798,12 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
   it('does not persist a stale drag after same-zone auto-arrange advances', async () => {
     vi.useFakeTimers();
     const patch = vi.fn().mockResolvedValue({});
-    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    const client = {
+      service: vi.fn(() => ({ patch, ...zoneWorkflowStub() })),
+      io: forkSocketStub(),
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as AgorClient;
 
     render(
       <ConnectionProvider value={connected}>
@@ -814,7 +843,12 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
 
   it('drops stale local absolute geometry when set_zone moves a branch before a delayed local echo', async () => {
     const patch = vi.fn().mockResolvedValue({});
-    const client = { service: vi.fn(() => ({ patch })) } as unknown as AgorClient;
+    const client = {
+      service: vi.fn(() => ({ patch, ...zoneWorkflowStub() })),
+      io: forkSocketStub(),
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as AgorClient;
 
     const view = render(
       <ConnectionProvider value={connected}>

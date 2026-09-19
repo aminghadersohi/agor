@@ -1008,8 +1008,14 @@ export async function handleGitBranchAdd(
       );
     }
 
-    // Idempotency: only adopt a prior checkout when retry authority explicitly
-    // permits it, and bind that checkout to both the resolved ref and branch.
+    // Create the git branch on filesystem.
+    //
+    // Idempotency: a prior attempt may have materialized the worktree/clone
+    // and then died before acking (its branch was subsequently marked 'failed'
+    // by the daemon safety net). If a checkout for exactly this ref is already
+    // present, adopt it instead of re-running materialization — `git worktree
+    // add` / `git clone` would otherwise fail on the already-attached ref.
+    // Adoption is bound to the resolved ref, not just the requested branch.
     const alreadyMaterialized = payload.params.allowExistingCheckout
       ? await isBranchAlreadyMaterialized(branchPath, resolvedStartingRef?.name ?? branch, branchId)
       : false;
@@ -1167,10 +1173,9 @@ export async function handleGitBranchAdd(
     // No filesystem work (including fallback recovery) may follow publication
     // of readiness: deletion may acquire the Branch fence immediately afterward.
     materializationWritesSettled = true;
-    await client.service('branches').patch(branchId, {
-      filesystem_status: 'ready',
-      ...attemptFence,
-    });
+    await client
+      .service('branches')
+      .patch(branchId, { filesystem_status: 'ready', ...attemptFence });
 
     return {
       success: true,

@@ -54,9 +54,6 @@ it('persists two real pointer drags when the first PATCH completes during the se
     return result;
   });
   const client = {
-    io: { on: vi.fn(), off: vi.fn(), emit: vi.fn(), volatile: { emit: vi.fn() } },
-    on: vi.fn(),
-    off: vi.fn(),
     service: () => ({
       patch,
       find: async () => ({ data: [], capabilities: [] }),
