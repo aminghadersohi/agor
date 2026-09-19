@@ -84,6 +84,7 @@ function createBranchData(overrides?: {
   permission_source?: 'board' | 'override';
   others_can?: 'none' | 'view' | 'session' | 'prompt' | 'all';
   others_fs_access?: 'none' | 'read' | 'write';
+  color_override?: string;
 }) {
   const name = overrides?.name ?? 'feature-branch';
   const repoId = overrides?.repo_id ?? (generateId() as UUID);
@@ -119,6 +120,7 @@ function createBranchData(overrides?: {
     permission_source: overrides?.permission_source,
     others_can: overrides?.others_can,
     others_fs_access: overrides?.others_fs_access,
+    color_override: overrides?.color_override,
   } as const;
 }
 
@@ -1567,5 +1569,53 @@ describe('BranchRepository.findTeammateBranches', () => {
     expect(outsiderSessionResult.map((branch) => branch.branch_id)).not.toContain(
       viewOnlyTeammate.branch_id
     );
+  });
+});
+
+describe('BranchRepository color_override', () => {
+  dbTest('round-trips a user-chosen color and clears it on explicit null', async ({ db }) => {
+    const repoRepository = new RepoRepository(db);
+    const branchRepository = new BranchRepository(db);
+    const repo = await repoRepository.create(createRepoData());
+
+    const branch = await branchRepository.create(
+      createBranchData({ repo_id: repo.repo_id, color_override: '#FF5630' })
+    );
+    // Normalized on the way in, so every reader sees one casing.
+    expect(branch.color_override).toBe('#ff5630');
+
+    const recolored = await branchRepository.update(branch.branch_id, {
+      color_override: '#36b37e',
+    });
+    expect(recolored.color_override).toBe('#36b37e');
+
+    // `null` is the clear signal; `undefined` means "leave it alone".
+    const untouched = await branchRepository.update(branch.branch_id, {
+      notes: 'An unrelated patch',
+    });
+    expect(untouched.color_override).toBe('#36b37e');
+
+    const cleared = await branchRepository.update(branch.branch_id, {
+      color_override: null as unknown as string,
+    });
+    expect(cleared.color_override).toBeUndefined();
+  });
+
+  dbTest('stores no color rather than persisting a non-hex value', async ({ db }) => {
+    const repoRepository = new RepoRepository(db);
+    const branchRepository = new BranchRepository(db);
+    const repo = await repoRepository.create(createRepoData());
+    const branch = await branchRepository.create(
+      createBranchData({ repo_id: repo.repo_id, color_override: 'rebeccapurple' })
+    );
+    expect(branch.color_override).toBeUndefined();
+  });
+
+  dbTest('defaults to no color', async ({ db }) => {
+    const repoRepository = new RepoRepository(db);
+    const branchRepository = new BranchRepository(db);
+    const repo = await repoRepository.create(createRepoData());
+    const branch = await branchRepository.create(createBranchData({ repo_id: repo.repo_id }));
+    expect(branch.color_override).toBeUndefined();
   });
 });

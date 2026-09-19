@@ -133,6 +133,19 @@ export function createMigrationImpactRegistry(
 
 const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
   [
+    '9026_branch_color_override',
+    {
+      requiresOfflineCutover: false,
+      impact: defineMigrationImpact({
+        classification: 'schema',
+        userAction: 'none',
+        rollbackCompatibility: 'compatible',
+        summary:
+          'Adds the optional branch color_override column. Older binaries ignore the additive column; rolling back leaves stored colors unread.',
+      }),
+    },
+  ],
+  [
     '9020_standalone_power_ownership',
     {
       requiresOfflineCutover: true,

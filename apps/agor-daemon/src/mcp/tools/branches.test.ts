@@ -550,6 +550,45 @@ describe('agor_branches_update', () => {
     expect(branchesPatch).toHaveBeenCalledWith('branch-1', { needs_attention: true }, {});
   });
 
+  it('normalizes a hex card color and clears it on null', async () => {
+    const branchesGet = vi.fn(async () => ({ branch_id: 'branch-1' }));
+    const branchesPatch = vi.fn(async () => ({ branch_id: 'branch-1' }));
+    const app = {
+      get: () => ({}),
+      service(name: string) {
+        if (name === 'branches') return { get: branchesGet, patch: branchesPatch };
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+
+    const update = registerAndCaptureUpdate({ app, userId: 'user-1' });
+
+    await update({ branchId: 'branch-1', colorOverride: '#FF5630' });
+    expect(branchesPatch).toHaveBeenCalledWith('branch-1', { color_override: '#ff5630' }, {});
+
+    await update({ branchId: 'branch-1', colorOverride: null });
+    expect(branchesPatch).toHaveBeenLastCalledWith('branch-1', { color_override: null }, {});
+  });
+
+  it('rejects a non-hex color instead of silently dropping it', async () => {
+    const branchesGet = vi.fn(async () => ({ branch_id: 'branch-1' }));
+    const branchesPatch = vi.fn();
+    const app = {
+      get: () => ({}),
+      service(name: string) {
+        if (name === 'branches') return { get: branchesGet, patch: branchesPatch };
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+
+    const update = registerAndCaptureUpdate({ app, userId: 'user-1' });
+
+    await expect(update({ branchId: 'branch-1', colorOverride: 'red' })).rejects.toThrow(
+      /hex color/
+    );
+    expect(branchesPatch).not.toHaveBeenCalled();
+  });
+
   it('returns an actionable error when branchId is omitted without session context', async () => {
     const sessionsGet = vi.fn();
     const app = {
