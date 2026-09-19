@@ -44,7 +44,7 @@ import type {
   Task,
   TaskPendingDispatchStatus,
 } from '@agor/core/types';
-import type { DaemonMetrics } from './metrics/index.js';
+import type { DaemonMetrics, DaemonOperationalMetrics } from './metrics/index.js';
 import type { PowerPolicyController } from './power-management/index.js';
 import type { EnvironmentHealthCheckOptions } from './services/branches.js';
 import type {
@@ -77,6 +77,8 @@ export type Application = ExpressApplication & {
   set(name: 'metrics', value: DaemonMetrics): ExpressApplication;
   get(name: 'powerPolicyController'): PowerPolicyController | undefined;
   set(name: 'powerPolicyController', value: PowerPolicyController): ExpressApplication;
+  get(name: 'daemonOperationalMetrics'): DaemonOperationalMetrics | undefined;
+  set(name: 'daemonOperationalMetrics', value: DaemonOperationalMetrics): ExpressApplication;
 };
 
 /**
@@ -286,6 +288,13 @@ export interface ReposServiceImpl extends Service<Repo, Partial<Repo>, FeathersP
     },
     params?: FeathersParams
   ): Promise<Branch>;
+  retryBranchProvisioning(branchId: string, params?: FeathersParams): Promise<Branch>;
+  // Takes AuthenticatedParams, not bare FeathersParams: the startup watchdog
+  // calls it with an explicit static-tenant context and no user, and that
+  // tenant has to survive into the repository scope.
+  reconcileStuckCreatingBranches(
+    params?: CoreAuthenticatedParams
+  ): Promise<{ scanned: number; failed: number }>;
   removeBranch(id: string, name: string, params?: FeathersParams): Promise<Repo>;
   importFromAgorYml(
     id: string,

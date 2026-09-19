@@ -32,6 +32,7 @@ import {
 } from 'antd';
 import React from 'react';
 import { useAppActions } from '../../contexts/AppActionsContext';
+import { useIsMobileViewport } from '../../hooks/useIsMobileViewport';
 import { useAgorStore } from '../../store/agorStore';
 import { selectMcpServerById, selectRepoById, selectUserById } from '../../store/selectors';
 import { copyToClipboard } from '../../utils/clipboard';
@@ -45,6 +46,7 @@ import {
   queuedPromptPreviewIsStale,
   queuedPromptUnavailableReason,
 } from './queuedPromptEditorState';
+import { SessionConversationLayout } from './SessionConversationLayout';
 
 export interface SessionPanelContentProps {
   client: AgorClient | null;
@@ -87,6 +89,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
     forceExpandAll = false,
   }) => {
     const { token } = theme.useToken();
+    const isMobileShell = useIsMobileViewport();
     const { showSuccess, showError } = useThemedMessage();
     const [resumeQueueInFlight, setResumeQueueInFlight] = React.useState(false);
     const [batchOpen, setBatchOpen] = React.useState(false);
@@ -379,6 +382,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
         {/* Header row with pills and scroll navigation */}
         <div
           style={{
+            flexShrink: 0,
             marginBottom: token.sizeUnit,
             display: 'flex',
             // Keep navigation aligned with the branch pill's first row when metadata wraps below it.
@@ -400,7 +404,8 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
                   onNukeEnvironment={onNukeEnvironment}
                   onViewLogs={onViewLogs}
                   identityLink={sessionPath(session.session_id)}
-                  truncateToFit
+                  // Full labels on mobile (wrap) instead of cramped truncation.
+                  truncateToFit={!isMobileShell}
                 />
               )}
             </BranchMetadataRow>
@@ -432,53 +437,15 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
 
         <Divider style={{ margin: `${token.sizeUnit * 2}px 0` }} />
 
-        <ConversationView
-          client={client}
-          sessionId={session.session_id}
-          agentic_tool={session.agentic_tool}
-          sessionModel={session.model_config?.model}
-          userById={userById}
-          currentUserId={currentUserId}
-          onScrollRef={handleScrollRef}
-          onPermissionDecision={onPermissionDecision}
-          branchName={branch?.name}
-          scheduledFromBranch={session.scheduled_from_branch}
-          scheduledRunAt={session.scheduled_run_at}
-          isActive={isOpen}
-          genealogy={session.genealogy}
-          teammateEmoji={
-            branch && isTeammate(branch) ? getTeammateConfig(branch)?.emoji : undefined
-          }
-          forceExpandAll={forceExpandAll}
-          onOpenAgenticToolSettings={onOpenAgenticToolSettings}
-        />
-
-        {/* Queued Tasks Drawer - Above Footer.
-            Reads tasks (status='queued') instead of messages now that the queue
-            is task-centric (see never-lose-prompt §C). The full prompt lives on
-            task.full_prompt; description is the truncated 120-char preview. */}
-        {queuedTasks.length > 0 && (
-          <div
-            style={{
-              flexShrink: 0,
-              background: token.colorBgElevated,
-              borderTop: `1px solid ${token.colorBorderSecondary}`,
-              borderTopLeftRadius: token.borderRadiusLG,
-              borderTopRightRadius: token.borderRadiusLG,
-              padding: `${token.sizeUnit * 3}px ${token.sizeUnit * 6}px`,
-              marginLeft: -token.sizeUnit * 6 + token.sizeUnit * 2,
-              marginRight: -token.sizeUnit * 6 + token.sizeUnit * 2,
-              marginTop: token.sizeUnit * 2,
-              boxShadow: `0 -2px 8px ${token.colorBgMask}`,
-            }}
-          >
+        <SessionConversationLayout
+          queueHeader={
             <div
               style={{
-                marginBottom: token.sizeUnit * 2,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
                 gap: token.sizeUnit * 2,
+                marginBottom: token.sizeUnit,
               }}
             >
               <Typography.Text
@@ -498,106 +465,167 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
                 </Button>
               )}
             </div>
-            {isQueueHeldByFailure && (
-              <Alert
-                type="warning"
-                showIcon
-                style={{ marginBottom: token.sizeUnit * 2 }}
-                message="Queue paused by failed session"
-                description="Queued prompts are preserved. Resume the queue to run the next prompt without copy/paste."
-                action={
-                  <Button
-                    size="small"
-                    type="primary"
-                    loading={resumeQueueInFlight}
-                    disabled={!client}
-                    onClick={handleResumeHeldQueue}
-                  >
-                    Resume queue
-                  </Button>
-                }
-              />
-            )}
-            <Space orientation="vertical" size={8} style={{ width: '100%' }}>
-              {queuedTasks.map((task, idx) => (
-                <div
-                  key={task.task_id}
-                  style={{
-                    background: token.colorBgContainer,
-                    padding: `${token.sizeUnit * 2}px ${token.sizeUnit * 3}px`,
-                    borderRadius: token.borderRadius,
-                    border: `1px solid ${token.colorBorder}`,
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: token.sizeUnit * 2,
-                  }}
-                >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <Typography.Text ellipsis style={{ display: 'block' }}>
-                      <span
-                        style={{ color: token.colorTextSecondary, marginRight: token.sizeUnit }}
-                      >
-                        {idx + 1}.
-                      </span>
-                      {task.full_prompt}
-                    </Typography.Text>
-                    {task.metadata?.coordinator_queue_batch && (
-                      <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                        {task.metadata.coordinator_queue_batch.source_request_count} requests became
-                        one execution turn ({task.metadata.coordinator_queue_batch.strategy})
-                      </Typography.Text>
-                    )}
-                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                      Editable until dispatch/claim
-                      {task.metadata?.queued_prompt_amendment
-                        ? ` · revision ${task.metadata.queued_prompt_amendment.current_revision}`
-                        : ' · original'}
-                    </Typography.Text>
-                  </div>
-                  <Space size={4}>
-                    {isQueueHeldByFailure && idx === 0 && (
+          }
+          queue={
+            queuedTasks.length > 0 ? (
+              <>
+                {isQueueHeldByFailure && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: token.sizeUnit * 2 }}
+                    message="Queue paused by failed session"
+                    description="Queued prompts are preserved. Resume the queue to run the next prompt without copy/paste."
+                    action={
                       <Button
                         size="small"
-                        type="link"
+                        type="primary"
                         loading={resumeQueueInFlight}
                         disabled={!client}
                         onClick={handleResumeHeldQueue}
                       >
-                        Run next
+                        Resume queue
                       </Button>
-                    )}
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<CopyOutlined />}
-                      onClick={async () => {
-                        await copyToClipboard(task.full_prompt);
-                        showSuccess('Message copied to clipboard');
+                    }
+                  />
+                )}
+                <Space orientation="vertical" size={8} style={{ width: '100%' }}>
+                  {queuedTasks.map((task, idx) => (
+                    <div
+                      key={task.task_id}
+                      style={{
+                        background: token.colorBgContainer,
+                        padding: `${token.sizeUnit * 2}px ${token.sizeUnit * 3}px`,
+                        borderRadius: token.borderRadius,
+                        border: `1px solid ${token.colorBorder}`,
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: token.sizeUnit * 2,
                       }}
-                    />
-                    <Tooltip
-                      title={
-                        currentUserId === task.created_by
-                          ? 'Edit or cancel this queued prompt'
-                          : 'Only the prompt author can edit here; parent/coordinator access is available through the API/MCP contract.'
-                      }
                     >
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<EditOutlined />}
-                        aria-label={`Edit queued prompt ${idx + 1}`}
-                        disabled={!client || currentUserId !== task.created_by}
-                        onClick={() => openEditDialog(task)}
-                      />
-                    </Tooltip>
-                  </Space>
-                </div>
-              ))}
-            </Space>
-          </div>
-        )}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <Typography.Text ellipsis style={{ display: 'block' }}>
+                          <span
+                            style={{ color: token.colorTextSecondary, marginRight: token.sizeUnit }}
+                          >
+                            {idx + 1}.
+                          </span>
+                          {task.full_prompt}
+                        </Typography.Text>
+                        {task.metadata?.coordinator_queue_batch && (
+                          <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                            {task.metadata.coordinator_queue_batch.source_request_count} requests
+                            became one execution turn (
+                            {task.metadata.coordinator_queue_batch.strategy})
+                          </Typography.Text>
+                        )}
+                        <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                          Editable until dispatch/claim
+                          {task.metadata?.queued_prompt_amendment
+                            ? ` · revision ${task.metadata.queued_prompt_amendment.current_revision}`
+                            : ' · original'}
+                        </Typography.Text>
+                      </div>
+                      <Space size={4} style={{ flexShrink: 0 }}>
+                        {isQueueHeldByFailure && idx === 0 && (
+                          <Button
+                            size="small"
+                            type="link"
+                            loading={resumeQueueInFlight}
+                            disabled={!client}
+                            onClick={handleResumeHeldQueue}
+                          >
+                            Run next
+                          </Button>
+                        )}
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<CopyOutlined />}
+                          aria-label={`Copy queued task ${idx + 1}`}
+                          onClick={async () => {
+                            await copyToClipboard(task.full_prompt);
+                            showSuccess('Message copied to clipboard');
+                          }}
+                        />
+                        <Button
+                          type="text"
+                          size="small"
+                          danger
+                          icon={<DeleteOutlined />}
+                          aria-label={`Remove queued task ${idx + 1}`}
+                          onClick={async () => {
+                            if (!client) return;
+
+                            try {
+                              // Optimistically remove from UI
+                              setQueuedTasks((prev) =>
+                                prev.filter((t) => t.task_id !== task.task_id)
+                              );
+
+                              // Delete the queued task — cascade removes the row
+                              // entirely; spawnTaskExecutor never gets a chance.
+                              await client.service('tasks').remove(task.task_id);
+                            } catch (error) {
+                              showError(
+                                `Failed to remove queued task: ${error instanceof Error ? error.message : String(error)}`
+                              );
+
+                              // Re-fetch queue to restore accurate state
+                              const response = await client
+                                .service(`sessions/${session.session_id}/tasks/queue`)
+                                .find();
+                              const data = (response as { data: Task[] }).data || [];
+                              setQueuedTasks(data);
+                            }
+                          }}
+                        />
+                        <Tooltip
+                          title={
+                            currentUserId === task.created_by
+                              ? 'Edit or cancel this queued prompt'
+                              : 'Only the prompt author can edit here; parent/coordinator access is available through the API/MCP contract.'
+                          }
+                        >
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<EditOutlined />}
+                            aria-label={`Edit queued prompt ${idx + 1}`}
+                            disabled={!client || currentUserId !== task.created_by}
+                            onClick={() => openEditDialog(task)}
+                          />
+                        </Tooltip>
+                      </Space>
+                    </div>
+                  ))}
+                </Space>
+              </>
+            ) : undefined
+          }
+        >
+          <ConversationView
+            client={client}
+            sessionId={session.session_id}
+            agentic_tool={session.agentic_tool}
+            sessionModel={session.model_config?.model}
+            userById={userById}
+            currentUserId={currentUserId}
+            onScrollRef={handleScrollRef}
+            onPermissionDecision={onPermissionDecision}
+            branchName={branch?.name}
+            scheduledFromBranch={session.scheduled_from_branch}
+            scheduledRunAt={session.scheduled_run_at}
+            isActive={isOpen}
+            genealogy={session.genealogy}
+            teammateEmoji={
+              branch && isTeammate(branch) ? getTeammateConfig(branch)?.emoji : undefined
+            }
+            forceExpandAll={forceExpandAll}
+            onOpenAgenticToolSettings={onOpenAgenticToolSettings}
+          />
+        </SessionConversationLayout>
 
         <Modal
           open={!!editTask}
