@@ -19,7 +19,7 @@ interface MobileHomePageProps {
   /** Fork-only: the schedules section reads its own data. */
   client?: AgorClient | null;
   /** Fork-only: opens the teammate chat-collections manager. */
-  onManageTeammateChats?: () => void;
+  onManageTeammateChats?: (sessionId?: string) => void;
   sessionById: Map<string, Session>;
   branchById: Map<string, Branch>;
   boardById: Map<string, Board>;
@@ -178,20 +178,25 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
           />
 
           {/* Fork-only sections, also reused from the desktop home. */}
-          <HomeTeammateChatsSection
-            currentUserId={currentUser?.user_id}
-            onSessionClick={(sessionId) => navigate(`/m/session/${sessionId}`)}
-            onManageTeammateChats={onManageTeammateChats}
-          />
-          <HomeSchedulesSection
-            client={client ?? null}
-            currentUserId={currentUser?.user_id}
-            compact
-            onBranchClick={(branchId) => {
-              const branch = branchById.get(branchId);
-              if (branch?.board_id) navigate(`/m/board/${branch.board_id}`);
-            }}
-          />
+          {onManageTeammateChats && (
+            <HomeTeammateChatsSection
+              hideWhenEmpty
+              currentUserId={currentUser?.user_id}
+              onSessionClick={(sessionId) => navigate(`/m/session/${sessionId}`)}
+              onManageTeammateChats={onManageTeammateChats}
+            />
+          )}
+          {client && (
+            <HomeSchedulesSection
+              client={client}
+              currentUserId={currentUser?.user_id}
+              compact
+              onBranchClick={(branchId) => {
+                const branch = branchById.get(branchId);
+                if (branch?.board_id) navigate(`/m/board/${branch.board_id}`);
+              }}
+            />
+          )}
 
           <GlassPanel
             size="small"

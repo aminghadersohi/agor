@@ -91,8 +91,11 @@ const TeammateChatRow = memo(function TeammateChatRow({
 });
 
 export const HomeTeammateChatsSection: React.FC<
-  Pick<HomePageProps, 'currentUserId' | 'onSessionClick' | 'onManageTeammateChats'>
-> = ({ currentUserId, onSessionClick, onManageTeammateChats }) => {
+  Pick<HomePageProps, 'currentUserId' | 'onSessionClick' | 'onManageTeammateChats'> & {
+    /** Render nothing instead of the empty-state invitation (mobile home). */
+    hideWhenEmpty?: boolean;
+  }
+> = ({ currentUserId, onSessionClick, onManageTeammateChats, hideWhenEmpty = false }) => {
   const { token } = theme.useToken();
   const userById = useAgorStore(selectUserById);
   const sessionById = useAgorStore(selectSessionById);
@@ -126,6 +129,7 @@ export const HomeTeammateChatsSection: React.FC<
   );
 
   if (collections.length === 0) {
+    if (hideWhenEmpty) return null;
     return (
       <section aria-label="Chat collections" style={{ marginBottom: 24 }}>
         <Card

@@ -161,7 +161,10 @@ describe('SessionPage', () => {
       </MemoryRouter>
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add to chat collection' }));
-    expect(onPinToChatCollection).toHaveBeenCalledWith(sessionId);
+    // The chat-collection action now lives in SessionPanel's own actions menu,
+    // so this page's contract is forwarding the handler to it.
+    expect(sessionPanelProps).toHaveBeenCalledWith(
+      expect.objectContaining({ onPinToChatCollection })
+    );
   });
 });
