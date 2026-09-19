@@ -62,9 +62,19 @@ export function registerExecutorRequestSizeGuard(client: AgorClient): void {
             path === 'messages' && (context.method === 'create' || context.method === 'patch');
           if (!isTranscriptWrite) return context;
           // Project after provider enrichment and wrapper construction, on a copy.
-          // The budget assertion below remains the final transport postcondition.
-          if (context.data && typeof context.data === 'object') {
-            context.data = projectTranscriptData(context.data, EXECUTOR_REQUEST_DATA_BUDGET_BYTES);
+          // Unserializable data must surface as the shared serialization error,
+          // not as a raw JSON exception, so projection shares the guard's frame.
+          try {
+            if (context.data && typeof context.data === 'object') {
+              context.data = projectTranscriptData(
+                context.data,
+                EXECUTOR_REQUEST_DATA_BUDGET_BYTES
+              );
+            }
+          } catch {
+            throw new Error(
+              `Executor transcript data could not be serialized (${path}.${context.method})`
+            );
           }
           assertExecutorRequestDataWithinBudget(path, context.method, context.data);
           return context;

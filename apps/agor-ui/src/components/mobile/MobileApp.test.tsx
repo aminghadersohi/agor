@@ -103,7 +103,17 @@ const primaryBranch = {
   board_id: 'board-1',
   mcp_server_ids: ['branch-mcp'],
 };
-const primaryClient = { service: () => ({ getPrimaryTeammate: async () => primaryBranch }) };
+
+// This fork's mobile Home also renders HomeSchedulesSection, which reads and then
+// subscribes to the schedules service; stubs need that surface to mount.
+const forkServiceStub = () => ({
+  find: async () => ({ data: [] }),
+  on: () => undefined,
+  off: () => undefined,
+});
+const primaryClient = {
+  service: () => ({ getPrimaryTeammate: async () => primaryBranch, ...forkServiceStub() }),
+};
 
 /** Taps Ask with a session creation that stays in flight until `resolve` is called. */
 async function askWithPendingCreation(extraProps: Record<string, unknown> = {}) {
@@ -273,7 +283,7 @@ describe('MobileApp branch actions', () => {
       .mockReturnValue(new Promise((done) => (resolveNext = done)));
     const onCreateSession = vi.fn(async () => null);
     const props = {
-      client: { service: () => ({ getPrimaryTeammate }) },
+      client: { service: () => ({ getPrimaryTeammate, ...forkServiceStub() }) },
       user: { user_id: 'user-1' },
       onCreateSession,
     };
@@ -304,7 +314,9 @@ describe('MobileApp branch actions', () => {
   });
 
   it('scopes the primary-teammate picker to the signed-in identity', async () => {
-    const client = { service: () => ({ getPrimaryTeammate: async () => null }) };
+    const client = {
+      service: () => ({ getPrimaryTeammate: async () => null, ...forkServiceStub() }),
+    };
     const props = { client, user: { user_id: 'user-1' }, authGeneration: 3 };
     const view = render(mobileAppTree('/m', props));
     await act(async () => {});

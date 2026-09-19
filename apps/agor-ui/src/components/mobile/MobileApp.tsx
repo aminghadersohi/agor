@@ -493,6 +493,7 @@ export const MobileApp: React.FC<MobileAppProps> = ({
                   onUpdateSessionEnvSelections={onUpdateSessionEnvSelections}
                   onOpenBranch={(branchId, tab = 'general') => setBranchEditor({ branchId, tab })}
                   onOpenAgenticToolSettings={onOpenAgenticToolSettings}
+                  onPinToChatCollection={openTeammateChats}
                 />
               }
             />
