@@ -133,6 +133,19 @@ export function createMigrationImpactRegistry(
 
 const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
   [
+    '0111_management_ownership_transfer',
+    {
+      requiresOfflineCutover: false,
+      impact: defineMigrationImpact({
+        classification: 'schema',
+        userAction: 'none',
+        rollbackCompatibility: 'compatible',
+        summary:
+          'Removes immutable-owner triggers. Shared application commands validate and authorize management transfers. Existing reference guards and tenant isolation remain; no resource rows are rewritten.',
+      }),
+    },
+  ],
+  [
     '0107_branch_permanent_deletion',
     {
       requiresOfflineCutover: true,
@@ -226,7 +239,11 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
       }),
     },
   ],
-  ...['0111_transitive_completion_subscriptions', '0112_retire_completion_discovery'].map(
+  ...[
+    '0111_transitive_completion_subscriptions',
+    '0112_retire_completion_discovery',
+    '0113_callback_ownership_reconciliation',
+  ].map(
     (name) =>
       [
         name,

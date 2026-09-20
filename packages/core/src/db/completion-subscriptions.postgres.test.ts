@@ -42,9 +42,21 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       expect(await policies()).not.toContain('completion_callback_task_discovery');
     });
 
+    it('adds tenant-isolated storage after main ownership transfer', async () => {
+      await executeRaw(db, sql`DROP TABLE completion_subscriptions`);
+      await executeRaw(
+        db,
+        sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at > 1789344000005`
+      );
+      await initializeDatabase(db);
+      expect(await policies()).toContain('tenant_isolation_completion_subscriptions');
+      expect(await policies()).not.toContain('completion_callback_discovery');
+      expect(await policies()).not.toContain('completion_callback_task_discovery');
+    });
+
     it('upgrades the draft ledger without deleting rows and denies foreign tenant access', async () => {
       // Reconstruct only the withdrawn discovery policies and last ledger step in
-      // this file's disposable DB. Original 0111 DDL and watermark stay unchanged.
+      // this file's disposable DB. The original draft SQL remains a fixture.
       const original = await readFile(
         new URL(
           '../../drizzle/postgres/0111_transitive_completion_subscriptions.sql',
@@ -69,9 +81,39 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
           VALUES ('fixture-a', 'retained', 'fixture-user', 'fixture-session', 'fixture-task', '[]', now(), now())`
         );
       });
+      const ownershipGuards = await readFile(
+        new URL(
+          '../../drizzle/postgres/0095_board_branch_capability_policies.sql',
+          import.meta.url
+        ),
+        'utf8'
+      );
+      for (const statement of ownershipGuards
+        .split('--> statement-breakpoint')
+        .filter((statement) =>
+          /^\s*CREATE (?:FUNCTION agor_reject_primary_owner_change\(|TRIGGER (?:boards|branches)_primary_owner_immutable\b)/.test(
+            statement
+          )
+        )) {
+        await executeRaw(db, sql.raw(statement));
+      }
+      // Also cover the retired draft's later watermark; reconciliation must
+      // remain pending beyond both conflicting histories.
+      await executeRaw(
+        db,
+        sql`INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES ('draft-retirement', 1789344000006)`
+      );
       await initializeDatabase(db);
       expect(await policies()).not.toContain('completion_callback_discovery');
       expect(await policies()).not.toContain('completion_callback_task_discovery');
+      expect(
+        rawRows(
+          await executeRaw(
+            db,
+            sql`SELECT tgname FROM pg_trigger WHERE tgname IN ('boards_primary_owner_immutable', 'branches_primary_owner_immutable')`
+          )
+        )
+      ).toEqual([]);
       await runWithTenantDatabaseScope(db, 'fixture-b', async (scoped) => {
         expect(
           rawRows(

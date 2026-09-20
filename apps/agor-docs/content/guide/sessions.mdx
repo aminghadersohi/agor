@@ -216,7 +216,7 @@ can leave a terminal task without a queued callback. Once admitted, the callback
 is a durable queued task. Do not infer aggregate completion from genealogy.
 
 The withdrawn root-propagation draft's `callbackPropagation`, `continueCompletion`,
-and completion-subscription lookup tool are not supported. Its migration ledger
+and completion-subscription lookup tool are not supported. Its historical migration SQL
 and tenant-isolated stored rows are retained only for compatibility and portability;
 no worker creates or delivers subscriptions. PostgreSQL retirement removes the old
 cross-tenant discovery policies without deleting rows. Do not run mixed versions
