@@ -13,7 +13,7 @@ import { resolveExecutorBranch } from './branch-filesystem.js';
  * Feathers hooks handle WebSocket broadcasts automatically when records are created/updated.
  */
 
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -1101,26 +1101,6 @@ export async function handleGitBranchAdd(
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error('[git.branch.add] Failed:', errorMessage);
 
-    // Fallback: preserve the historical empty-directory recovery behavior
-    // when git worktree add fails. No host permission repair is attempted.
-    const fallbackPath = resolvedBranchPath;
-    let fallbackCreated = false;
-    if (fallbackPath && !materializationWritesSettled && !localHome) {
-      // Step 1: Ensure directory exists
-      if (!existsSync(fallbackPath)) {
-        try {
-          mkdirSync(fallbackPath, { recursive: true });
-          console.log(`[git.branch.add] Fallback: created empty directory ${fallbackPath}`);
-          fallbackCreated = true;
-        } catch (mkdirError) {
-          console.error(
-            '[git.branch.add] Fallback: failed to create directory:',
-            mkdirError instanceof Error ? mkdirError.message : String(mkdirError)
-          );
-        }
-      }
-    }
-
     // Provide user-friendly error messages for common failures. Match on the
     // specific "ref already attached to another worktree" signal — NOT merely
     // the word "branch", which also appears in the non-empty-directory message
@@ -1160,7 +1140,6 @@ export async function handleGitBranchAdd(
           repoPath: resolvedRepoPath,
           branchName: resolvedBranchName,
           branchPath: resolvedBranchPath,
-          fallbackDirectoryCreated: fallbackCreated,
         },
       },
     };

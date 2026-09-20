@@ -82,6 +82,49 @@ test('known unfinished tasks prevent claiming maintenance without changing branc
   ).toBeUndefined();
 });
 
+test('overlap guard ignores sibling rows that own nothing on disk', async ({ db }) => {
+  const { branch: failed, user } = await seedEnvironmentCommandBranch(db);
+  const branches = new BranchRepository(db);
+  await branches.update(failed.branch_id, { filesystem_status: 'failed' });
+  const cleaned = await branches.create({
+    repo_id: failed.repo_id,
+    name: 'sibling-cleaned',
+    ref: 'sibling-cleaned',
+    branch_unique_id: 9600001,
+    path: failed.path,
+    created_by: user.user_id,
+    filesystem_status: 'cleaned',
+    archived: true,
+  });
+  const maintenance = new BranchMaintenanceRepository(db);
+  // Neither sibling owns anything on disk, so maintenance on either must not
+  // be blocked by the other — this is the exact deadlock from SC-121372.
+  expect((await maintenance.claim(failed.branch_id, 'delete')).acquired).toBe(true);
+  expect((await maintenance.claim(cleaned.branch_id, 'delete')).acquired).toBe(true);
+});
+
+test('overlap guard still blocks a broken row against a live sibling sharing its path', async ({
+  db,
+}) => {
+  const { branch: live, user } = await seedEnvironmentCommandBranch(db);
+  const branches = new BranchRepository(db);
+  const failed = await branches.create({
+    repo_id: live.repo_id,
+    name: 'sibling-failed',
+    ref: 'sibling-failed',
+    branch_unique_id: 9600002,
+    path: live.path,
+    created_by: user.user_id,
+    filesystem_status: 'failed',
+  });
+  const maintenance = new BranchMaintenanceRepository(db);
+  // The live sibling might still own real files at the shared path — deleting
+  // the broken row must not risk touching them.
+  await expect(maintenance.claim(failed.branch_id, 'delete')).rejects.toThrow('overlaps');
+  // But the live row itself is unaffected by its broken sibling.
+  expect((await maintenance.claim(live.branch_id, 'delete')).acquired).toBe(true);
+});
+
 test('environment admission and maintenance exclude each other under the branch lock', async ({
   db,
 }) => {

@@ -82,9 +82,15 @@ export class BranchMaintenanceRepository {
           'Branch filesystem materialization is active or unsettled; wait for verified completion before maintenance'
         );
       }
+      // A row whose filesystem_status is failed/cleaned/deleted owns nothing
+      // on disk. It cannot conflict with maintenance on another row's path,
+      // and — being broken — must not be able to block maintenance on itself.
       const overlap = await select(tx, { branch_id: branches.branch_id })
         .from(branches)
         .where(sql`${branches.branch_id} <> ${branchId} AND (
+          ${branches.filesystem_status} IS NULL
+          OR ${branches.filesystem_status} NOT IN ('failed', 'cleaned', 'deleted')
+        ) AND (
           ${branches.data} ->> 'path' = ${row.data.path}
           OR ${branches.data} ->> 'path' LIKE ${`${row.data.path}/%`}
           OR ${row.data.path} LIKE ((${branches.data} ->> 'path') || '/%'))`)
