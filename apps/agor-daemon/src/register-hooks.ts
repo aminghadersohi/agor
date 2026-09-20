@@ -1,3 +1,4 @@
+import { OWNERSHIP_TRANSFER_SERVICES } from '@agor/core/types';
 /**
  * Service Hooks Registration
  *
@@ -484,6 +485,7 @@ export interface RegisterHooksContext {
  * without tenant authority over REST.
  */
 export const AUTHENTICATED_RBAC_SERVICE_PATHS = [
+  ...Object.values(OWNERSHIP_TRANSFER_SERVICES),
   'groups',
   'group-memberships',
   'branches/:id/permissions',
@@ -1081,7 +1083,13 @@ export function classifyRealtimeAuthorizationInvalidation(
     return 'evict';
   }
 
-  if (['branches/:id/permissions', 'boards/:id/permissions'].includes(context.path)) {
+  if (
+    [
+      ...Object.values(OWNERSHIP_TRANSFER_SERVICES),
+      'branches/:id/permissions',
+      'boards/:id/permissions',
+    ].includes(context.path)
+  ) {
     return 'evict';
   }
 
@@ -1742,6 +1750,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   };
 
   for (const path of [
+    ...Object.values(OWNERSHIP_TRANSFER_SERVICES),
     'branches/:id/permissions',
     'boards/:id/permissions',
     'groups',
@@ -2929,6 +2938,12 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       remove: [clearRealtimeBranchVisibility, publishMarketplaceInvalidation],
     },
   });
+  for (const path of Object.values(OWNERSHIP_TRANSFER_SERVICES)) {
+    safeService(path)?.hooks({
+      before: { patch: [captureMarketplaceInvalidationTargets] },
+      after: { patch: [clearRealtimeBranchVisibility, publishMarketplaceInvalidation] },
+    });
+  }
   safeService('branches/:id/permissions')?.hooks({
     before: {
       patch: [captureMarketplaceInvalidationTargets],

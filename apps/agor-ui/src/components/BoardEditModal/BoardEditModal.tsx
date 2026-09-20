@@ -18,6 +18,7 @@ import { selectUserById } from '../../store/selectors';
 import { BoardFormFields, extractBoardFormValues } from '../forms/BoardFormFields';
 import { JSONEditor, validateJSON } from '../JSONEditor';
 import { BoardCapabilityPolicyModalEditor } from '../permissions/CapabilityPolicyEditor';
+import { OwnershipTransfer } from '../permissions/CapabilityPolicyEditor/OwnershipTransfer';
 import { ZoneLayoutPolicyEditor } from '../SessionCanvas/canvas/ZoneLayoutPolicyEditor';
 
 export interface BoardEditModalProps {
@@ -68,9 +69,10 @@ export function BoardEditModal({
     for (const user of allUsers) knownUsers.set(user.user_id, user);
     return [...knownUsers.values()];
   }, [userById, allUsers]);
+  const boardId = board?.board_id;
 
   useEffect(() => {
-    if (!open || !board) return;
+    if (!open || !boardId) return;
     let cancelled = false;
     setLoading(true);
     setLoadError(null);
@@ -81,10 +83,12 @@ export function BoardEditModal({
 
     // Re-read the board as the modal opens. The selector uses a lean board list,
     // while this form must always start from the full, latest representation.
+    // Same-board realtime updates must not reset drafts or unmount a pending
+    // ownership command and its completion result. Reopen to refresh authority.
     const load = async () => {
       try {
         if (!client) throw new Error('Agor client is unavailable');
-        const fresh = await client.service('boards').get(board.board_id);
+        const fresh = await client.service('boards').get(boardId);
         const [usersResult, groupsResult] = await Promise.allSettled([
           client.service('users').findAll({}),
           client.service('groups').findAll({ query: { archived: false } }),
@@ -105,9 +109,9 @@ export function BoardEditModal({
         }
 
         const [policyResult, preferencesResult, accessResult] = await Promise.allSettled([
-          client.service('boards/:id/permissions').find({ route: { id: board.board_id } }),
+          client.service('boards/:id/permissions').find({ route: { id: boardId } }),
           client.service('workspace-preferences').find(),
-          client.service('boards/:id/effective-access').find({ route: { id: board.board_id } }),
+          client.service('boards/:id/effective-access').find({ route: { id: boardId } }),
         ]);
         if (cancelled) return;
         if (policyResult.status === 'fulfilled') {
@@ -174,7 +178,7 @@ export function BoardEditModal({
     return () => {
       cancelled = true;
     };
-  }, [board, client, form, open]);
+  }, [boardId, client, form, open]);
 
   const canEditGeneral = Boolean(effectiveAccess?.capabilities.includes('board.edit'));
 
@@ -204,8 +208,7 @@ export function BoardEditModal({
       setSaving(true);
       await form.validateFields();
       // The normalized permission service is the only supported persistence
-      // route for board access. The legacy fields may still be rendered while
-      // the feature flag is off, but generic board writes reject them, so they
+      // route for board access. Generic board writes reject legacy fields, so they
       // must never hitchhike on an otherwise unrelated settings/defaults save.
       const formValues = extractBoardFormValues(form, {
         includeLegacyPermissions: false,
@@ -298,6 +301,18 @@ export function BoardEditModal({
             capabilityPolicyEditor={
               policy ? (
                 <BoardCapabilityPolicyModalEditor
+                  ownershipAction={
+                    <OwnershipTransfer
+                      kind="board"
+                      resourceId={loadedBoard.board_id}
+                      ownerUserId={policy.primary_owner_user_id}
+                      client={client}
+                      users={permissionUsers}
+                      currentUser={currentUser}
+                      disabled={saving || loading}
+                      onTransferred={close}
+                    />
+                  }
                   value={policy}
                   onChange={setPolicy}
                   client={client}

@@ -1,18 +1,52 @@
-import type { AgorClient, Board, BoardCapabilityPolicies, UserID } from '@agor-live/client';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { AgorClient, Board, BoardCapabilityPolicies, User, UserID } from '@agor-live/client';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { Form, Input } from 'antd';
-import { isValidElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { __setAuthConfigForTests } from '../../hooks/useAuthConfig';
 import { BoardEditModal } from './BoardEditModal';
 
 const showError = vi.hoisted(() => vi.fn());
 vi.mock('@/utils/message', () => ({
-  useThemedMessage: () => ({ showError }),
+  useThemedMessage: () => ({ showError, showSuccess: vi.fn() }),
 }));
 vi.mock('../JSONEditor', () => ({
   JSONEditor: () => <textarea aria-label="Custom Context (JSON)" />,
   validateJSON: () => Promise.resolve(),
+}));
+vi.mock('../permissions/CapabilityPolicyEditor', () => ({
+  BoardCapabilityPolicyModalEditor: ({
+    value,
+    onChange,
+    groups,
+    ownershipAction,
+  }: {
+    ownershipAction?: React.ReactNode;
+    value: BoardCapabilityPolicies;
+    onChange: (value: BoardCapabilityPolicies) => void;
+    groups: Array<{ name: string }>;
+  }) => (
+    <>
+      {ownershipAction}
+      <button
+        type="button"
+        data-sharing-mode={value.board_access.sharing_mode}
+        onClick={() =>
+          onChange({
+            ...value,
+            board_access: {
+              ...value.board_access,
+              sharing_mode: value.board_access.sharing_mode === 'shared' ? 'private' : 'shared',
+            },
+          })
+        }
+      >
+        Change board access
+      </button>
+      <div
+        data-testid="board-modal-policy-editor"
+        data-group-names={groups.map((group) => group.name).join(',')}
+      />
+    </>
+  ),
 }));
 vi.mock('../forms/BoardFormFields', () => ({
   BoardFormFields: ({
@@ -23,58 +57,18 @@ vi.mock('../forms/BoardFormFields', () => ({
     capabilityPolicyEditor?: React.ReactNode;
     zoneDefaultsEditor?: React.ReactNode;
     canEditGeneral?: boolean;
-  }) => {
-    const editor = isValidElement<{
-      value: BoardCapabilityPolicies;
-      onChange: (value: BoardCapabilityPolicies) => void;
-    }>(capabilityPolicyEditor)
-      ? capabilityPolicyEditor.props
-      : null;
-    // The edit modal passes groups straight to the capability-policy editor
-    // element; assert propagation by inspecting that element's props.
-    const editorGroups =
-      capabilityPolicyEditor &&
-      typeof capabilityPolicyEditor === 'object' &&
-      'props' in capabilityPolicyEditor
-        ? ((capabilityPolicyEditor as { props?: { groups?: Array<{ name: string }> } }).props
-            ?.groups ?? [])
-        : [];
-    return (
-      <>
-        <Form.Item name="name" label="Name" rules={[{ required: true }]}>
-          <Input />
-        </Form.Item>
-        <div data-testid="board-modal-can-edit-general" data-value={String(canEditGeneral)} />
-        {editor && (
-          <button
-            type="button"
-            data-sharing-mode={editor.value.board_access.sharing_mode}
-            onClick={() =>
-              editor.onChange({
-                ...editor.value,
-                board_access: {
-                  ...editor.value.board_access,
-                  sharing_mode:
-                    editor.value.board_access.sharing_mode === 'shared' ? 'private' : 'shared',
-                },
-              })
-            }
-          >
-            Change board access
-          </button>
-        )}
-        {capabilityPolicyEditor && (
-          <div
-            data-testid="board-modal-policy-editor"
-            data-group-names={editorGroups.map((group) => group.name).join(',')}
-          />
-        )}
-        {zoneDefaultsEditor && (
-          <div data-testid="board-zone-defaults-editor">{zoneDefaultsEditor}</div>
-        )}
-      </>
-    );
-  },
+  }) => (
+    <>
+      <Form.Item name="name" label="Name" rules={[{ required: true }]}>
+        <Input />
+      </Form.Item>
+      <div data-testid="board-modal-can-edit-general" data-value={String(canEditGeneral)} />
+      {capabilityPolicyEditor}
+      {zoneDefaultsEditor && (
+        <div data-testid="board-zone-defaults-editor">{zoneDefaultsEditor}</div>
+      )}
+    </>
+  ),
   extractBoardFormValues: (
     form: { getFieldValue: (name: string) => unknown },
     options?: { includeLegacyPermissions?: boolean }
@@ -179,8 +173,7 @@ describe('BoardEditModal', () => {
     showError.mockReset();
   });
 
-  it('does not attach retired permission fields to a settings write when RBAC is disabled', async () => {
-    __setAuthConfigForTests({ requireAuth: true }, { branchRbac: false });
+  it('does not attach retired permission fields to a settings write when saving settings', async () => {
     const { client } = makeClient();
     const onUpdate = vi.fn().mockResolvedValue(undefined);
 
@@ -204,6 +197,56 @@ describe('BoardEditModal', () => {
         name: 'Fictional planning board',
       })
     );
+  });
+
+  it('keeps a pending transfer and its completion result across same-board realtime updates', async () => {
+    const { client: baseClient, get } = makeClient();
+    const owner = { user_id: policy.primary_owner_user_id, role: 'admin', name: 'Owner' } as User;
+    const successor = { user_id: 'successor' as UserID, role: 'member', name: 'Reed' } as User;
+    let complete!: (value: unknown) => void;
+    const patch = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        })
+    );
+    const client = {
+      service: (path: string) => {
+        if (path === 'boards/:id/ownership') return { patch };
+        if (path === 'users') return { findAll: vi.fn().mockResolvedValue([owner, successor]) };
+        return baseClient.service(path);
+      },
+    } as unknown as AgorClient;
+    const onClose = vi.fn();
+    const editor = (board: Board) => (
+      <BoardEditModal board={board} client={client} currentUser={owner} open onClose={onClose} />
+    );
+    const { rerender } = render(editor(listedBoard));
+    const transferButton = await screen.findByRole('button', { name: 'Transfer ownership' });
+    fireEvent.click(transferButton);
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Successor owner' }));
+    fireEvent.click(await screen.findByText('Reed'));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Transfer ownership' }).at(-1)!);
+    await waitFor(() => expect(patch).toHaveBeenCalledOnce());
+
+    // The canonical patched event can arrive before the command's reply.
+    rerender(editor({ ...freshBoard, primary_owner_user_id: successor.user_id }));
+    expect(screen.getByRole('combobox', { name: 'Successor owner' })).toBeInTheDocument();
+    await act(async () =>
+      complete({
+        scope: 'management_only',
+        previous_owner_access: { capabilities: ['board.view'], fs_access: 'none' },
+      })
+    );
+    await screen.findByRole('button', { name: 'Done' });
+    rerender(
+      editor({ ...freshBoard, primary_owner_user_id: successor.user_id, name: 'Realtime refresh' })
+    );
+    expect(screen.getByText(/board.view/)).toBeInTheDocument();
+    expect(get).toHaveBeenCalledOnce();
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it('passes canEditGeneral=false through to BoardFormFields when the caller lacks board.edit', async () => {
@@ -534,8 +577,13 @@ describe('BoardEditModal', () => {
     );
     await screen.findByDisplayValue('Fresh name');
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Rejected name' } });
-    fireEvent.click(await screen.findByRole('button', { name: 'Save' }));
+    const save = await screen.findByRole('button', { name: 'Save' });
+    fireEvent.click(save);
     await waitFor(() => expect(onUpdate).toHaveBeenCalledOnce());
+    // The loading icon temporarily changes the accessible name to "loading
+    // Save". Await the mutation and actual busy-state exit, not that label.
+    await waitFor(() => expect(save).not.toHaveClass('ant-btn-loading'));
+    expect(save).toBeEnabled();
     expect(onClose).not.toHaveBeenCalled();
   });
 });
