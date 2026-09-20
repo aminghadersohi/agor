@@ -2,13 +2,29 @@
 import type { BranchDeletionStatus } from './branch-deletion';
 import type { BoardID, BranchID, UUID } from './id';
 import type { KnowledgeNamespaceID, KnowledgeVisibility } from './knowledge';
-import type { BranchName } from './repo';
+import type { BranchName, Repo } from './repo';
 
 export const BRANCH_METADATA_ACTIONS = ['archive', 'delete'] as const;
 export type BranchMetadataAction = (typeof BRANCH_METADATA_ACTIONS)[number];
 
 export const BRANCH_FILESYSTEM_ACTIONS = ['preserved', 'cleaned', 'deleted'] as const;
 export type BranchFilesystemAction = (typeof BRANCH_FILESYSTEM_ACTIONS)[number];
+
+/** Only terminal filesystem outcome belongs in the fenced provisioning CAS. */
+export interface BranchProvisioningOutcome {
+  filesystem_status: 'ready' | 'failed';
+  error_message?: string;
+}
+
+export function isBranchProvisioningOutcome(value: unknown): value is BranchProvisioningOutcome {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const outcome = value as Record<string, unknown>;
+  return (
+    (outcome.filesystem_status === 'ready' || outcome.filesystem_status === 'failed') &&
+    (outcome.error_message === undefined || typeof outcome.error_message === 'string') &&
+    Object.keys(outcome).every((key) => key === 'filesystem_status' || key === 'error_message')
+  );
+}
 
 /** Canonical request contract for the hooked branch archive/delete boundary. */
 export type BranchArchiveOrDeleteOptions =
@@ -378,9 +394,28 @@ export interface Branch {
    */
   error_message?: string;
 
+  /**
+   * Fence identifying which provisioning attempt currently owns `creating`.
+   *
+   * `filesystem_status` alone is a claim lock, not an attempt fence: it says a
+   * materialization is in flight but not *which* one. Without this, a slow
+   * attempt that is superseded by a retry can still land its acknowledgement on
+   * the newer attempt — an old `onExit` marking the new attempt `failed`, or a
+   * late success patching `ready` over a newer attempt or lifecycle transition.
+   *
+   * Set whenever an attempt is dispatched (branch create, or a retry claim), and
+   * echoed back by the executor. Acknowledgements — the daemon's `onExit` safety
+   * net and the executor's own terminal patch — are only applied when the id
+   * still matches, so a stale attempt can never write over a newer one.
+   */
+  provisioning_attempt_id?: string;
+
+  /** Materialization operation that the current/last attempt must replay. */
+  provisioning_operation?: 'create' | 'retry' | 'restore';
+
   // ===== RBAC: App-layer permissions (rbac.md) =====
 
-  /** Immutable primary owner. This is intentionally independent of attribution. */
+  /** Primary owner, changed only by explicit ownership transfer; independent of attribution. */
   primary_owner_user_id?: UUID;
 
   /** Whether the complete branch permission package is inherited or overridden. */
@@ -835,6 +870,18 @@ export type RepoEnvironmentConfig = RepoEnvironmentConfigV1;
 export const TEAMMATE_FRAMEWORK_REPO_SLUG = 'preset-io/agor-teammate';
 export const TEAMMATE_FRAMEWORK_REPO_URL = 'https://github.com/preset-io/agor-teammate.git';
 
+/** Exact public template identity, never a name/slug substring match. */
+export function isCanonicalTeammateFrameworkRepo(repo: Pick<Repo, 'remote_url'>): boolean {
+  return [
+    TEAMMATE_FRAMEWORK_REPO_URL,
+    `https://github.com/${TEAMMATE_FRAMEWORK_REPO_SLUG}`,
+    `git@github.com:${TEAMMATE_FRAMEWORK_REPO_SLUG}.git`,
+    `git@github.com:${TEAMMATE_FRAMEWORK_REPO_SLUG}`,
+    `ssh://git@github.com/${TEAMMATE_FRAMEWORK_REPO_SLUG}.git`,
+    `ssh://git@github.com/${TEAMMATE_FRAMEWORK_REPO_SLUG}`,
+  ].includes(repo.remote_url ?? '');
+}
+
 export type TeammateKnowledgeGrantAccess = 'none' | 'read' | 'write';
 export interface TeammateKnowledgeGrant {
   namespace_id: KnowledgeNamespaceID;
@@ -876,6 +923,8 @@ export interface TeammateConfig {
   frameworkVersion?: string;
   /** Whether this was created via the onboarding wizard */
   createdViaOnboarding?: boolean;
+  /** Server-derived immutable creation marker; not a current backup-status assertion. */
+  localHome?: true;
   /** Knowledge Base namespace and grant config for teammate memory/context. */
   kb?: TeammateKnowledgeConfig;
 }

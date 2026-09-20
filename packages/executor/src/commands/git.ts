@@ -14,12 +14,17 @@ import { resolveExecutorBranch } from './branch-filesystem.js';
  */
 
 import { existsSync, mkdirSync } from 'node:fs';
+import { readFile, writeFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { getReposDir } from '@agor/core/config';
 import { parseAgorYml, writeAgorYml } from '@agor/core/config/node';
 import { shortId } from '@agor/core/db';
-import { TEAMMATE_FRAMEWORK_REPO_URL } from '@agor/core/types';
+import {
+  getTeammateConfig,
+  isCanonicalTeammateFrameworkRepo,
+  TEAMMATE_FRAMEWORK_REPO_URL,
+} from '@agor/core/types';
 import { diagnoseGit } from '@agor/git';
 import type { UserGitEnvironment } from '@agor/git/pure';
 import { cloneDiagnostic } from '../git/clone-diagnostic.js';
@@ -802,13 +807,53 @@ export async function handleGitClone(
  *
  * Creates a git branch at the specified path.
  * The DB record is created by the daemon BEFORE this runs (with filesystem_status: 'creating').
- * This handler patches the branch to 'ready' when complete (or leaves as 'creating' on failure).
+ * On success this handler patches the branch to 'ready'; on a caught error it
+ * patches 'failed' with a sanitized message — but ONLY when it still holds a
+ * daemon connection (`client`). If this process is killed or crashes before its
+ * catch runs, or it never connected, it cannot patch anything. The daemon's
+ * onExit safety net (`ReposService.dispatchBranchProvisioning`) reconciles those
+ * cases by marking the branch 'failed' for an explicit retry.
  */
+
+/**
+ * Idempotency preflight: is a working directory for exactly this ref already
+ * materialized at `branchPath`? Executor-local filesystem probe (the daemon
+ * deliberately does not do this — it can't reliably distinguish a complete
+ * checkout from a stale/partial/wrong-ref one, and may not even share the
+ * filesystem). Lets a retry after "executor materialized then crashed before
+ * acking" adopt the existing checkout instead of re-running `git worktree add`
+ * (which would fail on the already-attached ref). Only claims a match when the
+ * checkout's HEAD is the expected branch, so a stale or wrong-ref directory is
+ * NOT silently promoted — it falls through to normal materialization/guarding.
+ */
+async function isBranchAlreadyMaterialized(
+  branchPath: string,
+  expectedRef: string,
+  expectedBranchId: string
+): Promise<boolean> {
+  if (!existsSync(join(branchPath, '.git'))) return false;
+  try {
+    const { git } = createGit(branchPath);
+    const headCommit = (await git.revparse(['HEAD^{commit}'])).trim();
+    const expectedCommit = (await git.revparse([`${expectedRef}^{commit}`])).trim();
+    if (headCommit !== expectedCommit) return false;
+    const markerPath = (await git.revparse(['--git-path', 'agor-branch-id'])).trim();
+    return (await readFile(resolve(branchPath, markerPath), 'utf8')).trim() === expectedBranchId;
+  } catch {
+    return false;
+  }
+}
+
 export async function handleGitBranchAdd(
   payload: GitBranchAddPayload,
   options: CommandOptions
 ): Promise<ExecutorResult> {
   const branchId = payload.params.branchId;
+  // Echoed on every terminal patch below so the daemon can drop this
+  // acknowledgement if a retry superseded the attempt while we were running.
+  const attemptFence = payload.params.provisioningAttemptId
+    ? { provisioning_attempt_id: payload.params.provisioningAttemptId }
+    : {};
   let resolvedRepoPath: string | undefined;
   let resolvedBranchPath: string | undefined;
   let resolvedBranchName: string | undefined;
@@ -830,6 +875,7 @@ export async function handleGitBranchAdd(
 
   let client: AgorClient | null = null;
   let materializationWritesSettled = false;
+  let localHome = false;
 
   try {
     // Connect to daemon
@@ -874,7 +920,19 @@ export async function handleGitBranchAdd(
         'Refusing untrusted base_remote_url: only the canonical Agor teammate template repository is allowed.'
       );
     }
-    const referencePath = payload.params.useReference ? repo.local_path : undefined;
+    localHome = getTeammateConfig(branchRecord)?.localHome === true;
+    if (
+      localHome &&
+      (restoreMode ||
+        storageMode !== 'clone' ||
+        cloneDepth != null ||
+        !isCanonicalTeammateFrameworkRepo(repo))
+    ) {
+      throw new Error(
+        'Local teammate home cannot be reconstructed from the public template. Restore its files from your own backup.'
+      );
+    }
+    const referencePath = !localHome && payload.params.useReference ? repo.local_path : undefined;
 
     if (!repoPath && storageMode === 'worktree') {
       throw new Error(`Repository ${repoId} has no local_path for worktree materialization`);
@@ -885,8 +943,21 @@ export async function handleGitBranchAdd(
       `[git.branch.add] Repo: ${repoPath}, Branch: ${branch}, CreateBranch: ${shouldCreateBranch}, RestoreMode: ${restoreMode}, RefType: ${refType || 'branch'}, StorageMode: ${storageMode}`
     );
 
-    // Create the git branch on filesystem
-    if (storageMode === 'clone') {
+    // Create the git branch on filesystem.
+    //
+    // Idempotency: a prior attempt may have materialized the worktree/clone
+    // and then died before acking (its branch was subsequently marked 'failed'
+    // by the daemon safety net). If a checkout for exactly this ref is already
+    // present, adopt it instead of re-running materialization — `git worktree
+    // add` / `git clone` would otherwise fail on the already-attached ref.
+    const alreadyMaterialized = payload.params.allowExistingCheckout
+      ? await isBranchAlreadyMaterialized(branchPath, branch, branchId)
+      : false;
+    if (alreadyMaterialized) {
+      console.log(
+        `[git.branch.add] Existing checkout for '${branch}' already present at ${branchPath} — adopting it (idempotent retry)`
+      );
+    } else if (storageMode === 'clone') {
       // Self-standing clone path. The remote URL is daemon-resolved from the
       // repo record; refuse to silently fall through to worktree mode if it
       // didn't come along — that would defeat the leak-defense reason for
@@ -903,7 +974,7 @@ export async function handleGitBranchAdd(
       // branch, just clone the ref directly. The helper owns both flows so
       // the executor handler doesn't have to orchestrate post-clone git ops.
       let cloneRef = branch;
-      let cloneRemoteUrl = remoteUrl;
+      let cloneRemoteUrl = localHome ? TEAMMATE_FRAMEWORK_REPO_URL : remoteUrl;
       let newBranchName: string | undefined;
 
       if (shouldCreateBranch) {
@@ -918,7 +989,7 @@ export async function handleGitBranchAdd(
 
         if (!restoreFromDestination) {
           cloneRef = sourceBranch || branch;
-          cloneRemoteUrl = baseRemoteUrl || remoteUrl;
+          cloneRemoteUrl = localHome ? TEAMMATE_FRAMEWORK_REPO_URL : baseRemoteUrl || remoteUrl;
           newBranchName = branch !== cloneRef ? branch : undefined;
         }
       }
@@ -930,7 +1001,8 @@ export async function handleGitBranchAdd(
       );
       await createBranchAsClone({
         remoteUrl: cloneRemoteUrl,
-        ...(cloneRemoteUrl !== remoteUrl ? { originRemoteUrl: remoteUrl } : {}),
+        localHome,
+        ...(!localHome && cloneRemoteUrl !== remoteUrl ? { originRemoteUrl: remoteUrl } : {}),
         targetPath: branchPath,
         ref: cloneRef,
         ...(newBranchName ? { newBranchName } : {}),
@@ -979,6 +1051,12 @@ export async function handleGitBranchAdd(
 
     console.log(`[git.branch.add] Branch created at ${branchPath}`);
 
+    // Durable workspace ownership prevents a retry/restore from adopting an
+    // archived or unrelated checkout which merely happens to use the same ref.
+    const { git: materializedGit } = createGit(branchPath);
+    const markerPath = (await materializedGit.revparse(['--git-path', 'agor-branch-id'])).trim();
+    await writeFile(resolve(branchPath, markerPath), `${branchId}\n`, { mode: 0o600 });
+
     // Persist only filesystem outcome directly. Executable environment
     // rendering belongs to the daemon's existing authorization/validation
     // boundary and is derived there from trusted repo configuration.
@@ -1004,7 +1082,9 @@ export async function handleGitBranchAdd(
     // No filesystem work (including fallback recovery) may follow publication
     // of readiness: deletion may acquire the Branch fence immediately afterward.
     materializationWritesSettled = true;
-    await client.service('branches').patch(branchId, { filesystem_status: 'ready' });
+    await client
+      .service('branches')
+      .patch(branchId, { filesystem_status: 'ready', ...attemptFence });
 
     return {
       success: true,
@@ -1025,7 +1105,7 @@ export async function handleGitBranchAdd(
     // when git worktree add fails. No host permission repair is attempted.
     const fallbackPath = resolvedBranchPath;
     let fallbackCreated = false;
-    if (fallbackPath && !materializationWritesSettled) {
+    if (fallbackPath && !materializationWritesSettled && !localHome) {
       // Step 1: Ensure directory exists
       if (!existsSync(fallbackPath)) {
         try {
@@ -1041,14 +1121,15 @@ export async function handleGitBranchAdd(
       }
     }
 
-    // Provide user-friendly error messages for common failures
+    // Provide user-friendly error messages for common failures. Match on the
+    // specific "ref already attached to another worktree" signal — NOT merely
+    // the word "branch", which also appears in the non-empty-directory message
+    // and would otherwise be misreported as a ref collision.
     let userMessage = errorMessage;
-    if (errorMessage.includes('already exists')) {
-      if (errorMessage.includes('branch')) {
-        userMessage = `A branch named '${resolvedBranchName || 'unknown'}' already exists and is in use by another branch. Please choose a different name.`;
-      } else {
-        userMessage = `Directory '${resolvedBranchPath || resolvedBranchName || 'unknown'}' already exists. An archived or partially-cleaned branch may still occupy this path.`;
-      }
+    if (errorMessage.includes('is in use by another')) {
+      userMessage = `A branch named '${resolvedBranchName || 'unknown'}' already exists and is in use by another branch. Please choose a different name.`;
+    } else if (errorMessage.includes('already exists') && errorMessage.includes('not empty')) {
+      userMessage = `Directory '${resolvedBranchPath || resolvedBranchName || 'unknown'}' already exists and is not empty. An archived or partially-cleaned branch may still occupy this path.`;
     }
 
     // Try to mark branch as failed with error details (if we have a branchId and client)
@@ -1057,6 +1138,7 @@ export async function handleGitBranchAdd(
         await client.service('branches').patch(branchId, {
           filesystem_status: 'failed',
           error_message: userMessage,
+          ...attemptFence,
         });
         console.log(`[git.branch.add] Marked branch as failed`);
       } catch (patchError) {

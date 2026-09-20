@@ -17,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   getReposDir: vi.fn(() => '/safe/repos'),
   addConfig: vi.fn(),
   gitRaw: vi.fn(),
+  gitRevparse: vi.fn(),
+  writeFile: vi.fn(),
   isValidGitRepo: vi.fn(),
   getDefaultBranch: vi.fn(),
   getRemoteUrl: vi.fn(),
@@ -25,6 +27,15 @@ const mocks = vi.hoisted(() => ({
   scrubGitConfigRemoteCredentials: vi.fn(),
   userHome: '/passwd/home',
 }));
+
+// Only `writeFile` is stubbed: `git.branch.add` uses it to drop the durable
+// workspace-ownership marker, and these cases run against unwritable synthetic
+// branch paths. Everything else (including this file's own tmpdir helpers)
+// stays real.
+vi.mock('node:fs/promises', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>('node:fs/promises');
+  return { ...actual, writeFile: mocks.writeFile };
+});
 
 vi.mock('node:os', async () => {
   const actual = await vi.importActual<typeof import('node:os')>('node:os');
@@ -48,7 +59,9 @@ vi.mock('../git/index.js', async () => {
   const actual = await vi.importActual<Record<string, unknown>>('../git/index.js');
   return {
     ...actual,
-    createGit: vi.fn(() => ({ git: { addConfig: mocks.addConfig, raw: mocks.gitRaw } })),
+    createGit: vi.fn(() => ({
+      git: { addConfig: mocks.addConfig, raw: mocks.gitRaw, revparse: mocks.gitRevparse },
+    })),
     cloneRepo: mocks.cloneRepo,
     createBranchAsClone: mocks.createBranchAsClone,
     isRemoteRefVisibleForClone: mocks.isRemoteRefVisibleForClone,
@@ -188,6 +201,10 @@ beforeEach(() => {
     binary: '/usr/bin/git',
     version: '2.47.1',
   });
+  mocks.writeFile.mockResolvedValue(undefined);
+  mocks.gitRevparse.mockImplementation(async (args: string[]) =>
+    args.includes('--git-path') ? 'agor-branch-id\n' : 'sha-abc\n'
+  );
   mocks.gitRaw.mockImplementation(async (args: string[]) => {
     if (args.includes('status')) return '';
     if (args.includes('--abbrev-ref')) return 'main\n';
@@ -382,6 +399,14 @@ describe('managed executor git/fs commands', () => {
         depth: 42,
         referencePath: '/trusted/repo',
       })
+    );
+    // The durable workspace-ownership marker must land before the branch is
+    // acknowledged ready — it is what stops a later retry/restore from adopting
+    // an archived or unrelated checkout at the same deterministic path.
+    expect(mocks.writeFile).toHaveBeenCalledWith(
+      '/trusted/branch/agor-branch-id',
+      `${branchId}\n`,
+      { mode: 0o600 }
     );
     expect(patchedBranches).toContainEqual({ filesystem_status: 'ready' });
     expect(renderedBranches).toEqual([branchId]);
@@ -985,4 +1010,69 @@ describe('managed executor git/fs commands', () => {
       environment
     );
   });
+});
+
+describe('local teammate materialization', () => {
+  it.each([false, true])(
+    'derives independent clone from the trusted row, restore=%s',
+    async (restoreMode) => {
+      const root = await mkdtemp(join(tmpdir(), 'local-teammate-executor-'));
+      const path = join(root, 'home');
+      try {
+        const patchedBranches: Array<Record<string, unknown>> = [];
+        createClient({
+          repo: {
+            repo_id: repoId,
+            remote_url: 'https://github.com/preset-io/agor-teammate.git',
+            local_path: '/unmounted/cache',
+          },
+          branch: {
+            branch_id: branchId,
+            repo_id: repoId,
+            name: 'private-builder',
+            path,
+            storage_mode: 'clone',
+            new_branch: true,
+            base_ref: 'template/builder',
+            custom_context: {
+              teammate: { kind: 'teammate', displayName: 'Builder', localHome: true },
+            },
+          },
+          patchedBranches,
+        });
+        mocks.createBranchAsClone.mockImplementationOnce(async (options) => {
+          expect(options).toMatchObject({
+            localHome: true,
+            ref: 'template/builder',
+            newBranchName: 'private-builder',
+          });
+          expect(options.referencePath).toBeUndefined();
+          expect(options.depth).toBeUndefined();
+          expect(patchedBranches).toEqual([]); // no readiness before clone + remote removal settle
+        });
+        const result = await handleGitBranchAdd(
+          {
+            command: 'git.branch.add',
+            sessionToken: 'tenant-token',
+            params: { branchId, repoId, useReference: true, restoreMode },
+          },
+          {}
+        );
+        expect(result.success).toBe(!restoreMode);
+        if (restoreMode) {
+          expect(mocks.createBranchAsClone).not.toHaveBeenCalled();
+          await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+          expect(patchedBranches).toContainEqual(
+            expect.objectContaining({ filesystem_status: 'failed' })
+          );
+        } else {
+          expect(patchedBranches).toContainEqual(
+            expect.objectContaining({ filesystem_status: 'ready' })
+          );
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  );
 });

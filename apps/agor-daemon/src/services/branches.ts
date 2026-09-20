@@ -42,6 +42,7 @@ import {
   RepoRepository,
   runWithTenantDatabaseScope,
   runWithTenantDatabaseTransaction,
+  shortId,
   type TenantScopeAwareDatabase,
   type TenantScopedDatabase,
   UsersRepository,
@@ -96,6 +97,8 @@ import {
   getBranchCleanupBlockReason,
   getTeammateConfig,
   hasMinimumRole,
+  isBranchProvisioningOutcome,
+  isCanonicalTeammateFrameworkRepo,
   isTeammate,
   ROLES,
   resolveRepoCleanupPolicy,
@@ -133,6 +136,10 @@ import {
   resolveCurrentTenantAuthorityActor,
 } from './tenant-authorization-fence.js';
 
+// Only repos.createBranch owns materialization. A Symbol cannot be supplied by
+// REST/WebSocket JSON, unlike a string-keyed "trusted" parameter or ready status.
+export const BRANCH_MATERIALIZATION_INTENT = Symbol('branchMaterializationIntent');
+
 /**
  * Branch service params
  */
@@ -148,6 +155,7 @@ export type BranchParams = QueryParams<{
 }> &
   AuthenticatedParams &
   InternalEnrichmentParams & {
+    [BRANCH_MATERIALIZATION_INTENT]?: true;
     /** Root-level include_sessions flag (bypasses Feathers query filtering, used by internal service calls) */
     _include_sessions?: boolean | 'true' | 'false';
     /** Internal RBAC SQL pushdown marker set by register-hooks for external regular users. */
@@ -953,7 +961,10 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
    * branch is aligned. The permissions service copies that complete package
    * when the user later switches to override mode.
    */
-  private async applyBranchCreateDefaults(data: Partial<Branch>): Promise<Partial<Branch>> {
+  private async applyBranchCreateDefaults(
+    data: Partial<Branch>,
+    params?: BranchParams
+  ): Promise<Partial<Branch>> {
     const withDefaults: Partial<Branch> = { ...data };
     if (
       withDefaults.base_remote_url !== undefined &&
@@ -963,7 +974,40 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
         'base_remote_url is restricted to the canonical Agor teammate template repository.'
       );
     }
+    for (const key of ['teammate', 'assistant', 'agent']) {
+      const value = data.custom_context?.[key];
+      if (value && typeof value === 'object' && Object.hasOwn(value, 'localHome')) {
+        throw new BadRequest('localHome is server-managed at teammate creation.');
+      }
+    }
     const config = this.app.get('config');
+    if (isTeammate(data)) {
+      const repo = await this.app.service('repos').get(data.repo_id!, params);
+      if (isCanonicalTeammateFrameworkRepo(repo)) {
+        if (!params?.[BRANCH_MATERIALIZATION_INTENT]) {
+          throw new BadRequest(
+            'Create local teammate homes through repos.createBranch so their files are materialized.'
+          );
+        }
+        const storage = config.execution?.executor_storage?.branch_workspace;
+        if (
+          (config.execution?.unix_user_mode === 'delegated' ||
+            config.execution?.executor_command_template?.trim()) &&
+          storage !== 'shared' &&
+          storage !== 'persistent-per-branch'
+        ) {
+          throw new BadRequest(
+            'Local teammate homes require operator-configured persistent branch storage.'
+          );
+        }
+        withDefaults.storage_mode = 'clone';
+        withDefaults.clone_depth = undefined;
+        withDefaults.custom_context = {
+          ...data.custom_context,
+          teammate: { ...getTeammateConfig(data)!, localHome: true },
+        };
+      }
+    }
     const { defaultMode } = resolveBranchStorageConfig(config);
     const storageMode = withDefaults.storage_mode ?? defaultMode;
     ensureBranchStorageModeAllowed(storageMode, config);
@@ -1026,7 +1070,7 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
     if (Array.isArray(data)) {
       data.forEach(assertHasBoard);
       const withDefaults = await Promise.all(
-        data.map((item) => this.applyBranchCreateDefaults(item))
+        data.map((item) => this.applyBranchCreateDefaults(item, params))
       );
       const created = (await super.create(withDefaults, params)) as Branch[];
       const readyBranches = await Promise.all(
@@ -1041,7 +1085,7 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
       return readyBranches;
     }
     assertHasBoard(data);
-    const withDefaults = await this.applyBranchCreateDefaults(data);
+    const withDefaults = await this.applyBranchCreateDefaults(data, params);
     const created = (await super.create(withDefaults, params)) as Branch;
     const readyBranch = await this.maybeEnsureTeammateKnowledgeNamespace(created, params);
     await this.maybeSetBoardPrimaryTeammate(readyBranch, params);
@@ -1279,6 +1323,28 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
       currentBranch as unknown as Record<string, unknown>,
       patchData as Record<string, unknown>
     ) as unknown as Branch;
+    if (
+      getTeammateConfig(currentBranch)?.localHome !== getTeammateConfig(wouldBeBranch)?.localHome
+    ) {
+      throw new BadRequest('localHome is immutable after teammate creation.');
+    }
+    for (const key of ['teammate', 'assistant', 'agent']) {
+      const value = patchData.custom_context?.[key];
+      if (
+        value &&
+        typeof value === 'object' &&
+        Object.hasOwn(value, 'localHome') &&
+        (value as Record<string, unknown>).localHome !== getTeammateConfig(currentBranch)?.localHome
+      ) {
+        throw new BadRequest('localHome is immutable after teammate creation.');
+      }
+    }
+    if (
+      getTeammateConfig(currentBranch)?.localHome &&
+      (wouldBeBranch.storage_mode !== 'clone' || wouldBeBranch.clone_depth != null)
+    ) {
+      throw new BadRequest('Local teammate homes require full-history clone storage.');
+    }
     if (isTeammate(currentBranch) === isTeammate(wouldBeBranch)) return;
 
     throw new BadRequest(
@@ -1428,6 +1494,29 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
     await this.validateCleanupProtectionWrite(currentBranch, data, params);
     await this.assertCanMutateTeammateKnowledgeConfig(currentBranch, data, params);
     this.assertTeammateKindIsStable(currentBranch, data);
+    if (data.filesystem_status === 'ready' || data.filesystem_status === 'failed') {
+      const expectedAttemptId = data.provisioning_attempt_id;
+      const { provisioning_attempt_id: _attempt, ...acknowledgement } = data;
+      if (
+        !isBranchProvisioningOutcome(acknowledgement) ||
+        (expectedAttemptId !== undefined && typeof expectedAttemptId !== 'string')
+      ) {
+        throw new BadRequest(
+          'Provisioning acknowledgement must contain only a terminal outcome. Patch metadata separately.'
+        );
+      }
+      const result = await this.branchRepo.acknowledgeProvisioningAttempt(
+        id,
+        acknowledgement,
+        expectedAttemptId
+      );
+      if (!result.applied) {
+        console.warn(
+          `[branch-provisioning ${shortId(id)}] discarded terminal acknowledgement for a stale or inactive attempt`
+        );
+      }
+      return (await this.branchRepo.enrichWithZoneInfo(result.branch)) as BranchWithZoneAndSessions;
+    }
 
     const oldBoardId = currentBranch.board_id;
     const boardIdProvided = Object.hasOwn(data, 'board_id');
@@ -2272,8 +2361,17 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
       console.log(`📂 Branch directory missing, spawning executor to recreate: ${branch.path}`);
 
       // Set filesystem_status to 'creating' while we rebuild
+      const provisioningAttemptId = generateId();
       await this.withTenantDatabase(params, () =>
-        this.patch(id, { filesystem_status: 'creating' }, { ...params, provider: undefined })
+        this.patch(
+          id,
+          {
+            filesystem_status: 'creating',
+            provisioning_attempt_id: provisioningAttemptId,
+            provisioning_operation: 'restore',
+          },
+          { ...params, provider: undefined }
+        )
       );
 
       // Look up repo to get local_path
@@ -2285,22 +2383,35 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
 
       // The executor derives the materialization mode from this persisted row.
       const storageMode = branch.storage_mode ?? 'worktree';
-      if (storageMode === 'clone' && !repo.remote_url) {
-        const errMsg =
-          `Cannot unarchive clone-mode branch '${branch.name}' for repo '${repo.slug}': ` +
-          `repo has no remote_url. The clone source URL is unknown.`;
+      if (getTeammateConfig(branch)?.localHome || (storageMode === 'clone' && !repo.remote_url)) {
+        const errMsg = getTeammateConfig(branch)?.localHome
+          ? 'Local teammate home is missing. Restore its files from your own backup; the public template cannot recover personal state.'
+          : `Cannot unarchive clone-mode branch '${branch.name}' for repo '${repo.slug}': ` +
+            `repo has no remote_url. The clone source URL is unknown.`;
         console.error(`⚠️  ${errMsg}`);
-        await this.withTenantDatabase(params, () =>
-          this.patch(
+        const result = await this.withTenantDatabase(params, () =>
+          this.branchRepo.acknowledgeProvisioningAttempt(
             id,
             { filesystem_status: 'failed', error_message: errMsg },
-            { ...params, provider: undefined }
+            provisioningAttemptId
           )
         );
-        return unarchivedBranch;
+        if (result.applied) {
+          emitServiceEvent(this.app, {
+            path: 'branches',
+            event: 'patched',
+            data: result.branch,
+            params,
+            id: result.branch.branch_id,
+          });
+        }
+        return this.withTenantDatabase(params, () =>
+          this.branchRepo.enrichWithZoneInfo(result.branch)
+        );
       }
 
       try {
+        const tenantId = params?.tenant?.tenant_id ?? getCurrentTenantId();
         const sessionToken = await issueExecutorCommandToken(
           this.app,
           'git.branch.add',
@@ -2320,6 +2431,8 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
               // This is safe because it only creates a new branch when ls-remote confirms
               // the branch doesn't exist on the remote (no risk of force-deleting existing branches).
               restoreMode: true,
+              provisioningAttemptId,
+              allowExistingCheckout: true,
               useReference:
                 storageMode === 'clone' &&
                 !!repo.local_path &&
@@ -2338,6 +2451,27 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
               user_id: userId,
               branch_fs_access: branchFsAccess,
             },
+            onExit: async (code) => {
+              if (code === 0) return;
+              await runWithTenantDatabaseScope(this.db, tenantId, async (tenantDb) => {
+                const result = await new BranchRepository(
+                  tenantDb
+                ).markProvisioningFailedIfCreating(
+                  branch.branch_id,
+                  `Branch restore exited with code ${code ?? 'unknown'} before confirming completion. Retry provisioning to try again.`,
+                  provisioningAttemptId
+                );
+                if (result.changed) {
+                  emitServiceEvent(this.app, {
+                    path: 'branches',
+                    event: 'patched',
+                    data: result.branch,
+                    params,
+                    id: result.branch.branch_id,
+                  });
+                }
+              });
+            },
           }
         );
       } catch (error) {
@@ -2347,13 +2481,25 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
         );
         // Mark as failed so the UI can show the error state
         const errMsg = error instanceof Error ? error.message : String(error);
-        await this.withTenantDatabase(params, () =>
-          this.patch(
+        const result = await this.withTenantDatabase(params, () =>
+          this.branchRepo.acknowledgeProvisioningAttempt(
             id,
-            { filesystem_status: 'failed', error_message: `Failed to spawn executor: ${errMsg}` },
-            { ...params, provider: undefined }
+            {
+              filesystem_status: 'failed',
+              error_message: `Failed to spawn executor: ${errMsg}`,
+            },
+            provisioningAttemptId
           )
         );
+        if (result.applied) {
+          emitServiceEvent(this.app, {
+            path: 'branches',
+            event: 'patched',
+            data: result.branch,
+            params,
+            id: result.branch.branch_id,
+          });
+        }
       }
     }
 

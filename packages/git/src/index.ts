@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { constants, existsSync } from 'node:fs';
+import { constants, existsSync, readdirSync } from 'node:fs';
 import { lstat, mkdir, mkdtemp, open, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
@@ -171,6 +171,27 @@ function getGitBinary(): string {
  *
  * Exported so tests can assert the argv shape without spawning a real git.
  */
+/**
+ * True when `path` exists and contains at least one entry. Used to distinguish
+ * a genuinely occupied target directory (must not be clobbered) from a harmless
+ * empty directory. An empty directory is a valid target for both
+ * `git worktree add <path>` and `git clone <url> <path>`, and — critically — it
+ * is exactly what a prior *failed* provisioning attempt leaves behind (the
+ * executor's fallback `mkdirSync`). Treating an empty directory as "already
+ * occupied" makes retry provisioning permanently un-repairable, so provisioning
+ * guards must key off non-emptiness, not mere existence.
+ */
+export function directoryHasEntries(path: string): boolean {
+  if (!existsSync(path)) return false;
+  try {
+    return readdirSync(path).length > 0;
+  } catch {
+    // Not a directory (a file at the path) or unreadable — treat as occupied so
+    // we fail safe rather than clobber something unexpected.
+    return true;
+  }
+}
+
 export function buildWorktreeAddArgs(params: {
   branchPath: string;
   ref: string;
@@ -1277,15 +1298,20 @@ export async function createBranch(
     );
   }
 
-  // Refuse to clobber an existing directory. Matches createBranchAsClone's
-  // guard, so worktree-mode and clone-mode surface the same user-facing
-  // error when the path is already taken (typically by an archived or
-  // partially-cleaned branch). Used to live in the daemon as a
-  // synchronous preflight; moved here so the executor / core layer is the
-  // single source of truth for filesystem facts.
-  if (existsSync(branchPath)) {
+  // Refuse to clobber a NON-EMPTY existing directory. Matches
+  // createBranchAsClone's guard, so worktree-mode and clone-mode surface the
+  // same user-facing error when the path is genuinely occupied (typically by an
+  // archived or partially-cleaned branch). An *empty* directory is deliberately
+  // allowed through: `git worktree add` accepts an empty target, and a prior
+  // failed attempt leaves exactly such an empty directory behind (the
+  // executor's fallback mkdir). Refusing it would make retry provisioning
+  // permanently un-repairable. Used to live in the daemon as a synchronous
+  // preflight; moved here so the executor / core layer is the single source of
+  // truth for filesystem facts.
+  if (directoryHasEntries(branchPath)) {
     throw new Error(
-      `Target directory '${branchPath}' already exists on disk. ` +
+      `Target directory '${branchPath}' already exists on disk and is not empty. ` +
+        'This usually means an archived or partially-cleaned branch still occupies this path. ' +
         'Please choose a different name or clean up the existing directory.'
     );
   }
@@ -1496,6 +1522,8 @@ export interface CreateBranchAsCloneOptions {
    * Use when the base ref is hosted by a separate template repository.
    */
   originRemoteUrl?: string;
+  /** New local teammate home: independent full history and no publishing remote. */
+  localHome?: boolean;
   /** Absolute path where the new clone should land. Must not already exist by default. */
   targetPath: string;
   /**
@@ -1693,6 +1721,11 @@ export async function createBranchAsClone(
     ? assertSafeGitRemoteUrl(stripGitUrlCredentials(options.originRemoteUrl))
     : undefined;
   const singleBranch = options.singleBranch ?? true;
+  if (options.localHome && (depth !== undefined || referencePath || originRemoteUrl)) {
+    throw new Error(
+      'Local teammate homes require full history, no reference, and no origin override.'
+    );
+  }
 
   if (!remoteUrl) {
     throw new Error('remoteUrl is required');
@@ -1716,9 +1749,13 @@ export async function createBranchAsClone(
     throw new Error(`Invalid clone depth: expected positive integer, got ${depth}`);
   }
 
-  if (existsSync(targetPath)) {
+  // Refuse a NON-EMPTY target only. `git clone <url> <dir>` accepts an empty
+  // existing directory, and a prior failed provisioning attempt leaves exactly
+  // such an empty directory behind — allowing it through is what makes retry
+  // idempotent and repairable rather than permanently wedged.
+  if (directoryHasEntries(targetPath)) {
     throw new Error(
-      `Target directory '${targetPath}' already exists. ` +
+      `Target directory '${targetPath}' already exists and is not empty. ` +
         'Refusing to clone over existing contents — pick a different path or remove the directory first.'
     );
   }
@@ -1765,6 +1802,7 @@ export async function createBranchAsClone(
   // clone via alternates; deliberately NOT paired with `--dissociate`
   // (see option doc above + design doc §5).
   const cloneArgs: string[] = ['--branch', ref];
+  if (options.localHome) cloneArgs.push('--no-local');
   if (singleBranch) cloneArgs.push('--single-branch');
   if (depth !== undefined) cloneArgs.push('--depth', String(depth));
   if (useReference && referencePath) cloneArgs.push('--reference', referencePath);
@@ -1829,6 +1867,13 @@ export async function createBranchAsClone(
     if (newBranchName && localBranches.all.includes(ref)) {
       await cloneGit.deleteLocalBranch(ref, true);
     }
+  }
+
+  if (options.localHome) {
+    const { git: cloneGit } = createGit(targetPath);
+    // This is a newly-created independent clone, never the registered source
+    // or a linked worktree. Git removes origin's tracking configuration too.
+    await cloneGit.removeRemote('origin');
   }
 
   await addSafeDirectoryBestEffort(targetPath, '[createBranchAsClone]');
