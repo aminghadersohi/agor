@@ -1,6 +1,7 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, isNull, notInArray, or, sql } from 'drizzle-orm';
 import { generateId } from '../../lib/ids';
 import {
+  BRANCH_FILESYSTEM_STATUSES_OWNING_NOTHING,
   BRANCH_MAINTENANCE_DISCOVERY_PAGE_SIZE,
   type BranchID,
   type BranchMaintenanceClaim,
@@ -82,15 +83,16 @@ export class BranchMaintenanceRepository {
           'Branch filesystem materialization is active or unsettled; wait for verified completion before maintenance'
         );
       }
-      // A row whose filesystem_status is failed/cleaned/deleted owns nothing
-      // on disk. It cannot conflict with maintenance on another row's path,
-      // and — being broken — must not be able to block maintenance on itself.
+      // A row in BRANCH_FILESYSTEM_STATUSES_OWNING_NOTHING is presumed dead:
+      // it must not block, or be blocked by, maintenance on an overlapping
+      // sibling path.
+      const livelySiblingFilesystemStatus = or(
+        isNull(branches.filesystem_status),
+        notInArray(branches.filesystem_status, [...BRANCH_FILESYSTEM_STATUSES_OWNING_NOTHING])
+      );
       const overlap = await select(tx, { branch_id: branches.branch_id })
         .from(branches)
-        .where(sql`${branches.branch_id} <> ${branchId} AND (
-          ${branches.filesystem_status} IS NULL
-          OR ${branches.filesystem_status} NOT IN ('failed', 'cleaned', 'deleted')
-        ) AND (
+        .where(sql`${branches.branch_id} <> ${branchId} AND (${livelySiblingFilesystemStatus}) AND (
           ${branches.data} ->> 'path' = ${row.data.path}
           OR ${branches.data} ->> 'path' LIKE ${`${row.data.path}/%`}
           OR ${row.data.path} LIKE ((${branches.data} ->> 'path') || '/%'))`)
