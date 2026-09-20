@@ -13,6 +13,7 @@ import {
   SOCKET_IO_MAX_BUFFER_SIZE_BYTES,
 } from '@agor/core/config';
 import { isTerminalTaskStatus } from '@agor/core/types';
+import { projectTranscriptData } from './tool-result-truncator.js';
 
 // Re-export AgorClient type for use in other executor files
 export type { AgorClient } from '@agor/core/api';
@@ -60,7 +61,29 @@ export function registerExecutorRequestSizeGuard(client: AgorClient): void {
           const isTranscriptWrite =
             path === 'messages' && (context.method === 'create' || context.method === 'patch');
           if (!isTranscriptWrite) return context;
-          assertExecutorRequestDataWithinBudget(path, context.method, context.data);
+
+          let byteSize: number;
+          try {
+            // Project after provider enrichment and wrapper construction, on a copy.
+            // The guard below remains the final transport postcondition.
+            if (context.data && typeof context.data === 'object') {
+              context.data = projectTranscriptData(
+                context.data,
+                EXECUTOR_REQUEST_DATA_BUDGET_BYTES
+              );
+            }
+            byteSize = Buffer.byteLength(JSON.stringify(context.data), 'utf8');
+          } catch {
+            throw new Error(
+              `Executor transcript data could not be serialized (${path}.${context.method})`
+            );
+          }
+          if (byteSize > EXECUTOR_REQUEST_DATA_BUDGET_BYTES) {
+            throw new Error(
+              `Executor transcript data is ${byteSize} bytes, exceeding the ${EXECUTOR_REQUEST_DATA_BUDGET_BYTES}-byte transport budget (${path}.${context.method}). ` +
+                `Reduce transcript data at the source (e.g. smaller tool inputs, pagination, or result limits).`
+            );
+          }
           return context;
         },
       ],
