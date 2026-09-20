@@ -1,5 +1,5 @@
 import type { AgorClient, Board, BoardCapabilityPolicies, User, UserID } from '@agor-live/client';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Form, Input } from 'antd';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BoardEditModal } from './BoardEditModal';
@@ -222,30 +222,44 @@ describe('BoardEditModal', () => {
       <BoardEditModal board={board} client={client} currentUser={owner} open onClose={onClose} />
     );
     const { rerender } = render(editor(listedBoard));
-    const transferButton = await screen.findByRole('button', { name: 'Transfer ownership' });
+    const transferButton = await screen.findByLabelText('Transfer ownership');
     fireEvent.click(transferButton);
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Successor owner' }));
+    // The settings modal now includes a full zone editor. Scope ownership
+    // queries to its own dialog instead of repeatedly computing accessibility
+    // for every unrelated AntD control in the underlying settings form.
+    const transferDialog = within(
+      screen.getByText('Transfer board ownership').closest<HTMLElement>('[role="dialog"]')!
+    );
+    fireEvent.mouseDown(transferDialog.getByRole('combobox', { name: 'Successor owner' }));
     fireEvent.click(await screen.findByText('Reed'));
-    fireEvent.click(screen.getAllByRole('button', { name: 'Transfer ownership' }).at(-1)!);
+    fireEvent.click(transferDialog.getByRole('button', { name: 'Transfer ownership' }));
     await waitFor(() => expect(patch).toHaveBeenCalledOnce());
+    expect(patch).toHaveBeenCalledWith(
+      null,
+      { expected_owner_user_id: owner.user_id, target_user_id: successor.user_id },
+      { route: { id: listedBoard.board_id } }
+    );
 
     // The canonical patched event can arrive before the command's reply.
     rerender(editor({ ...freshBoard, primary_owner_user_id: successor.user_id }));
-    expect(screen.getByRole('combobox', { name: 'Successor owner' })).toBeInTheDocument();
+    const pendingSuccessor = transferDialog.getByRole('combobox', { name: 'Successor owner' });
+    expect(pendingSuccessor).toBeInTheDocument();
+    expect(pendingSuccessor).toBeDisabled();
+    expect(onClose).not.toHaveBeenCalled();
     await act(async () =>
       complete({
         scope: 'management_only',
         previous_owner_access: { capabilities: ['board.view'], fs_access: 'none' },
       })
     );
-    await screen.findByRole('button', { name: 'Done' });
+    await transferDialog.findByRole('button', { name: 'Done' });
     rerender(
       editor({ ...freshBoard, primary_owner_user_id: successor.user_id, name: 'Realtime refresh' })
     );
-    expect(screen.getByText(/board.view/)).toBeInTheDocument();
+    expect(transferDialog.getByText(/board.view/)).toBeInTheDocument();
     expect(get).toHaveBeenCalledOnce();
     expect(onClose).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    fireEvent.click(transferDialog.getByRole('button', { name: 'Done' }));
     expect(onClose).toHaveBeenCalledOnce();
   });
 
