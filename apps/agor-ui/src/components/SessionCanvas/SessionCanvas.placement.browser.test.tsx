@@ -61,6 +61,13 @@ it('persists two real pointer drags when the first PATCH completes during the se
       on: vi.fn(),
       off: vi.fn(),
     }),
+    // The canvas subscribes to socket lifecycle events (zone-workflow
+    // transitions refresh on reconnect) and joins the board cursor-presence
+    // room, so the double needs the socket surface the real client always
+    // carries. Mirrors the stub in SessionCanvas.zoom.test.tsx.
+    io: { on: vi.fn(), off: vi.fn(), emit: vi.fn(), volatile: { emit: vi.fn() } },
+    on: vi.fn(),
+    off: vi.fn(),
   } as unknown as AgorClient;
   const view = render(
     <App>
@@ -107,13 +114,23 @@ it('persists two real pointer drags when the first PATCH completes during the se
   const transform = node.style.transform.match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/);
   expect(transform).not.toBeNull();
   const expected = { x: Number(transform![1]), y: Number(transform![2]) };
-  expect(expected).not.toEqual(patch.mock.calls[0][1].position);
+  // `expected` is reparsed out of a CSS transform string, which has no way to
+  // spell -0 (`String(-0) === '0'`). A drag that lands exactly on an axis can
+  // legitimately yield -0, so that round-trip silently flips the sign and
+  // `toEqual` treats -0 and 0 as different. Adding +0 maps -0 to 0 and leaves
+  // every other value untouched; -0 and 0 are the same board position, and
+  // JSON serialization collapses them anyway.
+  const normalize = (position: { x: number; y: number }) => ({
+    x: position.x + 0,
+    y: position.y + 0,
+  });
+  expect(expected).not.toEqual(normalize(patch.mock.calls[0][1].position));
   await act(async () => release());
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
-  expect(patch.mock.calls[1][1].position).toEqual(expected);
-  expect(agorStore.getState().boardObjectsByBoardId.get(board.board_id)?.[0].position).toEqual(
-    expected
-  );
+  expect(normalize(patch.mock.calls[1][1].position)).toEqual(expected);
+  expect(
+    normalize(agorStore.getState().boardObjectsByBoardId.get(board.board_id)![0].position!)
+  ).toEqual(expected);
   await waitFor(() =>
     expect(node.style.transform).toBe(`translate(${expected.x}px, ${expected.y}px)`)
   );
