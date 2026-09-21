@@ -1038,6 +1038,10 @@ export const branches = pgTable(
         pull_request_url?: string; // PR link
         notes?: string; // Freeform user notes
         error_message?: string; // Error details when filesystem_status is 'failed'
+        // Generation owning the in-flight provisioning attempt. Fences stale
+        // acknowledgements from a superseded attempt (see Branch type).
+        provisioning_attempt_id?: string;
+        provisioning_operation?: 'create' | 'retry' | 'restore';
 
         // Environment instance (runtime state only, no variables)
         environment_instance?: BranchEnvironmentInstance;
@@ -3135,6 +3139,12 @@ export const gatewayOutboundMessages = pgTable(
     platform_message_id: text('platform_message_id').notNull(),
     platform_thread_id: text('platform_thread_id').notNull(),
     platform_permalink: text('platform_permalink'),
+    /**
+     * `platform_thread_id` on the one row that seeds a thread, NULL on every
+     * later send into an already-seeded thread. Uniqueness lives here so a
+     * follow-up send can keep its own audit row without racing the seed.
+     */
+    seed_thread_id: text('seed_thread_id'),
 
     target_branch_id: varchar('target_branch_id', { length: 36 })
       .notNull()
@@ -3174,8 +3184,12 @@ export const gatewayOutboundMessages = pgTable(
   },
   (table) => ({
     tenantIdx: index('gateway_outbound_messages_tenant_id_idx').on(table.tenant_id),
-    uniqueChannelThread: uniqueIndex('uniq_gateway_outbound_tenant_channel_thread').on(
+    uniqueChannelSeedThread: uniqueIndex('uniq_gateway_outbound_tenant_channel_seed_thread').on(
       table.tenant_id,
+      table.gateway_channel_id,
+      table.seed_thread_id
+    ),
+    channelThreadIdx: index('idx_gateway_outbound_channel_thread').on(
       table.gateway_channel_id,
       table.platform_thread_id
     ),

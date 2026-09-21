@@ -146,6 +146,19 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
     },
   ],
   [
+    '9021_gateway_outbound_thread_seed',
+    {
+      requiresOfflineCutover: true,
+      impact: defineMigrationImpact({
+        classification: 'protocol',
+        userAction: 'required',
+        rollbackCompatibility: 'incompatible',
+        summary:
+          'Moves gateway outbound thread uniqueness onto seed_thread_id. Stop all old daemons first: older binaries write no seed key, so seeded threads stop routing inbound replies.',
+      }),
+    },
+  ],
+  [
     '9020_standalone_power_ownership',
     {
       requiresOfflineCutover: true,

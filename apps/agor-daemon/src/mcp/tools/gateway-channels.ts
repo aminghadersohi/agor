@@ -965,7 +965,7 @@ const slackManifestGenerateSchema = z.strictObject({
     .boolean()
     .default(false)
     .describe(
-      'Ingest images and text files attached to inbound messages (adds the files:read scope). The gateway stages them server-side and hands opaque, expiring handles to the session agent.'
+      'Ingest images, text files, and PDFs attached to inbound messages (adds the files:read scope). The gateway stages them server-side and hands opaque, expiring handles to the session agent.'
     ),
   threadHistory: z
     .boolean()
@@ -2244,7 +2244,7 @@ export function registerGatewayChannelTools(server: McpServer, ctx: McpContext):
     'agor_gateway_slack_file_download',
     {
       description:
-        "Download a Slack file by fileId (from the files metadata in the Slack history tools) into tenant/session-scoped staging, returning an opaque handle for agor_upload_materialize. Gated by the channel's agent_tools.file_download capability; only files shared in a conversation permitted by the channel's allowed_channel_ids (DMs exempt), and only image/text-like types under the same limits as inbound attachment ingestion.",
+        "Download a Slack file by fileId (from the files metadata in the Slack history tools) into tenant/session-scoped staging, returning an opaque handle for agor_upload_materialize. Gated by the channel's agent_tools.file_download capability; only files shared in a conversation permitted by the channel's allowed_channel_ids (DMs exempt), and only image, text-like, and PDF types under the same limits as inbound attachment ingestion.",
       annotations: { destructiveHint: false, idempotentHint: true },
       inputSchema: slackFileDownloadSchema,
     },
@@ -2268,7 +2268,7 @@ export function registerGatewayChannelTools(server: McpServer, ctx: McpContext):
       }
       if (!isIngestableFile(file)) {
         throw new Error(
-          `Slack file "${file.name}" has type ${file.mimetype}, which the gateway does not download. Only image and text-like files (png/jpeg/gif/webp, plain text, markdown, CSV, JSON) are supported.`
+          `Slack file "${file.name}" has type ${file.mimetype}, which the gateway does not download. Only image, text-like, and PDF files (png/jpeg/gif/webp, plain text, markdown, CSV, JSON, PDF) are supported.`
         );
       }
       const maxFileBytes = getUploadLimits().maxFileBytes;
@@ -2319,7 +2319,7 @@ export function registerGatewayChannelTools(server: McpServer, ctx: McpContext):
     'agor_gateway_emit_message',
     {
       description:
-        "Send a proactive Slack or Discord message through an outbound-enabled gateway channel and persist a seed/audit record. Slack targets may be channel IDs, channel names, or user emails; Discord targets are channel:<snowflake>. The emit starts a fresh provider message and does not create a thread-session mapping until a human replies. When called from a session, outbound is restricted to channels whose target branch matches the calling session's branch.",
+        "Send a proactive Slack or Discord message through an outbound-enabled gateway channel and persist a seed/audit record. Slack targets may be channel IDs, channel names, or user emails; Discord targets are channel:<snowflake>. The emit starts a fresh provider message and does not create a thread-session mapping until a human replies; replying into an already-seeded thread records a follow-up audit row (audit_role) and leaves that thread's seed alone. Reaching a result at all means the message was delivered, so never re-send on recorded:false — that posts a duplicate. When called from a session, outbound is restricted to channels whose target branch matches the calling session's branch.",
       annotations: { destructiveHint: false, idempotentHint: false },
       inputSchema: z.strictObject({
         gatewayChannelId: mcpRequiredId(

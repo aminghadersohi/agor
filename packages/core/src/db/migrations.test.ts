@@ -87,7 +87,11 @@ describe('Postgres migrations', () => {
       const index = journal.entries.findIndex(({ tag }) => tag === '9026_branch_color_override');
       expect(index).toBeGreaterThan(0);
       const added = journal.entries[index]!;
-      expect(added).toMatchObject({ idx: 9026, tag: '9026_branch_color_override' });
+      // The tag is the migration's identity (it names the .sql file); `idx` is
+      // just the journal slot, and slot 9026 went to the gateway seed migration
+      // that landed on main first. Renumbering that one would rewrite an entry
+      // deployed databases already record.
+      expect(added).toMatchObject({ idx: 9027, tag: '9026_branch_color_override' });
       // Drizzle decides "pending" by timestamp, so an append below an existing
       // watermark is silently skipped rather than failing loudly.
       expect(added.when).toBeGreaterThan(

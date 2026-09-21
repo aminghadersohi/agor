@@ -10,10 +10,11 @@ import type {
   GatewayOutboundMessage,
   GatewayOutboundMessageID,
   GatewayOutboundReplyAdmission,
+  GatewayOutboundSendRecord,
   SessionID,
 } from '@agor/core/types';
 import { prefixToLikePattern } from '@agor/core/types';
-import { and, eq, isNull, like, or, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull, like, or, sql } from 'drizzle-orm';
 import { generateId } from '../../lib/ids';
 import type { Database } from '../client';
 import {
@@ -50,6 +51,7 @@ export class GatewayOutboundMessageRepository {
       platform_message_id: row.platform_message_id,
       platform_thread_id: row.platform_thread_id,
       platform_permalink: row.platform_permalink ?? null,
+      seed_thread_id: row.seed_thread_id ?? null,
       target_branch_id: row.target_branch_id as GatewayOutboundMessage['target_branch_id'],
       emitted_by_user_id: row.emitted_by_user_id as GatewayOutboundMessage['emitted_by_user_id'],
       emitted_by_session_id: (row.emitted_by_session_id as SessionID | null) ?? null,
@@ -79,6 +81,12 @@ export class GatewayOutboundMessageRepository {
       platform_message_id: data.platform_message_id ?? '',
       platform_thread_id: data.platform_thread_id ?? '',
       platform_permalink: data.platform_permalink ?? null,
+      // A row is a seed unless the caller explicitly says otherwise, so every
+      // existing writer keeps its one-seed-per-thread meaning.
+      seed_thread_id:
+        data.seed_thread_id === null
+          ? null
+          : (data.seed_thread_id ?? data.platform_thread_id ?? ''),
       target_branch_id: data.target_branch_id ?? '',
       emitted_by_user_id: data.emitted_by_user_id ?? '',
       emitted_by_session_id: data.emitted_by_session_id ?? null,
@@ -109,6 +117,66 @@ export class GatewayOutboundMessageRepository {
     return rows[0].id;
   }
 
+  /**
+   * Conflict target for the one-seed-per-thread unique index.
+   *
+   * The index carries `tenant_id` on PostgreSQL and omits it on SQLite (one
+   * tenant per database), so the target is read off the live table rather than
+   * hard-coded. Naming the target keeps `DO NOTHING` scoped to the seed index
+   * — a primary-key collision still raises instead of being swallowed.
+   */
+  private seedConflictTarget(): unknown[] {
+    const tenantColumn = (gatewayOutboundMessages as unknown as Record<string, unknown>).tenant_id;
+    return [
+      ...(tenantColumn ? [tenantColumn] : []),
+      gatewayOutboundMessages.gateway_channel_id,
+      gatewayOutboundMessages.seed_thread_id,
+    ];
+  }
+
+  /**
+   * Record one proactive send, seeding the thread if nothing seeded it yet.
+   *
+   * The seed insert is the atomic arbiter: `ON CONFLICT DO NOTHING` against the
+   * one-seed-per-thread index either wins the seed or reports that someone else
+   * holds it. There is no read before it, so two concurrent sends into the same
+   * thread cannot both decide they are the seed. The loser is then written as a
+   * follow-up row (`seed_thread_id = null`), which cannot collide with anything
+   * and carries this send's own message id, permalink, text and attribution.
+   */
+  async recordSend(data: Partial<GatewayOutboundMessage>): Promise<GatewayOutboundSendRecord> {
+    try {
+      const seedInsert = this.toInsert({ ...data, id: data.id ?? generateId() });
+      const seeded = await insert(this.db, gatewayOutboundMessages)
+        .values(seedInsert)
+        .onConflictDoNothing({ target: this.seedConflictTarget() })
+        .returning()
+        .one();
+      if (seeded) return { message: this.rowToMessage(seeded), role: 'thread_seed' };
+
+      const followUp = await insert(this.db, gatewayOutboundMessages)
+        .values({ ...seedInsert, seed_thread_id: null })
+        .returning()
+        .one();
+      if (!followUp) {
+        throw new RepositoryError('Failed to retrieve created gateway outbound follow-up message');
+      }
+      return { message: this.rowToMessage(followUp), role: 'thread_followup' };
+    } catch (error) {
+      if (error instanceof RepositoryError) throw error;
+      throw new RepositoryError(
+        `Failed to record gateway outbound send: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /**
+   * Create one seed row for a thread.
+   *
+   * Unlike {@link recordSend} this asserts the thread has no seed yet and
+   * raises on collision. Use it where a seed is the intended outcome.
+   */
   async create(data: Partial<GatewayOutboundMessage>): Promise<GatewayOutboundMessage> {
     try {
       const insertData = this.toInsert({ ...data, id: data.id ?? generateId() });
@@ -169,6 +237,10 @@ export class GatewayOutboundMessageRepository {
       .where(
         and(
           eq(gatewayOutboundMessages.gateway_channel_id, gatewayChannelId),
+          // Only seed rows own a thread's session identity. Follow-up sends
+          // share the thread id (and may repeat its reply aliases) but must
+          // never be admitted as a seed or make the lookup ambiguous.
+          isNotNull(gatewayOutboundMessages.seed_thread_id),
           or(eq(gatewayOutboundMessages.platform_thread_id, platformThreadId), aliasMatch)
         )
       )
