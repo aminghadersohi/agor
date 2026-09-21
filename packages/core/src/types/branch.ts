@@ -504,17 +504,6 @@ export interface Branch {
   sdk_home?: 'per_branch' | null;
 }
 
-/**
- * `filesystem_status` values that mark a row as terminal-and-presumed-dead
- * for the purpose of maintenance overlap checks: it must never block, or be
- * blocked by, another row's archive/delete on an overlapping path. This is a
- * "give up trying to protect it" bucket, not a filesystem-verified "zero
- * bytes on disk" guarantee — e.g. a `storage_mode: 'clone'` row can reach
- * `'failed'` after real (if incomplete) content was already materialized.
- * See `BranchMaintenanceRepository.claim`'s overlap query.
- */
-export const BRANCH_FILESYSTEM_STATUSES_OWNING_NOTHING = ['failed', 'cleaned', 'deleted'] as const;
-
 export type BranchFilesystemReadinessState = 'pending' | 'ready' | 'failed' | 'unavailable';
 
 /**

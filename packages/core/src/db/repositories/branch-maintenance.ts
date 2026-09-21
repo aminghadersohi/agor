@@ -1,7 +1,6 @@
-import { and, eq, isNull, notInArray, or, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { generateId } from '../../lib/ids';
 import {
-  BRANCH_FILESYSTEM_STATUSES_OWNING_NOTHING,
   BRANCH_MAINTENANCE_DISCOVERY_PAGE_SIZE,
   type BranchID,
   type BranchMaintenanceClaim,
@@ -83,25 +82,23 @@ export class BranchMaintenanceRepository {
           'Branch filesystem materialization is active or unsettled; wait for verified completion before maintenance'
         );
       }
-      // A row in BRANCH_FILESYSTEM_STATUSES_OWNING_NOTHING is presumed dead:
-      // it must not block, or be blocked by, maintenance on an overlapping
-      // sibling path.
-      const livelySiblingFilesystemStatus = or(
-        isNull(branches.filesystem_status),
-        notInArray(branches.filesystem_status, [...BRANCH_FILESYSTEM_STATUSES_OWNING_NOTHING])
-      );
-      const overlap = await select(tx, { branch_id: branches.branch_id })
-        .from(branches)
-        .where(sql`${branches.branch_id} <> ${branchId} AND (${livelySiblingFilesystemStatus}) AND (
-          ${branches.data} ->> 'path' = ${row.data.path}
-          OR ${branches.data} ->> 'path' LIKE ${`${row.data.path}/%`}
-          OR ${row.data.path} LIKE ((${branches.data} ->> 'path') || '/%'))`)
-        .limit(1)
-        .one();
-      if (overlap)
-        throw new RepositoryError(
-          'Branch storage overlaps another branch; reconcile ownership before maintenance'
-        );
+      // Status is not proof of absent files: cleaned/failed rows can retain
+      // content, and failed siblings can retry under a different row lock.
+      // Only a claim that cannot launch a filesystem executor may skip this.
+      if (kind !== 'metadata_archive') {
+        const overlap = await select(tx, { branch_id: branches.branch_id })
+          .from(branches)
+          .where(sql`${branches.branch_id} <> ${branchId} AND (
+            ${branches.data} ->> 'path' = ${row.data.path}
+            OR ${branches.data} ->> 'path' LIKE ${`${row.data.path}/%`}
+            OR ${row.data.path} LIKE ((${branches.data} ->> 'path') || '/%'))`)
+          .limit(1)
+          .one();
+        if (overlap)
+          throw new RepositoryError(
+            'Branch storage overlaps another branch; use metadata-only archival or reconcile ownership before filesystem maintenance'
+          );
+      }
       // This same Branch lock excludes new queued work and dispatch claims.
       // Deliberately a known-activity proxy, not proof of detached-process absence.
       if (await new TaskRepository(tx).hasNonterminalForBranch(branchId)) {
@@ -216,6 +213,8 @@ export class BranchMaintenanceRepository {
   async beginExecution(claim: BranchMaintenanceClaim): Promise<UUID> {
     return this.locked(claim.branch_id, async (tx, row) => {
       const current = this.assertClaim(row, claim);
+      if (current.kind === 'metadata_archive')
+        throw new RepositoryError('Metadata-only archival cannot launch a filesystem executor');
       if (current.execution_id)
         throw new RepositoryError('Prior executor outcome requires containment reconciliation');
       const executionId = generateId();
