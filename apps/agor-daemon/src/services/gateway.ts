@@ -86,6 +86,8 @@ import type {
   GatewayOutboundMessage,
   GatewayOutboundMessageID,
   GatewayOutboundReplyAdmission,
+  GatewayOutboundSendRecord,
+  GatewayOutboundSendRole,
   GatewaySource,
   MCPOAuthAttemptID,
   MCPServerID,
@@ -284,9 +286,34 @@ interface EmitGatewayMessageData {
   userRole?: string;
 }
 
+/**
+ * Outcome of one proactive emit.
+ *
+ * Delivery and persistence are reported separately on purpose. Reaching this
+ * type at all means the provider accepted the message, so `success` is always
+ * `true` and a caller must never retry on the strength of `recorded: false` —
+ * that would post a duplicate. A failure to deliver is still thrown.
+ *
+ * `platform_message_id` / `platform_permalink` always describe THIS send, never
+ * the thread's pre-existing seed.
+ */
 interface EmitGatewayMessageResult {
+  /** The provider accepted this message. Never a claim about persistence. */
   success: true;
-  gateway_outbound_message_id: string;
+  /** Same claim, named so it cannot be confused with "the call succeeded". */
+  delivered: true;
+  /** Whether the audit row for this send persisted. */
+  recorded: boolean;
+  /**
+   * How this send is represented in the audit trail: it seeded the thread, it
+   * was a follow-up into an already-seeded thread, or — delivered but not
+   * recorded — it is missing from the trail entirely.
+   */
+  audit_role: GatewayOutboundSendRole | 'unrecorded';
+  /** Null only when `recorded` is false. */
+  gateway_outbound_message_id: string | null;
+  /** Present only when `recorded` is false; why persistence failed. */
+  persistence_error?: string;
   gateway_channel_id: string;
   channel_type: ChannelType;
   platform_channel_id: string;
@@ -2972,7 +2999,10 @@ export class GatewayService {
       throw new Error(`${channel.channel_type} connector returned an incomplete outbound receipt`);
     }
 
-    const row = await this.outboundRepo.create({
+    // Delivery already happened. From here nothing may turn a delivered
+    // message into a thrown error, or the caller retries and Slack gets the
+    // message twice.
+    const audit = {
       gateway_channel_id: channel.id,
       channel_type: channel.channel_type,
       platform_channel_id: platformChannelId,
@@ -2994,22 +3024,48 @@ export class GatewayService {
         ...(sent.metadata ? { provider_target: sent.metadata } : {}),
         ...(sent.replyAliases?.length ? { provider_reply_aliases: sent.replyAliases } : {}),
       },
-    });
+    };
 
-    await this.channelRepo.updateLastMessage(channel.id);
-    console.log(
-      `[gateway] Proactive ${channel.channel_type} outbound ${shortId(row.id)} sent via ${shortId(channel.id)}`
-    );
-
-    return {
+    // Everything the caller is told about the delivered message comes from this
+    // send's receipt, not from whatever row the thread already had.
+    const delivery = {
       success: true,
-      gateway_outbound_message_id: row.id,
+      delivered: true,
       gateway_channel_id: channel.id,
       channel_type: channel.channel_type,
       platform_channel_id: platformChannelId,
       platform_message_id: sent.messageId,
       platform_thread_id: platformThreadId,
       ...(sent.permalink ? { platform_permalink: sent.permalink } : {}),
+    } as const;
+
+    let record: GatewayOutboundSendRecord;
+    try {
+      record = await this.outboundRepo.recordSend(audit);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(
+        `[gateway] Proactive ${channel.channel_type} outbound via ${shortId(channel.id)} was delivered but not recorded: ${reason}`
+      );
+      return {
+        ...delivery,
+        recorded: false,
+        audit_role: 'unrecorded',
+        gateway_outbound_message_id: null,
+        persistence_error: reason,
+      };
+    }
+
+    await this.channelRepo.updateLastMessage(channel.id);
+    console.log(
+      `[gateway] Proactive ${channel.channel_type} outbound ${shortId(record.message.id)} (${record.role}) sent via ${shortId(channel.id)}`
+    );
+
+    return {
+      ...delivery,
+      recorded: true,
+      audit_role: record.role,
+      gateway_outbound_message_id: record.message.id,
     };
   }
 

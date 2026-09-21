@@ -2319,7 +2319,7 @@ export function registerGatewayChannelTools(server: McpServer, ctx: McpContext):
     'agor_gateway_emit_message',
     {
       description:
-        "Send a proactive Slack or Discord message through an outbound-enabled gateway channel and persist a seed/audit record. Slack targets may be channel IDs, channel names, or user emails; Discord targets are channel:<snowflake>. The emit starts a fresh provider message and does not create a thread-session mapping until a human replies. When called from a session, outbound is restricted to channels whose target branch matches the calling session's branch.",
+        "Send a proactive Slack or Discord message through an outbound-enabled gateway channel and persist a seed/audit record. Slack targets may be channel IDs, channel names, or user emails; Discord targets are channel:<snowflake>. The emit starts a fresh provider message and does not create a thread-session mapping until a human replies; replying into an already-seeded thread records a follow-up audit row (audit_role) and leaves that thread's seed alone. Reaching a result at all means the message was delivered, so never re-send on recorded:false — that posts a duplicate. When called from a session, outbound is restricted to channels whose target branch matches the calling session's branch.",
       annotations: { destructiveHint: false, idempotentHint: false },
       inputSchema: z.strictObject({
         gatewayChannelId: mcpRequiredId(
