@@ -965,7 +965,7 @@ const slackManifestGenerateSchema = z.strictObject({
     .boolean()
     .default(false)
     .describe(
-      'Ingest images and text files attached to inbound messages (adds the files:read scope). The gateway stages them server-side and hands opaque, expiring handles to the session agent.'
+      'Ingest images, text files, and PDFs attached to inbound messages (adds the files:read scope). The gateway stages them server-side and hands opaque, expiring handles to the session agent.'
     ),
   threadHistory: z
     .boolean()
@@ -2244,7 +2244,7 @@ export function registerGatewayChannelTools(server: McpServer, ctx: McpContext):
     'agor_gateway_slack_file_download',
     {
       description:
-        "Download a Slack file by fileId (from the files metadata in the Slack history tools) into tenant/session-scoped staging, returning an opaque handle for agor_upload_materialize. Gated by the channel's agent_tools.file_download capability; only files shared in a conversation permitted by the channel's allowed_channel_ids (DMs exempt), and only image/text-like types under the same limits as inbound attachment ingestion.",
+        "Download a Slack file by fileId (from the files metadata in the Slack history tools) into tenant/session-scoped staging, returning an opaque handle for agor_upload_materialize. Gated by the channel's agent_tools.file_download capability; only files shared in a conversation permitted by the channel's allowed_channel_ids (DMs exempt), and only image, text-like, and PDF types under the same limits as inbound attachment ingestion.",
       annotations: { destructiveHint: false, idempotentHint: true },
       inputSchema: slackFileDownloadSchema,
     },
@@ -2268,7 +2268,7 @@ export function registerGatewayChannelTools(server: McpServer, ctx: McpContext):
       }
       if (!isIngestableFile(file)) {
         throw new Error(
-          `Slack file "${file.name}" has type ${file.mimetype}, which the gateway does not download. Only image and text-like files (png/jpeg/gif/webp, plain text, markdown, CSV, JSON) are supported.`
+          `Slack file "${file.name}" has type ${file.mimetype}, which the gateway does not download. Only image, text-like, and PDF files (png/jpeg/gif/webp, plain text, markdown, CSV, JSON, PDF) are supported.`
         );
       }
       const maxFileBytes = getUploadLimits().maxFileBytes;
