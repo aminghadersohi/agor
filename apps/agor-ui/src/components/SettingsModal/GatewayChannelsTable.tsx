@@ -85,7 +85,6 @@ import {
   Spin,
   Steps,
   Switch,
-  Table,
   Tag,
   Tooltip,
   Typography,
@@ -116,6 +115,7 @@ import { JSONEditor, validateJSON } from '../JSONEditor';
 import { AdaptiveSettingsModal } from './AdaptiveSettingsModal';
 import { BranchSelect } from './BranchSelect';
 import { ResponsiveSettingsHeader } from './ResponsiveSettingsHeader';
+import { ResponsiveTable } from './ResponsiveTable';
 import { SettingsActionGroup } from './SettingsActionGroup';
 import { UserSelect } from './UserSelect';
 
@@ -1292,7 +1292,7 @@ const SlackSetupWizard: React.FC<{
           name="ingest_files"
           valuePropName="checked"
           initialValue={false}
-          tooltip="Download images and text files (screenshots, logs, CSV, JSON) attached to inbound messages so session agents can read them. Adds the files:read scope."
+          tooltip="Download images, text files, and PDFs (screenshots, logs, CSV, JSON, PDF) attached to inbound messages so session agents can read them. Adds the files:read scope."
         >
           <Switch />
         </Form.Item>
@@ -1342,7 +1342,7 @@ const SlackSetupWizard: React.FC<{
           name="agent_file_download"
           valuePropName="checked"
           initialValue={false}
-          tooltip="Let session agents download image/text files referenced in Slack history through the gateway MCP tool. Adds the files:read scope."
+          tooltip="Let session agents download image, text, and PDF files referenced in Slack history through the gateway MCP tool. Adds the files:read scope."
         >
           <Switch />
         </Form.Item>
@@ -3342,7 +3342,7 @@ const ChannelFormFields: React.FC<{
                       name="ingest_files"
                       valuePropName="checked"
                       initialValue={false}
-                      tooltip="Download images and text files (screenshots, logs, CSV, JSON) attached to inbound messages so session agents can read them. Requires the files:read scope."
+                      tooltip="Download images, text files, and PDFs (screenshots, logs, CSV, JSON, PDF) attached to inbound messages so session agents can read them. Requires the files:read scope."
                     >
                       <Switch />
                     </Form.Item>
@@ -3392,7 +3392,7 @@ const ChannelFormFields: React.FC<{
                       name="agent_file_download"
                       valuePropName="checked"
                       initialValue={false}
-                      tooltip="Let session agents download image/text files referenced in Slack history through the gateway MCP tool. Requires the files:read scope."
+                      tooltip="Let session agents download image, text, and PDF files referenced in Slack history through the gateway MCP tool. Requires the files:read scope."
                     >
                       <Switch />
                     </Form.Item>
@@ -4703,7 +4703,7 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
           </Typography.Text>
         </div>
       ) : (
-        <Table
+        <ResponsiveTable
           dataSource={channels}
           columns={columns}
           scroll={{ x: 1050 }}

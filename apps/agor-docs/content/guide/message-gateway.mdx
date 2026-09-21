@@ -166,6 +166,13 @@ and tenant-RLS provider-event table. Apply normal Agor migrations before
 serving traffic with the upgraded daemon; no database role with `BYPASSRLS`
 and no superuser daemon connection is required.
 
+Migration `9021_gateway_outbound_thread_seed` moves outbound thread uniqueness
+onto `seed_thread_id` and is an **offline cutover**: an older daemon writes no
+seed key, so a thread it seeds afterwards stops routing inbound replies. On an
+existing database, stop every daemon, run `agor db migrate --offline-cutover`,
+then start the upgraded daemons. Rollback is not compatible — a database
+migrated here must not be served by an older binary.
+
 ### Outbound branch binding
 
 Proactive outbound emits (`agor_gateway_emit_message`) and Slack thread history reads made from a session are bound to that session's own branch: the gateway channel's target branch must match the calling session's branch, and there is no admin-role bypass. `agor_gateway_outbound_targets_list` only returns channels a session can actually use. Calls made without session context (personal API keys) follow the regular user-permission model instead.
@@ -174,6 +181,30 @@ Discord outbound emits use a `channel:<snowflake>` target. A Discord outbound
 seed is recorded durably; the first eligible human reply to any seed chunk
 consumes that seed and starts the mapped session. Replies to later response
 chunks continue the same session.
+
+### Outbound seeds and the audit trail
+
+Every proactive emit writes its own audit row, including a second or third emit
+into a thread an earlier emit already started. Exactly one of those rows is the
+thread's **seed** — the row a human reply admits to decide which session the
+thread belongs to — and it is the one carrying `seed_thread_id`. Later sends
+into the same thread are recorded with `seed_thread_id` unset, so they keep
+their own provider message id, permalink, text and attribution without
+disturbing the thread's existing routing. Which send becomes the seed is
+decided by the one-seed-per-thread unique index at insert time, so simultaneous
+emits into one thread cannot both claim it.
+
+The emit result reports delivery and persistence separately:
+
+| Field                                       | Meaning                                                                       |
+| ------------------------------------------- | ----------------------------------------------------------------------------- |
+| `success` / `delivered`                     | The provider accepted this message. A failure to deliver is an error instead. |
+| `recorded`                                  | Whether the audit row for this send was persisted.                            |
+| `audit_role`                                | `thread_seed`, `thread_followup`, or `unrecorded`.                            |
+| `platform_message_id`, `platform_permalink` | Always describe this send, never the thread's existing seed.                  |
+
+A result with `recorded: false` still means the message is in Slack or Discord.
+Re-sending it posts a duplicate; reconcile the audit trail instead.
 
 ## Slack thread behavior
 

@@ -62,12 +62,17 @@ vi.mock('@agor/core/config', async (importOriginal) => {
   };
 });
 
-vi.mock('../utils/gateway-attachments.js', () => ({
+vi.mock('../utils/gateway-attachments.js', async (importOriginal) => ({
   ingestInboundAttachments: vi.fn(),
   buildPromptWithAttachments: vi.fn(
     (text: string, attachments: Array<{ ref: string }>) =>
       `${text}\n\n${attachments.map((attachment) => attachment.ref).join('\n')}`
   ),
+  // The note text is the user-visible contract for a dropped attachment, so
+  // assert the real formatter rather than a stub of it.
+  formatSkippedAttachmentNote: (
+    await importOriginal<typeof import('../utils/gateway-attachments.js')>()
+  ).formatSkippedAttachmentNote,
 }));
 
 const user: User = {
@@ -3757,7 +3762,10 @@ describe('GatewayService Discord beta routing', () => {
     }));
     const { service } = makeGatewayHarness({ channel: discordChannel });
     const outboundRepo = {
-      create: vi.fn(async (data: Record<string, unknown>) => ({ id: 'out-discord', ...data })),
+      recordSend: vi.fn(async (data: Record<string, unknown>) => ({
+        message: { id: 'out-discord', ...data },
+        role: 'thread_seed',
+      })),
     };
     (service as unknown as { outboundRepo: unknown }).outboundRepo = outboundRepo;
     vi.mocked(getConnector).mockReturnValue({ sendDirectMessage } as never);
@@ -3772,7 +3780,7 @@ describe('GatewayService Discord beta routing', () => {
     expect(sendDirectMessage).toHaveBeenCalledWith(
       expect.objectContaining({ target: 'channel:323456789012345678', text: 'proactive update' })
     );
-    expect(outboundRepo.create).toHaveBeenCalledWith(
+    expect(outboundRepo.recordSend).toHaveBeenCalledWith(
       expect.objectContaining({
         channel_type: 'discord',
         platform_channel_id: '323456789012345678',
@@ -4021,7 +4029,10 @@ describe('GatewayService outbound emit session branch binding', () => {
     );
     vi.mocked(getConnector).mockReturnValue({ sendSlackMessage, sendDirectMessage } as never);
     const outboundRepo = {
-      create: vi.fn(async (data: Record<string, unknown>) => ({ id: 'out-1', ...data })),
+      recordSend: vi.fn(async (data: Record<string, unknown>) => ({
+        message: { id: 'out-1', ...data },
+        role: 'thread_seed',
+      })),
       admitReplySession: vi.fn(async () => null),
       completeReplyAdmission: vi.fn(async () => undefined),
     };
@@ -4067,7 +4078,7 @@ describe('GatewayService outbound emit session branch binding', () => {
       gateway_channel_id: 'chan-outbound',
     });
     expect(sendSlackMessage).toHaveBeenCalledTimes(1);
-    expect(outboundRepo.create).toHaveBeenCalledWith(
+    expect(outboundRepo.recordSend).toHaveBeenCalledWith(
       expect.objectContaining({ emitted_by_session_id: 'sess-1' })
     );
   });
@@ -4082,7 +4093,7 @@ describe('GatewayService outbound emit session branch binding', () => {
     ).rejects.toThrow(/Gateway outbound denied/);
     expect(sessionRepo.findById).toHaveBeenCalledWith('sess-1');
     expect(sendSlackMessage).not.toHaveBeenCalled();
-    expect(outboundRepo.create).not.toHaveBeenCalled();
+    expect(outboundRepo.recordSend).not.toHaveBeenCalled();
   });
 
   it('names the session branch but never the channel target branch in the denial', async () => {
@@ -4110,7 +4121,7 @@ describe('GatewayService outbound emit session branch binding', () => {
       service.emitMessage(emitData({ emittedBySessionId: 'sess-gone' as SessionID }))
     ).rejects.toThrow('Gateway outbound denied: emitting session not found');
     expect(sendSlackMessage).not.toHaveBeenCalled();
-    expect(outboundRepo.create).not.toHaveBeenCalled();
+    expect(outboundRepo.recordSend).not.toHaveBeenCalled();
   });
 
   it('keeps admin access for calls without session context', async () => {
@@ -4151,6 +4162,151 @@ describe('GatewayService outbound emit session branch binding', () => {
     expect(sendSlackMessage).toHaveBeenCalledWith(
       expect.not.objectContaining({ thread_ts: expect.anything() })
     );
+  });
+
+  it('reports a delivered send that could not be recorded instead of failing', async () => {
+    const { service, sendSlackMessage, outboundRepo } = makeEmitHarness({});
+    outboundRepo.recordSend.mockRejectedValueOnce(
+      new Error('Failed to record gateway outbound send: disk is full')
+    );
+
+    const result = await service.emitMessage(emitData());
+
+    // The message really is in Slack. Telling the caller the whole operation
+    // failed is what made callers retry and post a duplicate.
+    expect(sendSlackMessage).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      success: true,
+      delivered: true,
+      recorded: false,
+      audit_role: 'unrecorded',
+      gateway_outbound_message_id: null,
+      platform_message_id: '200.000100',
+    });
+    expect(result.persistence_error).toContain('disk is full');
+  });
+});
+
+describe('GatewayService outbound emit into an already-seeded thread', () => {
+  const outboundChannel = {
+    ...slackChannel,
+    id: 'chan-outbound',
+    config: {
+      bot_token: 'xoxb-test',
+      outbound_enabled: true,
+      default_outbound_target: 'channel:C123',
+    },
+  } as unknown as GatewayChannel;
+
+  const ROOT_TS = '1789949079.895189';
+  const THREAD_ID = `C123-${ROOT_TS}`;
+
+  /**
+   * Fake Slack: every reply carrying a thread_ts derives the SAME composite
+   * thread id as the root message, which is the collision under test. No
+   * provider is contacted.
+   */
+  function makeThreadHarness() {
+    const { service } = makeGatewayHarness({ channel: outboundChannel });
+    let sendCounter = 0;
+    const sendDirectMessage = vi.fn(async (req: { target: string; threadId?: string }) => {
+      sendCounter += 1;
+      const ts = req.threadId ? `${1789949079 + sendCounter}.000${sendCounter}` : ROOT_TS;
+      const threadTs = req.threadId ?? ts;
+      return {
+        messageId: ts,
+        platformChannelId: 'C123',
+        platformThreadId: `C123-${threadTs}`,
+        permalink: `https://example.slack.test/archives/C123/p${ts.replace('.', '')}`,
+        metadata: { target: req.target },
+      };
+    });
+    vi.mocked(getConnector).mockReturnValue({ sendDirectMessage } as never);
+
+    // Stand-in for the unique index: one seed per (channel, thread), decided
+    // by the insert itself rather than by a read-then-write.
+    const seeds = new Map<string, string>();
+    let rowCounter = 0;
+    const outboundRepo = {
+      recordSend: vi.fn(async (data: Record<string, unknown>) => {
+        const id = `out-${++rowCounter}`;
+        const thread = data.platform_thread_id as string;
+        const seeded = !seeds.has(thread);
+        if (seeded) seeds.set(thread, id);
+        return {
+          message: { ...data, id, seed_thread_id: seeded ? thread : null },
+          role: seeded ? 'thread_seed' : 'thread_followup',
+        };
+      }),
+      admitReplySession: vi.fn(async () => null),
+      completeReplyAdmission: vi.fn(async () => undefined),
+    };
+    const branchRepo = {
+      findById: vi.fn(async () => ({
+        branch_id: outboundChannel.target_branch_id,
+        others_can: 'view',
+      })),
+      isOwner: vi.fn(async () => false),
+      resolveUserPermission: vi.fn(async () => 'view'),
+    };
+    (service as unknown as { outboundRepo: unknown }).outboundRepo = outboundRepo;
+    (service as unknown as { branchRepo: unknown }).branchRepo = branchRepo;
+    return { service, sendDirectMessage, outboundRepo, seeds };
+  }
+
+  function threadEmitData(overrides: Record<string, unknown> = {}) {
+    return {
+      gatewayChannelId: 'chan-outbound',
+      message: 'status update',
+      emittedByUserId: 'user-1' as UserID,
+      userRole: 'admin',
+      ...overrides,
+    } as Parameters<GatewayService['emitMessage']>[0];
+  }
+
+  it('records a second sequential emit into one thread as a follow-up', async () => {
+    const { service, outboundRepo } = makeThreadHarness();
+
+    const root = await service.emitMessage(threadEmitData());
+    const reply = await service.emitMessage(threadEmitData({ threadTs: ROOT_TS }));
+
+    expect(outboundRepo.recordSend).toHaveBeenCalledTimes(2);
+    expect(root).toMatchObject({
+      success: true,
+      recorded: true,
+      audit_role: 'thread_seed',
+      platform_thread_id: THREAD_ID,
+      platform_message_id: ROOT_TS,
+    });
+    expect(reply).toMatchObject({
+      success: true,
+      recorded: true,
+      audit_role: 'thread_followup',
+      platform_thread_id: THREAD_ID,
+    });
+    // The reply must carry its OWN delivery evidence, not the seed's.
+    expect(reply.platform_message_id).not.toBe(root.platform_message_id);
+    expect(reply.platform_permalink).not.toBe(root.platform_permalink);
+    expect(reply.gateway_outbound_message_id).not.toBe(root.gateway_outbound_message_id);
+  });
+
+  it('keeps one seed and one audit row per send when emits into a thread race', async () => {
+    const { service, outboundRepo } = makeThreadHarness();
+
+    const results = await Promise.all([
+      service.emitMessage(threadEmitData({ threadTs: ROOT_TS })),
+      service.emitMessage(threadEmitData({ threadTs: ROOT_TS })),
+      service.emitMessage(threadEmitData({ threadTs: ROOT_TS })),
+      service.emitMessage(threadEmitData({ threadTs: ROOT_TS })),
+    ]);
+
+    expect(results.every((result) => result.success && result.recorded)).toBe(true);
+    expect(results.filter((result) => result.audit_role === 'thread_seed')).toHaveLength(1);
+    expect(results.filter((result) => result.audit_role === 'thread_followup')).toHaveLength(3);
+    expect(outboundRepo.recordSend).toHaveBeenCalledTimes(4);
+    expect(new Set(results.map((result) => result.gateway_outbound_message_id)).size).toBe(4);
+    expect(new Set(results.map((result) => result.platform_message_id)).size).toBe(4);
+    expect(results.every((result) => result.platform_thread_id === THREAD_ID)).toBe(true);
   });
 });
 
@@ -4207,7 +4363,10 @@ describe('GatewayService outbound emit allowed_channel_ids enforcement', () => {
       ...args.connectorExtras,
     } as never);
     const outboundRepo = {
-      create: vi.fn(async (data: Record<string, unknown>) => ({ id: 'out-1', ...data })),
+      recordSend: vi.fn(async (data: Record<string, unknown>) => ({
+        message: { id: 'out-1', ...data },
+        role: 'thread_seed',
+      })),
       admitReplySession: vi.fn(async () => null),
       completeReplyAdmission: vi.fn(async () => undefined),
     };
@@ -4236,7 +4395,7 @@ describe('GatewayService outbound emit allowed_channel_ids enforcement', () => {
       /provider_request_failed/
     );
     expect(sendSlackMessage).not.toHaveBeenCalled();
-    expect(outboundRepo.create).not.toHaveBeenCalled();
+    expect(outboundRepo.recordSend).not.toHaveBeenCalled();
   });
 
   it('denies a channel-name target that resolves to an id outside the allowlist', async () => {
@@ -4338,6 +4497,8 @@ describe('GatewayService Slack attachment ingestion', () => {
         },
       ],
       failed: 0,
+      skipped: 0,
+      skippedMimeTypes: [],
     });
     const { service, promptCreate } = makeGatewayHarness({
       channel: ingestChannel,
@@ -4391,7 +4552,12 @@ describe('GatewayService Slack attachment ingestion', () => {
   });
 
   it('delivers the prompt with a degradation note when downloads fail', async () => {
-    vi.mocked(ingestInboundAttachments).mockResolvedValue({ uploads: [], failed: 1 });
+    vi.mocked(ingestInboundAttachments).mockResolvedValue({
+      uploads: [],
+      failed: 1,
+      skipped: 0,
+      skippedMimeTypes: [],
+    });
     const { service, promptCreate } = makeGatewayHarness({
       channel: ingestChannel,
       existingMapping: makeMapping({ thread_id: 'D123-100.000000' }),
@@ -4427,6 +4593,8 @@ describe('GatewayService Slack attachment ingestion', () => {
         },
       ],
       failed: 1,
+      skipped: 0,
+      skippedMimeTypes: [],
     });
     const { service, promptCreate } = makeGatewayHarness({
       channel: ingestChannel,
@@ -4445,6 +4613,107 @@ describe('GatewayService Slack attachment ingestion', () => {
     const prompt = promptCreate.mock.calls[0][0].prompt as string;
     expect(prompt).toContain('upl_00000000-0000-4000-8000-000000000002');
     expect(prompt).toContain('(an attachment could not be fetched)');
+  });
+
+  it('folds an ingested PDF into the prompt with no degradation note', async () => {
+    vi.mocked(ingestInboundAttachments).mockResolvedValue({
+      uploads: [
+        {
+          ref: 'upl_00000000-0000-4000-8000-000000000003',
+          name: 'F123_report.pdf',
+          mimeType: 'application/pdf',
+          size: 14_500_000,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          expiresAt: '2026-01-02T00:00:00.000Z',
+          provenance: 'gateway-slack',
+        },
+      ],
+      failed: 0,
+      skipped: 0,
+      skippedMimeTypes: [],
+    });
+    const { service, promptCreate } = makeGatewayHarness({
+      channel: ingestChannel,
+      existingMapping: makeMapping({ thread_id: 'D123-100.000000' }),
+      connector: {},
+    });
+
+    await runWithTenantContext('tenant-channel', () =>
+      service.create({
+        channel_key: 'slack-key',
+        thread_id: 'D123-100.000000',
+        text: 'summarize this deck',
+        files: [
+          {
+            id: 'F123',
+            name: 'report.pdf',
+            mimetype: 'application/pdf',
+            size: 14_500_000,
+            url_private_download: 'https://files.slack.com/files-pri/T1-F123/download/report.pdf',
+          },
+        ],
+        metadata: dmMetadata,
+      })
+    );
+
+    const prompt = promptCreate.mock.calls[0][0].prompt as string;
+    expect(prompt).toContain('upl_00000000-0000-4000-8000-000000000003');
+    expect(prompt).toContain('summarize this deck');
+    expect(prompt).not.toContain('an attachment could not be fetched');
+    expect(prompt).not.toContain('not delivered');
+  });
+
+  it('names the unsupported type when an attachment is skipped with nothing ingested', async () => {
+    vi.mocked(ingestInboundAttachments).mockResolvedValue({
+      uploads: [],
+      failed: 0,
+      skipped: 1,
+      skippedMimeTypes: ['application/zip'],
+    });
+    const { service, promptCreate } = makeGatewayHarness({
+      channel: ingestChannel,
+      existingMapping: makeMapping({ thread_id: 'D123-100.000000' }),
+      connector: {},
+    });
+
+    await service.create({
+      channel_key: 'slack-key',
+      thread_id: 'D123-100.000000',
+      text: 'here are the logs',
+      files: inboundFiles,
+      metadata: dmMetadata,
+    });
+
+    const prompt = promptCreate.mock.calls[0][0].prompt as string;
+    expect(prompt).toContain('here are the logs');
+    expect(prompt).toContain('(1 attachment was not delivered: unsupported type application/zip)');
+    expect(prompt).not.toContain('an attachment could not be fetched');
+  });
+
+  it('reports fetch failures and unsupported types as separate notes', async () => {
+    vi.mocked(ingestInboundAttachments).mockResolvedValue({
+      uploads: [],
+      failed: 1,
+      skipped: 1,
+      skippedMimeTypes: ['application/zip'],
+    });
+    const { service, promptCreate } = makeGatewayHarness({
+      channel: ingestChannel,
+      existingMapping: makeMapping({ thread_id: 'D123-100.000000' }),
+      connector: {},
+    });
+
+    await service.create({
+      channel_key: 'slack-key',
+      thread_id: 'D123-100.000000',
+      text: 'take a look',
+      files: inboundFiles,
+      metadata: dmMetadata,
+    });
+
+    const prompt = promptCreate.mock.calls[0][0].prompt as string;
+    expect(prompt).toContain('(an attachment could not be fetched)');
+    expect(prompt).toContain('(1 attachment was not delivered: unsupported type application/zip)');
   });
 });
 
