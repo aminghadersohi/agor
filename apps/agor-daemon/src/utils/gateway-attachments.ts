@@ -1,14 +1,15 @@
 /**
  * Server-side ingestion of inbound gateway message attachments.
  *
- * Downloads image and text-like files attached to inbound Slack messages
- * using the channel's bot token and stores them in the daemon upload
+ * Downloads image, text-like, and PDF files attached to inbound Slack
+ * messages using the channel's bot token and stores them in the daemon upload
  * directory — the same destination the session composer's
  * `/sessions/:sessionId/upload` route writes to — so the session's agent can
  * Read them by absolute path.
  *
- * Other attachment types (PDFs, office documents, archives, media) are out of
- * scope and never downloaded. Downloads are restricted to Slack-owned hosts
+ * Other attachment types (office documents, archives, media) are out of scope
+ * and never downloaded; they are reported as `skipped` so the caller can tell
+ * the user why nothing arrived. Downloads are restricted to Slack-owned hosts
  * and to the same per-file size / per-message count ceilings the upload route
  * enforces.
  */
@@ -36,6 +37,14 @@ export interface AttachmentIngestResult {
   uploads: UploadMetadata[];
   /** Ingestable attachments that could not be fetched or stored. */
   failed: number;
+  /**
+   * Attachments whose type the pipeline refuses to download at all. Distinct
+   * from `failed`: "we will not fetch this type" is a different message to the
+   * user than "we could not fetch it".
+   */
+  skipped: number;
+  /** Normalized MIME types of the `skipped` attachments, in arrival order. */
+  skippedMimeTypes: string[];
 }
 
 const MAX_REDIRECT_HOPS = 3;
@@ -57,23 +66,56 @@ export function isAllowedSlackFileUrl(rawUrl: string): boolean {
   return host === 'slack.com' || host.endsWith('.slack.com');
 }
 
-/**
- * MIME types the ingestion pipeline accepts: images and text-like files
- * (logs, plain text, CSV, JSON, markdown) agents use as context. Constrained
- * to the upload route's allowlist, which deliberately excludes script-bearing
- * types like image/svg+xml; the image/text prefix check additionally keeps
- * allowlisted-but-unsupported types (PDFs, office documents, archives) out of
- * ingestion.
- */
-function isAllowedIngestMime(rawMime: string): boolean {
-  const mime = rawMime.split(';')[0].trim().toLowerCase();
-  if (!ALLOWED_UPLOAD_MIME_TYPES.has(mime)) return false;
-  return mime.startsWith('image/') || mime.startsWith('text/') || mime === 'application/json';
+/** Strip MIME parameters and case so `Text/Plain; charset=utf-8` compares. */
+function normalizeMime(rawMime: string): string {
+  return rawMime.split(';')[0].trim().toLowerCase();
 }
 
-/** Image and text-like attachments the ingestion pipeline accepts. */
+/**
+ * MIME types the ingestion pipeline accepts: images, text-like files (logs,
+ * plain text, CSV, JSON, markdown), and PDFs — the document types agents can
+ * read directly. Constrained to the upload route's allowlist, which
+ * deliberately excludes script-bearing types like image/svg+xml; the prefix
+ * check additionally keeps allowlisted-but-unsupported types (office
+ * documents, archives) out of ingestion.
+ */
+function isAllowedIngestMime(rawMime: string): boolean {
+  const mime = normalizeMime(rawMime);
+  if (!ALLOWED_UPLOAD_MIME_TYPES.has(mime)) return false;
+  return (
+    mime.startsWith('image/') ||
+    mime.startsWith('text/') ||
+    mime === 'application/json' ||
+    mime === 'application/pdf'
+  );
+}
+
+/** Image, text-like, and PDF attachments the ingestion pipeline accepts. */
 export function isIngestableFile(file: InboundFile): boolean {
   return isAllowedIngestMime(file.mimetype);
+}
+
+/**
+ * MIME type to name in a user-facing note. Slack supplies this string, so it
+ * is reported only when it looks like a MIME type — never echoed verbatim
+ * into a prompt.
+ */
+function describeMime(rawMime: string): string {
+  const mime = normalizeMime(rawMime);
+  return /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(mime) ? mime : 'unknown';
+}
+
+/**
+ * User-facing note for attachments the pipeline will not download. Without it
+ * a dropped attachment is entirely invisible to the agent and the sender —
+ * Slack inbound prompts carry no gateway context block to fall back on.
+ */
+export function formatSkippedAttachmentNote(skipped: number, mimeTypes: string[]): string {
+  const distinct = [...new Set(mimeTypes)];
+  const subject = skipped === 1 ? '1 attachment was' : `${skipped} attachments were`;
+  if (distinct.length === 0) return `(${subject} not delivered: unsupported type)`;
+  const types = distinct.length === 1 ? `type ${distinct[0]}` : `types ${distinct.join(', ')}`;
+  return `(${subject} not delivered: unsupported ${types})`;
 }
 
 export function buildPromptWithAttachments(text: string, attachments: UploadMetadata[]): string {
@@ -123,8 +165,9 @@ async function fetchFromAllowedHosts(
 /**
  * Download the ingestable attachments of one inbound message and store them
  * in tenant-scoped staging. Never throws: every attachment that cannot be
- * fetched, validated, or written is counted in `failed` so the caller can
- * still deliver the prompt with a degradation note.
+ * fetched, validated, or written is counted in `failed`, and every attachment
+ * whose type is out of scope in `skipped`, so the caller can still deliver the
+ * prompt with a degradation note.
  */
 export async function ingestInboundAttachments(args: {
   files: InboundFile[];
@@ -140,6 +183,12 @@ export async function ingestInboundAttachments(args: {
   const store = args.store ?? getUploadStagingStore();
 
   const ingestable = args.files.filter(isIngestableFile);
+  const skippedMimeTypes = args.files
+    .filter((file) => !isIngestableFile(file))
+    .map((file) => describeMime(file.mimetype));
+  for (const mimeType of skippedMimeTypes) {
+    console.warn(`[gateway] Not downloading attachment of unsupported type ${mimeType}`);
+  }
   const uploads: UploadMetadata[] = [];
   let failed = 0;
 
@@ -180,9 +229,7 @@ export async function ingestInboundAttachments(args: {
       // text/html and script-bearing types like image/svg+xml).
       const contentType = response.headers.get('content-type') ?? '';
       if (!isAllowedIngestMime(contentType)) {
-        throw new Error(
-          `unexpected content-type ${contentType.split(';')[0].trim().toLowerCase() || 'unknown'}`
-        );
+        throw new Error(`unexpected content-type ${normalizeMime(contentType) || 'unknown'}`);
       }
       const declaredLength = Number.parseInt(response.headers.get('content-length') ?? '', 10);
       if (Number.isFinite(declaredLength) && declaredLength > maxFileBytes) {
@@ -197,7 +244,7 @@ export async function ingestInboundAttachments(args: {
           createdBy: args.createdBy,
         },
         name: `${file.id}_${file.name}`,
-        mimeType: contentType.split(';')[0].trim().toLowerCase(),
+        mimeType: normalizeMime(contentType),
         provenance: 'gateway-slack',
         body: Readable.fromWeb(response.body as never),
         sizeHint: Number.isFinite(declaredLength) ? declaredLength : file.size,
@@ -209,5 +256,5 @@ export async function ingestInboundAttachments(args: {
     }
   }
 
-  return { uploads, failed };
+  return { uploads, failed, skipped: skippedMimeTypes.length, skippedMimeTypes };
 }
