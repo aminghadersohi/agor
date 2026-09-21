@@ -2618,13 +2618,45 @@ describe('gateway agent-tool capability gating (MCP)', () => {
       expect(getConnector).not.toHaveBeenCalled();
     });
 
+    it('downloads a PDF, which the gateway now accepts', async () => {
+      void withUploadDir();
+      const fetchMock = vi.fn(
+        async () =>
+          new Response('%PDF-1.4 fake body', {
+            status: 200,
+            headers: { 'content-type': 'application/pdf' },
+          })
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      vi.mocked(getConnector).mockReturnValue({
+        getFileInfo: vi.fn(async () => ({
+          ...slackFileResult,
+          file: { ...slackFileInfo, name: 'report.pdf', mimetype: 'application/pdf' },
+        })),
+      } as any);
+      spyCallerGatewaySession('branch-1', gatewaySource);
+      vi.spyOn(GatewayChannelRepository.prototype, 'findById').mockResolvedValue(
+        fileDownloadEnabled as any
+      );
+      vi.spyOn(BranchRepository.prototype, 'findById').mockResolvedValue(branch as any);
+
+      const tools = await captureTools('member');
+      const result = await tools.agor_gateway_slack_file_download.handler({ fileId: 'F123' });
+      const payload = JSON.parse(result.content[0].text);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(payload.downloaded).toBe(true);
+      expect(payload.file.mimetype).toBe('application/pdf');
+      expect(payload.file.upload_ref).toMatch(/^upl_/);
+    });
+
     it('rejects a disallowed mimetype without downloading', async () => {
       const fetchMock = vi.fn();
       vi.stubGlobal('fetch', fetchMock);
       vi.mocked(getConnector).mockReturnValue({
         getFileInfo: vi.fn(async () => ({
           ...slackFileResult,
-          file: { ...slackFileInfo, mimetype: 'application/pdf' },
+          file: { ...slackFileInfo, name: 'logs.zip', mimetype: 'application/zip' },
         })),
       } as any);
       spyCallerGatewaySession('branch-1', gatewaySource);
