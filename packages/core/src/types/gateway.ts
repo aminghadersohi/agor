@@ -857,6 +857,16 @@ export interface GatewayOutboundMessage {
   platform_message_id: string;
   platform_thread_id: string;
   platform_permalink: string | null;
+  /**
+   * Set to `platform_thread_id` on the one row that seeds a platform thread,
+   * and `null` on every later send into a thread another row already seeded.
+   *
+   * Inbound routing needs exactly one seed per thread, so the uniqueness
+   * constraint lives on this column rather than on `platform_thread_id`:
+   * NULLs do not collide in a unique index in either dialect, which lets
+   * follow-up sends keep their own full audit row.
+   */
+  seed_thread_id: string | null;
 
   target_branch_id: BranchID;
   emitted_by_user_id: UserID;
@@ -872,6 +882,22 @@ export interface GatewayOutboundMessage {
 
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * How one proactive send is represented in the outbound audit trail.
+ *
+ * - `thread_seed` — this send created the thread's single seed row, which is
+ *   what a later human reply admits to pick a session.
+ * - `thread_followup` — the thread was already seeded, so this send got its
+ *   own audit row with `seed_thread_id = null` and did not disturb the seed.
+ */
+export type GatewayOutboundSendRole = 'thread_seed' | 'thread_followup';
+
+/** One durably recorded proactive send plus its role in the audit trail. */
+export interface GatewayOutboundSendRecord {
+  message: GatewayOutboundMessage;
+  role: GatewayOutboundSendRole;
 }
 
 /** Durable admission of one proactive seed into the session-creation path. */
