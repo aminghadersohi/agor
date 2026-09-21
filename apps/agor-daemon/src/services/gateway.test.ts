@@ -62,12 +62,17 @@ vi.mock('@agor/core/config', async (importOriginal) => {
   };
 });
 
-vi.mock('../utils/gateway-attachments.js', () => ({
+vi.mock('../utils/gateway-attachments.js', async (importOriginal) => ({
   ingestInboundAttachments: vi.fn(),
   buildPromptWithAttachments: vi.fn(
     (text: string, attachments: Array<{ ref: string }>) =>
       `${text}\n\n${attachments.map((attachment) => attachment.ref).join('\n')}`
   ),
+  // The note text is the user-visible contract for a dropped attachment, so
+  // assert the real formatter rather than a stub of it.
+  formatSkippedAttachmentNote: (
+    await importOriginal<typeof import('../utils/gateway-attachments.js')>()
+  ).formatSkippedAttachmentNote,
 }));
 
 const user: User = {
@@ -4338,6 +4343,8 @@ describe('GatewayService Slack attachment ingestion', () => {
         },
       ],
       failed: 0,
+      skipped: 0,
+      skippedMimeTypes: [],
     });
     const { service, promptCreate } = makeGatewayHarness({
       channel: ingestChannel,
@@ -4391,7 +4398,12 @@ describe('GatewayService Slack attachment ingestion', () => {
   });
 
   it('delivers the prompt with a degradation note when downloads fail', async () => {
-    vi.mocked(ingestInboundAttachments).mockResolvedValue({ uploads: [], failed: 1 });
+    vi.mocked(ingestInboundAttachments).mockResolvedValue({
+      uploads: [],
+      failed: 1,
+      skipped: 0,
+      skippedMimeTypes: [],
+    });
     const { service, promptCreate } = makeGatewayHarness({
       channel: ingestChannel,
       existingMapping: makeMapping({ thread_id: 'D123-100.000000' }),
@@ -4427,6 +4439,8 @@ describe('GatewayService Slack attachment ingestion', () => {
         },
       ],
       failed: 1,
+      skipped: 0,
+      skippedMimeTypes: [],
     });
     const { service, promptCreate } = makeGatewayHarness({
       channel: ingestChannel,
@@ -4445,6 +4459,107 @@ describe('GatewayService Slack attachment ingestion', () => {
     const prompt = promptCreate.mock.calls[0][0].prompt as string;
     expect(prompt).toContain('upl_00000000-0000-4000-8000-000000000002');
     expect(prompt).toContain('(an attachment could not be fetched)');
+  });
+
+  it('folds an ingested PDF into the prompt with no degradation note', async () => {
+    vi.mocked(ingestInboundAttachments).mockResolvedValue({
+      uploads: [
+        {
+          ref: 'upl_00000000-0000-4000-8000-000000000003',
+          name: 'F123_report.pdf',
+          mimeType: 'application/pdf',
+          size: 14_500_000,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          expiresAt: '2026-01-02T00:00:00.000Z',
+          provenance: 'gateway-slack',
+        },
+      ],
+      failed: 0,
+      skipped: 0,
+      skippedMimeTypes: [],
+    });
+    const { service, promptCreate } = makeGatewayHarness({
+      channel: ingestChannel,
+      existingMapping: makeMapping({ thread_id: 'D123-100.000000' }),
+      connector: {},
+    });
+
+    await runWithTenantContext('tenant-channel', () =>
+      service.create({
+        channel_key: 'slack-key',
+        thread_id: 'D123-100.000000',
+        text: 'summarize this deck',
+        files: [
+          {
+            id: 'F123',
+            name: 'report.pdf',
+            mimetype: 'application/pdf',
+            size: 14_500_000,
+            url_private_download: 'https://files.slack.com/files-pri/T1-F123/download/report.pdf',
+          },
+        ],
+        metadata: dmMetadata,
+      })
+    );
+
+    const prompt = promptCreate.mock.calls[0][0].prompt as string;
+    expect(prompt).toContain('upl_00000000-0000-4000-8000-000000000003');
+    expect(prompt).toContain('summarize this deck');
+    expect(prompt).not.toContain('an attachment could not be fetched');
+    expect(prompt).not.toContain('not delivered');
+  });
+
+  it('names the unsupported type when an attachment is skipped with nothing ingested', async () => {
+    vi.mocked(ingestInboundAttachments).mockResolvedValue({
+      uploads: [],
+      failed: 0,
+      skipped: 1,
+      skippedMimeTypes: ['application/zip'],
+    });
+    const { service, promptCreate } = makeGatewayHarness({
+      channel: ingestChannel,
+      existingMapping: makeMapping({ thread_id: 'D123-100.000000' }),
+      connector: {},
+    });
+
+    await service.create({
+      channel_key: 'slack-key',
+      thread_id: 'D123-100.000000',
+      text: 'here are the logs',
+      files: inboundFiles,
+      metadata: dmMetadata,
+    });
+
+    const prompt = promptCreate.mock.calls[0][0].prompt as string;
+    expect(prompt).toContain('here are the logs');
+    expect(prompt).toContain('(1 attachment was not delivered: unsupported type application/zip)');
+    expect(prompt).not.toContain('an attachment could not be fetched');
+  });
+
+  it('reports fetch failures and unsupported types as separate notes', async () => {
+    vi.mocked(ingestInboundAttachments).mockResolvedValue({
+      uploads: [],
+      failed: 1,
+      skipped: 1,
+      skippedMimeTypes: ['application/zip'],
+    });
+    const { service, promptCreate } = makeGatewayHarness({
+      channel: ingestChannel,
+      existingMapping: makeMapping({ thread_id: 'D123-100.000000' }),
+      connector: {},
+    });
+
+    await service.create({
+      channel_key: 'slack-key',
+      thread_id: 'D123-100.000000',
+      text: 'take a look',
+      files: inboundFiles,
+      metadata: dmMetadata,
+    });
+
+    const prompt = promptCreate.mock.calls[0][0].prompt as string;
+    expect(prompt).toContain('(an attachment could not be fetched)');
+    expect(prompt).toContain('(1 attachment was not delivered: unsupported type application/zip)');
   });
 });
 

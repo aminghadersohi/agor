@@ -121,6 +121,7 @@ import { hasBranchPermission, sessionPromptDeniedMessage } from '../utils/branch
 import { gatewayInboundSessionId, gatewayInboundTaskId } from '../utils/durable-task-id.js';
 import {
   buildPromptWithAttachments,
+  formatSkippedAttachmentNote,
   ingestInboundAttachments,
 } from '../utils/gateway-attachments.js';
 import { fetchGatewayCatchUp, GatewayCatchUpError } from '../utils/gateway-catch-up.js';
@@ -4197,11 +4198,11 @@ export class GatewayService {
         promptText = buildShortcutInitialPrompt(data.text, data.metadata);
       }
 
-      // Download Slack image and text attachments server-side and fold their
-      // opaque handles into the prompt for executor-owned materialization. Gated on the
+      // Download Slack image, text, and PDF attachments server-side and fold
+      // their opaque handles into the prompt for executor-owned materialization. Gated on the
       // channel's ingest_files flag — channels without the files:read scope
-      // never attempt downloads. Any failure degrades to a short note; the
-      // prompt is always delivered.
+      // never attempt downloads. Any failure or unsupported type degrades to a
+      // short note; the prompt is always delivered.
       if (
         channel.channel_type === 'slack' &&
         channelConfig.ingest_files === true &&
@@ -4211,6 +4212,8 @@ export class GatewayService {
         const botToken =
           typeof channelConfig.bot_token === 'string' ? channelConfig.bot_token : undefined;
         let failedAttachments = 0;
+        let skippedAttachments = 0;
+        let skippedMimeTypes: string[] = [];
         if (botToken) {
           const ingestion = await ingestInboundAttachments({
             files: data.files,
@@ -4221,8 +4224,9 @@ export class GatewayService {
             createdBy: channel.agor_user_id ?? user.user_id,
           });
           const stagedUploads = ingestion.uploads;
-          const { failed } = ingestion;
-          failedAttachments = failed;
+          failedAttachments = ingestion.failed;
+          skippedAttachments = ingestion.skipped;
+          skippedMimeTypes = ingestion.skippedMimeTypes;
           if (stagedUploads.length > 0) {
             promptText = buildPromptWithAttachments(promptText, stagedUploads);
             console.log(
@@ -4235,8 +4239,14 @@ export class GatewayService {
             `[gateway] Cannot ingest Slack attachments for channel ${shortId(channel.id)}: no bot_token in config`
           );
         }
+        // Slack messages skip the gateway context block, so these notes are the
+        // only trace an attachment existed. Appended even when nothing was
+        // ingested — silence is what made the original drop undiagnosable.
         if (failedAttachments > 0) {
           promptText = `${promptText}\n\n(an attachment could not be fetched)`;
+        }
+        if (skippedAttachments > 0) {
+          promptText = `${promptText}\n\n${formatSkippedAttachmentNote(skippedAttachments, skippedMimeTypes)}`;
         }
       }
 
