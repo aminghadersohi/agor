@@ -73,7 +73,16 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
         borderBottom: `${token.lineWidth}px solid ${token.colorBorderSecondary}`,
       }}
     >
-      <Space size={token.marginXS} align="center" style={{ flex: 1, minWidth: 0 }}>
+      <Space
+        size={token.marginXS}
+        align="center"
+        style={{ flex: 1, minWidth: 0 }}
+        // A flex item will not shrink below its own content unless min-width
+        // is cleared. Without this the ellipsis on the title never engages and
+        // a long title widens the header past the viewport, pushing the
+        // accessory and action icons off-screen on a narrow phone.
+        styles={{ item: { minWidth: 0 } }}
+      >
         {onBack && (
           <Button
             type="text"
