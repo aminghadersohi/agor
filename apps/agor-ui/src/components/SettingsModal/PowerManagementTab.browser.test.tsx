@@ -151,8 +151,12 @@ describe('UPS admin workspace (browser)', () => {
         <PowerManagementTab client={client} currentUser={user} />
       </ConfigProvider>
     );
+    // 'UPS power management' is the static tab heading and resolves while the
+    // policy read is still in flight ("Reading power policy"), so the first
+    // status-derived assertion has to await the loaded card rather than read
+    // the DOM synchronously behind it.
     expect(await screen.findByText('UPS power management')).toBeInTheDocument();
-    expect(screen.getByText('Power source monitoring')).toBeInTheDocument();
+    expect(await screen.findByText('Power source monitoring')).toBeInTheDocument();
     expect(screen.getAllByText('Battery power')).not.toHaveLength(0);
     expect(screen.getByText('Detected')).toBeInTheDocument();
     expect(screen.getByText('Power conservation policy')).toBeInTheDocument();
