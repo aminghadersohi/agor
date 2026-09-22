@@ -407,6 +407,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN deletion_updated_at`);
       await executeRaw(db, sql`ALTER TABLE repos DROP COLUMN cleanup_policy`);
       await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN cleanup_protected`);
+      await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN color_override`);
 
       // This fixture rewinds the journal to the previous fork watermark. Keep
       // the physical schema aligned with that watermark so the later Session
