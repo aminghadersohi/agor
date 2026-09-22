@@ -2,8 +2,10 @@
  * CardNode - React Flow node component for rendering cards on the board canvas.
  *
  * Visual hierarchy:
- * - Colored left border from CardType (or override)
- * - Zone border color when pinned to a zone (matching BranchCard pattern)
+ * - Colored left border from CardType (or the user's color override)
+ * - Zone border color when pinned to a zone (matching BranchCard pattern);
+ *   the user's own color still wins the left stripe, since it's the one
+ *   channel that carries a meaning they chose
  * - CardType emoji + title (with optional URL link)
  * - Pin icon when in a zone (click to unpin)
  * - Description (markdown, collapsed after ~3 lines)
@@ -14,12 +16,14 @@ import type { CardWithType } from '@agor-live/client';
 import { DragOutlined, LinkOutlined, PushpinFilled } from '@ant-design/icons';
 import { Button, Tooltip, Typography, theme } from 'antd';
 import React, { useMemo } from 'react';
+import { resolveEntityStripeColor } from '../../utils/boardEntityColors';
 import {
   REACT_FLOW_DRAG_HANDLE_CLASS,
   REACT_FLOW_NO_DRAG_CLASS,
 } from '../../utils/reactFlowDragClasses';
 import { isSafeExternalUrl } from '../../utils/safeExternalUrl';
 import { ensureColorVisible, isDarkTheme } from '../../utils/theme';
+import { EntityColorPicker } from '../EntityColorPicker';
 import { MarkdownPreview } from '../MarkdownRenderer';
 
 const CARD_WIDTH = 380;
@@ -31,14 +35,31 @@ export interface CardNodeData {
   zoneColor?: string;
   onClick?: (cardId: string) => void;
   onUnpin?: (cardId: string) => void;
+  /** Persist the user's chosen card color, or `null` to clear it. */
+  onSetColor?: (cardId: string, color: string | null) => void | Promise<void>;
+  /** Effective `board.edit` capability. Omitted only by isolated tests/fixtures. */
+  canEdit?: boolean;
 }
 
 const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
   const { token } = theme.useToken();
-  const { card, isPinned, zoneName, zoneColor, onClick, onUnpin } = data;
+  const { card, isPinned, zoneName, zoneColor, onClick, onUnpin, onSetColor, canEdit } = data;
 
   const borderColor = card.effective_color || token.colorBorder;
   const emoji = card.effective_emoji;
+  // The user's explicit choice, as distinct from a color inherited from the
+  // card type. Only the override is editable here; the type default is a
+  // Settings-level concern.
+  const userColor = card.color_override;
+
+  const stripeColor = resolveEntityStripeColor({
+    userColor,
+    zoneColor,
+    isPinned,
+    fallback: borderColor,
+  });
+  /** The three non-accent edges: zone membership, else the neutral card edge. */
+  const edgeColor = isPinned && zoneColor ? zoneColor : token.colorBorderSecondary;
 
   // Match BranchCard pattern: ensure pin icon color is visible
   const isDarkMode = isDarkTheme(token);
@@ -53,11 +74,20 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
       style={{
         width: CARD_WIDTH,
         background: token.colorBgContainer,
-        border:
-          isPinned && zoneColor
-            ? `1px solid ${zoneColor}`
-            : `1px solid ${token.colorBorderSecondary}`,
-        borderLeft: `4px solid ${isPinned && zoneColor ? zoneColor : borderColor}`,
+        // Per-edge longhands, not `border` + `borderLeft`. React applies only
+        // the style keys that changed between renders, so a shorthand that
+        // still covers the left edge leaves a stale stripe whenever the zone
+        // color changes and the stripe doesn't — which is what happens when a
+        // colored card is dragged into a zone.
+        borderStyle: 'solid',
+        borderTopColor: edgeColor,
+        borderRightColor: edgeColor,
+        borderBottomColor: edgeColor,
+        borderTopWidth: 1,
+        borderRightWidth: 1,
+        borderBottomWidth: 1,
+        borderLeftColor: stripeColor,
+        borderLeftWidth: 4,
         borderRadius: token.borderRadiusLG,
         cursor: 'pointer',
         overflow: 'hidden',
@@ -105,6 +135,13 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
           >
             <LinkOutlined style={{ fontSize: 12 }} />
           </a>
+        )}
+        {onSetColor && canEdit && (
+          <EntityColorPicker
+            value={userColor}
+            onChange={(color) => onSetColor(card.card_id, color)}
+            label="Card color"
+          />
         )}
         {isPinned && (
           <Tooltip

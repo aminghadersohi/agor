@@ -24,6 +24,7 @@ import { useConnectionDisabled } from '../../contexts/ConnectionContext';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useProgressiveMount } from '../../hooks/useProgressiveMount';
 import { readCollapsedBranchNode } from '../../utils/collapsedBranchNodes';
+import { useThemedMessage } from '../../utils/message';
 import {
   REACT_FLOW_DRAG_HANDLE_CLASS,
   REACT_FLOW_NO_DRAG_CLASS,
@@ -33,6 +34,7 @@ import { ensureColorVisible, isDarkTheme } from '../../utils/theme';
 import { ArchiveActionButton } from '../ArchiveButton';
 import { ArchiveDeleteBranchModal } from '../ArchiveDeleteBranchModal';
 import { BranchWorkspaceStatus } from '../BranchWorkspaceStatus';
+import { EntityColorPicker } from '../EntityColorPicker';
 import { EnvironmentPill } from '../EnvironmentPill';
 import { MarkdownPreview } from '../MarkdownRenderer';
 import { CreatedByTag } from '../metadata';
@@ -112,6 +114,7 @@ const BranchCardComponent = ({
 }: BranchCardProps) => {
   const { token } = theme.useToken();
   const connectionDisabled = useConnectionDisabled();
+  const { showError } = useThemedMessage();
 
   const branchBoardId = (branch as { board_id?: string | null }).board_id;
   const cardRef = React.useRef<HTMLDivElement>(null);
@@ -336,14 +339,54 @@ const BranchCardComponent = ({
     return ensureColorVisible(zoneColor, isDarkMode, 50, 50);
   }, [zoneColor, isDarkMode]);
 
+  // User-chosen organisational color (Trello-style label). Not derived from
+  // any status — a human picked it and it means whatever they decided.
+  const userColor = branch.color_override;
+
+  const handleColorChange = useCallback(
+    async (color: string | null) => {
+      if (!client) return;
+      try {
+        // `null` clears the column. `Branch['color_override']` is `string |
+        // undefined` like every other optional branch field, so the clearing
+        // patch widens at the call site — the same shape `BranchUpdate` uses
+        // for `notes` / `issue_url` in the branch modal.
+        const patch: Omit<Partial<Branch>, 'color_override'> & {
+          color_override?: string | null;
+        } = { color_override: color };
+        await client.service('branches').patch(branch.branch_id, patch as Partial<Branch>);
+      } catch (error) {
+        showError(
+          error instanceof Error && error.message
+            ? `Could not set branch color: ${error.message}`
+            : 'Could not set branch color.'
+        );
+      }
+    },
+    [client, branch.branch_id, showError]
+  );
+
+  // The left edge is the accent stripe. A color the user set outranks the
+  // derived teammate accent: it's the one channel here carrying a meaning they
+  // chose, and teammate-ness is still legible from the robot/emoji avatar.
+  // Living on the card border (rather than inside a section) keeps it visible
+  // when the session sections are collapsed, which is the point of the feature.
+  const accentColor = userColor ?? (isAgent ? token.colorInfo : undefined);
+
   // Compose card chrome from independent visual channels so multiple
   // states can stack cleanly:
   //   • `boxShadow` — attention halo for needs_attention / awaiting prompt
   //   • `outline`   — dashed selected state (focused OR active URL target)
-  //   • `borderLeft` — thick accent stripe for teammate branches
-  //   • `borderColor` — zone color when pinned (no other states use it)
+  //   • border longhands — accent stripe on the left, zone color elsewhere
   // outline + box-shadow are paint-only, so they don't disturb layout
-  // and don't fight with each other or with `borderLeft`.
+  // and don't fight with each other or with the border.
+  //
+  // Every border value is a per-edge longhand on purpose. React applies only
+  // the style keys that changed between renders, so mixing `borderColor` /
+  // `borderWidth` with `borderLeft` leaves a stale left edge whenever the zone
+  // color changes and the stripe doesn't — which is exactly what happens when
+  // a colored branch is dragged into a zone. Disjoint longhands cannot clobber
+  // each other on a partial diff.
   const highlightStyle: React.CSSProperties = (() => {
     if (inPopover) return {};
     const style: React.CSSProperties = {};
@@ -356,18 +399,21 @@ const BranchCardComponent = ({
       style.outlineOffset = -3;
     }
     if (isPinned && zoneColor) {
-      style.borderColor = zoneColor;
-      style.borderWidth = 1;
+      style.borderTopColor = zoneColor;
+      style.borderRightColor = zoneColor;
+      style.borderBottomColor = zoneColor;
+      style.borderTopWidth = 1;
+      style.borderRightWidth = 1;
+      style.borderBottomWidth = 1;
+      if (!accentColor) {
+        style.borderLeftColor = zoneColor;
+        style.borderLeftWidth = 1;
+      }
     }
-    if (isAgent) {
-      // Teammate accent stripe: thick left border in `colorInfo`. Drops
-      // the previous full `colorInfo` border (which collided with the
-      // primary-color selected ring in the default theme where
-      // colorInfo === colorPrimary). The stripe lives only on the left
-      // edge so it doesn't compete with the dashed selected outline,
-      // and composes with the zone-color border on the other three
-      // edges when a teammate is also pinned.
-      style.borderLeft = `4px solid ${token.colorInfo}`;
+    if (accentColor) {
+      style.borderLeftColor = accentColor;
+      style.borderLeftWidth = 4;
+      style.borderLeftStyle = 'solid';
     }
     return style;
   })();
@@ -531,6 +577,14 @@ const BranchCardComponent = ({
               Removing this here in checkpoint 3; the Schedules UI
               lands in checkpoint 5.
             */}
+            {!inPopover && client && (
+              <EntityColorPicker
+                value={userColor}
+                onChange={handleColorChange}
+                disabled={Boolean(branch.deletion_status)}
+                label="Branch color"
+              />
+            )}
             {onOpenSettings && (
               <Button
                 type="text"
