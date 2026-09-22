@@ -1,3 +1,4 @@
+import { OPENCODE_VERSION } from '@agor/agentic-tool-opencode';
 import { isTenantAgenticToolEnabled, loadConfigSync } from '@agor/core/config';
 import { runWithTenantContext, UsersRepository } from '@agor/core/db';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -44,8 +45,12 @@ const db = { run: vi.fn() } as never;
 const params = {
   user: { user_id: 'fictional-user', email: 'reader@example.invalid', role: 'member' },
 } as never;
+// The daemon only trusts a catalog produced by the exact packaged runtime
+// (see `isOpenCodeModelCatalog`). Derive the fixture from the shipped constant
+// so bumping the runtime cannot silently turn every "configured provider"
+// assertion into a fallback-catalog assertion.
 const catalog = {
-  runtimeVersion: '1.14.33',
+  runtimeVersion: OPENCODE_VERSION,
   providers: [
     {
       id: 'openai',
@@ -166,12 +171,14 @@ describe('OpenCode production model-catalog path', () => {
   it.each([
     undefined,
     {},
-    { runtimeVersion: '1.14.33' },
-    { ...catalog, runtimeVersion: '1.14.32' },
-    { runtimeVersion: '1.14.33', providers: [{}] },
+    { runtimeVersion: OPENCODE_VERSION },
+    // Deliberately not the packaged runtime — a catalog from any other
+    // version must be refused outright.
+    { ...catalog, runtimeVersion: '0.0.0-not-the-packaged-runtime' },
+    { runtimeVersion: OPENCODE_VERSION, providers: [{}] },
     { ...catalog, suggestedSelection: { providerId: 'openai' } },
     {
-      runtimeVersion: '1.14.33',
+      runtimeVersion: OPENCODE_VERSION,
       providers: [
         {
           id: 'openai',
