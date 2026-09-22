@@ -82,6 +82,47 @@ describe('Postgres migrations', () => {
     }
   });
 
+  it('appends the branch color column above every prior watermark in both journals', async () => {
+    for (const journal of await readJournals()) {
+      const index = journal.entries.findIndex(({ tag }) => tag === '9026_branch_color_override');
+      expect(index).toBeGreaterThan(0);
+      const added = journal.entries[index]!;
+      // The tag is the migration's identity (it names the .sql file); `idx` is
+      // just the journal slot, and slot 9026 went to the gateway seed migration
+      // that landed on main first. Renumbering that one would rewrite an entry
+      // deployed databases already record.
+      expect(added).toMatchObject({ idx: 9027, tag: '9026_branch_color_override' });
+      // Drizzle decides "pending" by timestamp, so an append below an existing
+      // watermark is silently skipped rather than failing loudly.
+      expect(added.when).toBeGreaterThan(
+        Math.max(...journal.entries.slice(0, index).map(({ when }) => when))
+      );
+      expect(index).toBe(journal.entries.length - 1);
+      expect(new Set(journal.entries.map(({ idx }) => idx)).size).toBe(journal.entries.length);
+      expect(new Set(journal.entries.map(({ tag }) => tag)).size).toBe(journal.entries.length);
+    }
+    // Purely additive: no daemon needs to stop to pick up a nullable column.
+    for (const dialect of ['postgresql', 'sqlite'] as const) {
+      expect(
+        pendingOfflineCutoverMigrations(dialect, {
+          applied: ['0110_user_provider_oauth_grants'],
+          pending: ['9026_branch_color_override'],
+        })
+      ).toEqual([]);
+    }
+    // The Postgres ALTER bounds its own lock wait (see the migrations guide).
+    const postgres = await readFile(
+      new URL('../../drizzle/postgres/9026_branch_color_override.sql', import.meta.url),
+      'utf8'
+    );
+    expect(
+      postgres
+        .split('--> statement-breakpoint')
+        .map((statement) => statement.trim())
+        .filter(Boolean)[0]
+    ).toBe("SET LOCAL lock_timeout = '3s';");
+  });
+
   it('keeps branch-local deletion pending after the previously published ledger migration', async () => {
     // Development environments may already have applied the earlier PR revision.
     // Drizzle uses timestamps, not tags or hashes, to decide what to apply.
