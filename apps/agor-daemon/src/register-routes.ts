@@ -2718,7 +2718,11 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                 }
                 await assertCurrentPromptAuthority(operationDb, admissionSession);
                 return new TaskRepository(operationDb).createPending({
-                  task_id: compactionRequestId,
+                  // Only a caller-supplied stable identity may pin the Task ID.
+                  // Direct admission requires a fresh queued input, so a
+                  // synthesized ID here would refuse every idle fast-path
+                  // prompt; the repository assigns the ID in that case.
+                  task_id: data.idempotencyTaskId as TaskID | undefined,
                   session_id: id as SessionID,
                   full_prompt: data.prompt,
                   created_by: createdBy,
@@ -2736,7 +2740,14 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             );
             await tasksService.autoTitleSession(task, params);
 
-            if (!prior && task.task_id === compactionRequestId) {
+            // Folding into the queue tail is the only admission path that
+            // returns a Task this request did not create, and it always leaves
+            // the tail's own request beside ours. A created Task carries
+            // exactly one compaction request, or none at all when the prompt
+            // was never eligible. Identity cannot answer this any more: the
+            // repository, not this route, now assigns the fresh Task ID.
+            const joinedQueueTail = (task.metadata?.prompt_compaction?.requests?.length ?? 1) > 1;
+            if (!prior && !joinedQueueTail) {
               // Repository admission bypasses TasksService.create. Publish the
               // entity before its possible patched/dispatch event so reactive
               // clients observe a coherent lifecycle.
