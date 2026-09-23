@@ -67,6 +67,7 @@ describe('tenantPortabilityForeignKeys', () => {
   it('freezes the exact schema-derived movable FK set', () => {
     const foreignKeys = tenantPortabilityForeignKeys();
     expect(foreignKeys).toHaveLength(116);
+    expect(foreignKeys).toHaveLength(115);
     expect(Object.isFrozen(foreignKeys)).toBe(true);
     const structuralKeys = foreignKeys.map((foreignKey) =>
       [

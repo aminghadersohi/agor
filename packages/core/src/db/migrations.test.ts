@@ -108,6 +108,19 @@ describe('Postgres migrations', () => {
     expect(migration).not.toMatch(/CREATE TABLE|ALTER TABLE|DROP TABLE/);
   });
 
+  it('reconciles both shipped ownership and draft callback watermarks', async () => {
+    for (const journal of await readJournals()) {
+      expect(
+        journal.entries.find((entry) => entry.tag === '0111_management_ownership_transfer')
+      ).toMatchObject({ idx: 110, when: 1789344000005 });
+      for (const watermark of [1789344000005, 1789344000006]) {
+        expect(classifyMigrationWatermark(journal.entries, watermark).pending).toEqual([
+          '0113_callback_ownership_reconciliation',
+        ]);
+      }
+    }
+  });
+
   it('keeps ownership transfer pending after the provider-grant migration in both journals', async () => {
     for (const journal of await readJournals()) {
       const previous = journal.entries.find(

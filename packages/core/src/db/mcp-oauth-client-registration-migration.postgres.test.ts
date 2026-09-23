@@ -438,6 +438,10 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`DROP INDEX sessions_tenant_session_id_unique`);
       await executeRaw(db, sql`DROP INDEX tasks_tenant_task_id_unique`);
       // Upstream's provider-grant table is likewise newer than this watermark.
+      // Rewind the later completion schema too, not just its ledger entry.
+      // The policy on tasks references the outbox and must be removed first.
+      await executeRaw(db, sql`DROP POLICY IF EXISTS completion_callback_task_discovery ON tasks`);
+      await executeRaw(db, sql`DROP TABLE completion_subscriptions`);
       await executeRaw(db, sql`DROP TABLE user_provider_oauth_grants`);
       await withPostgresTestTransaction(db, recreateHistoricalClaudeAuthority);
       await withPostgresTestTransaction(db, restoreHistoricalOwnerImmutability);
