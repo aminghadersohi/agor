@@ -30,6 +30,7 @@ import { useCopyToClipboard } from '../../utils/clipboard';
 import { BrandMark } from '../BrandMark';
 import { HistoryTextChoices } from '../MessageBlock/HistoryMarkdown';
 import { TaskBlock } from '../TaskBlock';
+import { useConversationHistory } from './useConversationHistory';
 
 const { Text } = Typography;
 const EMPTY_STREAMING_MESSAGES = new Map();
@@ -235,25 +236,6 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
       scrollToBottom({ animation: 'instant' });
     }, [state, scrollToBottom]);
 
-    // Scroll to top. While content is still streaming/growing, the library's
-    // persistent observer can re-pin to the bottom before our scrollTop write
-    // takes effect, snapping the user right back down. `stopScroll()`
-    // synchronously releases the bottom lock (and cancels any in-flight scroll
-    // animation) so the scrollTop = 0 sticks.
-    const scrollToTop = useCallback(() => {
-      stopScroll();
-      if (scrollRef.current) {
-        scrollRef.current.scrollTop = 0;
-      }
-    }, [scrollRef, stopScroll]);
-
-    // Expose scroll functions to parent
-    useEffect(() => {
-      if (onScrollRef) {
-        onScrollRef(handleScrollToBottom, scrollToTop);
-      }
-    }, [onScrollRef, handleScrollToBottom, scrollToTop]);
-
     const { handle: reactiveSession, state: reactiveState } = useSharedReactiveSession(
       client,
       sessionId,
@@ -273,11 +255,26 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
     // when the underlying reactive `tasks` list hasn't changed. Without this,
     // every streaming chunk produced a fresh array → every downstream useMemo
     // depending on `tasks` would invalidate and rebuild.
-    const tasks = useMemo(
+    const allTasks = useMemo(
       () => (currentReactiveState?.tasks || []).filter((t) => t.status !== TaskStatus.QUEUED),
       [currentReactiveState?.tasks]
     );
 
+    const {
+      visibleTasks: tasks,
+      olderCount,
+      revealOlder,
+      revealAllAtTop,
+      // #2759 gated this on a `forceExpandAll` prop that no longer exists: the
+      // base replaced expand-all with per-turn text choices. Bounding therefore
+      // stays on, and `revealOlder` / `revealAllAtTop` are the ways out.
+    } = useConversationHistory(sessionId, allTasks, false, scrollRef, stopScroll);
+
+    // Explicit top navigation and in-session search still reach the complete
+    // conversation. Normal opens mount only a bounded tail of task headers.
+    useEffect(() => {
+      onScrollRef?.(handleScrollToBottom, revealAllAtTop);
+    }, [onScrollRef, handleScrollToBottom, revealAllAtTop]);
     const allStreamingMessages =
       currentReactiveState?.streamingMessages || EMPTY_STREAMING_MESSAGES;
     const streamingMessagesByTask = useStreamingMessagesByTask(allStreamingMessages);
@@ -312,7 +309,7 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
     // that never re-runs; gating on tasks.length>0 fires it when the container
     // mounts. handleScrollToBottom also clears the escape so the library's
     // persistent observer reliably follows lazy/streamed growth from there.
-    const hasContent = tasks.length > 0 && !initialHydrationPending;
+    const hasContent = allTasks.length > 0 && !initialHydrationPending;
     useEffect(() => {
       if (isActive && sessionId && hasContent) {
         handleScrollToBottom();
@@ -428,7 +425,7 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
       );
     }
 
-    if (loading && (tasks.length === 0 || initialHydrationPending)) {
+    if (loading && (allTasks.length === 0 || initialHydrationPending)) {
       return (
         <div
           style={{
@@ -444,7 +441,7 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
       );
     }
 
-    if (tasks.length === 0) {
+    if (allTasks.length === 0) {
       return (
         <div
           style={{
@@ -549,6 +546,11 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
             <GenealogyBanner />
 
             {error && <Alert type="error" title={error} />}
+            {olderCount > 0 && (
+              <Button onClick={revealOlder} block>
+                Show older tasks ({olderCount} remaining)
+              </Button>
+            )}
             {currentReactiveState?.hasOlderTasks && (
               <Button loading={loadingOlder} onClick={() => void loadOlder()}>
                 Load older history
