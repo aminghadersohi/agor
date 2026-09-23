@@ -448,6 +448,12 @@ async function startDaemonWithOwnedMetrics(
   ownMetrics(metrics);
   app.set('metrics', metrics);
   const powerPolicyController = createPowerPolicyController(effectiveConfig, metrics);
+  // The route context accepts a missing controller so upstream-owned callers
+  // can construct it, which means a production wiring regression would degrade
+  // silently instead of failing. This is the one place that must stay strict.
+  if (!powerPolicyController) {
+    throw new Error('Power policy controller was not constructed; refusing to start unfenced');
+  }
   app.set('powerPolicyController', powerPolicyController);
   app.set('daemonOperationalMetrics', createDaemonOperationalMetrics(metrics));
   reconcileTrackedExecutorGauge(app);

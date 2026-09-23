@@ -204,7 +204,10 @@ import {
   deliverPermissionDecision,
   type PermissionDecisionSubmission,
 } from './permissions/deliver-permission-decision.js';
-import type { PowerPolicyController } from './power-management/index.js';
+import {
+  createDisabledPowerPolicyController,
+  type PowerPolicyController,
+} from './power-management/index.js';
 import { publicBoardCommentRepositionInput } from './services/board-comments.js';
 import type { GatewayService } from './services/gateway.js';
 import { createMCPCatalogConnectService } from './services/mcp-catalog-connect.js';
@@ -541,7 +544,16 @@ export interface RegisterRoutesContext {
     typeof import('./services/session-env-selections.js').createSessionEnvSelectionsService
   >;
   terminalsService: TerminalsService | null;
-  powerPolicyController: PowerPolicyController;
+  /**
+   * Fork-only host power policy. Optional at this boundary because
+   * upstream-owned callers — including upstream route integration tests —
+   * construct this context without one. Production wiring always supplies a
+   * controller; see the assertion at its construction site in `index.ts`,
+   * which keeps a genuine wiring regression loud. When absent, route
+   * registration substitutes a disabled controller so fork-only fencing
+   * degrades to upstream behaviour instead of throwing.
+   */
+  powerPolicyController: PowerPolicyController | null;
   powerPolicyRuntimeSettingsRepository: PowerPolicyRuntimeSettingsRepository;
 }
 
@@ -928,9 +940,27 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     sessionMCPServersService,
     sessionEnvSelectionsService,
     terminalsService: _terminalsService,
-    powerPolicyController,
+    powerPolicyController: suppliedPowerPolicyController,
     powerPolicyRuntimeSettingsRepository,
   } = ctx;
+
+  // Fork-only power fencing must not break upstream-owned callers that know
+  // nothing about it. Rather than make every call site below nullable — which
+  // would let the dispatch claim escape the permit that must lexically contain
+  // it — substitute a controller pinned to `mode: 'off'`. Its already-tested
+  // disabled path allows every dispatch and reports nothing held, which is
+  // exactly upstream's behaviour, and the admin routes then report power
+  // management as off rather than inventing a status.
+  if (!suppliedPowerPolicyController) {
+    console.info(
+      formatStructuredLog('[power-management.disabled]', {
+        reason: 'no_controller_supplied',
+        detail: 'Route context has no power policy controller; dispatch runs unfenced.',
+      })
+    );
+  }
+  const powerPolicyController =
+    suppliedPowerPolicyController ?? createDisabledPowerPolicyController();
 
   registerExecutorResponseRoutes(app);
 
@@ -2688,7 +2718,11 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                 }
                 await assertCurrentPromptAuthority(operationDb, admissionSession);
                 return new TaskRepository(operationDb).createPending({
-                  task_id: compactionRequestId,
+                  // Only a caller-supplied stable identity may pin the Task ID.
+                  // Direct admission requires a fresh queued input, so a
+                  // synthesized ID here would refuse every idle fast-path
+                  // prompt; the repository assigns the ID in that case.
+                  task_id: data.idempotencyTaskId as TaskID | undefined,
                   session_id: id as SessionID,
                   full_prompt: data.prompt,
                   created_by: createdBy,
@@ -2706,7 +2740,14 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             );
             await tasksService.autoTitleSession(task, params);
 
-            if (!prior && task.task_id === compactionRequestId) {
+            // Folding into the queue tail is the only admission path that
+            // returns a Task this request did not create, and it always leaves
+            // the tail's own request beside ours. A created Task carries
+            // exactly one compaction request, or none at all when the prompt
+            // was never eligible. Identity cannot answer this any more: the
+            // repository, not this route, now assigns the fresh Task ID.
+            const joinedQueueTail = (task.metadata?.prompt_compaction?.requests?.length ?? 1) > 1;
+            if (!prior && !joinedQueueTail) {
               // Repository admission bypasses TasksService.create. Publish the
               // entity before its possible patched/dispatch event so reactive
               // clients observe a coherent lifecycle.
