@@ -55,6 +55,15 @@ export interface FileCollectionProps {
 
   /** Message to show when no files found */
   emptyMessage?: string;
+
+  /** Dense explorer presentation for split-pane workspace editing. */
+  compact?: boolean;
+
+  /** Controlled active file path. */
+  selectedPath?: string | null;
+
+  /** Available virtual-scroll height. */
+  treeHeight?: number;
 }
 
 /**
@@ -76,6 +85,7 @@ interface TreeNode {
 function buildTree(
   files: FileItem[],
   searchQuery: string,
+  compact: boolean,
   onDownload?: (file: FileItem) => void,
   onCopyPath?: (file: FileItem) => void
 ): TreeNode[] {
@@ -161,7 +171,14 @@ function buildTree(
               <FileIcon />
               {fileName}
             </span>
-            <span style={{ marginLeft: 8, whiteSpace: 'nowrap', display: 'inline-flex', gap: 4 }}>
+            <span
+              style={{
+                marginLeft: 8,
+                whiteSpace: 'nowrap',
+                display: compact ? 'none' : 'inline-flex',
+                gap: 4,
+              }}
+            >
               <Tooltip title="Copy path">
                 <Button
                   size="small"
@@ -248,6 +265,9 @@ const FileCollectionInner: React.FC<FileCollectionProps> = ({
   onDownload,
   loading = false,
   emptyMessage = 'No files found',
+  compact = false,
+  selectedPath = null,
+  treeHeight = 600,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchInput, setSearchInput] = useState('');
@@ -283,8 +303,8 @@ const FileCollectionInner: React.FC<FileCollectionProps> = ({
 
   // Build tree structure - only depends on files, searchQuery, and stable callbacks
   const treeData = useMemo(
-    () => buildTree(files, searchQuery, stableOnDownload, handleCopyPath),
-    [files, searchQuery, stableOnDownload, handleCopyPath]
+    () => buildTree(files, searchQuery, compact, stableOnDownload, handleCopyPath),
+    [files, searchQuery, compact, stableOnDownload, handleCopyPath]
   );
 
   // Handle node selection - stable callback using ref
@@ -398,7 +418,7 @@ const FileCollectionInner: React.FC<FileCollectionProps> = ({
   }
 
   return (
-    <div style={{ padding: '0 24px' }}>
+    <div style={{ padding: compact ? 0 : '0 24px' }}>
       <div style={{ marginBottom: 16 }}>
         <Search
           placeholder="Search files..."
@@ -414,12 +434,13 @@ const FileCollectionInner: React.FC<FileCollectionProps> = ({
         className="agor-flat-tree"
         treeData={treeData}
         onSelect={handleSelect}
+        selectedKeys={selectedPath ? [selectedPath] : []}
         showIcon={false}
         expandedKeys={expandedKeys}
         onExpand={handleExpand}
         style={{ background: 'transparent', borderRadius: 0, padding: 0 }}
         virtual
-        height={600}
+        height={treeHeight}
       />
     </div>
   );
