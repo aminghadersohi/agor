@@ -1,5 +1,6 @@
 import { KNOWLEDGE_TRANSFER } from '@agor/core/types';
 import { BranchCleanupStepsService } from './services/branch-cleanup-steps.js';
+import type { MCPOAuthCallbackHandler } from './services/mcp-oauth-callback-route.js';
 /**
  * Service Registration
  *
@@ -431,6 +432,7 @@ export interface RegisteredServices {
   terminalsService: TerminalsService | null;
   configService: ReturnType<typeof createConfigService>;
   boardCommentsService: unknown;
+  oauthCallbackHandler: MCPOAuthCallbackHandler;
 }
 
 type OAuthPostCommitTailCode =
@@ -831,7 +833,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   // MCP Servers (conditionally registered)
   // ============================================================================
 
-  let oauthCallbackHandler: ((req: express.Request, res: express.Response) => void) | null = null;
+  let oauthCallbackHandler: MCPOAuthCallbackHandler;
 
   // The OAuth callback middleware is registered in boot.ts; here we set the handler
   {
@@ -1258,9 +1260,6 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   // Bootstrap superadmin users
   await bootstrapSuperadminUsers(config, db, allowSuperadmin);
 
-  // Store oauthCallbackHandler on app for boot.ts to wire up
-  appRecord.oauthCallbackHandler = oauthCallbackHandler;
-
   // Store sessionTokenService for auth setup
   appRecord.sessionTokenServiceInstance = sessionTokenService;
 
@@ -1276,6 +1275,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
     terminalsService,
     configService,
     boardCommentsService: safeService('board-comments'),
+    oauthCallbackHandler,
   };
 }
 
