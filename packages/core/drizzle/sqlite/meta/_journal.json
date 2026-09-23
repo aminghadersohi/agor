@@ -827,6 +827,13 @@
       "when": 1790129000211,
       "tag": "9027_restore_fork_only_session_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 9032,
+      "version": "6",
+      "when": 1790129000212,
+      "tag": "9028_profile_image_galleries",
+      "breakpoints": true
     }
   ]
 }

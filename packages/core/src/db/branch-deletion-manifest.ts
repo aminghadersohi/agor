@@ -28,6 +28,9 @@ export const BRANCH_DELETION_RELATIONS: Readonly<Record<string, BranchDeletionRe
   'messages.task_id': classify(
     'Delete branch-owned messages; a foreign-session reference is not ownership.'
   ),
+  'profile_images.branch_id': owned(
+    'Only branch-owned profile bytes; preserve board and user galleries.'
+  ),
   'schedules.branch_id': owned('Fence production before deleting schedules.'),
   'schedules.last_run_session_id': clear('Preserve schedules owned by other branches.'),
   'branch_owners.branch_id': owned('Retain all authorization rows until finalization.'),
