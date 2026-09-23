@@ -97,6 +97,7 @@ interface FormValues {
     enabled: boolean;
     delivery: NonNullable<Session['callback_config']>['delivery'];
     includeLastMessage: boolean;
+    mode: NonNullable<Session['callback_config']>['callback_mode'];
     template?: string;
   };
   autoArchive: Session['auto_archive'];
@@ -135,6 +136,7 @@ function buildInitialValues(session: Session, sessionMcpServerIds: string[]): Fo
     callbackConfig: {
       enabled: session.callback_config?.enabled ?? true,
       delivery: session.callback_config?.delivery ?? 'direct',
+      mode: session.callback_config?.callback_mode ?? 'persistent',
       includeLastMessage: session.callback_config?.include_last_message ?? true,
       template: session.callback_config?.template,
     },
@@ -206,6 +208,7 @@ function buildUpdates(values: FormValues, session: Session): Partial<Session> {
   if (values.callbackConfig) {
     updates.callback_config = {
       ...session.callback_config,
+      callback_mode: values.callbackConfig.mode,
       enabled: values.callbackConfig.enabled ?? true,
       delivery: values.callbackConfig.delivery ?? 'direct',
       include_last_message: values.callbackConfig.includeLastMessage ?? true,

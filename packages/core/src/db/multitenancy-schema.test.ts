@@ -53,6 +53,9 @@ function migrationTenantTables(): string[] {
   const discordGatewayHybridMigration = readRepoFile(
     'packages/core/drizzle/postgres/0094_discord_gateway_hybrid.sql'
   );
+  const completionSubscriptionsMigration = readRepoFile(
+    'packages/core/drizzle/postgres/0113_callback_ownership_reconciliation.sql'
+  );
   const externalIdentitiesMigration = readRepoFile(
     'packages/core/drizzle/postgres/0090_external_user_identities.sql'
   );
@@ -90,6 +93,9 @@ function migrationTenantTables(): string[] {
         ),
         ...githubInstallStateMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...discordGatewayHybridMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...completionSubscriptionsMigration.matchAll(
+          /CREATE TABLE IF NOT EXISTS "([^"]+)" \([\s\S]*?"tenant_id"/g
+        ),
         ...externalIdentitiesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...codexDeviceAuthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...claudeOauthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
@@ -115,6 +121,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/9015_mcp_oauth_client_registrations.sql'),
     readRepoFile('packages/core/drizzle/postgres/0082_github_install_state.sql'),
     readRepoFile('packages/core/drizzle/postgres/0094_discord_gateway_hybrid.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0113_callback_ownership_reconciliation.sql'),
     readRepoFile('packages/core/drizzle/postgres/0090_external_user_identities.sql'),
     readRepoFile('packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'),
     readRepoFile('packages/core/drizzle/postgres/0100_claude_oauth_attempts.sql'),
@@ -258,6 +265,21 @@ describe('Postgres multitenancy schema coverage', () => {
     expect(migration).toContain("= 'session_auto_archive_migration_0101'");
     expect(migration).toContain('DROP POLICY "session_auto_archive_migration_0101"');
     expect(migration).toContain("SELECT set_config('agor.system_scope', '', true)");
+  });
+
+  it('retires root discovery without deleting compatibility rows or tenant isolation', () => {
+    const migration = readRepoFile(
+      'packages/core/drizzle/postgres/0113_callback_ownership_reconciliation.sql'
+    );
+    expect(migration).toContain(
+      'DROP POLICY IF EXISTS "completion_callback_task_discovery" ON "tasks"'
+    );
+    expect(migration).toContain(
+      'DROP POLICY IF EXISTS "completion_callback_discovery" ON "completion_subscriptions"'
+    );
+    expect(migration).not.toMatch(/DROP TABLE|DELETE FROM/);
+    expect(migration).toContain('CREATE POLICY "tenant_isolation_completion_subscriptions"');
+    expect(migration).toContain('ALTER TABLE "completion_subscriptions" FORCE ROW LEVEL SECURITY');
   });
 
   it('limits Knowledge embedding discovery to routing-only candidate rows', () => {
