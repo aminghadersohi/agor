@@ -1,5 +1,5 @@
 /**
- * Read-only branch file browser. Tenant filesystem access is delegated to the executor.
+ * Branch file browser/editor. Tenant filesystem access is delegated to the executor.
  */
 import {
   type BranchRepository,
@@ -12,6 +12,7 @@ import type {
   AuthenticatedParams,
   FileDetail,
   FileListItem,
+  FilePatchData,
   Id,
   QueryParams,
   RBACParams,
@@ -45,7 +46,8 @@ function extractFile(data: unknown): FileDetail | null {
 }
 
 export class FileService
-  implements Pick<ServiceMethods<FileListItem | FileDetail>, 'find' | 'get' | 'setup' | 'teardown'>
+  implements
+    Pick<ServiceMethods<FileListItem | FileDetail>, 'find' | 'get' | 'patch' | 'setup' | 'teardown'>
 {
   constructor(
     private branchRepo: BranchRepository,
@@ -102,8 +104,53 @@ export class FileService
     return file;
   }
 
+  private async resolveBranchWrite(branchId: string, params?: FileParams) {
+    const tenantId = requireCurrentTenantId(
+      'Missing active tenant context for file database access'
+    );
+    return runWithTenantDatabaseScope(this.db, tenantId, async () => {
+      const cachedBranch = (params as Partial<RBACParams> | undefined)?.branch;
+      const branch =
+        cachedBranch?.branch_id === branchId
+          ? cachedBranch
+          : await this.branchRepo.findById(branchId);
+      if (!branch) throw new Error(`Branch not found: ${branchId}`);
+      const userId = params?.user?.user_id;
+      if (!userId) throw new NotAuthenticated('Authentication required');
+
+      const config = this.app.get('config');
+      const fsAccess = await ensureBranchWorkspaceAccess(
+        this.branchRepo,
+        branch,
+        userId,
+        params?.user?.role as UserRole | undefined,
+        'view',
+        'write',
+        config.execution?.allow_superadmin === true
+      );
+      const delegatedHomeKey = await resolveDelegatedExecutionHomeKey(this.db, userId, config);
+      // Writes use the same caller-scoped sandbox mounts as reads. The executor
+      // remains responsible for rejecting traversal and symlink escapes inside
+      // this explicitly authorized branch root.
+      const sandboxMounts = await resolveBranchExecutorSandboxMounts({
+        config,
+        tenantId,
+        executionUserId: userId as UserID,
+        branch,
+        db: this.db,
+      });
+      return {
+        branchId: branch.branch_id,
+        branchPath: branch.path,
+        delegatedHomeKey,
+        fsAccess,
+        userId,
+        sandboxMounts,
+      };
+    });
+  }
   private async runCommand(
-    command: 'branch.files.browse' | 'branch.files.read',
+    command: 'branch.files.browse' | 'branch.files.read' | 'branch.files.write',
     branchId: string,
     userId: string,
     delegatedHomeKey: string | undefined,
@@ -138,6 +185,35 @@ export class FileService
     );
   }
 
+  async patch(id: Id, data: FilePatchData, params?: FileParams): Promise<FileDetail> {
+    ensureMinimumRole(params, ROLES.MEMBER, 'edit file');
+    const branchId = params?.query?.branch_id;
+    if (!branchId) throw new Error('branch_id query parameter is required');
+    if (typeof data?.content !== 'string' || typeof data?.expectedLastModified !== 'string') {
+      throw new Error('content and expectedLastModified are required');
+    }
+    const resolved = await this.resolveBranchWrite(branchId, params);
+    const result = await this.runCommand(
+      'branch.files.write',
+      resolved.branchId,
+      resolved.userId,
+      resolved.delegatedHomeKey,
+      resolved.branchPath,
+      resolved.fsAccess,
+      resolved.sandboxMounts,
+      {
+        filePath: id.toString(),
+        content: data.content,
+        expectedLastModified: data.expectedLastModified,
+      }
+    );
+    if (!result.success) {
+      throw new Error(`Failed to save file: ${result.error?.message ?? 'unknown executor error'}`);
+    }
+    const file = extractFile(result.data);
+    if (!file) throw new Error('Failed to save file: executor returned an invalid response');
+    return file;
+  }
   private async resolveBranchRead(branchId: string, params?: FileParams) {
     const tenantId = requireCurrentTenantId(
       'Missing active tenant context for file database access'
