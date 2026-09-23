@@ -1156,7 +1156,7 @@ function AppContent() {
   }
 
   // Show connection error
-  if (connectionError) {
+  if (connectionError && !hasLoadedOnce) {
     return (
       <div
         style={{
