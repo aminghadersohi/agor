@@ -18,12 +18,20 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
+import { type ParseError, parse as parseJsonc, printParseErrorCode } from 'jsonc-parser';
 import type {
   RepoEnvironment,
   RepoEnvironmentConfigV1,
   RepoEnvironmentVariant,
 } from '../types/branch';
 import * as yaml from '../yaml/index.js';
+import {
+  LAUNCH_JSON_PATHS,
+  type LaunchJsonDocument,
+  type LaunchJsonPath,
+  parseLaunchJsonDocument,
+} from './launch-json.js';
 import {
   type AgorYmlSchema,
   parseAgorYmlString,
@@ -63,6 +71,34 @@ export function parseAgorYml(filePath: string): RepoEnvironment | null {
   }
   const content = fs.readFileSync(filePath, 'utf-8');
   return parseAgorYmlString(content);
+}
+
+/**
+ * Find and parse an Agor/VS Code launch file from a branch root.
+ * `.agor/launch.json` wins so projects can add Agor lifecycle metadata without
+ * changing the editor configuration used by developers.
+ */
+export function parseLaunchJson(repoRoot: string): {
+  environment: RepoEnvironment;
+  path: LaunchJsonPath;
+} | null {
+  for (const relativePath of LAUNCH_JSON_PATHS) {
+    const filePath = path.join(repoRoot, relativePath);
+    if (!fs.existsSync(filePath)) continue;
+    const errors: ParseError[] = [];
+    const document = parseJsonc(fs.readFileSync(filePath, 'utf8'), errors, {
+      allowTrailingComma: true,
+      disallowComments: false,
+    }) as LaunchJsonDocument;
+    if (errors.length > 0) {
+      const first = errors[0]!;
+      throw new Error(
+        `Invalid ${relativePath}: ${printParseErrorCode(first.error)} at offset ${first.offset}`
+      );
+    }
+    return { environment: parseLaunchJsonDocument(document, relativePath), path: relativePath };
+  }
+  return null;
 }
 
 /**
