@@ -38,6 +38,7 @@ import {
   assertPowerManagementActivationSupported,
   resolvePowerManagementConfig,
 } from './power-management';
+import { resolveRestartRecoverySettings } from './restart-recovery';
 import {
   type AgorApmSettings,
   type AgorConfig,
@@ -844,6 +845,7 @@ function validateConfig(config: AgorConfig): void {
     'sdk_watchdog',
     'dispatch_connect_timeout_ms',
     'unix_user_mode',
+    'restart_recovery',
     'branch_rbac',
     'allow_web_terminal',
     'allow_superadmin',
@@ -887,6 +889,13 @@ function validateConfig(config: AgorConfig): void {
     ['last_on_battery_critical_after_ms']
   );
   resolvePowerManagementConfig(config.execution?.power_management);
+  only(config.execution?.restart_recovery, 'execution.restart_recovery', [
+    'enabled',
+    'delay_ms',
+    'max_tasks_per_start',
+    'resume_after_crash',
+  ]);
+  resolveRestartRecoverySettings(config.execution);
   only(config.execution?.executor_heartbeat, 'execution.executor_heartbeat', [
     'enabled',
     'interval_ms',
