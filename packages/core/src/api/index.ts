@@ -32,6 +32,9 @@ import type {
   CreateAgenticToolPreset,
   CreateMCPServerInput,
   CreateSessionInput,
+  FileDetail,
+  FileListItem,
+  FilePatchData,
   GatewayChannel,
   GatewayChannelCreateData,
   GatewayChannelPatchData,
@@ -83,6 +86,7 @@ import type {
   SchedulePatchData,
   SdkHealthFailureInput,
   Session,
+  SessionAttentionAcknowledgement,
   SessionID,
   SessionMemory,
   SessionMemoryCreateData,
@@ -214,6 +218,10 @@ export interface SessionInitializationResult {
 
 export interface SessionsClientHelpers {
   prompt(sessionId: string, prompt: string, options?: SessionPromptOptions): Promise<Task>;
+  acknowledgeAttention(
+    sessionId: string,
+    params?: Params
+  ): Promise<SessionAttentionAcknowledgement>;
   initialize(
     sessionId: string,
     options: SessionInitializationOptions
@@ -277,6 +285,13 @@ export type { TemplateRenderRequest, TemplateRenderResponse };
 
 export interface TemplatesService {
   create(data: TemplateRenderRequest, params?: Params): Promise<TemplateRenderResponse>;
+}
+
+export interface FilesService {
+  find(params?: Params): Promise<FileListItem[]>;
+  findAll(params?: Params): Promise<FileListItem[]>;
+  get(id: string, params?: Params): Promise<FileDetail>;
+  patch(id: string, data: FilePatchData, params?: Params): Promise<FileDetail>;
 }
 
 export interface MCPMarketplaceService {
@@ -370,6 +385,7 @@ export interface ServiceTypes {
   'session-memories': SessionMemory;
   'session-reminders': SessionReminder;
   'gateway-channels': GatewayChannel;
+  file: FileDetail;
   users: User;
   groups: Group;
   'group-memberships': GroupMembership;
@@ -984,6 +1000,7 @@ export interface AgorClient
   service(path: 'zone-workflow-advances'): ZoneWorkflowAdvancesService;
   service(path: 'schedules'): SchedulesService;
   service(path: 'gateway-channels'): GatewayChannelsService;
+  service(path: 'file'): FilesService;
   service(path: 'kb/settings'): KnowledgeSettingsService;
   service(path: 'kb/indexing/status'): KnowledgeIndexingStatusService;
   service(path: 'kb/indexing/reindex'): KnowledgeReindexService;
@@ -1537,6 +1554,12 @@ function extendSessionsHelpers(client: AgorClient): void {
   }
 
   client.sessions = {
+    acknowledgeAttention: async (sessionId: string, params?: Params) => {
+      const response = await client
+        .service(`sessions/${sessionId}/acknowledge-attention`)
+        .create({}, params);
+      return response as SessionAttentionAcknowledgement;
+    },
     prompt: async (sessionId: string, prompt: string, options?: SessionPromptOptions) => {
       const { params, ...requestOptions } = options ?? {};
       const response = await client

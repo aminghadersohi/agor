@@ -33,7 +33,14 @@ export function useZoneWorkflow(client: AgorClient | null, boardId?: BoardID) {
     }
     setLoading(true);
     try {
-      const result = await client.service('zone-workflow-transitions').find({
+      const service = client.service('zone-workflow-transitions');
+      // Keep the board usable while a client is reconnecting or talking to a
+      // daemon that has not registered this additive service yet.
+      if (typeof service.find !== 'function') {
+        setTransitions([]);
+        return;
+      }
+      const result = await service.find({
         query: { board_id: boardId },
       });
       setTransitions(Array.isArray(result) ? result : result.data);
@@ -48,6 +55,14 @@ export function useZoneWorkflow(client: AgorClient | null, boardId?: BoardID) {
       return;
     }
     const service = client.service('zone-workflow-transitions');
+    if (
+      typeof service.find !== 'function' ||
+      typeof service.on !== 'function' ||
+      typeof service.off !== 'function'
+    ) {
+      setTransitions([]);
+      return;
+    }
     const created = (row: ZoneWorkflowTransition) => {
       if (row.board_id === boardId) setTransitions((current) => upsert(current, row));
     };

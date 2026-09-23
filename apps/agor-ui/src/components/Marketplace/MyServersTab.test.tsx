@@ -122,10 +122,13 @@ async function confirmServerRemoval(title: string): Promise<void> {
 
 describe('Marketplace server inventory and settings', () => {
   beforeEach(() => {
-    // Keep static notifications from scheduling React work after jsdom teardown.
+    // Ant's static message API schedules work outside this component tree.
+    // Stub it for the whole suite so a successful mutation cannot leave React
+    // scheduler work behind after jsdom has been torn down.
     vi.spyOn(message, 'success').mockImplementation(() => undefined as never);
     vi.spyOn(message, 'error').mockImplementation(() => undefined as never);
   });
+
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
@@ -913,5 +916,21 @@ describe('Marketplace server inventory and settings', () => {
       />
     );
     await waitFor(() => expect(remove).not.toHaveClass('ant-popover-open'));
+    // Losing the popover's open class is not the end of its work: rc-motion
+    // runs an exit transition afterwards, and React 19 flushes the renders it
+    // schedules from a macrotask (`performWorkUntilDeadline`, via
+    // `setImmediate`). Returning here lets the file finish with that callback
+    // still queued, and it then runs against a torn-down jsdom — surfacing as
+    // an uncaught `ReferenceError: window is not defined` that fails the whole
+    // shard even though all 997 assertions passed. Unmount so nothing further
+    // is scheduled, then yield two macrotasks: the first lets the pending
+    // `setImmediate` run (it is queued for the current loop iteration's check
+    // phase, after timers), the second confirms the queue is drained — all
+    // while the environment still exists.
+    view.unmount();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
   });
 });

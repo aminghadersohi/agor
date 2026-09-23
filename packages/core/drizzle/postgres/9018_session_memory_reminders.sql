@@ -1,6 +1,23 @@
 SET LOCAL lock_timeout = '3s';
 --> statement-breakpoint
-CREATE UNIQUE INDEX "sessions_tenant_session_id_unique" ON "sessions" ("tenant_id","session_id");
+-- amin_dev's already-applied attention migration owns this same key. Reuse
+-- only that exact valid, unconditional key; never hide an incompatible index.
+DO $$
+BEGIN
+  IF to_regclass('public.sessions_tenant_session_id_unique') IS NULL THEN
+    CREATE UNIQUE INDEX "sessions_tenant_session_id_unique" ON "sessions" ("tenant_id","session_id");
+  ELSIF NOT EXISTS (
+    SELECT 1 FROM pg_index i
+    WHERE i.indexrelid = 'public.sessions_tenant_session_id_unique'::regclass
+      AND i.indrelid = 'public.sessions'::regclass
+      AND i.indisunique AND i.indisvalid AND i.indisready
+      AND i.indpred IS NULL AND i.indexprs IS NULL
+      AND pg_get_indexdef(i.indexrelid) =
+        'CREATE UNIQUE INDEX sessions_tenant_session_id_unique ON public.sessions USING btree (tenant_id, session_id)'
+  ) THEN
+    RAISE EXCEPTION 'incompatible sessions tenant identity index; refusing reminder migration';
+  END IF;
+END $$;
 --> statement-breakpoint
 CREATE UNIQUE INDEX "tasks_tenant_task_id_unique" ON "tasks" ("tenant_id","task_id");
 --> statement-breakpoint

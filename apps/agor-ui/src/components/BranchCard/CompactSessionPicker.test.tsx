@@ -23,13 +23,22 @@ const branch = {
 
 const repo = { repo_id: 'repo-1', slug: 'preset-io/agor' } as unknown as Repo;
 
-const session = (id: string, title: string, lastUpdated: string, status = 'idle') =>
+const session = (
+  id: string,
+  title: string,
+  lastUpdated: string,
+  status = 'idle',
+  attentionGeneration = 0,
+  seenAttentionGeneration = 0
+) =>
   ({
     session_id: id,
     title,
     status,
     last_updated: lastUpdated,
     archived: false,
+    attention_generation: attentionGeneration,
+    viewer_seen_attention_generation: seenAttentionGeneration,
   }) as unknown as Session;
 
 function renderCard(props: Partial<React.ComponentProps<typeof BranchCard>> = {}) {
@@ -62,6 +71,66 @@ describe('CompactSessionPicker', () => {
 
     renderCard({ compact: false, sessions, onToggleCompact: vi.fn() });
     expect(screen.queryByLabelText('Sessions (2)')).toBeNull();
+  });
+
+  it('renders no badge when sessions exist but this viewer has seen them', () => {
+    const { container } = renderCard({
+      compact: true,
+      sessions,
+      onToggleCompact: vi.fn(),
+    });
+    const button = screen.getByLabelText('Sessions (2)');
+
+    expect(button.closest('.ant-badge')?.querySelector('.ant-badge-count')).toBeNull();
+    expect(container.querySelector('.ant-card')?.style.boxShadow).toBe('');
+  });
+
+  it('counts unseen sessions rather than total sessions and drives the card glow', () => {
+    const threeSessions = [
+      session('s-unseen-1', 'Unseen one', '2026-08-28T00:00:00.000Z', 'idle', 1, 0),
+      session('s-seen', 'Seen', '2026-08-27T00:00:00.000Z', 'idle', 4, 4),
+      session('s-unseen-2', 'Unseen two', '2026-08-26T00:00:00.000Z', 'failed', 3, 2),
+    ];
+    const { container } = renderCard({
+      compact: true,
+      sessions: threeSessions,
+      onToggleCompact: vi.fn(),
+    });
+    const button = screen.getByLabelText('Sessions (3)');
+    const badge = button.closest('.ant-badge')?.querySelector('.ant-badge-count');
+
+    expect(badge).not.toBeNull();
+    expect(badge?.textContent).toBe('2');
+    expect(container.querySelector('.ant-card')?.style.boxShadow).not.toBe('');
+  });
+
+  it('does not let shared branch attention create a session badge or glow', () => {
+    const { container } = renderCard({
+      branch: { ...branch, needs_attention: true } as Branch,
+      compact: true,
+      sessions,
+      onToggleCompact: vi.fn(),
+    });
+    const button = screen.getByLabelText('Sessions (2)');
+
+    expect(button.closest('.ant-badge')?.querySelector('.ant-badge-count')).toBeNull();
+    expect(container.querySelector('.ant-card')?.style.boxShadow).toBe('');
+  });
+
+  it('keeps unresolved terminal attention glowing after its result is seen', () => {
+    const failed = {
+      ...session('s-failed', 'Failed run', '2026-08-28T00:00:00.000Z', 'failed', 2, 2),
+      ready_for_prompt: true,
+    } as Session;
+    const { container } = renderCard({
+      compact: true,
+      sessions: [failed],
+      onToggleCompact: vi.fn(),
+    });
+    const button = screen.getByLabelText('Sessions (1)');
+
+    expect(button.closest('.ant-badge')?.querySelector('.ant-badge-count')).toBeNull();
+    expect(container.querySelector('.ant-card')?.style.boxShadow).not.toBe('');
   });
 
   it('opens a session without expanding the card', async () => {

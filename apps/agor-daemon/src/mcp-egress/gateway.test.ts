@@ -1737,7 +1737,6 @@ describe('authoritative MCP gateway real transport', () => {
     );
     expect(await result.response.json()).toMatchObject({ result: { tools: [tool] } });
   });
-
   it('rejects malformed tools/list metadata with a targeted provider diagnostic', async () => {
     const url = await listen((_request, response) => {
       response.writeHead(200, { 'content-type': 'application/json' });

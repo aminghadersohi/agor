@@ -234,6 +234,21 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         params,
         id: result.task.task_id,
       });
+      for (const coalescedTask of result.coalesced_tasks ?? []) {
+        emitServiceEvent(this.app, {
+          path: 'tasks',
+          event: 'patched',
+          data: coalescedTask,
+          params,
+          id: coalescedTask.task_id,
+        });
+      }
+      if (result.coalesced_tasks?.length) {
+        console.info(
+          `[task-queue] event=coalesced session_id=${JSON.stringify(result.task.session_id)} ` +
+            `leader_task_id=${JSON.stringify(result.task.task_id)} item_count=${result.coalesced_tasks.length + 1}`
+        );
+      }
     }
     return result;
   }
@@ -918,7 +933,11 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     if (!parentSessionId) return;
 
     try {
-      const latestTask = (await this.taskRepo.findById(task.task_id)) ?? task;
+      // The service constructor always supplies taskRepo. Keep this fallback
+      // for lifecycle helpers invoked in isolation (including recovery/tests),
+      // where only the tenant-scoped database handle is available.
+      const taskRepo = this.taskRepo ?? new TaskRepository(this.db);
+      const latestTask = (await taskRepo.findById(task.task_id)) ?? task;
       if (latestTask.metadata?.btw_result_delivered_at) return;
       const messagesService = this.app.service('messages');
 
@@ -1015,8 +1034,8 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       const previewText = `Q: ${promptText.substring(0, 80)} → A: ${responseText.substring(0, 100)}`;
 
       // Create via service so FeathersJS broadcasts the `created` event to all clients
-      const finalMessageId = callbackDigest?.final_message_id;
-      const messageId = finalMessageId ?? btwResultMessageId(task.task_id, parentSessionId);
+      const finalMessageId =
+        callbackDigest?.final_message_id ?? btwResultMessageId(task.task_id, parentSessionId);
       try {
         await appendSystemMessage({
           app: this.app,
@@ -1025,7 +1044,6 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
           taskId: parentLatestTaskId as string | undefined,
           content: [{ type: 'text', text: responseText } as ContentBlock],
           contentPreview: previewText.substring(0, 200),
-          messageId,
           metadata: {
             is_btw_result: true,
             ...(callbackDigest
@@ -1052,22 +1070,22 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
             btw_caller_title: callerTitle,
             source: 'agor',
           },
+          messageId: finalMessageId,
         });
       } catch (error) {
         // The deterministic PK is the cross-daemon final-report fence. A
         // duplicate insert means another completion retry already delivered
-        // this exact result; verify its destination and provenance instead of
-        // appending a second one.
-        const existing = await messagesService.get(messageId, { provider: undefined });
-        const mismatchedDigest =
-          callbackDigest &&
-          existing?.metadata?.callback_source_task_id !== callbackDigest.source_task_id;
-        if (existing?.session_id !== parentSessionId || mismatchedDigest) {
+        // this exact digest; verify the row instead of appending a second one.
+        const existing = await messagesService.get(finalMessageId, { provider: undefined });
+        if (
+          existing?.session_id !== parentSessionId ||
+          (callbackDigest &&
+            existing?.metadata?.callback_source_task_id !== callbackDigest.source_task_id)
+        ) {
           throw error;
         }
       }
-
-      const refreshed = (await this.taskRepo.findById(task.task_id)) ?? latestTask;
+      const refreshed = (await taskRepo.findById(task.task_id)) ?? latestTask;
       await super.patch(
         task.task_id,
         {
@@ -1093,6 +1111,25 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     observedSession: Session,
     params?: TaskParams
   ): Promise<void> {
+    // The terminal repository projection is already current enough to rule out
+    // the overwhelmingly common case. Avoid an unnecessary service read for
+    // parents and children that have not opted into archival; only an eligible
+    // deadline needs a post-commit refresh to honor a concurrent re-prompt or
+    // settings mutation.
+    const observedEligibleChild =
+      observedSession.fork_origin === 'btw' ||
+      Boolean(observedSession.genealogy?.parent_session_id);
+    const observedTtl = observedSession.auto_archive_after_seconds;
+    if (
+      !observedEligibleChild ||
+      observedSession.auto_archive !== 'after_completion' ||
+      !Number.isInteger(observedTtl) ||
+      !observedTtl ||
+      observedTtl <= 0
+    ) {
+      return;
+    }
+
     const session = await this.app.service('sessions').get(observedSession.session_id, params);
     const eligibleChild =
       session.fork_origin === 'btw' || Boolean(session.genealogy?.parent_session_id);
@@ -1761,6 +1798,10 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
             child_task_id: task.task_id,
             queued_by_user_id: callbackCreator,
             initial_message_id: directCallbackTaskId as MessageID,
+            queue_coalescing: {
+              kind: 'callback',
+              group_key: 'session-system-updates',
+            },
             callback_delivery: {
               source_session_id: childSession.session_id,
               source_task_id: task.task_id,

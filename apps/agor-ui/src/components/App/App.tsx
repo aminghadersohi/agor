@@ -15,11 +15,17 @@ import type {
   PermissionMode,
   Repo,
   Session,
+  SessionID,
   SpawnConfig,
   UpdateUserInput,
   User,
 } from '@agor-live/client';
-import { getTeammateConfig, hasMinimumRole } from '@agor-live/client';
+import {
+  CHAT_WORKSPACE_PATH_SEGMENT,
+  chatWorkspacePath,
+  getTeammateConfig,
+  hasMinimumRole,
+} from '@agor-live/client';
 import { Flex, Layout, theme, Upload } from 'antd';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -28,11 +34,12 @@ import {
   PanelGroup,
   PanelResizeHandle,
 } from 'react-resizable-panels';
-import { useLocation, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import type { BranchStorageConfig } from '@/utils/branchStorage';
 import { AppActionsProvider } from '../../contexts/AppActionsContext';
 import { useRegisterBoardSwitcher } from '../../contexts/CanvasNavigationContext';
 import type { NewSessionConfig, SessionCreationResult } from '../../domain/sessionCreation';
+import { useAcknowledgeOpenSessionAttention } from '../../hooks/useAcknowledgeOpenSessionAttention';
 import { useAppNavigation } from '../../hooks/useAppNavigation';
 import { useBoardTitle } from '../../hooks/useBoardTitle';
 import { useEventStream } from '../../hooks/useEventStream';
@@ -96,6 +103,7 @@ import { SessionPanel } from '../SessionPanel';
 import { PendingToolChoicePanel } from '../SessionPanel/PendingToolChoicePanel';
 import { SessionSettingsModal } from '../SessionSettingsModal';
 import { SettingsModal } from '../SettingsModal';
+import { TeammateChatCollectionsModal } from '../TeammateChatCollections';
 import { TerminalModal, WEB_TERMINAL_MIN_ROLE } from '../TerminalModal';
 import { ThemeEditorModal } from '../ThemeEditorModal';
 import {
@@ -130,12 +138,14 @@ const BoardSwitcherBridge: React.FC<{ setCurrentBoardId: (id: string) => void }>
 const UrlStateBridge: React.FC<{
   currentBoardId: string;
   currentSessionId: string | null;
+  suspendStateToUrlSync?: boolean;
   onBoardChange: (boardId: string) => void;
   onSessionChange: (sessionId: string | null) => void;
   onActiveUrlTargetChange: (target: ActiveUrlTarget | null) => void;
 }> = ({
   currentBoardId,
   currentSessionId,
+  suspendStateToUrlSync,
   onBoardChange,
   onSessionChange,
   onActiveUrlTargetChange,
@@ -150,6 +160,7 @@ const UrlStateBridge: React.FC<{
     onBoardChange,
     onSessionChange,
     onActiveUrlTargetChange,
+    suspendStateToUrlSync,
   });
   return null;
 };
@@ -398,14 +409,21 @@ export const App: React.FC<AppProps> = ({
   const { token } = theme.useToken();
   const { showWarning, showError } = useThemedMessage();
   const location = useLocation();
+  const routeNavigate = useNavigate();
   const routeParams = useParams<{
     sessionShortId?: string;
     branchShortId?: string;
     artifactShortId?: string;
   }>();
-  // Settings owns the address bar, not the surface behind its modal.
-  // Preserve the Home/board background recorded by useSettingsRoute.
-  const isRootHomePath = getShellSurfacePath(location) === '/';
+  // Settings is a routed *overlay*: `/settings/...` takes over the address
+  // bar but is supposed to leave whatever it was opened over rendered
+  // behind it. `useSettingsRoute` stashes that origin in history state, so
+  // read the surface from there — deriving it from `location.pathname`
+  // instead makes opening settings unmount Home (or the chat workspace)
+  // and swap in the board canvas first, which is visible as a flash of the
+  // "normal" view before the modal appears.
+  const surfacePath = getShellSurfacePath(location);
+  const isRootHomePath = surfacePath === '/';
   const hasExplicitEntityTarget = hasExplicitEntityRouteTarget(routeParams);
   const sessionCanvasRef = useRef<SessionCanvasRef>(null);
   const [newSessionBranchId, setNewSessionBranchId] = useState<string | null>(null);
@@ -540,9 +558,13 @@ export const App: React.FC<AppProps> = ({
     useMemo(() => makeBoardSelector(currentBoardId), [currentBoardId])
   );
   const isHomeSurface = isRootHomePath && !hasExplicitEntityTarget;
-  const headerBoardId = isHomeSurface ? '' : currentBoardId;
-  const wasHomeSurfaceRef = useRef(isHomeSurface);
-  const isLeavingHomeSurface = wasHomeSurfaceRef.current && !isHomeSurface;
+  const isChatWorkspaceSurface =
+    surfacePath === `/${CHAT_WORKSPACE_PATH_SEGMENT}` ||
+    surfacePath.startsWith(`/${CHAT_WORKSPACE_PATH_SEGMENT}/`);
+  const isHomeLikeSurface = isHomeSurface || isChatWorkspaceSurface;
+  const headerBoardId = isHomeLikeSurface ? '' : currentBoardId;
+  const wasHomeSurfaceRef = useRef(isHomeLikeSurface);
+  const isLeavingHomeSurface = wasHomeSurfaceRef.current && !isHomeLikeSurface;
   const [homeExitSidePanelDeferred, setHomeExitSidePanelDeferred] = useState(false);
   const [homeExitPanelDetailsDeferred, setHomeExitPanelDetailsDeferred] = useState(false);
 
@@ -551,8 +573,8 @@ export const App: React.FC<AppProps> = ({
       setHomeExitSidePanelDeferred(true);
       setHomeExitPanelDetailsDeferred(true);
     }
-    wasHomeSurfaceRef.current = isHomeSurface;
-  }, [isLeavingHomeSurface, isHomeSurface]);
+    wasHomeSurfaceRef.current = isHomeLikeSurface;
+  }, [isLeavingHomeSurface, isHomeLikeSurface]);
 
   useEffect(() => {
     if (!homeExitSidePanelDeferred) return;
@@ -589,13 +611,14 @@ export const App: React.FC<AppProps> = ({
   const leftPanelCollapsed =
     commentsPanelCollapsed ||
     suppressLeftPanel ||
-    isHomeSurface ||
+    isHomeLikeSurface ||
     isLeavingHomeSurface ||
     homeExitSidePanelDeferred;
   // The rail only makes sense when there's a board to open the panel onto,
   // and stays hidden entirely while a modal-first flow suppresses the panel
   // (suppressLeftPanel) — same gating the old floating knob used.
-  const leftPanelRailVisible = leftPanelCollapsed && !!currentBoard && !suppressLeftPanel;
+  const leftPanelRailVisible =
+    leftPanelCollapsed && !!currentBoard && !suppressLeftPanel && !isHomeLikeSurface;
   const leftPanelCollapsedSize = leftPanelRailVisible ? leftPanelRailSize : 0;
 
   // Ref for programmatically controlling the comments panel
@@ -630,7 +653,7 @@ export const App: React.FC<AppProps> = ({
   );
 
   const effectiveSessionPanelSize = clampPercent(
-    sessionPanelSize,
+    isChatWorkspaceSurface ? Math.max(sessionPanelSize, 68) : sessionPanelSize,
     sessionPanelMinSize,
     SESSION_PANEL_MAX_SIZE_PERCENT
   );
@@ -666,6 +689,17 @@ export const App: React.FC<AppProps> = ({
   const [branchModalTab, setBranchModalTab] = useState<BranchModalTab | undefined>(undefined);
   const [logsModalBranchId, setLogsModalBranchId] = useState<string | null>(null);
   const [themeEditorOpen, setThemeEditorOpen] = useState(false);
+  const [teammateChatsSessionId, setTeammateChatsSessionId] = useState<string | undefined>();
+  const [teammateChatsOpen, setTeammateChatsOpen] = useState(false);
+
+  const openTeammateChats = useCallback((sessionId?: string) => {
+    setTeammateChatsSessionId(sessionId);
+    setTeammateChatsOpen(true);
+  }, []);
+  const closeTeammateChats = useCallback(() => {
+    setTeammateChatsOpen(false);
+    setTeammateChatsSessionId(undefined);
+  }, []);
 
   // Initialize event stream panel state from localStorage (collapsed by default)
   const [eventStreamPanelCollapsed, setEventStreamPanelCollapsed] = useLocalStorage<boolean>(
@@ -742,6 +776,13 @@ export const App: React.FC<AppProps> = ({
   const handleHomeBranchClick = useCallback(
     (branchId: string) => navigation.goToBranch(branchId),
     [navigation]
+  );
+
+  const handleChatWorkspaceSessionClick = useCallback(
+    (sessionId: string) => {
+      routeNavigate(chatWorkspacePath(sessionId as SessionID));
+    },
+    [routeNavigate]
   );
 
   const handleHomeOpenCreateDialog = useCallback(
@@ -862,8 +903,9 @@ export const App: React.FC<AppProps> = ({
   // the panel is the same as navigating to the board we're already on.
   const handleCloseSessionPanel = useCallback(() => {
     setPendingToolChoiceBranchId(null);
-    if (currentBoardId) navigation.goToBoard(currentBoardId);
-  }, [navigation, currentBoardId]);
+    if (isChatWorkspaceSurface) routeNavigate(chatWorkspacePath());
+    else if (currentBoardId) navigation.goToBoard(currentBoardId);
+  }, [currentBoardId, isChatWorkspaceSurface, navigation, routeNavigate]);
 
   const handleCloseTerminal = () => {
     setTerminalOpen(false);
@@ -1122,16 +1164,6 @@ export const App: React.FC<AppProps> = ({
       const { sessionById, branchById } = agorStore.getState();
       const session = sessionById.get(sessionId);
 
-      // Best-effort: clear highlight flags when opening the conversation.
-      // These updates may fail silently if the user lacks write permission (e.g. read-only
-      // access via RBAC). We suppress errors to avoid spurious toasts for read-only users.
-      if (client && session?.ready_for_prompt) {
-        client
-          .service('sessions')
-          .patch(sessionId, { ready_for_prompt: false })
-          .catch(() => {});
-      }
-
       const branch = session?.branch_id ? branchById.get(session.branch_id) : undefined;
       if (client && branch?.needs_attention) {
         client
@@ -1158,6 +1190,7 @@ export const App: React.FC<AppProps> = ({
     useAgorStore(
       useMemo(() => makeSessionSelector(effectiveSelectedSessionId), [effectiveSelectedSessionId])
     ) ?? null;
+  useAcknowledgeOpenSessionAttention(client, selectedSession);
   const selectedSessionBranchId = selectedSession?.branch_id;
   const selectedSessionBranch =
     useAgorStore(
@@ -1600,7 +1633,7 @@ export const App: React.FC<AppProps> = ({
                   minSize={CANVAS_MIN_SIZE_PERCENT}
                 >
                   <div style={{ position: 'relative', overflow: 'hidden', height: '100%' }}>
-                    {isHomeSurface ? (
+                    {isHomeLikeSurface ? (
                       <HomePage
                         client={client}
                         connected={connected}
@@ -1609,6 +1642,12 @@ export const App: React.FC<AppProps> = ({
                         onBoardClick={handleHomeBoardClick}
                         onBranchClick={handleHomeBranchClick}
                         onSessionClick={handleSessionClick}
+                        onChatWorkspaceSessionClick={handleChatWorkspaceSessionClick}
+                        onShowChatSessionOnBoard={handleSessionClick}
+                        onManageTeammateChats={openTeammateChats}
+                        chatWorkspace={isChatWorkspaceSurface}
+                        activeSessionId={effectiveSelectedSessionId}
+                        onExitChatWorkspace={handleHomeClick}
                         onOpenCreateDialog={handleHomeOpenCreateDialog}
                         onOpenSettings={openSettings}
                       />
@@ -1644,7 +1683,7 @@ export const App: React.FC<AppProps> = ({
                         onCommentSelect={handleCommentSelect}
                       />
                     )}
-                    {!isHomeSurface && (
+                    {!isHomeLikeSurface && (
                       <NewSessionButton
                         onClick={() => {
                           const center = sessionCanvasRef.current?.getViewportCenter();
@@ -1785,7 +1824,13 @@ export const App: React.FC<AppProps> = ({
           onStartEnvironment={onStartEnvironment}
           onStopEnvironment={onStopEnvironment}
           onCreateUser={onCreateUser}
-          onUpdateUser={onUpdateUser}
+          onUpdateUser={
+            onUpdateUser
+              ? async (userId, updates) => {
+                  await onUpdateUser(userId, updates);
+                }
+              : undefined
+          }
           onDeleteUser={onDeleteUser}
           onCreateMCPServer={onCreateMCPServer}
           onDeleteMCPServer={onDeleteMCPServer}
@@ -1874,6 +1919,19 @@ export const App: React.FC<AppProps> = ({
           />
         )}
         <ThemeEditorModal open={themeEditorOpen} onClose={() => setThemeEditorOpen(false)} />
+        <TeammateChatCollectionsModal
+          open={teammateChatsOpen}
+          currentUser={user}
+          preselectedSessionId={teammateChatsSessionId}
+          onClose={closeTeammateChats}
+          onUpdateUser={
+            onUpdateUser
+              ? async (userId, updates) => {
+                  await onUpdateUser(userId, updates);
+                }
+              : undefined
+          }
+        />
         <SharedUserSettingsModal
           open={effectiveUserSettingsOpen}
           initialTab={userSettingsInitialTool ?? initialUserSettingsTab}

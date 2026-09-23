@@ -1,11 +1,13 @@
 import type { AgorClient, Branch, FileDetail, FileListItem } from '@agor-live/client';
-import { Alert, Space } from 'antd';
+import { CodeOutlined } from '@ant-design/icons';
+import { Alert, Button, Flex, Space, Typography } from 'antd';
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { useThemedMessage } from '../../../utils/message';
 import { CodePreviewModal } from '../../CodePreviewModal/CodePreviewModal';
 import type { FileItem } from '../../FileCollection/FileCollection';
 import { FileCollection } from '../../FileCollection/FileCollection';
 import { MarkdownModal } from '../../MarkdownModal/MarkdownModal';
+import { WorktreeFileEditor } from '../WorktreeFileEditor';
 
 const MAX_FILES = 50000;
 
@@ -23,6 +25,7 @@ const FilesTabInner: React.FC<FilesTabProps> = ({ branch, client }) => {
   const [selectedFile, setSelectedFile] = useState<FileDetail | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
 
   // Store client and branch_id in refs to keep callbacks stable
   const clientRef = useRef(client);
@@ -154,9 +157,35 @@ const FilesTabInner: React.FC<FilesTabProps> = ({ branch, client }) => {
   const isMarkdown = selectedFile?.path.endsWith('.md');
   const isTruncated = files.length >= MAX_FILES;
 
+  const handleFileSaved = useCallback((saved: FileDetail) => {
+    setFiles((current) =>
+      current.map((file) =>
+        file.path === saved.path ? { ...file, ...saved, content: undefined } : file
+      )
+    );
+  }, []);
+
   return (
     <div style={{ width: '100%', maxHeight: '70vh', overflowY: 'auto' }}>
       <Space orientation="vertical" size="large" style={{ width: '100%' }}>
+        <Flex justify="space-between" align="center" gap={16} wrap>
+          <div>
+            <Typography.Title level={5} style={{ margin: 0 }}>
+              Worktree files
+            </Typography.Title>
+            <Typography.Text type="secondary">
+              Browse previews here, or open the split-pane editor to make focused changes.
+            </Typography.Text>
+          </div>
+          <Button
+            type="primary"
+            icon={<CodeOutlined />}
+            disabled={!client || loading || files.length === 0}
+            onClick={() => setEditorOpen(true)}
+          >
+            Open workspace editor
+          </Button>
+        </Flex>
         {isTruncated && (
           <Alert
             type="warning"
@@ -201,6 +230,15 @@ const FilesTabInner: React.FC<FilesTabProps> = ({ branch, client }) => {
             loading={loadingDetail}
           />
         )}
+
+        <WorktreeFileEditor
+          branch={branch}
+          client={client}
+          files={files}
+          open={editorOpen}
+          onClose={() => setEditorOpen(false)}
+          onFileSaved={handleFileSaved}
+        />
       </Space>
     </div>
   );

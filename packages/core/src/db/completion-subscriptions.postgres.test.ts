@@ -59,7 +59,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       // this file's disposable DB. The original draft SQL remains a fixture.
       const original = await readFile(
         new URL(
-          '../../drizzle/postgres/0111_transitive_completion_subscriptions.sql',
+          '../../drizzle/postgres/9000_transitive_completion_subscriptions.sql',
           import.meta.url
         ),
         'utf8'

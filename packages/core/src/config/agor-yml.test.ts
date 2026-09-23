@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { RepoEnvironment, RepoEnvironmentConfigV1 } from '../types/branch';
-import { parseAgorYml, resolveVariant, writeAgorYml } from './agor-yml';
+import { parseAgorYml, parseLaunchJson, resolveVariant, writeAgorYml } from './agor-yml';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
 const REPO_ROOT_AGOR_YML = path.join(REPO_ROOT, '.agor.yml');
@@ -265,6 +265,32 @@ describe('parseAgorYml — misc', () => {
   });
 });
 
+describe('parseLaunchJson', () => {
+  it('prefers .agor/launch.json and accepts comments and trailing commas', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agor-launch-json-test-'));
+    try {
+      fs.mkdirSync(path.join(tmpDir, '.agor'));
+      fs.mkdirSync(path.join(tmpDir, '.vscode'));
+      fs.writeFileSync(
+        path.join(tmpDir, '.agor/launch.json'),
+        `{
+          // Agor-specific launch profile
+          "configurations": [{ "name": "Agor", "command": "pnpm dev", }],
+        }`
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, '.vscode/launch.json'),
+        JSON.stringify({ configurations: [{ name: 'VS Code', command: 'npm start' }] })
+      );
+      const result = parseLaunchJson(tmpDir);
+      expect(result?.path).toBe('.agor/launch.json');
+      expect(result?.environment.default).toBe('Agor');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('parseAgorYml — repo .agor.yml demo variants', () => {
   it('renders HA as the auth-resolved multi-tenant development profile', () => {
     const env = parseAgorYml(REPO_ROOT_AGOR_YML);
@@ -284,6 +310,11 @@ describe('parseAgorYml — repo .agor.yml demo variants', () => {
   it('forwards the RBAC fixture flag used by .env.postgres', () => {
     const compose = fs.readFileSync(path.join(REPO_ROOT, 'docker-compose.yml'), 'utf8');
     expect(compose).toMatch(/- CREATE_RBAC_TEST_USERS=\$\{CREATE_RBAC_TEST_USERS:-\}/);
+  });
+
+  it('shadows @agor/core dist inside the development container', () => {
+    const compose = fs.readFileSync(path.join(REPO_ROOT, 'docker-compose.yml'), 'utf8');
+    expect(compose).toMatch(/^ {6}- \/app\/packages\/core\/dist$/m);
   });
 
   it('makes branch SDK homes the rich/full RBAC fixture default', () => {

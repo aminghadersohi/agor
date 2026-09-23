@@ -7,7 +7,7 @@ import type {
   SpawnConfig,
 } from '@agor-live/client';
 import { getTeammateConfig, isTeammate } from '@agor-live/client';
-import { LeftOutlined, RobotOutlined } from '@ant-design/icons';
+import { BgColorsOutlined, ExpandAltOutlined, LeftOutlined } from '@ant-design/icons';
 import {
   Alert,
   Badge,
@@ -41,8 +41,74 @@ import { BranchMetadataRow } from '../BranchMetadataRow';
 import type { BranchModalTab } from '../BranchModal';
 import { CommentsPanel } from '../CommentsPanel';
 import { MarkdownRenderer } from '../MarkdownRenderer';
+import { TeammateBoardPortrait } from '../ProfileImage';
+import { TeammateStageModal } from '../TeammateStage';
 
 export type BoardTeammatePanelTab = 'teammate' | 'all-sessions' | 'all-branches' | 'comments';
+
+type TeammatePortraitSize = 'tiny' | 'small' | 'medium' | 'large' | 'fill';
+
+const TEAMMATE_PORTRAIT_SIZE_STORAGE_KEY = 'agor:teammate-panel-portrait-size';
+const TEAMMATE_PORTRAIT_DEFAULT_SIZE: TeammatePortraitSize = 'large';
+/**
+ * The server stores gallery images at two fixed widths and the larger is 768px
+ * (`PROFILE_IMAGE_LARGE_SIZE` in the daemon, which the UI cannot import), so a
+ * portrait wider than that is upscaling a variant that has no more detail.
+ */
+const TEAMMATE_PORTRAIT_FILL_MAX_PX = 768;
+
+interface TeammatePortraitDimensions {
+  primary: number;
+  alternative: number;
+  maxAlternatives?: number;
+  /** Track the panel's width, with `primary` acting as the upper bound. */
+  fill?: boolean;
+}
+
+const TEAMMATE_PORTRAIT_SIZES: Record<TeammatePortraitSize, TeammatePortraitDimensions> = {
+  // The 36px identity box the panel header carried before the portrait became a
+  // hero element. It also drops the alternates strip, which at this scale would
+  // be an 18px thumbnail overlapping a 36px avatar.
+  tiny: { primary: 36, alternative: 18, maxAlternatives: 0 },
+  small: { primary: 112, alternative: 26 },
+  medium: { primary: 200, alternative: 32 },
+  large: { primary: 300, alternative: 40 },
+  fill: { primary: TEAMMATE_PORTRAIT_FILL_MAX_PX, alternative: 44, fill: true },
+};
+const TEAMMATE_PORTRAIT_SIZE_ORDER: TeammatePortraitSize[] = [
+  'tiny',
+  'small',
+  'medium',
+  'large',
+  'fill',
+];
+const TEAMMATE_PORTRAIT_SIZE_LABELS: Record<TeammatePortraitSize, string> = {
+  tiny: 'tiny',
+  small: 'small',
+  medium: 'medium',
+  large: 'large',
+  fill: 'panel width',
+};
+
+function nextTeammatePortraitSize(current: TeammatePortraitSize): TeammatePortraitSize {
+  const currentIndex = TEAMMATE_PORTRAIT_SIZE_ORDER.indexOf(current);
+  return TEAMMATE_PORTRAIT_SIZE_ORDER[(currentIndex + 1) % TEAMMATE_PORTRAIT_SIZE_ORDER.length];
+}
+
+function initialTeammatePortraitSize(): TeammatePortraitSize {
+  try {
+    const stored = localStorage.getItem(TEAMMATE_PORTRAIT_SIZE_STORAGE_KEY);
+    // Membership in the size table rather than a literal list, so a name that
+    // was valid when it was written keeps working and only a name this build
+    // cannot render falls back.
+    if (stored !== null && Object.hasOwn(TEAMMATE_PORTRAIT_SIZES, stored)) {
+      return stored as TeammatePortraitSize;
+    }
+  } catch {
+    // Storage can be unavailable in embedded/private browsing contexts.
+  }
+  return TEAMMATE_PORTRAIT_DEFAULT_SIZE;
+}
 
 interface BoardTeammatePanelProps {
   board: Board | null;
@@ -125,6 +191,23 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
     : 'teammate';
   const [uncontrolledActiveTab, setUncontrolledActiveTab] =
     useState<BoardTeammatePanelTab>(defaultTab);
+  const [teammatePortraitSize, setTeammatePortraitSize] = useState<TeammatePortraitSize>(
+    initialTeammatePortraitSize
+  );
+  const teammatePortraitDimensions = TEAMMATE_PORTRAIT_SIZES[teammatePortraitSize];
+  const nextPortraitSize = nextTeammatePortraitSize(teammatePortraitSize);
+  const portraitSizeControlLabel = `Portrait size: ${TEAMMATE_PORTRAIT_SIZE_LABELS[teammatePortraitSize]}. Click for ${TEAMMATE_PORTRAIT_SIZE_LABELS[nextPortraitSize]}.`;
+  const cycleTeammatePortraitSize = useCallback(() => {
+    setTeammatePortraitSize((currentSize) => {
+      const nextSize = nextTeammatePortraitSize(currentSize);
+      try {
+        localStorage.setItem(TEAMMATE_PORTRAIT_SIZE_STORAGE_KEY, nextSize);
+      } catch {
+        // The in-memory choice still works when storage is unavailable.
+      }
+      return nextSize;
+    });
+  }, []);
   const isControlled = controlledActiveTab !== undefined;
   const activeTab = controlledActiveTab ?? uncontrolledActiveTab;
   const [sessionDetailsHydrated, setSessionDetailsHydrated] = useState(() => !deferSessionDetails);
@@ -215,6 +298,7 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
   }, [branchById, primaryTeammateBranch, primaryTeammateInaccessible, repoById]);
   const [selectedTeammateId, setSelectedTeammateId] = useState<string | undefined>();
   const [assigningTeammate, setAssigningTeammate] = useState(false);
+  const [stageOpen, setStageOpen] = useState(false);
 
   useEffect(() => {
     if (
@@ -283,29 +367,74 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
               borderBottom: `1px solid ${token.colorBorderSecondary}`,
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 10,
+                minWidth: 0,
+                paddingBlock: 4,
+              }}
+            >
               <div
                 style={{
-                  width: 36,
-                  height: 36,
+                  width: '100%',
+                  // At the fill step `primary` is only a cap, so reserving it
+                  // as a minimum would hold open 768px of empty header.
+                  minHeight: teammatePortraitDimensions.fill
+                    ? undefined
+                    : teammatePortraitDimensions.primary,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  flexShrink: 0,
+                  position: 'relative',
                 }}
               >
+                <Tooltip title={portraitSizeControlLabel}>
+                  <Button
+                    type="text"
+                    shape="circle"
+                    icon={<ExpandAltOutlined />}
+                    aria-label={portraitSizeControlLabel}
+                    onClick={cycleTeammatePortraitSize}
+                    style={{ position: 'absolute', insetInlineEnd: 0, top: 0, zIndex: 1 }}
+                  />
+                </Tooltip>
+                <Tooltip title="View 3D identity stage">
+                  <Button
+                    type="text"
+                    shape="circle"
+                    icon={<BgColorsOutlined />}
+                    aria-label="View 3D identity stage"
+                    onClick={() => setStageOpen(true)}
+                    style={{ position: 'absolute', insetInlineStart: 0, top: 0, zIndex: 1 }}
+                  />
+                </Tooltip>
                 {isCreating ? (
                   <Spin />
-                ) : teammateConfig?.emoji ? (
-                  <span style={{ fontSize: 30 }}>{teammateConfig.emoji}</span>
                 ) : (
-                  <RobotOutlined style={{ fontSize: 30, color: token.colorInfo }} />
+                  <TeammateBoardPortrait
+                    branch={primaryTeammateBranch}
+                    primarySize={teammatePortraitDimensions.primary}
+                    alternativeSize={teammatePortraitDimensions.alternative}
+                    maxAlternatives={teammatePortraitDimensions.maxAlternatives}
+                    fill={teammatePortraitDimensions.fill}
+                  />
                 )}
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+              <div
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  minWidth: 0,
+                  width: '100%',
+                }}
+              >
                 <Typography.Title
                   level={4}
-                  style={{ margin: 0, fontWeight: 600 }}
+                  style={{ margin: 0, fontWeight: 600, maxWidth: '100%', textAlign: 'center' }}
                   ellipsis={{
                     tooltip: teammateConfig?.displayName ?? primaryTeammateBranch.name,
                   }}
@@ -376,6 +505,11 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
               </Space>
             </div>
           )}
+          <TeammateStageModal
+            branch={primaryTeammateBranch}
+            open={stageOpen}
+            onClose={() => setStageOpen(false)}
+          />
         </div>
       );
     }

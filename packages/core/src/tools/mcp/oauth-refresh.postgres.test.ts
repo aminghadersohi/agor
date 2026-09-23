@@ -226,6 +226,38 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       };
     }
 
+    it('keeps a live peer observation timeout retryable without replaying or quarantining its grant', async () => {
+      const tokenProvider = await provider((_body, response) => {
+        response.writeHead(500);
+        response.end();
+      });
+      const bound = await seed('observation-timeout', tokenProvider.url);
+      const claimed = await runWithTenantDatabaseScope(dbA, bound.tenantId, (scoped) =>
+        new UserMCPOAuthTokenRepository(scoped, masterSecret).claimRefresh(
+          bound.userId,
+          bound.serverId,
+          initialRefreshVersion(bound)
+        )
+      );
+      expect(claimed.outcome).toBe('claimed');
+      await expect(
+        refreshAndPersistToken({
+          db: dbB,
+          tenantId: bound.tenantId,
+          userId: bound.userId,
+          mcpServerId: bound.serverId,
+          validateGrant: async () => true,
+          observedRefreshVersion: initialRefreshVersion(bound),
+          allowLocalhostHttpDevelopment: true,
+        })
+      ).rejects.toBeInstanceOf(FailedRefreshError);
+      expect(tokenProvider.calls()).toBe(0);
+      const retained = await runWithTenantDatabaseScope(dbB, bound.tenantId, (scoped) =>
+        new UserMCPOAuthTokenRepository(scoped, masterSecret).getToken(bound.userId, bound.serverId)
+      );
+      expect(retained).toMatchObject({ refresh_status: 'refreshing', refresh_generation: 1 });
+    }, 30_000); // Exercises the real 20-second observation deadline against PostgreSQL.
+
     it.each([false, true])(
       'shared refresh preserves consent or fails after concurrent hard deletion: %s',
       async (deleteDuringRefresh) => {

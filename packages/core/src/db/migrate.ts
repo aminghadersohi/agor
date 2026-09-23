@@ -118,6 +118,26 @@ const QUEUED_MESSAGES_MIGRATION_POLICY: MigrationImpactPolicy = {
   }),
 };
 
+const PROFILE_IMAGE_GALLERIES_MIGRATION_POLICY: MigrationImpactPolicy = {
+  requiresOfflineCutover: false,
+  impact: defineMigrationImpact({
+    classification: 'schema',
+    userAction: 'none',
+    rollbackCompatibility: 'compatible',
+    summary: 'Adds private profile-image galleries without requiring an offline cutover.',
+  }),
+};
+
+const PROFILE_IDENTITY_MODELS_MIGRATION_POLICY: MigrationImpactPolicy = {
+  requiresOfflineCutover: false,
+  impact: defineMigrationImpact({
+    classification: 'schema',
+    userAction: 'none',
+    rollbackCompatibility: 'compatible',
+    summary: 'Adds optional private 3D identity-model state and GLB storage to profile images.',
+  }),
+};
+
 export function createMigrationImpactRegistry(
   entries: ReadonlyArray<readonly [string, MigrationImpactPolicy]>
 ): {
@@ -224,7 +244,7 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
     },
   ],
   [
-    '0104_environment_command_discovery',
+    '9014_environment_command_discovery',
     {
       requiresOfflineCutover: false,
       impact: defineMigrationImpact({
@@ -238,6 +258,8 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
   ],
   ['0030_migrate_queued_messages', QUEUED_MESSAGES_MIGRATION_POLICY],
   ['0040_migrate_queued_messages', QUEUED_MESSAGES_MIGRATION_POLICY],
+  ['9001_profile_image_galleries', PROFILE_IMAGE_GALLERIES_MIGRATION_POLICY],
+  ['9002_profile_identity_models', PROFILE_IDENTITY_MODELS_MIGRATION_POLICY],
   ...[
     '0074_knowledge_embedding_claims',
     '0078_mcp_oauth_pending_flows',
@@ -247,6 +269,9 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
     '0098_board_branch_capability_policies',
     '0099_shared_session_prompting',
     '0100_claude_oauth_attempts',
+    '9004_board_branch_capability_policies',
+    '9008_shared_session_prompting',
+    '9012_claude_oauth_attempts',
     '9015_mcp_oauth_client_registrations',
     '9016_oauth_authority_watermark_reconciliation',
     '9017_fork_migration_collision_repair',
@@ -682,7 +707,7 @@ export async function runMigrations(
     if (
       dialect === 'sqlite' &&
       status.applied.length > 0 &&
-      status.pending.includes('0098_board_branch_capability_policies')
+      status.pending.includes('9004_board_branch_capability_policies')
     ) {
       await preflightSQLiteCapabilityPolicyOwners(db);
     }

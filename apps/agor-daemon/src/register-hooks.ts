@@ -79,6 +79,7 @@ import {
   isMCPServerUsableInSession,
 } from '@agor/core/mcp';
 import type {
+  ArtifactID,
   AuthenticatedParams,
   Board,
   BoardID,
@@ -466,6 +467,8 @@ interface RouteParams extends Params {
     messageId?: string;
     mcpId?: string;
     requestId?: string;
+    actionId?: string;
+    dataId?: string;
   };
   user?: User;
 }
@@ -2147,6 +2150,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       create: [requireMinimumRole(ROLES.MEMBER, 'create artifacts'), injectCreatedBy()],
       publishFromExecutor: [requireMinimumRole(ROLES.MEMBER, 'publish artifacts')],
       validateFromExecutor: [requireMinimumRole(ROLES.MEMBER, 'validate artifacts')],
+      createChatArtifact: [requireMinimumRole(ROLES.MEMBER, 'create chat artifacts')],
       patch: [requireMinimumRole(ROLES.MEMBER, 'update artifacts'), ensureArtifactOwnerOrAdmin()],
       remove: [requireMinimumRole(ROLES.MEMBER, 'delete artifacts'), ensureArtifactOwnerOrAdmin()],
     },
@@ -2166,6 +2170,53 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         },
       },
       { find: { role: ROLES.VIEWER, action: 'get artifact payload' } },
+      requireAuth
+    );
+
+    // Declared-binding execution. Reads and writes get separate routes so a
+    // data_id can never reach a mutating dispatch and vice versa — the id
+    // namespaces don't overlap and neither route can resolve the other's
+    // bindings. Both re-read the persisted artifact rather than trusting the
+    // caller, and both delegate to the real schedules/sessions services with
+    // the caller's own identity, so branch RBAC and the schedule
+    // run-as-creator rule apply unchanged.
+    registerTenantScopedAuthenticatedRoute(
+      app,
+      '/artifacts/:id/actions/:actionId',
+      {
+        async create(_data: unknown, _params: RouteParams) {
+          const artifactId = _params.route?.id;
+          const actionId = _params.route?.actionId;
+          if (!artifactId || !actionId) throw new Error('Artifact and action ID required');
+          const artifactsService = app.service('artifacts') as unknown as ArtifactsService;
+          return artifactsService.invokeActionBinding(
+            artifactId as ArtifactID,
+            actionId,
+            _params as never
+          );
+        },
+      },
+      { create: { role: ROLES.MEMBER, action: 'run artifact action binding' } },
+      requireAuth
+    );
+
+    registerTenantScopedAuthenticatedRoute(
+      app,
+      '/artifacts/:id/data/:dataId',
+      {
+        async find(_params: RouteParams) {
+          const artifactId = _params.route?.id;
+          const dataId = _params.route?.dataId;
+          if (!artifactId || !dataId) throw new Error('Artifact and data ID required');
+          const artifactsService = app.service('artifacts') as unknown as ArtifactsService;
+          return artifactsService.readDataBinding(
+            artifactId as ArtifactID,
+            dataId,
+            _params as never
+          );
+        },
+      },
+      { find: { role: ROLES.VIEWER, action: 'read artifact data binding' } },
       requireAuth
     );
 

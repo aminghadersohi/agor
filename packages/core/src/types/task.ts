@@ -342,7 +342,6 @@ export interface TaskMetadata {
   }>;
   /** Durable acknowledgement that the inline BTW result reached its parent transcript. */
   btw_result_delivered_at?: string;
-
   /** Durable callback-delivery audit on direct callback Tasks and digest BTW Tasks. */
   callback_delivery?: {
     source_session_id: SessionID;
@@ -389,6 +388,19 @@ export interface TaskMetadata {
   widget_id?: MessageID;
   /** User who resolved the widget; Task execution remains session-owner attributed. */
   widget_resolved_by_user_id?: UserID;
+  /**
+   * Durable restart-continuation state. A terminal source Task stays pending
+   * until its deterministic continuation Task has been admitted. The
+   * continuation carries the same source ID for transcript/audit context.
+   */
+  restart_recovery?: {
+    source_task_id: TaskID;
+    state: 'pending' | 'admitted' | 'superseded';
+    requested_at: string;
+    admitted_task_id?: TaskID;
+    admitted_at?: string;
+    disposition_reason?: 'session_advanced' | 'session_archived';
+  };
   /** Provider-event occurrence that durably admitted this gateway prompt. */
   gateway_inbound_event_id?: GatewayInboundEventID;
   /** Provider reply target captured for this gateway Task (for example an editable ack ID). */
@@ -453,6 +465,20 @@ export interface TaskMetadata {
     target_session_id: SessionID;
     requested_from_session_id: SessionID;
     requested_by_user_id: string;
+  };
+  /**
+   * Durable queue-coalescing provenance for trusted system updates.
+   *
+   * Producers set `kind` + `group_key`. When the queue head is claimed, Agor
+   * may fold a contiguous compatible prefix into that head. Folded rows remain
+   * addressable and point at the task that owns the combined model turn.
+   */
+  queue_coalescing?: {
+    kind: 'gateway' | 'callback';
+    group_key: string;
+    coalesced_into_task_id?: TaskID;
+    coalesced_task_ids?: TaskID[];
+    item_count?: number;
   };
 
   /**

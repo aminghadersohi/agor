@@ -54,6 +54,8 @@ it('saves persistent one-hop mode, preserves routing, and allows switching back 
         callback_config: {
           ...session.callback_config,
           callback_mode: 'persistent',
+          // This fork also persists standing delivery policy alongside mode.
+          delivery: 'direct',
           include_last_message: true,
           template: undefined,
         },

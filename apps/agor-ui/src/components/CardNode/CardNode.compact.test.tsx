@@ -60,8 +60,8 @@ describe('CardNode density capability', () => {
     expect(body.textContent).toContain(note);
     expect(screen.getByLabelText('Collapse card').closest('[data-card-density-body]')).toBeNull();
 
-    // MarkdownPreview measures rendered overflow in a real browser; happy-dom
-    // keeps the complete source in the DOM without manufacturing that control.
+    // MarkdownPreview keeps the full document in its bounded DOM region;
+    // real-browser coverage verifies overflow disclosure after layout.
     expect(body.textContent).toContain(description.trim());
     fireEvent.focus(body);
     expect(body.style.boxShadow).toContain('inset 0 0 0 2px');

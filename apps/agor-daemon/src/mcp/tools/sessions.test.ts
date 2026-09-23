@@ -18,6 +18,10 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { z } from 'zod';
 
+const completionMocks = vi.hoisted(() => ({
+  tasks: [] as Array<Record<string, unknown>>,
+}));
+
 const interruptMocks = vi.hoisted(() => ({
   admit: vi.fn(),
   terminate: vi.fn(),
@@ -26,7 +30,6 @@ const interruptMocks = vi.hoisted(() => ({
   previewAmendment: vi.fn(),
   applyAmendment: vi.fn(),
 }));
-
 vi.mock('../resolve-ids.js', () => ({
   resolveBoardId: async (_ctx: unknown, id: string) => id,
   resolveSessionId: async (_ctx: unknown, id: string) => id,
@@ -48,12 +51,18 @@ vi.mock('@agor/core/db', () => ({
     work: (db: unknown) => Promise<unknown>
   ) => work({}),
   BranchRepository: class FakeBranchRepository {},
+  generateId: () => '018f0000-0000-7000-8000-000000000999',
   SessionRelationshipRepository: class FakeSessionRelationshipRepository {
     create = vi.fn(async (data: Record<string, unknown>) => ({
       relationship_id: 'rel-1',
       ...data,
       created_at: new Date(0).toISOString(),
     }));
+    // Orientation asks for the current session's remote origins. These
+    // fixtures are all locally-created sessions, so there are none — the
+    // populated case is covered end-to-end against a real database in
+    // sessions.remote-origin.test.ts.
+    findRemoteParents = vi.fn(async () => []);
     get = vi.fn(async (relationshipId: string) => ({
       relationship_id: relationshipId,
       source_session_id: 'sess-source',
@@ -81,6 +90,7 @@ vi.mock('@agor/core/db', () => ({
   },
   UserApiKeysRepository: class FakeUserApiKeysRepository {},
   TaskRepository: class FakeTaskRepository {
+    findBySession = vi.fn(async () => completionMocks.tasks);
     admitInterruptCorrection = interruptMocks.admit;
     previewCoordinatorQueueBatch = interruptMocks.previewBatch;
     applyCoordinatorQueueBatch = interruptMocks.applyBatch;
@@ -560,9 +570,9 @@ describe('session transfer MCP tools', () => {
     });
     const tools = await registerAndCaptureTools(
       { app, userId: 'user-1', sessionId: 'sess-current' },
-      ['agor_session_relationships_report']
+      ['agor_session_relationships_relay']
     );
-    const schema = tools.agor_session_relationships_report.cfg.inputSchema;
+    const schema = tools.agor_session_relationships_relay.cfg.inputSchema;
     expect(
       schema?.safeParse({ destination: 'coordinator', message: 'status update' }).success
     ).toBe(true);
@@ -572,7 +582,7 @@ describe('session transfer MCP tools', () => {
       'message',
     ]);
 
-    const response = await tools.agor_session_relationships_report.cb({
+    const response = await tools.agor_session_relationships_relay.cb({
       destination: 'coordinator',
       message: 'status update',
     });
@@ -2238,6 +2248,7 @@ describe('agor_sessions_prompt (subsession mode)', () => {
 
 describe('agor_sessions_prompt task callback', () => {
   afterEach(() => {
+    completionMocks.tasks = [];
     vi.resetModules();
     vi.clearAllMocks();
   });

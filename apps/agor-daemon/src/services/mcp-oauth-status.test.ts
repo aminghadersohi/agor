@@ -30,6 +30,23 @@ function buildDeps(overrides: Partial<OAuthStatusDeps> = {}): OAuthStatusDeps {
 }
 
 describe('resolveAuthenticatedServerIds', () => {
+  it('keeps refreshable grants visible using only the lightweight presence flag', async () => {
+    const deps = buildDeps({
+      now: new Date('2026-01-02T00:00:00.000Z'),
+      listShared: async () => [
+        {
+          ...grantFor('server-shared', {
+            oauth_token_expires_at: new Date('2026-01-01T00:00:00.000Z'),
+            refresh_status: 'idle',
+          }),
+          has_refresh_token: true,
+        },
+      ],
+      findServers: async () => [serverOwnedBy('server-shared')],
+    });
+    await expect(resolveAuthenticatedServerIds(deps)).resolves.toEqual(['server-shared']);
+  });
+
   it('batch reads distinct servers and retains private-server visibility checks', async () => {
     const findServers = vi.fn(async () => [
       serverOwnedBy('visible'),

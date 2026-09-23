@@ -25,7 +25,7 @@
  */
 
 import type { BoardID, SessionID } from '@agor-live/client';
-import { boardPath, ENTITY_PATH_SEGMENTS, sessionPath } from '@agor-live/client';
+import { boardPath, chatWorkspacePath, ENTITY_PATH_SEGMENTS, sessionPath } from '@agor-live/client';
 import { useCallback, useEffect, useRef } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useRecenterMap } from '../contexts/CanvasNavigationContext';
@@ -70,6 +70,23 @@ export interface UseUrlStateOptions {
    *  artifact). Null when the URL has no such target. Fires only on
    *  transitions to keep downstream React state updates idempotent. */
   onActiveUrlTargetChange?: (target: ActiveUrlTarget | null) => void;
+  /** Suspend the state→URL self-heal while the consumer has a deliberate
+   *  navigation in flight.
+   *
+   *  React Router commits `navigate()` inside a transition, so a plain
+   *  `setState` made alongside it renders once at the OLD pathname. If that
+   *  render also changes `currentBoardId` / `currentSessionId` — which is
+   *  exactly what App's "render Home immediately" flag does — the self-heal
+   *  reads the transitional pair as authoritative and `replace()`s the URL,
+   *  cancelling the navigation that was already on its way. The consumer
+   *  owns that knowledge, so it hands it down rather than us guessing. */
+  suspendStateToUrlSync?: boolean;
+}
+
+/** Normalize a path to its trailing-slash form so comparisons ignore the
+ *  optional trailing slash. Mirrors `useAppNavigation`'s `canonical`. */
+function withTrailingSlash(path: string): string {
+  return `${path.replace(/\/$/, '')}/`;
 }
 
 /** Slug lookup helper — the core `boardPath` builder takes a slug
@@ -106,6 +123,7 @@ export function useUrlState(options: UseUrlStateOptions) {
     onBoardChange,
     onSessionChange,
     onActiveUrlTargetChange,
+    suspendStateToUrlSync = false,
   } = options;
 
   const navigate = useNavigate();
@@ -184,6 +202,20 @@ export function useUrlState(options: UseUrlStateOptions) {
    *  (`/w/<…>/` or `/a/<…>/`) so share URLs persist in the address bar. */
   const updateUrlFromState = useCallback(() => {
     if (syncingRef.current) return;
+
+    // Sticky surface: `/chats/<short>/` is the chat workspace's own
+    // spelling of the open session — same (board, session) pair as
+    // `/s/<short>/`, different chrome — and `/chats/` with no session is
+    // a surface in its own right, the way `/` is. `buildUrl` can express
+    // neither, so without this the self-heal rewrites the workspace URL
+    // the first time anything nudges this effect (a board patch is
+    // enough) and ejects the user from the chat rail mid-conversation.
+    if (
+      withTrailingSlash(location.pathname) ===
+      withTrailingSlash(chatWorkspacePath(currentSessionId as SessionID | null))
+    ) {
+      return;
+    }
 
     // Sticky deep links: don't overwrite `/w/<…>/` or `/a/<…>/` when
     // no session is open. State (boardId, sessionId=null) can't
@@ -288,7 +320,14 @@ export function useUrlState(options: UseUrlStateOptions) {
     // paths also have no params, but should canonicalize to Home instead of
     // clearing board state and rendering a no-board canvas at that path.
     if (!urlBoardParam && !urlSessionShortId && !urlBranchShortId && !urlArtifactShortId) {
-      const isHomePath = location.pathname === '/' || location.pathname === '';
+      // `/chats/` is a real parameterless surface (the chat rail with no
+      // conversation open), not an unknown path — closing the session
+      // panel inside the workspace lands here deliberately. Canonicalizing
+      // it to `/` would bounce the user out to Home every time.
+      const isHomePath =
+        location.pathname === '/' ||
+        location.pathname === '' ||
+        withTrailingSlash(location.pathname) === chatWorkspacePath();
       if (!isSettingsRoute && !isHomePath) {
         syncingRef.current = true;
         navigate('/', { replace: true });
@@ -476,6 +515,9 @@ export function useUrlState(options: UseUrlStateOptions) {
   useEffect(() => {
     if (syncingRef.current) return;
     if (isSettingsRoute) return;
+    // A deliberate navigation is mid-flight and our (board, session) pair
+    // is transitional — see `suspendStateToUrlSync`.
+    if (suspendStateToUrlSync) return;
 
     // Unknown non-root paths have no entity params but are not the Home
     // route. The URL→state effect canonicalizes them to `/`; do not let
@@ -507,6 +549,7 @@ export function useUrlState(options: UseUrlStateOptions) {
     urlBranchShortId,
     urlArtifactShortId,
     isSettingsRoute,
+    suspendStateToUrlSync,
     updateUrlFromState,
     location.pathname,
   ]);

@@ -16,9 +16,13 @@ import { isDarkTheme } from '../../utils/theme';
 import { BoardTile, getBoardEmoji } from '../BoardTile';
 import { HomeActivitySection } from './HomeActivitySection';
 import { HomeBoardsSection } from './HomeBoardsSection';
+import { HomeChatWorkspaceNav } from './HomeChatWorkspaceNav';
 import { HomeKnowledgeSection } from './HomeKnowledgeSection';
+import { HomePinnedArtifactsSection } from './HomePinnedArtifactsSection';
+import { HomeSchedulesSection } from './HomeSchedulesSection';
 import { HomeSessionsSection } from './HomeSessionsSection';
 import { HomeStatsBar } from './HomeStatsBar';
+import { HomeTeammateChatsSection } from './HomeTeammateChatsSection';
 import { glassCardStyle } from './homeStyles';
 import { JumpBackInSection } from './JumpBackInSection';
 import { OnboardingCard } from './OnboardingCard';
@@ -247,7 +251,7 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
           value: b.board_id,
           label: (
             <Space size={8}>
-              <BoardTile emoji={getBoardEmoji(b, branchById)} size={20} />
+              <BoardTile board={b} emoji={getBoardEmoji(b, branchById)} size={20} />
               <span>{b.name}</span>
             </Space>
           ),
@@ -272,6 +276,20 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
     setCreateOpen(false);
     props.onOpenCreateDialog(createType, selectedBoardId);
   }, [props.onOpenCreateDialog, createType, selectedBoardId]);
+
+  if (props.chatWorkspace) {
+    return (
+      <HomeChatWorkspaceNav
+        currentUserId={props.currentUserId}
+        activeSessionId={props.activeSessionId}
+        onSessionClick={props.onChatWorkspaceSessionClick}
+        onManage={props.onManageTeammateChats}
+        onExit={props.onExitChatWorkspace ?? (() => {})}
+        onShowOnBoard={props.onShowChatSessionOnBoard ?? props.onSessionClick}
+        onBoardClick={props.onBoardClick}
+      />
+    );
+  }
 
   return (
     <>
@@ -347,16 +365,35 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
               {/* Jump back in — awaiting sessions (renders nothing when none) */}
               <JumpBackInSection
                 currentUserId={props.currentUserId}
-                onSessionClick={props.onSessionClick}
+                onSessionClick={props.onChatWorkspaceSessionClick}
               />
 
               {/* Workspace stats */}
               <HomeStatsBar currentUserId={props.currentUserId} />
 
+              <HomeTeammateChatsSection
+                currentUserId={props.currentUserId}
+                onSessionClick={props.onChatWorkspaceSessionClick}
+                onManageTeammateChats={props.onManageTeammateChats}
+              />
+
+              <HomePinnedArtifactsSection
+                client={props.client}
+                currentUserId={props.currentUserId}
+                onBoardClick={props.onBoardClick}
+                onSessionClick={props.onChatWorkspaceSessionClick}
+              />
+
               {/* My Sessions — flex: 1 fills remaining viewport height */}
               <HomeSessionsSection
                 currentUserId={props.currentUserId}
                 onSessionClick={props.onSessionClick}
+              />
+
+              <HomeSchedulesSection
+                client={props.client}
+                currentUserId={props.currentUserId}
+                onBranchClick={props.onBranchClick}
               />
 
               {/* Boards grid */}

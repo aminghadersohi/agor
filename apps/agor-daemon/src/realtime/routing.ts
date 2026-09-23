@@ -8,6 +8,7 @@ import {
   type PresenceLeftEvent,
   type PresenceUpdatedEvent,
   type RepoCloneError,
+  type SessionAttentionAcknowledgement,
 } from '@agor/core/types';
 
 /**
@@ -159,6 +160,7 @@ interface HaNativeSocketPayloads {
    * signal must not disclose which branch/server/credential changed.
    */
   'marketplace:invalidated': Record<string, never>;
+  'session-attention:acknowledged': SessionAttentionAcknowledgement;
   /** Caller-private Marketplace freshness hint; recipients retain stale data while re-reading. */
   'marketplace:changed': Record<string, never>;
 }
@@ -170,6 +172,7 @@ export const HA_NATIVE_SOCKET_EVENT_INVENTORY = [
   'oauth:completed',
   'oauth:disconnected',
   'marketplace:invalidated',
+  'session-attention:acknowledged',
   'marketplace:changed',
 ] as const satisfies readonly (keyof HaNativeSocketPayloads)[];
 

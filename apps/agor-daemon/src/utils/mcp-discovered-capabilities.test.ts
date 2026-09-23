@@ -209,6 +209,42 @@ describe('discovery authority/configuration CAS (SQLite)', () => {
     );
   });
 
+  it('persists the same bounded representation returned to Test Authentication', async () => {
+    const snapshot = await captureSnapshot();
+    const providerDescription = `Fictional mail tool ${'📨'.repeat(40_000)}`;
+    const result = await runWithTenantDatabaseTransaction(db, undefined, (scopedDb) =>
+      persistDiscoveredMCPCapabilities(
+        scopedDb,
+        undefined,
+        snapshot,
+        {
+          tools: [
+            {
+              name: 'fictional_mail_search',
+              description: providerDescription,
+              input_schema: { type: 'object' },
+            },
+          ],
+          resources: [],
+          prompts: [],
+        },
+        masterSecret
+      )
+    );
+
+    expect(result.truncatedDescriptions).toBe(1);
+    const description = result.capabilities.tools[0]?.description ?? '';
+    expect(description.length).toBeLessThanOrEqual(MAX_MCP_CAPABILITY_DESCRIPTION_LENGTH);
+    expect(description.endsWith(MCP_DESCRIPTION_TRUNCATION_SUFFIX)).toBe(true);
+    await expect(new MCPServerRepository(db).findById(server.mcp_server_id)).resolves.toMatchObject(
+      {
+        tools: result.capabilities.tools,
+        resources: [],
+        prompts: [],
+      }
+    );
+  });
+
   it('fails closed on oversized or malicious provider discovery before persistence', async () => {
     for (const malicious of [
       {

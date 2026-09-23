@@ -10,6 +10,7 @@ vi.mock('../JSONEditor', () => ({
   JSONEditor: () => <textarea aria-label="Custom Context (JSON)" />,
   validateJSON: () => Promise.resolve(),
 }));
+vi.mock('../ProfileImage', () => ({ ProfileImageGalleryEditor: () => null }));
 vi.mock('../EmojiPickerInput/AgorEmojiPickerInner', () => ({
   default: ({ onEmojiClick }: { onEmojiClick: (data: { emoji: string }) => void }) => (
     <button

@@ -8,7 +8,7 @@
  *   channel that carries a meaning they chose
  * - CardType emoji + title (with optional URL link)
  * - Pin icon when in a zone (click to unpin)
- * - Description (markdown, collapsed after ~3 lines)
+ * - Description (rendered as Markdown, expandable inside the bounded body)
  * - Note (complete inside the bounded keyboard-scrollable body)
  */
 
@@ -237,7 +237,7 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
             boxShadow: bodyFocused ? `inset 0 0 0 2px ${token.colorPrimary}` : 'none',
           }}
         >
-          {/* Markdown preview/expansion stays inside the bounded body. */}
+          {/* Markdown disclosure remains inside the bounded density body. */}
           {card.description && (
             <div
               style={{

@@ -14,6 +14,7 @@ import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { MCPCatalogModalProvider } from '../../contexts/MCPCatalogModalContext';
 import { ThemeProvider } from '../../contexts/ThemeContext';
 import { AppHeader } from '../AppHeader';
+import { ProfileImageNetworkProvider } from '../ProfileImage/ProfileImageNetworkContext';
 import { SessionMcpFooterControl } from '../SessionPanel/SessionMcpFooterControl';
 import { MCPCatalogModalHost } from './MCPCatalogModalHost';
 
@@ -179,47 +180,49 @@ export function CatalogHarness({
   children?: ReactNode;
 }) {
   return (
-    <ThemeProvider>
-      <ConfigProvider>
-        <App>
-          <MemoryRouter initialEntries={[path]}>
-            <ConnectionProvider
-              value={{
-                connected: true,
-                connecting: false,
-                authGeneration: 1,
-                outOfSync: false,
-                capturedSha: null,
-                currentSha: null,
-              }}
-            >
-              <MCPCatalogModalProvider key={user.user_id}>
-                <AppHeader user={user} />
-                <div style={{ position: 'fixed', bottom: 10, left: 10 }}>
-                  <SessionMcpFooterControl
+    <ProfileImageNetworkProvider value={false}>
+      <ThemeProvider>
+        <ConfigProvider>
+          <App>
+            <MemoryRouter initialEntries={[path]}>
+              <ConnectionProvider
+                value={{
+                  connected: true,
+                  connecting: false,
+                  authGeneration: 1,
+                  outOfSync: false,
+                  capturedSha: null,
+                  currentSha: null,
+                }}
+              >
+                <MCPCatalogModalProvider key={user.user_id}>
+                  <AppHeader user={user} />
+                  <div style={{ position: 'fixed', bottom: 10, left: 10 }}>
+                    <SessionMcpFooterControl
+                      client={client}
+                      currentUserId={user.user_id}
+                      sessionId="current-session"
+                      sessionMcpServerIds={[]}
+                      mcpServerById={new Map()}
+                      userAuthenticatedMcpServerIds={new Set()}
+                    />
+                  </div>
+                  <MCPCatalogModalHost
                     client={client}
-                    currentUserId={user.user_id}
-                    sessionId="current-session"
-                    sessionMcpServerIds={[]}
-                    mcpServerById={new Map()}
-                    userAuthenticatedMcpServerIds={new Set()}
+                    connected
+                    connecting={false}
+                    authGeneration={1}
+                    currentUser={user}
                   />
-                </div>
-                <MCPCatalogModalHost
-                  client={client}
-                  connected
-                  connecting={false}
-                  authGeneration={1}
-                  currentUser={user}
-                />
-                {children}
-                <Location />
-              </MCPCatalogModalProvider>
-            </ConnectionProvider>
-          </MemoryRouter>
-        </App>
-      </ConfigProvider>
-    </ThemeProvider>
+                  {children}
+                  <Location />
+                </MCPCatalogModalProvider>
+              </ConnectionProvider>
+            </MemoryRouter>
+          </App>
+        </ConfigProvider>
+      </ThemeProvider>
+    </ProfileImageNetworkProvider>
   );
 }
 

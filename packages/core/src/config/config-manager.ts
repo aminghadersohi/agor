@@ -38,6 +38,7 @@ import {
   assertPowerManagementActivationSupported,
   resolvePowerManagementConfig,
 } from './power-management';
+import { resolveRestartRecoverySettings } from './restart-recovery';
 import {
   type AgorApmSettings,
   type AgorConfig,
@@ -706,6 +707,7 @@ function validateConfig(config: AgorConfig): void {
     'host_ip_address',
     'public_url',
     'base_url',
+    'mcp_oauth_callback_mode',
     'jwtSecret',
     'masterSecret',
     'mcpEnabled',
@@ -719,6 +721,13 @@ function validateConfig(config: AgorConfig): void {
     ...RETIRED_CONFIG_KEYS.daemon,
   ]);
   only(config.ui, 'ui', ['base_url', 'port', 'host']);
+  if (
+    config.daemon?.mcp_oauth_callback_mode !== undefined &&
+    config.daemon.mcp_oauth_callback_mode !== 'loopback' &&
+    config.daemon.mcp_oauth_callback_mode !== 'public'
+  ) {
+    throw new Error('Config error: daemon.mcp_oauth_callback_mode must be loopback or public');
+  }
   only(config.uploads, 'uploads', ['location', 'max_age_days', 'max_file_size_mb']);
   only(config.external_launch, 'external_launch', [
     'enabled',
@@ -838,6 +847,7 @@ function validateConfig(config: AgorConfig): void {
     ]);
   }
   only(config.execution, 'execution', [
+    'restart_recovery',
     'power_management',
     'executor_heartbeat',
     'executor_response',
@@ -863,6 +873,13 @@ function validateConfig(config: AgorConfig): void {
     'branch_storage',
     'sandbox',
   ]);
+  only(config.execution?.restart_recovery, 'execution.restart_recovery', [
+    'enabled',
+    'delay_ms',
+    'max_tasks_per_start',
+    'resume_after_crash',
+  ]);
+  resolveRestartRecoverySettings(config.execution);
   only(config.execution?.power_management, 'execution.power_management', [
     'mode',
     'provider',
@@ -1470,6 +1487,7 @@ export function getDefaultConfig(): AgorConfig {
       port: DAEMON.DEFAULT_PORT,
       host: DAEMON.DEFAULT_HOST,
       mcpEnabled: true, // Default: Enable built-in MCP server
+      mcp_oauth_callback_mode: 'loopback',
     },
     ui: {
       port: 5173,

@@ -39,6 +39,17 @@ describe('buildWorktreeAddArgs', () => {
     expect(args).toEqual(['worktree', 'add', '-b', 'feature-x', '--', PATH, 'main']);
   });
 
+  it('preserves a concrete remote base ref selected by the resolver', () => {
+    const args = buildWorktreeAddArgs({
+      branchPath: PATH,
+      ref: 'feature-x',
+      createBranch: true,
+      sourceBranch: 'upstream/release',
+      refType: 'branch',
+    });
+    expect(args).toEqual(['worktree', 'add', '-b', 'feature-x', '--', PATH, 'upstream/release']);
+  });
+
   it('checks out an EXISTING ref without -b (no double-create)', () => {
     // createBranch=false → attach the worktree to the existing ref. Passing
     // `-b` here is exactly the "ref already exists, git exits 1" bug.

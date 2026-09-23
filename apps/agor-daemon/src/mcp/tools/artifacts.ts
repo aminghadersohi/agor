@@ -15,6 +15,9 @@ import { BranchRepository } from '@agor/core/db';
 import type {
   AgorGrants,
   AgorRuntimeConfig,
+  ArtifactActionEffect,
+  ArtifactDataSource,
+  ArtifactInteractionConfig,
   BoardID,
   BranchID,
   SandpackConfig,
@@ -28,7 +31,13 @@ import { z } from 'zod';
 import type { ArtifactParams, ArtifactsService } from '../../services/artifacts.js';
 import { hasBranchPermission, isSuperAdmin } from '../../utils/branch-authorization.js';
 import { emitServiceEvent } from '../../utils/emit-service-event.js';
-import { resolveArtifactId, resolveBoardId, resolveBranchId } from '../resolve-ids.js';
+import {
+  resolveArtifactId,
+  resolveBoardId,
+  resolveBranchId,
+  resolveScheduleId,
+  resolveSessionId,
+} from '../resolve-ids.js';
 import {
   mcpLimit,
   mcpOffset,
@@ -101,6 +110,164 @@ const AgorRuntimeSchema = z
       ),
   })
   .optional();
+
+const ArtifactInteractionConfigSchema = z
+  .object({
+    actions: z
+      .array(
+        z.object({
+          id: mcpRequiredString(
+            'interactionConfig.actions[].id',
+            'Stable identifier used by window.agor.runAction(id)'
+          ),
+          label: mcpRequiredString('interactionConfig.actions[].label', 'Button label'),
+          scheduleId: mcpRequiredId(
+            'interactionConfig.actions[].scheduleId',
+            'Schedule',
+            'Schedule owning the prompt, model, tools, and execution configuration'
+          ),
+          effect: z
+            .enum(['run', 'enable', 'disable'])
+            .optional()
+            .describe(
+              "What the button does to the schedule. 'run' (default) triggers a one-off run; 'enable'/'disable' arm or disarm it. Pinned at publish time — the artifact cannot choose at runtime, so a toggle is two declared actions."
+            ),
+          description: mcpOptionalString(
+            'interactionConfig.actions[].description',
+            'Optional action help text'
+          ),
+          confirm: z.boolean().optional().describe('Ask for confirmation before running'),
+        })
+      )
+      .max(12)
+      .optional(),
+    data: z
+      .array(
+        z.object({
+          id: mcpRequiredString(
+            'interactionConfig.data[].id',
+            'Stable identifier used by window.agor.fetchData(id)'
+          ),
+          label: mcpRequiredString('interactionConfig.data[].label', 'Human-readable label'),
+          kind: z
+            .enum(['schedule_status', 'session_status'])
+            .describe('Which read-only projection this binding returns'),
+          scheduleId: mcpOptionalId(
+            'interactionConfig.data[].scheduleId',
+            'Schedule',
+            "Schedule to read. Required when kind is 'schedule_status'"
+          ),
+          sessionId: mcpOptionalId(
+            'interactionConfig.data[].sessionId',
+            'Session',
+            "Session to read. Required when kind is 'session_status'"
+          ),
+          description: mcpOptionalString(
+            'interactionConfig.data[].description',
+            'Optional help text'
+          ),
+        })
+      )
+      .max(12)
+      .optional(),
+    chats: z
+      .array(
+        z.object({
+          id: mcpRequiredString(
+            'interactionConfig.chats[].id',
+            'Stable identifier used by window.agor.openChat(id)'
+          ),
+          label: mcpRequiredString('interactionConfig.chats[].label', 'Human-readable label'),
+          sessionId: mcpRequiredId(
+            'interactionConfig.chats[].sessionId',
+            'Session',
+            'Session this entry opens. Repoint it with agor_artifacts_update rather than republishing code.'
+          ),
+          description: mcpOptionalString(
+            'interactionConfig.chats[].description',
+            'Optional help text'
+          ),
+        })
+      )
+      .max(8)
+      .optional(),
+  })
+  .optional();
+
+async function resolveInteractionConfig(
+  ctx: McpContext,
+  input: z.infer<NonNullable<typeof ArtifactInteractionConfigSchema>> | undefined
+): Promise<ArtifactInteractionConfig | undefined> {
+  if (!input) return undefined;
+  const actions = await Promise.all(
+    (input.actions ?? []).map(async (action) => {
+      const scheduleId = await resolveScheduleId(ctx, action.scheduleId);
+      // The wire form is a friendly enum; persistence is the pinned effect
+      // union. `enabled` is fixed here and never reaches the artifact.
+      const effect: ArtifactActionEffect =
+        action.effect === 'enable'
+          ? { kind: 'schedule_set_enabled', schedule_id: scheduleId, enabled: true }
+          : action.effect === 'disable'
+            ? { kind: 'schedule_set_enabled', schedule_id: scheduleId, enabled: false }
+            : { kind: 'schedule_run', schedule_id: scheduleId };
+      return {
+        id: action.id,
+        label: action.label,
+        effect,
+        ...(action.description ? { description: action.description } : {}),
+        ...(action.confirm ? { confirm: true } : {}),
+      };
+    })
+  );
+
+  const data = await Promise.all(
+    (input.data ?? []).map(async (binding) => {
+      let source: ArtifactDataSource;
+      if (binding.kind === 'schedule_status') {
+        if (!binding.scheduleId) {
+          throw new Error(
+            `interactionConfig.data[].scheduleId is required when kind is "schedule_status" (id: ${binding.id})`
+          );
+        }
+        source = {
+          kind: 'schedule_status',
+          schedule_id: await resolveScheduleId(ctx, binding.scheduleId),
+        };
+      } else {
+        if (!binding.sessionId) {
+          throw new Error(
+            `interactionConfig.data[].sessionId is required when kind is "session_status" (id: ${binding.id})`
+          );
+        }
+        source = {
+          kind: 'session_status',
+          session_id: await resolveSessionId(ctx, binding.sessionId),
+        };
+      }
+      return {
+        id: binding.id,
+        label: binding.label,
+        source,
+        ...(binding.description ? { description: binding.description } : {}),
+      };
+    })
+  );
+
+  const chats = await Promise.all(
+    (input.chats ?? []).map(async (chat) => ({
+      id: chat.id,
+      label: chat.label,
+      session_id: await resolveSessionId(ctx, chat.sessionId),
+      ...(chat.description ? { description: chat.description } : {}),
+    }))
+  );
+
+  return {
+    ...(actions.length > 0 ? { actions } : {}),
+    ...(data.length > 0 ? { data } : {}),
+    ...(chats.length > 0 ? { chats } : {}),
+  };
+}
 
 export function registerArtifactTools(server: McpServer, ctx: McpContext): void {
   // Tool 1: agor_artifacts_publish
@@ -185,6 +352,9 @@ IMPORTANT:
         agorRuntime: AgorRuntimeSchema.describe(
           'Controls injection of the daemon-side `agor-runtime.js` (which powers agent DOM introspection via agor_artifacts_query_dom). Default: enabled.'
         ),
+        interactionConfig: ArtifactInteractionConfigSchema.describe(
+          'Optional safe runtime bridge. Actions bind to existing schedules; chat opens one canonical session.'
+        ),
         x: mcpOptionalNumber('x', 'X position on board (default: 0, only used on create)'),
         y: mcpOptionalNumber('y', 'Y position on board (default: 0, only used on create)'),
         width: mcpOptionalNumber('width', 'Width in pixels (default: 600, only used on create)'),
@@ -229,6 +399,7 @@ IMPORTANT:
           required_env_vars: args.requiredEnvVars,
           agor_grants: args.agorGrants as AgorGrants | undefined,
           agor_runtime: args.agorRuntime as AgorRuntimeConfig | undefined,
+          interaction_config: await resolveInteractionConfig(ctx, args.interactionConfig),
           x: args.x,
           y: args.y,
           width: args.width,
@@ -274,6 +445,42 @@ IMPORTANT:
           ? { publish_validation: { ...publishValidation, diagnostic: publishDiagnostic } }
           : {}),
         instructions: `${baseInstructions}${validationInstructions}`,
+      });
+    }
+  );
+
+  server.registerTool(
+    'agor_artifacts_create_chat',
+    {
+      description:
+        'Create a private chat artifact on the canonical session’s board. The artifact stores the session UUID (not its mutable name) and opens the normal live session surface with full controls.',
+      inputSchema: z.object({
+        sessionId: mcpRequiredId('sessionId', 'Session', 'Session to expose as a chat artifact'),
+        x: mcpOptionalNumber('x', 'X position on the board'),
+        y: mcpOptionalNumber('y', 'Y position on the board'),
+        width: mcpOptionalNumber('width', 'Artifact width'),
+        height: mcpOptionalNumber('height', 'Artifact height'),
+      }),
+    },
+    async (args) => {
+      const service = ctx.app.service('artifacts') as unknown as ArtifactsService;
+      const sessionId = await resolveSessionId(ctx, args.sessionId);
+      const artifact = await runWithMcpTenantDatabaseScope(ctx, () =>
+        service.createChatArtifact(
+          {
+            session_id: sessionId,
+            x: args.x,
+            y: args.y,
+            width: args.width,
+            height: args.height,
+          },
+          ctx.baseServiceParams as ArtifactParams
+        )
+      );
+      const { files: _files, ...summary } = artifact;
+      return textResult({
+        artifact: summary,
+        instructions: 'Private chat artifact created on the session branch board.',
       });
     }
   );
@@ -510,6 +717,9 @@ Caller must own the artifact (or be an admin).`,
         agorRuntime: AgorRuntimeSchema.describe(
           "Replace the artifact's agor_runtime config (controls agor-runtime.js injection)."
         ),
+        interactionConfig: ArtifactInteractionConfigSchema.describe(
+          "Replace the artifact's declared action buttons and/or chat session binding."
+        ),
         waitForStatus: z
           .boolean()
           .optional()
@@ -528,6 +738,7 @@ Caller must own the artifact (or be an admin).`,
 
       const boardIdInput = coerceString(args.boardId);
       const resolvedBoardId = boardIdInput ? await resolveBoardId(ctx, boardIdInput) : undefined;
+      const interactionConfig = await resolveInteractionConfig(ctx, args.interactionConfig);
 
       const updated = await runWithMcpTenantDatabaseScope(ctx, () =>
         service.updateMetadata(
@@ -546,6 +757,7 @@ Caller must own the artifact (or be an admin).`,
             required_env_vars: args.requiredEnvVars,
             agor_grants: args.agorGrants as AgorGrants | undefined,
             agor_runtime: args.agorRuntime as AgorRuntimeConfig | undefined,
+            interaction_config: interactionConfig,
           },
           ctx.userId,
           ctx.authenticatedUser.role as UserRole

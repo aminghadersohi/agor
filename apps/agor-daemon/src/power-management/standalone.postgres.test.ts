@@ -31,7 +31,11 @@ import {
 import { type Schedule, type SessionID, TaskStatus } from '@agor/core/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { SchedulerService } from '../services/scheduler.js';
-import { prepareTaskRuntimeStartup, type StartupContext } from '../startup.js';
+import {
+  createEnvironmentHealthMonitor,
+  prepareTaskRuntimeStartup,
+  type StartupContext,
+} from '../startup.js';
 import { PowerPolicyController } from './controller.js';
 
 const url = process.env.AGOR_TEST_POSTGRES_URL;
@@ -233,6 +237,27 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       ).resolves.toBeUndefined();
     });
 
+    it('admits the local environment monitor only while the real standalone PostgreSQL owner is healthy', async () => {
+      const s = await seed();
+      const owner = await acquire(s.tenant);
+      const c = await controller(s.tenant, owner);
+      const ctx = {
+        config: {
+          database: { dialect: 'postgresql' },
+          deployment: { mode: 'standalone', standalone_power_host_id: HOST_A },
+          multi_tenancy: { mode: 'static', static_tenant_id: s.tenant },
+        },
+        db,
+        taskRuntimePolicy: 'shared_postgres',
+        environmentHealthMonitorPolicy: 'standalone',
+        powerPolicyController: c,
+      } as StartupContext;
+      const monitor = { initialize: async () => undefined, cleanup: () => undefined };
+      expect(createEnvironmentHealthMonitor(ctx, () => monitor)).toBe(monitor);
+      await owner.close();
+      expect(createEnvironmentHealthMonitor(ctx, () => monitor)).toBeNull();
+    });
+
     it('binds checks to the actual scoped transaction, not a raw pool handle', async () => {
       const s = await seed();
       const owner = await acquire(s.tenant);
@@ -288,7 +313,12 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
         );
         const binding = JSON.parse(raw!);
         // The NOSUPERUSER role may terminate its own disposable backend only.
-        await tx.execute(sql`SELECT pg_terminate_backend(${binding.pid})`);
+        // A zero/default timeout acknowledges the signal, not termination. Wait
+        // for server acknowledgement before asserting admission after loss.
+        const terminated = rawRows<{ terminated: boolean }>(
+          await tx.execute(sql`SELECT pg_terminate_backend(${binding.pid}, 5000) AS terminated`)
+        );
+        expect(terminated).toEqual([{ terminated: true }]);
       });
       await expect(claim(s, c)).rejects.toThrow(/ownership unavailable/);
       expect(c.status()).toMatchObject({ mode: 'off', ownership: 'lost', held: false });
@@ -451,7 +481,10 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
         const binding = JSON.parse(
           (await new AppVariableRepository(tx).getPlain(OWNER_NAMESPACE, OWNER_KEY))!
         );
-        await tx.execute(sql`SELECT pg_terminate_backend(${binding.pid})`);
+        const terminated = rawRows<{ terminated: boolean }>(
+          await tx.execute(sql`SELECT pg_terminate_backend(${binding.pid}, 5000) AS terminated`)
+        );
+        expect(terminated).toEqual([{ terminated: true }]);
       });
       await expect(tick(now + 3600000)).rejects.toThrow(/ownership unavailable/);
       expect(

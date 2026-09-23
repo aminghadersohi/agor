@@ -510,6 +510,83 @@ function isExecutorResultStatus(status: Task['status']): boolean {
   );
 }
 
+const DEFAULT_MAX_COALESCED_UPDATES = 8;
+const MIN_MAX_COALESCED_UPDATES = 2;
+const MAX_MAX_COALESCED_UPDATES = 25;
+
+function resolvedMaxCoalescedUpdates(value: number | undefined): number {
+  if (!Number.isFinite(value)) return DEFAULT_MAX_COALESCED_UPDATES;
+  return Math.min(
+    MAX_MAX_COALESCED_UPDATES,
+    Math.max(MIN_MAX_COALESCED_UPDATES, Math.floor(value!))
+  );
+}
+
+function isCoalescibleSystemUpdate(task: Task): boolean {
+  const config = task.metadata?.queue_coalescing;
+  return (
+    task.status === TaskStatus.QUEUED &&
+    !!config &&
+    !config.coalesced_into_task_id &&
+    !task.metadata?.completion_callback &&
+    !task.metadata?.widget_id
+  );
+}
+
+function compatibleCoalescedPrefix(tasksToConsider: Task[], maximum: number): Task[] {
+  const head = tasksToConsider[0];
+  if (!head || !isCoalescibleSystemUpdate(head)) return [];
+  const headConfig = head.metadata!.queue_coalescing!;
+  const compatible: Task[] = [];
+
+  for (const candidate of tasksToConsider.slice(0, maximum)) {
+    const config = candidate.metadata?.queue_coalescing;
+    if (
+      !isCoalescibleSystemUpdate(candidate) ||
+      candidate.created_by !== head.created_by ||
+      config?.group_key !== headConfig.group_key
+    ) {
+      break;
+    }
+    compatible.push(candidate);
+  }
+
+  return compatible.length > 1 ? compatible : [];
+}
+
+/**
+ * Render one bounded, ordered prompt for a compatible queued-update prefix.
+ * Exact duplicate bodies are represented once; their arrival count is kept.
+ */
+export function renderCoalescedSystemUpdatePrompt(batch: Task[]): string {
+  const unique: Array<{ task: Task; count: number }> = [];
+  const byBody = new Map<string, { task: Task; count: number }>();
+  for (const task of batch) {
+    const existing = byBody.get(task.full_prompt);
+    if (existing) {
+      existing.count += 1;
+      continue;
+    }
+    const item = { task, count: 1 };
+    unique.push(item);
+    byBody.set(task.full_prompt, item);
+  }
+
+  const heading =
+    `Agor queued ${batch.length} system updates while this session was busy. ` +
+    `Handle them together in arrival order and avoid repeating completed work.`;
+  const dedupeNote =
+    unique.length < batch.length
+      ? `\n\n${batch.length - unique.length} exact duplicate update(s) were collapsed.`
+      : '';
+  const sections = unique.map(({ task, count }, index) => {
+    const kind = task.metadata?.queue_coalescing?.kind ?? 'system';
+    const repeated = count > 1 ? `; repeated ${count} times` : '';
+    return `### Update ${index + 1} of ${unique.length} (${kind}${repeated})\n\n${task.full_prompt}`;
+  });
+  return `${heading}${dedupeNote}\n\n${sections.join('\n\n---\n\n')}`;
+}
+
 function projectTerminalTaskStatusToSession(status: Task['status']): SessionStatus {
   switch (status) {
     case TaskStatus.COMPLETED:
@@ -643,6 +720,8 @@ export type TerminationSettlementInput =
   | (TerminationSettlementInputBase & {
       outcome: 'restart_unverified';
       coordinationToken?: never;
+      /** Atomically persist a pending continuation alongside restart settlement. */
+      restartRecovery?: TaskMetadata['restart_recovery'];
     });
 
 export interface TerminationSettlementResult {
@@ -653,6 +732,8 @@ export interface TerminationSettlementResult {
 export interface TaskDispatchClaimResult {
   outcome: 'claimed' | 'already_claimed' | 'condition_changed' | 'actor_missing';
   task: Task;
+  /** Queued system updates durably folded into `task` by this claim. */
+  coalesced_tasks?: Task[];
 }
 
 export interface InterruptCorrectionAdmissionInput {
@@ -2267,6 +2348,14 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         recorded_tool_count: await countRecordedTools(txDb, fullId),
         duration_ms: terminal.duration_ms,
         message_range: terminal.message_range ?? current.message_range,
+        ...(restartRelease && input.restartRecovery
+          ? {
+              metadata: {
+                ...(current.metadata ?? {}),
+                restart_recovery: input.restartRecovery,
+              },
+            }
+          : {}),
         ...(failure
           ? {
               sdk_failure: {
@@ -2311,6 +2400,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         .set({
           status: finalStatus === TaskStatus.FAILED ? SessionStatus.FAILED : SessionStatus.IDLE,
           ready_for_prompt: true,
+          attention_generation: sql`${sessions.attention_generation} + 1`,
           updated_at: settlementAt,
         })
         .where(eq(sessions.session_id, sessionRow.session_id))
@@ -2334,6 +2424,29 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         }),
       };
     });
+  }
+
+  /** Oldest restart-interrupted terminal Tasks still awaiting continuation admission. */
+  async findPendingRestartRecoveries(limit = 50): Promise<Task[]> {
+    try {
+      const rows = await select(this.db)
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.status, TaskStatus.STOPPED),
+            eq(jsonExtract(this.db, tasks.data, 'metadata.restart_recovery.state'), 'pending')
+          )
+        )
+        .orderBy(asc(tasks.created_at), asc(tasks.task_id))
+        .limit(limit)
+        .all();
+      return rows.map((row: TaskRow) => this.rowToTask(row));
+    } catch (error) {
+      throw new RepositoryError(
+        `Failed to find pending restart recoveries: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
   }
 
   /**
@@ -2469,6 +2582,11 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
               .set({
                 status: projectTerminalTaskStatusToSession(merged.status),
                 ready_for_prompt: true,
+                // This generic terminal transition shares the same persisted
+                // attention contract as termination settlement.  Keep the
+                // projection and generation increment in this transaction so
+                // every authorized observer sees one coherent revision.
+                attention_generation: sql`${sessions.attention_generation} + 1`,
                 updated_at: projectionAt,
               })
               .where(eq(sessions.session_id, sessionRow.session_id))
@@ -4196,8 +4314,90 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           isSQLiteDatabase(this.db) ? requestedStartedAt : undefined
         );
 
+        let dispatchTask = current;
+        const coalescedTasks: Task[] = [];
+        if (
+          expectedStatus === TaskStatus.QUEUED &&
+          sessionRow.data.queue_config?.coalesce_system_updates === true
+        ) {
+          // Session admission/dispatch paths share the Session lock. Locking the
+          // queued Task rows as well prevents an administrator delete from
+          // racing the exact prefix that is about to become one model turn.
+          await lockRowForUpdate(
+            txDb,
+            this.db,
+            tasks,
+            and(eq(tasks.session_id, current.session_id), eq(tasks.status, TaskStatus.QUEUED))!
+          );
+          const maximum = resolvedMaxCoalescedUpdates(
+            sessionRow.data.queue_config.max_coalesced_updates
+          );
+          const queuedRows = await select(txDb)
+            .from(tasks)
+            .where(
+              and(eq(tasks.session_id, current.session_id), eq(tasks.status, TaskStatus.QUEUED))
+            )
+            .orderBy(asc(tasks.queue_position), asc(tasks.created_at), asc(tasks.task_id))
+            .limit(maximum)
+            .all();
+          const batch = compatibleCoalescedPrefix(
+            queuedRows.map((row: TaskRow) => this.rowToTask(row)),
+            maximum
+          );
+
+          if (batch.length > 1 && batch[0]?.task_id === current.task_id) {
+            const followers = batch.slice(1);
+            const sourceKinds = new Set(batch.map((item) => item.metadata?.queue_coalescing?.kind));
+            const containsGatewayUpdate = sourceKinds.has('gateway');
+            const allCallbacks = sourceKinds.size === 1 && sourceKinds.has('callback');
+            dispatchTask = {
+              ...current,
+              full_prompt: renderCoalescedSystemUpdatePrompt(batch),
+              metadata: {
+                ...current.metadata,
+                ...(containsGatewayUpdate ? { source: 'gateway' as const } : {}),
+                ...(allCallbacks ? { is_agor_callback: true } : { is_agor_callback: false }),
+                queue_coalescing: {
+                  ...current.metadata!.queue_coalescing!,
+                  item_count: batch.length,
+                  coalesced_task_ids: followers.map((item) => item.task_id),
+                },
+              },
+            };
+
+            for (const follower of followers) {
+              const coalesced: Task = {
+                ...follower,
+                status: TaskStatus.STOPPED,
+                queue_position: undefined,
+                completed_at: dispatchAt.toISOString(),
+                metadata: {
+                  ...follower.metadata,
+                  queue_coalescing: {
+                    ...follower.metadata!.queue_coalescing!,
+                    coalesced_into_task_id: current.task_id,
+                  },
+                },
+              };
+              const followerData = this.taskToInsert(coalesced);
+              await update(txDb, tasks)
+                .set({
+                  status: followerData.status,
+                  queue_position: followerData.queue_position,
+                  completed_at: followerData.completed_at,
+                  data: followerData.data,
+                })
+                .where(
+                  and(eq(tasks.task_id, follower.task_id), eq(tasks.status, TaskStatus.QUEUED))
+                )
+                .run();
+              coalescedTasks.push(coalesced);
+            }
+          }
+        }
+
         const merged: Task = {
-          ...deepMerge(current, { ...updates, started_at: dispatchAt.toISOString() }),
+          ...deepMerge(dispatchTask, { ...updates, started_at: dispatchAt.toISOString() }),
           task_id: current.task_id,
           session_id: current.session_id,
           created_by: current.created_by,
@@ -4226,7 +4426,11 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         // IDLE and omitted the task from data.tasks. The Session row is already
         // locked by mutateLockedSessionTask.
         await this.projectDispatchedSession(txDb, sessionRow, merged, dispatchAt);
-        return { outcome: 'claimed', task: merged };
+        return {
+          outcome: 'claimed',
+          task: merged,
+          ...(coalescedTasks.length > 0 ? { coalesced_tasks: coalescedTasks } : {}),
+        };
       },
       true
     );

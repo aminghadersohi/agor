@@ -152,6 +152,12 @@ function fixture() {
 describe('recovered Catalog tryout flow in Chromium', () => {
   it('waits for install, chooses an eligible teammate, navigates, and hydrates an editable unsent composer', async () => {
     const api = fixture();
+    const modal = await screen.findByRole('dialog', { name: 'MCP Catalog' });
+    await waitFor(() =>
+      expect(modal.getAnimations().some((animation) => animation.playState === 'running')).toBe(
+        false
+      )
+    );
     await userEvent.click(await screen.findByRole('button', { name: 'Open DeepWiki' }));
     const drawer = within(
       screen.getByText('What this can access').closest<HTMLElement>('[role="dialog"]')!
@@ -169,13 +175,26 @@ describe('recovered Catalog tryout flow in Chromium', () => {
         false
       );
     });
-    await userEvent.click(drawer.getByRole('checkbox'));
-    await waitFor(() => expect(drawer.getByRole('checkbox')).toBeChecked());
-    await userEvent.click(drawer.getByRole('button', { name: 'Connect', exact: true }));
-    expect(api.connect).toHaveBeenCalledWith({
-      catalog_key: entry.name,
-      acknowledged_disclosure: entry.permission_disclosure,
-    });
+    await drawer.findByText(
+      'Catalog and saved connection data indicate no account is needed. Agor checks the endpoint when you connect.'
+    );
+    const consent = drawer.getByRole('checkbox');
+    const connect = drawer.getByRole('button', { name: 'Connect', exact: true });
+    // Ant's native input is transparent; its label is the visible target.
+    await waitFor(() => expect(consent.closest('label')).toBeVisible());
+    expect(consent).not.toBeChecked();
+    expect(connect).toBeDisabled();
+    consent.focus();
+    await userEvent.keyboard(' ');
+    await waitFor(() => expect(consent).toBeChecked());
+    await waitFor(() => expect(connect).toBeEnabled());
+    await userEvent.click(connect);
+    await waitFor(() =>
+      expect(api.connect).toHaveBeenCalledWith({
+        catalog_key: entry.name,
+        acknowledged_disclosure: entry.permission_disclosure,
+      })
+    );
     expect(api.start).not.toHaveBeenCalled();
     expect(api.candidates).not.toHaveBeenCalled();
     expect(drawer.queryByText('Teammate')).not.toBeInTheDocument();

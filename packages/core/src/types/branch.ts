@@ -352,10 +352,9 @@ export interface Branch {
    *
    * Set to true when:
    * - Branch is newly created
-   * - Any session in the branch has ready_for_prompt=true
-   *
    * Cleared when user interacts with the branch card.
-   * Used to draw attention to new or ready branches on the board.
+   * Session-output badges and glow use caller-scoped session attention
+   * generations instead of this shared flag.
    */
   needs_attention: boolean;
 
@@ -935,6 +934,8 @@ export interface TeammateConfig {
   displayName: string;
   /** Emoji icon for this teammate (e.g., "🧑‍💻") */
   emoji?: string;
+  /** Primary image in this teammate's tenant-owned profile gallery. */
+  profileImageId?: import('./profile-image').ProfileImageID;
   /** Template repo slug this teammate was created from */
   frameworkRepo?: string;
   /** Framework version at creation time, for upgrade detection */

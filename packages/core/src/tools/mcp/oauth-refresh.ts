@@ -418,7 +418,9 @@ async function observeCommittedRefresh(
     }
     await new Promise((resolve) => setTimeout(resolve, REFRESH_OBSERVE_INTERVAL_MS));
   }
-  throw new AmbiguousRefreshError('OAuth refresh owner did not commit before the wait timeout');
+  // A live peer that has not committed yet is not a quarantined grant.
+  // Keep the observation timeout retryable without replaying its exchange.
+  throw new FailedRefreshError('OAuth refresh owner did not commit before the wait timeout');
 }
 
 async function settleObservedRefresh(

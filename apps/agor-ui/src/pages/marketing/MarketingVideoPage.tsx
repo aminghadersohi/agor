@@ -11,6 +11,7 @@ import { App as AntdApp, ConfigProvider, Layout, theme } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ReactFlowProvider, useReactFlow, useViewport } from 'reactflow';
 import { AppHeader } from '../../components/AppHeader';
+import { ProfileImageNetworkProvider } from '../../components/ProfileImage/ProfileImageNetworkContext';
 import { SessionCanvas } from '../../components/SessionCanvas';
 import type { StaticRemoteCursor } from '../../components/SessionCanvas/canvas/RemoteCursorLayer';
 import { SessionSettingsModal } from '../../components/SessionSettingsModal';
@@ -317,7 +318,13 @@ const settingsSession = demoSessions.find(
   (session) => session.session_id === '019ee88d-demo-branch-0000-000000000101-session-1'
 );
 
-export const MarketingVideoPage = () => {
+export const MarketingVideoPage = () => (
+  <ProfileImageNetworkProvider value={false}>
+    <MarketingVideoContent />
+  </ProfileImageNetworkProvider>
+);
+
+const MarketingVideoContent = () => {
   const params = new URLSearchParams(window.location.search);
   const sceneName = params.get('scene') ?? 'multiplayer';
   const play = params.get('play') === '1';

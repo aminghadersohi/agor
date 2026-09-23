@@ -42,6 +42,8 @@ interface MobileHeaderProps {
     currentBoardId?: string;
     onSelect: (boardId: string) => void;
   };
+  /** Fork-only: extra header controls supplied by the route. */
+  actions?: ReactNode;
 }
 
 // The signed-in identity/account lives in the More sheet, so the header stays a
@@ -53,6 +55,7 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
   onOpenComments,
   commentsBadge,
   boardSwitcher,
+  actions,
 }) => {
   const { token } = theme.useToken();
   const reduced = usePrefersReducedMotion();
@@ -144,6 +147,7 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
       )}
 
       {accessory}
+      {actions}
 
       {onOpenComments && (
         <Badge count={commentsBadge ?? 0} size="small" offset={[-6, 6]}>

@@ -25,6 +25,8 @@ import {
   generateId,
   getCurrentTenantId,
   RepoRepository,
+  ScheduleRepository,
+  SessionRepository,
   type TenantScopeAwareDatabase,
   UsersRepository,
 } from '@agor/core/db';
@@ -33,15 +35,24 @@ import {
   BadRequest,
   Forbidden,
   NotAuthenticated,
+  NotFound,
   Unavailable,
 } from '@agor/core/feathers';
 import type {
   AgorGrants,
   AgorRuntimeConfig,
   Artifact,
+  ArtifactActionBinding,
+  ArtifactActionEffect,
+  ArtifactBindingBase,
   ArtifactBuildStatus,
   ArtifactCompilationStatus,
   ArtifactConsoleEntry,
+  ArtifactDataBinding,
+  ArtifactDataResult,
+  ArtifactDataSource,
+  ArtifactID,
+  ArtifactInteractionConfig,
   ArtifactPayload,
   ArtifactStatus,
   ArtifactTrustScopeType,
@@ -53,6 +64,9 @@ import type {
   SandpackConfig,
   SandpackError,
   SandpackTemplate,
+  Schedule,
+  ScheduleID,
+  Session,
   SessionID,
   UserID,
   UserRole,
@@ -142,6 +156,137 @@ interface ArtifactSidecar {
   agor_runtime?: AgorRuntimeConfig;
 }
 
+const MAX_ARTIFACT_ACTIONS = 12;
+const MAX_ARTIFACT_DATA_BINDINGS = 12;
+const MAX_ARTIFACT_CHATS = 8;
+const BINDING_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+
+const trimmedString = (value: unknown, max: number): string =>
+  typeof value === 'string' ? value.trim().slice(0, max) : '';
+
+/** A binding target id must be a non-empty string; identity is checked later. */
+const bindingTargetId = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
+
+/**
+ * Validate one binding family against the shared envelope.
+ *
+ * `detail` returns the family-specific member, or null when the binding is not
+ * fully pinned — in which case the whole binding is dropped. A binding we
+ * cannot completely resolve from persisted metadata is not one we are willing
+ * to expose, because the missing piece would have to come from somewhere at
+ * call time, and the only "somewhere" available is the iframe.
+ */
+function sanitizeBindings<TDetail extends object>(
+  value: unknown,
+  max: number,
+  detail: (candidate: Record<string, unknown>) => TDetail | null
+): Array<ArtifactBindingBase & TDetail> {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  return value.slice(0, max).flatMap((raw) => {
+    if (!raw || typeof raw !== 'object') return [];
+    const candidate = raw as Record<string, unknown>;
+    const id = trimmedString(candidate.id, 64);
+    const label = trimmedString(candidate.label, 80);
+    if (!BINDING_ID_PATTERN.test(id) || !label || seen.has(id)) return [];
+    const resolved = detail(candidate);
+    if (!resolved) return [];
+    seen.add(id);
+    const description = trimmedString(candidate.description, 240);
+    return [{ id, label, ...(description ? { description } : {}), ...resolved }];
+  });
+}
+
+/** Normalize an action's effect. Returns null when it is not fully pinned. */
+function sanitizeActionEffect(value: unknown): ArtifactActionEffect | null {
+  if (!value || typeof value !== 'object') return null;
+  const kind = (value as { kind?: unknown }).kind;
+  const scheduleId = bindingTargetId((value as { schedule_id?: unknown }).schedule_id);
+  if (!scheduleId) return null;
+  if (kind === 'schedule_run') {
+    return { kind: 'schedule_run', schedule_id: scheduleId as ScheduleID };
+  }
+  if (kind === 'schedule_set_enabled') {
+    const enabled = (value as { enabled?: unknown }).enabled;
+    // `enabled` is pinned at bind time, so it must be an explicit boolean.
+    // Coercing a missing/garbage value would silently pick a side.
+    if (typeof enabled !== 'boolean') return null;
+    return { kind: 'schedule_set_enabled', schedule_id: scheduleId as ScheduleID, enabled };
+  }
+  return null;
+}
+
+/** Normalize a data binding's source. Returns null when it is not fully pinned. */
+function sanitizeDataSource(value: unknown): ArtifactDataSource | null {
+  if (!value || typeof value !== 'object') return null;
+  const kind = (value as { kind?: unknown }).kind;
+  if (kind === 'schedule_status') {
+    const scheduleId = bindingTargetId((value as { schedule_id?: unknown }).schedule_id);
+    return scheduleId ? { kind, schedule_id: scheduleId as ScheduleID } : null;
+  }
+  if (kind === 'session_status') {
+    const sessionId = bindingTargetId((value as { session_id?: unknown }).session_id);
+    return sessionId ? { kind, session_id: sessionId as SessionID } : null;
+  }
+  return null;
+}
+
+/**
+ * Treat persisted and agent-authored interaction metadata as untrusted input.
+ *
+ * Runs on write *and* on every read, so it is also the definition of the
+ * canonical shape: anything it drops is something no downstream consumer —
+ * payload, route, or UI — will ever see.
+ */
+export function sanitizeArtifactInteractionConfig(
+  value: ArtifactInteractionConfig | null | undefined
+): ArtifactInteractionConfig | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+
+  const actions = sanitizeBindings(value.actions, MAX_ARTIFACT_ACTIONS, (candidate) => {
+    const effect = sanitizeActionEffect(candidate.effect);
+    if (!effect) return null;
+    return { effect, ...(candidate.confirm === true ? { confirm: true as const } : {}) };
+  });
+
+  const data = sanitizeBindings(value.data, MAX_ARTIFACT_DATA_BINDINGS, (candidate) => {
+    const source = sanitizeDataSource(candidate.source);
+    return source ? { source } : null;
+  });
+
+  const chats = sanitizeBindings(value.chats, MAX_ARTIFACT_CHATS, (candidate) => {
+    const sessionId = bindingTargetId(candidate.session_id);
+    return sessionId ? { session_id: sessionId as SessionID } : null;
+  });
+
+  if (actions.length === 0 && data.length === 0 && chats.length === 0) return undefined;
+  return {
+    ...(actions.length > 0 ? { actions } : {}),
+    ...(data.length > 0 ? { data } : {}),
+    ...(chats.length > 0 ? { chats } : {}),
+  };
+}
+
+/** Every branch-scoped resource a config references, for bind/execute validation. */
+export function collectInteractionBindingTargets(config: ArtifactInteractionConfig): {
+  scheduleIds: ScheduleID[];
+  sessionIds: SessionID[];
+} {
+  const scheduleIds = new Set<ScheduleID>();
+  const sessionIds = new Set<SessionID>();
+  for (const action of config.actions ?? []) {
+    scheduleIds.add(action.effect.schedule_id);
+  }
+  for (const binding of config.data ?? []) {
+    if (binding.source.kind === 'schedule_status') scheduleIds.add(binding.source.schedule_id);
+    else sessionIds.add(binding.source.session_id);
+  }
+  for (const chat of config.chats ?? []) {
+    sessionIds.add(chat.session_id);
+  }
+  return { scheduleIds: [...scheduleIds], sessionIds: [...sessionIds] };
+}
+
 interface ArtifactValidationDiagnostic {
   code: string;
   severity: 'error' | 'warning';
@@ -170,6 +315,7 @@ export const ARTIFACTS_SERVICE_TRANSPORT_METHODS = [
   'remove',
   'publishFromExecutor',
   'validateFromExecutor',
+  'createChatArtifact',
 ] as const;
 
 export type ArtifactParams = QueryParams<{
@@ -223,6 +369,8 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
   private trustRepo: ArtifactTrustGrantRepository;
   private branchRepo: BranchRepository;
   private boardRepo: BoardRepository;
+  private scheduleRepo: ScheduleRepository;
+  private sessionRepo: SessionRepository;
   private repoRepo: RepoRepository;
   private usersRepo: UsersRepository;
   private app: Application;
@@ -306,6 +454,8 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     this.trustRepo = bindRepositoryToTenantUnitOfWork(db, new ArtifactTrustGrantRepository(db));
     this.branchRepo = bindRepositoryToTenantUnitOfWork(db, new BranchRepository(db));
     this.boardRepo = bindRepositoryToTenantUnitOfWork(db, new BoardRepository(db));
+    this.scheduleRepo = bindRepositoryToTenantUnitOfWork(db, new ScheduleRepository(db));
+    this.sessionRepo = bindRepositoryToTenantUnitOfWork(db, new SessionRepository(db));
     this.repoRepo = bindRepositoryToTenantUnitOfWork(db, new RepoRepository(db));
     this.usersRepo = bindRepositoryToTenantUnitOfWork(db, new UsersRepository(db));
     this.app = app;
@@ -382,6 +532,206 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
   }
 
   /**
+   * Bind-time validation: every referenced schedule/session must live on the
+   * artifact's own branch.
+   *
+   * This is what bounds a binding's blast radius — author and viewer are then
+   * reasoning about the same branch, so a read cannot carry data across a trust
+   * boundary the branch does not already span. Re-checked at execute time in
+   * `resolveBindingTarget`, because the referenced row can move or be deleted
+   * after publish.
+   */
+  private async validateInteractionConfig(
+    value: ArtifactInteractionConfig | null | undefined,
+    branchId: BranchID
+  ): Promise<ArtifactInteractionConfig | undefined> {
+    const config = sanitizeArtifactInteractionConfig(value);
+    if (!config) return undefined;
+    const { scheduleIds, sessionIds } = collectInteractionBindingTargets(config);
+    for (const scheduleId of scheduleIds) {
+      const schedule = await this.scheduleRepo.findById(scheduleId);
+      if (!schedule || schedule.branch_id !== branchId) {
+        throw new BadRequest(
+          `Artifact binding must reference a schedule on the artifact branch (${scheduleId})`
+        );
+      }
+    }
+    for (const sessionId of sessionIds) {
+      const session = await this.sessionRepo.findById(sessionId);
+      if (!session || session.branch_id !== branchId) {
+        throw new BadRequest(
+          `Artifact binding must reference a session on the artifact branch (${sessionId})`
+        );
+      }
+    }
+    return config;
+  }
+
+  /**
+   * Execute-time resolution for a declared binding.
+   *
+   * Re-reads the persisted artifact rather than trusting anything the caller
+   * sent, then re-asserts that the target still lives on the artifact's source
+   * branch. The `interaction_config` in the payload is a rendering hint; this
+   * is the authority for what may execute.
+   */
+  async resolveBindingTarget(
+    artifactId: ArtifactID,
+    kind: 'action' | 'data',
+    bindingId: string
+  ): Promise<{
+    artifact: Artifact;
+    action?: ArtifactActionBinding;
+    data?: ArtifactDataBinding;
+  }> {
+    const artifact = await this.get(artifactId);
+    const config = sanitizeArtifactInteractionConfig(artifact.agor_runtime?.interactions);
+    if (!config) throw new NotFound(`Artifact ${artifactId} declares no bindings`);
+
+    // Reads and writes are separate collections, so an id handed to the wrong
+    // route resolves to nothing — no kind check to forget.
+    const action = kind === 'action' ? config.actions?.find((a) => a.id === bindingId) : undefined;
+    const data = kind === 'data' ? config.data?.find((d) => d.id === bindingId) : undefined;
+    if (!action && !data) {
+      throw new NotFound(`Artifact ${artifactId} does not declare ${kind} binding "${bindingId}"`);
+    }
+
+    const branchId = artifact.branch_id;
+    if (!branchId) {
+      throw new BadRequest('Artifact bindings require a source branch');
+    }
+    if (action) {
+      const schedule = await this.scheduleRepo.findById(action.effect.schedule_id);
+      if (!schedule || schedule.branch_id !== branchId) {
+        throw new BadRequest('Artifact binding target is no longer on the artifact branch');
+      }
+    } else if (data) {
+      if (data.source.kind === 'schedule_status') {
+        const schedule = await this.scheduleRepo.findById(data.source.schedule_id);
+        if (!schedule || schedule.branch_id !== branchId) {
+          throw new BadRequest('Artifact binding target is no longer on the artifact branch');
+        }
+      } else {
+        const session = await this.sessionRepo.findById(data.source.session_id);
+        if (!session || session.branch_id !== branchId) {
+          throw new BadRequest('Artifact binding target is no longer on the artifact branch');
+        }
+      }
+    }
+    return { artifact, action, data };
+  }
+
+  /**
+   * Forward the caller's identity to the delegated service.
+   *
+   * `provider` is deliberately preserved. Several Agor hooks short-circuit on
+   * `if (!context.params.provider) return context` — treating provider-less
+   * calls as trusted internal ones — including `ensureScheduleRunsAsCaller`
+   * (`utils/schedule-hooks.ts:140`), which is the check that stops one user
+   * running another user's schedule. Dropping `provider` here would silently
+   * turn every artifact button into a privilege escalation. Tenant context is
+   * forwarded too so the delegated service establishes its own scope.
+   */
+  private forwardCallerParams(params: AuthenticatedParams): AuthenticatedParams {
+    return {
+      user: params.user,
+      provider: params.provider,
+      authentication: params.authentication,
+      headers: params.headers,
+      ...(params.tenant ? { tenant: params.tenant } : {}),
+    } as AuthenticatedParams;
+  }
+
+  /**
+   * Apply a declared action binding as the *viewer*.
+   *
+   * Nothing here decides authorization: the effect is dispatched to the same
+   * route the viewer would hit from the UI, which enforces branch RBAC and the
+   * schedule run-as-creator rule. If the viewer could not do this by hand, this
+   * throws exactly as it would have.
+   */
+  async invokeActionBinding(
+    artifactId: ArtifactID,
+    actionId: string,
+    params: AuthenticatedParams
+  ): Promise<{
+    artifact_id: ArtifactID;
+    action_id: string;
+    effect: ArtifactActionEffect['kind'];
+    result: unknown;
+  }> {
+    const { action } = await this.resolveBindingTarget(artifactId, 'action', actionId);
+    if (!action) throw new NotFound(`Artifact ${artifactId} does not declare action "${actionId}"`);
+    const forwarded = this.forwardCallerParams(params);
+    const effect = action.effect;
+
+    let result: unknown;
+    if (effect.kind === 'schedule_run') {
+      result = await this.app
+        .service('/schedules/:id/run-now')
+        .create({}, { ...forwarded, route: { id: effect.schedule_id } });
+    } else {
+      // `enabled` comes from the persisted binding, never from the caller.
+      const updated = await this.app
+        .service('schedules')
+        .patch(effect.schedule_id, { enabled: effect.enabled }, forwarded);
+      result = { schedule_id: effect.schedule_id, enabled: updated?.enabled ?? effect.enabled };
+    }
+    return { artifact_id: artifactId, action_id: action.id, effect: effect.kind, result };
+  }
+
+  /**
+   * Read a declared data binding as the *viewer*, then project.
+   *
+   * The underlying resource never leaves this method — only the fixed field
+   * set below does. `prompt`, `agentic_tool_config`, and `created_by` are
+   * deliberately absent; widening this is an explicit edit.
+   */
+  async readDataBinding(
+    artifactId: ArtifactID,
+    dataId: string,
+    params: AuthenticatedParams
+  ): Promise<ArtifactDataResult> {
+    const { data } = await this.resolveBindingTarget(artifactId, 'data', dataId);
+    if (!data)
+      throw new NotFound(`Artifact ${artifactId} does not declare data binding "${dataId}"`);
+    const forwarded = this.forwardCallerParams(params);
+    const source = data.source;
+
+    if (source.kind === 'schedule_status') {
+      const schedule = (await this.app
+        .service('schedules')
+        .get(source.schedule_id, forwarded)) as Schedule;
+      return {
+        kind: 'schedule_status',
+        schedule_id: schedule.schedule_id,
+        name: schedule.name,
+        enabled: schedule.enabled,
+        cron_expression: schedule.cron_expression,
+        timezone: schedule.timezone,
+        timezone_mode: schedule.timezone_mode,
+        next_run_at: schedule.next_run_at ?? null,
+        last_run_at: schedule.last_run_at ?? null,
+        last_run_session_id: schedule.last_run_session_id ?? null,
+        allow_concurrent_runs: schedule.allow_concurrent_runs,
+      };
+    }
+
+    const session = (await this.app
+      .service('sessions')
+      .get(source.session_id, forwarded)) as Session;
+    return {
+      kind: 'session_status',
+      session_id: session.session_id,
+      title: session.title,
+      status: session.status,
+      agentic_tool: session.agentic_tool,
+      archived: session.archived,
+      last_updated: session.last_updated,
+    };
+  }
+
+  /**
    * Push the list read's high-selectivity predicates into SQL.
    *
    * The generic adapter would read the entire artifacts table and filter in
@@ -451,6 +801,83 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     );
   }
 
+  /** Create a controlled, private board artifact that opens one canonical session. */
+  async createChatArtifact(
+    data: { session_id: SessionID; x?: number; y?: number; width?: number; height?: number },
+    params?: ArtifactParams
+  ): Promise<Artifact> {
+    const userId = params?.user?.user_id;
+    if (!userId) throw new NotAuthenticated('Authentication required');
+    const session = await this.sessionRepo.findById(data.session_id);
+    if (!session) throw new BadRequest('Session not found');
+    const branch = await this.branchRepo.findById(session.branch_id);
+    if (!branch?.board_id) throw new BadRequest('Session branch is not on a board');
+    await ensureBranchWorkspaceAccess(
+      this.branchRepo,
+      branch,
+      userId,
+      params?.user?.role as UserRole | undefined,
+      'session'
+    );
+
+    const files = {
+      '/index.html': `<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>html,body{height:100%;margin:0;font-family:system-ui,sans-serif;background:#101315;color:#eef5f5}body{display:grid;place-items:center}.card{max-width:28rem;padding:2rem;text-align:center}.mark{font-size:2rem}h1{font-size:1.25rem;margin:.7rem 0}.hint{color:#9caeae;font-size:.9rem;line-height:1.45}button{margin-top:1rem;border:0;border-radius:999px;padding:.7rem 1.1rem;background:#167f79;color:white;font-weight:650;cursor:pointer}button:focus-visible{outline:3px solid #7ee2db;outline-offset:3px}</style></head>
+<body><main class="card"><div class="mark">💬</div><h1>Session chat</h1><div class="hint">Open the live conversation with its full session controls.</div><button id="open" type="button">Open chat</button><div id="status" class="hint" role="status"></div></main>
+<script>document.getElementById('open').addEventListener('click',async()=>{const status=document.getElementById('status');status.textContent='Opening…';try{await window.agor.openChat();status.textContent='Chat opened';}catch(error){status.textContent=error&&error.message?error.message:'Could not open chat';}});</script></body></html>`,
+    };
+    const artifactId = generateId();
+    const artifact = await this.artifactRepo.create({
+      artifact_id: artifactId,
+      board_id: branch.board_id,
+      branch_id: branch.branch_id,
+      source_session_id: session.session_id,
+      name: `${session.title?.trim() || 'Session'} chat`,
+      description: 'A board shortcut to the live session conversation.',
+      path: null,
+      template: 'static',
+      files,
+      content_hash: this.computeHashFromFiles(files),
+      build_status: 'success',
+      agor_runtime: {
+        interactions: {
+          chats: [{ id: 'default', label: 'Open chat', session_id: session.session_id }],
+        },
+      },
+      public: false,
+      created_by: userId,
+    });
+    const objectId = `artifact-${artifactId}`;
+    try {
+      const updatedBoard = await this.boardRepo.upsertBoardObject(branch.board_id, objectId, {
+        type: 'artifact',
+        artifact_id: artifactId,
+        x: data.x ?? 40,
+        y: data.y ?? 40,
+        width: Math.max(300, data.width ?? 420),
+        height: Math.max(200, data.height ?? 280),
+      });
+      emitServiceEvent(this.app, {
+        path: 'boards',
+        event: 'patched',
+        data: updatedBoard,
+        id: branch.board_id,
+      });
+    } catch (error) {
+      await this.artifactRepo.delete(artifactId);
+      throw error;
+    }
+    emitServiceEvent(this.app, {
+      path: 'artifacts',
+      event: 'created',
+      data: artifact,
+      id: artifact.artifact_id,
+      params,
+    });
+    return artifact;
+  }
+
   /**
    * Direct REST/service updates are metadata-only and must not rewrite
    * provenance. `source_session_id` is stamped by publishArtifact() from the
@@ -486,11 +913,17 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       y?: number;
       width?: number;
       height?: number;
+      interaction_config?: ArtifactInteractionConfig;
     };
     const placementFields =
       d.x !== undefined || d.y !== undefined || d.width !== undefined || d.height !== undefined;
 
-    if (d.board_id !== undefined || placementFields) {
+    if (
+      d.board_id !== undefined ||
+      d.agor_runtime !== undefined ||
+      d.interaction_config !== undefined ||
+      placementFields
+    ) {
       const artifactId = String(id);
       const existing = await this.artifactRepo.findById(artifactId);
       if (!existing) throw new Error(`Artifact ${artifactId} not found`);
@@ -510,6 +943,8 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
           y: d.y,
           width: d.width,
           height: d.height,
+          agor_runtime: d.agor_runtime,
+          interaction_config: d.interaction_config,
         },
         callerUserId,
         callerRole
@@ -584,6 +1019,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       required_env_vars?: string[];
       agor_grants?: AgorGrants;
       agor_runtime?: AgorRuntimeConfig;
+      interaction_config?: ArtifactInteractionConfig;
       x?: number;
       y?: number;
       width?: number;
@@ -673,6 +1109,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       required_env_vars?: string[];
       agor_grants?: AgorGrants;
       agor_runtime?: AgorRuntimeConfig;
+      interaction_config?: ArtifactInteractionConfig;
       x?: number;
       y?: number;
       width?: number;
@@ -724,10 +1161,10 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     const agorGrants = canonicalizeAgorGrants(
       data.agor_grants ?? sidecar?.agor_grants ?? existing?.agor_grants
     );
-    // agor_runtime is a small flag bag (currently just `enabled`). Same
+    // agor_runtime is a small flag bag. Same
     // explicit-data > sidecar > existing > default chain. Default is
     // implicit-enabled (i.e. `undefined` reads as enabled at render time).
-    const agorRuntime: AgorRuntimeConfig | undefined =
+    const resolvedAgorRuntime: AgorRuntimeConfig | undefined =
       data.agor_runtime ?? sidecar?.agor_runtime ?? existing?.agor_runtime ?? undefined;
 
     // Name and board are required on create; on update they default to the
@@ -745,6 +1182,18 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     if (branch.board_id !== resolvedBoardId) {
       throw new Forbidden('Artifact board must match the source branch board');
     }
+    const interactionConfig = await this.validateInteractionConfig(
+      data.interaction_config ??
+        resolvedAgorRuntime?.interactions ??
+        existing?.agor_runtime?.interactions ??
+        undefined,
+      matchedBranchId
+    );
+    const agorRuntime: AgorRuntimeConfig | undefined = resolvedAgorRuntime
+      ? { ...resolvedAgorRuntime, interactions: interactionConfig }
+      : interactionConfig
+        ? { interactions: interactionConfig }
+        : undefined;
 
     const isPublic = data.public ?? existing?.public ?? true;
 
@@ -886,6 +1335,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       required_env_vars?: string[];
       agor_grants?: AgorGrants;
       agor_runtime?: AgorRuntimeConfig;
+      interaction_config?: ArtifactInteractionConfig;
       sandpack_config?: SandpackConfig;
     },
     userId?: string,
@@ -944,8 +1394,27 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     if (updates.agor_grants !== undefined) {
       dbUpdates.agor_grants = canonicalizeAgorGrants(updates.agor_grants);
     }
-    if (updates.agor_runtime !== undefined) {
-      dbUpdates.agor_runtime = updates.agor_runtime;
+    if (updates.agor_runtime !== undefined || updates.interaction_config !== undefined) {
+      if (!existing.branch_id) {
+        throw new BadRequest('Artifact interactions require a source branch');
+      }
+      const runtimeExplicitlyUpdatesInteractions = Object.hasOwn(
+        updates.agor_runtime ?? {},
+        'interactions'
+      );
+      const interactionConfig = await this.validateInteractionConfig(
+        updates.interaction_config !== undefined
+          ? updates.interaction_config
+          : runtimeExplicitlyUpdatesInteractions
+            ? updates.agor_runtime?.interactions
+            : existing.agor_runtime?.interactions,
+        existing.branch_id
+      );
+      dbUpdates.agor_runtime = {
+        ...(existing.agor_runtime ?? {}),
+        ...(updates.agor_runtime ?? {}),
+        interactions: interactionConfig,
+      };
     }
     if (updates.sandpack_config !== undefined) {
       const sanitizedConfig = sanitizeSandpackConfig(updates.sandpack_config);
@@ -1014,6 +1483,9 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
               // value in place.
               rollback.entry = existing.entry ?? (null as unknown as string);
             }
+            if (updates.agor_runtime !== undefined || updates.interaction_config !== undefined) {
+              rollback.agor_runtime = existing.agor_runtime;
+            }
             if (Object.keys(rollback).length > 0) {
               await this.artifactRepo.update(fullArtifactId, rollback);
             }
@@ -1046,7 +1518,8 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       updates.sandpack_config !== undefined ||
       updates.required_env_vars !== undefined ||
       updates.agor_grants !== undefined ||
-      updates.agor_runtime !== undefined
+      updates.agor_runtime !== undefined ||
+      updates.interaction_config !== undefined
     ) {
       this.clearAllViewerBuffersFor(fullArtifactId);
     }
@@ -1252,6 +1725,23 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       '/.agor/sandpack-config.json': JSON.stringify(servedSandpackConfig ?? {}),
     });
     const legacy = detectLegacyFormat(artifact);
+    // Every binding target is validated onto the artifact's own branch, so one
+    // 'view' check covers all of them. Strip the whole set when the viewer
+    // can't see that branch: the widget then renders an unavailable state
+    // instead of discovering a 403 on first click. This is a UX affordance —
+    // the binding routes re-check authorization and are the actual authority.
+    let interactionConfig = sanitizeArtifactInteractionConfig(artifact.agor_runtime?.interactions);
+    if (interactionConfig) {
+      try {
+        const sourceBranch = artifact.branch_id
+          ? await this.branchRepo.findById(artifact.branch_id)
+          : null;
+        if (!sourceBranch) throw new Error('Artifact source branch is unavailable');
+        await ensureBranchWorkspaceAccess(this.branchRepo, sourceBranch, userId, undefined, 'view');
+      } catch {
+        interactionConfig = undefined;
+      }
+    }
 
     const payload: ArtifactPayload = {
       artifact_id: artifact.artifact_id,
@@ -1270,6 +1760,7 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
       runtime_report_hash: this.computeRuntimeReportHash(artifact),
       required_env_vars: requiredEnvVars.length > 0 ? requiredEnvVars : undefined,
       agor_grants: Object.keys(grants).length > 0 ? grants : undefined,
+      interaction_config: interactionConfig,
       trust_state: trustState,
       ...(trustScope ? { trust_scope: trustScope } : {}),
       ...(legacy.is_legacy ? { legacy } : {}),
@@ -2041,6 +2532,8 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
         required_env_vars: artifact.required_env_vars ?? [],
         agor_grants: canonicalizeAgorGrants(artifact.agor_grants),
         agor_runtime_enabled: artifact.agor_runtime?.enabled !== false,
+        interaction_config:
+          sanitizeArtifactInteractionConfig(artifact.agor_runtime?.interactions) ?? null,
       }),
     });
   }

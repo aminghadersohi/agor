@@ -33,13 +33,24 @@ import {
   ClockCircleOutlined,
   DatabaseOutlined,
   DownOutlined,
+  InboxOutlined,
   KeyOutlined,
   PoweroffOutlined,
   SettingOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import type { CollapseProps } from 'antd';
-import { Collapse, Divider, Form, InputNumber, Modal, Select, Typography, theme } from 'antd';
+import {
+  Collapse,
+  Divider,
+  Form,
+  InputNumber,
+  Modal,
+  Select,
+  Switch,
+  Typography,
+  theme,
+} from 'antd';
 import React from 'react';
 import { useAgorStore } from '../../store/agorStore';
 import { selectMcpServerById, selectSessionMcpServerIds } from '../../store/selectors';
@@ -95,10 +106,14 @@ interface FormValues {
   custom_context: string;
   callbackConfig: {
     enabled: boolean;
+    mode: NonNullable<Session['callback_config']>['callback_mode'];
     delivery: NonNullable<Session['callback_config']>['delivery'];
     includeLastMessage: boolean;
-    mode: NonNullable<Session['callback_config']>['callback_mode'];
     template?: string;
+  };
+  queueConfig: {
+    coalesceSystemUpdates: boolean;
+    maxCoalescedUpdates: number;
   };
   autoArchive: Session['auto_archive'];
   autoArchiveAfterSeconds?: number;
@@ -139,6 +154,10 @@ function buildInitialValues(session: Session, sessionMcpServerIds: string[]): Fo
       mode: session.callback_config?.callback_mode ?? 'persistent',
       includeLastMessage: session.callback_config?.include_last_message ?? true,
       template: session.callback_config?.template,
+    },
+    queueConfig: {
+      coalesceSystemUpdates: session.queue_config?.coalesce_system_updates ?? false,
+      maxCoalescedUpdates: session.queue_config?.max_coalesced_updates ?? 8,
     },
     autoArchive: session.auto_archive ?? 'never',
     autoArchiveAfterSeconds: session.auto_archive_after_seconds,
@@ -216,6 +235,15 @@ function buildUpdates(values: FormValues, session: Session): Partial<Session> {
     };
   }
 
+  if (values.queueConfig) {
+    updates.queue_config = {
+      coalesce_system_updates: values.queueConfig.coalesceSystemUpdates ?? false,
+      max_coalesced_updates: Math.min(
+        25,
+        Math.max(2, Math.floor(values.queueConfig.maxCoalescedUpdates || 8))
+      ),
+    };
+  }
   if (values.autoArchive !== session.auto_archive) {
     updates.auto_archive = values.autoArchive;
   }
@@ -507,6 +535,50 @@ export const SessionSettingsModal: React.FC<SessionSettingsModalProps> = ({
       ),
     });
   }
+
+  secondaryItems.push({
+    key: 'queue-config',
+    label: (
+      <Typography.Text strong>
+        <InboxOutlined style={{ marginRight: 8 }} />
+        Queued updates
+      </Typography.Text>
+    ),
+    children: (
+      <>
+        <Form.Item
+          name={['queueConfig', 'coalesceSystemUpdates']}
+          label="Batch queued system updates"
+          valuePropName="checked"
+        >
+          <Switch />
+        </Form.Item>
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -16 }}>
+          When this session is busy, combine adjacent gateway messages and completion callbacks into
+          one ordered turn. Human prompts remain separate. This can reduce repeated model context
+          and callback chatter.
+        </Typography.Paragraph>
+        <Form.Item
+          noStyle
+          shouldUpdate={(previous, current) =>
+            previous.queueConfig?.coalesceSystemUpdates !==
+            current.queueConfig?.coalesceSystemUpdates
+          }
+        >
+          {({ getFieldValue }) =>
+            getFieldValue(['queueConfig', 'coalesceSystemUpdates']) ? (
+              <Form.Item
+                name={['queueConfig', 'maxCoalescedUpdates']}
+                label="Maximum updates per turn"
+              >
+                <InputNumber min={2} max={25} precision={0} style={{ width: '100%' }} />
+              </Form.Item>
+            ) : null
+          }
+        </Form.Item>
+      </>
+    ),
+  });
 
   secondaryItems.push({
     key: 'advanced',

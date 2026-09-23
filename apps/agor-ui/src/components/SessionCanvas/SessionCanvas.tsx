@@ -918,6 +918,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       return () => {
         unsubscribe();
         placementWrites.dispose();
+        if (layoutUpdateTimerRef.current) clearTimeout(layoutUpdateTimerRef.current);
+        layoutUpdateTimerRef.current = null;
+        pendingLayoutUpdatesRef.current = {};
+        activeDragNodeIdsRef.current.clear();
+        activeDragPositionsRef.current = {};
       };
     }, [placementWrites, board?.board_id]);
     // Track objects we've deleted locally (to prevent them from reappearing during WebSocket updates)
@@ -2595,7 +2600,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         }
         setIsDraggingCanvas(true);
         setAlignmentGuides([]);
-        const viewport = reactFlowInstanceRef.current?.getViewport();
+        const viewport = reactFlowInstanceRef.current?.getViewport?.();
         if (viewport) setGuideViewport(viewport);
       },
       [cancelPendingLayoutRecovery, cancelPendingPostLayoutViewport, demoteAutoZone]
@@ -2774,6 +2779,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
         // Debounce: wait 500ms after last drag before persisting
         layoutUpdateTimerRef.current = setTimeout(async () => {
+          const ownsBoard = () =>
+            placementBoardRef.current?.board_id === board.board_id &&
+            placementWritesRef.current === placementWrites;
+          if (!ownsBoard()) return;
           const updates = pendingLayoutUpdatesRef.current;
           pendingLayoutUpdatesRef.current = {};
 
@@ -2788,6 +2797,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           await previousWrite;
 
           try {
+            if (!ownsBoard()) return;
             // Separate updates for branches vs zones vs markdown vs comments
             const branchUpdates: Array<{
               branch_id: string;
@@ -2859,6 +2869,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             const currentNodes = reactFlowInstanceRef.current?.getNodes() ?? nodes;
 
             for (const [nodeId, update] of Object.entries(updates)) {
+              if (!ownsBoard()) return;
               const position = { x: update.x, y: update.y };
               const draggedNode = currentNodes.find((n) => n.id === nodeId);
               if (update.intent) {
@@ -3094,6 +3105,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             // Persist every changed canvas object from the gesture as one
             // authoritative geometry transaction/realtime batch.
             if (Object.keys(canvasObjectUpdates).length > 0) {
+              if (!ownsBoard()) return;
               const batch: BoardLayoutBatch = { objects: canvasObjectUpdates, placements: {} };
               const result = (await client.service('boards').patch(board.board_id, {
                 _action: 'applyLayout',
@@ -3106,6 +3118,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
             // Update comment positions
             for (const { comment, position, parentId, parentType } of commentUpdates) {
+              if (!ownsBoard()) return;
               const reactFlowParentId =
                 parentId && parentType === 'zone'
                   ? boardCommentZoneParentObjectKey(parentId)
@@ -3132,6 +3145,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 .service(`board-comments/${comment.comment_id}/reposition`)
                 .create(plan.data);
 
+              if (!ownsBoard()) return;
               // Clear localPositionsRef immediately after patching
               // We've saved the correct position to DB, no need to keep overriding
               delete localPositionsRef.current[`comment-${comment.comment_id}`];
@@ -4611,9 +4625,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             snapGrid={BOARD_SNAP_GRID}
             minZoom={0.1}
             maxZoom={1.5}
-            // Each node carries its narrower authorization. Workflow mode
-            // reserves pointer gestures for connections instead of dragging.
-            nodesDraggable={mutationGate.canMutate && activeTool !== 'workflow'}
+            // The connection gate is global; each node carries its narrower
+            // authorization (board.edit for structure, author/admin for
+            // comments). Selection/focus remain available in read-only mode.
+            // React Flow's global gate must remain open for a Viewer who may
+            // reposition their own comments. Structural nodes carry the
+            // narrower `draggable: canMutateBoard` permission, while comment
+            // nodes carry their author/admin-specific permission.
+            nodesDraggable={(canMutateBoard || canMutateComments) && activeTool !== 'workflow'}
             nodesConnectable={activeTool === 'workflow' && canMutateBoard}
             edgesFocusable={activeTool === 'workflow'}
             elementsSelectable={true}

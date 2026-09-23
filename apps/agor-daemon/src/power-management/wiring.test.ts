@@ -26,6 +26,15 @@ describe('power admission safety wiring', () => {
     const acquisition = index.indexOf('StandalonePowerOwner.acquire(');
     expect(acquisition).toBeGreaterThan(index.indexOf('beforeInitialDataSetup:'));
     expect(acquisition).toBeLessThan(index.indexOf('powerPolicyRuntimeSettingsRepository.load('));
+    // The ownership try/finally refactor must retain the early OAuth route's
+    // handoff, without registering services or starting runtime workers twice.
+    expect(index.match(/await registerServices\(/g)).toHaveLength(1);
+    expect(index.match(/await startup\(/g)).toHaveLength(1);
+    const callbackHandoff = index.indexOf(
+      'mcpOAuthCallbackRoute.setHandler(services.oauthCallbackHandler)'
+    );
+    expect(callbackHandoff).toBeGreaterThan(index.indexOf('await registerServices('));
+    expect(callbackHandoff).toBeLessThan(index.indexOf('await startup('));
     expect(
       index.slice(
         index.indexOf('taskRuntimePolicy:'),

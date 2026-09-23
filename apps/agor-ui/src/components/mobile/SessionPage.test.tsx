@@ -124,4 +124,48 @@ describe('SessionPage', () => {
     expect(container.querySelector('.ant-spin')).not.toBeNull();
     expect(screen.queryByTestId('session-panel')).not.toBeInTheDocument();
   });
+
+  it('offers the session-level chat collection action', () => {
+    const sessionId = '01a012d8-4f50-7c32-9daa-6e3f70819b2c';
+    const branchId = '01a012d8-3e4f-7b21-8c99-5d2e6f708a1b';
+    const onPinToChatCollection = vi.fn();
+    render(
+      <MemoryRouter initialEntries={[`/m/session/${sessionId}`]}>
+        <Routes>
+          <Route
+            path="/m/session/:sessionId"
+            element={
+              <SessionPage
+                client={null}
+                sessionById={
+                  new Map([
+                    [
+                      sessionId,
+                      {
+                        session_id: sessionId,
+                        branch_id: branchId,
+                        status: 'idle',
+                      } as Session,
+                    ],
+                  ])
+                }
+                branchById={
+                  new Map([[branchId, { branch_id: branchId, name: 'feat/mobile' } as Branch]])
+                }
+                repoById={new Map()}
+                userById={new Map()}
+                onPinToChatCollection={onPinToChatCollection}
+              />
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    // The chat-collection action now lives in SessionPanel's own actions menu,
+    // so this page's contract is forwarding the handler to it.
+    expect(sessionPanelProps).toHaveBeenCalledWith(
+      expect.objectContaining({ onPinToChatCollection })
+    );
+  });
 });

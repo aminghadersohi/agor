@@ -17,6 +17,7 @@ import {
   type Block,
   groupMessagesIntoBlocks,
   isAuthorizationRevokedFailure,
+  isBlockVisibleInSimpleChat,
   isVerifiedRuntimeInterruption,
   shouldRenderLiveTaskProgress,
   TaskBlock,
@@ -159,6 +160,18 @@ describe('groupMessagesIntoBlocks — assistant activity', () => {
     expect(groupMessagesIntoBlocks([message])).toEqual([
       { type: 'agent-chain', messages: [message] },
     ]);
+  });
+});
+
+describe('simple chat projection', () => {
+  it('keeps prompts and assistant text while omitting tool/thinking chains', () => {
+    const blocks = groupMessagesIntoBlocks([
+      userMessage(0, 'u0'),
+      assistantActivity(1, 'tools', [{ type: 'tool_use', id: 'tool-1', name: 'Read', input: {} }]),
+      assistantText(2, 'a2', 'The change is ready.'),
+    ]);
+
+    expect(blocks.filter(isBlockVisibleInSimpleChat).map(blockId)).toEqual(['u0', 'a2']);
   });
 });
 

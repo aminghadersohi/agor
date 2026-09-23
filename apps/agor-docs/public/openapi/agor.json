@@ -10588,6 +10588,53 @@
         }
       }
     },
+    "/repos/{id}/import-launch-json": {
+      "post": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "description": "id parameter"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/_id"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "not authenticated"
+          },
+          "500": {
+            "description": "general error"
+          }
+        },
+        "description": "Imports .agor/launch.json or .vscode/launch.json profiles from a branch.",
+        "summary": "Imports launch profiles",
+        "tags": ["repos"],
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_id"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/user/api-keys": {
       "get": {
         "parameters": [

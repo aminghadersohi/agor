@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createClient } from '@libsql/client';
@@ -15,6 +15,22 @@ interface JournalEntry {
   tag: string;
   when: number;
 }
+
+const INTEGRATION_MIGRATION_BAND_START = 9000;
+const LOCAL_MIGRATION_SUFFIXES = [
+  'transitive_completion_subscriptions',
+  'profile_image_galleries',
+  'profile_identity_models',
+  'board_image_galleries',
+  'board_branch_capability_policies',
+  'strip_stdio_remote_fields',
+  'branch_sdk_home',
+  'session_sdk_home_scope',
+  'shared_session_prompting',
+  'session_attention_states',
+  'session_auto_archive',
+  'zone_workflow_transitions',
+] as const;
 
 /** Both journals, Postgres first, as the migrator reads them off disk. */
 const readJournals = () =>
@@ -72,10 +88,11 @@ describe('management ownership migration', () => {
 
 describe('Postgres migrations', () => {
   it('appends MCP recovery after the fork repair band without duplicate tags or indices', async () => {
-    for (const journal of await readJournals()) {
-      const index = journal.entries.findIndex(({ tag }) => tag === '9019_mcp_slack_recovery_due');
+    for (const [dialectIndex, journal] of (await readJournals()).entries()) {
+      const idx = dialectIndex === 0 ? 9019 : 9015;
+      const index = journal.entries.findIndex(({ tag }) => tag === `${idx}_mcp_slack_recovery_due`);
       const added = journal.entries[index]!;
-      expect(added).toMatchObject({ idx: 9019, tag: '9019_mcp_slack_recovery_due' });
+      expect(added).toMatchObject({ idx, tag: `${idx}_mcp_slack_recovery_due` });
       expect(added.when).toBeGreaterThan(
         Math.max(...journal.entries.slice(0, index).map(({ when }) => when))
       );
@@ -94,7 +111,7 @@ describe('Postgres migrations', () => {
     expect(pg.entries[ownershipIndex]!.when).toBeGreaterThan(
       Math.max(...pg.entries.slice(0, ownershipIndex).map((e) => e.when))
     );
-    expect(sqlite.entries.some((e) => e.tag === '9019_mcp_slack_recovery_due')).toBe(true);
+    expect(sqlite.entries.some((e) => e.tag === '9015_mcp_slack_recovery_due')).toBe(true);
     expect(
       pendingOfflineCutoverMigrations('postgresql', {
         applied: ['9019_mcp_slack_recovery_due'],
@@ -221,15 +238,15 @@ describe('Postgres migrations', () => {
     expect(
       pendingOfflineCutoverMigrations('postgresql', {
         applied: ['0094_discord_gateway_hybrid'],
-        pending: ['0095_board_branch_capability_policies'],
+        pending: ['9004_board_branch_capability_policies'],
       })
-    ).toEqual(['0095_board_branch_capability_policies']);
+    ).toEqual(['9004_board_branch_capability_policies']);
     expect(
       pendingOfflineCutoverMigrations('sqlite', {
         applied: ['0097_discord_gateway_hybrid'],
-        pending: ['0098_board_branch_capability_policies'],
+        pending: ['9004_board_branch_capability_policies'],
       })
-    ).toEqual(['0098_board_branch_capability_policies']);
+    ).toEqual(['9004_board_branch_capability_policies']);
   });
 
   it('requires the Knowledge claim protocol migration to be an offline existing-db cutover', () => {
@@ -323,19 +340,19 @@ describe('Postgres migrations', () => {
     expect(
       pendingOfflineCutoverMigrations('postgresql', {
         applied: ['0093_scheduler_poison_recovery'],
-        pending: ['0100_claude_oauth_attempts'],
+        pending: ['9012_claude_oauth_attempts'],
       })
-    ).toEqual(['0100_claude_oauth_attempts']);
+    ).toEqual(['9012_claude_oauth_attempts']);
     expect(
       pendingOfflineCutoverMigrations('sqlite', {
         applied: ['0096_scheduler_poison_recovery'],
-        pending: ['0103_claude_oauth_attempts'],
+        pending: ['9012_claude_oauth_attempts'],
       })
-    ).toEqual([]);
+    ).toEqual(['9012_claude_oauth_attempts']);
     expect(
       pendingOfflineCutoverMigrations('postgresql', {
         applied: [],
-        pending: ['0000_cuddly_captain_america', '0100_claude_oauth_attempts'],
+        pending: ['0000_cuddly_captain_america', '9012_claude_oauth_attempts'],
       })
     ).toEqual([]);
   });
@@ -419,36 +436,136 @@ describe('Postgres migrations', () => {
     }
   });
 
-  it('journals the matching power-priority migration slots after zone workflow', async () => {
+  it('keeps integration-only migrations and their successors in the reserved band', async () => {
+    for (const [dialectIndex, { entries }] of (await readJournals()).entries()) {
+      const isPostgres = dialectIndex === 0;
+      const localEntries = entries.filter((entry) =>
+        LOCAL_MIGRATION_SUFFIXES.some((suffix) => entry.tag.endsWith(`_${suffix}`))
+      );
+
+      expect(localEntries.map((entry) => entry.tag.replace(/^\d+_/, ''))).toEqual(
+        LOCAL_MIGRATION_SUFFIXES
+      );
+      expect(localEntries.map((entry) => entry.idx)).toEqual([
+        9000, 9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011,
+      ]);
+
+      const bandStart = entries.findIndex((entry) => entry.idx >= INTEGRATION_MIGRATION_BAND_START);
+      expect(bandStart).toBeGreaterThan(-1);
+
+      // Once this integration lineage enters its private band, every later
+      // entry stays there. An upstream journal append with a low idx must fail
+      // here and be renumbered during the merge instead of colliding silently.
+      const historicalBand = entries.slice(bandStart).filter((entry) => entry.idx < 9021);
+      expect(historicalBand.map((entry) => entry.idx)).toEqual(
+        historicalBand.map((_, offset) => INTEGRATION_MIGRATION_BAND_START + offset)
+      );
+      // SQLite has fewer historical authority migrations. Align only the new
+      // append across dialects; never fill that gap by inventing applied SQL.
+      // 9026 retires PostgreSQL-only RLS discovery policies, so it has no
+      // SQLite counterpart — exactly like 9020_standalone_power_ownership.
+      expect(entries.filter((entry) => entry.idx >= 9021).map((entry) => entry.idx)).toEqual([
+        9021,
+        9022,
+        9023,
+        9024,
+        9025,
+        ...(isPostgres ? [9026] : []),
+      ]);
+
+      for (const [position, entry] of entries.entries()) {
+        if (position >= bandStart) {
+          // Newly integrated upstream SQL retains its canonical name and bytes.
+          // Only the journal index moves into our reserved authoring band.
+          const upstreamAppends: Record<number, string> = {
+            9021: '0105_mcp_oauth_grant_attribution',
+            9022: '0107_branch_permanent_deletion',
+            9023: '0108_branch_deletion_recovery',
+            9024: '0109_branch_cleanup_policy',
+            9025: '0110_user_provider_oauth_grants',
+          };
+          if (upstreamAppends[entry.idx]) expect(entry.tag).toBe(upstreamAppends[entry.idx]);
+          else expect(entry.tag.startsWith(`${String(entry.idx).padStart(4, '0')}_`)).toBe(true);
+        }
+        if (position > 0) expect(entry.idx).toBeGreaterThan(entries[position - 1]?.idx ?? -1);
+      }
+    }
+  });
+
+  it('leaves the next generated migration a free number in both dialects', async () => {
+    // `idx` decides nothing when migrating: drizzle reads entries in array
+    // order and gates each one on `when` against the highest applied
+    // `created_at`. It decides everything when *authoring*, because
+    // `drizzle-kit generate` numbers the next migration `lastEntry.idx + 1`.
+    //
+    // So a journal whose last entry is not its highest hands the next generated
+    // migration a prefix that is already on disk. That is the shape a merge
+    // produces on its own: `_journal.json` is a JSON array, so an upstream
+    // entry appended beside a local one with the same `idx` merges clean and
+    // silently, with no conflict to review.
+    //
+    // Checked per dialect because the two journals are numbered independently.
+    for (const dialect of ['postgres', 'sqlite'] as const) {
+      const directory = new URL(`../../drizzle/${dialect}/`, import.meta.url);
+      const { entries } = JSON.parse(
+        await readFile(new URL('meta/_journal.json', directory), 'utf8')
+      ) as { entries: JournalEntry[] };
+
+      // The journal and the directory beside it must describe the same set, or
+      // a rename has updated one and not the other.
+      const onDisk = (await readdir(directory)).filter((name) => name.endsWith('.sql'));
+      expect(new Set(onDisk)).toEqual(new Set(entries.map((entry) => `${entry.tag}.sql`)));
+
+      const nextPrefix = String((entries.at(-1)?.idx ?? -1) + 1).padStart(4, '0');
+      expect(
+        onDisk.filter((name) => name.startsWith(`${nextPrefix}_`)),
+        `${dialect}: drizzle-kit generate would write ${nextPrefix}_* over an existing migration`
+      ).toEqual([]);
+    }
+  });
+
+  it('journals the matching zone-workflow migration and tenant-safe audit constraints', async () => {
     const [postgresJournal, sqliteJournal] = await readJournals();
+    expect(postgresJournal.entries).toContainEqual(
+      expect.objectContaining({
+        idx: 9011,
+        tag: '9011_zone_workflow_transitions',
+      })
+    );
+    expect(sqliteJournal.entries).toContainEqual(
+      expect.objectContaining({
+        idx: 9011,
+        tag: '9011_zone_workflow_transitions',
+      })
+    );
     expect(
-      postgresJournal.entries.find(({ tag }) => tag === '0103_session_power_priority')
+      postgresJournal.entries.find(({ tag }) => tag === '9013_session_power_priority')
     ).toMatchObject({
-      idx: 103,
-      tag: '0103_session_power_priority',
+      idx: 9013,
+      tag: '9013_session_power_priority',
     });
     expect(
-      sqliteJournal.entries.find(({ tag }) => tag === '0106_session_power_priority')
+      sqliteJournal.entries.find(({ tag }) => tag === '9013_session_power_priority')
     ).toMatchObject({
-      idx: 106,
-      tag: '0106_session_power_priority',
+      idx: 9013,
+      tag: '9013_session_power_priority',
     });
 
     const [postgres, sqlite, postgresZoneWorkflow, sqliteZoneWorkflow] = await Promise.all([
       readFile(
-        new URL('../../drizzle/postgres/0103_session_power_priority.sql', import.meta.url),
+        new URL('../../drizzle/postgres/9013_session_power_priority.sql', import.meta.url),
         'utf8'
       ),
       readFile(
-        new URL('../../drizzle/sqlite/0106_session_power_priority.sql', import.meta.url),
+        new URL('../../drizzle/sqlite/9013_session_power_priority.sql', import.meta.url),
         'utf8'
       ),
       readFile(
-        new URL('../../drizzle/postgres/0102_zone_workflow_transitions.sql', import.meta.url),
+        new URL('../../drizzle/postgres/9011_zone_workflow_transitions.sql', import.meta.url),
         'utf8'
       ),
       readFile(
-        new URL('../../drizzle/sqlite/0105_zone_workflow_transitions.sql', import.meta.url),
+        new URL('../../drizzle/sqlite/9011_zone_workflow_transitions.sql', import.meta.url),
         'utf8'
       ),
     ]);
@@ -631,7 +748,7 @@ describe('Board and branch capability-policy migration', () => {
         INSERT INTO branch_owners VALUES ('branch-3','owner',1);
       `);
       const migration = await readFile(
-        new URL('../../drizzle/sqlite/0098_board_branch_capability_policies.sql', import.meta.url),
+        new URL('../../drizzle/sqlite/9004_board_branch_capability_policies.sql', import.meta.url),
         'utf8'
       );
       for (const statement of migration.split('--> statement-breakpoint')) {
@@ -831,15 +948,17 @@ describe('Board and branch capability-policy migration', () => {
         INSERT INTO branches VALUES
           ('inherited','private-board',1,2,'owner','board','session','write','{}'),
           ('removed-creator',NULL,1,2,'removed-creator','override','none','none','{}'),
-          ('nullable-owner-order',NULL,1,2,'removed-creator','override','none','none','{}');
+          ('nullable-owner-order',NULL,1,2,'removed-creator','override','none','none','{}'),
+          ('board-source-without-board',NULL,1,2,'owner','board','session','read','{}');
         INSERT INTO branch_owners VALUES
           ('inherited','owner',1),
           ('removed-creator','manager',3),
           ('nullable-owner-order','manager',NULL),
-          ('nullable-owner-order','owner',5);
+          ('nullable-owner-order','owner',5),
+          ('board-source-without-board','owner',1);
       `);
       const migration = await readFile(
-        new URL('../../drizzle/sqlite/0098_board_branch_capability_policies.sql', import.meta.url),
+        new URL('../../drizzle/sqlite/9004_board_branch_capability_policies.sql', import.meta.url),
         'utf8'
       );
       for (const statement of migration.split('--> statement-breakpoint')) {
@@ -875,6 +994,15 @@ describe('Board and branch capability-policy migration', () => {
         `SELECT permission_binding FROM branches WHERE branch_id='inherited'`
       );
       expect(binding.rows[0]).toMatchObject({ permission_binding: 'inherit' });
+      const boardlessLegacyConfig = await client.execute(
+        `SELECT sharing_mode,others_role,others_fs_access
+         FROM branch_permission_configs WHERE branch_id='board-source-without-board'`
+      );
+      expect(boardlessLegacyConfig.rows[0]).toMatchObject({
+        sharing_mode: 'shared',
+        others_role: 'collaborator',
+        others_fs_access: 'read',
+      });
       const ignoredGroup = await client.execute(
         `SELECT count(*) AS count FROM branch_permission_entries e
          JOIN branch_permission_configs c ON c.config_id=e.config_id
@@ -945,7 +1073,7 @@ describe('Board and branch capability-policy migration', () => {
       await expect(preflightSQLiteCapabilityPolicyOwners(db)).rejects.toThrow(/branch:orphan/);
       await (db as unknown as { $client: { close(): Promise<void> } }).$client.close();
       const migration = await readFile(
-        new URL('../../drizzle/sqlite/0098_board_branch_capability_policies.sql', import.meta.url),
+        new URL('../../drizzle/sqlite/9004_board_branch_capability_policies.sql', import.meta.url),
         'utf8'
       );
       let failed = false;
@@ -968,7 +1096,7 @@ describe('Board and branch capability-policy migration', () => {
 
   it('forces tenant RLS and reports unattributed object IDs in PostgreSQL', async () => {
     const migration = await readFile(
-      new URL('../../drizzle/postgres/0095_board_branch_capability_policies.sql', import.meta.url),
+      new URL('../../drizzle/postgres/9004_board_branch_capability_policies.sql', import.meta.url),
       'utf8'
     );
     for (const table of [
@@ -989,6 +1117,9 @@ describe('Board and branch capability-policy migration', () => {
     expect(migration).toContain('ORDER BY bo.created_at NULLS LAST,bo.user_id');
     expect(migration).toContain('CONSTRAINT "boards_tenant_primary_owner_fk"');
     expect(migration).toContain('CONSTRAINT "branches_tenant_primary_owner_fk"');
+    expect(migration).toContain(
+      "br.permission_source='board' AND board_config.config_id IS NOT NULL"
+    );
     expect(migration).toContain("CHECK (\"permission_binding\" IN ('inherit','override'))");
     expect(migration).toContain("CHECK (\"sharing_mode\" IN ('private','shared'))");
     expect(migration).toContain("CHECK (\"others_fs_access\" IN ('none','read','write'))");
@@ -1032,7 +1163,7 @@ describe('Board and branch capability-policy migration', () => {
         INSERT INTO boards VALUES ('board-1','{"default_dangerously_allow_session_sharing":true,"keep":1}');
       `);
       const migration = await readFile(
-        new URL('../../drizzle/sqlite/0102_shared_session_prompting.sql', import.meta.url),
+        new URL('../../drizzle/sqlite/9008_shared_session_prompting.sql', import.meta.url),
         'utf8'
       );
       for (const statement of migration.split('--> statement-breakpoint')) {
@@ -1154,9 +1285,9 @@ describe('MCP OAuth pending-flow migrations', () => {
 describe('MCP OAuth client-registration migrations', () => {
   it('keeps PostgreSQL-only DCR authority out of SQLite while accepting later portable migrations', async () => {
     const [, sqliteJournal] = await readJournals();
-    expect(sqliteJournal.entries.find(({ idx }) => idx === 107)).toMatchObject({
-      idx: 107,
-      tag: '0107_session_memory_reminders',
+    expect(sqliteJournal.entries.find(({ idx }) => idx === 9014)).toMatchObject({
+      idx: 9014,
+      tag: '9014_session_memory_reminders',
     });
     expect(sqliteJournal.entries.some(({ tag }) => tag.includes('client_registrations'))).toBe(
       false
@@ -1166,9 +1297,9 @@ describe('MCP OAuth client-registration migrations', () => {
 
   it('follows current main and binds PostgreSQL authority to tenant/server UUID with forced RLS', async () => {
     const [postgresJournal] = await readJournals();
-    expect(postgresJournal.entries.filter(({ idx }) => idx >= 103 && idx <= 9020)).toEqual([
-      expect.objectContaining({ idx: 103, tag: '0103_session_power_priority' }),
-      expect.objectContaining({ idx: 104, tag: '0104_environment_command_discovery' }),
+    expect(postgresJournal.entries.filter(({ idx }) => idx >= 9013 && idx <= 9020)).toEqual([
+      expect.objectContaining({ idx: 9013, tag: '9013_session_power_priority' }),
+      expect.objectContaining({ idx: 9014, tag: '9014_environment_command_discovery' }),
       expect.objectContaining({ idx: 9015, tag: '9015_mcp_oauth_client_registrations' }),
       expect.objectContaining({
         idx: 9016,
@@ -1179,8 +1310,8 @@ describe('MCP OAuth client-registration migrations', () => {
       expect.objectContaining({ idx: 9019, tag: '9019_mcp_slack_recovery_due' }),
       expect.objectContaining({ idx: 9020, tag: '9020_standalone_power_ownership' }),
     ]);
-    expect(postgresJournal.entries.find(({ idx }) => idx === 103)!.when).toBeGreaterThan(
-      postgresJournal.entries.find(({ idx }) => idx === 102)!.when
+    expect(postgresJournal.entries.find(({ idx }) => idx === 9013)!.when).toBeGreaterThan(
+      postgresJournal.entries.find(({ idx }) => idx === 9012)!.when
     );
     const migration = await readFile(
       new URL('../../drizzle/postgres/9015_mcp_oauth_client_registrations.sql', import.meta.url),
@@ -1434,7 +1565,7 @@ describe('Session automatic archival migration', () => {
       INSERT INTO sessions VALUES ('legacy-btw', 0, '{"fork_origin":"btw"}');
     `);
     const migration = await readFile(
-      new URL('../../drizzle/sqlite/0104_session_auto_archive.sql', import.meta.url),
+      new URL('../../drizzle/sqlite/9010_session_auto_archive.sql', import.meta.url),
       'utf8'
     );
     await client.executeMultiple(migration.replaceAll('--> statement-breakpoint', ''));
@@ -1511,7 +1642,7 @@ describe('MCP stdio transport repair migrations', () => {
     `);
 
     const migration = await readFile(
-      new URL('../../drizzle/sqlite/0099_strip_stdio_remote_fields.sql', import.meta.url),
+      new URL('../../drizzle/sqlite/9005_strip_stdio_remote_fields.sql', import.meta.url),
       'utf8'
     );
     await client.executeMultiple(migration.replaceAll('--> statement-breakpoint', ''));
@@ -1560,7 +1691,7 @@ describe('MCP stdio transport repair migrations', () => {
 
   it('bounds the PostgreSQL cross-tenant repair to a temporary exact capability', async () => {
     const migration = await readFile(
-      new URL('../../drizzle/postgres/0096_strip_stdio_remote_fields.sql', import.meta.url),
+      new URL('../../drizzle/postgres/9005_strip_stdio_remote_fields.sql', import.meta.url),
       'utf8'
     );
 

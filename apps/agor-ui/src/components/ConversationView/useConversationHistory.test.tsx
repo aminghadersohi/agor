@@ -7,6 +7,23 @@ import { useConversationHistory } from './useConversationHistory';
 const scrollRef = { current: null };
 
 describe('conversation render history', () => {
+  it.each([20, 50])(
+    'preserves the existing %i-task view bound through reveal and arrivals',
+    (pageSize) => {
+      const { sessionId, tasks } = largeSessionFixture(121, 0);
+      const { result, rerender } = renderHook(
+        ({ rows }) => useConversationHistory(sessionId, rows, false, scrollRef, vi.fn(), pageSize),
+        { initialProps: { rows: tasks.slice(0, 120) } }
+      );
+      expect(result.current.visibleTasks).toHaveLength(pageSize);
+      act(() => result.current.revealOlder());
+      const revealed = result.current.visibleTasks;
+      expect(revealed).toHaveLength(pageSize * 2);
+      rerender({ rows: tasks });
+      expect(result.current.visibleTasks).toEqual([...revealed, tasks[120]]);
+    }
+  );
+
   it('honors canonical Session task order rather than assuming timestamps are monotonic', () => {
     const { sessionId, tasks } = largeSessionFixture(65, 0);
     const rows = [...tasks].reverse();

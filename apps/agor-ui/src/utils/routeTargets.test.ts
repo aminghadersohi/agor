@@ -29,6 +29,12 @@ describe('getShellSurfacePath', () => {
         state: { settingsBackgroundPath: '/b/alpha/' },
       })
     ).toBe('/b/alpha/');
+    expect(
+      getShellSurfacePath({
+        pathname: '/settings/mcp/',
+        state: { settingsBackgroundPath: '/chats/019e99990000700080000000/' },
+      })
+    ).toBe('/chats/019e99990000700080000000/');
   });
 
   it('drops search and hash from the recorded origin', () => {
@@ -41,7 +47,7 @@ describe('getShellSurfacePath', () => {
   });
 
   it('falls back to the pathname when no usable origin was recorded', () => {
-    // Shared settings link without history state — nothing to preserve.
+    // Cold-loaded settings URL (shared link / refresh) — nothing to preserve.
     expect(getShellSurfacePath({ pathname: '/settings/users/' })).toBe('/settings/users/');
     expect(getShellSurfacePath({ pathname: '/settings/users/', state: null })).toBe(
       '/settings/users/'

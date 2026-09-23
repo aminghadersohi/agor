@@ -7,6 +7,10 @@ description: Define named environment variants per repo, layer deployment-local 
 
 Agor's managed environments let a repo ship a **library of named variants** (`lean`, `postgres`, `full`, …) that every branch can pick from. Variants are Handlebars-templated and get **rendered into a per-branch snapshot** that the Start/Stop/Nuke/Logs buttons execute against.
 
+They are not limited to containers. In addition to `.agor.yml` shell/webhook
+variants, Agor can import VS Code-shaped launch profiles for local worktree dev
+servers.
+
 This page documents the data model, the template vars, deployment-local overrides, and the permission rules.
 
 <img
@@ -136,6 +140,90 @@ Math helpers are deterministic. The same branch always renders the same ports, w
 <a id="variants" />
 
 `.agor.yml` lives at the **branch root** (`$BRANCH_PATH/.agor.yml`) and is the shared, committed description of a repo's environment variants. It's a regular repo file: you edit it on a branch, open a PR, and it rolls out when merged.
+
+## Launch JSON profiles {/* #launch-json */}
+
+For projects that run directly in a worktree, the Environment tab can import
+`.agor/launch.json`. If that file is absent, Agor falls back to the familiar
+`.vscode/launch.json`. `.agor/launch.json` is recommended when you need Agor's
+lifecycle metadata without changing the configuration developers use in VS
+Code.
+
+Launch files use JSONC, so comments and trailing commas are supported. Every
+configuration becomes a named Agor environment variant; the first is the
+default unless exactly one configuration sets `agor.default: true`.
+
+```jsonc
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Web dev",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "pnpm dev",
+      "cwd": "${workspaceFolder}/apps/web",
+      "env": {
+        "PORT": "{{add 5000 branch.unique_id}}",
+      },
+      "agor": {
+        "default": true,
+        "description": "Vite dev server in this worktree",
+        "health": "http://localhost:{{add 5000 branch.unique_id}}/health",
+        "app": "http://localhost:{{add 5000 branch.unique_id}}",
+      },
+    },
+    {
+      "name": "Node API",
+      "type": "pwa-node",
+      "request": "launch",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--enable-source-maps"],
+      "program": "${workspaceFolder}/server.js",
+      "args": ["--port", "{{add 7000 branch.unique_id}}"],
+    },
+  ],
+}
+```
+
+### Supported launch fields
+
+| Field                                                 | Behavior                                                                                                  |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `name`                                                | Required; becomes the Agor variant name.                                                                  |
+| `request`                                             | Optional, but only `launch` is accepted. Attach/debug sessions are not managed environments.              |
+| `command`                                             | Shell command, matching VS Code's `node-terminal` style.                                                  |
+| `runtimeExecutable`, `runtimeArgs`, `program`, `args` | Safely shell-quoted into a command. Node profiles may omit `runtimeExecutable` when `program` is present. |
+| `cwd`                                                 | Working directory; defaults to `${workspaceFolder}`.                                                      |
+| `env`                                                 | Scalar environment variables for the launched process.                                                    |
+| `agor.default`                                        | Selects the default imported variant.                                                                     |
+| `agor.background`                                     | Defaults to `true`; Agor supervises the process and returns from Start immediately.                       |
+| `agor.stop`, `agor.nuke`, `agor.logs`                 | Optional lifecycle command overrides.                                                                     |
+| `agor.health`, `agor.app`                             | Health-check and browser URLs.                                                                            |
+
+`${workspaceFolder}` and the legacy `${workspaceRoot}` are translated to the
+branch checkout working directory. All normal Agor Handlebars variables are
+available for ports and other profile values.
+
+For a background profile, Agor writes private runtime PID and log files beneath
+the operating system's temporary directory, keyed by a SHA-256 digest of the
+worktree path. The checkout stays clean and different worktrees cannot share a
+runtime directory. Stop verifies the PID still belongs to the profile before
+signaling it, preventing a stale PID from stopping an unrelated process. When
+`pgrep` is available (standard on Linux and macOS), Stop walks and terminates
+the profile's descendant process tree as well. Nuke stops the profile and
+removes its runtime directory. For unusual launchers that re-parent processes
+outside that tree, set an explicit `agor.stop` command.
+
+Import is explicit and admin-only. It replaces repository variants just like
+`.agor.yml` import, preserves deployment-local `template_overrides`, and does
+not rewrite already-rendered branch snapshots. Select a profile and click
+**Render** to apply it to a branch.
+
+Current scope deliberately excludes VS Code `attach` requests, debug-adapter
+protocol behavior, `preLaunchTask`, variable commands/inputs, and compounds.
+Those editor orchestration features do not map safely to a long-lived Agor
+environment without additional lifecycle semantics.
 
 ### Schema
 

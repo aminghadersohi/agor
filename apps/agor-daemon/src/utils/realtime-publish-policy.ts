@@ -453,6 +453,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: `${NO_CONSUMER} The new session arrives as sessions.created.`,
   },
+  'sessions/:id/acknowledge-attention': {
+    audience: 'none',
+    why: 'The caller-private acknowledgement is emitted only to that tenant user room.',
+  },
   'sessions/:id/prompt': {
     audience: 'none',
     why: `${NO_CONSUMER} The task arrives as tasks.created/queued.`,
@@ -537,10 +541,19 @@ export const REALTIME_PUBLISH_POLICY = {
   'repos/:id/branches/:name': { audience: 'none', why: NO_CONSUMER },
   'repos/:id/import-agor-yml': { audience: 'none', why: NO_CONSUMER },
   'repos/:id/export-agor-yml': { audience: 'none', why: NO_CONSUMER },
+  'repos/:id/import-launch-json': { audience: 'none', why: NO_CONSUMER },
   'artifacts/:id/payload': { audience: 'none', why: `${NO_CONSUMER} Lands as artifacts.patched.` },
   'artifacts/:id/console': {
     audience: 'none',
     why: 'Artifact console output is fetched by the viewing tab.',
+  },
+  'artifacts/:id/actions/:actionId': {
+    audience: 'none',
+    why: `${NO_CONSUMER} The effect lands as schedules.patched / sessions.created.`,
+  },
+  'artifacts/:id/data/:dataId': {
+    audience: 'none',
+    why: 'A binding read answers the one viewing tab that asked; it is never broadcast.',
   },
   'artifacts/:id/sandpack-error': { audience: 'none', why: NO_CONSUMER },
   'artifacts/:id/runtime-response/:requestId': {
