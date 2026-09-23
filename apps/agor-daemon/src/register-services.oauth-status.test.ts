@@ -54,6 +54,8 @@ describe('register-services durable OAuth status authority', () => {
   it('supports a daemon-only forced refresh without treating transient failures as revocation', () => {
     expect(authHeadersBlock).toContain('force_refresh?: boolean');
     expect(authHeadersBlock).toContain('data?.force_refresh === true');
+    expect(authHeadersBlock).toContain('acquireMCPOAuthGrant({');
+    expect(authHeadersBlock).toContain('forceRefresh,');
     expect(authHeadersBlock).toMatch(/acquireMCPOAuthGrant\([\s\S]*?forceRefresh/);
     expect(authHeadersBlock).toMatch(
       /error instanceof FailedRefreshError[\s\S]*?error instanceof AmbiguousRefreshError[\s\S]*?error instanceof OAuthRefreshExchangeError[\s\S]*?error: 'token_refresh_failed'/

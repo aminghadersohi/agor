@@ -46,7 +46,7 @@ into SDK-private registration state.
 5. **`agor_sessions_reparent`** — change only branch-local
    `parent_session_id`, including detaching to a root. It does not touch
    callback routing or remote relationships.
-6. **`agor_session_relationships_report`** — relay from the current MCP Session
+6. **`agor_session_relationships_relay`** — relay from the current MCP Session
    to an explicitly selected `parent` or current `coordinator`. It accepts no
    target Session ID.
 7. **`agor_sessions_interrupt_with_message`** — a current branch-local parent
@@ -106,8 +106,7 @@ themselves.
 
 The exact-Task subscription from `agor_sessions_prompt(callback:true)` remains
 direct by design. If it coalesces with a standing subscription for the same
-source Task and destination, direct wins. Root-propagated exact-Task requests
-therefore do not acquire standing BTW policy accidentally. Callback and digest
+source Task and destination, direct wins. Callback and digest
 Tasks remain excluded from ordinary queued-prompt compaction.
 
 Standing callback retargeting preserves the callback's enabled state, mode,

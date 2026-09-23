@@ -26,11 +26,20 @@ export function AdaptiveSettingsModal({
   width,
   closable,
   maskClosable,
+  mask,
   keyboard,
   ...modalProps
 }: AdaptiveSettingsModalProps) {
   const screens = Grid.useBreakpoint();
   const compact = !screens.md;
+  // Preserve the wrapper's legacy public prop while translating it to AntD
+  // v6's non-deprecated mask configuration for both Modal and Drawer.
+  const resolvedMask =
+    maskClosable === undefined
+      ? mask
+      : typeof mask === 'object'
+        ? { ...mask, closable: maskClosable }
+        : { enabled: mask, closable: maskClosable };
 
   if (!compact) {
     return (
@@ -50,7 +59,7 @@ export function AdaptiveSettingsModal({
         destroyOnHidden={destroyOnHidden}
         width={width}
         closable={closable}
-        maskClosable={maskClosable}
+        mask={resolvedMask}
         keyboard={keyboard}
       >
         {children}
@@ -80,14 +89,14 @@ export function AdaptiveSettingsModal({
       placement="bottom"
       size="large"
       closable={closable}
-      maskClosable={maskClosable}
+      mask={resolvedMask}
       keyboard={keyboard}
       destroyOnHidden={destroyOnHidden}
       afterOpenChange={(isOpen) => {
         if (!isOpen) afterClose?.();
       }}
       styles={{
-        content: { borderStartStartRadius: 16, borderStartEndRadius: 16, overflow: 'hidden' },
+        section: { borderStartStartRadius: 16, borderStartEndRadius: 16, overflow: 'hidden' },
         body: { overflowX: 'hidden', overflowY: 'auto', padding: 16 },
         footer: { padding: '12px 16px' },
       }}

@@ -62,3 +62,13 @@ export interface FileDetail extends FileListItem {
   /** Content encoding: 'utf-8' for text files, 'base64' for binary files */
   encoding: 'utf-8' | 'base64';
 }
+
+/**
+ * Safe, optimistic update for an existing text file in a branch worktree.
+ * The timestamp prevents a browser tab from silently overwriting a newer
+ * agent, editor, or teammate change.
+ */
+export interface FilePatchData {
+  content: string;
+  expectedLastModified: string;
+}

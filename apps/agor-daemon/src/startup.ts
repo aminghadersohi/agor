@@ -16,6 +16,7 @@ import {
   resolveDispatchConnectTimeoutMs,
   resolveExecutorHeartbeatConfig,
   resolveMultiTenancyConfig,
+  resolveRestartRecoverySettings,
 } from '@agor/core/config';
 import type { DistributedWorkIdentity } from '@agor/core/coordination';
 import {
@@ -27,7 +28,7 @@ import {
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
 import type { Id, Paginated, Session, SessionID, Task, TenantContext } from '@agor/core/types';
-import { isTerminalTaskStatus, SessionStatus } from '@agor/core/types';
+import { isTerminalTaskStatus, SessionStatus, TaskStatus } from '@agor/core/types';
 import { hasSecureLocalCredentialOverlay, resolveSdkHomeConfig } from './branch-sdk-home.js';
 import type {
   Application,
@@ -50,6 +51,7 @@ import { DistributedHealthMonitor } from './services/distributed-health-monitor.
 import type { GatewayService } from './services/gateway.js';
 import { HealthMonitor } from './services/health-monitor.js';
 import { KnowledgeEmbeddingIndexer } from './services/knowledge-embedding-indexer.js';
+import { drainRestartRecoveries } from './services/restart-recovery-worker.js';
 import { SchedulerService } from './services/scheduler.js';
 import { SessionAutoArchiveWorker } from './services/session-auto-archive-worker.js';
 import { SessionQueueWorker } from './services/session-queue-worker.js';
@@ -144,7 +146,9 @@ export function shouldReconnectSocketClientsOnShutdown(policy: TaskRuntimePolicy
 
 /**
  * Construction boundary for standalone timers versus PostgreSQL-coordinated
- * all-daemon observation. A mismatched Task/environment policy fails closed.
+ * all-daemon observation. Owned standalone PostgreSQL retains local environment
+ * observation while using non-destructive shared Task startup/shutdown semantics.
+ * Every other mismatched Task/environment policy fails closed.
  */
 export function createEnvironmentHealthMonitor(
   ctx: StartupContext,
@@ -294,6 +298,7 @@ async function cleanupOrphanStatusesInTenantScope(
 
   // Determine restart type before touching anything — sentinel is consumed here
   const wasGraceful = await readAndClearSentinel();
+  const restartRecovery = resolveRestartRecoverySettings(ctx.config.execution);
 
   // Find all orphaned executor-owned tasks (dispatching, running, stopping, awaiting_permission, awaiting_input)
   const orphanedTasks = await tasksService.getOrphaned(startupParams as never);
@@ -301,6 +306,11 @@ async function cleanupOrphanStatusesInTenantScope(
   if (orphanedTasks.length > 0) {
     for (const task of orphanedTasks) {
       const session = await sessionsService.get(task.session_id, startupParams as never);
+      const shouldQueueRecovery =
+        restartRecovery.enabled &&
+        (wasGraceful || restartRecovery.resumeAfterCrash) &&
+        (task.status === TaskStatus.DISPATCHING || task.status === TaskStatus.RUNNING);
+      const recoveryRequestedAt = new Date().toISOString();
       await tasksService.settleTermination(
         {
           taskId: task.task_id,
@@ -315,6 +325,15 @@ async function cleanupOrphanStatusesInTenantScope(
                 termination: 'unverified',
               },
           errorMessage: 'Daemon restart released this Task without verifying executor termination.',
+          ...(shouldQueueRecovery
+            ? {
+                restartRecovery: {
+                  source_task_id: task.task_id,
+                  state: 'pending' as const,
+                  requested_at: recoveryRequestedAt,
+                },
+              }
+            : {}),
         },
         { ...startupParams, suppressTerminalQueueProcessing: true } as never
       );
@@ -401,12 +420,11 @@ async function cleanupOrphanStatusesInTenantScope(
   // Fix sessions that are IDLE but not promptable *because a kill interrupted
   // them* — the daemon died during the stop path after writing status=idle but
   // before writing ready_for_prompt=true, or the executor exit raced the stop
-  // endpoint. IDLE + ready_for_prompt=false is NOT inherently orphaned state:
-  // the UI also uses ready_for_prompt as the unread/attention flag (opening a
-  // conversation patches it false, branch cards highlight while it's true —
-  // see SessionPromptState in @agor/core/types), so it is the normal resting
-  // state of every read session. Discriminate by the session's most recent
-  // task: only sessions whose latest task was non-terminal at boot (just
+  // endpoint. IDLE + ready_for_prompt=false is not inherently orphaned state:
+  // newly initialized sessions can be idle before their first settled turn.
+  // Per-user read acknowledgement is stored separately and never mutates this
+  // flag. Discriminate by the session's most recent task: only sessions whose
+  // latest task was non-terminal at boot (just
   // orphan-stopped above, or still in an executing state) were
   // actually interrupted; read sessions have a terminal latest task from a
   // previous run and must be left untouched.
@@ -713,8 +731,11 @@ export async function startup(ctx: StartupContext): Promise<void> {
   initializeEnvironmentHealthMonitor(healthMonitor, metrics);
   if (orphanCleanupResult) {
     runPostStartJob(
-      'daemon-restart-notices',
-      () => injectRestartNotices(ctx, orphanCleanupResult),
+      'daemon-restart-recovery',
+      async () => {
+        await injectRestartNotices(ctx, orphanCleanupResult);
+        await drainRestartRecoveries(ctx);
+      },
       metrics
     );
   }
@@ -1007,7 +1028,6 @@ export async function startup(ctx: StartupContext): Promise<void> {
         terminalsService.cleanup();
       }
 
-      // Stop gateway listeners
       console.log('📨 Stopping discord message delivery worker...');
       await discordMessageDeliveryWorker.stop();
 

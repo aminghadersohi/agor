@@ -21,7 +21,7 @@ vi.mock('../utils/spawn-executor.js', () => ({
   requestExecutor: vi.fn(),
 }));
 
-function createApp(config = {}) {
+function createApp(config: Record<string, unknown> = {}) {
   return {
     get: () => config,
     sessionTokenService: { generateCommandToken: vi.fn(async () => 'user-token') },
@@ -85,6 +85,7 @@ describe('FileService executor failures', () => {
       invoke: (service: FileService, params: Parameters<FileService['find']>[0]) =>
         service.find(params),
       command: 'branch.files.browse',
+      fsAccess: 'read' as const,
       data: { files: [] },
     },
     {
@@ -92,6 +93,7 @@ describe('FileService executor failures', () => {
       invoke: (service: FileService, params: Parameters<FileService['get']>[1]) =>
         service.get('README.md', params),
       command: 'branch.files.read',
+      fsAccess: 'read' as const,
       data: {
         file: {
           path: 'README.md',
@@ -105,12 +107,39 @@ describe('FileService executor failures', () => {
         },
       },
     },
+    {
+      operation: 'editing',
+      invoke: (service: FileService, params: Parameters<FileService['patch']>[2]) =>
+        service.patch(
+          'README.md',
+          { content: '# Updated', expectedLastModified: '2026-07-30T00:00:00.000Z' },
+          params
+        ),
+      command: 'branch.files.write',
+      fsAccess: 'write' as const,
+      data: {
+        file: {
+          path: 'README.md',
+          title: 'Updated',
+          size: 9,
+          lastModified: '2026-07-30T00:01:00.000Z',
+          isText: true,
+          mimeType: 'text/markdown',
+          content: '# Updated',
+          encoding: 'utf-8',
+        },
+      },
+    },
   ])(
     'passes the resolved execution-substrate identity through file $operation',
-    async ({ invoke, command, data }) => {
+    async ({ invoke, command, fsAccess, data }) => {
       impersonationMocks.resolveDelegatedExecutionHomeKey.mockResolvedValue('alice');
       vi.mocked(requestExecutor).mockResolvedValue({ success: true, data });
-      const service = new FileService(createBranchRepo(), { run: vi.fn() } as never, createApp());
+      const service = new FileService(
+        createBranchRepo(undefined, fsAccess),
+        { run: vi.fn() } as never,
+        createApp()
+      );
       const params = {
         query: { branch_id: 'branch-1' },
         user: {
@@ -127,7 +156,7 @@ describe('FileService executor failures', () => {
           command,
           params: expect.objectContaining({
             cwd: '/tenant-a/branch-1',
-            principalBranchAccess: 'read',
+            principalBranchAccess: fsAccess,
           }),
         }),
         expect.objectContaining({
@@ -135,7 +164,7 @@ describe('FileService executor failures', () => {
           templateVariables: {
             branch_id: 'branch-1',
             user_id: 'user-1',
-            branch_fs_access: 'read',
+            branch_fs_access: fsAccess,
           },
         })
       );
@@ -186,6 +215,72 @@ describe('FileService executor failures', () => {
     );
     expect(UsersRepository.prototype.getFilesystemHomeProjection).toHaveBeenCalledWith('user-1');
     expect(JSON.stringify(vi.mocked(requestExecutor).mock.calls[0])).not.toContain('branch-owner');
+  });
+
+  it('passes the typed write payload and caller-scoped mounts through the production handler', async () => {
+    vi.spyOn(UsersRepository.prototype, 'getFilesystemHomeProjection').mockResolvedValue({
+      user_id: 'user-1',
+      filesystem_home: null,
+    } as never);
+    vi.spyOn(RepoRepository.prototype, 'findById').mockResolvedValue({
+      local_path: '/srv/tenants/tenant-a/repos/org/repo',
+    } as never);
+    vi.mocked(requestExecutor).mockResolvedValue({
+      success: true,
+      data: {
+        file: {
+          path: 'README.md',
+          title: 'Updated',
+          size: 9,
+          lastModified: '2026-09-03T00:01:00.000Z',
+          isText: true,
+          mimeType: 'text/markdown',
+          content: '# Updated',
+          encoding: 'utf-8',
+        },
+      },
+    });
+    const service = new FileService(
+      createBranchRepo(undefined, 'write'),
+      { run: vi.fn() } as never,
+      createApp({
+        paths: { data_home: '/srv/agor' },
+        multi_tenancy: {
+          mode: 'required_from_auth',
+          filesystem_isolation_enabled: true,
+          tenants_base_folder: '/srv/tenants',
+        },
+        execution: { sandbox: { enabled: true, home_mode: 'per_user' } },
+      })
+    );
+
+    await runWithTenantContext('tenant-a', () =>
+      service.patch(
+        'README.md',
+        { content: '# Updated', expectedLastModified: '2026-09-03T00:00:00.000Z' },
+        {
+          query: { branch_id: 'branch-1' },
+          user: { user_id: 'user-1', email: 'member@example.com', role: 'member' },
+        }
+      )
+    );
+
+    expect(requestExecutor).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: 'branch.files.write',
+        params: expect.objectContaining({
+          cwd: '/tenant-a/branch-1',
+          principalBranchAccess: 'write',
+          filePath: 'README.md',
+          content: '# Updated',
+          expectedLastModified: '2026-09-03T00:00:00.000Z',
+          sandboxHomeStore: '/srv/tenants/tenant-a/homes/user-1',
+          sandboxWorktreesRoot: '/srv/tenants/tenant-a/worktrees',
+          sandboxBaseRepoPath: '/srv/tenants/tenant-a/repos/org/repo',
+        }),
+      }),
+      expect.any(Object)
+    );
   });
 
   it('scopes database reads but leaves executor work outside the transaction', async () => {
@@ -270,6 +365,38 @@ describe('FileService executor failures', () => {
 
     expect(findById).not.toHaveBeenCalled();
     expect(requestExecutor).toHaveBeenCalledOnce();
+  });
+
+  it('requires filesystem write access for browser edits when branch RBAC is enabled', async () => {
+    const resolveUserAccess = vi.fn().mockResolvedValue({
+      can: 'view',
+      fs_access: 'read',
+      is_owner: false,
+      source: 'others',
+    });
+    const service = new FileService(
+      {
+        findById: vi.fn().mockResolvedValue({ branch_id: 'branch-1' }),
+        resolveUserAccess,
+      } as never,
+      { run: vi.fn() } as never,
+      createApp({ execution: { branch_rbac: true, allow_superadmin: false } })
+    );
+
+    await expect(
+      runWithTenantContext('tenant-a', () =>
+        service.patch(
+          'README.md',
+          { content: '# Updated', expectedLastModified: '2026-07-30T00:00:00.000Z' },
+          {
+            provider: 'rest',
+            query: { branch_id: 'branch-1' },
+            user: { user_id: 'user-1', email: 'member@example.com', role: 'member' },
+          }
+        )
+      )
+    ).rejects.toThrow(/filesystem write access/i);
+    expect(requestExecutor).not.toHaveBeenCalled();
   });
 
   it('requires normalized filesystem read access even when the branch is viewable', async () => {

@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   createExecutorClient: vi.fn(),
   diagnoseGit: vi.fn(),
   parseAgorYml: vi.fn(),
+  parseLaunchJson: vi.fn(),
   writeAgorYml: vi.fn(),
   deleteBranchDirectory: vi.fn(),
   deleteRepoDirectory: vi.fn(),
@@ -55,6 +56,7 @@ vi.mock('@agor/core/config', async () => {
 
 vi.mock('@agor/core/config/node', () => ({
   parseAgorYml: mocks.parseAgorYml,
+  parseLaunchJson: mocks.parseLaunchJson,
   writeAgorYml: mocks.writeAgorYml,
 }));
 
@@ -93,6 +95,7 @@ vi.mock('../services/feathers-client.js', () => ({
 import {
   handleBranchAgorYmlExport,
   handleBranchAgorYmlImport,
+  handleBranchLaunchJsonImport,
   handleGitBranchAdd,
   handleGitBranchRemove,
   handleGitClone,
@@ -241,6 +244,7 @@ beforeEach(() => {
   });
   mocks.scrubGitConfigRemoteCredentials.mockResolvedValue({ findings: [] });
   mocks.ensureGitRemoteUrl.mockResolvedValue({ changed: false });
+  mocks.writeFile.mockResolvedValue(undefined);
 });
 
 describe('managed executor git/fs commands', () => {
@@ -1315,6 +1319,30 @@ describe('managed executor git/fs commands', () => {
       '/safe/worktrees/repo/feature/.agor.yml',
       environment
     );
+  });
+
+  it('imports launch profiles only from the executor-owned branch path', async () => {
+    const imported = {
+      path: '.agor/launch.json',
+      environment: {
+        version: 2,
+        default: 'Web',
+        variants: { Web: { start: 'pnpm dev', stop: 'kill 1' } },
+      },
+    };
+    mocks.parseLaunchJson.mockReturnValue(imported);
+    createClient({
+      branch: { branch_id: branchId, repo_id: repoId, path: '/safe/worktrees/repo/feature' },
+    });
+
+    const result = await handleBranchLaunchJsonImport(
+      { command: 'branch.launch-json.import', sessionToken: 'jwt', params: { repoId, branchId } },
+      {}
+    );
+
+    expect(result.success).toBe(true);
+    expect(mocks.parseLaunchJson).toHaveBeenCalledWith('/safe/worktrees/repo/feature');
+    expect(result.data).toMatchObject(imported);
   });
 });
 

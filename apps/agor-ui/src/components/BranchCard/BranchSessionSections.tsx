@@ -4,6 +4,7 @@ import {
   isGatewaySession as isGatewaySessionCore,
   isSessionExecuting,
   SessionStatus,
+  sessionHasUnseenAttention,
 } from '@agor-live/client';
 import {
   ArrowUpOutlined,
@@ -611,6 +612,18 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
     () => [...manualSessions, ...scheduledSessions, ...gatewayTreeSessions],
     [gatewayTreeSessions, manualSessions, scheduledSessions]
   );
+  const manualUnseenCount = useMemo(
+    () => manualSessions.filter(sessionHasUnseenAttention).length,
+    [manualSessions]
+  );
+  const scheduledUnseenCount = useMemo(
+    () => scheduledSessions.filter(sessionHasUnseenAttention).length,
+    [scheduledSessions]
+  );
+  const gatewayUnseenCount = useMemo(
+    () => gatewayTreeSessions.filter(sessionHasUnseenAttention).length,
+    [gatewayTreeSessions]
+  );
   const sortedManualSessions = useMemo(
     () => (isManualSessionsOpen ? sortSessions(manualSessions, sort) : []),
     [isManualSessionsOpen, manualSessions, sort]
@@ -709,10 +722,11 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
   const sessionRowStyle = (session: Session): React.CSSProperties => {
     const isSessionSelected = session.session_id === selectedSessionId;
     const isRemoteSurrogate = Boolean(session.remote_surrogate);
+    const hasUnseenAttention = sessionHasUnseenAttention(session);
     return {
       borderWidth: 1,
       borderStyle: isRemoteSurrogate ? 'dashed' : 'solid',
-      borderColor: session.ready_for_prompt ? token.colorPrimary : token.colorBorderSecondary,
+      borderColor: hasUnseenAttention ? token.colorPrimary : token.colorBorderSecondary,
       borderRadius: isPanel ? 6 : 4,
       padding: isPanel ? 10 : 8,
       background: isRemoteSurrogate
@@ -733,7 +747,7 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
       whiteSpace: 'normal',
       marginBottom: 4,
       opacity: isRemoteSurrogate ? 0.78 : undefined,
-      boxShadow: session.ready_for_prompt ? `0 0 12px ${token.colorPrimary}30` : undefined,
+      boxShadow: hasUnseenAttention ? `0 0 12px ${token.colorPrimary}30` : undefined,
       ...(isSessionSelected
         ? { outline: `1px dashed ${token.colorTextBase}`, outlineOffset: -2 }
         : {}),
@@ -1063,8 +1077,8 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
       <Space size={4} align="center">
         <Typography.Text strong>Sessions</Typography.Text>
         <Badge
-          count={manualSessions.length}
-          showZero
+          count={manualUnseenCount}
+          showZero={false}
           style={{ backgroundColor: token.colorPrimaryBgHover }}
         />
         {!isPanel && (
@@ -1097,8 +1111,8 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
         <ClockCircleOutlined style={{ color: token.colorInfo }} />
         <Typography.Text strong>Scheduled Runs</Typography.Text>
         <Badge
-          count={scheduledSessions.length}
-          showZero
+          count={scheduledUnseenCount}
+          showZero={false}
           style={{ backgroundColor: token.colorInfoBgHover }}
         />
         {hasRunningScheduledSession && <Spin size="small" />}
@@ -1164,8 +1178,8 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
         <MessageOutlined style={{ color: token.colorSuccess }} />
         <Typography.Text strong>Gateway Sessions</Typography.Text>
         <Badge
-          count={gatewayRootSessions.length}
-          showZero
+          count={gatewayUnseenCount}
+          showZero={false}
           style={{ backgroundColor: token.colorSuccessBgHover }}
         />
         {hasRunningGatewaySession && <Spin size="small" />}

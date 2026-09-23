@@ -952,7 +952,7 @@ export function useAgorData(
             client.service('artifacts').findAll({
               query: {
                 $limit: PAGINATION.DEFAULT_LIMIT,
-                $select: [...ARTIFACT_METADATA_LIST_FIELDS],
+                $select: [...ARTIFACT_METADATA_LIST_FIELDS, 'agor_runtime'],
               },
             }),
           (list) =>
@@ -1553,10 +1553,18 @@ export function useAgorData(
       if (countMembershipChanged(countPrevious, session)) noteCountAffectingEvent();
       const previous =
         realtimeSessionLifecycleState.get(session.session_id) ??
+        realtimeSessionCountState.get(session.session_id) ??
         agorStore.getState().sessionById.get(session.session_id);
-      if (previous && isSessionExecuting(previous) && !isSessionExecuting(session)) {
-        // The event still invalidates any hydration snapshot already in flight,
-        // even though its lifecycle downgrade is held for confirmation.
+      realtimeSessionCountState.set(session.session_id, session);
+      if (countMembershipChanged(previous, session)) noteCountAffectingEvent();
+      // Count bookkeeping observes every socket fact, including an unconfirmed
+      // terminal event. It must not make the next terminal event bypass the
+      // in-flight lifecycle confirmation and prematurely clear the spinner.
+      if (
+        !isSessionExecuting(session) &&
+        (terminalReconciliations.has(session.session_id) ||
+          (previous && isSessionExecuting(previous)))
+      ) {
         bumpRevision('sessions');
         reconcileTerminalSession(session.session_id);
         return;
@@ -1593,6 +1601,7 @@ export function useAgorData(
     sessionsService.on('patched', sessionPatchedBatched);
     sessionsService.on('updated', sessionPatchedBatched);
     sessionsService.on('removed', sessionRemovedSync);
+    client.io.on('session-attention:acknowledged', scopedRealtime.sessionAttentionAcknowledged);
 
     // Subscribe to board events
     boardsService.on('created', scopedRealtime.boardCreated);
@@ -1897,6 +1906,7 @@ export function useAgorData(
       flushRealtimeNow(subscriptionAuthorityScope);
       client.io.off('oauth:completed', handleOAuthCompleted);
       client.io.off('oauth:disconnected', handleOAuthDisconnected);
+      client.io.off('session-attention:acknowledged', scopedRealtime.sessionAttentionAcknowledged);
       client.io.off('connect', refetchSilently);
       window.removeEventListener(TOKENS_REFRESHED_EVENT, handleTokensRefreshed);
       sessionsService.removeListener('created', sessionCreatedSync);

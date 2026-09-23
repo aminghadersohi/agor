@@ -65,10 +65,14 @@ export function completionCallbackBtwResultMessageId(
 ): MessageID {
   return stableTaskId(sourceTaskId, 'session_completion_btw_result', targetSessionId) as MessageID;
 }
-
 /** One durable auto-resume Task per widget message. */
 export function widgetAutoResumeTaskId(widgetId: MessageID): TaskID {
   return stableTaskId(widgetId, 'widget_auto_resume');
+}
+
+/** One durable continuation admission for one restart-interrupted source Task. */
+export function restartRecoveryTaskId(sourceTaskId: TaskID): TaskID {
+  return stableTaskId(sourceTaskId, 'restart_recovery');
 }
 
 /** One stable prompt Task for one durably admitted provider event. */

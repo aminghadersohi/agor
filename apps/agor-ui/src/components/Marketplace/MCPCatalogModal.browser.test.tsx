@@ -115,6 +115,14 @@ describe('MCP Catalog real Chromium flows', () => {
     const api = makeCatalogClient();
     render(<CatalogHarness client={api.client} />);
     await userEvent.click(screen.getByRole('button', { name: 'Open MCP Catalog' }));
+    const modal = await findCatalogModal();
+    // Finish the outer modal's opening/focus transition before opening its
+    // portaled drawer; otherwise two overlays are still moving during input.
+    await waitFor(() =>
+      expect(modal.getAnimations().some((animation) => animation.playState === 'running')).toBe(
+        false
+      )
+    );
     const card = await screen.findByRole('button', { name: 'Open DeepWiki' });
     await userEvent.click(card);
     const drawer = await screen.findByRole('dialog', { name: /DeepWiki/ });
@@ -127,11 +135,20 @@ describe('MCP Catalog real Chromium flows', () => {
         false
       );
     });
-    // This flow tests the handoff, not pointer hit-testing during drawer entry.
+    await waitFor(() => {
+      expect(drawer).toBeVisible();
+      const bounds = drawer.getBoundingClientRect();
+      expect(bounds.right).toBeLessThanOrEqual(window.innerWidth);
+      expect(bounds.left).toBeGreaterThanOrEqual(0);
+    });
+    // The drawer can still be translating when its portal becomes queryable.
+    // Give consent through native keyboard input and prove the state changed
+    // before testing the connect/handoff contract.
     const consent = within(drawer).getByRole('checkbox', { name: /I understand/ });
+    expect(within(drawer).getByRole('button', { name: /Connect/ })).toBeDisabled();
     act(() => consent.focus());
     await userEvent.keyboard(' ');
-    expect(consent).toBeChecked();
+    await waitFor(() => expect(consent).toBeChecked());
     const connect = within(drawer).getByRole('button', { name: /Connect/ });
     await waitFor(() => expect(connect).toBeEnabled());
     await userEvent.click(connect);

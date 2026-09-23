@@ -129,7 +129,7 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
         label: (
           <Flex align="center" gap={12} style={{ padding: '6px 0', minWidth: 0 }}>
             <span data-board-list-avatar style={{ display: 'inline-flex', flexShrink: 0 }}>
-              <BoardTile emoji={getBoardEmoji(board, branchById)} size={36} />
+              <BoardTile board={board} emoji={getBoardEmoji(board, branchById)} size={36} />
             </span>
             <Flex vertical gap={6} style={{ flex: 1, minWidth: 0 }}>
               <Text
@@ -315,7 +315,11 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
               style={{ flex: 1, minWidth: 0, marginRight: editActionReserve }}
             >
               {currentBoard ? (
-                <BoardTile emoji={getBoardEmoji(currentBoard, branchById)} size={28} />
+                <BoardTile
+                  board={currentBoard}
+                  emoji={getBoardEmoji(currentBoard, branchById)}
+                  size={28}
+                />
               ) : (
                 <HomeOutlined style={{ fontSize: 18 }} />
               )}

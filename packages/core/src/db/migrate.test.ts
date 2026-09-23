@@ -99,10 +99,56 @@ describe('migration status introspection', () => {
     expect(sqliteMigration?.impact).toBe(postgresqlMigration?.impact);
   });
 
+  it('describes profile-image galleries as an online schema migration for both dialects', () => {
+    const postgresqlMigration = introspectMigrationStatus('postgresql', {
+      applied: ['0000_init'],
+      pending: ['9001_profile_image_galleries'],
+      dbAheadOfBinary: false,
+    }).pendingMigrations[0];
+    const sqliteMigration = introspectMigrationStatus('sqlite', {
+      applied: ['0000_init'],
+      pending: ['9001_profile_image_galleries'],
+      dbAheadOfBinary: false,
+    }).pendingMigrations[0];
+
+    expect(postgresqlMigration).toMatchObject({
+      requiresOfflineCutover: false,
+      impact: {
+        classification: 'schema',
+        userAction: 'none',
+        rollbackCompatibility: 'compatible',
+      },
+    });
+    expect(sqliteMigration?.impact).toBe(postgresqlMigration?.impact);
+  });
+
+  it('describes private identity-model columns as an online additive migration', () => {
+    const postgres = introspectMigrationStatus('postgresql', {
+      applied: ['9001_profile_image_galleries'],
+      pending: ['9002_profile_identity_models'],
+      dbAheadOfBinary: false,
+    }).pendingMigrations[0];
+    const sqlite = introspectMigrationStatus('sqlite', {
+      applied: ['9001_profile_image_galleries'],
+      pending: ['9002_profile_identity_models'],
+      dbAheadOfBinary: false,
+    }).pendingMigrations[0];
+
+    expect(postgres).toMatchObject({
+      requiresOfflineCutover: false,
+      impact: {
+        classification: 'schema',
+        userAction: 'none',
+        rollbackCompatibility: 'compatible',
+      },
+    });
+    expect(sqlite?.impact).toBe(postgres?.impact);
+  });
+
   it('requires offline acknowledgement for the SQLite RBAC cutover on an existing database', () => {
     const report = introspectMigrationStatus('sqlite', {
       applied: ['0000_init'],
-      pending: ['0098_board_branch_capability_policies'],
+      pending: ['9004_board_branch_capability_policies'],
       dbAheadOfBinary: false,
     });
     expect(report.dialect).toBe('sqlite');
@@ -124,7 +170,7 @@ describe('migration status introspection', () => {
   it('reports Claude OAuth authority as a rollback-incompatible protocol cutover', () => {
     const migration = introspectMigrationStatus('postgresql', {
       applied: ['0093_scheduler_poison_recovery'],
-      pending: ['0100_claude_oauth_attempts'],
+      pending: ['9012_claude_oauth_attempts'],
       dbAheadOfBinary: false,
     }).pendingMigrations[0];
 
@@ -207,7 +253,7 @@ describe('migration status introspection', () => {
         '0082_github_install_state',
         '0083_transcript_hydration_keysets',
         '0091_codex_device_auth_attempts',
-        '0100_claude_oauth_attempts',
+        '9012_claude_oauth_attempts',
         '9015_mcp_oauth_client_registrations',
         '9016_oauth_authority_watermark_reconciliation',
         '9017_fork_migration_collision_repair',
@@ -244,7 +290,7 @@ describe('migration status introspection', () => {
       '0082_github_install_state',
       '0083_transcript_hydration_keysets',
       '0091_codex_device_auth_attempts',
-      '0100_claude_oauth_attempts',
+      '9012_claude_oauth_attempts',
       '9015_mcp_oauth_client_registrations',
       '9016_oauth_authority_watermark_reconciliation',
       '9017_fork_migration_collision_repair',

@@ -7,13 +7,14 @@ import type {
   MCPServerID,
   MessageID,
   Task,
+  TaskID,
   TaskLaunchFields,
   TaskPendingDispatchStatus,
   UserID,
   UUID,
 } from '@agor/core/types';
 import { MessageRole, SessionStatus, TaskStatus } from '@agor/core/types';
-import { describe, expect, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { generateId, toShortId } from '../../lib/ids';
 import type { Database } from '../client';
 import { runDatabaseTransaction } from '../database-wrapper';
@@ -25,7 +26,11 @@ import { MessagesRepository } from './messages';
 import { RepoRepository } from './repos';
 import { SessionMCPServerRepository } from './session-mcp-servers';
 import { SessionRepository } from './sessions';
-import { MISSING_TASK_ACTOR_ERROR, TaskRepository } from './tasks';
+import {
+  MISSING_TASK_ACTOR_ERROR,
+  renderCoalescedSystemUpdatePrompt,
+  TaskRepository,
+} from './tasks';
 import { UsersRepository } from './users';
 
 /**
@@ -2361,6 +2366,7 @@ describe('TaskRepository.update', () => {
       await expect(new SessionRepository(db).findById(sessionId)).resolves.toMatchObject({
         status: SessionStatus.IDLE,
         ready_for_prompt: true,
+        attention_generation: 1,
       });
     }
   );
@@ -2853,6 +2859,11 @@ describe('TaskRepository.update', () => {
           tool: 'codex',
           termination: 'unverified',
         },
+        restartRecovery: {
+          source_task_id: task.task_id,
+          state: 'pending',
+          requested_at: '2026-07-10T20:03:00.000Z',
+        },
       });
 
       expect(result).toMatchObject({
@@ -2861,8 +2872,30 @@ describe('TaskRepository.update', () => {
           status: TaskStatus.STOPPED,
           error_message: 'Daemon restarted',
           sdk_failure: { termination: 'unverified' },
+          metadata: {
+            restart_recovery: {
+              source_task_id: task.task_id,
+              state: 'pending',
+            },
+          },
         },
       });
+      expect((await taskRepo.findPendingRestartRecoveries()).map((item) => item.task_id)).toEqual([
+        task.task_id,
+      ]);
+
+      await taskRepo.update(task.task_id, {
+        metadata: {
+          restart_recovery: {
+            source_task_id: task.task_id,
+            state: 'admitted',
+            requested_at: '2026-07-10T20:03:00.000Z',
+            admitted_task_id: 'recovery-task' as TaskID,
+            admitted_at: '2026-07-10T20:03:01.000Z',
+          },
+        },
+      });
+      expect(await taskRepo.findPendingRestartRecoveries()).toEqual([]);
     }
   );
 
@@ -3655,6 +3688,151 @@ describe('TaskRepository.createPending', () => {
       status: TaskStatus.DISPATCHING,
       queue_position: undefined,
     });
+  });
+
+  dbTest(
+    'coalesces only the compatible queued prefix and preserves durable lineage',
+    async ({ db }) => {
+      const taskRepo = new TaskRepository(db);
+      const sessionRepo = new SessionRepository(db);
+      const sessionId = await createSessionWithDeps(db);
+      await sessionRepo.update(sessionId, {
+        queue_config: { coalesce_system_updates: true, max_coalesced_updates: 8 },
+      });
+      const systemMetadata = {
+        queue_coalescing: { kind: 'callback' as const, group_key: 'session-system-updates' },
+      };
+      const first = await taskRepo.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          full_prompt: 'first callback',
+          metadata: systemMetadata,
+        })
+      );
+      const second = await taskRepo.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          full_prompt: 'second callback',
+          metadata: systemMetadata,
+        })
+      );
+      const human = await taskRepo.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          full_prompt: 'human prompt',
+        })
+      );
+      const later = await taskRepo.createPending(
+        createPendingInput({
+          session_id: sessionId,
+          status: TaskStatus.QUEUED,
+          full_prompt: 'later callback',
+          metadata: systemMetadata,
+        })
+      );
+
+      const claim = await taskRepo.claimDispatchAndProjectSession(
+        first.task_id,
+        TaskStatus.QUEUED,
+        { status: TaskStatus.DISPATCHING }
+      );
+
+      expect(claim).toMatchObject({
+        outcome: 'claimed',
+        task: {
+          task_id: first.task_id,
+          status: TaskStatus.DISPATCHING,
+          metadata: {
+            queue_coalescing: {
+              item_count: 2,
+              coalesced_task_ids: [second.task_id],
+            },
+          },
+        },
+        coalesced_tasks: [
+          {
+            task_id: second.task_id,
+            status: TaskStatus.STOPPED,
+            metadata: {
+              queue_coalescing: { coalesced_into_task_id: first.task_id },
+            },
+          },
+        ],
+      });
+      expect(claim.task.full_prompt).toContain('first callback');
+      expect(claim.task.full_prompt).toContain('second callback');
+      await expect(taskRepo.findById(second.task_id)).resolves.toMatchObject({
+        status: TaskStatus.STOPPED,
+        metadata: { queue_coalescing: { coalesced_into_task_id: first.task_id } },
+      });
+      expect((await taskRepo.findQueued(sessionId)).map((task) => task.task_id)).toEqual([
+        human.task_id,
+        later.task_id,
+      ]);
+    }
+  );
+
+  dbTest('does not coalesce across task attribution boundaries', async ({ db }) => {
+    const taskRepo = new TaskRepository(db);
+    const users = new UsersRepository(db);
+    const sessionRepo = new SessionRepository(db);
+    const sessionId = await createSessionWithDeps(db);
+    await sessionRepo.update(sessionId, {
+      queue_config: { coalesce_system_updates: true, max_coalesced_updates: 8 },
+    });
+    const metadata = {
+      queue_coalescing: { kind: 'gateway' as const, group_key: 'session-system-updates' },
+    };
+    await users.create({ user_id: 'user-a' as UserID, email: 'user-a@example.test' });
+    await users.create({ user_id: 'user-b' as UserID, email: 'user-b@example.test' });
+    const first = await taskRepo.createPending({
+      ...createPendingInput({
+        session_id: sessionId,
+        status: TaskStatus.QUEUED,
+        full_prompt: 'first user update',
+        metadata,
+      }),
+      created_by: 'user-a',
+    });
+    const second = await taskRepo.createPending({
+      ...createPendingInput({
+        session_id: sessionId,
+        status: TaskStatus.QUEUED,
+        full_prompt: 'second user update',
+        metadata,
+      }),
+      created_by: 'user-b',
+    });
+
+    const claim = await taskRepo.claimDispatchAndProjectSession(first.task_id, TaskStatus.QUEUED, {
+      status: TaskStatus.DISPATCHING,
+    });
+
+    expect(claim.outcome).toBe('claimed');
+    expect(claim.coalesced_tasks).toBeUndefined();
+    await expect(taskRepo.findById(second.task_id)).resolves.toMatchObject({
+      status: TaskStatus.QUEUED,
+      queue_position: 2,
+    });
+  });
+
+  it('renders duplicate queued updates once with an explicit repetition count', () => {
+    const task = createTaskData({
+      task_id: generateId(),
+      full_prompt: 'same callback body',
+      status: TaskStatus.QUEUED,
+      metadata: {
+        queue_coalescing: { kind: 'callback', group_key: 'session-system-updates' },
+      },
+    }) as Task;
+    const rendered = renderCoalescedSystemUpdatePrompt([task, { ...task, task_id: generateId() }]);
+
+    expect(rendered.match(/same callback body/g)).toHaveLength(1);
+    expect(rendered).toContain('repeated 2 times');
+    expect(rendered).toContain('1 exact duplicate update(s) were collapsed');
   });
 
   dbTest(

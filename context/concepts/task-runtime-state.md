@@ -322,6 +322,22 @@ resume heartbeat through a peer. Shared-local/container deployment does not
 guarantee that survival; the policy only avoids destroying the process and the
 sole process-local evidence itself.
 
+### Optional standalone restart continuation
+
+`execution.restart_recovery.enabled` opts a standalone deployment into paced,
+durable continuation after restart. It does not replay the interrupted prompt.
+Startup terminalizes the old Task and atomically records a pending recovery on
+that source row; the post-start worker then creates a new system-authored Task
+whose prompt tells the agent to inspect prior state before continuing.
+
+The continuation Task ID is derived deterministically from the source Task ID,
+so a worker retry or daemon death during admission converges on one turn. A
+user-created Task or session archive supersedes a pending recovery. `stopping`,
+`awaiting_permission`, and `awaiting_input` are never automatically continued.
+Abrupt-crash recovery is separately gated by `resume_after_crash` because a
+lost local launcher cannot prove executor containment. The feature is disabled
+by default and is unsupported in shared-replica mode.
+
 ## Task truth and session projection
 
 The task row describes the active turn. The session row is a coarser
@@ -344,10 +360,14 @@ cross-tenant reconciliation of already-`dispatching`/running work remains the
 runtime-supervision contract; this queue layer deliberately does not redesign
 heartbeat, containment, or startup orphan ownership.
 
-`Session.ready_for_prompt` is also used as an attention/acknowledgement flag. It
-is not equivalent to promptability and must not be checked alone. Use the
-central session/task helpers at execution boundaries instead of inventing a
-second busy-state test.
+`Session.ready_for_prompt` is shared runtime promptability state and must not be
+used as read acknowledgement. A false→true settlement advances
+`Session.attention_generation`; authenticated session reads enrich the caller's
+persisted `viewer_seen_attention_generation`. Unseen-result badges are derived
+only from those generations. Failed/timed-out promptable sessions may retain a
+separate unresolved-attention halo after their result is read, while
+`ready_for_prompt` remains part of the central session/task helpers at execution
+boundaries and is never cleared as read acknowledgement.
 
 ## Change invariants
 
@@ -372,6 +392,11 @@ Preserve these invariants:
     external effects.
 11. Daemon startup is non-destructive in shared PostgreSQL policy; queues and
     Session projection change only from authoritative Task outcomes.
+12. Completion callbacks are one hop. A terminal Task notifies its own
+    configured destination; multi-hop coordination is composed by each
+    coordinator completing in turn (C completes → B processes → B completes →
+    A), never by a second execution lifecycle that infers completion from
+    genealogy.
 
 ## Code map
 
@@ -387,6 +412,7 @@ Preserve these invariants:
 | Runtime discovery and recovery                         | `apps/agor-daemon/src/services/task-runtime-reconciler.ts`                                     |
 | Termination claims and containment settlement          | `apps/agor-daemon/src/termination-coordinator.ts`, `apps/agor-daemon/src/executor-tracking.ts` |
 | Startup orphan reconciliation                          | `apps/agor-daemon/src/startup.ts`                                                              |
+| Transitive completion projection and delivery          | `apps/agor-daemon/src/services/completion-subscription-worker.ts`                              |
 | Full HA kill-point audit                               | `docs/internal/task-runtime-ha-reconciliation-2026-08-06.md`                                   |
 
 ## Why the architecture has this shape

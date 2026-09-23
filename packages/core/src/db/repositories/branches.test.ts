@@ -1223,6 +1223,22 @@ describe('BranchRepository.update', () => {
 // ============================================================================
 
 describe('BranchRepository.delete', () => {
+  dbTest('rejects metadata-only deletion throughout filesystem provisioning', async ({ db }) => {
+    const repo = await new RepoRepository(db).create(createRepoData());
+    const branches = new BranchRepository(db);
+    const branch = await branches.create({
+      ...createBranchData({ repo_id: repo.repo_id }),
+      filesystem_status: 'creating',
+    });
+    await expect(branches.delete(branch.branch_id)).rejects.toThrow(
+      'Cannot delete a branch while filesystem provisioning is in progress'
+    );
+    expect((await branches.findById(branch.branch_id))?.filesystem_status).toBe('creating');
+    await branches.update(branch.branch_id, { filesystem_status: 'ready' });
+    await expect(branches.delete(branch.branch_id)).rejects.toThrow('Metadata-only');
+    expect((await branches.findById(branch.branch_id))?.filesystem_status).toBe('ready');
+  });
+
   dbTest('rejects metadata-only deletion by full UUID and short ID', async ({ db }) => {
     const repoRepo = new RepoRepository(db);
     const wtRepo = new BranchRepository(db);

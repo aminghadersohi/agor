@@ -13,7 +13,13 @@ import { seedEnvironmentCommandBranch } from './repositories/environment-command
 import { SessionMemoryRepository, SessionReminderRepository } from './repositories/session-memory';
 import { SessionRepository } from './repositories/sessions';
 import { TaskRepository } from './repositories/tasks';
-import { branches, messages } from './schema';
+import {
+  branches,
+  completionSubscriptions,
+  messages,
+  profileImages,
+  sessionAttentionStates,
+} from './schema';
 import { ownedDbTest as test } from './test-helpers';
 
 test('drains a large single session in bounded transactions, preserves shared neighbors and keeps branch last', async ({
@@ -38,11 +44,56 @@ test('drains a large single session in bounded transactions, preserves shared ne
     status: 'completed',
   });
   const memories = new SessionMemoryRepository(db);
+  // Inert compatibility storage from the withdrawn root-propagation draft:
+  // no API writes these rows, but branch deletion must still clear their
+  // Session/Task references instead of erasing the retained audit row.
+  const subscriptionId = generateId();
+  const now = new Date();
+  await insert(db, completionSubscriptions)
+    .values({
+      subscription_id: subscriptionId,
+      requested_by_user_id: user.user_id,
+      origin_session_id: session.session_id,
+      origin_task_id: task.task_id,
+      root_session_id: session.session_id,
+      root_task_id: task.task_id,
+      callback_session_id: foreign.session_id,
+      path: [],
+      created_at: now,
+      updated_at: now,
+    })
+    .run();
   const reminders = new SessionReminderRepository(db);
   for (const [target, creator] of [
     [session, user],
     [foreign, neighborUser],
   ] as const) {
+    await insert(db, sessionAttentionStates)
+      .values({
+        user_id: creator.user_id,
+        session_id: target.session_id,
+        seen_attention_generation: 1,
+        seen_at: new Date(),
+      })
+      .run();
+    await insert(db, profileImages)
+      .values({
+        image_id: generateId(),
+        branch_id: target.branch_id,
+        created_by: creator.user_id,
+        original_name: 'fictional.png',
+        small_data: Buffer.from('fictional'),
+        small_content_type: 'image/png',
+        small_width: 1,
+        small_height: 1,
+        large_data: Buffer.from('fictional'),
+        large_content_type: 'image/png',
+        large_width: 1,
+        large_height: 1,
+        created_at: new Date(),
+        updated_at: new Date(),
+      })
+      .run();
     await memories.create({
       session_id: target.session_id,
       text: 'fictional memory',
@@ -127,6 +178,28 @@ test('drains a large single session in bounded transactions, preserves shared ne
   expect(await new BranchRepository(db).findById(branch.branch_id)).not.toBeNull();
   expect(await new SessionRepository(db).findById(session.session_id)).toBeNull();
   expect(await new SessionRepository(db).findById(foreign.session_id)).not.toBeNull();
+  expect(
+    await select(db)
+      .from(completionSubscriptions)
+      .where(eq(completionSubscriptions.subscription_id, subscriptionId))
+      .all()
+  ).toMatchObject([
+    {
+      callback_session_id: foreign.session_id,
+      root_session_id: null,
+      root_task_id: null,
+      active_session_id: null,
+      active_task_id: null,
+      origin_session_id: session.session_id,
+      origin_task_id: task.task_id,
+    },
+  ]);
+  expect(await select(db).from(sessionAttentionStates).all()).toMatchObject([
+    { session_id: foreign.session_id, user_id: neighborUser.user_id },
+  ]);
+  expect(await select(db).from(profileImages).all()).toMatchObject([
+    { branch_id: neighbor.branch_id, original_name: 'fictional.png' },
+  ]);
   expect(
     (await memories.findPage({ session_id: foreign.session_id, limit: 10, skip: 0 })).total
   ).toBe(1);

@@ -6,6 +6,10 @@ import { MCP_CAPABILITY_ISSUING_SERVICE_PATHS } from './utils/mcp-server-authori
 /**
  * Regression tests for the daemon-side MCP OAuth callback URL.
  *
+ * Every daemon OAuth path uses the same two-phase flow. Redirect policy is
+ * operator-aware: standalone defaults to a stable loopback callback like
+ * native developer tools, while a remote-browser deployment can explicitly
+ * select its configured public HTTPS origin.
  * Background: a previous bug had `apps/agor-daemon/src/register-services.ts`
  * routing some OAuth flows (Settings UI Discover, Test OAuth → Start Browser
  * Flow) through `performMCPOAuthFlow()` from `@agor/core/tools/mcp/...`. That
@@ -39,19 +43,24 @@ describe('register-services OAuth callback URL regression', () => {
   it('never calls performMCPOAuthFlow from the daemon', () => {
     // The CLI helper is now documented as CLI-only. Daemon code MUST go
     // through startTwoPhaseMCPOAuthFlow + the daemon-side oauth-callback
-    // handler so the redirect_uri is the daemon's public base URL.
+    // handler so every entry point uses the same configured callback policy.
     expect(codeOnly).not.toMatch(/\bperformMCPOAuthFlow\s*\(/);
   });
 
-  it('never constructs an OAuth redirect URI pointing at 127.0.0.1 or localhost', () => {
-    // Catch hand-rolled redirect URIs in any new code path that bypasses
-    // requirePublicBaseUrl(). Narrow the check to `redirect`-adjacent usage
-    // so it can't be tripped by unrelated hosts (e.g. `http://localhost:UI_PORT`).
-    const redirectContextWindows = codeOnly.match(/.{0,80}redirect.{0,160}/gi) || [];
-    for (const window of redirectContextWindows) {
-      expect(window).not.toMatch(/127\.0\.0\.1/);
-      expect(window).not.toMatch(/http:\/\/localhost/);
-    }
+  it('freezes standalone loopback selection at startup, separate from HA public callbacks', () => {
+    const startup = readFileSync(new URL('./index.ts', import.meta.url), 'utf8');
+    expect(startup).toContain("effectiveConfig.daemon?.mcp_oauth_callback_mode !== 'public'");
+    expect(startup).toContain(
+      'resolveMCPOAuthRedirectUri({ daemonPort: DAEMON_PORT, usePublicHttps: false })'
+    );
+    expect(startup).toContain('deployment.mcpOAuthCallbackUrl');
+  });
+
+  it('keeps loopback callback permission independent from provider endpoint egress', () => {
+    expect(codeOnly).toMatch(
+      /allowLoopbackRedirectUri:\s*ctx\.config\.daemon\?\.mcp_oauth_callback_mode\s*!==\s*['"]public['"]/
+    );
+    expect(codeOnly).toMatch(/allowLocalhostHttp:\s*!postgresOAuthDeployment/);
   });
 
   it('uses only the startup-injected OAuth callback URL', () => {
@@ -97,7 +106,8 @@ describe('register-services OAuth callback URL regression', () => {
       codeOnly.indexOf('const tenantIdFromParams')
     );
     expect(flowHelper).toMatch(/resolveMCPOAuthCompatibilityPolicy\s*\(\s*server\s*\)/);
-    expect(flowHelper).toMatch(/effectiveClientId\s*=\s*server\.auth\.oauth_client_id/);
+    expect(flowHelper).toMatch(/resolveProbeServerTemplates\s*\(/);
+    expect(flowHelper).toMatch(/effectiveClientId\s*=\s*resolvedOAuthAuth\.oauth_client_id/);
     expect(flowHelper).toMatch(/effectiveCompatibilityMode\s*=\s*compatibilityPolicy\.mode/);
     expect(flowHelper).toMatch(/compatibilityMode:\s*context\.compatibilityMode/);
 

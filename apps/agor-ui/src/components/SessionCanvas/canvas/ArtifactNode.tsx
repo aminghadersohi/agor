@@ -1,13 +1,16 @@
 import type {
+  AgorClient,
   ArtifactBoardObject,
   ArtifactID,
   ArtifactPayload,
+  BoardID,
   BoardObject,
   SandpackTemplate,
   SessionID,
 } from '@agor-live/client';
 import { artifactFullscreenPath, sessionPath, shortId } from '@agor-live/client';
 import {
+  AppstoreOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
   CopyOutlined,
@@ -18,7 +21,10 @@ import {
   LoadingOutlined,
   LockOutlined,
   MessageOutlined,
+  PushpinFilled,
+  PushpinOutlined,
   ReloadOutlined,
+  SwapOutlined,
   UnlockOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
@@ -29,19 +35,34 @@ import {
   type SandpackSetup,
   useSandpack,
 } from '@codesandbox/sandpack-react';
-import { Alert, Badge, Button, Card, Popconfirm, Spin, Tooltip, Typography, theme } from 'antd';
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Dropdown,
+  Popconfirm,
+  Spin,
+  Tooltip,
+  Typography,
+  theme,
+} from 'antd';
 import { compressToBase64 } from 'lz-string';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { NodeResizer } from 'reactflow';
 import {
   ArtifactConsoleReporter,
+  ArtifactInteractionBridge,
   ArtifactRuntimeBridge,
   ArtifactSandpackErrorReporter,
   ArtifactTrustStatusIcon,
 } from '@/components/artifacts/ArtifactRenderSupport';
+import { ArtifactStaticPreview } from '@/components/artifacts/ArtifactStaticPreview';
 import { getDaemonUrl } from '@/config/daemon';
+import { useAgorStore } from '@/store/agorStore';
 import { getAuthHeaders } from '@/utils/authHeaders';
 import { copyToClipboard } from '@/utils/clipboard';
+import { readHomeArtifactIds, withHomeArtifactPin } from '@/utils/homeArtifactPreferences';
 import { useThemedMessage } from '@/utils/message';
 import { ensureSandpackCryptoSubtle } from '@/utils/sandpackCrypto';
 import { uiRouteHref } from '@/utils/uiRoutes';
@@ -56,6 +77,7 @@ export interface ArtifactNodeData {
   artifactId: string;
   width: number;
   height: number;
+  /** Effective board.edit capability for structural artifact mutations. */
   canEdit: boolean;
   /** True when this artifact is the deep-link target of the current URL
    *  (`/a/<artifactShort>/`). Renders the same dashed "selected"
@@ -69,6 +91,11 @@ export interface ArtifactNodeData {
   y: number;
   /** Lifecycle-safe delete: removes filesystem + board object + DB record */
   onDeleteArtifact?: (objectId: string, artifactId: string) => void;
+  /** Open a configured canonical chat session in the normal session surface. */
+  onOpenSession?: (sessionId: string) => void;
+  client?: AgorClient | null;
+  currentUserId?: string;
+  boardId?: string;
 }
 
 const MIN_WIDTH = 300;
@@ -177,12 +204,21 @@ export const ArtifactNode = ({
   const { token } = theme.useToken();
   const mutationGate = useMutationGate();
   const layoutMutationDisabled = !mutationGate.canMutate || !data.canEdit;
+  const { showError, showSuccess } = useThemedMessage();
+  const currentUser = useAgorStore((state) =>
+    data.currentUserId ? state.userById.get(data.currentUserId) : undefined
+  );
+  const boardById = useAgorStore((state) => state.boardById);
+  const homeArtifactIds = readHomeArtifactIds(currentUser?.preferences);
+  const pinnedToHome = homeArtifactIds.includes(data.artifactId as ArtifactID);
   const [interactMode, setInteractMode] = useState(false);
   const [payload, setPayload] = useState<ArtifactPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [consentOpen, setConsentOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [staticReadyHash, setStaticReadyHash] = useState<string | null>(null);
+  const staticIframeRef = useRef<HTMLIFrameElement | null>(null);
   const lastHashRef = useRef<string | null>(null);
   const sandpackConfig = payload?.sandpack_config;
   const sandpackOptions = sandpackConfig?.options;
@@ -300,6 +336,51 @@ export const ArtifactNode = ({
     );
   }, [data.artifactId]);
 
+  const handleToggleHomePin = useCallback(async () => {
+    if (!data.client || !data.currentUserId || !currentUser) return;
+    const nextPinned = !pinnedToHome;
+    try {
+      await data.client.service('users').patch(data.currentUserId, {
+        preferences: withHomeArtifactPin(
+          currentUser.preferences,
+          data.artifactId as ArtifactID,
+          nextPinned
+        ),
+      });
+      showSuccess(nextPinned ? 'Pinned artifact to Home' : 'Removed artifact from Home');
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Could not update Home pins');
+    }
+  }, [
+    currentUser,
+    data.artifactId,
+    data.client,
+    data.currentUserId,
+    pinnedToHome,
+    showError,
+    showSuccess,
+  ]);
+
+  const destinationBoards = Array.from(boardById.values())
+    .filter((board) => board.board_id !== data.boardId)
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  const handleMoveToBoard = useCallback(
+    async (boardId: string) => {
+      if (!data.client) return;
+      try {
+        await data.client.service('artifacts').patch(data.artifactId, {
+          board_id: boardId as BoardID,
+        });
+        const board = boardById.get(boardId);
+        showSuccess(`Moved artifact to ${board?.name ?? 'board'}`);
+      } catch (error) {
+        showError(error instanceof Error ? error.message : 'Could not move artifact');
+      }
+    },
+    [boardById, data.artifactId, data.client, showError, showSuccess]
+  );
+
   // Title bar — always rendered, regardless of load state. When the
   // payload hasn't come back yet (initial fetch in flight, or the row's
   // files column got corrupted and getPayload threw), the user still
@@ -377,6 +458,52 @@ export const ArtifactNode = ({
               }}
             />
           </Tooltip>
+        )}
+        {data.client && data.currentUserId && (
+          <Dropdown
+            trigger={['click']}
+            menu={{
+              items: [
+                {
+                  key: 'home-pin',
+                  icon: pinnedToHome ? <PushpinFilled /> : <PushpinOutlined />,
+                  label: pinnedToHome ? 'Remove from Home' : 'Pin to Home',
+                },
+                ...(destinationBoards.length > 0
+                  ? [
+                      { type: 'divider' as const },
+                      {
+                        key: 'move',
+                        icon: <SwapOutlined />,
+                        label: 'Move to board',
+                        children: destinationBoards.map((board) => ({
+                          key: `board:${board.board_id}`,
+                          label: board.name,
+                        })),
+                      },
+                    ]
+                  : []),
+              ],
+              onClick: ({ key, domEvent }) => {
+                domEvent.stopPropagation();
+                if (key === 'home-pin') {
+                  void handleToggleHomePin();
+                } else if (key.startsWith('board:')) {
+                  void handleMoveToBoard(key.slice('board:'.length));
+                }
+              },
+            }}
+          >
+            <Tooltip title="Home and board placement">
+              <Button
+                type="text"
+                size="small"
+                aria-label="Artifact placement"
+                icon={<AppstoreOutlined />}
+                onClick={(event) => event.stopPropagation()}
+              />
+            </Tooltip>
+          </Dropdown>
         )}
         <Tooltip title="Open fullscreen">
           <Button
@@ -648,15 +775,32 @@ export const ArtifactNode = ({
             theme={sandpackConfig?.theme as never}
             options={sandpackInputs.options}
           >
-            <SandpackPreview
-              style={{
-                height: '100%',
-                border: 'none',
-              }}
-              showNavigator={false}
-              showOpenInCodeSandbox={false}
-              showRefreshButton={interactMode}
-            />
+            {sandpackInputs.template === 'static' ? (
+              <ArtifactStaticPreview
+                files={sandpackInputs.files}
+                entry={payload.entry}
+                externalResources={
+                  Array.isArray(sandpackOptions?.externalResources)
+                    ? sandpackOptions.externalResources.filter(
+                        (resource): resource is string => typeof resource === 'string'
+                      )
+                    : undefined
+                }
+                title={`${payload.name} preview`}
+                onReady={() => setStaticReadyHash(payload.content_hash)}
+                iframeRef={staticIframeRef}
+              />
+            ) : (
+              <SandpackPreview
+                style={{
+                  height: '100%',
+                  border: 'none',
+                }}
+                showNavigator={false}
+                showOpenInCodeSandbox={false}
+                showRefreshButton={interactMode}
+              />
+            )}
             <ArtifactConsoleReporter
               artifactId={data.artifactId}
               contentHash={payload.runtime_report_hash ?? payload.content_hash}
@@ -664,8 +808,16 @@ export const ArtifactNode = ({
             <ArtifactSandpackErrorReporter
               artifactId={data.artifactId}
               contentHash={payload.runtime_report_hash ?? payload.content_hash}
+              staticReady={
+                sandpackInputs.template === 'static' && staticReadyHash === payload.content_hash
+              }
             />
-            <ArtifactRuntimeBridge artifactId={data.artifactId} />
+            <ArtifactRuntimeBridge artifactId={data.artifactId} fallbackIframe={staticIframeRef} />
+            <ArtifactInteractionBridge
+              artifactId={data.artifactId}
+              config={payload.interaction_config}
+              onOpenSession={data.onOpenSession}
+            />
             <CodeSandboxExporter artifactId={data.artifactId} />
           </SandpackProvider>
         </div>

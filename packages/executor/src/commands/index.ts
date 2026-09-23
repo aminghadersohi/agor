@@ -32,6 +32,7 @@ import { handleEnvironmentLifecycle, handleEnvironmentLogs } from './environment
 import {
   handleBranchFilesBrowse,
   handleBranchFilesRead,
+  handleBranchFilesWrite,
   handleBranchFilesystemStatus,
 } from './files.js';
 import { handleBranchSlackFileUpload } from './gateway.js';
@@ -39,6 +40,7 @@ import {
   handleBranchAgorYmlExport,
   handleBranchAgorYmlImport,
   handleBranchFilesList,
+  handleBranchLaunchJsonImport,
   handleGitBranchAdd,
   handleGitBranchClean,
   handleGitBranchRemove,
@@ -257,6 +259,7 @@ registerCommand(BRANCH_ARCHIVE_COMMAND, handleBranchArchive);
 registerCommand('branch.files.list', handleBranchFilesList);
 registerCommand('branch.files.browse', handleBranchFilesBrowse);
 registerCommand('branch.files.read', handleBranchFilesRead);
+registerCommand('branch.files.write', handleBranchFilesWrite);
 registerCommand('branch.filesystem.status', handleBranchFilesystemStatus);
 registerCommand('branch.artifact.publish', handleBranchArtifactPublish);
 registerCommand('branch.artifact.land', handleBranchArtifactLand);
@@ -266,6 +269,7 @@ registerCommand('branch.knowledge.read', handleBranchKnowledgeRead);
 registerCommand('branch.gateway.slack-file-upload', handleBranchSlackFileUpload);
 registerCommand('branch.upload.materialize', handleBranchUploadMaterialize);
 registerCommand('branch.agor-yml.import', handleBranchAgorYmlImport);
+registerCommand('branch.launch-json.import', handleBranchLaunchJsonImport);
 registerCommand('branch.agor-yml.export', handleBranchAgorYmlExport);
 registerCommand('environment.lifecycle', handleEnvironmentLifecycle);
 registerCommand('environment.logs', handleEnvironmentLogs);

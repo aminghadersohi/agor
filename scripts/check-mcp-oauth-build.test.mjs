@@ -32,6 +32,23 @@ for (const format of ['js', 'cjs']) {
     const dbModule = await load(`../packages/core/dist/db/index.${format}`);
     const oauth = await load(`../packages/core/dist/tools/mcp/oauth-refresh.${format}`);
     const entitlement = await load(`../packages/core/dist/tools/mcp/grant-entitlement.${format}`);
+    // The shared runtime authority must also retain the renewable status contract:
+    // expired renewable grants are projected from metadata, never token material.
+    const status = {
+      oauth_token_expires_at: new Date(1),
+      has_refresh_token: true,
+      refresh_status: 'idle',
+    };
+    assert.equal(oauth.oauthGrantCanAuthenticate(status), true);
+    assert.equal(
+      oauth.oauthGrantCanAuthenticate({ ...status, refresh_status: 'refreshing' }),
+      true
+    );
+    assert.equal(
+      oauth.oauthGrantCanAuthenticate({ ...status, refresh_status: 'ambiguous' }),
+      false
+    );
+    assert.equal(oauth.oauthGrantCanAuthenticate({ ...status, has_refresh_token: false }), false);
     t.mock.method(globalThis, 'fetch', () => {
       throw new Error('Network is forbidden in this test');
     });

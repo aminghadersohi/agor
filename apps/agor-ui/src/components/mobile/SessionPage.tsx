@@ -40,6 +40,7 @@ interface SessionPageProps {
   onUpdateSessionEnvSelections?: (sessionId: string, envVarNames: string[]) => void;
   onOpenBranch?: AppActionsContextValue['onOpenBranch'];
   onOpenAgenticToolSettings?: AppActionsContextValue['onOpenAgenticToolSettings'];
+  /** Fork-only: pin this session into a teammate chat collection. */
 }
 
 const EMPTY_MCP_IDS: string[] = [];

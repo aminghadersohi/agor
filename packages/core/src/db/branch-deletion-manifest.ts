@@ -24,24 +24,6 @@ export const BRANCH_DELETION_RELATIONS: Readonly<Record<string, BranchDeletionRe
     'Preserve foreign-branch sessions; clear deleted schedule provenance.'
   ),
   'tasks.session_id': owned('Settle runtime containment before deleting tasks in bounded chunks.'),
-  'completion_subscriptions.callback_session_id': clear(
-    'Retain inert draft rows; clear the deleted callback reference.'
-  ),
-  'completion_subscriptions.root_session_id': clear(
-    'Historical root provenance does not own other branches.'
-  ),
-  'completion_subscriptions.root_task_id': clear(
-    'Historical root provenance does not own other branches.'
-  ),
-  'completion_subscriptions.active_session_id': clear(
-    'Preserve inert draft rows; clear deleted work references.'
-  ),
-  'completion_subscriptions.active_task_id': clear(
-    'Preserve inert draft rows; clear deleted work references.'
-  ),
-  'completion_subscriptions.delivery_task_id': clear(
-    'Clear deleted delivery provenance without deleting a foreign draft row.'
-  ),
   'messages.session_id': owned('Batch by session, including messages without a task.'),
   'messages.task_id': classify(
     'Delete branch-owned messages; a foreign-session reference is not ownership.'
@@ -94,6 +76,30 @@ export const BRANCH_DELETION_RELATIONS: Readonly<Record<string, BranchDeletionRe
     'Delete attachment, preserve shared server and OAuth grants.'
   ),
   'session_memories.session_id': owned('Private working memory belongs to its Session.'),
+  'session_attention_states.session_id': owned(
+    'Per-user acknowledgements belong to the removed Session, not the User.'
+  ),
+  'profile_images.branch_id': owned(
+    'Only branch-owned profile bytes; preserve board and user galleries.'
+  ),
+  'completion_subscriptions.callback_session_id': clear(
+    'Clear the removed delivery destination; retain the subscription audit and surviving Sessions.'
+  ),
+  'completion_subscriptions.root_session_id': clear(
+    'Retain immutable origin identities and delegation history when the root Session is removed.'
+  ),
+  'completion_subscriptions.root_task_id': clear(
+    'Task provenance is not ownership of the durable completion subscription.'
+  ),
+  'completion_subscriptions.active_session_id': clear(
+    'Retain the subscription; its worker reconciles a missing downstream Task.'
+  ),
+  'completion_subscriptions.active_task_id': clear(
+    'The existing worker handles missing downstream work; never delete a foreign callback Session.'
+  ),
+  'completion_subscriptions.delivery_task_id': clear(
+    'Preserve the delivery audit after its Task is removed.'
+  ),
   'session_reminders.session_id': owned('Drain reminders before their owning Session and Tasks.'),
   'session_reminders.task_id': classify(
     'Delete Session-owned reminders first; a foreign reminder task reference blocks deletion rather than erasing unrelated provenance.'
@@ -213,18 +219,6 @@ export const BRANCH_DELETION_NON_FK_RELATIONS: Readonly<
   ),
   'executor_session_token_authorities.task_id': classify(
     'Include task-bound authorities before deleting their lookup rows.'
-  ),
-  'completion_subscriptions.origin_session_id': retain(
-    'Immutable audit identity, not branch ownership or live delivery authority.'
-  ),
-  'completion_subscriptions.origin_task_id': retain(
-    'Immutable audit identity, not branch ownership or live delivery authority.'
-  ),
-  'completion_subscriptions.path': retain(
-    'Cross-branch chain audit history; never cascade deletion through its plain IDs.'
-  ),
-  'completion_subscriptions.terminal_snapshot': retain(
-    'Retain the cross-branch terminal outcome under the subscription owner; not a live resource grant.'
   ),
   'sessions.parent_session_id': clear(
     'Detach surviving sessions; ancestry never grants deletion ownership.'

@@ -147,6 +147,7 @@ export const sessions = pgTable(
 
     // UI state (materialized for efficient highlighting queries)
     ready_for_prompt: t.bool('ready_for_prompt').notNull().default(false),
+    attention_generation: integer('attention_generation').notNull().default(0),
 
     // Kept in schema parity even though V1 activation is standalone SQLite.
     power_priority: text('power_priority', { enum: ['normal', 'essential'] })
@@ -206,6 +207,9 @@ export const sessions = pgTable(
 
         // Callback config (child/remote session completion notifications)
         callback_config?: Session['callback_config'];
+
+        // Busy-session queue behavior (opt-in system update coalescing)
+        queue_config?: Session['queue_config'];
 
         // Fork origin tracking (set to 'btw' for ephemeral btw forks)
         fork_origin?: 'btw';
@@ -588,11 +592,7 @@ export const sessionReminders = pgTable(
   })
 );
 
-/**
- * Inert compatibility storage from the withdrawn root-propagation draft.
- * Retain rows, tenant isolation, and portability; no runtime creates or delivers them.
- * Keep the original migration ledger intact rather than rewriting applied history.
- */
+/** Durable designated-child completion propagation and callback outbox. */
 export const completionSubscriptions = pgTable(
   'completion_subscriptions',
   {
@@ -638,6 +638,8 @@ export const completionSubscriptions = pgTable(
     active_task_id: varchar('active_task_id', { length: 36 }).references(() => tasks.task_id, {
       onDelete: 'set null',
     }),
+    // Inert compatibility storage: no subscription API or delivery worker
+    // reads these rows, so the payload shapes are deliberately untyped.
     path: t.json<unknown[]>('path').notNull(),
     max_depth: integer('max_depth').notNull().default(8),
     terminal_status: text('terminal_status', {
@@ -866,6 +868,7 @@ export const boards = pgTable(
         zone_layout_defaults?: ZoneLayoutPolicy;
         layout_context?: import('@agor/core/types').BoardLayoutContext;
         custom_context?: Record<string, unknown>; // Custom context for Handlebars templates
+        profile_image_id?: import('@agor/core/types').ProfileImageID;
       }>()
       .notNull(),
 
@@ -1361,6 +1364,7 @@ export const users = pgTable(
         avatar_source?: string;
         avatar_source_id?: string;
         avatar_synced_at?: string;
+        profile_image_id?: string;
         preferences?: Record<string, unknown>;
         // Stable external-auth identity mappings used by generic launch-code auth.
         external_identities?: UserExternalIdentity[];
@@ -1482,6 +1486,35 @@ export const users = pgTable(
     executionHomeTenantUnique: uniqueIndex('users_tenant_unix_username_unique').on(
       table.tenant_id,
       table.unix_username
+    ),
+  })
+);
+
+/** Per-user acknowledgement of a session's latest attention-producing result. */
+export const sessionAttentionStates = pgTable(
+  'session_attention_states',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    user_id: varchar('user_id', { length: 36 }).notNull(),
+    session_id: varchar('session_id', { length: 36 }).notNull(),
+    seen_attention_generation: integer('seen_attention_generation').notNull().default(0),
+    seen_at: t.timestamp('seen_at').notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.tenant_id, table.user_id, table.session_id] }),
+    tenantUserFk: foreignKey({
+      name: 'session_attention_states_tenant_user_fk',
+      columns: [table.tenant_id, table.user_id],
+      foreignColumns: [users.tenant_id, users.user_id],
+    }).onDelete('cascade'),
+    tenantSessionFk: foreignKey({
+      name: 'session_attention_states_tenant_session_fk',
+      columns: [table.tenant_id, table.session_id],
+      foreignColumns: [sessions.tenant_id, sessions.session_id],
+    }).onDelete('cascade'),
+    sessionIdx: index('session_attention_states_tenant_session_idx').on(
+      table.tenant_id,
+      table.session_id
     ),
   })
 );
@@ -2970,6 +3003,82 @@ export const uploads = pgTable(
 );
 
 /**
+ * Durable, processed profile galleries for users, teammate branches, and boards.
+ * Exactly one subject FK is populated; services enforce that invariant and
+ * the partial unique indexes enforce at most one primary image per subject.
+ */
+export const profileImages = pgTable(
+  'profile_images',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    image_id: varchar('image_id', { length: 36 }).primaryKey(),
+    user_id: varchar('user_id', { length: 36 }).references(() => users.user_id, {
+      onDelete: 'cascade',
+    }),
+    branch_id: varchar('branch_id', { length: 36 }).references(() => branches.branch_id, {
+      onDelete: 'cascade',
+    }),
+    board_id: varchar('board_id', { length: 36 }).references(() => boards.board_id, {
+      onDelete: 'cascade',
+    }),
+    created_by: varchar('created_by', { length: 36 }).notNull(),
+    original_name: text('original_name').notNull(),
+    alt_text: text('alt_text'),
+    position: integer('position').notNull().default(0),
+    is_primary: t.bool('is_primary').notNull().default(false),
+    small_data: bytea('small_data').notNull(),
+    small_content_type: text('small_content_type').notNull(),
+    small_width: integer('small_width').notNull(),
+    small_height: integer('small_height').notNull(),
+    large_data: bytea('large_data').notNull(),
+    large_content_type: text('large_content_type').notNull(),
+    large_width: integer('large_width').notNull(),
+    large_height: integer('large_height').notNull(),
+    identity_model_provider: text('identity_model_provider'),
+    identity_model_task_id: text('identity_model_task_id'),
+    identity_model_status: text('identity_model_status'),
+    identity_model_progress: integer('identity_model_progress'),
+    identity_model_data: bytea('identity_model_data'),
+    identity_model_content_type: text('identity_model_content_type'),
+    identity_model_error: text('identity_model_error'),
+    identity_model_created_at: t.timestamp('identity_model_created_at'),
+    identity_model_updated_at: t.timestamp('identity_model_updated_at'),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+  },
+  (table) => ({
+    subjectXor: check(
+      'profile_images_subject_xor_check',
+      sql`((${table.user_id} IS NOT NULL AND ${table.branch_id} IS NULL AND ${table.board_id} IS NULL) OR (${table.user_id} IS NULL AND ${table.branch_id} IS NOT NULL AND ${table.board_id} IS NULL) OR (${table.user_id} IS NULL AND ${table.branch_id} IS NULL AND ${table.board_id} IS NOT NULL))`
+    ),
+    tenantUserPositionIdx: index('profile_images_tenant_user_position_idx').on(
+      table.tenant_id,
+      table.user_id,
+      table.position
+    ),
+    tenantBranchPositionIdx: index('profile_images_tenant_branch_position_idx').on(
+      table.tenant_id,
+      table.branch_id,
+      table.position
+    ),
+    tenantBoardPositionIdx: index('profile_images_tenant_board_position_idx').on(
+      table.tenant_id,
+      table.board_id,
+      table.position
+    ),
+    onePrimaryUser: uniqueIndex('profile_images_one_primary_user_idx')
+      .on(table.tenant_id, table.user_id)
+      .where(sql`${table.user_id} IS NOT NULL AND ${table.is_primary} = true`),
+    onePrimaryBranch: uniqueIndex('profile_images_one_primary_branch_idx')
+      .on(table.tenant_id, table.branch_id)
+      .where(sql`${table.branch_id} IS NOT NULL AND ${table.is_primary} = true`),
+    onePrimaryBoard: uniqueIndex('profile_images_one_primary_board_idx')
+      .on(table.tenant_id, table.board_id)
+      .where(sql`${table.board_id} IS NOT NULL AND ${table.is_primary} = true`),
+  })
+);
+
+/**
  * Gateway Channels table - Registered messaging platform integrations
  *
  * Users create channels to connect messaging platforms (Slack, Discord, etc.)
@@ -3789,6 +3898,8 @@ export const kbGraphEdges = pgTable(
  */
 export type SessionRow = typeof sessions.$inferSelect;
 export type SessionInsert = typeof sessions.$inferInsert;
+export type SessionAttentionStateRow = typeof sessionAttentionStates.$inferSelect;
+export type SessionAttentionStateInsert = typeof sessionAttentionStates.$inferInsert;
 export type SessionRelationshipRow = typeof sessionRelationships.$inferSelect;
 export type SessionRelationshipInsert = typeof sessionRelationships.$inferInsert;
 export type TaskRow = typeof tasks.$inferSelect;
@@ -3866,12 +3977,16 @@ export type ThreadSessionMapRow = typeof threadSessionMap.$inferSelect;
 export type ThreadSessionMapInsert = typeof threadSessionMap.$inferInsert;
 export type DiscordMessageDeliveryRow = typeof discordMessageDeliveries.$inferSelect;
 export type DiscordMessageDeliveryInsert = typeof discordMessageDeliveries.$inferInsert;
+export type CompletionSubscriptionRow = typeof completionSubscriptions.$inferSelect;
+export type CompletionSubscriptionInsert = typeof completionSubscriptions.$inferInsert;
 export type GatewayOutboundMessageRow = typeof gatewayOutboundMessages.$inferSelect;
 export type GatewayOutboundMessageInsert = typeof gatewayOutboundMessages.$inferInsert;
 export type GatewayInboundEventRow = typeof gatewayInboundEvents.$inferSelect;
 export type GatewayInboundEventInsert = typeof gatewayInboundEvents.$inferInsert;
 export type UploadRow = typeof uploads.$inferSelect;
 export type UploadInsert = typeof uploads.$inferInsert;
+export type ProfileImageRow = typeof profileImages.$inferSelect;
+export type ProfileImageInsert = typeof profileImages.$inferInsert;
 export type KBNamespaceRow = typeof kbNamespaces.$inferSelect;
 export type KBNamespaceInsert = typeof kbNamespaces.$inferInsert;
 export type KBNamespaceAclRow = typeof kbNamespaceAcl.$inferSelect;

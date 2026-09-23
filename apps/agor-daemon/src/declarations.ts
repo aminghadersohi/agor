@@ -199,6 +199,10 @@ export interface SessionsServiceImpl
     streaming: boolean;
   }>;
   materializeAgenticToolPreset(session: Session, params?: FeathersParams): Promise<Session>;
+  acknowledgeAttention(
+    id: string,
+    params?: FeathersParams
+  ): Promise<import('@agor/core/types').SessionAttentionAcknowledgement>;
   // Event emitter methods (FeathersJS EventEmitter interface - any[] for event args flexibility)
   // biome-ignore lint/suspicious/noExplicitAny: FeathersJS event handlers accept variable arguments
   on(event: string, handler: (...args: any[]) => void): this;
@@ -297,6 +301,11 @@ export interface ReposServiceImpl extends Service<Repo, Partial<Repo>, FeathersP
   ): Promise<{ scanned: number; failed: number }>;
   removeBranch(id: string, name: string, params?: FeathersParams): Promise<Repo>;
   importFromAgorYml(
+    id: string,
+    data: { branch_id: string },
+    params?: FeathersParams
+  ): Promise<Repo>;
+  importFromLaunchJson(
     id: string,
     data: { branch_id: string },
     params?: FeathersParams

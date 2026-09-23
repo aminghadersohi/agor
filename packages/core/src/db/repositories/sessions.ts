@@ -128,20 +128,6 @@ export type SessionArchiveStateUpdate = {
   archivedReason: SessionArchiveReason | null;
 };
 
-/**
- * Patches that only acknowledge UI attention state should not make a session
- * look recently active. Keep this intentionally value-aware: setting
- * ready_for_prompt=true is emitted by task/stop/executor completion paths and
- * is activity; clearing it is the session-open/highlight acknowledgement path.
- *
- * Do not add title/description/model/permission fields here — those are
- * user-visible session metadata changes and should continue to affect recency.
- */
-function isSessionTimestampNeutralPatch(updates: SessionUpdate): boolean {
-  const keys = Object.keys(updates);
-  return keys.length === 1 && keys[0] === 'ready_for_prompt' && updates.ready_for_prompt === false;
-}
-
 /** Options for the SQL-backed session list page used by board/branch views. */
 export interface SessionPageOptions {
   /** Omit the exact count for bounded consumers that do not need totals. */
@@ -323,6 +309,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         scheduler_init_attempt_count: row.scheduler_init_attempt_count,
         scheduler_init_retry_at: row.scheduler_init_retry_at?.toISOString(),
         ready_for_prompt: row.ready_for_prompt ?? false,
+        attention_generation: row.attention_generation ?? 0,
         power_priority: row.power_priority,
         power_priority_updated_at: row.power_priority_updated_at?.toISOString(),
         power_priority_updated_by:
@@ -385,6 +372,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         ? new Date(session.scheduler_init_retry_at)
         : null,
       ready_for_prompt: session.ready_for_prompt ?? false,
+      attention_generation: session.attention_generation ?? 0,
       power_priority: session.power_priority ?? 'normal',
       power_priority_updated_at: session.power_priority_updated_at
         ? new Date(session.power_priority_updated_at)
@@ -410,6 +398,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         permission_config: session.permission_config,
         model_config: session.model_config ?? undefined,
         callback_config: session.callback_config,
+        queue_config: session.queue_config,
         fork_origin: session.fork_origin,
         custom_context: session.custom_context,
         current_context_usage: session.current_context_usage,
@@ -443,7 +432,11 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
    */
   async create(data: Partial<Session>): Promise<Session> {
     try {
-      const insertData = this.sessionToInsert(data);
+      const insertData = this.sessionToInsert({
+        ...data,
+        // Server-owned: callers cannot seed an arbitrary generation.
+        attention_generation: data.ready_for_prompt === true ? 1 : 0,
+      });
       await runDatabaseTransaction(
         this.db,
         async (tx) => {
@@ -1033,11 +1026,16 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         // Strategy: Objects = deep merge, Arrays = replace, Primitives = replace
         const {
           sdk_session_id: sdkSessionIdUpdate,
+          attention_generation: _callerAttentionGeneration,
+          viewer_seen_attention_generation: _callerSeenAttentionGeneration,
           archived_reason: archivedReasonUpdate,
           auto_archive_at: autoArchiveAtUpdate,
           auto_archive_after_seconds: autoArchiveAfterSecondsUpdate,
           ...genericUpdates
-        } = updates;
+        } = updates as SessionUpdate & {
+          attention_generation?: unknown;
+          viewer_seen_attention_generation?: unknown;
+        };
         const merged = deepMerge(current, genericUpdates);
         if (sdkSessionIdUpdate === null) {
           delete merged.sdk_session_id;
@@ -1067,23 +1065,27 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
           }
         }
 
+        // A false -> true transition is the single persisted generation edge
+        // for output/attention. Repeated terminal projections are idempotent,
+        // while a later task start resets ready_for_prompt before its own
+        // completion advances the generation again.
+        if (updates.ready_for_prompt === true && current.ready_for_prompt === false) {
+          merged.attention_generation = current.attention_generation + 1;
+        }
+
         const insertData = this.sessionToInsert(merged);
 
         // STEP 3: Write merged session (within same transaction)
         // Pass all columns via insertData (matches branch repo pattern).
         // Previously used an explicit column allowlist that silently dropped
         // columns like archived/archived_reason, causing data to revert on reload.
-        // Refresh updated_at for meaningful updates. sessionToInsert() preserves
-        // the old timestamp from the merged session, so timestamp-neutral UI
-        // acknowledgements (currently only ready_for_prompt:false) can keep
-        // recency ordering stable. Meaningful activity/settings/status patches
-        // still advance it; without that, the staleness check in query-builder.ts
+        // Refresh updated_at for persisted session updates. Caller-private read
+        // acknowledgement lives in session_attention_states and never patches
+        // this shared session row. Without a refreshed timestamp, the staleness
+        // check in query-builder.ts
         // (hoursSinceUpdate > 24) would erroneously clear sdk_session_id and
         // disconnect agents from their history.
-        const shouldRefreshLastUpdated = !isSessionTimestampNeutralPatch(updates);
-        if (shouldRefreshLastUpdated) {
-          insertData.updated_at = new Date();
-        }
+        insertData.updated_at = new Date();
 
         await update(txAsDb(tx), sessions)
           .set(insertData)

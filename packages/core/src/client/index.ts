@@ -89,6 +89,8 @@ export {
   artifactPath,
   boardPath,
   branchPath,
+  CHAT_WORKSPACE_PATH_SEGMENT,
+  chatWorkspacePath,
   ENTITY_PATH_SEGMENTS,
   getArtifactFullscreenUrl,
   getArtifactUrl,

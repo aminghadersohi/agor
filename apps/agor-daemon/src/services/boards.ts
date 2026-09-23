@@ -331,9 +331,11 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
       // parent. Convert zone-relative positions to absolute while the zone origin
       // is still available.
       if (board && object?.type === 'zone') {
-        const removedTransitions = await new ZoneWorkflowRepository(
-          operationDb
-        ).removeTransitionsForZone(board.board_id, objectId);
+        const zoneWorkflowRepo = new ZoneWorkflowRepository(operationDb);
+        const removedTransitions = await zoneWorkflowRepo.removeTransitionsForZone(
+          board.board_id,
+          objectId
+        );
         for (const transition of removedTransitions) {
           this.emitZoneWorkflowRemoved?.(transition, _params);
         }

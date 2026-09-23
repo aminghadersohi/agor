@@ -3218,6 +3218,13 @@ export class GatewayService {
         ) {
           throw new Error('Gateway provider event Task identity is already in use');
         }
+        const coalescedInto = priorTask.metadata?.queue_coalescing?.coalesced_into_task_id;
+        const admittedTask = coalescedInto
+          ? await this.taskRepo.findById(coalescedInto)
+          : priorTask;
+        if (!admittedTask || admittedTask.session_id !== priorTask.session_id) {
+          throw new Error('Gateway provider event has invalid queue-coalescing lineage');
+        }
         const mappingMetadata = (existingMapping.metadata as Record<string, unknown> | null) ?? {};
         const ordinaryDiscordCatchUp =
           channel.channel_type === 'discord' &&
@@ -3237,13 +3244,13 @@ export class GatewayService {
         await this.markSeedInitialPromptAdmitted(
           existingMapping,
           data.gateway_inbound_event_id,
-          priorTask.task_id as TaskID
+          admittedTask.task_id as TaskID
         );
         return {
           success: true,
           sessionId: existingMapping.session_id,
           created: false,
-          taskId: priorTask.task_id,
+          taskId: admittedTask.task_id,
         };
       }
       recoveringInitialDelivery = existingMapping.session_id === data.idempotency_session_id;
@@ -4120,6 +4127,7 @@ export class GatewayService {
             metadata?: {
               gateway_inbound_event_id?: import('@agor/core/types').GatewayInboundEventID;
               gateway_reply_metadata?: Record<string, unknown>;
+              queue_coalescing?: import('@agor/core/types').TaskMetadata['queue_coalescing'];
               gateway_task_source?: import('@agor/core/types').TaskMetadata['gateway_task_source'];
             };
             idempotencyTaskId?: TaskID;
@@ -4356,6 +4364,10 @@ export class GatewayService {
       await this.requireInboundPromptAuthority(channel, sessionId, user.user_id);
 
       const gatewayTaskMetadata = {
+        queue_coalescing: {
+          kind: 'gateway' as const,
+          group_key: 'session-system-updates',
+        },
         ...(data.gateway_inbound_event_id
           ? { gateway_inbound_event_id: data.gateway_inbound_event_id }
           : {}),

@@ -21,8 +21,8 @@ function isSettingsPath(pathname: string): boolean {
 }
 
 /**
- * The path whose surface the workspace shell should render — Home vs. the
- * board canvas. Normally just the pathname.
+ * The path whose surface the workspace shell should render — Home, chat
+ * workspace, or board canvas. Normally just the pathname.
  *
  * (Distinct from `RouteSurfaceId` in `surfaces/surfaceRegistry.ts`, which
  * picks between top-level route families such as Workspace and Knowledge.

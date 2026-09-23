@@ -34,7 +34,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Handle, NodeResizer, Position, useViewport } from 'reactflow';
 import { useMutationGate } from '../../../contexts/ConnectionContext';
 import { getContrastingTextColor } from '../../../utils/theme';
-import { getUserInitials } from '../../UserIdentityAvatar';
+import { UserIdentityAvatar } from '../../UserIdentityAvatar';
 import { DeleteZoneModal } from './DeleteZoneModal';
 import { CANVAS_LAYOUT_CONTROLS_CLASS } from './SelectionLayoutPopover';
 import { ZoneConfigModal } from './ZoneConfigModal';
@@ -923,8 +923,8 @@ const CommentNodeComponent = ({ data }: { data: CommentNodeData }) => {
           }}
         >
           {/* Author identity (counter-rotate to keep upright) */}
-          <div style={{ transform: 'rotate(45deg)' }}>
-            {user ? getUserInitials(user) : <CommentOutlined />}
+          <div style={{ transform: 'rotate(45deg)', display: 'flex' }}>
+            {user ? <UserIdentityAvatar user={user} size={28} /> : <CommentOutlined />}
           </div>
         </div>
 
@@ -997,7 +997,9 @@ const CommentNodeComponent = ({ data }: { data: CommentNodeData }) => {
         >
           {/* Who and when */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <div style={{ fontSize: 14 }}>{user ? getUserInitials(user) : <CommentOutlined />}</div>
+            <div style={{ fontSize: 14 }}>
+              {user ? <UserIdentityAvatar user={user} size={24} /> : <CommentOutlined />}
+            </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div
                 style={{

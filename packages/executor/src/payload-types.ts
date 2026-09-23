@@ -502,6 +502,19 @@ export const BranchFilesReadPayloadSchema = BasePayloadSchema.extend({
 
 export type BranchFilesReadPayload = z.infer<typeof BranchFilesReadPayloadSchema>;
 
+export const BranchFilesWritePayloadSchema = BasePayloadSchema.extend({
+  command: z.literal('branch.files.write'),
+  sessionToken: z.string(),
+  params: z.object({
+    branchId: z.string().uuid(),
+    filePath: z.string().min(1),
+    content: z.string().max(1024 * 1024),
+    expectedLastModified: z.string().datetime(),
+  }),
+});
+
+export type BranchFilesWritePayload = z.infer<typeof BranchFilesWritePayloadSchema>;
+
 export const BranchFilesystemStatusPayloadSchema = BasePayloadSchema.extend({
   command: z.literal('branch.filesystem.status'),
   sessionToken: z.string(),
@@ -627,6 +640,17 @@ export const BranchAgorYmlImportPayloadSchema = BasePayloadSchema.extend({
 });
 
 export type BranchAgorYmlImportPayload = z.infer<typeof BranchAgorYmlImportPayloadSchema>;
+
+/** Import branch-scoped .agor/launch.json or .vscode/launch.json. */
+export const BranchLaunchJsonImportPayloadSchema = BasePayloadSchema.extend({
+  command: z.literal('branch.launch-json.import'),
+  sessionToken: z.string(),
+  params: z.object({
+    repoId: z.string().uuid(),
+    branchId: z.string().uuid(),
+  }),
+});
+export type BranchLaunchJsonImportPayload = z.infer<typeof BranchLaunchJsonImportPayloadSchema>;
 
 /**
  * Export environment config into branch-scoped .agor.yml in a managed checkout.
@@ -978,6 +1002,7 @@ const ExecutorPayloadUnionSchema = z.discriminatedUnion('command', [
   BranchFilesListPayloadSchema,
   BranchFilesBrowsePayloadSchema,
   BranchFilesReadPayloadSchema,
+  BranchFilesWritePayloadSchema,
   BranchFilesystemStatusPayloadSchema,
   BranchArtifactPublishPayloadSchema,
   BranchArtifactLandPayloadSchema,
@@ -987,6 +1012,7 @@ const ExecutorPayloadUnionSchema = z.discriminatedUnion('command', [
   BranchSlackFileUploadPayloadSchema,
   BranchUploadMaterializePayloadSchema,
   BranchAgorYmlImportPayloadSchema,
+  BranchLaunchJsonImportPayloadSchema,
   BranchAgorYmlExportPayloadSchema,
   EnvironmentLifecyclePayloadSchema,
   EnvironmentLogsPayloadSchema,
@@ -1060,6 +1086,7 @@ export function getSupportedCommands(): string[] {
     'branch.files.list',
     'branch.files.browse',
     'branch.files.read',
+    'branch.files.write',
     'branch.filesystem.status',
     'branch.artifact.publish',
     'branch.artifact.land',
@@ -1069,6 +1096,7 @@ export function getSupportedCommands(): string[] {
     'branch.gateway.slack-file-upload',
     'branch.upload.materialize',
     'branch.agor-yml.import',
+    'branch.launch-json.import',
     'branch.agor-yml.export',
     'environment.lifecycle',
     'environment.logs',

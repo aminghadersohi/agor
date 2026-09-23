@@ -53,6 +53,7 @@ describe('realtime routing boundary', () => {
       'oauth:completed',
       'oauth:disconnected',
       'marketplace:invalidated',
+      'session-attention:acknowledged',
       'marketplace:changed',
     ]);
     const target = { emit: vi.fn() };

@@ -51,11 +51,10 @@ vi.mock('../permissions/CapabilityPolicyEditor', () => ({
 vi.mock('../forms/BoardFormFields', () => ({
   BoardFormFields: ({
     capabilityPolicyEditor,
-    zoneDefaultsEditor,
     canEditGeneral,
+    zoneDefaultsEditor,
   }: {
     capabilityPolicyEditor?: React.ReactNode;
-    zoneDefaultsEditor?: React.ReactNode;
     canEditGeneral?: boolean;
   }) => (
     <>
@@ -74,13 +73,6 @@ vi.mock('../forms/BoardFormFields', () => ({
     options?: { includeLegacyPermissions?: boolean }
   ) => ({
     name: form.getFieldValue('name'),
-    ...(options?.includeLegacyPermissions === false
-      ? {}
-      : {
-          access_mode: 'shared',
-          default_others_can: 'session',
-          default_others_fs_access: 'read',
-        }),
   }),
   isCustomCSS: () => false,
 }));

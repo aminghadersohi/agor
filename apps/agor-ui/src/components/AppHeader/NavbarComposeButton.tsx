@@ -35,6 +35,7 @@ import { SessionAttachmentTray } from '../SessionPanel/SessionAttachmentTray';
 import { SessionComposerDropZone } from '../SessionPanel/SessionComposerDropZone';
 import { useComposerAttachments } from '../SessionPanel/useComposerAttachments';
 import { PrimaryTeammatePicker } from '../SettingsModal/PrimaryTeammatePicker';
+import { TeammateIdentityAvatar } from '../TeammateIdentityAvatar';
 
 const HINT_DISMISSED_KEY = 'agor:compose-hint-dismissed';
 
@@ -56,10 +57,6 @@ export interface NavbarComposeButtonProps {
 
 function teammateName(branch: Branch): string {
   return getTeammateConfig(branch)?.displayName ?? branch.name;
-}
-
-function teammateEmoji(branch: Branch): string | undefined {
-  return getTeammateConfig(branch)?.emoji;
 }
 
 /**
@@ -269,7 +266,6 @@ export const NavbarComposeButton: React.FC<NavbarComposeButtonProps> = ({
     submitting !== null ||
     (!prompt.trim() && attachments.length === 0);
 
-  const triggerEmoji = (primaryBranch && teammateEmoji(primaryBranch)) || '🤖';
   const boardPhrase = primaryBranch
     ? `${teammateName(primaryBranch)}'s board`
     : "your primary assistant's board";
@@ -282,11 +278,11 @@ export const NavbarComposeButton: React.FC<NavbarComposeButtonProps> = ({
         {primaryBranch ? (
           <>
             Ask{' '}
-            {teammateEmoji(primaryBranch) ? (
-              `${teammateEmoji(primaryBranch)} `
-            ) : (
-              <RobotOutlined style={{ marginInlineEnd: token.marginXXS }} />
-            )}
+            <TeammateIdentityAvatar
+              branch={primaryBranch}
+              size={18}
+              style={{ marginInlineEnd: token.marginXXS }}
+            />
             {teammateName(primaryBranch)}, your primary assistant
           </>
         ) : (
@@ -451,7 +447,7 @@ export const NavbarComposeButton: React.FC<NavbarComposeButtonProps> = ({
       }}
       trigger="click"
       placement="bottomRight"
-      destroyTooltipOnHide
+      destroyOnHidden
       content={content}
     >
       <Tooltip title="Start quick session">
@@ -466,7 +462,11 @@ export const NavbarComposeButton: React.FC<NavbarComposeButtonProps> = ({
             gap: token.marginXXS,
           }}
         >
-          <span style={{ fontSize: token.fontSize, lineHeight: 1 }}>{triggerEmoji}</span>
+          {primaryBranch ? (
+            <TeammateIdentityAvatar branch={primaryBranch} size={20} />
+          ) : (
+            <RobotOutlined style={{ fontSize: token.fontSize }} />
+          )}
           <EditOutlined style={{ fontSize: token.fontSizeLG }} />
         </Button>
       </Tooltip>

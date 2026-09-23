@@ -299,6 +299,7 @@ export const MCPServerFormFields: React.FC<MCPServerFormFieldsProps> = ({
           responseHeaders?: Record<string, string>;
           hint?: string;
           debugInfo?: unknown;
+          metadata?: { descriptions_truncated?: number };
         };
         if (!operation.isCurrent()) return;
 
@@ -319,6 +320,9 @@ export const MCPServerFormFields: React.FC<MCPServerFormFieldsProps> = ({
             }
             if (data.mcpStatus !== undefined) {
               message += ` | MCP server responded with ${data.mcpStatus}`;
+            }
+            if ((data.metadata?.descriptions_truncated ?? 0) > 0) {
+              message += ` | ${data.metadata?.descriptions_truncated} provider description(s) shortened to Agor's safe metadata budget`;
             }
             showSuccess(message);
           }

@@ -93,6 +93,8 @@ import { CodexAuthSettings } from '../CodexAuth';
 import { EnvVarEditor } from '../EnvVarEditor';
 import { HighlightMatch } from '../HighlightMatch';
 import { SessionMcpServersField } from '../MCPServerSelect';
+import { ProfileImageGalleryEditor } from '../ProfileImage';
+import { UserStagePreview } from '../TeammateStage';
 import { ToolIcon } from '../ToolIcon';
 import { UserIdentityAvatar } from '../UserIdentityAvatar';
 import { AudioSettingsTab } from './AudioSettingsTab';
@@ -1819,6 +1821,20 @@ const UserSettingsModalForIdentity: React.FC<UserSettingsModalProps> = ({
           )}
         />
       </FieldRow>
+
+      {user && (
+        <>
+          <SectionDivider label="Photos" />
+          <ProfileImageGalleryEditor
+            subject={{ type: 'user', id: user.user_id }}
+            canEdit={canEditTarget}
+            label="Profile photos"
+          />
+          <div style={{ marginTop: token.marginLG }}>
+            <UserStagePreview user={user} />
+          </div>
+        </>
+      )}
 
       {onReopenOnboarding && isSelf && (
         <>

@@ -206,6 +206,7 @@ import {
   type PermissionDecisionSubmission,
 } from './permissions/deliver-permission-decision.js';
 import type { PowerPolicyController } from './power-management/index.js';
+import { registerProfileImageRoutes } from './profile-image-routes.js';
 import { publicBoardCommentRepositionInput } from './services/board-comments.js';
 import type { GatewayService } from './services/gateway.js';
 import { createMCPCatalogConnectService } from './services/mcp-catalog-connect.js';
@@ -282,6 +283,7 @@ import {
   type InternalPromptTaskMetadataInput,
 } from './utils/prompt-task-metadata.js';
 import { ensureScheduleRunsAsCaller } from './utils/schedule-hooks.js';
+import { emitSessionAttentionAcknowledged } from './utils/session-attention-realtime.js';
 import {
   deferWithSessionQueueTenantScope,
   runWithSessionQueueTenantScope,
@@ -387,7 +389,7 @@ export class AgorLocalStrategy extends LocalStrategy {
 /**
  * Extended Params with route ID parameter.
  */
-export interface RouteParams extends Params {
+export interface RouteParams extends AuthenticatedParams {
   route?: {
     id?: string;
     messageId?: string;
@@ -1777,6 +1779,27 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
 
   registerAuthenticatedRoute(
     app,
+    '/sessions/:id/acknowledge-attention',
+    {
+      async create(_data: Record<string, never>, params: RouteParams) {
+        const id = params.route?.id;
+        if (!id) throw new BadRequest('Session ID required');
+        const userId = params.user?.user_id;
+        if (!userId) throw new NotAuthenticated('Authentication required');
+
+        const acknowledgement = await sessionsService.acknowledgeAttention(id, params);
+        emitSessionAttentionAcknowledged(app, params.tenant?.tenant_id, userId, acknowledgement);
+        return acknowledgement;
+      },
+    },
+    {
+      create: { role: ROLES.VIEWER, action: 'acknowledge viewed session output' },
+    },
+    requireAuth
+  );
+
+  registerAuthenticatedRoute(
+    app,
     '/sessions/:id/fork',
     {
       async create(data: { prompt: string; task_id?: string }, params: RouteParams) {
@@ -2536,6 +2559,16 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           if (prior.created_by !== expectedCreator || prior.full_prompt !== data.prompt) {
             throw new Conflict(`Task identity ${data.idempotencyTaskId} is already in use`);
           }
+          const coalescedInto = prior.metadata?.queue_coalescing?.coalesced_into_task_id;
+          if (coalescedInto) {
+            const leader = await taskRepo.findById(coalescedInto);
+            if (!leader || leader.session_id !== prior.session_id) {
+              throw new Conflict(
+                `Task identity ${data.idempotencyTaskId} has invalid queue lineage`
+              );
+            }
+            return leader;
+          }
           if (isTaskPendingDispatch(prior)) return null;
 
           await reconcileStableInitialUserMessage(
@@ -2647,6 +2680,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             if (params._taskCompletionCallback) {
               taskMetadata.completion_callback = params._taskCompletionCallback;
             }
+            // The Task row and its re-authorization at admission time are one
+            // metadata commit, so a crash can never leave an executable Task
+            // that advertises callback routing it did not durably record.
             const compactionRequestId = (data.idempotencyTaskId ?? generateId()) as TaskID;
             const hasAttachmentSemantics =
               data.prompt.includes('Attachments — use `agor_upload_materialize` to access:') ||
@@ -2688,7 +2724,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                   throw new Conflict('Cannot deliver to an archived Session');
                 }
                 await assertCurrentPromptAuthority(operationDb, admissionSession);
-                return new TaskRepository(operationDb).createPending({
+                const admitted = await new TaskRepository(operationDb).createPending({
                   task_id: compactionRequestId,
                   session_id: id as SessionID,
                   full_prompt: data.prompt,
@@ -2703,6 +2739,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                   },
                   dispatchIfIdle: preparedLaunch?.updates,
                 });
+                return admitted;
               }
             );
             await tasksService.autoTitleSession(task, params);
@@ -3405,6 +3442,13 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   const uploadAuthMiddleware = createUploadAuthMiddleware({
     authentication: app.service('authentication'),
     multiTenancy,
+  });
+
+  registerProfileImageRoutes({
+    app,
+    db,
+    authMiddleware: uploadAuthMiddleware,
+    allowSuperadmin: superadminOpts.allowSuperadmin,
   });
 
   // biome-ignore lint/suspicious/noExplicitAny: Express route method not on FeathersJS Application type
@@ -4683,6 +4727,23 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       // file to the branch working tree, so even though the content is
       // derivable, the side effect warrants the same permission bar as import.
       create: { role: ROLES.ADMIN, action: 'export .agor.yml' },
+    },
+    requireAuth
+  );
+
+  registerAuthenticatedRoute(
+    app,
+    '/repos/:id/import-launch-json',
+    {
+      async create(data: { branch_id: string }, params: RouteParams) {
+        const id = params.route?.id;
+        if (!id) throw new Error('Repo ID required');
+        if (!data?.branch_id) throw new Error('branch_id is required');
+        return reposService.importFromLaunchJson(id, data, params);
+      },
+    },
+    {
+      create: { role: ROLES.ADMIN, action: 'import environment config from launch.json' },
     },
     requireAuth
   );

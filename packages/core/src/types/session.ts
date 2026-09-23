@@ -53,7 +53,6 @@ export type SessionAutoArchivePolicy = (typeof SESSION_AUTO_ARCHIVE_POLICIES)[nu
 /** Product defaults applied once, when an eligible child Session is created. */
 export const BTW_AUTO_ARCHIVE_AFTER_SECONDS = 5 * 60;
 export const SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS = 60 * 60;
-
 /**
  * How a standing child-completion callback reaches its coordinator.
  *
@@ -542,12 +541,26 @@ export interface Session {
   /**
    * Whether this session is ready to receive a new prompt
    *
-   * Set to true when a task completes successfully, indicating the agent is ready for more work.
-   * Cleared when the user opens the conversation drawer (acknowledging completion).
-   * Used to highlight branch cards to show which sessions need attention.
+   * Set to true when a task settles and the session can accept more work. This
+   * includes failure and timeout outcomes, not only successful completion.
+   * This is runtime promptability state, not per-user acknowledgement state.
    */
   ready_for_prompt: boolean;
 
+  /**
+   * Monotonic generation advanced whenever a session transitions from active work
+   * to a result that needs human attention. Successful output, failures, timeouts,
+   * and interrupted/recovered work all advance the same signal so operational
+   * failures cannot disappear from the board.
+   */
+  attention_generation: number;
+
+  /**
+   * Caller-scoped acknowledgement generation, enriched on authenticated reads.
+   * It is intentionally absent from shared realtime session events; clients retain
+   * their last caller-scoped value while applying those shared patches.
+   */
+  viewer_seen_attention_generation?: number;
   /** Requested UPS power priority. Only the dedicated manager-only API may mutate it. */
   power_priority: SessionPowerPriority;
   /** Durable attribution for the latest priority change. */
@@ -603,6 +616,22 @@ export interface Session {
     delivery?: CallbackDelivery;
     /** Internal, durable loop guard and audit for callback-digest BTW forks. */
     digest?: CallbackDigestProvenance;
+  };
+
+  // ===== Queue Configuration =====
+
+  /**
+   * Optional controls for prompts that arrive while this Session is busy.
+   *
+   * Coalescing is deliberately opt-in and applies only to trusted,
+   * daemon-authored gateway/callback updates. Human-authored prompts remain
+   * independent queue entries and form hard ordering boundaries.
+   */
+  queue_config?: {
+    /** Combine compatible queued system updates into one ordered model turn. */
+    coalesce_system_updates?: boolean;
+    /** Maximum updates in one turn. Defaults to 8 and is clamped to 2..25. */
+    max_coalesced_updates?: number;
   };
 
   // ===== Fork Origin =====
@@ -706,7 +735,13 @@ export type SchedulerInitializationFailureCode =
 /** Session data accepted before defaults and configuration references are materialized. */
 export type CreateSessionInput = Omit<
   Partial<Session>,
-  'agentic_tool' | 'agentic_tool_preset_id' | 'model_config' | 'sdk_home_scope' | 'usage_summary'
+  | 'agentic_tool'
+  | 'agentic_tool_preset_id'
+  | 'model_config'
+  | 'sdk_home_scope'
+  | 'usage_summary'
+  | 'attention_generation'
+  | 'viewer_seen_attention_generation'
 > & {
   agentic_tool?: AgenticToolName;
   agentic_tool_preset_id?: AgenticToolConfigurationReference | null;
@@ -718,7 +753,11 @@ export type CreateSessionInput = Omit<
 /** Session patch semantics: omit/undefined preserves, string sets, null clears. */
 export type SessionUpdate = Omit<
   Partial<Session>,
-  'sdk_session_id' | 'sdk_home_scope' | 'usage_summary'
+  | 'sdk_session_id'
+  | 'sdk_home_scope'
+  | 'usage_summary'
+  | 'attention_generation'
+  | 'viewer_seen_attention_generation'
 > & {
   sdk_session_id?: string | null;
 };
@@ -727,10 +766,9 @@ export type SessionUpdate = Omit<
  * Minimal persisted session state needed to decide whether a new task can
  * start immediately.
  *
- * `ready_for_prompt` is intentionally not equivalent to promptability: the UI
- * also uses it as an attention/acknowledgement flag (for example timed-out
- * permission requests can set it true). Use this helper instead of checking
- * either field directly at task-execution boundaries.
+ * `ready_for_prompt` is not equivalent to an idle status: failed or timed-out
+ * sessions use it to indicate that the prior task has settled and prompting
+ * may resume. Caller-private attention acknowledgement is tracked separately.
  */
 export type SessionPromptState = Pick<Session, 'status' | 'ready_for_prompt'>;
 
@@ -753,6 +791,20 @@ export function isSessionPromptable<T extends SessionPromptState>(
   session: T
 ): session is T & PromptableSessionState {
   return sessionCanStartTask(session.status, session.ready_for_prompt);
+}
+
+/** Whether this session has attention-producing output unseen by the current viewer. */
+export function sessionHasUnseenAttention(
+  session: Pick<Session, 'attention_generation' | 'viewer_seen_attention_generation'>
+): boolean {
+  return session.attention_generation > (session.viewer_seen_attention_generation ?? 0);
+}
+
+/** Caller-private result returned and broadcast when a session is acknowledged. */
+export interface SessionAttentionAcknowledgement {
+  session_id: SessionID;
+  attention_generation: number;
+  seen_attention_generation: number;
 }
 
 export const EXECUTING_SESSION_STATUSES: ReadonlySet<SessionStatus> = new Set<SessionStatus>([

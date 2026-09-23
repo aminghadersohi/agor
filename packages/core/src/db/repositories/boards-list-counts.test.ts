@@ -97,10 +97,10 @@ describe('BoardRepository Board list counts', () => {
         status: SessionStatus.AWAITING_INPUT,
         custom_context: {
           gateway_source: {
-            channel_type: 'slack',
-            channel_id: 'fictional-channel',
+            channel_id: 'fictional-test-channel-id',
             channel_name: 'fictional-test-channel',
-            thread_id: 'fictional-thread',
+            channel_type: 'slack',
+            thread_id: 'fictional-thread-id',
           },
         },
       });

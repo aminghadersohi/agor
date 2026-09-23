@@ -79,6 +79,17 @@ A branch is a filesystem directory plus a database record. The record tracks:
 
 _Behind every card: the branch details modal (General / Sessions / Environment / Files / Schedule tabs). The same fields the table above describes, rendered as actual inputs._
 
+### Browse and edit worktree files
+
+Open a branch's **Files** tab to browse or download its files. **Open workspace editor** expands
+that browser into a resizable, IDE-style view with the file tree on the left and an editor on the
+right. Save with the button or `Cmd/Ctrl+S`.
+
+The editor updates the worktree directly. It supports existing text files up to 1 MB and refuses a
+save if the file changed after you opened it, so an agent or external editor is not silently
+overwritten. Binary files remain preview/download-only. In RBAC workspaces, editing requires
+filesystem `write` access to the branch.
+
 Sessions, tasks, comments, and artifacts all reference a branch. **The branch is the spine.**
 
 ---

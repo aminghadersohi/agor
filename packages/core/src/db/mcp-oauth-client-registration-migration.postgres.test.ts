@@ -53,7 +53,7 @@ async function recreateHistoricalClaudeAuthority(
 ): Promise<void> {
   await transaction.unsafe('DROP TABLE claude_oauth_attempts');
   await transaction.unsafe('DROP SEQUENCE claude_oauth_attempt_generation_seq');
-  const source = await readFile(join(migrationsFolder, '0100_claude_oauth_attempts.sql'), 'utf8');
+  const source = await readFile(join(migrationsFolder, '9012_claude_oauth_attempts.sql'), 'utf8');
   for (const statement of source.split('--> statement-breakpoint')) {
     if (statement.trim()) await transaction.unsafe(statement);
   }
@@ -125,7 +125,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           .digest('hex')
       ).toBe(OLD_HEAD_MIGRATION_SHA256);
       await Promise.all([
-        unlink(join(oldHeadFolder, '0100_claude_oauth_attempts.sql')),
+        unlink(join(oldHeadFolder, '9012_claude_oauth_attempts.sql')),
         unlink(join(oldHeadFolder, '9015_mcp_oauth_client_registrations.sql')),
         unlink(join(oldHeadFolder, '9016_oauth_authority_watermark_reconciliation.sql')),
       ]);
@@ -140,14 +140,15 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           breakpoints: boolean;
         }>;
       };
-      // Pin the historical cutover while allowing independent later migrations.
       pendingMigrations = journal.entries
         .filter(({ when }) => when > OLD_HEAD_WATERMARK)
         .map(({ tag }) => tag);
-      expect(pendingMigrations.slice(0, 9)).toEqual([
-        '0102_zone_workflow_transitions',
-        '0103_session_power_priority',
-        '0104_environment_command_discovery',
+      expect(pendingMigrations.slice(0, 11)).toEqual([
+        '9010_session_auto_archive',
+        '9011_zone_workflow_transitions',
+        '9012_claude_oauth_attempts',
+        '9013_session_power_priority',
+        '9014_environment_command_discovery',
         '9015_mcp_oauth_client_registrations',
         '9016_oauth_authority_watermark_reconciliation',
         '9017_fork_migration_collision_repair',
@@ -155,7 +156,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
         '9019_mcp_slack_recovery_due',
         '9020_standalone_power_ownership',
       ]);
-      journal.entries = journal.entries.filter((entry) => entry.idx <= 99);
+      journal.entries = journal.entries.filter((entry) => entry.when < OLD_HEAD_WATERMARK);
       journal.entries.push({
         idx: 100,
         version: '7',
@@ -363,7 +364,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       ).toEqual([{ workflows: true, auto_archive: true }]);
     });
 
-    it('preserves an exact final DCR schema and rows when upgrading the pre-rebase watermark', async () => {
+    it('preserves final DCR rows and applied Claude authority while repairing the fork watermark', async () => {
       if (!db || !isPostgresDatabase(db))
         throw new Error('PostgreSQL test database was not initialized');
       const registrationId = generateId();
@@ -437,6 +438,12 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`DROP TABLE session_reminders, session_memories`);
       await executeRaw(db, sql`DROP INDEX sessions_tenant_session_id_unique`);
       await executeRaw(db, sql`DROP INDEX tasks_tenant_task_id_unique`);
+
+      // This fork recorded Claude authority at 9012, later than upstream's
+      // old final watermark. Retain that real applied entry: erasing its ledger
+      // while keeping its table would invent an impossible upgrade fixture.
+      // Earlier missing fork schemas still need 9017's collision repair, and
+      // existing final DCR authority must retain its relation and rows.
       // Upstream's provider-grant table is likewise newer than this watermark.
       // Rewind the later completion schema too, not just its ledger entry.
       // The policy on tasks references the outbox and must be removed first.
@@ -446,20 +453,13 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await withPostgresTestTransaction(db, recreateHistoricalClaudeAuthority);
       await withPostgresTestTransaction(db, restoreHistoricalOwnerImmutability);
 
-      // Reproduce the previous reviewed head's timestamp-only final watermark.
-      // Its authority schema is identical; the rebased bootstrap must not try
-      // to CREATE it again or discard its rows before exact reconciliation.
       await executeRaw(
         db,
-        sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at >= 1788379200000`
-      );
-      await executeRaw(
-        db,
-        sql`INSERT INTO drizzle.__drizzle_migrations (hash, created_at)
-            VALUES ('pre-rebase-final-watermark', 1788379200000)`
+        sql`DELETE FROM drizzle.__drizzle_migrations
+            WHERE created_at >= 1788379200000 AND created_at <> 1788552000000`
       );
       await expect(checkMigrationStatus(db)).resolves.toMatchObject({
-        pending: pendingMigrations.slice(1),
+        pending: pendingMigrations.slice(3),
         dbAheadOfBinary: false,
       });
       await expect(runMigrations(db)).rejects.toThrow('Offline migration cutover required');

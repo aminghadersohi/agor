@@ -96,6 +96,8 @@ import { LOCAL_AUTHORIZATION_INVALIDATION_EVENT } from './realtime/routing.js';
 import { registerHooks } from './register-hooks.js';
 import { registerRoutes } from './register-routes.js';
 import { registerServices } from './register-services.js';
+import { createMCPOAuthCallbackRoute } from './services/mcp-oauth-callback-route.js';
+import { resolveMCPOAuthRedirectUri } from './services/mcp-oauth-redirect-uri.js';
 import { loadBuildInfo } from './setup/build-info.js';
 import { createDynamicCompressionMiddleware } from './setup/compression.js';
 import { buildCorsConfig, isSandpackOrigin } from './setup/cors.js';
@@ -289,10 +291,6 @@ async function startDaemonWithOwnedMetrics(
     databaseUrl,
     mcpOAuthCallbackOrigin
   );
-  const mcpOAuthCallbackUrl =
-    deployment.mode === 'ha'
-      ? (deployment.mcpOAuthCallbackUrl ?? undefined)
-      : (mcpOAuthCallbackOrigin.standaloneCallbackUrl ?? undefined);
   console.log(`🌐 Deployment mode: ${deployment.mode}`);
 
   const multiTenancy = resolveMultiTenancyConfig(effectiveConfig);
@@ -375,6 +373,14 @@ async function startDaemonWithOwnedMetrics(
   // --------------------------------------------------------------------------
   const envPort = process.env.PORT ? Number.parseInt(process.env.PORT, 10) : undefined;
   const DAEMON_PORT = envPort ?? effectiveConfig.daemon?.port ?? 3030;
+  // Freeze the fork's standalone loopback policy alongside upstream's public
+  // and HA callback authority. Request handlers never reload configuration.
+  const mcpOAuthCallbackUrl =
+    deployment.mode === 'ha'
+      ? (deployment.mcpOAuthCallbackUrl ?? undefined)
+      : effectiveConfig.daemon?.mcp_oauth_callback_mode !== 'public'
+        ? await resolveMCPOAuthRedirectUri({ daemonPort: DAEMON_PORT, usePublicHttps: false })
+        : (mcpOAuthCallbackOrigin.standaloneCallbackUrl ?? undefined);
   const DAEMON_HOST = process.env.DAEMON_HOST ?? effectiveConfig.daemon?.host ?? 'localhost';
 
   const envUiPort = process.env.UI_PORT ? Number.parseInt(process.env.UI_PORT, 10) : undefined;
@@ -707,22 +713,10 @@ async function startDaemonWithOwnedMetrics(
     }
   }
 
-  // OAuth callback middleware stub — handler is wired by registerServices()
-  const appRecord = app as unknown as Record<string, unknown>;
-  app.use('/mcp-servers/oauth-callback', ((
-    req: express.Request,
-    res: express.Response,
-    next: express.NextFunction
-  ) => {
-    const handler = appRecord.oauthCallbackHandler as
-      | ((req: express.Request, res: express.Response) => void)
-      | null;
-    if (req.method === 'GET' && handler) {
-      handler(req, res);
-    } else {
-      next();
-    }
-  }) as never);
+  // Browser OAuth callbacks must be mounted before Feathers REST. The handler
+  // itself is installed after service registration below.
+  const mcpOAuthCallbackRoute = createMCPOAuthCallbackRoute();
+  app.use('/mcp-servers/oauth-callback', mcpOAuthCallbackRoute.middleware as never);
 
   // Compress dynamic REST/API responses after static file serving. The filter
   // deliberately skips streaming/event-stream routes.
@@ -933,6 +927,7 @@ async function startDaemonWithOwnedMetrics(
       deployment,
       mcpOAuthCallbackUrl,
     });
+    mcpOAuthCallbackRoute.setHandler(services.oauthCallbackHandler);
 
     // --------------------------------------------------------------------------
     // Phase 2: Register hooks

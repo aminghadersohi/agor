@@ -112,7 +112,6 @@ describe('normalizeDiscoveredMCPCapabilities', () => {
       ).toThrow(/tools\[0\]\.input_schema/);
     }
   });
-
   it('allows protocol free text line breaks but rejects unsafe control characters', () => {
     expect(
       normalizeDiscoveredMCPCapabilities(capabilities('line one\nline two\tformatted')).capabilities

@@ -54,7 +54,7 @@ export const BoardCollapse: React.FC<BoardCollapseProps> = ({
           <div
             style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', minWidth: 0 }}
           >
-            <BoardTile emoji={emoji} size={avatarSize} />
+            <BoardTile board={board} emoji={emoji} size={avatarSize} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <Text strong ellipsis style={{ display: 'block', fontSize: 14 }}>
                 {board.name}

@@ -1,6 +1,7 @@
 import { Typography, theme } from 'antd';
 import type React from 'react';
 import { HighlightMatch } from '../HighlightMatch';
+import { TeammateIdentityAvatar } from '../TeammateIdentityAvatar';
 import { describeSearchResult } from './describeSearchResult';
 import type { SearchResultItem } from './types';
 
@@ -35,6 +36,7 @@ export const SearchResult: React.FC<SearchResultProps> = ({
 }) => {
   const { token } = theme.useToken();
   const { title, tag, secondary, time, icon } = describeSearchResult(result);
+  const teammateBranch = result.type === 'teammate' ? result.item : undefined;
 
   return (
     <button
@@ -62,7 +64,11 @@ export const SearchResult: React.FC<SearchResultProps> = ({
           emoji (teammate `config.emoji`). For other types the section header
           above already conveys the kind, so we drop the per-row glyph to keep
           visual noise down. */}
-      {icon && <span style={{ fontSize: 18, lineHeight: '20px', flexShrink: 0 }}>{icon}</span>}
+      {teammateBranch ? (
+        <TeammateIdentityAvatar branch={teammateBranch} size={22} />
+      ) : (
+        icon && <span style={{ fontSize: 18, lineHeight: '20px', flexShrink: 0 }}>{icon}</span>
+      )}
       <div style={{ flex: 1, minWidth: 0 }}>
         {/* Title row: title takes remaining width and ellipsizes; tag + time
             stay on one line via whiteSpace:nowrap + flex-shrink:0. Plain flex

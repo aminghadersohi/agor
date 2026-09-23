@@ -10,9 +10,12 @@ const SANDPACK_ERROR_THROTTLE_MS = 1000;
 export function ArtifactSandpackErrorReporter({
   artifactId,
   contentHash,
+  staticReady = false,
 }: {
   artifactId: string;
   contentHash?: string;
+  /** Native static preview readiness; it does not run a Sandpack compiler. */
+  staticReady?: boolean;
 }) {
   const { sandpack, listen } = useSandpack();
   const [compilation, setCompilation] = useState<{
@@ -52,9 +55,11 @@ export function ArtifactSandpackErrorReporter({
 
   const compilationStatus: ArtifactCompilationStatus = sandpack.error
     ? 'error'
-    : sandpack.status !== 'running' || compilation.contentHash !== contentHash
-      ? 'pending'
-      : compilation.status;
+    : staticReady
+      ? 'success'
+      : sandpack.status !== 'running' || compilation.contentHash !== contentHash
+        ? 'pending'
+        : compilation.status;
 
   useEffect(() => {
     const payload: ArtifactSandpackReport = {
@@ -67,7 +72,7 @@ export function ArtifactSandpackErrorReporter({
             ...(sandpack.error.column != null ? { column: sandpack.error.column } : {}),
           }
         : null,
-      status: sandpack.status,
+      status: staticReady ? 'idle' : sandpack.status,
       compilation_status: compilationStatus,
       content_hash: contentHash,
     };
@@ -97,7 +102,7 @@ export function ArtifactSandpackErrorReporter({
         pendingSendRef.current?.();
       }
     };
-  }, [sandpack.error, sandpack.status, compilationStatus, artifactId, contentHash]);
+  }, [sandpack.error, sandpack.status, compilationStatus, artifactId, contentHash, staticReady]);
 
   return null;
 }

@@ -32,6 +32,14 @@ const clear = (table: string, key: string, column: string, owned: string): DataS
  * for finalization. Cascades are only a backstop after their children drained.
  */
 export const BRANCH_DELETION_DATA_STEPS: readonly DataStep[] = [
+  clear('completion_subscriptions', 'subscription_id', 'callback_session_id', 'os'),
+  clear('completion_subscriptions', 'subscription_id', 'root_session_id', 'os'),
+  clear('completion_subscriptions', 'subscription_id', 'root_task_id', 'ot'),
+  clear('completion_subscriptions', 'subscription_id', 'active_session_id', 'os'),
+  clear('completion_subscriptions', 'subscription_id', 'active_task_id', 'ot'),
+  clear('completion_subscriptions', 'subscription_id', 'delivery_task_id', 'ot'),
+  del('session_attention_states', 'user_id,session_id', 'session_id IN (SELECT id FROM os)'),
+  del('profile_images', 'image_id', 'branch_id IN (SELECT id FROM ob)'),
   del(
     'kb_graph_edges',
     'edge_id',
