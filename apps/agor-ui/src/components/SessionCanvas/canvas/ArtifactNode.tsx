@@ -35,6 +35,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { NodeResizer } from 'reactflow';
 import {
   ArtifactConsoleReporter,
+  ArtifactInteractionBridge,
   ArtifactRuntimeBridge,
   ArtifactSandpackErrorReporter,
   ArtifactTrustStatusIcon,
@@ -52,6 +53,8 @@ import { useStableSandpackProviderInputs } from './utils/sandpackDefaults';
 ensureSandpackCryptoSubtle();
 
 export interface ArtifactNodeData {
+  /** Open a configured canonical chat session in the normal session surface. */
+  onOpenSession?: (sessionId: string) => void;
   objectId: string;
   artifactId: string;
   width: number;
@@ -666,6 +669,11 @@ export const ArtifactNode = ({
               contentHash={payload.runtime_report_hash ?? payload.content_hash}
             />
             <ArtifactRuntimeBridge artifactId={data.artifactId} />
+            <ArtifactInteractionBridge
+              artifactId={data.artifactId}
+              config={payload.interaction_config}
+              onOpenSession={data.onOpenSession}
+            />
             <CodeSandboxExporter artifactId={data.artifactId} />
           </SandpackProvider>
         </div>
