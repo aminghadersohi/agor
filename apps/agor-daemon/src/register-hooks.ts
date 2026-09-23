@@ -1,3 +1,4 @@
+import { KNOWLEDGE_TRANSFER, OWNERSHIP_TRANSFER_SERVICES } from '@agor/core/types';
 /**
  * Service Hooks Registration
  *
@@ -500,6 +501,7 @@ export interface RegisterHooksContext {
  * without tenant authority over REST.
  */
 export const AUTHENTICATED_RBAC_SERVICE_PATHS = [
+  ...Object.values(OWNERSHIP_TRANSFER_SERVICES),
   'groups',
   'group-memberships',
   'branches/:id/permissions',
@@ -563,6 +565,7 @@ export const TENANT_OWNED_SERVICE_PATHS = [
   'thread-session-map',
   'gateway-outbound-messages',
   'session-env-selections',
+  KNOWLEDGE_TRANSFER.path,
   'kb/namespaces',
   'kb/documents',
   'kb/graph',
@@ -710,7 +713,6 @@ const EXECUTOR_TASK_PATCH_FIELDS = taskFieldSet(
   'raw_sdk_response',
   'normalized_sdk_response',
   'computed_context_window',
-  'tool_use_count',
   'duration_ms',
   'agent_session_id',
   'error_message',
@@ -1103,7 +1105,13 @@ export function classifyRealtimeAuthorizationInvalidation(
     return 'evict';
   }
 
-  if (['branches/:id/permissions', 'boards/:id/permissions'].includes(context.path)) {
+  if (
+    [
+      ...Object.values(OWNERSHIP_TRANSFER_SERVICES),
+      'branches/:id/permissions',
+      'boards/:id/permissions',
+    ].includes(context.path)
+  ) {
     return 'evict';
   }
 
@@ -1765,6 +1773,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   };
 
   for (const path of [
+    ...Object.values(OWNERSHIP_TRANSFER_SERVICES),
     'branches/:id/permissions',
     'boards/:id/permissions',
     'groups',
@@ -2536,6 +2545,11 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     },
   } as never);
 
+  safeService(KNOWLEDGE_TRANSFER.path)?.hooks({
+    before: { all: [requireAuth, requireMinimumRole(ROLES.MEMBER, 'transfer knowledge')] },
+    after: { create: [suppressKnowledgeCommandRealtimeEvent] },
+  });
+
   safeService('kb/documents')?.hooks({
     before: {
       all: [requireAuth],
@@ -3043,6 +3057,12 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       remove: [clearRealtimeBranchVisibility, publishMarketplaceInvalidation],
     },
   });
+  for (const path of Object.values(OWNERSHIP_TRANSFER_SERVICES)) {
+    safeService(path)?.hooks({
+      before: { patch: [captureMarketplaceInvalidationTargets] },
+      after: { patch: [clearRealtimeBranchVisibility, publishMarketplaceInvalidation] },
+    });
+  }
   safeService('branches/:id/permissions')?.hooks({
     before: {
       patch: [captureMarketplaceInvalidationTargets],

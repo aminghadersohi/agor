@@ -820,6 +820,27 @@
       "when": 1790000000001,
       "tag": "9026_branch_color_override",
       "breakpoints": true
+    },
+    {
+      "idx": 9028,
+      "version": "7",
+      "when": 1790000000002,
+      "tag": "0111_management_ownership_transfer",
+      "breakpoints": true
+    },
+    {
+      "idx": 9029,
+      "version": "7",
+      "when": 1790000000003,
+      "tag": "0112_kb_import_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 9030,
+      "version": "7",
+      "when": 1790129000212,
+      "tag": "0113_session_recency_not_null",
+      "breakpoints": true
     }
   ]
 }

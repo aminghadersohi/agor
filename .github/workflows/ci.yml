@@ -68,6 +68,7 @@ jobs:
 
       - run: pnpm check:agor-live-deps
       - run: pnpm check:agentic-tool-packages
+      - run: node --test scripts/verify-npm-release.test.mjs
       - run: pnpm check:shortid
       - run: pnpm check:multitenancy-boundaries
       - run: pnpm check:daemon-filesystem-boundaries
@@ -97,6 +98,9 @@ jobs:
 
       # Docs have their own PR/push workflow and are intentionally excluded.
       - run: pnpm turbo run build typecheck --filter='!@agor/docs'
+
+      # Source aliases hide cross-entrypoint AsyncLocalStorage duplication.
+      - run: pnpm --filter @agor/core test:runtime
 
       # @agor/executor#test includes this runtime check, which requires dist.
       # Keep both executor checks here: a filtered test runner cannot compile

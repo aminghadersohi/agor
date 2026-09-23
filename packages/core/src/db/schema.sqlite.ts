@@ -55,7 +55,8 @@ export const sessions = sqliteTable(
     // Primary identity
     session_id: text('session_id', { length: 36 }).primaryKey(),
     created_at: t.timestamp('created_at').notNull(),
-    updated_at: t.timestamp('updated_at'),
+    // 0113 backfills legacy NULLs; writers initialize recency from created_at.
+    updated_at: t.timestamp('updated_at').notNull(),
 
     // User attribution
     created_by: text('created_by', { length: 36 }).notNull(),
@@ -375,7 +376,7 @@ export const tasks = sqliteTable(
 
         /** Filled by the executor after the turn. */
         model?: string;
-        tool_use_count: number;
+        recorded_tool_count?: number | null;
 
         duration_ms?: number;
         agent_session_id?: string;
@@ -672,8 +673,8 @@ export const boards = sqliteTable(
 
     // User attribution
     created_by: text('created_by', { length: 36 }).notNull(),
-    // User deletion guards are a separate lifecycle flow; this immutable
-    // logical owner pointer intentionally does not cascade or transfer.
+    // User deletion is a separate lifecycle flow. Only an explicit management
+    // transfer changes this owner pointer; attribution is never reassigned.
     primary_owner_user_id: text('primary_owner_user_id', { length: 36 }).notNull(),
 
     // Materialized for lookups
@@ -952,6 +953,7 @@ export const branches = sqliteTable(
 
         // Git state (current)
         base_ref?: string; // Branch this diverged from (e.g., "main")
+        base_source?: import('../types/branch').Branch['base_source'];
         base_remote_url?: string; // Optional remote that owns base_ref
         base_sha?: string; // SHA at branch creation
         last_commit_sha?: string; // Latest commit
@@ -3394,3 +3396,30 @@ export const schedulesRelations = relations(schedules, ({ one, many }) => ({
   }),
   sessions: many(sessions),
 }));
+
+/** Durable create receipts survive target archive/deletion; never grant access by themselves. */
+export const kbImportReceipts = sqliteTable(
+  'kb_import_receipts',
+  {
+    receipt_id: text('receipt_id').primaryKey(),
+    owner_user_id: text('owner_user_id', { length: 36 })
+      .notNull()
+      .references(() => users.user_id, { onDelete: 'cascade' }),
+    bundle: text('bundle').notNull(),
+    slug: text('slug').notNull(),
+    entry_key: text('entry_key').notNull(),
+    target_id: text('target_id').notNull(),
+    digest: text('digest').notNull(),
+    request_bytes: integer('request_bytes').notNull().default(0),
+    reconciled_count: integer('reconciled_count').notNull().default(-1),
+    created_at: t.timestamp('created_at').notNull(),
+  },
+  (table) => ({
+    identityIdx: uniqueIndex('kb_import_receipts_identity_unique').on(
+      table.owner_user_id,
+      table.bundle,
+      table.slug,
+      table.entry_key
+    ),
+  })
+);

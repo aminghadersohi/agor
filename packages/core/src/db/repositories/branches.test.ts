@@ -4,7 +4,7 @@
  * Tests for type-safe CRUD operations on branches with short ID support.
  */
 
-import type { BoardID, BranchID, UUID } from '@agor/core/types';
+import type { BoardID, Branch, BranchID, UUID } from '@agor/core/types';
 import { eq } from 'drizzle-orm';
 import { describe, expect, vi } from 'vitest';
 import { generateId, shortId } from '../../lib/ids';
@@ -64,6 +64,7 @@ function createBranchData(overrides?: {
   board_id?: UUID;
   created_by?: UUID;
   primary_owner_user_id?: UUID;
+  base_source?: Branch['base_source'];
   base_ref?: string;
   base_remote_url?: string;
   base_sha?: string;
@@ -101,6 +102,7 @@ function createBranchData(overrides?: {
     created_by: overrides?.created_by ?? ('test-user' as UUID),
     primary_owner_user_id: overrides?.primary_owner_user_id,
     base_ref: overrides?.base_ref,
+    base_source: overrides?.base_source,
     base_remote_url: overrides?.base_remote_url,
     base_sha: overrides?.base_sha,
     last_commit_sha: overrides?.last_commit_sha,
@@ -227,6 +229,7 @@ describe('BranchRepository.create', () => {
       board_id: boardId,
       base_ref: 'main',
       base_remote_url: 'https://github.com/example/template-source.git',
+      base_source: { name: 'main', remote_url: 'https://example.test/source.git' },
       base_sha: 'abc123',
       last_commit_sha: 'def456',
       tracking_branch: 'origin/feature',
@@ -252,6 +255,7 @@ describe('BranchRepository.create', () => {
     expect(created.base_ref).toBe('main');
     expect(created.base_remote_url).toBe('https://github.com/example/template-source.git');
     expect(created.base_sha).toBe('abc123');
+    expect(created.base_source).toEqual(data.base_source);
     expect(created.last_commit_sha).toBe('def456');
     expect(created.tracking_branch).toBe('origin/feature');
     expect(created.new_branch).toBe(true);
@@ -1106,6 +1110,7 @@ describe('BranchRepository.update', () => {
     const updated = await wtRepo.update(data.branch_id, {
       board_id: boardId,
       base_ref: 'develop',
+      base_source: { name: 'develop', remote_url: 'https://example.test/personal.git' },
       base_sha: 'abc123',
       last_commit_sha: 'def456',
       tracking_branch: 'origin/feature',
@@ -1121,6 +1126,10 @@ describe('BranchRepository.update', () => {
     expect(updated.board_id).toBe(boardId);
     expect(updated.base_ref).toBe('develop');
     expect(updated.base_sha).toBe('abc123');
+    expect((await wtRepo.findById(data.branch_id))?.base_source).toEqual({
+      name: 'develop',
+      remote_url: 'https://example.test/personal.git',
+    });
     expect(updated.last_commit_sha).toBe('def456');
     expect(updated.tracking_branch).toBe('origin/feature');
     expect(updated.new_branch).toBe(true);

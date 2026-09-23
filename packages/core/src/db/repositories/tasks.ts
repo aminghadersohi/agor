@@ -24,8 +24,10 @@ import type {
   QueuedPromptAmendmentPreview,
   SdkFailure,
   SessionID,
+  SessionUsageSummary,
   Task,
   TaskID,
+  TaskLaunchFields,
   TaskMetadata,
   TaskPendingDispatchStatus,
   TerminationCause,
@@ -67,6 +69,7 @@ import {
   insert,
   isPostgresDatabase,
   isSQLiteDatabase,
+  jsonExtract,
   lockRowForUpdate,
   runDatabaseTransaction,
   select,
@@ -96,6 +99,7 @@ import {
 } from './branch-access';
 import { ExecutorSessionTokenAuthorityRepository } from './executor-session-token-authorities';
 import { deepMerge } from './merge-utils';
+import { countRecordedTools } from './recorded-tool-count';
 
 export const MAX_COMPACTED_PROMPT_BYTES = 32 * 1024;
 export const MAX_EDITABLE_QUEUED_PROMPT_BYTES = 32 * 1024;
@@ -722,6 +726,7 @@ export interface TaskRuntimeDiscoveryOptions {
 }
 
 export interface TaskFindPageOptions {
+  excludeQueued?: boolean;
   taskId?: TaskID;
   afterTaskId?: TaskID;
   throughTaskId?: TaskID;
@@ -852,8 +857,12 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
    */
   private rowToTask(row: TaskRow): Task {
     const storedTerminationRequest = row.data.termination_request;
-    const { executor_launch_fs_access_floor: _executorLaunchFsAccessFloor, ...publicData } =
-      row.data;
+    // Strip the retired JSON key without migrating historical blobs.
+    const {
+      executor_launch_fs_access_floor: _executorLaunchFsAccessFloor,
+      tool_use_count: _retiredToolCount,
+      ...publicData
+    } = row.data as TaskRow['data'] & { tool_use_count?: unknown };
     const coordination: TerminationCoordinationClaim | undefined =
       row.termination_coordination_token &&
       row.termination_coordination_claimed_at &&
@@ -961,7 +970,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         git_state,
         // Filled in by the executor after the turn — don't substitute a default.
         ...(task.model ? { model: task.model } : {}),
-        tool_use_count: task.tool_use_count ?? 0,
+        recorded_tool_count: task.recorded_tool_count,
         duration_ms: task.duration_ms, // Task execution duration
         agent_session_id: task.agent_session_id, // SDK session ID
         error_message: task.error_message, // Human-readable failure reason when status='failed'
@@ -999,7 +1008,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
    */
   async create(data: Partial<Task>): Promise<Task> {
     try {
-      const insertData = this.taskToInsert(data);
+      const insertData = this.taskToInsert({ ...data, recorded_tool_count: null });
       await runDatabaseTransaction(
         this.db,
         async (tx) => {
@@ -1098,6 +1107,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
     if (opts.throughTaskId) conditions.push(lte(tasks.task_id, opts.throughTaskId));
     if (opts.sessionId) conditions.push(eq(tasks.session_id, opts.sessionId));
     if (opts.sessionIds) conditions.push(inArray(tasks.session_id, opts.sessionIds));
+    if (opts.excludeQueued) conditions.push(ne(tasks.status, TaskStatus.QUEUED));
     if (opts.status) conditions.push(eq(tasks.status, opts.status));
     if (opts.createdAt) conditions.push(eq(tasks.created_at, opts.createdAt));
     if (opts.createdBy) conditions.push(eq(tasks.created_by, opts.createdBy));
@@ -1144,6 +1154,31 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           }))
         : rows.map((row: unknown) => this.rowToTask(row as TaskRow)),
       total: Number(countRow?.count ?? 0),
+    };
+  }
+
+  /** Aggregate in SQL: no prompt, response or tool payload leaves the database. */
+  async getSessionUsage(sessionId: SessionID): Promise<SessionUsageSummary> {
+    const sum = (path: string) =>
+      sql<number>`COALESCE(SUM(CAST(${jsonExtract(this.db, tasks.data, `normalized_sdk_response.${path}`)} AS DOUBLE PRECISION)), 0)`;
+    const row = await select(this.db, {
+      total: sum('tokenUsage.totalTokens'),
+      input: sum('tokenUsage.inputTokens'),
+      output: sum('tokenUsage.outputTokens'),
+      cacheRead: sum('tokenUsage.cacheReadTokens'),
+      cacheCreation: sum('tokenUsage.cacheCreationTokens'),
+      cost: sum('costUsd'),
+    })
+      .from(tasks)
+      .where(eq(tasks.session_id, sessionId))
+      .one();
+    return {
+      total: Number(row?.total ?? 0),
+      input: Number(row?.input ?? 0),
+      output: Number(row?.output ?? 0),
+      cacheRead: Number(row?.cacheRead ?? 0),
+      cacheCreation: Number(row?.cacheCreation ?? 0),
+      cost: Number(row?.cost ?? 0),
     };
   }
 
@@ -2186,6 +2221,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       const failure = input.sdkFailure ?? current.sdk_failure;
       const data = {
         ...row.data,
+        recorded_tool_count: await countRecordedTools(txDb, fullId),
         duration_ms: terminal.duration_ms,
         message_range: terminal.message_range ?? current.message_range,
         ...(failure
@@ -2328,6 +2364,12 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
 
         const merged = {
           ...deepMerge(current, withTerminalTiming(current, updates)),
+          recorded_tool_count:
+            updates.status !== undefined &&
+            isTerminalTaskStatus(updates.status) &&
+            !isTerminalTaskStatus(current.status)
+              ? await countRecordedTools(txDb, fullId)
+              : current.recorded_tool_count,
           task_id: current.task_id,
           session_id: current.session_id,
           created_by: current.created_by,
@@ -2985,7 +3027,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
               start_timestamp: requestedAt,
             },
             git_state: { ref_at_start: '', sha_at_start: '' },
-            tool_use_count: 0,
+            recorded_tool_count: null,
           });
           await insert(txDb, tasks).values(correctiveInsert).run();
           const correctiveRow = await select(txDb)
@@ -3624,9 +3666,9 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
   }
 
   /**
-   * Create a pending task — either CREATED (will spawn immediately) or
-   * QUEUED (will drain later) — owning the sentinel defaults that the
-   * caller would otherwise have to assemble by hand.
+   * Admit CREATED/QUEUED work with repository-owned sentinel defaults, or
+   * insert a fresh idle prompt directly as DISPATCHING with prepared launch
+   * fields and its atomic Session projection.
    *
    * For QUEUED tasks, `queue_position = max(queue_position) + 1` is computed
    * while holding the owning Session row lock. A transaction by itself does
@@ -3636,8 +3678,8 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
    *
    * Sentinel contract: while a task carries `message_range.start_index = -1`
    * and `git_state.sha_at_start = ''`, it has not yet been pinned to real
-   * conversation/git state. spawnTaskExecutor is the sole place that
-   * overwrites these on the way to RUNNING.
+   * conversation/git state. Direct admission supplies prepared fields here;
+   * queued work receives them at claimDispatchAndProjectSession.
    */
   async createPending(input: {
     /** Optional stable identity used by idempotent internal producers. */
@@ -3654,7 +3696,23 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       permission_mode?: import('@agor/core/types').PermissionMode;
       stream: boolean;
     };
+    /**
+     * Prepared launch metadata for a fresh prompt only. Under the same Branch/
+     * Session fence, insert DISPATCHING directly when no unfinished work exists.
+     * Stable-ID producers retain their existing queue/reconciliation protocol.
+     */
+    dispatchIfIdle?: TaskLaunchFields;
   }): Promise<Task> {
+    if (
+      input.dispatchIfIdle &&
+      (input.task_id ||
+        input.status !== TaskStatus.QUEUED ||
+        input.dispatchIfIdle.status !== TaskStatus.DISPATCHING)
+    ) {
+      throw new RepositoryError(
+        'Direct admission requires a fresh queued input and dispatch preparation'
+      );
+    }
     const submittedAt = new Date().toISOString();
     const normalizedPrompt = normalizePromptForDeduplication(input.full_prompt);
     const compactionEligible =
@@ -3707,9 +3765,8 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       created_by: input.created_by,
       status: input.status,
       metadata: taskMetadata,
-      // Sentinels — overwritten by spawnTaskExecutor at the status → RUNNING
-      // transition. While `start_index === -1` / `sha_at_start === ''`, the
-      // task is intentionally unpinned.
+      // Sentinels — replaced when dispatch is claimed, including direct admission.
+      // While `start_index === -1` / `sha_at_start === ''`, the task is unpinned.
       message_range: {
         start_index: -1,
         end_index: -1,
@@ -3719,7 +3776,6 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         ref_at_start: '',
         sha_at_start: '',
       },
-      tool_use_count: 0,
     };
 
     if (input.status === TaskStatus.CREATED && !input.task_id) {
@@ -3758,12 +3814,6 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         this.db,
         async (txDb) => {
           await lockSessionBranchForAdmission(txDb, input.session_id);
-          await lockRowForUpdate(
-            txDb,
-            this.db,
-            sessions,
-            eq(sessions.session_id, input.session_id)
-          );
           const sessionRow = await select(txDb)
             .from(sessions)
             .where(eq(sessions.session_id, input.session_id))
@@ -3803,6 +3853,58 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
             }
           }
 
+          if (
+            input.dispatchIfIdle &&
+            sessionCanStartTask(sessionRow.status, sessionRow.ready_for_prompt)
+          ) {
+            // Include CREATED handoffs as well as executor-owned states.
+            // Queue emptiness alone cannot authorize another executor.
+            const unfinished = await select(txDb, { task_id: tasks.task_id })
+              .from(tasks)
+              .where(
+                and(
+                  eq(tasks.session_id, input.session_id),
+                  inArray(tasks.status, [...NONTERMINAL_TASK_STATUSES])
+                )
+              )
+              .limit(1)
+              .one();
+            const actor = !unfinished
+              ? await select(txDb, { user_id: users.user_id })
+                  .from(users)
+                  .where(eq(users.user_id, input.created_by))
+                  .one()
+              : undefined;
+            if (actor) {
+              const nowRow = isPostgresDatabase(this.db)
+                ? await select(txDb, { now: sql<Date>`clock_timestamp()` })
+                    .from(sessions)
+                    .where(eq(sessions.session_id, input.session_id))
+                    .one()
+                : undefined;
+              const dispatchAt = nowRow ? new Date(nowRow.now) : new Date();
+              const insertData = this.taskToInsert({
+                ...taskBase,
+                executor_mode: input.dispatchIfIdle.executor_mode,
+                sdk_watchdog_mode: input.dispatchIfIdle.sdk_watchdog_mode,
+                // Preparation supplies launch state, not caller identity or payload.
+                message_range: input.dispatchIfIdle.message_range,
+                git_state: input.dispatchIfIdle.git_state,
+                status: TaskStatus.DISPATCHING,
+                started_at: dispatchAt.toISOString(),
+                queue_position: undefined,
+              });
+              await insert(txDb, tasks).values(insertData).run();
+              const row = await select(txDb)
+                .from(tasks)
+                .where(eq(tasks.task_id, insertData.task_id))
+                .one();
+              if (!row) throw new RepositoryError('Failed to retrieve directly admitted task');
+              const admitted = this.rowToTask(row);
+              await this.projectDispatchedSession(txDb, sessionRow, admitted, dispatchAt);
+              return admitted;
+            }
+          }
           // Only ordinary human prompts opt into compaction. The current
           // Session row is locked, so callback/genealogy changes and competing
           // admissions cannot race this eligibility decision. We fold only
@@ -4039,22 +4141,31 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         // point where a Task could be DISPATCHING while its Session remained
         // IDLE and omitted the task from data.tasks. The Session row is already
         // locked by mutateLockedSessionTask.
-        const sessionTasks = sessionRow.data.tasks.includes(current.task_id)
-          ? sessionRow.data.tasks
-          : [...sessionRow.data.tasks, current.task_id];
-        await update(txDb, sessions)
-          .set({
-            status: SessionStatus.RUNNING,
-            ready_for_prompt: false,
-            updated_at: dispatchAt,
-            data: { ...sessionRow.data, tasks: sessionTasks },
-          })
-          .where(eq(sessions.session_id, current.session_id))
-          .run();
+        await this.projectDispatchedSession(txDb, sessionRow, merged, dispatchAt);
         return { outcome: 'claimed', task: merged };
       },
       true
     );
+  }
+
+  private async projectDispatchedSession(
+    txDb: Database,
+    sessionRow: SessionRow,
+    task: Task,
+    dispatchAt: Date
+  ): Promise<void> {
+    const sessionTasks = sessionRow.data.tasks.includes(task.task_id)
+      ? sessionRow.data.tasks
+      : [...sessionRow.data.tasks, task.task_id];
+    await update(txDb, sessions)
+      .set({
+        status: SessionStatus.RUNNING,
+        ready_for_prompt: false,
+        updated_at: dispatchAt,
+        data: { ...sessionRow.data, tasks: sessionTasks },
+      })
+      .where(eq(sessions.session_id, task.session_id))
+      .run();
   }
 
   /**
@@ -4101,6 +4212,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       queue_position: undefined,
       completed_at: completedAt.toISOString(),
       error_message: MISSING_TASK_ACTOR_ERROR,
+      recorded_tool_count: await countRecordedTools(txDb, fullId),
     };
     const insertData = this.taskToInsert(failed);
     await update(txDb, tasks)

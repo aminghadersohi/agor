@@ -201,6 +201,13 @@ export interface Branch {
   base_ref?: string;
 
   /**
+   * Normalized remote source for clone restore when the repository cache is
+   * unavailable. Provenance only: this URL NEVER grants managed credentials;
+   * transport authority must still come from trusted repository/template metadata.
+   */
+  base_source?: { name: string; remote_url: string };
+
+  /**
    * Remote that owns {@link base_ref} when the branch was seeded from a
    * different repository than {@link repo_id}.
    *
@@ -426,7 +433,7 @@ export interface Branch {
 
   // ===== RBAC: App-layer permissions (rbac.md) =====
 
-  /** Immutable primary owner. This is intentionally independent of attribution. */
+  /** Primary owner, changed only by explicit ownership transfer; independent of attribution. */
   primary_owner_user_id?: UUID;
 
   /** Whether the complete branch permission package is inherited or overridden. */

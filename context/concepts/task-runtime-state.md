@@ -14,7 +14,7 @@ safe release.
 ```text
 Prompt
   |
-  `-- durable admission --> QUEUED
+  `-- durable admission --> QUEUED (or directly DISPATCHING when idle)
                                |
                      queue-head/Session claim
                                v
@@ -88,6 +88,14 @@ QUEUED -----> DISPATCHING <----- CREATED
                        STOPPED or FAILED
 ```
 
+Claude completion requires an SDK result, not merely iterator exhaustion or a
+persisted assistant-message ID. A result with `is_error: true` is a failure even
+when its subtype is `success`; a synthesized missing-assistant notice is also a
+failure, not model output. A stream closing without a result fails unless it
+was interrupted. Real assistant/tool messages already persisted remain intact.
+These adapter outcomes use the existing executor terminal patch; they do not
+supersede daemon-owned containment or retry/replay the prompt.
+
 Terminal task state is immutable at the row-locked repository boundary. A late
 executor claim, result, or permission resume cannot revive or overwrite it.
 `dispatching`, `running`, `stopping`, and permission/input waits are
@@ -98,9 +106,14 @@ still block admission until it is dispatched or settled.
 Queue materialization and draining are documented separately in
 [task-queueing.md](task-queueing.md).
 
-Prompt admission normally enters through `queued` even for an idle Session, so
-ordering and idle-vs-waiting are one database decision. `created` remains for
-the explicit create-then-run API and scheduled compatibility/reconciliation.
+Fresh ordinary prompts can be admitted directly as `dispatching` when the
+locked Session is eligible and has no unfinished Tasks. Admission inserts the
+Task and projects the Session atomically; only its caller may launch after
+commit. Busy/pending Sessions and stable-ID producers retain `queued` admission.
+`created` remains for the explicit create-then-run API and scheduled
+compatibility/reconciliation. Direct admission has the same dispatch
+connection timeout/recovery contract: a crash after commit never silently
+requeues or replays a possibly launched prompt.
 
 ## The runtime facts stored on a task
 

@@ -158,7 +158,6 @@ describe('BoardRepository Board list counts', () => {
             end_index: 0,
             start_timestamp: new Date().toISOString(),
           },
-          tool_use_count: 0,
           git_state: { ref_at_start: 'main', sha_at_start: 'abc123' },
           model: 'test-model',
         });
