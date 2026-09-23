@@ -172,6 +172,11 @@ export type CoordinatorQueueBatchApplyResult =
       execution_task: Task;
       superseded_tasks: Task[];
     };
+/** Launch metadata only; does not confer ownership of a dispatch claim. */
+export type TaskLaunchFields = Pick<
+  Task,
+  'message_range' | 'git_state' | 'started_at' | 'executor_mode' | 'sdk_watchdog_mode'
+> & { status: typeof TaskStatus.DISPATCHING };
 
 export type ExecutorMode = 'local' | 'templated';
 
@@ -658,7 +663,10 @@ export interface Task {
   };
 
   // Tool usage
-  tool_use_count: number;
+  /** Server-derived terminal snapshot of distinct recorded tool IDs. Missing/null
+   * means unknown (including legacy turns); never substitute zero.
+   * Transcript mutations invalidate it. Not an executor/client-writable field. */
+  recorded_tool_count?: number | null;
 
   // Git state
   git_state: {

@@ -59,14 +59,12 @@ export interface SessionPanelContentProps {
   setScrollToBottom: (fn: (() => void) | null) => void;
   setScrollToTop: (fn: (() => void) | null) => void;
   queuedTasks: Task[];
-  setQueuedTasks: React.Dispatch<React.SetStateAction<Task[]>>;
   spawnModalOpen: boolean;
   setSpawnModalOpen: (open: boolean) => void;
   onSpawnModalConfirm: (config: string | Partial<SpawnConfig>) => Promise<void>;
   inputValueRef: React.RefObject<string>;
   isOpen: boolean;
   /** When true, all task blocks are force-expanded (used by in-session search) */
-  forceExpandAll?: boolean;
 }
 
 export const SessionPanelContent = React.memo<SessionPanelContentProps>(
@@ -80,13 +78,11 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
     setScrollToBottom,
     setScrollToTop,
     queuedTasks,
-    setQueuedTasks,
     spawnModalOpen,
     setSpawnModalOpen,
     onSpawnModalConfirm,
     inputValueRef,
     isOpen,
-    forceExpandAll = false,
   }) => {
     const { token } = theme.useToken();
     const isMobileShell = useIsMobileViewport();
@@ -120,6 +116,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
       availableBatchRelationships.includes('coordinator') ? 'coordinator' : 'parent'
     );
     const batchOperationIdRef = React.useRef<string>('');
+    const [removingQueuedTaskId, setRemovingQueuedTaskId] = React.useState<string | null>(null);
     const isQueueHeldByFailure = queuedTasks.length > 0 && session.status === 'failed';
     const editDirty = !!editPreview && editText !== editPreview.canonical_prompt;
     const editBytes = React.useMemo(
@@ -307,7 +304,8 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
         if (result.outcome === 'relationship_changed') {
           throw new Error('Coordinator relationship changed; reopen the preview.');
         }
-        setQueuedTasks([result.execution_task]);
+        // Queue state is reactive upstream of this component now; the batch's
+        // task patch/removal events reconcile it without an optimistic write.
         showSuccess(`${result.preview.source_request_count} queued requests will run as one turn`);
         setBatchOpen(false);
       } catch (error) {
@@ -325,7 +323,6 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
       client,
       replacementPrompt,
       session.session_id,
-      setQueuedTasks,
       showError,
       showSuccess,
     ]);
@@ -555,15 +552,15 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
                           danger
                           icon={<DeleteOutlined />}
                           aria-label={`Remove queued task ${idx + 1}`}
+                          loading={removingQueuedTaskId === task.task_id}
+                          disabled={
+                            removingQueuedTaskId !== null && removingQueuedTaskId !== task.task_id
+                          }
                           onClick={async () => {
-                            if (!client) return;
-
+                            if (!client || removingQueuedTaskId) return;
+                            setRemovingQueuedTaskId(task.task_id);
                             try {
-                              // Optimistically remove from UI
-                              setQueuedTasks((prev) =>
-                                prev.filter((t) => t.task_id !== task.task_id)
-                              );
-
+                              // Shared session events own queue membership. Keep the row on failure.
                               // Delete the queued task — cascade removes the row
                               // entirely; spawnTaskExecutor never gets a chance.
                               await client.service('tasks').remove(task.task_id);
@@ -571,13 +568,8 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
                               showError(
                                 `Failed to remove queued task: ${error instanceof Error ? error.message : String(error)}`
                               );
-
-                              // Re-fetch queue to restore accurate state
-                              const response = await client
-                                .service(`sessions/${session.session_id}/tasks/queue`)
-                                .find();
-                              const data = (response as { data: Task[] }).data || [];
-                              setQueuedTasks(data);
+                            } finally {
+                              setRemovingQueuedTaskId(null);
                             }
                           }}
                         />
@@ -622,7 +614,6 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
             teammateEmoji={
               branch && isTeammate(branch) ? getTeammateConfig(branch)?.emoji : undefined
             }
-            forceExpandAll={forceExpandAll}
             onOpenAgenticToolSettings={onOpenAgenticToolSettings}
           />
         </SessionConversationLayout>

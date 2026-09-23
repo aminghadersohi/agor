@@ -1,3 +1,10 @@
+import type {
+  KNOWLEDGE_TRANSFER,
+  KnowledgeTransferBody,
+  KnowledgeTransferPage,
+  KnowledgeTransferWrite,
+  KnowledgeTransferWriteResult,
+} from '../types/knowledge-transfer';
 /**
  * Feathers Client for Agor
  *
@@ -63,6 +70,8 @@ import type {
   OpenCodeOllamaSettingsPatch,
   OpenCodeOllamaTestRequest,
   OpenCodeProviderSettings,
+  OwnershipTransferRequest,
+  OwnershipTransferResult,
   PatchAgenticToolPreset,
   PermissionMode,
   PowerEssentialSessionSearchResult,
@@ -288,6 +297,14 @@ export interface MCPMarketplaceToolPermissionService {
   ): Promise<MCPMarketplaceToolPermissionResult>;
 }
 
+export interface OwnershipTransferService {
+  patch(
+    id: null,
+    data: ClientInput<OwnershipTransferRequest>,
+    params?: Params
+  ): Promise<OwnershipTransferResult>;
+}
+
 export interface BoardPermissionsService {
   find(params?: Params): Promise<BoardCapabilityPolicies>;
   patch(
@@ -356,6 +373,8 @@ export interface ServiceTypes {
   users: User;
   groups: Group;
   'group-memberships': GroupMembership;
+  'boards/:id/ownership': OwnershipTransferResult;
+  'branches/:id/ownership': OwnershipTransferResult;
   'boards/:id/permissions': BoardCapabilityPolicies;
   'branches/:id/permissions': BranchCapabilityPolicy;
   'workspace-preferences': CapabilityPolicyWorkspacePreferences;
@@ -954,6 +973,7 @@ export interface AgorClient
   service(path: 'repos/local'): ReposLocalService;
   service(path: 'branches'): BranchesService;
   service(path: 'boards'): BoardsService;
+  service(path: 'boards/:id/ownership' | 'branches/:id/ownership'): OwnershipTransferService;
   service(path: 'boards/:id/permissions'): BoardPermissionsService;
   service(path: 'branches/:id/permissions'): BranchPermissionsService;
   service(path: 'workspace-preferences'): WorkspacePreferencesService;
@@ -975,6 +995,11 @@ export interface AgorClient
   service(path: `board-comments/${string}/reposition`): BoardCommentRepositionService;
 
   // Standard services (CRUD only)
+  service(path: typeof KNOWLEDGE_TRANSFER.path): {
+    find(params?: Params): Promise<KnowledgeTransferPage>;
+    get(id: string, params?: Params): Promise<KnowledgeTransferBody>;
+    create(data: KnowledgeTransferWrite, params?: Params): Promise<KnowledgeTransferWriteResult>;
+  };
   service(path: 'cards'): AgorService<CardWithType>;
   service(path: 'card-types'): AgorService<CardType>;
   service(path: 'users'): UsersService;

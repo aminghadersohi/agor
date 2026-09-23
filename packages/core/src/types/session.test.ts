@@ -13,12 +13,14 @@
  * - Cursor: bypassPermissions (experimental/autonomous until permission callbacks exist)
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import type { AgenticToolName } from './agentic-tool';
 import {
+  type CreateSessionInput,
   getDefaultPermissionMode,
   isSessionExecuting,
   isSessionPromptable,
+  type SessionUpdate,
   sessionCanStartTask,
 } from './session';
 
@@ -170,4 +172,9 @@ describe('getDefaultPermissionMode', () => {
       }
     });
   });
+});
+
+it('keeps the computed usage summary out of session mutation inputs', () => {
+  expectTypeOf<'usage_summary'>().not.toExtend<keyof CreateSessionInput>();
+  expectTypeOf<'usage_summary'>().not.toExtend<keyof SessionUpdate>();
 });

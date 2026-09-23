@@ -42,6 +42,7 @@ import {
   ensureGitRemoteUrl,
   getDefaultBranch,
   getRemoteUrl,
+  gitEnvironmentForRemote,
   isRemoteRefVisibleForClone,
   isValidGitRepo,
   redactGitUrlCredentials,
@@ -944,38 +945,6 @@ export async function handleGitBranchAdd(
       `[git.branch.add] Repo: ${repoPath}, Branch: ${branch}, CreateBranch: ${shouldCreateBranch}, RestoreMode: ${restoreMode}, RefType: ${refType || 'branch'}, StorageMode: ${storageMode}`
     );
 
-    // Resolve the user-controlled starting point once, before storage-mode
-    // dispatch. Worktree and clone materializers consume this concrete result
-    // and must not independently guess or qualify the ref.
-    const requestedStartingRef = shouldCreateBranch ? sourceBranch : branch;
-    const resolveStartingRef = () =>
-      resolveGitRef(repoPath, requestedStartingRef, {
-        refType: refType || 'branch',
-        ...(baseRemoteUrl
-          ? { remote: { url: baseRemoteUrl }, remoteOnly: true }
-          : remoteUrl
-            ? { remote: { url: remoteUrl, name: 'origin' } }
-            : {}),
-        env,
-      });
-    // A local teammate home is a hard-gated flow: it must clone the canonical
-    // template with no origin override, no `--reference`, and no depth
-    // (createBranchAsClone throws otherwise). Resolving a user-requested
-    // starting ref here would redirect the clone source at `repoPath` and
-    // record a base_sha from a repository the template clone never reads, so
-    // the starting ref is deliberately not resolved on this path.
-    const resolvedStartingRef = restoreMode || localHome ? undefined : await resolveStartingRef();
-
-    if (resolvedStartingRef) {
-      await client.service('branches').patch(branchId, {
-        base_ref: resolvedStartingRef.ref,
-        base_sha: resolvedStartingRef.sha,
-      });
-      console.log(
-        `[git.branch.add] Resolved '${requestedStartingRef}' to ${resolvedStartingRef.ref} @ ${resolvedStartingRef.sha}`
-      );
-    }
-
     // Create the git branch on filesystem.
     //
     // Idempotency: a prior attempt may have materialized the worktree/clone
@@ -986,6 +955,60 @@ export async function handleGitBranchAdd(
     const alreadyMaterialized = payload.params.allowExistingCheckout
       ? await isBranchAlreadyMaterialized(branchPath, branch, branchId)
       : false;
+
+    // Resolve the user-controlled starting point once, before storage-mode
+    // dispatch. Worktree and clone materializers consume this concrete result
+    // and must not independently guess or qualify the ref.
+    const requestedStartingRef = shouldCreateBranch ? sourceBranch : branch;
+    // A local home is sourced from the canonical template, never cached refs
+    // or remotes belonging to an existing repository workspace.
+    const sourceRemoteUrl = localHome ? TEAMMATE_FRAMEWORK_REPO_URL : baseRemoteUrl;
+    const resolutionPath =
+      storageMode === 'clone' && (!repoPath || !existsSync(repoPath)) ? undefined : repoPath;
+    const resolveStartingRef = () => {
+      // Persisted source identity is a locator, not credential authority. Resolve
+      // it without the mutable cache, and bound credentials independently just as
+      // we do for the eventual clone transport. Older rows retain the legacy path.
+      if (restoreMode && branchRecord.base_source) {
+        const source = branchRecord.base_source;
+        return resolveGitRef(undefined, source.name, {
+          refType: refType || 'branch',
+          remote: { url: source.remote_url },
+          remoteOnly: true,
+          env: gitEnvironmentForRemote(source.remote_url, [remoteUrl, sourceRemoteUrl], env),
+        });
+      }
+      return resolveGitRef(resolutionPath, requestedStartingRef, {
+        refType: refType || 'branch',
+        ...(sourceRemoteUrl
+          ? { remote: { url: sourceRemoteUrl }, remoteOnly: true }
+          : remoteUrl
+            ? { remote: { url: remoteUrl, name: 'origin' } }
+            : {}),
+        env,
+      });
+    };
+    let resolvedStartingRef =
+      restoreMode || alreadyMaterialized ? undefined : await resolveStartingRef();
+
+    if (resolvedStartingRef) {
+      await client.service('branches').patch(branchId, {
+        base_ref: resolvedStartingRef.ref,
+        base_sha: resolvedStartingRef.sha,
+        ...(resolvedStartingRef.remoteUrl
+          ? {
+              base_source: {
+                name: resolvedStartingRef.name,
+                remote_url: stripGitUrlCredentials(resolvedStartingRef.remoteUrl),
+              },
+            }
+          : {}),
+      });
+      console.log(
+        `[git.branch.add] Resolved '${requestedStartingRef}' to ${resolvedStartingRef.ref} @ ${resolvedStartingRef.sha}`
+      );
+    }
+
     if (alreadyMaterialized) {
       console.log(
         `[git.branch.add] Existing checkout for '${branch}' already present at ${branchPath} — adopting it (idempotent retry)`
@@ -1009,7 +1032,6 @@ export async function handleGitBranchAdd(
       let cloneRef = resolvedStartingRef?.name ?? branch;
       let cloneRemoteUrl = localHome ? TEAMMATE_FRAMEWORK_REPO_URL : remoteUrl;
       let newBranchName: string | undefined;
-      const detached = resolvedStartingRef?.kind === 'commit';
 
       if (shouldCreateBranch) {
         const restoreFromDestination = restoreMode
@@ -1022,6 +1044,7 @@ export async function handleGitBranchAdd(
           : false;
 
         if (!restoreFromDestination) {
+          resolvedStartingRef ??= await resolveStartingRef();
           cloneRef = resolvedStartingRef?.name ?? sourceBranch ?? branch;
           cloneRemoteUrl = localHome
             ? TEAMMATE_FRAMEWORK_REPO_URL
@@ -1034,13 +1057,14 @@ export async function handleGitBranchAdd(
           newBranchName = branch !== cloneRef ? branch : undefined;
         }
       } else if (resolvedStartingRef) {
-        cloneRemoteUrl =
-          resolvedStartingRef.remoteUrl ??
-          (resolvedStartingRef.kind === 'local_branch' ||
-          resolvedStartingRef.kind === 'commit' ||
-          resolvedStartingRef.kind === 'tag'
-            ? repoPath
-            : remoteUrl);
+        cloneRemoteUrl = localHome
+          ? TEAMMATE_FRAMEWORK_REPO_URL
+          : (resolvedStartingRef.remoteUrl ??
+            (resolvedStartingRef.kind === 'local_branch' ||
+            resolvedStartingRef.kind === 'commit' ||
+            resolvedStartingRef.kind === 'tag'
+              ? repoPath
+              : remoteUrl));
       }
       if (!cloneRemoteUrl) {
         throw new Error(`Cannot materialize resolved ref '${requestedStartingRef}': no source URL`);
@@ -1054,20 +1078,18 @@ export async function handleGitBranchAdd(
       await createBranchAsClone({
         remoteUrl: cloneRemoteUrl,
         localHome,
-        ...(!localHome && remoteUrl && cloneRemoteUrl !== remoteUrl
-          ? { originRemoteUrl: remoteUrl }
-          : {}),
+        ...(!localHome && cloneRemoteUrl !== remoteUrl ? { originRemoteUrl: remoteUrl } : {}),
         targetPath: branchPath,
         ref: cloneRef,
         ...(newBranchName ? { newBranchName } : {}),
-        ...(detached ? { detached: true } : {}),
+        ...(resolvedStartingRef?.kind === 'commit' ? { detached: true } : {}),
         ...(resolvedStartingRef ? { expectedSha: resolvedStartingRef.sha } : {}),
         depth: cloneDepth,
         // Pass the daemon's hint through unconditionally. The helper does
         // the existsSync check on the executor's filesystem and falls back
         // gracefully if the path isn't actually mounted here.
         ...(referencePath ? { referencePath } : {}),
-        env,
+        env: gitEnvironmentForRemote(cloneRemoteUrl, [remoteUrl, sourceRemoteUrl], env),
       });
     } else if (restoreMode && sourceBranch) {
       // Restore mode: smart branch detection — checks if branch exists on remote,
@@ -1094,15 +1116,30 @@ export async function handleGitBranchAdd(
       await createBranch(
         repoPath,
         branchPath,
-        shouldCreateBranch ? branch : (resolvedStartingRef?.ref ?? branch),
+        shouldCreateBranch
+          ? branch
+          : resolvedStartingRef?.kind === 'remote_branch' ||
+              resolvedStartingRef?.kind === 'local_branch'
+            ? resolvedStartingRef.name
+            : (resolvedStartingRef?.ref ?? branch),
         shouldCreateBranch,
         true, // pullLatest
-        shouldCreateBranch ? resolvedStartingRef?.ref : undefined,
+        resolvedStartingRef?.remoteUrl
+          ? resolvedStartingRef.name
+          : shouldCreateBranch
+            ? resolvedStartingRef?.ref
+            : undefined,
         env,
         refType,
-        baseRemoteUrl,
+        resolvedStartingRef?.remoteUrl ?? baseRemoteUrl,
         remoteUrl,
-        resolvedStartingRef?.sha
+        resolvedStartingRef?.sha,
+        gitEnvironmentForRemote(
+          resolvedStartingRef?.remoteUrl ?? baseRemoteUrl ?? '',
+          [remoteUrl, sourceRemoteUrl],
+          env
+        ) ?? {},
+        resolvedStartingRef
       );
     }
 

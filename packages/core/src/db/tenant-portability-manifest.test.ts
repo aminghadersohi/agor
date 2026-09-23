@@ -124,6 +124,21 @@ describe('tenantPortabilityForeignKeys', () => {
     );
   });
 
+  it('moves import receipts with their owners without requiring surviving targets', () => {
+    expect(
+      tenantPortabilityForeignKeys().filter((fk) => fk.childTable === 'kb_import_receipts')
+    ).toEqual([
+      expect.objectContaining({
+        childTable: 'kb_import_receipts',
+        childColumns: ['owner_user_id'],
+        parentTable: 'users',
+        parentColumns: ['user_id'],
+        onDelete: 'cascade',
+      }),
+    ]);
+    expect(tenantPortabilityTableNames()).toContain('kb_import_receipts');
+  });
+
   it('moves normalized board and branch policies with their resources and principals', () => {
     expect(tenantPortabilityForeignKeys()).toEqual(
       expect.arrayContaining([

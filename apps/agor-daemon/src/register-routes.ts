@@ -1,5 +1,5 @@
 import { resolveClaudeOAuthCapability } from '@agor/core/config';
-import { isPostgresDatabaseHandle } from '@agor/core/db';
+import { getPostgresSqlState, isPostgresDatabaseHandle } from '@agor/core/db';
 import { sandboxManagedCredentialIsolationAvailable } from './utils/sandbox-wrap.js';
 /**
  * Authentication & Custom REST Routes Registration
@@ -113,6 +113,7 @@ import type {
   StreamingEventType,
   Task,
   TaskID,
+  TaskLaunchFields,
   TaskMetadata,
   TenantID,
   User,
@@ -197,6 +198,7 @@ import { createMCPEgressHttpHandler } from './mcp-egress/http-handler.js';
 import { validateMCPEgressRolloutChange } from './mcp-egress/rollout.js';
 import { createFeathersMetricsHook } from './metrics/feathers.js';
 import { getDaemonMetrics, getDaemonOperationalMetrics } from './metrics/index.js';
+import { recordDispatchClaim } from './metrics/task-lifecycle.js';
 import { resolveForUserIdWithGate } from './oauth-auth-helpers.js';
 import {
   deliverPermissionDecision,
@@ -271,6 +273,8 @@ import {
 import { canConfigureMcpServers } from './utils/mcp-server-authorization.js';
 import { authorizeMcpSessionConfigAccess } from './utils/mcp-session-config-authorization.js';
 import { patchUnlessRemoved } from './utils/patch-unless-removed.js';
+import { runPromptAdmissionTransaction } from './utils/prompt-admission-transaction.js';
+import { promptDatabaseErrorAround } from './utils/prompt-database-error.js';
 import { resolvePromptOrigin } from './utils/prompt-origin.js';
 import {
   buildPromptTaskMetadata,
@@ -1345,7 +1349,12 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   ) =>
     registerAuthenticatedRouteUnscoped(routeApp, path, service, authConfig, routeRequireAuth, {
       ...options,
-      around: [tenantIdentityAround, tenantWriteAdmissionAround, ...(options.around ?? [])],
+      around: [
+        ...(path === '/sessions/:id/prompt' ? [promptDatabaseErrorAround] : []),
+        tenantIdentityAround,
+        tenantWriteAdmissionAround,
+        ...(options.around ?? []),
+      ],
     });
 
   // Long routes carry tenant identity without holding a route-wide database
@@ -2038,85 +2047,32 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     });
   }
 
-  /**
-   * spawnTaskExecutor — sole transition point for `tasks.status` going from
-   * `created` / `queued` → `dispatching`.
-   *
-   * Both POST /sessions/:id/prompt's immediate queue-head attempt and the
-   * queued-task drainer call this helper. Centralising the transition
-   * guarantees that:
-   *
-   *   - `message_range.start_index`, `git_state.{ref,sha}_at_start`, and
-   *     `started_at` are recomputed against fresh state right before the
-   *     executor is spawned (sentinels on the stored row are only ever
-   *     visible while `status='queued'`).
-   *   - The initial user-message row is written by the daemon synchronously,
-   *     before the executor process is forked. Without this, any crash
-   *     during executor startup loses the prompt from the chat transcript
-   *     even though `tasks.full_prompt` still has the text. Gated by
-   *     `config.execution.daemon_writes_user_message` (kill switch — see
-   *     §5.E of `docs/never-lose-prompt-design.md`).
-   *   - `task.metadata.is_agor_callback` / `task.metadata.source` are
-   *     re-stamped onto the new message so the UI's callback styling
-   *     (`MessageBlock.tsx`) survives the queue → run transition.
-   *   - Spawn failures synthesise a `type:'system'` error message so the
-   *     chat surfaces *why* the assistant didn't respond, instead of silently
-   *     leaving a ghost task in FAILED with no transcript trace.
-   *
-   * The session.tasks list is appended here too, so callers don't have to
-   * remember to do it themselves.
-   */
-  async function spawnTaskExecutor(
-    task: Task,
-    options: {
-      permissionMode?: import('@agor/core/types').PermissionMode;
-      stream?: boolean;
-      messageSource?: MessageSource;
-      stableInitialMessageId?: MessageID;
-    },
+  interface PreparedTaskDispatch {
+    session: Session;
+    messageStartIndex: number;
+    startTimestamp: string;
+    updates: TaskLaunchFields;
+  }
+
+  // Preparation may materialize configuration; never run it under admission locks.
+  async function prepareTaskDispatch(
+    sessionId: SessionID,
     params: RouteParams
-  ): Promise<Task> {
+  ): Promise<PreparedTaskDispatch> {
     const tenantId = getCurrentTenantId();
-    if (!tenantId) throw new Error('Missing active tenant context for task executor startup');
-    const stableInitialMessageId = stableInitialMessageIdForTask(
-      task,
-      options.stableInitialMessageId
-    );
-    const persistedMessageSource = task.metadata?.source ?? options.messageSource;
-    const runtimeMessageSource =
-      persistedMessageSource === 'gateway' || persistedMessageSource === 'agor'
-        ? persistedMessageSource
-        : undefined;
-
-    // A stable scheduled Task that has crossed the dispatch fence needs only
-    // deterministic projection repair. Do not make that reconciliation depend
-    // on mutable launch-time state (tool enablement, preset validity, or user
-    // defaults): no new executor launch will occur on this path.
-    if (shouldReconcileStableInitialMessage(task, stableInitialMessageId)) {
-      await reconcileStableInitialUserMessage(task, params, stableInitialMessageId, {
-        messageSource: runtimeMessageSource,
-      });
-      return task;
-    }
-
-    // The token minted below authenticates the executor as params.user, while
-    // credential services resolve secrets from Task.created_by. Those must be
-    // the same durable actor; Session/branch prompt authority alone must never
-    // authorize consuming somebody else's provider credential.
-    assertTaskExecutorPrincipal(task, params);
-
+    if (!tenantId) throw new Error('Missing tenant context for dispatch preparation');
     const {
       agenticToolEnabled,
       messageStartIndex,
       session: loadedSession,
     } = await runWithTenantDatabaseScope(db, tenantId, async () => {
-      const session = await sessionsService.get(task.session_id, params);
+      const session = await sessionsService.get(sessionId, params);
       const agenticTool = requireActiveAgenticTool(session.agentic_tool);
       return {
         session,
         agenticToolEnabled: await isAgenticToolEnabledForTenant(db, tenantId, agenticTool),
         // Recompute message_range.start_index against the live message count.
-        messageStartIndex: await sessionsRepository.countMessages(task.session_id),
+        messageStartIndex: await sessionsRepository.countMessages(sessionId),
       };
     });
     if (!agenticToolEnabled) {
@@ -2138,11 +2094,114 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       config.execution?.executor_command_template ? 'templated' : 'local'
     );
 
-    if (!isTaskPendingDispatch(task)) return task;
+    const updates: TaskLaunchFields = {
+      ...launchState,
+      ...(launchState.executor_mode
+        ? { sdk_watchdog_mode: resolveSdkWatchdogConfig(config.execution).mode }
+        : {}),
+      message_range: {
+        start_index: messageStartIndex,
+        end_index: messageStartIndex + 1,
+        start_timestamp: startTimestamp,
+        end_timestamp: startTimestamp,
+      },
+      git_state: {
+        ref_at_start: refAtStart,
+        sha_at_start: gitStateAtStart,
+      },
+    };
+    return { session, messageStartIndex, startTimestamp, updates };
+  }
+
+  /**
+   * spawnTaskExecutor — shared post-commit launch path. Claims pending work,
+   * or consumes the fresh prompt admission's already-committed dispatch claim.
+   *
+   * Both POST /sessions/:id/prompt and the queued-task drainer call this
+   * helper. Sharing preparation and post-commit launch guarantees that:
+   *
+   *   - `message_range.start_index`, `git_state.{ref,sha}_at_start`, and
+   *     `started_at` are prepared before the durable dispatch decision, then
+   *     consumed by its winner (queued/created rows retain sentinels until claimed).
+   *   - The initial user-message row is written by the daemon synchronously,
+   *     before the executor process is forked. Without this, any crash
+   *     during executor startup loses the prompt from the chat transcript
+   *     even though `tasks.full_prompt` still has the text. Gated by
+   *     `config.execution.daemon_writes_user_message` (kill switch — see
+   *     §5.E of `docs/never-lose-prompt-design.md`).
+   *   - `task.metadata.is_agor_callback` / `task.metadata.source` are
+   *     re-stamped onto the new message so the UI's callback styling
+   *     (`MessageBlock.tsx`) survives the queue → run transition.
+   *   - Spawn failures synthesise a `type:'system'` error message so the
+   *     chat surfaces *why* the assistant didn't respond, instead of silently
+   *     leaving a ghost task in FAILED with no transcript trace.
+   *
+   * Both repository admission paths append session.tasks atomically before
+   * entering this post-commit launch path.
+   */
+  async function spawnTaskExecutor(
+    task: Task,
+    options: {
+      permissionMode?: import('@agor/core/types').PermissionMode;
+      stream?: boolean;
+      messageSource?: MessageSource;
+      stableInitialMessageId?: MessageID;
+      /** Prepared metadata alone is not ownership: name the fresh admission winner. */
+      dispatch?:
+        | { kind: 'claim' }
+        | { kind: 'admitted'; taskId: Task['task_id']; preparation: PreparedTaskDispatch };
+    },
+    params: RouteParams
+  ): Promise<Task> {
+    const admittedLaunch = options.dispatch?.kind === 'admitted' ? options.dispatch : undefined;
+    const tenantId = getCurrentTenantId();
+    if (!tenantId) throw new Error('Missing active tenant context for task executor startup');
+    const stableInitialMessageId = stableInitialMessageIdForTask(
+      task,
+      options.stableInitialMessageId
+    );
+    const persistedMessageSource = task.metadata?.source ?? options.messageSource;
+    const runtimeMessageSource =
+      persistedMessageSource === 'gateway' || persistedMessageSource === 'agor'
+        ? persistedMessageSource
+        : undefined;
+
+    // A stable scheduled Task that has crossed the dispatch fence needs only
+    // deterministic projection repair. Do not make that reconciliation depend
+    // on mutable launch-time state (tool enablement, preset validity, or user
+    // defaults): no new executor launch will occur on this path.
+    if (!admittedLaunch && shouldReconcileStableInitialMessage(task, stableInitialMessageId)) {
+      await reconcileStableInitialUserMessage(task, params, stableInitialMessageId, {
+        messageSource: runtimeMessageSource,
+      });
+      return task;
+    }
+
+    // The token minted below authenticates the executor as params.user, while
+    // credential services resolve secrets from Task.created_by. Those must be
+    // the same durable actor; Session/branch prompt authority alone must never
+    // authorize consuming somebody else's provider credential.
+    assertTaskExecutorPrincipal(task, params);
+
+    const prepared =
+      admittedLaunch?.preparation ?? (await prepareTaskDispatch(task.session_id, params));
+    const { session, messageStartIndex, startTimestamp } = prepared;
+
+    if (
+      admittedLaunch &&
+      (task.status !== TaskStatus.DISPATCHING || admittedLaunch.taskId !== task.task_id)
+    ) {
+      throw new Error('Direct launch requires a freshly admitted dispatching task');
+    }
+    if (!admittedLaunch && !isTaskPendingDispatch(task)) return task;
 
     // Atomically claim queued/created → launch status. Process-local session
     // locks reduce contention, but this expected-state transition is the
     // cross-daemon fence that prevents duplicate executor launches.
+    // This fork fences every dispatch behind the UPS power permit. Upstream's
+    // direct-admission fast path is already gated at admission time (a prompt
+    // is only prepared while power is not held), so a freshly admitted launch
+    // reports as claimed without a second transaction.
     const fencedClaim = await powerPolicyController.withDispatchPermit(
       async () => {
         const current = await runWithTenantDatabaseScope(db, tenantId, () =>
@@ -2150,34 +2209,20 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         );
         return current?.power_priority ?? 'normal';
       },
-      () =>
-        runWithTenantDatabaseTransaction(db, tenantId, async (tenantDb) => {
-          await powerPolicyController.assertOwnershipInTransaction(tenantDb);
-          await lockTenantAuthorizationFence(tenantDb, params);
-          await assertTenantWritable(tenantDb, tenantId);
-          return tasksService.claimDispatchAndProjectSession(
-            task.task_id,
-            task.status,
-            {
-              ...launchState,
-              ...(launchState.executor_mode
-                ? { sdk_watchdog_mode: resolveSdkWatchdogConfig(config.execution).mode }
-                : {}),
-              queue_position: undefined,
-              message_range: {
-                start_index: messageStartIndex,
-                end_index: messageStartIndex + 1,
-                start_timestamp: startTimestamp,
-                end_timestamp: startTimestamp,
-              },
-              git_state: {
-                ref_at_start: refAtStart,
-                sha_at_start: gitStateAtStart,
-              },
-            },
-            { ...params, provider: undefined }
-          );
-        })
+      async () =>
+        admittedLaunch
+          ? { outcome: 'claimed' as const, task }
+          : runWithTenantDatabaseTransaction(db, tenantId, async (tenantDb) => {
+              await powerPolicyController.assertOwnershipInTransaction(tenantDb);
+              await lockTenantAuthorizationFence(tenantDb, params);
+              await assertTenantWritable(tenantDb, tenantId);
+              return tasksService.claimDispatchAndProjectSession(
+                task.task_id,
+                task.status as import('@agor/core/types').TaskPendingDispatchStatus,
+                prepared.updates,
+                { ...params, provider: undefined }
+              );
+            })
     );
     if (fencedClaim.decision.outcome === 'held') {
       return { ...task, power_hold: fencedClaim.decision.hold };
@@ -2212,6 +2257,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       return dispatchClaim.task;
     }
     const updatedTask = dispatchClaim.task;
+    if (admittedLaunch) recordDispatchClaim(getDaemonMetrics(app), dispatchClaim);
 
     // Alt D — write the user-message row before spawning. Gated by kill switch.
     // The executor's createUserMessage has a skip-if-exists guard so a duplicate
@@ -2235,26 +2281,15 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       });
     }
 
-    // Re-apply the Session projection through Feathers so hooks/realtime see
-    // the transition. TaskRepository.claimDispatchAndProjectSession already
-    // committed the same projection atomically with the Task fence; this
-    // service patch is no longer correctness-critical on SQLite and is
-    // intentionally idempotent.
-    //
-    // The session-status flip used to fall out of `TasksService.create` when
-    // the IDLE path created a task with `status: RUNNING` directly. Now the
-    // IDLE path creates `status: CREATED` and we patch the task here, which
-    // `TasksService.patch` does NOT mirror onto the session. Without this
-    // explicit patch, `session.status` stays IDLE while a task is RUNNING,
-    // causing the queue gate in the prompt route to wave subsequent prompts
-    // through instead of queuing them.
+    // Both admission paths have committed the Session projection. Re-apply
+    // status through Feathers for existing hooks/realtime, but never overwrite
+    // its authoritative task list from a preflight snapshot.
     await runWithTenantDatabaseScope(db, tenantId, () =>
       app.service('sessions').patch(
         task.session_id,
         {
           status: SessionStatus.RUNNING,
           ready_for_prompt: false,
-          tasks: [...session.tasks, task.task_id],
         },
         params
       )
@@ -2569,11 +2604,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           throw new Error('Cannot send prompt: session is currently stopping');
         }
 
-        // Every prompt first takes one durable queue position. The subsequent
-        // Session+Task database claim decides whether this Task leaves the
-        // queue immediately or remains queued. This avoids a split
-        // read-session/create-CREATED race: two daemons can admit concurrently,
-        // but only the durable head can claim the idle Session.
+        // Admission decides direct dispatch vs durable queueing under one
+        // Branch/Session fence. Preflight reads never authorize a launch.
         if (!params.user?.user_id) {
           throw new NotAuthenticated('Authentication required to prompt a session');
         }
@@ -2625,7 +2657,19 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
               (messageSource === undefined || (!!params.provider && messageSource === 'agor')) &&
               !hasAttachmentSemantics &&
               !data.prompt.trimStart().startsWith('/');
-            const task = await runWithTenantDatabaseTransaction(
+            // A preflight hint avoids preparation for known-busy sessions. The
+            // repository rechecks queue/active work under its durable locks.
+            // Stable-ID callback/widget producers keep their existing protocol.
+            // This fork adds one more precondition: a UPS power hold must stop
+            // direct admission, because a task inserted straight as DISPATCHING
+            // never reaches the permit that would otherwise refuse it.
+            const preparedLaunch =
+              !data.idempotencyTaskId &&
+              !powerPolicyController.status().held &&
+              sessionCanStartTask(lockedSession.status, lockedSession.ready_for_prompt)
+                ? await prepareTaskDispatch(id as SessionID, params)
+                : undefined;
+            const task = await runPromptAdmissionTransaction(
               db,
               promptTenantId,
               async (operationDb) => {
@@ -2656,6 +2700,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                     permission_mode: data.permissionMode,
                     stream: data.stream !== false,
                   },
+                  dispatchIfIdle: preparedLaunch?.updates,
                 });
               }
             );
@@ -2690,6 +2735,15 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                 permissionMode: data.permissionMode,
                 stream: data.stream !== false,
                 messageSource,
+                ...(task.status === TaskStatus.DISPATCHING && preparedLaunch
+                  ? {
+                      dispatch: {
+                        kind: 'admitted' as const,
+                        taskId: task.task_id,
+                        preparation: preparedLaunch,
+                      },
+                    }
+                  : {}),
                 ...(data.idempotencyTaskId
                   ? { stableInitialMessageId: data.idempotencyTaskId as MessageID }
                   : {}),
@@ -2711,7 +2765,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                 try {
                   await sessionsService.triggerQueueProcessing(id as SessionID, params);
                 } catch (error) {
-                  console.error(`❌ [Prompt] Failed to trigger queued Task processing:`, error);
+                  console.error(
+                    `[prompt.queue_trigger] failed sqlstate=${getPostgresSqlState(error) ?? 'unknown'} recovery=durable_queue_discovery`
+                  );
                 }
               });
             }

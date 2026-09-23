@@ -25,7 +25,13 @@ import {
   getCurrentTenantId,
   runWithTenantContext,
 } from '@agor/core/db';
-import { type Branch, type HookContext, type Task, TaskStatus } from '@agor/core/types';
+import {
+  type Branch,
+  type HookContext,
+  OWNERSHIP_TRANSFER_SERVICES,
+  type Task,
+  TaskStatus,
+} from '@agor/core/types';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -105,6 +111,8 @@ describe('classifyRealtimeAuthorizationInvalidation', () => {
     ['users', 'patch', { must_change_password: true }],
     ['users', 'update', { must_change_password: false }],
     ['users', 'remove', {}],
+    [OWNERSHIP_TRANSFER_SERVICES.branch, 'patch', {}],
+    [OWNERSHIP_TRANSFER_SERVICES.board, 'patch', {}],
     ['branches/:id/permissions', 'patch', {}],
     ['boards/:id/permissions', 'patch', {}],
     ['group-memberships', 'remove', {}],
@@ -411,23 +419,28 @@ describe('protectServerManagedTaskWrites', () => {
     ).rejects.toThrow('executor token scoped to this task');
   });
 
-  it.each(['task_id', 'session_id', 'created_by', 'queue_position', 'sdk_failure'])(
-    'rejects executor patch field %s outside the result allowlist',
-    async (field) => {
-      await expect(
-        protectServerManagedTaskWrites(
-          externalContext(
-            'patch',
-            { [field]: 'forged' },
-            {
-              taskId: 'task-1',
-              executorTaskId: 'task-1',
-            }
-          )
+  it.each([
+    'task_id',
+    'session_id',
+    'created_by',
+    'queue_position',
+    'sdk_failure',
+    'recorded_tool_count',
+    'tool_use_count',
+  ])('rejects executor patch field %s outside the result allowlist', async (field) => {
+    await expect(
+      protectServerManagedTaskWrites(
+        externalContext(
+          'patch',
+          { [field]: 'forged' },
+          {
+            taskId: 'task-1',
+            executorTaskId: 'task-1',
+          }
         )
-      ).rejects.toThrow('not executor-managed');
-    }
-  );
+      )
+    ).rejects.toThrow('not executor-managed');
+  });
 
   it('allows a task-scoped executor to publish bounded result fields', async () => {
     await expect(
