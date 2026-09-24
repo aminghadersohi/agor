@@ -76,10 +76,14 @@ describe('Postgres migrations', () => {
       expect(
         journal.entries.find((entry) => entry.tag === '0111_management_ownership_transfer')
       ).toMatchObject({ idx: 110, when: 1789344000005 });
-      for (const watermark of [1789344000005, 1789344000006]) {
-        expect(classifyMigrationWatermark(journal.entries, watermark).pending).toEqual([
-          '0113_callback_ownership_reconciliation',
-        ]);
+      const mainTip = journal.entries.find((entry) => entry.tag === '0114_mcp_slack_connect_due')!;
+      expect(classifyMigrationWatermark(journal.entries, mainTip.when).pending).toEqual([
+        '0115_callback_ownership_reconciliation',
+      ]);
+      for (const watermark of [1789344000005, 1789344000006, 1789344000007]) {
+        expect(classifyMigrationWatermark(journal.entries, watermark).pending).toContain(
+          '0115_callback_ownership_reconciliation'
+        );
       }
     }
   });

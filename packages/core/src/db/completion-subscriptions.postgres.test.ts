@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDatabase, type Database } from './client';
 import { executeRaw, rawRows } from './database-wrapper';
 import { initializeDatabase } from './migrate';
+import { UsersRepository } from './repositories/users';
 import { runWithTenantDatabaseScope } from './tenant-scope';
 
 const postgresUrl = process.env.AGOR_TEST_POSTGRES_URL;
@@ -42,17 +43,78 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       expect(await policies()).not.toContain('completion_callback_task_discovery');
     });
 
-    it('adds tenant-isolated storage after main ownership transfer', async () => {
+    it('adds tenant-isolated storage after current main migrations', async () => {
       await executeRaw(db, sql`DROP TABLE completion_subscriptions`);
       await executeRaw(
         db,
-        sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at > 1789344000005`
+        sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at = 1790129000214`
       );
       await initializeDatabase(db);
       expect(await policies()).toContain('tenant_isolation_completion_subscriptions');
       expect(await policies()).not.toContain('completion_callback_discovery');
       expect(await policies()).not.toContain('completion_callback_task_discovery');
     });
+
+    for (const watermark of [1789344000006, 1789344000007]) {
+      it(`restores tenant-isolated KB receipts skipped by draft watermark ${watermark}`, async () => {
+        await executeRaw(db, sql`DROP TABLE kb_import_receipts`);
+        await executeRaw(db, sql`ALTER TABLE messages DROP COLUMN mcp_slack_connect_due_at`);
+        await executeRaw(
+          db,
+          sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at > 1789344000005`
+        );
+        await executeRaw(
+          db,
+          sql`INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES ('draft', ${watermark})`
+        );
+        await initializeDatabase(db);
+        await runWithTenantDatabaseScope(db, 'fixture-a', async (scoped) => {
+          const owner = await new UsersRepository(scoped).create({
+            email: `receipt-${watermark}@example.invalid`,
+          });
+          await executeRaw(
+            scoped,
+            sql`INSERT INTO kb_import_receipts
+            (tenant_id, receipt_id, owner_user_id, bundle, slug, entry_key, target_id, digest, created_at)
+            VALUES ('fixture-a', 'retained-receipt', ${owner.user_id}, 'bundle', 'slug', 'entry', 'target', 'digest', now())`
+          );
+        });
+        // Replaying reconciliation must preserve main's existing receipt rows.
+        await executeRaw(
+          db,
+          sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at = 1790129000214`
+        );
+        await initializeDatabase(db);
+        await runWithTenantDatabaseScope(db, 'fixture-b', async (scoped) => {
+          expect(
+            rawRows(
+              await executeRaw(
+                scoped,
+                sql`SELECT * FROM kb_import_receipts WHERE receipt_id = 'retained-receipt'`
+              )
+            )
+          ).toEqual([]);
+          expect(
+            rawRows(
+              await executeRaw(
+                scoped,
+                sql`UPDATE kb_import_receipts SET digest = 'foreign' WHERE receipt_id = 'retained-receipt' RETURNING receipt_id`
+              )
+            )
+          ).toEqual([]);
+        });
+        await runWithTenantDatabaseScope(db, 'fixture-a', async (scoped) => {
+          expect(
+            rawRows(
+              await executeRaw(
+                scoped,
+                sql`SELECT digest FROM kb_import_receipts WHERE receipt_id = 'retained-receipt'`
+              )
+            )
+          ).toEqual([{ digest: 'digest' }]);
+        });
+      });
+    }
 
     it('upgrades the draft ledger without deleting rows and denies foreign tenant access', async () => {
       // Reconstruct only the withdrawn discovery policies and last ledger step in

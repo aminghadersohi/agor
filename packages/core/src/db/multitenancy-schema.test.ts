@@ -54,7 +54,7 @@ function migrationTenantTables(): string[] {
     'packages/core/drizzle/postgres/0094_discord_gateway_hybrid.sql'
   );
   const completionSubscriptionsMigration = readRepoFile(
-    'packages/core/drizzle/postgres/0113_callback_ownership_reconciliation.sql'
+    'packages/core/drizzle/postgres/0115_callback_ownership_reconciliation.sql'
   );
   const externalIdentitiesMigration = readRepoFile(
     'packages/core/drizzle/postgres/0090_external_user_identities.sql'
@@ -68,6 +68,9 @@ function migrationTenantTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0110_user_provider_oauth_grants.sql');
   const capabilityPoliciesMigration = readRepoFile(
     'packages/core/drizzle/postgres/0095_board_branch_capability_policies.sql'
+  );
+  const transferMigration = readRepoFile(
+    'packages/core/drizzle/postgres/0112_kb_import_receipts.sql'
   );
   const retiredTables = retiredTenantTables();
   return [
@@ -90,6 +93,7 @@ function migrationTenantTables(): string[] {
         ...externalIdentitiesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...codexDeviceAuthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...claudeOauthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...transferMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...capabilityPoliciesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
       ]
         .map((m) => m[1])
@@ -109,12 +113,13 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0102_mcp_oauth_client_registrations.sql'),
     readRepoFile('packages/core/drizzle/postgres/0082_github_install_state.sql'),
     readRepoFile('packages/core/drizzle/postgres/0094_discord_gateway_hybrid.sql'),
-    readRepoFile('packages/core/drizzle/postgres/0113_callback_ownership_reconciliation.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0115_callback_ownership_reconciliation.sql'),
     readRepoFile('packages/core/drizzle/postgres/0090_external_user_identities.sql'),
     readRepoFile('packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'),
     readRepoFile('packages/core/drizzle/postgres/0100_claude_oauth_attempts.sql'),
     readRepoFile('packages/core/drizzle/postgres/0110_user_provider_oauth_grants.sql'),
     readRepoFile('packages/core/drizzle/postgres/0095_board_branch_capability_policies.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0112_kb_import_receipts.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
   return [
@@ -212,7 +217,7 @@ describe('Postgres multitenancy schema coverage', () => {
 
   it('retires root discovery without deleting compatibility rows or tenant isolation', () => {
     const migration = readRepoFile(
-      'packages/core/drizzle/postgres/0113_callback_ownership_reconciliation.sql'
+      'packages/core/drizzle/postgres/0115_callback_ownership_reconciliation.sql'
     );
     expect(migration).toContain(
       'DROP POLICY IF EXISTS "completion_callback_task_discovery" ON "tasks"'

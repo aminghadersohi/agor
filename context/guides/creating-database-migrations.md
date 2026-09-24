@@ -99,11 +99,14 @@ When inserting manual or backfill migrations into `meta/_journal.json`, ensure t
 Main's `0111_management_ownership_transfer` and the withdrawn callback draft's
 `0111_transitive_completion_subscriptions` both used `1789344000005`; the draft's
 PostgreSQL retirement used `1789344000006`. Keep main's journal entry unchanged.
-`0113_callback_ownership_reconciliation` runs at `1789344000007` in both dialects:
+`0115_callback_ownership_reconciliation` runs at `1790129000214` in both dialects:
 it creates missing inert callback storage, preserves existing rows, removes
 retired discovery policies while enforcing tenant RLS, and idempotently removes
 owner-immutability triggers. This supports either already-applied history without
 replaying non-idempotent DDL or silently skipping the other branch's changes.
+It also idempotently restores main's KB receipt storage: the draft retirement
+and earlier reconciliation watermarks (`1789344000006` / `1789344000007`) could
+skip `0112_kb_import_receipts`. Main's published journal entries remain unchanged.
 The original callback SQL files remain historical fixtures, not journal entries.
 
 ### Avoid `CHECK` constraints for enum-like columns on SQLite
