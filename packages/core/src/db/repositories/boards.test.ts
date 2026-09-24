@@ -2340,7 +2340,13 @@ describe('BoardRepository import object handling', () => {
 
       expect(imported.board_id).not.toBe(original.board_id);
       expect(imported.objects).toEqual({
-        'zone-1770517487066': zone,
+        // Import normalizes every zone's layout policy and binding (upstream
+        // PR #2540), the same way the other zone expectations in this file do.
+        'zone-1770517487066': {
+          ...zone,
+          layout: normalizeZoneLayoutPolicy(undefined),
+          layout_binding: 'inherit',
+        },
         'markdown-1789334120446': markdown,
         'app-1': app,
         [`artifact-${artifact.artifact_id}`]: artifactObject,
