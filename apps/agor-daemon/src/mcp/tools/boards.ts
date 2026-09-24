@@ -52,7 +52,11 @@ import type {
   LayoutDensityPolicy,
   ZoneLayoutPolicy,
 } from '@agor/core/types';
-import { BRANCH_PERMISSION_LEVELS, OWNERSHIP_TRANSFER_SERVICES } from '@agor/core/types';
+import {
+  BOARD_OBJECT_TYPES,
+  BRANCH_PERMISSION_LEVELS,
+  OWNERSHIP_TRANSFER_SERVICES,
+} from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { BoardsServiceImpl } from '../../declarations.js';
@@ -73,13 +77,6 @@ import type { McpContext } from '../server.js';
 import { coerceString, textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
 
-const BOARD_OBJECT_TYPES = [
-  'zone',
-  'text',
-  'markdown',
-  'app',
-  'artifact',
-] as const satisfies readonly BoardObjectType[];
 const BOARD_ENTITY_TYPES = ['branch', 'card'] as const satisfies readonly BoardEntityType[];
 
 // These match the rendered React Flow nodes.  Keeping the dimensions here is

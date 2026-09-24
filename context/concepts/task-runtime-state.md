@@ -14,7 +14,7 @@ safe release.
 ```text
 Prompt
   |
-  `-- durable admission --> QUEUED
+  `-- durable admission --> QUEUED (or directly DISPATCHING when idle)
                                |
                      queue-head/Session claim
                                v
@@ -106,9 +106,14 @@ still block admission until it is dispatched or settled.
 Queue materialization and draining are documented separately in
 [task-queueing.md](task-queueing.md).
 
-Prompt admission normally enters through `queued` even for an idle Session, so
-ordering and idle-vs-waiting are one database decision. `created` remains for
-the explicit create-then-run API and scheduled compatibility/reconciliation.
+Fresh ordinary prompts can be admitted directly as `dispatching` when the
+locked Session is eligible and has no unfinished Tasks. Admission inserts the
+Task and projects the Session atomically; only its caller may launch after
+commit. Busy/pending Sessions and stable-ID producers retain `queued` admission.
+`created` remains for the explicit create-then-run API and scheduled
+compatibility/reconciliation. Direct admission has the same dispatch
+connection timeout/recovery contract: a crash after commit never silently
+requeues or replays a possibly launched prompt.
 
 ## The runtime facts stored on a task
 
@@ -336,6 +341,22 @@ heartbeat, containment, or startup orphan ownership.
 is not equivalent to promptability and must not be checked alone. Use the
 central session/task helpers at execution boundaries instead of inventing a
 second busy-state test.
+
+## Diagnosing a runtime interruption
+
+The UI's "Task interrupted" notice covers every verified non-user,
+non-authorization termination. `heartbeat_lost` has two producers: a stale
+heartbeat found by the reconciler, and any local/authoritative executor
+process exit while its Task is active (including the SIGTERM a standalone
+daemon sends on graceful shutdown). Correlate by `task_id`:
+
+| Log line                                                | Answers                                                                                                        |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `[executor.exit] event=process_exited`                  | pid, exit code, signal, and `daemon_shutdown` for every prompt-executor exit                                   |
+| `[distributed-work.task-runtime] event=heartbeat_stale` | approximate heartbeat age vs threshold (daemon clock), last pulse, and whether the tracked process still lives |
+| `[executor.heartbeat] event=write_failed` / `recovered` | executor-side heartbeat write error class and outage length                                                    |
+| `[task.termination] event=request_committed`            | winning cause, connection state, heartbeat/pulse age, and SDK failure reason                                   |
+| `[task.termination] event=settled`                      | outcome, containment result, and request-to-settle time                                                        |
 
 ## Change invariants
 
