@@ -91,6 +91,15 @@ export interface FileCollectionProps {
 
   /** Which git status dimension supplies file and folder badges. */
   gitStatusSource?: GitFileStatusSource;
+
+  /** Dense explorer presentation for split-pane workspace editing. */
+  compact?: boolean;
+
+  /** Controlled active file path. */
+  selectedPath?: string | null;
+
+  /** Available virtual-scroll height. */
+  treeHeight?: number;
 }
 
 function getDisplayedGitStatus(
@@ -123,6 +132,7 @@ function buildTree(
   searchQuery: string,
   statusMeta: Record<GitFileStatus, GitStatusMeta>,
   gitStatusSource: GitFileStatusSource,
+  compact: boolean,
   onDownload?: (file: FileItem) => void,
   onCopyPath?: (file: FileItem) => void
 ): TreeNode[] {
@@ -268,7 +278,14 @@ function buildTree(
                 </span>
               )}
             </span>
-            <span style={{ marginLeft: 8, whiteSpace: 'nowrap', display: 'inline-flex', gap: 4 }}>
+            <span
+              style={{
+                marginLeft: 8,
+                whiteSpace: 'nowrap',
+                display: compact ? 'none' : 'inline-flex',
+                gap: 4,
+              }}
+            >
               <Tooltip title="Copy path">
                 <Button
                   size="small"
@@ -359,6 +376,9 @@ const FileCollectionInner: React.FC<FileCollectionProps> = ({
   loading = false,
   emptyMessage = 'No files found',
   gitStatusSource = 'combined',
+  compact = false,
+  selectedPath = null,
+  treeHeight = 600,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchInput, setSearchInput] = useState('');
@@ -403,10 +423,20 @@ const FileCollectionInner: React.FC<FileCollectionProps> = ({
         searchQuery,
         statusMeta,
         gitStatusSource,
+        compact,
         onDownload ? stableOnDownload : undefined,
         handleCopyPath
       ),
-    [files, searchQuery, statusMeta, gitStatusSource, onDownload, stableOnDownload, handleCopyPath]
+    [
+      files,
+      searchQuery,
+      statusMeta,
+      gitStatusSource,
+      compact,
+      onDownload,
+      stableOnDownload,
+      handleCopyPath,
+    ]
   );
 
   // Handle node selection - stable callback using ref
@@ -520,7 +550,7 @@ const FileCollectionInner: React.FC<FileCollectionProps> = ({
   }
 
   return (
-    <div style={{ padding: '0 24px' }}>
+    <div style={{ padding: compact ? 0 : '0 24px' }}>
       <div style={{ marginBottom: 16 }}>
         <Search
           placeholder="Search files..."
@@ -536,12 +566,13 @@ const FileCollectionInner: React.FC<FileCollectionProps> = ({
         className="agor-flat-tree"
         treeData={treeData}
         onSelect={handleSelect}
+        selectedKeys={selectedPath ? [selectedPath] : []}
         showIcon={false}
         expandedKeys={expandedKeys}
         onExpand={handleExpand}
         style={{ background: 'transparent', borderRadius: 0, padding: 0 }}
         virtual
-        height={600}
+        height={treeHeight}
       />
     </div>
   );
