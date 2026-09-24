@@ -156,6 +156,12 @@ collapse identical completion contracts into the survivor's one result. Any
 claimed Task, mixed callback/control/admission contract, or attachment,
 widget, gateway, slash, source, interrupt, or internal continuation semantic
 fails closed.
+For multi-hop coordination, keep the intermediate session's callback persistent:
+C completes → B processes its callback → B completes → A receives B's report.
+Use `agor_sessions_update` with `callbackMode: "persistent"` for an existing
+coordinator. Its initial delegation turn may also report. Neither `once` nor
+an exact-task callback covers a later processing turn; no descendant takes
+over completion ownership. The UI selector is in Session Settings → Callbacks.
 
 ## Overrides at create/spawn/subsession time
 

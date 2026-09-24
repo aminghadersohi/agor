@@ -66,7 +66,13 @@ describe('buildTenantInsertOrder', () => {
 describe('tenantPortabilityForeignKeys', () => {
   it('freezes the exact schema-derived movable FK set', () => {
     const foreignKeys = tenantPortabilityForeignKeys();
-    expect(foreignKeys).toHaveLength(116);
+    // Change-detector, refreshed for this integration branch. HEAD asserted 116
+    // and PR #2564 asserted 115; both were computed before the other's schema
+    // existed, and 116 was already stale against personal/main. The merged
+    // schema derives 126: fork PR #46's profile_images (now three-subject) and
+    // PR #2564's completion_subscriptions, plus the FKs fork PRs #45/#47 add to
+    // existing tables. The substantive assertions below are independent of it.
+    expect(foreignKeys).toHaveLength(126);
     expect(Object.isFrozen(foreignKeys)).toBe(true);
     const structuralKeys = foreignKeys.map((foreignKey) =>
       [
