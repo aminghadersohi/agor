@@ -44,6 +44,7 @@ export * from './mcp-servers';
 export * from './mcp-slack-connect-settings';
 export * from './messages';
 export * from './power-policy-runtime-settings';
+export * from './profile-images';
 export * from './repos';
 export * from './schedules';
 export * from './session-env-selections';

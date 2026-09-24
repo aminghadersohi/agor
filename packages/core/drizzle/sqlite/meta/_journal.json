@@ -103,14 +103,14 @@
     {
       "idx": 16,
       "version": "6",
-      "when": 1763973169728,
+      "when": 1764210800738,
       "tag": "0016_gorgeous_talkback",
       "breakpoints": true
     },
     {
       "idx": 17,
       "version": "6",
-      "when": 1763974000000,
+      "when": 1764210800739,
       "tag": "0017_backfill_worktree_owners",
       "breakpoints": true
     },
@@ -833,6 +833,13 @@
       "version": "6",
       "when": 1790129000212,
       "tag": "0114_mcp_slack_connect_due",
+      "breakpoints": true
+    },
+    {
+      "idx": 9033,
+      "version": "6",
+      "when": 1790129000213,
+      "tag": "9028_profile_image_galleries",
       "breakpoints": true
     }
   ]
