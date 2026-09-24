@@ -218,6 +218,18 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
     scopeClass: 'scoped',
     why: 'Fork coordinator queue batching. Registered through createTenantScopedAuthenticatedRouteRegistrar; preview and apply hold the same tenant-owned Session row lock admission and dispatch use.',
   },
+  'repos/:id/import-launch-json': {
+    scopeClass: 'scoped',
+    why: 'Fork launch.json import. Registered through createTenantScopedAuthenticatedRouteRegistrar; reads the repo and writes environment variants in the armed request scope.',
+  },
+  'artifacts/:id/actions/:actionId': {
+    scopeClass: 'scoped',
+    why: 'Fork artifact action bindings. Registered through createTenantScopedAuthenticatedRouteRegistrar; re-reads the persisted artifact and delegates to schedules/sessions with the caller identity, all inside the armed request scope.',
+  },
+  'artifacts/:id/data/:dataId': {
+    scopeClass: 'scoped',
+    why: 'Fork artifact data bindings. Same registrar and scope as the action route; read-only, and the id namespaces do not overlap so a data_id cannot reach a mutating dispatch.',
+  },
   'mcp-egress/status': {
     scopeClass: 'scoped',
     why: 'Registered through createTenantScopedAuthenticatedRouteRegistrar; the gateway-mode read runs in the request scope and the runtime status is process-local.',

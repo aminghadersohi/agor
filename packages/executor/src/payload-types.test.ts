@@ -777,6 +777,9 @@ describe('getSupportedCommands', () => {
     expect(commands).toContain('claude.auth-file');
     expect(commands).toContain('branch.clean');
     expect(commands).toContain('branch.archive');
-    expect(commands.length).toBe(32);
+    // personal/main had 31. Fork PR #42 adds branch.launch-json.import and
+    // fork PR #45 adds branch.files.write; each bumped this to 32 on its own
+    // branch, so the merge has to carry both.
+    expect(commands.length).toBe(33);
   });
 });
