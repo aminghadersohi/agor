@@ -124,10 +124,20 @@ describe('Postgres migrations', () => {
         journal.entries.find((entry) => entry.tag === '0111_management_ownership_transfer')
       ).toMatchObject({ idx: 9028, when: 1790000000002 });
       const entries = journal.entries;
-      expect(entries.at(-1)!.tag).toBe('0113_callback_ownership_reconciliation');
-      expect(classifyMigrationWatermark(entries, entries.at(-2)!.when).pending).toEqual([
-        '0113_callback_ownership_reconciliation',
-      ]);
+      // Not "is last": the SQLite journal appends 0114_restore_session_indexes
+      // after this one. The invariant is that it is journalled above every
+      // prior watermark and is the first thing pending at the watermark
+      // immediately below it.
+      const index = entries.findIndex(
+        (entry) => entry.tag === '0113_callback_ownership_reconciliation'
+      );
+      expect(index).toBeGreaterThan(0);
+      expect(entries[index]!.when).toBeGreaterThan(
+        Math.max(...entries.slice(0, index).map((entry) => entry.when))
+      );
+      expect(classifyMigrationWatermark(entries, entries[index - 1]!.when).pending[0]).toBe(
+        '0113_callback_ownership_reconciliation'
+      );
     }
   });
 
