@@ -108,6 +108,24 @@ describe('Postgres migrations', () => {
     expect(migration).not.toMatch(/CREATE TABLE|ALTER TABLE|DROP TABLE/);
   });
 
+  // Fork numbering: this fork renumbers every upstream migration into its own
+  // 90xx band, so upstream's literal idx/when for 0111 and its two hardcoded
+  // pre-0113 watermarks do not hold here. The invariant that test encodes —
+  // the callback reconciliation is the newest entry, and the only one pending
+  // immediately before it — is asserted against each journal's own watermark.
+  it('reconciles both shipped ownership and draft callback watermarks', async () => {
+    for (const journal of await readJournals()) {
+      expect(
+        journal.entries.find((entry) => entry.tag === '0111_management_ownership_transfer')
+      ).toMatchObject({ idx: 9028, when: 1790000000002 });
+      const entries = journal.entries;
+      expect(entries.at(-1)!.tag).toBe('0113_callback_ownership_reconciliation');
+      expect(classifyMigrationWatermark(entries, entries.at(-2)!.when).pending).toEqual([
+        '0113_callback_ownership_reconciliation',
+      ]);
+    }
+  });
+
   it('keeps ownership transfer pending after the provider-grant migration in both journals', async () => {
     for (const journal of await readJournals()) {
       const previous = journal.entries.find(
