@@ -255,7 +255,7 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
   ...[
     '0111_transitive_completion_subscriptions',
     '0112_retire_completion_discovery',
-    '0115_callback_ownership_reconciliation',
+    '0117_callback_ownership_reconciliation',
   ].map(
     (name) =>
       [

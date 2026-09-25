@@ -99,7 +99,7 @@ When inserting manual or backfill migrations into `meta/_journal.json`, ensure t
 Main's `0111_management_ownership_transfer` and the withdrawn callback draft's
 `0111_transitive_completion_subscriptions` both used `1789344000005`; the draft's
 PostgreSQL retirement used `1789344000006`. Keep main's journal entry unchanged.
-`0115_callback_ownership_reconciliation` runs at `1790129000214` in both dialects:
+`0117_callback_ownership_reconciliation` runs at `1790129000216` in both dialects:
 it creates missing inert callback storage, preserves existing rows, removes
 retired discovery policies while enforcing tenant RLS, and idempotently removes
 owner-immutability triggers. This supports either already-applied history without

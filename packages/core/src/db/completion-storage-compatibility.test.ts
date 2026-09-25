@@ -14,6 +14,7 @@ dbTest('retains inert draft completion rows across SQLite initialization', async
   await executeRaw(db, sql`DROP TABLE kb_import_receipts`);
   await executeRaw(db, sql`DROP INDEX messages_mcp_slack_connect_due_idx`);
   await executeRaw(db, sql`ALTER TABLE messages DROP COLUMN mcp_slack_connect_due_at`);
+  await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
   // The draft had the same timestamp as main's ownership-transfer migration.
   await executeRaw(db, sql`DELETE FROM __drizzle_migrations WHERE created_at > 1789344000005`);
   await executeRaw(
@@ -42,7 +43,7 @@ dbTest('retains inert draft completion rows across SQLite initialization', async
 
 dbTest('adds inert completion storage after current main migrations', async ({ db }) => {
   await executeRaw(db, sql`DROP TABLE completion_subscriptions`);
-  await executeRaw(db, sql`DELETE FROM __drizzle_migrations WHERE created_at = 1790129000214`);
+  await executeRaw(db, sql`DELETE FROM __drizzle_migrations WHERE created_at = 1790129000216`);
   await initializeDatabase(db);
   expect(rawRows(await executeRaw(db, sql`SELECT * FROM completion_subscriptions`))).toEqual([]);
 });
@@ -52,6 +53,7 @@ for (const watermark of [1789344000006, 1789344000007]) {
     await executeRaw(db, sql`DROP TABLE kb_import_receipts`);
     await executeRaw(db, sql`DROP INDEX messages_mcp_slack_connect_due_idx`);
     await executeRaw(db, sql`ALTER TABLE messages DROP COLUMN mcp_slack_connect_due_at`);
+    await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
     await executeRaw(db, sql`DELETE FROM __drizzle_migrations WHERE created_at > 1789344000005`);
     await executeRaw(
       db,

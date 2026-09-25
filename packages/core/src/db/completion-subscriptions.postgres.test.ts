@@ -47,7 +47,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       await executeRaw(db, sql`DROP TABLE completion_subscriptions`);
       await executeRaw(
         db,
-        sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at = 1790129000214`
+        sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at = 1790129000216`
       );
       await initializeDatabase(db);
       expect(await policies()).toContain('tenant_isolation_completion_subscriptions');
@@ -59,6 +59,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       it(`restores tenant-isolated KB receipts skipped by draft watermark ${watermark}`, async () => {
         await executeRaw(db, sql`DROP TABLE kb_import_receipts`);
         await executeRaw(db, sql`ALTER TABLE messages DROP COLUMN mcp_slack_connect_due_at`);
+        await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
         await executeRaw(
           db,
           sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at > 1789344000005`
@@ -82,7 +83,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
         // Replaying reconciliation must preserve main's existing receipt rows.
         await executeRaw(
           db,
-          sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at = 1790129000214`
+          sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at = 1790129000216`
         );
         await initializeDatabase(db);
         await runWithTenantDatabaseScope(db, 'fixture-b', async (scoped) => {
