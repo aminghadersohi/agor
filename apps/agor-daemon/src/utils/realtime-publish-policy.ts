@@ -2,6 +2,7 @@ import {
   BRANCH_CLEANUP_REPORT_SERVICE,
   BRANCH_DELETION_REPORT_SERVICE,
   ENVIRONMENT_COMMAND_REPORT_SERVICE,
+  KNOWLEDGE_TRANSFER,
   OWNERSHIP_TRANSFER_SERVICES,
   type UserRole,
 } from '@agor/core/types';
@@ -220,6 +221,10 @@ export const REALTIME_PUBLISH_POLICY = {
   },
   'kb/document-edits': { audience: 'knowledge', why: 'created is suppressed outright.' },
   'kb/indexing/reindex': { audience: 'knowledge', why: 'created is suppressed outright.' },
+  [KNOWLEDGE_TRANSFER.path]: {
+    audience: 'none',
+    why: 'Transfer replies are caller-private; imports emit through kb/documents and kb/namespaces.',
+  },
 
   // ---------------------------------------------------------------------------
   // Silent: services that already opted out with their own `.publish(() => [])`.
@@ -261,6 +266,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: 'Invocation-scoped workspace reports; branch state publishes through branches.',
   },
+  'branches/:id/retire-teammate': {
+    audience: 'none',
+    why: 'Retirement admission response; archived branch state publishes through branches.',
+  },
   'branches/:id/clean': {
     audience: 'none',
     why: 'Cleanup admission response; status publishes through branches.',
@@ -278,6 +287,7 @@ export const REALTIME_PUBLISH_POLICY = {
     why: 'Returns a command-scoped Git credential DTO to one executor.',
   },
   'api/v1/user/api-keys': { audience: 'none', why: 'Returns a freshly minted user API key.' },
+  'api/v1/user/me': { audience: 'none', why: 'Returns the caller identity to that caller only.' },
   terminals: {
     audience: 'none',
     why: 'Shell control plane; output rides native terminal:* socket packets.',
@@ -360,6 +370,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: 'Authenticated recovery preflight belongs only to the caller; never broadcast its result.',
   },
+  'mcp-oauth-connect': {
+    audience: 'none',
+    why: 'Authenticated connect preflight belongs only to the caller; never broadcast its result.',
+  },
   'mcp-marketplace': {
     audience: 'none',
     why: 'Caller-private overview returned only to the requesting connection.',
@@ -376,6 +390,10 @@ export const REALTIME_PUBLISH_POLICY = {
   'mcp-egress/status': {
     audience: 'none',
     why: 'Tenant-scoped rollout and health status; Settings refetches explicitly.',
+  },
+  'mcp-slack-connect/card': {
+    audience: 'none',
+    why: 'Admin-only operator switch; the answer belongs to the operator who asked, and the lane reads the setting itself rather than a broadcast.',
   },
 
   // ---------------------------------------------------------------------------
@@ -509,6 +527,10 @@ export const REALTIME_PUBLISH_POLICY = {
   'widgets/:id/dismiss': {
     audience: 'none',
     why: 'Widget input is deliberately kept out of broadcast.',
+  },
+  'widgets/:id/oauth-resolve': {
+    audience: 'none',
+    why: 'The resolution answers the caller; subscribers learn the outcome from the messages room.',
   },
 } as const satisfies Record<string, RealtimePublishPolicy>;
 

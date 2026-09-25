@@ -1,4 +1,4 @@
-import { OWNERSHIP_TRANSFER_SERVICES } from '@agor/core/types';
+import { KNOWLEDGE_TRANSFER, OWNERSHIP_TRANSFER_SERVICES } from '@agor/core/types';
 /**
  * Service Hooks Registration
  *
@@ -25,6 +25,7 @@ import {
 import {
   ArtifactRepository,
   assertTenantWritable,
+  attachHiddenTenant,
   BoardCommentsRepository,
   BoardObjectRepository,
   BoardRepository,
@@ -63,6 +64,7 @@ import {
   boardObjectQueryValidator,
   boardQueryValidator,
   branchQueryValidator,
+  knowledgeDocumentQueryValidator,
   mcpCatalogQueryValidator,
   mcpServerQueryValidator,
   messageQueryValidator,
@@ -81,11 +83,13 @@ import type {
   AuthenticatedParams,
   Board,
   BoardID,
+  BoardImportResult,
   Branch,
   DeepReadonly,
   GatewayChannel,
   HookContext,
   MCPServer,
+  Message,
   MessageID,
   Paginated,
   Params,
@@ -191,6 +195,7 @@ import {
 import {
   redactMcpRecoveryTopology,
   stripMcpSlackRecoveryNotice,
+  stripWidgetSlackConnectDelivery,
 } from './utils/mcp-recovery-redaction.js';
 import {
   didMcpPrincipalRoleChange,
@@ -542,6 +547,7 @@ export const TENANT_OWNED_SERVICE_PATHS = [
   'thread-session-map',
   'gateway-outbound-messages',
   'session-env-selections',
+  KNOWLEDGE_TRANSFER.path,
   'kb/namespaces',
   'kb/documents',
   'kb/graph',
@@ -687,7 +693,6 @@ const EXECUTOR_TASK_PATCH_FIELDS = taskFieldSet(
   'raw_sdk_response',
   'normalized_sdk_response',
   'computed_context_window',
-  'tool_use_count',
   'duration_ms',
   'agent_session_id',
   'error_message',
@@ -961,6 +966,37 @@ function redactMCPServerPayload(result: any): any {
  * property for a redaction gate. Which methods it is registered on is pinned
  * separately in `register-hooks.mcp-headers-redaction.test.ts`.
  */
+/**
+ * Keep the authoritative Message result intact while projecting the external
+ * caller response without the widget's Slack connect delivery state.
+ *
+ * Mirrors `createRedactTaskMcpRecoveryAfter`: `context.dispatch` is what the
+ * external caller receives, while `context.result` stays whole for
+ * audience-specific publishers (which do their own strip).
+ */
+export const redactMessageSlackConnect = async (context: HookContext): Promise<HookContext> => {
+  if (!context.params.provider) return context;
+  const project = (value: unknown): unknown =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? stripWidgetSlackConnectDelivery(value as Message)
+      : value;
+  let dispatch: unknown = context.result;
+  if (Array.isArray(context.result)) {
+    dispatch = (context.result as Message[]).map(project);
+  } else if (
+    context.result &&
+    typeof context.result === 'object' &&
+    Array.isArray((context.result as { data?: unknown }).data)
+  ) {
+    const page = context.result as { data: Message[] } & Record<string, unknown>;
+    dispatch = { ...page, data: page.data.map(project) };
+  } else {
+    dispatch = project(context.result);
+  }
+  context.dispatch = dispatch;
+  return context;
+};
+
 export const redactMCPServerSecretFields = async (context: HookContext) => {
   if (context.event) {
     context.dispatch = redactMCPServerPayload(context.result);
@@ -1885,6 +1921,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       ],
     },
     after: {
+      all: [redactMessageSlackConnect],
       create: [gatewayRouteHook],
       patch: [
         async (context: HookContext<Board>) => {
@@ -2351,6 +2388,25 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     captureMarketplaceInvalidationTargets,
   ];
 
+  const publishCommittedBoardMove = (context: HookContext): HookContext => {
+    if (!context.event || !context.data || !Object.hasOwn(context.data, 'board_id')) return context;
+    // Board moves can join an outer admission transaction (e.g. unarchive).
+    // Feathers' automatic event fires when this nested method returns, not when
+    // that transaction commits. Replace only this event with the existing queue;
+    // rollback drops it, and successful commit emits it exactly once.
+    const event = context.event;
+    context.event = null;
+    emitServiceEvent(app, {
+      path: 'branches',
+      event,
+      method: context.method,
+      id: context.id,
+      data: context.dispatch ?? context.result,
+      params: context.params,
+    });
+    return context;
+  };
+
   app.service('branches').hooks({
     before: {
       all: [typedValidateQuery(branchQueryValidator), requireAuth],
@@ -2379,8 +2435,16 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     },
     after: {
       create: [invalidateRealtimeBranchFromResult],
-      update: [invalidateRealtimeBranchFromResult, publishMarketplaceInvalidation],
-      patch: [invalidateRealtimeBranchFromResult, publishMarketplaceInvalidation],
+      update: [
+        invalidateRealtimeBranchFromResult,
+        publishMarketplaceInvalidation,
+        publishCommittedBoardMove,
+      ],
+      patch: [
+        invalidateRealtimeBranchFromResult,
+        publishMarketplaceInvalidation,
+        publishCommittedBoardMove,
+      ],
       remove: [
         invalidateRealtimeBranchFromResult,
         publishMarketplaceInvalidation,
@@ -2395,7 +2459,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   type BranchCustomHookRegistrar = {
     hooks(options: {
       before: Record<
-        'updateEnvironment' | 'ensureTeammateKnowledgeNamespace' | 'clean',
+        'ensureTeammateKnowledgeNamespace' | 'clean',
         Array<(context: HookContext) => HookContext>
       >;
     }): void;
@@ -2403,7 +2467,6 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   (app.service('branches') as unknown as BranchCustomHookRegistrar).hooks({
     before: {
       clean: [requireMinimumRole(ROLES.MEMBER, 'clean branches')],
-      updateEnvironment: [requireMinimumRole(ROLES.MEMBER, 'update branch environments')],
       ensureTeammateKnowledgeNamespace: [
         requireMinimumRole(ROLES.MEMBER, 'create teammate knowledge namespaces'),
       ],
@@ -2428,9 +2491,14 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     },
   } as never);
 
+  safeService(KNOWLEDGE_TRANSFER.path)?.hooks({
+    before: { all: [requireAuth, requireMinimumRole(ROLES.MEMBER, 'transfer knowledge')] },
+    after: { create: [suppressKnowledgeCommandRealtimeEvent] },
+  });
+
   safeService('kb/documents')?.hooks({
     before: {
-      all: [requireAuth],
+      all: [typedValidateQuery(knowledgeDocumentQueryValidator), requireAuth],
       create: [requireMinimumRole(ROLES.MEMBER, 'create knowledge documents')],
       patch: [requireMinimumRole(ROLES.MEMBER, 'update knowledge documents')],
       update: [requireMinimumRole(ROLES.MEMBER, 'update knowledge documents')],
@@ -3460,6 +3528,15 @@ export function registerHooks(ctx: RegisterHooksContext): void {
 
   const tasksService = app.service('tasks') as FeathersService<Application, TasksServiceImpl>;
   const redactTaskMcpRecoveryAfter = createRedactTaskMcpRecoveryAfter(sessionsRepository);
+  // Queue management has the same capability as tasks.remove: Branch Manager
+  // ('all'), not mere prompt access. MCP retains the acting user's provider.
+  const manageTaskQueueGuards = [
+    requireMinimumRole(ROLES.MEMBER, 'manage queued tasks'),
+    resolveSessionContext(),
+    loadSession(sessionsRepository),
+    loadBranchFromSession(branchRepository),
+    ensureBranchPermission('all', 'manage queued tasks', superadminOpts),
+  ];
   tasksService.hooks({
     before: {
       all: [typedValidateQuery(taskQueryValidator), requireAuth],
@@ -3484,6 +3561,8 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         loadBranchFromSession(branchRepository),
         ensureCanPromptInSession({ ...superadminOpts, branchRepository }),
       ],
+      cancelQueued: manageTaskQueueGuards,
+      reorderQueued: manageTaskQueueGuards,
       connectExecutor: [requireTaskScopedExecutorRuntimeToken()],
       reportTerminationComplete: [requireTaskScopedExecutorRuntimeToken()],
       reportRuntimeTelemetry: [requireTaskScopedExecutorRuntimeToken()],
@@ -3630,6 +3709,23 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         id: context.id,
       });
     }
+  };
+
+  // Import custom methods don't publish automatically; emit `created` manually.
+  // `import_skipped` is diagnostics for the importing caller only, so it stays
+  // out of the broadcast board (keeping the hidden tenant marker).
+  const emitImportedBoardCreated = async (context: HookContext<Board>) => {
+    const result = context.result as BoardImportResult | undefined;
+    if (result) {
+      const { import_skipped: _importSkipped, ...board } = result;
+      emitServiceEvent(app, {
+        path: 'boards',
+        event: 'created',
+        data: attachHiddenTenant(board, result),
+        params: context.params,
+      });
+    }
+    return context;
   };
 
   const boardUpdateAuthorization = [
@@ -3833,34 +3929,8 @@ export function registerHooks(ctx: RegisterHooksContext): void {
           return context;
         },
       ],
-      fromBlob: [
-        clearRealtimeBranchVisibility,
-        async (context: HookContext<Board>) => {
-          if (context.result) {
-            emitServiceEvent(app, {
-              path: 'boards',
-              event: 'created',
-              data: context.result,
-              params: context.params,
-            });
-          }
-          return context;
-        },
-      ],
-      fromYaml: [
-        clearRealtimeBranchVisibility,
-        async (context: HookContext<Board>) => {
-          if (context.result) {
-            emitServiceEvent(app, {
-              path: 'boards',
-              event: 'created',
-              data: context.result,
-              params: context.params,
-            });
-          }
-          return context;
-        },
-      ],
+      fromBlob: [clearRealtimeBranchVisibility, emitImportedBoardCreated],
+      fromYaml: [clearRealtimeBranchVisibility, emitImportedBoardCreated],
       setPrimaryTeammate: [
         clearRealtimeBranchVisibility,
         // Replacing an attached primary is cache-only because its board_id is

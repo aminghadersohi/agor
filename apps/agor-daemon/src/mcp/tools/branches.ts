@@ -47,6 +47,7 @@ import {
   MIN_BRANCH_FILESYSTEM_READY_WAIT_TIMEOUT_MS,
   waitForBranchFilesystemReady,
 } from '../branch-filesystem-readiness.js';
+import { waitForBranchRefResolution } from '../branch-ref-resolution.js';
 import { branchCapabilityPolicySchema } from '../capability-policy-schema.js';
 import {
   resolveBoardId,
@@ -163,8 +164,8 @@ function readinessResponse(result: BranchFilesystemReadinessResult): {
   return { readiness, isError: true };
 }
 
-function mcpRequestSignal(requestContext: ServerContext): AbortSignal {
-  return requestContext.mcpReq.signal;
+function mcpRequestSignal(requestContext?: ServerContext): AbortSignal | undefined {
+  return requestContext?.mcpReq.signal;
 }
 
 /**
@@ -700,8 +701,9 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
         sourceBranch: mcpOptionalString(
           'sourceBranch',
           'Base branch to fork from when creating a new branch (defaults to the repo default branch, usually "main"). ' +
-            'The new branch will be created from the tip of this branch. ' +
-            'Must exist on the remote (origin) for clone storage mode; worktree storage mode may also use local refs.'
+            'Accepts local branches, remote-qualified branches (for example origin/main), tags, and commit SHAs. ' +
+            'A bare branch name is rejected when matching local or remote refs disagree; qualify it explicitly. ' +
+            'The response reports _resolution.resolved_ref and resolved_sha. Clone storage requires the resolved object to be cloneable from its selected source.'
         ),
         autoSuffix: z
           .boolean()
@@ -1020,23 +1022,43 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
         )
       );
 
+      const readCreatedBranch = (branchId: BranchID | string) =>
+        ctx.app
+          .service('branches')
+          .get(branchId, freshMcpServiceParams(ctx) as Parameters<BranchesServiceImpl['get']>[1]);
+      const resolutionResult = await waitForBranchRefResolution({
+        branch,
+        signal: mcpRequestSignal(requestContext),
+        readBranch: readCreatedBranch,
+      });
+
       const readinessResult = args.waitForReady
         ? await waitForBranchFilesystemReady({
             branchId: branch.branch_id,
             timeoutMs: args.waitTimeoutMs ?? DEFAULT_BRANCH_FILESYSTEM_READY_WAIT_TIMEOUT_MS,
             signal: mcpRequestSignal(requestContext),
-            readBranch: (branchId) =>
-              ctx.app
-                .service('branches')
-                .get(
-                  branchId,
-                  freshMcpServiceParams(ctx) as Parameters<BranchesServiceImpl['get']>[1]
-                ),
+            readBranch: readCreatedBranch,
           })
         : undefined;
 
       // Build response with appropriate notes
-      const response: Record<string, unknown> = { ...(readinessResult?.branch ?? branch) };
+      const response: Record<string, unknown> = {
+        ...(readinessResult?.branch ?? resolutionResult.branch),
+      };
+      response._resolution =
+        resolutionResult.outcome === 'resolved'
+          ? {
+              outcome: 'resolved',
+              requested_ref: sourceBranch ?? ref,
+              resolved_ref: resolutionResult.branch.base_ref,
+              resolved_sha: resolutionResult.branch.base_sha,
+            }
+          : {
+              outcome: resolutionResult.outcome,
+              message:
+                resolutionResult.branch.error_message ??
+                'Timed out before Agor could resolve the requested starting ref.',
+            };
 
       const formattedReadiness = readinessResult ? readinessResponse(readinessResult) : undefined;
       if (formattedReadiness) response._readiness = formattedReadiness.readiness;
@@ -1083,7 +1105,9 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
 
       return {
         ...textResult(response),
-        ...(formattedReadiness?.isError ? { isError: true } : {}),
+        ...(formattedReadiness?.isError || resolutionResult.outcome !== 'resolved'
+          ? { isError: true }
+          : {}),
       };
     }
   );
@@ -1682,7 +1706,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     'agor_branches_unarchive',
     {
       description:
-        'Restore a previously archived branch. Optionally place it back on a board. Also unarchives all sessions that were archived as part of the branch archival.',
+        'Request asynchronous restoration of an archived branch, optionally onto a board. Unarchives branch-archived sessions. Acceptance is not filesystem readiness: use agor_branches_wait_for_ready before starting work.',
       inputSchema: z.object({
         branchId: mcpRequiredId(
           'branchId',
@@ -1709,7 +1733,8 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       return textResult({
         success: true,
         branch: result,
-        message: 'Branch unarchived successfully.',
+        message:
+          'Unarchive accepted. Wait for filesystem_status ready before starting work; acceptance is not readiness.',
       });
     }
   );
@@ -1816,23 +1841,16 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
   );
 
   // Tool: agor_branches_retry_provisioning
-  // Explicit, non-destructive repair for a branch whose filesystem provisioning
-  // landed in 'failed'. Wraps the exact same `reposService.retryBranchProvisioning`
-  // implementation used by the REST route and the UI, so all three surfaces share
-  // one code path. Only `failed → creating` is retryable; the transition is an
-  // atomic claim, so concurrent calls can never dispatch two materializers.
+  // Shared attempt-fenced recovery for failed provisioning and stale active archive states.
   server.registerTool(
     'agor_branches_retry_provisioning',
     {
       description:
-        'Repair a branch whose git working directory failed to materialize ' +
-        "(filesystem_status 'failed') by re-dispatching provisioning. Also recovers a branch " +
-        "left 'creating' by a daemon restart. Requires branch control ('all' permission, branch " +
-        "owner, or admin). Not retryable otherwise: 'ready' is returned unchanged, a " +
-        "still-in-flight 'creating' attempt is rejected as a conflict, and " +
-        "archived/'preserved'/'cleaned'/'deleted' branches must use the restore/unarchive flow " +
-        'instead. Non-destructive — never deletes refs or directories. ' +
-        'Returns the updated branch with its new filesystem_status.',
+        'Retry failed provisioning or recover an active branch with stale preserved/cleaned/deleted filesystem status. ' +
+        'Requires branch Manager authority and filesystem write access. The executor validates existing files; ' +
+        'invalid Git linkage fails without overwriting them. Missing local teammate homes require personal backup restoration. ' +
+        'Archived branches must use unarchive. Ready is a no-op; creating is always a conflict, including after a restart. ' +
+        'Returns admission state, not proof of completion; wait for ready before creating sessions.',
       inputSchema: z.object({
         branchId: mcpRequiredId('branchId', 'Branch'),
       }),

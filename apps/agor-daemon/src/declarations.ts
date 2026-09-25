@@ -22,8 +22,8 @@ import type { ExpressApplication, Service } from '@agor/core/feathers';
 import type {
   Board,
   Branch,
-  BranchEnvironmentUpdate,
   BranchID,
+  CancelQueuedTasksInput,
   CloneRepositoryResult,
   AuthenticatedParams as CoreAuthenticatedParams,
   AuthenticatedUser as CoreAuthenticatedUser,
@@ -33,6 +33,7 @@ import type {
   DeepReadonly,
   Params as FeathersParams,
   Message,
+  ReorderQueuedTasksInput,
   Repo,
   RuntimeTelemetryInput,
   SdkHealthFailureInput,
@@ -40,6 +41,7 @@ import type {
   SessionUpdate,
   Task,
   TaskPendingDispatchStatus,
+  TaskQueueMutationResult,
 } from '@agor/core/types';
 import type { DaemonMetrics, DaemonOperationalMetrics } from './metrics/index.js';
 import type { EnvironmentHealthCheckOptions } from './services/branches.js';
@@ -194,6 +196,14 @@ export interface TasksServiceImpl extends Service<Task, Partial<Task>, FeathersP
   ): Promise<Task | null>;
   reportRuntimeTelemetry(data: RuntimeTelemetryInput, params?: FeathersParams): Promise<Task>;
   reportSdkHealthFailure(data: SdkHealthFailureInput, params?: FeathersParams): Promise<Task>;
+  cancelQueued(
+    data: CancelQueuedTasksInput,
+    params?: FeathersParams
+  ): Promise<TaskQueueMutationResult>;
+  reorderQueued(
+    data: ReorderQueuedTasksInput,
+    params?: FeathersParams
+  ): Promise<TaskQueueMutationResult>;
   autoTitleSession(task: Task, params?: FeathersParams): Promise<void>;
   complete(
     id: string,
@@ -311,9 +321,12 @@ export interface BoardsServiceImpl extends Service<Board, Partial<Board>, Feathe
   fromBlob(
     blob: import('@agor/core/types').BoardExportBlob,
     params?: FeathersParams
-  ): Promise<Board>;
+  ): Promise<import('@agor/core/types').BoardImportResult>;
   toYaml(boardId: string, params?: FeathersParams): Promise<string>;
-  fromYaml(yamlContent: string, params?: FeathersParams): Promise<Board>;
+  fromYaml(
+    yamlContent: string,
+    params?: FeathersParams
+  ): Promise<import('@agor/core/types').BoardImportResult>;
   clone(boardId: string, newName: string, params?: FeathersParams): Promise<Board>;
   setPrimaryTeammate(
     data: { id?: string; boardId?: string; branchId: string },
@@ -341,22 +354,14 @@ export interface MessagesServiceImpl
  * Branches service with custom methods (server-side implementation)
  */
 export interface BranchesServiceImpl extends Service<Branch, Partial<Branch>, FeathersParams> {
+  retireTeammate(
+    id: BranchID,
+    params?: FeathersParams
+  ): Promise<import('@agor/core/types').BranchCleanAccepted>;
   clean(
     input: { branchId: import('@agor/core/types').BranchID },
     params?: FeathersParams
   ): Promise<import('@agor/core/types').BranchCleanAccepted>;
-  updateEnvironment(
-    id:
-      | BranchID
-      | {
-          branch_id?: BranchID;
-          branchId?: BranchID;
-          environment_update?: BranchEnvironmentUpdate;
-          environmentUpdate?: BranchEnvironmentUpdate;
-        },
-    environmentUpdate?: BranchEnvironmentUpdate | FeathersParams,
-    params?: FeathersParams
-  ): Promise<Branch>;
   startEnvironment(id: BranchID, params?: FeathersParams, confirmationOf?: string): Promise<Branch>;
   stopEnvironment(id: BranchID, params?: FeathersParams): Promise<Branch>;
   restartEnvironment(id: BranchID, params?: FeathersParams): Promise<Branch>;

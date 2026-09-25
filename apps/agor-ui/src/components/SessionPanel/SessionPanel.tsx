@@ -55,7 +55,7 @@ import { useAppActions } from '../../contexts/AppActionsContext';
 import { useRecenterMap } from '../../contexts/CanvasNavigationContext';
 import { useConnectionDisabled } from '../../contexts/ConnectionContext';
 import { useIsMobileViewport } from '../../hooks/useIsMobileViewport';
-import { useSessionActions } from '../../hooks/useSessionActions';
+import { ARCHIVE_REFRESH_WARNING, useSessionActions } from '../../hooks/useSessionActions';
 import { useSessionSearch } from '../../hooks/useSessionSearch';
 import { useSharedReactiveSession } from '../../hooks/useSharedReactiveSession';
 import { useAgorStore } from '../../store/agorStore';
@@ -88,7 +88,6 @@ import { ToolIcon } from '../ToolIcon';
 import {
   buildPromptWithAttachments,
   getComposerAttachmentFailureMessage,
-  getComposerUploadAccept,
   getLatestComposerPromptText,
   isBlockingComposerAttachment,
 } from './composerAttachments';
@@ -99,6 +98,7 @@ import { SessionAttachmentTray } from './SessionAttachmentTray';
 import { SessionComposerDropZone } from './SessionComposerDropZone';
 import { SessionFooter } from './SessionFooter';
 import { SessionPanelContent } from './SessionPanelContent';
+import { buildSpawnPromptContext } from './spawn-prompt-context';
 import {
   isStopTransportAmbiguous,
   reconcileStopTransportFailure,
@@ -337,7 +337,6 @@ PromptInput.displayName = 'PromptInput';
 // a fresh array — the memos deriving footer props from `tasks` (and through
 // them the memoized SessionFooter) key on its identity.
 const EMPTY_TASKS: Task[] = [];
-
 export interface SessionPanelProps {
   client: AgorClient | null;
   session: Session | null;
@@ -366,7 +365,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     ? { minWidth: MOBILE_TOUCH_TARGET, minHeight: MOBILE_TOUCH_TARGET }
     : undefined;
   const { modal } = App.useApp();
-  const { showSuccess, showInfo, showError } = useThemedMessage();
+  const { showSuccess, showInfo, showError, showWarning } = useThemedMessage();
   const connectionDisabled = useConnectionDisabled();
   const recenterMap = useRecenterMap();
 
@@ -523,7 +522,6 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   );
   const [scrollToBottom, setScrollToBottom] = React.useState<(() => void) | null>(null);
   const [scrollToTop, setScrollToTop] = React.useState<(() => void) | null>(null);
-  const [queuedTasks, setQueuedTasks] = React.useState<Task[]>([]);
   const [forkModalOpen, setForkModalOpen] = React.useState(false);
   const [spawnModalOpen, setSpawnModalOpen] = React.useState(false);
   const [uploadModalOpen, setUploadModalOpen] = React.useState(false);
@@ -541,13 +539,14 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   const reactiveSessionId = session?.session_id ?? null;
   const { state: reactiveSessionState } = useSharedReactiveSession(client, reactiveSessionId, {
     enabled: open,
-    // ConversationView retains the same lazy handle. Keeping the cache key
+    // ConversationView retains the same lean handle. Keeping the cache key
     // identical collapses duplicate Session bootstrap/reconnect reads while
-    // preserving the transcript's latest-task hydration contract.
-    reactiveOptions: { taskHydration: 'lazy' },
+    // preserving paged history without eager historical tool hydration.
+    reactiveOptions: { taskHydration: 'lean' },
   });
 
   const tasks = reactiveSessionState?.tasks || EMPTY_TASKS;
+  const queuedTasks = reactiveSessionState?.queuedTasks ?? EMPTY_TASKS;
   React.useEffect(() => {
     if (
       forceFailTarget &&
@@ -631,87 +630,6 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   const composerSendInFlightRef = React.useRef<typeof composerSessionIdentityRef.current | null>(
     null
   );
-
-  // Fetch queued tasks (post never-lose-prompt: queueing lives on tasks, not messages).
-  React.useEffect(() => {
-    if (!client || !session) return;
-
-    const fetchQueue = async () => {
-      try {
-        const response = await client.service(`/sessions/${session.session_id}/tasks/queue`).find();
-        const data = (response as { data: Task[] }).data || [];
-        setQueuedTasks(data);
-      } catch (error) {
-        console.error('[SessionPanel] Failed to fetch queue:', error);
-      }
-    };
-
-    fetchQueue();
-
-    const tasksService = client.service('tasks');
-
-    const handleQueued = (task: Task) => {
-      if (task.session_id === session.session_id) {
-        setQueuedTasks((prev) => {
-          // Deduplicate: optimistic update from enqueue may have already added this task
-          if (prev.some((t) => t.task_id === task.task_id)) return prev;
-          return [...prev, task].sort((a, b) => (a.queue_position ?? 0) - (b.queue_position ?? 0));
-        });
-      }
-    };
-
-    // A queued task drops out of the drawer when its status flips off 'queued'
-    // (drained by spawnTaskExecutor → RUNNING, or admin-cancelled to STOPPED).
-    const handleTaskPatched = (task: Task) => {
-      if (task.session_id !== session.session_id) return;
-      if (task.status !== TaskStatus.QUEUED) {
-        setQueuedTasks((prev) => prev.filter((t) => t.task_id !== task.task_id));
-      }
-    };
-
-    const handleTaskRemoved = (task: Task) => {
-      if (task.session_id === session.session_id) {
-        setQueuedTasks((prev) => prev.filter((t) => t.task_id !== task.task_id));
-      }
-    };
-
-    tasksService.on('queued', handleQueued);
-    tasksService.on('patched', handleTaskPatched);
-    tasksService.on('updated', handleTaskPatched);
-    tasksService.on('removed', handleTaskRemoved);
-
-    return () => {
-      tasksService.off('queued', handleQueued);
-      tasksService.off('patched', handleTaskPatched);
-      tasksService.off('updated', handleTaskPatched);
-      tasksService.off('removed', handleTaskRemoved);
-    };
-  }, [client, session]);
-
-  // Token breakdown calculation
-  const tokenBreakdown = React.useMemo(() => {
-    if (!session?.agentic_tool) {
-      return { total: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, cost: 0 };
-    }
-
-    return tasks.reduce(
-      (acc, task) => {
-        if (!task.normalized_sdk_response) return acc;
-
-        const { tokenUsage, costUsd } = task.normalized_sdk_response;
-
-        return {
-          total: acc.total + tokenUsage.totalTokens,
-          input: acc.input + tokenUsage.inputTokens,
-          output: acc.output + tokenUsage.outputTokens,
-          cacheRead: acc.cacheRead + (tokenUsage.cacheReadTokens || 0),
-          cacheCreation: acc.cacheCreation + (tokenUsage.cacheCreationTokens || 0),
-          cost: acc.cost + (costUsd || 0),
-        };
-      },
-      { total: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, cost: 0 }
-    );
-  }, [tasks, session?.agentic_tool]);
 
   // Get latest context window
   const latestContextWindow = React.useMemo(() => {
@@ -968,7 +886,6 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
         <input
           ref={attachmentInputRef}
           type="file"
-          accept={getComposerUploadAccept()}
           multiple
           disabled={composerAttachmentUploading}
           style={{ display: 'none' }}
@@ -1028,7 +945,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       cancelText: 'Cancel',
       onOk: async () => {
         const archived = await archiveSession(session.session_id);
-        if (archived) {
+        if (archived?.reconciliation === 'refresh-required') {
+          showWarning(ARCHIVE_REFRESH_WARNING);
+        } else if (archived) {
           showSuccess('Session and same-branch children archived');
           onClose();
         } else {
@@ -1374,25 +1293,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     // forwarding prompt; the spawn config's `permissionMode` is rendered into
     // the meta-prompt as the *child* session's intended mode. They're distinct
     // — don't reuse one for the other.
-    const spawnConfig =
-      typeof config === 'string'
-        ? { userPrompt: config }
-        : {
-            userPrompt: config.prompt || '',
-            agenticTool: config.agent,
-            permissionMode: config.permissionMode,
-            modelConfig: config.modelConfig,
-            codexSandboxMode: config.codexSandboxMode,
-            codexApprovalPolicy: config.codexApprovalPolicy,
-            codexNetworkAccess: config.codexNetworkAccess,
-            mcpServerIds: config.mcpServerIds,
-            callbackConfig: {
-              enableCallback: config.enableCallback,
-              includeLastMessage: config.includeLastMessage,
-              includeOriginalPrompt: config.includeOriginalPrompt,
-            },
-            extraInstructions: config.extraInstructions,
-          };
+    const spawnConfig = buildSpawnPromptContext(config);
 
     await client
       .service(`sessions/${session.session_id}/spawn-prompt`)
@@ -1509,7 +1410,6 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       session={activeSession}
       currentUserId={currentUserId}
       footerTimerTask={footerTimerTask}
-      tokenBreakdown={tokenBreakdown}
       latestContextWindow={latestContextWindow}
       footerGradient={footerGradient}
       sessionMcpServerIds={sessionMcpServerIds}
@@ -1859,13 +1759,11 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             setScrollToBottom={setScrollToBottom}
             setScrollToTop={setScrollToTop}
             queuedTasks={queuedTasks}
-            setQueuedTasks={setQueuedTasks}
             spawnModalOpen={spawnModalOpen}
             setSpawnModalOpen={setSpawnModalOpen}
             onSpawnModalConfirm={handleSpawnModalConfirm}
             inputValueRef={inputValueRef}
             isOpen={open}
-            forceExpandAll={searchOpen && query.trim().length > 0}
           />
         </div>
 

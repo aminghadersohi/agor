@@ -198,9 +198,8 @@ export function buildWorktreeAddArgs(params: {
   createBranch: boolean;
   sourceBranch?: string;
   refType?: 'branch' | 'tag';
-  fetchSucceeded: boolean;
 }): string[] {
-  const { branchPath, ref, createBranch, sourceBranch, refType, fetchSucceeded } = params;
+  const { branchPath, ref, createBranch, sourceBranch } = params;
 
   const optionArgs: string[] = [];
   const positionalArgs: string[] = [branchPath];
@@ -208,18 +207,297 @@ export function buildWorktreeAddArgs(params: {
   if (createBranch) {
     optionArgs.push('-b', ref);
     if (sourceBranch) {
-      if (refType === 'tag') {
-        positionalArgs.push(sourceBranch);
-      } else {
-        const baseRef = fetchSucceeded ? `origin/${sourceBranch}` : sourceBranch;
-        positionalArgs.push(baseRef);
-      }
+      // sourceBranch is already concrete. Resolution (including ambiguity
+      // handling) belongs to resolveGitRef; this argv builder must never
+      // reinterpret or qualify it.
+      positionalArgs.push(sourceBranch);
     }
   } else {
     positionalArgs.push(ref);
   }
 
   return ['worktree', 'add', ...optionArgs, '--', ...positionalArgs];
+}
+
+export type ResolvedGitRefKind = 'commit' | 'local_branch' | 'remote_branch' | 'tag';
+
+/** A user-supplied ref resolved to one immutable starting commit. */
+export interface ResolvedGitRef {
+  /** The exact spelling supplied by the caller. */
+  input: string;
+  /** The concrete ref selected for checkout and reporting. */
+  ref: string;
+  /** Full commit SHA after peeling annotated tags. */
+  sha: string;
+  kind: ResolvedGitRefKind;
+  /** Unqualified branch/tag name, suitable for `git clone --branch`. */
+  name: string;
+  /** Configured remote that owns a remote branch, when applicable. */
+  remoteName?: string;
+  /** Credential-free URL for the selected configured remote. */
+  remoteUrl?: string;
+}
+
+export interface ResolveGitRefOptions {
+  /** Namespace requested by the branch creation API. Defaults to branch. */
+  refType?: 'branch' | 'tag';
+  /**
+   * Canonical remote to query in addition to cached remote-tracking refs.
+   * Supplying no name models an explicitly selected external source remote.
+   */
+  remote?: { url: string; name?: string };
+  /** Ignore local/configured-remote candidates and resolve only `remote`. */
+  remoteOnly?: boolean;
+  env?: UserGitEnvironment;
+}
+
+/** Managed credentials follow trusted metadata URLs, never mutable workspace remotes. */
+export function gitEnvironmentForRemote(
+  remoteUrl: string,
+  authorizedRemoteUrls: readonly (string | undefined)[],
+  env?: UserGitEnvironment
+): UserGitEnvironment | undefined {
+  const url = stripGitUrlCredentials(remoteUrl);
+  return authorizedRemoteUrls.some((trusted) => trusted && stripGitUrlCredentials(trusted) === url)
+    ? env
+    : undefined;
+}
+
+interface RefCandidate extends ResolvedGitRef {
+  display: string;
+}
+
+async function resolveCommitSha(
+  git: ReturnType<typeof createGit>['git'],
+  ref: string
+): Promise<string | undefined> {
+  try {
+    return (await git.raw(['rev-parse', '--verify', `${ref}^{commit}`])).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+function parseLsRemoteSha(output: string): string | undefined {
+  return output
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/, 1)[0])
+    .filter((sha) => /^[0-9a-f]{40,64}$/i.test(sha ?? ''))
+    .at(-1);
+}
+
+/**
+ * Resolve a user-supplied branch, remote branch, tag, or commit exactly once.
+ *
+ * Bare branch precedence is local, then remote name in lexical order, but
+ * precedence is used only when every match identifies the same commit. If
+ * candidates disagree, resolution fails and lists every candidate: silently
+ * choosing either side is more dangerous than requiring qualification.
+ * Already-qualified remote refs are matched against configured remote names
+ * (longest name first), so remotes whose names contain `/` remain unambiguous.
+ */
+export async function resolveGitRef(
+  repoPath: string | undefined,
+  input: string,
+  options: ResolveGitRefOptions = {}
+): Promise<ResolvedGitRef> {
+  await validateGitRef(input);
+
+  const refType = options.refType ?? 'branch';
+  const remoteOnly = options.remoteOnly === true || !repoPath;
+  // Remote-only resolution must not depend on a mounted repository cache.
+  const git = remoteOnly ? undefined : createGit(repoPath).git;
+  const candidates: RefCandidate[] = [];
+
+  const addCandidate = (candidate: RefCandidate) => {
+    const existing = candidates.findIndex((item) => item.ref === candidate.ref);
+    if (existing >= 0) candidates[existing] = candidate;
+    else candidates.push(candidate);
+  };
+
+  const explicitCommitSha =
+    git && /^[0-9a-f]{7,64}$/i.test(input) ? await resolveCommitSha(git, input) : undefined;
+  if (explicitCommitSha && !remoteOnly) {
+    return { input, ref: input, sha: explicitCommitSha, kind: 'commit', name: input };
+  }
+
+  const configuredRemotes = git
+    ? (await git.getRemotes(true)).sort((a, b) => b.name.length - a.name.length)
+    : [];
+
+  const explicitRemote =
+    refType === 'branch'
+      ? configuredRemotes.find((remote) => input.startsWith(`${remote.name}/`))
+      : undefined;
+  const explicitFullRef = input.startsWith('refs/');
+
+  if (git && explicitFullRef) {
+    const sha = await resolveCommitSha(git, input);
+    if (sha) {
+      if (input.startsWith('refs/tags/')) {
+        return { input, ref: input, sha, kind: 'tag', name: input.slice('refs/tags/'.length) };
+      }
+      if (input.startsWith('refs/remotes/')) {
+        const remainder = input.slice('refs/remotes/'.length);
+        const remote = configuredRemotes.find((item) => remainder.startsWith(`${item.name}/`));
+        return {
+          input,
+          ref: input,
+          sha,
+          kind: 'remote_branch',
+          name: remote ? remainder.slice(remote.name.length + 1) : remainder,
+          ...(remote
+            ? { remoteName: remote.name, remoteUrl: stripGitUrlCredentials(remote.refs.fetch) }
+            : {}),
+        };
+      }
+      return {
+        input,
+        ref: input,
+        sha,
+        kind: 'local_branch',
+        name: input.startsWith('refs/heads/') ? input.slice('refs/heads/'.length) : input,
+      };
+    }
+  }
+
+  if (git && explicitRemote) {
+    const name = input.slice(explicitRemote.name.length + 1);
+    const ref = `refs/remotes/${explicitRemote.name}/${name}`;
+    const sha = await resolveCommitSha(git, ref);
+    if (sha) {
+      addCandidate({
+        input,
+        ref: input,
+        sha,
+        kind: 'remote_branch',
+        name,
+        remoteName: explicitRemote.name,
+        remoteUrl: stripGitUrlCredentials(explicitRemote.refs.fetch),
+        display: `remote:${input}`,
+      });
+    }
+
+    // A non-canonical configured remote was explicitly requested. Query that
+    // remote itself rather than accidentally interpreting (for example)
+    // `personal/topic` as branch `personal/topic` on origin.
+    if (!options.remote?.name || options.remote.name !== explicitRemote.name) {
+      const explicitRemoteUrl = assertSafeGitRemoteUrl(
+        stripGitUrlCredentials(explicitRemote.refs.fetch)
+      );
+      const output = await listRemoteRef(
+        explicitRemoteUrl,
+        `refs/heads/${name}`,
+        gitEnvironmentForRemote(explicitRemoteUrl, [options.remote?.url], options.env),
+        'heads'
+      );
+      const remoteSha = parseLsRemoteSha(output);
+      if (remoteSha) {
+        addCandidate({
+          input,
+          ref: input,
+          sha: remoteSha,
+          kind: 'remote_branch',
+          name,
+          remoteName: explicitRemote.name,
+          remoteUrl: explicitRemoteUrl,
+          display: `remote:${input}`,
+        });
+      }
+    }
+  }
+
+  if (git && explicitRemote) {
+    // A qualified remote ref is not also a bare local/remote branch name.
+  } else if (git && refType === 'tag') {
+    const sha = await resolveCommitSha(git, `refs/tags/${input}`);
+    if (sha) {
+      addCandidate({ input, ref: input, sha, kind: 'tag', name: input, display: `tag:${input}` });
+    }
+  } else if (git) {
+    const localSha = await resolveCommitSha(git, `refs/heads/${input}`);
+    if (localSha) {
+      addCandidate({
+        input,
+        ref: input,
+        sha: localSha,
+        kind: 'local_branch',
+        name: input,
+        display: `local:${input}`,
+      });
+    }
+
+    for (const remote of configuredRemotes.sort((a, b) => a.name.localeCompare(b.name))) {
+      const sha = await resolveCommitSha(git, `refs/remotes/${remote.name}/${input}`);
+      if (!sha) continue;
+      addCandidate({
+        input,
+        ref: `${remote.name}/${input}`,
+        sha,
+        kind: 'remote_branch',
+        name: input,
+        remoteName: remote.name,
+        remoteUrl: stripGitUrlCredentials(remote.refs.fetch),
+        display: `remote:${remote.name}/${input}`,
+      });
+    }
+  }
+
+  if (options.remote && (!explicitRemote || options.remote.name === explicitRemote.name)) {
+    const safeRemoteUrl = assertSafeGitRemoteUrl(stripGitUrlCredentials(options.remote.url));
+    const namespace = refType === 'tag' ? 'refs/tags' : 'refs/heads';
+    const remoteInput =
+      refType === 'branch' && options.remote.name && input.startsWith(`${options.remote.name}/`)
+        ? input.slice(options.remote.name.length + 1)
+        : input;
+    const output = await listRemoteRef(
+      safeRemoteUrl,
+      `${namespace}/${remoteInput}`,
+      options.env,
+      refType === 'tag' ? 'tags' : 'heads'
+    );
+    const sha = parseLsRemoteSha(output);
+    if (sha) {
+      const ref =
+        refType === 'branch' && options.remote.name
+          ? `${options.remote.name}/${remoteInput}`
+          : input;
+      addCandidate({
+        input,
+        ref,
+        sha,
+        kind: refType === 'tag' ? 'tag' : 'remote_branch',
+        name: remoteInput,
+        ...(options.remote.name ? { remoteName: options.remote.name } : {}),
+        remoteUrl: safeRemoteUrl,
+        display: options.remote.name
+          ? `remote:${options.remote.name}/${remoteInput}`
+          : `remote:${remoteInput}`,
+      });
+    }
+  }
+
+  if (candidates.length === 0) {
+    throw new Error(
+      `Git ${refType} '${input}' does not exist. Fetch it, use an explicit remote-qualified ref, ` +
+        'or choose an existing local branch, remote branch, tag, or commit SHA.'
+    );
+  }
+
+  const shas = new Set(candidates.map((candidate) => candidate.sha));
+  if (shas.size > 1) {
+    const details = candidates
+      .map((candidate) => `${candidate.display} @ ${candidate.sha}`)
+      .join(', ');
+    throw new Error(
+      `Git ref '${input}' is ambiguous because matching refs disagree: ${details}. ` +
+        'Qualify the ref explicitly (for example, a local full ref or <remote>/<branch>).'
+    );
+  }
+
+  const chosen = candidates[0];
+  const { display: _display, ...resolved } = chosen;
+  return resolved;
 }
 
 /**
@@ -679,11 +957,13 @@ export function buildAuthenticatedGitTransportEnvironment(
 function createGitClient(
   baseDir: string | undefined,
   spawnEnv: Record<string, string>,
-  timeoutMs?: number
+  timeoutMs?: number,
+  abort?: AbortSignal
 ): { git: ReturnType<typeof simpleGit> } {
   const git = simpleGit({
     baseDir,
     binary: getGitBinary(),
+    abort,
     config: [],
     ...(timeoutMs === undefined ? {} : { timeout: { block: timeoutMs } }),
     unsafe: {
@@ -714,11 +994,17 @@ function createGitClient(
  */
 export function createGit(
   baseDir?: string,
-  timeoutMs?: number
+  timeoutMs?: number,
+  abort?: AbortSignal
 ): { git: ReturnType<typeof simpleGit> } {
   const localConfig: [string, string][] = [...FIXED_GIT_SECURITY_CONFIG];
   if (baseDir) localConfig.push(['safe.directory', baseDir]);
-  return createGitClient(baseDir, buildFixedGitEnvironment(localConfig, process.env), timeoutMs);
+  return createGitClient(
+    baseDir,
+    buildFixedGitEnvironment(localConfig, process.env),
+    timeoutMs,
+    abort
+  );
 }
 
 /**
@@ -821,7 +1107,12 @@ async function listRemoteRef(
 ): Promise<string> {
   const safeRemoteUrl = assertSafeGitRemoteUrl(stripGitUrlCredentials(remoteUrl));
   return withCleanTransportRepository(safeRemoteUrl, env, (git) =>
-    git.listRemote([kind === 'tags' ? '--tags' : '--heads', safeRemoteUrl, ref])
+    git.listRemote([
+      kind === 'tags' ? '--tags' : '--heads',
+      safeRemoteUrl,
+      ref,
+      ...(kind === 'tags' ? [`${ref}^{}`] : []),
+    ])
   );
 }
 
@@ -1271,7 +1562,15 @@ export async function createBranch(
   /** Remote that owns sourceBranch when it differs from repoPath's origin. */
   sourceRemoteUrl?: string,
   /** Canonical tenant-owned destination remote from the database. */
-  destinationRemoteUrl?: string
+  destinationRemoteUrl?: string,
+  /** Immutable commit selected by resolveGitRef; pins creation against ref movement. */
+  sourceSha?: string,
+  /** Separately bounded credentials for the selected source transport. */
+  sourceEnv: UserGitEnvironment | undefined = env,
+  /** Resolver identity: names (including hexadecimal branch names) are not kinds. */
+  resolvedSource?: Pick<ResolvedGitRef, 'kind' | 'remoteName'>,
+  /** Filesystem recovery must fail rather than delete a ref that appeared during I/O. */
+  preserveExistingBranch = false
 ): Promise<void> {
   console.log('🔍 createBranch called with:', {
     repoPath,
@@ -1285,6 +1584,7 @@ export async function createBranch(
     destinationRemoteUrl: destinationRemoteUrl
       ? redactGitUrlCredentials(destinationRemoteUrl)
       : destinationRemoteUrl,
+    sourceSha,
   });
 
   if (!repoPath) {
@@ -1323,6 +1623,9 @@ export async function createBranch(
   if (sourceBranch !== undefined) {
     await validateGitRef(sourceBranch);
   }
+  if (sourceSha !== undefined) {
+    await validateGitRef(sourceSha);
+  }
 
   const safeSourceRemoteUrl = sourceRemoteUrl
     ? assertSafeGitRemoteUrl(stripGitUrlCredentials(sourceRemoteUrl))
@@ -1338,8 +1641,8 @@ export async function createBranch(
   ) {
     throw new Error('Credential-bearing branch fetch requires destinationRemoteUrl');
   }
-  if (safeSourceRemoteUrl && (!createBranch || !sourceBranch)) {
-    throw new Error('sourceRemoteUrl requires createBranch=true and a sourceBranch');
+  if (safeSourceRemoteUrl && !sourceBranch) {
+    throw new Error('sourceRemoteUrl requires a sourceBranch');
   }
   if (
     safeSourceRemoteUrl &&
@@ -1350,7 +1653,6 @@ export async function createBranch(
 
   const { git } = createGit(repoPath);
 
-  let fetchSucceeded = false;
   let effectiveSourceBranch = sourceBranch;
   let temporarySourceRef: string | undefined;
 
@@ -1361,7 +1663,7 @@ export async function createBranch(
     const namespace = refType === 'tag' ? 'refs/tags' : 'refs/heads';
     temporarySourceRef = `refs/agor/base/${randomUUID()}`;
     try {
-      await transferRemoteRefs(repoPath, safeSourceRemoteUrl, env, [
+      await transferRemoteRefs(repoPath, safeSourceRemoteUrl, sourceEnv, [
         {
           remoteRef: `${namespace}/${sourceBranch}`,
           localRef: temporarySourceRef,
@@ -1397,37 +1699,7 @@ export async function createBranch(
         const fetchArgs = refType === 'tag' ? ['origin', '--tags'] : ['origin'];
         await git.fetch(fetchArgs);
       }
-      fetchSucceeded = true;
       console.log('✅ Fetched latest from origin');
-
-      // If not creating a new branch and this is a branch (not a tag), update local branch to match remote
-      // Tags don't need this update - they're immutable and don't have origin/ prefix
-      if (!createBranch && refType !== 'tag') {
-        try {
-          // Check if local branch exists
-          const branches = await git.branch();
-          const localBranchExists = branches.all.includes(ref);
-
-          if (localBranchExists) {
-            // Update local branch to match remote (if remote exists)
-            const remoteBranches = await git.branch(['-r']);
-            const remoteBranchExists = remoteBranches.all.includes(`origin/${ref}`);
-
-            if (remoteBranchExists) {
-              // Reset local branch to match remote.
-              // `--` separator not supported by `git branch`; ref has already
-              // been validated by validateGitRef above.
-              await git.raw(['branch', '-f', ref, `origin/${ref}`]);
-              console.log(`✅ Updated local ${ref} to match origin/${ref}`);
-            }
-          }
-        } catch (error) {
-          console.warn(
-            `⚠️  Failed to update local ${ref} branch:`,
-            error instanceof Error ? error.message : String(error)
-          );
-        }
-      }
     } catch (error) {
       console.warn(
         '⚠️  Failed to fetch from origin (will use local refs):',
@@ -1436,13 +1708,23 @@ export async function createBranch(
     }
   }
 
+  if (sourceSha) effectiveSourceBranch = sourceSha;
+
+  // Existing remote branches need a local branch identity, not a detached
+  // checkout of the remote-tracking ref. Never replace an existing local tip.
+  const attachNewLocalBranch =
+    !createBranch &&
+    sourceSha &&
+    resolvedSource?.kind === 'remote_branch' &&
+    !(await resolveCommitSha(git, `refs/heads/${ref}`));
+  const trackingRemote = attachNewLocalBranch ? resolvedSource?.remoteName : undefined;
+  const trackingName = sourceBranch ?? ref;
   const worktreeAddArgs = buildWorktreeAddArgs({
     branchPath,
     ref,
-    createBranch,
+    createBranch: createBranch || Boolean(attachNewLocalBranch),
     sourceBranch: effectiveSourceBranch,
     refType,
-    fetchSucceeded,
   });
 
   if (createBranch && sourceBranch && refType === 'tag') {
@@ -1450,8 +1732,38 @@ export async function createBranch(
   }
 
   try {
+    if (trackingRemote) {
+      // A remote name alone is not identity. Refuse to wire tracking to a mutable
+      // destination that no longer matches the source selected by the resolver.
+      const configuredUrl = await getRemoteUrl(repoPath, trackingRemote);
+      const selectedUrl = safeSourceRemoteUrl ?? safeDestinationRemoteUrl;
+      if (!configuredUrl || (selectedUrl && configuredUrl !== selectedUrl)) {
+        throw new Error(`Selected remote '${trackingRemote}' changed; retry source resolution.`);
+      }
+    }
     try {
       await git.raw(worktreeAddArgs);
+      if (sourceSha) {
+        const actualSha = (await createGit(branchPath).git.revparse(['HEAD'])).trim();
+        if (actualSha !== sourceSha) {
+          try {
+            await git.raw(['worktree', 'remove', '--force', branchPath]);
+          } catch {
+            // Preserve the authoritative ref-drift failure below.
+          }
+          throw new Error(
+            `Resolved ref '${sourceBranch ?? ref}' moved during worktree creation: expected ${sourceSha}, checked out ${actualSha}. Retry to resolve the new tip explicitly.`
+          );
+        }
+      }
+      if (trackingRemote && sourceSha) {
+        // Creating at the immutable SHA deliberately avoids Git's DWIM checkout,
+        // so restore the selected tracking relationship explicitly. The clean
+        // source fetch may only have populated our temporary namespace.
+        await git.raw(['update-ref', `refs/remotes/${trackingRemote}/${trackingName}`, sourceSha]);
+        await git.addConfig(`branch.${ref}.remote`, trackingRemote);
+        await git.addConfig(`branch.${ref}.merge`, `refs/heads/${trackingName}`);
+      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
 
@@ -1469,6 +1781,12 @@ export async function createBranch(
           throw new Error(
             `A branch named '${ref}' already exists and is in use by another branch. ` +
               `Please choose a different name.`
+          );
+        }
+
+        if (preserveExistingBranch) {
+          throw new Error(
+            `Local branch '${ref}' appeared during filesystem recovery; refusing to replace it. Retry recovery.`
           );
         }
 
@@ -1533,6 +1851,10 @@ export interface CreateBranchAsCloneOptions {
    * "feature off main" flow).
    */
   ref: string;
+  /** Clone all reachable refs, then check out {@link ref} detached (for a commit SHA). */
+  detached?: boolean;
+  /** Immutable commit selected by resolveGitRef; clone fails if the ref moved. */
+  expectedSha?: string;
   /**
    * Optional new branch to create after the clone, via
    * `git checkout -b <newBranchName>` against the cloned tip of {@link ref}.
@@ -1715,7 +2037,16 @@ export async function assertRemoteRefVisibleForClone(
 export async function createBranchAsClone(
   options: CreateBranchAsCloneOptions
 ): Promise<CreateBranchAsCloneResult> {
-  const { targetPath, ref, newBranchName, depth, referencePath, env } = options;
+  const {
+    targetPath,
+    ref,
+    newBranchName,
+    depth,
+    referencePath,
+    env,
+    detached = false,
+    expectedSha,
+  } = options;
   const remoteUrl = assertSafeGitRemoteUrl(stripGitUrlCredentials(options.remoteUrl));
   const originRemoteUrl = options.originRemoteUrl
     ? assertSafeGitRemoteUrl(stripGitUrlCredentials(options.originRemoteUrl))
@@ -1744,6 +2075,9 @@ export async function createBranchAsClone(
   await validateGitRef(ref);
   if (newBranchName !== undefined) {
     await validateGitRef(newBranchName);
+  }
+  if (expectedSha !== undefined) {
+    await validateGitRef(expectedSha);
   }
   if (depth !== undefined && (!Number.isInteger(depth) || depth <= 0)) {
     throw new Error(`Invalid clone depth: expected positive integer, got ${depth}`);
@@ -1806,9 +2140,9 @@ export async function createBranchAsClone(
   // `--reference <path>` (optional) borrows objects from a local base
   // clone via alternates; deliberately NOT paired with `--dissociate`
   // (see option doc above + design doc §5).
-  const cloneArgs: string[] = ['--branch', ref];
+  const cloneArgs: string[] = detached ? ['--no-checkout'] : ['--branch', ref];
   if (options.localHome) cloneArgs.push('--no-local');
-  if (singleBranch) cloneArgs.push('--single-branch');
+  if (singleBranch && !detached) cloneArgs.push('--single-branch');
   if (depth !== undefined) cloneArgs.push('--depth', String(depth));
   if (useReference && referencePath) cloneArgs.push('--reference', referencePath);
 
@@ -1826,18 +2160,35 @@ export async function createBranchAsClone(
   });
   await scrubGitConfigRemoteCredentials(targetPath);
 
+  if (detached) {
+    const { git: cloneGit } = createGit(targetPath);
+    await cloneGit.raw(
+      newBranchName ? ['checkout', '-b', newBranchName, ref] : ['checkout', '--detach', ref]
+    );
+  }
+
   // Optional post-clone fork: create the new branch off the cloned tip.
   // simple-git's `.checkoutLocalBranch` issues `git checkout -b <name>`.
   // Re-scope to the working tree (not the original `git` instance, which
   // wasn't bound to a baseDir).
-  let finalRef = ref;
-  if (newBranchName) {
+  let finalRef = detached && newBranchName ? newBranchName : ref;
+  if (newBranchName && !detached) {
     console.log(
       `[createBranchAsClone] Creating local branch '${newBranchName}' off cloned '${ref}'`
     );
     const { git: cloneGit } = createGit(targetPath);
     await cloneGit.checkoutLocalBranch(newBranchName);
     finalRef = newBranchName;
+  }
+
+  if (expectedSha) {
+    const { git: cloneGit } = createGit(targetPath);
+    const actualSha = (await cloneGit.revparse(['HEAD'])).trim();
+    if (actualSha !== expectedSha) {
+      throw new Error(
+        `Resolved ref '${ref}' moved during clone: expected ${expectedSha}, checked out ${actualSha}. Retry to resolve the new tip explicitly.`
+      );
+    }
   }
 
   // A template repository may own the base ref while the newly-created
@@ -1930,7 +2281,9 @@ export async function restoreBranchFilesystem(
   baseRemoteUrl?: string,
   baseRefType: 'branch' | 'tag' = 'branch',
   /** Canonical tenant-owned destination remote from the database. */
-  destinationRemoteUrl?: string
+  destinationRemoteUrl?: string,
+  /** Internal policy: only a trusted, admitted filesystem recovery may preserve a retained tip. */
+  preserveLocalRef = false
 ): Promise<RestoreBranchResult> {
   // Validate refs early — this function both passes them to createBranch
   // (which re-validates) and to ls-remote (which does not).
@@ -1952,6 +2305,21 @@ export async function restoreBranchFilesystem(
   }
   const { git } = createGit(repoPath);
 
+  // Ordinary restore keeps destination fast-forward/refusal semantics below.
+  // Recovery reattaches retained history before remote I/O, without resetting it.
+  if (preserveLocalRef && (await resolveCommitSha(git, `refs/heads/${ref}`))) {
+    try {
+      await createBranch(repoPath, branchPath, ref, false, false);
+      return { success: true, strategy: 'checkout' };
+    } catch (error) {
+      return {
+        success: false,
+        strategy: 'checkout',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   // Step 1: Fetch from remote
   try {
     if (safeDestinationRemoteUrl) {
@@ -1972,11 +2340,13 @@ export async function restoreBranchFilesystem(
   // Step 2: Check if branch exists on remote via ls-remote
   // Using ls-remote instead of local branch list to get authoritative remote state
   let branchExistsOnRemote = false;
+  let destinationSha: string | undefined;
   try {
     const lsRemoteOutput = safeDestinationRemoteUrl
       ? await listRemoteRef(safeDestinationRemoteUrl, `refs/heads/${ref}`, env, 'heads')
       : await git.listRemote(['--heads', 'origin', ref]);
-    branchExistsOnRemote = lsRemoteOutput.trim().length > 0;
+    destinationSha = parseLsRemoteSha(lsRemoteOutput);
+    branchExistsOnRemote = destinationSha !== undefined;
   } catch (error) {
     // A cached remote-tracking branch is still safe to restore while the
     // destination is temporarily unavailable. Without one, however, the
@@ -2006,6 +2376,32 @@ export async function restoreBranchFilesystem(
   // Step 3/4: Create branch with appropriate strategy
   try {
     if (branchExistsOnRemote) {
+      // Restore from the fetched destination tip. A stale local branch may
+      // fast-forward, but unpublished/divergent local work must not be discarded.
+      const fetchedSha = await resolveCommitSha(git, `refs/remotes/origin/${ref}`);
+      if (!fetchedSha || (destinationSha && destinationSha !== fetchedSha)) {
+        throw new Error(
+          `Destination branch '${ref}' changed or could not be fetched; retry restore.`
+        );
+      }
+      destinationSha = fetchedSha;
+      const localSha = await resolveCommitSha(git, `refs/heads/${ref}`);
+      if (preserveLocalRef && localSha) {
+        throw new Error(
+          `Local branch '${ref}' appeared during filesystem recovery; refusing to move it. Retry recovery.`
+        );
+      }
+      if (localSha && localSha !== destinationSha) {
+        try {
+          const ancestor = (await git.raw(['merge-base', localSha, destinationSha])).trim();
+          if (ancestor !== localSha) throw new Error('Not a fast-forward');
+        } catch {
+          throw new Error(
+            `Local branch '${ref}' diverges from the destination; refusing to discard local work.`
+          );
+        }
+        await git.raw(['branch', '-f', ref, destinationSha]);
+      }
       // Branch exists on remote — checkout it directly
       console.log(`[restoreBranch] Branch '${ref}' found on remote, checking out`);
       await createBranch(
@@ -2018,7 +2414,11 @@ export async function restoreBranchFilesystem(
         env,
         undefined,
         undefined,
-        safeDestinationRemoteUrl
+        safeDestinationRemoteUrl,
+        destinationSha,
+        env,
+        { kind: 'remote_branch', remoteName: 'origin' },
+        preserveLocalRef
       );
       return { success: true, strategy: 'checkout' };
     }
@@ -2035,7 +2435,11 @@ export async function restoreBranchFilesystem(
       env,
       baseRefType,
       baseRemoteUrl,
-      safeDestinationRemoteUrl
+      safeDestinationRemoteUrl,
+      undefined,
+      env,
+      undefined,
+      preserveLocalRef
     );
     return { success: true, strategy: 'create' };
   } catch (error) {
@@ -2386,12 +2790,40 @@ export async function removeBranchWorkspace(options: {
   const { branchPath, branchesRoot, repoPath, storageMode } = options;
   const target = await resolveManagedBranchDeletionPath(branchPath, branchesRoot);
   const { realpath } = await import('node:fs/promises');
-  // Require the authoritative repo to be available; canonicalize its root, not
-  // the victim (whose symlink descendants are rejected by the validator).
-  const repository = await realpath(repoPath);
-  if (repository === target || repository.startsWith(`${target}${sep}`))
-    throw new Error('Cannot delete the shared base repository');
+  // A clone is self-contained, so its base checkout may be absent from an
+  // external executor. Worktrees still require it to remove Git registration.
+  // Check both the declared location and a live canonical location before
+  // deleting: neither may point into the victim workspace.
+  const declaredRepository = resolve(repoPath);
+  const assertOutsideTarget = (candidate: string) => {
+    if (candidate === target || candidate.startsWith(`${target}${sep}`))
+      throw new Error('Cannot delete the shared base repository');
+  };
+  assertOutsideTarget(declaredRepository);
+  let repository: string | undefined;
+  try {
+    repository = await realpath(repoPath);
+  } catch (error) {
+    if (storageMode === 'worktree' || (error as NodeJS.ErrnoException).code !== 'ENOENT')
+      throw error;
+    // The checkout itself can be absent, but an existing ancestor could still
+    // be a symlink into the branch slated for removal.
+    let ancestor = dirname(declaredRepository);
+    for (;;) {
+      try {
+        assertOutsideTarget(await realpath(ancestor));
+        break;
+      } catch (ancestorError) {
+        if ((ancestorError as NodeJS.ErrnoException).code !== 'ENOENT') throw ancestorError;
+        const parent = dirname(ancestor);
+        if (parent === ancestor) throw ancestorError;
+        ancestor = parent;
+      }
+    }
+  }
+  if (repository) assertOutsideTarget(repository);
   if (storageMode === 'worktree') {
+    if (!repository) throw new Error('Shared base repository is unavailable');
     const registrations = await listGitWorktrees(repository);
     if (registrations.some((item) => resolve(item.path) === target)) {
       await removeGitWorktree(repository, target);

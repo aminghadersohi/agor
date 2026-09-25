@@ -1,4 +1,5 @@
 import { resolveExecutorBranch } from './branch-filesystem.js';
+import { validateExistingRestore } from './branch-restore-validation.js';
 /**
  * Git Command Handlers for Executor
  *
@@ -42,10 +43,12 @@ import {
   ensureGitRemoteUrl,
   getDefaultBranch,
   getRemoteUrl,
+  gitEnvironmentForRemote,
   isRemoteRefVisibleForClone,
   isValidGitRepo,
   redactGitUrlCredentials,
   removeBranchWorkspace,
+  resolveGitRef,
   restoreBranchFilesystem,
   scanGitConfigRemoteCredentials,
   scrubGitConfigRemoteCredentials,
@@ -876,6 +879,7 @@ export async function handleGitBranchAdd(
   let client: AgorClient | null = null;
   let materializationWritesSettled = false;
   let localHome = false;
+  let filesystemRecovery = false;
 
   try {
     // Connect to daemon
@@ -887,10 +891,24 @@ export async function handleGitBranchAdd(
     // user's delegated Feathers authority in this same executor.
     const repo = await client.service('repos').get(payload.params.repoId);
     const branchRecord = await resolveExecutorBranch(client, branchId);
-    if (branchRecord.filesystem_status !== 'creating')
+    if (
+      branchRecord.filesystem_status !== 'creating' ||
+      branchRecord.provisioning_attempt_id !== payload.params.provisioningAttemptId
+    )
       throw new Error('Branch materialization is not admitted');
     if (branchRecord.repo_id !== payload.params.repoId) {
       throw new Error(`Branch ${branchId} does not belong to repository ${payload.params.repoId}`);
+    }
+
+    // Recovery policy comes from the tenant-scoped, authorized row, not the
+    // caller's restoreMode hint. The admission check above binds this intent to
+    // the current provisioning attempt; ordinary remote restore stays unchanged.
+    filesystemRecovery = branchRecord.provisioning_operation === 'restore';
+    if (
+      filesystemRecovery &&
+      (!payload.params.restoreMode || !payload.params.provisioningAttemptId)
+    ) {
+      throw new Error('Filesystem recovery requires its admitted restore attempt');
     }
 
     // Fetch per-user git credentials via Feathers RPC
@@ -921,8 +939,12 @@ export async function handleGitBranchAdd(
       );
     }
     localHome = getTeammateConfig(branchRecord)?.localHome === true;
+    const existingRestore = filesystemRecovery
+      ? await validateExistingRestore(branchRecord, repo)
+      : false;
     if (
       localHome &&
+      !existingRestore &&
       (restoreMode ||
         storageMode !== 'clone' ||
         cloneDepth != null ||
@@ -950,9 +972,66 @@ export async function handleGitBranchAdd(
     // by the daemon safety net). If a checkout for exactly this ref is already
     // present, adopt it instead of re-running materialization — `git worktree
     // add` / `git clone` would otherwise fail on the already-attached ref.
-    const alreadyMaterialized = payload.params.allowExistingCheckout
-      ? await isBranchAlreadyMaterialized(branchPath, branch, branchId)
-      : false;
+    const alreadyMaterialized =
+      existingRestore ||
+      (payload.params.allowExistingCheckout
+        ? await isBranchAlreadyMaterialized(branchPath, branch, branchId)
+        : false);
+
+    // Resolve the user-controlled starting point once, before storage-mode
+    // dispatch. Worktree and clone materializers consume this concrete result
+    // and must not independently guess or qualify the ref.
+    const requestedStartingRef = shouldCreateBranch ? sourceBranch : branch;
+    // A local home is sourced from the canonical template, never cached refs
+    // or remotes belonging to an existing repository workspace.
+    const sourceRemoteUrl = localHome ? TEAMMATE_FRAMEWORK_REPO_URL : baseRemoteUrl;
+    const resolutionPath =
+      storageMode === 'clone' && (!repoPath || !existsSync(repoPath)) ? undefined : repoPath;
+    const resolveStartingRef = () => {
+      // Persisted source identity is a locator, not credential authority. Resolve
+      // it without the mutable cache, and bound credentials independently just as
+      // we do for the eventual clone transport. Older rows retain the legacy path.
+      if (restoreMode && branchRecord.base_source) {
+        const source = branchRecord.base_source;
+        return resolveGitRef(undefined, source.name, {
+          refType: refType || 'branch',
+          remote: { url: source.remote_url },
+          remoteOnly: true,
+          env: gitEnvironmentForRemote(source.remote_url, [remoteUrl, sourceRemoteUrl], env),
+        });
+      }
+      return resolveGitRef(resolutionPath, requestedStartingRef, {
+        refType: refType || 'branch',
+        ...(sourceRemoteUrl
+          ? { remote: { url: sourceRemoteUrl }, remoteOnly: true }
+          : remoteUrl
+            ? { remote: { url: remoteUrl, name: 'origin' } }
+            : {}),
+        env,
+      });
+    };
+    let resolvedStartingRef =
+      restoreMode || alreadyMaterialized ? undefined : await resolveStartingRef();
+
+    if (resolvedStartingRef) {
+      await client.service('branches').patch(branchId, {
+        ...attemptFence,
+        base_ref: resolvedStartingRef.ref,
+        base_sha: resolvedStartingRef.sha,
+        ...(resolvedStartingRef.remoteUrl
+          ? {
+              base_source: {
+                name: resolvedStartingRef.name,
+                remote_url: stripGitUrlCredentials(resolvedStartingRef.remoteUrl),
+              },
+            }
+          : {}),
+      });
+      console.log(
+        `[git.branch.add] Resolved '${requestedStartingRef}' to ${resolvedStartingRef.ref} @ ${resolvedStartingRef.sha}`
+      );
+    }
+
     if (alreadyMaterialized) {
       console.log(
         `[git.branch.add] Existing checkout for '${branch}' already present at ${branchPath} — adopting it (idempotent retry)`
@@ -973,7 +1052,7 @@ export async function handleGitBranchAdd(
       // helper fork off the cloned tip. When checking out an existing
       // branch, just clone the ref directly. The helper owns both flows so
       // the executor handler doesn't have to orchestrate post-clone git ops.
-      let cloneRef = branch;
+      let cloneRef = resolvedStartingRef?.name ?? branch;
       let cloneRemoteUrl = localHome ? TEAMMATE_FRAMEWORK_REPO_URL : remoteUrl;
       let newBranchName: string | undefined;
 
@@ -988,10 +1067,30 @@ export async function handleGitBranchAdd(
           : false;
 
         if (!restoreFromDestination) {
-          cloneRef = sourceBranch || branch;
-          cloneRemoteUrl = localHome ? TEAMMATE_FRAMEWORK_REPO_URL : baseRemoteUrl || remoteUrl;
+          resolvedStartingRef ??= await resolveStartingRef();
+          cloneRef = resolvedStartingRef?.name ?? sourceBranch ?? branch;
+          cloneRemoteUrl = localHome
+            ? TEAMMATE_FRAMEWORK_REPO_URL
+            : (resolvedStartingRef?.remoteUrl ??
+              (resolvedStartingRef?.kind === 'local_branch' ||
+              resolvedStartingRef?.kind === 'commit' ||
+              (resolvedStartingRef?.kind === 'tag' && !resolvedStartingRef.remoteUrl)
+                ? repoPath
+                : baseRemoteUrl || remoteUrl));
           newBranchName = branch !== cloneRef ? branch : undefined;
         }
+      } else if (resolvedStartingRef) {
+        cloneRemoteUrl = localHome
+          ? TEAMMATE_FRAMEWORK_REPO_URL
+          : (resolvedStartingRef.remoteUrl ??
+            (resolvedStartingRef.kind === 'local_branch' ||
+            resolvedStartingRef.kind === 'commit' ||
+            resolvedStartingRef.kind === 'tag'
+              ? repoPath
+              : remoteUrl));
+      }
+      if (!cloneRemoteUrl) {
+        throw new Error(`Cannot materialize resolved ref '${requestedStartingRef}': no source URL`);
       }
       console.log(
         `[git.branch.add] Using createBranchAsClone (sourceRemote=${redactGitUrlCredentials(cloneRemoteUrl)}, ` +
@@ -1006,12 +1105,14 @@ export async function handleGitBranchAdd(
         targetPath: branchPath,
         ref: cloneRef,
         ...(newBranchName ? { newBranchName } : {}),
+        ...(resolvedStartingRef?.kind === 'commit' ? { detached: true } : {}),
+        ...(resolvedStartingRef ? { expectedSha: resolvedStartingRef.sha } : {}),
         depth: cloneDepth,
         // Pass the daemon's hint through unconditionally. The helper does
         // the existsSync check on the executor's filesystem and falls back
         // gracefully if the path isn't actually mounted here.
         ...(referencePath ? { referencePath } : {}),
-        env,
+        env: gitEnvironmentForRemote(cloneRemoteUrl, [remoteUrl, sourceRemoteUrl], env),
       });
     } else if (restoreMode && sourceBranch) {
       // Restore mode: smart branch detection — checks if branch exists on remote,
@@ -1028,7 +1129,8 @@ export async function handleGitBranchAdd(
         env,
         baseRemoteUrl,
         refType || 'branch',
-        remoteUrl
+        remoteUrl,
+        filesystemRecovery
       );
       if (!result.success) {
         throw new Error(`restoreBranchFilesystem failed: ${result.error}`);
@@ -1038,14 +1140,30 @@ export async function handleGitBranchAdd(
       await createBranch(
         repoPath,
         branchPath,
-        branch,
+        shouldCreateBranch
+          ? branch
+          : resolvedStartingRef?.kind === 'remote_branch' ||
+              resolvedStartingRef?.kind === 'local_branch'
+            ? resolvedStartingRef.name
+            : (resolvedStartingRef?.ref ?? branch),
         shouldCreateBranch,
         true, // pullLatest
-        sourceBranch,
+        resolvedStartingRef?.remoteUrl
+          ? resolvedStartingRef.name
+          : shouldCreateBranch
+            ? resolvedStartingRef?.ref
+            : undefined,
         env,
         refType,
-        baseRemoteUrl,
-        remoteUrl
+        resolvedStartingRef?.remoteUrl ?? baseRemoteUrl,
+        remoteUrl,
+        resolvedStartingRef?.sha,
+        gitEnvironmentForRemote(
+          resolvedStartingRef?.remoteUrl ?? baseRemoteUrl ?? '',
+          [remoteUrl, sourceRemoteUrl],
+          env
+        ) ?? {},
+        resolvedStartingRef
       );
     }
 
@@ -1053,9 +1171,11 @@ export async function handleGitBranchAdd(
 
     // Durable workspace ownership prevents a retry/restore from adopting an
     // archived or unrelated checkout which merely happens to use the same ref.
-    const { git: materializedGit } = createGit(branchPath);
-    const markerPath = (await materializedGit.revparse(['--git-path', 'agor-branch-id'])).trim();
-    await writeFile(resolve(branchPath, markerPath), `${branchId}\n`, { mode: 0o600 });
+    if (!existingRestore) {
+      const { git: materializedGit } = createGit(branchPath);
+      const markerPath = (await materializedGit.revparse(['--git-path', 'agor-branch-id'])).trim();
+      await writeFile(resolve(branchPath, markerPath), `${branchId}\n`, { mode: 0o600 });
+    }
 
     // Persist only filesystem outcome directly. Executable environment
     // rendering belongs to the daemon's existing authorization/validation
@@ -1106,7 +1226,13 @@ export async function handleGitBranchAdd(
     // the word "branch", which also appears in the non-empty-directory message
     // and would otherwise be misreported as a ref collision.
     let userMessage = errorMessage;
-    if (errorMessage.includes('is in use by another')) {
+    if (
+      payload.params.restoreMode &&
+      /is in use by another|already registered|already checked out/.test(errorMessage)
+    ) {
+      userMessage =
+        'Recovery cannot attach this checkout: Git registration is stale or the ref is occupied. Keep files and refs intact. An operator must verify the target storage and backups in the executor storage context before target-scoped repair; do not run global worktree repair or prune.';
+    } else if (errorMessage.includes('is in use by another')) {
       userMessage = `A branch named '${resolvedBranchName || 'unknown'}' already exists and is in use by another branch. Please choose a different name.`;
     } else if (errorMessage.includes('already exists') && errorMessage.includes('not empty')) {
       userMessage = `Directory '${resolvedBranchPath || resolvedBranchName || 'unknown'}' already exists and is not empty. An archived or partially-cleaned branch may still occupy this path.`;
