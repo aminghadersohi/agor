@@ -108,6 +108,13 @@ It also idempotently restores main's KB receipt storage: the draft retirement
 and earlier reconciliation watermarks (`1789344000006` / `1789344000007`) could
 skip `0112_kb_import_receipts`. Main's published journal entries remain unchanged.
 The original callback SQL files remain historical fixtures, not journal entries.
+The immediate predecessor `7475feacb` used `1790129000214`, skipping SQLite's
+`0115_user_api_key_source` and PostgreSQL's equal-watermark
+`0115_api_key_host_tenant_discovery`. The same `0117` also repairs those: the
+PostgreSQL policy is guarded in SQL, while `migrate-sqlite.ts` guards the marked
+SQLite `ADD COLUMN` (SQLite has no `ADD COLUMN IF NOT EXISTS`). That runner keeps
+DDL and the original migration hash/watermark in one libsql migration batch,
+including when main's source-column migration runs earlier in the batch.
 
 ### Avoid `CHECK` constraints for enum-like columns on SQLite
 

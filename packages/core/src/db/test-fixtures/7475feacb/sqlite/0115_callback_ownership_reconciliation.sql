@@ -69,10 +69,3 @@ CREATE TABLE IF NOT EXISTS "kb_import_receipts" (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "kb_import_receipts_identity_unique" ON "kb_import_receipts" ("owner_user_id", "bundle", "slug", "entry_key");
-
---> statement-breakpoint
--- 7475feacb used 1790129000214, skipping main's source column at ...212.
--- SQLite's migrator guards this ADD against an existing or earlier-batched
--- column; SQLite itself has no ADD COLUMN IF NOT EXISTS syntax.
--- agor:sqlite-add-user-api-key-source-if-missing
-ALTER TABLE `user_api_keys` ADD COLUMN `source` text DEFAULT 'manual' NOT NULL;

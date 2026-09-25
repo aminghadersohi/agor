@@ -33,6 +33,7 @@ import {
   isSQLiteDatabase,
   runDatabaseTransaction,
 } from './database-wrapper';
+import { migrateSQLiteWithCallbackReconciliation } from './migrate-sqlite';
 import { sanitizeDbError } from './sanitize-error';
 import { boards } from './schema';
 import type { DatabaseDialect } from './schema-factory';
@@ -653,7 +654,11 @@ export async function runMigrations(
     // 3. Runs them in order within transaction
     // 4. Updates tracking table
     if (isSQLiteDatabase(db)) {
-      await migrateSQLite(db, { migrationsFolder });
+      if (status.pending.includes('0117_callback_ownership_reconciliation')) {
+        await migrateSQLiteWithCallbackReconciliation(db, migrationsFolder);
+      } else {
+        await migrateSQLite(db, { migrationsFolder });
+      }
     } else if (isPostgresDatabase(db)) {
       await migratePostgres(db, { migrationsFolder });
     } else {

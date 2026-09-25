@@ -80,7 +80,7 @@ describe('Postgres migrations', () => {
       expect(classifyMigrationWatermark(journal.entries, mainTip.when).pending).toEqual([
         '0117_callback_ownership_reconciliation',
       ]);
-      for (const watermark of [1789344000005, 1789344000006, 1789344000007]) {
+      for (const watermark of [1789344000005, 1789344000006, 1789344000007, 1790129000214]) {
         expect(classifyMigrationWatermark(journal.entries, watermark).pending).toContain(
           '0117_callback_ownership_reconciliation'
         );

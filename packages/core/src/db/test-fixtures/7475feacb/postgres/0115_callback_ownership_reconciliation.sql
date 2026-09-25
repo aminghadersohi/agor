@@ -108,24 +108,3 @@ DROP POLICY IF EXISTS "tenant_isolation_kb_import_receipts" ON "kb_import_receip
 CREATE POLICY "tenant_isolation_kb_import_receipts" ON "kb_import_receipts"
 USING (COALESCE(current_setting('agor.system_scope', true), '') = '' AND "tenant_id" = NULLIF(current_setting('agor.tenant_id', true), ''))
 WITH CHECK (COALESCE(current_setting('agor.system_scope', true), '') = '' AND "tenant_id" = NULLIF(current_setting('agor.tenant_id', true), ''));
-
---> statement-breakpoint
--- 7475feacb used 1790129000214, equal to main's host-discovery watermark.
--- Restore exactly main's SELECT-only routing capability if it was skipped.
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'app_variables'
-      AND policyname = 'api_key_host_tenant_discovery'
-  ) THEN
-    CREATE POLICY "api_key_host_tenant_discovery"
-      ON "app_variables"
-      FOR SELECT
-      USING (
-        current_setting('agor.system_scope', true) = 'api_key_host_tenant_discovery'
-        AND "namespace" = 'tenant.routing'
-        AND "key" = 'public_url'
-      );
-  END IF;
-END $$;
