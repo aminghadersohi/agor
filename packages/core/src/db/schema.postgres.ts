@@ -3897,3 +3897,46 @@ export const kbImportReceipts = pgTable(
     ),
   })
 );
+
+/**
+ * Declared front-desk session per `(branch, scope, slot)`. Retired rows are
+ * rotation history; the partial unique index admits one occupying row.
+ */
+export const branchFrontDeskSessions = pgTable(
+  'branch_front_desk_sessions',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    id: varchar('id', { length: 36 }).primaryKey(),
+    branch_id: varchar('branch_id', { length: 36 }).notNull(),
+    scope: text('scope').notNull(),
+    slot: integer('slot').notNull(),
+    session_id: varchar('session_id', { length: 36 }).notNull(),
+    status: text('status', { enum: ['active', 'retiring', 'retired', 'failed'] }).notNull(),
+    promoted_at: t.timestamp('promoted_at').notNull(),
+    promoted_by: varchar('promoted_by', { length: 36 }).references(() => users.user_id, {
+      onDelete: 'set null',
+    }),
+    retired_at: t.timestamp('retired_at'),
+    retired_reason: text('retired_reason', {
+      enum: ['context', 'dead', 'manual', 'archived', 'replaced'],
+    }),
+    metadata: t.json<Record<string, unknown>>('metadata'),
+  },
+  (table) => ({
+    tenantIdx: index('branch_front_desk_sessions_tenant_id_idx').on(table.tenant_id),
+    occupiedSlotUnique: uniqueIndex('uniq_front_desk_slot')
+      .on(table.tenant_id, table.branch_id, table.scope, table.slot)
+      .where(sql`${table.status} IN ('active', 'retiring')`),
+    sessionIdx: index('idx_front_desk_session').on(table.tenant_id, table.session_id),
+    branchFk: foreignKey({
+      columns: [table.tenant_id, table.branch_id],
+      foreignColumns: [branches.tenant_id, branches.branch_id],
+      name: 'branch_front_desk_sessions_tenant_branch_fk',
+    }).onDelete('cascade'),
+    sessionFk: foreignKey({
+      columns: [table.tenant_id, table.session_id],
+      foreignColumns: [sessions.tenant_id, sessions.session_id],
+      name: 'branch_front_desk_sessions_tenant_session_fk',
+    }).onDelete('cascade'),
+  })
+);
