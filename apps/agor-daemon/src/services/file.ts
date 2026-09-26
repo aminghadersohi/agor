@@ -7,12 +7,13 @@ import {
   runWithTenantDatabaseScope,
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
-import { type Application, NotAuthenticated } from '@agor/core/feathers';
+import { type Application, BadRequest, NotAuthenticated } from '@agor/core/feathers';
 import type {
   AuthenticatedParams,
   FileDetail,
   FileListItem,
   FilePatchData,
+  GitFileStatusSource,
   Id,
   QueryParams,
   RBACParams,
@@ -31,7 +32,17 @@ import { resolveDelegatedExecutionHomeKey } from '../utils/executor-delegated-ho
 import { getDaemonUrl, requestExecutor } from '../utils/spawn-executor.js';
 import { issueExecutorCommandToken } from './session-token-service.js';
 
-export type FileParams = QueryParams<{ branch_id?: string }> & Partial<AuthenticatedParams>;
+export type FileParams = QueryParams<{
+  branch_id?: string;
+  git_status_source?: GitFileStatusSource;
+}> &
+  Partial<AuthenticatedParams>;
+
+function resolveGitStatusSource(value: unknown): GitFileStatusSource {
+  if (value === undefined) return 'combined';
+  if (value === 'combined' || value === 'workingTree' || value === 'staged') return value;
+  throw new BadRequest('git_status_source must be combined, workingTree, or staged');
+}
 
 function extractFiles(data: unknown): FileListItem[] {
   if (!data || typeof data !== 'object') return [];
@@ -82,6 +93,7 @@ export class FileService
     ensureMinimumRole(params, ROLES.MEMBER, 'read file');
     const branchId = params?.query?.branch_id;
     if (!branchId) throw new Error('branch_id query parameter is required');
+    const gitStatusSource = resolveGitStatusSource(params?.query?.git_status_source);
     const resolved = await this.resolveBranchRead(branchId, params);
 
     const result = await this.runCommand(
@@ -94,6 +106,7 @@ export class FileService
       resolved.sandboxMounts,
       {
         filePath: id.toString(),
+        gitStatusSource,
       }
     );
     if (!result.success) {
