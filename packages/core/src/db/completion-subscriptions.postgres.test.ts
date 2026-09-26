@@ -20,6 +20,19 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       await (db as Database & { $client: { end: () => Promise<void> } }).$client.end();
     });
 
+    // Fork: upstream journals 0117 last at 1790129000216. This fork journals it
+    // directly after its own 0113 (1790129000215) and below the fork-band
+    // re-stamps of upstream's 0115/0116, so deleting only the 216 row replays
+    // nothing. Rewind to just below the profile slot instead (the replayed
+    // slice is conditional) and undo 0116's plain ADD COLUMN first.
+    async function rewindToForkCallbackReconciliation() {
+      await executeRaw(
+        db,
+        sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at >= 1790129000214`
+      );
+      await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
+    }
+
     async function policies() {
       return rawRows(
         await executeRaw(
@@ -45,18 +58,19 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
 
     it('adds tenant-isolated storage after current main migrations', async () => {
       await executeRaw(db, sql`DROP TABLE completion_subscriptions`);
-      await executeRaw(
-        db,
-        sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at = 1790129000216`
-      );
+      await rewindToForkCallbackReconciliation();
       await initializeDatabase(db);
       expect(await policies()).toContain('tenant_isolation_completion_subscriptions');
       expect(await policies()).not.toContain('completion_callback_discovery');
       expect(await policies()).not.toContain('completion_callback_task_discovery');
     });
 
+    // Fork: skipped. These replay upstream's draft-retirement watermarks in
+    // upstream's journal band; on this fork, fork migrations sit above them and
+    // 0112_kb_import_receipts is journalled at 1790000000003, so no fork
+    // history can skip KB receipts this way.
     for (const watermark of [1789344000006, 1789344000007]) {
-      it(`restores tenant-isolated KB receipts skipped by draft watermark ${watermark}`, async () => {
+      it.skip(`restores tenant-isolated KB receipts skipped by draft watermark ${watermark}`, async () => {
         await executeRaw(db, sql`DROP TABLE kb_import_receipts`);
         await executeRaw(db, sql`ALTER TABLE messages DROP COLUMN mcp_slack_connect_due_at`);
         await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
@@ -132,10 +146,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
         .split('--> statement-breakpoint')) {
         await executeRaw(db, sql.raw(statement));
       }
-      await executeRaw(
-        db,
-        sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at = (SELECT MAX(created_at) FROM drizzle.__drizzle_migrations)`
-      );
+      await rewindToForkCallbackReconciliation();
       await runWithTenantDatabaseScope(db, 'fixture-a', async (scoped) => {
         await executeRaw(
           scoped,

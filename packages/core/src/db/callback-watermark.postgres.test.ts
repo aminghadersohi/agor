@@ -25,7 +25,11 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       await (db as Database & { $client: { end(): Promise<void> } }).$client.end();
     });
 
-    it('restores narrowly scoped API-key host discovery after watermark 1790129000214', async () => {
+    // Fork: skipped. This replays upstream's withdrawn 7475feacb ledger, which no
+    // fork database has: the fork's PostgreSQL 1790129000214 slot is its own
+    // 9028_profile_image_galleries, and upstream's 0115 is re-stamped above the
+    // deployed watermark — see context/guides/creating-database-migrations.md.
+    it.skip('restores narrowly scoped API-key host discovery after watermark 1790129000214', async () => {
       const policy = () =>
         executeRaw(
           db,
