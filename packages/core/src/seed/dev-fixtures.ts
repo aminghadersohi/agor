@@ -12,6 +12,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import type { BranchID, UUID } from '@agor/core/types';
+import { cloneRepo, createBranch } from '@agor/git';
 import { getBranchesDir, loadConfigSync } from '../config/config-manager';
 import { resolveBootstrapTenantId } from '../config/multitenancy';
 import {
@@ -20,7 +21,6 @@ import {
   BranchRepository,
   RepoRepository,
 } from '../db/repositories';
-import { cloneRepo, createBranch } from '../git/exec';
 import { generateId } from '../lib/ids';
 
 export interface SeedOptions {
