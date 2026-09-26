@@ -77,4 +77,18 @@ describe('MCP tool prompt provenance', () => {
   it.each(callSites)('$id marks the prompt system-authored, not human', ({ call }) => {
     expect(call).toMatch(/metadata: \{[^}]*system_authored: true/);
   });
+
+  /**
+   * The server-stamped provenance envelope rides on `ctx.baseServiceParams`
+   * rather than being requested per call site, so that a tool cannot deliver
+   * agent text unattributed by forgetting to opt in. That only holds while
+   * every call site passes those params through - directly, or through a
+   * helper that carries the stamp forward. A call site that assembles its own
+   * params object would silently reopen the gap.
+   */
+  it.each(callSites)('$id passes the request params through, keeping the stamp', ({ call }) => {
+    expect(call).toMatch(
+      /\.\.\.(ctx\.baseServiceParams|callbackParams|provenanceParams|withPromptProvenanceTool\(|freshMcpServiceParams\()/
+    );
+  });
 });

@@ -53,6 +53,7 @@ import { requireActiveAgenticTool } from '../../utils/agentic-tool-runtime.js';
 import { ensureCanPromptTargetSession } from '../../utils/branch-authorization.js';
 import { interruptCorrectionTaskId } from '../../utils/durable-task-id.js';
 import { emitServiceEvent } from '../../utils/emit-service-event.js';
+import { withPromptProvenanceTool } from '../../utils/prompt-provenance.js';
 import {
   resolveBoardId,
   resolveBranchId,
@@ -869,7 +870,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           metadata: { system_authored: true },
         },
         {
-          ...ctx.baseServiceParams,
+          ...withPromptProvenanceTool(ctx.baseServiceParams, 'agor_sessions_spawn'),
           provider: undefined,
           route: { id: childSession.session_id },
         }
@@ -1059,16 +1060,24 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           )
         );
       }
+      // Name the delivering tool on the inherited server-stamped origin. The
+      // stamp itself rides on `ctx.baseServiceParams`, so forgetting this line
+      // would only blur a label, never drop the block.
+      const provenanceParams = withPromptProvenanceTool(
+        ctx.baseServiceParams,
+        'agor_sessions_prompt',
+        mode
+      );
       const callbackParams = args.callback
         ? {
-            ...ctx.baseServiceParams,
+            ...provenanceParams,
             _taskCompletionCallback: {
               target_session_id: ctx.sessionId!,
               requested_from_session_id: ctx.sessionId!,
               requested_by_user_id: ctx.userId,
             },
           }
-        : ctx.baseServiceParams;
+        : provenanceParams;
 
       if (mode === 'continue') {
         // The prompt route returns the Task entity directly. Whether it ran
@@ -1301,7 +1310,11 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           metadata: { system_authored: true },
         },
         {
-          ...ctx.baseServiceParams,
+          ...withPromptProvenanceTool(
+            ctx.baseServiceParams,
+            'agor_session_relationships_report',
+            args.destination
+          ),
           provider: undefined,
           route: { id: resolution.destination_session_id },
         }
@@ -2193,7 +2206,11 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             stream: true,
             metadata: { system_authored: true },
           },
-          { ...ctx.baseServiceParams, provider: undefined, route: { id: session.session_id } }
+          {
+            ...withPromptProvenanceTool(ctx.baseServiceParams, 'agor_sessions_create'),
+            provider: undefined,
+            route: { id: session.session_id },
+          }
         );
       }
 
