@@ -416,9 +416,13 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority_updated_by`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN power_priority`);
       // This fixture reuses the database upgraded by the preceding test. Remove
-      // later Slack recovery, consent-attribution, and cleanup policy additions as well as
-      // rewinding the ledger: the old head did not have these future columns.
+      // later Slack recovery, Slack connect, consent-attribution, and cleanup policy
+      // additions as well as rewinding the ledger: the old head did not have these
+      // future columns. Every migration landing after OLD_HEAD_WATERMARK that adds a
+      // column has to be undone here, or its replay collides with the column the
+      // upgraded database already carries.
       await executeRaw(db, sql`ALTER TABLE tasks DROP COLUMN mcp_slack_recovery_due_at`);
+      await executeRaw(db, sql`ALTER TABLE messages DROP COLUMN mcp_slack_connect_due_at`);
       await executeRaw(db, sql`ALTER TABLE user_mcp_oauth_tokens DROP COLUMN granted_by_user_id`);
       await executeRaw(db, sql`DROP POLICY IF EXISTS branch_maintenance_discovery ON branches`);
       await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN deletion_status`);
@@ -429,6 +433,9 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN color_override`);
       // Rewind 0112's schema too: replaying its ledger must recreate the table.
       await executeRaw(db, sql`DROP TABLE kb_import_receipts`);
+      // 9028's front-desk table references the Session tenant identity index
+      // dropped below, and its replay must recreate the table.
+      await executeRaw(db, sql`DROP TABLE branch_front_desk_sessions`);
 
       // This fixture rewinds the journal to the previous fork watermark. Keep
       // the physical schema aligned with that watermark so the later Session
