@@ -4795,6 +4795,26 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
+  // Long route: the launch file is read by an executor, so tenant identity is
+  // armed without a request-long transaction and the service opens a short
+  // unit per database access (see ReposService.importFromLaunchJson).
+  registerLongAuthenticatedRoute(
+    app,
+    '/repos/:id/import-launch-json',
+    {
+      async create(data: { branch_id: string }, params: RouteParams) {
+        const id = params.route?.id;
+        if (!id) throw new Error('Repo ID required');
+        if (!data?.branch_id) throw new Error('branch_id is required');
+        return reposService.importFromLaunchJson(id, data, params);
+      },
+    },
+    {
+      create: { role: ROLES.ADMIN, action: 'import environment config from launch.json' },
+    },
+    requireAuth
+  );
+
   // ============================================================================
   // User API Keys routes
   // ============================================================================
