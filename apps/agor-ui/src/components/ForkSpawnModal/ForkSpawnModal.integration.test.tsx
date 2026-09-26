@@ -22,6 +22,14 @@ vi.mock('../AutocompleteTextarea', () => ({
 }));
 vi.mock('../SessionEnvVarsSelector', () => ({ SessionEnvVarsSelector: () => null }));
 
+// Fork delta: every spawn carries the child auto-archive default and the
+// parent's callback delivery (sessions without a callback_config deliver direct).
+const FORK_SPAWN_DEFAULTS = {
+  autoArchive: 'after_completion',
+  autoArchiveAfterSeconds: 3600,
+  callbackDelivery: 'direct',
+};
+
 const parent = {
   session_id: 'parent',
   title: 'Codex parent',
@@ -208,8 +216,11 @@ describe('spawn effective configuration through real AgenticConfigChipRow', () =
   it('detaches a sparse source by editing a chip and derives from the NEW mode', async () => {
     const { submit } = mount(networkParent, sparse);
     await selectOption(await screen.findByLabelText('Configuration'), 'My default');
+    // Relative, not absolute: the fork's spawn form renders its own
+    // auto-archive/callback-delivery select beside the configuration select.
+    const comboboxes = screen.getAllByRole('combobox').length;
     fireEvent.click(screen.getByTestId('permission-chip'));
-    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(2));
+    await waitFor(() => expect(screen.getAllByRole('combobox')).toHaveLength(comboboxes + 1));
     await selectOption(screen.getAllByRole('combobox').at(-1)!, 'Untrusted');
     await screen.findByRole('switch');
     await expectAdvanced('read-only', 'untrusted', false);
@@ -245,6 +256,10 @@ describe('spawn effective configuration through real AgenticConfigChipRow', () =
     await screen.findByRole('switch');
     fireEvent.click(screen.getByText('Same as parent'));
     fireEvent.click(screen.getByRole('button', { name: 'Spawn Session' }));
-    await waitFor(() => expect(submit).toHaveBeenCalledWith({ prompt: 'Delegate' }));
+    // The fork's spawn defaults (child auto-archive, parent callback delivery)
+    // are not agentic configuration overrides.
+    await waitFor(() =>
+      expect(submit).toHaveBeenCalledWith({ prompt: 'Delegate', ...FORK_SPAWN_DEFAULTS })
+    );
   });
 });
