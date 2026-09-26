@@ -27,7 +27,7 @@ vi.mock('../tenant-scope.js', () => ({
   ) => work(ctx.db),
 }));
 
-const { registerProfileImageTools } = await import('./profile-images.js');
+const { registerProfileImageTools } = await import('./users.js');
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<unknown>;
 
