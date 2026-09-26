@@ -78,6 +78,9 @@ function migrationTenantTables(): string[] {
   const frontDeskMigration = readRepoFile(
     'packages/core/drizzle/postgres/9028_branch_front_desk_sessions.sql'
   );
+  const profileImagesMigration = readRepoFile(
+    'packages/core/drizzle/postgres/9029_profile_image_galleries.sql'
+  );
   const retiredTables = retiredTenantTables();
   return [
     ...new Set(
@@ -101,6 +104,7 @@ function migrationTenantTables(): string[] {
         ...zoneWorkflowMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...sessionMemoryMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...frontDeskMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...profileImagesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
       ]
         .map((m) => m[1])
         .filter((table) => !retiredTables.has(table))
@@ -128,6 +132,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/9018_session_memory_reminders.sql'),
     readRepoFile('packages/core/drizzle/postgres/0112_kb_import_receipts.sql'),
     readRepoFile('packages/core/drizzle/postgres/9028_branch_front_desk_sessions.sql'),
+    readRepoFile('packages/core/drizzle/postgres/9029_profile_image_galleries.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
   return [
