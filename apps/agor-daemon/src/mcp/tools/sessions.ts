@@ -78,6 +78,7 @@ import {
   resolveTeammateName,
   resolveTeammateSession,
   type TeammateCandidate,
+  type TeammateSessionVia,
   teammateAmbiguousPayload,
   teammateNotFoundPayload,
 } from './teammate-addressing.js';
@@ -864,7 +865,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         ),
         teammate: mcpOptionalNonBlankString(
           'teammate',
-          'Teammate to address by name instead of session ID — either the branch slug ("front-desk") or the teammate display name ("Front Desk"), matched case-insensitively. Resolves to that teammate\'s most recently active non-archived session, so the reply has their current working context. Errors listing candidates if the name is ambiguous; never guesses. Call agor_teammates_list to see addressable names. Provide exactly one of sessionId or teammate.'
+          'Teammate to address by name instead of session ID — either the branch slug ("front-desk") or the teammate display name ("Front Desk"), matched case-insensitively. Resolves to that teammate\'s declared front-desk session when one is pinned (agor_teammates_front_desk_set), otherwise to its most recently active non-archived session, so the reply has their current working context. Errors listing candidates if the name is ambiguous; never guesses. Call agor_teammates_list to see addressable names. Provide exactly one of sessionId or teammate.'
         ),
         prompt: mcpRequiredString('prompt', 'The prompt/task to execute'),
         mode: z
@@ -936,6 +937,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
 
       let sessionId: SessionID;
       let addressedTeammate: TeammateCandidate | undefined;
+      let addressedVia: TeammateSessionVia | undefined;
 
       if (args.teammate) {
         const resolution = await resolveTeammateName(ctx, args.teammate);
@@ -975,6 +977,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
 
         sessionId = target.session.session_id;
         addressedTeammate = describeTeammateBranch(target.branch);
+        addressedVia = target.via;
       } else {
         sessionId = await resolveSessionId(ctx, args.sessionId!);
       }
@@ -1005,6 +1008,9 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
               teammate: addressedTeammate,
               session_id: sessionId,
               mode,
+              // Only a pinned front desk changes the echo; without one the
+              // payload stays exactly what recency addressing always returned.
+              ...(addressedVia === 'front_desk' ? { session_source: 'front_desk' as const } : {}),
             },
           }
         : {};

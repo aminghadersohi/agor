@@ -70,6 +70,7 @@ import type { McpContext } from '../server.js';
 import { coerceString, sessionContextRequiredResult, textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
 import { assertValidVariant } from './_environment-helpers.js';
+import { registerFrontDeskTools } from './front-desk.js';
 
 const BRANCH_NAME_PATTERN = /^[a-z0-9-]+$/;
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;
@@ -1870,6 +1871,9 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     },
     listTeammatesHandler
   );
+
+  // agor_teammates_front_desk_set / agor_teammates_front_desk_clear
+  registerFrontDeskTools(server, ctx);
 
   // Tool: agor_branches_retry_provisioning
   // Explicit, non-destructive repair for a branch whose filesystem provisioning

@@ -115,6 +115,12 @@ Through Agor's [MCP tools](/guide/internal-mcp), teammates can:
 
 This makes teammates natural orchestrators. They can break down complex tasks, distribute work across multiple branches, and synthesize results.
 
+### Talking to another teammate
+
+An agent can prompt another teammate by name — `agor_sessions_prompt { teammate: "Front Desk" }` — instead of by session ID. The name matches the branch slug or display name, case-insensitively; an ambiguous name is refused rather than guessed. Addressing by name defaults to `btw` mode, so the answer comes from a fork that inherits the teammate's current context without interrupting it.
+
+By default the name reaches the teammate's most recently active session. A Branch Manager can instead pin a **front desk** with `agor_teammates_front_desk_set`, and name addressing then always reaches that session, even while a newer session or an in-flight `btw` fork exists in the branch. If the pinned session is archived, deleted, or its executor dies, the next address falls back to the most recent session automatically. `agor_teammates_front_desk_clear` removes the pin. Pinning never moves, archives, or changes any session.
+
 ### Learning and adaptation
 
 As your teammate works with you, it naturally improves:
