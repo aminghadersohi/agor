@@ -87,6 +87,8 @@ import type {
   BoardComment,
   BoardCommentReposition,
   BranchArchiveOrDeleteOptions,
+  CreateUserApiKeyRequest,
+  CurrentUserIdentity,
   HookContext,
   MCPMemberPolicy,
   MCPMemberPolicySetting,
@@ -126,9 +128,11 @@ import {
   isBranchArchiveOrDeleteOptions,
   isCanonicalFullUuid,
   isTaskPendingDispatch,
+  isUserApiKeySource,
   MCP_MEMBER_POLICIES,
   MCP_MEMBER_POLICY_CHANGED_EVENT,
   MessageRole,
+  normalizeRole,
   ROLES,
   SESSION_POWER_PRIORITIES,
   SessionStatus,
@@ -224,6 +228,7 @@ import {
   type SchedulerService,
 } from './services/scheduler.js';
 import { runSessionInitializationStages } from './services/session-initialization.js';
+import { createSpawnPromptService } from './services/session-spawn-prompt';
 import {
   lockTenantAuthorizationFence,
   resolveCurrentTenantAuthorityActor,
@@ -3045,52 +3050,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   registerAuthenticatedRoute(
     app,
     '/sessions/:id/spawn-prompt',
-    {
-      async create(
-        data: {
-          userPrompt?: string;
-          /**
-           * Permission mode for the *parent* session's prompt. The spawn
-           * config's `permissionMode` (child's intended mode) is rendered into
-           * the meta-prompt; this field governs how the parent prompt is sent.
-           */
-          parentPermissionMode?: import('@agor/core/types').PermissionMode;
-          // Remaining fields are spawn-subsession context (incl. the *child*
-          // session's permissionMode/modelConfig/etc) — see
-          // `SpawnSubsessionContext` in @agor/core for the shape.
-          [key: string]: unknown;
-        },
-        params: RouteParams
-      ) {
-        const id = params.route?.id;
-        if (!id) throw new BadRequest('Session ID required');
-        if (typeof data?.userPrompt !== 'string') {
-          throw new BadRequest('userPrompt (string) is required');
-        }
-
-        const { renderSpawnSubsessionPrompt } = await import(
-          '@agor/core/templates/spawn-subsession-template'
-        );
-        // Render the meta-prompt against the child-session config (the rest
-        // of `data`). `parentPermissionMode` is intentionally excluded — it's
-        // the parent's send-mode, not part of the template.
-        const { parentPermissionMode, ...spawnContext } = data;
-        const metaPrompt = renderSpawnSubsessionPrompt(
-          spawnContext as unknown as import('@agor/core/templates/spawn-subsession-template').SpawnSubsessionContext
-        );
-
-        const promptService = app.service('/sessions/:id/prompt');
-        return promptService.create(
-          {
-            prompt: metaPrompt,
-            permissionMode: parentPermissionMode,
-            messageSource: 'agor',
-            metadata: { system_authored: true },
-          },
-          { ...params, provider: undefined, route: { id } }
-        );
-      },
-    },
+    createSpawnPromptService(app),
     {
       create: { role: ROLES.MEMBER, action: 'send spawn-subsession prompts' },
     },
@@ -4831,12 +4791,14 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
 
   registerAuthenticatedRoute(
     app,
+    // Literal on purpose: the realtime-publish and tenant-classification source
+    // scans read registered paths from this file (USER_API_KEYS_SERVICE_PATH).
     '/api/v1/user/api-keys',
     {
       async find(params: AuthenticatedParams) {
         return userApiKeysService.find(params);
       },
-      async create(data: { name: string }, params: AuthenticatedParams) {
+      async create(data: CreateUserApiKeyRequest, params: AuthenticatedParams) {
         return userApiKeysService.create(data, params);
       },
       async patch(id: string, data: { name?: string }, params: AuthenticatedParams) {
@@ -4854,6 +4816,43 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       patch: { role: ROLES.MEMBER, action: 'update API keys' },
       remove: { role: ROLES.MEMBER, action: 'delete API keys' },
     },
+    requireAuth
+  );
+
+  // Credential self-check for non-browser clients (`agor login --api-key`).
+  // Returns only the caller's own identity and the tenant the request was
+  // authenticated in, so a raw key can be validated without exchanging it for
+  // refresh-capable browser tokens.
+  registerAuthenticatedRoute(
+    app,
+    '/api/v1/user/me', // USER_IDENTITY_SERVICE_PATH; literal for the source scans
+    {
+      async find(params: AuthenticatedParams): Promise<CurrentUserIdentity> {
+        const user = params.user;
+        if (!user) throw new NotAuthenticated('Authentication required');
+        const authentication = params.authentication as
+          | { strategy?: string; api_key_id?: unknown; api_key_source?: unknown }
+          | undefined;
+        return {
+          user_id: user.user_id as UserID,
+          email: user.email,
+          name: (user as { name?: string }).name,
+          role: normalizeRole(user.role),
+          tenant_id: params.tenant?.tenant_id,
+          auth_strategy: authentication?.strategy,
+          ...(authentication?.strategy === 'api-key' &&
+          typeof authentication.api_key_id === 'string'
+            ? {
+                api_key_id: authentication.api_key_id,
+                api_key_source: isUserApiKeySource(authentication.api_key_source)
+                  ? authentication.api_key_source
+                  : 'manual',
+              }
+            : {}),
+        };
+      },
+    },
+    { find: { role: ROLES.VIEWER, action: 'read own identity' } },
     requireAuth
   );
 
@@ -5059,7 +5058,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   );
 
   // Explicit, non-destructive repair for a branch whose filesystem provisioning
-  // landed in 'failed'. A stranded 'creating' attempt is not retryable. Shares
+  // landed in 'failed', or an active stale archive outcome. Creating is not retryable. Shares
   // the exact same service implementation the MCP tool and UI use, so REST, MCP
   // and UI can never drift. A live 'creating' attempt conflicts, 'ready' no-ops;
   // the transition is an atomic claim. Returns the (possibly-updated) branch row.
@@ -5082,11 +5081,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       // in the service (not here) is what keeps REST, MCP and the UI on one
       // check.
       //
-      // Identity split (intentional): the caller must hold branch control, but
-      // the executor runs as `branch.created_by`, not as the caller. That
-      // mirrors the create path (the directory must be materialized as its
-      // owner to be usable) and re-runs provisioning the owner already
-      // initiated, so it grants no capability the owner had not exercised.
+      // Recovery uses the authorized caller's execution identity and credentials.
       create: { role: ROLES.MEMBER, action: 'retry branch provisioning' },
     },
     requireAuth
@@ -5166,6 +5161,28 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   app.service('/branches/:id/clean').hooks({
     around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
     before: { create: [requireAuth, requireMinimumRole(ROLES.MEMBER, 'clean branches')] },
+  });
+
+  // Explicit, metadata-only retirement: same tenant/write boundary as cleanup.
+  app.use('/branches/:id/retire-teammate', {
+    async create(data: unknown, params: RouteParams) {
+      if (
+        !params.route?.id ||
+        !data ||
+        typeof data !== 'object' ||
+        Array.isArray(data) ||
+        Object.keys(data).length
+      )
+        throw new BadRequest('Retirement accepts an empty body and branch route ID only');
+      return branchesService.retireTeammate(
+        params.route.id as import('@agor/core/types').BranchID,
+        params
+      );
+    },
+  });
+  app.service('/branches/:id/retire-teammate').hooks({
+    around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
+    before: { create: [requireAuth, requireMinimumRole(ROLES.MEMBER, 'retire teammates')] },
   });
 
   // Archive/delete branch

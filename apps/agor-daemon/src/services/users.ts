@@ -48,6 +48,7 @@ import {
   isNull,
   isPostgresDatabaseHandle,
   jsonExtract,
+  jsonSetString,
   runWithTenantDatabaseTransaction,
   select,
   sessionEnvSelections,
@@ -1780,12 +1781,17 @@ export class UsersService {
    * that would immediately resolve back to null.
    */
   async setPrimaryTeammate(
-    data: { branchId: string; expectedUserId: UserID },
+    data: { branchId: string | null; expectedUserId: UserID },
     params?: Params
   ): Promise<Branch | null> {
     const userId = this.requirePrimaryTeammateMember(params);
     if (data?.expectedUserId !== userId) {
       throw new Forbidden(USER_AUTHORITY_DENIED);
+    }
+    if (data.branchId === null) {
+      await new UserPrimaryTeammateRepository(this.db).clearPrimaryTeammate(userId);
+      await this.emitUserPreferencePatched(userId, params);
+      return null;
     }
     const branchId = data?.branchId as BranchID | undefined;
     if (!branchId) {
@@ -1889,7 +1895,7 @@ export class UsersService {
     const updatedRow = await update(this.db, users)
       .set({
         updated_at: new Date(),
-        data: { ...currentData, primary_agentic_tool: tool },
+        data: jsonSetString(this.db, users.data, 'primary_agentic_tool', tool),
       })
       .where(
         and(
