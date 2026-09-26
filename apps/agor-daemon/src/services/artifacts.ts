@@ -2762,13 +2762,22 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
   async resolveBindingTarget(
     artifactId: ArtifactID,
     kind: 'action' | 'data',
-    bindingId: string
+    bindingId: string,
+    viewerId: UserID
   ): Promise<{
     artifact: Artifact;
     action?: ArtifactActionBinding;
     data?: ArtifactDataBinding;
   }> {
+    // Bound repositories: each read opens its own tenant unit when the route
+    // holds none (the identity-only action route) and joins the request unit
+    // when it does (the scoped data route).
     const artifact = await this.get(artifactId);
+    // Same visibility rule as the payload, console and sandpack routes: a
+    // caller who cannot load the artifact cannot drive its bindings either.
+    if (!this.isVisibleTo(artifact, viewerId)) {
+      throw new NotFound(`Artifact ${artifactId} not found`);
+    }
     const config = sanitizeArtifactInteractionConfig(artifact.agor_runtime?.interactions);
     if (!config) throw new NotFound(`Artifact ${artifactId} declares no bindings`);
 
@@ -2817,6 +2826,12 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
    * forwarded too so the delegated service establishes its own scope.
    */
   private forwardCallerParams(params: AuthenticatedParams): AuthenticatedParams {
+    // Bindings exist for the viewing browser tab. Without an external provider
+    // the delegated hooks would treat the call as trusted-internal and skip
+    // every RBAC check, so refuse rather than forward such a call.
+    if (!params?.provider || !params.user?.user_id) {
+      throw new NotAuthenticated('Artifact bindings require an authenticated external caller');
+    }
     return {
       user: params.user,
       provider: params.provider,
@@ -2844,9 +2859,14 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     effect: ArtifactActionEffect['kind'];
     result: unknown;
   }> {
-    const { action } = await this.resolveBindingTarget(artifactId, 'action', actionId);
-    if (!action) throw new NotFound(`Artifact ${artifactId} does not declare action "${actionId}"`);
     const forwarded = this.forwardCallerParams(params);
+    const { action } = await this.resolveBindingTarget(
+      artifactId,
+      'action',
+      actionId,
+      forwarded.user?.user_id as UserID
+    );
+    if (!action) throw new NotFound(`Artifact ${artifactId} does not declare action "${actionId}"`);
     const effect = action.effect;
 
     let result: unknown;
@@ -2876,10 +2896,15 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     dataId: string,
     params: AuthenticatedParams
   ): Promise<ArtifactDataResult> {
-    const { data } = await this.resolveBindingTarget(artifactId, 'data', dataId);
+    const forwarded = this.forwardCallerParams(params);
+    const { data } = await this.resolveBindingTarget(
+      artifactId,
+      'data',
+      dataId,
+      forwarded.user?.user_id as UserID
+    );
     if (!data)
       throw new NotFound(`Artifact ${artifactId} does not declare data binding "${dataId}"`);
-    const forwarded = this.forwardCallerParams(params);
     const source = data.source;
 
     if (source.kind === 'schedule_status') {
