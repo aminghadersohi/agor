@@ -83,6 +83,11 @@ export const BRANCH_DELETION_DATA_STEPS: readonly DataStep[] = [
   del('session_memories', 'memory_id', 'session_id IN (SELECT id FROM os)'),
   del('session_reminders', 'reminder_id', 'session_id IN (SELECT id FROM os)'),
   del(
+    'branch_front_desk_sessions',
+    'id',
+    'branch_id IN (SELECT id FROM ob) OR session_id IN (SELECT id FROM os)'
+  ),
+  del(
     'session_relationships',
     'relationship_id',
     'source_session_id IN (SELECT id FROM os) OR target_session_id IN (SELECT id FROM os)'

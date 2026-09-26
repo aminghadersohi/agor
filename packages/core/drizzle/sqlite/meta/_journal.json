@@ -834,6 +834,13 @@
       "when": 1790129000212,
       "tag": "0114_mcp_slack_connect_due",
       "breakpoints": true
+    },
+    {
+      "idx": 9033,
+      "version": "6",
+      "when": 1790129000213,
+      "tag": "9028_branch_front_desk_sessions",
+      "breakpoints": true
     }
   ]
 }

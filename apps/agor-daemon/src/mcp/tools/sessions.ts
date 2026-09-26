@@ -61,6 +61,7 @@ import {
   mcpListLimit,
   mcpOffset,
   mcpOptionalId,
+  mcpOptionalNonBlankString,
   mcpOptionalNonEmptyString,
   mcpOptionalPositiveInt,
   mcpOptionalString,
@@ -72,6 +73,15 @@ import type { McpContext } from '../server.js';
 import { sessionContextRequiredResult, structuredResult, textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
 import { listAttachedMcpServers } from './mcp-servers.js';
+import {
+  describeTeammateBranch,
+  resolveTeammateName,
+  resolveTeammateSession,
+  type TeammateCandidate,
+  type TeammateSessionVia,
+  teammateAmbiguousPayload,
+  teammateNotFoundPayload,
+} from './teammate-addressing.js';
 
 /**
  * Shared Zod schema for specifying a model override at session-create / spawn /
@@ -846,18 +856,23 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_prompt',
     {
       description:
-        'Prompt an existing session to continue work. Supports four modes: continue (append to conversation), fork (branch at decision point), subsession (delegate to child agent), or btw (ephemeral fork — ask a side question without disrupting the target session, even if running). Configuration is inherited from parent session or user defaults. For urgent information that invalidates active work: capture the original active task ID before any queue changes, then use mode=continue to enqueue updated instructions while the child is active; inspect/re-read agor_tasks_list with status=queued, cancel obsolete pending work with agor_tasks_cancel_queued, and move the update to the front with agor_tasks_reorder_queued using expectedTaskIds. ONLY THEN call agor_sessions_stop with expectedTaskId set to that original active task ID and a reason: stop preserves/drains the queue, so stopping first risks dispatching stale work. The update is a next turn after verified termination, not in-place injection or guaranteed instantaneous delivery. Accepted/pending stop is not confirmed termination. If the original finishes and the update starts, expectedTaskId protects the update: on condition_changed re-read and reassess, never fall back to an unconditional stop. These separate calls are not atomic; on conflicts or unexpected dispatch/queue changes re-read and reassess. Existing running-task edits are preserved, not rolled back.',
+        "Prompt an existing session to continue work. Address the target either by `sessionId`, or by `teammate` name to reach a teammate's current warm session without knowing its ID. Supports four modes: continue (append to conversation), fork (branch at decision point), subsession (delegate to child agent), or btw (ephemeral fork — ask a side question without disrupting the target session, even if running). Addressing by `teammate` defaults to btw, so you get an answer that knows what the teammate is currently working on without interrupting it. Configuration is inherited from parent session or user defaults. For urgent information that invalidates active work: capture the original active task ID before any queue changes, then use mode=continue to enqueue updated instructions while the child is active; inspect/re-read agor_tasks_list with status=queued, cancel obsolete pending work with agor_tasks_cancel_queued, and move the update to the front with agor_tasks_reorder_queued using expectedTaskIds. ONLY THEN call agor_sessions_stop with expectedTaskId set to that original active task ID and a reason: stop preserves/drains the queue, so stopping first risks dispatching stale work. The update is a next turn after verified termination, not in-place injection or guaranteed instantaneous delivery. Accepted/pending stop is not confirmed termination. If the original finishes and the update starts, expectedTaskId protects the update: on condition_changed re-read and reassess, never fall back to an unconditional stop. These separate calls are not atomic; on conflicts or unexpected dispatch/queue changes re-read and reassess. Existing running-task edits are preserved, not rolled back.",
       inputSchema: z.object({
-        sessionId: mcpRequiredId(
+        sessionId: mcpOptionalId(
           'sessionId',
           'Session',
-          'Session ID to prompt (UUIDv7 or short ID)'
+          'Session ID to prompt (UUIDv7 or short ID). Provide exactly one of sessionId or teammate.'
+        ),
+        teammate: mcpOptionalNonBlankString(
+          'teammate',
+          'Teammate to address by name instead of session ID — either the branch slug ("front-desk") or the teammate display name ("Front Desk"), matched case-insensitively. Resolves to that teammate\'s declared front-desk session when one is pinned (agor_teammates_front_desk_set), otherwise to its most recently active non-archived session, so the reply has their current working context. Errors listing candidates if the name is ambiguous; never guesses. Call agor_teammates_list to see addressable names. Provide exactly one of sessionId or teammate.'
         ),
         prompt: mcpRequiredString('prompt', 'The prompt/task to execute'),
         mode: z
           .enum(['continue', 'fork', 'subsession', 'btw'])
+          .optional()
           .describe(
-            'How to route the work: continue (add to existing session), fork (create sibling session), subsession (create child session), btw (ephemeral fork — works even on running sessions, auto-callbacks result to caller, auto-archives when done)'
+            'How to route the work: continue (add to existing session), fork (create sibling session), subsession (create child session), btw (ephemeral fork — works even on running sessions, auto-callbacks result to caller, auto-archives when done). Required with sessionId; defaults to btw when addressing by teammate name.'
           ),
         agenticTool: z
           .enum(AGENTIC_TOOL_NAMES)
@@ -896,8 +911,110 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
       }),
     },
     async (args) => {
-      const mode = args.mode;
-      const sessionId = await resolveSessionId(ctx, args.sessionId);
+      // Addressing: exactly one of sessionId / teammate. Requiring the choice
+      // to be explicit keeps a caller that fat-fingers one of them from
+      // silently delivering their message to the other's target.
+      if (args.sessionId && args.teammate) {
+        return {
+          ...textResult({
+            error: 'Provide exactly one of sessionId or teammate, not both.',
+            how_to_fix:
+              'Use teammate to address a teammate by name, or sessionId to address one specific session.',
+          }),
+          isError: true,
+        };
+      }
+      if (!args.sessionId && !args.teammate) {
+        return {
+          ...textResult({
+            error: 'Provide exactly one of sessionId or teammate.',
+            how_to_fix:
+              'Pass teammate: "<name>" to reach a teammate by name (call agor_teammates_list for addressable names), or sessionId: "<id>" for one specific session.',
+          }),
+          isError: true,
+        };
+      }
+
+      let sessionId: SessionID;
+      let addressedTeammate: TeammateCandidate | undefined;
+      let addressedVia: TeammateSessionVia | undefined;
+
+      if (args.teammate) {
+        const resolution = await resolveTeammateName(ctx, args.teammate);
+        if (resolution.outcome === 'ambiguous') {
+          return {
+            ...textResult(teammateAmbiguousPayload(args.teammate, resolution)),
+            isError: true,
+          };
+        }
+        if (resolution.outcome === 'not_found') {
+          return {
+            ...textResult(teammateNotFoundPayload(args.teammate, resolution)),
+            isError: true,
+          };
+        }
+
+        const target = await resolveTeammateSession(ctx, resolution.branch);
+        if (target.outcome === 'no_session') {
+          // Deliberately not auto-creating one. A teammate with no session has
+          // no warm context to inherit, so any session made here would start
+          // cold — exactly the outcome name addressing exists to avoid — and
+          // the caller would have no signal that the teammate answering them
+          // has no idea what it was doing. Hand back the branch so the caller
+          // can cold-start on purpose, with its own choice of agent.
+          return {
+            ...textResult({
+              error: `Teammate "${args.teammate}" has no active session to talk to.`,
+              needs_session: true,
+              branch_id: target.branch.branch_id,
+              teammate: describeTeammateBranch(target.branch),
+              how_to_fix:
+                'Call agor_sessions_create with this branchId and an agenticTool to start one. Note that a new session starts cold: it will not know what this teammate was previously working on.',
+            }),
+            isError: true,
+          };
+        }
+
+        sessionId = target.session.session_id;
+        addressedTeammate = describeTeammateBranch(target.branch);
+        addressedVia = target.via;
+      } else {
+        sessionId = await resolveSessionId(ctx, args.sessionId!);
+      }
+
+      // btw is the default only for name addressing: it inherits the target's
+      // warm context, works while the target is busy, and auto-archives — the
+      // behavior a caller means by "ask <teammate> a question". sessionId
+      // callers keep today's contract, where mode is required and explicit.
+      const mode = args.mode ?? (args.teammate ? ('btw' as const) : undefined);
+      if (!mode) {
+        return {
+          ...textResult({
+            error: 'mode is required when addressing a session by sessionId.',
+            how_to_fix:
+              "Pass mode: one of 'continue', 'fork', 'subsession', or 'btw'. (mode defaults to 'btw' only when addressing by teammate name.)",
+          }),
+          isError: true,
+        };
+      }
+
+      // Echo who a name actually resolved to. The caller asked for "Front
+      // Desk" and got back a task ID; without this they cannot tell which
+      // teammate or session received their message.
+      const addressedEcho = addressedTeammate
+        ? {
+            addressed: {
+              resolved_by: 'teammate_name' as const,
+              teammate: addressedTeammate,
+              session_id: sessionId,
+              mode,
+              // Only a pinned front desk changes the echo; without one the
+              // payload stays exactly what recency addressing always returned.
+              ...(addressedVia === 'front_desk' ? { session_source: 'front_desk' as const } : {}),
+            },
+          }
+        : {};
+
       if (args.callback && !ctx.sessionId) return sessionContextRequiredResult();
       if (args.callback) {
         await runWithMcpTenantDatabaseScope(ctx, (db) =>
@@ -936,6 +1053,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           return textResult({
             success: true,
             queued: true,
+            ...addressedEcho,
             taskId: task.task_id,
             queue_position: task.queue_position,
             ...(compaction
@@ -961,6 +1079,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         }
         return textResult({
           success: true,
+          ...addressedEcho,
           taskId: task.task_id,
           status: task.status,
           note: 'Prompt added to existing session and execution started.',
@@ -1036,6 +1155,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             : 'Forked session created and prompt execution started.';
 
         return textResult({
+          ...addressedEcho,
           session: redactSessionForMcp(updatedSession),
           taskId: task.task_id,
           status: task.status,
