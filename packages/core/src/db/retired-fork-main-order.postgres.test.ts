@@ -9,6 +9,8 @@ const { from, retired } = RETIRED_FORK_MAIN_ORDER.postgresql;
 const REPLAYED = [
   '9028_profile_image_galleries',
   '0113_callback_ownership_reconciliation',
+  // Upstream's reconciliation, journalled directly after 0113 on this fork.
+  '0117_callback_ownership_reconciliation',
   '9030_branch_front_desk_sessions',
 ];
 // Upstream migrations this fork journals above the deployed tail. Neither
