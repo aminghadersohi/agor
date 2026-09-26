@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   AgenticToolInvokePayloadSchema,
+  BranchFilesReadPayloadSchema,
   EnvironmentLifecyclePayloadSchema,
   EnvironmentLogsPayloadSchema,
   ExecutorPayloadSchema,
@@ -24,6 +25,36 @@ import {
   parseExecutorPayload,
   ZellijAttachPayloadSchema,
 } from './payload-types.js';
+
+describe('BranchFilesReadPayloadSchema', () => {
+  const payload = {
+    command: 'branch.files.read',
+    sessionToken: 'jwt-token-here',
+    params: {
+      branchId: '550e8400-e29b-41d4-a716-446655440000',
+      filePath: 'src/example.ts',
+    },
+  };
+
+  it('accepts a staged source-control preview', () => {
+    expect(
+      BranchFilesReadPayloadSchema.parse({
+        ...payload,
+        params: { ...payload.params, gitStatusSource: 'staged' },
+      }).params.gitStatusSource
+    ).toBe('staged');
+  });
+
+  it('defaults to the combined preview and rejects unknown snapshots', () => {
+    expect(BranchFilesReadPayloadSchema.parse(payload).params.gitStatusSource).toBe('combined');
+    expect(() =>
+      BranchFilesReadPayloadSchema.parse({
+        ...payload,
+        params: { ...payload.params, gitStatusSource: 'unknown' },
+      })
+    ).toThrow();
+  });
+});
 
 describe('PromptPayloadSchema', () => {
   it('should parse valid prompt payload', () => {
@@ -723,6 +754,7 @@ describe('getSupportedCommands', () => {
     expect(commands).toContain('branch.files.list');
     expect(commands).toContain('branch.files.browse');
     expect(commands).toContain('branch.files.read');
+    expect(commands).toContain('branch.files.write');
     expect(commands).toContain('branch.filesystem.status');
     expect(commands).toContain('branch.artifact.publish');
     expect(commands).toContain('branch.artifact.land');
@@ -744,6 +776,6 @@ describe('getSupportedCommands', () => {
     expect(commands).toContain('claude.auth-file');
     expect(commands).toContain('branch.clean');
     expect(commands).toContain('branch.archive');
-    expect(commands.length).toBe(31);
+    expect(commands.length).toBe(32);
   });
 });

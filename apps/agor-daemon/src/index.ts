@@ -96,6 +96,7 @@ import { LOCAL_AUTHORIZATION_INVALIDATION_EVENT } from './realtime/routing.js';
 import { registerHooks } from './register-hooks.js';
 import { registerRoutes } from './register-routes.js';
 import { registerServices } from './register-services.js';
+import { createMCPOAuthCallbackRoute } from './services/mcp-oauth-callback-route.js';
 import { loadBuildInfo } from './setup/build-info.js';
 import { createDynamicCompressionMiddleware } from './setup/compression.js';
 import { buildCorsConfig, isSandpackOrigin } from './setup/cors.js';
@@ -118,6 +119,7 @@ import { startOpenSourceTelemetryUsageSummaryInterval } from './utils/open-sourc
 import { assertRealtimePublishPolicyCoverage } from './utils/realtime-publish-policy.js';
 import { resolveSandboxProtectedDataRoots } from './utils/sandbox-context.js';
 import { configureDaemonUrl, configureExecutor } from './utils/spawn-executor.js';
+import { assertTenantServiceClassification } from './utils/tenant-service-classification.js';
 import { configureUploadStagingStoreFromConfig } from './utils/upload-staging.js';
 import { registerAllWidgets } from './widgets/index.js';
 
@@ -713,22 +715,10 @@ async function startDaemonWithOwnedMetrics(
     }
   }
 
-  // OAuth callback middleware stub — handler is wired by registerServices()
-  const appRecord = app as unknown as Record<string, unknown>;
-  app.use('/mcp-servers/oauth-callback', ((
-    req: express.Request,
-    res: express.Response,
-    next: express.NextFunction
-  ) => {
-    const handler = appRecord.oauthCallbackHandler as
-      | ((req: express.Request, res: express.Response) => void)
-      | null;
-    if (req.method === 'GET' && handler) {
-      handler(req, res);
-    } else {
-      next();
-    }
-  }) as never);
+  // Browser OAuth callbacks must be mounted before Feathers REST. The handler
+  // itself is installed after service registration below.
+  const mcpOAuthCallbackRoute = createMCPOAuthCallbackRoute();
+  app.use('/mcp-servers/oauth-callback', mcpOAuthCallbackRoute.middleware as never);
 
   // Compress dynamic REST/API responses after static file serving. The filter
   // deliberately skips streaming/event-stream routes.
@@ -939,6 +929,7 @@ async function startDaemonWithOwnedMetrics(
       deployment,
       mcpOAuthCallbackUrl,
     });
+    mcpOAuthCallbackRoute.setHandler(services.oauthCallbackHandler);
 
     // --------------------------------------------------------------------------
     // Phase 2: Register hooks
@@ -1001,6 +992,18 @@ async function startDaemonWithOwnedMetrics(
     // not request data.
     // --------------------------------------------------------------------------
     assertRealtimePublishPolicyCoverage(app);
+
+    // --------------------------------------------------------------------------
+    // Phase 3.6: Every registered service must also have declared WHERE its
+    // tenant database scope is armed — `scoped`, `identity-only`, or a narrowly
+    // reviewed `system`. One defect class (an unclassified route reaching a free
+    // function from identity-only context, the guard error laundered into a
+    // generic refusal) has shipped five times; declaring the policy at
+    // registration is what stops a new service from reintroducing it. Services
+    // that predate the mechanism are baselined, and that baseline may only
+    // shrink. Deterministic for the same reason as the assertion above.
+    // --------------------------------------------------------------------------
+    assertTenantServiceClassification(app);
 
     // --------------------------------------------------------------------------
     // Phase 4: Startup (orphan cleanup, health, scheduler, listen, shutdown)
