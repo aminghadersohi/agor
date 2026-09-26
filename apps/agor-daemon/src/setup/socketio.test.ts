@@ -744,6 +744,9 @@ describe('Socket.IO transport ceiling', () => {
         threshold: 1024,
         serverNoContextTakeover: true,
         clientNoContextTakeover: true,
+        serverMaxWindowBits: 13,
+        clientMaxWindowBits: 13,
+        zlibDeflateOptions: { memLevel: 7 },
       },
     });
   });

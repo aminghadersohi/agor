@@ -231,6 +231,24 @@ describe('SessionSettingsModal configuration', { timeout: 10_000 }, () => {
       expect(onUpdate.mock.calls[0][1]).not.toHaveProperty('custom_context');
     });
 
+    it('unlocks the field with the row context when the full record cannot load', async () => {
+      const get = vi.fn().mockRejectedValue(new Error('offline'));
+      render(
+        <SessionSettingsModal
+          open
+          onClose={vi.fn()}
+          session={leanSession}
+          client={{ service: () => ({ get }) } as unknown as AgorClient}
+          currentUser={null}
+        />
+      );
+      fireEvent.click(screen.getByText('Advanced'));
+      const field = (await screen.findByTestId('custom-context')) as HTMLTextAreaElement;
+
+      await waitFor(() => expect(field.readOnly).toBe(false));
+      expect(JSON.parse(field.value)).toEqual({ teamName: 'Backend' });
+    });
+
     it('edits the full record, read-only until it loads', async () => {
       const onUpdate = vi.fn();
       let resolve: (session: Session) => void = () => {};

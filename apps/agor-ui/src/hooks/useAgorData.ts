@@ -774,9 +774,12 @@ export function useAgorData(
             : null;
         let openedTranscriptReady: Promise<void> | null = null;
         if (openedSessionId) {
-          releaseOpenedTranscriptPrefetch();
+          // Retain before releasing any earlier prefetch: for the same session
+          // the shared handle stays warm instead of dropping to zero refs.
+          const previous = openedTranscriptPrefetchRef.current;
           const prefetch = prefetchOpenedTranscript(client, openedSessionId);
           openedTranscriptPrefetchRef.current = prefetch;
+          previous?.release();
           openedTranscriptReady = prefetch.ready;
         }
 
@@ -1208,7 +1211,6 @@ export function useAgorData(
       directSessionId,
       enabled,
       refetchOAuthDurableState,
-      releaseOpenedTranscriptPrefetch,
     ]
   );
 

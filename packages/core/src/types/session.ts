@@ -784,6 +784,8 @@ export const LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS = [
 /**
  * Project a session row for a lean list. Returns the same row when there is
  * nothing to omit; otherwise a shallow copy with a trimmed `custom_context`.
+ * The copy keeps every own property descriptor, including non-enumerable ones
+ * such as the hidden `tenant_id` the daemon's tenant after-hook checks.
  */
 export function toLeanSessionListRow<T extends Pick<Session, 'custom_context'>>(session: T): T {
   const context = session.custom_context;
@@ -792,7 +794,12 @@ export function toLeanSessionListRow<T extends Pick<Session, 'custom_context'>>(
   }
   const lean: Record<string, unknown> = { ...context };
   for (const key of LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS) delete lean[key];
-  return { ...session, custom_context: lean };
+  const copy = Object.create(
+    Object.getPrototypeOf(session),
+    Object.getOwnPropertyDescriptors(session)
+  ) as T;
+  copy.custom_context = lean;
+  return copy;
 }
 
 /**

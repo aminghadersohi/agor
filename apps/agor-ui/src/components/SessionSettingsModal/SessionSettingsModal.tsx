@@ -185,8 +185,9 @@ function buildUpdates(
     };
   }
 
-  // custom_context is replaced wholesale on patch, so only send it when the
-  // JSON was actually edited — never echo back a possibly partial copy.
+  // Only send custom_context when the JSON was actually edited: echoing an
+  // unedited copy back would overwrite newer server-side values (arrays such
+  // as SDK-reported slash_commands replace rather than merge on patch).
   if (values.custom_context !== initialCustomContext) {
     if (values.custom_context) {
       try {
@@ -237,8 +238,8 @@ export const SessionSettingsModal: React.FC<SessionSettingsModalProps> = ({
     buildInitialValues(session, sessionMcpServerIds)
   );
   // The `session` prop comes from a lean session list that omits bulky
-  // custom_context keys. Seed the editable JSON from the full record so a save
-  // can never drop them; until it loads, the field stays read-only.
+  // custom_context keys. Seed the editable JSON from the full record so the
+  // user edits what is actually stored; read-only only while it loads.
   const [fullContextSessionId, setFullContextSessionId] = React.useState<string | null>(null);
   const customContextReady = !client || fullContextSessionId === session.session_id;
   const [envSelections, setEnvSelections] = React.useState<string[]>([]);
@@ -284,7 +285,9 @@ export const SessionSettingsModal: React.FC<SessionSettingsModalProps> = ({
         // The field is read-only until now, so there is no edit to preserve.
         form.setFieldValue('custom_context', text);
       } catch {
-        // Leave the field read-only; unchanged JSON is never sent on save.
+        // Fall back to the row's (possibly lean) context. Patches deep-merge
+        // objects, so keys absent from an edit are kept server-side.
+        if (!cancelled) setFullContextSessionId(session.session_id);
       }
     })();
     return () => {
