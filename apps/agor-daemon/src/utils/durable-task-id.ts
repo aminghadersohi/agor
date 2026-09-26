@@ -85,3 +85,8 @@ export function gatewayInboundSessionId(eventId: GatewayInboundEventID): Session
 export function sessionReminderTaskId(reminderId: SessionReminderID): TaskID {
   return stableTaskId(reminderId, 'session_reminder');
 }
+
+/** One durable continuation admission for one restart-interrupted source Task. */
+export function restartRecoveryTaskId(sourceTaskId: TaskID): TaskID {
+  return stableTaskId(sourceTaskId, 'restart_recovery');
+}
