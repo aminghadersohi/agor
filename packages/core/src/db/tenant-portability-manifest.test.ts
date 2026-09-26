@@ -66,7 +66,12 @@ describe('buildTenantInsertOrder', () => {
 describe('tenantPortabilityForeignKeys', () => {
   it('freezes the exact schema-derived movable FK set', () => {
     const foreignKeys = tenantPortabilityForeignKeys();
-    expect(foreignKeys).toHaveLength(123);
+    // Change-detector, refreshed for amin_dev_next-20260926. The 2026-09-24
+    // integration derived 126 (fork PR #46's three-subject profile_images and
+    // PR #2564's completion_subscriptions on top of personal/main); fork PR
+    // #53's branch_front_desk_sessions adds its three FKs. The substantive
+    // assertions below are independent of it.
+    expect(foreignKeys).toHaveLength(129);
     expect(Object.isFrozen(foreignKeys)).toBe(true);
     const structuralKeys = foreignKeys.map((foreignKey) =>
       [
