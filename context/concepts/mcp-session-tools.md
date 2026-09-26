@@ -156,6 +156,7 @@ collapse identical completion contracts into the survivor's one result. Any
 claimed Task, mixed callback/control/admission contract, or attachment,
 widget, gateway, slash, source, interrupt, or internal continuation semantic
 fails closed.
+
 For multi-hop coordination, keep the intermediate session's callback persistent:
 C completes → B processes its callback → B completes → A receives B's report.
 Use `agor_sessions_update` with `callbackMode: "persistent"` for an existing

@@ -228,10 +228,7 @@ test('a failed sibling retry cannot race an admitted deletion of its shared work
           () => 'admitted',
           (error: Error) => error.message
         );
-      const retry = await branches.claimFailedForProvisioningRetry(
-        sibling.branch_id,
-        'retry-attempt'
-      );
+      const retry = await branches.claimForProvisioning(sibling.branch_id, 'retry-attempt');
       expect(retry.claimed).toBe(true);
       await writeFile(join(root, 'new-workspace.txt'), 'retry content');
       await removeWorkspace?.();

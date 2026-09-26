@@ -182,10 +182,25 @@ describe('Postgres migrations', () => {
       expect(added).toMatchObject({ idx: 9027, tag: '9026_branch_color_override' });
       // Drizzle decides "pending" by timestamp, so an append below an existing
       // watermark is silently skipped rather than failing loudly.
-      expect(added.when).toBeGreaterThan(
-        Math.max(...journal.entries.slice(0, index).map(({ when }) => when))
+      const watermark = Math.max(...journal.entries.slice(0, index).map(({ when }) => when));
+      expect(added.when).toBeGreaterThan(watermark);
+      // Not "is last": later migrations append above it. The invariant is that
+      // it is the first thing pending at the watermark immediately below it.
+      expect(classifyMigrationWatermark(journal.entries, watermark).pending[0]).toBe(
+        '9026_branch_color_override'
       );
-      expect(index).toBe(journal.entries.length - 1);
+      // Every entry from here on must clear every watermark before it, not just
+      // its own predecessor. This replaces an `index === entries.length - 1`
+      // check that only held until the next migration landed: the color column
+      // stopped being the newest entry the moment upstream 0111-0114 were
+      // adopted on top of it, and it can never be made last again — raising its
+      // `when` above theirs would re-open a non-idempotent ADD COLUMN that
+      // deployed databases have already applied.
+      for (let position = index; position < journal.entries.length; position++) {
+        expect(journal.entries[position]!.when).toBeGreaterThan(
+          Math.max(...journal.entries.slice(0, position).map(({ when }) => when))
+        );
+      }
       expect(new Set(journal.entries.map(({ idx }) => idx)).size).toBe(journal.entries.length);
       expect(new Set(journal.entries.map(({ tag }) => tag)).size).toBe(journal.entries.length);
     }
@@ -1737,6 +1752,9 @@ describe('front desk / profile image watermark reconciliation', () => {
         db,
         sql`DELETE FROM __drizzle_migrations WHERE created_at >= ${frontDeskWhen}`
       );
+      // Upstream's user_api_keys.source is journalled above front desk, so the
+      // rewound ledger replays its plain ADD COLUMN.
+      await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
       await runMigrations(db, { allowOfflineCutover: true });
       expect(Number(await tableCount())).toBe(1);
 
@@ -1745,6 +1763,9 @@ describe('front desk / profile image watermark reconciliation', () => {
         db,
         sql`DELETE FROM __drizzle_migrations WHERE created_at >= ${frontDeskWhen}`
       );
+      // Upstream's user_api_keys.source is journalled above front desk, so the
+      // rewound ledger replays its plain ADD COLUMN.
+      await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
       await runMigrations(db, { allowOfflineCutover: true });
       expect(Number(await tableCount())).toBe(1);
     } finally {

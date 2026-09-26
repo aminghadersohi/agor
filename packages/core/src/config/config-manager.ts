@@ -16,7 +16,13 @@ import type { Database } from '../db/client';
 import { EXECUTOR_RESPONSE_PROTOCOL } from '../executor-protocol';
 import type { AgenticToolName } from '../types';
 import { normalizeHttpBaseUrl } from '../utils/url';
-import { ensureAgorHome, ensureAgorHomeSync, getAgorHome, getConfigPath } from './agor-home';
+import {
+  agorHomePath,
+  ensureAgorHome,
+  ensureAgorHomeSync,
+  getAgorHome,
+  getConfigPath,
+} from './agor-home';
 import { getDefaultAnalyticsConfig } from './analytics-defaults.js';
 import { validateAnalyticsHeaders, validateAnalyticsMetadata } from './analytics-validation.js';
 import { DAEMON, ENVIRONMENT, MCP_TOKEN } from './constants';
@@ -245,8 +251,9 @@ function parseAndValidateConfig(content: string): AgorConfig {
   return finalConfig;
 }
 
+export { AGOR_HOME_ENV, AGOR_HOME_MODE } from './agor-home';
 /** Shared state-home paths and creation policy. */
-export { ensureAgorHome, ensureAgorHomeSync, getAgorHome, getConfigPath };
+export { agorHomePath, ensureAgorHome, ensureAgorHomeSync, getAgorHome, getConfigPath };
 
 /**
  * Validate config and throw helpful errors for deprecated/invalid settings
@@ -857,6 +864,7 @@ function validateConfig(config: AgorConfig): void {
     'permission_timeout_ms',
     'executor_command_template',
     'executor_storage',
+    'delegated_branch_deletion',
     'executor_command_nonzero_may_have_dispatched',
     'required_user_env_vars',
     ...RETIRED_CONFIG_KEYS.execution,
@@ -973,6 +981,12 @@ function validateConfig(config: AgorConfig): void {
     'branch_workspace',
     'base_repository',
   ]);
+  if (
+    config.execution?.delegated_branch_deletion !== undefined &&
+    typeof config.execution.delegated_branch_deletion !== 'boolean'
+  ) {
+    throw new Error('Config error: execution.delegated_branch_deletion must be a boolean');
+  }
   if (
     config.execution?.executor_storage?.user_home !== undefined &&
     !['replica-local', 'shared', 'persistent-per-user'].includes(
@@ -1510,12 +1524,12 @@ export function getDefaultConfig(): AgorConfig {
     },
     multi_tenancy: {
       filesystem_isolation_enabled: false,
-      tenants_base_folder: '~/.agor/tenants',
+      tenants_base_folder: agorHomePath('tenants'),
       mode: 'static',
       static_tenant_id: 'default',
     },
     uploads: {
-      location: '~/.agor',
+      location: getAgorHome(),
       max_age_days: 30,
       max_file_size_mb: 50,
     },
@@ -1733,6 +1747,15 @@ export function assertValidEffectiveExecutionConfig(
   if (execution.unix_user_mode === 'delegated' && !execution.executor_command_template) {
     throw new Error(
       "execution.unix_user_mode 'delegated' requires execution.executor_command_template so execution is actually delegated to an external substrate."
+    );
+  }
+
+  if (
+    execution.delegated_branch_deletion &&
+    (execution.unix_user_mode !== 'delegated' || !execution.executor_command_template)
+  ) {
+    throw new Error(
+      'execution.delegated_branch_deletion requires delegated mode and an external executor command template'
     );
   }
 
@@ -2255,7 +2278,7 @@ export function ensureBranchCloneDepthAllowed(
 //
 // AGOR_HOME vs AGOR_DATA_HOME:
 //
-// AGOR_HOME (~/.agor by default):
+// AGOR_HOME (env var; ~/.agor by default, see getAgorHome()):
 //   - Daemon operating files: config.yaml, agor.db, logs/
 //   - Fast local storage (SSD)
 //
@@ -2357,7 +2380,7 @@ export function resolveTenantsBaseFolderFromConfig(
   config: { readonly multi_tenancy?: { readonly tenants_base_folder?: string } },
   agorHome = getAgorHome()
 ): string {
-  const configuredBase = config.multi_tenancy?.tenants_base_folder || '~/.agor/tenants';
+  const configuredBase = config.multi_tenancy?.tenants_base_folder || agorHomePath('tenants');
   const expandedBase = expandHomePath(configuredBase);
   return path.isAbsolute(expandedBase) ? expandedBase : path.resolve(agorHome, expandedBase);
 }

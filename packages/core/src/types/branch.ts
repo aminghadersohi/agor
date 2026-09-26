@@ -1,7 +1,7 @@
 // src/types/branch.ts
 import type { BranchDeletionStatus } from './branch-deletion';
 import type { BoardID, BranchID, UUID } from './id';
-import type { KnowledgeNamespaceID, KnowledgeVisibility } from './knowledge';
+import type { KnowledgeEditPolicy, KnowledgeNamespaceID, KnowledgeVisibility } from './knowledge';
 import type { BranchName, Repo } from './repo';
 
 export const BRANCH_METADATA_ACTIONS = ['archive', 'delete'] as const;
@@ -23,6 +23,42 @@ export function isBranchProvisioningOutcome(value: unknown): value is BranchProv
     (outcome.filesystem_status === 'ready' || outcome.filesystem_status === 'failed') &&
     (outcome.error_message === undefined || typeof outcome.error_message === 'string') &&
     Object.keys(outcome).every((key) => key === 'filesystem_status' || key === 'error_message')
+  );
+}
+
+/** Resolved source only; never materialization intent or filesystem readiness. */
+export type BranchProvisioningProvenance = Required<Pick<Branch, 'base_ref' | 'base_sha'>> &
+  Pick<Branch, 'base_source'>;
+
+export function isBranchProvisioningProvenance(
+  value: unknown
+): value is BranchProvisioningProvenance {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const ref = (v: unknown) =>
+    typeof v === 'string' &&
+    v.length > 0 &&
+    v.length <= 1024 &&
+    !v.startsWith('-') &&
+    !Array.from(v).some((c) => c.charCodeAt(0) <= 32 || c.charCodeAt(0) === 127 || /\s/.test(c));
+  const source = record.base_source as Record<string, unknown> | undefined;
+  return (
+    Object.keys(record).every((key) => ['base_ref', 'base_sha', 'base_source'].includes(key)) &&
+    ref(record.base_ref) &&
+    typeof record.base_sha === 'string' &&
+    /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(record.base_sha) &&
+    (source === undefined ||
+      (!!source &&
+        typeof source === 'object' &&
+        !Array.isArray(source) &&
+        Object.keys(source).every((key) => key === 'name' || key === 'remote_url') &&
+        ref(source.name) &&
+        typeof source.remote_url === 'string' &&
+        source.remote_url.length > 0 &&
+        source.remote_url.length <= 4096 &&
+        !Array.from(source.remote_url).some(
+          (c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127
+        )))
   );
 }
 
@@ -600,6 +636,8 @@ export interface BranchEnvironmentInstance {
   process?: {
     /** Process ID */
     pid?: number;
+    /** Opaque ID used to reject a late Start result from an older attempt. */
+    attempt_id?: string;
     /** When process started */
     started_at?: string;
     /** Human-readable uptime */
@@ -627,6 +665,14 @@ export interface BranchEnvironmentInstance {
     name: string;
     url: string;
   }>;
+
+  /**
+   * Runtime health URL reported by the most recent successful Start command.
+   * It overrides the rendered static health URL until the next lifecycle
+   * boundary. Unlike operator-authored static URLs, this value is always
+   * treated as untrusted outbound input by the daemon.
+   */
+  health_url?: string;
 
   /**
    * Process logs (last N lines)
@@ -667,6 +713,8 @@ export const BRANCH_ENVIRONMENT_CLEARABLE_FIELDS = [
   'last_error',
   'last_command',
   'logs',
+  'access_urls',
+  'health_url',
 ] as const satisfies ReadonlyArray<keyof BranchEnvironmentInstance>;
 
 export type BranchEnvironmentClearableField = (typeof BRANCH_ENVIRONMENT_CLEARABLE_FIELDS)[number];
@@ -911,7 +959,24 @@ export interface TeammateKnowledgeConfig {
   primary_namespace_id: KnowledgeNamespaceID;
   primary_namespace_slug: string;
   memory_path_template: 'memory/{{YYYY-MM-DD}}.md';
+  /**
+   * Governance default for ordinary teammate documents.
+   *
+   * This is a machine-maintained mirror of the home namespace's
+   * `visibility_default` (see `teammateKbPatch`), not a statement of intent —
+   * so it must not be read as an opt-in to publish anything.
+   */
   default_visibility: KnowledgeVisibility;
+  /**
+   * Explicit opt-in overrides for daily memory documents only.
+   *
+   * Daily memory is personal operational context, so it is created
+   * private/owner. Nothing auto-populates these two fields, which is what
+   * makes a value here an actual owner decision rather than an inherited
+   * namespace default.
+   */
+  memory_visibility?: KnowledgeVisibility;
+  memory_edit_policy?: KnowledgeEditPolicy;
   /**
    * Teammate-tool policy for namespaces not listed in `grants`.
    *

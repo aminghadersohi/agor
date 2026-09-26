@@ -2340,12 +2340,12 @@ describe('BoardRepository import object handling', () => {
 
       expect(imported.board_id).not.toBe(original.board_id);
       expect(imported.objects).toEqual({
-        // Import normalizes every zone's layout policy and binding (upstream
-        // PR #2540), the same way the other zone expectations in this file do.
+        // Creation binds new zones to board defaults; the round trip must keep
+        // that persisted policy as well as the original geometry and trigger.
         'zone-1770517487066': {
           ...zone,
-          layout: normalizeZoneLayoutPolicy(undefined),
           layout_binding: 'inherit',
+          layout: normalizeZoneLayoutPolicy(original.zone_layout_defaults),
         },
         'markdown-1789334120446': markdown,
         'app-1': app,

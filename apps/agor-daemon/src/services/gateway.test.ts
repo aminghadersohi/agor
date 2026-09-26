@@ -304,6 +304,7 @@ function makeGatewayHarness(args: {
     findByChannel: vi.fn(async () => []),
     findByThread: vi.fn(async () => null),
     findBySession: vi.fn(async () => mapping),
+    findBySessionAmbiguityAware: vi.fn(async () => ({ mapping, ambiguous: false })),
     updateLastMessage: vi.fn(async () => undefined),
     updateMetadata: vi.fn(async (_id: string, metadata: Record<string, unknown>) => {
       if (mapping) mapping = { ...mapping, metadata } as ThreadSessionMap;
@@ -613,6 +614,35 @@ describe('GatewayService inbound permission admission', () => {
     expect(promptCreate).toHaveBeenCalledOnce();
   });
 
+  it('stamps the admitted Task with the mapping it was admitted through', async () => {
+    // The reply address is decided once, here. Everything outbound reads it
+    // back rather than re-asking which thread the Session belongs to, which
+    // stops having one answer as soon as a Session serves two threads.
+    const { service, promptCreate } = makeGatewayHarness({
+      existingMapping: makeMapping({ id: 'map-dm' as never }),
+    });
+
+    await service.create({
+      channel_key: 'slack-key',
+      thread_id: 'C123-100.000000',
+      text: 'what is my api key',
+      metadata: {
+        channel: 'C123',
+        channel_type: 'im',
+        slack_has_mention: true,
+        slack_message_ts: '103.000000',
+      },
+    });
+
+    expect(promptCreate.mock.calls[0][0].metadata).toMatchObject({
+      gateway_task_source: {
+        thread_session_map_id: 'map-dm',
+        gateway_channel_id: slackChannel.id,
+        thread_id: 'C123-100.000000',
+      },
+    });
+  });
+
   it('edits a GitHub processing acknowledgement with the execution-home denial', async () => {
     const githubChannel = {
       ...slackChannel,
@@ -843,7 +873,10 @@ describe('GatewayService multi-tenant process state', () => {
           isOwner: vi.fn(async () => false),
           resolveUserPermission: vi.fn(async () => 'view'),
         },
-        threadMapRepo: { findBySession: vi.fn() },
+        threadMapRepo: {
+          findBySession: vi.fn(),
+          findBySessionAmbiguityAware: vi.fn(),
+        },
         channelRepo: { findById: vi.fn() },
       });
       vi.mocked(getConnector).mockReturnValue({ sendMessage, channelType: 'slack' });
@@ -856,8 +889,11 @@ describe('GatewayService multi-tenant process state', () => {
       ).rejects.toThrow();
       expect(sendMessage).not.toHaveBeenCalled();
       expect(
-        (service as unknown as { threadMapRepo: { findBySession: ReturnType<typeof vi.fn> } })
-          .threadMapRepo.findBySession
+        (
+          service as unknown as {
+            threadMapRepo: { findBySessionAmbiguityAware: ReturnType<typeof vi.fn> };
+          }
+        ).threadMapRepo.findBySessionAmbiguityAware
       ).not.toHaveBeenCalled();
     }
   );
@@ -875,6 +911,7 @@ describe('GatewayService multi-tenant process state', () => {
       },
       threadMapRepo: {
         findBySession: vi.fn(async () => mapping),
+        findBySessionAmbiguityAware: vi.fn(async () => ({ mapping, ambiguous: false })),
         updateLastMessage: vi.fn(async () => undefined),
         findById: vi.fn(async () => mapping),
         updateMetadata: vi.fn(async () => undefined),
@@ -907,6 +944,7 @@ describe('GatewayService multi-tenant process state', () => {
     };
     const threadMapRepo = {
       findBySession: vi.fn(async () => mapping),
+      findBySessionAmbiguityAware: vi.fn(async () => ({ mapping, ambiguous: false })),
       updateLastMessage: vi.fn(async () => undefined),
       findById: vi.fn(async () => mapping),
       updateMetadata: vi.fn(async () => undefined),
@@ -4007,7 +4045,10 @@ describe('GatewayService Discord beta routing', () => {
         threadId === currentMapping.thread_id ? currentMapping : null
     );
     harness.threadMapRepo.findByChannel.mockImplementation(async () => [currentMapping]);
-    harness.threadMapRepo.findBySession.mockImplementation(async () => currentMapping);
+    harness.threadMapRepo.findBySessionAmbiguityAware.mockImplementation(async () => ({
+      mapping: currentMapping,
+      ambiguous: false,
+    }));
     for (let index = 0; index < 101; index += 1) {
       await harness.service.routeMessage({
         session_id: currentMapping.session_id,
@@ -4163,17 +4204,13 @@ describe('GatewayService Slack progress tenant scope', () => {
       resolveUpdated();
     });
 
-    // A DM thread, because `assistant.threads.setStatus` only applies to the
-    // app's own DM surface and the status call is now guarded to it. This
-    // case is about tenant scope, not about which surfaces qualify — that is
-    // the case below.
     const { service } = makeGatewayHarness({
       db,
       existingMapping: makeMapping({
-        thread_id: 'D123-100.000000',
+        thread_id: 'C123-100.000000',
         metadata: {
           slack_last_delivered_ts: '101.000000',
-          slack_active_thread_id: 'D123-100.000000',
+          slack_active_thread_id: 'C123-100.000000',
         },
       } as Partial<ThreadSessionMap>),
       connector: { setThreadStatus },
@@ -4197,7 +4234,7 @@ describe('GatewayService Slack progress tenant scope', () => {
 
     expect(setThreadStatus).toHaveBeenCalledWith(
       expect.objectContaining({
-        threadId: 'D123-100.000000',
+        threadId: 'C123-100.000000',
         status: 'is using Read.',
       })
     );
@@ -4205,60 +4242,57 @@ describe('GatewayService Slack progress tenant scope', () => {
     expect(events.indexOf('tx:commit')).toBeLessThan(events.indexOf('status'));
   });
 
-  /**
-   * `assistant.threads.setStatus` on a surface that has no assistant thread.
-   *
-   * The call fired on EVERY progress tick of every Slack conversation — public
-   * channels, private channels and MPIMs included — with no guard at all.
-   * Slack was never going to accept it there: the assistant-thread APIs are a
-   * property of the app's DM surface. So each tick spent a request, each
-   * refusal was then entitled to the WebClient's own retry ladder, and the
-   * result landed in a bare `catch` that said nothing. Invisible work and a
-   * silent refusal, forever, for every channel conversation Agor is in.
-   *
-   * The mapping's own metadata still has to be written — the guard is about
-   * the outbound call, not about the progress bookkeeping.
-   */
-  it('does not set an assistant status on channel-like Slack threads', async () => {
-    const tx = { execute: vi.fn(async () => []) };
-    const db = {
-      transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(tx)),
-    } as TenantScopeAwareDatabase;
+  it.each(['C123', 'G123', 'D123'])(
+    'sends queued/tool status and clears it in order for %s threads',
+    async (conversationId) => {
+      const threadId = `${conversationId}-200.000000`;
+      const setThreadStatus = vi.fn(async () => {});
+      const { service, threadMapRepo } = makeGatewayHarness({
+        existingMapping: makeMapping({
+          // The active thread, not the original mapping root, owns the status.
+          metadata: { slack_active_thread_id: threadId },
+        }),
+        connector: { setThreadStatus },
+      });
 
-    let resolveWritten!: () => void;
-    const written = new Promise<void>((resolve) => {
-      resolveWritten = resolve;
-    });
-    const setThreadStatus = vi.fn(async () => {});
-
-    // The default mapping is `C123-…`: a public channel, which is exactly the
-    // surface this fired on unguarded.
-    const { service, threadMapRepo } = makeGatewayHarness({
-      db,
-      existingMapping: makeMapping(),
-      connector: { setThreadStatus },
-    });
-    threadMapRepo.updateMetadata.mockImplementation(async () => {
-      resolveWritten();
-    });
-
-    await runWithTenantDatabaseScope(db, 'tenant-channel', async () => {
-      service.updateProgressAfterCommit(
-        { session_id: 'sess-1', state: 'working', task_id: 'task-1', tool_name: 'Read' },
-        { tenant: { tenant_id: 'tenant-channel' } }
+      // Exercise the per-session queue without waiting between incoming events.
+      // Tool and terminal updates must bypass the ordinary progress throttle.
+      await runWithTenantContext('tenant-channel', () =>
+        Promise.all(
+          [
+            { state: 'queued' as const },
+            { state: 'working' as const, tool_name: 'Read' },
+            { state: 'done' as const },
+          ].map((event) =>
+            service.updateProgress({ session_id: 'sess-1', task_id: 'task-1', ...event })
+          )
+        )
       );
-    });
 
-    // The progress bookkeeping still happens; the guard is about the outbound
-    // call, and reaching this write is what proves the status block was
-    // reached and declined rather than never arrived at. The status call sits
-    // immediately after it, so settle the rest of the chain before asserting
-    // its absence — otherwise this passes on an unguarded build too.
-    await written;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(threadMapRepo.updateMetadata).toHaveBeenCalled();
-    expect(setThreadStatus).not.toHaveBeenCalled();
-  });
+      expect(setThreadStatus).toHaveBeenCalledTimes(3);
+      expect(setThreadStatus).toHaveBeenNthCalledWith(1, {
+        threadId,
+        status: 'is queued.',
+        loadingMessages: ['Queued in Agor…'],
+        iconEmoji: ':hourglass_flowing_sand:',
+      });
+      expect(setThreadStatus).toHaveBeenNthCalledWith(2, {
+        threadId,
+        status: 'is using Read.',
+        loadingMessages: ['Using Read…'],
+        iconEmoji: ':hourglass_flowing_sand:',
+      });
+      expect(setThreadStatus).toHaveBeenNthCalledWith(3, {
+        threadId,
+        status: '',
+        loadingMessages: undefined,
+        iconEmoji: ':hourglass_flowing_sand:',
+      });
+      expect(threadMapRepo.updateMetadata).toHaveBeenLastCalledWith(expect.any(String), {
+        slack_active_thread_id: threadId,
+      });
+    }
+  );
 });
 
 describe('GatewayService Slack streaming', () => {

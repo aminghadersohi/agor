@@ -33,6 +33,7 @@ import {
   isSQLiteDatabase,
   runDatabaseTransaction,
 } from './database-wrapper';
+import { migrateSQLiteWithCallbackReconciliation } from './migrate-sqlite';
 import { sanitizeDbError } from './sanitize-error';
 import { boards } from './schema';
 import type { DatabaseDialect } from './schema-factory';
@@ -322,6 +323,7 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
     '0111_transitive_completion_subscriptions',
     '0112_retire_completion_discovery',
     '0113_callback_ownership_reconciliation',
+    '0117_callback_ownership_reconciliation',
   ].map(
     (name) =>
       [
@@ -590,6 +592,8 @@ export async function checkMigrationStatus(db: Database): Promise<{
   pending: string[];
   applied: string[];
   dbAheadOfBinary: boolean;
+  /** Present when runMigrations will first rewind fork main's retired order. */
+  ledgerRewind?: RetiredForkMainOrderRewind;
 }> {
   try {
     const migrationsFolder = getMigrationsFolder(db);
@@ -615,20 +619,20 @@ export async function checkMigrationStatus(db: Database): Promise<{
       };
     }
 
-    let maxAppliedMillis = 0;
-    if (isSQLiteDatabase(db)) {
-      const result = await db.run(sql`SELECT MAX(created_at) as max_ts FROM __drizzle_migrations`);
-      const row = result.rows[0] as Record<string, unknown> | undefined;
-      maxAppliedMillis = row ? Number(row.max_ts ?? 0) : 0;
-    } else if (isPostgresDatabase(db)) {
-      const result = await db.execute(
-        sql`SELECT MAX(created_at) as max_ts FROM drizzle.__drizzle_migrations`
-      );
-      const row = result[0] as Record<string, unknown> | undefined;
-      maxAppliedMillis = row ? Number(row.max_ts ?? 0) : 0;
-    }
+    // A ledger that ran fork main's retired order is reported as it will be
+    // after runMigrations rewinds it, so status shows the slice that replays.
+    const dialect = getDatabaseInstanceDialect(db);
+    const rewind = planRetiredForkMainOrderRewind(
+      dialect,
+      journalEntries,
+      await readMigrationLedger(db, RETIRED_FORK_MAIN_ORDER[dialect].from)
+    );
+    const maxAppliedMillis = await readMigrationWatermark(db, rewind?.rewindFrom);
 
-    return classifyMigrationWatermark(journalEntries, maxAppliedMillis, journalMaxWhen);
+    return {
+      ...classifyMigrationWatermark(journalEntries, maxAppliedMillis, journalMaxWhen),
+      ...(rewind ? { ledgerRewind: rewind } : {}),
+    };
   } catch (error) {
     const rootCause = getRootCause(error);
     const rootMsg =
@@ -669,6 +673,170 @@ export function classifyMigrationWatermark(
     // watermark known by the binary is unsafe for that binary to interpret.
     dbAheadOfBinary: maxAppliedMillis > journalMaxWhen,
   };
+}
+
+async function readMigrationWatermark(db: Database, below?: number): Promise<number> {
+  const bound = below === undefined ? sql`` : sql` WHERE created_at < ${below}`;
+  if (isSQLiteDatabase(db)) {
+    const result = await db.run(
+      sql`SELECT MAX(created_at) as max_ts FROM __drizzle_migrations${bound}`
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? Number(row.max_ts ?? 0) : 0;
+  }
+  if (isPostgresDatabase(db)) {
+    const result = await db.execute(
+      sql`SELECT MAX(created_at) as max_ts FROM drizzle.__drizzle_migrations${bound}`
+    );
+    const row = result[0] as Record<string, unknown> | undefined;
+    return row ? Number(row.max_ts ?? 0) : 0;
+  }
+  return 0;
+}
+
+async function readMigrationLedger(
+  db: Database,
+  from: number
+): Promise<Array<{ hash: string; created_at: number }>> {
+  const rows = isSQLiteDatabase(db)
+    ? (
+        await db.run(
+          sql`SELECT hash, created_at FROM __drizzle_migrations WHERE created_at >= ${from} ORDER BY created_at, id`
+        )
+      ).rows
+    : isPostgresDatabase(db)
+      ? await db.execute(
+          sql`SELECT hash, created_at FROM drizzle.__drizzle_migrations WHERE created_at >= ${from} ORDER BY created_at, id`
+        )
+      : [];
+  return (rows as unknown as Array<Record<string, unknown>>).map((row) => ({
+    hash: String(row.hash),
+    created_at: Number(row.created_at),
+  }));
+}
+
+/**
+ * Fork main briefly journalled `9028_branch_front_desk_sessions` and then
+ * `9029_profile_image_galleries` in the two slots a deployed amin_dev database
+ * had already used for `9028_profile_image_galleries` and
+ * `0113_callback_ownership_reconciliation`. The journal now matches that
+ * deployed history, so a database that ran fork main's order records both slots
+ * as applied without having run what the journal now puts there: profile
+ * images (if it stopped after front desk) and callback storage. Drizzle compares
+ * only watermarks, so it would skip them silently.
+ *
+ * Such a ledger is recognised solely by the Drizzle hashes (sha256 of the SQL
+ * file) of the two retired files. Those files no longer exist, so the hashes can
+ * never drift. The repair rewinds the ledger to just below the first slot and
+ * lets Drizzle replay the slice above it. Every migration in that slice is
+ * conditional, and the Postgres ones verify the shape they leave, so replaying
+ * over objects fork main already created is a no-op or a loud failure. Anything
+ * else recorded in the range is refused rather than guessed at.
+ */
+export const RETIRED_FORK_MAIN_ORDER: Readonly<
+  Record<
+    DatabaseDialect,
+    {
+      from: number;
+      retired: ReadonlyArray<{ tag: string; createdAt: number; hash: string }>;
+    }
+  >
+> = {
+  postgresql: {
+    from: 1790129000214,
+    retired: [
+      {
+        tag: '9028_branch_front_desk_sessions',
+        createdAt: 1790129000214,
+        hash: '5fa3bcbba7381b5e6941810c3bd662b739e79ce5ebbedcd1dd9bbe00d20a0b2a',
+      },
+      {
+        tag: '9029_profile_image_galleries',
+        createdAt: 1790129000215,
+        hash: '41bf69d213d0b45f50534ad5e28f0e817d98b93446d5a8f1b5cc0d0edc8d8e4b',
+      },
+    ],
+  },
+  sqlite: {
+    from: 1790129000213,
+    retired: [
+      {
+        tag: '9028_branch_front_desk_sessions',
+        createdAt: 1790129000213,
+        hash: 'a8e582017fa2bc19f34bae4622ffecd8116bef74ae2eeda7e5fe11bb385a3b32',
+      },
+      {
+        tag: '9029_profile_image_galleries',
+        createdAt: 1790129000214,
+        hash: 'e178d8927f126b90f5db70934e0e3d5fbefcc9666e66f129674943008e89b70e',
+      },
+    ],
+  },
+};
+
+/** The journalled slice a rewind replays; each entry is conditional. */
+const REPLAYABLE_AFTER_RETIRED_FORK_MAIN_ORDER: ReadonlySet<string> = new Set([
+  '9028_profile_image_galleries',
+  '0113_callback_ownership_reconciliation',
+  '0114_restore_session_indexes',
+  '9030_branch_front_desk_sessions',
+]);
+
+export interface RetiredForkMainOrderRewind {
+  /** Ledger rows at or above this `created_at` are removed before migrating. */
+  rewindFrom: number;
+  /** Retired tags the ledger recorded, for the operator log. */
+  retired: string[];
+}
+
+/**
+ * Pure planner for the retired fork-main order. `ledger` holds every row at or
+ * above `RETIRED_FORK_MAIN_ORDER[dialect].from`, ordered by `created_at`.
+ * Returns null when no retired row is present; throws when one is present
+ * alongside anything the rewind could not safely replay.
+ */
+export function planRetiredForkMainOrderRewind(
+  dialect: DatabaseDialect,
+  journalEntries: ReadonlyArray<{ tag: string; when: number }>,
+  ledger: ReadonlyArray<{ hash: string; created_at: number }>
+): RetiredForkMainOrderRewind | null {
+  const order = RETIRED_FORK_MAIN_ORDER[dialect];
+  const retiredByHash = new Map(order.retired.map((entry) => [entry.hash, entry]));
+  const rows = ledger.filter((row) => row.created_at >= order.from);
+  if (!rows.some((row) => retiredByHash.has(row.hash))) return null;
+
+  const replayable = new Set(
+    journalEntries
+      .filter((entry) => REPLAYABLE_AFTER_RETIRED_FORK_MAIN_ORDER.has(entry.tag))
+      .map((entry) => entry.when)
+  );
+  const retired: string[] = [];
+  const unrecognized: string[] = [];
+  for (const row of rows) {
+    const entry = retiredByHash.get(row.hash);
+    if (entry ? entry.createdAt === row.created_at : replayable.has(row.created_at)) {
+      if (entry) retired.push(entry.tag);
+    } else {
+      unrecognized.push(`${row.created_at}:${row.hash.slice(0, 12)}`);
+    }
+  }
+  if (rows[0]?.hash !== order.retired[0]!.hash || unrecognized.length > 0) {
+    throw new MigrationError(
+      `Migration ledger records fork main's retired front-desk/profile-image order (${retired.join(', ')}) ` +
+        `but not in a shape this binary can replay${unrecognized.length > 0 ? ` (unrecognized rows: ${unrecognized.join(', ')})` : ''}. ` +
+        'Refusing to migrate; restore a backup or reconcile the ledger by hand ' +
+        '(context/guides/creating-database-migrations.md).'
+    );
+  }
+  return { rewindFrom: order.from, retired };
+}
+
+async function rewindMigrationLedger(db: Database, from: number): Promise<void> {
+  if (isSQLiteDatabase(db)) {
+    await db.run(sql`DELETE FROM __drizzle_migrations WHERE created_at >= ${from}`);
+  } else if (isPostgresDatabase(db)) {
+    await db.execute(sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at >= ${from}`);
+  }
 }
 
 /**
@@ -713,13 +881,27 @@ export async function runMigrations(
       await preflightSQLiteCapabilityPolicyOwners(db);
     }
 
+    if (status.ledgerRewind) {
+      console.warn(
+        `⚠️  Migration ledger recorded fork main's retired order (${status.ledgerRewind.retired.join(', ')}). ` +
+          `Rewinding it below ${status.ledgerRewind.rewindFrom} so the reconciled migrations replay; each is conditional.`
+      );
+      // Not atomic with the replay below, but convergent: if the replay fails,
+      // the ledger stays rewound and the next run replays the same slice.
+      await rewindMigrationLedger(db, status.ledgerRewind.rewindFrom);
+    }
+
     // Drizzle handles everything:
     // 1. Creates __drizzle_migrations table if needed
     // 2. Checks which migrations are pending
     // 3. Runs them in order within transaction
     // 4. Updates tracking table
     if (isSQLiteDatabase(db)) {
-      await migrateSQLite(db, { migrationsFolder });
+      if (status.pending.includes('0117_callback_ownership_reconciliation')) {
+        await migrateSQLiteWithCallbackReconciliation(db, migrationsFolder);
+      } else {
+        await migrateSQLite(db, { migrationsFolder });
+      }
     } else if (isPostgresDatabase(db)) {
       await migratePostgres(db, { migrationsFolder });
     } else {
