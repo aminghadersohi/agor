@@ -52,12 +52,13 @@ Each artifact is a stored file map plus a small set of declarative metadata colu
 - `sandpack_config`: Author-controlled SandpackProvider props (template, customSetup, options). Sanitized on write.
 - `required_env_vars`: Names of env vars the artifact needs (e.g. `["OPENAI_KEY"]`). The daemon synthesizes a per-viewer `.env` at render time.
 - `agor_grants`: Declarative daemon capabilities (`agor_api_url`, viewer email, and metadata grants).
-- `agor_runtime`: Controls injection of the daemon-side `agor-runtime.js` (which powers agent DOM introspection via `agor_artifacts_query_dom`). Enabled by default; opt out per-artifact with `{ enabled: false }`. The runtime ships as an iframe-level `<script>` tag via Sandpack's `externalResources`, so it works regardless of which user files exist (no entry-file detection, no file mutation, no template-specific gotchas).
+- `agor_runtime`: Controls injection of the daemon-side `agor-runtime.js` (which powers agent DOM introspection via `agor_artifacts_query_dom`). Enabled by default; opt out per-artifact with `{ enabled: false }`. The runtime ships as an iframe-level `<script>` tag via Sandpack's `externalResources`, so it works regardless of which user files exist (no entry-file detection, no file mutation, no template-specific gotchas). It also carries the artifact's declared [interaction bindings](#interaction-bindings) under `agor_runtime.interactions`.
 
 **On the board:**
 
 - **Header**: Artifact name with a trust badge (`Yours`/`Trusted`/`Untrusted`), an interact toggle (eye icon), and a 🔒 lock affordance to open the consent modal when the artifact is untrusted.
 - **Preview**: Live Sandpack renderer showing the running application.
+- **Controls**: When the artifact declares [interaction bindings](#interaction-bindings) and you can view its branch, a toolbar under the preview shows each data binding's status and a button per action and chat.
 - **Legacy banner**: Old-format artifacts (those still carrying `sandpack.json` / `agor.config.js`) render in safe-degraded mode with an inline upgrade prompt you can hand to an agent.
 
 ---
@@ -179,6 +180,51 @@ Artifacts live on the React Flow canvas, which means mouse events need careful h
 - **Interact mode**: Click the eye icon in the header to enable direct interaction. Mouse events pass through to the iframe so you can click buttons, scroll, and type
 
 This toggle prevents the iframe from capturing canvas navigation while still letting you use the running app when needed.
+
+---
+
+## Interaction bindings
+
+An artifact can be a small control panel for its branch: show whether a schedule is armed, run it once, arm or disarm it, or open a conversation. It does this through **bindings** the author declares when publishing. Artifact code never gets a token and can't call Agor's API directly; it can only name a binding by id.
+
+There are three kinds:
+
+| Kind      | Declares                                                           | Artifact code calls         |
+| --------- | ------------------------------------------------------------------ | --------------------------- |
+| `data`    | A read of a schedule's or session's status (a fixed set of fields) | `window.agor.fetchData(id)` |
+| `actions` | Run a schedule once, or arm / disarm it                            | `window.agor.runAction(id)` |
+| `chats`   | A session to open in Agor                                          | `window.agor.openChat(id)`  |
+
+Declare them with `interactionConfig` on `agor_artifacts_publish` or `agor_artifacts_update`:
+
+```ts
+agor_artifacts_update({
+  artifactId,
+  interactionConfig: {
+    data: [{ id: 'nightly', label: 'Nightly', kind: 'schedule_status', scheduleId }],
+    actions: [
+      { id: 'run-now', label: 'Run once', scheduleId, confirm: true },
+      { id: 'disarm', label: 'Disarm', scheduleId, effect: 'disable' },
+    ],
+    chats: [{ id: 'triage', label: 'Triage', sessionId }],
+  },
+});
+```
+
+Over REST, the same bindings are the `agor_runtime.interactions` field of `PATCH /artifacts/:id`, in the stored shape (`effect: { kind, schedule_id }`, `source: { kind, schedule_id | session_id }`, `session_id`).
+
+**Rules Agor enforces when you save:**
+
+- Every schedule and session a binding names must be on the artifact's own branch.
+- Ids are 1–64 letters, digits, `_` or `-`, unique within their kind; each binding needs a `label`.
+- Bindings take no arguments. Everything, including whether an action arms or disarms, is fixed when you declare it.
+- Invalid bindings are rejected with the reason and nothing is saved.
+
+**Who can use them.** Bindings run as the person viewing the artifact, with their own permissions. They're a shortcut, not a grant: a viewer who couldn't run the schedule by hand gets the same refusal from the button. Viewers who can't view the artifact's branch see the artifact without controls. Actions declared with `confirm: true` ask for confirmation in an Agor dialog the artifact can't draw or dismiss.
+
+Agor renders the bindings as a toolbar on the artifact card and the fullscreen page, so they work even if the artifact's own code never calls `window.agor`. `window.agor` needs the runtime (`agor_runtime.enabled`, on by default).
+
+To repoint a chat or action later, call `agor_artifacts_update` with new `interactionConfig`; the artifact's code doesn't change. `interactionConfig: null` removes all bindings.
 
 ---
 

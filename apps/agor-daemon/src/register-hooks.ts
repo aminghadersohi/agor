@@ -2209,7 +2209,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
           const artifactId = _params.route?.id;
           if (!artifactId) throw new Error('Artifact ID required');
           const artifactsService = app.service('artifacts') as unknown as ArtifactsService;
-          return artifactsService.getPayload(artifactId, _params.user?.user_id);
+          return artifactsService.getPayload(artifactId, _params.user?.user_id, _params.user?.role);
         },
       },
       { find: { role: ROLES.VIEWER, action: 'get artifact payload' } },
