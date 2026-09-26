@@ -62,6 +62,7 @@ import {
   sql,
 } from 'drizzle-orm';
 import { generateId, shortId } from '../../lib/ids';
+import { escapePromptProvenanceSentinels } from '../../templates/prompt-provenance';
 import { lockSessionBranchForAdmission } from '../branch-admission';
 import type { Database } from '../client';
 import {
@@ -3393,7 +3394,10 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
             revisions: [],
           };
           if (input.action === 'update') {
-            const revisedPrompt = input.revised_prompt!;
+            // Same reservation as prompt admission: an amendment rewrites
+            // `full_prompt` wholesale, so without this a queued prompt could be
+            // edited into carrying a block Agor never stamped.
+            const revisedPrompt = escapePromptProvenanceSentinels(input.revised_prompt!).text;
             if (revisedPrompt === task.full_prompt) {
               throw new RepositoryError('Revised prompt is unchanged');
             }
