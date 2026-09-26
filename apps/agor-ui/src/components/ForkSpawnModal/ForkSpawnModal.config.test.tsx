@@ -98,6 +98,14 @@ vi.mock('../AgenticConfigChipRow', () => ({
   },
 }));
 
+// Fork delta: every spawn carries the child auto-archive default and the
+// parent's callback delivery (sessions without a callback_config deliver direct).
+const FORK_SPAWN_DEFAULTS = {
+  autoArchive: 'after_completion',
+  autoArchiveAfterSeconds: 3600,
+  callbackDelivery: 'direct',
+};
+
 const claudeSession = {
   session_id: 'parent',
   title: 'Parent',
@@ -228,7 +236,11 @@ describe('ForkSpawnModal configuration defaults', { timeout: 10_000 }, () => {
     fireEvent.click(await screen.findByRole('switch'));
     fireEvent.click(screen.getByText('Same as parent'));
     fireEvent.click(screen.getByRole('button', { name: 'Spawn Session' }));
-    await waitFor(() => expect(onConfirm).toHaveBeenCalledWith({ prompt: 'Inherit' }));
+    // The fork's spawn defaults (child auto-archive, parent callback delivery)
+    // are not agentic configuration overrides.
+    await waitFor(() =>
+      expect(onConfirm).toHaveBeenCalledWith({ prompt: 'Inherit', ...FORK_SPAWN_DEFAULTS })
+    );
   });
 
   it('keeps an inherited parent preset instead of submitting seeded inline fields', async () => {
