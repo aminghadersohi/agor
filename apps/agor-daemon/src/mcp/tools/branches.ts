@@ -67,6 +67,7 @@ import {
   mcpLimit,
   mcpOffset,
   mcpOptionalId,
+  mcpOptionalNonBlankString,
   mcpOptionalNonNegativeInt,
   mcpOptionalPositiveInt,
   mcpOptionalString,
@@ -77,6 +78,12 @@ import type { McpContext } from '../server.js';
 import { coerceString, sessionContextRequiredResult, textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
 import { assertValidVariant } from './_environment-helpers.js';
+import {
+  createFrontDeskToolHandlers,
+  FRONT_DESK_CLEAR_DESCRIPTION,
+  FRONT_DESK_SET_DESCRIPTION,
+  FRONT_DESK_TEAMMATE_ARG_DESCRIPTION,
+} from './front-desk.js';
 
 const BRANCH_NAME_PATTERN = /^[a-z0-9-]+$/;
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;
@@ -1940,6 +1947,9 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     listTeammatesHandler
   );
 
+  // agor_teammates_front_desk_set / agor_teammates_front_desk_clear
+  registerFrontDeskTools(server, ctx);
+
   // Tool: agor_branches_retry_provisioning
   // Explicit, non-destructive repair for a branch whose filesystem provisioning
   // landed in 'failed'. Wraps the exact same `reposService.retryBranchProvisioning`
@@ -1975,5 +1985,62 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
         path: branch.path,
       });
     }
+  );
+}
+
+/**
+ * agor_teammates_front_desk_set / agor_teammates_front_desk_clear.
+ *
+ * Registered here rather than in `front-desk.ts` so the zod schemas live in an
+ * entry that already bundles zod — see the note at the top of `front-desk.ts`.
+ */
+export function registerFrontDeskTools(server: McpServer, ctx: McpContext): void {
+  const handlers = createFrontDeskToolHandlers(ctx);
+  const teammate = mcpOptionalNonBlankString('teammate', FRONT_DESK_TEAMMATE_ARG_DESCRIPTION);
+  const branchId = mcpOptionalId(
+    'branchId',
+    'Branch',
+    'Teammate branch ID (UUIDv7 or short ID). Provide exactly one of teammate or branchId.'
+  );
+
+  server.registerTool(
+    'agor_teammates_front_desk_set',
+    {
+      description: FRONT_DESK_SET_DESCRIPTION,
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        teammate,
+        branchId,
+        sessionId: mcpRequiredId(
+          'sessionId',
+          'Session',
+          "Session to pin (UUIDv7 or short ID); must be in the teammate's branch."
+        ),
+        expectedSessionId: mcpOptionalId(
+          'expectedSessionId',
+          'Session',
+          'Only replace the pin if this session is the current front desk. Guards against overwriting a change you have not seen.'
+        ),
+      }),
+    },
+    (args) => handlers.set(args)
+  );
+
+  server.registerTool(
+    'agor_teammates_front_desk_clear',
+    {
+      description: FRONT_DESK_CLEAR_DESCRIPTION,
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        teammate,
+        branchId,
+        expectedSessionId: mcpOptionalId(
+          'expectedSessionId',
+          'Session',
+          'Only clear the pin if this session is the current front desk.'
+        ),
+      }),
+    },
+    (args) => handlers.clear(args)
   );
 }

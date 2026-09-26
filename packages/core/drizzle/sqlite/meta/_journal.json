@@ -855,6 +855,13 @@
       "when": 1790208000000,
       "tag": "0114_restore_session_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 9036,
+      "version": "6",
+      "when": 1790208000001,
+      "tag": "9030_branch_front_desk_sessions",
+      "breakpoints": true
     }
   ]
 }

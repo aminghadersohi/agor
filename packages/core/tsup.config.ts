@@ -90,7 +90,11 @@ export default defineConfig({
   format: ['cjs', 'esm'],
   dts: false,
   clean: process.env.TSUP_CLEAN !== 'false',
-  splitting: false,
+  // `splitting` is deliberately unset: tsup then splits the ESM build into
+  // shared root-level chunks (so the schema and repositories are not copied
+  // into every entry) and leaves CJS unsplit, avoiding tsup's experimental CJS
+  // splitting. Asset lookups that use __dirname/import.meta.url must accept
+  // both the entry directory and the dist root.
   esbuildOptions(options) {
     options.define = {
       ...options.define,

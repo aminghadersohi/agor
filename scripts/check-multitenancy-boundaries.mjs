@@ -298,7 +298,6 @@ export const APPROVED_UNCLASSIFIED_SERVICE_BASELINE = [
   'branches/:id/unarchive',
   'branches/:id/execute-schedule-now',
   'branches/:id/fire-zone-trigger',
-  'schedules/:id/run-now',
   'boards/:id/sessions',
   'board-comments/:id/reply',
   'board-comments/:id/toggle-reaction',

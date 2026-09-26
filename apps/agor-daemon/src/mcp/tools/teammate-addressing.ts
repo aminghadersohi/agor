@@ -9,9 +9,11 @@
  *
  * This module turns a human name ("Front Desk", "front-desk") into the session
  * that is actually warm, so the caller can address a teammate the way a person
- * would. It deliberately does NOT create anything: resolution is a pure read
- * that either names one session, reports that the teammate has no session to
- * talk to, or refuses because the name was ambiguous.
+ * would. It deliberately does NOT create anything: resolution either names one
+ * session, reports that the teammate has no session to talk to, or refuses
+ * because the name was ambiguous. The only write it can cause is the shared
+ * resolver demoting an unhealthy front-desk slot before falling back to
+ * recency (see `front-desk/resolve-target-session.ts`).
  *
  * Authorization: candidates come from `findTeammateBranches` with
  * `minimumPermission: 'session'`, so a caller can only resolve — and only sees
@@ -26,11 +28,13 @@ import {
   type BranchID,
   getTeammateConfig,
   type Session,
+  type UserID,
   type UUID,
 } from '@agor/core/types';
+import { resolveTargetSession } from '../../front-desk/resolve-target-session.js';
 import { isSuperAdmin } from '../../utils/branch-authorization.js';
 import type { McpContext } from '../server.js';
-import { runWithMcpTenantDatabaseScope } from '../tenant-scope.js';
+import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
 
 /**
  * Upper bound on the teammate branches scanned for one name resolution.
@@ -58,8 +62,11 @@ export type TeammateNameResolution =
   | { outcome: 'not_found'; scanTruncated: boolean; known: TeammateCandidate[] }
   | { outcome: 'ambiguous'; candidates: TeammateCandidate[] };
 
+/** Whether a name reached a declared front desk or Part 1's recency pick. */
+export type TeammateSessionVia = 'front_desk' | 'recency';
+
 export type TeammateSessionResolution =
-  | { outcome: 'session'; branch: Branch; session: Session }
+  | { outcome: 'session'; branch: Branch; session: Session; via: TeammateSessionVia }
   | { outcome: 'no_session'; branch: Branch };
 
 /** Project a teammate branch to the compact identity echoed back to callers. */
@@ -148,22 +155,19 @@ export async function resolveTeammateName(
 }
 
 /**
- * Pick the session to talk to inside an already-resolved teammate branch.
- *
- * Rule: the most recently active non-archived session in that branch, i.e. the
- * greatest `updated_at`. That is the branch's warm context — the conversation
- * the teammate was last actually working in — which is the whole point of
- * addressing by name instead of cold-starting.
+ * Part 1's recency rule: the most recently active non-archived session in the
+ * branch, i.e. the greatest `updated_at`. That is the branch's warm context —
+ * the conversation the teammate was last actually working in.
  *
  * Routed through the `sessions` service rather than the repository so the
  * service's own access scoping applies. `$sort: { updated_at: -1 }` selects the
  * SQL `findPage` path, which supplies a `session_id` tie-breaker, so equal
  * timestamps resolve deterministically instead of by physical row order.
  */
-export async function resolveTeammateSession(
+async function findMostRecentTeammateSession(
   ctx: McpContext,
   branch: Branch
-): Promise<TeammateSessionResolution> {
+): Promise<Session | null> {
   const result = await ctx.app.service('sessions').find({
     query: {
       branch_id: branch.branch_id,
@@ -176,7 +180,7 @@ export async function resolveTeammateSession(
 
   const data: Session[] = Array.isArray(result) ? result : (result?.data ?? []);
   const session = data[0];
-  if (!session) return { outcome: 'no_session', branch };
+  if (!session) return null;
 
   // A session outside the branch we asked for means an adapter or
   // authorization contract broke. Prompting it would send the caller's message
@@ -184,7 +188,41 @@ export async function resolveTeammateSession(
   if (session.branch_id !== branch.branch_id) {
     throw new Error('Teammate session lookup returned a session outside the requested branch.');
   }
-  return { outcome: 'session', branch, session };
+  return session;
+}
+
+/**
+ * Pick the session to talk to inside an already-resolved teammate branch.
+ *
+ * A declared front desk (`agor_teammates_front_desk_set`) wins whenever it
+ * passes the health gate — even over a session with a later `updated_at`,
+ * which is what makes addressing deterministic. Without one, or when the
+ * pinned session is unusable, this is exactly Part 1's recency pick. Both
+ * rules live in the shared resolver so gateway routing cannot drift from it.
+ */
+export async function resolveTeammateSession(
+  ctx: McpContext,
+  branch: Branch
+): Promise<TeammateSessionResolution> {
+  const target = await resolveTargetSession(
+    {
+      branchId: branch.branch_id,
+      callerUserId: ctx.userId as UserID,
+      scope: { kind: 'teammate' },
+    },
+    {
+      read: (work) => runWithMcpTenantDatabaseScope(ctx, work),
+      write: (work) => runWithMcpTenantDatabaseWrite(ctx, work),
+      mostRecentSession: () => findMostRecentTeammateSession(ctx, branch),
+    }
+  );
+
+  if (target.via === 'front_desk' || target.via === 'recency') {
+    return { outcome: 'session', branch, session: target.session, via: target.via };
+  }
+  if (target.via === 'needs_session') return { outcome: 'no_session', branch };
+  // Explicit and thread-mapping targets are not produced for teammate scope.
+  throw new Error(`Unexpected teammate session resolution: ${target.via}`);
 }
 
 /** Render `not_found` as a caller-facing MCP error payload. */

@@ -4804,7 +4804,10 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
-  registerAuthenticatedRoute(
+  // Long route: the launch file is read by an executor, so tenant identity is
+  // armed without a request-long transaction and the service opens a short
+  // unit per database access (see ReposService.importFromLaunchJson).
+  registerLongAuthenticatedRoute(
     app,
     '/repos/:id/import-launch-json',
     {
@@ -5284,8 +5287,12 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     },
   });
 
+  // Identity-only (see TENANT_SERVICE_CLASSIFICATIONS): the scheduler opens a
+  // short unit per access and the spawned prompt dispatch defers its executor
+  // launch out of any scope. Write admission refuses a frozen tenant before
+  // any of that starts, as registerLongAuthenticatedRoute does.
   app.service('/schedules/:id/run-now').hooks({
-    around: { all: [tenantIdentityAround] },
+    around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
     before: {
       create: [
         requireAuth,

@@ -1270,6 +1270,36 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
     }
   }
 
+  /**
+   * The Session's most recently settled Task that actually ran to an outcome
+   * (`completed` or `failed`). Stopped and timed-out Tasks are skipped: they
+   * say nothing about whether the executor can still complete a turn.
+   */
+  async findLastSettledOutcome(sessionId: SessionID): Promise<Task | null> {
+    try {
+      const row = await select(this.db)
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.session_id, sessionId),
+            inArray(tasks.status, [TaskStatus.COMPLETED, TaskStatus.FAILED])
+          )
+        )
+        .orderBy(
+          desc(sql`COALESCE(${tasks.completed_at}, ${tasks.created_at})`),
+          desc(tasks.task_id)
+        )
+        .limit(1)
+        .one();
+      return row ? this.rowToTask(row as TaskRow) : null;
+    } catch (error) {
+      throw new RepositoryError(
+        `Failed to find the last settled session task: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
   /** Whether deleting this Branch would cascade any unfinished Task. */
   async hasNonterminalForBranch(branchId: string): Promise<boolean> {
     try {

@@ -39,6 +39,10 @@ vi.mock('@agor/core/db', () => ({
   BranchRepository: class FakeBranchRepository {
     findTeammateBranches = findTeammateBranches;
   },
+  // No declared front desk: resolution falls through to recency, as before.
+  BranchFrontDeskRepository: class FakeBranchFrontDeskRepository {
+    findOccupant = async () => null;
+  },
   SessionRelationshipRepository: class FakeSessionRelationshipRepository {},
   TaskRepository: class FakeTaskRepository {},
   shortId: (id: string) => id,

@@ -3522,6 +3522,44 @@ export const kbImportReceipts = sqliteTable(
   })
 );
 
+/**
+ * Declared front-desk session per `(branch, scope, slot)`. Retired rows are
+ * rotation history; the partial unique index admits one occupying row.
+ */
+export const branchFrontDeskSessions = sqliteTable(
+  'branch_front_desk_sessions',
+  {
+    id: text('id', { length: 36 }).primaryKey(),
+    branch_id: text('branch_id', { length: 36 })
+      .notNull()
+      .references(() => branches.branch_id, { onDelete: 'cascade' }),
+    scope: text('scope').notNull(),
+    slot: integer('slot').notNull(),
+    session_id: text('session_id', { length: 36 })
+      .notNull()
+      .references(() => sessions.session_id, { onDelete: 'cascade' }),
+    status: text('status', { enum: ['active', 'retiring', 'retired', 'failed'] }).notNull(),
+    promoted_at: t.timestamp('promoted_at').notNull(),
+    promoted_by: text('promoted_by', { length: 36 }).references(() => users.user_id, {
+      onDelete: 'set null',
+    }),
+    retired_at: t.timestamp('retired_at'),
+    retired_reason: text('retired_reason', {
+      enum: ['context', 'dead', 'manual', 'archived', 'replaced'],
+    }),
+    metadata: t.json<Record<string, unknown>>('metadata'),
+  },
+  (table) => ({
+    occupiedSlotUnique: uniqueIndex('uniq_front_desk_slot')
+      .on(table.branch_id, table.scope, table.slot)
+      .where(sql`${table.status} IN ('active', 'retiring')`),
+    sessionIdx: index('idx_front_desk_session').on(table.session_id),
+  })
+);
+
+export type BranchFrontDeskSessionRow = typeof branchFrontDeskSessions.$inferSelect;
+export type BranchFrontDeskSessionInsert = typeof branchFrontDeskSessions.$inferInsert;
+
 export const profileImages = sqliteTable(
   'profile_images',
   {
