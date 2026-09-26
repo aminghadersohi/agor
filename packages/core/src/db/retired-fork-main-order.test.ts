@@ -103,9 +103,13 @@ describe('retired fork-main front desk / profile image order', () => {
         });
       }
       const replay = classifyMigrationWatermark(entries, order.from - 1).pending;
-      expect(replay.slice(0, dialect === 'sqlite' ? 4 : 3)).toEqual(
-        REPLAYED.filter((tag) => entries.some((entry) => entry.tag === tag))
-      );
+      const replayed = [
+        ...REPLAYED.slice(0, 2),
+        // Upstream's 0117 is journalled directly after 0113, in PostgreSQL only.
+        '0117_callback_ownership_reconciliation',
+        ...REPLAYED.slice(2),
+      ].filter((tag) => entries.some((entry) => entry.tag === tag));
+      expect(replay.slice(0, replayed.length)).toEqual(replayed);
 
       // Anything the rewind could not replay idempotently is refused.
       expect(() =>
