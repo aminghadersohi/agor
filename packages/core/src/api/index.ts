@@ -22,9 +22,11 @@ import type {
   BoardCommentPatch,
   BoardCommentReposition,
   BoardExportBlob,
+  BoardImportResult,
   Branch,
   BranchCapabilityPolicy,
   BranchEnvironmentUpdate,
+  CancelQueuedTasksInput,
   CapabilityPolicyWorkspacePreferences,
   CardType,
   CardWithType,
@@ -76,6 +78,7 @@ import type {
   PermissionMode,
   PowerEssentialSessionSearchResult,
   PowerManagementStatus,
+  ReorderQueuedTasksInput,
   Repo,
   RuntimeTelemetryInput,
   Schedule,
@@ -94,6 +97,7 @@ import type {
   SessionUpdate,
   SetSessionPowerPriorityRequest,
   Task,
+  TaskQueueMutationResult,
   TeammateWelcomeNoteRequest,
   TemplateRenderRequest,
   TemplateRenderResponse,
@@ -656,6 +660,8 @@ export interface TasksService extends AgorService<Task> {
   reportRuntimeTelemetry(data: RuntimeTelemetryInput, params?: Params): Promise<Task>;
   /** Report a daemon-authorized SDK watchdog decision. */
   reportSdkHealthFailure(data: SdkHealthFailureInput, params?: Params): Promise<Task>;
+  cancelQueued(data: CancelQueuedTasksInput, params?: Params): Promise<TaskQueueMutationResult>;
+  reorderQueued(data: ReorderQueuedTasksInput, params?: Params): Promise<TaskQueueMutationResult>;
   /**
    * Mark a task as completed
    */
@@ -772,7 +778,7 @@ export interface BoardsService extends AgorService<Board> {
   /**
    * Import board from a JSON blob
    */
-  fromBlob(blob: BoardExportBlob, params?: Params): Promise<Board>;
+  fromBlob(blob: BoardExportBlob, params?: Params): Promise<BoardImportResult>;
 
   /**
    * Export board to YAML string
@@ -782,7 +788,10 @@ export interface BoardsService extends AgorService<Board> {
   /**
    * Import board from YAML string
    */
-  fromYaml(data: { yaml?: string; content?: string } | string, params?: Params): Promise<Board>;
+  fromYaml(
+    data: { yaml?: string; content?: string } | string,
+    params?: Params
+  ): Promise<BoardImportResult>;
 
   /**
    * Clone an existing board with a new name
@@ -1077,7 +1086,7 @@ function extendBoardsService(client: AgorClient): void {
 
   const rawFromBlob = (
     boardsService as unknown as {
-      fromBlob?: (data: BoardExportBlob, params?: Params) => Promise<Board>;
+      fromBlob?: (data: BoardExportBlob, params?: Params) => Promise<BoardImportResult>;
     }
   ).fromBlob?.bind(boardsService);
 
@@ -1102,7 +1111,7 @@ function extendBoardsService(client: AgorClient): void {
 
   const rawFromYaml = (
     boardsService as unknown as {
-      fromYaml?: (data: unknown, params?: Params) => Promise<Board>;
+      fromYaml?: (data: unknown, params?: Params) => Promise<BoardImportResult>;
     }
   ).fromYaml?.bind(boardsService);
 
@@ -1501,7 +1510,9 @@ function extendTasksService(client: AgorClient): void {
       'connectExecutor',
       'reportTerminationComplete',
       'reportRuntimeTelemetry',
-      'reportSdkHealthFailure'
+      'reportSdkHealthFailure',
+      'cancelQueued',
+      'reorderQueued'
     );
   }
   tasksService[TASKS_SERVICE_EXTENDED] = true;
