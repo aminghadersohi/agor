@@ -11,6 +11,9 @@ const REPLAYED = [
   '0113_callback_ownership_reconciliation',
   '9030_branch_front_desk_sessions',
 ];
+// Upstream migrations this fork journals above the deployed tail. Neither
+// retired order ran them, so the repair replays them after the slice.
+const UPSTREAM_TAIL = ['0115_api_key_host_tenant_discovery', '0116_user_api_key_source'];
 
 // Fork main journalled front desk at 1790129000214 and profile images at
 // 1790129000215, the slots deployed amin_dev history uses for profile images
@@ -39,6 +42,14 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
             WHERE created_at >= ${from} ORDER BY created_at`
         )
       ).map((row) => ({ hash: String(row.hash), created_at: Number(row.created_at) }));
+    }
+
+    async function dropUpstreamTail() {
+      await executeRaw(
+        db,
+        sql`DROP POLICY IF EXISTS "api_key_host_tenant_discovery" ON app_variables`
+      );
+      await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
     }
 
     async function recordRetiredOrder(count: 1 | 2) {
@@ -77,6 +88,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
     it('repairs a database that ran fork main at 7fe364e72', async () => {
       const before = await relations();
       await executeRaw(db, sql`DROP TABLE completion_subscriptions`);
+      await dropUpstreamTail();
       await recordRetiredOrder(2);
 
       const status = await checkMigrationStatus(db);
@@ -84,7 +96,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
         '9028_branch_front_desk_sessions',
         '9029_profile_image_galleries',
       ]);
-      expect(status.pending).toEqual(REPLAYED);
+      expect(status.pending).toEqual([...REPLAYED, ...UPSTREAM_TAIL]);
 
       await runMigrations(db);
       const after = await relations();
@@ -100,8 +112,9 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
     it('repairs a database that stopped after fork main front desk', async () => {
       await executeRaw(db, sql`DROP TABLE profile_images`);
       await executeRaw(db, sql`DROP TABLE completion_subscriptions`);
+      await dropUpstreamTail();
       await recordRetiredOrder(1);
-      expect((await checkMigrationStatus(db)).pending).toEqual(REPLAYED);
+      expect((await checkMigrationStatus(db)).pending).toEqual([...REPLAYED, ...UPSTREAM_TAIL]);
 
       await runMigrations(db);
       const after = await relations();
@@ -117,12 +130,13 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
 
     it('fails loudly when a replayed table has a different shape', async () => {
       await executeRaw(db, sql`ALTER TABLE branch_front_desk_sessions DROP COLUMN retired_reason`);
+      await dropUpstreamTail();
       await recordRetiredOrder(2);
       await expect(runMigrations(db)).rejects.toMatchObject({
         cause: { cause: { message: expect.stringContaining('retired_reason') } },
       });
       // The batch rolled back; the rewound ledger keeps reporting the replay.
-      expect((await checkMigrationStatus(db)).pending).toEqual(REPLAYED);
+      expect((await checkMigrationStatus(db)).pending).toEqual([...REPLAYED, ...UPSTREAM_TAIL]);
     });
   }
 );
