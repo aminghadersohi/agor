@@ -189,6 +189,18 @@ describe('Postgres migrations', () => {
       expect(classifyMigrationWatermark(journal.entries, watermark).pending[0]).toBe(
         '9026_branch_color_override'
       );
+      // Every entry from here on must clear every watermark before it, not just
+      // its own predecessor. This replaces an `index === entries.length - 1`
+      // check that only held until the next migration landed: the color column
+      // stopped being the newest entry the moment upstream 0111-0114 were
+      // adopted on top of it, and it can never be made last again — raising its
+      // `when` above theirs would re-open a non-idempotent ADD COLUMN that
+      // deployed databases have already applied.
+      for (let position = index; position < journal.entries.length; position++) {
+        expect(journal.entries[position]!.when).toBeGreaterThan(
+          Math.max(...journal.entries.slice(0, position).map(({ when }) => when))
+        );
+      }
       expect(new Set(journal.entries.map(({ idx }) => idx)).size).toBe(journal.entries.length);
       expect(new Set(journal.entries.map(({ tag }) => tag)).size).toBe(journal.entries.length);
     }
