@@ -32,6 +32,7 @@ export * from './opencode-models';
 export * from './opencode-ollama';
 export * from './power-management';
 export * from './presence';
+export * from './profile-image';
 export * from './provider-oauth';
 export * from './realtime';
 export * from './repo';

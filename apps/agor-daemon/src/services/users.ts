@@ -429,6 +429,7 @@ interface UpdateUserData {
   avatar_source?: string | null;
   avatar_source_id?: string | null;
   avatar_synced_at?: string | null;
+  profile_image_id?: import('@agor/core/types').ProfileImageID | null;
   preferences?: Record<string, unknown>;
   onboarding_completed?: boolean;
   /**
@@ -476,6 +477,7 @@ const TRUSTED_USER_MUTATION_FIELDS: Readonly<
     'avatar_synced_at',
   ]),
   'env-vars-widget': new Set(['env_vars', 'env_var_scopes']),
+  'profile-image-projection': new Set(['profile_image_id']),
   'claude-auth': new Set(['agentic_tools', 'agentic_auth_methods', 'agentic_credential_sources']),
 };
 
