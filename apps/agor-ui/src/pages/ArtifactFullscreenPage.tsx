@@ -23,8 +23,10 @@ import {
 import { Alert, Button, Layout, Space, Spin, Tooltip, Typography, theme } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
+import { ArtifactBindingControls } from '@/components/artifacts/ArtifactBindingControls';
 import {
   ArtifactConsoleReporter,
+  ArtifactInteractionBridge,
   ArtifactRuntimeBridge,
   ArtifactSandpackErrorReporter,
   ArtifactTrustStatusIcon,
@@ -296,6 +298,11 @@ export function ArtifactFullscreenPage({
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
+  // No session surface on this page, so a chat opens in a new tab.
+  const openSession = useCallback((sessionId: string) => {
+    window.open(uiRouteHref(sessionPath(sessionId as SessionID)), '_blank', 'noopener,noreferrer');
+  }, []);
+
   const body = (() => {
     if (loading && !payload) {
       return <Spin size="large" tip="Loading artifact..." />;
@@ -359,8 +366,18 @@ export function ArtifactFullscreenPage({
               contentHash={payload.runtime_report_hash ?? payload.content_hash}
             />
             <ArtifactRuntimeBridge artifactId={payload.artifact_id} />
+            <ArtifactInteractionBridge
+              artifactId={payload.artifact_id}
+              config={payload.interaction_config}
+              onOpenSession={openSession}
+            />
           </SandpackProvider>
         </div>
+        <ArtifactBindingControls
+          artifactId={payload.artifact_id}
+          config={payload.interaction_config}
+          onOpenSession={openSession}
+        />
       </div>
     );
   })();
