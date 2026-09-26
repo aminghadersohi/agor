@@ -133,6 +133,19 @@ export function createMigrationImpactRegistry(
 
 const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
   [
+    '9030_branch_front_desk_sessions',
+    {
+      requiresOfflineCutover: false,
+      impact: defineMigrationImpact({
+        classification: 'schema',
+        userAction: 'none',
+        rollbackCompatibility: 'compatible',
+        summary:
+          'Adds the branch front-desk slot table if absent and verifies its shape. Older binaries never read it; rolling back leaves declared front desks unused.',
+      }),
+    },
+  ],
+  [
     '0114_restore_session_indexes',
     {
       requiresOfflineCutover: false,
