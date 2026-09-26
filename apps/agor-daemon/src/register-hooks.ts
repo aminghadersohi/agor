@@ -1441,6 +1441,16 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     transaction: false,
   });
   const tenantWriteAdmissionAround = createTenantWriteAdmissionAroundHook(db);
+  // Identity-only custom routes: tenant identity without a request-long
+  // transaction, for handlers that dispatch across a process spawn and open a
+  // short unit per database access themselves. Pair with
+  // tenantWriteAdmissionAround on mutating methods.
+  const registerTenantIdentityAuthenticatedRoute = createTenantScopedAuthenticatedRouteRegistrar({
+    db,
+    config,
+    jwtSecret,
+    transaction: false,
+  });
 
   const ensureTenantContext = async (context: HookContext): Promise<HookContext> => {
     try {
@@ -2251,7 +2261,13 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     // caller, and both delegate to the real schedules/sessions services with
     // the caller's own identity, so branch RBAC and the schedule
     // run-as-creator rule apply unchanged.
-    registerTenantScopedAuthenticatedRoute(
+    //
+    // Actions are identity-only: `schedule_run` dispatches run-now, which
+    // spawns a session and its executor. Holding this request's transaction
+    // across that would pull the schedule lock, session insert and prompt
+    // admission into it, so the binding lookup and every delegated service
+    // open their own short units instead.
+    registerTenantIdentityAuthenticatedRoute(
       app,
       '/artifacts/:id/actions/:actionId',
       {
@@ -2268,7 +2284,8 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         },
       },
       { create: { role: ROLES.MEMBER, action: 'run artifact action binding' } },
-      requireAuth
+      requireAuth,
+      { around: [tenantWriteAdmissionAround] }
     );
 
     registerTenantScopedAuthenticatedRoute(

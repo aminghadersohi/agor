@@ -5258,8 +5258,12 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     },
   });
 
+  // Identity-only (see TENANT_SERVICE_CLASSIFICATIONS): the scheduler opens a
+  // short unit per access and the spawned prompt dispatch defers its executor
+  // launch out of any scope. Write admission refuses a frozen tenant before
+  // any of that starts, as registerLongAuthenticatedRoute does.
   app.service('/schedules/:id/run-now').hooks({
-    around: { all: [tenantIdentityAround] },
+    around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
     before: {
       create: [
         requireAuth,
