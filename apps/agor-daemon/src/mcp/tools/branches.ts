@@ -46,6 +46,7 @@ import { issueExecutorCommandToken } from '../../services/session-token-service.
 import { isSuperAdmin } from '../../utils/branch-authorization.js';
 import { ensureBranchWorkspaceAccess } from '../../utils/branch-workspace-path.js';
 import { resolveDelegatedExecutionHomeKey } from '../../utils/executor-delegated-home.js';
+import { withPromptProvenanceTool } from '../../utils/prompt-provenance.js';
 import { getDaemonUrl, requestExecutor } from '../../utils/spawn-executor.js';
 import {
   BRANCH_FILESYSTEM_READY_POLL_INTERVAL_MS,
@@ -209,12 +210,16 @@ function mcpRequestSignal(requestContext?: ServerContext): AbortSignal | undefin
  * that may already be present after optional Session authorization.
  */
 function freshMcpServiceParams(ctx: McpContext): McpContext['baseServiceParams'] {
-  const { authenticated, provider, tenant, user } = ctx.baseServiceParams;
+  const { authenticated, provider, tenant, user, _promptProvenance } = ctx.baseServiceParams;
   return {
     ...(user ? { user: { ...user } } : {}),
     ...(authenticated !== undefined ? { authenticated } : {}),
     ...(provider !== undefined ? { provider } : {}),
     ...(tenant ? { tenant: { ...tenant } } : {}),
+    // The server-stamped prompt origin is a trusted MCP identity field, not
+    // cached hook data: a prompt admitted through these params must still
+    // carry it, or the zone-trigger path would deliver agent text unattributed.
+    ...(_promptProvenance ? { _promptProvenance: { ..._promptProvenance } } : {}),
   };
 }
 
@@ -1635,7 +1640,11 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
               stream: true,
               metadata: { system_authored: true },
             },
-            { ...ctx.baseServiceParams, provider: undefined, route: { id: targetSessionId } }
+            {
+              ...withPromptProvenanceTool(ctx.baseServiceParams, 'agor_branches_set_zone'),
+              provider: undefined,
+              route: { id: targetSessionId },
+            }
           );
 
           if (task.status === 'queued') {
@@ -1814,7 +1823,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     'agor_branches_unarchive',
     {
       description:
-        'Restore a previously archived branch. Optionally place it back on a board. Also unarchives all sessions that were archived as part of the branch archival.',
+        'Request asynchronous restoration of an archived branch, optionally onto a board. Unarchives branch-archived sessions. Acceptance is not filesystem readiness: use agor_branches_wait_for_ready before starting work.',
       inputSchema: z.object({
         branchId: mcpRequiredId(
           'branchId',
@@ -1841,7 +1850,8 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       return textResult({
         success: true,
         branch: result,
-        message: 'Branch unarchived successfully.',
+        message:
+          'Unarchive accepted. Wait for filesystem_status ready before starting work; acceptance is not readiness.',
       });
     }
   );
@@ -1951,23 +1961,16 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
   registerFrontDeskTools(server, ctx);
 
   // Tool: agor_branches_retry_provisioning
-  // Explicit, non-destructive repair for a branch whose filesystem provisioning
-  // landed in 'failed'. Wraps the exact same `reposService.retryBranchProvisioning`
-  // implementation used by the REST route and the UI, so all three surfaces share
-  // one code path. Only `failed → creating` is retryable; the transition is an
-  // atomic claim, so concurrent calls can never dispatch two materializers.
+  // Shared attempt-fenced recovery for failed provisioning and stale active archive states.
   server.registerTool(
     'agor_branches_retry_provisioning',
     {
       description:
-        'Repair a branch whose git working directory failed to materialize ' +
-        "(filesystem_status 'failed') by re-dispatching provisioning. Also recovers a branch " +
-        "left 'creating' by a daemon restart. Requires branch control ('all' permission, branch " +
-        "owner, or admin). Not retryable otherwise: 'ready' is returned unchanged, a " +
-        "still-in-flight 'creating' attempt is rejected as a conflict, and " +
-        "archived/'preserved'/'cleaned'/'deleted' branches must use the restore/unarchive flow " +
-        'instead. Non-destructive — never deletes refs or directories. ' +
-        'Returns the updated branch with its new filesystem_status.',
+        'Retry failed provisioning or recover an active branch with stale preserved/cleaned/deleted filesystem status. ' +
+        'Requires branch Manager authority and filesystem write access. The executor validates existing files; ' +
+        'invalid Git linkage fails without overwriting them. Missing local teammate homes require personal backup restoration. ' +
+        'Archived branches must use unarchive. Ready is a no-op; creating is always a conflict, including after a restart. ' +
+        'Returns admission state, not proof of completion; wait for ready before creating sessions.',
       inputSchema: z.object({
         branchId: mcpRequiredId('branchId', 'Branch'),
       }),

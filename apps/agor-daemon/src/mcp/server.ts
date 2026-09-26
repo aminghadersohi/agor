@@ -18,6 +18,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { AgorConfig } from '@agor/core/config';
 import {
+  isMissingTenantContextError,
   resolveMultiTenancyConfig,
   resolveTenantContext,
   TenantResolutionError,
@@ -30,16 +31,26 @@ import {
   UserApiKeysRepository,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
-import type { Session, SessionID, TenantContext, UserID } from '@agor/core/types';
+import {
+  MCP_CLIENT_HINT_HEADER,
+  PERSONAL_API_KEY_PREFIX,
+  type Session,
+  type SessionID,
+  type TenantContext,
+  type UserID,
+} from '@agor/core/types';
 import { isNotFoundError } from '@agor/core/utils/errors';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpHandler, type ListToolsResult, McpServer } from '@modelcontextprotocol/server';
 import type { Request, Response } from 'express';
 import { toJSONSchema } from 'zod/v4-mini';
+import { createApiKeyHostTenantResolver } from '../auth/api-key-host-tenant.js';
 import type { AuthenticatedParams, AuthenticatedUser } from '../declarations.js';
+import type { McpPromptProvenanceStamp } from '../utils/prompt-provenance.js';
+import { createMcpAuthRejectionLogger } from './auth-rejection-log.js';
 import { ToolDispatcher, toolDispatcherProxy } from './register-tool-proxy.js';
 import { tenantScopedToolProxy } from './tenant-scope.js';
-import { validateVerifiedSessionToken, verifySessionToken } from './tokens.js';
+import { validateVerifiedSessionToken, verifySessionTokenDetailed } from './tokens.js';
 import { formatDomainDescriptionsForInstructions, ToolRegistry } from './tool-registry.js';
 import { textResult } from './tool-result.js';
 import { registerAnalyticsTools } from './tools/analytics.js';
@@ -91,7 +102,27 @@ export interface McpContext {
   /** Freshly authorized Session identity available to session-aware tool boundaries. */
   authenticatedSession?: Pick<Session, 'session_id' | 'agentic_tool' | 'branch_id'>;
   authenticatedUser: AuthenticatedUser;
-  baseServiceParams: Pick<AuthenticatedParams, 'user' | 'authenticated' | 'provider' | 'tenant'>;
+  /**
+   * Base params for every service call this request makes.
+   *
+   * `_promptProvenance` rides here rather than being passed per call site so
+   * an MCP-originated prompt cannot be admitted unstamped by a tool that
+   * forgot to opt in. That failure mode is not hypothetical: exactly one of
+   * the eight MCP prompt call sites once omitted `system_authored`, and the
+   * consequence was a relayed agent message reaching the destination SDK
+   * labeled as human-typed.
+   */
+  baseServiceParams: Pick<AuthenticatedParams, 'user' | 'authenticated' | 'provider' | 'tenant'> & {
+    /**
+     * Optional in the type, always present at runtime. Test fixtures build
+     * partial contexts, and widening every one of them to carry a stamp they
+     * never use would trade a real guard for a ceremonial one. The guard that
+     * matters is structural and is asserted in `tools/prompt-provenance.test.ts`:
+     * every prompt call site passes `ctx.baseServiceParams` through rather
+     * than assembling params of its own.
+     */
+    _promptProvenance?: McpPromptProvenanceStamp;
+  };
 }
 
 /**
@@ -440,7 +471,9 @@ export function setupMCPRoutes(
   app: Application,
   db: TenantScopeAwareDatabase,
   toolSearchEnabled = true,
-  config: Pick<AgorConfig, 'multi_tenancy' | 'metrics'> = { multi_tenancy: undefined },
+  config: Pick<AgorConfig, 'multi_tenancy' | 'metrics' | 'external_launch'> = {
+    multi_tenancy: undefined,
+  },
   options: { serverVersion?: string } = {}
 ): void {
   const serverVersion = options.serverVersion ?? '0.0.0';
@@ -451,8 +484,10 @@ export function setupMCPRoutes(
     console.log(`✅ MCP tool registry built (${cachedRegistry!.size} tools cached)`);
   }
 
+  const logAuthRejection = createMcpAuthRejectionLogger();
   const personalApiKeys = new UserApiKeysRepository(db);
   const multiTenancy = resolveMultiTenancyConfig(config);
+  const resolveApiKeyHostTenant = createApiKeyHostTenantResolver({ db, config });
   const requestContext = new AsyncLocalStorage<McpContext>();
 
   const protocolHandler = createMcpHandler(
@@ -595,6 +630,7 @@ export function setupMCPRoutes(
 
       let requestedSessionId: string | undefined;
       let credential: string | undefined;
+      let credentialSource: 'authorization' | 'api_key' | 'none' = 'none';
       try {
         const authorization = getSingleHeader(req, 'Authorization');
         const xApiKey = getSingleHeader(req, 'X-API-Key');
@@ -604,6 +640,7 @@ export function setupMCPRoutes(
           throw new MalformedHeaderError('Mcp-Session-Id must contain only visible ASCII');
         }
         credential = getCredential(authorization, xApiKey);
+        credentialSource = authorization ? 'authorization' : xApiKey ? 'api_key' : 'none';
       } catch (error) {
         if (error instanceof MalformedHeaderError) {
           return res.status(400).json({
@@ -614,7 +651,8 @@ export function setupMCPRoutes(
       }
 
       if (!credential) {
-        console.warn('⚠️  MCP request missing credentials');
+        // Credential-free discovery is expected traffic, not a JWT failure.
+        // Still reject before tenant resolution, database access, or protocol dispatch.
         return res.status(401).json({
           ...jsonRpcError(
             req,
@@ -628,17 +666,23 @@ export function setupMCPRoutes(
       let userId: UserID;
       let sessionId: SessionID | undefined;
       let tenant: TenantContext;
-      const isPersonalApiKey = credential.startsWith('agor_sk_');
+      const isPersonalApiKey = credential.startsWith(PERSONAL_API_KEY_PREFIX);
 
       if (isPersonalApiKey) {
         try {
           // Opaque personal keys do not contain a signed tenant claim. Resolve
           // static mode or the configured trusted edge header before touching
-          // the tenant-owned key table. Auth-claim-only hosted deployments must
-          // use an internal tenant-bound MCP token instead.
-          tenant = resolveTenantContext(multiTenancy, {
-            headers: getTenantResolutionHeaders(req),
-          });
+          // the tenant-owned key table. Hosted claim-only deployments route the
+          // key by the trusted workspace Host instead (see api-key-host-tenant).
+          const tenantHeaders = getTenantResolutionHeaders(req);
+          try {
+            tenant = resolveTenantContext(multiTenancy, { headers: tenantHeaders });
+          } catch (error) {
+            // Only a missing identity may fall back to Host routing; malformed
+            // or conflicting trusted tenant headers stay terminal.
+            if (!isMissingTenantContextError(error) || !resolveApiKeyHostTenant) throw error;
+            tenant = await resolveApiKeyHostTenant(tenantHeaders);
+          }
         } catch (error) {
           if (error instanceof TenantResolutionError) {
             return res.status(401).json({
@@ -654,7 +698,13 @@ export function setupMCPRoutes(
           )
         );
         if (!keyRow) {
-          console.warn('⚠️  Invalid MCP personal API key');
+          logAuthRejection(
+            'invalid_personal_key',
+            req.method,
+            credentialSource,
+            req.body,
+            req.headers[MCP_CLIENT_HINT_HEADER]
+          );
           return res.status(401).json({
             ...jsonRpcError(req, -32001, 'Invalid personal API key'),
           });
@@ -683,14 +733,21 @@ export function setupMCPRoutes(
         }
         sessionId = requestedSessionId as SessionID | undefined;
       } else {
-        const verifiedToken = verifySessionToken(app, credential);
-        if (!verifiedToken) {
-          console.warn('⚠️  Invalid MCP session token');
+        const verification = verifySessionTokenDetailed(app, credential);
+        if (!verification.context) {
+          logAuthRejection(
+            verification.reason,
+            req.method,
+            credentialSource,
+            req.body,
+            req.headers[MCP_CLIENT_HINT_HEADER]
+          );
           return res.status(401).json({
             ...jsonRpcError(req, -32001, 'Invalid or expired session token'),
           });
         }
 
+        const verifiedToken = verification.context;
         try {
           // The signed token binding is an authenticated tenant signal. Static
           // configuration and a configured trusted header, when present, must
@@ -710,7 +767,13 @@ export function setupMCPRoutes(
 
         const context = await validateVerifiedSessionToken(verifiedToken);
         if (!context) {
-          console.warn('⚠️  Invalid MCP session token');
+          logAuthRejection(
+            'session_missing',
+            req.method,
+            credentialSource,
+            req.body,
+            req.headers[MCP_CLIENT_HINT_HEADER]
+          );
           return res.status(401).json({
             ...jsonRpcError(req, -32001, 'Invalid or expired session token'),
           });
@@ -744,10 +807,15 @@ export function setupMCPRoutes(
       // holding a database transaction. Tool/repository operations open their
       // own short tenant units of work.
       return runWithTenantContext(tenant.tenant_id, async () => {
-        const baseServiceParams: Pick<
-          AuthenticatedParams,
-          'user' | 'authenticated' | 'provider' | 'tenant'
-        > = {
+        const promptProvenanceStamp = (
+          origin: Partial<McpPromptProvenanceStamp> = {}
+        ): McpPromptProvenanceStamp => ({
+          authenticated_by: isPersonalApiKey ? 'personal_api_key' : 'session_token',
+          origin_user_id: authenticatedUser.user_id as UserID,
+          origin_user_label: authenticatedUser.email || shortId(authenticatedUser.user_id),
+          ...origin,
+        });
+        const baseServiceParams: McpContext['baseServiceParams'] = {
           user: {
             user_id: authenticatedUser.user_id,
             email: authenticatedUser.email,
@@ -756,6 +824,14 @@ export function setupMCPRoutes(
           authenticated: true,
           provider: 'mcp',
           tenant,
+          // Session identity is added below, once the optional current Session
+          // context has been re-authorized. Everything here is read from the
+          // daemon's own request state; nothing on the JSON-RPC envelope
+          // contributes. `authenticated_by` keeps a signed session token
+          // distinct from a personal API key that merely NAMED a session it can
+          // read (`X-Agor-Session-Id` is re-authorized, not authenticated), so
+          // the weaker claim is never rendered as the stronger one.
+          _promptProvenance: promptProvenanceStamp(),
         };
 
         // Re-authorize every optional current-Session context through the
@@ -772,6 +848,11 @@ export function setupMCPRoutes(
               agentic_tool: session.agentic_tool,
               branch_id: session.branch_id,
             };
+            baseServiceParams._promptProvenance = promptProvenanceStamp({
+              origin_session_id: session.session_id,
+              origin_branch_id: session.branch_id,
+              ...(session.agentic_tool ? { origin_agentic_tool: session.agentic_tool } : {}),
+            });
           } catch {
             return res.status(403).json({
               ...jsonRpcError(

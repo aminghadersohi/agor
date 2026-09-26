@@ -181,6 +181,10 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
   // Operator surfaces the lanes read. Registered through the tenant-scoped
   // route registrar, so the scope is armed at registration.
   // --------------------------------------------------------------------------
+  'api/v1/user/me': {
+    scopeClass: 'scoped',
+    why: 'Registered through createTenantScopedAuthenticatedRouteRegistrar; returns the authenticated caller projection only.',
+  },
   'mcp-slack-connect/card': {
     scopeClass: 'scoped',
     why: 'Registered through createTenantScopedAuthenticatedRouteRegistrar; reads and writes one app variable in the request scope.',
@@ -239,16 +243,25 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
   // predate this mechanism and sit in the baseline; this one is new, so it
   // answers.
   // --------------------------------------------------------------------------
+  'branches/:id/retire-teammate': {
+    scopeClass: 'identity-only',
+    why: 'Metadata-only retirement carries authenticated tenant identity and the write gate at registration. Branch/repo reads, the authority-fenced preference-and-archive admission, session archival and final read each open short tenant units in requestWorkspaceOperation; terminal closure and realtime delivery happen outside those units. No global or creator authority is used.',
+  },
   'branches/:id/retry-provisioning': {
     scopeClass: 'identity-only',
     why: 'Long route that crosses the executor spawn boundary: the authorization read, the repo lookup, the failed -> creating CAS and the dispatch each open their own short unit via reposService.withTenantDatabase, so no transaction is held across the spawn.',
   },
 
   // --------------------------------------------------------------------------
-  // Fork launch.json import (#42). Its `.agor.yml` sibling predates this
-  // mechanism and sits in the baseline holding a request transaction across
-  // its executor spawn; this one is new, so it answers — and does not.
+  // Repository environment imports that read a branch file through an
+  // executor. launch.json (#42) was classified at landing; its `.agor.yml`
+  // sibling predated this mechanism and sat in the baseline holding a request
+  // transaction across its executor spawn until it was moved to the same shape.
   // --------------------------------------------------------------------------
+  'repos/:id/import-agor-yml': {
+    scopeClass: 'identity-only',
+    why: 'Long route across the executor spawn that reads .agor.yml: registered with tenant identity and write admission only. The repo read, branch authorization (branches service), pre-spawn workspace-access check and delegated-home lookup each open their own short unit; the executor reaches the daemon only through a command token carrying the tenant_id claim; the environment write runs in withFreshTenantWrite after the spawn. Admin-only, enforced in the route hook and again in ReposService.importFromAgorYml.',
+  },
   'repos/:id/import-launch-json': {
     scopeClass: 'identity-only',
     why: 'Long route across the executor spawn that reads the launch file: registered with tenant identity and write admission only. The repo read, branch authorization (branches service), pre-spawn workspace-access check and delegated-home lookup each open their own short unit; the executor reaches the daemon only through a command token carrying the tenant_id claim; the environment write runs in withFreshTenantWrite after the spawn. Admin-only, enforced in the route hook and again in ReposService.importFromLaunchJson.',
@@ -345,7 +358,6 @@ export const UNCLASSIFIED_SERVICE_BASELINE: readonly string[] = [
   'repos/clone', // BASELINE-ENTRY
   'repos/:id/branches', // BASELINE-ENTRY
   'repos/:id/branches/:name', // BASELINE-ENTRY
-  'repos/:id/import-agor-yml', // BASELINE-ENTRY
   'repos/:id/export-agor-yml', // BASELINE-ENTRY
   'artifacts/:id/payload', // BASELINE-ENTRY
   'artifacts/:id/console', // BASELINE-ENTRY

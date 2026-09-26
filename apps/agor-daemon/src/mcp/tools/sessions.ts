@@ -33,8 +33,11 @@ import {
   type Session,
   type SessionID,
   type SessionRelationship,
+  type SpawnConfig,
   type TaskID,
+  USER_DEFAULT_AGENTIC_CONFIGURATION,
   type UserID,
+  WORKSPACE_DEFAULT_AGENTIC_CONFIGURATION,
   type ZoneBoardObject,
 } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
@@ -50,6 +53,7 @@ import { requireActiveAgenticTool } from '../../utils/agentic-tool-runtime.js';
 import { ensureCanPromptTargetSession } from '../../utils/branch-authorization.js';
 import { interruptCorrectionTaskId } from '../../utils/durable-task-id.js';
 import { emitServiceEvent } from '../../utils/emit-service-event.js';
+import { withPromptProvenanceTool } from '../../utils/prompt-provenance.js';
 import {
   resolveBoardId,
   resolveBranchId,
@@ -799,6 +803,31 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .max(365 * 24 * 60 * 60)
           .optional()
           .describe('Grace period before archival when autoArchive is after_completion.'),
+        presetId: mcpOptionalNonEmptyString(
+          'presetId',
+          `Child configuration preset UUID, ${USER_DEFAULT_AGENTIC_CONFIGURATION}, or ${WORKSPACE_DEFAULT_AGENTIC_CONFIGURATION}. Cannot be combined with individual configuration overrides.`
+        ),
+        permissionMode: z
+          .enum([
+            'default',
+            'acceptEdits',
+            'bypassPermissions',
+            'plan',
+            'dontAsk',
+            'autoEdit',
+            'yolo',
+            'ask',
+            'auto',
+            'on-failure',
+            'allow-all',
+          ])
+          .optional()
+          .describe(
+            'Child permission mode. Inline configuration must be allowed by the workspace.'
+          ),
+        codexSandboxMode: z.enum(['read-only', 'workspace-write', 'danger-full-access']).optional(),
+        codexApprovalPolicy: z.enum(['untrusted', 'on-failure', 'on-request', 'never']).optional(),
+        codexNetworkAccess: z.boolean().optional(),
       }),
     },
     async (args) => {
@@ -818,6 +847,11 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         modelConfig: coerceModelConfig(args.modelConfig),
         autoArchive: args.autoArchive,
         autoArchiveAfterSeconds: args.autoArchiveAfterSeconds,
+        presetId: args.presetId as SpawnConfig['presetId'],
+        permissionMode: args.permissionMode,
+        codexSandboxMode: args.codexSandboxMode,
+        codexApprovalPolicy: args.codexApprovalPolicy,
+        codexNetworkAccess: args.codexNetworkAccess,
       };
 
       // spawn/fork are custom methods, not Feathers transport methods. Scope
@@ -836,7 +870,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           metadata: { system_authored: true },
         },
         {
-          ...ctx.baseServiceParams,
+          ...withPromptProvenanceTool(ctx.baseServiceParams, 'agor_sessions_spawn'),
           provider: undefined,
           route: { id: childSession.session_id },
         }
@@ -1026,16 +1060,24 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           )
         );
       }
+      // Name the delivering tool on the inherited server-stamped origin. The
+      // stamp itself rides on `ctx.baseServiceParams`, so forgetting this line
+      // would only blur a label, never drop the block.
+      const provenanceParams = withPromptProvenanceTool(
+        ctx.baseServiceParams,
+        'agor_sessions_prompt',
+        mode
+      );
       const callbackParams = args.callback
         ? {
-            ...ctx.baseServiceParams,
+            ...provenanceParams,
             _taskCompletionCallback: {
               target_session_id: ctx.sessionId!,
               requested_from_session_id: ctx.sessionId!,
               requested_by_user_id: ctx.userId,
             },
           }
-        : ctx.baseServiceParams;
+        : provenanceParams;
 
       if (mode === 'continue') {
         // The prompt route returns the Task entity directly. Whether it ran
@@ -1257,12 +1299,26 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           ctx.baseServiceParams
         )
       );
-      const task = await ctx.app
-        .service('/sessions/:id/prompt')
-        .create(
-          { prompt: args.message, stream: true },
-          { ...ctx.baseServiceParams, route: { id: resolution.destination_session_id } }
-        );
+      // A relayed report is agent-composed, not typed by the caller's human.
+      // Dropping the provider is what lets the daemon accept internal metadata
+      // at all, and `system_authored` is what keeps `resolvePromptOrigin` from
+      // handing this text human trust authority in the destination Session.
+      const task = await ctx.app.service('/sessions/:id/prompt').create(
+        {
+          prompt: args.message,
+          stream: true,
+          metadata: { system_authored: true },
+        },
+        {
+          ...withPromptProvenanceTool(
+            ctx.baseServiceParams,
+            'agor_session_relationships_report',
+            args.destination
+          ),
+          provider: undefined,
+          route: { id: resolution.destination_session_id },
+        }
+      );
       return structuredResult({
         ...resolution,
         task_id: task.task_id,
@@ -2153,7 +2209,11 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             stream: true,
             metadata: { system_authored: true },
           },
-          { ...ctx.baseServiceParams, provider: undefined, route: { id: session.session_id } }
+          {
+            ...withPromptProvenanceTool(ctx.baseServiceParams, 'agor_sessions_create'),
+            provider: undefined,
+            route: { id: session.session_id },
+          }
         );
       }
 

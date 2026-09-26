@@ -25,7 +25,6 @@ import type {
   BoardImportResult,
   Branch,
   BranchCapabilityPolicy,
-  BranchEnvironmentUpdate,
   CancelQueuedTasksInput,
   CapabilityPolicyWorkspacePreferences,
   CardType,
@@ -838,7 +837,7 @@ export interface UsersService extends AgorService<User> {
    * recorded as an explicit user pick.
    */
   setPrimaryTeammate(
-    data: { branchId: string; expectedUserId: UserID },
+    data: { branchId: string | null; expectedUserId: UserID },
     params?: Params
   ): Promise<Branch | null>;
   /** Set an onboarding/default teammate only when the caller is still unset. */
@@ -889,22 +888,6 @@ export interface BranchesService extends AgorService<Branch> {
    * Remove branch from board
    */
   removeFromBoard(id: string, params?: Params): Promise<Branch>;
-
-  /**
-   * Update environment status
-   */
-  updateEnvironment(
-    data:
-      | {
-          branch_id?: string;
-          branchId?: string;
-          environment_update?: BranchEnvironmentUpdate;
-          environmentUpdate?: BranchEnvironmentUpdate;
-        }
-      | string,
-    environmentUpdate?: BranchEnvironmentUpdate,
-    params?: Params
-  ): Promise<Branch>;
 
   /**
    * Start branch environment
@@ -1494,7 +1477,7 @@ function extendBranchesService(client: AgorClient): void {
   };
   if (branchesService[BRANCHES_SERVICE_EXTENDED]) return;
   if (typeof branchesService.methods === 'function') {
-    branchesService.methods('updateEnvironment', 'ensureTeammateKnowledgeNamespace', 'clean');
+    branchesService.methods('ensureTeammateKnowledgeNamespace', 'clean');
   }
   branchesService[BRANCHES_SERVICE_EXTENDED] = true;
 }

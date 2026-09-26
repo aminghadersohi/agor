@@ -85,6 +85,7 @@ import {
   isSessionExecuting,
   SessionStatus,
   SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS,
+  toLeanSessionListRow,
   USER_DEFAULT_AGENTIC_CONFIGURATION,
 } from '@agor/core/types';
 import { assertExecutionHomeKeySatisfiesMode } from '@agor/core/unix';
@@ -221,6 +222,8 @@ export type SessionParams = QueryParams<{
   agentic_tool?: Session['agentic_tool'];
   board_id?: string;
   include_usage?: boolean | 'true' | 'false';
+  /** List-only projection; see `LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS`. */
+  lean?: boolean;
   include_last_message?: boolean | 'true' | 'false'; // Opt-in last message enrichment
   last_message_truncation_length?: number; // Default: 500 chars, min: 50, max: 10000
   /** Marks a `remove` as the delete half of a "switch tool" swap (see `remove`). */
@@ -1541,7 +1544,11 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       data.codexApprovalPolicy !== undefined ||
       data.codexNetworkAccess !== undefined;
     const inheritedPresetId =
-      targetTool === parent.agentic_tool ? parent.agentic_tool_preset_id : undefined;
+      // Explicit inline selection detaches from the parent's preset. The
+      // materializer still enforces the workspace's inline-configuration policy.
+      !hasAtomicOverride && targetTool === parent.agentic_tool
+        ? parent.agentic_tool_preset_id
+        : undefined;
     const presetId = data.presetId ?? inheritedPresetId ?? undefined;
     if (presetId && hasAtomicOverride) {
       throw new BadRequest(
@@ -2002,12 +2009,17 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       }
     }
 
-    const affectedSessions = await this.sessionRepo.updateArchiveStateForTargets(
-      targets.map((target) => ({
-        id: target.session.session_id,
-        archived: target.archived,
-        archivedReason: target.archivedReason,
-      }))
+    // Carry remote relationships on the patched rows, as get/find do. The UI
+    // projects remote-created children as surrogates under their creator from
+    // these edges; a restored creator without them would lose its surrogates.
+    const affectedSessions = await this.enrichRemoteRelationships(
+      await this.sessionRepo.updateArchiveStateForTargets(
+        targets.map((target) => ({
+          id: target.session.session_id,
+          archived: target.archived,
+          archivedReason: target.archivedReason,
+        }))
+      )
     );
 
     for (const affectedSession of affectedSessions) {
@@ -2475,8 +2487,27 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
   /**
    * Override find to include durable remote relationships in list results.
    * Note: Last message is NOT included in list operations - only on single GET.
+   *
+   * `lean: true` is a list-only projection that omits bulky single-session
+   * `custom_context` keys from every row (see `toLeanSessionListRow`). It is not
+   * a column, so it is removed from the query before any filter sees it, and
+   * it never widens visibility: rows come from the same scoped read either way.
+   * The result object itself is preserved so its enrichment marker survives.
    */
   async find(params?: SessionParams): Promise<Paginated<Session> | Session[]> {
+    const query = params?.query as Record<string, unknown> | undefined;
+    if (!query || !('lean' in query)) return this.findRows(params);
+    const { lean, ...rest } = query;
+    const result = await this.findRows({ ...params, query: rest } as SessionParams);
+    if (lean !== true) return result;
+    const rows = Array.isArray(result) ? result : result.data;
+    for (let index = 0; index < rows.length; index += 1) {
+      rows[index] = toLeanSessionListRow(rows[index]);
+    }
+    return result;
+  }
+
+  private async findRows(params?: SessionParams): Promise<Paginated<Session> | Session[]> {
     // SQL-pushdown path for the recency-sorted / board-scoped list queries the
     // first-paint loader issues. The before-hook stamps a marker here so the
     // same SQL path can compose branch visibility into the query.

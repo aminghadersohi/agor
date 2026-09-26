@@ -683,9 +683,14 @@ describe('session transfer MCP tools', () => {
       { destination: 'coordinator' },
       expect.any(Object)
     );
+    // The relayed text is composed by the calling agent, so it must reach the
+    // destination Session unattributed rather than dressed up as human input.
     expect(createPrompt).toHaveBeenCalledWith(
-      { prompt: 'status update', stream: true },
-      expect.objectContaining({ route: { id: 'sess-current-coordinator' } })
+      { prompt: 'status update', stream: true, metadata: { system_authored: true } },
+      expect.objectContaining({
+        route: { id: 'sess-current-coordinator' },
+        provider: undefined,
+      })
     );
     expect(response.structuredContent).toEqual({
       session_id: 'sess-current',

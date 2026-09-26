@@ -58,15 +58,19 @@ export function useZoneWorkflow(client: AgorClient | null, boardId?: BoardID) {
       );
     const connected = () => void refresh().catch(console.error);
     void refresh().catch(console.error);
+    // Fork-only wiring: an upstream-owned caller may hand the canvas a client
+    // whose services cannot emit (test doubles, partial clients). Degrade to
+    // the one fetch above rather than throwing inside a React effect.
+    if (typeof service.on !== 'function' || typeof service.off !== 'function') return;
     service.on('created', created);
     service.on('patched', patched);
     service.on('removed', removed);
-    client.io.on('connect', connected);
+    client.io?.on('connect', connected);
     return () => {
       service.off('created', created);
       service.off('patched', patched);
       service.off('removed', removed);
-      client.io.off('connect', connected);
+      client.io?.off('connect', connected);
     };
   }, [client, boardId, refresh]);
 

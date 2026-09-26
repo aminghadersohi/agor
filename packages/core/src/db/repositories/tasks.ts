@@ -62,6 +62,7 @@ import {
   sql,
 } from 'drizzle-orm';
 import { generateId, shortId } from '../../lib/ids';
+import { escapePromptProvenanceSentinels } from '../../templates/prompt-provenance';
 import { lockSessionBranchForAdmission } from '../branch-admission';
 import type { Database } from '../client';
 import {
@@ -1242,35 +1243,6 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
   }
 
   /**
-   * Which of these Sessions still own unfinished Task work.
-   *
-   * One indexed query for the whole set so an archive tree does not fan out
-   * into per-Session reads. Like the Branch-level check this is a
-   * known-activity proxy over durable Task status, not proof that a detached
-   * process is absent.
-   */
-  async findSessionIdsWithNonterminalTasks(sessionIds: string[]): Promise<Set<string>> {
-    if (sessionIds.length === 0) return new Set();
-    try {
-      const rows = await select(this.db, { session_id: tasks.session_id })
-        .from(tasks)
-        .where(
-          and(
-            inArray(tasks.session_id, sessionIds),
-            inArray(tasks.status, [...NONTERMINAL_TASK_STATUSES])
-          )
-        )
-        .all();
-      return new Set(rows.map((row: { session_id: string }) => row.session_id));
-    } catch (error) {
-      throw new RepositoryError(
-        `Failed to inspect unfinished session tasks: ${error instanceof Error ? error.message : String(error)}`,
-        error
-      );
-    }
-  }
-
-  /**
    * The Session's most recently settled Task that actually ran to an outcome
    * (`completed` or `failed`). Stopped and timed-out Tasks are skipped: they
    * say nothing about whether the executor can still complete a turn.
@@ -1295,6 +1267,35 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
     } catch (error) {
       throw new RepositoryError(
         `Failed to find the last settled session task: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /**
+   * Which of these Sessions still own unfinished Task work.
+   *
+   * One indexed query for the whole set so an archive tree does not fan out
+   * into per-Session reads. Like the Branch-level check this is a
+   * known-activity proxy over durable Task status, not proof that a detached
+   * process is absent.
+   */
+  async findSessionIdsWithNonterminalTasks(sessionIds: string[]): Promise<Set<string>> {
+    if (sessionIds.length === 0) return new Set();
+    try {
+      const rows = await select(this.db, { session_id: tasks.session_id })
+        .from(tasks)
+        .where(
+          and(
+            inArray(tasks.session_id, sessionIds),
+            inArray(tasks.status, [...NONTERMINAL_TASK_STATUSES])
+          )
+        )
+        .all();
+      return new Set(rows.map((row: { session_id: string }) => row.session_id));
+    } catch (error) {
+      throw new RepositoryError(
+        `Failed to inspect unfinished session tasks: ${error instanceof Error ? error.message : String(error)}`,
         error
       );
     }
@@ -3477,7 +3478,10 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
             revisions: [],
           };
           if (input.action === 'update') {
-            const revisedPrompt = input.revised_prompt!;
+            // Same reservation as prompt admission: an amendment rewrites
+            // `full_prompt` wholesale, so without this a queued prompt could be
+            // edited into carrying a block Agor never stamped.
+            const revisedPrompt = escapePromptProvenanceSentinels(input.revised_prompt!).text;
             if (revisedPrompt === task.full_prompt) {
               throw new RepositoryError('Revised prompt is unchanged');
             }

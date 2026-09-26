@@ -83,11 +83,14 @@ import {
   mcpRuntimeProviderCapability,
   resolveEffectiveSessionMcpServers,
 } from '@agor/core/mcp';
+import { escapePromptProvenanceSentinels } from '@agor/core/templates/prompt-provenance';
 import type {
   AuthenticatedParams,
   BoardComment,
   BoardCommentReposition,
   BranchArchiveOrDeleteOptions,
+  CreateUserApiKeyRequest,
+  CurrentUserIdentity,
   HookContext,
   MCPMemberPolicy,
   MCPMemberPolicySetting,
@@ -127,9 +130,11 @@ import {
   isBranchArchiveOrDeleteOptions,
   isCanonicalFullUuid,
   isTaskPendingDispatch,
+  isUserApiKeySource,
   MCP_MEMBER_POLICIES,
   MCP_MEMBER_POLICY_CHANGED_EVENT,
   MessageRole,
+  normalizeRole,
   ROLES,
   SESSION_POWER_PRIORITIES,
   SessionStatus,
@@ -225,6 +230,7 @@ import {
   type SchedulerService,
 } from './services/scheduler.js';
 import { runSessionInitializationStages } from './services/session-initialization.js';
+import { createSpawnPromptService } from './services/session-spawn-prompt';
 import {
   lockTenantAuthorizationFence,
   resolveCurrentTenantAuthorityActor,
@@ -284,6 +290,10 @@ import { patchUnlessRemoved } from './utils/patch-unless-removed.js';
 import { runPromptAdmissionTransaction } from './utils/prompt-admission-transaction.js';
 import { promptDatabaseErrorAround } from './utils/prompt-database-error.js';
 import { resolvePromptOrigin } from './utils/prompt-origin.js';
+import {
+  type McpPromptProvenanceStamp,
+  resolvePromptProvenance,
+} from './utils/prompt-provenance.js';
 import {
   buildPromptTaskMetadata,
   type InternalPromptTaskMetadataInput,
@@ -411,6 +421,15 @@ export interface RouteParams extends Params {
   user?: User;
   /** Trusted internal callback request, populated by MCP tooling only. */
   _taskCompletionCallback?: NonNullable<TaskMetadata['completion_callback']>;
+  /**
+   * Trusted prompt-origin stamp, populated by the MCP request layer only.
+   *
+   * Set on `McpContext.baseServiceParams`, so it reaches this route for every
+   * MCP-originated prompt without any tool opting in. Nothing on the wire can
+   * produce it: the matching `metadata.prompt_provenance` key is stripped from
+   * caller input unconditionally.
+   */
+  _promptProvenance?: McpPromptProvenanceStamp;
 }
 
 /**
@@ -2584,6 +2603,52 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           );
         }
 
+        // The provenance sentinel is reserved on EVERY admitted prompt, not
+        // only the stamped ones. That is what makes the tag mean something: it
+        // can then appear in delivered text only where Agor put it, so a
+        // caller cannot type a convincing block of its own and a recipient
+        // does not have to judge which one is real.
+        //
+        // Escape rather than refuse. Rejecting would make Agor's own design
+        // notes unquotable over `agor_sessions_prompt` and would lose a
+        // legitimate message to punish a string. It is logged, because a body
+        // carrying the reserved tag is either a quotation or an attempt, and
+        // both are worth seeing.
+        const escapedBody = escapePromptProvenanceSentinels(data.prompt);
+        if (escapedBody.escaped > 0) {
+          console.warn(
+            `[Prompt] Neutralized ${escapedBody.escaped} reserved provenance sentinel(s) in a prompt body for session ${shortId(id)}`
+          );
+        }
+
+        // Server-stamped prompt provenance. An MCP-originated prompt carries
+        // the caller's authenticated Session identity on `params`, never in
+        // `data`, so no caller can set, suppress, or imitate the block.
+        //
+        // Two deliberate exclusions. A `provider`-carrying transport is a
+        // browser/REST caller, not an Agor session relaying on someone's
+        // behalf, and must never be able to hand this route a stamp.
+        // Idempotent internal producers (scheduler, session reminders, widget
+        // auto-resume) reconcile on exact prompt text across more than one
+        // call path, so a per-caller block would break their convergence
+        // rather than attest anything - and none of them relays caller text.
+        const promptProvenanceStamp =
+          !params.provider && !data.idempotencyTaskId ? params._promptProvenance : undefined;
+        const provenance = promptProvenanceStamp
+          ? await runWithTenantDatabaseScope(db, promptTenantId, (operationDb) =>
+              resolvePromptProvenance({
+                stamp: promptProvenanceStamp,
+                body: escapedBody.text,
+                escapedSentinels: escapedBody.escaped,
+                recipientSession: session,
+                branchRepo: new BranchRepository(operationDb),
+                findUserRole: async (userId) =>
+                  (await new UsersRepository(operationDb).findById(userId))?.role,
+              })
+            )
+          : undefined;
+        const admittedPrompt = provenance?.prompt ?? escapedBody.text;
+
         const reconcileDurablyDispatchedTask = async (): Promise<Task | null> => {
           if (!data.idempotencyTaskId) return null;
           const prior = await taskRepo.findById(data.idempotencyTaskId);
@@ -2592,7 +2657,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             throw new Conflict(`Task identity ${data.idempotencyTaskId} is already in use`);
           }
           const expectedCreator = params.user?.user_id ?? session.created_by;
-          if (prior.created_by !== expectedCreator || prior.full_prompt !== data.prompt) {
+          if (prior.created_by !== expectedCreator || prior.full_prompt !== admittedPrompt) {
             throw new Conflict(`Task identity ${data.idempotencyTaskId} is already in use`);
           }
           if (isTaskPendingDispatch(prior)) return null;
@@ -2706,17 +2771,20 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             if (params._taskCompletionCallback) {
               taskMetadata.completion_callback = params._taskCompletionCallback;
             }
+            if (provenance) {
+              taskMetadata.prompt_provenance = provenance.metadata;
+            }
             const compactionRequestId = (data.idempotencyTaskId ?? generateId()) as TaskID;
             const hasAttachmentSemantics =
-              data.prompt.includes('Attachments — use `agor_upload_materialize` to access:') ||
-              data.prompt.includes('/_uploads/');
+              admittedPrompt.includes('Attachments — use `agor_upload_materialize` to access:') ||
+              admittedPrompt.includes('/_uploads/');
             const compactionEligible =
               !data.idempotencyTaskId &&
               !params._taskCompletionCallback &&
               data.metadata === undefined &&
               (messageSource === undefined || (!!params.provider && messageSource === 'agor')) &&
               !hasAttachmentSemantics &&
-              !data.prompt.trimStart().startsWith('/');
+              !admittedPrompt.trimStart().startsWith('/');
             // A preflight hint avoids preparation for known-busy sessions. The
             // repository rechecks queue/active work under its durable locks.
             // Stable-ID callback/widget producers keep their existing protocol.
@@ -2754,7 +2822,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                   // prompt; the repository assigns the ID in that case.
                   task_id: data.idempotencyTaskId as TaskID | undefined,
                   session_id: id as SessionID,
-                  full_prompt: data.prompt,
+                  full_prompt: admittedPrompt,
                   created_by: createdBy,
                   status: TaskStatus.QUEUED,
                   metadata: Object.keys(taskMetadata).length > 0 ? taskMetadata : undefined,
@@ -3046,52 +3114,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   registerAuthenticatedRoute(
     app,
     '/sessions/:id/spawn-prompt',
-    {
-      async create(
-        data: {
-          userPrompt?: string;
-          /**
-           * Permission mode for the *parent* session's prompt. The spawn
-           * config's `permissionMode` (child's intended mode) is rendered into
-           * the meta-prompt; this field governs how the parent prompt is sent.
-           */
-          parentPermissionMode?: import('@agor/core/types').PermissionMode;
-          // Remaining fields are spawn-subsession context (incl. the *child*
-          // session's permissionMode/modelConfig/etc) — see
-          // `SpawnSubsessionContext` in @agor/core for the shape.
-          [key: string]: unknown;
-        },
-        params: RouteParams
-      ) {
-        const id = params.route?.id;
-        if (!id) throw new BadRequest('Session ID required');
-        if (typeof data?.userPrompt !== 'string') {
-          throw new BadRequest('userPrompt (string) is required');
-        }
-
-        const { renderSpawnSubsessionPrompt } = await import(
-          '@agor/core/templates/spawn-subsession-template'
-        );
-        // Render the meta-prompt against the child-session config (the rest
-        // of `data`). `parentPermissionMode` is intentionally excluded — it's
-        // the parent's send-mode, not part of the template.
-        const { parentPermissionMode, ...spawnContext } = data;
-        const metaPrompt = renderSpawnSubsessionPrompt(
-          spawnContext as unknown as import('@agor/core/templates/spawn-subsession-template').SpawnSubsessionContext
-        );
-
-        const promptService = app.service('/sessions/:id/prompt');
-        return promptService.create(
-          {
-            prompt: metaPrompt,
-            permissionMode: parentPermissionMode,
-            messageSource: 'agor',
-            metadata: { system_authored: true },
-          },
-          { ...params, provider: undefined, route: { id } }
-        );
-      },
-    },
+    createSpawnPromptService(app),
     {
       create: { role: ROLES.MEMBER, action: 'send spawn-subsession prompts' },
     },
@@ -4767,7 +4790,10 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
-  registerAuthenticatedRoute(
+  // Long route: `.agor.yml` is read by an executor, so tenant identity is armed
+  // without a request-long transaction and the service opens a short unit per
+  // database access (see ReposService.importFromAgorYml).
+  registerLongAuthenticatedRoute(
     app,
     '/repos/:id/import-agor-yml',
     {
@@ -4832,12 +4858,14 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
 
   registerAuthenticatedRoute(
     app,
+    // Literal on purpose: the realtime-publish and tenant-classification source
+    // scans read registered paths from this file (USER_API_KEYS_SERVICE_PATH).
     '/api/v1/user/api-keys',
     {
       async find(params: AuthenticatedParams) {
         return userApiKeysService.find(params);
       },
-      async create(data: { name: string }, params: AuthenticatedParams) {
+      async create(data: CreateUserApiKeyRequest, params: AuthenticatedParams) {
         return userApiKeysService.create(data, params);
       },
       async patch(id: string, data: { name?: string }, params: AuthenticatedParams) {
@@ -4855,6 +4883,43 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       patch: { role: ROLES.MEMBER, action: 'update API keys' },
       remove: { role: ROLES.MEMBER, action: 'delete API keys' },
     },
+    requireAuth
+  );
+
+  // Credential self-check for non-browser clients (`agor login --api-key`).
+  // Returns only the caller's own identity and the tenant the request was
+  // authenticated in, so a raw key can be validated without exchanging it for
+  // refresh-capable browser tokens.
+  registerAuthenticatedRoute(
+    app,
+    '/api/v1/user/me', // USER_IDENTITY_SERVICE_PATH; literal for the source scans
+    {
+      async find(params: AuthenticatedParams): Promise<CurrentUserIdentity> {
+        const user = params.user;
+        if (!user) throw new NotAuthenticated('Authentication required');
+        const authentication = params.authentication as
+          | { strategy?: string; api_key_id?: unknown; api_key_source?: unknown }
+          | undefined;
+        return {
+          user_id: user.user_id as UserID,
+          email: user.email,
+          name: (user as { name?: string }).name,
+          role: normalizeRole(user.role),
+          tenant_id: params.tenant?.tenant_id,
+          auth_strategy: authentication?.strategy,
+          ...(authentication?.strategy === 'api-key' &&
+          typeof authentication.api_key_id === 'string'
+            ? {
+                api_key_id: authentication.api_key_id,
+                api_key_source: isUserApiKeySource(authentication.api_key_source)
+                  ? authentication.api_key_source
+                  : 'manual',
+              }
+            : {}),
+        };
+      },
+    },
+    { find: { role: ROLES.VIEWER, action: 'read own identity' } },
     requireAuth
   );
 
@@ -5060,7 +5125,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   );
 
   // Explicit, non-destructive repair for a branch whose filesystem provisioning
-  // landed in 'failed'. A stranded 'creating' attempt is not retryable. Shares
+  // landed in 'failed', or an active stale archive outcome. Creating is not retryable. Shares
   // the exact same service implementation the MCP tool and UI use, so REST, MCP
   // and UI can never drift. A live 'creating' attempt conflicts, 'ready' no-ops;
   // the transition is an atomic claim. Returns the (possibly-updated) branch row.
@@ -5083,11 +5148,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       // in the service (not here) is what keeps REST, MCP and the UI on one
       // check.
       //
-      // Identity split (intentional): the caller must hold branch control, but
-      // the executor runs as `branch.created_by`, not as the caller. That
-      // mirrors the create path (the directory must be materialized as its
-      // owner to be usable) and re-runs provisioning the owner already
-      // initiated, so it grants no capability the owner had not exercised.
+      // Recovery uses the authorized caller's execution identity and credentials.
       create: { role: ROLES.MEMBER, action: 'retry branch provisioning' },
     },
     requireAuth
@@ -5167,6 +5228,28 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   app.service('/branches/:id/clean').hooks({
     around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
     before: { create: [requireAuth, requireMinimumRole(ROLES.MEMBER, 'clean branches')] },
+  });
+
+  // Explicit, metadata-only retirement: same tenant/write boundary as cleanup.
+  app.use('/branches/:id/retire-teammate', {
+    async create(data: unknown, params: RouteParams) {
+      if (
+        !params.route?.id ||
+        !data ||
+        typeof data !== 'object' ||
+        Array.isArray(data) ||
+        Object.keys(data).length
+      )
+        throw new BadRequest('Retirement accepts an empty body and branch route ID only');
+      return branchesService.retireTeammate(
+        params.route.id as import('@agor/core/types').BranchID,
+        params
+      );
+    },
+  });
+  app.service('/branches/:id/retire-teammate').hooks({
+    around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
+    before: { create: [requireAuth, requireMinimumRole(ROLES.MEMBER, 'retire teammates')] },
   });
 
   // Archive/delete branch

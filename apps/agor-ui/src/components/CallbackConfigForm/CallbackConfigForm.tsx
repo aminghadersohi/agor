@@ -40,6 +40,19 @@ export const CallbackConfigForm: React.FC<CallbackConfigFormProps> = ({ showHelp
         </Paragraph>
       )}
 
+      <Form.Item
+        name={['callbackConfig', 'mode']}
+        label="Callback mode"
+        extra="Use Persistent for coordinators awaiting child results: C completes → B processes the result → B completes → A is notified. B's initial delegation turn can also notify A. Once is consumed by the first completion, not the end of a descendant chain."
+      >
+        <Select
+          virtual={false}
+          options={[
+            { value: 'persistent', label: 'Persistent — every completion until unlinked' },
+            { value: 'once', label: 'Once — next completion only' },
+          ]}
+        />
+      </Form.Item>
       <Form.Item name={['callbackConfig', 'delivery']} label="Callback Delivery">
         <Select
           options={[
@@ -56,19 +69,6 @@ export const CallbackConfigForm: React.FC<CallbackConfigFormProps> = ({ showHelp
           is at least 8 KiB. If BTW is unavailable, Agor delivers the original callback directly.
         </Paragraph>
       )}
-      <Form.Item
-        name={['callbackConfig', 'mode']}
-        label="Callback mode"
-        extra="Use Persistent for coordinators awaiting child results: C completes → B processes the result → B completes → A is notified. B's initial delegation turn can also notify A. Once is consumed by the first completion, not the end of a descendant chain."
-      >
-        <Select
-          virtual={false}
-          options={[
-            { value: 'persistent', label: 'Persistent — every completion until unlinked' },
-            { value: 'once', label: 'Once — next completion only' },
-          ]}
-        />
-      </Form.Item>
 
       {/* Include Last Message Toggle */}
       <Form.Item

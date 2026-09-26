@@ -227,12 +227,7 @@ describe('SessionCanvas authoritative zone placement reconciliation', () => {
       boardObjectPatched(result);
       return result;
     });
-    const client = {
-      service: vi.fn(() => ({ patch, ...zoneWorkflowStub() })),
-      io: forkSocketStub(),
-      on: vi.fn(),
-      off: vi.fn(),
-    } as unknown as AgorClient;
+    const client = { service: () => ({ patch }) } as unknown as AgorClient;
     render(
       <ConnectionProvider value={connected}>
         <SessionCanvas board={board} client={client} branches={[branch]} />
