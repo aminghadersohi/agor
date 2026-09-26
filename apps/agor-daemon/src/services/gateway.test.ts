@@ -302,6 +302,7 @@ function makeGatewayHarness(args: {
     findByChannel: vi.fn(async () => []),
     findByThread: vi.fn(async () => null),
     findBySession: vi.fn(async () => mapping),
+    findBySessionAmbiguityAware: vi.fn(async () => ({ mapping, ambiguous: false })),
     updateLastMessage: vi.fn(async () => undefined),
     updateMetadata: vi.fn(async (_id: string, metadata: Record<string, unknown>) => {
       if (mapping) mapping = { ...mapping, metadata } as ThreadSessionMap;
@@ -611,6 +612,35 @@ describe('GatewayService inbound permission admission', () => {
     expect(promptCreate).toHaveBeenCalledOnce();
   });
 
+  it('stamps the admitted Task with the mapping it was admitted through', async () => {
+    // The reply address is decided once, here. Everything outbound reads it
+    // back rather than re-asking which thread the Session belongs to, which
+    // stops having one answer as soon as a Session serves two threads.
+    const { service, promptCreate } = makeGatewayHarness({
+      existingMapping: makeMapping({ id: 'map-dm' as never }),
+    });
+
+    await service.create({
+      channel_key: 'slack-key',
+      thread_id: 'C123-100.000000',
+      text: 'what is my api key',
+      metadata: {
+        channel: 'C123',
+        channel_type: 'im',
+        slack_has_mention: true,
+        slack_message_ts: '103.000000',
+      },
+    });
+
+    expect(promptCreate.mock.calls[0][0].metadata).toMatchObject({
+      gateway_task_source: {
+        thread_session_map_id: 'map-dm',
+        gateway_channel_id: slackChannel.id,
+        thread_id: 'C123-100.000000',
+      },
+    });
+  });
+
   it('edits a GitHub processing acknowledgement with the execution-home denial', async () => {
     const githubChannel = {
       ...slackChannel,
@@ -841,7 +871,10 @@ describe('GatewayService multi-tenant process state', () => {
           isOwner: vi.fn(async () => false),
           resolveUserPermission: vi.fn(async () => 'view'),
         },
-        threadMapRepo: { findBySession: vi.fn() },
+        threadMapRepo: {
+          findBySession: vi.fn(),
+          findBySessionAmbiguityAware: vi.fn(),
+        },
         channelRepo: { findById: vi.fn() },
       });
       vi.mocked(getConnector).mockReturnValue({ sendMessage, channelType: 'slack' });
@@ -854,8 +887,11 @@ describe('GatewayService multi-tenant process state', () => {
       ).rejects.toThrow();
       expect(sendMessage).not.toHaveBeenCalled();
       expect(
-        (service as unknown as { threadMapRepo: { findBySession: ReturnType<typeof vi.fn> } })
-          .threadMapRepo.findBySession
+        (
+          service as unknown as {
+            threadMapRepo: { findBySessionAmbiguityAware: ReturnType<typeof vi.fn> };
+          }
+        ).threadMapRepo.findBySessionAmbiguityAware
       ).not.toHaveBeenCalled();
     }
   );
@@ -873,6 +909,7 @@ describe('GatewayService multi-tenant process state', () => {
       },
       threadMapRepo: {
         findBySession: vi.fn(async () => mapping),
+        findBySessionAmbiguityAware: vi.fn(async () => ({ mapping, ambiguous: false })),
         updateLastMessage: vi.fn(async () => undefined),
         findById: vi.fn(async () => mapping),
         updateMetadata: vi.fn(async () => undefined),
@@ -905,6 +942,7 @@ describe('GatewayService multi-tenant process state', () => {
     };
     const threadMapRepo = {
       findBySession: vi.fn(async () => mapping),
+      findBySessionAmbiguityAware: vi.fn(async () => ({ mapping, ambiguous: false })),
       updateLastMessage: vi.fn(async () => undefined),
       findById: vi.fn(async () => mapping),
       updateMetadata: vi.fn(async () => undefined),
@@ -3992,7 +4030,10 @@ describe('GatewayService Discord beta routing', () => {
         threadId === currentMapping.thread_id ? currentMapping : null
     );
     harness.threadMapRepo.findByChannel.mockImplementation(async () => [currentMapping]);
-    harness.threadMapRepo.findBySession.mockImplementation(async () => currentMapping);
+    harness.threadMapRepo.findBySessionAmbiguityAware.mockImplementation(async () => ({
+      mapping: currentMapping,
+      ambiguous: false,
+    }));
     for (let index = 0; index < 101; index += 1) {
       await harness.service.routeMessage({
         session_id: currentMapping.session_id,
