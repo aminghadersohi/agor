@@ -1257,12 +1257,22 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           ctx.baseServiceParams
         )
       );
-      const task = await ctx.app
-        .service('/sessions/:id/prompt')
-        .create(
-          { prompt: args.message, stream: true },
-          { ...ctx.baseServiceParams, route: { id: resolution.destination_session_id } }
-        );
+      // A relayed report is agent-composed, not typed by the caller's human.
+      // Dropping the provider is what lets the daemon accept internal metadata
+      // at all, and `system_authored` is what keeps `resolvePromptOrigin` from
+      // handing this text human trust authority in the destination Session.
+      const task = await ctx.app.service('/sessions/:id/prompt').create(
+        {
+          prompt: args.message,
+          stream: true,
+          metadata: { system_authored: true },
+        },
+        {
+          ...ctx.baseServiceParams,
+          provider: undefined,
+          route: { id: resolution.destination_session_id },
+        }
+      );
       return structuredResult({
         ...resolution,
         task_id: task.task_id,
