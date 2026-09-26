@@ -850,6 +850,7 @@ describe('useAgorData — skip-apply-on-race hydration', () => {
     expect(fetchArguments('sessions', 'find')).toContainEqual({
       query: {
         archived: false,
+        lean: true,
         $limit: 50,
         $count: false,
         $sort: { updated_at: -1 },
@@ -857,6 +858,8 @@ describe('useAgorData — skip-apply-on-race hydration', () => {
     });
     for (const args of fetchArguments('sessions', 'findAll')) {
       expect((args as { query: Record<string, unknown> }).query.$count).toBeUndefined();
+      // Store-feeding session lists never carry the bulky single-session context.
+      expect((args as { query: Record<string, unknown> }).query.lean).toBe(true);
     }
 
     expect(agorStore.getState().sessionById.has('s-1')).toBe(true);

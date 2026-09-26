@@ -103,6 +103,11 @@ export type InitialLoadItemKey = (typeof INITIAL_LOAD_ITEMS)[number]['key'];
 // genealogy / GlobalSearch / per-board counts converge without blocking the
 // gate. Sessions are the unbounded-with-activity collection, so this is the
 // single most important cap for first-paint latency on a busy workspace.
+//
+// Every session list read that feeds the store is `lean: true`: rows omit the
+// bulky single-session `custom_context` keys (LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS),
+// so `sessionById` must never be the source for those. The open session reads
+// them from its full `sessions.get` (the reactive session / settings modal).
 const RECENT_SESSIONS_LIMIT = 50;
 
 // One row in the loading checklist. `count` is captured atomically with
@@ -609,6 +614,7 @@ export function useAgorData(
                 client.service('sessions').findAll({
                   query: {
                     archived: false,
+                    lean: true,
                     $limit: PAGINATION.DEFAULT_LIMIT,
                     $sort: { updated_at: -1 },
                   },
@@ -623,6 +629,7 @@ export function useAgorData(
                   .find({
                     query: {
                       archived: false,
+                      lean: true,
                       $limit: RECENT_SESSIONS_LIMIT,
                       $count: false,
                       $sort: { updated_at: -1 },
@@ -789,6 +796,7 @@ export function useAgorData(
                 query: {
                   archived: false,
                   board_id: boardScope,
+                  lean: true,
                   $limit: PAGINATION.DEFAULT_LIMIT,
                   $sort: { updated_at: -1 },
                 },
@@ -988,6 +996,7 @@ export function useAgorData(
               client.service('sessions').findAll({
                 query: {
                   archived: false,
+                  lean: true,
                   $limit: PAGINATION.DEFAULT_LIMIT,
                   $sort: { updated_at: -1 },
                 },
