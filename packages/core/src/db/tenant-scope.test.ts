@@ -461,8 +461,9 @@ describe('tenant-scoped database proxy', () => {
 });
 
 /**
- * `@agor/core` is built with `splitting: false`, so every tsup entry point
- * inlines its own copy of this module. The daemon loads at least two —
+ * The CJS build of `@agor/core` is not split, so every CJS entry point inlines
+ * its own copy of this module, and an ESM and a CJS entry are always two
+ * copies. A process can load at least two —
  * `@agor/core/db` builds the guarded handle, `@agor/core/tools/mcp/oauth-refresh`
  * arms scopes around its repository work — and until these stores were keyed on
  * the process, each copy owned a private `AsyncLocalStorage` and a private
