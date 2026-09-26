@@ -94,11 +94,47 @@ Drizzle determines pending migrations by comparing each journal entry's `when` a
 
 When inserting manual or backfill migrations into `meta/_journal.json`, ensure the `when` value is **strictly greater** than every preceding entry. The sqlite and postgres journals are tracked independently — apply this rule to each one separately.
 
+### Callback-draft / management-transfer watermark collision
+
+Main's `0111_management_ownership_transfer` and the withdrawn callback draft's
+`0111_transitive_completion_subscriptions` both used `1789344000005`; the draft's
+PostgreSQL retirement used `1789344000006`. Keep main's journal entry unchanged.
+`0113_callback_ownership_reconciliation` runs at `1789344000007` in both dialects:
+it creates missing inert callback storage, preserves existing rows, removes
+retired discovery policies while enforcing tenant RLS, and idempotently removes
+owner-immutability triggers. This supports either already-applied history without
+replaying non-idempotent DDL or silently skipping the other branch's changes.
+The original callback SQL files remain historical fixtures, not journal entries.
+
 ### Avoid `CHECK` constraints for enum-like columns on SQLite
 
 Don't use `CHECK(col IN ('a', 'b', 'c'))` on a SQLite column. When a new value is added (e.g. extending `others_can` with `'session'`), the CHECK constraint forces a full table-recreation migration — SQLite can't alter constraints in place. This is error-prone and easy to forget when updating TypeScript enums.
 
 Validate enum values at the application layer instead — Drizzle schema `enum` option, Zod, or service hooks. The TypeScript types are the source of truth; the DB just stores text.
+
+### Fork journal tail is shared with the deployed amin_dev database
+
+From `9026` up, both journals and every migration file they name are
+byte-identical to the deployed amin_dev history, so merging main into amin_dev
+changes no migration. Never move, renumber, or edit an entry in that range;
+append new migrations above `1790208000001`. (In both journals
+`0113_callback_ownership_reconciliation` sits at Postgres `1790129000215` /
+SQLite `1790129000214`, not the `1789344000007` the section above names.)
+
+Fork main once journalled `9028_branch_front_desk_sessions` and
+`9029_profile_image_galleries` in the two slots deployed history uses for
+`9028_profile_image_galleries` and `0113_callback_ownership_reconciliation`.
+A database that ran that order would read both slots as applied and never get
+profile images (if it stopped after front desk) or callback storage.
+`runMigrations` recognises it by the retired files' hashes
+(`RETIRED_FORK_MAIN_ORDER` in `packages/core/src/db/migrate.ts`), rewinds the
+ledger below the profile slot, and replays the conditional slice
+(`9028_profile_image_galleries`, `0113_callback_ownership_reconciliation`,
+SQLite `0114_restore_session_indexes`, `9030_branch_front_desk_sessions`).
+`agor db status` already reports that slice as pending. Existing tables are
+verified in place (Postgres raises on a different shape). A ledger that carries
+the retired hashes next to anything else in that range is refused rather than
+rewound; reconcile it by hand or restore a backup.
 
 ### New tenant-table FKs must be made `DEFERRABLE INITIALLY IMMEDIATE` (Postgres)
 
