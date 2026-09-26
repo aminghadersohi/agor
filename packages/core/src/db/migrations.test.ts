@@ -2,13 +2,18 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createClient } from '@libsql/client';
+import { is, sql } from 'drizzle-orm';
+import { getTableConfig, SQLiteTable } from 'drizzle-orm/sqlite-core';
 import { describe, expect, it } from 'vitest';
 import { createDatabase } from './client';
+import { executeRaw, isSQLiteDatabase, rawRows } from './database-wrapper';
 import {
   classifyMigrationWatermark,
   pendingOfflineCutoverMigrations,
   preflightSQLiteCapabilityPolicyOwners,
+  runMigrations,
 } from './migrate';
+import * as sqliteSchema from './schema.sqlite';
 
 interface JournalEntry {
   idx: number;
@@ -108,6 +113,34 @@ describe('Postgres migrations', () => {
     expect(migration).not.toMatch(/CREATE TABLE|ALTER TABLE|DROP TABLE/);
   });
 
+  // Fork numbering: this fork renumbers every upstream migration into its own
+  // 90xx band, so upstream's literal idx/when for 0111 and its two hardcoded
+  // pre-0113 watermarks do not hold here. The invariant that test encodes —
+  // the callback reconciliation is the newest entry, and the only one pending
+  // immediately before it — is asserted against each journal's own watermark.
+  it('reconciles both shipped ownership and draft callback watermarks', async () => {
+    for (const journal of await readJournals()) {
+      expect(
+        journal.entries.find((entry) => entry.tag === '0111_management_ownership_transfer')
+      ).toMatchObject({ idx: 9028, when: 1790000000002 });
+      const entries = journal.entries;
+      // Not "is last": the SQLite journal appends 0114_restore_session_indexes
+      // after this one. The invariant is that it is journalled above every
+      // prior watermark and is the first thing pending at the watermark
+      // immediately below it.
+      const index = entries.findIndex(
+        (entry) => entry.tag === '0113_callback_ownership_reconciliation'
+      );
+      expect(index).toBeGreaterThan(0);
+      expect(entries[index]!.when).toBeGreaterThan(
+        Math.max(...entries.slice(0, index).map((entry) => entry.when))
+      );
+      expect(classifyMigrationWatermark(entries, entries[index - 1]!.when).pending[0]).toBe(
+        '0113_callback_ownership_reconciliation'
+      );
+    }
+  });
+
   it('keeps ownership transfer pending after the provider-grant migration in both journals', async () => {
     for (const journal of await readJournals()) {
       const previous = journal.entries.find(
@@ -149,10 +182,13 @@ describe('Postgres migrations', () => {
       expect(added).toMatchObject({ idx: 9027, tag: '9026_branch_color_override' });
       // Drizzle decides "pending" by timestamp, so an append below an existing
       // watermark is silently skipped rather than failing loudly.
-      expect(added.when).toBeGreaterThan(
-        Math.max(...journal.entries.slice(0, index).map(({ when }) => when))
+      const watermark = Math.max(...journal.entries.slice(0, index).map(({ when }) => when));
+      expect(added.when).toBeGreaterThan(watermark);
+      // Not "is last": later migrations append above it. The invariant is that
+      // it is the first thing pending at the watermark immediately below it.
+      expect(classifyMigrationWatermark(journal.entries, watermark).pending[0]).toBe(
+        '9026_branch_color_override'
       );
-      expect(index).toBe(journal.entries.length - 1);
       expect(new Set(journal.entries.map(({ idx }) => idx)).size).toBe(journal.entries.length);
       expect(new Set(journal.entries.map(({ tag }) => tag)).size).toBe(journal.entries.length);
     }
@@ -1560,4 +1596,163 @@ describe('MCP stdio transport repair migrations', () => {
     expect(migration.match(/DROP POLICY "stdio_repair_0096_/g)).toHaveLength(6);
     expect(migration).toContain("SELECT set_config('agor.system_scope', '', true)");
   });
+});
+
+describe('SQLite index parity with the declared schema', () => {
+  // The SQLite table-rebuild dance (create `__new_x` → copy → DROP TABLE x →
+  // rename) drops the old table's indexes, so every rebuild has to re-list
+  // every index by hand. A rebuild that forgets one leaves a database that
+  // still satisfies its own migration history while quietly no longer matching
+  // schema.sqlite.ts, and nothing downstream notices: Drizzle builds queries
+  // from the declared schema whether or not the index behind it exists.
+  //
+  // `0009_reconcile-missing-columns` did exactly that and dropped
+  // `sessions_agentic_tool_idx` and `sessions_scheduled_flag_idx`;
+  // `0114_restore_session_indexes` puts them back. Migration-local tests cannot
+  // catch this class of drift — they compare the table before a rebuild to the
+  // table after it, and an index already missing from both sides looks fine.
+  // Only the whole chain measured against the declared schema does.
+  //
+  // Known divergences are listed rather than tolerated silently. Each is a
+  // pre-existing gap with its own history and its own fix; adding to this list
+  // means the schema is asking for an index no database has.
+  const KNOWN_MISSING_INDEXES = new Map([
+    [
+      'sessions.sessions_forked_idx',
+      // 0000 created this name; 0009 recreated the same single-column index on
+      // `forked_from_session_id` as `sessions_forked_from_idx`. The column is
+      // indexed, only the name diverges, so renaming it is a separate change.
+      'renamed to sessions_forked_from_idx by 0009_reconcile-missing-columns',
+    ],
+    [
+      'thread_session_map.idx_thread_map_thread_id',
+      // 0023 and 0026 both create the session_id and channel_status indexes and
+      // neither creates this one, so it has never existed on any database.
+      'never created by any migration (0023_tough_hercules onward)',
+    ],
+  ]);
+
+  it('creates every index schema.sqlite.ts declares', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agor-sqlite-index-parity-'));
+    const db = createDatabase({ url: `file:${join(directory, 'parity.db')}` });
+    if (!isSQLiteDatabase(db)) throw new Error('Expected a SQLite database');
+
+    try {
+      await runMigrations(db);
+      const live = new Set(
+        rawRows(await executeRaw(db, sql`SELECT name FROM sqlite_master WHERE type = 'index'`)).map(
+          (row) => String(row.name)
+        )
+      );
+
+      const missing: string[] = [];
+      for (const value of Object.values(sqliteSchema)) {
+        if (!is(value, SQLiteTable)) continue;
+        const { name: tableName, indexes } = getTableConfig(value);
+        for (const { config } of indexes) {
+          if (!live.has(config.name)) missing.push(`${tableName}.${config.name}`);
+        }
+      }
+
+      const reasons = [...KNOWN_MISSING_INDEXES]
+        .map(([name, reason]) => `${name}: ${reason}`)
+        .join('\n');
+      expect(
+        missing.filter((name) => !KNOWN_MISSING_INDEXES.has(name)),
+        `Declared but never created. Known divergences:\n${reasons}`
+      ).toEqual([]);
+      // The carve-outs have to stay real: a fixed one must leave this list.
+      expect(missing, `No longer missing:\n${reasons}`).toEqual([...KNOWN_MISSING_INDEXES.keys()]);
+    } finally {
+      (db as typeof db & { $client: { close(): void } }).$client.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30000);
+});
+
+// Fork main journals front desk as 9028 at 1790129000214 and renumbers profile
+// images to 9029 at 1790129000215. A deployed amin_dev database had already
+// recorded 9028_profile_image_galleries at 214 and the callback reconciliation
+// at 215, so taking that journal would read front desk as applied and never
+// create it. Applied `when`s are facts about deployed databases and are pinned;
+// front desk must sit above every watermark either dialect has shipped.
+describe('front desk / profile image watermark reconciliation', () => {
+  const DEPLOYED = {
+    '9028_profile_image_galleries': { postgres: 1790129000214, sqlite: 1790129000213 },
+    '0113_callback_ownership_reconciliation': { postgres: 1790129000215, sqlite: 1790129000214 },
+  } as const;
+
+  it('keeps deployed history in place and journals front desk above it', async () => {
+    const journals = await readJournals();
+    for (const [index, dialect] of (['postgres', 'sqlite'] as const).entries()) {
+      const entries = journals[index]!.entries;
+      for (const [tag, when] of Object.entries(DEPLOYED)) {
+        expect(entries.find((entry) => entry.tag === tag)?.when).toBe(when[dialect]);
+      }
+      expect(entries.some(({ tag }) => tag === '9028_branch_front_desk_sessions')).toBe(false);
+      expect(entries.some(({ tag }) => tag === '9029_profile_image_galleries')).toBe(false);
+
+      const frontDesk = entries.findIndex(({ tag }) => tag === '9030_branch_front_desk_sessions');
+      expect(frontDesk).toBeGreaterThan(0);
+      const watermark = Math.max(...entries.slice(0, frontDesk).map(({ when }) => when));
+      expect(entries[frontDesk]!.when).toBeGreaterThan(watermark);
+      expect(classifyMigrationWatermark(entries, watermark).pending).toContain(
+        '9030_branch_front_desk_sessions'
+      );
+    }
+  });
+
+  it('creates profile_images in exactly one journalled migration per dialect', async () => {
+    const journals = await readJournals();
+    for (const [index, dialect] of (['postgres', 'sqlite'] as const).entries()) {
+      const creators: string[] = [];
+      for (const { tag } of journals[index]!.entries) {
+        const body = await readFile(
+          new URL(`../../drizzle/${dialect}/${tag}.sql`, import.meta.url),
+          'utf8'
+        );
+        if (/CREATE TABLE (IF NOT EXISTS )?["`]profile_images["`]/.test(body)) creators.push(tag);
+      }
+      expect(creators).toEqual(['9028_profile_image_galleries']);
+    }
+  });
+
+  it('creates front desk on deployed amin_dev history and tolerates fork-main history', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agor-front-desk-watermark-'));
+    const db = createDatabase({ url: `file:${join(directory, 'migration.db')}` });
+    try {
+      await runMigrations(db);
+      const [, sqliteJournal] = await readJournals();
+      const frontDeskWhen = sqliteJournal.entries.find(
+        ({ tag }) => tag === '9030_branch_front_desk_sessions'
+      )!.when;
+      const tableCount = async () =>
+        rawRows(
+          await executeRaw(
+            db,
+            sql`SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'branch_front_desk_sessions'`
+          )
+        )[0]!.n;
+
+      // Deployed amin_dev: everything through the index restore, no front desk.
+      await executeRaw(db, sql`DROP TABLE branch_front_desk_sessions`);
+      await executeRaw(
+        db,
+        sql`DELETE FROM __drizzle_migrations WHERE created_at >= ${frontDeskWhen}`
+      );
+      await runMigrations(db, { allowOfflineCutover: true });
+      expect(Number(await tableCount())).toBe(1);
+
+      // Fork main: front desk already created under its old tag.
+      await executeRaw(
+        db,
+        sql`DELETE FROM __drizzle_migrations WHERE created_at >= ${frontDeskWhen}`
+      );
+      await runMigrations(db, { allowOfflineCutover: true });
+      expect(Number(await tableCount())).toBe(1);
+    } finally {
+      (db as typeof db & { $client: { close(): void } }).$client.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30000);
 });

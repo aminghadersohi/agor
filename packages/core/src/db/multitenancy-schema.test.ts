@@ -53,6 +53,9 @@ function migrationTenantTables(): string[] {
   const discordGatewayHybridMigration = readRepoFile(
     'packages/core/drizzle/postgres/0094_discord_gateway_hybrid.sql'
   );
+  const completionSubscriptionsMigration = readRepoFile(
+    'packages/core/drizzle/postgres/0113_callback_ownership_reconciliation.sql'
+  );
   const externalIdentitiesMigration = readRepoFile(
     'packages/core/drizzle/postgres/0090_external_user_identities.sql'
   );
@@ -76,10 +79,10 @@ function migrationTenantTables(): string[] {
     'packages/core/drizzle/postgres/0112_kb_import_receipts.sql'
   );
   const frontDeskMigration = readRepoFile(
-    'packages/core/drizzle/postgres/9028_branch_front_desk_sessions.sql'
+    'packages/core/drizzle/postgres/9030_branch_front_desk_sessions.sql'
   );
   const profileImagesMigration = readRepoFile(
-    'packages/core/drizzle/postgres/9029_profile_image_galleries.sql'
+    'packages/core/drizzle/postgres/9028_profile_image_galleries.sql'
   );
   const retiredTables = retiredTenantTables();
   return [
@@ -96,6 +99,9 @@ function migrationTenantTables(): string[] {
         ),
         ...githubInstallStateMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...discordGatewayHybridMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...completionSubscriptionsMigration.matchAll(
+          /CREATE TABLE IF NOT EXISTS "([^"]+)" \([\s\S]*?"tenant_id"/g
+        ),
         ...externalIdentitiesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...codexDeviceAuthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...claudeOauthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
@@ -103,8 +109,12 @@ function migrationTenantTables(): string[] {
         ...capabilityPoliciesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...zoneWorkflowMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...sessionMemoryMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
-        ...frontDeskMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
-        ...profileImagesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...frontDeskMigration.matchAll(
+          /CREATE TABLE IF NOT EXISTS "([^"]+)" \([\s\S]*?"tenant_id"/g
+        ),
+        ...profileImagesMigration.matchAll(
+          /CREATE TABLE IF NOT EXISTS "([^"]+)" \([\s\S]*?"tenant_id"/g
+        ),
       ]
         .map((m) => m[1])
         .filter((table) => !retiredTables.has(table))
@@ -123,6 +133,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/9015_mcp_oauth_client_registrations.sql'),
     readRepoFile('packages/core/drizzle/postgres/0082_github_install_state.sql'),
     readRepoFile('packages/core/drizzle/postgres/0094_discord_gateway_hybrid.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0113_callback_ownership_reconciliation.sql'),
     readRepoFile('packages/core/drizzle/postgres/0090_external_user_identities.sql'),
     readRepoFile('packages/core/drizzle/postgres/0091_codex_device_auth_attempts.sql'),
     readRepoFile('packages/core/drizzle/postgres/0100_claude_oauth_attempts.sql'),
@@ -131,8 +142,8 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0102_zone_workflow_transitions.sql'),
     readRepoFile('packages/core/drizzle/postgres/9018_session_memory_reminders.sql'),
     readRepoFile('packages/core/drizzle/postgres/0112_kb_import_receipts.sql'),
-    readRepoFile('packages/core/drizzle/postgres/9028_branch_front_desk_sessions.sql'),
-    readRepoFile('packages/core/drizzle/postgres/9029_profile_image_galleries.sql'),
+    readRepoFile('packages/core/drizzle/postgres/9030_branch_front_desk_sessions.sql'),
+    readRepoFile('packages/core/drizzle/postgres/9028_profile_image_galleries.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
   return [
@@ -268,6 +279,21 @@ describe('Postgres multitenancy schema coverage', () => {
     expect(migration).toContain("= 'session_auto_archive_migration_0101'");
     expect(migration).toContain('DROP POLICY "session_auto_archive_migration_0101"');
     expect(migration).toContain("SELECT set_config('agor.system_scope', '', true)");
+  });
+
+  it('retires root discovery without deleting compatibility rows or tenant isolation', () => {
+    const migration = readRepoFile(
+      'packages/core/drizzle/postgres/0113_callback_ownership_reconciliation.sql'
+    );
+    expect(migration).toContain(
+      'DROP POLICY IF EXISTS "completion_callback_task_discovery" ON "tasks"'
+    );
+    expect(migration).toContain(
+      'DROP POLICY IF EXISTS "completion_callback_discovery" ON "completion_subscriptions"'
+    );
+    expect(migration).not.toMatch(/DROP TABLE|DELETE FROM/);
+    expect(migration).toContain('CREATE POLICY "tenant_isolation_completion_subscriptions"');
+    expect(migration).toContain('ALTER TABLE "completion_subscriptions" FORCE ROW LEVEL SECURITY');
   });
 
   it('limits Knowledge embedding discovery to routing-only candidate rows', () => {
