@@ -5,13 +5,14 @@ import type {
   FileListItem,
   GitFileStatusSource,
 } from '@agor-live/client';
-import { ReloadOutlined } from '@ant-design/icons';
-import { Alert, Button, Space, Tabs } from 'antd';
+import { CodeOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Alert, Button, Flex, Space, Tabs, Typography } from 'antd';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useThemedMessage } from '../../../utils/message';
 import { CodePreviewModal } from '../../CodePreviewModal/CodePreviewModal';
 import type { FileItem } from '../../FileCollection/FileCollection';
 import { FileCollection } from '../../FileCollection/FileCollection';
+import { WorktreeFileEditor } from '../WorktreeFileEditor';
 
 const MAX_FILES = 50000;
 
@@ -22,6 +23,7 @@ interface FilesTabProps {
 
 const FilesTabInner: React.FC<FilesTabProps> = ({ branch, client }) => {
   const [files, setFiles] = useState<FileListItem[]>([]);
+  const [editorOpen, setEditorOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -215,6 +217,14 @@ const FilesTabInner: React.FC<FilesTabProps> = ({ branch, client }) => {
     setSelectedFile(null);
   }, []);
 
+  const handleFileSaved = useCallback((saved: FileDetail) => {
+    setFiles((current) =>
+      current.map((file) =>
+        file.path === saved.path ? { ...file, ...saved, content: undefined } : file
+      )
+    );
+  }, []);
+
   const isTruncated = files.length >= MAX_FILES;
   const visibleFiles = useMemo(
     // Deleted entries are synthesized by the executor for source-control
@@ -235,6 +245,25 @@ const FilesTabInner: React.FC<FilesTabProps> = ({ branch, client }) => {
   return (
     <div style={{ width: '100%', maxHeight: '70vh', overflowY: 'auto' }}>
       <Space orientation="vertical" size="large" style={{ width: '100%' }}>
+        <Flex justify="space-between" align="center" gap={16} wrap>
+          <div>
+            <Typography.Title level={5} style={{ margin: 0 }}>
+              Worktree files
+            </Typography.Title>
+            <Typography.Text type="secondary">
+              Browse previews here, or open the split-pane editor to make focused changes.
+            </Typography.Text>
+          </div>
+          <Button
+            type="primary"
+            icon={<CodeOutlined />}
+            disabled={!client || loading || files.length === 0}
+            onClick={() => setEditorOpen(true)}
+          >
+            Open workspace editor
+          </Button>
+        </Flex>
+
         {isTruncated && (
           <Alert
             type="warning"
@@ -317,6 +346,15 @@ const FilesTabInner: React.FC<FilesTabProps> = ({ branch, client }) => {
           open={modalOpen}
           onClose={handleModalClose}
           loading={loadingDetail}
+        />
+
+        <WorktreeFileEditor
+          branch={branch}
+          client={client}
+          files={files}
+          open={editorOpen}
+          onClose={() => setEditorOpen(false)}
+          onFileSaved={handleFileSaved}
         />
       </Space>
     </div>
