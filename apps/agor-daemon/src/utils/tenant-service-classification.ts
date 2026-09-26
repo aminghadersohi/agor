@@ -218,18 +218,6 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
     scopeClass: 'scoped',
     why: 'Fork coordinator queue batching. Registered through createTenantScopedAuthenticatedRouteRegistrar; preview and apply hold the same tenant-owned Session row lock admission and dispatch use.',
   },
-  'repos/:id/import-launch-json': {
-    scopeClass: 'scoped',
-    why: 'Fork launch.json import. Registered through createTenantScopedAuthenticatedRouteRegistrar; reads the repo and writes environment variants in the armed request scope.',
-  },
-  'artifacts/:id/actions/:actionId': {
-    scopeClass: 'scoped',
-    why: 'Fork artifact action bindings. Registered through createTenantScopedAuthenticatedRouteRegistrar; re-reads the persisted artifact and delegates to schedules/sessions with the caller identity, all inside the armed request scope.',
-  },
-  'artifacts/:id/data/:dataId': {
-    scopeClass: 'scoped',
-    why: 'Fork artifact data bindings. Same registrar and scope as the action route; read-only, and the id namespaces do not overlap so a data_id cannot reach a mutating dispatch.',
-  },
   'mcp-egress/status': {
     scopeClass: 'scoped',
     why: 'Registered through createTenantScopedAuthenticatedRouteRegistrar; the gateway-mode read runs in the request scope and the runtime status is process-local.',
@@ -254,6 +242,34 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
   'branches/:id/retry-provisioning': {
     scopeClass: 'identity-only',
     why: 'Long route that crosses the executor spawn boundary: the authorization read, the repo lookup, the failed -> creating CAS and the dispatch each open their own short unit via reposService.withTenantDatabase, so no transaction is held across the spawn.',
+  },
+
+  // --------------------------------------------------------------------------
+  // Fork launch.json import (#42). Its `.agor.yml` sibling predates this
+  // mechanism and sits in the baseline holding a request transaction across
+  // its executor spawn; this one is new, so it answers — and does not.
+  // --------------------------------------------------------------------------
+  'repos/:id/import-launch-json': {
+    scopeClass: 'identity-only',
+    why: 'Long route across the executor spawn that reads the launch file: registered with tenant identity and write admission only. The repo read, branch authorization (branches service), pre-spawn workspace-access check and delegated-home lookup each open their own short unit; the executor reaches the daemon only through a command token carrying the tenant_id claim; the environment write runs in withFreshTenantWrite after the spawn. Admin-only, enforced in the route hook and again in ReposService.importFromLaunchJson.',
+  },
+
+  // --------------------------------------------------------------------------
+  // Artifact interaction bindings (#47), and the run-now route its actions
+  // dispatch into — reviewed and classified here rather than depended on from
+  // the baseline.
+  // --------------------------------------------------------------------------
+  'artifacts/:id/actions/:actionId': {
+    scopeClass: 'identity-only',
+    why: 'A schedule_run action dispatches schedules/:id/run-now, which spawns a session and its executor; runWithTenantDatabaseScope re-enters an outer transaction, so a scoped registration would hold the schedule lock, session insert and prompt admission until this request commits. Registered with tenant identity and write admission only; the binding lookup uses repositories bound to the tenant unit of work, and the delegated schedules / run-now services open their own units under the forwarded caller params.',
+  },
+  'artifacts/:id/data/:dataId': {
+    scopeClass: 'scoped',
+    why: 'Registered through createTenantScopedAuthenticatedRouteRegistrar. Read-only: the binding lookup and the delegated schedules.get / sessions.get join the armed request scope; no spawn, network call or write.',
+  },
+  'schedules/:id/run-now': {
+    scopeClass: 'identity-only',
+    why: 'Around hooks are tenantIdentityAround (no transaction) and tenantWriteAdmissionAround. loadScheduleAndBranch runs in its own short scope; SchedulerService.executeScheduleNow / spawnScheduledSession wrap every access in withTenantDatabase (bound repositories on PostgreSQL), with run admission in one short unit; the prompt dispatch is the long identity-only sessions/:id/prompt route, which defers the executor launch out of any scope via deferWithTenantContext. RBAC: member floor, runs-as-caller, branch all, and created_by === caller in executeScheduleNow.',
   },
 };
 
@@ -321,7 +337,6 @@ export const UNCLASSIFIED_SERVICE_BASELINE: readonly string[] = [
   'branches/:id/unarchive', // BASELINE-ENTRY
   'branches/:id/execute-schedule-now', // BASELINE-ENTRY
   'branches/:id/fire-zone-trigger', // BASELINE-ENTRY
-  'schedules/:id/run-now', // BASELINE-ENTRY
   'boards/:id/sessions', // BASELINE-ENTRY
   'board-comments/:id/reply', // BASELINE-ENTRY
   'board-comments/:id/toggle-reaction', // BASELINE-ENTRY

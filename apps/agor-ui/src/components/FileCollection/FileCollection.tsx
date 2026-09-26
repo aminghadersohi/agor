@@ -89,9 +89,6 @@ export interface FileCollectionProps {
   /** Message to show when no files found */
   emptyMessage?: string;
 
-  /** Which git status dimension supplies file and folder badges. */
-  gitStatusSource?: GitFileStatusSource;
-
   /** Dense explorer presentation for split-pane workspace editing. */
   compact?: boolean;
 
@@ -100,6 +97,9 @@ export interface FileCollectionProps {
 
   /** Available virtual-scroll height. */
   treeHeight?: number;
+
+  /** Which git status dimension supplies file and folder badges. */
+  gitStatusSource?: GitFileStatusSource;
 }
 
 function getDisplayedGitStatus(
@@ -130,9 +130,9 @@ interface TreeNode {
 function buildTree(
   files: FileItem[],
   searchQuery: string,
+  compact: boolean,
   statusMeta: Record<GitFileStatus, GitStatusMeta>,
   gitStatusSource: GitFileStatusSource,
-  compact: boolean,
   onDownload?: (file: FileItem) => void,
   onCopyPath?: (file: FileItem) => void
 ): TreeNode[] {
@@ -375,10 +375,10 @@ const FileCollectionInner: React.FC<FileCollectionProps> = ({
   onDownload,
   loading = false,
   emptyMessage = 'No files found',
-  gitStatusSource = 'combined',
   compact = false,
   selectedPath = null,
   treeHeight = 600,
+  gitStatusSource = 'combined',
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchInput, setSearchInput] = useState('');
@@ -421,18 +421,18 @@ const FileCollectionInner: React.FC<FileCollectionProps> = ({
       buildTree(
         files,
         searchQuery,
+        compact,
         statusMeta,
         gitStatusSource,
-        compact,
         onDownload ? stableOnDownload : undefined,
         handleCopyPath
       ),
     [
       files,
       searchQuery,
+      compact,
       statusMeta,
       gitStatusSource,
-      compact,
       onDownload,
       stableOnDownload,
       handleCopyPath,

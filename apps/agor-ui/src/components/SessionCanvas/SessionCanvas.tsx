@@ -1090,6 +1090,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       onUserLayoutStart: beginPostLayoutViewportIntent,
       onUserLayoutComplete: requestPostLayoutViewport,
       canEdit: canEditBoard,
+      onOpenSession: onSessionClick,
     });
 
     const arrangeBoardUnavailable = !mutationGate.canMutate || !canArrangeWholeBoard;

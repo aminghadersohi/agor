@@ -1,6 +1,7 @@
 # Artifact interaction bindings
 
-Status: implemented on `feat/action-chat-artifacts`
+Status: implemented. Routes and model landed in fork PR #47; authoring, save-time
+validation, payload, `window.agor`, and the rendered controls followed.
 
 ## Problem
 
@@ -140,9 +141,18 @@ returns a hardcoded subset.
 `prompt`, `agentic_tool_config`, and `created_by` are deliberately absent.
 Widening a projection is an edit to an explicit list, which is the point.
 
-**Validation happens twice.** Declaration time (`validateInteractionConfig`)
+**Validation happens twice.** Declaration time
+(`ArtifactsService.validateInteractionConfig`) runs the sanitizer in strict
+mode — anything it would drop is refused with its reason, including unknown
+fields, so an attempted argument fails loudly rather than vanishing — and then
 rejects a binding whose referenced schedule/session is missing or on another
-branch. Execute time re-resolves the binding from the persisted artifact and
+branch. Missing, cross-branch, and cross-tenant ids get one message, so the
+error confirms nothing about a resource the author may not see. Every write
+path goes through it: MCP publish/update, the executor publish callback
+(including an author-edited `agor.artifact.json` sidecar), and a plain REST
+`PATCH` of `agor_runtime`. Unchanged bindings on an unchanged branch are not
+re-validated, so a routine republish does not fail because a bound schedule
+was since deleted. Execute time re-resolves the binding from the persisted artifact and
 re-checks branch identity before dispatching. The `interaction_config` in the
 payload is a rendering hint; it is never the authority for what executes.
 
@@ -169,7 +179,17 @@ the only "somewhere" available is the iframe.
 **Payload filtering mirrors trust handling elsewhere.** Bindings are stripped
 from `interaction_config` when the viewer cannot `view` the artifact's source
 branch, so a widget renders an unavailable state instead of discovering a `403`
-at click time. This is a UX affordance; the route check is the authority.
+at click time. A chat whose session has left the branch is dropped too, since
+opening a chat has no execute route to catch it later. This is a UX
+affordance; the route check is the authority.
+
+**Rendering.** The parent page renders the payload's bindings as its own
+toolbar under the preview (`ArtifactBindingControls`): status per data
+binding, a button per action, a button per chat. These use the same
+artifact-scoped routes as `window.agor`, so an artifact is usable even if its
+code never calls the API. `window.agor.runAction/fetchData/openChat` are
+defined by the injected `agor-runtime.js`; each posts only a binding id to the
+parent, which answers through `ArtifactInteractionBridge`.
 
 ### Relationship to the TOFU consent surface
 
@@ -261,7 +281,13 @@ that declares them. Fictional data only.
 ## Configuration surface
 
 Bindings are authored through the existing MCP tools — `agor_artifacts_publish`
-and `agor_artifacts_update` both take `interactionConfig`. Short ids are
+and `agor_artifacts_update` both take `interactionConfig`
+(`apps/agor-daemon/src/mcp/tools/artifact-interactions.ts`). Short ids are
 resolved to full ids by the same `resolveScheduleId` / `resolveSessionId`
 helpers used elsewhere in those tools. No new authoring surface: an agent that
 can publish an artifact can declare its bindings in the same call.
+`interactionConfig` replaces all bindings; `null` clears them; replacing
+`agorRuntime` keeps them.
+
+REST callers send the canonical shape as `agor_runtime.interactions` on
+`PATCH /artifacts/:id`, gated by the existing creator-or-admin hook.

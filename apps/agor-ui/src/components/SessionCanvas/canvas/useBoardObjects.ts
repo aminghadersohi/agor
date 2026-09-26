@@ -398,6 +398,8 @@ interface UseBoardObjectsProps {
   onUserLayoutComplete?: (intent: PostLayoutViewportIntent, intentToken?: number) => void;
   /** Effective board.edit permission, resolved by the canvas. */
   canEdit?: boolean;
+  /** Open a session in the normal session surface (artifact chat bindings). */
+  onOpenSession?: (sessionId: string) => void;
 }
 
 function zonesOverlap(
@@ -466,6 +468,7 @@ export const useBoardObjects = ({
   onUserLayoutStart,
   onUserLayoutComplete,
   canEdit = true,
+  onOpenSession,
 }: UseBoardObjectsProps) => {
   // Use ref to avoid recreating callbacks when board changes
   const boardRef = useRef(board);
@@ -580,6 +583,15 @@ export const useBoardObjects = ({
     for (const zoneId of zoneIds) {
       expectedAutoLayoutSignaturesRef.current.delete(zoneId);
     }
+  }, []);
+
+  // Stable across parent re-renders so artifact nodes are not rebuilt each
+  // time the canvas hands down a fresh callback.
+  const onOpenSessionRef = useRef(onOpenSession);
+  onOpenSessionRef.current = onOpenSession;
+  const canOpenSession = !!onOpenSession;
+  const openSession = useCallback((sessionId: string) => {
+    onOpenSessionRef.current?.(sessionId);
   }, []);
 
   // Use the board object's reference directly. The store already preserves
@@ -2823,6 +2835,7 @@ export const useBoardObjects = ({
               isActiveUrlTarget: objectData.artifact_id === activeUrlTargetArtifactId,
               onUpdate: handleUpdateObject,
               onDeleteArtifact: deleteArtifact,
+              onOpenSession: canOpenSession ? openSession : undefined,
             },
           };
         }
@@ -2966,6 +2979,8 @@ export const useBoardObjects = ({
     board?.zone_layout_defaults,
     onEditMarkdown,
     canEdit,
+    canOpenSession,
+    openSession,
   ]);
 
   /**

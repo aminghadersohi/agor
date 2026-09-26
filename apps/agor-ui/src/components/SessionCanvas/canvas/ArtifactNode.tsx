@@ -33,6 +33,7 @@ import { Alert, Badge, Button, Card, Popconfirm, Spin, Tooltip, Typography, them
 import { compressToBase64 } from 'lz-string';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { NodeResizer } from 'reactflow';
+import { ArtifactBindingControls } from '@/components/artifacts/ArtifactBindingControls';
 import {
   ArtifactConsoleReporter,
   ArtifactInteractionBridge,
@@ -677,6 +678,14 @@ export const ArtifactNode = ({
             <CodeSandboxExporter artifactId={data.artifactId} />
           </SandpackProvider>
         </div>
+        {/* Outside the interact-mode overlay: these are Agor's own controls,
+            usable without handing pointer events to the iframe. */}
+        <ArtifactBindingControls
+          className="nodrag nopan"
+          artifactId={data.artifactId}
+          config={payload.interaction_config}
+          onOpenSession={data.onOpenSession}
+        />
       </Card>
       {consentOpen && (
         <ArtifactConsentModal

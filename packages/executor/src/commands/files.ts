@@ -765,10 +765,6 @@ export async function writeBranchFile(
     throw new Error('File is too large to edit in Agor (1 MB maximum)');
   }
 
-  // Upstream's resolvePathInsideBranch supersedes fork PR #45's local
-  // normalizedRelativePath, which the upstream rewrite of this module removed.
-  // It applies the same normalization and NUL/empty rejection and additionally
-  // refuses absolute paths and any path escaping the branch root.
   const { absolute: requestedPath, relative: filePath } = await resolvePathInsideBranch(
     branchRoot,
     relativeFilePath,

@@ -433,6 +433,11 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN color_override`);
       // Rewind 0112's schema too: replaying its ledger must recreate the table.
       await executeRaw(db, sql`DROP TABLE kb_import_receipts`);
+      // 9030's front-desk table references the Session tenant identity index
+      // dropped below, and its replay must recreate the table.
+      await executeRaw(db, sql`DROP TABLE branch_front_desk_sessions`);
+      // 9028's profile image galleries are newer than this watermark too.
+      await executeRaw(db, sql`DROP TABLE profile_images`);
 
       // This fixture rewinds the journal to the previous fork watermark. Keep
       // the physical schema aligned with that watermark so the later Session

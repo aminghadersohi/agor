@@ -1666,3 +1666,90 @@ describe('SQLite index parity with the declared schema', () => {
     }
   }, 30000);
 });
+
+// Fork main journals front desk as 9028 at 1790129000214 and renumbers profile
+// images to 9029 at 1790129000215. A deployed amin_dev database had already
+// recorded 9028_profile_image_galleries at 214 and the callback reconciliation
+// at 215, so taking that journal would read front desk as applied and never
+// create it. Applied `when`s are facts about deployed databases and are pinned;
+// front desk must sit above every watermark either dialect has shipped.
+describe('front desk / profile image watermark reconciliation', () => {
+  const DEPLOYED = {
+    '9028_profile_image_galleries': { postgres: 1790129000214, sqlite: 1790129000213 },
+    '0113_callback_ownership_reconciliation': { postgres: 1790129000215, sqlite: 1790129000214 },
+  } as const;
+
+  it('keeps deployed history in place and journals front desk above it', async () => {
+    const journals = await readJournals();
+    for (const [index, dialect] of (['postgres', 'sqlite'] as const).entries()) {
+      const entries = journals[index]!.entries;
+      for (const [tag, when] of Object.entries(DEPLOYED)) {
+        expect(entries.find((entry) => entry.tag === tag)?.when).toBe(when[dialect]);
+      }
+      expect(entries.some(({ tag }) => tag === '9028_branch_front_desk_sessions')).toBe(false);
+      expect(entries.some(({ tag }) => tag === '9029_profile_image_galleries')).toBe(false);
+
+      const frontDesk = entries.findIndex(({ tag }) => tag === '9030_branch_front_desk_sessions');
+      expect(frontDesk).toBeGreaterThan(0);
+      const watermark = Math.max(...entries.slice(0, frontDesk).map(({ when }) => when));
+      expect(entries[frontDesk]!.when).toBeGreaterThan(watermark);
+      expect(classifyMigrationWatermark(entries, watermark).pending).toContain(
+        '9030_branch_front_desk_sessions'
+      );
+    }
+  });
+
+  it('creates profile_images in exactly one journalled migration per dialect', async () => {
+    const journals = await readJournals();
+    for (const [index, dialect] of (['postgres', 'sqlite'] as const).entries()) {
+      const creators: string[] = [];
+      for (const { tag } of journals[index]!.entries) {
+        const body = await readFile(
+          new URL(`../../drizzle/${dialect}/${tag}.sql`, import.meta.url),
+          'utf8'
+        );
+        if (/CREATE TABLE (IF NOT EXISTS )?["`]profile_images["`]/.test(body)) creators.push(tag);
+      }
+      expect(creators).toEqual(['9028_profile_image_galleries']);
+    }
+  });
+
+  it('creates front desk on deployed amin_dev history and tolerates fork-main history', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agor-front-desk-watermark-'));
+    const db = createDatabase({ url: `file:${join(directory, 'migration.db')}` });
+    try {
+      await runMigrations(db);
+      const [, sqliteJournal] = await readJournals();
+      const frontDeskWhen = sqliteJournal.entries.find(
+        ({ tag }) => tag === '9030_branch_front_desk_sessions'
+      )!.when;
+      const tableCount = async () =>
+        rawRows(
+          await executeRaw(
+            db,
+            sql`SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'branch_front_desk_sessions'`
+          )
+        )[0]!.n;
+
+      // Deployed amin_dev: everything through the index restore, no front desk.
+      await executeRaw(db, sql`DROP TABLE branch_front_desk_sessions`);
+      await executeRaw(
+        db,
+        sql`DELETE FROM __drizzle_migrations WHERE created_at >= ${frontDeskWhen}`
+      );
+      await runMigrations(db, { allowOfflineCutover: true });
+      expect(Number(await tableCount())).toBe(1);
+
+      // Fork main: front desk already created under its old tag.
+      await executeRaw(
+        db,
+        sql`DELETE FROM __drizzle_migrations WHERE created_at >= ${frontDeskWhen}`
+      );
+      await runMigrations(db, { allowOfflineCutover: true });
+      expect(Number(await tableCount())).toBe(1);
+    } finally {
+      (db as typeof db & { $client: { close(): void } }).$client.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30000);
+});

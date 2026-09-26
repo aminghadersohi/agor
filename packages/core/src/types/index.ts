@@ -17,6 +17,7 @@ export * from './entity-color';
 export * from './environment-command';
 export * from './feathers';
 export * from './file';
+export * from './front-desk';
 export * from './gateway';
 export * from './group';
 export * from './id';

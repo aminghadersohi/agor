@@ -12,7 +12,6 @@ import { useThemedMessage } from '../../../utils/message';
 import { CodePreviewModal } from '../../CodePreviewModal/CodePreviewModal';
 import type { FileItem } from '../../FileCollection/FileCollection';
 import { FileCollection } from '../../FileCollection/FileCollection';
-import { MarkdownModal } from '../../MarkdownModal/MarkdownModal';
 import { WorktreeFileEditor } from '../WorktreeFileEditor';
 
 const MAX_FILES = 50000;
@@ -226,7 +225,6 @@ const FilesTabInner: React.FC<FilesTabProps> = ({ branch, client }) => {
     );
   }, []);
 
-  const isMarkdown = selectedFile?.path.endsWith('.md');
   const isTruncated = files.length >= MAX_FILES;
   const visibleFiles = useMemo(
     // Deleted entries are synthesized by the executor for source-control
@@ -343,22 +341,12 @@ const FilesTabInner: React.FC<FilesTabProps> = ({ branch, client }) => {
           ]}
         />
 
-        {isMarkdown ? (
-          <MarkdownModal
-            open={modalOpen}
-            title={selectedFile?.title || ''}
-            content={selectedFile?.content || ''}
-            filePath={selectedFile?.path || ''}
-            onClose={handleModalClose}
-          />
-        ) : (
-          <CodePreviewModal
-            file={selectedFile}
-            open={modalOpen}
-            onClose={handleModalClose}
-            loading={loadingDetail}
-          />
-        )}
+        <CodePreviewModal
+          file={selectedFile}
+          open={modalOpen}
+          onClose={handleModalClose}
+          loading={loadingDetail}
+        />
 
         <WorktreeFileEditor
           branch={branch}
