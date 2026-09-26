@@ -28,7 +28,8 @@ test('the approved inventory is exactly what the daemon file lists today', () =>
     'utf8'
   );
   assert.deepEqual(checkUnclassifiedServiceBaseline(source), []);
-  assert.equal(APPROVED_UNCLASSIFIED_SERVICE_BASELINE.length, 57);
+  // 57 at landing; schedules/:id/run-now was since classified identity-only.
+  assert.equal(APPROVED_UNCLASSIFIED_SERVICE_BASELINE.length, 56);
 });
 
 /** What the previous ratchet actually asked: how many markers are in the file. */
