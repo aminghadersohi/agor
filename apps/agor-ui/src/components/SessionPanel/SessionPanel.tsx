@@ -98,6 +98,7 @@ import { SessionAttachmentTray } from './SessionAttachmentTray';
 import { SessionComposerDropZone } from './SessionComposerDropZone';
 import { SessionFooter } from './SessionFooter';
 import { SessionPanelContent } from './SessionPanelContent';
+import { buildSpawnPromptContext } from './spawn-prompt-context';
 import {
   isStopTransportAmbiguous,
   reconcileStopTransportFailure,
@@ -939,7 +940,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     modal.confirm({
       title: 'Archive session and same-branch children?',
       content:
-        'This archives the session and its same-branch forked or spawned descendants. Remote-created sessions remain active.',
+        'This archives the session and its same-branch forked or spawned descendants. Remote-created sessions stay active in their own branch.',
       okText: 'Archive',
       cancelText: 'Cancel',
       onOk: async () => {
@@ -1292,27 +1293,20 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     // forwarding prompt; the spawn config's `permissionMode` is rendered into
     // the meta-prompt as the *child* session's intended mode. They're distinct
     // — don't reuse one for the other.
+    const baseSpawnConfig = buildSpawnPromptContext(config);
+    // Fork delta: callback delivery and child auto-archive ride the same
+    // prompt context as upstream's modal selection.
     const spawnConfig =
-      typeof config === 'string'
-        ? { userPrompt: config }
+      typeof config === 'string' || !('callbackConfig' in baseSpawnConfig)
+        ? baseSpawnConfig
         : {
-            userPrompt: config.prompt || '',
-            agenticTool: config.agent,
-            permissionMode: config.permissionMode,
-            modelConfig: config.modelConfig,
-            codexSandboxMode: config.codexSandboxMode,
-            codexApprovalPolicy: config.codexApprovalPolicy,
-            codexNetworkAccess: config.codexNetworkAccess,
-            mcpServerIds: config.mcpServerIds,
+            ...baseSpawnConfig,
             callbackConfig: {
-              enableCallback: config.enableCallback,
+              ...baseSpawnConfig.callbackConfig,
               callbackDelivery: config.callbackDelivery,
-              includeLastMessage: config.includeLastMessage,
-              includeOriginalPrompt: config.includeOriginalPrompt,
             },
             autoArchive: config.autoArchive,
             autoArchiveAfterSeconds: config.autoArchiveAfterSeconds,
-            extraInstructions: config.extraInstructions,
           };
 
     await client

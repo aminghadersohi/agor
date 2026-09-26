@@ -869,6 +869,20 @@
       "when": 1790208000001,
       "tag": "9030_branch_front_desk_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 9035,
+      "version": "7",
+      "when": 1790208000002,
+      "tag": "0115_api_key_host_tenant_discovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 9036,
+      "version": "7",
+      "when": 1790208000003,
+      "tag": "0116_user_api_key_source",
+      "breakpoints": true
     }
   ]
 }

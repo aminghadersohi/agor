@@ -22,7 +22,6 @@ import type { ExpressApplication, Service } from '@agor/core/feathers';
 import type {
   Board,
   Branch,
-  BranchEnvironmentUpdate,
   BranchID,
   CancelQueuedTasksInput,
   CloneRepositoryResult,
@@ -394,22 +393,14 @@ export interface MessagesServiceImpl
  * Branches service with custom methods (server-side implementation)
  */
 export interface BranchesServiceImpl extends Service<Branch, Partial<Branch>, FeathersParams> {
+  retireTeammate(
+    id: BranchID,
+    params?: FeathersParams
+  ): Promise<import('@agor/core/types').BranchCleanAccepted>;
   clean(
     input: { branchId: import('@agor/core/types').BranchID },
     params?: FeathersParams
   ): Promise<import('@agor/core/types').BranchCleanAccepted>;
-  updateEnvironment(
-    id:
-      | BranchID
-      | {
-          branch_id?: BranchID;
-          branchId?: BranchID;
-          environment_update?: BranchEnvironmentUpdate;
-          environmentUpdate?: BranchEnvironmentUpdate;
-        },
-    environmentUpdate?: BranchEnvironmentUpdate | FeathersParams,
-    params?: FeathersParams
-  ): Promise<Branch>;
   startEnvironment(id: BranchID, params?: FeathersParams, confirmationOf?: string): Promise<Branch>;
   stopEnvironment(id: BranchID, params?: FeathersParams): Promise<Branch>;
   restartEnvironment(id: BranchID, params?: FeathersParams): Promise<Branch>;

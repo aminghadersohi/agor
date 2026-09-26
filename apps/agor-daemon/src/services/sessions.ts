@@ -1523,7 +1523,11 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       data.codexApprovalPolicy !== undefined ||
       data.codexNetworkAccess !== undefined;
     const inheritedPresetId =
-      targetTool === parent.agentic_tool ? parent.agentic_tool_preset_id : undefined;
+      // Explicit inline selection detaches from the parent's preset. The
+      // materializer still enforces the workspace's inline-configuration policy.
+      !hasAtomicOverride && targetTool === parent.agentic_tool
+        ? parent.agentic_tool_preset_id
+        : undefined;
     const presetId = data.presetId ?? inheritedPresetId ?? undefined;
     if (presetId && hasAtomicOverride) {
       throw new BadRequest(
@@ -1937,12 +1941,17 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       }
     }
 
-    const affectedSessions = await this.sessionRepo.updateArchiveStateForTargets(
-      targets.map((target) => ({
-        id: target.session.session_id,
-        archived: target.archived,
-        archivedReason: target.archivedReason,
-      }))
+    // Carry remote relationships on the patched rows, as get/find do. The UI
+    // projects remote-created children as surrogates under their creator from
+    // these edges; a restored creator without them would lose its surrogates.
+    const affectedSessions = await this.enrichRemoteRelationships(
+      await this.sessionRepo.updateArchiveStateForTargets(
+        targets.map((target) => ({
+          id: target.session.session_id,
+          archived: target.archived,
+          archivedReason: target.archivedReason,
+        }))
+      )
     );
 
     for (const affectedSession of affectedSessions) {

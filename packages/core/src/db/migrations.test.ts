@@ -1740,6 +1740,9 @@ describe('front desk / profile image watermark reconciliation', () => {
         db,
         sql`DELETE FROM __drizzle_migrations WHERE created_at >= ${frontDeskWhen}`
       );
+      // Upstream's user_api_keys.source is journalled above front desk, so the
+      // rewound ledger replays its plain ADD COLUMN.
+      await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
       await runMigrations(db, { allowOfflineCutover: true });
       expect(Number(await tableCount())).toBe(1);
 
@@ -1748,6 +1751,9 @@ describe('front desk / profile image watermark reconciliation', () => {
         db,
         sql`DELETE FROM __drizzle_migrations WHERE created_at >= ${frontDeskWhen}`
       );
+      // Upstream's user_api_keys.source is journalled above front desk, so the
+      // rewound ledger replays its plain ADD COLUMN.
+      await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
       await runMigrations(db, { allowOfflineCutover: true });
       expect(Number(await tableCount())).toBe(1);
     } finally {
