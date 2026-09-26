@@ -33,8 +33,11 @@ import {
   type Session,
   type SessionID,
   type SessionRelationship,
+  type SpawnConfig,
   type TaskID,
+  USER_DEFAULT_AGENTIC_CONFIGURATION,
   type UserID,
+  WORKSPACE_DEFAULT_AGENTIC_CONFIGURATION,
   type ZoneBoardObject,
 } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
@@ -799,6 +802,31 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .max(365 * 24 * 60 * 60)
           .optional()
           .describe('Grace period before archival when autoArchive is after_completion.'),
+        presetId: mcpOptionalNonEmptyString(
+          'presetId',
+          `Child configuration preset UUID, ${USER_DEFAULT_AGENTIC_CONFIGURATION}, or ${WORKSPACE_DEFAULT_AGENTIC_CONFIGURATION}. Cannot be combined with individual configuration overrides.`
+        ),
+        permissionMode: z
+          .enum([
+            'default',
+            'acceptEdits',
+            'bypassPermissions',
+            'plan',
+            'dontAsk',
+            'autoEdit',
+            'yolo',
+            'ask',
+            'auto',
+            'on-failure',
+            'allow-all',
+          ])
+          .optional()
+          .describe(
+            'Child permission mode. Inline configuration must be allowed by the workspace.'
+          ),
+        codexSandboxMode: z.enum(['read-only', 'workspace-write', 'danger-full-access']).optional(),
+        codexApprovalPolicy: z.enum(['untrusted', 'on-failure', 'on-request', 'never']).optional(),
+        codexNetworkAccess: z.boolean().optional(),
       }),
     },
     async (args) => {
@@ -818,6 +846,11 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         modelConfig: coerceModelConfig(args.modelConfig),
         autoArchive: args.autoArchive,
         autoArchiveAfterSeconds: args.autoArchiveAfterSeconds,
+        presetId: args.presetId as SpawnConfig['presetId'],
+        permissionMode: args.permissionMode,
+        codexSandboxMode: args.codexSandboxMode,
+        codexApprovalPolicy: args.codexApprovalPolicy,
+        codexNetworkAccess: args.codexNetworkAccess,
       };
 
       // spawn/fork are custom methods, not Feathers transport methods. Scope

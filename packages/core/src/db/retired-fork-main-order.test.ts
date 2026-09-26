@@ -178,6 +178,12 @@ describe('retired fork-main front desk / profile image order', () => {
     }
   }
 
+  // Upstream migrations this fork journals above the deployed tail. Neither
+  // retired order ran them, so the repair replays them after the slice.
+  const UPSTREAM_TAIL = ['0115_user_api_key_source'];
+  const dropUpstreamTail = (db: ReturnType<typeof createDatabase>) =>
+    executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
+
   const ALL_OBJECTS = [
     'branch_front_desk_sessions',
     'completion_subscriptions',
@@ -194,6 +200,7 @@ describe('retired fork-main front desk / profile image order', () => {
       await executeRaw(db, sql`DROP TABLE completion_subscriptions`);
       await executeRaw(db, sql`DROP INDEX sessions_agentic_tool_idx`);
       await executeRaw(db, sql`DROP INDEX sessions_scheduled_flag_idx`);
+      await dropUpstreamTail(db);
       await recordRetiredOrder(db, 2);
 
       const status = await checkMigrationStatus(db);
@@ -201,7 +208,7 @@ describe('retired fork-main front desk / profile image order', () => {
         rewindFrom: RETIRED_FORK_MAIN_ORDER.sqlite.from,
         retired: ['9028_branch_front_desk_sessions', '9029_profile_image_galleries'],
       });
-      expect(status.pending).toEqual(REPLAYED);
+      expect(status.pending).toEqual([...REPLAYED, ...UPSTREAM_TAIL]);
       expect(pendingOfflineCutoverMigrations('sqlite', status)).toEqual([]);
 
       await runMigrations(db);
@@ -221,9 +228,10 @@ describe('retired fork-main front desk / profile image order', () => {
       await executeRaw(db, sql`DROP TABLE completion_subscriptions`);
       await executeRaw(db, sql`DROP INDEX sessions_agentic_tool_idx`);
       await executeRaw(db, sql`DROP INDEX sessions_scheduled_flag_idx`);
+      await dropUpstreamTail(db);
       await recordRetiredOrder(db, 1);
       // Without the repair the new journal would read profile images as applied.
-      expect((await checkMigrationStatus(db)).pending).toEqual(REPLAYED);
+      expect((await checkMigrationStatus(db)).pending).toEqual([...REPLAYED, ...UPSTREAM_TAIL]);
 
       await runMigrations(db);
       expect(await objects()).toEqual(ALL_OBJECTS);

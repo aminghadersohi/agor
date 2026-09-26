@@ -2572,6 +2572,25 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     captureMarketplaceInvalidationTargets,
   ];
 
+  const publishCommittedBoardMove = (context: HookContext): HookContext => {
+    if (!context.event || !context.data || !Object.hasOwn(context.data, 'board_id')) return context;
+    // Board moves can join an outer admission transaction (e.g. unarchive).
+    // Feathers' automatic event fires when this nested method returns, not when
+    // that transaction commits. Replace only this event with the existing queue;
+    // rollback drops it, and successful commit emits it exactly once.
+    const event = context.event;
+    context.event = null;
+    emitServiceEvent(app, {
+      path: 'branches',
+      event,
+      method: context.method,
+      id: context.id,
+      data: context.dispatch ?? context.result,
+      params: context.params,
+    });
+    return context;
+  };
+
   app.service('branches').hooks({
     before: {
       all: [typedValidateQuery(branchQueryValidator), requireAuth],
@@ -2600,8 +2619,16 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     },
     after: {
       create: [invalidateRealtimeBranchFromResult],
-      update: [invalidateRealtimeBranchFromResult, publishMarketplaceInvalidation],
-      patch: [invalidateRealtimeBranchFromResult, publishMarketplaceInvalidation],
+      update: [
+        invalidateRealtimeBranchFromResult,
+        publishMarketplaceInvalidation,
+        publishCommittedBoardMove,
+      ],
+      patch: [
+        invalidateRealtimeBranchFromResult,
+        publishMarketplaceInvalidation,
+        publishCommittedBoardMove,
+      ],
       remove: [
         invalidateRealtimeBranchFromResult,
         publishMarketplaceInvalidation,
@@ -2616,7 +2643,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   type BranchCustomHookRegistrar = {
     hooks(options: {
       before: Record<
-        'updateEnvironment' | 'ensureTeammateKnowledgeNamespace' | 'clean',
+        'ensureTeammateKnowledgeNamespace' | 'clean',
         Array<(context: HookContext) => HookContext>
       >;
     }): void;
@@ -2624,7 +2651,6 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   (app.service('branches') as unknown as BranchCustomHookRegistrar).hooks({
     before: {
       clean: [requireMinimumRole(ROLES.MEMBER, 'clean branches')],
-      updateEnvironment: [requireMinimumRole(ROLES.MEMBER, 'update branch environments')],
       ensureTeammateKnowledgeNamespace: [
         requireMinimumRole(ROLES.MEMBER, 'create teammate knowledge namespaces'),
       ],
