@@ -80,6 +80,12 @@ export const BRANCH_DELETION_RELATIONS: Readonly<Record<string, BranchDeletionRe
   'session_reminders.task_id': classify(
     'Delete Session-owned reminders first; a foreign reminder task reference blocks deletion rather than erasing unrelated provenance.'
   ),
+  'branch_front_desk_sessions.branch_id': owned(
+    'A front-desk declaration is a routing preference of its branch; history goes with it.'
+  ),
+  'branch_front_desk_sessions.session_id': owned(
+    'Promotion pins only same-branch Sessions, so the declaration dies with its Session.'
+  ),
   'session_env_selections.session_id': owned(
     'Delete selection, preserve user-owned environment values.'
   ),
