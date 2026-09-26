@@ -7,6 +7,7 @@
  * prompt prefixes remain stable for server-side caching.
  */
 
+import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { SessionID } from '../types/id';
@@ -16,7 +17,13 @@ import { renderTemplate } from './handlebars-helpers';
  * Load Agor system prompt template from disk
  */
 export async function loadAgorSystemPromptTemplate(): Promise<string> {
-  const templatePath = path.join(__dirname, 'agor-system-prompt.md');
+  // Source and CJS builds keep the template beside this module; the split ESM
+  // build may hoist it into a root chunk, which finds the copy under templates/.
+  const candidates = [
+    path.join(__dirname, 'agor-system-prompt.md'),
+    path.join(__dirname, 'templates', 'agor-system-prompt.md'),
+  ];
+  const templatePath = candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
   return await fs.readFile(templatePath, 'utf-8');
 }
 

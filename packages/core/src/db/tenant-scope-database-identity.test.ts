@@ -134,9 +134,9 @@ describe('a scope is fenced to the database it was opened on', () => {
 /**
  * The reviewer's own shape: two independently evaluated copies of this module.
  *
- * `@agor/core` builds with `splitting: false`, so each tsup entry inlines its
- * own copy; `vi.resetModules()` plus a fresh import is that duplication in one
- * process. Everything the fence relies on — the scope store and the
+ * The CJS build of `@agor/core` is not split, so each CJS entry inlines its
+ * own copy, and an ESM and a CJS entry are always two copies;
+ * `vi.resetModules()` plus a fresh import is that duplication in one process. Everything the fence relies on — the scope store and the
  * proxy-target map — is `Symbol.for`-keyed and therefore shared between the
  * copies, which is precisely why the missing check was reachable across them.
  */
