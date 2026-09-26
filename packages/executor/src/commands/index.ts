@@ -32,6 +32,7 @@ import { handleEnvironmentLifecycle, handleEnvironmentLogs } from './environment
 import {
   handleBranchFilesBrowse,
   handleBranchFilesRead,
+  handleBranchFilesWrite,
   handleBranchFilesystemStatus,
 } from './files.js';
 import { handleBranchSlackFileUpload } from './gateway.js';
@@ -258,6 +259,7 @@ registerCommand(BRANCH_ARCHIVE_COMMAND, handleBranchArchive);
 registerCommand('branch.files.list', handleBranchFilesList);
 registerCommand('branch.files.browse', handleBranchFilesBrowse);
 registerCommand('branch.files.read', handleBranchFilesRead);
+registerCommand('branch.files.write', handleBranchFilesWrite);
 registerCommand('branch.filesystem.status', handleBranchFilesystemStatus);
 registerCommand('branch.artifact.publish', handleBranchArtifactPublish);
 registerCommand('branch.artifact.land', handleBranchArtifactLand);
