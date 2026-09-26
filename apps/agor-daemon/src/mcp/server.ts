@@ -41,6 +41,7 @@ import { ToolDispatcher, toolDispatcherProxy } from './register-tool-proxy.js';
 import { tenantScopedToolProxy } from './tenant-scope.js';
 import { validateVerifiedSessionToken, verifySessionToken } from './tokens.js';
 import { formatDomainDescriptionsForInstructions, ToolRegistry } from './tool-registry.js';
+import { textResult } from './tool-result.js';
 import { registerAnalyticsTools } from './tools/analytics.js';
 import { registerArtifactTools } from './tools/artifacts.js';
 import { registerBoardTools } from './tools/boards.js';
@@ -118,14 +119,7 @@ export function coerceJsonRecord(value: unknown): unknown {
   }
 }
 
-/**
- * Helper: format a value as MCP text content response.
- */
-export function textResult(data: unknown) {
-  return {
-    content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
-  };
-}
+export { textResult };
 
 /** Format one JSON value as both human-readable text and typed MCP output. */
 export function structuredResult<T extends Record<string, unknown>>(data: T) {

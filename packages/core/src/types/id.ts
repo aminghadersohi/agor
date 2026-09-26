@@ -254,6 +254,8 @@ export type SessionMemoryID = UUID;
 /** One-shot reminder owned by exactly one Session. */
 export type SessionReminderID = UUID;
 export type SessionRelationshipID = UUID;
+/** One front-desk slot declaration (current or historical) for a branch. */
+export type BranchFrontDeskID = UUID;
 
 /**
  * Task identifier

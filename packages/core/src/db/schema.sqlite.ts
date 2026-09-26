@@ -629,6 +629,14 @@ export const messages = sqliteTable(
     // Parent tool use ID (for nested tool calls - e.g., Task tool spawning Read/Grep)
     parent_tool_use_id: text('parent_tool_use_id'),
 
+    // Indexed due-work projection for the bounded Slack MCP connect-card
+    // repair sweep. Mirrors `metadata.widget.slack_connect.next_repair_at` and
+    // is written by the same locked mutation, so it cannot drift from the JSON
+    // it projects. Null for every message that is not a Slack-delivered
+    // `oauth` widget — which is all but a handful — so the partial index stays
+    // tiny on a table this large.
+    mcp_slack_connect_due_at: t.timestamp('mcp_slack_connect_due_at'),
+
     // NOTE: queueing moved off `messages` and onto `tasks.status='queued'` as
     // of migration sqlite/0040 (postgres/0030). The legacy `status` and
     // `queue_position` columns are gone — see `tasks.queue_position` instead.
@@ -658,6 +666,9 @@ export const messages = sqliteTable(
       table.session_id,
       table.timestamp
     ),
+    mcpSlackConnectDueIdx: index('messages_mcp_slack_connect_due_idx')
+      .on(table.mcp_slack_connect_due_at, table.message_id)
+      .where(sql`${table.mcp_slack_connect_due_at} IS NOT NULL`),
   })
 );
 
@@ -2470,7 +2481,7 @@ export const uploads = sqliteTable(
       .notNull()
       .default('active'),
     provenance: text('provenance', {
-      enum: ['browser', 'gateway-slack', 'mcp-slack'],
+      enum: ['browser', 'gateway-slack', 'gateway-discord', 'mcp-slack'],
     }).notNull(),
     created_at: t.timestamp('created_at').notNull(),
     expires_at: t.timestamp('expires_at'),
@@ -3424,6 +3435,44 @@ export const kbImportReceipts = sqliteTable(
     ),
   })
 );
+
+/**
+ * Declared front-desk session per `(branch, scope, slot)`. Retired rows are
+ * rotation history; the partial unique index admits one occupying row.
+ */
+export const branchFrontDeskSessions = sqliteTable(
+  'branch_front_desk_sessions',
+  {
+    id: text('id', { length: 36 }).primaryKey(),
+    branch_id: text('branch_id', { length: 36 })
+      .notNull()
+      .references(() => branches.branch_id, { onDelete: 'cascade' }),
+    scope: text('scope').notNull(),
+    slot: integer('slot').notNull(),
+    session_id: text('session_id', { length: 36 })
+      .notNull()
+      .references(() => sessions.session_id, { onDelete: 'cascade' }),
+    status: text('status', { enum: ['active', 'retiring', 'retired', 'failed'] }).notNull(),
+    promoted_at: t.timestamp('promoted_at').notNull(),
+    promoted_by: text('promoted_by', { length: 36 }).references(() => users.user_id, {
+      onDelete: 'set null',
+    }),
+    retired_at: t.timestamp('retired_at'),
+    retired_reason: text('retired_reason', {
+      enum: ['context', 'dead', 'manual', 'archived', 'replaced'],
+    }),
+    metadata: t.json<Record<string, unknown>>('metadata'),
+  },
+  (table) => ({
+    occupiedSlotUnique: uniqueIndex('uniq_front_desk_slot')
+      .on(table.branch_id, table.scope, table.slot)
+      .where(sql`${table.status} IN ('active', 'retiring')`),
+    sessionIdx: index('idx_front_desk_session').on(table.session_id),
+  })
+);
+
+export type BranchFrontDeskSessionRow = typeof branchFrontDeskSessions.$inferSelect;
+export type BranchFrontDeskSessionInsert = typeof branchFrontDeskSessions.$inferInsert;
 
 export const profileImages = sqliteTable(
   'profile_images',

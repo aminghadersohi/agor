@@ -695,6 +695,14 @@ export const messages = pgTable(
     // Parent tool use ID (for nested tool calls - e.g., Task tool spawning Read/Grep)
     parent_tool_use_id: text('parent_tool_use_id'),
 
+    // Indexed due-work projection for the bounded Slack MCP connect-card
+    // repair sweep. Mirrors `metadata.widget.slack_connect.next_repair_at` and
+    // is written by the same locked mutation, so it cannot drift from the JSON
+    // it projects. Null for every message that is not a Slack-delivered
+    // `oauth` widget — which is all but a handful — so the partial index stays
+    // tiny on a table this large.
+    mcp_slack_connect_due_at: t.timestamp('mcp_slack_connect_due_at'),
+
     // NOTE: queueing moved off `messages` and onto `tasks.status='queued'` as
     // of migration sqlite/0040 (postgres/0030). The legacy `status` and
     // `queue_position` columns are gone — see `tasks.queue_position` instead.
@@ -726,6 +734,9 @@ export const messages = pgTable(
       table.session_id,
       table.timestamp
     ),
+    mcpSlackConnectDueIdx: index('messages_mcp_slack_connect_due_idx')
+      .on(table.tenant_id, table.mcp_slack_connect_due_at, table.message_id)
+      .where(sql`${table.mcp_slack_connect_due_at} IS NOT NULL`),
   })
 );
 
@@ -2860,7 +2871,7 @@ export const uploads = pgTable(
       .notNull()
       .default('active'),
     provenance: text('provenance', {
-      enum: ['browser', 'gateway-slack', 'mcp-slack'],
+      enum: ['browser', 'gateway-slack', 'gateway-discord', 'mcp-slack'],
     }).notNull(),
     created_at: t.timestamp('created_at').notNull(),
     expires_at: t.timestamp('expires_at'),
@@ -3885,6 +3896,49 @@ export const kbImportReceipts = pgTable(
       table.slug,
       table.entry_key
     ),
+  })
+);
+
+/**
+ * Declared front-desk session per `(branch, scope, slot)`. Retired rows are
+ * rotation history; the partial unique index admits one occupying row.
+ */
+export const branchFrontDeskSessions = pgTable(
+  'branch_front_desk_sessions',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    id: varchar('id', { length: 36 }).primaryKey(),
+    branch_id: varchar('branch_id', { length: 36 }).notNull(),
+    scope: text('scope').notNull(),
+    slot: integer('slot').notNull(),
+    session_id: varchar('session_id', { length: 36 }).notNull(),
+    status: text('status', { enum: ['active', 'retiring', 'retired', 'failed'] }).notNull(),
+    promoted_at: t.timestamp('promoted_at').notNull(),
+    promoted_by: varchar('promoted_by', { length: 36 }).references(() => users.user_id, {
+      onDelete: 'set null',
+    }),
+    retired_at: t.timestamp('retired_at'),
+    retired_reason: text('retired_reason', {
+      enum: ['context', 'dead', 'manual', 'archived', 'replaced'],
+    }),
+    metadata: t.json<Record<string, unknown>>('metadata'),
+  },
+  (table) => ({
+    tenantIdx: index('branch_front_desk_sessions_tenant_id_idx').on(table.tenant_id),
+    occupiedSlotUnique: uniqueIndex('uniq_front_desk_slot')
+      .on(table.tenant_id, table.branch_id, table.scope, table.slot)
+      .where(sql`${table.status} IN ('active', 'retiring')`),
+    sessionIdx: index('idx_front_desk_session').on(table.tenant_id, table.session_id),
+    branchFk: foreignKey({
+      columns: [table.tenant_id, table.branch_id],
+      foreignColumns: [branches.tenant_id, branches.branch_id],
+      name: 'branch_front_desk_sessions_tenant_branch_fk',
+    }).onDelete('cascade'),
+    sessionFk: foreignKey({
+      columns: [table.tenant_id, table.session_id],
+      foreignColumns: [sessions.tenant_id, sessions.session_id],
+      name: 'branch_front_desk_sessions_tenant_session_fk',
+    }).onDelete('cascade'),
   })
 );
 
