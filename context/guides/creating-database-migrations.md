@@ -105,6 +105,15 @@ retired discovery policies while enforcing tenant RLS, and idempotently removes
 owner-immutability triggers. This supports either already-applied history without
 replaying non-idempotent DDL or silently skipping the other branch's changes.
 The original callback SQL files remain historical fixtures, not journal entries.
+On this fork, upstream's `0117_callback_ownership_reconciliation`
+(`1790129000216`) is journalled in PostgreSQL only, directly after `0113` and
+below the deployed watermark. Everything it reconciles already exists here
+through `0113`, `0112_kb_import_receipts`, and the fork-band re-stamps of
+`0115`/`0116`, so it only runs on a fresh database, where it is a no-op. The
+SQLite file is kept but not journalled: `migrate-sqlite.ts` requires its guarded
+`ADD COLUMN` to follow `0115_user_api_key_source` in the same batch, which the
+fork can only satisfy by breaking journal monotonicity, and no fork SQLite
+history needs it.
 
 ### Avoid `CHECK` constraints for enum-like columns on SQLite
 
