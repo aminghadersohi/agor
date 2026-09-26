@@ -7,6 +7,7 @@
  * rather than silently putting a half-populated card into the marketplace.
  */
 
+import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { MCPCatalogEntry, MCPCatalogTransport } from '@agor/core/types';
@@ -149,9 +150,17 @@ const catalogFileSchema = z
   })
   .strict();
 
-/** Absolute path of the checked-in catalog file, alongside its loader. */
+/**
+ * Absolute path of the checked-in catalog file. Source and CJS builds keep it
+ * beside this loader; the split ESM build may hoist the loader into a root
+ * chunk, which finds the copied file under mcp-catalog/.
+ */
 export function curatedCatalogPath(): string {
-  return path.join(__dirname, 'curated.yaml');
+  const candidates = [
+    path.join(__dirname, 'curated.yaml'),
+    path.join(__dirname, 'mcp-catalog', 'curated.yaml'),
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
 }
 
 /**
