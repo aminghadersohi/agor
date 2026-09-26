@@ -4795,7 +4795,10 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
-  registerAuthenticatedRoute(
+  // Long route: the launch file is read by an executor, so tenant identity is
+  // armed without a request-long transaction and the service opens a short
+  // unit per database access (see ReposService.importFromLaunchJson).
+  registerLongAuthenticatedRoute(
     app,
     '/repos/:id/import-launch-json',
     {

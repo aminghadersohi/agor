@@ -191,7 +191,12 @@ describe('ReposService .agor.yml normalized branch access', () => {
 
   function service() {
     return new ReposService(
-      {} as never,
+      // Pre-spawn access checks open their own tenant unit, so the handle must
+      // be able to back one (runWithTenantDatabaseScope sets the tenant GUC).
+      {
+        transaction: async (fn: (tx: unknown) => Promise<unknown>) =>
+          fn({ execute: async () => undefined }),
+      } as never,
       {
         get: () => ({}),
         service: vi.fn(),
@@ -287,6 +292,24 @@ describe('ReposService .agor.yml normalized branch access', () => {
     await expect(
       instance.exportToAgorYml(repo.repo_id, { branch_id: branch.branch_id }, params)
     ).rejects.toThrow('Admin access is required');
+    await expect(
+      instance.importFromLaunchJson(repo.repo_id, { branch_id: branch.branch_id }, params)
+    ).rejects.toThrow('Admin access is required');
+    expect(executorMocks.requestExecutor).not.toHaveBeenCalled();
+  });
+
+  it('rejects launch.json import for non-admins before reading the repo or branch', async () => {
+    const instance = service();
+    const get = vi.spyOn(instance, 'get');
+    for (const role of ['viewer', 'member', undefined] as const) {
+      await expect(
+        instance.importFromLaunchJson(repo.repo_id, { branch_id: branch.branch_id }, {
+          user: { ...user, role },
+          tenant: { tenant_id: 'default' },
+        } as never)
+      ).rejects.toMatchObject({ name: 'Forbidden' });
+    }
+    expect(get).not.toHaveBeenCalled();
     expect(executorMocks.requestExecutor).not.toHaveBeenCalled();
   });
 });
