@@ -2000,5 +2000,19 @@
     "rationale": "Invokes only the absolute Apple utility path /usr/bin/pmset with fixed arguments -g ps, without a shell or caller-controlled input. Timeout and output bounds apply before strict parsing; raw output and device identity never cross the provider boundary.",
     "reviewTarget": null,
     "reviewDate": null
+  },
+  {
+    "id": "DAEMON-FS-CAP-253",
+    "class": "A",
+    "file": "packages/core/src/mcp-catalog/curated-loader.ts",
+    "import": "node:fs",
+    "symbol": "existsSync",
+    "local": "existsSync",
+    "operation": "call:existsSync@curatedCatalogPath#1",
+    "owner": "daemon host/operator runtime",
+    "boundary": "deployment-local host capability",
+    "rationale": "Chooses between two fixed package-relative locations of the checked-in curated catalog (beside the loader, or under mcp-catalog/ when the split ESM build hoists the loader into a root chunk). No caller- or tenant-supplied path reaches it.",
+    "reviewTarget": null,
+    "reviewDate": null
   }
 ]
