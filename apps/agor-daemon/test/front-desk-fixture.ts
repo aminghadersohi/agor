@@ -47,7 +47,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { expect, it } from 'vitest';
 import { generateId } from '../../../packages/core/src/lib/ids';
 import { tenantScopedToolProxy } from '../src/mcp/tenant-scope';
-import { registerFrontDeskTools } from '../src/mcp/tools/front-desk';
+import { registerFrontDeskTools } from '../src/mcp/tools/branches';
 import { resolveTeammateSession } from '../src/mcp/tools/teammate-addressing';
 import {
   type TeammateAddressingFixture,

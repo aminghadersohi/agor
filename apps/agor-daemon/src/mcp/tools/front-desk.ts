@@ -1,8 +1,15 @@
 /**
- * MCP tools that pin and clear a teammate's front desk — the session that
- * `agor_sessions_prompt { teammate }` reaches instead of the most recently
- * active one. Both are thin: addressing lives in `teammate-addressing.ts`,
- * authorization and the compare-and-swap in `front-desk/manage-front-desk.ts`.
+ * Handlers for the MCP tools that pin and clear a teammate's front desk — the
+ * session that `agor_sessions_prompt { teammate }` reaches instead of the most
+ * recently active one. Both are thin: addressing lives in
+ * `teammate-addressing.ts`, authorization and the compare-and-swap in
+ * `front-desk/manage-front-desk.ts`.
+ *
+ * The tools are registered, with their zod input schemas, by
+ * `registerFrontDeskTools` in `branches.ts`. This module deliberately imports
+ * neither zod nor `../server.js`: every `src/**` file is its own tsup entry
+ * with code splitting off, so either import would inline a full private copy
+ * of zod (~750 KB) or of the whole MCP server into this entry.
  */
 
 import {
@@ -12,18 +19,15 @@ import {
   runWithTenantDatabaseTransaction,
 } from '@agor/core/db';
 import type { BranchFrontDeskSession, BranchID, SessionID } from '@agor/core/types';
-import type { McpServer } from '@modelcontextprotocol/server';
-import { z } from 'zod';
 import {
   clearTeammateFrontDesk,
   findTeammateFrontDesk,
   setTeammateFrontDesk,
 } from '../../front-desk/manage-front-desk.js';
 import { resolveBranchId, resolveSessionId } from '../resolve-ids.js';
-import { mcpOptionalId, mcpOptionalNonBlankString, mcpRequiredId } from '../schema.js';
 import type { McpContext } from '../server.js';
-import { textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
+import { textResult } from '../tool-result.js';
 import {
   resolveTeammateName,
   teammateAmbiguousPayload,
@@ -32,8 +36,19 @@ import {
 
 type ToolResult = ReturnType<typeof textResult> & { isError?: boolean };
 
-const TEAMMATE_ARG_DESCRIPTION =
+export const FRONT_DESK_TEAMMATE_ARG_DESCRIPTION =
   'Teammate by name — branch slug or display name, matched case-insensitively. Provide exactly one of teammate or branchId.';
+
+export const FRONT_DESK_SET_DESCRIPTION =
+  "Pin a session as a teammate's front desk: agor_sessions_prompt { teammate } then reaches that session instead of the teammate's most recently active one, so name addressing is deterministic. The session must belong to the teammate's branch and not be archived. Replaces any current pin atomically. Requires Branch Manager access. If the pinned session is later archived or dies, addressing falls back to the most recent session automatically.";
+
+export const FRONT_DESK_CLEAR_DESCRIPTION =
+  "Remove a teammate's front-desk pin. agor_sessions_prompt { teammate } goes back to reaching the teammate's most recently active session. No session is archived or changed. Requires Branch Manager access.";
+
+export interface FrontDeskTargetArgs {
+  teammate?: string;
+  branchId?: string;
+}
 
 function errorResult(payload: Record<string, unknown>): ToolResult {
   return { ...textResult(payload), isError: true };
@@ -53,15 +68,14 @@ function describeFrontDesk(desk: BranchFrontDeskSession | null) {
     : null;
 }
 
-export function registerFrontDeskTools(server: McpServer, ctx: McpContext): void {
+export function createFrontDeskToolHandlers(ctx: McpContext) {
   const allowSuperadmin = () => ctx.app.get('config')?.execution?.allow_superadmin === true;
   const tenantId = () => ctx.baseServiceParams.tenant?.tenant_id ?? getCurrentTenantId();
 
   /** Exactly one of `teammate` / `branchId`, resolved to a branch id or an error result. */
-  async function resolveTarget(args: {
-    teammate?: string;
-    branchId?: string;
-  }): Promise<{ branchId: BranchID } | { result: ToolResult }> {
+  async function resolveTarget(
+    args: FrontDeskTargetArgs
+  ): Promise<{ branchId: BranchID } | { result: ToolResult }> {
     if (Boolean(args.teammate) === Boolean(args.branchId)) {
       return {
         result: errorResult({
@@ -102,32 +116,11 @@ export function registerFrontDeskTools(server: McpServer, ctx: McpContext): void
     throw error;
   }
 
-  server.registerTool(
-    'agor_teammates_front_desk_set',
-    {
-      description:
-        "Pin a session as a teammate's front desk: agor_sessions_prompt { teammate } then reaches that session instead of the teammate's most recently active one, so name addressing is deterministic. The session must belong to the teammate's branch and not be archived. Replaces any current pin atomically. Requires Branch Manager access. If the pinned session is later archived or dies, addressing falls back to the most recent session automatically.",
-      annotations: { idempotentHint: true },
-      inputSchema: z.object({
-        teammate: mcpOptionalNonBlankString('teammate', TEAMMATE_ARG_DESCRIPTION),
-        branchId: mcpOptionalId(
-          'branchId',
-          'Branch',
-          'Teammate branch ID (UUIDv7 or short ID). Provide exactly one of teammate or branchId.'
-        ),
-        sessionId: mcpRequiredId(
-          'sessionId',
-          'Session',
-          "Session to pin (UUIDv7 or short ID); must be in the teammate's branch."
-        ),
-        expectedSessionId: mcpOptionalId(
-          'expectedSessionId',
-          'Session',
-          'Only replace the pin if this session is the current front desk. Guards against overwriting a change you have not seen.'
-        ),
-      }),
-    },
-    async (args) => {
+  return {
+    /** `agor_teammates_front_desk_set` */
+    async set(
+      args: FrontDeskTargetArgs & { sessionId: string; expectedSessionId?: string }
+    ): Promise<ToolResult> {
       const target = await resolveTarget(args);
       if ('result' in target) return target.result;
       const sessionId: SessionID = await resolveSessionId(ctx, args.sessionId);
@@ -152,30 +145,10 @@ export function registerFrontDeskTools(server: McpServer, ctx: McpContext): void
       } catch (error) {
         return refusalResult(error, target.branchId);
       }
-    }
-  );
-
-  server.registerTool(
-    'agor_teammates_front_desk_clear',
-    {
-      description:
-        "Remove a teammate's front-desk pin. agor_sessions_prompt { teammate } goes back to reaching the teammate's most recently active session. No session is archived or changed. Requires Branch Manager access.",
-      annotations: { idempotentHint: true },
-      inputSchema: z.object({
-        teammate: mcpOptionalNonBlankString('teammate', TEAMMATE_ARG_DESCRIPTION),
-        branchId: mcpOptionalId(
-          'branchId',
-          'Branch',
-          'Teammate branch ID (UUIDv7 or short ID). Provide exactly one of teammate or branchId.'
-        ),
-        expectedSessionId: mcpOptionalId(
-          'expectedSessionId',
-          'Session',
-          'Only clear the pin if this session is the current front desk.'
-        ),
-      }),
     },
-    async (args) => {
+
+    /** `agor_teammates_front_desk_clear` */
+    async clear(args: FrontDeskTargetArgs & { expectedSessionId?: string }): Promise<ToolResult> {
       const target = await resolveTarget(args);
       if ('result' in target) return target.result;
       const expectedSessionId = args.expectedSessionId
@@ -195,6 +168,6 @@ export function registerFrontDeskTools(server: McpServer, ctx: McpContext): void
       } catch (error) {
         return refusalResult(error, target.branchId);
       }
-    }
-  );
+    },
+  };
 }
