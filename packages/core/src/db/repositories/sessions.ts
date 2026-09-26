@@ -1953,7 +1953,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
       return this.rowToSession(
         updated.sessions,
         (updated.branches?.board_id ?? null) as UUID | null,
-        await getBaseUrl()
+        await getBaseUrl(this.db)
       );
     });
   }
