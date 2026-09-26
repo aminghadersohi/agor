@@ -70,10 +70,11 @@ export interface TenantContextScope {
 /**
  * One scope store per process, not per bundled copy of this module.
  *
- * `@agor/core` ships with `splitting: false`, so every tsup entry point inlines
- * its own copy of this file. `@agor/core/db` and
- * `@agor/core/tools/mcp/oauth-refresh` are separate entries, and the daemon
- * loads both: without this, each would own a private `AsyncLocalStorage`, a
+ * The ESM build of `@agor/core` shares chunks between entries, but the CJS
+ * build does not: every CJS entry point inlines its own copy of this file, and
+ * an ESM entry and a CJS entry are always two copies. `@agor/core/db` and
+ * `@agor/core/tools/mcp/oauth-refresh` are separate entries, and a process can
+ * load both formats: without this, each would own a private `AsyncLocalStorage`, a
  * scope armed through one would be invisible to a guarded proxy built by the
  * other, and the guard would reject work that had correctly declared its
  * tenant. Keying on `Symbol.for` makes the store the process's, which is what
