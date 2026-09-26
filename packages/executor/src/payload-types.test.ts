@@ -764,6 +764,7 @@ describe('getSupportedCommands', () => {
     expect(commands).toContain('branch.gateway.slack-file-upload');
     expect(commands).toContain('branch.upload.materialize');
     expect(commands).toContain('branch.agor-yml.import');
+    expect(commands).toContain('branch.launch-json.import');
     expect(commands).toContain('branch.agor-yml.export');
     expect(commands).toContain('environment.lifecycle');
     expect(commands).toContain('environment.logs');
@@ -776,6 +777,6 @@ describe('getSupportedCommands', () => {
     expect(commands).toContain('claude.auth-file');
     expect(commands).toContain('branch.clean');
     expect(commands).toContain('branch.archive');
-    expect(commands.length).toBe(32);
+    expect(commands.length).toBe(33);
   });
 });

@@ -245,6 +245,16 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
   },
 
   // --------------------------------------------------------------------------
+  // Fork launch.json import (#42). Its `.agor.yml` sibling predates this
+  // mechanism and sits in the baseline holding a request transaction across
+  // its executor spawn; this one is new, so it answers — and does not.
+  // --------------------------------------------------------------------------
+  'repos/:id/import-launch-json': {
+    scopeClass: 'identity-only',
+    why: 'Long route across the executor spawn that reads the launch file: registered with tenant identity and write admission only. The repo read, branch authorization (branches service), pre-spawn workspace-access check and delegated-home lookup each open their own short unit; the executor reaches the daemon only through a command token carrying the tenant_id claim; the environment write runs in withFreshTenantWrite after the spawn. Admin-only, enforced in the route hook and again in ReposService.importFromLaunchJson.',
+  },
+
+  // --------------------------------------------------------------------------
   // Artifact interaction bindings (#47), and the run-now route its actions
   // dispatch into — reviewed and classified here rather than depended on from
   // the baseline.

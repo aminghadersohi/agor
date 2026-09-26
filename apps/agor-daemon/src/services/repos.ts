@@ -42,6 +42,7 @@ import {
   Conflict,
   Forbidden,
   NotAuthenticated,
+  NotFound,
 } from '@agor/core/feathers';
 import { redactGitUrlCredentials, stripGitUrlCredentials } from '@agor/core/git/pure';
 import type {
@@ -1464,7 +1465,7 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
   private async runAgorYmlExecutorCommand(
     repo: Repo,
     branch: Branch,
-    command: 'branch.agor-yml.import' | 'branch.agor-yml.export',
+    command: 'branch.agor-yml.import' | 'branch.agor-yml.export' | 'branch.launch-json.import',
     params: Record<string, unknown>,
     serviceParams?: RepoParams
   ) {
@@ -1472,16 +1473,20 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       | UserID
       | undefined;
     if (!userId) throw new NotAuthenticated('Authentication required');
-    const branchFsAccess = await ensureBranchWorkspaceAccess(
-      new BranchRepository(this.db),
-      branch,
-      userId,
-      (serviceParams as Partial<AuthenticatedParams> | undefined)?.user?.role as
-        | UserRole
-        | undefined,
-      command === 'branch.agor-yml.export' ? 'session' : 'view',
-      command === 'branch.agor-yml.export' ? 'write' : 'read',
-      this.app.get('config').execution?.allow_superadmin === true
+    // Own short unit: long (identity-only) callers hold no request scope, and
+    // this re-enters harmlessly when a request-scoped caller already has one.
+    const branchFsAccess = await this.withTenantDatabase(serviceParams, () =>
+      ensureBranchWorkspaceAccess(
+        new BranchRepository(this.db),
+        branch,
+        userId,
+        (serviceParams as Partial<AuthenticatedParams> | undefined)?.user?.role as
+          | UserRole
+          | undefined,
+        command === 'branch.agor-yml.export' ? 'session' : 'view',
+        command === 'branch.agor-yml.export' ? 'write' : 'read',
+        this.app.get('config').execution?.allow_superadmin === true
+      )
     );
     const sessionToken = await issueExecutorCommandToken(
       this.app,
@@ -1618,6 +1623,77 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       data: updated,
       params,
       id,
+    });
+    return updated;
+  }
+
+  /**
+   * Import editor-style launch profiles from `.agor/launch.json`, falling
+   * back to `.vscode/launch.json`, and compile them into normal Agor variants.
+   *
+   * Registered as a long (identity-only) route: the file is read by an
+   * executor process, so no tenant transaction may be held across that spawn.
+   * Every database access here therefore opens its own short tenant unit — the
+   * repo read, the branch authorization (through the branches service, which
+   * arms its own scope), the pre-spawn access checks, and the final write,
+   * which re-checks the tenant write gate after the executor returns. Tenant
+   * identity reaches the executor only through the `tenant_id` claim sealed
+   * into its command token, which its daemon callbacks are resolved against.
+   */
+  async importFromLaunchJson(
+    id: string,
+    data: { branch_id: string },
+    params?: RepoParams
+  ): Promise<Repo> {
+    if (
+      !hasMinimumRole((params as Partial<AuthenticatedParams> | undefined)?.user?.role, ROLES.ADMIN)
+    ) {
+      throw new Forbidden('Admin access is required to import repository environment settings');
+    }
+    if (!data?.branch_id) throw new BadRequest('branch_id is required to import launch.json');
+    const tenantId =
+      (params as AuthenticatedParams | undefined)?.tenant?.tenant_id ?? getCurrentTenantId();
+    if (!tenantId) throw new NotAuthenticated('Trusted tenant context is required');
+
+    const repo = await this.withTenantDatabase(params, () => this.get(id, params));
+    const branch = await this.getAuthorizedAgorYmlBranch(repo, data.branch_id, params);
+    const importResult = await this.runAgorYmlExecutorCommand(
+      repo,
+      branch,
+      'branch.launch-json.import',
+      {},
+      params
+    );
+    if (!importResult.success) {
+      throw new Error(
+        `Cannot import launch.json from ${branch.name}: ${importResult.error?.message ?? 'executor failed'}`
+      );
+    }
+    const payload = importResult.data as
+      | { environment?: RepoEnvironment | null; path?: string }
+      | undefined;
+    if (!payload?.environment) {
+      throw new Error('No .agor/launch.json or .vscode/launch.json found in this branch');
+    }
+    const environment = payload.environment;
+
+    // Fresh unit after the spawn: re-read the row so DB-only template_overrides
+    // written while the executor ran are preserved, and re-assert the write
+    // gate in case a tenant freeze began meanwhile.
+    const updated = await withFreshTenantWrite(this.db, tenantId, async () => {
+      const current = await this.repoRepo.findById(repo.repo_id);
+      if (!current) throw new NotFound(`Repository ${repo.repo_id} no longer exists`);
+      const replacement: RepoEnvironment = current.environment?.template_overrides
+        ? { ...environment, template_overrides: current.environment.template_overrides }
+        : environment;
+      return this.repoRepo.setEnvironment(current.repo_id, replacement);
+    });
+    emitServiceEvent(this.app, {
+      path: 'repos',
+      event: 'patched',
+      data: updated,
+      params,
+      id: updated.repo_id,
     });
     return updated;
   }
