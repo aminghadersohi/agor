@@ -735,6 +735,18 @@ describe('Socket.IO transport ceiling', () => {
       maxHttpBufferSize: SOCKET_IO_MAX_BUFFER_SIZE_BYTES,
     });
   });
+
+  it('compresses WebSocket frames without cross-message context', () => {
+    const { config } = buildHarness();
+
+    expect(config.serverOptions).toMatchObject({
+      perMessageDeflate: {
+        threshold: 1024,
+        serverNoContextTakeover: true,
+        clientNoContextTakeover: true,
+      },
+    });
+  });
 });
 
 describe('Socket.IO lifecycle logging', () => {

@@ -453,6 +453,27 @@ function bearerTokenFromHeader(value: string | string[] | undefined): string | u
 }
 
 /**
+ * WebSocket per-message compression (RFC 7692).
+ *
+ * Every UI service call and realtime event rides the socket, and engine.io
+ * leaves WebSocket frames uncompressed by default (its `httpCompression` only
+ * covers long-polling; REST gets the `compression` middleware). Workspace
+ * snapshots are repetitive JSON that deflates 4-5x, which matters most on
+ * slow links such as a VPN.
+ *
+ * - `threshold` skips small frames (streaming chunks, cursor presence) where
+ *   zlib overhead outweighs the saving.
+ * - No context takeover in either direction: each message is compressed
+ *   independently, so a connection holds no zlib window between messages
+ *   (bounded memory per socket) and no dictionary spans two messages.
+ */
+export const SOCKET_IO_PER_MESSAGE_DEFLATE = {
+  threshold: 1024,
+  serverNoContextTakeover: true,
+  clientNoContextTakeover: true,
+} as const;
+
+/**
  * Create Socket.io configuration callback for FeathersJS
  *
  * This returns the configuration object and callback function that can be passed
@@ -498,6 +519,7 @@ export function createSocketIOConfig(
     pingInterval: 25000, // How often to ping clients
     maxHttpBufferSize: SOCKET_IO_MAX_BUFFER_SIZE_BYTES,
     transports: ['websocket', 'polling'], // Prefer WebSocket
+    perMessageDeflate: SOCKET_IO_PER_MESSAGE_DEFLATE,
     ...(options.adapter ? { adapter: options.adapter } : {}),
   };
 
