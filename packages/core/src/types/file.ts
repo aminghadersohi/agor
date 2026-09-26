@@ -130,3 +130,13 @@ export interface FileGitDiff {
   /** Original HEAD path when git reports a rename or copy. */
   basePath?: FilePath;
 }
+
+/**
+ * Safe, optimistic update for an existing text file in a branch worktree.
+ * The timestamp prevents a browser tab from silently overwriting a newer
+ * agent, editor, or teammate change.
+ */
+export interface FilePatchData {
+  content: string;
+  expectedLastModified: string;
+}
