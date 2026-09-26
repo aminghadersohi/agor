@@ -1566,6 +1566,13 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
    * caller must name which branch's working copy to read. This is a
    * one-shot manual import — the repo is NOT re-ingested automatically on
    * subsequent operations.
+   *
+   * Registered as a long (identity-only) route, like importFromLaunchJson: the
+   * file is read by an executor process, so no tenant transaction may be held
+   * across that spawn. The repo read, the branch authorization (through the
+   * branches service, which arms its own scope) and the pre-spawn access checks
+   * each open their own short unit; the executor carries the tenant only in its
+   * command token; the write runs in a fresh unit after the executor returns.
    */
   async importFromAgorYml(
     id: string,
@@ -1580,7 +1587,11 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
     if (!data?.branch_id) {
       throw new Error('branch_id is required to import .agor.yml');
     }
-    const repo = await this.get(id, params);
+    const tenantId =
+      (params as AuthenticatedParams | undefined)?.tenant?.tenant_id ?? getCurrentTenantId();
+    if (!tenantId) throw new NotAuthenticated('Trusted tenant context is required');
+
+    const repo = await this.withTenantDatabase(params, () => this.get(id, params));
     const branch = await this.getAuthorizedAgorYmlBranch(repo, data.branch_id, params);
 
     const importResult = await this.runAgorYmlExecutorCommand(
@@ -1607,22 +1618,27 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       throw new Error('.agor.yml not found or has no environment configuration');
     }
 
-    // Preserve any existing DB-only template_overrides across import — the
-    // file never contains them, so a naive replace would otherwise wipe them.
-    const replacement: RepoEnvironment = repo.environment?.template_overrides
-      ? { ...environment, template_overrides: repo.environment.template_overrides }
-      : environment;
-
-    // Imports and YAML Save share the repository's complete-configuration
-    // replacement contract, removing deleted variants and fields atomically.
-    const updated = await this.repoRepo.setEnvironment(id, replacement);
+    // Fresh unit after the spawn: re-read the row, and re-assert the write gate
+    // in case a tenant freeze began while the executor ran. Preserve any
+    // existing DB-only template_overrides across import — the file never
+    // contains them, so a naive replace would otherwise wipe them. Imports and
+    // YAML Save share the repository's complete-configuration replacement
+    // contract, removing deleted variants and fields atomically.
+    const updated = await withFreshTenantWrite(this.db, tenantId, async () => {
+      const current = await this.repoRepo.findById(repo.repo_id);
+      if (!current) throw new NotFound(`Repository ${repo.repo_id} no longer exists`);
+      const replacement: RepoEnvironment = current.environment?.template_overrides
+        ? { ...environment, template_overrides: current.environment.template_overrides }
+        : environment;
+      return this.repoRepo.setEnvironment(current.repo_id, replacement);
+    });
 
     emitServiceEvent(this.app, {
       path: 'repos',
       event: 'patched',
       data: updated,
       params,
-      id,
+      id: updated.repo_id,
     });
     return updated;
   }
