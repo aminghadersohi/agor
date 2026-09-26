@@ -1372,6 +1372,20 @@
     "reviewDate": null
   },
   {
+    "id": "DAEMON-FS-CAP-254",
+    "class": "A",
+    "file": "packages/core/src/db/migrate-sqlite.ts",
+    "import": "node:fs",
+    "symbol": "readFileSync",
+    "local": "readFileSync",
+    "operation": "call:readFileSync@migrateSQLiteWithCallbackReconciliation#1",
+    "owner": "daemon host/operator runtime",
+    "boundary": "deployment-local host capability",
+    "rationale": "Reads the bundled SQLite 0115 migration to recognise the guarded 0117 reconciliation statement.",
+    "reviewTarget": null,
+    "reviewDate": null
+  },
+  {
     "id": "DAEMON-FS-CAP-191",
     "class": "A",
     "file": "packages/core/src/unix/bwrap.ts",
