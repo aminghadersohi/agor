@@ -433,10 +433,10 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN color_override`);
       // Rewind 0112's schema too: replaying its ledger must recreate the table.
       await executeRaw(db, sql`DROP TABLE kb_import_receipts`);
-      // 9028's front-desk table references the Session tenant identity index
+      // 9030's front-desk table references the Session tenant identity index
       // dropped below, and its replay must recreate the table.
       await executeRaw(db, sql`DROP TABLE branch_front_desk_sessions`);
-      // 9029's profile image galleries are newer than this watermark too.
+      // 9028's profile image galleries are newer than this watermark too.
       await executeRaw(db, sql`DROP TABLE profile_images`);
 
       // This fixture rewinds the journal to the previous fork watermark. Keep
@@ -447,6 +447,10 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`DROP INDEX sessions_tenant_session_id_unique`);
       await executeRaw(db, sql`DROP INDEX tasks_tenant_task_id_unique`);
       // Upstream's provider-grant table is likewise newer than this watermark.
+      // Rewind the later completion schema too, not just its ledger entry.
+      // The policy on tasks references the outbox and must be removed first.
+      await executeRaw(db, sql`DROP POLICY IF EXISTS completion_callback_task_discovery ON tasks`);
+      await executeRaw(db, sql`DROP TABLE completion_subscriptions`);
       await executeRaw(db, sql`DROP TABLE user_provider_oauth_grants`);
       await withPostgresTestTransaction(db, recreateHistoricalClaudeAuthority);
       await withPostgresTestTransaction(db, restoreHistoricalOwnerImmutability);
