@@ -9,6 +9,9 @@
  * a role verified NOSUPERUSER/NOBYPASSRLS. run-now is stubbed to observe what
  * the action route hands it; its own registration is covered by
  * register-routes.schedule-run-now.postgres.test.ts.
+ *
+ * The round-trip tests declare bindings through the ordinary REST patch, read
+ * them back from the payload route, and invoke them — the path a browser takes.
  */
 import {
   ArtifactRepository,
@@ -28,12 +31,14 @@ import {
   runWithTenantDatabaseScope,
   ScheduleRepository,
   SessionRepository,
+  shortId,
   sql,
   UsersRepository,
 } from '@agor/core/db';
 import { type Application, feathers, feathersExpress } from '@agor/core/feathers';
 import type {
   Artifact,
+  ArtifactPayload,
   AuthenticatedParams,
   HookContext,
   Schedule,
@@ -69,6 +74,7 @@ interface TenantFixture {
   schedule: Schedule;
   artifact: Artifact;
   privateArtifact: Artifact;
+  unboundArtifact: Artifact;
 }
 
 describe.skipIf(!postgresUrl || !usesPostgresSchema)(
@@ -180,7 +186,23 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           name: 'Private console',
           public: false,
         } as never);
-        return { tenantId, owner, outsider, viewer, schedule, artifact, privateArtifact };
+        const { agor_runtime: _bindings, ...unbound } = base;
+        const unboundArtifact = await artifacts.create({
+          ...unbound,
+          artifact_id: generateId(),
+          name: 'Unbound console',
+          public: true,
+        } as never);
+        return {
+          tenantId,
+          owner,
+          outsider,
+          viewer,
+          schedule,
+          artifact,
+          privateArtifact,
+          unboundArtifact,
+        };
       });
     }
 
@@ -203,6 +225,27 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       return app
         .service('artifacts/:id/data/:dataId')
         .find(params(caller, tenantId, { id: artifactId, dataId }));
+    }
+
+    function patchArtifact(
+      caller: User,
+      tenantId: TenantID,
+      artifactId: string,
+      data: Record<string, unknown>
+    ) {
+      return app.service('artifacts').patch(artifactId, data, params(caller, tenantId, {}));
+    }
+
+    function readPayload(caller: User, tenantId: TenantID, artifactId: string) {
+      return app
+        .service('artifacts/:id/payload')
+        .find(params(caller, tenantId, { id: artifactId })) as Promise<ArtifactPayload>;
+    }
+
+    function readPersistedRuntime(tenantId: TenantID, artifactId: string) {
+      return runWithTenantDatabaseScope(db, tenantId, async () => {
+        return (await new ArtifactRepository(db).findById(artifactId))?.agor_runtime;
+      });
     }
 
     function readSchedule(tenantId: TenantID, scheduleId: string) {
@@ -286,6 +329,103 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
 
     beforeEach(() => {
       runNowCalls.length = 0;
+    });
+
+    it('round-trips declared bindings: REST save, payload, action, and data', async () => {
+      const a = await seedTenant('a');
+      const id = a.unboundArtifact.artifact_id;
+      // A short schedule id: stored canonically, so the payload and the
+      // execute-time lookup see the full id.
+      const declared = interactions(shortId(a.schedule.schedule_id)).interactions;
+
+      await patchArtifact(a.owner, a.tenantId, id, { agor_runtime: { interactions: declared } });
+      const expected = interactions(a.schedule.schedule_id).interactions;
+      expect((await readPersistedRuntime(a.tenantId, id))?.interactions).toEqual(expected);
+
+      const payload = await readPayload(a.owner, a.tenantId, id);
+      expect(payload.interaction_config).toEqual(expected);
+
+      await expect(runAction(a.owner, a.tenantId, id, 'run')).resolves.toMatchObject({
+        artifact_id: id,
+        action_id: 'run',
+        effect: 'schedule_run',
+      });
+      expect(runNowCalls).toEqual([
+        expect.objectContaining({
+          scheduleId: a.schedule.schedule_id,
+          provider: 'rest',
+          userId: a.owner.user_id,
+          tenant: a.tenantId,
+        }),
+      ]);
+      await expect(readData(a.owner, a.tenantId, id, 'status')).resolves.toMatchObject({
+        kind: 'schedule_status',
+        schedule_id: a.schedule.schedule_id,
+        enabled: true,
+      });
+      await runAction(a.owner, a.tenantId, id, 'pause');
+      await expect(readData(a.owner, a.tenantId, id, 'status')).resolves.toMatchObject({
+        enabled: false,
+      });
+
+      // A viewer who cannot view the source branch gets the artifact but no
+      // controls, and the routes still refuse them on their own.
+      const outsiderPayload = await readPayload(a.outsider, a.tenantId, id);
+      expect(outsiderPayload.artifact_id).toBe(id);
+      expect(outsiderPayload.interaction_config).toBeUndefined();
+      await expect(readData(a.outsider, a.tenantId, id, 'status')).rejects.toMatchObject({
+        name: 'Forbidden',
+      });
+    });
+
+    it('rejects invalid bindings at save time and persists nothing', async () => {
+      const a = await seedTenant('a');
+      const b = await seedTenant('b');
+      const id = a.unboundArtifact.artifact_id;
+
+      // Another tenant's real schedule is invisible under RLS: refused, and
+      // the message is the same one a nonexistent id gets.
+      await expect(
+        patchArtifact(a.owner, a.tenantId, id, {
+          agor_runtime: interactions(b.schedule.schedule_id),
+        })
+      ).rejects.toMatchObject({
+        name: 'BadRequest',
+        message: expect.stringContaining(
+          `"${b.schedule.schedule_id}" is not a schedule on this artifact's branch`
+        ),
+      });
+      await expect(
+        patchArtifact(a.owner, a.tenantId, id, {
+          agor_runtime: {
+            interactions: {
+              actions: [
+                {
+                  id: 'run',
+                  label: 'Run',
+                  effect: { kind: 'schedule_run', schedule_id: a.schedule.schedule_id },
+                  args: { prompt: 'injected' },
+                },
+              ],
+            },
+          },
+        })
+      ).rejects.toMatchObject({
+        name: 'BadRequest',
+        message: expect.stringContaining('actions[0] ("run").args is not a recognized field'),
+      });
+      // Only the creator (or an admin) may declare bindings at all.
+      await expect(
+        patchArtifact(a.outsider, a.tenantId, id, {
+          agor_runtime: interactions(a.schedule.schedule_id),
+        })
+      ).rejects.toMatchObject({ name: 'Forbidden' });
+
+      expect(await readPersistedRuntime(a.tenantId, id)).toBeFalsy();
+      await expect(runAction(a.owner, a.tenantId, id, 'run')).rejects.toMatchObject({
+        name: 'NotFound',
+      });
+      expect(runNowCalls).toEqual([]);
     });
 
     it('dispatches run-now with the caller identity and no open database scope', async () => {

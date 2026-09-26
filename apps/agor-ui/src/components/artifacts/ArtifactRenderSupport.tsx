@@ -1,8 +1,4 @@
-import type {
-  ArtifactActionEffect,
-  ArtifactInteractionConfig,
-  ArtifactPayload,
-} from '@agor-live/client';
+import type { ArtifactInteractionConfig, ArtifactPayload } from '@agor-live/client';
 import { SafetyOutlined, WarningOutlined } from '@ant-design/icons';
 import { useSandpack, useSandpackConsole } from '@codesandbox/sandpack-react';
 import { App, Tooltip, theme } from 'antd';
@@ -11,6 +7,7 @@ import { useEffect, useRef } from 'react';
 import { getDaemonUrl } from '@/config/daemon';
 import { fetchArtifactDataBinding, runArtifactActionBinding } from '@/utils/artifactActions';
 import { getAuthHeaders, getCurrentUserIdFromJwt } from '@/utils/authHeaders';
+import { confirmArtifactAction, notifyArtifactBindingAction } from './ArtifactBindingControls';
 
 /** Max console entries to send per batch, and minimum interval between sends. */
 const CONSOLE_BATCH_MAX = 50;
@@ -214,31 +211,6 @@ export function ArtifactInteractionBridge({
       target.postMessage({ type: 'agor:interaction-result', requestId, ...body }, '*');
     };
 
-    const describeEffect = (effect: ArtifactActionEffect): string => {
-      if (effect.kind === 'schedule_run') {
-        return 'This starts a new agent session using the configured schedule.';
-      }
-      return effect.enabled
-        ? 'This enables the configured schedule so it runs on its cron.'
-        : 'This disables the configured schedule; it will stop running on its cron.';
-    };
-
-    const confirmRun = (
-      label: string,
-      description: string | undefined,
-      effect: ArtifactActionEffect
-    ) =>
-      new Promise<boolean>((resolve) => {
-        modal.confirm({
-          title: `Run “${label}”?`,
-          content: description || describeEffect(effect),
-          okText: 'Run action',
-          cancelText: 'Cancel',
-          onOk: () => resolve(true),
-          onCancel: () => resolve(false),
-        });
-      });
-
     const handler = async (event: MessageEvent) => {
       const current = sandpackRef.current;
       const firstClientId = Object.keys(current.clients)[0];
@@ -303,13 +275,14 @@ export function ArtifactInteractionBridge({
         reply(target, message.requestId, { ok: false, error: 'Action is not configured' });
         return;
       }
-      if (action.confirm && !(await confirmRun(action.label, action.description, action.effect))) {
+      if (action.confirm && !(await confirmArtifactAction(modal, action))) {
         reply(target, message.requestId, { ok: false, error: 'Action cancelled' });
         return;
       }
       try {
         const result = await runArtifactActionBinding(artifactId, action.id);
         reply(target, message.requestId, { ok: true, result });
+        notifyArtifactBindingAction(artifactId);
       } catch (error) {
         reply(target, message.requestId, {
           ok: false,

@@ -824,6 +824,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       activeUrlTargetArtifactId,
       onEditMarkdown: handleEditMarkdownNote,
       canEdit: canEditBoard,
+      onOpenSession: onSessionClick,
     });
 
     // Extract zone labels - memoized to only change when labels actually change
