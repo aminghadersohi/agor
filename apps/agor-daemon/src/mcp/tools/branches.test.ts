@@ -1446,8 +1446,9 @@ describe('agor_branches_set_zone placement', () => {
 
     await setZone({ branchId: 'branch-1', zoneId: 'zone-1' });
 
-    // The only occupant is the branch itself, so the first slot must stay free.
-    expect(patched[0].data.position).toEqual({ x: 24, y: 24 });
+    // The only occupant is the branch itself, so the frame origin (below the
+    // title reserve) must stay free.
+    expect(patched[0].data.position).toEqual({ x: 32, y: 112 });
   });
 
   it('rejects an overflowing placement without creating a board object', async () => {
@@ -1653,11 +1654,11 @@ describe('agor_branches_set_zone', () => {
     // zone-relative coordinates. The non-zero origin is never added here.
     expect(boardObjectsPatch).toHaveBeenCalledWith(
       'obj-branch-1',
-      { position: { x: 24, y: 24 }, zone_id: 'zone-review' },
+      { position: { x: 32, y: 112 }, zone_id: 'zone-review' },
       baseServiceParams
     );
-    expect(persistedBoardObject.position).toEqual({ x: 24, y: 24 });
-    expect(parsed.position).toEqual({ x: 24, y: 24 });
+    expect(persistedBoardObject.position).toEqual({ x: 32, y: 112 });
+    expect(parsed.position).toEqual({ x: 32, y: 112 });
     expect(parsed.position).not.toEqual({ x: 24, y: 1600 });
     expect(parsed.position.x + 500).toBeLessThanOrEqual(zone.width);
     expect(parsed.position.y + 200).toBeLessThanOrEqual(zone.height);
@@ -1754,7 +1755,7 @@ describe('agor_branches_set_zone', () => {
       expect.objectContaining({
         // Zone origin is intentionally non-zero: set_zone persists React Flow
         // child coordinates, never canvas-absolute coordinates.
-        position: { x: 24, y: 24 },
+        position: { x: 32, y: 112 },
         zone_id: 'zone-validate',
       }),
       baseServiceParams

@@ -1,4 +1,6 @@
-import type { BoardPosition, ZoneBoardObject } from '../types/board.js';
+import { ceilBoardGridValue } from '../layout/rectangle-packing.js';
+import { growZoneLayoutHeight } from '../layout/zone-layout.js';
+import type { BoardPosition, ZoneBoardObject, ZoneResizeMode } from '../types/board.js';
 
 /** Standard branch card dimensions used for zone placement calculations */
 export const BRANCH_CARD_WIDTH = 500;
@@ -172,6 +174,31 @@ function overlapsAnyOccupant(
   );
 }
 
+/** Shared frame/spacing options for zone slot allocation. */
+export interface ZoneSlotOptions {
+  entityWidth?: number;
+  entityHeight?: number;
+  padding?: number;
+  /** Scalar spacing fallback for {@link gapX} and {@link gapY}. */
+  gap?: number;
+  gapX?: number;
+  gapY?: number;
+  titleInset?: number;
+}
+
+function resolveZoneSlotOptions(options: ZoneSlotOptions | undefined) {
+  const gap = Math.max(0, options?.gap ?? 24);
+  const padding = Math.max(0, options?.padding ?? 24);
+  return {
+    entityWidth: options?.entityWidth ?? BRANCH_CARD_WIDTH,
+    entityHeight: options?.entityHeight ?? BRANCH_CARD_HEIGHT,
+    padding,
+    gapX: Math.max(0, options?.gapX ?? gap),
+    gapY: Math.max(0, options?.gapY ?? gap),
+    top: padding + Math.max(0, options?.titleInset ?? 0),
+  };
+}
+
 /**
  * Find a zone-relative position for a new entity that does not land on the
  * zone's current occupants.
@@ -179,8 +206,11 @@ function overlapsAnyOccupant(
  * {@link computeZoneRelativePosition} places by random jitter, which is fine
  * for an empty zone and wrong for a populated one: dropping a 500x200 worktree
  * into a zone of cards puts it on top of them, and the caller has no way to ask
- * for anything better. This scans the zone row-major on an item-sized grid and
- * returns the first free cell.
+ * for anything better. This scans candidate origins row-major and returns the
+ * first free one. Candidates are the item-sized lattice from the padded top
+ * inset plus the edges just past every occupant: occupants arranged with the
+ * zone's own padding/gaps/title reserve sit off that lattice, and a lattice-only
+ * scan then misses the obvious free band beside or below them.
  *
  * When nothing inside the zone is free the entity is parked directly below the
  * lowest occupant. That can exceed the zone's current height, which is both
@@ -192,21 +222,12 @@ function overlapsAnyOccupant(
 export function findFreeZoneSlot(
   zone: Pick<ZoneBoardObject, 'width' | 'height'>,
   occupants: readonly ZoneOccupantRectangle[],
-  options?: {
-    entityWidth?: number;
-    entityHeight?: number;
-    padding?: number;
-    gap?: number;
-    titleInset?: number;
+  options?: ZoneSlotOptions & {
     /** Reject instead of parking outside the frame when no contained slot fits. */
     overflow?: 'below' | 'reject';
   }
 ): BoardPosition {
-  const entityWidth = options?.entityWidth ?? BRANCH_CARD_WIDTH;
-  const entityHeight = options?.entityHeight ?? BRANCH_CARD_HEIGHT;
-  const padding = Math.max(0, options?.padding ?? 24);
-  const gap = Math.max(0, options?.gap ?? 24);
-  const top = padding + Math.max(0, options?.titleInset ?? 0);
+  const { entityWidth, entityHeight, padding, gapX, gapY, top } = resolveZoneSlotOptions(options);
 
   const requireContainment = options?.overflow === 'reject';
   const fitsFrame =
@@ -216,13 +237,34 @@ export function findFreeZoneSlot(
   }
   if (occupants.length === 0) return { x: padding, y: top };
 
-  const stepX = entityWidth + gap;
-  const stepY = entityHeight + gap;
   const maxX = Math.max(padding, zone.width - padding - entityWidth);
   const maxY = Math.max(top, zone.height - padding - entityHeight);
+  const axisCandidates = (
+    start: number,
+    max: number,
+    step: number,
+    edges: readonly number[]
+  ): number[] => {
+    const values = new Set<number>();
+    for (let value = start; value <= max; value += step) values.add(value);
+    for (const edge of edges) if (edge >= start && edge <= max) values.add(edge);
+    return [...values].sort((a, b) => a - b);
+  };
+  const xs = axisCandidates(
+    padding,
+    maxX,
+    entityWidth + gapX,
+    occupants.map((occupant) => occupant.x + occupant.width + gapX)
+  );
+  const ys = axisCandidates(
+    top,
+    maxY,
+    entityHeight + gapY,
+    occupants.map((occupant) => occupant.y + occupant.height + gapY)
+  );
 
-  for (let y = top; y <= maxY; y += stepY) {
-    for (let x = padding; x <= maxX; x += stepX) {
+  for (const y of ys) {
+    for (const x of xs) {
       const candidate = { x, y, width: entityWidth, height: entityHeight };
       if (!overlapsAnyOccupant(candidate, occupants)) return { x, y };
     }
@@ -232,5 +274,66 @@ export function findFreeZoneSlot(
     throw new Error('No free slot inside this zone; resize or arrange its contents before placing');
   }
   const lowestOccupiedEdge = Math.max(...occupants.map((occupant) => occupant.y + occupant.height));
-  return { x: padding, y: lowestOccupiedEdge + gap };
+  return { x: padding, y: lowestOccupiedEdge + gapY };
+}
+
+export interface ZoneSlotPlan {
+  /** Zone-relative origin for the new entity. */
+  position: BoardPosition;
+  /** Zone size required to contain it; equals the input size unless `grew`. */
+  width: number;
+  height: number;
+  grew: boolean;
+}
+
+/**
+ * Plan a contained zone slot, growing the zone when its resize policy allows.
+ *
+ * A zone whose policy lets it resize (`height`/`both`) should absorb a new
+ * pin rather than refuse it — refusing is what left callers with an unpinned
+ * branch parked beside the zone. A `fixed` zone still rejects, and `height`
+ * cannot rescue an entity wider than the frame. Growth is grow-only and
+ * grid-aligned, matching the zone arrange's auto-resize contract.
+ */
+export function planZoneSlot(
+  zone: Pick<ZoneBoardObject, 'width' | 'height'>,
+  occupants: readonly ZoneOccupantRectangle[],
+  options?: ZoneSlotOptions & { resize?: ZoneResizeMode }
+): ZoneSlotPlan {
+  const resize = options?.resize ?? 'fixed';
+  try {
+    const position = findFreeZoneSlot(zone, occupants, { ...options, overflow: 'reject' });
+    return { position, width: zone.width, height: zone.height, grew: false };
+  } catch (error) {
+    if (resize === 'fixed') throw error;
+  }
+
+  const { entityWidth, entityHeight, padding, gapY, top } = resolveZoneSlotOptions(options);
+  const width =
+    resize === 'both'
+      ? Math.max(zone.width, ceilBoardGridValue(padding * 2 + entityWidth))
+      : zone.width;
+  if (padding + entityWidth > width - padding) {
+    throw new Error(
+      'Zone is too narrow for this entity and its resize policy only grows height; widen the zone before placing it'
+    );
+  }
+  // Below every occupant is always free, so a frame tall enough to hold that
+  // slot guarantees the scan succeeds; it may still find an earlier gap.
+  const lowestOccupiedEdge = Math.max(
+    top - gapY,
+    ...occupants.map((occupant) => occupant.y + occupant.height)
+  );
+  const searchHeight = Math.max(zone.height, lowestOccupiedEdge + gapY + entityHeight + padding);
+  const position = findFreeZoneSlot({ width, height: searchHeight }, occupants, {
+    ...options,
+    overflow: 'reject',
+  });
+  const height = growZoneLayoutHeight(zone.height, position.y + entityHeight + padding);
+  return {
+    position,
+    width,
+    height,
+    grew: width !== zone.width || height !== zone.height,
+  };
 }

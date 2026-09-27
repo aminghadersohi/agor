@@ -9,7 +9,13 @@ import {
   RepoRepository,
   runWithTenantContext,
 } from '@agor/core/db';
-import type { BoardEntityObject, BoardID, UUID } from '@agor/core/types';
+import type {
+  BoardEntityObject,
+  BoardID,
+  BoardLayoutBatch,
+  UUID,
+  ZoneLayoutPolicy,
+} from '@agor/core/types';
 import { findFreeZoneSlot } from '@agor/core/utils/board-placement';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { expect, vi } from 'vitest';
@@ -19,7 +25,7 @@ import { registerBranchTools } from './branches';
 
 type Handler = (args: { branchId: string; zoneId: string }) => Promise<unknown>;
 
-async function fixture(db: Database) {
+async function fixture(db: Database, extraObjects: Record<string, unknown> = {}) {
   const boards = new BoardRepository(db);
   const branches = new BranchRepository(db);
   const objects = new BoardObjectRepository(db);
@@ -49,8 +55,9 @@ async function fixture(db: Database) {
         height: 900,
         artifact_id: generateId(),
       },
+      ...extraObjects,
     },
-  });
+  } as Parameters<BoardRepository['create']>[0]);
   const repo = await new RepoRepository(db).create({
     repo_id: generateId(),
     slug: 'example/project',
@@ -104,7 +111,13 @@ async function fixture(db: Database) {
     const app = {
       get: () => ({}),
       service(name: string) {
-        if (name === 'boards') return { get: () => boards.findById(board.board_id as BoardID) };
+        if (name === 'boards') {
+          return {
+            get: () => boards.findById(board.board_id as BoardID),
+            patch: (id: string, data: BoardLayoutBatch & { _action: string }) =>
+              boards.applyBoardLayout(id, data),
+          };
+        }
         if (name === 'branches') return { get: () => branches.findById(moving.branch_id) };
         if (name === 'board-objects') return service;
         throw new Error(`Unexpected service ${name}`);
@@ -118,7 +131,18 @@ async function fixture(db: Database) {
     } as unknown as Parameters<typeof registerBranchTools>[1]);
     return setZone;
   }
-  return { destination, board, moving, placement, objects, find, patch, handler };
+  return {
+    destination,
+    board,
+    boards,
+    moving,
+    placement,
+    objects,
+    find,
+    patch,
+    handler,
+    createBranch,
+  };
 }
 
 function contained(placement: BoardEntityObject, zone: { width: number; height: number }) {
@@ -153,7 +177,8 @@ dbTest(
       await f.handler()({ branchId: f.moving.branch_id, zoneId });
       const stored = await f.objects.findByObjectId(f.placement.object_id);
       expect(stored?.zone_id).toBe(zoneId);
-      expect(stored?.position).toEqual({ x: 24, y: 24 });
+      // Default zone frame: 32px padding below the 80px title reserve.
+      expect(stored?.position).toEqual({ x: 32, y: 112 });
       contained(stored!, f.destination);
       // Relative hydration adds the parent once, leaving the preview untouched.
       expect(f.destination.y + stored!.position.y + 200).toBeLessThan(2000);
@@ -222,3 +247,110 @@ dbTest(
     expect(await f.objects.findByObjectId(f.placement.object_id)).toEqual(before);
   }
 );
+
+// Fictional shape of a live report: a manual one-column zone that already
+// holds one arranged branch at its frame origin (20,100) and may grow in height.
+const implementingLayout: ZoneLayoutPolicy = {
+  mode: 'manual',
+  preset: 'grid',
+  sortBy: 'position',
+  sortDirection: 'asc',
+  columns: 1,
+  padding: 20,
+  rowGap: 8,
+  resize: 'height',
+  autoResizeHeight: true,
+  onOverflow: 'reflow_board',
+};
+
+async function implementingFixture(
+  db: Database,
+  options: { height: number; layout?: ZoneLayoutPolicy }
+) {
+  const implementing = {
+    type: 'zone' as const,
+    label: 'Implementing',
+    x: 5000,
+    y: 0,
+    width: 812,
+    height: options.height,
+    layout: options.layout ?? implementingLayout,
+  };
+  const below = {
+    type: 'zone' as const,
+    label: 'Below',
+    x: 5000,
+    y: options.height + 20,
+    width: 812,
+    height: 300,
+  };
+  const f = await fixture(db, { implementing, below });
+  const resident = await f.createBranch('resident');
+  await f.objects.create({
+    board_id: f.board.board_id as BoardID,
+    branch_id: resident.branch_id,
+    zone_id: 'implementing',
+    position: { x: 20, y: 100 },
+    size: { width: 500, height: 200 },
+  });
+  // The moving branch is a measured compact card.
+  await f.objects.updateSize(f.placement.object_id, { width: 500, height: 220 });
+  return { ...f, implementing, below };
+}
+
+dbTest(
+  'pins into the free band below an arranged occupant instead of rejecting',
+  async ({ db }) => {
+    const f = await implementingFixture(db, { height: 600 });
+
+    await f.handler()({ branchId: f.moving.branch_id, zoneId: 'implementing' });
+
+    const stored = await f.objects.findByObjectId(f.placement.object_id);
+    expect(stored?.zone_id).toBe('implementing');
+    expect(stored?.position).toEqual({ x: 20, y: 308 });
+    const board = await f.boards.findById(f.board.board_id as BoardID);
+    expect(board?.objects?.implementing).toMatchObject({ width: 812, height: 600 });
+    expect(board?.objects?.below).toMatchObject({ y: 620 });
+  }
+);
+
+dbTest(
+  'grows a height-resizable zone and reflows its neighbour instead of rejecting',
+  async ({ db }) => {
+    const f = await implementingFixture(db, { height: 340 });
+
+    const result = (await f.handler()({
+      branchId: f.moving.branch_id,
+      zoneId: 'implementing',
+    })) as { content: Array<{ text: string }> };
+
+    const stored = await f.objects.findByObjectId(f.placement.object_id);
+    expect(stored?.zone_id).toBe('implementing');
+    expect(stored?.position).toEqual({ x: 20, y: 308 });
+    const board = await f.boards.findById(f.board.board_id as BoardID);
+    expect(board?.objects?.implementing).toMatchObject({ y: 0, width: 812, height: 560 });
+    const below = board?.objects?.below;
+    expect(below?.type).toBe('zone');
+    expect(below!.y).toBeGreaterThanOrEqual(560);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      zone_resize: { height: 560, moved_zone_ids: ['below'] },
+    });
+  }
+);
+
+dbTest('a full fixed-size zone rejects without resizing or moving the branch', async ({ db }) => {
+  const f = await implementingFixture(db, {
+    height: 340,
+    layout: { ...implementingLayout, resize: 'fixed', autoResizeHeight: false },
+  });
+  const before = await f.objects.findByObjectId(f.placement.object_id);
+
+  await expect(
+    f.handler()({ branchId: f.moving.branch_id, zoneId: 'implementing' })
+  ).rejects.toThrow(/No free slot/);
+
+  expect(f.patch).not.toHaveBeenCalled();
+  expect(await f.objects.findByObjectId(f.placement.object_id)).toEqual(before);
+  const board = await f.boards.findById(f.board.board_id as BoardID);
+  expect(board?.objects?.implementing).toMatchObject({ height: 340 });
+});

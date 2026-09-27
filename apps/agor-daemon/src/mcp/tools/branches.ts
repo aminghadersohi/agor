@@ -15,7 +15,6 @@ import type {
   Session,
   TeammateConfig,
   UUID,
-  ZoneBoardObject,
 } from '@agor/core/types';
 import {
   getBranchCleanupBlockReason,
@@ -25,14 +24,7 @@ import {
   OWNERSHIP_TRANSFER_SERVICES,
   resolveRepoCleanupPolicy,
 } from '@agor/core/types';
-import {
-  BRANCH_CARD_HEIGHT,
-  BRANCH_CARD_WIDTH,
-  CARD_HEIGHT,
-  CARD_WIDTH,
-  findFreeZoneSlot,
-  type ZoneOccupantRectangle,
-} from '@agor/core/utils/board-placement';
+import { BRANCH_CARD_HEIGHT, BRANCH_CARD_WIDTH } from '@agor/core/utils/board-placement';
 import { normalizeOptionalHttpUrl } from '@agor/core/utils/url';
 import type { McpServer, ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
@@ -48,6 +40,10 @@ import { ensureBranchWorkspaceAccess } from '../../utils/branch-workspace-path.j
 import { resolveDelegatedExecutionHomeKey } from '../../utils/executor-delegated-home.js';
 import { withPromptProvenanceTool } from '../../utils/prompt-provenance.js';
 import { getDaemonUrl, requestExecutor } from '../../utils/spawn-executor.js';
+import {
+  commitZoneEntityPlacementGrowth,
+  planZoneEntityPlacement,
+} from '../../utils/zone-placement.js';
 import {
   BRANCH_FILESYSTEM_READY_POLL_INTERVAL_MS,
   type BranchFilesystemReadinessResult,
@@ -256,45 +252,6 @@ function notesPreview(notes: string | undefined, maxLength = 200): string | null
   const singleLine = notes.replace(/\s+/g, ' ').trim();
   if (singleLine.length <= maxLength) return singleLine;
   return `${singleLine.slice(0, maxLength - 1)}…`;
-}
-
-/**
- * Rectangles currently occupying a zone, in zone-relative coordinates.
- *
- * Sizes come from the entity's measured `size` when the browser has recorded
- * one, and otherwise from the nominal size for its kind — the same two-tier
- * sizing the board arrange tools use, because a worktree renders far taller
- * than a card and treating them alike is what makes a mixed zone collide.
- */
-async function collectZoneOccupantRectangles(
-  ctx: McpContext,
-  options: { boardId: BoardID; zoneId: string; excludeObjectId?: string }
-): Promise<ZoneOccupantRectangle[]> {
-  const result = (await ctx.app.service('board-objects').find({
-    query: {
-      board_id: options.boardId,
-      zone_id: options.zoneId,
-      exclude_archived_branches: true,
-    },
-    ...ctx.baseServiceParams,
-  })) as { data: Array<import('@agor/core/types').BoardEntityObject> };
-
-  return result.data.flatMap((entity) => {
-    if (entity.object_id === options.excludeObjectId) return [];
-    const size = entity.size;
-    const usable =
-      size !== undefined &&
-      Number.isFinite(size.width) &&
-      Number.isFinite(size.height) &&
-      size.width > 0 &&
-      size.height > 0;
-    const nominal =
-      entity.entity_type === 'branch'
-        ? { width: BRANCH_CARD_WIDTH, height: BRANCH_CARD_HEIGHT }
-        : { width: CARD_WIDTH, height: CARD_HEIGHT };
-    const { width, height } = usable ? size : nominal;
-    return [{ x: entity.position.x, y: entity.position.y, width, height }];
-  });
 }
 
 async function shouldScopeTeammateDiscoveryToUser(ctx: McpContext): Promise<boolean> {
@@ -1401,7 +1358,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     'agor_branches_set_zone',
     {
       description:
-        "Pin a branch to a zone on a board, clear its current zone pin with zoneId:null, and optionally trigger the zone's prompt template. Finds a contained free position among non-archived branches and existing card placements and creates board association. If the branch cannot fit, rejects without changing its current placement; resize or arrange the zone first. If the zone has an 'always_new' trigger, a new session is automatically created and the prompt template is executed (matching UI drag-drop behavior). For 'show_picker' zones, use triggerTemplate + targetSessionId to send to an existing session on the branch being moved (targetSessionId must live on that branch — cross-branch targets are rejected, since the trigger prompt acts on the moved branch's files). A remote orchestrator on a different branch does NOT target itself here; to be notified when the work finishes, register a completion callback instead (agor_sessions_create with enableCallback:true and omit callbackSessionId for the current caller, or agor_sessions_prompt callback). Only supply callbackSessionId for an intentional authorized alternate destination.",
+        "Pin a branch to a zone on a board, clear its current zone pin with zoneId:null, and optionally trigger the zone's prompt template. Finds a contained free position among non-archived branches and existing card placements, using the zone's layout padding, gaps, and title reserve, and creates board association. If the branch cannot fit and the zone's layout policy allows resizing (resize height/both), the zone grows to hold it (reflowing neighbouring zones when onOverflow is reflow_board); a fixed-size zone rejects without changing the branch's current placement — resize or arrange the zone first. If the zone has an 'always_new' trigger, a new session is automatically created and the prompt template is executed (matching UI drag-drop behavior). For 'show_picker' zones, use triggerTemplate + targetSessionId to send to an existing session on the branch being moved (targetSessionId must live on that branch — cross-branch targets are rejected, since the trigger prompt acts on the moved branch's files). A remote orchestrator on a different branch does NOT target itself here; to be notified when the work finishes, register a completion callback instead (agor_sessions_create with enableCallback:true and omit callbackSessionId for the current caller, or agor_sessions_prompt callback). Only supply callbackSessionId for an intentional authorized alternate destination.",
       inputSchema: z.object({
         branchId: mcpRequiredId(
           'branchId',
@@ -1544,29 +1501,25 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       // Calculate position RELATIVE to zone (not absolute canvas coordinates).
       // The UI expects relative positions and adds zone.x/zone.y when rendering.
       //
-      // Placement is collision-aware: a zone that already holds cards or other
-      // worktrees would otherwise get this branch dropped on top of them, since
-      // the random-jitter placement cannot see its occupants. The branch's own
-      // placement is excluded so re-pinning it to the same zone doesn't treat
-      // its current rectangle as an obstacle to itself.
-      const occupants = await collectZoneOccupantRectangles(ctx, {
-        boardId: branch.board_id as BoardID,
+      // Placement is collision-aware and uses the zone's own layout frame
+      // (padding, gaps, title reserve), so it lands where an arrange of the
+      // zone would. The branch's own placement is excluded so re-pinning it to
+      // the same zone doesn't treat its current rectangle as an obstacle. A
+      // zone whose resize policy allows growth grows to hold the pin (and
+      // reflows its neighbours when onOverflow is reflow_board); a fixed zone
+      // with no room rejects before anything is written, leaving the branch's
+      // current placement untouched.
+      const measured = (value: number | undefined) =>
+        value !== undefined && Number.isFinite(value) && value > 0 ? value : undefined;
+      const placement = await planZoneEntityPlacement(ctx.app, ctx.baseServiceParams, {
+        board,
         zoneId,
+        entityWidth: measured(boardObject?.size?.width) ?? BRANCH_CARD_WIDTH,
+        entityHeight: measured(boardObject?.size?.height) ?? BRANCH_CARD_HEIGHT,
         excludeObjectId: boardObject?.object_id,
       });
-      const { x: relativeX, y: relativeY } = findFreeZoneSlot(zone as ZoneBoardObject, occupants, {
-        entityWidth:
-          boardObject?.size && Number.isFinite(boardObject.size.width) && boardObject.size.width > 0
-            ? boardObject.size.width
-            : BRANCH_CARD_WIDTH,
-        entityHeight:
-          boardObject?.size &&
-          Number.isFinite(boardObject.size.height) &&
-          boardObject.size.height > 0
-            ? boardObject.size.height
-            : BRANCH_CARD_HEIGHT,
-        overflow: 'reject',
-      });
+      await commitZoneEntityPlacementGrowth(ctx.app, ctx.baseServiceParams, board, placement);
+      const { x: relativeX, y: relativeY } = placement.position;
 
       if (!boardObject) {
         // Create new board object
@@ -1734,6 +1687,16 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
         zone_id: zoneId,
         position: { x: relativeX, y: relativeY },
         board_object_id: boardObject.object_id,
+        ...(placement.growth
+          ? {
+              zone_resize: {
+                width: placement.width,
+                height: placement.height,
+                resized_over_zone_ids: placement.growth.resizedOverZoneIds,
+                moved_zone_ids: placement.growth.movedZoneIds,
+              },
+            }
+          : {}),
         ...(promptResult ? { trigger: promptResult } : {}),
       });
     }
