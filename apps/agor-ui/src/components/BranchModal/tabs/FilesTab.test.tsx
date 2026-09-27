@@ -88,7 +88,7 @@ describe('FilesTab', () => {
       .mockRejectedValueOnce(new Error('download failed'))
       .mockResolvedValueOnce({ path: 'archive.bin', encoding: 'utf8', content: 'safe file' });
 
-    render(<FilesTab branch={branch} client={client} />);
+    render(<FilesTab branch={branch} client={client} canWriteFiles />);
     const download = screen.getByRole('button', { name: 'Download fixture' });
 
     fireEvent.click(download);
@@ -116,7 +116,7 @@ describe('FilesTab', () => {
         { path: 'changed.ts', title: 'changed.ts', size: 12, gitStatus: 'modified' },
       ]);
 
-    render(<FilesTab branch={branch} client={client} />);
+    render(<FilesTab branch={branch} client={client} canWriteFiles />);
 
     await waitFor(() => expect(findAll).toHaveBeenCalledTimes(1));
     expect(await screen.findByText('0 files')).toBeInTheDocument();
@@ -142,7 +142,7 @@ describe('FilesTab', () => {
       },
     ]);
     get.mockResolvedValue({ content: 'small staged version', isText: true, encoding: 'utf-8' });
-    render(<FilesTab branch={branch} client={client} />);
+    render(<FilesTab branch={branch} client={client} canWriteFiles />);
     fireEvent.click(await screen.findByRole('tab', { name: 'Staged changes (1)' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Open large.txt' }));
     await waitFor(() =>
@@ -164,10 +164,14 @@ describe('FilesTab', () => {
     findAll.mockResolvedValue([
       { path: 'private.txt', title: 'private.txt', size: 10, isText: true },
     ]);
-    const { rerender } = render(<FilesTab branch={branch} client={client} />);
+    const { rerender } = render(<FilesTab branch={branch} client={client} canWriteFiles />);
     fireEvent.click(await screen.findByRole('button', { name: 'Open private.txt' }));
     rerender(
-      <FilesTab branch={{ ...branch, branch_id: 'other' as Branch['branch_id'] }} client={client} />
+      <FilesTab
+        branch={{ ...branch, branch_id: 'other' as Branch['branch_id'] }}
+        client={client}
+        canWriteFiles
+      />
     );
     resolveDetail({ content: 'old branch bytes' });
     await waitFor(() => expect(screen.queryByText('old branch bytes')).not.toBeInTheDocument());
@@ -228,7 +232,7 @@ describe('FilesTab', () => {
       },
     ]);
 
-    render(<FilesTab branch={branch} client={client} />);
+    render(<FilesTab branch={branch} client={client} canWriteFiles />);
 
     expect(await screen.findByRole('tab', { name: 'All files' })).toBeInTheDocument();
     expect(screen.getByTestId('file-collection-combined')).not.toHaveTextContent(

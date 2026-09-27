@@ -23,6 +23,8 @@ interface WorktreeFileEditorProps {
   open: boolean;
   onClose: () => void;
   onFileSaved: (file: FileDetail) => void;
+  /** False unless the caller has branch file `write` access; the editor is then view-only. */
+  canWrite: boolean;
 }
 
 function languageForPath(path: string): CodeEditorLanguage {
@@ -40,6 +42,7 @@ export const WorktreeFileEditor: React.FC<WorktreeFileEditorProps> = ({
   open,
   onClose,
   onFileSaved,
+  canWrite,
 }) => {
   const { token } = theme.useToken();
   const screens = Grid.useBreakpoint();
@@ -90,7 +93,7 @@ export const WorktreeFileEditor: React.FC<WorktreeFileEditorProps> = ({
   );
 
   const save = useCallback(async () => {
-    if (!client || !selectedFile || !dirty || saving) return;
+    if (!canWrite || !client || !selectedFile || !dirty || saving) return;
     setSaving(true);
     try {
       const saved = (await client
@@ -111,6 +114,7 @@ export const WorktreeFileEditor: React.FC<WorktreeFileEditorProps> = ({
     }
   }, [
     branch.branch_id,
+    canWrite,
     client,
     content,
     dirty,
@@ -188,12 +192,16 @@ export const WorktreeFileEditor: React.FC<WorktreeFileEditorProps> = ({
             {!compactLayout && <Text type="secondary">Workspace editor</Text>}
           </Space>
           <Space size="small">
-            {!compactLayout &&
+            {!canWrite ? (
+              <Tag>Read-only</Tag>
+            ) : (
+              !compactLayout &&
               (dirty ? (
                 <Tag color="gold">Unsaved</Tag>
               ) : selectedFile ? (
                 <Tag icon={<CheckOutlined />}>Saved</Tag>
-              ) : null)}
+              ) : null)
+            )}
             <Button
               icon={<ReloadOutlined />}
               aria-label="Reload file"
@@ -202,16 +210,18 @@ export const WorktreeFileEditor: React.FC<WorktreeFileEditorProps> = ({
             >
               {compactLayout ? null : 'Reload'}
             </Button>
-            <Button
-              type="primary"
-              icon={<SaveOutlined />}
-              aria-label="Save file"
-              disabled={!dirty}
-              loading={saving}
-              onClick={() => void save()}
-            >
-              {compactLayout ? null : 'Save'}
-            </Button>
+            {canWrite && (
+              <Button
+                type="primary"
+                icon={<SaveOutlined />}
+                aria-label="Save file"
+                disabled={!dirty}
+                loading={saving}
+                onClick={() => void save()}
+              >
+                {compactLayout ? null : 'Save'}
+              </Button>
+            )}
             <Button
               type="text"
               aria-label="Close workspace editor"
@@ -302,6 +312,7 @@ export const WorktreeFileEditor: React.FC<WorktreeFileEditorProps> = ({
                   <CodeEditor
                     value={content}
                     onChange={setContent}
+                    readOnly={!canWrite}
                     language={languageForPath(selectedFile.path)}
                     height="100%"
                   />
@@ -315,7 +326,11 @@ export const WorktreeFileEditor: React.FC<WorktreeFileEditorProps> = ({
                 banner
                 showIcon
                 type="info"
-                title="Saves update the worktree directly. Agent and external-editor changes are detected before overwrite."
+                title={
+                  canWrite
+                    ? 'Saves update the worktree directly. Agent and external-editor changes are detected before overwrite.'
+                    : 'You have read-only file access to this branch. Ask a branch manager for write access to edit.'
+                }
               />
             </main>
           </Panel>
