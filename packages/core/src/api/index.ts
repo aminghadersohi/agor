@@ -75,6 +75,7 @@ import type {
   OwnershipTransferResult,
   PatchAgenticToolPreset,
   PermissionMode,
+  PowerAdmissionStatus,
   PowerEssentialSessionSearchResult,
   PowerManagementStatus,
   ReorderQueuedTasksInput,
@@ -348,6 +349,13 @@ export interface PowerManagementService {
   off(event: 'patched', handler: (data: PowerManagementStatus) => void): void;
 }
 
+/** Redacted, read-only admission projection readable by every tenant member. */
+export interface PowerAdmissionService {
+  find(params?: Params): Promise<PowerAdmissionStatus>;
+  on(event: 'patched', handler: (data: PowerAdmissionStatus) => void): void;
+  off(event: 'patched', handler: (data: PowerAdmissionStatus) => void): void;
+}
+
 export interface PowerEssentialSessionsService {
   find(
     params?: Params & { query?: { search?: string } }
@@ -394,6 +402,7 @@ export interface ServiceTypes {
   'branches/:id/permissions': BranchCapabilityPolicy;
   'workspace-preferences': CapabilityPolicyWorkspacePreferences;
   'power-management': PowerManagementStatus;
+  'power-management/admission': PowerAdmissionStatus;
   'power-management/essential-sessions': PowerEssentialSessionSearchResult;
   cards: CardWithType;
   'card-types': CardType; // CardType CRUD
@@ -982,6 +991,7 @@ export interface AgorClient
   service(path: 'branches/:id/permissions'): BranchPermissionsService;
   service(path: 'workspace-preferences'): WorkspacePreferencesService;
   service(path: 'power-management'): PowerManagementService;
+  service(path: 'power-management/admission'): PowerAdmissionService;
   service(path: 'power-management/essential-sessions'): PowerEssentialSessionsService;
   service(path: `sessions/${string}/power-priority`): SessionPowerPriorityService;
   service(path: `branches/${string}/front-desk`): BranchFrontDeskService;

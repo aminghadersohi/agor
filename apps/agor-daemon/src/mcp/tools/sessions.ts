@@ -77,6 +77,7 @@ import { sessionContextRequiredResult, structuredResult, textResult } from '../s
 import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
 import { listAttachedMcpServers } from './mcp-servers.js';
 import { readOpenCodeModelReadiness } from './opencode-models.js';
+import { resolvePromptPowerHold } from './power.js';
 import {
   describeTeammateBranch,
   resolveTeammateName,
@@ -876,11 +877,15 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         }
       );
 
+      const powerHold = await resolvePromptPowerHold(ctx, task, childSession.session_id);
       return textResult({
         session: redactSessionForMcp(childSession),
         taskId: task.task_id,
         status: task.status,
-        note: 'Subsession created and prompt execution started in background.',
+        ...(powerHold ? { power_hold: powerHold } : {}),
+        note: powerHold
+          ? `Subsession created; its prompt is queued. ${powerHold.note}`
+          : 'Subsession created and prompt execution started in background.',
       });
     }
   );
@@ -1082,14 +1087,20 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             { ...callbackParams, provider: undefined, route: { id: sessionId } }
           );
 
+        const powerHold = await resolvePromptPowerHold(ctx, task, sessionId);
         if (task.status === 'queued') {
           const compaction = task.metadata?.prompt_compaction;
+          const busyNote =
+            compaction && compaction.requests.length > 1
+              ? 'Session is busy. This ordinary prompt was coalesced into a queued execution; provenance and duplicate counts are attached to the Task.'
+              : 'Session is busy. Prompt has been queued and will execute automatically when the session becomes idle.';
           return textResult({
             success: true,
             queued: true,
             ...addressedEcho,
             taskId: task.task_id,
             queue_position: task.queue_position,
+            ...(powerHold ? { power_hold: powerHold } : {}),
             ...(compaction
               ? {
                   admissionRequestId: compaction.last_admitted_request_id,
@@ -1105,10 +1116,13 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
                   duplicateRequestCount: compaction.duplicate_request_count,
                 }
               : {}),
-            note:
-              compaction && compaction.requests.length > 1
-                ? 'Session is busy. This ordinary prompt was coalesced into a queued execution; provenance and duplicate counts are attached to the Task.'
-                : 'Session is busy. Prompt has been queued and will execute automatically when the session becomes idle.',
+            // A power hold is the actual reason when the task never reached
+            // the executor; "busy" would send orchestrators into retries.
+            note: powerHold
+              ? task.power_hold?.held
+                ? powerHold.note
+                : `${busyNote} ${powerHold.note}`
+              : busyNote,
           });
         }
         return textResult({
@@ -1183,17 +1197,21 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           { ...callbackParams, provider: undefined, route: { id: forkedSession.session_id } }
         );
 
+        const powerHold = await resolvePromptPowerHold(ctx, task, forkedSession.session_id);
         const note =
           mode === 'btw'
             ? 'Ephemeral "btw" fork created. Result will be sent back via callback when done, then the fork will auto-archive.'
-            : 'Forked session created and prompt execution started.';
+            : powerHold
+              ? 'Forked session created; its prompt is queued.'
+              : 'Forked session created and prompt execution started.';
 
         return textResult({
           ...addressedEcho,
           session: redactSessionForMcp(updatedSession),
           taskId: task.task_id,
           status: task.status,
-          note,
+          ...(powerHold ? { power_hold: powerHold } : {}),
+          note: powerHold ? `${note} ${powerHold.note}` : note,
         });
       } else if (mode === 'subsession') {
         const spawnData: Partial<import('@agor/core/types').SpawnConfig> = {
@@ -1223,11 +1241,15 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           { ...callbackParams, provider: undefined, route: { id: childSession.session_id } }
         );
 
+        const powerHold = await resolvePromptPowerHold(ctx, task, childSession.session_id);
         return textResult({
           session: redactSessionForMcp(childSession),
           taskId: task.task_id,
           status: task.status,
-          note: 'Subsession created and prompt execution started.',
+          ...(powerHold ? { power_hold: powerHold } : {}),
+          note: powerHold
+            ? `Subsession created; its prompt is queued. ${powerHold.note}`
+            : 'Subsession created and prompt execution started.',
         });
       }
 
@@ -2203,12 +2225,18 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           ? ` Warning: ${mcpAttachFailures.length} requested MCP server(s) failed to attach — see mcpAttachFailures.`
           : '';
 
+      const powerHold = initialTask
+        ? await resolvePromptPowerHold(ctx, initialTask, session.session_id)
+        : undefined;
       return textResult({
         session: redactSessionForMcp(session),
         taskId: initialTask?.task_id,
-        note: args.initialPrompt
-          ? `Session created and initial prompt execution started.${parentNote}${callbackNote}${mcpFailureNote}`
-          : `Session created successfully.${parentNote}${callbackNote}${mcpFailureNote}`,
+        ...(powerHold ? { power_hold: powerHold } : {}),
+        note: powerHold
+          ? `Session created; its initial prompt is queued. ${powerHold.note}${parentNote}${callbackNote}${mcpFailureNote}`
+          : args.initialPrompt
+            ? `Session created and initial prompt execution started.${parentNote}${callbackNote}${mcpFailureNote}`
+            : `Session created successfully.${parentNote}${callbackNote}${mcpFailureNote}`,
         ...(remoteRelationship && { remoteRelationship }),
         ...(mcpAttachFailures.length > 0 && { mcpAttachFailures }),
       });

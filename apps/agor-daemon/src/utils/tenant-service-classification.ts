@@ -206,6 +206,10 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
     scopeClass: 'scoped',
     why: 'Fork power management. Registered through createTenantScopedAuthenticatedRouteRegistrar (transaction: false, because refreshOwnership awaits a host UPS probe); each read/write runs in the armed request scope.',
   },
+  'power-management/admission': {
+    scopeClass: 'scoped',
+    why: 'Fork power management. Registered through createTenantScopedAuthenticatedRouteRegistrar (transaction: false); returns the redacted in-memory admission projection and reads no rows.',
+  },
   'power-management/essential-sessions': {
     scopeClass: 'scoped',
     why: 'Fork power management. Registered through createTenantScopedAuthenticatedRouteRegistrar; a tenant-scoped session search in the armed request scope.',

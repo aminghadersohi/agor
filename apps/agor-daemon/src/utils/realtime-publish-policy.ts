@@ -145,6 +145,10 @@ export const REALTIME_PUBLISH_POLICY = {
     minimumRole: 'admin',
     why: 'The admin power banner tracks the redacted host policy projection live.',
   },
+  'power-management/admission': {
+    audience: 'tenant',
+    why: 'The session footer "held" tag tracks the redacted {held, state, reason} admission projection live.',
+  },
   'power-management/essential-sessions': {
     audience: 'none',
     why: 'Bounded admin picker RPC; canonical sessions events trigger caller-scoped refreshes.',
