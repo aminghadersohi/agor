@@ -927,6 +927,40 @@ describe('GatewayService multi-tenant process state', () => {
     expect(sendMessage).toHaveBeenCalledOnce();
   });
 
+  it("does not answer one tenant's Task lookup from another tenant's cached coordinates", async () => {
+    const service = new GatewayService({ run: vi.fn() } as never, { service: vi.fn() } as never);
+    const source = {
+      gateway_channel_id: slackChannel.id,
+      channel_type: 'slack',
+      thread_id: 'C123-100.000000',
+      thread_session_map_id: 'map-tenant-a',
+      provider_user_id: 'U1',
+    };
+    const taskRepo = {
+      findById: vi.fn(async () =>
+        getCurrentTenantId() === 'tenant-a'
+          ? { task_id: 'task-shared-id', metadata: { gateway_task_source: source } }
+          : null
+      ),
+    };
+    (service as unknown as { taskRepo: typeof taskRepo }).taskRepo = taskRepo;
+    const lookup = (
+      service as unknown as {
+        gatewayTaskSource(input: { taskId: string }): Promise<unknown>;
+      }
+    ).gatewayTaskSource.bind(service);
+
+    await expect(
+      runWithTenantContext('tenant-a', () => lookup({ taskId: 'task-shared-id' }))
+    ).resolves.toEqual(source);
+    await expect(
+      runWithTenantContext('tenant-b', () => lookup({ taskId: 'task-shared-id' }))
+    ).resolves.toBeUndefined();
+    // Same-tenant repeats are memoized; the other tenant forced its own read.
+    await runWithTenantContext('tenant-a', () => lookup({ taskId: 'task-shared-id' }));
+    expect(taskRepo.findById).toHaveBeenCalledTimes(2);
+  });
+
   it("does not let one tenant's empty channel set suppress another tenant's delivery", async () => {
     const sendMessage = vi.fn(async () => 'sent-1');
     const service = new GatewayService({ run: vi.fn() } as never, { service: vi.fn() } as never);

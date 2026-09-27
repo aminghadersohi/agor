@@ -1250,7 +1250,7 @@ export class GatewayService {
   private slackProgressLastUpdate = new Map<string, number>();
   /** Throttle state for {@link logOutboundAddressingOnce}. */
   private outboundAddressingLogged = new Map<string, number>();
-  /** Per-Task gateway coordinates; see {@link gatewayTaskSource}. */
+  /** Per-tenant, per-Task gateway coordinates; see {@link gatewayTaskSource}. */
   private gatewayTaskSources = new Map<string, GatewayTaskSource | null>();
   private slackProgressQueues = new Map<string, Promise<void>>();
   private slackStreamsByTask = new Map<string, SlackStreamState>();
@@ -4012,7 +4012,11 @@ export class GatewayService {
     if (input.task) return input.task.metadata?.gateway_task_source;
     if (!input.taskId) return undefined;
 
-    const cached = this.gatewayTaskSources.get(input.taskId);
+    // Keyed by tenant as well as Task: the entry is tenant data read through a
+    // tenant-scoped repository, so one tenant's read must never answer another
+    // tenant's lookup, even for an id that tenant cannot see.
+    const cacheKey = `${getCurrentTenantId() ?? ''}\0${input.taskId}`;
+    const cached = this.gatewayTaskSources.get(cacheKey);
     if (cached !== undefined) return cached ?? undefined;
 
     const task = await this.taskRepo.findById(input.taskId).catch(() => null);
@@ -4021,7 +4025,7 @@ export class GatewayService {
     if (this.gatewayTaskSources.size >= GatewayService.GATEWAY_TASK_SOURCE_CACHE_MAX) {
       this.gatewayTaskSources.clear();
     }
-    this.gatewayTaskSources.set(input.taskId, source ?? null);
+    this.gatewayTaskSources.set(cacheKey, source ?? null);
     return source;
   }
 
