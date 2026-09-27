@@ -94,6 +94,23 @@ export interface ProfileImageManager {
   remove(caller: ProfileImageCaller, imageId: ProfileImageID): Promise<void>;
 }
 
+const PROFILE_IMAGE_MANAGER_SETTING = 'profileImageManager';
+
+/**
+ * Publish the daemon-wired manager so MCP tools reuse it instead of touching
+ * the database handle themselves; every call opens its own short unit scoped
+ * to the caller's trusted tenant.
+ */
+export function registerProfileImageManager(app: Application, manager: ProfileImageManager): void {
+  app.set(PROFILE_IMAGE_MANAGER_SETTING, manager);
+}
+
+export function getProfileImageManager(app: Application): ProfileImageManager {
+  const manager = app.get(PROFILE_IMAGE_MANAGER_SETTING) as ProfileImageManager | undefined;
+  if (!manager) throw new Unavailable('Profile image management is unavailable');
+  return manager;
+}
+
 export function parseProfileImageSubjectType(value: unknown): ProfileImageSubjectType {
   if (value === 'user' || value === 'teammate' || value === 'board') return value;
   throw new BadRequest('subjectType must be user, teammate, or board');

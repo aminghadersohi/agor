@@ -62,9 +62,12 @@ vi.mock('./profile-image-processing.js', async (importOriginal) => ({
   processProfileImage: mocks.processProfileImage,
 }));
 
-const { createProfileImageManager, profileImageCallerFromParams } = await import(
-  './profile-image-management.js'
-);
+const {
+  createProfileImageManager,
+  getProfileImageManager,
+  profileImageCallerFromParams,
+  registerProfileImageManager,
+} = await import('./profile-image-management.js');
 
 const TENANT = 'tenant-a';
 
@@ -326,6 +329,19 @@ describe('profile image manager', () => {
     expect(mocks.images.remove).not.toHaveBeenCalled();
     expect(mocks.images.readVariant).not.toHaveBeenCalled();
     expect(patches.boards).not.toHaveBeenCalled();
+  });
+
+  it('hands MCP tools the daemon-wired manager and fails closed without one', () => {
+    const settings = new Map<string, unknown>();
+    const app = {
+      set: (key: string, value: unknown) => settings.set(key, value),
+      get: (key: string) => settings.get(key),
+    } as never;
+    const { manager } = makeManager();
+
+    expect(() => getProfileImageManager(app)).toThrow('Profile image management is unavailable');
+    registerProfileImageManager(app, manager);
+    expect(getProfileImageManager(app)).toBe(manager);
   });
 
   it('requires an authenticated caller with tenant identity', () => {
