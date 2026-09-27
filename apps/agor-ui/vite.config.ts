@@ -1,7 +1,10 @@
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
+import { brotliCompress, constants as zlibConstants } from 'node:zlib';
 import { getDefaultConfig, loadConfigSync } from '@agor-live/client/config';
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import viteCompression from 'vite-plugin-compression';
 
 // Load Agor config to get daemon port
@@ -18,6 +21,73 @@ const daemonPort = process.env.VITE_DAEMON_PORT
   ? Number(process.env.VITE_DAEMON_PORT)
   : agorConfig.daemon?.port || defaults.daemon?.port || 3030;
 
+/**
+ * Pre-compress the chunks a page load actually fetches with Brotli (~18%
+ * smaller than gzip on our JS); the daemon serves `.br` when the browser
+ * accepts it and falls back to `.gz`.
+ *
+ * "Fetched by a page load" = the static import closure of the entry and of
+ * each module the entry imports dynamically (route surfaces, shell modals).
+ * Deeper lazy chunks (Shiki grammars, Mermaid diagram types, Vega, KaTeX,
+ * xterm, Sandpack) keep only `.gz`: Brotli copies of everything add ~4 MiB of
+ * incompressible bytes and push the agor-live package over its packed-size
+ * budget. JS chunks under `minBytes` gain little and are skipped too.
+ *
+ * (A second vite-plugin-compression instance can't do this: instances share
+ * an mtime cache, so it skips every file the gzip pass already wrote.)
+ */
+function brotliBootChunks(minBytes: number): Plugin {
+  let outDir = '';
+  let bootChunkFiles = new Set<string>();
+  return {
+    name: 'agor:brotli-boot-chunks',
+    apply: 'build',
+    enforce: 'post',
+    configResolved(config) {
+      outDir = path.resolve(config.root, config.build.outDir);
+    },
+    generateBundle(_options, bundle) {
+      const chunks = new Map(
+        Object.values(bundle)
+          .filter((output) => output.type === 'chunk')
+          .map((chunk) => [chunk.fileName, chunk])
+      );
+      const closure = new Set<string>();
+      const addStatic = (fileName: string) => {
+        if (closure.has(fileName)) return;
+        const chunk = chunks.get(fileName);
+        if (!chunk) return;
+        closure.add(fileName);
+        for (const imported of chunk.imports) addStatic(imported);
+      };
+      for (const chunk of chunks.values()) {
+        if (!chunk.isEntry) continue;
+        addStatic(chunk.fileName);
+        for (const lazy of chunk.dynamicImports) addStatic(lazy);
+      }
+      bootChunkFiles = closure;
+    },
+    async closeBundle() {
+      await Promise.all(
+        [...bootChunkFiles].map(async (file) => {
+          const filePath = path.join(outDir, file);
+          const source = await readFile(filePath);
+          if (source.byteLength < minBytes) return;
+          const compressed = await brotli(source, {
+            params: {
+              [zlibConstants.BROTLI_PARAM_QUALITY]: zlibConstants.BROTLI_MAX_QUALITY,
+              [zlibConstants.BROTLI_PARAM_SIZE_HINT]: source.byteLength,
+            },
+          });
+          await writeFile(`${filePath}.br`, compressed);
+        })
+      );
+    },
+  };
+}
+
+const brotli = promisify(brotliCompress);
+
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [
@@ -30,6 +100,7 @@ export default defineConfig({
       threshold: 1024, // Only compress files > 1KB
       deleteOriginFile: false, // Keep originals for fallback
     }),
+    brotliBootChunks(20 * 1024),
   ],
 
   // Polyfill Node.js globals for browser compatibility
