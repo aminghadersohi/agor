@@ -121,6 +121,7 @@ import {
   type LatestSessionUpdateRequests,
   runSessionUpdateWithLatestNotification,
 } from './utils/sessionUpdateNotifications';
+import { afterStartupSignInDispatched } from './utils/startupSignIn';
 import { getRouterBasename } from './utils/uiRoutes';
 
 type RouteModuleKey = RouteSurfaceId | 'mobile';
@@ -323,17 +324,25 @@ function AppContent() {
   useEffect(() => {
     let cancelled = false;
 
-    if (!loadedRouteModuleKeys.has(routeModuleKey)) {
-      setRouteModuleReady(false);
-    }
+    const preload = () =>
+      preloadRouteModule(routeModuleKey)
+        .catch(() => {
+          // Let React.lazy/ErrorBoundary surface the route-load failure.
+        })
+        .finally(() => {
+          if (!cancelled) setRouteModuleReady(true);
+        });
 
-    preloadRouteModule(routeModuleKey)
-      .catch(() => {
-        // Let React.lazy/ErrorBoundary surface the route-load failure.
-      })
-      .finally(() => {
-        if (!cancelled) setRouteModuleReady(true);
+    if (loadedRouteModuleKeys.has(routeModuleKey)) {
+      void preload();
+    } else {
+      setRouteModuleReady(false);
+      // Let the startup sign-in request queue ahead of this route's chunks
+      // (see utils/startupSignIn): the socket and all data wait on sign-in.
+      void afterStartupSignInDispatched().then(() => {
+        if (!cancelled) void preload();
       });
+    }
 
     return () => {
       cancelled = true;
