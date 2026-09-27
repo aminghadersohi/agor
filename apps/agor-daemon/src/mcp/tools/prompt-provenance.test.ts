@@ -13,9 +13,8 @@ import { describe, expect, it } from 'vitest';
  *     withhold `{ kind: 'human' }` from the SDK user message.
  *
  * Omitting them is silent: the prompt still delivers, just wearing human trust
- * authority it never earned. So this asserts over every call site rather than
- * over the one that was found wearing it, and pins the roster so a new tool
- * cannot join without a decision.
+ * authority it never earned. So this asserts over every call site and pins the
+ * roster so a new tool cannot join without a decision.
  */
 const TOOLS_DIR = __dirname;
 
@@ -76,5 +75,19 @@ describe('MCP tool prompt provenance', () => {
 
   it.each(callSites)('$id marks the prompt system-authored, not human', ({ call }) => {
     expect(call).toMatch(/metadata: \{[^}]*system_authored: true/);
+  });
+
+  /**
+   * The server-stamped provenance envelope rides on `ctx.baseServiceParams`
+   * rather than being requested per call site, so that a tool cannot deliver
+   * agent text unattributed by forgetting to opt in. That only holds while
+   * every call site passes those params through - directly, or through a
+   * helper that carries the stamp forward. A call site that assembles its own
+   * params object would silently reopen the gap.
+   */
+  it.each(callSites)('$id passes the request params through, keeping the stamp', ({ call }) => {
+    expect(call).toMatch(
+      /\.\.\.(ctx\.baseServiceParams|callbackParams|withPromptProvenanceTool\(|freshMcpServiceParams\()/
+    );
   });
 });
