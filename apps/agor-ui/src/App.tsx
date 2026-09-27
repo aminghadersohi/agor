@@ -546,7 +546,7 @@ function AppContent() {
 
   const workspaceLoadingFallback = (
     <InitialLoadingScreen
-      phase={loaderPhase === 'done' ? 'fading' : loaderPhase}
+      phase={loaderPhase}
       connecting={connecting}
       loadingStage={loadingStage}
       items={initialLoadItems}
@@ -1203,7 +1203,7 @@ function AppContent() {
 
   // Show loading state ONLY on initial load, not during reconnections
   // Once data is loaded, keep UI mounted and show connection status in header instead
-  if (workspaceSurfaceShouldRun && (loaderPhase !== 'done' || !routeModuleReady)) {
+  if (workspaceSurfaceShouldRun && (loaderPhase === 'loading' || !routeModuleReady)) {
     return workspaceLoadingFallback;
   }
 
@@ -2339,6 +2339,14 @@ function AppContent() {
         </ConfigProvider>
 
         <DeviceRouter />
+        {workspaceSurfaceShouldRun && loaderPhase === 'fading' && (
+          <InitialLoadingScreen
+            overlay
+            phase="fading"
+            loadingStage={loadingStage}
+            items={initialLoadItems}
+          />
+        )}
         <Suspense fallback={routeFallback}>
           <Routes>
             {/* Demo routes */}
