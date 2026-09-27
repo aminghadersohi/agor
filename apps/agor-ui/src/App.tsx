@@ -44,11 +44,11 @@ import { uploadFilesToSession } from './components/FileUpload/upload';
 import { ForcePasswordChangeModal } from './components/ForcePasswordChangeModal';
 import { InitialLoadingScreen } from './components/InitialLoadingScreen';
 import { LoginPage } from './components/LoginPage';
+import { lazyWhenOpened } from './components/lazyWhenOpened';
 import { MCPCatalogModalHost } from './components/Marketplace/MCPCatalogModalHost';
 import { OnboardingBanners } from './components/OnboardingBanners';
-import { type OnboardingCompletionResult, OnboardingWizard } from './components/OnboardingWizard';
+import type { OnboardingCompletionResult } from './components/OnboardingWizard';
 import { buildPromptWithAttachments } from './components/SessionPanel/composerAttachments';
-import { SettingsModal } from './components/SettingsModal';
 import { StreamdownPortalApp } from './components/StreamdownPortalApp';
 import { getDaemonUrl } from './config/daemon';
 import { CanvasNavigationProvider } from './contexts/CanvasNavigationContext';
@@ -87,7 +87,6 @@ import { useUnarchiveBranch } from './hooks/useUnarchiveBranch';
 import { sessionCreated } from './store/agorRealtimeActions';
 import { agorStore, useAgorStore } from './store/agorStore';
 import { DeviceRouter } from './surfaces/DeviceRouter';
-import { SharedUserSettingsModal } from './surfaces/SharedUserSettingsModal';
 import type { RouteSurfaceId } from './surfaces/surfaceRegistry';
 import {
   ARTIFACT_FULLSCREEN_ROUTE_PATHS,
@@ -258,6 +257,18 @@ const RbacPolicyPrototypePage = import.meta.env.DEV
       }))
     )
   : null;
+
+// Modal surfaces the shell mounts but rarely shows: loaded on first open so
+// their dependency graphs stay out of the boot bundle.
+const OnboardingWizard = lazyWhenOpened(() =>
+  import('./components/OnboardingWizard').then((module) => module.OnboardingWizard)
+);
+const SettingsModal = lazyWhenOpened(() =>
+  import('./components/SettingsModal').then((module) => module.SettingsModal)
+);
+const SharedUserSettingsModal = lazyWhenOpened(() =>
+  import('./surfaces/SharedUserSettingsModal').then((module) => module.SharedUserSettingsModal)
+);
 
 const AgorApp = lazy(loadAgorApp);
 const KnowledgePage = lazy(loadKnowledgePage);
