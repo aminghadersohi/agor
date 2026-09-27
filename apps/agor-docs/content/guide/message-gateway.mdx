@@ -189,6 +189,12 @@ The emit result reports delivery and persistence separately:
 A result with `recorded: false` still means the message is in Slack or Discord.
 Re-sending it posts a duplicate; reconcile the audit trail instead.
 
+Admins read the trail with `agor_gateway_outbound_messages_list`, filtered by
+gateway channel, thread, or session and paged newest first. Each entry carries
+its role, permalink, and user/session/task/schedule attribution; full message
+text is returned only with `includeText`. Called from a session, it is limited
+to channels targeting that session's branch, like the other gateway tools.
+
 ## Slack thread behavior
 
 In Slack channels, Agor uses a hard mention rule:
