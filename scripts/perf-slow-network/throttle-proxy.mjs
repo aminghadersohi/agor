@@ -118,6 +118,10 @@ export async function startThrottleProxy(opts) {
         lastActivity,
       };
     },
+    /** Simulate a VPN blip: drop every open connection at once. */
+    dropAll() {
+      for (const socket of sockets) socket.destroy();
+    },
     reset() {
       down.bytes = 0;
       up.bytes = 0;

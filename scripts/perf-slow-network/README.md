@@ -27,6 +27,9 @@ frames reliably, and nearly all Agor data rides the Socket.IO WebSocket.
 
 Per run (median of `--reps`):
 
+Session opens use the full session id. The seed creates sessions seconds
+apart, so their 8-character short ids (a UUIDv7 time prefix) collide.
+
 - **Paint**: the target first appears in the DOM and any loading overlay is at
   least half faded. For a session, that is the newest turn's prompt inside the
   conversation pane. For a board, it is the first branch card.
@@ -70,7 +73,9 @@ node scripts/perf-slow-network/run-bench.mjs \
 
 The runner also takes these flags:
 
-- `--scenarios session,board`
+- `--scenarios session,board` (add `session-reconnect` / `board-reconnect`
+  to load, wait for quiet, drop every connection like a VPN blip, and
+  measure the resync)
 - `--cache cold,warm`
 - `--screenshots <dir>` saves the final frame of each run.
 - `--trace` records, per run, each Socket.IO request/ack, the HTTP waterfall

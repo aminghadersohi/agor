@@ -60,6 +60,7 @@ function parseArgs(argv) {
     else if (a === '--screenshots') out.screenshots = path.resolve(next());
     else if (a === '--headed') out.headed = true;
     else if (a === '--trace') out.trace = true;
+    else if (a === '--perf-trace') out.perfTrace = path.resolve(next());
     else throw new Error(`unknown arg ${a}`);
   }
   if (!out.targets.length) throw new Error('at least one --target name=worktreeDir is required');
@@ -91,7 +92,8 @@ async function startDaemon(target, port, seedHome) {
   writeFileSync(path.join(home, '.agor/config.yaml'), config);
   // The daemon serves `dist/../ui` when present (the packaged layout).
   const uiLink = path.join(target.dir, 'apps/agor-daemon/ui');
-  if (!existsSync(uiLink)) symlinkSync(path.join(target.dir, 'apps/agor-ui/dist'), uiLink);
+  const createdUiLink = !existsSync(uiLink);
+  if (createdUiLink) symlinkSync(path.join(target.dir, 'apps/agor-ui/dist'), uiLink);
 
   const seedEnv = readEnvFile(path.join(seedHome, 'env.sh'));
   const env = {
@@ -116,7 +118,7 @@ async function startDaemon(target, port, seedHome) {
       const res = await fetch(`http://localhost:${port}/health`);
       if (res.ok) {
         const health = await res.json();
-        return { child, home, health };
+        return { child, home, health, uiLink: createdUiLink ? uiLink : null };
       }
     } catch {}
     if (child.exitCode !== null) break;
@@ -194,6 +196,7 @@ const initScript = ({ tokens, watch }) => {
 };
 
 async function measure({
+  perfTrace,
   browser,
   proxy,
   port,
@@ -206,12 +209,13 @@ async function measure({
   trace,
 }) {
   const context = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
+  const base = scenario.replace(/-reconnect$/, '');
   const url =
-    scenario === 'session'
+    base === 'session'
       ? `http://localhost:${proxyPort}/ui/s/${manifest.openSessionId}`
       : `http://localhost:${proxyPort}/ui/b/${manifest.boardSlug}`;
   const watch =
-    scenario === 'session'
+    base === 'session'
       ? [
           {
             name: 'transcript',
@@ -226,10 +230,14 @@ async function measure({
   const cdp = await context.newCDPSession(page);
   await cdp.send('Network.enable');
 
-  if (cache === 'warm') {
+  if (cache === 'warm' || scenario.endsWith('-reconnect')) {
     // Prime the HTTP cache with an untimed load, then measure a reload.
     await page.goto(url, { waitUntil: 'load' });
-    await waitForMark(page, watch[0].name, 120_000);
+    await waitForMark(page, watch[0].name, 180_000).catch(async (error) => {
+      await page.screenshot({ path: '/tmp/agor-bench-failure.png' }).catch(() => {});
+      await context.close();
+      throw error;
+    });
     await waitForQuiet(proxy, page, 2_000, 60_000);
   }
 
@@ -339,10 +347,25 @@ async function measure({
   cdp.once('Network.requestWillBeSent', (e) => {
     navWall = e.timestamp * 1000;
   });
-  await page.goto(url, { waitUntil: 'commit' });
+  if (perfTrace) await browser.startTracing(page, { path: perfTrace, screenshots: true });
   const primary = watch[0].name;
-  await waitForMark(page, primary, 180_000);
+  let reconnectStart = 0;
+  if (scenario.endsWith('-reconnect')) {
+    // Already loaded and quiet (above): drop the link and measure the resync.
+    reconnectStart = await page.evaluate(() => performance.now());
+    proxy.dropAll();
+  } else {
+    await page.goto(url, { waitUntil: 'commit' });
+    try {
+      await waitForMark(page, primary, 180_000);
+    } catch (error) {
+      await page.screenshot({ path: '/tmp/agor-bench-failure.png' }).catch(() => {});
+      await context.close();
+      throw error;
+    }
+  }
   const settledEpoch = await waitForQuiet(proxy, page, 3_000, 120_000);
+  if (perfTrace) await browser.stopTracing();
   const pageState = await page.evaluate(() => ({
     marks: window.__bench.marks,
     longTasks: window.__bench.longTasks,
@@ -356,16 +379,18 @@ async function measure({
     throw new Error(`requests bypassed the link emulator: ${strays.slice(0, 5).join(', ')}`);
   if (stats.bytesDown === 0) throw new Error('no bytes crossed the link emulator');
 
-  const settledMs = settledEpoch - pageState.timeOrigin;
-  const paintMs = pageState.marks[primary];
-  const longTasks = pageState.longTasks.filter(([start]) => start <= settledMs + 1);
+  const settledMs = settledEpoch - pageState.timeOrigin - reconnectStart;
+  const paintMs = reconnectStart ? 0 : pageState.marks[primary];
+  const longTasks = pageState.longTasks.filter(
+    ([start]) => start >= reconnectStart && start <= reconnectStart + settledMs + 1
+  );
   const lastLongTaskEnd = longTasks.reduce((m, [s, d]) => Math.max(m, s + d), 0);
   return {
     paintMs: Math.round(paintMs),
     boardPaintMs: pageState.marks.board !== undefined ? Math.round(pageState.marks.board) : null,
     // Interactive: the target is painted and the main thread has had its last
     // long task of the load (network may still be trickling in).
-    ttiMs: Math.round(Math.max(paintMs, lastLongTaskEnd)),
+    ttiMs: Math.round(Math.max(paintMs, lastLongTaskEnd - reconnectStart)),
     // Settled: last byte of the load crossed the link (followed by 3 s quiet).
     settledMs: Math.round(settledMs),
     domContentLoadedMs: Math.round(pageState.nav?.domContentLoadedEventEnd ?? 0),
@@ -461,18 +486,35 @@ async function main() {
                       )
                     : undefined;
                   if (screenshot) mkdirSync(opts.screenshots, { recursive: true });
-                  const m = await measure({
-                    browser,
-                    proxy,
-                    port,
-                    proxyPort,
-                    manifest,
-                    scenario,
-                    cache,
-                    tokens,
-                    screenshot,
-                    trace: opts.trace,
-                  });
+                  let m;
+                  try {
+                    m = await measure({
+                      browser,
+                      proxy,
+                      port,
+                      proxyPort,
+                      manifest,
+                      scenario,
+                      cache,
+                      tokens,
+                      screenshot,
+                      trace: opts.trace,
+                      perfTrace: opts.perfTrace
+                        ? opts.perfTrace.replace(
+                            /(\.json)?$/,
+                            `-${target.name}-${profileName}-${scenario}-${cache}-${r}.json`
+                          )
+                        : undefined,
+                    });
+                  } catch (error) {
+                    // A load that never paints (e.g. a stalled transcript) is a
+                    // result too: record it, exclude it from medians, go on.
+                    console.log(
+                      `    ${profileName} ${scenario} ${cache} #${r}: FAILED (${error.message.split('\n')[0]})`
+                    );
+                    samples.push({ failed: true, error: String(error.message).slice(0, 300) });
+                    continue;
+                  }
                   samples.push(m);
                   console.log(
                     `    ${profileName} ${scenario} ${cache} #${r}: paint ${m.paintMs} ms, tti ${m.ttiMs} ms, settled ${m.settledMs} ms, ` +
@@ -480,9 +522,10 @@ async function main() {
                       `long ${m.longTaskCount} (${m.longTaskTotalMs} ms)`
                   );
                 }
-                const summary = {};
-                for (const k of Object.keys(samples[0]).filter((k) => k !== 'trace')) {
-                  const vals = samples.map((s) => s[k]).filter((v) => typeof v === 'number');
+                const ok = samples.filter((sample) => !sample.failed);
+                const summary = { failedRuns: samples.length - ok.length };
+                for (const k of Object.keys(ok[0] ?? {}).filter((k) => k !== 'trace')) {
+                  const vals = ok.map((s) => s[k]).filter((v) => typeof v === 'number');
                   if (vals.length) summary[k] = median(vals);
                 }
                 results.runs.push({
@@ -503,6 +546,7 @@ async function main() {
         daemon.child.kill('SIGTERM');
         await sleep(1000);
         if (daemon.child.exitCode === null) daemon.child.kill('SIGKILL');
+        if (daemon.uiLink) rmSync(daemon.uiLink, { force: true });
       }
     }
   } finally {
@@ -524,8 +568,13 @@ function printTable(results) {
   console.log('|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|');
   for (const r of results.runs) {
     const m = r.median;
+    if (m.paintMs === undefined) {
+      console.log(`| ${r.profile} | ${r.scenario} | ${r.cache} | ${r.target} | all runs failed |`);
+      continue;
+    }
+    const failed = m.failedRuns ? ` (${m.failedRuns} failed)` : '';
     console.log(
-      `| ${r.profile} | ${r.scenario} | ${r.cache} | ${r.target} | ${s(m.paintMs)} | ${s(m.ttiMs)} | ${s(m.settledMs)} | ${kib(m.bytesDown)} | ${m.httpRequests} | ${m.wsFramesIn}/${m.wsFramesOut} | ${m.longTaskCount} (${m.longTaskTotalMs}) |`
+      `| ${r.profile} | ${r.scenario} | ${r.cache} | ${r.target} | ${s(m.paintMs)} | ${s(m.ttiMs)} | ${s(m.settledMs)} | ${kib(m.bytesDown)} | ${m.httpRequests} | ${m.wsFramesIn}/${m.wsFramesOut} | ${m.longTaskCount} (${m.longTaskTotalMs}) |${failed}`
     );
   }
 }
