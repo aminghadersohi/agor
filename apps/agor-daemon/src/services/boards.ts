@@ -247,6 +247,16 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
   }
 
   /**
+   * Replace a point read's neutral `0` counts with the same caller-scoped
+   * aggregates the list read returns. `visibleToUserId` is the RBAC SQL marker
+   * (unset for superadmin/internal callers, matching `find`).
+   */
+  async attachCallerCounts(board: Board, visibleToUserId?: UUID): Promise<Board> {
+    const [withCounts] = await this.boardRepo.attachBoardListCounts([board], visibleToUserId);
+    return withCounts;
+  }
+
+  /**
    * Custom method: Find board by slug
    */
   async findBySlug(slug: string, _params?: BoardParams): Promise<Board | null> {

@@ -21,7 +21,6 @@ import {
   getBranchCleanupBlockReason,
   getTeammateConfig,
   isTeammate,
-  normalizeEntityColor,
   OWNERSHIP_TRANSFER_SERVICES,
   resolveRepoCleanupPolicy,
 } from '@agor/core/types';
@@ -50,6 +49,7 @@ import {
 } from '../branch-filesystem-readiness.js';
 import { waitForBranchRefResolution } from '../branch-ref-resolution.js';
 import { branchCapabilityPolicySchema } from '../capability-policy-schema.js';
+import { entityColorOverrideDescription, parseEntityColorOverride } from '../entity-color.js';
 import {
   resolveBoardId,
   resolveBranchId,
@@ -100,23 +100,9 @@ const CLEANUP_CANDIDATE_FILESYSTEM_STATUSES = [
 ] as const satisfies readonly CleanupCandidateFilesystemStatus[];
 const CLEANUP_CANDIDATE_STORAGE_MODES = ['worktree', 'clone'] as const;
 
-const BRANCH_COLOR_OVERRIDE_DESCRIPTION =
-  "User-chosen organisational color for this branch's board card, as hex " +
-  '(#rgb, #rrggbb, or #rrggbbaa). This is a human grouping/priority label in the ' +
-  'Trello sense — do not derive it from CI, PR, or environment state.';
-
-/** Reject a non-hex color loudly rather than silently dropping an agent's value. */
-function parseBranchColorOverride(value: unknown): string | null {
-  const raw = coerceString(value);
-  if (!raw) return null;
-  const normalized = normalizeEntityColor(raw);
-  if (!normalized) {
-    throw new Error(
-      `colorOverride must be a hex color like #ff5630 (received ${JSON.stringify(raw)})`
-    );
-  }
-  return normalized;
-}
+const BRANCH_COLOR_OVERRIDE_DESCRIPTION = entityColorOverrideDescription(
+  "this branch's board card"
+);
 
 function containsTeammateKnowledgeConfigMutation(customContext: unknown): boolean {
   if (!customContext || typeof customContext !== 'object' || Array.isArray(customContext)) {
@@ -1005,7 +991,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       }
 
       const issueUrl = normalizeOptionalHttpUrl(args.issueUrl, 'issueUrl');
-      const colorOverride = parseBranchColorOverride(args.colorOverride);
+      const colorOverride = parseEntityColorOverride(args.colorOverride);
       const pullRequestUrl = normalizeOptionalHttpUrl(args.pullRequestUrl, 'pullRequestUrl');
 
       // If auto-suffix changed the ref (branch name defaults to branchName), update it
@@ -1276,7 +1262,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       if (args.colorOverride !== undefined) {
         fieldsProvided++;
         updates.color_override =
-          args.colorOverride === null ? null : parseBranchColorOverride(args.colorOverride);
+          args.colorOverride === null ? null : parseEntityColorOverride(args.colorOverride);
       }
       if (fieldsProvided === 0) throw new Error('provide at least one field to update');
 

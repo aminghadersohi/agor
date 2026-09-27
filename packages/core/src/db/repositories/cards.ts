@@ -8,6 +8,7 @@
 import type { BoardID, Card, CardType, CardTypeID, CardWithType, UUID } from '@agor/core/types';
 import { and, asc, eq, getTableColumns, inArray, like } from 'drizzle-orm';
 import { generateId } from '../../lib/ids';
+import { normalizeEntityColor } from '../../types/entity-color';
 import type { Database } from '../client';
 import { deleteFrom, insert, jsonExtract, select, update } from '../database-wrapper';
 import { boardObjects, type CardInsert, type CardRow, cards, cardTypes } from '../schema';
@@ -98,7 +99,9 @@ export class CardRepository implements BaseRepository<Card, Partial<Card>> {
         description: data.description ?? null,
         note: data.note ?? null,
         data: data.data ? JSON.stringify(data.data) : null,
-        color_override: data.color_override ?? null,
+        // Store only hex (the Branch repository does the same); an
+        // unrepresentable value is kept as absent, like `url` above.
+        color_override: normalizeEntityColor(data.color_override),
         emoji_override: data.emoji_override ?? null,
         created_by: data.created_by ?? null,
         created_at: now,
@@ -395,7 +398,7 @@ export class CardRepository implements BaseRepository<Card, Partial<Card>> {
         setData.data = updates.data ? JSON.stringify(updates.data) : null;
       }
       if (updates.color_override !== undefined)
-        setData.color_override = updates.color_override ?? null;
+        setData.color_override = normalizeEntityColor(updates.color_override);
       if (updates.emoji_override !== undefined)
         setData.emoji_override = updates.emoji_override ?? null;
       if (updates.archived !== undefined) setData.archived = updates.archived;
