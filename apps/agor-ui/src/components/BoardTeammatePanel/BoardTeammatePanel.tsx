@@ -7,7 +7,7 @@ import type {
   SpawnConfig,
 } from '@agor-live/client';
 import { getTeammateConfig, isTeammate } from '@agor-live/client';
-import { LeftOutlined, RobotOutlined } from '@ant-design/icons';
+import { LeftOutlined } from '@ant-design/icons';
 import {
   Alert,
   Badge,
@@ -44,6 +44,7 @@ import { BranchMetadataRow } from '../BranchMetadataRow';
 import type { BranchModalTab } from '../BranchModal';
 import { CommentsPanel } from '../CommentsPanel';
 import { MarkdownRenderer } from '../MarkdownRenderer';
+import { TeammateBoardPortrait } from '../ProfileImage';
 
 export type BoardTeammatePanelTab = 'teammate' | 'all-sessions' | 'all-branches' | 'comments';
 
@@ -336,8 +337,8 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
               <div
                 style={{
-                  width: 36,
-                  height: 36,
+                  minWidth: 36,
+                  minHeight: 36,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -346,10 +347,9 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
               >
                 {isCreating ? (
                   <Spin />
-                ) : teammateConfig?.emoji ? (
-                  <span style={{ fontSize: 30 }}>{teammateConfig.emoji}</span>
                 ) : (
-                  <RobotOutlined style={{ fontSize: 30, color: token.colorInfo }} />
+                  // Gallery photo (with a glimpse of alternates), else the teammate emoji.
+                  <TeammateBoardPortrait branch={primaryTeammateBranch} />
                 )}
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
