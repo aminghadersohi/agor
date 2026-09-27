@@ -34,7 +34,11 @@ import {
 } from '@agor/core/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateId } from '../../../../packages/core/src/lib/ids';
-import { frontDeskFixture, frontDeskSuite } from '../../test/front-desk-fixture';
+import {
+  frontDeskFixture,
+  frontDeskSuite,
+  teammateAddressingPreviewSuite,
+} from '../../test/front-desk-fixture';
 import { resolveTeammateSession } from '../mcp/tools/teammate-addressing';
 import { createBranchFrontDeskRoute } from '../services/branch-front-desk';
 import { setTeammateFrontDesk } from './manage-front-desk';
@@ -77,6 +81,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)('pinned front desk (Postgre
   const freshFixture = () => frontDeskFixture(rawDb, tenant());
 
   describe('shared suite', () => frontDeskSuite(freshFixture));
+  describe('addressing preview', () => teammateAddressingPreviewSuite(freshFixture));
 
   it('never produces two occupants under concurrent promotion', async () => {
     const f = await freshFixture();
@@ -258,6 +263,23 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)('pinned front desk (Postgre
     await expect(
       y.inTenant(() => yRoute.remove(null, params(y, { expected_session_id: pinned.session_id })))
     ).rejects.toMatchObject({ code: 404 });
+
+    // The addressing preview runs as the caller, inside the caller's tenant.
+    await xRoute.setup(x.contextFor().app);
+    await yRoute.setup(y.contextFor().app);
+    const preview = { include_addressing: 'true' };
+    await expect(x.inTenant(() => xRoute.find(params(x, preview)))).resolves.toMatchObject({
+      addressing: { via: 'front_desk', session_id: pinned.session_id },
+    });
+    await expect(y.inTenant(() => yRoute.find(params(y, preview)))).rejects.toMatchObject({
+      code: 404,
+    });
+    // Nor can Y's owner find X's teammate by name through the MCP dry run.
+    const yResolve = await y
+      .frontDeskHandlersFor()
+      .agor_teammates_resolve({ teammate: 'front-desk' });
+    expect(yResolve.isError).toBe(true);
+    expect(y.payloadOf(yResolve)).toMatchObject({ known_teammates: [] });
 
     expect(await x.declarations(branch.branch_id)).toEqual([
       expect.objectContaining({ session_id: pinned.session_id, status: 'active' }),

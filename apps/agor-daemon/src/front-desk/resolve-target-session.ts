@@ -16,8 +16,10 @@
  * This is addressing, not authorization. It never promotes, and the only write
  * it performs is demoting a slot the health gate rejects — after which it
  * falls through to recency, so a broken front desk degrades to exactly the
- * behavior that existed before front desks, never to nothing. Whoever sends
- * the prompt still authorizes it downstream.
+ * behavior that existed before front desks, never to nothing. A `dryRun`
+ * resolution skips that write and only reports the slot it passed over, so a
+ * preview (`agor_teammates_resolve`) walks the same precedence without side
+ * effects. Whoever sends the prompt still authorizes it downstream.
  */
 
 import {
@@ -51,6 +53,20 @@ export type FrontDeskScope =
 /** Why resolution found nothing to talk to. */
 export type FrontDeskMissReason = 'no_session';
 
+/**
+ * A declared front desk the health gate rejected, so resolution fell through
+ * to recency. `demoted` is whether this resolution won the demotion write —
+ * always false for a dry run, and false when a concurrent resolver won it.
+ */
+export interface BypassedFrontDesk {
+  frontDeskId: BranchFrontDeskID;
+  sessionId: SessionID;
+  status: FrontDeskStatus;
+  demoteTo: Extract<FrontDeskStatus, 'retired' | 'failed'>;
+  reason: FrontDeskRetiredReason;
+  demoted: boolean;
+}
+
 export type FrontDeskTarget =
   | { via: 'explicit'; sessionId: SessionID }
   | { via: 'thread_mapping'; sessionId: SessionID; mappingId: string }
@@ -61,8 +77,18 @@ export type FrontDeskTarget =
       frontDeskId: BranchFrontDeskID;
       session: Session;
     }
-  | { via: 'recency'; sessionId: SessionID; session: Session }
-  | { via: 'needs_session'; branchId: BranchID; reason: FrontDeskMissReason };
+  | {
+      via: 'recency';
+      sessionId: SessionID;
+      session: Session;
+      bypassedFrontDesk?: BypassedFrontDesk;
+    }
+  | {
+      via: 'needs_session';
+      branchId: BranchID;
+      reason: FrontDeskMissReason;
+      bypassedFrontDesk?: BypassedFrontDesk;
+    };
 
 export interface ResolveTargetSessionInput {
   branchId: BranchID;
@@ -70,6 +96,8 @@ export interface ResolveTargetSessionInput {
   callerUserId: UserID;
   scope: FrontDeskScope;
   explicitSessionId?: SessionID;
+  /** Report an unhealthy front desk instead of demoting it. */
+  dryRun?: boolean;
 }
 
 export interface ResolveTargetSessionDeps {
@@ -177,26 +205,51 @@ export async function resolveTargetSession(
     };
   }
 
+  let bypassedFrontDesk: BypassedFrontDesk | undefined;
   if (pinned?.verdict.demoteTo && pinned.verdict.reason) {
-    const { desk, verdict } = pinned;
+    const { desk } = pinned;
+    const demoteTo = pinned.verdict.demoteTo;
+    const reason = pinned.verdict.reason;
     // Conditional on the status just read, so concurrent resolvers converge:
     // one wins, the rest see zero rows and fall through the same way.
-    const won = await deps.write((db) =>
-      new BranchFrontDeskRepository(db).demote({
-        id: desk.id,
-        expectedStatus: desk.status,
-        toStatus: verdict.demoteTo!,
-        reason: verdict.reason!,
-      })
-    );
+    const won =
+      !input.dryRun &&
+      (await deps.write((db) =>
+        new BranchFrontDeskRepository(db).demote({
+          id: desk.id,
+          expectedStatus: desk.status,
+          toStatus: demoteTo,
+          reason,
+        })
+      ));
     if (won) {
       console.warn(
-        `[front-desk] demoted front_desk_id=${desk.id} from=${desk.status} to=${verdict.demoteTo} reason=${verdict.reason} fallback=recency`
+        `[front-desk] demoted front_desk_id=${desk.id} from=${desk.status} to=${demoteTo} reason=${reason} fallback=recency`
       );
     }
+    bypassedFrontDesk = {
+      frontDeskId: desk.id,
+      sessionId: desk.session_id,
+      status: desk.status,
+      demoteTo,
+      reason,
+      demoted: won,
+    };
   }
 
   const recent = await deps.mostRecentSession(input.branchId);
-  if (!recent) return { via: 'needs_session', branchId: input.branchId, reason: 'no_session' };
-  return { via: 'recency', sessionId: recent.session_id, session: recent };
+  if (!recent) {
+    return {
+      via: 'needs_session',
+      branchId: input.branchId,
+      reason: 'no_session',
+      ...(bypassedFrontDesk ? { bypassedFrontDesk } : {}),
+    };
+  }
+  return {
+    via: 'recency',
+    sessionId: recent.session_id,
+    session: recent,
+    ...(bypassedFrontDesk ? { bypassedFrontDesk } : {}),
+  };
 }
