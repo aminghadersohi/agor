@@ -38,7 +38,6 @@ import { issueExecutorCommandToken } from '../../services/session-token-service.
 import { isSuperAdmin } from '../../utils/branch-authorization.js';
 import { ensureBranchWorkspaceAccess } from '../../utils/branch-workspace-path.js';
 import { resolveDelegatedExecutionHomeKey } from '../../utils/executor-delegated-home.js';
-import { withPromptProvenanceTool } from '../../utils/prompt-provenance.js';
 import { getDaemonUrl, requestExecutor } from '../../utils/spawn-executor.js';
 import {
   commitZoneEntityPlacementGrowth,
@@ -206,16 +205,12 @@ function mcpRequestSignal(requestContext?: ServerContext): AbortSignal | undefin
  * that may already be present after optional Session authorization.
  */
 function freshMcpServiceParams(ctx: McpContext): McpContext['baseServiceParams'] {
-  const { authenticated, provider, tenant, user, _promptProvenance } = ctx.baseServiceParams;
+  const { authenticated, provider, tenant, user } = ctx.baseServiceParams;
   return {
     ...(user ? { user: { ...user } } : {}),
     ...(authenticated !== undefined ? { authenticated } : {}),
     ...(provider !== undefined ? { provider } : {}),
     ...(tenant ? { tenant: { ...tenant } } : {}),
-    // The server-stamped prompt origin is a trusted MCP identity field, not
-    // cached hook data: a prompt admitted through these params must still
-    // carry it, or the zone-trigger path would deliver agent text unattributed.
-    ...(_promptProvenance ? { _promptProvenance: { ..._promptProvenance } } : {}),
   };
 }
 
@@ -1593,11 +1588,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
               stream: true,
               metadata: { system_authored: true },
             },
-            {
-              ...withPromptProvenanceTool(ctx.baseServiceParams, 'agor_branches_set_zone'),
-              provider: undefined,
-              route: { id: targetSessionId },
-            }
+            { ...ctx.baseServiceParams, provider: undefined, route: { id: targetSessionId } }
           );
 
           if (task.status === 'queued') {

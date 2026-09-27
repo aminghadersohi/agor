@@ -83,7 +83,6 @@ import {
   mcpRuntimeProviderCapability,
   resolveEffectiveSessionMcpServers,
 } from '@agor/core/mcp';
-import { escapePromptProvenanceSentinels } from '@agor/core/templates/prompt-provenance';
 import type {
   AuthenticatedParams,
   BoardComment,
@@ -291,10 +290,6 @@ import { runPromptAdmissionTransaction } from './utils/prompt-admission-transact
 import { promptDatabaseErrorAround } from './utils/prompt-database-error.js';
 import { resolvePromptOrigin } from './utils/prompt-origin.js';
 import {
-  type McpPromptProvenanceStamp,
-  resolvePromptProvenance,
-} from './utils/prompt-provenance.js';
-import {
   buildPromptTaskMetadata,
   type InternalPromptTaskMetadataInput,
 } from './utils/prompt-task-metadata.js';
@@ -421,15 +416,6 @@ export interface RouteParams extends Params {
   user?: User;
   /** Trusted internal callback request, populated by MCP tooling only. */
   _taskCompletionCallback?: NonNullable<TaskMetadata['completion_callback']>;
-  /**
-   * Trusted prompt-origin stamp, populated by the MCP request layer only.
-   *
-   * Set on `McpContext.baseServiceParams`, so it reaches this route for every
-   * MCP-originated prompt without any tool opting in. Nothing on the wire can
-   * produce it: the matching `metadata.prompt_provenance` key is stripped from
-   * caller input unconditionally.
-   */
-  _promptProvenance?: McpPromptProvenanceStamp;
 }
 
 /**
@@ -2603,52 +2589,6 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           );
         }
 
-        // The provenance sentinel is reserved on EVERY admitted prompt, not
-        // only the stamped ones. That is what makes the tag mean something: it
-        // can then appear in delivered text only where Agor put it, so a
-        // caller cannot type a convincing block of its own and a recipient
-        // does not have to judge which one is real.
-        //
-        // Escape rather than refuse. Rejecting would make Agor's own design
-        // notes unquotable over `agor_sessions_prompt` and would lose a
-        // legitimate message to punish a string. It is logged, because a body
-        // carrying the reserved tag is either a quotation or an attempt, and
-        // both are worth seeing.
-        const escapedBody = escapePromptProvenanceSentinels(data.prompt);
-        if (escapedBody.escaped > 0) {
-          console.warn(
-            `[Prompt] Neutralized ${escapedBody.escaped} reserved provenance sentinel(s) in a prompt body for session ${shortId(id)}`
-          );
-        }
-
-        // Server-stamped prompt provenance. An MCP-originated prompt carries
-        // the caller's authenticated Session identity on `params`, never in
-        // `data`, so no caller can set, suppress, or imitate the block.
-        //
-        // Two deliberate exclusions. A `provider`-carrying transport is a
-        // browser/REST caller, not an Agor session relaying on someone's
-        // behalf, and must never be able to hand this route a stamp.
-        // Idempotent internal producers (scheduler, session reminders, widget
-        // auto-resume) reconcile on exact prompt text across more than one
-        // call path, so a per-caller block would break their convergence
-        // rather than attest anything - and none of them relays caller text.
-        const promptProvenanceStamp =
-          !params.provider && !data.idempotencyTaskId ? params._promptProvenance : undefined;
-        const provenance = promptProvenanceStamp
-          ? await runWithTenantDatabaseScope(db, promptTenantId, (operationDb) =>
-              resolvePromptProvenance({
-                stamp: promptProvenanceStamp,
-                body: escapedBody.text,
-                escapedSentinels: escapedBody.escaped,
-                recipientSession: session,
-                branchRepo: new BranchRepository(operationDb),
-                findUserRole: async (userId) =>
-                  (await new UsersRepository(operationDb).findById(userId))?.role,
-              })
-            )
-          : undefined;
-        const admittedPrompt = provenance?.prompt ?? escapedBody.text;
-
         const reconcileDurablyDispatchedTask = async (): Promise<Task | null> => {
           if (!data.idempotencyTaskId) return null;
           const prior = await taskRepo.findById(data.idempotencyTaskId);
@@ -2657,7 +2597,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             throw new Conflict(`Task identity ${data.idempotencyTaskId} is already in use`);
           }
           const expectedCreator = params.user?.user_id ?? session.created_by;
-          if (prior.created_by !== expectedCreator || prior.full_prompt !== admittedPrompt) {
+          if (prior.created_by !== expectedCreator || prior.full_prompt !== data.prompt) {
             throw new Conflict(`Task identity ${data.idempotencyTaskId} is already in use`);
           }
           if (isTaskPendingDispatch(prior)) return null;
@@ -2771,20 +2711,17 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             if (params._taskCompletionCallback) {
               taskMetadata.completion_callback = params._taskCompletionCallback;
             }
-            if (provenance) {
-              taskMetadata.prompt_provenance = provenance.metadata;
-            }
             const compactionRequestId = (data.idempotencyTaskId ?? generateId()) as TaskID;
             const hasAttachmentSemantics =
-              admittedPrompt.includes('Attachments — use `agor_upload_materialize` to access:') ||
-              admittedPrompt.includes('/_uploads/');
+              data.prompt.includes('Attachments — use `agor_upload_materialize` to access:') ||
+              data.prompt.includes('/_uploads/');
             const compactionEligible =
               !data.idempotencyTaskId &&
               !params._taskCompletionCallback &&
               data.metadata === undefined &&
               (messageSource === undefined || (!!params.provider && messageSource === 'agor')) &&
               !hasAttachmentSemantics &&
-              !admittedPrompt.trimStart().startsWith('/');
+              !data.prompt.trimStart().startsWith('/');
             // A preflight hint avoids preparation for known-busy sessions. The
             // repository rechecks queue/active work under its durable locks.
             // Stable-ID callback/widget producers keep their existing protocol.
@@ -2822,7 +2759,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                   // prompt; the repository assigns the ID in that case.
                   task_id: data.idempotencyTaskId as TaskID | undefined,
                   session_id: id as SessionID,
-                  full_prompt: admittedPrompt,
+                  full_prompt: data.prompt,
                   created_by: createdBy,
                   status: TaskStatus.QUEUED,
                   metadata: Object.keys(taskMetadata).length > 0 ? taskMetadata : undefined,
