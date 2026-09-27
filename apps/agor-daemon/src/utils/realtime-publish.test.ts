@@ -1203,6 +1203,45 @@ describe('configureRealtimePublish', () => {
     expect(channel.connections).toEqual([{ user: tenantUser }]);
   });
 
+  it('fans the redacted power admission out to every member of its tenant only', async () => {
+    const member = { user: user('tenant-member') };
+    const admin = { user: user('tenant-admin', ROLES.ADMIN) };
+    const otherTenantMember = { user: user('other-tenant-member') };
+    const app = makeApp(
+      [member, admin, otherTenantMember],
+      {},
+      {
+        authenticated: [member, admin, otherTenantMember],
+        'tenant:default': [member, admin],
+      }
+    );
+    configureRealtimePublish({
+      app,
+      multiTenancy: { mode: 'static', static_tenant_id: 'default' as any },
+      ...repos({ branch: branch('b1'), permissions: {} }),
+    });
+    const tenantParams = { tenant: { tenant_id: 'default', source: 'explicit' } };
+
+    const admission = await app.runPublish(
+      { held: true, state: 'conserve', reason: 'on_battery' },
+      {
+        path: 'power-management/admission',
+        method: 'patch',
+        event: 'patched',
+        params: tenantParams,
+      }
+    );
+    expect(admission.connections).toEqual([member, admin]);
+    expect(admission.connections).not.toContain(otherTenantMember);
+
+    // The full host status keeps its admin floor.
+    const full = await app.runPublish(
+      { held: true, state: 'conserve', reason: 'on_battery', observation: {} },
+      { path: 'power-management', method: 'patch', event: 'patched', params: tenantParams }
+    );
+    expect(full.connections).toEqual([admin]);
+  });
+
   it('fails closed for required_from_auth realtime events without tenant context', async () => {
     const member = user('member');
     const service = { user: { _isServiceAccount: true, role: 'service' } };

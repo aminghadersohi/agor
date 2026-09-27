@@ -322,6 +322,23 @@ pages, or issue per-result lookups. It uses the existing atomic priority API for
 alone does not grant foreign-branch access. Clear an existing Essential designation before choosing
 a replacement; the UI never silently demotes an inaccessible Session.
 
+### What members and agents see
+
+Everyone else gets one bounded answer: whether ordinary work is held right now, plus the policy
+state and reason. `GET /power-management/admission` returns only `held`, `state`, `reason`, and
+`transitioned_at` to any authenticated member of the tenant, and publishes the same projection live
+on each transition. It never includes telemetry, provider support, ownership, or configuration.
+
+- **Session footer:** while a Session has queued prompts that the policy is holding, a **Held by host
+  power policy** tag appears beside the Send button. The Essential Session is not marked while the
+  policy is Conserving, because it still dispatches.
+- **Schedules:** **Run now** on a held schedule shows a warning that the host is holding new work,
+  instead of an error.
+- **MCP:** `agor_power_status` is read-only; admins also receive the full status. `agor_sessions_prompt`,
+  `agor_sessions_spawn`, and `agor_sessions_create` (with an initial prompt) add a `power_hold`
+  object to their result when the prompt is held, and the result says the prompt will dispatch after
+  recovery and must not be retried, stopped, or cancelled. MCP cannot change the power policy.
+
 Fresh interactive init always writes `agentic_tools.installed` once, then installs the selected
 packages before returning. Fresh headless init requires `--agentic-tools` (or
 `AGOR_AGENTIC_TOOLS`); `all` and `none` are explicit shorthands.

@@ -102,6 +102,7 @@ import type {
   MessageID,
   MessageSource,
   Params,
+  PowerAdmissionStatus,
   PowerEssentialSessionSearchResult,
   PowerManagementMutableSettings,
   ScheduleID,
@@ -137,6 +138,7 @@ import {
   SESSION_POWER_PRIORITIES,
   SessionStatus,
   TaskStatus,
+  toPowerAdmissionStatus,
   UPLOAD_REQUEST_ID_HEADER,
 } from '@agor/core/types';
 import { isNotFoundError } from '@agor/core/utils/errors';
@@ -1234,6 +1236,20 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     },
     requireAuth
   );
+  // Every tenant member (and agents over MCP) may learn whether ordinary work
+  // is held and why — nothing else. Observation, provider support, ownership
+  // and configuration stay on the admin-only projection above.
+  registerPowerAuthenticatedRoute(
+    app,
+    '/power-management/admission',
+    {
+      async find(): Promise<PowerAdmissionStatus> {
+        return toPowerAdmissionStatus(powerPolicyController.status());
+      },
+    },
+    { find: { role: ROLES.VIEWER, action: 'view power admission' } },
+    requireAuth
+  );
   powerPolicyController.subscribe((transition) => {
     const tenantConfig = resolveMultiTenancyConfig(config);
     if (tenantConfig.mode !== 'static') return;
@@ -1242,6 +1258,12 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       path: 'power-management',
       event: 'patched',
       data: transition.status,
+      params: { tenant: { tenant_id: tenantId, source: 'explicit' } },
+    });
+    emitServiceEvent(app, {
+      path: 'power-management/admission',
+      event: 'patched',
+      data: toPowerAdmissionStatus(transition.status),
       params: { tenant: { tenant_id: tenantId, source: 'explicit' } },
     });
   });
