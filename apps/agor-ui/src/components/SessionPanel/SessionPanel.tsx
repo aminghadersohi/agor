@@ -98,6 +98,7 @@ import { SessionAttachmentTray } from './SessionAttachmentTray';
 import { SessionComposerDropZone } from './SessionComposerDropZone';
 import { SessionFooter } from './SessionFooter';
 import { SessionPanelContent } from './SessionPanelContent';
+import { buildSpawnPromptContext } from './spawn-prompt-context';
 import {
   isStopTransportAmbiguous,
   reconcileStopTransportFailure,
@@ -939,7 +940,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     modal.confirm({
       title: 'Archive session and same-branch children?',
       content:
-        'This archives the session and its same-branch forked or spawned descendants. Remote-created sessions remain active.',
+        'This archives the session and its same-branch forked or spawned descendants. Remote-created sessions stay active in their own branch.',
       okText: 'Archive',
       cancelText: 'Cancel',
       onOk: async () => {
@@ -1292,25 +1293,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     // forwarding prompt; the spawn config's `permissionMode` is rendered into
     // the meta-prompt as the *child* session's intended mode. They're distinct
     // — don't reuse one for the other.
-    const spawnConfig =
-      typeof config === 'string'
-        ? { userPrompt: config }
-        : {
-            userPrompt: config.prompt || '',
-            agenticTool: config.agent,
-            permissionMode: config.permissionMode,
-            modelConfig: config.modelConfig,
-            codexSandboxMode: config.codexSandboxMode,
-            codexApprovalPolicy: config.codexApprovalPolicy,
-            codexNetworkAccess: config.codexNetworkAccess,
-            mcpServerIds: config.mcpServerIds,
-            callbackConfig: {
-              enableCallback: config.enableCallback,
-              includeLastMessage: config.includeLastMessage,
-              includeOriginalPrompt: config.includeOriginalPrompt,
-            },
-            extraInstructions: config.extraInstructions,
-          };
+    const spawnConfig = buildSpawnPromptContext(config);
 
     await client
       .service(`sessions/${session.session_id}/spawn-prompt`)
