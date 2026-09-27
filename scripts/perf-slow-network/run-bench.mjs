@@ -61,11 +61,13 @@ function parseArgs(argv) {
     else if (a === '--headed') out.headed = true;
     else if (a === '--trace') out.trace = true;
     else if (a === '--perf-trace') out.perfTrace = path.resolve(next());
+    else if (a === '--gap') out.gapMs = Number(next());
     else throw new Error(`unknown arg ${a}`);
   }
   if (!out.targets.length) throw new Error('at least one --target name=worktreeDir is required');
   if (!out.seedHome) throw new Error('--seed-home is required');
   out.basePort ??= 4420;
+  out.gapMs ??= 8000;
   return out;
 }
 
@@ -196,6 +198,7 @@ const initScript = ({ tokens, watch }) => {
 };
 
 async function measure({
+  gapMs,
   perfTrace,
   browser,
   proxy,
@@ -350,10 +353,24 @@ async function measure({
   if (perfTrace) await browser.startTracing(page, { path: perfTrace, screenshots: true });
   const primary = watch[0].name;
   let reconnectStart = 0;
+  let resync = null;
   if (scenario.endsWith('-reconnect')) {
-    // Already loaded and quiet (above): drop the link and measure the resync.
+    // Already loaded and quiet (above). Take the link down for `gapMs`, change
+    // the workspace behind the client's back (its realtime events are lost),
+    // bring the link back and measure the resync.
     reconnectStart = await page.evaluate(() => performance.now());
+    const downAt = performance.now();
+    proxy.setBlocked(true);
     proxy.dropAll();
+    const expectations = await applyWorkspaceChanges(port, tokens.accessToken, manifest);
+    await sleep(Math.max(0, gapMs - (performance.now() - downAt)));
+    const upAt = performance.now();
+    proxy.setBlocked(false);
+    // Socket.IO retries on its own backoff; time the resync from the first
+    // byte after the link is back, not from the (random) retry delay.
+    const deadline = Date.now() + 60_000;
+    while (proxy.stats().lastActivity <= upAt && Date.now() < deadline) await sleep(50);
+    resync = { expectations, firstByteAt: proxy.stats().lastActivity };
   } else {
     await page.goto(url, { waitUntil: 'commit' });
     try {
@@ -366,6 +383,14 @@ async function measure({
   }
   const settledEpoch = await waitForQuiet(proxy, page, 3_000, 120_000);
   if (perfTrace) await browser.stopTracing();
+  let resyncCorrect = null;
+  if (resync) {
+    // Did the resync pick up every change made while the link was down?
+    resyncCorrect = await page.evaluate(({ present, absent }) => {
+      const text = document.body.textContent ?? '';
+      return present.every((s) => text.includes(s)) && absent.every((s) => !text.includes(s));
+    }, resync.expectations);
+  }
   const pageState = await page.evaluate(() => ({
     marks: window.__bench.marks,
     longTasks: window.__bench.longTasks,
@@ -391,6 +416,13 @@ async function measure({
     // Interactive: the target is painted and the main thread has had its last
     // long task of the load (network may still be trickling in).
     ttiMs: Math.round(Math.max(paintMs, lastLongTaskEnd - reconnectStart)),
+    ...(resync
+      ? {
+          // From the first byte after the link came back to the resync's last byte.
+          resyncMs: Math.round(settledEpoch - (performance.timeOrigin + resync.firstByteAt)),
+          resyncCorrect,
+        }
+      : {}),
     // Settled: last byte of the load crossed the link (followed by 3 s quiet).
     settledMs: Math.round(settledMs),
     domContentLoadedMs: Math.round(pageState.nav?.domContentLoadedEventEnd ?? 0),
@@ -446,6 +478,43 @@ async function waitForQuiet(proxy, page, quietMs, timeoutMs) {
   return toEpoch(proxy.stats().lastActivity);
 }
 
+let changeCounter = 0;
+
+/**
+ * Change the workspace through the daemon's REST API directly (not through the
+ * link emulator), as another user would while this client is offline: retitle
+ * the opened session and one card, delete another card, move a placement.
+ * Returns the text the resynced page must, and must not, contain.
+ */
+async function applyWorkspaceChanges(port, token, manifest) {
+  const tag = `${Date.now().toString(36)}-${++changeCounter}`;
+  const api = async (method, route, body) => {
+    const res = await fetch(`http://localhost:${port}/${route}`, {
+      method,
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) throw new Error(`${method} /${route}: ${res.status} ${await res.text()}`);
+    return res.json();
+  };
+  const rows = (result) => (Array.isArray(result) ? result : result.data);
+  const sessionTitle = `Resync session ${tag}`;
+  await api('PATCH', `sessions/${manifest.openSessionId}`, { title: sessionTitle });
+  const cards = rows(await api('GET', `cards?board_id=${manifest.boardId}&$limit=50`));
+  const [renamed, removed] = cards;
+  const cardTitle = `Resync card ${tag}`;
+  await api('PATCH', `cards/${renamed.card_id}`, { title: cardTitle });
+  await api('DELETE', `cards/${removed.card_id}`);
+  const objects = rows(await api('GET', `board-objects?board_id=${manifest.boardId}&$limit=5`));
+  const moved = objects.find((object) => object.branch_id) ?? objects[0];
+  if (moved) {
+    await api('PATCH', `board-objects/${moved.object_id}`, {
+      position: { x: (moved.position?.x ?? 0) + 40, y: (moved.position?.y ?? 0) + 40 },
+    });
+  }
+  return { present: [sessionTitle, cardTitle], absent: [removed.title] };
+}
+
 const median = (xs) => {
   const s = [...xs].sort((a, b) => a - b);
   return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
@@ -499,6 +568,7 @@ async function main() {
                       tokens,
                       screenshot,
                       trace: opts.trace,
+                      gapMs: opts.gapMs,
                       perfTrace: opts.perfTrace
                         ? opts.perfTrace.replace(
                             /(\.json)?$/,
@@ -573,6 +643,13 @@ function printTable(results) {
       continue;
     }
     const failed = m.failedRuns ? ` (${m.failedRuns} failed)` : '';
+    if (m.resyncMs !== undefined) {
+      const correct = r.samples.every((sample) => sample.failed || sample.resyncCorrect);
+      console.log(
+        `| ${r.profile} | ${r.scenario} | ${r.cache} | ${r.target} | resync ${s(m.resyncMs)} | | ${s(m.settledMs)} | ${kib(m.bytesDown)} (up ${kib(m.bytesUp)}) | ${m.httpRequests} | ${m.wsFramesIn}/${m.wsFramesOut} | ${correct ? 'all changes applied' : 'MISSED CHANGES'} |${failed}`
+      );
+      continue;
+    }
     console.log(
       `| ${r.profile} | ${r.scenario} | ${r.cache} | ${r.target} | ${s(m.paintMs)} | ${s(m.ttiMs)} | ${s(m.settledMs)} | ${kib(m.bytesDown)} | ${m.httpRequests} | ${m.wsFramesIn}/${m.wsFramesOut} | ${m.longTaskCount} (${m.longTaskTotalMs}) |${failed}`
     );
