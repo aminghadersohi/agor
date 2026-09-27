@@ -304,7 +304,7 @@ const configSchema = z
   .record(z.string(), z.unknown())
   .superRefine((config, issue) => addPublicConfigIssues(config, issue, false))
   .describe(
-    'Platform-specific gateway configuration. Secrets are stored encrypted and returned redacted. Prefer env/template references for shared credentials where the connector supports them.'
+    "Platform-specific gateway configuration. Secrets are stored encrypted and returned redacted. Prefer env/template references for shared credentials where the connector supports them. Slack: inbound_reactions:true delivers human emoji reactions on messages in already-mapped threads to that thread's session (requires the reactions:read scope and reaction_added/reaction_removed events — regenerate the manifest with inboundReactions:true and reinstall the app)."
   );
 
 const outboundTargetSchema = z
@@ -1080,6 +1080,12 @@ const slackManifestGenerateSchema = z.strictObject({
     .describe(
       'Ingest images, text files, and PDFs attached to inbound messages (adds the files:read scope). The gateway stages them server-side and hands opaque, expiring handles to the session agent.'
     ),
+  inboundReactions: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Deliver human emoji reactions (added/removed) on messages in threads already mapped to a session as a short prompt to that session, e.g. react ✅ to approve. Never starts a session; rate limited per thread. Adds the reactions:read scope and the reaction_added/reaction_removed bot events. Maps to config.inbound_reactions.'
+    ),
   threadHistory: z
     .boolean()
     .default(true)
@@ -1252,6 +1258,7 @@ function toSlackWizardOptions(
     alignUsers: args.alignUsers,
     outbound: args.outbound,
     ingestFiles: args.ingestFiles,
+    inboundReactions: args.inboundReactions,
     agentTools: {
       thread_history: args.threadHistory,
       channel_history: args.channelHistory,
@@ -1277,6 +1284,7 @@ function toCreateChannelConfigHint(args: z.infer<typeof slackManifestGenerateSch
     align_slack_users: args.alignUsers,
     outbound_enabled: args.outbound,
     ingest_files: args.ingestFiles,
+    inbound_reactions: args.inboundReactions,
     agent_tools: {
       thread_history: args.threadHistory,
       channel_history: args.channelHistory,
