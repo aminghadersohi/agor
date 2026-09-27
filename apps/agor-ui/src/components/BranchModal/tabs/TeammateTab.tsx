@@ -1,4 +1,4 @@
-import type { AgorClient, Branch } from '@agor-live/client';
+import type { AgorClient, Branch, Session } from '@agor-live/client';
 import { getTeammateConfig } from '@agor-live/client';
 import { RobotOutlined } from '@ant-design/icons';
 import { Button, Descriptions, Form, Input, Popconfirm, Space, Typography } from 'antd';
@@ -8,10 +8,13 @@ import { useThemedMessage } from '../../../utils/message';
 import { EmojiPickerInput } from '../../EmojiPickerInput/EmojiPickerInput';
 import { Tag } from '../../Tag';
 import type { TeammateFormState } from '../useBranchModalForm';
+import { TeammateFrontDeskSection } from './TeammateFrontDeskSection';
 
 interface TeammateTabProps {
   branch: Branch;
   client?: AgorClient | null;
+  /** The teammate branch's sessions, offered as front-desk candidates. */
+  sessions?: Session[];
   onRetired?: () => void;
   canEdit: boolean;
   state: TeammateFormState;
@@ -24,6 +27,7 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
   state,
   setField,
   client,
+  sessions = [],
   onRetired,
 }) => {
   const [retiring, setRetiring] = useState(false);
@@ -92,6 +96,8 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
             />
           </Form.Item>
         </Form>
+
+        <TeammateFrontDeskSection branch={branch} client={client} sessions={sessions} />
 
         {!branch.archived && (
           <Popconfirm

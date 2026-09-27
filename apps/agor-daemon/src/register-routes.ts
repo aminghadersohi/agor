@@ -215,6 +215,7 @@ import {
 } from './power-management/index.js';
 import { registerProfileImageRoutes } from './profile-image-routes.js';
 import { publicBoardCommentRepositionInput } from './services/board-comments.js';
+import { createBranchFrontDeskRoute } from './services/branch-front-desk.js';
 import type { GatewayService } from './services/gateway.js';
 import { createMCPCatalogConnectService } from './services/mcp-catalog-connect.js';
 import { createMCPCatalogStartSessionService } from './services/mcp-catalog-start-session.js';
@@ -1399,6 +1400,20 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     {
       find: { role: ROLES.VIEWER, action: 'view session power priority' },
       create: { role: ROLES.MEMBER, action: 'change session power priority' },
+    },
+    requireAuth
+  );
+
+  // Teammate front desk (fork). Branch Manager authorization lives in
+  // front-desk/manage-front-desk.ts, shared with the MCP front-desk tools.
+  registerAuthenticatedRoute(
+    app,
+    '/branches/:id/front-desk',
+    createBranchFrontDeskRoute({ db, allowSuperadmin: () => superadminOpts.allowSuperadmin }),
+    {
+      find: { role: ROLES.VIEWER, action: 'view a teammate front desk' },
+      create: { role: ROLES.MEMBER, action: 'pin a teammate front desk' },
+      remove: { role: ROLES.MEMBER, action: 'clear a teammate front desk' },
     },
     requireAuth
   );

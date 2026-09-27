@@ -132,6 +132,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: 'Selection names are credential metadata; there is no subscriber, and any future consumer needs an owner-aware disclosure decision.',
   },
+  'branches/:id/front-desk': {
+    audience: 'none',
+    why: 'Pin/clear return the fresh front-desk view to the caller; other viewers refetch when they open the teammate.',
+  },
   'sessions/:id/power-priority': {
     audience: 'none',
     why: 'The dedicated mutation returns its projection; the canonical sessions.patched event refreshes viewers.',
