@@ -1666,12 +1666,13 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
    * one-shot manual import — the repo is NOT re-ingested automatically on
    * subsequent operations.
    *
-   * Registered as a long (identity-only) route, like importFromLaunchJson: the
+   * Registered as a long (identity-only) route, like its export sibling and importFromLaunchJson: the
    * file is read by an executor process, so no tenant transaction may be held
    * across that spawn. The repo read, the branch authorization (through the
-   * branches service, which arms its own scope) and the pre-spawn access checks
-   * each open their own short unit; the executor carries the tenant only in its
-   * command token; the write runs in a fresh unit after the executor returns.
+   * branches service, which arms its own scope) and the launch preparation in
+   * runAgorYmlExecutorCommand each open their own short unit; the executor
+   * carries the tenant only in its command token; the write runs in a fresh
+   * unit after the executor returns.
    */
   async importFromAgorYml(
     id: string,
