@@ -54,6 +54,7 @@ import {
 } from '../store/agorMaps';
 import * as realtime from '../store/agorRealtimeActions';
 import { agorStore, shallow, useStoreWithEqualityFn } from '../store/agorStore';
+import { findAllVersioned, resetListSyncVersions } from '../store/listSync';
 import {
   type OpenedTranscriptPrefetch,
   prefetchOpenedTranscript,
@@ -379,6 +380,7 @@ export function useAgorData(
     agorStore.getState().reset();
     resetHydrationRevisions();
     cancelAllHydrations();
+    resetListSyncVersions();
     // Drop any straggler frame-batched patches from a prior mount of the
     // singleton so they can't flush into this instance's fresh store.
     discardRealtimeNow();
@@ -623,14 +625,13 @@ export function useAgorData(
             'sessions',
             silent
               ? // Reconnect resyncs must fully repopulate every board, so they stay
-                // GLOBAL/full (mirrors the heavy + hydration paths below).
-                client.service('sessions').findAll({
-                  query: {
-                    archived: false,
-                    lean: true,
-                    $limit: PAGINATION.DEFAULT_LIMIT,
-                    $sort: { updated_at: -1 },
-                  },
+                // GLOBAL/full (mirrors the heavy + hydration paths below), but
+                // transfer only the rows that changed (see store/listSync).
+                findAllVersioned<Session>(client, 'sessions', {
+                  archived: false,
+                  lean: true,
+                  $limit: PAGINATION.DEFAULT_LIMIT,
+                  $sort: { updated_at: -1 },
                 })
               : // Bounded recent slice for first paint. Use find() (a SINGLE page),
                 // NOT findAll(): findAll loops until it has `total` rows, so a small
@@ -660,9 +661,11 @@ export function useAgorData(
             // backfill via the `boards` background hydration. Silent reconnect
             // resyncs FULL (mirrors sessions/branches) so the displayed board's
             // zones never flash off while re-syncing.
-            client.service('boards').findAll({
-              query: { ...(silent ? {} : { lean: true }), $limit: PAGINATION.DEFAULT_LIMIT },
-            })
+            silent
+              ? findAllVersioned<Board>(client, 'boards', { $limit: PAGINATION.DEFAULT_LIMIT })
+              : client.service('boards').findAll({
+                  query: { lean: true, $limit: PAGINATION.DEFAULT_LIMIT },
+                })
           ),
           track(
             'card-types',
@@ -806,8 +809,9 @@ export function useAgorData(
           track(
             'branches',
             silent
-              ? client.service('branches').findAll({
-                  query: { archived: false, $limit: PAGINATION.DEFAULT_LIMIT },
+              ? findAllVersioned<Branch>(client, 'branches', {
+                  archived: false,
+                  $limit: PAGINATION.DEFAULT_LIMIT,
                 })
               : boardScope
                 ? client.service('branches').findAll({
@@ -841,31 +845,34 @@ export function useAgorData(
             // expected authorization failure here is not an essential bootstrap
             // failure. Keep the collection empty and don't subscribe below.
             canUseMemberWorkspaceServices
-              ? client.service('board-objects').findAll({
-                  query: {
+              ? boardScope
+                ? client.service('board-objects').findAll({
+                    query: { $limit: PAGINATION.DEFAULT_LIMIT, board_id: boardScope },
+                  })
+                : findAllVersioned<BoardEntityObject>(client, 'board-objects', {
                     $limit: PAGINATION.DEFAULT_LIMIT,
-                    ...(boardScope ? { board_id: boardScope } : {}),
-                  },
-                })
+                  })
               : Promise.resolve([])
           ),
           track(
             'board-comments',
-            client.service('board-comments').findAll({
-              query: {
-                $limit: PAGINATION.DEFAULT_LIMIT,
-                ...(boardScope ? { board_id: boardScope } : {}),
-              },
-            })
+            boardScope
+              ? client.service('board-comments').findAll({
+                  query: { $limit: PAGINATION.DEFAULT_LIMIT, board_id: boardScope },
+                })
+              : findAllVersioned<BoardComment>(client, 'board-comments', {
+                  $limit: PAGINATION.DEFAULT_LIMIT,
+                })
           ),
           track(
             'cards',
-            client.service('cards').findAll({
-              query: {
-                $limit: PAGINATION.DEFAULT_LIMIT,
-                ...(boardScope ? { board_id: boardScope } : {}),
-              },
-            })
+            boardScope
+              ? client.service('cards').findAll({
+                  query: { $limit: PAGINATION.DEFAULT_LIMIT, board_id: boardScope },
+                })
+              : findAllVersioned<CardWithType>(client, 'cards', {
+                  $limit: PAGINATION.DEFAULT_LIMIT,
+                })
           ),
           // Displayed board's FULL record (with objects/custom_css) so its
           // zones/text/markdown paint at first load — the gated boards fetch
@@ -1025,13 +1032,11 @@ export function useAgorData(
               'sessions',
               ['sessions'],
               () =>
-                client.service('sessions').findAll({
-                  query: {
-                    archived: false,
-                    lean: true,
-                    $limit: PAGINATION.DEFAULT_LIMIT,
-                    $sort: { updated_at: -1 },
-                  },
+                findAllVersioned<Session>(client, 'sessions', {
+                  archived: false,
+                  lean: true,
+                  $limit: PAGINATION.DEFAULT_LIMIT,
+                  $sort: { updated_at: -1 },
                 }),
               (allSessions) =>
                 agorStore.getState().applyMaps((prev) => {
@@ -1065,9 +1070,10 @@ export function useAgorData(
               'branches',
               ['branches'],
               () =>
-                client
-                  .service('branches')
-                  .findAll({ query: { archived: false, $limit: PAGINATION.DEFAULT_LIMIT } }),
+                findAllVersioned<Branch>(client, 'branches', {
+                  archived: false,
+                  $limit: PAGINATION.DEFAULT_LIMIT,
+                }),
               (allBranches) =>
                 // Quiet window proven by runHydration → apply wholesale. Branches
                 // are active-only (the snapshot query is archived:false and the
@@ -1094,9 +1100,9 @@ export function useAgorData(
                 'board-objects',
                 ['boardObjects'],
                 () =>
-                  client
-                    .service('board-objects')
-                    .findAll({ query: { $limit: PAGINATION.DEFAULT_LIMIT } }),
+                  findAllVersioned<BoardEntityObject>(client, 'board-objects', {
+                    $limit: PAGINATION.DEFAULT_LIMIT,
+                  }),
                 (allBoardObjects) =>
                   agorStore.getState().applyMaps((prev) => {
                     const base = buildBoardObjectMaps(allBoardObjects);
@@ -1114,7 +1120,9 @@ export function useAgorData(
               'cards',
               ['cards'],
               () =>
-                client.service('cards').findAll({ query: { $limit: PAGINATION.DEFAULT_LIMIT } }),
+                findAllVersioned<CardWithType>(client, 'cards', {
+                  $limit: PAGINATION.DEFAULT_LIMIT,
+                }),
               (allCards) =>
                 agorStore.getState().applyMaps((prev) => ({
                   ...prev,
@@ -1125,9 +1133,9 @@ export function useAgorData(
               'board-comments',
               ['comments'],
               () =>
-                client
-                  .service('board-comments')
-                  .findAll({ query: { $limit: PAGINATION.DEFAULT_LIMIT } }),
+                findAllVersioned<BoardComment>(client, 'board-comments', {
+                  $limit: PAGINATION.DEFAULT_LIMIT,
+                }),
               (allComments) =>
                 agorStore.getState().applyMaps((prev) => ({
                   ...prev,
@@ -1146,8 +1154,7 @@ export function useAgorData(
             void runAuthorityHydration(
               'boards',
               ['boards'],
-              () =>
-                client.service('boards').findAll({ query: { $limit: PAGINATION.DEFAULT_LIMIT } }),
+              () => findAllVersioned<Board>(client, 'boards', { $limit: PAGINATION.DEFAULT_LIMIT }),
               (allBoards) =>
                 agorStore.getState().applyMaps((prev) => ({
                   ...prev,
@@ -1247,6 +1254,9 @@ export function useAgorData(
       // OAuth state, credential presence), so an in-place identity replacement
       // gets the same map boundary as logout before the new authority resyncs.
       agorStore.getState().resetMaps();
+      // A reconnect of the same identity keeps its held row versions: that is
+      // what makes the reconnect resync cheap (store/listSync).
+      resetListSyncVersions();
     } else if (!canUseMemberWorkspaceServices) {
       bumpRevision('boardObjects');
       agorStore.getState().applyMaps((previousMaps) => ({
@@ -1299,6 +1309,7 @@ export function useAgorData(
     cancelAndFailAllHydrations();
     releaseOpenedTranscriptPrefetch();
     agorStore.getState().resetMaps();
+    resetListSyncVersions();
     setHasInitiallyFetched(false);
   }, [client, releaseOpenedTranscriptPrefetch]);
 
