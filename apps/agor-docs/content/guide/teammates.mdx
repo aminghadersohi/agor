@@ -121,6 +121,8 @@ An agent can prompt another teammate by name — `agor_sessions_prompt { teammat
 
 By default the name reaches the teammate's most recently active session. A Branch Manager can instead pin a **front desk** with `agor_teammates_front_desk_set`, and name addressing then always reaches that session, even while a newer session or an in-flight `btw` fork exists in the branch. If the pinned session is archived, deleted, or its executor dies, the next address falls back to the most recent session automatically. `agor_teammates_front_desk_clear` removes the pin. Pinning never moves, archives, or changes any session.
 
+In the UI, the pinned session shows a **Front desk** tag in its session header. A Branch Manager can pin or unpin from the session header's **More actions** menu (**Pin as front desk** / **Unpin front desk**), or from the teammate's settings (**Teammate** tab → **Front desk**), which shows the current pin and lets you choose any active session in the branch. Other members see the current pin but not the controls. The same pin is available over REST at `GET` / `POST` / `DELETE /branches/:id/front-desk`.
+
 ### Learning and adaptation
 
 As your teammate works with you, it naturally improves:

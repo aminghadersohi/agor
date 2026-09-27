@@ -60,3 +60,26 @@ export interface BranchFrontDeskSession {
   retired_reason?: FrontDeskRetiredReason;
   metadata?: Record<string, unknown>;
 }
+
+/**
+ * `GET /branches/:id/front-desk` — the teammate's current front desk and
+ * whether the caller may change it. `can_manage` is computed by the daemon
+ * with the same rule the pin/clear commands enforce, so a client hides the
+ * controls rather than guessing from its own copy of the policy.
+ */
+export interface TeammateFrontDeskView {
+  branch_id: BranchID;
+  front_desk: BranchFrontDeskSession | null;
+  can_manage: boolean;
+}
+
+/** `POST /branches/:id/front-desk` — pin a session, replacing any current pin. */
+export interface SetTeammateFrontDeskRequest {
+  session_id: SessionID;
+  /**
+   * Compare-and-swap guard: `null` pins only into an empty slot; a session id
+   * pins only while that session is the occupant. Omit to replace whatever is
+   * there.
+   */
+  expected_session_id?: SessionID | null;
+}
