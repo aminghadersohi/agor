@@ -271,3 +271,83 @@ it('reloads saved policy after Save & Test and projection-less realtime without 
   expect(discover).toHaveBeenCalledOnce();
   expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
 });
+
+/**
+ * An edit that never opens the Advanced panel must not restate the OAuth policy
+ * fields the panel owns. `mcp-servers` PATCH merges auth field by field, so a
+ * value invented for an unpopulated field overwrites the one the user saved —
+ * and the daemon answers that as a real auth-configuration change by deleting
+ * every OAuth grant on the server. The daemon half of this regression is in
+ * apps/agor-daemon/src/services/mcp-oauth-grant-binding.test.ts.
+ */
+it('saves an unrelated edit without restating untouched OAuth policy', async () => {
+  const auth = {
+    type: 'oauth',
+    oauth_mode: 'per_user',
+    oauth_grant_type: 'client_credentials',
+    oauth_client_id: 'pre-registered-client',
+    oauth_compatibility_mode: 'legacy',
+    oauth_dcr_mode: 'disabled',
+  } as const;
+  const server = {
+    mcp_server_id: '01900000-0000-7000-8000-000000000004',
+    name: 'OAuth policy preservation fixture',
+    transport: 'http',
+    url: 'https://fixture.example/mcp',
+    scope: 'global',
+    enabled: true,
+    config_version: 4,
+    source: 'user',
+    description: 'before',
+    auth,
+    oauth_compatibility_policy: {
+      effective_mode: 'legacy',
+      managed_by_catalog: false,
+      effective_dcr_mode: 'disabled',
+      dcr_mode_source: 'explicit',
+    },
+  } as unknown as MCPServer;
+  const patch = vi.fn().mockResolvedValue({ ...server, config_version: 5 });
+  const client = {
+    service: (path: string) => {
+      if (path === 'mcp-servers') return { patch };
+      throw new Error(`Unexpected service call during an unrelated edit: ${path}`);
+    },
+    io: { on: vi.fn(), off: vi.fn() },
+  } as unknown as AgorClient;
+  const close = vi.fn();
+  render(
+    <ConfigProvider theme={{ algorithm: theme.darkAlgorithm, token: { motion: false } }}>
+      <App>
+        <MCPServerEditModal
+          server={server}
+          open
+          client={client}
+          identityKey="user-a"
+          authorityKey="user-a:admin:1"
+          authGeneration={1}
+          mutationAllowed
+          onClose={close}
+        />
+      </App>
+    </ConfigProvider>
+  );
+
+  // The Advanced panel stays closed for the whole edit, which is the shape of
+  // save that was reported as reverting a stored `disabled` to `advertised`.
+  const advanced = await screen.findByText('Advanced — OAuth settings');
+  expect(advanced.closest('[aria-expanded]')).toHaveAttribute('aria-expanded', 'false');
+  expect(await screen.findByText(/Saved OAuth policy:/)).toHaveTextContent(
+    'compatibility legacy; DCR disabled (explicit).'
+  );
+
+  await act(() => userEvent.fill(screen.getByLabelText('Description'), 'after'));
+  await act(() => userEvent.click(screen.getByRole('button', { name: 'Save' })));
+  await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+
+  expect(patch.mock.calls[0]?.[1]?.description).toBe('after');
+  // Exact equality: a field the user never touched must not appear with an
+  // invented value, and the ones they did configure must survive verbatim.
+  expect(patch.mock.calls[0]?.[1]?.auth).toEqual({ ...auth });
+  expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
+});
