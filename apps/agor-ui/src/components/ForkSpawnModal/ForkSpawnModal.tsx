@@ -30,6 +30,7 @@ import {
 import { AgentSelectionGrid } from '../AgentSelectionGrid/AgentSelectionGrid';
 import { AVAILABLE_AGENTS } from '../AgentSelectionGrid/availableAgents';
 import { AutocompleteTextarea } from '../AutocompleteTextarea';
+import { CALLBACK_MODE_OPTIONS } from '../CallbackConfigForm';
 import { CodexSettingsForm } from '../CodexSettingsForm';
 import { SessionEnvVarsSelector } from '../SessionEnvVarsSelector';
 
@@ -131,6 +132,8 @@ export const ForkSpawnModal: React.FC<ForkSpawnModalProps> = ({
       form.setFieldsValue({
         prompt: initialPrompt,
         enableCallback: session.callback_config?.enabled,
+        // Spawned children default to one-shot callbacks (SessionsService.spawn).
+        callbackMode: 'once',
         callbackDelivery: session.callback_config?.delivery ?? 'direct',
         includeLastMessage: session.callback_config?.include_last_message,
         includeOriginalPrompt: session.callback_config?.include_original_prompt,
@@ -223,6 +226,9 @@ export const ForkSpawnModal: React.FC<ForkSpawnModalProps> = ({
         // Callback fields are always included when explicitly set
         if (values.enableCallback !== undefined) {
           spawnConfig.enableCallback = values.enableCallback;
+        }
+        if (values.callbackMode !== undefined) {
+          spawnConfig.callbackMode = values.callbackMode;
         }
         if (values.callbackDelivery !== undefined) {
           spawnConfig.callbackDelivery = values.callbackDelivery;
@@ -439,6 +445,15 @@ export const ForkSpawnModal: React.FC<ForkSpawnModalProps> = ({
                 {({ getFieldValue }) =>
                   getFieldValue('enableCallback') && (
                     <>
+                      <Form.Item
+                        name="callbackMode"
+                        label="Mode"
+                        style={{ marginLeft: 24 }}
+                        tooltip="Once notifies the parent on the child's next completion, then turns the callback off. Every completion keeps notifying until turned off."
+                      >
+                        <Select options={CALLBACK_MODE_OPTIONS} />
+                      </Form.Item>
+
                       <Form.Item
                         name="callbackDelivery"
                         label="Delivery"

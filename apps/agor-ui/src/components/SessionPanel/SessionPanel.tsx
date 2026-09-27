@@ -1317,7 +1317,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     // the meta-prompt as the *child* session's intended mode. They're distinct
     // — don't reuse one for the other.
     const baseSpawnConfig = buildSpawnPromptContext(config);
-    // Fork delta: callback delivery and child auto-archive ride the same
+    // Fork delta: callback mode/delivery and child auto-archive ride the same
     // prompt context as upstream's modal selection.
     const spawnConfig =
       typeof config === 'string' || !('callbackConfig' in baseSpawnConfig)
@@ -1326,6 +1326,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             ...baseSpawnConfig,
             callbackConfig: {
               ...baseSpawnConfig.callbackConfig,
+              callbackMode: config.callbackMode,
               callbackDelivery: config.callbackDelivery,
             },
             autoArchive: config.autoArchive,

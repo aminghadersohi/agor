@@ -2321,6 +2321,7 @@ describe('agor_sessions_prompt (subsession mode)', () => {
       modelConfig: { model: 'claude-opus-4-6', effort: 'max', provider: 'anthropic' },
       autoArchive: 'after_completion',
       autoArchiveAfterSeconds: 1800,
+      callbackMode: 'persistent',
     });
 
     expect(spawnCalls).toHaveLength(1);
@@ -2333,6 +2334,7 @@ describe('agor_sessions_prompt (subsession mode)', () => {
     expect(spawnCalls[0].data).toMatchObject({
       autoArchive: 'after_completion',
       autoArchiveAfterSeconds: 1800,
+      callbackMode: 'persistent',
     });
   });
 });

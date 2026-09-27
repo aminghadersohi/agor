@@ -487,6 +487,11 @@ export const REALTIME_PUBLISH_POLICY = {
   'sessions/:id/archive': { audience: 'none', why: `${NO_CONSUMER} Lands as sessions.patched.` },
   'sessions/:id/unarchive': { audience: 'none', why: `${NO_CONSUMER} Lands as sessions.patched.` },
   'sessions/:id/genealogy': { audience: 'none', why: NO_CONSUMER },
+  'sessions/:id/retarget-callback': {
+    audience: 'none',
+    why: `${NO_CONSUMER} Lands as sessions.patched.`,
+  },
+  'sessions/:id/reparent': { audience: 'none', why: `${NO_CONSUMER} Lands as sessions.patched.` },
   'sessions/:id/env-selections': {
     audience: 'none',
     why: `${NO_CONSUMER} Lands as session-env-selections.`,

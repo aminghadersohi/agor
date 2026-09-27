@@ -86,6 +86,16 @@ describe('renderSpawnSubsessionPrompt', () => {
     expect(out.match(/"callbackDelivery"/g)).toHaveLength(1);
   });
 
+  it('carries callbackMode into the exact MCP spawn call', () => {
+    const out = renderSpawnSubsessionPrompt({
+      userPrompt: 'x',
+      callbackConfig: { enableCallback: true, callbackMode: 'persistent' },
+    });
+    expect(out).toContain('Callback Configuration:');
+    expect(out).toContain('- callbackMode: "persistent"');
+    expect(out.match(/"callbackMode": "persistent"/g)).toHaveLength(1);
+  });
+
   it('renders mcpServerIds with @last separator handling', () => {
     const out = renderSpawnSubsessionPrompt({
       userPrompt: 'x',

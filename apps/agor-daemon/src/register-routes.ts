@@ -1984,6 +1984,55 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
+  // Human controls for the fork's routing/genealogy transfers. Same service
+  // methods and authority as agor_sessions_retarget_callback/_reparent.
+  registerAuthenticatedRoute(
+    app,
+    '/sessions/:id/retarget-callback',
+    {
+      async create(data: { callbackSessionId?: unknown } | undefined, params: RouteParams) {
+        const id = params.route?.id;
+        if (!id) throw new BadRequest('Session ID required');
+        if (typeof data?.callbackSessionId !== 'string' || !data.callbackSessionId) {
+          throw new BadRequest('callbackSessionId is required');
+        }
+        return sessionsService.retargetCallback(
+          id,
+          { callbackSessionId: data.callbackSessionId as SessionID },
+          params
+        );
+      },
+    },
+    {
+      create: { role: ROLES.MEMBER, action: 'retarget session callbacks' },
+    },
+    requireAuth
+  );
+
+  registerAuthenticatedRoute(
+    app,
+    '/sessions/:id/reparent',
+    {
+      async create(data: { parentSessionId?: unknown } | undefined, params: RouteParams) {
+        const id = params.route?.id;
+        if (!id) throw new BadRequest('Session ID required');
+        const parentSessionId = data?.parentSessionId;
+        if (parentSessionId !== null && (typeof parentSessionId !== 'string' || !parentSessionId)) {
+          throw new BadRequest('parentSessionId must be a Session ID or null');
+        }
+        return sessionsService.reparent(
+          id,
+          { parentSessionId: parentSessionId as SessionID | null },
+          params
+        );
+      },
+    },
+    {
+      create: { role: ROLES.MEMBER, action: 'reparent sessions' },
+    },
+    requireAuth
+  );
+
   registerAuthenticatedRoute(
     app,
     '/sessions/:id/restart-cli',
