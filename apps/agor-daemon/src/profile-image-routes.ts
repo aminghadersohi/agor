@@ -14,6 +14,7 @@ import {
   parseProfileImageSubjectId,
   parseProfileImageSubjectType,
   profileImageCallerFromParams,
+  registerProfileImageManager,
 } from './utils/profile-image-management.js';
 import { PROFILE_IMAGE_MAX_BYTES } from './utils/profile-image-processing.js';
 
@@ -37,6 +38,7 @@ export function registerProfileImageRoutes({
   allowSuperadmin,
 }: RegisterProfileImageRoutesOptions): void {
   const manager = createProfileImageManager({ app, db, allowSuperadmin });
+  registerProfileImageManager(app, manager);
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: PROFILE_IMAGE_MAX_BYTES, files: 1, fields: 4 },

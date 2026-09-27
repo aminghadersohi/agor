@@ -6,18 +6,11 @@ const managerMocks = vi.hoisted(() => ({
   upload: vi.fn(),
   update: vi.fn(),
   remove: vi.fn(),
-  createOptions: [] as Array<{ allowSuperadmin: boolean }>,
 }));
 
 vi.mock('../../utils/profile-image-management.js', () => ({
-  createProfileImageManager: (options: { allowSuperadmin: boolean }) => {
-    managerMocks.createOptions.push(options);
-    return {
-      upload: managerMocks.upload,
-      update: managerMocks.update,
-      remove: managerMocks.remove,
-    };
-  },
+  getProfileImageManager: (app: { get: (key: string) => unknown }) =>
+    app.get('profileImageManager'),
   profileImageCallerFromParams: (
     params: { tenant?: { tenant_id: string }; user: { user_id: string } },
     fallbackTenantId: string
@@ -63,8 +56,7 @@ function makeContext(fileGet = vi.fn()) {
   return {
     ctx: {
       app: {
-        get: (key: string) =>
-          key === 'config' ? { execution: { allow_superadmin: true } } : undefined,
+        get: (key: string) => (key === 'profileImageManager' ? managerMocks : undefined),
         service: (name: string) => {
           if (name === 'file') return { get: fileGet };
           throw new Error(`Unexpected service: ${name}`);
@@ -85,7 +77,6 @@ const created = { image_id: 'image-1', subject_type: 'teammate', is_primary: tru
 describe('profile-image MCP write tools', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    managerMocks.createOptions.length = 0;
     managerMocks.upload.mockResolvedValue(created);
   });
 
@@ -101,9 +92,6 @@ describe('profile-image MCP write tools', () => {
       altText: 'Portrait',
     });
 
-    expect(managerMocks.createOptions).toEqual([
-      expect.objectContaining({ allowSuperadmin: true }),
-    ]);
     const [caller, input] = managerMocks.upload.mock.calls[0];
     expect(caller).toMatchObject({ tenantId: 'tenant-a', userId: 'user-1' });
     expect(input).toMatchObject({

@@ -18,8 +18,7 @@ import { isTeammate, ROLES, type User } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import {
-  createProfileImageManager,
-  type ProfileImageManager,
+  getProfileImageManager,
   profileImageCallerFromParams,
 } from '../../utils/profile-image-management.js';
 import {
@@ -427,14 +426,6 @@ async function authorizeImage(ctx: McpContext, image: ProfileImage): Promise<voi
 const PROFILE_IMAGE_MAX_BASE64_LENGTH = Math.ceil(PROFILE_IMAGE_MAX_BYTES / 3) * 4 + 64;
 const BASE64_PAYLOAD = /^[A-Za-z0-9+/_-]*={0,2}$/;
 
-function profileImageManagerFor(ctx: McpContext): ProfileImageManager {
-  return createProfileImageManager({
-    app: ctx.app,
-    db: ctx.db,
-    allowSuperadmin: ctx.app.get('config')?.execution?.allow_superadmin === true,
-  });
-}
-
 function profileImageCaller(ctx: McpContext) {
   return profileImageCallerFromParams(
     ctx.baseServiceParams as AuthenticatedParams,
@@ -621,7 +612,7 @@ Managing a user gallery requires being that user or an admin; a board gallery re
         args.branchId && args.path
           ? await readBranchImage(ctx, args.branchId, args.path)
           : { data: decodeProfileImageBase64(args.imageBase64 ?? ''), name: undefined };
-      const created = await profileImageManagerFor(ctx).upload(profileImageCaller(ctx), {
+      const created = await getProfileImageManager(ctx.app).upload(profileImageCaller(ctx), {
         subjectType: args.subjectType,
         subjectId: args.subjectId as UserID | BranchID | BoardID,
         data: source.data,
@@ -663,7 +654,7 @@ Managing a user gallery requires being that user or an admin; a board gallery re
         ...(args.position !== undefined ? { position: args.position } : {}),
         ...(args.altText !== undefined ? { alt_text: args.altText ?? '' } : {}),
       };
-      const updated = await profileImageManagerFor(ctx).update(
+      const updated = await getProfileImageManager(ctx.app).update(
         profileImageCaller(ctx),
         args.imageId as ProfileImageID,
         patch
@@ -684,7 +675,7 @@ Managing a user gallery requires being that user or an admin; a board gallery re
     },
     async (args) => {
       const imageId = args.imageId as ProfileImageID;
-      await profileImageManagerFor(ctx).remove(profileImageCaller(ctx), imageId);
+      await getProfileImageManager(ctx.app).remove(profileImageCaller(ctx), imageId);
       return textResult({ deleted: true, image_id: imageId });
     }
   );
