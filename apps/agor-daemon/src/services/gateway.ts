@@ -5571,6 +5571,7 @@ export class GatewayService {
               gateway_inbound_event_id?: import('@agor/core/types').GatewayInboundEventID;
               gateway_reply_metadata?: Record<string, unknown>;
               gateway_task_source?: import('@agor/core/types').TaskMetadata['gateway_task_source'];
+              gateway_skipped_attachments?: import('@agor/core/types').TaskMetadata['gateway_skipped_attachments'];
             };
             idempotencyTaskId?: TaskID;
           },
@@ -5583,6 +5584,9 @@ export class GatewayService {
       // delivered prompt advances the last-delivered cursor. Non-mention replies
       // are picked up here the next time the bot is summoned.
       let promptText = data.text;
+      // Structured twin of the attachment notes appended to the prompt below,
+      // so the transcript can say what was dropped without parsing prompt text.
+      const undeliveredAttachments = { skipped: 0, skipped_mime_types: [] as string[], failed: 0 };
       let slackCursorTsToWrite: string | undefined;
       let discordCursorToWrite: string | undefined;
       if (channel.channel_type === 'discord' && !outboundSeed) {
@@ -5757,6 +5761,9 @@ export class GatewayService {
         if (skippedAttachments > 0) {
           promptText = `${promptText}\n\n${formatSkippedAttachmentNote(skippedAttachments, skippedMimeTypes)}`;
         }
+        undeliveredAttachments.failed += failedAttachments;
+        undeliveredAttachments.skipped += skippedAttachments;
+        undeliveredAttachments.skipped_mime_types.push(...skippedMimeTypes);
       }
 
       // Discord inbound images use the provider's signed CDN URL and the
@@ -5786,6 +5793,7 @@ export class GatewayService {
         if (ingestion.failed > 0) {
           promptText = `${promptText}\n\n(an attachment could not be fetched)`;
         }
+        undeliveredAttachments.failed += ingestion.failed;
       }
 
       // Prepend gateway context block so the agent knows the message source.
@@ -5842,6 +5850,14 @@ export class GatewayService {
           ? {
               gateway_reply_metadata: {
                 processing_comment_id: data.metadata.processing_comment_id,
+              },
+            }
+          : {}),
+        ...(undeliveredAttachments.skipped > 0 || undeliveredAttachments.failed > 0
+          ? {
+              gateway_skipped_attachments: {
+                ...undeliveredAttachments,
+                skipped_mime_types: [...new Set(undeliveredAttachments.skipped_mime_types)],
               },
             }
           : {}),

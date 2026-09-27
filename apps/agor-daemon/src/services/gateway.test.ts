@@ -3110,6 +3110,9 @@ describe('GatewayService Discord beta routing', () => {
     expect(harness.promptCreate.mock.calls[0][0].prompt).toContain(
       'upl_00000000-0000-4000-8000-000000000011'
     );
+    expect(harness.promptCreate.mock.calls[0][0].metadata).not.toHaveProperty(
+      'gateway_skipped_attachments'
+    );
   });
 
   it('does not stage Discord files when the channel keeps the text-only default', async () => {
@@ -5001,6 +5004,11 @@ describe('GatewayService Slack attachment ingestion', () => {
     expect(prompt).toContain('here are the logs');
     expect(prompt).toContain('(1 attachment was not delivered: unsupported type application/zip)');
     expect(prompt).not.toContain('an attachment could not be fetched');
+    expect(promptCreate.mock.calls[0][0].metadata.gateway_skipped_attachments).toEqual({
+      skipped: 1,
+      skipped_mime_types: ['application/zip'],
+      failed: 0,
+    });
   });
 
   it('reports fetch failures and unsupported types as separate notes', async () => {
@@ -5027,6 +5035,11 @@ describe('GatewayService Slack attachment ingestion', () => {
     const prompt = promptCreate.mock.calls[0][0].prompt as string;
     expect(prompt).toContain('(an attachment could not be fetched)');
     expect(prompt).toContain('(1 attachment was not delivered: unsupported type application/zip)');
+    expect(promptCreate.mock.calls[0][0].metadata.gateway_skipped_attachments).toEqual({
+      skipped: 1,
+      skipped_mime_types: ['application/zip'],
+      failed: 1,
+    });
   });
 });
 
