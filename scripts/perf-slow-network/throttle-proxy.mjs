@@ -60,7 +60,13 @@ export async function startThrottleProxy(opts) {
   let connections = 0;
   let lastActivity = performance.now();
 
+  let blocked = false;
   const server = net.createServer((client) => {
+    // While "offline", refuse new connections the way an unreachable host does.
+    if (blocked) {
+      client.destroy();
+      return;
+    }
     connections++;
     const upstream = net.connect(targetPort, targetHost);
     sockets.add(client);
@@ -121,6 +127,10 @@ export async function startThrottleProxy(opts) {
     /** Simulate a VPN blip: drop every open connection at once. */
     dropAll() {
       for (const socket of sockets) socket.destroy();
+    },
+    /** While true, new connections are refused (the link is down). */
+    setBlocked(value) {
+      blocked = value;
     },
     reset() {
       down.bytes = 0;
