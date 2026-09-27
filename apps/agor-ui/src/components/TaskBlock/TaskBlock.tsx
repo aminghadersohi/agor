@@ -16,7 +16,6 @@ import {
   PermissionStatus,
   ROLES,
   type SessionID,
-  shortId,
   type Task,
   TaskStatus,
   type ToolExecutionState,
@@ -47,6 +46,7 @@ import { Tag } from '../Tag';
 import { ToolDisclosureHeader } from '../ToolBlock/ToolBlock';
 import { ToolIcon } from '../ToolIcon';
 import { LeanTurnMetadata } from './LeanTurnMetadata';
+import { TaskAuditTags } from './TaskAuditTags';
 import { TurnOutcome } from './TurnOutcome';
 
 const { Paragraph } = Typography;
@@ -814,6 +814,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
             prefix="By"
           />
         )}
+        <TaskAuditTags task={task} />
         {normalized && (
           <TokenCountPill
             count={normalized.tokenUsage.totalTokens}
@@ -845,83 +846,6 @@ export const TaskBlock = React.memo<TaskBlockProps>(
               branchName={branchName}
               style={{ fontSize: 11 }}
             />
-            {scheduledFromBranch && scheduledRunAt && (
-              <ScheduledRunPill scheduledRunAt={scheduledRunAt} />
-            )}
-            {task.created_by && (
-              <CreatedByTag
-                createdBy={task.created_by}
-                currentUserId={currentUserId}
-                userById={userById}
-                prefix="By"
-              />
-            )}
-            {task.metadata?.coordinator_queue_batch && (
-              <Tag color="blue" style={{ fontSize: 11 }}>
-                {task.metadata.coordinator_queue_batch.source_request_count} requests → 1 turn (
-                {task.metadata.coordinator_queue_batch.strategy})
-              </Tag>
-            )}
-            {task.metadata?.coordinator_queue_batch_member && (
-              <Tag color="default" style={{ fontSize: 11 }}>
-                Batched into{' '}
-                {shortId(task.metadata.coordinator_queue_batch_member.execution_task_id)}
-              </Tag>
-            )}
-            {normalized && (
-              <TokenCountPill
-                count={normalized.tokenUsage.totalTokens}
-                inputTokens={normalized.tokenUsage.inputTokens}
-                outputTokens={normalized.tokenUsage.outputTokens}
-                cacheReadTokens={normalized.tokenUsage.cacheReadTokens}
-                cacheCreationTokens={normalized.tokenUsage.cacheCreationTokens}
-              />
-            )}
-            {hasContextWindowUsage && (
-              <ContextWindowPill
-                used={contextWindowUsed}
-                limit={contextWindowLimit || 0}
-                taskMetadata={{
-                  model: task.model,
-                  duration_ms: task.duration_ms,
-                  agentic_tool,
-                  raw_sdk_response: task.raw_sdk_response,
-                  normalized_sdk_response: normalized ?? undefined,
-                }}
-              />
-            )}
-            {task.model && task.model !== sessionModel && <ModelPill model={task.model} />}
-            {task.git_state.sha_at_start && task.git_state.sha_at_start !== 'unknown' && (
-              <Flex gap={token.sizeUnit / 2} align="center">
-                <GitStatePill
-                  branch={task.git_state.ref_at_start}
-                  sha={task.git_state.sha_at_start}
-                  branchName={branchName}
-                  style={{ fontSize: 11 }}
-                />
-                {task.git_state.sha_at_end &&
-                  task.git_state.sha_at_end !== 'unknown' &&
-                  task.git_state.sha_at_end !== task.git_state.sha_at_start && (
-                    <>
-                      <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                        →
-                      </Typography.Text>
-                      <GitStatePill
-                        branch={task.git_state.ref_at_end}
-                        sha={task.git_state.sha_at_end}
-                        branchName={branchName}
-                        showDirtyIndicator={true}
-                        style={{ fontSize: 11 }}
-                      />
-                    </>
-                  )}
-              </Flex>
-            )}
-            {task.report && (
-              <Tag icon={<FileTextOutlined />} color="green" style={{ fontSize: 11 }}>
-                Report
-              </Tag>
-            )}
             {task.git_state.sha_at_end &&
               task.git_state.sha_at_end !== 'unknown' &&
               task.git_state.sha_at_end !== task.git_state.sha_at_start && (
