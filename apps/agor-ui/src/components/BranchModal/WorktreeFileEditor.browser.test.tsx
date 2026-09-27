@@ -54,6 +54,7 @@ describe('WorktreeFileEditor layout (real browser)', () => {
               open
               onClose={vi.fn()}
               onFileSaved={vi.fn()}
+              canWrite
             />
           </App>
         </ConfigProvider>

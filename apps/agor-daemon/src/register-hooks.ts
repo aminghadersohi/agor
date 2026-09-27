@@ -3117,8 +3117,10 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     },
   });
 
-  // /file (singular): read-only branch filesystem browser. Takes branch_id
-  // as a query param. Gate with branch RBAC 'view' permission.
+  // /file (singular): branch filesystem browser and editor. Takes branch_id
+  // as a query param. Every method needs branch RBAC 'view' here; `patch`
+  // (save) additionally requires branch file `write` access, enforced in
+  // FileService.resolveBranchWrite.
   safeService('/file')?.hooks({
     before: {
       all: [

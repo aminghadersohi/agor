@@ -262,7 +262,7 @@ export const BranchModal: React.FC<BranchModalProps> = ({
     {
       key: 'files',
       label: 'Files',
-      children: <FilesTab branch={branch} client={client} />,
+      children: <FilesTab branch={branch} client={client} canWriteFiles={form.canWriteFiles} />,
     },
     ...(form.canViewPermissions
       ? [
