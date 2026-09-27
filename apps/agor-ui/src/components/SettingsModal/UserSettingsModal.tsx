@@ -50,6 +50,7 @@ import {
   Form,
   Grid,
   Input,
+  InputNumber,
   Layout,
   Menu,
   Modal,
@@ -92,7 +93,13 @@ import { ClaudeAuthSettings } from '../ClaudeAuth';
 import { CodexAuthSettings } from '../CodexAuth';
 import { EnvVarEditor } from '../EnvVarEditor';
 import { HighlightMatch } from '../HighlightMatch';
+import {
+  MAX_SCREENSAVER_IDLE_MINUTES,
+  MIN_SCREENSAVER_IDLE_MINUTES,
+  resolveScreensaverIdleMinutes,
+} from '../IdleGlyphScreensaver';
 import { SessionMcpServersField } from '../MCPServerSelect';
+import { ProfileImageGalleryEditor } from '../ProfileImage';
 import { ToolIcon } from '../ToolIcon';
 import { UserIdentityAvatar } from '../UserIdentityAvatar';
 import { AudioSettingsTab } from './AudioSettingsTab';
@@ -221,7 +228,7 @@ const PANEL_META: Record<string, { title: string; icon: React.ReactNode; keyword
     title: 'Preferences',
     icon: <BellOutlined />,
     keywords:
-      'assistant teammate primary coding agent agentic tool audio sound notification chime event stream',
+      'assistant teammate primary coding agent agentic tool audio sound notification chime event stream screensaver idle',
   },
   security: { title: 'Security', icon: <LockOutlined />, keywords: 'account password credentials' },
   tokens: { title: 'API tokens', icon: <KeyOutlined />, keywords: 'api token key ci pipeline' },
@@ -305,6 +312,7 @@ const UserSettingsModalForIdentity: React.FC<UserSettingsModalProps> = ({
   );
 
   const [form] = Form.useForm();
+  const screensaverEnabled = Form.useWatch('screensaverEnabled', form) === true;
   const [rawActiveKey, setActiveKey] = useState<string>(() => normalizeInitialKey(initialTab));
   const [search, setSearch] = useState('');
   const [providerSubtab, setProviderSubtab] = useState<ProviderSubtab>('auth');
@@ -516,6 +524,8 @@ const UserSettingsModalForIdentity: React.FC<UserSettingsModalProps> = ({
         unix_username: userData.unix_username,
         groupIds: [],
         eventStreamEnabled: userData.preferences?.eventStream?.enabled ?? true,
+        screensaverEnabled: userData.preferences?.screensaver?.enabled === true,
+        screensaverIdleMinutes: resolveScreensaverIdleMinutes(userData.preferences?.screensaver),
         useSlackAvatar: userData.preferences?.use_slack_avatar !== false,
         must_change_password: userData.must_change_password ?? false,
       });
@@ -878,6 +888,13 @@ const UserSettingsModalForIdentity: React.FC<UserSettingsModalProps> = ({
           minDurationSeconds: audioValues.minDurationSeconds,
         };
         nextPreferences.eventStream = { enabled: form.getFieldValue('eventStreamEnabled') ?? true };
+        nextPreferences.screensaver = {
+          enabled: form.getFieldValue('screensaverEnabled') === true,
+          idleMinutes: resolveScreensaverIdleMinutes({
+            enabled: true,
+            idleMinutes: form.getFieldValue('screensaverIdleMinutes'),
+          }),
+        };
         const primaryAgenticTool = primaryToolForm.getFieldValue('primaryAgenticTool') as
           | AgenticToolName
           | undefined;
@@ -1820,6 +1837,17 @@ const UserSettingsModalForIdentity: React.FC<UserSettingsModalProps> = ({
         />
       </FieldRow>
 
+      {user && (
+        <>
+          <SectionDivider label="Photos" />
+          <ProfileImageGalleryEditor
+            subject={{ type: 'user', id: user.user_id }}
+            canEdit={canEditTarget && hasMinimumRole(currentUser?.role, ROLES.MEMBER)}
+            label="Profile photos"
+          />
+        </>
+      )}
+
       {onReopenOnboarding && isSelf && (
         <>
           <SectionDivider label="Onboarding" />
@@ -1957,6 +1985,27 @@ const UserSettingsModalForIdentity: React.FC<UserSettingsModalProps> = ({
           form={audioForm}
           onValuesChange={() => markMainPanelDirty('preferences')}
         />
+      </SettingsSection>
+
+      <SettingsSection title="Screensaver">
+        <FieldRow
+          label="Start when idle"
+          name="screensaverEnabled"
+          valuePropName="checked"
+          help="Show an ambient screensaver after a period without input. Preview it anytime from the user menu."
+        >
+          <Switch disabled={saving} />
+        </FieldRow>
+        <FieldRow label="Idle time" name="screensaverIdleMinutes">
+          <InputNumber
+            min={MIN_SCREENSAVER_IDLE_MINUTES}
+            max={MAX_SCREENSAVER_IDLE_MINUTES}
+            precision={0}
+            suffix="minutes"
+            disabled={saving || !screensaverEnabled}
+            style={{ width: 160 }}
+          />
+        </FieldRow>
       </SettingsSection>
 
       <SettingsSection title="Developer tools">
