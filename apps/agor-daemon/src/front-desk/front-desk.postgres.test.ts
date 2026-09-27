@@ -36,6 +36,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateId } from '../../../../packages/core/src/lib/ids';
 import { frontDeskFixture, frontDeskSuite } from '../../test/front-desk-fixture';
 import { resolveTeammateSession } from '../mcp/tools/teammate-addressing';
+import { createBranchFrontDeskRoute } from '../services/branch-front-desk';
 import { setTeammateFrontDesk } from './manage-front-desk';
 
 const postgresUrl = process.env.AGOR_TEST_POSTGRES_URL;
@@ -220,5 +221,46 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)('pinned front desk (Postgre
       via: 'front_desk',
       session: { session_id: pinned.session_id },
     });
+  });
+
+  it('serves branches/:id/front-desk only inside the caller’s tenant', async () => {
+    const x = await freshFixture();
+    const y = await freshFixture();
+    const branch = await x.createTeammate({ name: 'front-desk', displayName: 'Front Desk' });
+    const pinned = await x.createSession({
+      branchId: branch.branch_id,
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    const other = await x.createSession({
+      branchId: branch.branch_id,
+      updatedAt: new Date('2026-05-01T00:00:00.000Z'),
+    });
+    const params = (f: typeof x, query?: Record<string, unknown>) =>
+      ({
+        ...f.contextFor().baseServiceParams,
+        provider: 'rest',
+        route: { id: branch.branch_id },
+        ...(query ? { query } : {}),
+      }) as never;
+    const xRoute = createBranchFrontDeskRoute({ db: x.db, allowSuperadmin: () => false });
+    const yRoute = createBranchFrontDeskRoute({ db: y.db, allowSuperadmin: () => false });
+
+    // In-tenant, the route pins through the fenced transaction on PostgreSQL.
+    await expect(
+      x.inTenant(() => xRoute.create({ session_id: pinned.session_id }, params(x)))
+    ).resolves.toMatchObject({ front_desk: { session_id: pinned.session_id }, can_manage: true });
+
+    // Tenant Y's owner, handed X's exact ids, sees and changes nothing.
+    await expect(y.inTenant(() => yRoute.find(params(y)))).rejects.toMatchObject({ code: 404 });
+    await expect(
+      y.inTenant(() => yRoute.create({ session_id: other.session_id }, params(y)))
+    ).rejects.toMatchObject({ code: 404 });
+    await expect(
+      y.inTenant(() => yRoute.remove(null, params(y, { expected_session_id: pinned.session_id })))
+    ).rejects.toMatchObject({ code: 404 });
+
+    expect(await x.declarations(branch.branch_id)).toEqual([
+      expect.objectContaining({ session_id: pinned.session_id, status: 'active' }),
+    ]);
   });
 });

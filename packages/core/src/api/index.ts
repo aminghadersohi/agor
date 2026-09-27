@@ -95,8 +95,10 @@ import type {
   SessionReminderPatchData,
   SessionUpdate,
   SetSessionPowerPriorityRequest,
+  SetTeammateFrontDeskRequest,
   Task,
   TaskQueueMutationResult,
+  TeammateFrontDeskView,
   TeammateWelcomeNoteRequest,
   TemplateRenderRequest,
   TemplateRenderResponse,
@@ -355,6 +357,16 @@ export interface PowerEssentialSessionsService {
 export interface SessionPowerPriorityService {
   find(params?: Params): Promise<SessionPowerPriorityView>;
   create(data: SetSessionPowerPriorityRequest, params?: Params): Promise<SessionPowerPriorityView>;
+}
+
+/** `branches/:id/front-desk` — every method answers with the fresh view. */
+export interface BranchFrontDeskService {
+  find(params?: Params): Promise<TeammateFrontDeskView>;
+  create(data: SetTeammateFrontDeskRequest, params?: Params): Promise<TeammateFrontDeskView>;
+  remove(
+    id: null,
+    params?: Params & { query?: { expected_session_id?: SessionID } }
+  ): Promise<TeammateFrontDeskView>;
 }
 
 /**
@@ -972,6 +984,7 @@ export interface AgorClient
   service(path: 'power-management'): PowerManagementService;
   service(path: 'power-management/essential-sessions'): PowerEssentialSessionsService;
   service(path: `sessions/${string}/power-priority`): SessionPowerPriorityService;
+  service(path: `branches/${string}/front-desk`): BranchFrontDeskService;
   service(path: 'zone-workflow-transitions'): ZoneWorkflowTransitionsService;
   service(path: 'zone-workflow-advances'): ZoneWorkflowAdvancesService;
   service(path: 'schedules'): SchedulesService;
