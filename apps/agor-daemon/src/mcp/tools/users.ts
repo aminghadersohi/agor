@@ -1,12 +1,15 @@
 import { DEFAULT_STATIC_TENANT_ID } from '@agor/core/config';
 import { ProfileImageRepository } from '@agor/core/db';
-import { NotFound } from '@agor/core/feathers';
+import { BadRequest, NotFound } from '@agor/core/feathers';
 import type {
+  AuthenticatedParams,
   BoardID,
   Branch,
   BranchID,
+  FileDetail,
   ProfileImage,
   ProfileImageID,
+  ProfileImagePatch,
   ProfileImageSubjectType,
   TenantID,
   UserID,
@@ -14,8 +17,17 @@ import type {
 import { isTeammate, ROLES, type User } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { PROFILE_IMAGE_MAX_GALLERY_ITEMS } from '../../utils/profile-image-processing.js';
-import { mcpOptionalString, mcpRequiredId, mcpRequiredString } from '../schema.js';
+import {
+  createProfileImageManager,
+  type ProfileImageManager,
+  profileImageCallerFromParams,
+} from '../../utils/profile-image-management.js';
+import {
+  PROFILE_IMAGE_MAX_BYTES,
+  PROFILE_IMAGE_MAX_GALLERY_ITEMS,
+} from '../../utils/profile-image-processing.js';
+import { resolveBranchId } from '../resolve-ids.js';
+import { mcpOptionalId, mcpOptionalString, mcpRequiredId, mcpRequiredString } from '../schema.js';
 import type { McpContext } from '../server.js';
 import { textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope } from '../tenant-scope.js';
@@ -411,7 +423,65 @@ async function authorizeImage(ctx: McpContext, image: ProfileImage): Promise<voi
   await authorizeSubject(ctx, image.subject_type, image.subject_id);
 }
 
-/** Read-only, permission-aware access to processed user, teammate, and board galleries. */
+/** Base64 of the largest accepted upload, plus room for a `data:` URL prefix. */
+const PROFILE_IMAGE_MAX_BASE64_LENGTH = Math.ceil(PROFILE_IMAGE_MAX_BYTES / 3) * 4 + 64;
+const BASE64_PAYLOAD = /^[A-Za-z0-9+/_-]*={0,2}$/;
+
+function profileImageManagerFor(ctx: McpContext): ProfileImageManager {
+  return createProfileImageManager({
+    app: ctx.app,
+    db: ctx.db,
+    allowSuperadmin: ctx.app.get('config')?.execution?.allow_superadmin === true,
+  });
+}
+
+function profileImageCaller(ctx: McpContext) {
+  return profileImageCallerFromParams(
+    ctx.baseServiceParams as AuthenticatedParams,
+    tenantIdFor(ctx)
+  );
+}
+
+function decodeProfileImageBase64(value: string): Buffer {
+  const payload = value.replace(/^data:[^,]*;base64,/i, '').replace(/\s+/g, '');
+  if (!payload || !BASE64_PAYLOAD.test(payload)) {
+    throw new BadRequest('imageBase64 must be base64-encoded image bytes');
+  }
+  const data = Buffer.from(payload, 'base64');
+  if (data.byteLength > PROFILE_IMAGE_MAX_BYTES) {
+    throw new BadRequest('Images must be 5 MB or smaller');
+  }
+  return data;
+}
+
+/**
+ * Read a gallery upload out of a branch through the `file` service, so the
+ * read carries the caller's branch file access and runs in the executor like
+ * every other branch file read; the daemon never opens the path itself.
+ */
+async function readBranchImage(
+  ctx: McpContext,
+  branchIdInput: string,
+  path: string
+): Promise<{ data: Buffer; name: string }> {
+  const branchId = await resolveBranchId(ctx, branchIdInput);
+  const file = (await ctx.app
+    .service('file')
+    .get(path, { ...ctx.baseServiceParams, query: { branch_id: branchId } })) as FileDetail;
+  if (file.encoding !== 'base64') {
+    throw new BadRequest('path must point to a JPEG, PNG, or WebP image');
+  }
+  if (file.size > PROFILE_IMAGE_MAX_BYTES) {
+    throw new BadRequest('Images must be 5 MB or smaller');
+  }
+  return { data: Buffer.from(file.content, 'base64'), name: path.split('/').pop() || path };
+}
+
+/**
+ * Permission-aware access to processed user, teammate, and board galleries.
+ * Writes share authorization, the gallery cap, image processing, and primary
+ * projection with the browser upload routes.
+ */
 export function registerProfileImageTools(server: McpServer, ctx: McpContext): void {
   server.registerTool(
     'agor_profile_images_list',
@@ -499,6 +569,123 @@ export function registerProfileImageTools(server: McpServer, ctx: McpContext): v
           },
         ],
       };
+    }
+  );
+
+  server.registerTool(
+    'agor_profile_images_upload',
+    {
+      description: `Add an image to the gallery of an Agor user, teammate, or board. The first image becomes the main (primary) image and is what avatars show. The daemon re-encodes the upload into small and large WebP variants and strips its metadata; JPEG, PNG, and WebP up to 5 MB are accepted, ${PROFILE_IMAGE_MAX_GALLERY_ITEMS} images per gallery.
+
+Provide exactly one source:
+- branchId + path: a branch-relative image file, read with your branch file access (preferred for anything but tiny images).
+- imageBase64: raw base64 or a data: URL.
+
+Managing a user gallery requires being that user or an admin; a board gallery requires board edit access; a teammate gallery requires Manager access to the teammate branch.`,
+      inputSchema: z
+        .strictObject({
+          subjectType: z
+            .enum(['user', 'teammate', 'board'])
+            .describe('Gallery owner type: an Agor user, teammate branch, or board'),
+          subjectId: mcpRequiredId(
+            'subjectId',
+            'Profile subject',
+            'User, teammate branch, or board ID (UUIDv7 or short ID)'
+          ),
+          branchId: mcpOptionalId(
+            'branchId',
+            'Branch',
+            'Branch containing the image file (use with path)'
+          ),
+          path: mcpOptionalString('path', 'Branch-relative image file path (use with branchId)'),
+          imageBase64: z
+            .string()
+            .max(PROFILE_IMAGE_MAX_BASE64_LENGTH, 'imageBase64 exceeds the 5 MB image limit.')
+            .optional()
+            .describe('Base64 image bytes or a data: URL (alternative to branchId + path)'),
+          originalName: mcpOptionalString(
+            'originalName',
+            'File name recorded for the image (default: the path basename)'
+          ),
+          altText: mcpOptionalString('altText', 'Accessible description of the image'),
+        })
+        .refine((args) => Boolean(args.imageBase64) !== Boolean(args.branchId || args.path), {
+          message: 'Provide either imageBase64 or branchId + path, not both.',
+        })
+        .refine((args) => Boolean(args.branchId) === Boolean(args.path), {
+          message: 'branchId and path must be provided together.',
+        }),
+    },
+    async (args) => {
+      const source =
+        args.branchId && args.path
+          ? await readBranchImage(ctx, args.branchId, args.path)
+          : { data: decodeProfileImageBase64(args.imageBase64 ?? ''), name: undefined };
+      const created = await profileImageManagerFor(ctx).upload(profileImageCaller(ctx), {
+        subjectType: args.subjectType,
+        subjectId: args.subjectId as UserID | BranchID | BoardID,
+        data: source.data,
+        originalName: args.originalName ?? source.name,
+        altText: args.altText,
+      });
+      return textResult(created);
+    }
+  );
+
+  server.registerTool(
+    'agor_profile_images_update',
+    {
+      description:
+        'Update one gallery image of an Agor user, teammate, or board: make it the main (primary) image, move it to another position, or change its alt text. Requires the same manage access as agor_profile_images_upload.',
+      inputSchema: z.strictObject({
+        imageId: mcpRequiredId('imageId', 'Profile image'),
+        isPrimary: z
+          .literal(true)
+          .optional()
+          .describe('Make this the main image (the previous main image is demoted)'),
+        position: z
+          .number({ error: 'position must be a non-negative integer when provided.' })
+          .int('position must be an integer.')
+          .min(0, 'position must be 0 or greater.')
+          .optional()
+          .describe('Gallery order position (0 = first)'),
+        altText: z
+          .string()
+          .max(240, 'altText must be 240 characters or fewer.')
+          .nullable()
+          .optional()
+          .describe('Accessible description; null or an empty string clears it'),
+      }),
+    },
+    async (args) => {
+      const patch: ProfileImagePatch = {
+        ...(args.isPrimary ? { is_primary: true } : {}),
+        ...(args.position !== undefined ? { position: args.position } : {}),
+        ...(args.altText !== undefined ? { alt_text: args.altText ?? '' } : {}),
+      };
+      const updated = await profileImageManagerFor(ctx).update(
+        profileImageCaller(ctx),
+        args.imageId as ProfileImageID,
+        patch
+      );
+      return textResult(updated);
+    }
+  );
+
+  server.registerTool(
+    'agor_profile_images_delete',
+    {
+      description:
+        'Delete one gallery image of an Agor user, teammate, or board. Deleting the main image promotes the next gallery image, or clears the main image when none remain. Requires the same manage access as agor_profile_images_upload.',
+      annotations: { destructiveHint: true },
+      inputSchema: z.strictObject({
+        imageId: mcpRequiredId('imageId', 'Profile image'),
+      }),
+    },
+    async (args) => {
+      const imageId = args.imageId as ProfileImageID;
+      await profileImageManagerFor(ctx).remove(profileImageCaller(ctx), imageId);
+      return textResult({ deleted: true, image_id: imageId });
     }
   );
 }
