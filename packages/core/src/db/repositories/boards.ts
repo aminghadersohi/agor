@@ -271,9 +271,9 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
         primary_owner_user_id: row.primary_owner_user_id,
         url,
         archived: Boolean(row.archived),
-        // Point reads and write responses have no caller-specific branch RBAC
-        // context. Board list reads replace these neutral defaults with the
-        // authoritative per-caller aggregates below.
+        // Write responses and internal point reads have no caller-specific
+        // branch RBAC context. List reads and external `boards.get` replace
+        // these neutral defaults via attachBoardListCounts below.
         worktree_count: 0,
         total_session_count: 0,
         active_session_count: 0,
@@ -534,10 +534,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
    * tenant RLS / the tenant-scoped database proxy remains the outer tenant
    * boundary for every joined row.
    */
-  private async attachBoardListCounts(
-    boardList: Board[],
-    visibleToUserId?: UUID
-  ): Promise<Board[]> {
+  async attachBoardListCounts(boardList: Board[], visibleToUserId?: UUID): Promise<Board[]> {
     if (boardList.length === 0) return boardList;
 
     const conditions: SQL[] = [

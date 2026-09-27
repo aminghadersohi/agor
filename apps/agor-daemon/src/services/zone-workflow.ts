@@ -1,3 +1,4 @@
+import { PAGINATION } from '@agor/core/config';
 import {
   BoardRepository,
   BranchRepository,
@@ -31,6 +32,23 @@ const TRANSITION_BEHAVIORS = new Set<ZoneWorkflowTransitionBehavior>([
 const MAX_ADVANCE_ENTITIES = 100;
 
 export type ZoneWorkflowParams = QueryParams<{ board_id?: BoardID }> & AuthenticatedParams;
+export type ZoneWorkflowAdvanceParams = QueryParams<{
+  board_id?: BoardID;
+  transition_id?: string;
+  $limit?: number | string;
+  $skip?: number | string;
+}> &
+  AuthenticatedParams;
+
+/** Parse a REST/socket pagination value (query strings arrive as text). */
+function boundedInteger(value: unknown, field: string, min: number): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = typeof value === 'string' && value.trim() ? Number(value) : value;
+  if (typeof parsed !== 'number' || !Number.isInteger(parsed) || parsed < min) {
+    throw new BadRequest(`${field} must be an integer >= ${min}`);
+  }
+  return parsed;
+}
 
 function requiredTrimmed(value: unknown, field: string, max: number): string {
   if (typeof value !== 'string' || !value.trim()) throw new BadRequest(`${field} is required`);
@@ -170,9 +188,34 @@ export class ZoneWorkflowAdvancesService {
     this.branches = new BranchRepository(db);
   }
 
-  async find(params?: ZoneWorkflowParams) {
-    const data = await this.repo.findAdvances(params?.query?.board_id);
-    return { total: data.length, limit: data.length, skip: 0, data };
+  /**
+   * Board advance history, newest first. `board_id` is required (the hook
+   * authorizes the board from it); `transition_id` narrows to one edge.
+   */
+  async find(params?: ZoneWorkflowAdvanceParams) {
+    const query = params?.query ?? {};
+    if (typeof query.board_id !== 'string') {
+      throw new BadRequest('board_id is required when listing workflow data');
+    }
+    const transitionId = query.transition_id;
+    if (
+      transitionId !== undefined &&
+      (typeof transitionId !== 'string' || !isValidUUID(transitionId))
+    ) {
+      throw new BadRequest('transition_id must be a UUID');
+    }
+    const limit = Math.min(
+      boundedInteger(query.$limit, '$limit', 0) ?? PAGINATION.DEFAULT_LIMIT,
+      PAGINATION.MAX_LIMIT
+    );
+    const skip = boundedInteger(query.$skip, '$skip', 0) ?? 0;
+    const page = await this.repo.findAdvancePage({
+      boardId: query.board_id,
+      transitionId,
+      limit,
+      offset: skip,
+    });
+    return { total: page.total, limit, skip, data: page.data };
   }
 
   async get(id: string): Promise<ZoneWorkflowAdvance> {

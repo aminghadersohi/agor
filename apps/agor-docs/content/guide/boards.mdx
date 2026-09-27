@@ -116,6 +116,19 @@ Each zone has a different prompt template. Drag a branch across the board and it
 
 You can also build asymmetric pipelines: a "Stuck" zone that escalates to a different model, a "Spawn 5 reviewers" zone that fans out to multiple agents, a "Generate tests" zone wired to a Codex template.
 
+### Workflow transitions and advance history
+
+With the canvas **workflow** tool you can draw a directed arrow from one zone to
+another. Selecting an arrow offers **Advance selected**, which moves the selected
+branches/cards from the source zone to the target in one explicit, retry-safe
+step. An advance keeps each card's other placement data (such as its size); it
+only changes the zone and position.
+
+Every advance is recorded. Select an arrow and choose **History** to see who
+advanced what, when, and whether the target-zone prompt ran. Agents read the
+same trail with `agor_zone_workflow_advances_list`, which needs only view access
+to the board.
+
 ---
 
 ## Multiple boards, one workspace
@@ -144,7 +157,9 @@ Completed, failed, timed-out, idle, and archived Sessions are not active. A
 queued Task does not make an otherwise idle Session active; when dispatch
 claims the Session, its executing status does. Counts come from the same
 permission-filtered board-list query on every surface, so a partially loaded
-browser view never becomes the source of a board-wide total.
+browser view never becomes the source of a board-wide total. A single-board
+read (`GET /boards/:id`, `agor_boards_get`) returns the same caller-scoped
+counts.
 
 ---
 
