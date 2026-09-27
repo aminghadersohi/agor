@@ -53,6 +53,8 @@ export const DOMAIN_DESCRIPTIONS: Record<string, string> = {
   cards: 'Kanban-style cards and card type definitions on boards',
   artifacts: 'Live Sandpack-style apps and DOM inspection/materialization for board artifacts',
   users: 'User accounts, profiles, preferences, and administration',
+  'profile-images':
+    'Photo galleries for users, teammates, and boards: list, view, upload, reorder, and delete',
   analytics: 'Usage and cost tracking leaderboard',
   'mcp-servers': 'External MCP server configuration and OAuth management',
   gateway: 'Gateway channels for Slack, GitHub, Teams, and other message integrations',
