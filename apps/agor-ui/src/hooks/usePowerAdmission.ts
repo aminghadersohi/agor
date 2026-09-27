@@ -38,12 +38,20 @@ export function usePowerAdmission(
       }
     };
     void load();
-    service.on('patched', apply);
+    // A client without realtime (REST-only, older transports) still gets the
+    // slow poll; a subscription failure must not take the composer down.
+    let subscribed = false;
+    try {
+      service.on('patched', apply);
+      subscribed = true;
+    } catch {
+      subscribed = false;
+    }
     const timer = window.setInterval(() => void load(), 60_000);
     return () => {
       operation.cancel();
       window.clearInterval(timer);
-      service.off('patched', apply);
+      if (subscribed) service.off('patched', apply);
     };
   }, [client, guard, scope.operationScope]);
 
