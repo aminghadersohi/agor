@@ -27,6 +27,7 @@ import {
   resolvePasswordPolicyRequirements,
   resolvePowerManagementConfig,
   resolvePowerManagementRuntimeOverlay,
+  resolveRestartRecoverySettings,
   resolveSdkWatchdogConfig,
   resolveTeammateFrameworkRepoUrl,
   resolveTenantContext,
@@ -7659,6 +7660,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             unixUserMode: config.execution?.unix_user_mode ?? 'simple',
             managedEnvsExecutionMode:
               config.execution?.managed_envs_execution_mode ?? MANAGED_ENV_EXECUTION_MODE_DEFAULT,
+            // Boot-time opt-in; results are logged per start, so this is the
+            // only place an operator can confirm what the daemon resolved.
+            restartRecovery: resolveRestartRecoverySettings(config.execution),
           },
           deployment: {
             mode: deployment.mode,

@@ -349,6 +349,36 @@ change it; the packaged daemon refuses to start while both policy sources are ab
 is never exposed for mutation through API, UI, or MCP. Headless deployments should use an explicit
 YAML list, including `[]` when a tool-free deployment is intentional.
 
+## Restart recovery (opt-in)
+
+When the daemon restarts, it releases Tasks that were still dispatching or running, because it
+cannot verify their executors. Queued prompts are kept either way. With restart recovery on, the
+daemon then starts a new, system-authored **continuation** Task in each affected Session. It asks
+the agent to inspect the previous task state and continue safely. It never replays the interrupted
+prompt.
+
+```yaml
+execution:
+  restart_recovery:
+    enabled: false # default; set true to opt in
+    delay_ms: 2000 # pause between continuations, 250–60000
+    max_tasks_per_start: 50 # cap per daemon start, 1–500
+    resume_after_crash: false # also recover after an unclean exit
+```
+
+- Recovery runs once per daemon start, pacing admissions by `delay_ms` and admitting at most
+  `max_tasks_per_start`.
+- After an abrupt crash Agor cannot verify that the old executor stopped, so crash recovery is
+  gated separately behind `resume_after_crash`.
+- A Session that already moved on (a newer prompt, or archived) is skipped and the source Task
+  records why.
+- Settings are read at startup; change `config.yaml` and restart to apply them. Out-of-range values
+  stop the daemon at boot with the offending key.
+
+To confirm what the daemon resolved, open **Settings → About → Daemon Config (Admin Only)** and
+check **Restart Recovery**, or read `execution.restartRecovery` from authenticated `GET /health`.
+Per-start results are written to the daemon log.
+
 ## Environment precedence
 
 Supported environment overrides still win over YAML. Important examples are `PORT`,
