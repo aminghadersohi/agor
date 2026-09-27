@@ -1707,9 +1707,12 @@ describe('BoardRepository.applyBoardLayout', () => {
       expect(result.changed_object_ids).toEqual(['zone']);
       expect(result.changed_placement_ids).toEqual([placement.object_id]);
       expect(result.placements).toHaveLength(1);
+      // Whole-board and zone arranges commit through this path; moving a pinned
+      // placement must never clear its zone pin.
       expect(await placementRepo.findByObjectId(placement.object_id)).toMatchObject({
         position: { x: 20, y: 100 },
         compact: true,
+        zone_id: 'zone',
       });
     }
   );

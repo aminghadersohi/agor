@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ZoneBoardObject } from '../types/board.js';
-import { findFreeZoneSlot, type ZoneOccupantRectangle } from './board-placement';
+import { findFreeZoneSlot, planZoneSlot, type ZoneOccupantRectangle } from './board-placement';
 
 const zone = (width: number, height: number) =>
   ({ width, height }) as Pick<ZoneBoardObject, 'width' | 'height'>;
@@ -76,9 +76,77 @@ describe('findFreeZoneSlot', () => {
     ).toThrow(/zone/i);
   });
 
+  it('finds the free band directly below an occupant that is off the item-sized lattice', () => {
+    // A branch arranged at (20,100) blocks every lattice row anchored at the
+    // top inset (24, 268), yet a 500x220 slot clearly fits below it.
+    const occupant = { x: 20, y: 100, width: 500, height: 200 };
+    const slot = findFreeZoneSlot(zone(812, 600), [occupant], {
+      entityWidth: 500,
+      entityHeight: 220,
+      overflow: 'reject',
+    });
+
+    expect(slot).toEqual({ x: 24, y: 324 });
+    expect(overlaps({ ...slot, width: 500, height: 220 }, occupant)).toBe(false);
+  });
+
+  it('honors independent column and row gaps', () => {
+    const slot = findFreeZoneSlot(zone(812, 600), [{ x: 20, y: 100, width: 500, height: 200 }], {
+      entityWidth: 500,
+      entityHeight: 220,
+      padding: 20,
+      titleInset: 80,
+      gapX: 40,
+      gapY: 8,
+      overflow: 'reject',
+    });
+
+    expect(slot).toEqual({ x: 20, y: 308 });
+  });
+
   it('reserves the zone title band when a title inset is given', () => {
     const slot = findFreeZoneSlot(zone(1200, 900), [], { ...branch, padding: 24, titleInset: 64 });
 
     expect(slot).toEqual({ x: 24, y: 88 });
+  });
+});
+
+describe('planZoneSlot', () => {
+  const frame = { padding: 20, titleInset: 80, gapX: 40, gapY: 8 };
+  const pinned = [{ x: 20, y: 100, width: 500, height: 200 }];
+
+  it('keeps the zone size when a contained slot exists', () => {
+    expect(
+      planZoneSlot(zone(812, 600), pinned, { ...frame, ...branch, entityHeight: 220 })
+    ).toEqual({ position: { x: 20, y: 308 }, width: 812, height: 600, grew: false });
+  });
+
+  it('grows a height-resizable zone instead of rejecting the pin', () => {
+    expect(
+      planZoneSlot(zone(812, 340), pinned, {
+        ...frame,
+        ...branch,
+        entityHeight: 220,
+        resize: 'height',
+      })
+    ).toEqual({ position: { x: 20, y: 308 }, width: 812, height: 560, grew: true });
+  });
+
+  it('widens only when the policy allows width growth', () => {
+    expect(() =>
+      planZoneSlot(zone(400, 340), [], { ...frame, ...branch, resize: 'height' })
+    ).toThrow(/too narrow/);
+    expect(planZoneSlot(zone(400, 340), [], { ...frame, ...branch, resize: 'both' })).toEqual({
+      position: { x: 20, y: 100 },
+      width: 540,
+      height: 340,
+      grew: true,
+    });
+  });
+
+  it('still rejects a full fixed-size zone', () => {
+    expect(() =>
+      planZoneSlot(zone(812, 340), pinned, { ...frame, ...branch, entityHeight: 220 })
+    ).toThrow(/No free slot/);
   });
 });

@@ -17,7 +17,6 @@ import {
   layoutCompactRectangles,
   layoutRectangles,
 } from '@agor/core/layout/rectangle-packing';
-import { planZoneGrowthReflow } from '@agor/core/layout/zone-growth-reflow';
 import {
   BOARD_DENSITY_EXPANDABLE_ENTITY_TYPES,
   compactZoneItemSize,
@@ -61,6 +60,11 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { BoardsServiceImpl } from '../../declarations.js';
 import { emitServiceEvent } from '../../utils/emit-service-event.js';
+import {
+  getCanvasObjectDimensions,
+  planZoneGrowthObjects,
+  rectanglesOverlap,
+} from '../../utils/zone-placement.js';
 import { boardCapabilityPoliciesSchema } from '../capability-policy-schema.js';
 import {
   mcpListLimit,
@@ -171,13 +175,6 @@ function hasUnusableSize(entity: Pick<BoardEntityObject, 'size'>): boolean {
 
 type CanvasRectangle = { id: string; x: number; y: number; width: number; height: number };
 
-function rectanglesOverlap(
-  a: { x: number; y: number; width: number; height: number },
-  b: { x: number; y: number; width: number; height: number }
-): boolean {
-  return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
-}
-
 /**
  * Zone rectangles a whole-board arrange must not lay its grid on top of.
  *
@@ -193,30 +190,6 @@ function zoneObstacles(board: Board, arrangingZones: boolean): CanvasRectangle[]
     const { x, y } = object;
     const { width, height } = getCanvasObjectDimensions(object);
     return [{ id: objectId, x, y, width, height }];
-  });
-}
-
-/**
- * Zones that the given rectangle would sit on top of.
- *
- * Growing a zone to fit its contents is not free: a zone is a rectangle on a
- * shared canvas, and autoResizeHeight moves its bottom edge without asking what
- * is underneath it. A zone that silently swallows its neighbour is the same
- * class of defect this tool refuses to create *inside* a zone, so it is
- * reported rather than performed in silence. The resize still happens —
- * contents overflowing their own zone is the worse outcome — but the caller is
- * told which zones it now covers, and agor_boards_auto_arrange with
- * includeZones:true is the repair.
- */
-function zonesOverlappedBy(
-  board: Board,
-  zoneId: string,
-  rect: { x: number; y: number; width: number; height: number }
-): string[] {
-  return Object.entries(board.objects ?? {}).flatMap(([objectId, object]) => {
-    if (objectId === zoneId || object.type !== 'zone') return [];
-    const { x, y, width, height } = object;
-    return rectanglesOverlap(rect, { x, y, width, height }) ? [objectId] : [];
   });
 }
 
@@ -252,32 +225,6 @@ function resolveArrangeOrigin(options: {
     y = Math.max(...blocking.map((zone) => zone.y + zone.height)) + gapY;
   }
   return { startX, startY: y, avoidedZoneIds };
-}
-
-function usableCanvasDimension(value: number | undefined, fallback: number): number {
-  return Number.isFinite(value) && (value ?? 0) > 0 ? (value as number) : fallback;
-}
-
-function getCanvasObjectDimensions(object: BoardObject): { width: number; height: number } {
-  if (object.type === 'text') {
-    return {
-      width: usableCanvasDimension(object.width, 240),
-      height: usableCanvasDimension(object.height, 120),
-    };
-  }
-  if (object.type === 'markdown') {
-    const width = usableCanvasDimension(object.width, 400);
-    const charsPerLine = Math.max(20, Math.floor(width / 8));
-    const lines = Math.max(3, Math.ceil(object.content.length / charsPerLine));
-    return { width, height: Math.max(140, 48 + lines * 20) };
-  }
-  if (object.type === 'app' || object.type === 'artifact' || object.type === 'zone') {
-    return {
-      width: usableCanvasDimension(object.width, 600),
-      height: usableCanvasDimension(object.height, 400),
-    };
-  }
-  return { width: 240, height: 120 };
 }
 
 async function filterVisibleBoardEntities(
@@ -1920,82 +1867,17 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         resizeMode === 'both'
           ? Math.max(frame.width, ceilBoardGridValue(layout.width))
           : frame.width;
-      // A grow moves an edge onto whatever shares the canvas beside or below
-      // it. Only a grow can newly cover a neighbour; a shrink or a no-op cannot.
-      const resizedOverZoneIds =
-        appliedZoneHeight > zone.height || appliedZoneWidth > zone.width
-          ? zonesOverlappedBy(board, zoneId, {
-              x: zone.x,
-              y: zone.y,
-              width: appliedZoneWidth,
-              height: appliedZoneHeight,
-            })
-          : [];
-      const reflowPlan =
-        zonePolicy.onOverflow === 'reflow_board' && resizedOverZoneIds.length > 0
-          ? planZoneGrowthReflow(
-              Object.entries(board.objects ?? {}).flatMap(([id, object]) =>
-                object.type === 'zone' ? [{ id, ...object }] : []
-              ),
-              zoneId,
-              {
-                id: zoneId,
-                x: zone.x,
-                y: zone.y,
-                width: appliedZoneWidth,
-                height: appliedZoneHeight,
-              },
-              { gapX: zonePolicy.columnGap, gapY: zonePolicy.rowGap }
-            )
-          : null;
-      const movedZoneIds = reflowPlan?.movedZoneIds ?? [];
-      const reflowedZoneUpdates = Object.fromEntries(
-        movedZoneIds.flatMap((movedZoneId) => {
-          const source = board.objects?.[movedZoneId];
-          const placement = reflowPlan?.placements.find((item) => item.id === movedZoneId);
-          return source?.type === 'zone' && placement
-            ? [[movedZoneId, { ...source, x: placement.x, y: placement.y }] as const]
-            : [];
-        })
+      const {
+        objects: growthObjects,
+        resizedOverZoneIds,
+        movedZoneIds,
+      } = planZoneGrowthObjects(
+        board,
+        zoneId,
+        { width: appliedZoneWidth, height: appliedZoneHeight },
+        zonePolicy
       );
-      const translatedCanvasUpdates = Object.fromEntries(
-        Object.entries(board.objects ?? {}).flatMap(([objectId, object]) => {
-          if (object.type === 'zone' || (object.type === 'artifact' && object.locked === true)) {
-            return [];
-          }
-          const size = getCanvasObjectDimensions(object);
-          const center = { x: object.x + size.width / 2, y: object.y + size.height / 2 };
-          const sourceZone = movedZoneIds
-            .flatMap((movedZoneId) => {
-              const candidate = board.objects?.[movedZoneId];
-              return candidate?.type === 'zone' ? [[movedZoneId, candidate] as const] : [];
-            })
-            .filter(
-              ([, candidate]) =>
-                center.x >= candidate.x &&
-                center.x <= candidate.x + candidate.width &&
-                center.y >= candidate.y &&
-                center.y <= candidate.y + candidate.height
-            )
-            .sort(
-              ([leftId, left], [rightId, right]) =>
-                left.width * left.height - right.width * right.height ||
-                leftId.localeCompare(rightId)
-            )[0];
-          if (!sourceZone) return [];
-          const placement = reflowPlan?.placements.find((item) => item.id === sourceZone[0]);
-          if (!placement) return [];
-          const deltaX = placement.x - sourceZone[1].x;
-          const deltaY = placement.y - sourceZone[1].y;
-          return [[objectId, { ...object, x: object.x + deltaX, y: object.y + deltaY }] as const];
-        })
-      );
-      const objects = {
-        [zoneId]: { ...zone, width: appliedZoneWidth, height: appliedZoneHeight },
-        ...reflowedZoneUpdates,
-        ...translatedCanvasUpdates,
-        ...canvasObjectUpdates,
-      };
+      const objects = { ...growthObjects, ...canvasObjectUpdates };
       const objectChanged = Object.entries(objects).some(
         ([objectId, object]) => JSON.stringify(board.objects?.[objectId]) !== JSON.stringify(object)
       );
