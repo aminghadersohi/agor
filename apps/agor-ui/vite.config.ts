@@ -63,30 +63,22 @@ export default defineConfig({
     rollupOptions: {
       external: ['@openai/codex-sdk', '@anthropic-ai/claude-agent-sdk', '@google/gemini-cli-core'],
       output: {
-        // Coarse manual chunking so heavy single-use libs don't land in the
-        // initial bundle. Tune as the app's hot path stabilizes; the goal
-        // here is "warn if a chunk crosses ~1MB" not perfect split.
+        // Name only the vendor chunks every page boots with, so their hashes
+        // (and browser caches) survive app-only deploys.
+        //
+        // Do NOT add groups for libraries that are only reached through a
+        // lazy boundary (CodeMirror, Sandpack, emoji picker, syntax
+        // highlighter, xterm, vega, streamdown). Rolldown folds a group's
+        // dependencies into the group, so shared modules such as
+        // `react/jsx-runtime` or Vite's preload helper land inside it and
+        // the entry then statically imports (and modulepreloads) the whole
+        // heavy chunk. Left alone, those libraries split at their dynamic
+        // imports and load only when used. `resolve.dedupe` above keeps a
+        // single @codemirror/state instance without the group.
         manualChunks(id: string) {
           if (!id.includes('node_modules')) return undefined;
           if (id.includes('@ant-design') || /\/antd\//.test(id)) return 'antd';
           if (id.includes('reactflow')) return 'reactflow';
-          // Keep the entire CM6 + lezer graph together so @codemirror/state
-          // is never split across chunks (lezer packages are CM6 peer deps).
-          if (
-            id.includes('@uiw/react-codemirror') ||
-            id.includes('@codemirror/') ||
-            id.includes('@lezer/')
-          )
-            return 'editor';
-          if (id.includes('react-syntax-highlighter')) return 'syntax';
-          if (id.includes('emoji-picker-react') || id.includes('emojibase')) return 'emoji';
-          if (id.includes('@xterm/')) return 'xterm';
-          if (id.includes('@codesandbox/sandpack')) return 'sandpack';
-          // Vega is only reached through the fenced `vega-lite` renderer. Keep
-          // its full runtime in a named async chunk so static plugin
-          // registration can never pull it into the initial Streamdown chunk.
-          if (/node_modules\/(?:vega(?:-|\/))/.test(id)) return 'vega';
-          if (id.includes('streamdown')) return 'streamdown';
           return undefined;
         },
       },
