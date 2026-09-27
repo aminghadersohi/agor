@@ -1,7 +1,11 @@
 import { PublicBaseUrlNotConfiguredError } from '@agor/core/config';
 import { BadRequest, Conflict, Forbidden } from '@agor/core/feathers';
 import { sanitizeMCPExternalError } from '@agor/core/mcp';
-import { OAuthConfigurationError, OAuthDCRFailure } from '@agor/core/tools/mcp/oauth-mcp-transport';
+import {
+  describeMCPOAuthResourceMismatch,
+  OAuthConfigurationError,
+  OAuthDCRFailure,
+} from '@agor/core/tools/mcp/oauth-mcp-transport';
 import {
   AmbiguousRefreshError,
   GrantConfigurationChangedError,
@@ -102,6 +106,12 @@ const OAUTH_FAILURE_GUIDANCE: Record<MCPOAuthFailureReason, string> = {
  * Convert internal/provider failures into the closed public recovery contract.
  * Provider exception text is deliberately not inspected: even local logs are
  * not a safe destination for URLs, redirects, or reflected request values.
+ *
+ * `protected_resource_mismatch` is the one reason that says more than the map
+ * above, and it does so without breaking that rule: the detail comes from
+ * `OAuthConfigurationError.resourceMismatch`, a closed set of fields Agor's own
+ * equality check consumed, rendered by core with an origin bound — never from
+ * the exception's message, and never into a log.
  */
 export function classifyMCPAuthRecovery(
   error: unknown,
@@ -239,6 +249,10 @@ export function classifyMCPAuthRecovery(
       'issuer_mismatch',
       'pkce_required',
     ].includes(typeof failureCode === 'string' ? failureCode : '');
+    const mismatchDetail =
+      reason === 'protected_resource_mismatch'
+        ? describeMCPOAuthResourceMismatch(safeOwnDataValue(error, 'resourceMismatch'))
+        : undefined;
     return incompatible
       ? {
           ...common,
@@ -246,9 +260,9 @@ export function classifyMCPAuthRecovery(
           ...(reason ? { failure_reason: reason } : {}),
           category: 'metadata_incompatible',
           action: 'review_compatibility',
-          message: reason
-            ? OAUTH_FAILURE_GUIDANCE[reason]
-            : OAUTH_FAILURE_GUIDANCE.profile_rejected,
+          message: `${
+            reason ? OAUTH_FAILURE_GUIDANCE[reason] : OAUTH_FAILURE_GUIDANCE.profile_rejected
+          }${mismatchDetail ? ` ${mismatchDetail}` : ''}`,
         }
       : {
           ...common,
