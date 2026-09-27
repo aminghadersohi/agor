@@ -152,6 +152,13 @@ const modelConfigInputSchema = z
     "Model override for this session. Pass either a model ID string (e.g. 'claude-opus-4-6') or a full { mode, model, effort, advisorModel, provider } object. Overrides the user default model_config and is threaded through to the spawned agent process. Call agor_models_list to discover valid model IDs per agenticTool."
   );
 
+const spawnCallbackModeSchema = z
+  .enum(['once', 'persistent'])
+  .optional()
+  .describe(
+    'Child callback firing mode: "once" (default for spawned children) notifies the parent on the next completion then auto-disables; "persistent" notifies on every completion until disabled.'
+  );
+
 const callbackDeliverySchema = z
   .enum(CALLBACK_DELIVERIES)
   .optional()
@@ -772,6 +779,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .boolean()
           .optional()
           .describe('Enable callback to parent on completion (default: true)'),
+        callbackMode: spawnCallbackModeSchema,
         callbackDelivery: callbackDeliverySchema,
         includeLastMessage: z
           .boolean()
@@ -839,6 +847,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         title: args.title,
         agent: args.agenticTool as AgenticToolName | undefined,
         enableCallback: args.enableCallback,
+        callbackMode: args.callbackMode,
         callbackDelivery: args.callbackDelivery,
         includeLastMessage: args.includeLastMessage,
         includeOriginalPrompt: args.includeOriginalPrompt,
@@ -930,6 +939,9 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         modelConfig: modelConfigInputSchema,
         callbackDelivery: callbackDeliverySchema.describe(
           'Standing callback delivery for subsession mode. Ignored by continue/fork/btw; the separate callback:true exact-task subscription always stays direct.'
+        ),
+        callbackMode: spawnCallbackModeSchema.describe(
+          'Standing callback firing mode for subsession mode: "once" (default) or "persistent". Ignored by continue/fork/btw.'
         ),
         callback: z
           .boolean()
@@ -1220,6 +1232,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           modelConfig: coerceModelConfig(args.modelConfig),
           autoArchive: args.autoArchive,
           autoArchiveAfterSeconds: args.autoArchiveAfterSeconds,
+          callbackMode: args.callbackMode,
           callbackDelivery: args.callbackDelivery,
         };
         if (args.title) spawnData.title = args.title;
@@ -1787,7 +1800,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_retarget_callback',
     {
       description:
-        "Move an existing Session's standing/direct completion callback to another Session. This is routing, not genealogy: it does not change parent_session_id. For cross-branch remote_create links, the Session route and matching durable relationship rows change atomically while enabled/once/persistent/include flags are preserved. A running Task that completes after this transfer commits resolves the standing route to the new destination only. Exact-Task callbacks requested with agor_sessions_prompt callback:true (the durable caller/root-propagated subscription mechanism) remain unchanged and may independently report to their original destination.",
+        "Move an existing Session's standing/direct completion callback to another Session. This is routing, not genealogy: it does not change parent_session_id. For cross-branch remote_create links, the Session route and matching durable relationship rows change atomically while enabled/once/persistent/include flags are preserved. A running Task that completes after this transfer commits resolves the standing route to the new destination only. Exact-Task callbacks requested with agor_sessions_prompt callback:true (an immutable one-shot callback bound to that Task and its calling Session) remain unchanged and may independently report to their original destination.",
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         sessionId: mcpRequiredId(

@@ -1,7 +1,7 @@
 /** Configuration regressions after the chip-row migration. */
 
 import type { Session, SpawnConfig, User } from '@agor-live/client';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Form } from 'antd';
 import { describe, expect, it, vi } from 'vitest';
 import { buildSpawnPromptContext } from '../SessionPanel/spawn-prompt-context';
@@ -99,11 +99,13 @@ vi.mock('../AgenticConfigChipRow', () => ({
 }));
 
 // Fork delta: every spawn carries the child auto-archive default and the
-// parent's callback delivery (sessions without a callback_config deliver direct).
+// parent's callback delivery (sessions without a callback_config deliver direct),
+// plus the one-shot callback mode spawned children default to.
 const FORK_SPAWN_DEFAULTS = {
   autoArchive: 'after_completion',
   autoArchiveAfterSeconds: 3600,
   callbackDelivery: 'direct',
+  callbackMode: 'once',
 };
 
 const claudeSession = {
@@ -431,5 +433,35 @@ describe('modal to SessionPanel spawn-prompt payload', () => {
         : { permissionMode: 'bypassPermissions' };
     expect(create.mock.calls[0][0]).toMatchObject(expected);
     expect(create.mock.calls[0][0].presetId).toBeUndefined();
+  });
+
+  it('sends the chosen callback mode with the spawn', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ForkSpawnModal
+        open
+        action="spawn"
+        session={{ ...claudeSession, callback_config: { enabled: true } } as Session}
+        currentUser={null}
+        initialPrompt="Delegate"
+        onConfirm={onConfirm}
+        onCancel={vi.fn()}
+        client={null}
+        userById={new Map()}
+      />
+    );
+
+    const current = await screen.findByText('Once, then turn off');
+    fireEvent.mouseDown(
+      within(current.closest('.ant-select') as HTMLElement).getByRole('combobox')
+    );
+    fireEvent.click(await screen.findByText('Every completion'));
+    fireEvent.click(screen.getByRole('button', { name: 'Spawn Session' }));
+
+    await waitFor(() =>
+      expect(onConfirm).toHaveBeenCalledWith(
+        expect.objectContaining({ enableCallback: true, callbackMode: 'persistent' })
+      )
+    );
   });
 });

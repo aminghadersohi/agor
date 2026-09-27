@@ -34,6 +34,7 @@ export interface SpawnSubsessionContext {
   hasCallbackConfig?: boolean;
   callbackConfig?: {
     enableCallback?: boolean;
+    callbackMode?: 'once' | 'persistent';
     callbackDelivery?: CallbackDelivery;
     includeLastMessage?: boolean;
     includeOriginalPrompt?: boolean;
@@ -92,6 +93,8 @@ REQUEST: """
     - Callback Configuration:
     {{#if callbackConfig.enableCallback}}ENABLED - Include last message:
       {{callbackConfig.includeLastMessage}}
+      - Mode:
+      {{callbackConfig.callbackMode}}
       - Delivery:
       {{callbackConfig.callbackDelivery}}
       - Include original prompt:
@@ -152,6 +155,9 @@ hashing and JWT for tokens."
   - enableCallback:
   {{callbackConfig.enableCallback}}
 {{/if}}
+{{#if (isDefined callbackConfig.callbackMode)}}
+  - callbackMode: "{{callbackConfig.callbackMode}}"
+{{/if}}
 {{#if (isDefined callbackConfig.callbackDelivery)}}
   - callbackDelivery: "{{callbackConfig.callbackDelivery}}"
 {{/if}}
@@ -195,6 +201,7 @@ export function renderSpawnSubsessionPrompt(context: SpawnSubsessionContext): st
       context.codexNetworkAccess !== undefined ||
       (context.mcpServerIds?.length ?? 0) > 0 ||
       context.callbackConfig?.enableCallback !== undefined ||
+      context.callbackConfig?.callbackMode !== undefined ||
       context.callbackConfig?.callbackDelivery !== undefined ||
       context.callbackConfig?.includeLastMessage !== undefined ||
       context.callbackConfig?.includeOriginalPrompt !== undefined ||
@@ -205,6 +212,7 @@ export function renderSpawnSubsessionPrompt(context: SpawnSubsessionContext): st
   const hasCallbackConfig =
     context.hasCallbackConfig ??
     (context.callbackConfig?.enableCallback !== undefined ||
+      context.callbackConfig?.callbackMode !== undefined ||
       context.callbackConfig?.callbackDelivery !== undefined ||
       context.callbackConfig?.includeLastMessage !== undefined ||
       context.callbackConfig?.includeOriginalPrompt !== undefined);
@@ -227,6 +235,7 @@ export function renderSpawnSubsessionPrompt(context: SpawnSubsessionContext): st
         codexNetworkAccess: context.codexNetworkAccess,
         mcpServerIds: context.mcpServerIds,
         enableCallback: context.callbackConfig?.enableCallback,
+        callbackMode: context.callbackConfig?.callbackMode,
         callbackDelivery: context.callbackConfig?.callbackDelivery,
         includeLastMessage: context.callbackConfig?.includeLastMessage,
         includeOriginalPrompt: context.callbackConfig?.includeOriginalPrompt,
