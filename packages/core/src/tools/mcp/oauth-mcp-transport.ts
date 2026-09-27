@@ -2180,6 +2180,15 @@ async function startMCPOAuthFlowWithAS(opts: {
   compatibilityMode: MCPOAuthRuntimeCompatibilityMode;
   dcrMode: MCPOAuthDCRMode;
   allowLocalhostHttp: boolean;
+  /**
+   * Loopback-HTTP exception for the browser `redirect_uri` only. Separate from
+   * `allowLocalhostHttp`, which governs where this process will open a socket:
+   * the redirect URI is resolved by the user's browser and is never an outbound
+   * fetch destination, so its policy follows the deployment's callback decision
+   * rather than the daemon's egress policy. Defaults to `allowLocalhostHttp`
+   * so legacy CLI/loopback callers keep their existing behavior.
+   */
+  allowLocalhostRedirectUri?: boolean;
   /** Daemon-owned authority/deadline assertion around provider side effects. */
   assertCurrent?: () => void;
 }): Promise<OAuthFlowContext> {
@@ -2198,6 +2207,7 @@ async function startMCPOAuthFlowWithAS(opts: {
     dcrMode,
     allowLocalhostHttp,
   } = opts;
+  const allowLocalhostRedirectUri = opts.allowLocalhostRedirectUri ?? allowLocalhostHttp;
 
   const hasFullOverrides = !!(authorizationUrlOverride && tokenUrlOverride);
   opts.assertCurrent?.();
@@ -2209,8 +2219,12 @@ async function startMCPOAuthFlowWithAS(opts: {
   const actualRedirectUri = redirectUri || 'http://127.0.0.1:0/oauth/callback';
   // Validate before registration: DCR sends this value to an external service
   // and must not turn an unsafe configured callback into durable provider-side
-  // client metadata.
-  assertSafeOAuthUrl(actualRedirectUri, { allowLocalhostHttp });
+  // client metadata. It travels as a request *body* value, not as a fetch
+  // destination, so the loopback exception here is the deployment's callback
+  // policy rather than this daemon's egress policy. Every other rule
+  // `assertSafeOAuthUrl` applies (embedded credentials, fragments, blocked and
+  // private subnets, non-loopback plaintext) still holds either way.
+  assertSafeOAuthUrl(actualRedirectUri, { allowLocalhostHttp: allowLocalhostRedirectUri });
 
   // Scope: explicit option > resource-metadata advertised scopes > none
   // (Skip auto-populating when client_id is pre-registered — see comment in
@@ -2353,6 +2367,14 @@ export async function startMCPOAuthFlow(
     /** Exact loopback HTTP exception for standalone development only. */
     allowLocalhostHttp?: boolean;
     /**
+     * Loopback-HTTP exception applied only to the browser `redirect_uri`.
+     * Deployments whose egress policy forbids plaintext loopback can still
+     * advertise the localhost callback their own configuration layer admitted;
+     * the redirect URI is never fetched by this process. Defaults to
+     * `allowLocalhostHttp`.
+     */
+    allowLocalhostRedirectUri?: boolean;
+    /**
      * Optional daemon authority/deadline assertion. Called before and after
      * discovery and DCR boundaries; standalone/CLI callers omit it.
      */
@@ -2418,6 +2440,7 @@ export async function startMCPOAuthFlow(
       compatibilityMode,
       dcrMode,
       allowLocalhostHttp,
+      allowLocalhostRedirectUri: options.allowLocalhostRedirectUri,
       assertCurrent: options.assertCurrent,
     });
   }
@@ -2523,6 +2546,7 @@ export async function startMCPOAuthFlow(
     compatibilityMode,
     dcrMode,
     allowLocalhostHttp,
+    allowLocalhostRedirectUri: options?.allowLocalhostRedirectUri,
     assertCurrent: options?.assertCurrent,
   });
 }
