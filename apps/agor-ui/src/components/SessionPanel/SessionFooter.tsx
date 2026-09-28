@@ -61,6 +61,7 @@ import { ContextWindowPill, TimerPill } from '../Pill';
 import { getModelDisplayName } from '../Pill/modelDisplay';
 import { SessionIdsList } from '../SessionIds';
 import { Tag } from '../Tag';
+import { PowerHoldTag } from './PowerHoldTag';
 import { SessionMcpFooterControl } from './SessionMcpFooterControl';
 import { SessionUsagePopover } from './SessionUsagePopover';
 
@@ -1743,6 +1744,12 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                 </Button>
               </Tooltip>
             )}
+            <PowerHoldTag
+              client={client}
+              identityKey={currentUserId ?? null}
+              powerPriority={session.power_priority}
+              queuedCount={queuedTasks.length}
+            />
             <Tooltip title={sendTooltip}>
               <Badge
                 count={queuedTasks.length > 0 ? queuedTasks.length : 0}

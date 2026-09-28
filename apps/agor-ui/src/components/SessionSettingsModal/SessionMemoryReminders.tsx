@@ -1,20 +1,34 @@
-import type { AgorClient, Paginated, SessionMemory, SessionReminder } from '@agor-live/client';
+import {
+  type AgorClient,
+  type Paginated,
+  SESSION_MEMORY_DEFAULT_LIMIT,
+  SESSION_MEMORY_MAX_TAG_CHARS,
+  SESSION_MEMORY_MAX_TAGS,
+  SESSION_REMINDER_DEFAULT_LIMIT,
+  type SessionMemory,
+  type SessionReminder,
+  type SessionReminderFailureCode,
+  shortId,
+} from '@agor-live/client';
 import {
   BellOutlined,
   DeleteOutlined,
   EditOutlined,
   PlusOutlined,
   SearchOutlined,
+  UndoOutlined,
 } from '@ant-design/icons';
 import {
   Alert,
   Button,
+  Checkbox,
   Empty,
   Flex,
   Form,
   Input,
   List,
   Segmented,
+  Select,
   Space,
   Spin,
   Tag,
@@ -26,6 +40,36 @@ type Props = { client: AgorClient; sessionId: string; sessionArchived: boolean }
 
 function pageData<T>(result: T[] | Paginated<T>): T[] {
   return Array.isArray(result) ? result : result.data;
+}
+
+function pageTotal<T>(result: T[] | Paginated<T>): number {
+  return Array.isArray(result) ? result.length : result.total;
+}
+
+const REMINDER_FAILURE_LABELS: Record<SessionReminderFailureCode, string> = {
+  session_archived: 'The Session was archived before the reminder fired.',
+  branch_archived: 'The branch was archived before the reminder fired.',
+  branch_unavailable: "The branch or its worktree wasn't executable.",
+  authorization_revoked: 'The reminder author no longer has prompt authority on this Session.',
+  session_missing: 'The Session no longer exists.',
+  dispatch_failed: 'The reminder could not be queued as a task.',
+};
+
+function TagsSelect(props: { value: string[]; onChange: (tags: string[]) => void }) {
+  return (
+    <Select
+      mode="tags"
+      value={props.value}
+      onChange={(tags: string[]) =>
+        props.onChange(tags.map((tag) => tag.trim().toLowerCase()).filter(Boolean))
+      }
+      tokenSeparators={[',']}
+      maxCount={SESSION_MEMORY_MAX_TAGS}
+      maxTagTextLength={SESSION_MEMORY_MAX_TAG_CHARS}
+      placeholder="Tags (optional)"
+      aria-label="Memory tags"
+    />
+  );
 }
 
 function localInputToUtc(value: string): string | null {
@@ -51,34 +95,48 @@ export const SessionMemoryReminders: React.FC<Props> = ({ client, sessionId, ses
   const [tab, setTab] = React.useState<'Memory' | 'Reminders'>('Memory');
   const [memories, setMemories] = React.useState<SessionMemory[]>([]);
   const [reminders, setReminders] = React.useState<SessionReminder[]>([]);
+  const [memoryTotal, setMemoryTotal] = React.useState(0);
+  const [reminderTotal, setReminderTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(true);
+  const [loadingMore, setLoadingMore] = React.useState(false);
   const [error, setError] = React.useState<string>();
   const [query, setQuery] = React.useState('');
+  const [showArchived, setShowArchived] = React.useState(false);
   const [memoryText, setMemoryText] = React.useState('');
+  const [memoryTags, setMemoryTags] = React.useState<string[]>([]);
   const [reminderText, setReminderText] = React.useState('');
   const [dueLocal, setDueLocal] = React.useState('');
   const [editingMemory, setEditingMemory] = React.useState<SessionMemory>();
   const [editingReminder, setEditingReminder] = React.useState<SessionReminder>();
 
+  // Omitting `archived` lists active and archived memories together.
+  const memoryQuery = React.useMemo(
+    () => ({
+      session_id: sessionId,
+      archived: showArchived ? undefined : false,
+      search: query.trim() || undefined,
+      $limit: SESSION_MEMORY_DEFAULT_LIMIT,
+    }),
+    [query, sessionId, showArchived]
+  );
+  const reminderQuery = React.useMemo(
+    () => ({ session_id: sessionId, $limit: SESSION_REMINDER_DEFAULT_LIMIT }),
+    [sessionId]
+  );
+
+  /** Reloads the first page of each list; "Load more" appends further pages. */
   const load = React.useCallback(async () => {
     setLoading(true);
     setError(undefined);
     try {
       const [memoryResult, reminderResult] = await Promise.all([
-        client.service('session-memories').find({
-          query: {
-            session_id: sessionId,
-            archived: false,
-            search: query.trim() || undefined,
-            $limit: 25,
-          },
-        }),
-        client.service('session-reminders').find({
-          query: { session_id: sessionId, $limit: 50 },
-        }),
+        client.service('session-memories').find({ query: memoryQuery }),
+        client.service('session-reminders').find({ query: reminderQuery }),
       ]);
       setMemories(pageData(memoryResult));
+      setMemoryTotal(pageTotal(memoryResult));
       setReminders(pageData(reminderResult));
+      setReminderTotal(pageTotal(reminderResult));
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : 'Memory and reminders could not be loaded.'
@@ -86,7 +144,7 @@ export const SessionMemoryReminders: React.FC<Props> = ({ client, sessionId, ses
     } finally {
       setLoading(false);
     }
-  }, [client, query, sessionId]);
+  }, [client, memoryQuery, reminderQuery]);
 
   React.useEffect(() => {
     void load();
@@ -115,14 +173,46 @@ export const SessionMemoryReminders: React.FC<Props> = ({ client, sessionId, ses
     await load();
   };
 
+  const loadMoreMemories = async () => {
+    setLoadingMore(true);
+    try {
+      const result = await client
+        .service('session-memories')
+        .find({ query: { ...memoryQuery, $skip: memories.length } });
+      setMemories((current) => [...current, ...pageData(result)]);
+      setMemoryTotal(pageTotal(result));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'More memories could not be loaded.');
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  const loadMoreReminders = async () => {
+    setLoadingMore(true);
+    try {
+      const result = await client
+        .service('session-reminders')
+        .find({ query: { ...reminderQuery, $skip: reminders.length } });
+      setReminders((current) => [...current, ...pageData(result)]);
+      setReminderTotal(pageTotal(result));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'More reminders could not be loaded.');
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
   const createMemory = async () => {
     if (!memoryText.trim()) return;
     try {
       await client.service('session-memories').create({
         session_id: sessionId,
         text: memoryText,
+        ...(memoryTags.length > 0 ? { tags: memoryTags } : {}),
       });
       setMemoryText('');
+      setMemoryTags([]);
       await load();
     } catch (cause) {
       await failOrReload(cause);
@@ -147,12 +237,12 @@ export const SessionMemoryReminders: React.FC<Props> = ({ client, sessionId, ses
     }
   };
 
-  const archiveMemory = async (memory: SessionMemory) => {
+  const setMemoryArchived = async (memory: SessionMemory, archived: boolean) => {
     try {
       await client.service('session-memories').patch(memory.memory_id, {
         session_id: sessionId,
         expected_revision: memory.revision,
-        archived: true,
+        archived,
       });
       await load();
     } catch (cause) {
@@ -269,41 +359,78 @@ export const SessionMemoryReminders: React.FC<Props> = ({ client, sessionId, ses
             placeholder="Remember a fact or decision…"
             aria-label="New Session memory"
           />
-          <Button
-            icon={<PlusOutlined />}
-            onClick={() => void createMemory()}
-            disabled={!memoryText.trim()}
-          >
-            Remember
-          </Button>
+          <TagsSelect value={memoryTags} onChange={setMemoryTags} />
+          <Flex justify="space-between" align="center" wrap gap="small">
+            <Button
+              icon={<PlusOutlined />}
+              onClick={() => void createMemory()}
+              disabled={!memoryText.trim()}
+            >
+              Remember
+            </Button>
+            <Checkbox
+              checked={showArchived}
+              onChange={(event) => setShowArchived(event.target.checked)}
+            >
+              Show archived
+            </Checkbox>
+          </Flex>
           {memories.length === 0 ? (
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No matching memories" />
           ) : (
             <List
               size="small"
               dataSource={memories}
+              loadMore={
+                memories.length < memoryTotal && (
+                  <Flex justify="center" style={{ marginBlockStart: 8 }}>
+                    <Button loading={loadingMore} onClick={() => void loadMoreMemories()}>
+                      Load more memories
+                    </Button>
+                  </Flex>
+                )
+              }
               renderItem={(memory) => (
                 <List.Item
-                  actions={[
-                    <Button
-                      key="edit"
-                      type="text"
-                      icon={<EditOutlined />}
-                      aria-label="Edit memory"
-                      onClick={() => setEditingMemory({ ...memory })}
-                    />,
-                    <Button
-                      key="archive"
-                      type="text"
-                      danger
-                      icon={<DeleteOutlined />}
-                      aria-label="Archive memory"
-                      onClick={() => void archiveMemory(memory)}
-                    />,
-                  ]}
+                  actions={
+                    memory.archived
+                      ? [
+                          <Button
+                            key="restore"
+                            type="text"
+                            icon={<UndoOutlined />}
+                            aria-label="Restore memory"
+                            onClick={() => void setMemoryArchived(memory, false)}
+                          >
+                            Restore
+                          </Button>,
+                        ]
+                      : [
+                          <Button
+                            key="edit"
+                            type="text"
+                            icon={<EditOutlined />}
+                            aria-label="Edit memory"
+                            onClick={() => setEditingMemory({ ...memory })}
+                          />,
+                          <Button
+                            key="archive"
+                            type="text"
+                            danger
+                            icon={<DeleteOutlined />}
+                            aria-label="Archive memory"
+                            onClick={() => void setMemoryArchived(memory, true)}
+                          />,
+                        ]
+                  }
                 >
                   <List.Item.Meta
-                    title={memory.title || 'Memory'}
+                    title={
+                      <Space wrap>
+                        <span>{memory.title || 'Memory'}</span>
+                        {memory.archived && <Tag>Archived</Tag>}
+                      </Space>
+                    }
                     description={
                       <>
                         <Typography.Paragraph ellipsis={{ rows: 3 }} style={{ marginBottom: 4 }}>
@@ -336,6 +463,12 @@ export const SessionMemoryReminders: React.FC<Props> = ({ client, sessionId, ses
                   onChange={(event) =>
                     setEditingMemory({ ...editingMemory, text: event.target.value })
                   }
+                />
+              </Form.Item>
+              <Form.Item label="Tags">
+                <TagsSelect
+                  value={editingMemory.tags}
+                  onChange={(tags) => setEditingMemory({ ...editingMemory, tags })}
                 />
               </Form.Item>
               <Space>
@@ -379,6 +512,15 @@ export const SessionMemoryReminders: React.FC<Props> = ({ client, sessionId, ses
             <List
               size="small"
               dataSource={reminders}
+              loadMore={
+                reminders.length < reminderTotal && (
+                  <Flex justify="center" style={{ marginBlockStart: 8 }}>
+                    <Button loading={loadingMore} onClick={() => void loadMoreReminders()}>
+                      Load more reminders
+                    </Button>
+                  </Flex>
+                )
+              }
               renderItem={(reminder) => (
                 <List.Item
                   actions={
@@ -407,14 +549,34 @@ export const SessionMemoryReminders: React.FC<Props> = ({ client, sessionId, ses
                   <List.Item.Meta
                     title={
                       <Space wrap>
-                        <Tag>{reminder.status}</Tag>
+                        <Tag color={reminder.status === 'blocked' ? 'error' : undefined}>
+                          {reminder.status}
+                        </Tag>
                         <span>{dueLabel(reminder)}</span>
                       </Space>
                     }
                     description={
-                      <Typography.Paragraph ellipsis={{ rows: 3 }} style={{ marginBottom: 0 }}>
-                        {reminder.text}
-                      </Typography.Paragraph>
+                      <>
+                        <Typography.Paragraph ellipsis={{ rows: 3 }} style={{ marginBottom: 0 }}>
+                          {reminder.text}
+                        </Typography.Paragraph>
+                        {reminder.failure_code && (
+                          <Typography.Paragraph type="danger" style={{ marginBottom: 0 }}>
+                            {REMINDER_FAILURE_LABELS[reminder.failure_code] ?? 'Blocked.'}{' '}
+                            <Typography.Text code type="danger">
+                              {reminder.failure_code}
+                            </Typography.Text>
+                          </Typography.Paragraph>
+                        )}
+                        {reminder.task_id && (
+                          <Typography.Text type="secondary">
+                            Task{' '}
+                            <Typography.Text code copyable={{ text: reminder.task_id }}>
+                              {shortId(reminder.task_id)}
+                            </Typography.Text>
+                          </Typography.Text>
+                        )}
+                      </>
                     }
                   />
                 </List.Item>

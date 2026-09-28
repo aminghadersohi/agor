@@ -81,6 +81,7 @@ import {
   isMCPServerUsableInSession,
 } from '@agor/core/mcp';
 import type {
+  ArtifactID,
   AuthenticatedParams,
   Board,
   BoardID,
@@ -468,6 +469,8 @@ interface RouteParams extends Params {
     messageId?: string;
     mcpId?: string;
     requestId?: string;
+    actionId?: string;
+    dataId?: string;
   };
   user?: User;
 }
@@ -1438,6 +1441,16 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     transaction: false,
   });
   const tenantWriteAdmissionAround = createTenantWriteAdmissionAroundHook(db);
+  // Identity-only custom routes: tenant identity without a request-long
+  // transaction, for handlers that dispatch across a process spawn and open a
+  // short unit per database access themselves. Pair with
+  // tenantWriteAdmissionAround on mutating methods.
+  const registerTenantIdentityAuthenticatedRoute = createTenantScopedAuthenticatedRouteRegistrar({
+    db,
+    config,
+    jwtSecret,
+    transaction: false,
+  });
 
   const ensureTenantContext = async (context: HookContext): Promise<HookContext> => {
     try {
@@ -2196,7 +2209,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
           const artifactId = _params.route?.id;
           if (!artifactId) throw new Error('Artifact ID required');
           const artifactsService = app.service('artifacts') as unknown as ArtifactsService;
-          return artifactsService.getPayload(artifactId, _params.user?.user_id);
+          return artifactsService.getPayload(artifactId, _params.user?.user_id, _params.user?.role);
         },
       },
       { find: { role: ROLES.VIEWER, action: 'get artifact payload' } },
@@ -2238,6 +2251,60 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       {
         create: { role: ROLES.MEMBER, action: 'post artifact console logs' },
       },
+      requireAuth
+    );
+
+    // Declared-binding execution. Reads and writes get separate routes so a
+    // data_id can never reach a mutating dispatch and vice versa — the id
+    // namespaces don't overlap and neither route can resolve the other's
+    // bindings. Both re-read the persisted artifact rather than trusting the
+    // caller, and both delegate to the real schedules/sessions services with
+    // the caller's own identity, so branch RBAC and the schedule
+    // run-as-creator rule apply unchanged.
+    //
+    // Actions are identity-only: `schedule_run` dispatches run-now, which
+    // spawns a session and its executor. Holding this request's transaction
+    // across that would pull the schedule lock, session insert and prompt
+    // admission into it, so the binding lookup and every delegated service
+    // open their own short units instead.
+    registerTenantIdentityAuthenticatedRoute(
+      app,
+      '/artifacts/:id/actions/:actionId',
+      {
+        async create(_data: unknown, _params: RouteParams) {
+          const artifactId = _params.route?.id;
+          const actionId = _params.route?.actionId;
+          if (!artifactId || !actionId) throw new Error('Artifact and action ID required');
+          const artifactsService = app.service('artifacts') as unknown as ArtifactsService;
+          return artifactsService.invokeActionBinding(
+            artifactId as ArtifactID,
+            actionId,
+            _params as never
+          );
+        },
+      },
+      { create: { role: ROLES.MEMBER, action: 'run artifact action binding' } },
+      requireAuth,
+      { around: [tenantWriteAdmissionAround] }
+    );
+
+    registerTenantScopedAuthenticatedRoute(
+      app,
+      '/artifacts/:id/data/:dataId',
+      {
+        async find(_params: RouteParams) {
+          const artifactId = _params.route?.id;
+          const dataId = _params.route?.dataId;
+          if (!artifactId || !dataId) throw new Error('Artifact and data ID required');
+          const artifactsService = app.service('artifacts') as unknown as ArtifactsService;
+          return artifactsService.readDataBinding(
+            artifactId as ArtifactID,
+            dataId,
+            _params as never
+          );
+        },
+      },
+      { find: { role: ROLES.VIEWER, action: 'read artifact data binding' } },
       requireAuth
     );
 
@@ -2505,6 +2572,25 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     captureMarketplaceInvalidationTargets,
   ];
 
+  const publishCommittedBoardMove = (context: HookContext): HookContext => {
+    if (!context.event || !context.data || !Object.hasOwn(context.data, 'board_id')) return context;
+    // Board moves can join an outer admission transaction (e.g. unarchive).
+    // Feathers' automatic event fires when this nested method returns, not when
+    // that transaction commits. Replace only this event with the existing queue;
+    // rollback drops it, and successful commit emits it exactly once.
+    const event = context.event;
+    context.event = null;
+    emitServiceEvent(app, {
+      path: 'branches',
+      event,
+      method: context.method,
+      id: context.id,
+      data: context.dispatch ?? context.result,
+      params: context.params,
+    });
+    return context;
+  };
+
   app.service('branches').hooks({
     before: {
       all: [typedValidateQuery(branchQueryValidator), requireAuth],
@@ -2533,8 +2619,16 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     },
     after: {
       create: [invalidateRealtimeBranchFromResult],
-      update: [invalidateRealtimeBranchFromResult, publishMarketplaceInvalidation],
-      patch: [invalidateRealtimeBranchFromResult, publishMarketplaceInvalidation],
+      update: [
+        invalidateRealtimeBranchFromResult,
+        publishMarketplaceInvalidation,
+        publishCommittedBoardMove,
+      ],
+      patch: [
+        invalidateRealtimeBranchFromResult,
+        publishMarketplaceInvalidation,
+        publishCommittedBoardMove,
+      ],
       remove: [
         invalidateRealtimeBranchFromResult,
         publishMarketplaceInvalidation,
@@ -2549,7 +2643,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   type BranchCustomHookRegistrar = {
     hooks(options: {
       before: Record<
-        'updateEnvironment' | 'ensureTeammateKnowledgeNamespace' | 'clean',
+        'ensureTeammateKnowledgeNamespace' | 'clean',
         Array<(context: HookContext) => HookContext>
       >;
     }): void;
@@ -2557,7 +2651,6 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   (app.service('branches') as unknown as BranchCustomHookRegistrar).hooks({
     before: {
       clean: [requireMinimumRole(ROLES.MEMBER, 'clean branches')],
-      updateEnvironment: [requireMinimumRole(ROLES.MEMBER, 'update branch environments')],
       ensureTeammateKnowledgeNamespace: [
         requireMinimumRole(ROLES.MEMBER, 'create teammate knowledge namespaces'),
       ],
@@ -3024,8 +3117,10 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     },
   });
 
-  // /file (singular): read-only branch filesystem browser. Takes branch_id
-  // as a query param. Gate with branch RBAC 'view' permission.
+  // /file (singular): branch filesystem browser and editor. Takes branch_id
+  // as a query param. Every method needs branch RBAC 'view' here; `patch`
+  // (save) additionally requires branch file `write` access, enforced in
+  // FileService.resolveBranchWrite.
   safeService('/file')?.hooks({
     before: {
       all: [
@@ -3825,6 +3920,20 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     return context;
   };
 
+  // External point reads (REST, socket, MCP) carry the same caller-scoped
+  // worktree/session counts as the list read instead of rowToBoard's neutral
+  // zeros. Hooks do not run for the adapter's internal this.get() inside
+  // patch/remove, so writes never pay for the aggregate.
+  const attachBoardPointReadCounts = async (context: HookContext<Board>) => {
+    if (!context.params.provider || !context.result) return context;
+    const service = context.service as unknown as BoardsServiceImpl;
+    context.result = await service.attachCallerCounts(
+      context.result as Board,
+      (context.params as { _agorSqlBoardAccessUserId?: UUID })._agorSqlBoardAccessUserId
+    );
+    return context;
+  };
+
   const boardUpdateAuthorization = [
     requireMinimumRole(ROLES.MEMBER, 'update boards'),
     ensureCanMutateBoard('update this board'),
@@ -3835,7 +3944,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     before: {
       all: [typedValidateQuery(boardQueryValidator), requireAuth],
       find: [scopeFindToAccessibleBoardsSql(superadminOpts)],
-      get: [ensureCanViewBoard('view this board')],
+      get: [scopeReadToAccessibleBoardsSql(superadminOpts), ensureCanViewBoard('view this board')],
       findBySlug: [ensureCanViewBoard('view this board')],
       findBySlugOrId: [ensureCanViewBoard('view this board')],
       create: [
@@ -4005,7 +4114,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     },
     after: {
       // Batch minimal visibility reads across the complete returned board page.
-      get: [filterBoardArtifactObjects(new ArtifactRepository(db))],
+      get: [attachBoardPointReadCounts, filterBoardArtifactObjects(new ArtifactRepository(db))],
       find: [filterBoardArtifactObjects(new ArtifactRepository(db))],
       update: [clearRealtimeBranchVisibility, publishMarketplaceInvalidation],
       patch: [clearRealtimeBranchVisibility, publishMarketplaceInvalidation],

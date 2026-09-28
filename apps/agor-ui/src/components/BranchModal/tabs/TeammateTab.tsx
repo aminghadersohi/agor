@@ -1,19 +1,52 @@
-import type { Branch } from '@agor-live/client';
+import type { AgorClient, Branch, Session } from '@agor-live/client';
 import { getTeammateConfig } from '@agor-live/client';
-import { RobotOutlined } from '@ant-design/icons';
-import { Descriptions, Form, Input, Space, Typography } from 'antd';
+import { Button, Descriptions, Form, Input, Popconfirm, Space, Typography } from 'antd';
+import { useState } from 'react';
+import { useConnectionDisabled } from '../../../contexts/ConnectionContext';
+import { useThemedMessage } from '../../../utils/message';
 import { EmojiPickerInput } from '../../EmojiPickerInput/EmojiPickerInput';
+import { ProfileImageGalleryEditor } from '../../ProfileImage';
 import { Tag } from '../../Tag';
+import { TeammateIdentityAvatar } from '../../TeammateIdentityAvatar';
 import type { TeammateFormState } from '../useBranchModalForm';
+import { TeammateFrontDeskSection } from './TeammateFrontDeskSection';
 
 interface TeammateTabProps {
   branch: Branch;
+  client?: AgorClient | null;
+  /** The teammate branch's sessions, offered as front-desk candidates. */
+  sessions?: Session[];
+  onRetired?: () => void;
   canEdit: boolean;
   state: TeammateFormState;
   setField: <K extends keyof TeammateFormState>(key: K, value: TeammateFormState[K]) => void;
 }
 
-export const TeammateTab: React.FC<TeammateTabProps> = ({ branch, canEdit, state, setField }) => {
+export const TeammateTab: React.FC<TeammateTabProps> = ({
+  branch,
+  canEdit,
+  state,
+  setField,
+  client,
+  sessions = [],
+  onRetired,
+}) => {
+  const [retiring, setRetiring] = useState(false);
+  const disabled = useConnectionDisabled();
+  const { showSuccess, showError } = useThemedMessage();
+  const retire = async () => {
+    if (!client) return;
+    setRetiring(true);
+    try {
+      await client.service(`branches/${branch.branch_id}/retire-teammate`).create({});
+      showSuccess('Teammate retired; files preserved');
+      onRetired?.();
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to retire teammate');
+    } finally {
+      setRetiring(false);
+    }
+  };
   const config = getTeammateConfig(branch);
   if (!config) return null;
 
@@ -21,15 +54,17 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({ branch, canEdit, state
     <div style={{ width: '100%', maxHeight: '70vh', overflowY: 'auto' }}>
       <Space orientation="vertical" size="large" style={{ width: '100%' }}>
         <Space>
-          {config.emoji ? (
-            <span style={{ fontSize: 20 }}>{config.emoji}</span>
-          ) : (
-            <RobotOutlined style={{ fontSize: 20 }} />
-          )}
+          <TeammateIdentityAvatar branch={branch} size={32} />
           <Typography.Text strong style={{ fontSize: 16 }}>
             Teammate Configuration
           </Typography.Text>
         </Space>
+
+        <ProfileImageGalleryEditor
+          subject={{ type: 'teammate', id: branch.branch_id }}
+          canEdit={canEdit}
+          label="Teammate photos"
+        />
 
         {/* Editable fields */}
         <Form layout="horizontal" colon={false}>
@@ -64,6 +99,20 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({ branch, canEdit, state
             />
           </Form.Item>
         </Form>
+
+        <TeammateFrontDeskSection branch={branch} client={client} sessions={sessions} />
+
+        {!branch.archived && (
+          <Popconfirm
+            title="Retire teammate?"
+            description="Archives this teammate and clears personal primary preferences. Files are preserved. Reassign any board primary first."
+            onConfirm={retire}
+          >
+            <Button danger disabled={!canEdit || !client || disabled} loading={retiring}>
+              Retire teammate
+            </Button>
+          </Popconfirm>
+        )}
 
         {/* Read-only metadata */}
         <Descriptions column={1} bordered size="small">

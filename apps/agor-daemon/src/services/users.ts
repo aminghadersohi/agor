@@ -48,6 +48,7 @@ import {
   isNull,
   isPostgresDatabaseHandle,
   jsonExtract,
+  jsonSetString,
   runWithTenantDatabaseTransaction,
   select,
   sessionEnvSelections,
@@ -429,6 +430,7 @@ interface UpdateUserData {
   avatar_source?: string | null;
   avatar_source_id?: string | null;
   avatar_synced_at?: string | null;
+  profile_image_id?: import('@agor/core/types').ProfileImageID | null;
   preferences?: Record<string, unknown>;
   onboarding_completed?: boolean;
   /**
@@ -476,6 +478,7 @@ const TRUSTED_USER_MUTATION_FIELDS: Readonly<
     'avatar_synced_at',
   ]),
   'env-vars-widget': new Set(['env_vars', 'env_var_scopes']),
+  'profile-image-projection': new Set(['profile_image_id']),
   'claude-auth': new Set(['agentic_tools', 'agentic_auth_methods', 'agentic_credential_sources']),
 };
 
@@ -583,7 +586,7 @@ export class UsersService {
     }
   }
 
-  private assertPatchAllowed(data: UpdateUserData): void {
+  private assertPatchAllowed(data: UpdateUserData, params?: Params): void {
     if (data.role !== undefined && !this.identityAuthority.capabilities.users.roleWrite) {
       this.externallyManaged(IdentityCapability.USER_ROLE_WRITE, AgorRoleAuthority.CLAIMS);
     }
@@ -606,6 +609,15 @@ export class UsersService {
         IdentityCapability.USER_IDENTITY_WRITE,
         AgorUserLifecycleAuthority.EXTERNAL
       );
+    }
+
+    // The primary photo is a projection of the gallery; only the profile-image
+    // manager (which authorizes the gallery write) may move it.
+    if (
+      data.profile_image_id !== undefined &&
+      getTrustedUserMutationPurpose(params) !== 'profile-image-projection'
+    ) {
+      throw new Forbidden('Profile image selection must use the profile image service');
     }
 
     if (
@@ -696,7 +708,7 @@ export class UsersService {
     const purpose = getTrustedUserMutationPurpose(params);
     if (purpose) {
       assertTrustedMutationFields(purpose, data);
-      if (purpose === 'avatar-sync') return { target };
+      if (purpose === 'avatar-sync' || purpose === 'profile-image-projection') return { target };
     }
 
     if (!this.mutationNeedsActor(params)) return { target };
@@ -996,7 +1008,7 @@ export class UsersService {
       return withUserPatchLock(id, params, (lockedParams) => this.patch(id, data, lockedParams));
     }
     assertSingleUserMutation(data);
-    this.assertPatchAllowed(data);
+    this.assertPatchAllowed(data, params);
     assertValidExecutionHomeKeyWrite(data.unix_username);
     if (data.primary_agentic_tool !== undefined && !isAgenticToolName(data.primary_agentic_tool)) {
       throw new BadRequest('Invalid primary agentic tool');
@@ -1112,6 +1124,7 @@ export class UsersService {
       data.avatar_source !== undefined ||
       data.avatar_source_id !== undefined ||
       data.avatar_synced_at !== undefined ||
+      data.profile_image_id !== undefined ||
       data.preferences ||
       data.agentic_tools ||
       data.agentic_auth_methods ||
@@ -1133,6 +1146,7 @@ export class UsersService {
         avatar_source?: string;
         avatar_source_id?: string;
         avatar_synced_at?: string;
+        profile_image_id?: import('@agor/core/types').ProfileImageID;
         preferences?: Record<string, unknown>;
         agentic_tools?: StoredAgenticTools;
         agentic_auth_methods?: AgenticAuthMethods;
@@ -1439,6 +1453,10 @@ export class UsersService {
           (avatarSourceChangedAwayFromSlack && data.avatar_synced_at === undefined)
             ? undefined
             : (data.avatar_synced_at ?? current.avatar_synced_at),
+        profile_image_id:
+          data.profile_image_id === null
+            ? undefined
+            : (data.profile_image_id ?? current.profile_image_id),
         preferences: data.preferences ?? current.preferences,
         agentic_tools: Object.keys(nextAgenticTools).length > 0 ? nextAgenticTools : undefined,
         agentic_auth_methods:
@@ -1778,12 +1796,17 @@ export class UsersService {
    * that would immediately resolve back to null.
    */
   async setPrimaryTeammate(
-    data: { branchId: string; expectedUserId: UserID },
+    data: { branchId: string | null; expectedUserId: UserID },
     params?: Params
   ): Promise<Branch | null> {
     const userId = this.requirePrimaryTeammateMember(params);
     if (data?.expectedUserId !== userId) {
       throw new Forbidden(USER_AUTHORITY_DENIED);
+    }
+    if (data.branchId === null) {
+      await new UserPrimaryTeammateRepository(this.db).clearPrimaryTeammate(userId);
+      await this.emitUserPreferencePatched(userId, params);
+      return null;
     }
     const branchId = data?.branchId as BranchID | undefined;
     if (!branchId) {
@@ -1887,7 +1910,7 @@ export class UsersService {
     const updatedRow = await update(this.db, users)
       .set({
         updated_at: new Date(),
-        data: { ...currentData, primary_agentic_tool: tool },
+        data: jsonSetString(this.db, users.data, 'primary_agentic_tool', tool),
       })
       .where(
         and(
@@ -1958,6 +1981,7 @@ export class UsersService {
       avatar_source?: string;
       avatar_source_id?: string;
       avatar_synced_at?: string;
+      profile_image_id?: import('@agor/core/types').ProfileImageID;
       preferences?: Record<string, unknown>;
       agentic_tools?: StoredAgenticTools; // Encrypted per-tool credential blobs
       agentic_auth_methods?: AgenticAuthMethods;
@@ -1993,6 +2017,7 @@ export class UsersService {
       avatar_source: data.avatar_source,
       avatar_source_id: data.avatar_source_id,
       avatar_synced_at: data.avatar_synced_at,
+      profile_image_id: data.profile_image_id,
       preferences: data.preferences,
       onboarding_completed: !!row.onboarding_completed,
       must_change_password: !!row.must_change_password,
@@ -2070,6 +2095,7 @@ class UsersServiceWithAuth extends UsersService {
       avatar_source?: string;
       avatar_source_id?: string;
       avatar_synced_at?: string;
+      profile_image_id?: import('@agor/core/types').ProfileImageID;
       preferences?: Record<string, unknown>;
       agentic_tools?: StoredAgenticTools;
       env_vars?: Record<string, string | StoredEnvVar>;
@@ -2098,6 +2124,7 @@ class UsersServiceWithAuth extends UsersService {
       avatar_source: data.avatar_source,
       avatar_source_id: data.avatar_source_id,
       avatar_synced_at: data.avatar_synced_at,
+      profile_image_id: data.profile_image_id,
       preferences: data.preferences,
       onboarding_completed: !!row.onboarding_completed,
       must_change_password: !!row.must_change_password,

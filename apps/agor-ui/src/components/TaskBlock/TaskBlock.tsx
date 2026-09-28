@@ -16,7 +16,6 @@ import {
   PermissionStatus,
   ROLES,
   type SessionID,
-  shortId,
   type Task,
   TaskStatus,
   type ToolExecutionState,
@@ -47,6 +46,7 @@ import { Tag } from '../Tag';
 import { ToolDisclosureHeader } from '../ToolBlock/ToolBlock';
 import { ToolIcon } from '../ToolIcon';
 import { LeanTurnMetadata } from './LeanTurnMetadata';
+import { TaskAuditTags } from './TaskAuditTags';
 import { TurnOutcome } from './TurnOutcome';
 
 const { Paragraph } = Typography;
@@ -814,6 +814,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
             prefix="By"
           />
         )}
+        <TaskAuditTags task={task} />
         {normalized && (
           <TokenCountPill
             count={normalized.tokenUsage.totalTokens}
@@ -845,83 +846,6 @@ export const TaskBlock = React.memo<TaskBlockProps>(
               branchName={branchName}
               style={{ fontSize: 11 }}
             />
-            {scheduledFromBranch && scheduledRunAt && (
-              <ScheduledRunPill scheduledRunAt={scheduledRunAt} />
-            )}
-            {task.created_by && (
-              <CreatedByTag
-                createdBy={task.created_by}
-                currentUserId={currentUserId}
-                userById={userById}
-                prefix="By"
-              />
-            )}
-            {task.metadata?.coordinator_queue_batch && (
-              <Tag color="blue" style={{ fontSize: 11 }}>
-                {task.metadata.coordinator_queue_batch.source_request_count} requests → 1 turn (
-                {task.metadata.coordinator_queue_batch.strategy})
-              </Tag>
-            )}
-            {task.metadata?.coordinator_queue_batch_member && (
-              <Tag color="default" style={{ fontSize: 11 }}>
-                Batched into{' '}
-                {shortId(task.metadata.coordinator_queue_batch_member.execution_task_id)}
-              </Tag>
-            )}
-            {normalized && (
-              <TokenCountPill
-                count={normalized.tokenUsage.totalTokens}
-                inputTokens={normalized.tokenUsage.inputTokens}
-                outputTokens={normalized.tokenUsage.outputTokens}
-                cacheReadTokens={normalized.tokenUsage.cacheReadTokens}
-                cacheCreationTokens={normalized.tokenUsage.cacheCreationTokens}
-              />
-            )}
-            {hasContextWindowUsage && (
-              <ContextWindowPill
-                used={contextWindowUsed}
-                limit={contextWindowLimit || 0}
-                taskMetadata={{
-                  model: task.model,
-                  duration_ms: task.duration_ms,
-                  agentic_tool,
-                  raw_sdk_response: task.raw_sdk_response,
-                  normalized_sdk_response: normalized ?? undefined,
-                }}
-              />
-            )}
-            {task.model && task.model !== sessionModel && <ModelPill model={task.model} />}
-            {task.git_state.sha_at_start && task.git_state.sha_at_start !== 'unknown' && (
-              <Flex gap={token.sizeUnit / 2} align="center">
-                <GitStatePill
-                  branch={task.git_state.ref_at_start}
-                  sha={task.git_state.sha_at_start}
-                  branchName={branchName}
-                  style={{ fontSize: 11 }}
-                />
-                {task.git_state.sha_at_end &&
-                  task.git_state.sha_at_end !== 'unknown' &&
-                  task.git_state.sha_at_end !== task.git_state.sha_at_start && (
-                    <>
-                      <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                        →
-                      </Typography.Text>
-                      <GitStatePill
-                        branch={task.git_state.ref_at_end}
-                        sha={task.git_state.sha_at_end}
-                        branchName={branchName}
-                        showDirtyIndicator={true}
-                        style={{ fontSize: 11 }}
-                      />
-                    </>
-                  )}
-              </Flex>
-            )}
-            {task.report && (
-              <Tag icon={<FileTextOutlined />} color="green" style={{ fontSize: 11 }}>
-                Report
-              </Tag>
-            )}
             {task.git_state.sha_at_end &&
               task.git_state.sha_at_end !== 'unknown' &&
               task.git_state.sha_at_end !== task.git_state.sha_at_start && (
@@ -974,6 +898,28 @@ export const TaskBlock = React.memo<TaskBlockProps>(
           : Array.isArray(message.content) &&
             message.content.some((block) => block.type === 'text' || block.type === 'image'))
     )?.message_id;
+    const promptKey = `task:${task.task_id}:prompt`;
+    // Presentation only, derived from an already-admitted Task. Never insert this
+    // into reactive messages or persist it. Reuse MessageBlock so Markdown, copy,
+    // avatars and attachments have the same layout before/after message delivery.
+    const fallbackPrompt: Message = {
+      message_id: task.task_id,
+      task_id: task.task_id,
+      session_id: task.session_id,
+      role: MessageRole.USER,
+      type: 'user',
+      content: task.full_prompt,
+      content_preview: '',
+      index: task.message_range?.start_index ?? 0,
+      timestamp: task.message_range?.start_timestamp ?? task.created_at,
+      metadata: task.metadata?.is_agor_callback ? { is_agor_callback: true } : undefined,
+    };
+    const promptMessageId =
+      firstPromptId ?? (task.full_prompt ? fallbackPrompt.message_id : undefined);
+    const displayBlocks: Block[] =
+      !firstPromptId && task.full_prompt
+        ? [{ type: 'message', message: fallbackPrompt }, ...blocks]
+        : blocks;
     const hasTools = messages.some(
       (message) =>
         message.tool_uses?.length ||
@@ -1059,7 +1005,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
                       tell structural transcript changes (new message/chain,
                       task hydration, a block settling after streaming) apart
                       from per-frame streaming churn inside a block. */}
-        {blocks.map((block, blockIndex) => {
+        {displayBlocks.map((block, blockIndex) => {
           if (block.type === 'message') {
             // Find if this is a permission request and if it's the first pending one
             const isPermissionRequest = block.message.type === 'permission_request';
@@ -1069,7 +1015,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
               const content = block.message.content as PermissionRequestContent;
               if (content.status === PermissionStatus.PENDING) {
                 // Check if this is the first pending permission request
-                isFirstPending = !blocks.slice(0, blockIndex).some((b) => {
+                isFirstPending = !displayBlocks.slice(0, blockIndex).some((b) => {
                   if (b.type === 'message' && b.message.type === 'permission_request') {
                     const c = b.message.content as PermissionRequestContent;
                     return c.status === PermissionStatus.PENDING;
@@ -1090,11 +1036,14 @@ export const TaskBlock = React.memo<TaskBlockProps>(
 
             // Check if this is the latest agent message (last message block)
             const isLatestMessage =
-              block.message.role === MessageRole.ASSISTANT && blockIndex === blocks.length - 1;
+              block.message.role === MessageRole.ASSISTANT &&
+              blockIndex === displayBlocks.length - 1;
 
+            const isPrompt = block.message.message_id === promptMessageId;
             const messageElement = (
               <MessageBlock
-                key={block.message.message_id}
+                key={isPrompt ? promptKey : block.message.message_id}
+                textChoiceKey={isPrompt ? promptKey : undefined}
                 message={block.message}
                 agentic_tool={agentic_tool}
                 userById={userById}
@@ -1113,8 +1062,11 @@ export const TaskBlock = React.memo<TaskBlockProps>(
               />
             );
             return (
-              <div key={block.message.message_id} data-conversation-block={getBlockMarker(block)}>
-                {block.message.message_id === firstPromptId ? (
+              <div
+                key={isPrompt ? promptKey : block.message.message_id}
+                data-conversation-block={getBlockMarker(block)}
+              >
+                {isPrompt ? (
                   <>
                     <LeanTurnMetadata
                       metadata={metadataPills}
@@ -1132,16 +1084,19 @@ export const TaskBlock = React.memo<TaskBlockProps>(
             );
           }
           if (block.type === 'agent-chain') {
+            const sourceBlockIndex = blockIndex - (displayBlocks.length - blocks.length);
             // Use first message ID as key for agent chain
             const blockKey = `agent-chain-${block.messages[0]?.message_id || 'unknown'}`;
             return (
               <div key={blockKey} data-conversation-block={getBlockMarker(block)}>
                 <AgentChain
                   messages={block.messages}
-                  revealRequested={revealLoadedActivity && blockIndex === firstAgentChainIndex}
+                  revealRequested={
+                    revealLoadedActivity && sourceBlockIndex === firstAgentChainIndex
+                  }
                   latestActivity={
-                    blockIndex === pendingActivityChainIndex ||
-                    (blockIndex === lastAgentChainIndex &&
+                    sourceBlockIndex === pendingActivityChainIndex ||
+                    (sourceBlockIndex === lastAgentChainIndex &&
                       latestActivity &&
                       block.messages.some((message) =>
                         messageHasTool(message, latestActivity.toolUseId)
@@ -1150,9 +1105,9 @@ export const TaskBlock = React.memo<TaskBlockProps>(
                       : undefined
                   }
                   isTaskRunning={runtimeLive && !hasPendingApproval}
-                  isLatest={isLatestTask && blockIndex === lastAgentChainIndex}
+                  isLatest={isLatestTask && sourceBlockIndex === lastAgentChainIndex}
                   hasFollowingResponse={blocks
-                    .slice(blockIndex + 1)
+                    .slice(sourceBlockIndex + 1)
                     .some(
                       (next) =>
                         next.type === 'message' &&
@@ -1280,22 +1235,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
     );
     return (
       <div data-task-block={task.task_id}>
-        {!firstPromptId && (
-          <>
-            {task.full_prompt && (
-              <LeanTurnMetadata
-                metadata={metadataPills}
-                background={taskHeaderGradient}
-                reserveSpace={hasPendingApproval}
-              >
-                <Typography.Paragraph style={{ whiteSpace: 'pre-wrap' }}>
-                  {task.full_prompt}
-                </Typography.Paragraph>
-              </LeanTurnMetadata>
-            )}
-            {toolDisclosure}
-          </>
-        )}
+        {!promptMessageId && toolDisclosure}
         {taskContent}
         {isAuthorizationRevokedFailure(task) ? (
           <AuthorizationRevokedNotice task={task} />

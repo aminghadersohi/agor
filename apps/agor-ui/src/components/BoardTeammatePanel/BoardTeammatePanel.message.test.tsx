@@ -1,4 +1,4 @@
-import type { AgorClient, Board, Branch } from '@agor-live/client';
+import type { AgorClient, Board, Branch, User } from '@agor-live/client';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,6 +17,15 @@ vi.mock('../../utils/message', () => ({
 
 import { BoardTeammatePanel } from './BoardTeammatePanel';
 
+// Profile galleries and portraits load from the daemon; keep these tests hermetic.
+vi.mock('../ProfileImage/profileImageApi', () => ({
+  listProfileImages: vi.fn(async () => ({ images: [], max_images: 24 })),
+  fetchProfileImageBlob: vi.fn(),
+  uploadProfileImage: vi.fn(),
+  patchProfileImage: vi.fn(),
+  deleteProfileImage: vi.fn(),
+}));
+
 const board = {
   board_id: 'board-1' as Board['board_id'],
   name: 'Board',
@@ -24,6 +33,7 @@ const board = {
   created_at: '2026-08-14T00:00:00.000Z',
   last_updated: '2026-08-14T00:00:00.000Z',
   created_by: 'user-1',
+  primary_owner_user_id: 'user-1',
   url: '',
   archived: false,
 } satisfies Board;
@@ -42,6 +52,7 @@ describe('BoardTeammatePanel messages', () => {
     messageApi.showError.mockReset();
     agorStore.setState({
       ...EMPTY_MAPS,
+      userById: new Map([['user-1', { user_id: 'user-1', role: 'member' } as User]]),
       branchById: new Map([[teammate.branch_id, teammate]]),
     });
   });
@@ -59,6 +70,7 @@ describe('BoardTeammatePanel messages', () => {
       <AntApp>
         <BoardTeammatePanel
           board={board}
+          currentUserId="user-1"
           activeTab="teammate"
           onTabChange={vi.fn()}
           primaryTeammateInaccessible={false}
@@ -101,6 +113,7 @@ describe('BoardTeammatePanel messages', () => {
       <AntApp>
         <BoardTeammatePanel
           board={board}
+          currentUserId="user-1"
           activeTab="teammate"
           onTabChange={vi.fn()}
           primaryTeammateInaccessible={false}

@@ -21,7 +21,9 @@ const schema = dialect === 'postgresql' ? postgresSchema : sqliteSchema;
 
 // Re-export all tables from the selected schema
 export const sessions = schema.sessions;
+export const profileImages = schema.profileImages;
 export const tasks = schema.tasks;
+export const completionSubscriptions = schema.completionSubscriptions;
 export const sessionMemories = schema.sessionMemories;
 export const sessionReminders = schema.sessionReminders;
 export const executorSessionTokenAuthorities = schema.executorSessionTokenAuthorities;
@@ -82,3 +84,4 @@ export const kbGraphEdges = schema.kbGraphEdges;
 export type * from './schema.sqlite';
 
 export const kbImportReceipts = schema.kbImportReceipts;
+export const branchFrontDeskSessions = schema.branchFrontDeskSessions;

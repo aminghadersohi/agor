@@ -657,7 +657,7 @@ export type BranchAgorYmlExportPayload = z.infer<typeof BranchAgorYmlExportPaylo
 // ═══════════════════════════════════════════════════════════
 
 /**
- * Environment lifecycle payload - run shell-based start/stop/restart/nuke
+ * Environment lifecycle payload - run shell-based start/stop/nuke
  * commands from the executor. Webhook lifecycle commands stay daemon-owned.
  */
 export const EnvironmentLifecyclePayloadSchema = BasePayloadSchema.extend({
@@ -672,46 +672,34 @@ export const EnvironmentLifecyclePayloadSchema = BasePayloadSchema.extend({
       branchId: z.string().uuid(),
 
       /** Branch checkout path. Executor refetches the branch but this avoids ambiguity. */
-      branchPath: z.string().optional(),
+      branchPath: z.string(),
 
       /** Lifecycle action */
-      action: z.enum(['start', 'stop', 'restart', 'nuke']),
-      /** Only the asynchronous delegated path carries durable attempt authority. */
-      attempt: z
-        .object({
-          id: z.string().uuid(),
-          claimDeadline: z.string().datetime(),
-          commandDeadline: z.string().datetime(),
-          resultDeadline: z.string().datetime(),
-          externalJobDeadlineMs: z.number().int().min(305000).max(365000),
-        })
-        .optional(),
+      action: z.enum(['start', 'stop', 'nuke']),
+      /** Durable, daemon-issued attempt authority for every execution mode. */
+      attempt: z.object({
+        id: z.string().uuid(),
+        claimDeadline: z.string().datetime(),
+        commandDeadline: z.string().datetime(),
+        resultDeadline: z.string().datetime(),
+        externalJobDeadlineMs: z.number().int().min(305000).max(365000),
+      }),
 
-      /** Shell start command. Required for start/restart. */
+      /** Shell start command. Required for start. */
       startCommand: z.string().optional(),
 
-      /** Shell stop command. Required for stop and used before restart when present. */
+      /** Shell stop command. Required for stop. */
       stopCommand: z.string().optional(),
 
       /** Shell nuke command. Required for nuke. */
       nukeCommand: z.string().optional(),
-
-      /** Static app URL rendered by the daemon/branch snapshot. */
-      appUrl: z.string().optional(),
     })
     .superRefine((params, ctx) => {
-      if (params.attempt && (!params.branchPath || params.action === 'restart')) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['attempt'],
-          message: 'Asynchronous commands require branchPath and support only Start, Stop, or Nuke',
-        });
-      }
-      if ((params.action === 'start' || params.action === 'restart') && !params.startCommand) {
+      if (params.action === 'start' && !params.startCommand) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['startCommand'],
-          message: 'startCommand is required for start/restart',
+          message: 'startCommand is required for start',
         });
       }
       if (params.action === 'stop' && !params.stopCommand) {
@@ -962,9 +950,34 @@ export const BranchDeletePayloadSchema = BasePayloadSchema.extend({
     /** Existing tenant storage anchor; branch-homes itself is lazily created. */
     tenantDataRoot: z.string(),
     storageMode: z.enum(['clone', 'worktree']),
+    verifyDelegatedStorageMounts: z.boolean().optional(),
   }),
 });
 export type BranchDeletePayload = z.infer<typeof BranchDeletePayloadSchema>;
+
+/** Import branch-scoped .agor/launch.json or .vscode/launch.json. */
+export const BranchLaunchJsonImportPayloadSchema = BasePayloadSchema.extend({
+  command: z.literal('branch.launch-json.import'),
+  sessionToken: z.string(),
+  params: z.object({
+    repoId: z.string().uuid(),
+    branchId: z.string().uuid(),
+  }),
+});
+export type BranchLaunchJsonImportPayload = z.infer<typeof BranchLaunchJsonImportPayloadSchema>;
+
+export const BranchFilesWritePayloadSchema = BasePayloadSchema.extend({
+  command: z.literal('branch.files.write'),
+  sessionToken: z.string(),
+  params: z.object({
+    branchId: z.string().uuid(),
+    filePath: z.string().min(1),
+    content: z.string().max(1024 * 1024),
+    expectedLastModified: z.string().datetime(),
+  }),
+});
+
+export type BranchFilesWritePayload = z.infer<typeof BranchFilesWritePayloadSchema>;
 
 const ExecutorPayloadUnionSchema = z.discriminatedUnion('command', [
   BranchDeletePayloadSchema,
@@ -979,6 +992,7 @@ const ExecutorPayloadUnionSchema = z.discriminatedUnion('command', [
   BranchFilesListPayloadSchema,
   BranchFilesBrowsePayloadSchema,
   BranchFilesReadPayloadSchema,
+  BranchFilesWritePayloadSchema,
   BranchFilesystemStatusPayloadSchema,
   BranchArtifactPublishPayloadSchema,
   BranchArtifactLandPayloadSchema,
@@ -988,6 +1002,7 @@ const ExecutorPayloadUnionSchema = z.discriminatedUnion('command', [
   BranchSlackFileUploadPayloadSchema,
   BranchUploadMaterializePayloadSchema,
   BranchAgorYmlImportPayloadSchema,
+  BranchLaunchJsonImportPayloadSchema,
   BranchAgorYmlExportPayloadSchema,
   EnvironmentLifecyclePayloadSchema,
   EnvironmentLogsPayloadSchema,
@@ -1061,6 +1076,7 @@ export function getSupportedCommands(): string[] {
     'branch.files.list',
     'branch.files.browse',
     'branch.files.read',
+    'branch.files.write',
     'branch.filesystem.status',
     'branch.artifact.publish',
     'branch.artifact.land',
@@ -1070,6 +1086,7 @@ export function getSupportedCommands(): string[] {
     'branch.gateway.slack-file-upload',
     'branch.upload.materialize',
     'branch.agor-yml.import',
+    'branch.launch-json.import',
     'branch.agor-yml.export',
     'environment.lifecycle',
     'environment.logs',

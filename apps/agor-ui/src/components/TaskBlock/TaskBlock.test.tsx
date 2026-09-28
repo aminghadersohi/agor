@@ -330,4 +330,32 @@ describe('coordinator queue batch audit', () => {
     );
     expect(screen.getByText(/5 requests → 1 turn \(replace\)/)).toBeInTheDocument();
   });
+
+  it('renders audit tags and every metadata pill once when git state is known', () => {
+    render(
+      <TaskBlock
+        task={{
+          ...baseTask,
+          status: 'completed',
+          report: 'done',
+          git_state: { ref_at_start: 'main', sha_at_start: 'abc1234' },
+          metadata: {
+            restart_recovery: {
+              source_task_id: '018f0000-0000-7000-8000-00000000000a' as never,
+              state: 'admitted',
+              requested_at: baseTask.created_at,
+            },
+          },
+        }}
+        isExpanded={false}
+        onExpandChange={vi.fn()}
+        taskMessages={[]}
+        taskMessagesLoaded
+        onLoadTaskMessages={vi.fn()}
+        onUnloadTaskMessages={vi.fn()}
+      />
+    );
+    expect(screen.getAllByText('Recovered after restart')).toHaveLength(1);
+    expect(screen.getAllByText('Report')).toHaveLength(1);
+  });
 });

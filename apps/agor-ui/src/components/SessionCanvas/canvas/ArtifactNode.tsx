@@ -33,8 +33,10 @@ import { Alert, Badge, Button, Card, Popconfirm, Spin, Tooltip, Typography, them
 import { compressToBase64 } from 'lz-string';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { NodeResizer } from 'reactflow';
+import { ArtifactBindingControls } from '@/components/artifacts/ArtifactBindingControls';
 import {
   ArtifactConsoleReporter,
+  ArtifactInteractionBridge,
   ArtifactRuntimeBridge,
   ArtifactSandpackErrorReporter,
   ArtifactTrustStatusIcon,
@@ -52,6 +54,8 @@ import { useStableSandpackProviderInputs } from './utils/sandpackDefaults';
 ensureSandpackCryptoSubtle();
 
 export interface ArtifactNodeData {
+  /** Open a configured canonical chat session in the normal session surface. */
+  onOpenSession?: (sessionId: string) => void;
   objectId: string;
   artifactId: string;
   width: number;
@@ -666,9 +670,22 @@ export const ArtifactNode = ({
               contentHash={payload.runtime_report_hash ?? payload.content_hash}
             />
             <ArtifactRuntimeBridge artifactId={data.artifactId} />
+            <ArtifactInteractionBridge
+              artifactId={data.artifactId}
+              config={payload.interaction_config}
+              onOpenSession={data.onOpenSession}
+            />
             <CodeSandboxExporter artifactId={data.artifactId} />
           </SandpackProvider>
         </div>
+        {/* Outside the interact-mode overlay: these are Agor's own controls,
+            usable without handing pointer events to the iframe. */}
+        <ArtifactBindingControls
+          className="nodrag nopan"
+          artifactId={data.artifactId}
+          config={payload.interaction_config}
+          onOpenSession={data.onOpenSession}
+        />
       </Card>
       {consentOpen && (
         <ArtifactConsentModal

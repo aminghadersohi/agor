@@ -336,7 +336,6 @@ describe.each(RBAC_MODES)('viewer read access ($name)', () => {
     ['branches', 'create'],
     ['branches', 'patch'],
     ['branches', 'remove'],
-    ['branches', 'updateEnvironment'],
     ['branches', 'ensureTeammateKnowledgeNamespace'],
   ])('keeps %s.%s restricted to members', async (path, method) => {
     await expect(runCapturedHooks(captured, path, method, 'viewer')).rejects.toMatchObject({
@@ -374,6 +373,7 @@ const UPDATE_NOT_ROUTED: Record<string, string | readonly string[]> = {
   'agentic-tool-settings':
     'no update method — TenantAgenticToolSettingsService is not a DrizzleService',
   artifacts: ARTIFACTS_SERVICE_TRANSPORT_METHODS,
+  'artifacts/:id/actions/:actionId': 'no update method — custom route exposes create only',
   'artifacts/:id/console': 'no update method — custom route exposes create only',
   'artifacts/:id/runtime-response/:requestId':
     'no update method — custom route exposes create only',

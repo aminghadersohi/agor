@@ -57,6 +57,14 @@ interface HealthInfo {
   };
   execution?: {
     unixUserMode: UnixUserMode;
+    managedEnvsExecutionMode?: string;
+    /** Resolved `execution.restart_recovery`; absent on older daemons. */
+    restartRecovery?: {
+      enabled: boolean;
+      delayMs: number;
+      maxTasksPerStart: number;
+      resumeAfterCrash: boolean;
+    };
   };
   security?: {
     csp: {
@@ -72,6 +80,32 @@ interface HealthInfo {
       allowSandpack: boolean;
     };
   };
+}
+
+type RestartRecoverySettings = NonNullable<NonNullable<HealthInfo['execution']>['restartRecovery']>;
+
+/** Read-only: restart recovery is boot-time config (`execution.restart_recovery`). */
+export function RestartRecoverySummary({ settings }: { settings: RestartRecoverySettings }) {
+  if (!settings.enabled) {
+    return (
+      <Space size={8} wrap>
+        <Tag>Off</Tag>
+        <Typography.Text type="secondary">
+          Tasks interrupted by a daemon restart are not resumed automatically.
+        </Typography.Text>
+      </Space>
+    );
+  }
+  return (
+    <Space size={8} wrap>
+      <Tag color="success">On</Tag>
+      <Typography.Text type="secondary">
+        Continues up to {settings.maxTasksPerStart} interrupted tasks per start, one every{' '}
+        {settings.delayMs / 1000}s;{' '}
+        {settings.resumeAfterCrash ? 'also after a crash' : 'only after a clean restart'}.
+      </Typography.Text>
+    </Space>
+  );
 }
 
 export const AboutTab: React.FC<AboutTabProps> = ({
@@ -261,6 +295,16 @@ export const AboutTab: React.FC<AboutTabProps> = ({
                           </Typography.Text>
                         )}
                       </Descriptions.Item>
+                      {healthInfo.execution.managedEnvsExecutionMode && (
+                        <Descriptions.Item label="Managed Environments">
+                          <code>{healthInfo.execution.managedEnvsExecutionMode}</code>
+                        </Descriptions.Item>
+                      )}
+                      {healthInfo.execution.restartRecovery && (
+                        <Descriptions.Item label="Restart Recovery">
+                          <RestartRecoverySummary settings={healthInfo.execution.restartRecovery} />
+                        </Descriptions.Item>
+                      )}
                     </>
                   )}
                 </Descriptions>

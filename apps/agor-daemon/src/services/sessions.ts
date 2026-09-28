@@ -517,8 +517,9 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (getHiddenTenantId(source) !== getHiddenTenantId(destination)) {
       throw new Forbidden('Source and callback destination must belong to the same tenant.');
     }
+    let result: SessionCallbackRetargetResult;
     try {
-      return await this.sessionRepo.retargetCompletionCallback(
+      result = await this.sessionRepo.retargetCompletionCallback(
         source.session_id,
         destination.session_id
       );
@@ -526,6 +527,11 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       if (error instanceof SessionTransferValidationError) throw new Conflict(error.message);
       throw error;
     }
+    await this.emitTransferredSessions(
+      [result.session_id, result.previous_callback_session_id, result.callback_session_id],
+      params
+    );
+    return result;
   }
 
   async reparent(
@@ -546,14 +552,44 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       }
       parentSessionId = destination.session_id;
     }
+    let result: SessionReparentResult;
     try {
-      return await this.sessionRepo.reparentBranchLocalGenealogy(
+      result = await this.sessionRepo.reparentBranchLocalGenealogy(
         source.session_id,
         parentSessionId
       );
     } catch (error) {
       if (error instanceof SessionTransferValidationError) throw new Conflict(error.message);
       throw error;
+    }
+    await this.emitTransferredSessions(
+      [result.session_id, result.previous_parent_session_id, result.parent_session_id],
+      params
+    );
+    return result;
+  }
+
+  /**
+   * Routing and genealogy transfers write through the repository, bypassing
+   * patch hooks. Publish the affected rows (source plus both ends) so open
+   * callback/genealogy views converge without a refetch.
+   */
+  private async emitTransferredSessions(
+    sessionIds: Array<SessionID | null>,
+    params?: SessionParams
+  ): Promise<void> {
+    const ids = [...new Set(sessionIds.filter((id): id is SessionID => !!id))];
+    const rows = (await Promise.all(ids.map((id) => this.sessionRepo.findById(id)))).filter(
+      (row): row is Session => !!row
+    );
+    for (const session of await this.enrichRemoteRelationships(rows)) {
+      emitServiceEvent(this.app, {
+        path: 'sessions',
+        event: 'patched',
+        data: session,
+        params,
+        id: session.session_id,
+      });
     }
   }
 
@@ -1523,7 +1559,11 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       data.codexApprovalPolicy !== undefined ||
       data.codexNetworkAccess !== undefined;
     const inheritedPresetId =
-      targetTool === parent.agentic_tool ? parent.agentic_tool_preset_id : undefined;
+      // Explicit inline selection detaches from the parent's preset. The
+      // materializer still enforces the workspace's inline-configuration policy.
+      !hasAtomicOverride && targetTool === parent.agentic_tool
+        ? parent.agentic_tool_preset_id
+        : undefined;
     const presetId = data.presetId ?? inheritedPresetId ?? undefined;
     if (presetId && hasAtomicOverride) {
       throw new BadRequest(
@@ -1937,12 +1977,17 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       }
     }
 
-    const affectedSessions = await this.sessionRepo.updateArchiveStateForTargets(
-      targets.map((target) => ({
-        id: target.session.session_id,
-        archived: target.archived,
-        archivedReason: target.archivedReason,
-      }))
+    // Carry remote relationships on the patched rows, as get/find do. The UI
+    // projects remote-created children as surrogates under their creator from
+    // these edges; a restored creator without them would lose its surrogates.
+    const affectedSessions = await this.enrichRemoteRelationships(
+      await this.sessionRepo.updateArchiveStateForTargets(
+        targets.map((target) => ({
+          id: target.session.session_id,
+          archived: target.archived,
+          archivedReason: target.archivedReason,
+        }))
+      )
     );
 
     for (const affectedSession of affectedSessions) {

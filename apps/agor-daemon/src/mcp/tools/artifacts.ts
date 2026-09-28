@@ -43,6 +43,11 @@ import {
 import type { McpContext } from '../server.js';
 import { coerceString, textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope } from '../tenant-scope.js';
+import {
+  ARTIFACT_INTERACTION_CONFIG_DESCRIPTION,
+  ArtifactInteractionConfigInputSchema,
+  toArtifactInteractionConfig,
+} from './artifact-interactions.js';
 
 const SANDPACK_TEMPLATES = [
   'static',
@@ -130,6 +135,7 @@ DECLARATIVE CONFIG:
     \`agor_artifact_id: true\` → \`AGOR_ARTIFACT_ID\` (informational, no consent).
     \`agor_board_id: true\`   → \`AGOR_BOARD_ID\` (informational, no consent).
 - \`sandpackConfig\`: author-controlled SandpackProvider config (template, customSetup, theme, options). Sanitized on write — UI-affecting / private-account props are stripped.
+- \`interactionConfig\`: declared bindings the artifact can invoke — \`data\` (read a schedule's or session's status), \`actions\` (run a schedule once, or arm/disarm it), \`chats\` (open a session in Agor). Artifact JS calls \`window.agor.fetchData(id)\`, \`window.agor.runAction(id)\`, or \`window.agor.openChat(id)\` with the binding id only; Agor also renders the bindings as controls on the artifact card. Every schedule/session must be on the artifact's branch. Actions run as the VIEWER with their own permissions (a non-creator cannot run your schedule). Invalid bindings fail the publish with the reason.
 
 CONSENT MODEL (TOFU): when the viewer is NOT the artifact author, the daemon does NOT inject env vars or grants without an explicit trust grant. Untrusted artifacts render with empty env values and a "Trust to render with secrets" badge.
 
@@ -183,7 +189,10 @@ IMPORTANT:
           'Daemon capabilities to inject. See tool description for the full list.'
         ),
         agorRuntime: AgorRuntimeSchema.describe(
-          'Controls injection of the daemon-side `agor-runtime.js` (which powers agent DOM introspection via agor_artifacts_query_dom). Default: enabled.'
+          'Controls injection of the daemon-side `agor-runtime.js` (which powers agent DOM introspection via agor_artifacts_query_dom and window.agor bindings). Default: enabled.'
+        ),
+        interactionConfig: ArtifactInteractionConfigInputSchema.describe(
+          ARTIFACT_INTERACTION_CONFIG_DESCRIPTION
         ),
         x: mcpOptionalNumber('x', 'X position on board (default: 0, only used on create)'),
         y: mcpOptionalNumber('y', 'Y position on board (default: 0, only used on create)'),
@@ -215,6 +224,7 @@ IMPORTANT:
         ? await resolveArtifactId(ctx, coerceString(args.artifactId)!)
         : undefined;
       if (!resolvedBranchId || !subpath) throw new Error('branchId and subpath are required');
+      const interactionConfig = await toArtifactInteractionConfig(ctx, args.interactionConfig);
       const artifact = await service.publishArtifact(
         {
           branch_id: resolvedBranchId,
@@ -229,6 +239,7 @@ IMPORTANT:
           required_env_vars: args.requiredEnvVars,
           agor_grants: args.agorGrants as AgorGrants | undefined,
           agor_runtime: args.agorRuntime as AgorRuntimeConfig | undefined,
+          interaction_config: interactionConfig,
           x: args.x,
           y: args.y,
           width: args.width,
@@ -474,7 +485,9 @@ NOTE: sandpack_error and console_logs require a browser to be viewing the artifa
   server.registerTool(
     'agor_artifacts_update',
     {
-      description: `Update artifact metadata without re-reading files from disk. Use this to move an artifact to a different board, rename it, toggle visibility, archive it, reposition its board placement, or update its declarative config (requiredEnvVars / agorGrants / sandpackConfig).
+      description: `Update artifact metadata without re-reading files from disk. Use this to move an artifact to a different board, rename it, toggle visibility, archive it, reposition its board placement, or update its declarative config (requiredEnvVars / agorGrants / sandpackConfig / interactionConfig).
+
+\`interactionConfig\` repoints bindings without republishing code — e.g. swap a chat's session. It replaces all bindings (null clears them) and is validated like on publish.
 
 For file/content changes, use agor_artifacts_publish (which re-reads a folder and updates the stored files).
 
@@ -508,7 +521,10 @@ Caller must own the artifact (or be an admin).`,
           .describe("Replace the artifact's required_env_vars list."),
         agorGrants: AgorGrantsSchema.describe("Replace the artifact's agor_grants object."),
         agorRuntime: AgorRuntimeSchema.describe(
-          "Replace the artifact's agor_runtime config (controls agor-runtime.js injection)."
+          "Replace the artifact's agor_runtime flags (controls agor-runtime.js injection). Declared bindings are kept; change them with interactionConfig."
+        ),
+        interactionConfig: ArtifactInteractionConfigInputSchema.describe(
+          ARTIFACT_INTERACTION_CONFIG_DESCRIPTION
         ),
         waitForStatus: z
           .boolean()
@@ -528,6 +544,7 @@ Caller must own the artifact (or be an admin).`,
 
       const boardIdInput = coerceString(args.boardId);
       const resolvedBoardId = boardIdInput ? await resolveBoardId(ctx, boardIdInput) : undefined;
+      const interactionConfig = await toArtifactInteractionConfig(ctx, args.interactionConfig);
 
       const updated = await runWithMcpTenantDatabaseScope(ctx, () =>
         service.updateMetadata(
@@ -546,6 +563,7 @@ Caller must own the artifact (or be an admin).`,
             required_env_vars: args.requiredEnvVars,
             agor_grants: args.agorGrants as AgorGrants | undefined,
             agor_runtime: args.agorRuntime as AgorRuntimeConfig | undefined,
+            interaction_config: interactionConfig,
           },
           ctx.userId,
           ctx.authenticatedUser.role as UserRole
