@@ -3,8 +3,8 @@
  *
  * The daemon records where a turn came from (coordinator batches, merged
  * busy-session prompts, edits, interrupts, callback routing, reminders,
- * restart recovery, dropped gateway attachments) but none of it reaches the
- * prompt bubble on its own. This module is presentation only: it never
+ * restart recovery, dropped gateway attachments, MCP relays) but none of it
+ * reaches the prompt bubble on its own. This module is presentation only: it never
  * decides authority, it just says what the audit already says.
  */
 
@@ -236,11 +236,26 @@ export function getTaskAuditTags(task: Pick<Task, 'task_id' | 'metadata'>): Task
     });
   }
 
-  // Seam for "Relayed by agent": server-stamped prompt provenance (upstream
-  // #2893, `metadata.prompt_provenance`) is not on this branch yet. When it
-  // lands, push a tag here linking the origin session with its tool/mode and
-  // `authenticated_by`, and a tooltip stating it attests the hop, not human
-  // approval.
+  // Server-stamped MCP prompt provenance. IDs only: the origin session link
+  // resolves its title from the viewer's own store, so nothing here can name a
+  // session the viewer may not see.
+  const provenance = metadata.prompt_provenance;
+  if (provenance) {
+    const via = `${provenance.tool}${provenance.mode ? ` (${provenance.mode})` : ''}`;
+    tags.push({
+      key: 'prompt-provenance',
+      label: provenance.origin_session_id ? 'Relayed by agent' : 'Relayed by agent (unattributed)',
+      status: 'default',
+      tooltip: [
+        `Delivered over MCP by ${provenance.origin_agentic_tool ?? 'an agent'} via ${via}.`,
+        provenance.authenticated_by === 'session_token'
+          ? 'Origin session proven by a signed session token.'
+          : 'Origin session named by a personal API key caller, not a signed session binding.',
+        'This attests the hop, not that a human read or approved the prompt.',
+      ].join(' '),
+      session: provenance.origin_session_id,
+    });
+  }
 
   return tags;
 }
