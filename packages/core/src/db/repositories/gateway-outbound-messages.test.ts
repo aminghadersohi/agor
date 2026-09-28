@@ -285,4 +285,52 @@ describe('GatewayOutboundMessageRepository', () => {
       outbound_seed_initial_task_id: taskA,
     });
   });
+
+  dbTest('lists the audit trail newest first with filters and paging', async ({ db }) => {
+    const { user, branch, channel } = await seedGateway(db);
+    const sessionId = generateId();
+    await seedSession(db, branch.branch_id, user.user_id, sessionId);
+    const repo = new GatewayOutboundMessageRepository(db);
+    const send = (messageId: string, threadId: string, at: number, emittedBySession = false) =>
+      repo.recordSend({
+        gateway_channel_id: channel.id,
+        channel_type: 'slack',
+        platform_channel_id: 'C123',
+        platform_message_id: messageId,
+        platform_thread_id: threadId,
+        target_branch_id: branch.branch_id,
+        emitted_by_user_id: user.user_id,
+        emitted_by_session_id: emittedBySession ? (sessionId as never) : null,
+        message_text: `send ${messageId}`,
+        message_preview: `send ${messageId}`,
+        created_at: new Date(at).toISOString(),
+      });
+    const seed = await send('100.000001', 'C123-100.000001', 1_000, true);
+    const followUp = await send('100.000002', 'C123-100.000001', 2_000);
+    const other = await send('200.000001', 'C123-200.000001', 3_000);
+
+    const all = await repo.list({}, { limit: 10, offset: 0 });
+    expect(all.total).toBe(3);
+    expect(all.data.map((row) => row.id)).toEqual([
+      other.message.id,
+      followUp.message.id,
+      seed.message.id,
+    ]);
+
+    const thread = await repo.list(
+      { gatewayChannelId: channel.id, platformThreadId: 'C123-100.000001' },
+      { limit: 1, offset: 1 }
+    );
+    expect(thread.total).toBe(2);
+    expect(thread.data.map((row) => row.id)).toEqual([seed.message.id]);
+
+    const bySession = await repo.list({ sessionId: sessionId as never }, { limit: 10, offset: 0 });
+    expect(bySession.data.map((row) => row.id)).toEqual([seed.message.id]);
+
+    const otherBranch = await repo.list(
+      { targetBranchId: generateId() as BranchID },
+      { limit: 10, offset: 0 }
+    );
+    expect(otherBranch).toEqual({ data: [], total: 0 });
+  });
 });

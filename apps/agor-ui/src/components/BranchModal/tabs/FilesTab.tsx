@@ -19,9 +19,11 @@ const MAX_FILES = 50000;
 interface FilesTabProps {
   branch: Branch;
   client: AgorClient | null;
+  /** Caller has branch file `write` access; otherwise the editor opens view-only. */
+  canWriteFiles: boolean;
 }
 
-const FilesTabInner: React.FC<FilesTabProps> = ({ branch, client }) => {
+const FilesTabInner: React.FC<FilesTabProps> = ({ branch, client, canWriteFiles }) => {
   const [files, setFiles] = useState<FileListItem[]>([]);
   const [editorOpen, setEditorOpen] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -260,7 +262,7 @@ const FilesTabInner: React.FC<FilesTabProps> = ({ branch, client }) => {
             disabled={!client || loading || files.length === 0}
             onClick={() => setEditorOpen(true)}
           >
-            Open workspace editor
+            {canWriteFiles ? 'Open workspace editor' : 'Open workspace viewer'}
           </Button>
         </Flex>
 
@@ -355,6 +357,7 @@ const FilesTabInner: React.FC<FilesTabProps> = ({ branch, client }) => {
           open={editorOpen}
           onClose={() => setEditorOpen(false)}
           onFileSaved={handleFileSaved}
+          canWrite={canWriteFiles}
         />
       </Space>
     </div>

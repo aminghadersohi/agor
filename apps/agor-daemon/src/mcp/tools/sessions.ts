@@ -76,6 +76,7 @@ import type { McpContext } from '../server.js';
 import { sessionContextRequiredResult, structuredResult, textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
 import { listAttachedMcpServers } from './mcp-servers.js';
+import { readOpenCodeModelReadiness } from './opencode-models.js';
 import {
   describeTeammateBranch,
   resolveTeammateName,
@@ -2690,7 +2691,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_models_list',
     {
       description:
-        'List selectable model aliases grouped by agenticTool. Use this to discover what to pass for `modelConfig` (or its string shorthand) in agor_sessions_create / spawn / prompt. Lists the registry loaded by the running daemon; provider-specific exact IDs may be account-dependent.',
+        'List selectable model aliases grouped by agenticTool. Use this to discover what to pass for `modelConfig` (or its string shorthand) in agor_sessions_create / spawn / prompt. Lists the registry loaded by the running daemon; provider-specific exact IDs may be account-dependent. With agenticTool "opencode", also returns `readiness`: the providers and exact models you can select right now (including the experimental local Ollama preset) and why other providers are unavailable. Provider settings are changed in User Settings, not here.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         agenticTool: z
@@ -2751,7 +2752,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         opencode: {
           default: null,
           models: [],
-          note: 'OpenCode models are provider-specific and are discovered after selecting a provider. Pass both modelConfig.provider and modelConfig.model from the OpenCode provider catalog.',
+          note: 'OpenCode models are provider-specific and are discovered after selecting a provider. Pass both modelConfig.provider and modelConfig.model from the OpenCode provider catalog. Call with agenticTool: "opencode" for your ready providers and models (including the experimental Ollama preset).',
         },
         copilot: {
           default: DEFAULT_COPILOT_MODEL,
@@ -2774,6 +2775,12 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         { default: string | null; models: unknown[]; note: string }
       >;
 
+      if (args.agenticTool === 'opencode') {
+        // Caller-specific readiness probes providers, so only on explicit request.
+        return textResult({
+          opencode: { ...all.opencode, readiness: await readOpenCodeModelReadiness(ctx) },
+        });
+      }
       if (args.agenticTool) {
         return textResult({ [args.agenticTool]: all[args.agenticTool] });
       }

@@ -133,6 +133,7 @@ import { gatewayInboundSessionId, gatewayInboundTaskId } from '../utils/durable-
 import {
   buildPromptWithAttachments,
   formatSkippedAttachmentNote,
+  formatUndeliveredAttachmentReply,
   ingestDiscordInboundImages,
   ingestInboundAttachments,
 } from '../utils/gateway-attachments.js';
@@ -5745,6 +5746,13 @@ export class GatewayService {
             console.log(
               `[gateway] Ingested ${stagedUploads.length} Slack attachment(s) for session ${shortId(sessionId)}`
             );
+          }
+          // Tell the sender, in their thread, which files the agent will not
+          // see and why. Fire-and-forget: sendSystemMessage swallows provider
+          // errors, so the reply can never delay or fail the prompt.
+          const undeliveredReply = formatUndeliveredAttachmentReply(ingestion.undelivered);
+          if (undeliveredReply) {
+            this.sendSystemMessage(channel, data.thread_id, undeliveredReply);
           }
         } else {
           failedAttachments = data.files.length;

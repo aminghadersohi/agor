@@ -184,7 +184,10 @@ export function ArtifactBindingControls({
         );
       })}
       {actions.map((action) => (
-        <Tooltip key={`action-${action.id}`} title={action.description}>
+        <Tooltip
+          key={`action-${action.id}`}
+          title={action.description || describeEffect(action.effect)}
+        >
           <Button
             size="small"
             loading={running === action.id}

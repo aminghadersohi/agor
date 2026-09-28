@@ -1,6 +1,7 @@
 import {
   BranchRepository,
   GatewayChannelRepository,
+  GatewayOutboundMessageRepository,
   SessionRepository,
   ThreadSessionMapRepository,
 } from '@agor/core/db';
@@ -37,6 +38,8 @@ import {
   type GatewayChannel,
   type GatewayChannelCreateData,
   type GatewayChannelPatchData,
+  type GatewayOutboundMessage,
+  type GatewayOutboundSendRole,
   type GatewaySource,
   getGatewaySource,
   getRequiredSecretFields,
@@ -76,8 +79,10 @@ import { getDaemonUrl, requestExecutor } from '../../utils/spawn-executor.js';
 import { getUploadLimits } from '../../utils/upload.js';
 import { getUploadStagingStore } from '../../utils/upload-staging.js';
 import { resolveMcpCallerSandboxMounts } from '../caller-sandbox-mounts.js';
+import { resolveSessionId } from '../resolve-ids.js';
 import {
   mcpLimit,
+  mcpOffset,
   mcpOptionalId,
   mcpOptionalNonEmptyString,
   mcpOptionalNonNegativeInt,
@@ -209,6 +214,39 @@ function getOutboundConfig(channel: GatewayChannel): {
     ...(typeof config.default_outbound_target === 'string' && config.default_outbound_target.trim()
       ? { default_outbound_target: config.default_outbound_target }
       : {}),
+  };
+}
+
+/**
+ * MCP projection of one outbound audit row. Built field by field so provider
+ * receipts, reply aliases and admission reservations in `metadata` never leave
+ * the daemon; only the operator-facing `target` and `purpose` are surfaced.
+ */
+function toOutboundAuditEntry(message: GatewayOutboundMessage, includeText: boolean) {
+  const metadata = message.metadata ?? {};
+  const role: GatewayOutboundSendRole =
+    message.seed_thread_id !== null ? 'thread_seed' : 'thread_followup';
+  return {
+    gateway_outbound_message_id: message.id,
+    gateway_channel_id: message.gateway_channel_id,
+    channel_type: message.channel_type,
+    role,
+    platform_channel_id: message.platform_channel_id,
+    platform_message_id: message.platform_message_id,
+    platform_thread_id: message.platform_thread_id,
+    platform_permalink: message.platform_permalink,
+    target_branch_id: message.target_branch_id,
+    emitted_by_user_id: message.emitted_by_user_id,
+    emitted_by_session_id: message.emitted_by_session_id,
+    emitted_by_task_id: message.emitted_by_task_id,
+    emitted_by_schedule_id: message.emitted_by_schedule_id,
+    ...(typeof metadata.target === 'string' ? { target: metadata.target } : {}),
+    ...(typeof metadata.purpose === 'string' ? { purpose: metadata.purpose } : {}),
+    message_preview: message.message_preview,
+    ...(includeText ? { message_text: message.message_text } : {}),
+    reply_session_id: message.consumed_by_session_id,
+    reply_consumed_at: message.consumed_at,
+    created_at: message.created_at,
   };
 }
 
@@ -2047,6 +2085,82 @@ export function registerGatewayChannelTools(server: McpServer, ctx: McpContext):
           ...(callerSessionBranchId && page.length === 0
             ? {
                 hint: "No outbound-enabled channel targets this session's branch — ask an operator to create/enable one.",
+              }
+            : {}),
+        });
+      });
+    }
+  );
+
+  server.registerTool(
+    'agor_gateway_outbound_messages_list',
+    {
+      description:
+        "List the proactive gateway outbound audit trail (admin-only), newest first: one row per message sent through agor_gateway_emit_message, with its thread role (thread_seed or thread_followup), provider permalink, and attribution (user, session, task, schedule). Filter by gateway channel, provider thread, or session (matches the emitting session or the session a reply was routed to). When called from a session, results are restricted to gateway channels targeting the calling session's branch. message_text is returned only with includeText; secrets and provider internals are never returned.",
+      annotations: { readOnlyHint: true },
+      inputSchema: z.strictObject({
+        gatewayChannelId: mcpOptionalId(
+          'gatewayChannelId',
+          'Gateway channel',
+          'Filter by gateway channel ID.'
+        ),
+        threadId: mcpOptionalNonEmptyString(
+          'threadId',
+          'Filter by provider thread ID as recorded (platform_thread_id, e.g. Slack C123-1712345678.000100).'
+        ),
+        sessionId: mcpOptionalId(
+          'sessionId',
+          'Session',
+          'Filter by the emitting session or the session a reply was routed to.'
+        ),
+        includeText: z
+          .boolean()
+          .optional()
+          .describe(
+            'Include full message_text (default: false; message_preview is always returned).'
+          ),
+        limit: mcpLimit(25, 100),
+        offset: mcpOffset(0),
+      }),
+    },
+    async (args) => {
+      requireAdmin(ctx, 'list gateway outbound messages');
+      const sessionId = args.sessionId ? await resolveSessionId(ctx, args.sessionId) : undefined;
+      return runWithMcpTenantDatabaseScope(ctx, async (db) => {
+        // Same session binding as the other gateway reads: a session sees only
+        // sends through channels targeting its own branch, even as an admin.
+        const callerSessionBranchId = await resolveCallerSessionBranchId(ctx);
+        let gatewayChannelId: GatewayChannel['id'] | undefined;
+        if (args.gatewayChannelId) {
+          const channel = await new GatewayChannelRepository(db).findById(args.gatewayChannelId);
+          if (!channel) throw new Error(`Gateway channel not found: ${args.gatewayChannelId}`);
+          gatewayChannelId = channel.id;
+        }
+        const limit = args.limit ?? 25;
+        const offset = args.offset ?? 0;
+        const page = await new GatewayOutboundMessageRepository(db).list(
+          {
+            ...(gatewayChannelId ? { gatewayChannelId } : {}),
+            ...(args.threadId ? { platformThreadId: args.threadId } : {}),
+            ...(sessionId ? { sessionId } : {}),
+            ...(callerSessionBranchId ? { targetBranchId: callerSessionBranchId } : {}),
+          },
+          { limit, offset }
+        );
+        const hasMore = offset + page.data.length < page.total;
+        return textResult({
+          outbound_messages: page.data.map((message) =>
+            toOutboundAuditEntry(message, args.includeText === true)
+          ),
+          total: page.total,
+          limit,
+          offset,
+          hasMore,
+          nextOffset: hasMore ? offset + page.data.length : null,
+          ...(callerSessionBranchId
+            ? {
+                binding:
+                  "Results are scoped to gateway channels targeting the calling session's branch.",
               }
             : {}),
         });
