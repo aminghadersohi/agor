@@ -123,6 +123,8 @@ By default the name reaches the teammate's most recently active session. A Branc
 
 In the UI, the pinned session shows a **Front desk** tag in its session header. A Branch Manager can pin or unpin from the session header's **More actions** menu (**Pin as front desk** / **Unpin front desk**), or from the teammate's settings (**Teammate** tab → **Front desk**), which shows the current pin and lets you choose any active session in the branch. Other members see the current pin but not the controls. The same pin is available over REST at `GET` / `POST` / `DELETE /branches/:id/front-desk`.
 
+Listing a teammate needs only view access, but addressing one by name needs session permission on its branch and a name no other teammate you can address shares. Each row of `agor_teammates_list` therefore says whether a name reaches it for you: `addressable: true` with the `address` to pass, or `not_addressable_reason` (`no_prompt_permission`, `ambiguous_name`, or `beyond_scan_limit`) with an explanation. To see which session an address would reach before sending anything, call `agor_teammates_resolve { teammate }` (or `{ branchId }`, optionally with a `sessionId`). It is a dry run: it reports `via` (`explicit`, `front_desk`, `recency`, or `needs_session`), the session, and any pinned front desk it skipped as unhealthy, without prompting, creating, or demoting anything. The **Front desk** section in the Teammate tab shows the same answer as **Name addressing reaches** and **Address as** (from `GET /branches/:id/front-desk?include_addressing=true`).
+
 ### Learning and adaptation
 
 As your teammate works with you, it naturally improves:

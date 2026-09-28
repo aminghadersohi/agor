@@ -47,8 +47,8 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { expect, it } from 'vitest';
 import { generateId } from '../../../packages/core/src/lib/ids';
 import { tenantScopedToolProxy } from '../src/mcp/tenant-scope';
-import { registerFrontDeskTools } from '../src/mcp/tools/branches';
-import { resolveTeammateSession } from '../src/mcp/tools/teammate-addressing';
+import { registerBranchTools, registerFrontDeskTools } from '../src/mcp/tools/branches';
+import { resolveTeammateName, resolveTeammateSession } from '../src/mcp/tools/teammate-addressing';
 import {
   type TeammateAddressingFixture,
   teammateAddressingFixture,
@@ -59,8 +59,12 @@ type Handler = ReturnType<TeammateAddressingFixture['handlersFor']>[string];
 export interface FrontDeskFixture extends TeammateAddressingFixture {
   /** Branch Collaborator on every teammate branch: may prompt, may not pin. */
   collaborator: User;
+  /** Branch Viewer on every teammate branch: sees it listed, may not prompt it. */
+  viewer: User;
   /** The registered front-desk MCP tools, as `user`. */
   frontDeskHandlersFor(user?: User): Record<string, Handler>;
+  /** Every registered branch/teammate MCP tool (incl. `agor_teammates_list`), as `user`. */
+  branchHandlersFor(user?: User): Record<string, Handler>;
   /** Every declaration for a branch, occupants and history, read in-tenant. */
   declarations(branchId: BranchID): Promise<BranchFrontDeskSession[]>;
   /** Repository-level pin, bypassing RBAC — for arranging state only. */
@@ -93,26 +97,35 @@ export async function frontDeskFixture(
   const inTenant = <T>(work: (scoped: Database) => Promise<T>) =>
     runWithTenantDatabaseScope(db, tenantId, work);
 
-  const collaborator = await inTenant(async (scoped) => {
-    const user = await new UsersRepository(scoped).create({
-      email: `front-desk-collaborator-${generateId()}@example.invalid`,
-      name: 'Front Desk Collaborator',
-      role: 'member',
-    });
+  const { collaborator, viewer } = await inTenant(async (scoped) => {
+    const users = new UsersRepository(scoped);
+    const createMember = (label: string) =>
+      users.create({
+        email: `front-desk-${label}-${generateId()}@example.invalid`,
+        name: `Front Desk ${label}`,
+        role: 'member',
+      });
+    const collaboratorUser = await createMember('collaborator');
+    const viewerUser = await createMember('viewer');
     // Teammate branches inherit the board's branch template, so one direct
-    // Collaborator entry there applies to every teammate the fixture seeds.
+    // entry per user there applies to every teammate the fixture seeds.
     const policies = new CapabilityPolicyRepository(scoped);
     const board = await policies.getBoardPolicies(base.boardId as never);
     board.branch_template.access.sharing_mode = 'shared';
-    board.branch_template.access.entries.push({
-      entry_id: generateId(),
-      principal: { principal_type: 'user', user_id: user.user_id as UserID },
-      preset: 'collaborator',
-      capabilities: capabilityPolicyPresetCapabilities('branch_access', 'collaborator') ?? [],
-      fs_access: 'none',
-    });
+    for (const [user, preset] of [
+      [collaboratorUser, 'collaborator'],
+      [viewerUser, 'viewer'],
+    ] as const) {
+      board.branch_template.access.entries.push({
+        entry_id: generateId(),
+        principal: { principal_type: 'user', user_id: user.user_id as UserID },
+        preset,
+        capabilities: capabilityPolicyPresetCapabilities('branch_access', preset) ?? [],
+        fs_access: 'none',
+      });
+    }
     await policies.replaceBoardPolicies(base.boardId as never, board, base.owner.user_id as UserID);
-    return user;
+    return { collaborator: collaboratorUser, viewer: viewerUser };
   });
 
   function frontDeskHandlersFor(user: User = base.owner): Record<string, Handler> {
@@ -127,10 +140,24 @@ export async function frontDeskFixture(
     return handlers;
   }
 
+  function branchHandlersFor(user: User = base.owner): Record<string, Handler> {
+    const ctx = base.contextFor(user);
+    const handlers: Record<string, Handler> = {};
+    const server = {
+      registerTool: (name: string, _config: unknown, handler: Handler) => {
+        handlers[name] = handler;
+      },
+    } as unknown as McpServer;
+    registerBranchTools(tenantScopedToolProxy(server, ctx), ctx);
+    return handlers;
+  }
+
   return {
     ...base,
     collaborator,
+    viewer,
     frontDeskHandlersFor,
+    branchHandlersFor,
     inTenant,
     declarations: (branchId) =>
       inTenant((scoped) => new BranchFrontDeskRepository(scoped).findByBranch(branchId)),
@@ -594,5 +621,216 @@ export function frontDeskSuite(setup: () => Promise<FrontDeskFixture>): void {
     await f.inTenant((scoped) => new SessionRepository(scoped).delete(pinned.session_id));
 
     expect(await f.declarations(branch.branch_id)).toEqual([]);
+  });
+}
+
+type ListedTeammate = {
+  branch_id: string;
+  addressable: boolean;
+  address?: string;
+  not_addressable_reason?: string;
+  conflicts_with?: Array<{ branch_id: string }>;
+};
+
+/**
+ * Addressing discoverability (WI-8): `agor_teammates_list` says which listed
+ * teammates a name would actually reach, and `agor_teammates_resolve` previews
+ * which session an address reaches — without the side effects of addressing.
+ */
+export function teammateAddressingPreviewSuite(setup: () => Promise<FrontDeskFixture>): void {
+  async function listAs(f: FrontDeskFixture, user: User): Promise<ListedTeammate[]> {
+    const result = await f.branchHandlersFor(user).agor_teammates_list({});
+    expect(result.isError).toBeFalsy();
+    return f.payloadOf(result).teammates as ListedTeammate[];
+  }
+
+  it('lists a view-only teammate as not addressable, matching what name resolution does', async () => {
+    const f = await setup();
+    const branch = await f.createTeammate({ name: 'front-desk', displayName: 'Front Desk' });
+
+    const [asViewer] = await listAs(f, f.viewer);
+    expect(asViewer).toMatchObject({
+      branch_id: branch.branch_id,
+      addressable: false,
+      not_addressable_reason: 'no_prompt_permission',
+    });
+    await expect(resolveTeammateName(f.contextFor(f.viewer), 'front-desk')).resolves.toMatchObject({
+      outcome: 'not_found',
+    });
+
+    const [asCollaborator] = await listAs(f, f.collaborator);
+    expect(asCollaborator).toMatchObject({
+      branch_id: branch.branch_id,
+      addressable: true,
+      address: 'front-desk',
+    });
+    expect(asCollaborator).not.toHaveProperty('not_addressable_reason');
+  });
+
+  it('flags name collisions, offering whichever name is still unique', async () => {
+    const f = await setup();
+    // Slug of one is the display name of the other, both ways: no name is unique.
+    const crossedA = await f.createTeammate({ name: 'desk-a', displayName: 'desk-b' });
+    const crossedB = await f.createTeammate({ name: 'desk-b', displayName: 'desk-a' });
+    // Only the slug collides here, so the display name still addresses it.
+    const bySlug = await f.createTeammate({ name: 'front-desk', displayName: 'Reception' });
+    const byDisplayName = await f.createTeammate({ name: 'fd-two', displayName: 'Front-Desk' });
+
+    const rows = new Map((await listAs(f, f.owner)).map((row) => [row.branch_id, row]));
+
+    expect(rows.get(crossedA.branch_id)).toMatchObject({
+      addressable: false,
+      not_addressable_reason: 'ambiguous_name',
+      conflicts_with: [expect.objectContaining({ branch_id: crossedB.branch_id })],
+    });
+    expect(rows.get(crossedB.branch_id)).toMatchObject({
+      addressable: false,
+      not_addressable_reason: 'ambiguous_name',
+    });
+    expect(rows.get(bySlug.branch_id)).toMatchObject({ addressable: true, address: 'Reception' });
+    expect(rows.get(byDisplayName.branch_id)).toMatchObject({
+      addressable: true,
+      address: 'fd-two',
+    });
+
+    // Every advertised address really resolves to its own teammate.
+    for (const row of rows.values()) {
+      if (!row.address) continue;
+      await expect(resolveTeammateName(f.contextFor(), row.address)).resolves.toMatchObject({
+        outcome: 'matched',
+        branch: { branch_id: row.branch_id },
+      });
+    }
+  });
+
+  it('previews the front desk, then recency once the pin is cleared', async () => {
+    const f = await setup();
+    const { branch, pinned, recent } = await teammateWithTwoSessions(f);
+    const desk = await f.pinDirect(branch.branch_id, pinned.session_id);
+    const tools = f.frontDeskHandlersFor();
+
+    const viaDesk = await tools.agor_teammates_resolve({ teammate: 'Front Desk' });
+    expect(viaDesk.isError).toBeFalsy();
+    expect(f.payloadOf(viaDesk)).toMatchObject({
+      dry_run: true,
+      teammate: { branch_id: branch.branch_id, name: 'front-desk' },
+      name_addressing: { addressable: true, address: 'front-desk' },
+      via: 'front_desk',
+      front_desk_id: desk.id,
+      session: { session_id: pinned.session_id, branch_id: branch.branch_id },
+    });
+
+    await tools.agor_teammates_front_desk_clear({ teammate: 'front-desk' });
+    const viaRecency = f.payloadOf(
+      await tools.agor_teammates_resolve({ branchId: branch.branch_id })
+    );
+    expect(viaRecency).toMatchObject({
+      via: 'recency',
+      session: { session_id: recent.session_id },
+    });
+    expect(viaRecency).not.toHaveProperty('bypassed_front_desk');
+  });
+
+  it('reports an unhealthy front desk it skipped without demoting it', async () => {
+    const f = await setup();
+    const { branch, pinned, recent } = await teammateWithTwoSessions(f);
+    await f.pinDirect(branch.branch_id, pinned.session_id);
+    await f.settleTask(pinned.session_id, {
+      status: TaskStatus.FAILED,
+      sdkFailure: HEARTBEAT_LOST,
+      completedAt: new Date('2026-03-01T00:00:00.000Z'),
+    });
+
+    const payload = f.payloadOf(
+      await f.frontDeskHandlersFor().agor_teammates_resolve({ teammate: 'front-desk' })
+    );
+    expect(payload).toMatchObject({
+      via: 'recency',
+      session: { session_id: recent.session_id },
+      bypassed_front_desk: {
+        session_id: pinned.session_id,
+        status: 'active',
+        reason: 'dead',
+        would_demote_to: 'failed',
+      },
+    });
+    expect(payload.explanation).toMatch(/skipped as unhealthy \(dead\)/);
+    // The preview wrote nothing: the pin is still active.
+    expect(occupying(await f.declarations(branch.branch_id))).toEqual([
+      expect.objectContaining({ session_id: pinned.session_id, status: 'active' }),
+    ]);
+
+    // A real address does demote it — the preview differs only by the write.
+    await resolveTeammateSession(f.contextFor(), branch);
+    expect(await f.declarations(branch.branch_id)).toEqual([
+      expect.objectContaining({ status: 'failed', retired_reason: 'dead' }),
+    ]);
+  });
+
+  it('reports needs_session for a teammate with nothing to talk to', async () => {
+    const f = await setup();
+    const branch = await f.createTeammate({ name: 'fresh-desk', displayName: 'Fresh Desk' });
+
+    const result = await f
+      .frontDeskHandlersFor()
+      .agor_teammates_resolve({ teammate: 'fresh-desk' });
+    expect(result.isError).toBeFalsy();
+    expect(f.payloadOf(result)).toMatchObject({
+      teammate: { branch_id: branch.branch_id },
+      via: 'needs_session',
+      session: null,
+    });
+  });
+
+  it('lets an explicit sessionId win over the front desk, and warns when it is elsewhere', async () => {
+    const f = await setup();
+    const { branch, pinned, recent } = await teammateWithTwoSessions(f);
+    await f.pinDirect(branch.branch_id, pinned.session_id);
+    const tools = f.frontDeskHandlersFor();
+
+    const explicit = f.payloadOf(
+      await tools.agor_teammates_resolve({ teammate: 'front-desk', sessionId: recent.session_id })
+    );
+    expect(explicit).toMatchObject({ via: 'explicit', session: { session_id: recent.session_id } });
+    expect(explicit).not.toHaveProperty('warning');
+
+    const other = await f.createTeammate({ name: 'back-office', displayName: 'Back Office' });
+    const elsewhere = await f.createSession({ branchId: other.branch_id, updatedAt: NEWER });
+    const mismatched = f.payloadOf(
+      await tools.agor_teammates_resolve({
+        teammate: 'front-desk',
+        sessionId: elsewhere.session_id,
+      })
+    );
+    expect(mismatched).toMatchObject({
+      via: 'explicit',
+      session: { session_id: elsewhere.session_id },
+    });
+    expect(mismatched.warning).toMatch(/not to this teammate/);
+  });
+
+  it('explains why a teammate addressed by branchId is not name-addressable for the caller', async () => {
+    const f = await setup();
+    const branch = await f.createTeammate({ name: 'front-desk', displayName: 'Front Desk' });
+
+    const payload = f.payloadOf(
+      await f.frontDeskHandlersFor(f.viewer).agor_teammates_resolve({ branchId: branch.branch_id })
+    );
+    expect(payload.name_addressing).toMatchObject({
+      addressable: false,
+      reason: 'no_prompt_permission',
+    });
+  });
+
+  it('returns the same ambiguity error as addressing for a name matching several teammates', async () => {
+    const f = await setup();
+    await f.createTeammate({ name: 'front-desk', displayName: 'Reception' });
+    await f.createTeammate({ name: 'fd-two', displayName: 'Front-Desk' });
+
+    const result = await f
+      .frontDeskHandlersFor()
+      .agor_teammates_resolve({ teammate: 'front-desk' });
+    expect(result.isError).toBe(true);
+    expect(f.payloadOf(result).candidates).toHaveLength(2);
   });
 }

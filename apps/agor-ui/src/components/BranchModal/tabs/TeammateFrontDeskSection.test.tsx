@@ -137,6 +137,56 @@ describe('TeammateFrontDeskSection', () => {
     expect(screen.getByRole('button', { name: /Replace pin/ })).toBeDisabled();
   });
 
+  it('shows who name addressing reaches and the name to use, from the daemon preview', async () => {
+    const find = vi.fn(async (params?: { query?: Record<string, unknown> }) =>
+      params?.query?.include_addressing
+        ? {
+            ...view('session-desk', false),
+            addressing: {
+              via: 'recency',
+              session_id: 'session-work',
+              name_addressing: { addressable: true, address: 'front-desk' },
+              bypassed_front_desk: { session_id: 'session-desk', reason: 'dead' },
+            },
+          }
+        : view('session-desk', false)
+    );
+    renderSection({ find });
+
+    expect(await screen.findByTestId('front-desk-reaches')).toHaveTextContent('Work session');
+    expect(screen.getByText('Most recent')).toBeVisible();
+    expect(
+      screen.getByText('The pinned session is skipped because its executor stopped.')
+    ).toBeVisible();
+    expect(screen.getByTestId('front-desk-address')).toHaveTextContent('front-desk');
+    expect(find).toHaveBeenCalledWith({ query: { include_addressing: true } });
+  });
+
+  it('says why the teammate is not addressable by name, and when it has no session', async () => {
+    renderSection({
+      find: vi.fn(async () => ({
+        ...view(null, false),
+        addressing: {
+          via: 'needs_session',
+          session_id: null,
+          name_addressing: {
+            addressable: false,
+            reason: 'no_prompt_permission',
+            detail: 'You can see this teammate but lack session permission on its branch.',
+          },
+          bypassed_front_desk: null,
+        },
+      })),
+    });
+
+    expect(await screen.findByTestId('front-desk-reaches')).toHaveTextContent(
+      'No active session — a message by name is refused until one is started'
+    );
+    expect(screen.getByTestId('front-desk-address')).toHaveTextContent(
+      'Not addressable by name for you. You can see this teammate but lack session permission on its branch.'
+    );
+  });
+
   it('reports a load failure instead of controls', async () => {
     renderSection({
       find: vi.fn(async () => {

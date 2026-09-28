@@ -62,6 +62,48 @@ function paramsFor(
 }
 
 describe('branches/:id/front-desk', () => {
+  it('previews who name addressing reaches only when include_addressing is asked for', async () => {
+    const { f, branch, pinned, recent, route } = await setup();
+    await route.setup(f.contextFor().app);
+    const withAddressing = (user: User) =>
+      f.inTenant(() =>
+        route.find(paramsFor(f, user, branch.branch_id, { include_addressing: 'true' }))
+      );
+
+    await expect(
+      f.inTenant(() => route.find(paramsFor(f, f.owner, branch.branch_id)))
+    ).resolves.not.toHaveProperty('addressing');
+    await expect(withAddressing(f.owner)).resolves.toMatchObject({
+      addressing: {
+        via: 'recency',
+        session_id: recent.session_id,
+        name_addressing: { addressable: true, address: 'front-desk' },
+        bypassed_front_desk: null,
+      },
+    });
+
+    await f.pinDirect(branch.branch_id, pinned.session_id);
+    await expect(withAddressing(f.owner)).resolves.toMatchObject({
+      addressing: { via: 'front_desk', session_id: pinned.session_id },
+    });
+
+    // A Viewer sees the desk but cannot prompt, so a name would not reach it for them.
+    await expect(withAddressing(f.viewer)).resolves.toMatchObject({
+      addressing: { name_addressing: { addressable: false, reason: 'no_prompt_permission' } },
+    });
+
+    // The preview reports an archived pin it skipped but leaves demotion to a real address.
+    await f.archiveSession(pinned.session_id);
+    await expect(withAddressing(f.owner)).resolves.toMatchObject({
+      front_desk: { session_id: pinned.session_id, status: 'active' },
+      addressing: {
+        via: 'recency',
+        session_id: recent.session_id,
+        bypassed_front_desk: { session_id: pinned.session_id, reason: 'archived' },
+      },
+    });
+  });
+
   it('reports no pin and the caller’s manage capability', async () => {
     const { f, branch, route } = await setup();
 
