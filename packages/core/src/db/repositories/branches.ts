@@ -586,9 +586,12 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
     archived?: boolean;
     userId?: UUID;
     minimumPermission?: 'view' | 'session';
+    /** Restrict to these branches; an empty list matches nothing. */
+    branchIds?: BranchID[];
     limit?: number;
     offset?: number;
   }): Promise<Branch[]> {
+    if (filter?.branchIds?.length === 0) return [];
     const teammateKindConditions = [
       eq(sql`${jsonExtract(this.db, branches.data, 'custom_context.teammate.kind')}`, 'teammate'),
       eq(sql`${jsonExtract(this.db, branches.data, 'custom_context.assistant.kind')}`, 'assistant'),
@@ -615,6 +618,7 @@ export class BranchRepository implements BaseRepository<Branch, Partial<Branch>>
     const conditions = [or(...teammateKindConditions, hasEnabledSchedule) ?? sql`false`];
     if (filter?.repo_id) conditions.push(eq(branches.repo_id, filter.repo_id));
     if (filter?.archived !== undefined) conditions.push(eq(branches.archived, filter.archived));
+    if (filter?.branchIds) conditions.push(inArray(branches.branch_id, filter.branchIds));
     if (filter?.userId) {
       conditions.push(
         filter.minimumPermission === 'session'

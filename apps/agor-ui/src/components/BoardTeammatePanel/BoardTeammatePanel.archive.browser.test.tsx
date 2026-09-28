@@ -12,6 +12,15 @@ import { enqueueSessionPatch, setRealtimeAuthorityScope } from '../../store/real
 import { checkBrowserSanity } from '../../test/browserSanity';
 import { BoardTeammatePanel } from './BoardTeammatePanel';
 
+// Profile galleries and portraits load from the daemon; keep these tests hermetic.
+vi.mock('../ProfileImage/profileImageApi', () => ({
+  listProfileImages: vi.fn(async () => ({ images: [], max_images: 24 })),
+  fetchProfileImageBlob: vi.fn(),
+  uploadProfileImage: vi.fn(),
+  patchProfileImage: vi.fn(),
+  deleteProfileImage: vi.fn(),
+}));
+
 checkBrowserSanity();
 
 const branch = {

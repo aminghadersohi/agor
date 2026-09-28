@@ -21,7 +21,6 @@ import {
   getBranchCleanupBlockReason,
   getTeammateConfig,
   isTeammate,
-  normalizeEntityColor,
   OWNERSHIP_TRANSFER_SERVICES,
   resolveRepoCleanupPolicy,
 } from '@agor/core/types';
@@ -36,9 +35,9 @@ import type {
 } from '../../declarations.js';
 import type { BranchParams } from '../../services/branches.js';
 import { issueExecutorCommandToken } from '../../services/session-token-service.js';
-import { isSuperAdmin } from '../../utils/branch-authorization.js';
 import { ensureBranchWorkspaceAccess } from '../../utils/branch-workspace-path.js';
 import { resolveDelegatedExecutionHomeKey } from '../../utils/executor-delegated-home.js';
+import { withPromptProvenanceTool } from '../../utils/prompt-provenance.js';
 import { getDaemonUrl, requestExecutor } from '../../utils/spawn-executor.js';
 import {
   BRANCH_FILESYSTEM_READY_POLL_INTERVAL_MS,
@@ -50,6 +49,7 @@ import {
 } from '../branch-filesystem-readiness.js';
 import { waitForBranchRefResolution } from '../branch-ref-resolution.js';
 import { branchCapabilityPolicySchema } from '../capability-policy-schema.js';
+import { entityColorOverrideDescription, parseEntityColorOverride } from '../entity-color.js';
 import {
   resolveBoardId,
   resolveBranchId,
@@ -76,7 +76,12 @@ import {
   FRONT_DESK_CLEAR_DESCRIPTION,
   FRONT_DESK_SET_DESCRIPTION,
   FRONT_DESK_TEAMMATE_ARG_DESCRIPTION,
+  TEAMMATE_RESOLVE_DESCRIPTION,
 } from './front-desk.js';
+import {
+  assessTeammateAddressability,
+  shouldScopeTeammateDiscoveryToUser,
+} from './teammate-addressing.js';
 
 const BRANCH_NAME_PATTERN = /^[a-z0-9-]+$/;
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;
@@ -100,23 +105,9 @@ const CLEANUP_CANDIDATE_FILESYSTEM_STATUSES = [
 ] as const satisfies readonly CleanupCandidateFilesystemStatus[];
 const CLEANUP_CANDIDATE_STORAGE_MODES = ['worktree', 'clone'] as const;
 
-const BRANCH_COLOR_OVERRIDE_DESCRIPTION =
-  "User-chosen organisational color for this branch's board card, as hex " +
-  '(#rgb, #rrggbb, or #rrggbbaa). This is a human grouping/priority label in the ' +
-  'Trello sense — do not derive it from CI, PR, or environment state.';
-
-/** Reject a non-hex color loudly rather than silently dropping an agent's value. */
-function parseBranchColorOverride(value: unknown): string | null {
-  const raw = coerceString(value);
-  if (!raw) return null;
-  const normalized = normalizeEntityColor(raw);
-  if (!normalized) {
-    throw new Error(
-      `colorOverride must be a hex color like #ff5630 (received ${JSON.stringify(raw)})`
-    );
-  }
-  return normalized;
-}
+const BRANCH_COLOR_OVERRIDE_DESCRIPTION = entityColorOverrideDescription(
+  "this branch's board card"
+);
 
 function containsTeammateKnowledgeConfigMutation(customContext: unknown): boolean {
   if (!customContext || typeof customContext !== 'object' || Array.isArray(customContext)) {
@@ -202,12 +193,16 @@ function mcpRequestSignal(requestContext?: ServerContext): AbortSignal | undefin
  * that may already be present after optional Session authorization.
  */
 function freshMcpServiceParams(ctx: McpContext): McpContext['baseServiceParams'] {
-  const { authenticated, provider, tenant, user } = ctx.baseServiceParams;
+  const { authenticated, provider, tenant, user, _promptProvenance } = ctx.baseServiceParams;
   return {
     ...(user ? { user: { ...user } } : {}),
     ...(authenticated !== undefined ? { authenticated } : {}),
     ...(provider !== undefined ? { provider } : {}),
     ...(tenant ? { tenant: { ...tenant } } : {}),
+    // The server-stamped prompt origin is a trusted MCP identity field, not
+    // cached hook data: a prompt admitted through these params must still
+    // carry it, or the zone-trigger path would deliver agent text unattributed.
+    ...(_promptProvenance ? { _promptProvenance: { ..._promptProvenance } } : {}),
   };
 }
 
@@ -244,14 +239,6 @@ function notesPreview(notes: string | undefined, maxLength = 200): string | null
   const singleLine = notes.replace(/\s+/g, ' ').trim();
   if (singleLine.length <= maxLength) return singleLine;
   return `${singleLine.slice(0, maxLength - 1)}…`;
-}
-
-async function shouldScopeTeammateDiscoveryToUser(ctx: McpContext): Promise<boolean> {
-  if (ctx.authenticatedUser?._isServiceAccount) return false;
-
-  const config = ctx.app.get('config');
-  const allowSuperadmin = config.execution?.allow_superadmin === true;
-  return !isSuperAdmin(ctx.authenticatedUser?.role, allowSuperadmin);
 }
 
 async function findAllArchivedBranchesForCleanup(
@@ -1005,7 +992,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       }
 
       const issueUrl = normalizeOptionalHttpUrl(args.issueUrl, 'issueUrl');
-      const colorOverride = parseBranchColorOverride(args.colorOverride);
+      const colorOverride = parseEntityColorOverride(args.colorOverride);
       const pullRequestUrl = normalizeOptionalHttpUrl(args.pullRequestUrl, 'pullRequestUrl');
 
       // If auto-suffix changed the ref (branch name defaults to branchName), update it
@@ -1276,7 +1263,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       if (args.colorOverride !== undefined) {
         fieldsProvided++;
         updates.color_override =
-          args.colorOverride === null ? null : parseBranchColorOverride(args.colorOverride);
+          args.colorOverride === null ? null : parseEntityColorOverride(args.colorOverride);
       }
       if (fieldsProvided === 0) throw new Error('provide at least one field to update');
 
@@ -1566,7 +1553,11 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
               stream: true,
               metadata: { system_authored: true },
             },
-            { ...ctx.baseServiceParams, provider: undefined, route: { id: targetSessionId } }
+            {
+              ...withPromptProvenanceTool(ctx.baseServiceParams, 'agor_branches_set_zone'),
+              provider: undefined,
+              route: { id: targetSessionId },
+            }
           );
 
           if (task.status === 'queued') {
@@ -1824,7 +1815,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     const offset = args.offset ?? 0;
     const repoId = args.repoId ? await resolveRepoId(ctx, args.repoId) : undefined;
 
-    const userScoped = await shouldScopeTeammateDiscoveryToUser(ctx);
+    const userScoped = shouldScopeTeammateDiscoveryToUser(ctx);
     const teammates = await runWithMcpTenantDatabaseScope(ctx, (db) =>
       new BranchRepository(db).findTeammateBranches({
         archived: false,
@@ -1837,8 +1828,15 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       })
     );
 
-    const shaped = teammates.map((w) => {
+    const hasMore = teammates.length > limit;
+    const pageRows = teammates.slice(0, limit);
+    // Listing needs only `view`; name addressing needs `session` and a unique
+    // name. Say per row which of these teammates a name would actually reach.
+    const addressability = await assessTeammateAddressability(ctx, pageRows);
+
+    const page = pageRows.map((w) => {
       const config = getTeammateConfig(w);
+      const verdict = addressability.get(w.branch_id);
       return {
         branch_id: w.branch_id,
         name: w.name,
@@ -1848,11 +1846,17 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
         board_id: w.board_id || null,
         repo_id: w.repo_id,
         last_used: w.last_used,
+        addressable: verdict?.addressable ?? false,
+        ...(verdict?.addressable
+          ? { address: verdict.address }
+          : {
+              not_addressable_reason: verdict?.reason,
+              not_addressable_detail: verdict?.detail,
+              ...(verdict?.conflicts_with ? { conflicts_with: verdict.conflicts_with } : {}),
+            }),
       };
     });
 
-    const hasMore = shaped.length > limit;
-    const page = shaped.slice(0, limit);
     return textResult({
       total: hasMore ? null : offset + page.length,
       limit,
@@ -1868,7 +1872,8 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     'agor_teammates_list',
     {
       description:
-        'List a page of teammates (long-lived AI teammates with schedules). Authorization is applied before paging. Advance with offset=nextOffset while hasMore is true.',
+        'List a page of teammates (long-lived AI teammates with schedules). Authorization is applied before paging. Advance with offset=nextOffset while hasMore is true. ' +
+        'Listing needs only view access, so each row says whether agor_sessions_prompt { teammate } would reach it for you: addressable with the address to pass, or not_addressable_reason (no_prompt_permission, ambiguous_name, beyond_scan_limit). Use agor_teammates_resolve to see which session an address reaches.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         repoId: mcpOptionalId('repoId', 'Repository', 'Filter teammates by repository ID'),
@@ -1879,7 +1884,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     listTeammatesHandler
   );
 
-  // agor_teammates_front_desk_set / agor_teammates_front_desk_clear
+  // agor_teammates_resolve / agor_teammates_front_desk_set / agor_teammates_front_desk_clear
   registerFrontDeskTools(server, ctx);
 
   // Tool: agor_branches_retry_provisioning
@@ -1914,7 +1919,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
 }
 
 /**
- * agor_teammates_front_desk_set / agor_teammates_front_desk_clear.
+ * agor_teammates_resolve / agor_teammates_front_desk_set / agor_teammates_front_desk_clear.
  *
  * Registered here rather than in `front-desk.ts` so the zod schemas live in an
  * entry that already bundles zod — see the note at the top of `front-desk.ts`.
@@ -1926,6 +1931,24 @@ export function registerFrontDeskTools(server: McpServer, ctx: McpContext): void
     'branchId',
     'Branch',
     'Teammate branch ID (UUIDv7 or short ID). Provide exactly one of teammate or branchId.'
+  );
+
+  server.registerTool(
+    'agor_teammates_resolve',
+    {
+      description: TEAMMATE_RESOLVE_DESCRIPTION,
+      annotations: { readOnlyHint: true },
+      inputSchema: z.object({
+        teammate,
+        branchId,
+        sessionId: mcpOptionalId(
+          'sessionId',
+          'Session',
+          'Preview an explicit sessionId address (UUIDv7 or short ID); it takes precedence over the front desk and recency.'
+        ),
+      }),
+    },
+    (args) => handlers.resolve(args)
   );
 
   server.registerTool(

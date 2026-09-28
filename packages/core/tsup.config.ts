@@ -21,6 +21,7 @@ export default defineConfig({
     'codex/auth-file': 'src/codex/auth-file.ts', // Pure Codex auth.json schema inspection
     'codex/credential-file': 'src/codex/credential-file.ts', // Node-only race-safe Codex credential I/O
     'config/index': 'src/config/index.ts',
+    'config/agor-home': 'src/config/agor-home.ts', // Leaf state-home resolver (AGOR_HOME)
     'config/agor-yml': 'src/config/agor-yml.ts', // Node-only .agor.yml file I/O
     'config/browser': 'src/config/browser.ts', // Browser-safe config utilities
     'permissions/index': 'src/permissions/index.ts',
@@ -30,6 +31,7 @@ export default defineConfig({
     'ids/index': 'src/lib/ids.ts', // Canonical Node UUIDv7 generation and ID utilities
     'ids/browser': 'src/lib/ids.browser.ts', // Browser-safe UUIDv7 generation via Web Crypto
     'templates/handlebars-helpers': 'src/templates/handlebars-helpers.ts', // Handlebars helpers
+    'templates/prompt-provenance': 'src/templates/prompt-provenance.ts', // Server-stamped prompt provenance block
     'templates/session-context': 'src/templates/session-context.ts', // Agor system prompt rendering
     'templates/spawn-subsession-template': 'src/templates/spawn-subsession-template.ts', // Spawn-subsession meta-prompt
     'templates/teammate-welcome-note': 'src/templates/teammate-welcome-note.ts', // Teammate board welcome note renderer

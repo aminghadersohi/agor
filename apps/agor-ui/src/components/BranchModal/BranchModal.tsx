@@ -39,7 +39,7 @@ export interface BranchModalProps {
   onClose: () => void;
   branch: Branch | null;
   repo: Repo | null;
-  sessions: Session[]; // Used for GeneralTab session count
+  sessions: Session[]; // GeneralTab session count; Teammate tab front-desk candidates
   boardObjects?: BoardEntityObject[];
   client: AgorClient | null;
   currentUser?: User | null; // Current user for RBAC
@@ -189,6 +189,7 @@ export const BranchModal: React.FC<BranchModalProps> = ({
               <TeammateTab
                 branch={branch}
                 client={client}
+                sessions={sessions}
                 onRetired={onClose}
                 canEdit={form.canEditGeneral}
                 state={form.teammate}
@@ -261,7 +262,7 @@ export const BranchModal: React.FC<BranchModalProps> = ({
     {
       key: 'files',
       label: 'Files',
-      children: <FilesTab branch={branch} client={client} />,
+      children: <FilesTab branch={branch} client={client} canWriteFiles={form.canWriteFiles} />,
     },
     ...(form.canViewPermissions
       ? [

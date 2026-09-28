@@ -27,6 +27,7 @@ import {
   resolvePasswordPolicyRequirements,
   resolvePowerManagementConfig,
   resolvePowerManagementRuntimeOverlay,
+  resolveRestartRecoverySettings,
   resolveSdkWatchdogConfig,
   resolveTeammateFrameworkRepoUrl,
   resolveTenantContext,
@@ -82,6 +83,7 @@ import {
   MCPServerNotUsableError,
   mcpRuntimeProviderCapability,
 } from '@agor/core/mcp';
+import { escapePromptProvenanceSentinels } from '@agor/core/templates/prompt-provenance';
 import type {
   AuthenticatedParams,
   BoardComment,
@@ -102,6 +104,7 @@ import type {
   MessageID,
   MessageSource,
   Params,
+  PowerAdmissionStatus,
   PowerEssentialSessionSearchResult,
   PowerManagementMutableSettings,
   ScheduleID,
@@ -137,6 +140,7 @@ import {
   SESSION_POWER_PRIORITIES,
   SessionStatus,
   TaskStatus,
+  toPowerAdmissionStatus,
   UPLOAD_REQUEST_ID_HEADER,
 } from '@agor/core/types';
 import { isNotFoundError } from '@agor/core/utils/errors';
@@ -215,6 +219,7 @@ import {
 } from './power-management/index.js';
 import { registerProfileImageRoutes } from './profile-image-routes.js';
 import { publicBoardCommentRepositionInput } from './services/board-comments.js';
+import { createBranchFrontDeskRoute } from './services/branch-front-desk.js';
 import type { GatewayService } from './services/gateway.js';
 import { createMCPCatalogConnectService } from './services/mcp-catalog-connect.js';
 import { createMCPCatalogStartSessionService } from './services/mcp-catalog-start-session.js';
@@ -288,6 +293,10 @@ import { patchUnlessRemoved } from './utils/patch-unless-removed.js';
 import { runPromptAdmissionTransaction } from './utils/prompt-admission-transaction.js';
 import { promptDatabaseErrorAround } from './utils/prompt-database-error.js';
 import { resolvePromptOrigin } from './utils/prompt-origin.js';
+import {
+  type McpPromptProvenanceStamp,
+  resolvePromptProvenance,
+} from './utils/prompt-provenance.js';
 import {
   buildPromptTaskMetadata,
   type InternalPromptTaskMetadataInput,
@@ -415,6 +424,15 @@ export interface RouteParams extends Params {
   user?: User;
   /** Trusted internal callback request, populated by MCP tooling only. */
   _taskCompletionCallback?: NonNullable<TaskMetadata['completion_callback']>;
+  /**
+   * Trusted prompt-origin stamp, populated by the MCP request layer only.
+   *
+   * Set on `McpContext.baseServiceParams`, so it reaches this route for every
+   * MCP-originated prompt without any tool opting in. Nothing on the wire can
+   * produce it: the matching `metadata.prompt_provenance` key is stripped from
+   * caller input unconditionally.
+   */
+  _promptProvenance?: McpPromptProvenanceStamp;
 }
 
 /**
@@ -1233,6 +1251,20 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     },
     requireAuth
   );
+  // Every tenant member (and agents over MCP) may learn whether ordinary work
+  // is held and why — nothing else. Observation, provider support, ownership
+  // and configuration stay on the admin-only projection above.
+  registerPowerAuthenticatedRoute(
+    app,
+    '/power-management/admission',
+    {
+      async find(): Promise<PowerAdmissionStatus> {
+        return toPowerAdmissionStatus(powerPolicyController.status());
+      },
+    },
+    { find: { role: ROLES.VIEWER, action: 'view power admission' } },
+    requireAuth
+  );
   powerPolicyController.subscribe((transition) => {
     const tenantConfig = resolveMultiTenancyConfig(config);
     if (tenantConfig.mode !== 'static') return;
@@ -1241,6 +1273,12 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       path: 'power-management',
       event: 'patched',
       data: transition.status,
+      params: { tenant: { tenant_id: tenantId, source: 'explicit' } },
+    });
+    emitServiceEvent(app, {
+      path: 'power-management/admission',
+      event: 'patched',
+      data: toPowerAdmissionStatus(transition.status),
       params: { tenant: { tenant_id: tenantId, source: 'explicit' } },
     });
   });
@@ -1399,6 +1437,20 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     {
       find: { role: ROLES.VIEWER, action: 'view session power priority' },
       create: { role: ROLES.MEMBER, action: 'change session power priority' },
+    },
+    requireAuth
+  );
+
+  // Teammate front desk (fork). Branch Manager authorization lives in
+  // front-desk/manage-front-desk.ts, shared with the MCP front-desk tools.
+  registerAuthenticatedRoute(
+    app,
+    '/branches/:id/front-desk',
+    createBranchFrontDeskRoute({ db, allowSuperadmin: () => superadminOpts.allowSuperadmin }),
+    {
+      find: { role: ROLES.VIEWER, action: 'view a teammate front desk' },
+      create: { role: ROLES.MEMBER, action: 'pin a teammate front desk' },
+      remove: { role: ROLES.MEMBER, action: 'clear a teammate front desk' },
     },
     requireAuth
   );
@@ -1943,6 +1995,55 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     },
     {
       create: { role: ROLES.MEMBER, action: 'unarchive sessions' },
+    },
+    requireAuth
+  );
+
+  // Human controls for the fork's routing/genealogy transfers. Same service
+  // methods and authority as agor_sessions_retarget_callback/_reparent.
+  registerAuthenticatedRoute(
+    app,
+    '/sessions/:id/retarget-callback',
+    {
+      async create(data: { callbackSessionId?: unknown } | undefined, params: RouteParams) {
+        const id = params.route?.id;
+        if (!id) throw new BadRequest('Session ID required');
+        if (typeof data?.callbackSessionId !== 'string' || !data.callbackSessionId) {
+          throw new BadRequest('callbackSessionId is required');
+        }
+        return sessionsService.retargetCallback(
+          id,
+          { callbackSessionId: data.callbackSessionId as SessionID },
+          params
+        );
+      },
+    },
+    {
+      create: { role: ROLES.MEMBER, action: 'retarget session callbacks' },
+    },
+    requireAuth
+  );
+
+  registerAuthenticatedRoute(
+    app,
+    '/sessions/:id/reparent',
+    {
+      async create(data: { parentSessionId?: unknown } | undefined, params: RouteParams) {
+        const id = params.route?.id;
+        if (!id) throw new BadRequest('Session ID required');
+        const parentSessionId = data?.parentSessionId;
+        if (parentSessionId !== null && (typeof parentSessionId !== 'string' || !parentSessionId)) {
+          throw new BadRequest('parentSessionId must be a Session ID or null');
+        }
+        return sessionsService.reparent(
+          id,
+          { parentSessionId: parentSessionId as SessionID | null },
+          params
+        );
+      },
+    },
+    {
+      create: { role: ROLES.MEMBER, action: 'reparent sessions' },
     },
     requireAuth
   );
@@ -2588,6 +2689,52 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           );
         }
 
+        // The provenance sentinel is reserved on EVERY admitted prompt, not
+        // only the stamped ones. That is what makes the tag mean something: it
+        // can then appear in delivered text only where Agor put it, so a
+        // caller cannot type a convincing block of its own and a recipient
+        // does not have to judge which one is real.
+        //
+        // Escape rather than refuse. Rejecting would make Agor's own design
+        // notes unquotable over `agor_sessions_prompt` and would lose a
+        // legitimate message to punish a string. It is logged, because a body
+        // carrying the reserved tag is either a quotation or an attempt, and
+        // both are worth seeing.
+        const escapedBody = escapePromptProvenanceSentinels(data.prompt);
+        if (escapedBody.escaped > 0) {
+          console.warn(
+            `[Prompt] Neutralized ${escapedBody.escaped} reserved provenance sentinel(s) in a prompt body for session ${shortId(id)}`
+          );
+        }
+
+        // Server-stamped prompt provenance. An MCP-originated prompt carries
+        // the caller's authenticated Session identity on `params`, never in
+        // `data`, so no caller can set, suppress, or imitate the block.
+        //
+        // Two deliberate exclusions. A `provider`-carrying transport is a
+        // browser/REST caller, not an Agor session relaying on someone's
+        // behalf, and must never be able to hand this route a stamp.
+        // Idempotent internal producers (scheduler, session reminders, widget
+        // auto-resume) reconcile on exact prompt text across more than one
+        // call path, so a per-caller block would break their convergence
+        // rather than attest anything - and none of them relays caller text.
+        const promptProvenanceStamp =
+          !params.provider && !data.idempotencyTaskId ? params._promptProvenance : undefined;
+        const provenance = promptProvenanceStamp
+          ? await runWithTenantDatabaseScope(db, promptTenantId, (operationDb) =>
+              resolvePromptProvenance({
+                stamp: promptProvenanceStamp,
+                body: escapedBody.text,
+                escapedSentinels: escapedBody.escaped,
+                recipientSession: session,
+                branchRepo: new BranchRepository(operationDb),
+                findUserRole: async (userId) =>
+                  (await new UsersRepository(operationDb).findById(userId))?.role,
+              })
+            )
+          : undefined;
+        const admittedPrompt = provenance?.prompt ?? escapedBody.text;
+
         const reconcileDurablyDispatchedTask = async (): Promise<Task | null> => {
           if (!data.idempotencyTaskId) return null;
           const prior = await taskRepo.findById(data.idempotencyTaskId);
@@ -2596,7 +2743,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             throw new Conflict(`Task identity ${data.idempotencyTaskId} is already in use`);
           }
           const expectedCreator = params.user?.user_id ?? session.created_by;
-          if (prior.created_by !== expectedCreator || prior.full_prompt !== data.prompt) {
+          if (prior.created_by !== expectedCreator || prior.full_prompt !== admittedPrompt) {
             throw new Conflict(`Task identity ${data.idempotencyTaskId} is already in use`);
           }
           if (isTaskPendingDispatch(prior)) return null;
@@ -2710,17 +2857,20 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             if (params._taskCompletionCallback) {
               taskMetadata.completion_callback = params._taskCompletionCallback;
             }
+            if (provenance) {
+              taskMetadata.prompt_provenance = provenance.metadata;
+            }
             const compactionRequestId = (data.idempotencyTaskId ?? generateId()) as TaskID;
             const hasAttachmentSemantics =
-              data.prompt.includes('Attachments — use `agor_upload_materialize` to access:') ||
-              data.prompt.includes('/_uploads/');
+              admittedPrompt.includes('Attachments — use `agor_upload_materialize` to access:') ||
+              admittedPrompt.includes('/_uploads/');
             const compactionEligible =
               !data.idempotencyTaskId &&
               !params._taskCompletionCallback &&
               data.metadata === undefined &&
               (messageSource === undefined || (!!params.provider && messageSource === 'agor')) &&
               !hasAttachmentSemantics &&
-              !data.prompt.trimStart().startsWith('/');
+              !admittedPrompt.trimStart().startsWith('/');
             // A preflight hint avoids preparation for known-busy sessions. The
             // repository rechecks queue/active work under its durable locks.
             // Stable-ID callback/widget producers keep their existing protocol.
@@ -2758,7 +2908,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                   // prompt; the repository assigns the ID in that case.
                   task_id: data.idempotencyTaskId as TaskID | undefined,
                   session_id: id as SessionID,
-                  full_prompt: data.prompt,
+                  full_prompt: admittedPrompt,
                   created_by: createdBy,
                   status: TaskStatus.QUEUED,
                   metadata: Object.keys(taskMetadata).length > 0 ? taskMetadata : undefined,
@@ -4726,7 +4876,10 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
-  registerAuthenticatedRoute(
+  // Long route: `.agor.yml` is read by an executor, so tenant identity is armed
+  // without a request-long transaction and the service opens a short unit per
+  // database access (see ReposService.importFromAgorYml).
+  registerLongAuthenticatedRoute(
     app,
     '/repos/:id/import-agor-yml',
     {
@@ -7573,6 +7726,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             unixUserMode: config.execution?.unix_user_mode ?? 'simple',
             managedEnvsExecutionMode:
               config.execution?.managed_envs_execution_mode ?? MANAGED_ENV_EXECUTION_MODE_DEFAULT,
+            // Boot-time opt-in; results are logged per start, so this is the
+            // only place an operator can confirm what the daemon resolved.
+            restartRecovery: resolveRestartRecoverySettings(config.execution),
           },
           deployment: {
             mode: deployment.mode,

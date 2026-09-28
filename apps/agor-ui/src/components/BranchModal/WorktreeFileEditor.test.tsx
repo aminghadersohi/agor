@@ -30,10 +30,19 @@ vi.mock('../FileCollection/FileCollection', () => ({
 }));
 
 vi.mock('../CodeEditor', () => ({
-  CodeEditor: ({ value, onChange }: { value: string; onChange: (value: string) => void }) => (
+  CodeEditor: ({
+    value,
+    onChange,
+    readOnly,
+  }: {
+    value: string;
+    onChange: (value: string) => void;
+    readOnly?: boolean;
+  }) => (
     <textarea
       aria-label="Code editor"
       value={value}
+      readOnly={readOnly}
       onChange={(event) => onChange(event.target.value)}
     />
   ),
@@ -74,6 +83,7 @@ describe('WorktreeFileEditor', () => {
           open
           onClose={vi.fn()}
           onFileSaved={onFileSaved}
+          canWrite
         />
       </App>
     );
@@ -131,6 +141,7 @@ describe('WorktreeFileEditor', () => {
           open
           onClose={vi.fn()}
           onFileSaved={vi.fn()}
+          canWrite
         />
       </App>
     );
@@ -143,5 +154,43 @@ describe('WorktreeFileEditor', () => {
 
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(editor).toHaveValue('export const a = 3;'));
+  });
+
+  it('opens view-only without file write access and never saves', async () => {
+    const get = vi.fn().mockResolvedValue({
+      path: 'src/index.ts',
+      title: 'index.ts',
+      size: 19,
+      lastModified: '2026-08-25T12:00:00.000Z',
+      isText: true,
+      content: 'export const a = 1;',
+      encoding: 'utf-8',
+    });
+    const patch = vi.fn();
+    const client = { service: () => ({ get, patch }) } as unknown as AgorClient;
+
+    render(
+      <App>
+        <WorktreeFileEditor
+          branch={makeBranch({ name: 'feature/editor' })}
+          client={client}
+          files={[]}
+          open
+          onClose={vi.fn()}
+          onFileSaved={vi.fn()}
+          canWrite={false}
+        />
+      </App>
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'src/index.ts' }));
+    const editor = await screen.findByRole('textbox', { name: 'Code editor' });
+    expect(editor).toHaveAttribute('readonly');
+    expect(screen.getByText('Read-only')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/read-only file access/i)).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: 's', metaKey: true });
+    expect(patch).not.toHaveBeenCalled();
   });
 });

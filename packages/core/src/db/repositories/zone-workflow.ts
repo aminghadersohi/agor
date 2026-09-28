@@ -12,7 +12,7 @@ import type {
   ZoneWorkflowTransitionCreate,
   ZoneWorkflowTransitionPatch,
 } from '@agor/core/types';
-import { and, asc, eq, inArray, or } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, or, type SQL, sql } from 'drizzle-orm';
 import { generateId } from '../../lib/ids';
 import type { Database } from '../client';
 import {
@@ -240,6 +240,39 @@ export class ZoneWorkflowRepository {
     return rows.map((row: ZoneWorkflowAdvanceRow) => advanceFromRow(row));
   }
 
+  /**
+   * One page of a board's advance history, newest first, optionally narrowed
+   * to a single transition. Counted and paged in SQL so a long-lived board's
+   * audit trail is never materialized just to show its latest rows.
+   */
+  async findAdvancePage(filter: {
+    boardId: BoardID;
+    transitionId?: string;
+    limit: number;
+    offset?: number;
+  }): Promise<{ data: ZoneWorkflowAdvance[]; total: number }> {
+    const conditions: SQL[] = [eq(zoneWorkflowAdvances.board_id, filter.boardId)];
+    if (filter.transitionId) {
+      conditions.push(eq(zoneWorkflowAdvances.transition_id, filter.transitionId));
+    }
+    const where = and(...conditions);
+    const countRow = await select(this.db, { count: sql<number>`count(*)` })
+      .from(zoneWorkflowAdvances)
+      .where(where)
+      .one();
+    let query = select(this.db)
+      .from(zoneWorkflowAdvances)
+      .where(where)
+      .orderBy(desc(zoneWorkflowAdvances.requested_at), desc(zoneWorkflowAdvances.advance_id))
+      .limit(filter.limit);
+    if (filter.offset) query = query.offset(filter.offset);
+    const rows = await query.all();
+    return {
+      data: rows.map((row: ZoneWorkflowAdvanceRow) => advanceFromRow(row)),
+      total: Number(countRow?.count ?? 0),
+    };
+  }
+
   async findAdvance(id: string): Promise<ZoneWorkflowAdvance | null> {
     const row = await select(this.db)
       .from(zoneWorkflowAdvances)
@@ -367,9 +400,11 @@ export class ZoneWorkflowRepository {
                 ? activeBranches.has(entity.entity_id)
                 : activeCards.has(entity.entity_id);
             if (!active) throw new RepositoryError('Archived entities cannot be advanced');
-            const data = parseJson<{ position: { x: number; y: number }; zone_id?: string }>(
-              row.data
-            );
+            const data = parseJson<{
+              position: { x: number; y: number };
+              zone_id?: string;
+              [key: string]: unknown;
+            }>(row.data);
             if (data.zone_id !== transition.source_zone_id) {
               throw new RepositoryError(
                 'Every entity must currently be in the transition source zone'
@@ -380,11 +415,15 @@ export class ZoneWorkflowRepository {
               x: Math.max(20, Math.min(data.position.x, Math.max(20, targetZone.width - 80))),
               y: Math.max(40, Math.min(data.position.y, Math.max(40, targetZone.height - 60))),
             };
+            // Merge rather than replace: `data` also carries placement fields
+            // this move does not own (e.g. card size/compact state), which a
+            // workflow advance must preserve exactly as a manual move would.
+            const nextData = { ...data, position, zone_id: transition.target_zone_id };
             await update(tx, boardObjects)
-              .set({ data: { position, zone_id: transition.target_zone_id } })
+              .set({ data: nextData })
               .where(eq(boardObjects.object_id, row.object_id))
               .run();
-            const updated = { ...row, data: { position, zone_id: transition.target_zone_id } };
+            const updated = { ...row, data: nextData };
             moved.push(boardObjectFromRow(updated));
             auditedEntities.push({
               ...entity,

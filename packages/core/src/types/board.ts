@@ -2,6 +2,7 @@ import type { PersistedAgenticToolName } from './agentic-tool';
 import type { BranchPermissionLevel } from './branch';
 import type { CardID } from './card';
 import type { ArtifactID, BoardID, BranchID } from './id';
+import type { ProfileImageID } from './profile-image';
 
 /**
  * Canvas position (x/y coordinates in board space)
@@ -335,6 +336,12 @@ export interface Board extends BoardListCounts {
    * can't be expressed as inline styles. Sanitized before rendering.
    */
   custom_css?: string;
+
+  /**
+   * Main image from the board's private profile gallery. A projection of the
+   * gallery's primary, written by the profile-image routes and MCP tools.
+   */
+  profile_image_id?: ProfileImageID;
 
   /**
    * Custom context for Handlebars templates (board-level)

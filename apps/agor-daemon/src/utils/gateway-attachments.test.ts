@@ -9,6 +9,7 @@ import { LocalUploadStagingStore } from '../host/local/upload-staging-store.js';
 import {
   buildPromptWithAttachments,
   formatSkippedAttachmentNote,
+  formatUndeliveredAttachmentReply,
   ingestDiscordInboundImages,
   ingestInboundAttachments,
   isAllowedSlackFileUrl,
@@ -183,6 +184,53 @@ describe('formatSkippedAttachmentNote', () => {
     expect(formatSkippedAttachmentNote(2, [])).toBe(
       '(2 attachments were not delivered: unsupported type)'
     );
+  });
+});
+
+describe('formatUndeliveredAttachmentReply', () => {
+  it('returns null when every attachment was delivered', () => {
+    expect(formatUndeliveredAttachmentReply(undefined)).toBeNull();
+    expect(formatUndeliveredAttachmentReply([])).toBeNull();
+  });
+
+  it('lists each undelivered file with its reason', () => {
+    expect(
+      formatUndeliveredAttachmentReply([
+        {
+          name: 'deck.pptx',
+          reason: 'unsupported_type',
+          mimeType: 'application/vnd.ms-powerpoint',
+        },
+        { name: 'odd.bin', reason: 'unsupported_type', mimeType: 'unknown' },
+        { name: 'huge.pdf', reason: 'too_large' },
+        { name: 'img-11.png', reason: 'too_many' },
+        { name: 'shot.png', reason: 'fetch_failed' },
+      ])
+    ).toBe(
+      [
+        'These attachments were not delivered to the agent:',
+        '- `deck.pptx`: unsupported type (application/vnd.ms-powerpoint)',
+        '- `odd.bin`: unsupported type',
+        `- \`huge.pdf\`: too large (limit ${Math.floor(MAX_UPLOAD_FILE_SIZE / (1024 * 1024))} MB)`,
+        '- `img-11.png`: too many files (limit 10 per message)',
+        '- `shot.png`: could not be fetched',
+      ].join('\n')
+    );
+  });
+
+  it('neutralizes provider file names and bounds the list', () => {
+    const reply = formatUndeliveredAttachmentReply([
+      { name: 'a`b<!channel>&\nc.zip', reason: 'unsupported_type', mimeType: 'application/zip' },
+      ...Array.from({ length: 11 }, (_, i) => ({
+        name: `f${i}.zip`,
+        reason: 'unsupported_type' as const,
+      })),
+    ]);
+    expect(reply).toContain('- `ab!channelc.zip`: unsupported type (application/zip)');
+    expect(reply).not.toMatch(/[<>&]/);
+    expect(reply?.startsWith('These attachments')).toBe(true);
+    expect(reply?.split('\n')).toHaveLength(12);
+    expect(reply).toContain('- and 2 more');
   });
 });
 
@@ -367,6 +415,10 @@ describe('ingestInboundAttachments', () => {
       failed: 0,
       skipped: 2,
       skippedMimeTypes: ['application/zip', 'application/gzip'],
+      undelivered: [
+        { name: 'logs.zip', reason: 'unsupported_type', mimeType: 'application/zip' },
+        { name: 'logs.tar.gz', reason: 'unsupported_type', mimeType: 'application/gzip' },
+      ],
     });
   });
 
@@ -397,6 +449,10 @@ describe('ingestInboundAttachments', () => {
     expect(result.failed).toBe(1);
     expect(result.skipped).toBe(1);
     expect(result.skippedMimeTypes).toEqual(['application/zip']);
+    expect(result.undelivered).toEqual([
+      { name: 'logs.zip', reason: 'unsupported_type', mimeType: 'application/zip' },
+      { name: 'evil.png', reason: 'fetch_failed' },
+    ]);
   });
 
   it('reports a malformed MIME type as unknown rather than echoing it', async () => {
@@ -435,7 +491,13 @@ describe('ingestInboundAttachments', () => {
     });
 
     expect(fetchImpl).not.toHaveBeenCalled();
-    expect(result).toEqual({ uploads: [], failed: 1, skipped: 0, skippedMimeTypes: [] });
+    expect(result).toEqual({
+      uploads: [],
+      failed: 1,
+      skipped: 0,
+      skippedMimeTypes: [],
+      undelivered: [{ name: 'screenshot.png', reason: 'fetch_failed' }],
+    });
     expect(warn).toHaveBeenCalled();
   });
 
@@ -455,7 +517,13 @@ describe('ingestInboundAttachments', () => {
     });
 
     expect(fetchImpl).not.toHaveBeenCalled();
-    expect(result).toEqual({ uploads: [], failed: 1, skipped: 0, skippedMimeTypes: [] });
+    expect(result).toEqual({
+      uploads: [],
+      failed: 1,
+      skipped: 0,
+      skippedMimeTypes: [],
+      undelivered: [{ name: 'screenshot.png', reason: 'too_large' }],
+    });
   });
 
   it('rejects redirects to non-allowlisted hosts and never sends the token there', async () => {
@@ -479,7 +547,13 @@ describe('ingestInboundAttachments', () => {
       store,
     });
 
-    expect(result).toEqual({ uploads: [], failed: 1, skipped: 0, skippedMimeTypes: [] });
+    expect(result).toEqual({
+      uploads: [],
+      failed: 1,
+      skipped: 0,
+      skippedMimeTypes: [],
+      undelivered: [{ name: 'screenshot.png', reason: 'fetch_failed' }],
+    });
     // The Authorization header must only ever reach allowlisted slack.com
     // hosts: the redirect target is validated BEFORE any fetch to it.
     expect(fetchImpl).toHaveBeenCalledTimes(1);
@@ -551,7 +625,13 @@ describe('ingestInboundAttachments', () => {
       store,
     });
 
-    expect(result).toEqual({ uploads: [], failed: 1, skipped: 0, skippedMimeTypes: [] });
+    expect(result).toEqual({
+      uploads: [],
+      failed: 1,
+      skipped: 0,
+      skippedMimeTypes: [],
+      undelivered: [{ name: 'server.log', reason: 'fetch_failed' }],
+    });
     // Reading stopped as soon as the running total crossed the 50MB ceiling.
     expect(chunksPulled).toBeLessThanOrEqual(MAX_UPLOAD_FILE_SIZE / chunkSize + 3);
     const objectBuckets = await fs.readdir(path.join(uploadDir, 'objects'));
@@ -581,7 +661,13 @@ describe('ingestInboundAttachments', () => {
       store,
     });
 
-    expect(result).toEqual({ uploads: [], failed: 1, skipped: 0, skippedMimeTypes: [] });
+    expect(result).toEqual({
+      uploads: [],
+      failed: 1,
+      skipped: 0,
+      skippedMimeTypes: [],
+      undelivered: [{ name: 'screenshot.png', reason: 'fetch_failed' }],
+    });
     expect(await fs.readdir(uploadDir)).toEqual([]);
   });
 
@@ -606,7 +692,13 @@ describe('ingestInboundAttachments', () => {
       store,
     });
 
-    expect(result).toEqual({ uploads: [], failed: 1, skipped: 0, skippedMimeTypes: [] });
+    expect(result).toEqual({
+      uploads: [],
+      failed: 1,
+      skipped: 0,
+      skippedMimeTypes: [],
+      undelivered: [{ name: 'report.txt', reason: 'fetch_failed' }],
+    });
     expect(await fs.readdir(uploadDir)).toEqual([]);
   });
 
@@ -653,7 +745,13 @@ describe('ingestInboundAttachments', () => {
       store,
     });
 
-    expect(result).toEqual({ uploads: [], failed: 1, skipped: 0, skippedMimeTypes: [] });
+    expect(result).toEqual({
+      uploads: [],
+      failed: 1,
+      skipped: 0,
+      skippedMimeTypes: [],
+      undelivered: [{ name: 'screenshot.png', reason: 'fetch_failed' }],
+    });
   });
 
   it('continues past failures and still stores the remaining images', async () => {
@@ -705,6 +803,10 @@ describe('ingestInboundAttachments', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(10);
     expect(result.uploads).toHaveLength(10);
     expect(result.failed).toBe(2);
+    expect(result.undelivered).toEqual([
+      { name: 'img-10.png', reason: 'too_many' },
+      { name: 'img-11.png', reason: 'too_many' },
+    ]);
   });
 });
 

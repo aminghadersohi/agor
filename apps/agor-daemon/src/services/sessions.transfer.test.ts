@@ -200,6 +200,52 @@ describe('SessionsService transfer authorization', () => {
     ).rejects.toThrow(/Cannot use destination session/);
   });
 
+  dbTest('publishes every Session a routing or genealogy transfer touched', async ({ db }) => {
+    const caller = await user(db, 'publish-caller');
+    const targetBranch = await branch(db, caller, 'publish');
+    const oldDestination = await session(db, targetBranch, caller);
+    const newDestination = await session(db, targetBranch, caller);
+    const source = await session(db, targetBranch, caller, {
+      callback_config: { enabled: true, callback_session_id: oldDestination.session_id },
+    });
+    const emit = vi.fn();
+    const publishingApp = {
+      ...app(),
+      service: (path: string) => (path === 'sessions' ? { emit } : { get: vi.fn() }),
+    } as unknown as Application;
+    const service = new SessionsService(db, publishingApp);
+
+    await service.retargetCallback(
+      source.session_id,
+      { callbackSessionId: newDestination.session_id },
+      params(caller)
+    );
+    const retargeted = emit.mock.calls.map(([event, data]) => [event, data.session_id]);
+    expect(retargeted).toEqual(
+      expect.arrayContaining([
+        ['patched', source.session_id],
+        ['patched', oldDestination.session_id],
+        ['patched', newDestination.session_id],
+      ])
+    );
+    expect(
+      emit.mock.calls.find(([, data]) => data.session_id === source.session_id)?.[1]
+    ).toMatchObject({ callback_config: { callback_session_id: newDestination.session_id } });
+
+    emit.mockClear();
+    await service.reparent(
+      source.session_id,
+      { parentSessionId: newDestination.session_id },
+      params(caller)
+    );
+    expect(emit.mock.calls.map(([, data]) => data.session_id).sort()).toEqual(
+      [source.session_id, newDestination.session_id].sort()
+    );
+    expect(
+      emit.mock.calls.find(([, data]) => data.session_id === source.session_id)?.[1]
+    ).toMatchObject({ genealogy: { parent_session_id: newDestination.session_id } });
+  });
+
   dbTest(
     'relay requires independent source-view and destination-prompt authority',
     async ({ db }) => {

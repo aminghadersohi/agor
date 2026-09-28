@@ -1152,9 +1152,17 @@ describe('POST /mcp with personal API keys', () => {
           { destination: 'coordinator' },
           expect.objectContaining({ provider: 'mcp' })
         );
+        // The relay drops the provider so the daemon will accept the
+        // system-authored stamp, but that must not shed the authenticated
+        // caller: destination resolution above still runs as `provider: 'mcp'`,
+        // and the prompt itself still carries this user's identity.
         expect(createPrompt).toHaveBeenCalledWith(
-          { prompt: 'status update', stream: true },
-          expect.objectContaining({ route: { id: 'sess-current-coordinator' } })
+          { prompt: 'status update', stream: true, metadata: { system_authored: true } },
+          expect.objectContaining({
+            route: { id: 'sess-current-coordinator' },
+            provider: undefined,
+            user: expect.objectContaining({ user_id: 'user-1' }),
+          })
         );
       },
       { multi_tenancy: undefined },
