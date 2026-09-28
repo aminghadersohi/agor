@@ -5,6 +5,8 @@
  * - isOAuthRequired(): Bearer challenge detection
  * - discoverResourceMetadataUrl(): .well-known fallback discovery
  * - resolveResourceMetadataUrl(): header parse + .well-known fallback
+ * - the RFC 9728 path-aware fallback taken when an advertised document
+ *   describes a resource other than the saved MCP URL
  */
 
 import { request as httpRequest } from 'node:http';
@@ -41,6 +43,7 @@ import {
   assertAuthorizeRedirectUriMatchesClient,
   clearAuthCodeTokenCache,
   completeMCPOAuthFlow,
+  describeMCPOAuthResourceMismatch,
   discoverAuthorizationServerFromMcpOrigin,
   discoverResourceMetadataUrl,
   getAuthCodeTokenCacheStats,
@@ -51,6 +54,7 @@ import {
   OAuthCodeExchangeError,
   OAuthConfigurationError,
   parseOAuthCallback,
+  pathAwareResourceMetadataUrl,
   performMCPOAuthFlow,
   resolveMCPOAuthDiscovery,
   resolveResourceMetadataUrl,
@@ -2615,5 +2619,309 @@ describe('strict current MCP OAuth profile', () => {
         }
       )
     ).rejects.toThrow('token endpoint override does not match metadata');
+  });
+});
+
+describe('path-aware protected-resource metadata fallback', () => {
+  const originalFetch = globalThis.fetch;
+  // Google's shape: the handshake does not challenge, a read-only tool call
+  // does, and the pointer that challenge carries is per-tool. Its document
+  // describes the origin's `/mcp`, not the saved `/mcp/v1`.
+  const mcpUrl = 'https://gmailmcp.googleapis.test/mcp/v1';
+  const perToolMetadataUrl =
+    'https://gmailmcp.googleapis.test/.well-known/oauth-protected-resource/list_drafts';
+  const pathAwareMetadataUrl =
+    'https://gmailmcp.googleapis.test/.well-known/oauth-protected-resource/mcp/v1';
+  const issuer = 'https://accounts.googleapis.test';
+  // Only ever named by the per-tool document, and never served. Reaching it
+  // would mean a grant was bound from a document that failed validation.
+  const unauthoritativeIssuer = 'https://unauthoritative-as.googleapis.test';
+  const redirectUri = 'https://agor.example.com/mcp-servers/oauth-callback';
+
+  beforeEach(() => {
+    clearAuthCodeTokenCache();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  const json = (body: unknown) =>
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+
+  /**
+   * Serves at most three things: the advertised document, the path-aware
+   * document, and the authoritative AS metadata. Anything else 404s, so an
+   * extra request is visible in the call log rather than silently satisfied.
+   */
+  function googleFetch(
+    documents: Record<string, { resource?: unknown; authorization_servers: string[] } | undefined>
+  ) {
+    return vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      const document = documents[url];
+      if (document) {
+        return json({
+          ...(document.resource === undefined ? {} : { resource: document.resource }),
+          authorization_servers: document.authorization_servers,
+          scopes_supported: ['gmail.readonly'],
+        });
+      }
+      if (url === `${issuer}/.well-known/oauth-authorization-server`) {
+        return json({
+          issuer,
+          authorization_endpoint: `${issuer}/authorize`,
+          token_endpoint: `${issuer}/token`,
+          code_challenge_methods_supported: ['S256'],
+          authorization_response_iss_parameter_supported: true,
+        });
+      }
+      return new Response(null, { status: 404 });
+    }) as unknown as typeof fetch;
+  }
+
+  const start = (metadataUrl: string, compatibilityMode?: 'strict' | 'marketplace') =>
+    startMCPOAuthFlow(
+      `Bearer resource_metadata="${metadataUrl}"`,
+      'pre-registered-client',
+      redirectUri,
+      {
+        resourceUri: mcpUrl,
+        ...(compatibilityMode ? { compatibilityMode } : {}),
+      }
+    );
+
+  it('derives the RFC 9728 path-aware location only for a path-bearing resource', () => {
+    expect(pathAwareResourceMetadataUrl(mcpUrl)).toBe(pathAwareMetadataUrl);
+    expect(pathAwareResourceMetadataUrl('https://gmailmcp.googleapis.test/mcp/v1/')).toBe(
+      pathAwareMetadataUrl
+    );
+    expect(pathAwareResourceMetadataUrl('https://gmailmcp.googleapis.test')).toBeNull();
+    expect(pathAwareResourceMetadataUrl('https://gmailmcp.googleapis.test/')).toBeNull();
+    expect(pathAwareResourceMetadataUrl('not-a-url')).toBeNull();
+  });
+
+  it('binds the grant to the path-aware document when the advertised pointer describes another resource', async () => {
+    globalThis.fetch = googleFetch({
+      [perToolMetadataUrl]: {
+        resource: 'https://gmailmcp.googleapis.test/mcp',
+        authorization_servers: [unauthoritativeIssuer],
+      },
+      [pathAwareMetadataUrl]: { resource: mcpUrl, authorization_servers: [issuer] },
+    });
+
+    const context = await start(perToolMetadataUrl);
+
+    // The authoritative document is the one that matched, and everything the
+    // flow carries forward comes from it — including the metadata URI the
+    // daemon persists as the grant's binding.
+    expect(context.metadataUrl).toBe(pathAwareMetadataUrl);
+    expect(context.issuer).toBe(issuer);
+    expect(context.resourceUri).toBe(mcpUrl);
+    // RFC 8707 still carries the exact saved MCP URL, not the advertised one.
+    expect(new URL(context.authorizationUrl).searchParams.get('resource')).toBe(mcpUrl);
+    const requested = vi.mocked(globalThis.fetch).mock.calls.map(([input]) => String(input));
+    expect(requested).toEqual([
+      perToolMetadataUrl,
+      pathAwareMetadataUrl,
+      `${issuer}/.well-known/oauth-authorization-server`,
+    ]);
+    expect(requested.some((url) => url.startsWith(unauthoritativeIssuer))).toBe(false);
+  });
+
+  it('spends no extra request when the advertised document already matches', async () => {
+    globalThis.fetch = googleFetch({
+      [pathAwareMetadataUrl]: { resource: mcpUrl, authorization_servers: [issuer] },
+    });
+
+    const context = await start(pathAwareMetadataUrl);
+
+    expect(context.metadataUrl).toBe(pathAwareMetadataUrl);
+    expect(vi.mocked(globalThis.fetch).mock.calls.map(([input]) => String(input))).toEqual([
+      pathAwareMetadataUrl,
+      `${issuer}/.well-known/oauth-authorization-server`,
+    ]);
+  });
+
+  it('prefers the resource-owned document over an off-origin advertised pointer', async () => {
+    const offOriginMetadataUrl = 'https://attacker.example/.well-known/oauth-protected-resource';
+    globalThis.fetch = googleFetch({
+      [offOriginMetadataUrl]: {
+        resource: 'https://attacker.example/mcp',
+        authorization_servers: [unauthoritativeIssuer],
+      },
+      [pathAwareMetadataUrl]: { resource: mcpUrl, authorization_servers: [issuer] },
+    });
+
+    const context = await start(offOriginMetadataUrl);
+
+    expect(context.metadataUrl).toBe(pathAwareMetadataUrl);
+    expect(context.issuer).toBe(issuer);
+  });
+
+  it.each([
+    ['a trailing slash', `${mcpUrl}/`],
+    ['the resource origin', 'https://gmailmcp.googleapis.test'],
+    ['a parent path', 'https://gmailmcp.googleapis.test/mcp'],
+  ])(
+    'keeps strict equality exact when the path-aware document declares %s',
+    async (_label, pathAwareResource) => {
+      globalThis.fetch = googleFetch({
+        [perToolMetadataUrl]: {
+          resource: 'https://gmailmcp.googleapis.test/mcp',
+          authorization_servers: [unauthoritativeIssuer],
+        },
+        [pathAwareMetadataUrl]: {
+          resource: pathAwareResource,
+          authorization_servers: [issuer],
+        },
+      });
+
+      await expect(start(perToolMetadataUrl)).rejects.toMatchObject({
+        failureCode: 'metadata_incompatible',
+        failureReason: 'protected_resource_mismatch',
+      });
+      expect(
+        vi
+          .mocked(globalThis.fetch)
+          .mock.calls.every(([input]) => !String(input).startsWith(unauthoritativeIssuer))
+      ).toBe(true);
+    }
+  );
+
+  it('names both documents and both compared resources when neither matches', async () => {
+    const advertisedResource = 'https://gmailmcp.googleapis.test/mcp';
+    const pathAwareResource = 'https://gmailmcp.googleapis.test/mcp/v2';
+    globalThis.fetch = googleFetch({
+      [perToolMetadataUrl]: {
+        resource: advertisedResource,
+        authorization_servers: [unauthoritativeIssuer],
+      },
+      [pathAwareMetadataUrl]: {
+        resource: pathAwareResource,
+        authorization_servers: [issuer],
+      },
+    });
+
+    const failure = await rejectedError<OAuthConfigurationError>(start(perToolMetadataUrl));
+
+    expect(failure).toBeInstanceOf(OAuthConfigurationError);
+    expect(failure.failureReason).toBe('protected_resource_mismatch');
+    expect(failure.resourceMismatch).toEqual({
+      resourceUri: mcpUrl,
+      attempts: [
+        {
+          metadataUrl: perToolMetadataUrl,
+          source: 'header',
+          statedResource: advertisedResource,
+        },
+        {
+          metadataUrl: pathAwareMetadataUrl,
+          source: 'path-aware-fallback',
+          statedResource: pathAwareResource,
+        },
+      ],
+    });
+
+    const described = describeMCPOAuthResourceMismatch(failure.resourceMismatch);
+    expect(described).toContain(mcpUrl);
+    expect(described).toContain(perToolMetadataUrl);
+    expect(described).toContain(advertisedResource);
+    expect(described).toContain(pathAwareMetadataUrl);
+    expect(described).toContain(pathAwareResource);
+  });
+
+  it('reports the advertised document alone when the path-aware candidate is unavailable', async () => {
+    globalThis.fetch = googleFetch({
+      [perToolMetadataUrl]: {
+        resource: 'https://gmailmcp.googleapis.test/mcp',
+        authorization_servers: [unauthoritativeIssuer],
+      },
+    });
+
+    const failure = await rejectedError<OAuthConfigurationError>(start(perToolMetadataUrl));
+
+    expect(failure.failureReason).toBe('protected_resource_mismatch');
+    expect(failure.resourceMismatch?.attempts).toEqual([
+      {
+        metadataUrl: perToolMetadataUrl,
+        source: 'header',
+        statedResource: 'https://gmailmcp.googleapis.test/mcp',
+      },
+    ]);
+  });
+
+  it('describes rather than reproduces an off-origin or oversized provider value', () => {
+    const described = describeMCPOAuthResourceMismatch({
+      resourceUri: mcpUrl,
+      attempts: [
+        {
+          metadataUrl: 'https://attacker.example/.well-known/oauth-protected-resource',
+          source: 'header',
+          statedResource: `https://attacker.example/${'x'.repeat(400)}`,
+        },
+        {
+          metadataUrl: pathAwareMetadataUrl,
+          source: 'path-aware-fallback',
+          statedResource: null,
+        },
+      ],
+    });
+
+    expect(described).toContain(mcpUrl);
+    expect(described).toContain(pathAwareMetadataUrl);
+    expect(described).toContain('declares no single resource identifier');
+    expect(described).not.toContain('attacker.example');
+    expect(described).not.toContain('xxxx');
+  });
+
+  it('returns no description for a malformed diagnostic', () => {
+    expect(describeMCPOAuthResourceMismatch(undefined)).toBeUndefined();
+    expect(describeMCPOAuthResourceMismatch({ resourceUri: mcpUrl })).toBeUndefined();
+    expect(describeMCPOAuthResourceMismatch({ resourceUri: mcpUrl, attempts: [] })).toBeUndefined();
+  });
+
+  it('shares the fallback with the audit-safe metadata validation path', async () => {
+    globalThis.fetch = googleFetch({
+      [perToolMetadataUrl]: {
+        resource: 'https://gmailmcp.googleapis.test/mcp',
+        authorization_servers: [unauthoritativeIssuer],
+      },
+      [pathAwareMetadataUrl]: { resource: mcpUrl, authorization_servers: [issuer] },
+    });
+
+    await expect(
+      validateMCPOAuthMetadata(
+        { kind: 'resource-metadata', metadataUrl: perToolMetadataUrl, source: 'header' },
+        mcpUrl,
+        { compatibilityMode: 'strict' }
+      )
+    ).resolves.toMatchObject({ issuer });
+  });
+
+  it('applies the marketplace rule, not a looser one, to the fallback document', async () => {
+    globalThis.fetch = googleFetch({
+      // A sibling path, which no mode accepts — the bounded marketplace
+      // allowance covers a parent of the saved path, not a neighbour of it.
+      [perToolMetadataUrl]: {
+        resource: 'https://gmailmcp.googleapis.test/other',
+        authorization_servers: [unauthoritativeIssuer],
+      },
+      // A parent path on the resource's own origin: accepted by the bounded
+      // marketplace allowance, and rejected by strict equality above.
+      [pathAwareMetadataUrl]: {
+        resource: 'https://gmailmcp.googleapis.test/mcp',
+        authorization_servers: [issuer],
+      },
+    });
+
+    const context = await start(perToolMetadataUrl, 'marketplace');
+    expect(context.metadataUrl).toBe(pathAwareMetadataUrl);
+    expect(new URL(context.authorizationUrl).searchParams.get('resource')).toBe(mcpUrl);
   });
 });
