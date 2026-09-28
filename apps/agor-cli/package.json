@@ -1,6 +1,6 @@
 {
   "name": "@agor/cli",
-  "version": "0.26.6",
+  "version": "0.26.7",
   "private": true,
   "type": "module",
   "bin": {
@@ -22,7 +22,7 @@
     "@agor/daemon": "workspace:*",
     "@oclif/core": "^4.13.3",
     "@oclif/plugin-help": "^6.2.56",
-    "chalk": "^5.6.2",
+    "chalk": "^6.0.0",
     "cli-table3": "^0.6.5",
     "inquirer": "^12.10.0",
     "proper-lockfile": "4.1.2"

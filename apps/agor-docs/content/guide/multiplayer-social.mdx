@@ -45,6 +45,36 @@ Hidden or unfocused tabs publish only workspace-level online status. Each
 tab/device has its own presence instance, so closing one tab does not make a
 user disappear while another remains active.
 
+### Profile photos
+
+People, teammates, and boards can each keep a small gallery of photos (up to
+24). The first photo becomes the main one; you can pick another, remove
+photos, and avatars slowly cycle through the gallery. Uploads are re-encoded
+on the server, so originals and their metadata are never stored.
+
+- **Your photos**: User Settings → Profile → Photos. Admins can manage another
+  user's photos from that user's settings.
+- **Teammate photos**: open the teammate branch → Teammate tab. Requires
+  Manager access to the teammate branch. The main photo also appears in the
+  board's teammate panel.
+- **Board images**: board settings (Edit Board). Requires permission to edit
+  the board.
+
+Agents can do the same through the Agor MCP server:
+`agor_profile_images_list` / `agor_profile_images_get` read galleries, and
+`agor_profile_images_upload` (from a branch-relative image file or base64),
+`agor_profile_images_update` (main image, order, alt text), and
+`agor_profile_images_delete` manage them with the calling user's permissions.
+
+### Idle screensaver
+
+User Settings → Preferences → Screensaver can start an ambient screensaver
+after a period without input. It is **off by default**; turn on **Start when
+idle** and choose the idle time (1–120 minutes). You can preview it anytime
+from the user menu with **Start screensaver**. Any key, click, or pointer
+movement dismisses it, and it never starts while your system requests reduced
+motion.
+
 ---
 
 ## 💬 Spatial Comments

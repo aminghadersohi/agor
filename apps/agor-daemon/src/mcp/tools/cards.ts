@@ -4,6 +4,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { CardsService } from '../../services/cards.js';
 import { emitServiceEvent } from '../../utils/emit-service-event.js';
+import { entityColorOverrideDescription, parseEntityColorOverride } from '../entity-color.js';
 import { resolveBoardId, resolveCardId } from '../resolve-ids.js';
 import {
   mcpLimit,
@@ -18,6 +19,8 @@ import {
 import type { McpContext } from '../server.js';
 import { coerceString, textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope } from '../tenant-scope.js';
+
+const CARD_COLOR_OVERRIDE_DESCRIPTION = entityColorOverrideDescription('this card');
 
 export function registerCardTools(server: McpServer, ctx: McpContext): void {
   // Tool 1: agor_cards_create
@@ -35,12 +38,16 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
         description: mcpOptionalString('description', 'Card description (optional)'),
         note: mcpOptionalString('note', 'Card note (optional)'),
         data: z.object({}).passthrough().optional().describe('Custom data object (optional)'),
-        colorOverride: mcpOptionalString('colorOverride', 'Color override (optional)'),
+        colorOverride: mcpOptionalString(
+          'colorOverride',
+          `${CARD_COLOR_OVERRIDE_DESCRIPTION} Optional.`
+        ),
         emojiOverride: mcpOptionalString('emojiOverride', 'Emoji override (optional)'),
       }),
     },
     async (args) => {
       const title = coerceString(args.title)!;
+      const colorOverride = parseEntityColorOverride(args.colorOverride);
       // boards.get already resolves exact and short IDs. Reuse the authorized
       // canonical entity instead of resolving it with one get and immediately
       // reading the same board again.
@@ -70,7 +77,7 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
               args.data && typeof args.data === 'object'
                 ? (args.data as Record<string, unknown>)
                 : undefined,
-            color_override: coerceString(args.colorOverride),
+            color_override: colorOverride ?? undefined,
             emoji_override: coerceString(args.emojiOverride),
             zoneId,
             zoneData,
@@ -180,7 +187,7 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
           .describe('New data object (null to clear)'),
         colorOverride: mcpOptionalString(
           'colorOverride',
-          'New color override (null to clear)'
+          `${CARD_COLOR_OVERRIDE_DESCRIPTION} Pass null to clear.`
         ).nullable(),
         emojiOverride: mcpOptionalString(
           'emojiOverride',
@@ -195,7 +202,8 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
       if (args.description !== undefined) updateData.description = args.description;
       if (args.note !== undefined) updateData.note = args.note;
       if (args.data !== undefined) updateData.data = args.data;
-      if (args.colorOverride !== undefined) updateData.color_override = args.colorOverride;
+      if (args.colorOverride !== undefined)
+        updateData.color_override = parseEntityColorOverride(args.colorOverride);
       if (args.emojiOverride !== undefined) updateData.emoji_override = args.emojiOverride;
       const updatedCard = await ctx.app
         .service('cards')
@@ -357,7 +365,10 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
               description: mcpOptionalString('cards[].description', 'Description'),
               note: mcpOptionalString('cards[].note', 'Note'),
               data: z.object({}).passthrough().optional().describe('Custom data'),
-              colorOverride: mcpOptionalString('cards[].colorOverride', 'Color override'),
+              colorOverride: mcpOptionalString(
+                'cards[].colorOverride',
+                CARD_COLOR_OVERRIDE_DESCRIPTION
+              ),
               emojiOverride: mcpOptionalString('cards[].emojiOverride', 'Emoji override'),
             })
           )
@@ -369,6 +380,11 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
       const cardsArr = args.cards;
       if (!Array.isArray(cardsArr) || cardsArr.length === 0)
         throw new Error('non-empty cards array is required');
+      // Validate every color before the first write so one bad entry never
+      // leaves a partially created batch.
+      const colorOverrides = cardsArr.map((c, index) =>
+        parseEntityColorOverride(c.colorOverride, `cards[${index}].colorOverride`)
+      );
 
       // Preserve the same short-ID resolution and authorization boundary while
       // avoiding resolveBoardId() + boards.get() for the same entity.
@@ -378,7 +394,7 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
       const cardsService = ctx.app.service('cards') as unknown as CardsService;
 
       const results = [];
-      for (const c of cardsArr) {
+      for (const [index, c] of cardsArr.entries()) {
         let zoneData: ZoneBoardObject | undefined;
         const zoneId = coerceString(c.zoneId);
         if (zoneId) {
@@ -396,7 +412,7 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
               description: coerceString(c.description),
               note: coerceString(c.note),
               data: c.data && typeof c.data === 'object' ? c.data : undefined,
-              color_override: coerceString(c.colorOverride),
+              color_override: colorOverrides[index] ?? undefined,
               emoji_override: coerceString(c.emojiOverride),
               zoneId,
               zoneData,
@@ -439,7 +455,7 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
               data: z.object({}).passthrough().nullable().optional().describe('New data'),
               colorOverride: mcpOptionalString(
                 'updates[].colorOverride',
-                'New color override'
+                `${CARD_COLOR_OVERRIDE_DESCRIPTION} Pass null to clear.`
               ).nullable(),
               emojiOverride: mcpOptionalString(
                 'updates[].emojiOverride',
@@ -455,9 +471,14 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
       const updates = args.updates;
       if (!Array.isArray(updates) || updates.length === 0)
         throw new Error('non-empty updates array is required');
+      const colorOverrides = updates.map((u, index) =>
+        u.colorOverride === undefined
+          ? undefined
+          : parseEntityColorOverride(u.colorOverride, `updates[${index}].colorOverride`)
+      );
 
       const results = [];
-      for (const u of updates) {
+      for (const [index, u] of updates.entries()) {
         const cardId = coerceString(u.cardId);
         if (!cardId) continue;
         const updateData: Record<string, unknown> = {};
@@ -466,7 +487,7 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
         if (u.description !== undefined) updateData.description = u.description;
         if (u.note !== undefined) updateData.note = u.note;
         if (u.data !== undefined) updateData.data = u.data;
-        if (u.colorOverride !== undefined) updateData.color_override = u.colorOverride;
+        if (colorOverrides[index] !== undefined) updateData.color_override = colorOverrides[index];
         if (u.emojiOverride !== undefined) updateData.emoji_override = u.emojiOverride;
         const updated = await ctx.app
           .service('cards')

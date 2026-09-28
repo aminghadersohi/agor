@@ -5,6 +5,15 @@ import type { ComponentProps } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { BoardTeammatePanel } from './BoardTeammatePanel';
 
+// Profile galleries and portraits load from the daemon; keep these tests hermetic.
+vi.mock('../ProfileImage/profileImageApi', () => ({
+  listProfileImages: vi.fn(async () => ({ images: [], max_images: 24 })),
+  fetchProfileImageBlob: vi.fn(),
+  uploadProfileImage: vi.fn(),
+  patchProfileImage: vi.fn(),
+  deleteProfileImage: vi.fn(),
+}));
+
 const board = { board_id: 'board-1' } as Board;
 
 const renderPanel = (props: Partial<ComponentProps<typeof BoardTeammatePanel>> = {}) =>

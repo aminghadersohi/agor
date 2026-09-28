@@ -55,6 +55,7 @@ import {
 import { ensureBranchWorkspaceAccess } from '../../utils/branch-workspace-path.js';
 import { resolveDelegatedExecutionHomeKey } from '../../utils/executor-delegated-home.js';
 import { getDaemonUrl, requestExecutor } from '../../utils/spawn-executor.js';
+import { resolveMcpCallerSandboxMounts } from '../caller-sandbox-mounts.js';
 import { resolveBranchId } from '../resolve-ids.js';
 import {
   mcpLimit,
@@ -735,6 +736,7 @@ async function runBranchKnowledgeCommand(
     );
     return { branch, fsAccess };
   });
+  const sandboxMounts = await resolveMcpCallerSandboxMounts(ctx, workspace.branch);
   const result = await requestExecutor(
     {
       command,
@@ -744,6 +746,7 @@ async function runBranchKnowledgeCommand(
         ...params,
         cwd: workspace.branch.path,
         principalBranchAccess: workspace.fsAccess,
+        ...sandboxMounts,
       },
     },
     {
@@ -1107,8 +1110,15 @@ export function registerKnowledgeTools(server: McpServer, ctx: McpContext): void
             : {
                 title: date,
                 kind: 'memory',
-                visibility: teammate?.kb?.default_visibility ?? namespace.visibility_default,
-                edit_policy: 'public',
+                // Daily memory is personal operational context, so it is
+                // created private/owner. The namespace's `visibility_default`
+                // governs ordinary docs and is the wrong signal here, and
+                // `kb.default_visibility` only mirrors it (teammate namespaces
+                // are created public), so neither is an opt-in to publish.
+                // Only the memory-specific fields, which nothing
+                // auto-populates, can widen this.
+                visibility: teammate?.kb?.memory_visibility ?? 'private',
+                edit_policy: teammate?.kb?.memory_edit_policy ?? 'owner',
                 status: 'published',
               }),
           content_text: nextContent,

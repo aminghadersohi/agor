@@ -25,7 +25,6 @@ import type {
   BoardImportResult,
   Branch,
   BranchCapabilityPolicy,
-  BranchEnvironmentUpdate,
   CancelQueuedTasksInput,
   CapabilityPolicyWorkspacePreferences,
   CardType,
@@ -76,6 +75,7 @@ import type {
   OwnershipTransferResult,
   PatchAgenticToolPreset,
   PermissionMode,
+  PowerAdmissionStatus,
   PowerEssentialSessionSearchResult,
   PowerManagementStatus,
   ReorderQueuedTasksInput,
@@ -96,8 +96,10 @@ import type {
   SessionReminderPatchData,
   SessionUpdate,
   SetSessionPowerPriorityRequest,
+  SetTeammateFrontDeskRequest,
   Task,
   TaskQueueMutationResult,
+  TeammateFrontDeskView,
   TeammateWelcomeNoteRequest,
   TemplateRenderRequest,
   TemplateRenderResponse,
@@ -347,6 +349,13 @@ export interface PowerManagementService {
   off(event: 'patched', handler: (data: PowerManagementStatus) => void): void;
 }
 
+/** Redacted, read-only admission projection readable by every tenant member. */
+export interface PowerAdmissionService {
+  find(params?: Params): Promise<PowerAdmissionStatus>;
+  on(event: 'patched', handler: (data: PowerAdmissionStatus) => void): void;
+  off(event: 'patched', handler: (data: PowerAdmissionStatus) => void): void;
+}
+
 export interface PowerEssentialSessionsService {
   find(
     params?: Params & { query?: { search?: string } }
@@ -356,6 +365,16 @@ export interface PowerEssentialSessionsService {
 export interface SessionPowerPriorityService {
   find(params?: Params): Promise<SessionPowerPriorityView>;
   create(data: SetSessionPowerPriorityRequest, params?: Params): Promise<SessionPowerPriorityView>;
+}
+
+/** `branches/:id/front-desk` — every method answers with the fresh view. */
+export interface BranchFrontDeskService {
+  find(params?: Params): Promise<TeammateFrontDeskView>;
+  create(data: SetTeammateFrontDeskRequest, params?: Params): Promise<TeammateFrontDeskView>;
+  remove(
+    id: null,
+    params?: Params & { query?: { expected_session_id?: SessionID } }
+  ): Promise<TeammateFrontDeskView>;
 }
 
 /**
@@ -383,6 +402,7 @@ export interface ServiceTypes {
   'branches/:id/permissions': BranchCapabilityPolicy;
   'workspace-preferences': CapabilityPolicyWorkspacePreferences;
   'power-management': PowerManagementStatus;
+  'power-management/admission': PowerAdmissionStatus;
   'power-management/essential-sessions': PowerEssentialSessionSearchResult;
   cards: CardWithType;
   'card-types': CardType; // CardType CRUD
@@ -838,7 +858,7 @@ export interface UsersService extends AgorService<User> {
    * recorded as an explicit user pick.
    */
   setPrimaryTeammate(
-    data: { branchId: string; expectedUserId: UserID },
+    data: { branchId: string | null; expectedUserId: UserID },
     params?: Params
   ): Promise<Branch | null>;
   /** Set an onboarding/default teammate only when the caller is still unset. */
@@ -889,22 +909,6 @@ export interface BranchesService extends AgorService<Branch> {
    * Remove branch from board
    */
   removeFromBoard(id: string, params?: Params): Promise<Branch>;
-
-  /**
-   * Update environment status
-   */
-  updateEnvironment(
-    data:
-      | {
-          branch_id?: string;
-          branchId?: string;
-          environment_update?: BranchEnvironmentUpdate;
-          environmentUpdate?: BranchEnvironmentUpdate;
-        }
-      | string,
-    environmentUpdate?: BranchEnvironmentUpdate,
-    params?: Params
-  ): Promise<Branch>;
 
   /**
    * Start branch environment
@@ -987,8 +991,10 @@ export interface AgorClient
   service(path: 'branches/:id/permissions'): BranchPermissionsService;
   service(path: 'workspace-preferences'): WorkspacePreferencesService;
   service(path: 'power-management'): PowerManagementService;
+  service(path: 'power-management/admission'): PowerAdmissionService;
   service(path: 'power-management/essential-sessions'): PowerEssentialSessionsService;
   service(path: `sessions/${string}/power-priority`): SessionPowerPriorityService;
+  service(path: `branches/${string}/front-desk`): BranchFrontDeskService;
   service(path: 'zone-workflow-transitions'): ZoneWorkflowTransitionsService;
   service(path: 'zone-workflow-advances'): ZoneWorkflowAdvancesService;
   service(path: 'schedules'): SchedulesService;
@@ -1494,7 +1500,7 @@ function extendBranchesService(client: AgorClient): void {
   };
   if (branchesService[BRANCHES_SERVICE_EXTENDED]) return;
   if (typeof branchesService.methods === 'function') {
-    branchesService.methods('updateEnvironment', 'ensureTeammateKnowledgeNamespace', 'clean');
+    branchesService.methods('ensureTeammateKnowledgeNamespace', 'clean');
   }
   branchesService[BRANCHES_SERVICE_EXTENDED] = true;
 }

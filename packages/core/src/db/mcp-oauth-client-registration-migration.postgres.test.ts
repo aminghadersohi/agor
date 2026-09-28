@@ -425,6 +425,11 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`ALTER TABLE messages DROP COLUMN mcp_slack_connect_due_at`);
       await executeRaw(db, sql`ALTER TABLE user_mcp_oauth_tokens DROP COLUMN granted_by_user_id`);
       await executeRaw(db, sql`DROP POLICY IF EXISTS branch_maintenance_discovery ON branches`);
+      await executeRaw(
+        db,
+        sql`DROP POLICY IF EXISTS api_key_host_tenant_discovery ON app_variables`
+      );
+      await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
       await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN deletion_status`);
       await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN deletion_error`);
       await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN deletion_updated_at`);
@@ -433,6 +438,11 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN color_override`);
       // Rewind 0112's schema too: replaying its ledger must recreate the table.
       await executeRaw(db, sql`DROP TABLE kb_import_receipts`);
+      // 9030's front-desk table references the Session tenant identity index
+      // dropped below, and its replay must recreate the table.
+      await executeRaw(db, sql`DROP TABLE branch_front_desk_sessions`);
+      // 9028's profile image galleries are newer than this watermark too.
+      await executeRaw(db, sql`DROP TABLE profile_images`);
 
       // This fixture rewinds the journal to the previous fork watermark. Keep
       // the physical schema aligned with that watermark so the later Session
@@ -442,6 +452,10 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       await executeRaw(db, sql`DROP INDEX sessions_tenant_session_id_unique`);
       await executeRaw(db, sql`DROP INDEX tasks_tenant_task_id_unique`);
       // Upstream's provider-grant table is likewise newer than this watermark.
+      // Rewind the later completion schema too, not just its ledger entry.
+      // The policy on tasks references the outbox and must be removed first.
+      await executeRaw(db, sql`DROP POLICY IF EXISTS completion_callback_task_discovery ON tasks`);
+      await executeRaw(db, sql`DROP TABLE completion_subscriptions`);
       await executeRaw(db, sql`DROP TABLE user_provider_oauth_grants`);
       await withPostgresTestTransaction(db, recreateHistoricalClaudeAuthority);
       await withPostgresTestTransaction(db, restoreHistoricalOwnerImmutability);

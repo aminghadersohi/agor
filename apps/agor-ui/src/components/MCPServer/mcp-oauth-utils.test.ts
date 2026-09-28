@@ -435,6 +435,100 @@ describe('buildAuthFromValues PATCH semantics', () => {
       )
     ).toMatchObject({ type: 'jwt', api_token: null, api_secret: null });
   });
+
+  // A PATCH merges field by field, so an omitted policy field keeps whatever is
+  // stored while an explicit one overwrites it. The daemon reads that overwrite
+  // as a real auth-configuration change and deletes every OAuth grant on the
+  // server, so a policy field the form was not holding must not be sent at all.
+  it('omits policy fields the form is not holding rather than inventing defaults', () => {
+    const auth = buildAuthFromValues(
+      { auth_type: 'oauth', oauth_scope: 'calendar.events' },
+      { forPatch: true }
+    );
+
+    expect(auth).toEqual({ type: 'oauth', oauth_scope: 'calendar.events' });
+    expect(auth).not.toHaveProperty('oauth_dcr_mode');
+    expect(auth).not.toHaveProperty('oauth_compatibility_mode');
+    expect(auth).not.toHaveProperty('oauth_grant_type');
+    expect(auth).not.toHaveProperty('oauth_mode');
+  });
+
+  it('omits a policy field whose form value is unrecognized', () => {
+    expect(
+      buildAuthFromValues(
+        {
+          auth_type: 'oauth',
+          oauth_dcr_mode: null,
+          oauth_mode: 'something_else',
+          // Read-only display value for catalog-managed policy — never public data.
+          oauth_compatibility_mode: 'marketplace',
+        },
+        { forPatch: true }
+      )
+    ).toEqual({ type: 'oauth' });
+  });
+
+  it('still sends a policy the user selected, including the recommended default', () => {
+    expect(
+      buildAuthFromValues(
+        {
+          auth_type: 'oauth',
+          oauth_dcr_mode: 'advertised',
+          oauth_compatibility_mode: 'strict',
+          oauth_mode: 'shared',
+          oauth_grant_type: 'client_credentials',
+        },
+        { forPatch: true }
+      )
+    ).toMatchObject({
+      oauth_dcr_mode: 'advertised',
+      oauth_compatibility_mode: 'strict',
+      oauth_mode: 'shared',
+      oauth_grant_type: 'client_credentials',
+    });
+  });
+
+  it('keeps defaulting on create, where no stored value can be preserved', () => {
+    expect(buildAuthFromValues({ auth_type: 'oauth', oauth_client_id: 'cid' })).toMatchObject({
+      oauth_dcr_mode: 'advertised',
+      oauth_compatibility_mode: 'strict',
+      oauth_grant_type: 'client_credentials',
+      oauth_mode: 'per_user',
+    });
+  });
+
+  /**
+   * The exact payload the Advanced-panel-untouched round-trip produces for a
+   * server stored with `oauth_dcr_mode: 'disabled'` +
+   * `oauth_compatibility_mode: 'legacy'`. Pinned here because the daemon-side
+   * half of this regression — that the same payload does not trip
+   * `hasMCPOAuthRelevantServerConfigurationChanged`, and so never reaches
+   * `deleteAllForServer` — asserts against the same literal in
+   * apps/agor-daemon/src/services/mcp-oauth-grant-binding.test.ts.
+   */
+  it('round-trips an explicit disabled + legacy policy unchanged', () => {
+    expect(
+      buildAuthFromValues(
+        {
+          transport: 'http',
+          auth_type: 'oauth',
+          oauth_dcr_mode: 'disabled',
+          oauth_compatibility_mode: 'legacy',
+          oauth_mode: 'per_user',
+          oauth_grant_type: 'client_credentials',
+          oauth_client_id: 'pre-registered-client',
+        },
+        { forPatch: true }
+      )
+    ).toEqual({
+      type: 'oauth',
+      oauth_client_id: 'pre-registered-client',
+      oauth_grant_type: 'client_credentials',
+      oauth_mode: 'per_user',
+      oauth_compatibility_mode: 'legacy',
+      oauth_dcr_mode: 'disabled',
+    });
+  });
 });
 
 describe('environment form validation', () => {

@@ -1,4 +1,5 @@
 import { resolveExecutorBranch } from './branch-filesystem.js';
+import { validateExistingRestore } from './branch-restore-validation.js';
 /**
  * Git Command Handlers for Executor
  *
@@ -18,7 +19,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { getReposDir } from '@agor/core/config';
-import { parseAgorYml, writeAgorYml } from '@agor/core/config/node';
+import { parseAgorYml, parseLaunchJson, writeAgorYml } from '@agor/core/config/node';
 import { shortId } from '@agor/core/db';
 import {
   getTeammateConfig,
@@ -57,6 +58,7 @@ import type {
   BranchAgorYmlExportPayload,
   BranchAgorYmlImportPayload,
   BranchFilesListPayload,
+  BranchLaunchJsonImportPayload,
   ExecutorResult,
   GitBranchAddPayload,
   GitBranchCleanPayload,
@@ -384,6 +386,34 @@ export async function handleBranchAgorYmlImport(
         // Ignore disconnect errors
       }
     }
+  }
+}
+
+/** Read and compile a branch-scoped editor-style launch file. */
+export async function handleBranchLaunchJsonImport(
+  payload: BranchLaunchJsonImportPayload,
+  options: CommandOptions
+): Promise<ExecutorResult> {
+  const { repoId, branchId } = payload.params;
+  if (options.dryRun) {
+    return { success: true, data: { dryRun: true, command: payload.command, repoId, branchId } };
+  }
+  let client: AgorClient | null = null;
+  try {
+    const daemonUrl = payload.daemonUrl || 'http://localhost:3030';
+    client = await createExecutorClient(daemonUrl, payload.sessionToken);
+    const branch = await fetchBranchForRepo(client, repoId, branchId);
+    const result = parseLaunchJson(branch.path);
+    return { success: true, data: { repoId, branchId, ...result } };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[branch.launch-json.import] Failed:', message);
+    return {
+      success: false,
+      error: { code: 'BRANCH_LAUNCH_JSON_IMPORT_FAILED', message, details: { repoId, branchId } },
+    };
+  } finally {
+    client?.io.disconnect();
   }
 }
 
@@ -877,7 +907,9 @@ export async function handleGitBranchAdd(
 
   let client: AgorClient | null = null;
   let materializationWritesSettled = false;
+  let sourceResolutionAdmitted = false;
   let localHome = false;
+  let filesystemRecovery = false;
 
   try {
     // Connect to daemon
@@ -889,10 +921,24 @@ export async function handleGitBranchAdd(
     // user's delegated Feathers authority in this same executor.
     const repo = await client.service('repos').get(payload.params.repoId);
     const branchRecord = await resolveExecutorBranch(client, branchId);
-    if (branchRecord.filesystem_status !== 'creating')
+    if (
+      branchRecord.filesystem_status !== 'creating' ||
+      branchRecord.provisioning_attempt_id !== payload.params.provisioningAttemptId
+    )
       throw new Error('Branch materialization is not admitted');
     if (branchRecord.repo_id !== payload.params.repoId) {
       throw new Error(`Branch ${branchId} does not belong to repository ${payload.params.repoId}`);
+    }
+
+    // Recovery policy comes from the tenant-scoped, authorized row, not the
+    // caller's restoreMode hint. The admission check above binds this intent to
+    // the current provisioning attempt; ordinary remote restore stays unchanged.
+    filesystemRecovery = branchRecord.provisioning_operation === 'restore';
+    if (
+      filesystemRecovery &&
+      (!payload.params.restoreMode || !payload.params.provisioningAttemptId)
+    ) {
+      throw new Error('Filesystem recovery requires its admitted restore attempt');
     }
 
     // Fetch per-user git credentials via Feathers RPC
@@ -923,8 +969,12 @@ export async function handleGitBranchAdd(
       );
     }
     localHome = getTeammateConfig(branchRecord)?.localHome === true;
+    const existingRestore = filesystemRecovery
+      ? await validateExistingRestore(branchRecord, repo)
+      : false;
     if (
       localHome &&
+      !existingRestore &&
       (restoreMode ||
         storageMode !== 'clone' ||
         cloneDepth != null ||
@@ -952,9 +1002,11 @@ export async function handleGitBranchAdd(
     // by the daemon safety net). If a checkout for exactly this ref is already
     // present, adopt it instead of re-running materialization — `git worktree
     // add` / `git clone` would otherwise fail on the already-attached ref.
-    const alreadyMaterialized = payload.params.allowExistingCheckout
-      ? await isBranchAlreadyMaterialized(branchPath, branch, branchId)
-      : false;
+    const alreadyMaterialized =
+      existingRestore ||
+      (payload.params.allowExistingCheckout
+        ? await isBranchAlreadyMaterialized(branchPath, branch, branchId)
+        : false);
 
     // Resolve the user-controlled starting point once, before storage-mode
     // dispatch. Worktree and clone materializers consume this concrete result
@@ -993,6 +1045,7 @@ export async function handleGitBranchAdd(
 
     if (resolvedStartingRef) {
       await client.service('branches').patch(branchId, {
+        ...attemptFence,
         base_ref: resolvedStartingRef.ref,
         base_sha: resolvedStartingRef.sha,
         ...(resolvedStartingRef.remoteUrl
@@ -1009,6 +1062,8 @@ export async function handleGitBranchAdd(
       );
     }
 
+    // A rejected provenance capability must not create even a fallback directory.
+    sourceResolutionAdmitted = true;
     if (alreadyMaterialized) {
       console.log(
         `[git.branch.add] Existing checkout for '${branch}' already present at ${branchPath} — adopting it (idempotent retry)`
@@ -1106,7 +1161,8 @@ export async function handleGitBranchAdd(
         env,
         baseRemoteUrl,
         refType || 'branch',
-        remoteUrl
+        remoteUrl,
+        filesystemRecovery
       );
       if (!result.success) {
         throw new Error(`restoreBranchFilesystem failed: ${result.error}`);
@@ -1147,9 +1203,11 @@ export async function handleGitBranchAdd(
 
     // Durable workspace ownership prevents a retry/restore from adopting an
     // archived or unrelated checkout which merely happens to use the same ref.
-    const { git: materializedGit } = createGit(branchPath);
-    const markerPath = (await materializedGit.revparse(['--git-path', 'agor-branch-id'])).trim();
-    await writeFile(resolve(branchPath, markerPath), `${branchId}\n`, { mode: 0o600 });
+    if (!existingRestore) {
+      const { git: materializedGit } = createGit(branchPath);
+      const markerPath = (await materializedGit.revparse(['--git-path', 'agor-branch-id'])).trim();
+      await writeFile(resolve(branchPath, markerPath), `${branchId}\n`, { mode: 0o600 });
+    }
 
     // Persist only filesystem outcome directly. Executable environment
     // rendering belongs to the daemon's existing authorization/validation
@@ -1199,7 +1257,14 @@ export async function handleGitBranchAdd(
     // when git worktree add fails. No host permission repair is attempted.
     const fallbackPath = resolvedBranchPath;
     let fallbackCreated = false;
-    if (fallbackPath && !materializationWritesSettled && !localHome) {
+    if (
+      fallbackPath &&
+      sourceResolutionAdmitted &&
+      !materializationWritesSettled &&
+      !localHome &&
+      !filesystemRecovery &&
+      !payload.params.restoreMode
+    ) {
       // Step 1: Ensure directory exists
       if (!existsSync(fallbackPath)) {
         try {
@@ -1220,7 +1285,13 @@ export async function handleGitBranchAdd(
     // the word "branch", which also appears in the non-empty-directory message
     // and would otherwise be misreported as a ref collision.
     let userMessage = errorMessage;
-    if (errorMessage.includes('is in use by another')) {
+    if (
+      payload.params.restoreMode &&
+      /is in use by another|already registered|already checked out/.test(errorMessage)
+    ) {
+      userMessage =
+        'Recovery cannot attach this checkout: Git registration is stale or the ref is occupied. Keep files and refs intact. An operator must verify the target storage and backups in the executor storage context before target-scoped repair; do not run global worktree repair or prune.';
+    } else if (errorMessage.includes('is in use by another')) {
       userMessage = `A branch named '${resolvedBranchName || 'unknown'}' already exists and is in use by another branch. Please choose a different name.`;
     } else if (errorMessage.includes('already exists') && errorMessage.includes('not empty')) {
       userMessage = `Directory '${resolvedBranchPath || resolvedBranchName || 'unknown'}' already exists and is not empty. An archived or partially-cleaned branch may still occupy this path.`;

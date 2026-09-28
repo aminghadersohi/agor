@@ -6,6 +6,15 @@ import { EMPTY_MAPS } from '../../store/agorMaps';
 import { agorStore } from '../../store/agorStore';
 import { BoardTeammatePanel } from './BoardTeammatePanel';
 
+// Profile galleries and portraits load from the daemon; keep these tests hermetic.
+vi.mock('../ProfileImage/profileImageApi', () => ({
+  listProfileImages: vi.fn(async () => ({ images: [], max_images: 24 })),
+  fetchProfileImageBlob: vi.fn(),
+  uploadProfileImage: vi.fn(),
+  patchProfileImage: vi.fn(),
+  deleteProfileImage: vi.fn(),
+}));
+
 vi.mock('../BranchCard', () => ({
   BranchSessionSections: ({ mode }: { mode?: string }) => (
     <div data-testid="teammate-session-sections">mode:{String(mode)}</div>
@@ -48,6 +57,7 @@ describe('BoardTeammatePanel teammate tab', () => {
       </AntApp>
     );
 
+    expect(screen.getByTestId('teammate-board-portrait')).toBeInTheDocument();
     expect(screen.getByTestId('teammate-session-sections')).toHaveTextContent('mode:panel');
     expect(screen.getByTestId('branch-header-pill')).toHaveAttribute(
       'data-truncate-to-fit',

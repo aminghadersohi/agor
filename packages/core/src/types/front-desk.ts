@@ -1,0 +1,131 @@
+import type { GatewayChannelID } from './gateway';
+import type { BranchFrontDeskID, BranchID, SessionID, UserID } from './id';
+
+/**
+ * Front-desk sessions: a declared, warm session that addressing routes to
+ * instead of inferring one from recency.
+ *
+ * A row pins one session to one `(branch, scope, slot)`. Retired rows stay as
+ * rotation history; at most one row per `(branch, scope, slot)` may be
+ * `active` or `retiring`, enforced by a partial unique index on both engines.
+ * Having no row is the opt-out: resolution then falls through to recency.
+ */
+
+/** Target for teammate-to-teammate `agor_sessions_prompt { teammate }`. */
+export const FRONT_DESK_TEAMMATE_SCOPE = 'teammate' as const;
+
+/** Prefix of the per-gateway-channel scope key (not written until gateway opt-in ships). */
+export const FRONT_DESK_GATEWAY_SCOPE_PREFIX = 'gateway:' as const;
+
+/** Persisted scope discriminator. */
+export type FrontDeskScopeKey =
+  | typeof FRONT_DESK_TEAMMATE_SCOPE
+  | `${typeof FRONT_DESK_GATEWAY_SCOPE_PREFIX}${GatewayChannelID}`;
+
+/**
+ * The only slot any shipped path accepts. The column exists so a pool is a
+ * value rather than a schema rewrite; sessions cannot share a context window,
+ * so a second slot is deliberately not offered.
+ */
+export const FRONT_DESK_PRIMARY_SLOT = 0 as const;
+
+export const FRONT_DESK_STATUSES = ['active', 'retiring', 'retired', 'failed'] as const;
+export type FrontDeskStatus = (typeof FRONT_DESK_STATUSES)[number];
+
+/** Statuses that occupy the slot (and the partial unique index). */
+export const FRONT_DESK_OCCUPYING_STATUSES = [
+  'active',
+  'retiring',
+] as const satisfies readonly FrontDeskStatus[];
+
+export const FRONT_DESK_RETIRED_REASONS = [
+  'context',
+  'dead',
+  'manual',
+  'archived',
+  'replaced',
+] as const;
+export type FrontDeskRetiredReason = (typeof FRONT_DESK_RETIRED_REASONS)[number];
+
+export interface BranchFrontDeskSession {
+  id: BranchFrontDeskID;
+  branch_id: BranchID;
+  scope: FrontDeskScopeKey;
+  slot: number;
+  session_id: SessionID;
+  status: FrontDeskStatus;
+  promoted_at: string;
+  promoted_by?: UserID;
+  retired_at?: string;
+  retired_reason?: FrontDeskRetiredReason;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * `GET /branches/:id/front-desk` — the teammate's current front desk and
+ * whether the caller may change it. `can_manage` is computed by the daemon
+ * with the same rule the pin/clear commands enforce, so a client hides the
+ * controls rather than guessing from its own copy of the policy.
+ */
+export interface TeammateFrontDeskView {
+  branch_id: BranchID;
+  front_desk: BranchFrontDeskSession | null;
+  can_manage: boolean;
+  /** Present only when requested with `?include_addressing=true`. */
+  addressing?: TeammateAddressingPreview;
+}
+
+/** Compact teammate identity echoed back by addressing. */
+export interface TeammateCandidate {
+  branch_id: BranchID;
+  /** Branch slug, e.g. "front-desk". */
+  name: string;
+  /** Teammate display name when configured, else the slug. */
+  display_name: string;
+}
+
+/** Why `agor_sessions_prompt { teammate }` will not reach a teammate for this caller. */
+export type TeammateNotAddressableReason =
+  | 'archived'
+  | 'not_a_teammate'
+  | 'no_prompt_permission'
+  | 'beyond_scan_limit'
+  | 'ambiguous_name';
+
+/** Whether name addressing reaches a teammate for the caller, and by which name. */
+export type TeammateAddressability =
+  | {
+      addressable: true;
+      /** A name that resolves to exactly this teammate: the slug when unique, else the display name. */
+      address: string;
+    }
+  | {
+      addressable: false;
+      reason: TeammateNotAddressableReason;
+      detail: string;
+      /** For `ambiguous_name`: the other teammates sharing this one's names. */
+      conflicts_with?: TeammateCandidate[];
+    };
+
+/**
+ * Dry-run answer to "who would a name address reach right now, for me?" —
+ * the same resolver addressing uses, minus its one write (demoting an
+ * unhealthy front desk), which is reported as `bypassed_front_desk` instead.
+ */
+export interface TeammateAddressingPreview {
+  via: 'front_desk' | 'recency' | 'needs_session';
+  session_id: SessionID | null;
+  name_addressing: TeammateAddressability;
+  bypassed_front_desk: { session_id: SessionID; reason: FrontDeskRetiredReason } | null;
+}
+
+/** `POST /branches/:id/front-desk` — pin a session, replacing any current pin. */
+export interface SetTeammateFrontDeskRequest {
+  session_id: SessionID;
+  /**
+   * Compare-and-swap guard: `null` pins only into an empty slot; a session id
+   * pins only while that session is the occupant. Omit to replace whatever is
+   * there.
+   */
+  expected_session_id?: SessionID | null;
+}

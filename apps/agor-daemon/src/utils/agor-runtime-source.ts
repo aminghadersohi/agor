@@ -23,6 +23,14 @@
  *   - `query_dom` — args: { selector, multiple?, maxNodes? }
  *   - `document_html` — args: {}
  *
+ * It also defines `window.agor`, the artifact's side of declared interaction
+ * bindings. Each call sends one opaque binding id to the parent, which
+ * resolves it against the artifact's persisted bindings and calls Agor with
+ * the viewer's own credentials; the iframe never holds a token.
+ *   iframe → parent: { type: 'agor:run-action' | 'agor:fetch-data' | 'agor:open-chat',
+ *                      requestId, actionId | dataId | chatId }
+ *   parent → iframe: { type: 'agor:interaction-result', requestId, ok, result?, error? }
+ *
  * Caps everything (per-element HTML, total HTML, node count) so an
  * artifact with a giant DOM can't blow up the wire / agent context.
  *
@@ -124,6 +132,54 @@ export const AGOR_RUNTIME_SOURCE = `// agor-runtime.js — injected by Agor at r
       return reply({ error: (err && err.message) ? err.message : String(err) });
     }
   });
+
+  // Declared interaction bindings. Only a binding id crosses to the parent;
+  // what it does was pinned when the author declared it.
+  var pending = {};
+  var nextRequest = 0;
+
+  window.addEventListener('message', function (event) {
+    var data = event.data;
+    if (!data || typeof data !== 'object' || data.type !== 'agor:interaction-result') return;
+    if (event.source !== window.parent) return;
+    var entry = pending[data.requestId];
+    if (!entry) return;
+    delete pending[data.requestId];
+    clearTimeout(entry.timer);
+    if (data.ok) entry.resolve(data.result);
+    else entry.reject(new Error(typeof data.error === 'string' ? data.error : 'Request failed'));
+  });
+
+  function request(type, key, id, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      if (typeof id !== 'string' || id.length === 0) {
+        reject(new Error('A binding id is required'));
+        return;
+      }
+      if (!window.parent || window.parent === window) {
+        reject(new Error('Agor bindings are only available inside Agor'));
+        return;
+      }
+      nextRequest += 1;
+      var requestId = 'agor-' + nextRequest + '-' + Math.random().toString(36).slice(2);
+      var timer = setTimeout(function () {
+        delete pending[requestId];
+        reject(new Error('Agor did not respond'));
+      }, timeoutMs);
+      pending[requestId] = { resolve: resolve, reject: reject, timer: timer };
+      var msg = { type: type, requestId: requestId };
+      msg[key] = id;
+      window.parent.postMessage(msg, '*');
+    });
+  }
+
+  var api = window.agor && typeof window.agor === 'object' ? window.agor : {};
+  // An action may wait on a human confirmation in the parent, so it gets
+  // longer than a read before giving up.
+  api.runAction = function (id) { return request('agor:run-action', 'actionId', id, 300000); };
+  api.fetchData = function (id) { return request('agor:fetch-data', 'dataId', id, 30000); };
+  api.openChat = function (id) { return request('agor:open-chat', 'chatId', id, 30000); };
+  window.agor = api;
 
   // Announce readiness to the parent so it knows the iframe is wired up
   // before sending any queries (avoids a race on first-paint).

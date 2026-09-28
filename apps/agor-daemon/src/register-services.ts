@@ -1,5 +1,6 @@
 import { KNOWLEDGE_TRANSFER } from '@agor/core/types';
 import { BranchCleanupStepsService } from './services/branch-cleanup-steps.js';
+import type { MCPOAuthCallbackHandler } from './services/mcp-oauth-callback-route.js';
 /**
  * Service Registration
  *
@@ -14,7 +15,10 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { OPENCODE_DAEMON_CONTRIBUTION } from '@agor/agentic-tool-opencode/daemon';
 import { AGENTIC_TOOL_DISPLAY_NAMES } from '@agor/agentic-tools';
-import { mutateCredentialFile, openCredentialFileForBind } from '@agor/core/codex/credential-file';
+import {
+  ensureEmptyCredentialMountpoint,
+  openCredentialFileForBind,
+} from '@agor/core/codex/credential-file';
 import {
   type AgorConfig,
   getBranchHomePath,
@@ -468,6 +472,7 @@ export interface RegisteredServices {
   terminalsService: TerminalsService | null;
   configService: ReturnType<typeof createConfigService>;
   boardCommentsService: unknown;
+  oauthCallbackHandler: MCPOAuthCallbackHandler;
 }
 
 type OAuthPostCommitTailCode =
@@ -779,7 +784,6 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
       'update',
       'patch',
       'remove',
-      'updateEnvironment',
       'ensureTeammateKnowledgeNamespace',
       'clean',
     ],
@@ -870,7 +874,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   // MCP Servers (conditionally registered)
   // ============================================================================
 
-  let oauthCallbackHandler: ((req: express.Request, res: express.Response) => void) | null = null;
+  let oauthCallbackHandler: MCPOAuthCallbackHandler;
 
   // The OAuth callback middleware is registered in boot.ts; here we set the handler
   {
@@ -1297,9 +1301,6 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   // Bootstrap superadmin users
   await bootstrapSuperadminUsers(config, db, allowSuperadmin);
 
-  // Store oauthCallbackHandler on app for boot.ts to wire up
-  appRecord.oauthCallbackHandler = oauthCallbackHandler;
-
   // Store sessionTokenService for auth setup
   appRecord.sessionTokenServiceInstance = sessionTokenService;
 
@@ -1315,6 +1316,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
     terminalsService,
     configService,
     boardCommentsService: safeService('board-comments'),
+    oauthCallbackHandler,
   };
 }
 
@@ -1581,9 +1583,10 @@ function createExecuteHandler(
           // Bubblewrap requires an existing file mountpoint. Keep the
           // branch-owned inode deliberately empty: the caller credential is
           // visible only as a per-executor mount and is never copied into
-          // shared branch state. The capability-based writer refuses symlinked
-          // parent directories and replaces an adversarial final symlink.
-          await mutateCredentialFile({ target: destination, content: '' });
+          // shared branch state. Never replace this dentry: existing executors
+          // on this branch have their caller overlays attached to it. Unsafe
+          // or nonempty mountpoints fail closed rather than being repaired live.
+          await ensureEmptyCredentialMountpoint(destination);
           branchCodexAuthBind = {
             source: join(credentialRoute.codexHome, 'auth.json'),
             destination,
@@ -2052,6 +2055,19 @@ export async function registerMCPServices(
   const { db, app } = ctx;
   const sessionsRepository = new SessionRepository(db);
   const postgresOAuthDeployment = isPostgresDatabaseHandle(db);
+  // `postgresOAuthDeployment` is an *egress* policy: a multi-daemon/hosted
+  // deployment must not let an admin-supplied endpoint turn into daemon-local
+  // outbound traffic. The browser `redirect_uri` is not an egress destination —
+  // it is handed to the provider and resolved by the user's browser — so its
+  // loopback-HTTP policy is the deployment's own callback decision instead.
+  //
+  // This is the same predicate `apps/agor-daemon/src/index.ts` uses to choose
+  // between `standaloneCallbackUrl` (admitted with the loopback-HTTP exception)
+  // and the HA callback (https + public host required) when it populates
+  // `ctx.mcpOAuthCallbackUrl`. Keying it on the database engine instead made a
+  // standalone-on-PostgreSQL deployment reject the very callback its own
+  // configuration layer had already admitted.
+  const allowLoopbackOAuthRedirectUri = ctx.deployment.mode !== 'ha';
   const durableOAuthFlows =
     ctx.mcpOAuthPendingFlowAuthority ??
     (postgresOAuthDeployment ? new MCPOAuthPendingFlowAuthority(db) : null);
@@ -2662,6 +2678,7 @@ export async function registerMCPServices(
         compatibilityMode: effectiveCompatibilityMode,
         dcrMode: effectiveDcrMode,
         allowLocalhostHttp: !postgresOAuthDeployment,
+        allowLocalhostRedirectUri: allowLoopbackOAuthRedirectUri,
         // The reservation is consumed before provider work starts, but its
         // deadline remains authoritative throughout discovery/DCR/flow setup.
         assertCurrent: assertFlowAuthority,

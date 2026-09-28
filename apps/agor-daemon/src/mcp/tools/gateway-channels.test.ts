@@ -5,6 +5,8 @@ import { Readable } from 'node:stream';
 import {
   BranchRepository,
   GatewayChannelRepository,
+  GatewayOutboundMessageRepository,
+  getCurrentTenantId,
   SessionRepository,
   ThreadSessionMapRepository,
   UsersRepository,
@@ -2303,6 +2305,41 @@ describe('gateway agent-tool capability gating (MCP)', () => {
       expect(payload).toMatchObject({ uploaded: true });
     });
 
+    it('mounts the caller home store for branch file uploads under a per-user sandbox', async () => {
+      vi.mocked(requestExecutor).mockResolvedValue({
+        success: true,
+        data: { uploaded: { id: 'F456', name: 'chart.png' } },
+      });
+      spyCallerGatewaySession('branch-1', gatewaySource);
+      vi.spyOn(GatewayChannelRepository.prototype, 'findById').mockResolvedValue(
+        fileUploadEnabled as any
+      );
+      vi.spyOn(BranchRepository.prototype, 'findById').mockResolvedValue(branch as any);
+      vi.spyOn(UsersRepository.prototype, 'getFilesystemHomeProjection').mockResolvedValue({
+        filesystem_home: null,
+      } as any);
+      const config = {
+        paths: { data_home: '/srv/agor-data' },
+        execution: { unix_user_mode: 'sandbox', sandbox: { enabled: true, home_mode: 'per_user' } },
+      };
+
+      const tools = await captureTools('member', makeFakeApp({}, config));
+      await tools.agor_gateway_slack_file_upload.handler({
+        source: { kind: 'branch', branchPath: 'chart.png' },
+      });
+
+      // The caller (user-1), not the branch owner, is the execution principal.
+      expect(requestExecutor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          command: 'branch.gateway.slack-file-upload',
+          params: expect.objectContaining({
+            sandboxHomeStore: '/srv/agor-data/tenants/tenant-test/homes/user-1',
+          }),
+        }),
+        expect.any(Object)
+      );
+    });
+
     it('rejects branch file uploads without filesystem read access', async () => {
       vi.spyOn(BranchRepository.prototype, 'resolveUserAccess').mockResolvedValue({
         can: 'session',
@@ -2959,7 +2996,7 @@ describe('agor_gateway_slack_manifest_generate MCP tool', () => {
         rate_limit_max_total_delay_ms: 10000,
       },
       files: false,
-      agent_tools: [],
+      agent_tools: { channel_history: false },
       outbound_enabled: true,
       default_outbound_target: 'channel:333333333333333333',
     });
@@ -3312,5 +3349,388 @@ describe('agor_gateway_slack_manifest_generate MCP tool', () => {
     await expect(tools.agor_gateway_slack_manifest_generate.handler(dmOnly)).rejects.toThrow(
       'admin role required'
     );
+  });
+});
+
+describe('Discord channel history agent tool (MCP)', () => {
+  const discordChannel = {
+    ...slackChannel,
+    name: 'Eng Discord',
+    channel_type: 'discord',
+    config: {
+      bot_token: 'discord-bot-secret',
+      application_id: '111111111111111111',
+      guild_id: '222222222222222222',
+      allowed_channel_ids: ['333333333333333333'],
+      agent_tools: { channel_history: true },
+    },
+  };
+  const discordSource = {
+    channel_id: 'chan-1',
+    channel_name: 'Eng Discord',
+    channel_type: 'discord',
+    thread_id: '444444444444444444',
+  };
+  const historyResult = {
+    channelId: '333333333333333333',
+    has_more: true,
+    next_cursor: { before: '555555555555555555' },
+    messages: [
+      {
+        id: '555555555555555555',
+        iso_time: '2026-09-24T12:00:00.000Z',
+        actor_label: 'Richard',
+        author_id: '666666666666666666',
+        text: 'standup: shipped the gateway fix',
+        is_bot: false,
+        is_system: false,
+        is_mention: false,
+        is_forwarded: true,
+        attachments: [{ filename: 'plan.png', content_type: 'image/png', size: 10 }],
+        thread_id: '777777777777777777',
+      },
+    ],
+  };
+
+  function spyDiscordSession(branchId: string, source: Record<string, unknown> | null) {
+    return vi.spyOn(SessionRepository.prototype, 'findById').mockResolvedValue({
+      session_id: 'sess-1',
+      branch_id: branchId,
+      custom_context: source ? { gateway_source: source } : {},
+    } as any);
+  }
+
+  function mockConnector() {
+    const connector = { fetchChannelHistory: vi.fn(async () => historyResult) };
+    vi.mocked(getConnector).mockReturnValue(connector as any);
+    return connector;
+  }
+
+  it("defaults to the session thread's parent channel and returns untrusted, token-free output", async () => {
+    const connector = mockConnector();
+    spyDiscordSession('branch-1', discordSource);
+    vi.spyOn(GatewayChannelRepository.prototype, 'findById').mockResolvedValue(
+      discordChannel as any
+    );
+    vi.spyOn(BranchRepository.prototype, 'findById').mockResolvedValue(branch as any);
+
+    const tools = await captureTools('member');
+    const result = await tools.agor_gateway_discord_channel_history_get.handler({ limit: 10 });
+    const payload = JSON.parse(result.content[0].text);
+
+    expect(getConnector).toHaveBeenCalledWith('discord', discordChannel.config);
+    expect(connector.fetchChannelHistory).toHaveBeenCalledWith({
+      sessionThreadKey: '444444444444444444',
+      limit: 10,
+      includeBotMessages: false,
+    });
+    expect(payload.warning).toContain('untrusted external content');
+    expect(payload.channel).toEqual({ discord_channel_id: '333333333333333333' });
+    expect(payload.pagination).toEqual({
+      requested_limit: 10,
+      returned: 1,
+      has_more: true,
+      next_cursor: { before: '555555555555555555' },
+    });
+    expect(payload.messages[0]).toMatchObject({ text: 'standup: shipped the gateway fix' });
+    expect(JSON.stringify(payload)).not.toContain('discord-bot-secret');
+  });
+
+  it('reads an explicit channel with a cursor and renders markdown', async () => {
+    const connector = mockConnector();
+    spyDiscordSession('branch-1', null);
+    vi.spyOn(GatewayChannelRepository.prototype, 'findById').mockResolvedValue(
+      discordChannel as any
+    );
+    vi.spyOn(BranchRepository.prototype, 'findById').mockResolvedValue(branch as any);
+
+    const tools = await captureTools('member');
+    const result = await tools.agor_gateway_discord_channel_history_get.handler({
+      gatewayChannelId: 'chan-1',
+      discordChannelId: '777777777777777777',
+      before: '888888888888888888',
+      format: 'markdown',
+    });
+    const payload = JSON.parse(result.content[0].text);
+
+    expect(connector.fetchChannelHistory).toHaveBeenCalledWith({
+      channelId: '777777777777777777',
+      before: '888888888888888888',
+      limit: 50,
+      includeBotMessages: false,
+    });
+    expect(payload.markdown).toContain('# Discord channel 333333333333333333 history');
+    expect(payload.markdown).toContain('standup: shipped the gateway fix');
+    expect(payload.markdown).toContain('Richard <666666666666666666>');
+    expect(payload.markdown).toContain('(555555555555555555) [forwarded]');
+    expect(payload.markdown).toContain('Attached file: plan.png (image/png, 10 bytes)');
+    expect(payload.markdown).toContain('Started thread 777777777777777777');
+    expect(payload.messages).toBeUndefined();
+  });
+
+  it('requires discordChannelId for sessions not created by this Discord channel', async () => {
+    mockConnector();
+    spyDiscordSession('branch-1', null);
+    vi.spyOn(GatewayChannelRepository.prototype, 'findById').mockResolvedValue(
+      discordChannel as any
+    );
+    vi.spyOn(BranchRepository.prototype, 'findById').mockResolvedValue(branch as any);
+
+    const tools = await captureTools('member');
+    await expect(
+      tools.agor_gateway_discord_channel_history_get.handler({ gatewayChannelId: 'chan-1' })
+    ).rejects.toThrow('discordChannelId is required');
+  });
+
+  it('is off for legacy [] and absent agent_tools, before any Discord call', async () => {
+    for (const agentTools of [[], undefined, { channel_history: false }]) {
+      spyDiscordSession('branch-1', discordSource);
+      vi.spyOn(GatewayChannelRepository.prototype, 'findById').mockResolvedValue({
+        ...discordChannel,
+        config: { ...discordChannel.config, agent_tools: agentTools },
+      } as any);
+      vi.spyOn(BranchRepository.prototype, 'findById').mockResolvedValue(branch as any);
+
+      const tools = await captureTools('admin');
+      await expect(tools.agor_gateway_discord_channel_history_get.handler({})).rejects.toThrow(
+        "capability 'channel_history' is disabled"
+      );
+      expect(getConnector).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('refuses other branches, non-Discord and disabled channels, and missing channels', async () => {
+    spyCallerSessionBranch('branch-2');
+    vi.spyOn(GatewayChannelRepository.prototype, 'findById').mockResolvedValue(
+      discordChannel as any
+    );
+    let tools = await captureTools('admin');
+    await expect(
+      tools.agor_gateway_discord_channel_history_get.handler({ gatewayChannelId: 'chan-1' })
+    ).rejects.toThrow('targets a different branch');
+    vi.restoreAllMocks();
+
+    spyCallerSessionBranch('branch-1');
+    vi.spyOn(BranchRepository.prototype, 'findById').mockResolvedValue(branch as any);
+    const findById = vi.spyOn(GatewayChannelRepository.prototype, 'findById');
+    tools = await captureTools('admin');
+
+    findById.mockResolvedValue({
+      ...slackChannel,
+      config: { ...slackChannel.config, agent_tools: { channel_history: true } },
+    } as any);
+    await expect(
+      tools.agor_gateway_discord_channel_history_get.handler({ gatewayChannelId: 'chan-1' })
+    ).rejects.toThrow('is slack, not discord');
+
+    findById.mockResolvedValue({ ...discordChannel, enabled: false } as any);
+    await expect(
+      tools.agor_gateway_discord_channel_history_get.handler({ gatewayChannelId: 'chan-1' })
+    ).rejects.toThrow('is disabled');
+
+    // A foreign tenant's channel is invisible to the tenant-scoped repository.
+    findById.mockResolvedValue(null as any);
+    await expect(
+      tools.agor_gateway_discord_channel_history_get.handler({ gatewayChannelId: 'chan-other' })
+    ).rejects.toThrow('Gateway channel not found');
+    expect(getConnector).not.toHaveBeenCalled();
+  });
+
+  it('denies unauthorized no-session callers without leaking channel details', async () => {
+    vi.spyOn(GatewayChannelRepository.prototype, 'findById').mockResolvedValue(
+      discordChannel as any
+    );
+    vi.spyOn(BranchRepository.prototype, 'findById').mockResolvedValue(branch as any);
+    vi.spyOn(BranchRepository.prototype, 'isOwner').mockResolvedValue(false);
+    vi.spyOn(BranchRepository.prototype, 'resolveUserPermission').mockResolvedValue('view' as any);
+
+    const tools = await captureTools('member', makeFakeApp({}), null);
+    const error = await tools.agor_gateway_discord_channel_history_get
+      .handler({ gatewayChannelId: 'chan-1', discordChannelId: '333333333333333333' })
+      .then(() => null)
+      .catch((err: Error) => err);
+
+    expect(error!.message).toContain("admin role or 'all' branch permission");
+    expect(error!.message).not.toContain('Eng Discord');
+    expect(error!.message).not.toContain('channel_history');
+    expect(getConnector).not.toHaveBeenCalled();
+  });
+
+  it('validates cursors and limits in the input schema', async () => {
+    const tools = await captureTools('member');
+    const schema = tools.agor_gateway_discord_channel_history_get.cfg.inputSchema;
+    expect(schema.safeParse({ limit: 200, before: '555555555555555555' }).success).toBe(true);
+    expect(schema.safeParse({ limit: 201 }).success).toBe(false);
+    expect(schema.safeParse({ before: 'abc' }).success).toBe(false);
+    expect(schema.safeParse({ discordChannelId: '12' }).success).toBe(false);
+    await expect(
+      tools.agor_gateway_discord_channel_history_get.handler({
+        before: '555555555555555555',
+        after: '555555555555555556',
+      })
+    ).rejects.toThrow('either before or after');
+  });
+
+  it('exposes the channelHistory setup option as agent_tools config', async () => {
+    const tools = await captureTools('admin');
+    const result = await tools.agor_gateway_discord_setup.handler({
+      applicationId: '111111111111111111',
+      guildId: '222222222222222222',
+      messageContentAcknowledged: true,
+      allowedChannelIds: ['333333333333333333'],
+      allowedUserIds: ['444444444444444444'],
+      agorUserId: 'user-1',
+      channelHistory: true,
+    });
+    const payload = JSON.parse(result.content[0].text);
+    expect(JSON.stringify(payload)).toContain('"agent_tools":{"channel_history":true}');
+  });
+});
+
+describe('agor_gateway_outbound_messages_list MCP tool', () => {
+  const outboundRow = {
+    id: 'out-1',
+    gateway_channel_id: 'chan-1',
+    channel_type: 'slack',
+    platform_channel_id: 'C123',
+    platform_message_id: '100.000002',
+    platform_thread_id: 'C123-100.000001',
+    platform_permalink: 'https://slack.example/archives/C123/p100000002',
+    seed_thread_id: null,
+    target_branch_id: 'branch-1',
+    emitted_by_user_id: 'user-1',
+    emitted_by_session_id: 'sess-1',
+    emitted_by_task_id: 'task-1',
+    emitted_by_schedule_id: null,
+    message_text: 'Full status update body',
+    message_preview: 'Full status…',
+    metadata: {
+      target: 'channel:C123',
+      purpose: 'status',
+      provider_target: { resolved_channel_id: 'C123' },
+      provider_reply_aliases: ['C123-100.000009'],
+      reply_session_admission_id: 'sess-reserved',
+    },
+    consumed_by_session_id: null,
+    consumed_at: null,
+    created_at: '2026-09-01T00:00:00.000Z',
+    updated_at: '2026-09-01T00:00:00.000Z',
+  };
+
+  it('returns role, permalink and attribution without text or provider internals', async () => {
+    let tenantDuringList: unknown;
+    const list = vi
+      .spyOn(GatewayOutboundMessageRepository.prototype, 'list')
+      .mockImplementation(async () => {
+        tenantDuringList = getCurrentTenantId();
+        return {
+          data: [
+            outboundRow,
+            { ...outboundRow, id: 'out-0', seed_thread_id: 'C123-100.000001' },
+          ] as any,
+          total: 3,
+        };
+      });
+
+    const tools = await captureTools('admin', makeFakeApp({}), null);
+    const result = await tools.agor_gateway_outbound_messages_list.handler({ limit: 2 });
+    const payload = JSON.parse(result.content[0].text);
+
+    expect(list).toHaveBeenCalledWith({}, { limit: 2, offset: 0 });
+    // The read runs inside the caller's tenant database scope.
+    expect(tenantDuringList).toBe('tenant-test');
+    expect(payload).toMatchObject({ total: 3, limit: 2, offset: 0, hasMore: true, nextOffset: 2 });
+    expect(payload.binding).toBeUndefined();
+    expect(payload.outbound_messages[0]).toEqual({
+      gateway_outbound_message_id: 'out-1',
+      gateway_channel_id: 'chan-1',
+      channel_type: 'slack',
+      role: 'thread_followup',
+      platform_channel_id: 'C123',
+      platform_message_id: '100.000002',
+      platform_thread_id: 'C123-100.000001',
+      platform_permalink: 'https://slack.example/archives/C123/p100000002',
+      target_branch_id: 'branch-1',
+      emitted_by_user_id: 'user-1',
+      emitted_by_session_id: 'sess-1',
+      emitted_by_task_id: 'task-1',
+      emitted_by_schedule_id: null,
+      target: 'channel:C123',
+      purpose: 'status',
+      message_preview: 'Full status…',
+      reply_session_id: null,
+      reply_consumed_at: null,
+      created_at: '2026-09-01T00:00:00.000Z',
+    });
+    expect(payload.outbound_messages[1].role).toBe('thread_seed');
+    const text = result.content[0].text;
+    for (const leaked of ['Full status update body', 'provider_reply_aliases', 'sess-reserved']) {
+      expect(text).not.toContain(leaked);
+    }
+  });
+
+  it('resolves channel and session filters and includes text on request', async () => {
+    const list = vi
+      .spyOn(GatewayOutboundMessageRepository.prototype, 'list')
+      .mockResolvedValue({ data: [outboundRow] as any, total: 1 });
+    vi.spyOn(GatewayChannelRepository.prototype, 'findById').mockResolvedValue(slackChannel as any);
+    const sessionsGet = vi.fn(async () => ({ session_id: 'sess-full-id' }));
+
+    const tools = await captureTools(
+      'admin',
+      makeFakeApp({ sessions: { get: sessionsGet } }),
+      null
+    );
+    const result = await tools.agor_gateway_outbound_messages_list.handler({
+      gatewayChannelId: 'chan',
+      threadId: 'C123-100.000001',
+      sessionId: 'sess',
+      includeText: true,
+      offset: 5,
+    });
+
+    expect(sessionsGet).toHaveBeenCalledWith('sess', expect.anything());
+    expect(list).toHaveBeenCalledWith(
+      {
+        gatewayChannelId: 'chan-1',
+        platformThreadId: 'C123-100.000001',
+        sessionId: 'sess-full-id',
+      },
+      { limit: 25, offset: 5 }
+    );
+    expect(JSON.parse(result.content[0].text).outbound_messages[0].message_text).toBe(
+      'Full status update body'
+    );
+  });
+
+  it('scopes session callers to their own branch even as admins', async () => {
+    spyCallerSessionBranch('branch-2');
+    const list = vi
+      .spyOn(GatewayOutboundMessageRepository.prototype, 'list')
+      .mockResolvedValue({ data: [], total: 0 });
+
+    const tools = await captureTools('admin');
+    const result = await tools.agor_gateway_outbound_messages_list.handler({});
+
+    expect(list).toHaveBeenCalledWith({ targetBranchId: 'branch-2' }, { limit: 25, offset: 0 });
+    expect(JSON.parse(result.content[0].text).binding).toContain("calling session's branch");
+  });
+
+  it('refuses non-admins and unknown or foreign-tenant channels', async () => {
+    const list = vi.spyOn(GatewayOutboundMessageRepository.prototype, 'list');
+
+    const memberTools = await captureTools('member', makeFakeApp({}), null);
+    await expect(memberTools.agor_gateway_outbound_messages_list.handler({})).rejects.toThrow(
+      'admin role required'
+    );
+
+    // A foreign tenant's channel is invisible to the tenant-scoped repository.
+    vi.spyOn(GatewayChannelRepository.prototype, 'findById').mockResolvedValue(null as any);
+    const adminTools = await captureTools('admin', makeFakeApp({}), null);
+    await expect(
+      adminTools.agor_gateway_outbound_messages_list.handler({ gatewayChannelId: 'chan-other' })
+    ).rejects.toThrow('Gateway channel not found');
+    expect(list).not.toHaveBeenCalled();
   });
 });

@@ -162,3 +162,25 @@ describe('CardRepository.findVisibleById', () => {
     await expect(repo.findVisibleById(userId, hiddenOnly.card_id)).resolves.toBeNull();
   });
 });
+
+describe('CardRepository color_override', () => {
+  dbTest('stores only hex colors, lowercased, and clears on null', async ({ db }) => {
+    const repo = new CardRepository(db);
+    const boardId = await createBoard(db);
+
+    const hex = await repo.create({ board_id: boardId, title: 'Hex', color_override: ' #FF5630 ' });
+    expect(hex.color_override).toBe('#ff5630');
+
+    const named = await repo.create({ board_id: boardId, title: 'Named', color_override: 'red' });
+    expect(named.color_override).toBeUndefined();
+
+    const css = await repo.update(hex.card_id, { color_override: 'url(javascript:alert(1))' });
+    expect(css.color_override).toBeUndefined();
+
+    const short = await repo.update(hex.card_id, { color_override: '#AbC' });
+    expect(short.color_override).toBe('#abc');
+
+    const cleared = await repo.update(hex.card_id, { color_override: null as never });
+    expect(cleared.color_override).toBeUndefined();
+  });
+});
