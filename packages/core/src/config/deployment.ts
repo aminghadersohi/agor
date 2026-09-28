@@ -1,4 +1,4 @@
-import { assertSafeOAuthUrl } from '../utils/safe-outbound-fetch';
+import { assertSafeOAuthRedirectUri } from '../utils/safe-outbound-fetch';
 import { isPublicHttpUrl } from '../utils/url';
 import { hasBackendClaudeOAuthTopology } from './claude-subscription-oauth';
 import { assertAsyncEnvironmentCommandConfig } from './environment-commands';
@@ -175,7 +175,7 @@ export function resolveMcpOAuthCallbackOrigin(
   const callbackUrl = new URL('/mcp-servers/oauth-callback', configured).toString();
   let standaloneCallbackUrl: string | null = null;
   try {
-    assertSafeOAuthUrl(callbackUrl, { allowLocalhostHttp: true });
+    assertSafeOAuthRedirectUri(callbackUrl);
     standaloneCallbackUrl = callbackUrl;
   } catch {
     // Unsafe explicit configuration disables the flow rather than turning an

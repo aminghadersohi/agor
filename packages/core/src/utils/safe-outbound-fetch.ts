@@ -469,3 +469,23 @@ export function assertSafeOAuthUrl(
   assertSafeParsedUrl(url, options.allowLocalhostHttp === true);
   return url;
 }
+
+/** RFC 8252 §7.3 loopback hosts, in `URL.hostname` spelling. */
+const OAUTH_LOOPBACK_REDIRECT_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/**
+ * Validate an OAuth `redirect_uri`.
+ *
+ * A redirect URI is a browser destination, not a request the daemon makes, so
+ * it does not follow the deployment's outbound `allowLocalhostHttp` switch: an
+ * HTTP loopback callback (RFC 8252 §7.3) is valid in every deployment. Any
+ * other redirect must be HTTPS to a host the outbound rules also accept, so an
+ * internal/private endpoint never becomes a provider callback capability.
+ */
+export function assertSafeOAuthRedirectUri(input: string): URL {
+  const url = new URL(input);
+  if (url.username || url.password || url.hash) throw new UnsafeOutboundUrlError();
+  if (url.protocol === 'http:' && OAUTH_LOOPBACK_REDIRECT_HOSTS.has(url.hostname)) return url;
+  assertSafeParsedUrl(url, false);
+  return url;
+}

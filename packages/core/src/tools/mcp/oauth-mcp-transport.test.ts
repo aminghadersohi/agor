@@ -11,7 +11,11 @@ import { request as httpRequest } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MCPOAuthClientRegistrationID, MCPOAuthDCRDiagnostic } from '../../types/mcp.js';
 
-vi.mock('../../utils/safe-outbound-fetch', () => ({
+vi.mock('../../utils/safe-outbound-fetch', async (importOriginal) => ({
+  // Redirect validation is pure parsing; exercise the real rule.
+  assertSafeOAuthRedirectUri: (
+    await importOriginal<typeof import('../../utils/safe-outbound-fetch')>()
+  ).assertSafeOAuthRedirectUri,
   assertSafeOAuthUrl: (input: string, options: { allowLocalhostHttp?: boolean } = {}) => {
     const url = new URL(input);
     const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
@@ -2615,5 +2619,225 @@ describe('strict current MCP OAuth profile', () => {
         }
       )
     ).rejects.toThrow('token endpoint override does not match metadata');
+  });
+});
+
+describe('challenge-scoped protected resource metadata (Google MCP shape)', () => {
+  const originalFetch = globalThis.fetch;
+  const resourceUri = 'https://gmailmcp.googleapis.com/mcp/v1';
+  const challengeMetadataUri =
+    'https://gmailmcp.googleapis.com/.well-known/oauth-protected-resource/list_labels';
+  const wellKnownMetadataUri =
+    'https://gmailmcp.googleapis.com/.well-known/oauth-protected-resource/mcp/v1';
+  const issuer = 'https://auth.example.com';
+  const redirectUri = 'https://agor.example.com/mcp-servers/oauth-callback';
+
+  beforeEach(() => {
+    clearAuthCodeTokenCache();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  function json(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+
+  function googleShapedFetch(
+    documents: Record<string, { resource: string } | 404> = {
+      [challengeMetadataUri]: { resource: 'https://gmailmcp.googleapis.com/mcp' },
+      [wellKnownMetadataUri]: { resource: resourceUri },
+    }
+  ) {
+    return vi.fn().mockImplementation(async (input: string | URL) => {
+      const url = String(input);
+      const document = documents[url];
+      if (document === 404) return new Response('not found', { status: 404 });
+      if (document) {
+        return json({
+          resource: document.resource,
+          authorization_servers: [issuer],
+          scopes_supported: ['https://mail.google.com/'],
+        });
+      }
+      if (url === `${issuer}/.well-known/oauth-authorization-server`) {
+        return json({
+          issuer,
+          authorization_endpoint: `${issuer}/authorize`,
+          token_endpoint: `${issuer}/token`,
+          code_challenge_methods_supported: ['S256'],
+          authorization_response_iss_parameter_supported: true,
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as unknown as typeof fetch;
+  }
+
+  function startWithChallenge(metadataUri = challengeMetadataUri) {
+    return startMCPOAuthFlow(
+      `Bearer resource_metadata="${metadataUri}"`,
+      'configured-google-client',
+      redirectUri,
+      { resourceUri }
+    );
+  }
+
+  it('falls back to the exact path-aware PRM in strict mode and binds the grant to it', async () => {
+    globalThis.fetch = googleShapedFetch();
+    const context = await startWithChallenge();
+
+    expect(context.compatibilityMode).toBe('strict');
+    expect(context.metadataUrl).toBe(wellKnownMetadataUri);
+    expect(context.resourceUri).toBe(resourceUri);
+    expect(new URL(context.authorizationUrl).searchParams.get('resource')).toBe(resourceUri);
+    expect(vi.mocked(globalThis.fetch).mock.calls.map(([input]) => String(input))).toEqual([
+      challengeMetadataUri,
+      wellKnownMetadataUri,
+      `${issuer}/.well-known/oauth-authorization-server`,
+    ]);
+
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(json({ access_token: 'bound-token' })) as unknown as typeof fetch;
+    await completeMCPOAuthFlow(context, 'single-use-code', context.state, {
+      cacheToken: false,
+      issuer,
+    });
+    const tokenRequest = vi.mocked(globalThis.fetch).mock.calls[0];
+    expect(String(tokenRequest?.[1]?.body)).toContain(
+      `resource=${encodeURIComponent(resourceUri)}`
+    );
+  });
+
+  it('applies the same fallback to side-effect-free metadata validation', async () => {
+    globalThis.fetch = googleShapedFetch();
+    await expect(
+      validateMCPOAuthMetadata(
+        { kind: 'resource-metadata', metadataUrl: challengeMetadataUri, source: 'header' },
+        resourceUri
+      )
+    ).resolves.toMatchObject({ issuer });
+  });
+
+  it('still rejects when the path-aware PRM does not state the exact resource', async () => {
+    globalThis.fetch = googleShapedFetch({
+      [challengeMetadataUri]: { resource: 'https://gmailmcp.googleapis.com/mcp' },
+      [wellKnownMetadataUri]: { resource: 'https://gmailmcp.googleapis.com/mcp' },
+    });
+    await expect(startWithChallenge()).rejects.toMatchObject({
+      failureCode: 'metadata_incompatible',
+      failureReason: 'protected_resource_mismatch',
+    });
+  });
+
+  it('keeps the original mismatch when no path-aware PRM is published', async () => {
+    globalThis.fetch = googleShapedFetch({
+      [challengeMetadataUri]: { resource: 'https://gmailmcp.googleapis.com/mcp' },
+      [wellKnownMetadataUri]: 404,
+    });
+    await expect(startWithChallenge()).rejects.toMatchObject({
+      failureReason: 'protected_resource_mismatch',
+    });
+  });
+
+  it('rejects a cross-origin challenge and never trusts its resource or authorization server', async () => {
+    const attackerMetadataUri = 'https://attacker.example/.well-known/oauth-protected-resource';
+    globalThis.fetch = googleShapedFetch({
+      [attackerMetadataUri]: { resource: 'https://attacker.example/mcp' },
+      [wellKnownMetadataUri]: 404,
+    });
+    await expect(startWithChallenge(attackerMetadataUri)).rejects.toMatchObject({
+      failureReason: 'protected_resource_mismatch',
+    });
+    expect(vi.mocked(globalThis.fetch).mock.calls.map(([input]) => String(input))).toEqual([
+      attackerMetadataUri,
+      wellKnownMetadataUri,
+    ]);
+  });
+
+  it('does not refetch when the challenge already names the path-aware PRM', async () => {
+    globalThis.fetch = googleShapedFetch({
+      [wellKnownMetadataUri]: { resource: 'https://gmailmcp.googleapis.com/mcp' },
+    });
+    await expect(startWithChallenge(wellKnownMetadataUri)).rejects.toMatchObject({
+      failureReason: 'protected_resource_mismatch',
+    });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('OAuth redirect URI validation is independent of outbound localhost policy', () => {
+  const originalFetch = globalThis.fetch;
+  const resourceUri = 'https://mcp.example.com/mcp';
+  const metadataUri = 'https://mcp.example.com/.well-known/oauth-protected-resource/mcp';
+  const issuer = 'https://auth.example.com';
+
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    globalThis.fetch = vi.fn().mockImplementation(async (input: string | URL) => {
+      const url = String(input);
+      const body =
+        url === metadataUri
+          ? { resource: resourceUri, authorization_servers: [issuer] }
+          : url === `${issuer}/.well-known/oauth-authorization-server`
+            ? {
+                issuer,
+                authorization_endpoint: `${issuer}/authorize`,
+                token_endpoint: `${issuer}/token`,
+                code_challenge_methods_supported: ['S256'],
+                authorization_response_iss_parameter_supported: true,
+              }
+            : null;
+      if (!body) throw new Error(`unexpected fetch: ${url}`);
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  // PostgreSQL daemons pass allowLocalhostHttp: false for outbound requests.
+  function start(redirectUri: string, compatibilityMode: 'strict' | 'legacy') {
+    return startMCPOAuthFlow(`Bearer resource_metadata="${metadataUri}"`, 'client', redirectUri, {
+      resourceUri,
+      compatibilityMode,
+      allowLocalhostHttp: false,
+    });
+  }
+
+  it.each([
+    ['strict', 'http://localhost:5173/mcp-servers/oauth-callback'],
+    ['legacy', 'http://localhost:5173/mcp-servers/oauth-callback'],
+    ['legacy', 'http://127.0.0.1:5173/mcp-servers/oauth-callback'],
+    ['legacy', 'http://[::1]:5173/mcp-servers/oauth-callback'],
+    ['strict', 'https://agor.example.com/mcp-servers/oauth-callback'],
+  ] as const)('%s mode accepts redirect %s', async (mode, redirectUri) => {
+    const context = await start(redirectUri, mode);
+    expect(context.redirectUri).toBe(redirectUri);
+    expect(new URL(context.authorizationUrl).searchParams.get('redirect_uri')).toBe(redirectUri);
+  });
+
+  it.each([
+    'http://10.0.0.5:5173/mcp-servers/oauth-callback',
+    'http://agor.example.com/mcp-servers/oauth-callback',
+    'https://192.168.1.10/mcp-servers/oauth-callback',
+  ])('rejects redirect %s before any provider request', async (redirectUri) => {
+    await expect(start(redirectUri, 'legacy')).rejects.toThrow();
+    expect(
+      vi
+        .mocked(globalThis.fetch)
+        .mock.calls.every(([, init]) => !init?.method || init.method === 'GET')
+    ).toBe(true);
   });
 });

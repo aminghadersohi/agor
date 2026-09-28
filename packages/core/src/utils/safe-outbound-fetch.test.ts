@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  assertSafeOAuthRedirectUri,
   assertSafeOAuthUrl,
   assertSafeOutboundUrl,
   OutboundPreDispatchAuthorityError,
@@ -49,6 +50,33 @@ describe('safe OAuth outbound URL policy', () => {
       await expect(result.json()).rejects.toThrow();
     }
   );
+
+  it.each([
+    'http://localhost:5173/mcp-servers/oauth-callback',
+    'http://127.0.0.1:5173/mcp-servers/oauth-callback',
+    'http://[::1]:5173/mcp-servers/oauth-callback',
+    'https://agor.example.com/mcp-servers/oauth-callback',
+  ])('accepts OAuth redirect URI %s regardless of outbound localhost policy', (url) => {
+    expect(assertSafeOAuthRedirectUri(url).toString()).toBe(url);
+    // The outbound rule used for token/metadata fetches is unchanged.
+    if (url.startsWith('http:')) expect(() => assertSafeOAuthUrl(url)).toThrow();
+  });
+
+  it.each([
+    'http://agor.example.com/mcp-servers/oauth-callback',
+    'http://10.0.0.5:5173/mcp-servers/oauth-callback',
+    'http://192.168.1.10/mcp-servers/oauth-callback',
+    'http://127.0.0.2/mcp-servers/oauth-callback',
+    'http://app.localhost/mcp-servers/oauth-callback',
+    'http://user:pw@localhost:5173/mcp-servers/oauth-callback',
+    'http://localhost:5173/mcp-servers/oauth-callback#fragment',
+    'https://10.0.0.5/mcp-servers/oauth-callback',
+    'https://metadata.google.internal/mcp-servers/oauth-callback',
+    'https://user:pw@agor.example.com/mcp-servers/oauth-callback',
+    'javascript:alert(1)',
+  ])('rejects OAuth redirect URI %s', (url) => {
+    expect(() => assertSafeOAuthRedirectUri(url)).toThrow(UnsafeOutboundUrlError);
+  });
 
   it('requires HTTPS except for the explicit loopback development exception', () => {
     expect(() => assertSafeOAuthUrl('http://example.com/token')).toThrow(UnsafeOutboundUrlError);

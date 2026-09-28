@@ -17,7 +17,11 @@ import type {
   MCPOAuthRuntimeCompatibilityMode,
 } from '../../types/mcp.js';
 import { MCP_OAUTH_DEFAULT_DCR_MODE } from '../../types/mcp.js';
-import { assertSafeOAuthUrl, safeOutboundFetch } from '../../utils/safe-outbound-fetch';
+import {
+  assertSafeOAuthRedirectUri,
+  assertSafeOAuthUrl,
+  safeOutboundFetch,
+} from '../../utils/safe-outbound-fetch';
 import { asMCPExternalError } from './external-error.js';
 import type { OAuthTokenResponse } from './oauth-auth.js';
 import { resolveTokenExpiry } from './oauth-token-expiry.js';
@@ -1926,6 +1930,67 @@ function assertOAuthProtectedResourceMetadata(
   }
 }
 
+/** RFC 9728 §3.1 well-known metadata location for exactly this resource. */
+function pathAwareResourceMetadataUrl(resourceUri: string): string {
+  const url = new URL(resourceUri);
+  const path = url.pathname === '/' ? '' : url.pathname.replace(/\/$/, '');
+  return `${url.origin}/.well-known/oauth-protected-resource${path}`;
+}
+
+/**
+ * Fetch the protected resource metadata named by discovery and bind it to the
+ * exact MCP resource.
+ *
+ * Some providers (Google's Gmail/Calendar MCP servers) answer a tool call with
+ * a challenge whose `resource_metadata` describes a different resource
+ * identifier than the saved MCP URL, while the RFC 9728 path-aware document for
+ * that URL states it exactly. On a mismatch, retry once at that well-known
+ * location and accept it only under the same resource predicate. The fallback
+ * URL is derived from the saved resource itself, so a challenge cannot steer
+ * it to another origin, and the matching rule is never relaxed.
+ */
+async function fetchBoundProtectedResourceMetadata(
+  metadataUrl: string,
+  resourceUri: string,
+  compatibilityMode: MCPOAuthRuntimeCompatibilityMode,
+  options: { allowLocalhostHttp: boolean; assertCurrent?: () => void }
+): Promise<{ metadataUrl: string; resourceMetadata: OAuthMetadata }> {
+  const resourceMetadata = await fetchResourceMetadata(metadataUrl, options);
+  options.assertCurrent?.();
+  try {
+    assertOAuthProtectedResourceMetadata(
+      metadataUrl,
+      resourceMetadata.resource,
+      resourceUri,
+      compatibilityMode
+    );
+    return { metadataUrl, resourceMetadata };
+  } catch (mismatch) {
+    const wellKnownUrl = pathAwareResourceMetadataUrl(resourceUri);
+    if (wellKnownUrl === metadataUrl) throw mismatch;
+    let fallbackMetadata: OAuthMetadata;
+    try {
+      fallbackMetadata = await fetchResourceMetadata(wellKnownUrl, options);
+    } catch {
+      // Authority/deadline expiry stays terminal; a provider failure reports
+      // the original mismatch rather than the fallback's transport error.
+      options.assertCurrent?.();
+      throw mismatch;
+    }
+    options.assertCurrent?.();
+    assertOAuthProtectedResourceMetadata(
+      wellKnownUrl,
+      fallbackMetadata.resource,
+      resourceUri,
+      compatibilityMode
+    );
+    console.log(
+      '[MCP OAuth] Challenge resource metadata did not match; using path-aware well-known metadata'
+    );
+    return { metadataUrl: wellKnownUrl, resourceMetadata: fallbackMetadata };
+  }
+}
+
 function assertOAuthDirectDiscoveryIssuer(
   authServerMetadata: AuthorizationServerMetadata,
   resourceUri: string,
@@ -2088,16 +2153,11 @@ export async function validateMCPOAuthMetadata(
     issuer = authServerMetadata.issuer;
   } else {
     options.assertCurrent?.();
-    const resourceMetadata = await fetchResourceMetadata(discovery.metadataUrl, {
-      allowLocalhostHttp,
-      assertCurrent: options.assertCurrent,
-    });
-    options.assertCurrent?.();
-    assertOAuthProtectedResourceMetadata(
+    const { resourceMetadata } = await fetchBoundProtectedResourceMetadata(
       discovery.metadataUrl,
-      resourceMetadata.resource,
       resourceUri,
-      compatibilityMode
+      compatibilityMode,
+      { allowLocalhostHttp, assertCurrent: options.assertCurrent }
     );
     if (
       !Array.isArray(resourceMetadata.authorization_servers) ||
@@ -2209,8 +2269,9 @@ async function startMCPOAuthFlowWithAS(opts: {
   const actualRedirectUri = redirectUri || 'http://127.0.0.1:0/oauth/callback';
   // Validate before registration: DCR sends this value to an external service
   // and must not turn an unsafe configured callback into durable provider-side
-  // client metadata.
-  assertSafeOAuthUrl(actualRedirectUri, { allowLocalhostHttp });
+  // client metadata. The browser, not the daemon, follows it, so an HTTP
+  // loopback callback stays valid when outbound localhost HTTP is disabled.
+  assertSafeOAuthRedirectUri(actualRedirectUri);
 
   // Scope: explicit option > resource-metadata advertised scopes > none
   // (Skip auto-populating when client_id is pre-registered — see comment in
@@ -2423,8 +2484,9 @@ export async function startMCPOAuthFlow(
   }
 
   // Step 1: Parse WWW-Authenticate header, fall back to pre-discovered URL
-  const metadataUrl = parseWWWAuthenticate(wwwAuthenticateHeader) || options?.resourceMetadataUrl;
-  if (!metadataUrl) {
+  const challengeMetadataUrl =
+    parseWWWAuthenticate(wwwAuthenticateHeader) || options?.resourceMetadataUrl;
+  if (!challengeMetadataUrl) {
     throw new OAuthConfigurationError(
       'metadata_unavailable',
       'Could not determine OAuth resource metadata URL. ' +
@@ -2434,20 +2496,16 @@ export async function startMCPOAuthFlow(
   }
   console.log('[MCP OAuth] Resource metadata resolved');
 
-  // Step 2: Fetch Protected Resource Metadata (RFC 9728)
+  // Step 2: Fetch Protected Resource Metadata (RFC 9728). `metadataUrl` is the
+  // document actually bound to the resource, and becomes the grant's key.
   options?.assertCurrent?.();
-  const resourceMetadata = await fetchResourceMetadata(metadataUrl, {
-    allowLocalhostHttp,
-    assertCurrent: options?.assertCurrent,
-  });
-  options?.assertCurrent?.();
-
-  assertOAuthProtectedResourceMetadata(
-    metadataUrl,
-    resourceMetadata.resource,
+  const { metadataUrl, resourceMetadata } = await fetchBoundProtectedResourceMetadata(
+    challengeMetadataUrl,
     resourceUri,
-    compatibilityMode
+    compatibilityMode,
+    { allowLocalhostHttp, assertCurrent: options?.assertCurrent }
   );
+  options?.assertCurrent?.();
 
   if (
     !resourceMetadata.authorization_servers ||

@@ -86,6 +86,21 @@ describe('startup MCP OAuth callback origin', () => {
     });
   });
 
+  it('resolves the same loopback callback set the OAuth flow accepts', () => {
+    expect(
+      resolveMcpOAuthCallbackOrigin({ daemon: { base_url: 'http://localhost:5173' } }, {})
+    ).toEqual({
+      standaloneCallbackUrl: 'http://localhost:5173/mcp-servers/oauth-callback',
+      haCallbackUrl: null,
+    });
+    for (const base_url of ['http://127.0.0.2:3030', 'http://10.0.0.5:5173']) {
+      expect(resolveMcpOAuthCallbackOrigin({ daemon: { base_url } }, {})).toEqual({
+        standaloneCallbackUrl: null,
+        haCallbackUrl: null,
+      });
+    }
+  });
+
   it('advertises exactly the callback URL supplied to HA runtime', () => {
     const origin = resolveMcpOAuthCallbackOrigin(
       { daemon: { base_url: 'https://frozen.example.test' } },
