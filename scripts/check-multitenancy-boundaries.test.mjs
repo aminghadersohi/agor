@@ -28,8 +28,9 @@ test('the approved inventory is exactly what the daemon file lists today', () =>
     'utf8'
   );
   assert.deepEqual(checkUnclassifiedServiceBaseline(source), []);
-  // 57 at landing; schedules/:id/run-now was since classified identity-only.
-  assert.equal(APPROVED_UNCLASSIFIED_SERVICE_BASELINE.length, 56);
+  // 57 at landing; schedules/:id/run-now and repos/:id/import-agor-yml were
+  // since classified identity-only.
+  assert.equal(APPROVED_UNCLASSIFIED_SERVICE_BASELINE.length, 55);
 });
 
 /** What the previous ratchet actually asked: how many markers are in the file. */
