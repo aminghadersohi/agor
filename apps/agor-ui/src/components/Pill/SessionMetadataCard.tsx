@@ -11,6 +11,7 @@ import { Space, Typography, theme } from 'antd';
 import type React from 'react';
 import { getSessionDisplayTitle } from '../../utils/sessionTitle';
 import { CreatedByTag } from '../metadata';
+import { SessionArchiveStatus } from '../SessionArchiveStatus';
 import { SessionIdsList } from '../SessionIds';
 import { Tag } from '../Tag';
 import { ToolIcon } from '../ToolIcon';
@@ -134,6 +135,11 @@ export const SessionMetadataCard: React.FC<SessionMetadataCardProps> = ({
           <div>
             <Text type="secondary">Permission mode: </Text>
             {session.permission_config.mode}
+          </div>
+        )}
+        {(session.archived || session.auto_archive_at) && (
+          <div style={{ marginTop: 4 }}>
+            <SessionArchiveStatus session={session} />
           </div>
         )}
       </div>

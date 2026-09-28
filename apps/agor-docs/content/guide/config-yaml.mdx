@@ -322,6 +322,23 @@ pages, or issue per-result lookups. It uses the existing atomic priority API for
 alone does not grant foreign-branch access. Clear an existing Essential designation before choosing
 a replacement; the UI never silently demotes an inaccessible Session.
 
+### What members and agents see
+
+Everyone else gets one bounded answer: whether ordinary work is held right now, plus the policy
+state and reason. `GET /power-management/admission` returns only `held`, `state`, `reason`, and
+`transitioned_at` to any authenticated member of the tenant, and publishes the same projection live
+on each transition. It never includes telemetry, provider support, ownership, or configuration.
+
+- **Session footer:** while a Session has queued prompts that the policy is holding, a **Held by host
+  power policy** tag appears beside the Send button. The Essential Session is not marked while the
+  policy is Conserving, because it still dispatches.
+- **Schedules:** **Run now** on a held schedule shows a warning that the host is holding new work,
+  instead of an error.
+- **MCP:** `agor_power_status` is read-only; admins also receive the full status. `agor_sessions_prompt`,
+  `agor_sessions_spawn`, and `agor_sessions_create` (with an initial prompt) add a `power_hold`
+  object to their result when the prompt is held, and the result says the prompt will dispatch after
+  recovery and must not be retried, stopped, or cancelled. MCP cannot change the power policy.
+
 Fresh interactive init always writes `agentic_tools.installed` once, then installs the selected
 packages before returning. Fresh headless init requires `--agentic-tools` (or
 `AGOR_AGENTIC_TOOLS`); `all` and `none` are explicit shorthands.
@@ -331,6 +348,36 @@ host-local managed manifest. Run interactive `agor install` and select at least 
 change it; the packaged daemon refuses to start while both policy sources are absent. The manifest
 is never exposed for mutation through API, UI, or MCP. Headless deployments should use an explicit
 YAML list, including `[]` when a tool-free deployment is intentional.
+
+## Restart recovery (opt-in)
+
+When the daemon restarts, it releases Tasks that were still dispatching or running, because it
+cannot verify their executors. Queued prompts are kept either way. With restart recovery on, the
+daemon then starts a new, system-authored **continuation** Task in each affected Session. It asks
+the agent to inspect the previous task state and continue safely. It never replays the interrupted
+prompt.
+
+```yaml
+execution:
+  restart_recovery:
+    enabled: false # default; set true to opt in
+    delay_ms: 2000 # pause between continuations, 250–60000
+    max_tasks_per_start: 50 # cap per daemon start, 1–500
+    resume_after_crash: false # also recover after an unclean exit
+```
+
+- Recovery runs once per daemon start, pacing admissions by `delay_ms` and admitting at most
+  `max_tasks_per_start`.
+- After an abrupt crash Agor cannot verify that the old executor stopped, so crash recovery is
+  gated separately behind `resume_after_crash`.
+- A Session that already moved on (a newer prompt, or archived) is skipped and the source Task
+  records why.
+- Settings are read at startup; change `config.yaml` and restart to apply them. Out-of-range values
+  stop the daemon at boot with the offending key.
+
+To confirm what the daemon resolved, open **Settings → About → Daemon Config (Admin Only)** and
+check **Restart Recovery**, or read `execution.restartRecovery` from authenticated `GET /health`.
+Per-start results are written to the daemon log.
 
 ## Environment precedence
 

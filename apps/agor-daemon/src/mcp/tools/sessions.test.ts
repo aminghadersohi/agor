@@ -2321,6 +2321,7 @@ describe('agor_sessions_prompt (subsession mode)', () => {
       modelConfig: { model: 'claude-opus-4-6', effort: 'max', provider: 'anthropic' },
       autoArchive: 'after_completion',
       autoArchiveAfterSeconds: 1800,
+      callbackMode: 'persistent',
     });
 
     expect(spawnCalls).toHaveLength(1);
@@ -2333,6 +2334,7 @@ describe('agor_sessions_prompt (subsession mode)', () => {
     expect(spawnCalls[0].data).toMatchObject({
       autoArchive: 'after_completion',
       autoArchiveAfterSeconds: 1800,
+      callbackMode: 'persistent',
     });
   });
 });
@@ -2380,6 +2382,39 @@ describe('agor_sessions_prompt task callback', () => {
       uniquePromptCount: 1,
       duplicateRequestCount: 1,
     });
+  });
+
+  it('reports a power hold instead of "busy" when the dispatch permit held the prompt', async () => {
+    const app = makeFakeApp({
+      '/sessions/:id/prompt': {
+        create: vi.fn(async () => ({
+          task_id: 'task-held',
+          status: 'queued',
+          queue_position: 1,
+          power_hold: { held: true, would_hold: true, state: 'conserve', reason: 'on_battery' },
+        })),
+      },
+    });
+    const { agor_sessions_prompt } = await registerAndCaptureHandlers(
+      { app, userId: 'user-1', sessionId: 'sess-caller' },
+      ['agor_sessions_prompt']
+    );
+
+    const response = await agor_sessions_prompt({
+      sessionId: 'sess-target',
+      prompt: 'work while on battery',
+      mode: 'continue',
+    });
+    const body = JSON.parse(response.content[0]!.text);
+
+    expect(body).toMatchObject({
+      queued: true,
+      taskId: 'task-held',
+      power_hold: { held: true, state: 'conserve', reason: 'on_battery' },
+    });
+    expect(body.note).toContain('Held by host power policy');
+    expect(body.note).toContain('Do not retry');
+    expect(body.note).not.toContain('Session is busy');
   });
 
   it('binds callback:true to trusted calling session context', async () => {

@@ -56,6 +56,7 @@ export const DOMAIN_DESCRIPTIONS: Record<string, string> = {
   'profile-images':
     'Photo galleries for users, teammates, and boards: list, view, upload, reorder, and delete',
   analytics: 'Usage and cost tracking leaderboard',
+  power: 'Read-only host power policy status: whether new work is held and why',
   'mcp-servers': 'External MCP server configuration and OAuth management',
   gateway: 'Gateway channels for Slack, GitHub, Teams, and other message integrations',
   widgets:
