@@ -2,6 +2,7 @@ import type { CodexApprovalPolicy, CodexNetworkAccess, CodexSandboxMode } from '
 import { type AgenticToolName, DEFAULT_AGENTIC_TOOL_NAME, isAgenticToolName } from './agentic-tool';
 import type { BranchID, UserID } from './id';
 import type { OpenCodeConfig } from './opencode-ollama';
+import type { ProfileImageID } from './profile-image';
 import type { EffortLevel, PermissionMode } from './session';
 
 /** Canonical syntax for the transitional delegated execution-home key. */
@@ -435,6 +436,18 @@ export interface EventStreamPreferences {
 }
 
 /**
+ * Idle screensaver preferences. Automatic activation is opt-in: an unset or
+ * disabled preference never starts the screensaver on idle, though it can
+ * still be previewed from the user menu.
+ */
+export interface ScreensaverPreferences {
+  /** Start the screensaver automatically after `idleMinutes` without input. */
+  enabled: boolean;
+  /** Minutes without input before the screensaver starts (UI default: 5). */
+  idleMinutes?: number;
+}
+
+/**
  * Per-user onboarding state (stored in user.preferences)
  */
 export interface OnboardingState {
@@ -479,6 +492,7 @@ export interface OnboardingState {
 export interface UserPreferences {
   audio?: AudioPreferences;
   eventStream?: EventStreamPreferences;
+  screensaver?: ScreensaverPreferences;
   onboarding?: OnboardingState;
   /** The user's personal/main board ID (created during onboarding or later) */
   mainBoardId?: string;
@@ -529,6 +543,8 @@ export interface User extends BaseUserFields {
   avatar_source?: 'manual' | 'slack' | 'launch-auth' | string;
   avatar_source_id?: string;
   avatar_synced_at?: string;
+  /** Primary image in the user's tenant-owned profile gallery. */
+  profile_image_id?: ProfileImageID;
   preferences?: UserPreferences;
   onboarding_completed: boolean;
   /** Force password change on next login (admin-settable, auto-cleared on password change) */
@@ -723,6 +739,7 @@ export interface UpdateUserInput extends Partial<BaseUserFields> {
   avatar_source?: string | null;
   avatar_source_id?: string | null;
   avatar_synced_at?: string | null;
+  profile_image_id?: ProfileImageID | null;
   preferences?: UserPreferences;
   onboarding_completed?: boolean;
   unix_username?: string;

@@ -21,7 +21,6 @@ import {
   getBranchCleanupBlockReason,
   getTeammateConfig,
   isTeammate,
-  normalizeEntityColor,
   OWNERSHIP_TRANSFER_SERVICES,
   resolveRepoCleanupPolicy,
 } from '@agor/core/types';
@@ -36,7 +35,6 @@ import type {
 } from '../../declarations.js';
 import type { BranchParams } from '../../services/branches.js';
 import { issueExecutorCommandToken } from '../../services/session-token-service.js';
-import { isSuperAdmin } from '../../utils/branch-authorization.js';
 import { ensureBranchWorkspaceAccess } from '../../utils/branch-workspace-path.js';
 import { resolveDelegatedExecutionHomeKey } from '../../utils/executor-delegated-home.js';
 import { withPromptProvenanceTool } from '../../utils/prompt-provenance.js';
@@ -51,6 +49,7 @@ import {
 } from '../branch-filesystem-readiness.js';
 import { waitForBranchRefResolution } from '../branch-ref-resolution.js';
 import { branchCapabilityPolicySchema } from '../capability-policy-schema.js';
+import { entityColorOverrideDescription, parseEntityColorOverride } from '../entity-color.js';
 import {
   resolveBoardId,
   resolveBranchId,
@@ -61,6 +60,7 @@ import {
   mcpLimit,
   mcpOffset,
   mcpOptionalId,
+  mcpOptionalNonBlankString,
   mcpOptionalNonNegativeInt,
   mcpOptionalPositiveInt,
   mcpOptionalString,
@@ -71,6 +71,17 @@ import type { McpContext } from '../server.js';
 import { coerceString, sessionContextRequiredResult, textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
 import { assertValidVariant } from './_environment-helpers.js';
+import {
+  createFrontDeskToolHandlers,
+  FRONT_DESK_CLEAR_DESCRIPTION,
+  FRONT_DESK_SET_DESCRIPTION,
+  FRONT_DESK_TEAMMATE_ARG_DESCRIPTION,
+  TEAMMATE_RESOLVE_DESCRIPTION,
+} from './front-desk.js';
+import {
+  assessTeammateAddressability,
+  shouldScopeTeammateDiscoveryToUser,
+} from './teammate-addressing.js';
 
 const BRANCH_NAME_PATTERN = /^[a-z0-9-]+$/;
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;
@@ -94,23 +105,9 @@ const CLEANUP_CANDIDATE_FILESYSTEM_STATUSES = [
 ] as const satisfies readonly CleanupCandidateFilesystemStatus[];
 const CLEANUP_CANDIDATE_STORAGE_MODES = ['worktree', 'clone'] as const;
 
-const BRANCH_COLOR_OVERRIDE_DESCRIPTION =
-  "User-chosen organisational color for this branch's board card, as hex " +
-  '(#rgb, #rrggbb, or #rrggbbaa). This is a human grouping/priority label in the ' +
-  'Trello sense — do not derive it from CI, PR, or environment state.';
-
-/** Reject a non-hex color loudly rather than silently dropping an agent's value. */
-function parseBranchColorOverride(value: unknown): string | null {
-  const raw = coerceString(value);
-  if (!raw) return null;
-  const normalized = normalizeEntityColor(raw);
-  if (!normalized) {
-    throw new Error(
-      `colorOverride must be a hex color like #ff5630 (received ${JSON.stringify(raw)})`
-    );
-  }
-  return normalized;
-}
+const BRANCH_COLOR_OVERRIDE_DESCRIPTION = entityColorOverrideDescription(
+  "this branch's board card"
+);
 
 function containsTeammateKnowledgeConfigMutation(customContext: unknown): boolean {
   if (!customContext || typeof customContext !== 'object' || Array.isArray(customContext)) {
@@ -242,14 +239,6 @@ function notesPreview(notes: string | undefined, maxLength = 200): string | null
   const singleLine = notes.replace(/\s+/g, ' ').trim();
   if (singleLine.length <= maxLength) return singleLine;
   return `${singleLine.slice(0, maxLength - 1)}…`;
-}
-
-async function shouldScopeTeammateDiscoveryToUser(ctx: McpContext): Promise<boolean> {
-  if (ctx.authenticatedUser?._isServiceAccount) return false;
-
-  const config = ctx.app.get('config');
-  const allowSuperadmin = config.execution?.allow_superadmin === true;
-  return !isSuperAdmin(ctx.authenticatedUser?.role, allowSuperadmin);
 }
 
 async function findAllArchivedBranchesForCleanup(
@@ -1003,7 +992,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       }
 
       const issueUrl = normalizeOptionalHttpUrl(args.issueUrl, 'issueUrl');
-      const colorOverride = parseBranchColorOverride(args.colorOverride);
+      const colorOverride = parseEntityColorOverride(args.colorOverride);
       const pullRequestUrl = normalizeOptionalHttpUrl(args.pullRequestUrl, 'pullRequestUrl');
 
       // If auto-suffix changed the ref (branch name defaults to branchName), update it
@@ -1274,7 +1263,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       if (args.colorOverride !== undefined) {
         fieldsProvided++;
         updates.color_override =
-          args.colorOverride === null ? null : parseBranchColorOverride(args.colorOverride);
+          args.colorOverride === null ? null : parseEntityColorOverride(args.colorOverride);
       }
       if (fieldsProvided === 0) throw new Error('provide at least one field to update');
 
@@ -1747,7 +1736,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     'agor_branches_unarchive',
     {
       description:
-        'Restore a previously archived branch. Optionally place it back on a board. Also unarchives all sessions that were archived as part of the branch archival.',
+        'Request asynchronous restoration of an archived branch, optionally onto a board. Unarchives branch-archived sessions. Acceptance is not filesystem readiness: use agor_branches_wait_for_ready before starting work.',
       inputSchema: z.object({
         branchId: mcpRequiredId(
           'branchId',
@@ -1774,7 +1763,8 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       return textResult({
         success: true,
         branch: result,
-        message: 'Branch unarchived successfully.',
+        message:
+          'Unarchive accepted. Wait for filesystem_status ready before starting work; acceptance is not readiness.',
       });
     }
   );
@@ -1825,7 +1815,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     const offset = args.offset ?? 0;
     const repoId = args.repoId ? await resolveRepoId(ctx, args.repoId) : undefined;
 
-    const userScoped = await shouldScopeTeammateDiscoveryToUser(ctx);
+    const userScoped = shouldScopeTeammateDiscoveryToUser(ctx);
     const teammates = await runWithMcpTenantDatabaseScope(ctx, (db) =>
       new BranchRepository(db).findTeammateBranches({
         archived: false,
@@ -1838,8 +1828,15 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       })
     );
 
-    const shaped = teammates.map((w) => {
+    const hasMore = teammates.length > limit;
+    const pageRows = teammates.slice(0, limit);
+    // Listing needs only `view`; name addressing needs `session` and a unique
+    // name. Say per row which of these teammates a name would actually reach.
+    const addressability = await assessTeammateAddressability(ctx, pageRows);
+
+    const page = pageRows.map((w) => {
       const config = getTeammateConfig(w);
+      const verdict = addressability.get(w.branch_id);
       return {
         branch_id: w.branch_id,
         name: w.name,
@@ -1849,11 +1846,17 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
         board_id: w.board_id || null,
         repo_id: w.repo_id,
         last_used: w.last_used,
+        addressable: verdict?.addressable ?? false,
+        ...(verdict?.addressable
+          ? { address: verdict.address }
+          : {
+              not_addressable_reason: verdict?.reason,
+              not_addressable_detail: verdict?.detail,
+              ...(verdict?.conflicts_with ? { conflicts_with: verdict.conflicts_with } : {}),
+            }),
       };
     });
 
-    const hasMore = shaped.length > limit;
-    const page = shaped.slice(0, limit);
     return textResult({
       total: hasMore ? null : offset + page.length,
       limit,
@@ -1869,7 +1872,8 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     'agor_teammates_list',
     {
       description:
-        'List a page of teammates (long-lived AI teammates with schedules). Authorization is applied before paging. Advance with offset=nextOffset while hasMore is true.',
+        'List a page of teammates (long-lived AI teammates with schedules). Authorization is applied before paging. Advance with offset=nextOffset while hasMore is true. ' +
+        'Listing needs only view access, so each row says whether agor_sessions_prompt { teammate } would reach it for you: addressable with the address to pass, or not_addressable_reason (no_prompt_permission, ambiguous_name, beyond_scan_limit). Use agor_teammates_resolve to see which session an address reaches.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         repoId: mcpOptionalId('repoId', 'Repository', 'Filter teammates by repository ID'),
@@ -1880,24 +1884,20 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     listTeammatesHandler
   );
 
+  // agor_teammates_resolve / agor_teammates_front_desk_set / agor_teammates_front_desk_clear
+  registerFrontDeskTools(server, ctx);
+
   // Tool: agor_branches_retry_provisioning
-  // Explicit, non-destructive repair for a branch whose filesystem provisioning
-  // landed in 'failed'. Wraps the exact same `reposService.retryBranchProvisioning`
-  // implementation used by the REST route and the UI, so all three surfaces share
-  // one code path. Only `failed → creating` is retryable; the transition is an
-  // atomic claim, so concurrent calls can never dispatch two materializers.
+  // Shared attempt-fenced recovery for failed provisioning and stale active archive states.
   server.registerTool(
     'agor_branches_retry_provisioning',
     {
       description:
-        'Repair a branch whose git working directory failed to materialize ' +
-        "(filesystem_status 'failed') by re-dispatching provisioning. Also recovers a branch " +
-        "left 'creating' by a daemon restart. Requires branch control ('all' permission, branch " +
-        "owner, or admin). Not retryable otherwise: 'ready' is returned unchanged, a " +
-        "still-in-flight 'creating' attempt is rejected as a conflict, and " +
-        "archived/'preserved'/'cleaned'/'deleted' branches must use the restore/unarchive flow " +
-        'instead. Non-destructive — never deletes refs or directories. ' +
-        'Returns the updated branch with its new filesystem_status.',
+        'Retry failed provisioning or recover an active branch with stale preserved/cleaned/deleted filesystem status. ' +
+        'Requires branch Manager authority and filesystem write access. The executor validates existing files; ' +
+        'invalid Git linkage fails without overwriting them. Missing local teammate homes require personal backup restoration. ' +
+        'Archived branches must use unarchive. Ready is a no-op; creating is always a conflict, including after a restart. ' +
+        'Returns admission state, not proof of completion; wait for ready before creating sessions.',
       inputSchema: z.object({
         branchId: mcpRequiredId('branchId', 'Branch'),
       }),
@@ -1915,5 +1915,80 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
         path: branch.path,
       });
     }
+  );
+}
+
+/**
+ * agor_teammates_resolve / agor_teammates_front_desk_set / agor_teammates_front_desk_clear.
+ *
+ * Registered here rather than in `front-desk.ts` so the zod schemas live in an
+ * entry that already bundles zod — see the note at the top of `front-desk.ts`.
+ */
+export function registerFrontDeskTools(server: McpServer, ctx: McpContext): void {
+  const handlers = createFrontDeskToolHandlers(ctx);
+  const teammate = mcpOptionalNonBlankString('teammate', FRONT_DESK_TEAMMATE_ARG_DESCRIPTION);
+  const branchId = mcpOptionalId(
+    'branchId',
+    'Branch',
+    'Teammate branch ID (UUIDv7 or short ID). Provide exactly one of teammate or branchId.'
+  );
+
+  server.registerTool(
+    'agor_teammates_resolve',
+    {
+      description: TEAMMATE_RESOLVE_DESCRIPTION,
+      annotations: { readOnlyHint: true },
+      inputSchema: z.object({
+        teammate,
+        branchId,
+        sessionId: mcpOptionalId(
+          'sessionId',
+          'Session',
+          'Preview an explicit sessionId address (UUIDv7 or short ID); it takes precedence over the front desk and recency.'
+        ),
+      }),
+    },
+    (args) => handlers.resolve(args)
+  );
+
+  server.registerTool(
+    'agor_teammates_front_desk_set',
+    {
+      description: FRONT_DESK_SET_DESCRIPTION,
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        teammate,
+        branchId,
+        sessionId: mcpRequiredId(
+          'sessionId',
+          'Session',
+          "Session to pin (UUIDv7 or short ID); must be in the teammate's branch."
+        ),
+        expectedSessionId: mcpOptionalId(
+          'expectedSessionId',
+          'Session',
+          'Only replace the pin if this session is the current front desk. Guards against overwriting a change you have not seen.'
+        ),
+      }),
+    },
+    (args) => handlers.set(args)
+  );
+
+  server.registerTool(
+    'agor_teammates_front_desk_clear',
+    {
+      description: FRONT_DESK_CLEAR_DESCRIPTION,
+      annotations: { idempotentHint: true },
+      inputSchema: z.object({
+        teammate,
+        branchId,
+        expectedSessionId: mcpOptionalId(
+          'expectedSessionId',
+          'Session',
+          'Only clear the pin if this session is the current front desk.'
+        ),
+      }),
+    },
+    (args) => handlers.clear(args)
   );
 }

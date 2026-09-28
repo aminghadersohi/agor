@@ -27,6 +27,7 @@ import {
   resolvePasswordPolicyRequirements,
   resolvePowerManagementConfig,
   resolvePowerManagementRuntimeOverlay,
+  resolveRestartRecoverySettings,
   resolveSdkWatchdogConfig,
   resolveTeammateFrameworkRepoUrl,
   resolveTenantContext,
@@ -88,6 +89,8 @@ import type {
   BoardComment,
   BoardCommentReposition,
   BranchArchiveOrDeleteOptions,
+  CreateUserApiKeyRequest,
+  CurrentUserIdentity,
   HookContext,
   MCPMemberPolicy,
   MCPMemberPolicySetting,
@@ -101,6 +104,7 @@ import type {
   MessageID,
   MessageSource,
   Params,
+  PowerAdmissionStatus,
   PowerEssentialSessionSearchResult,
   PowerManagementMutableSettings,
   ScheduleID,
@@ -127,13 +131,16 @@ import {
   isBranchArchiveOrDeleteOptions,
   isCanonicalFullUuid,
   isTaskPendingDispatch,
+  isUserApiKeySource,
   MCP_MEMBER_POLICIES,
   MCP_MEMBER_POLICY_CHANGED_EVENT,
   MessageRole,
+  normalizeRole,
   ROLES,
   SESSION_POWER_PRIORITIES,
   SessionStatus,
   TaskStatus,
+  toPowerAdmissionStatus,
   UPLOAD_REQUEST_ID_HEADER,
 } from '@agor/core/types';
 import { isNotFoundError } from '@agor/core/utils/errors';
@@ -210,7 +217,9 @@ import {
   createDisabledPowerPolicyController,
   type PowerPolicyController,
 } from './power-management/index.js';
+import { registerProfileImageRoutes } from './profile-image-routes.js';
 import { publicBoardCommentRepositionInput } from './services/board-comments.js';
+import { createBranchFrontDeskRoute } from './services/branch-front-desk.js';
 import type { GatewayService } from './services/gateway.js';
 import { createMCPCatalogConnectService } from './services/mcp-catalog-connect.js';
 import { createMCPCatalogStartSessionService } from './services/mcp-catalog-start-session.js';
@@ -224,6 +233,7 @@ import {
   type SchedulerService,
 } from './services/scheduler.js';
 import { runSessionInitializationStages } from './services/session-initialization.js';
+import { createSpawnPromptService } from './services/session-spawn-prompt';
 import {
   lockTenantAuthorizationFence,
   resolveCurrentTenantAuthorityActor,
@@ -1241,6 +1251,20 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     },
     requireAuth
   );
+  // Every tenant member (and agents over MCP) may learn whether ordinary work
+  // is held and why — nothing else. Observation, provider support, ownership
+  // and configuration stay on the admin-only projection above.
+  registerPowerAuthenticatedRoute(
+    app,
+    '/power-management/admission',
+    {
+      async find(): Promise<PowerAdmissionStatus> {
+        return toPowerAdmissionStatus(powerPolicyController.status());
+      },
+    },
+    { find: { role: ROLES.VIEWER, action: 'view power admission' } },
+    requireAuth
+  );
   powerPolicyController.subscribe((transition) => {
     const tenantConfig = resolveMultiTenancyConfig(config);
     if (tenantConfig.mode !== 'static') return;
@@ -1249,6 +1273,12 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       path: 'power-management',
       event: 'patched',
       data: transition.status,
+      params: { tenant: { tenant_id: tenantId, source: 'explicit' } },
+    });
+    emitServiceEvent(app, {
+      path: 'power-management/admission',
+      event: 'patched',
+      data: toPowerAdmissionStatus(transition.status),
       params: { tenant: { tenant_id: tenantId, source: 'explicit' } },
     });
   });
@@ -1407,6 +1437,20 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     {
       find: { role: ROLES.VIEWER, action: 'view session power priority' },
       create: { role: ROLES.MEMBER, action: 'change session power priority' },
+    },
+    requireAuth
+  );
+
+  // Teammate front desk (fork). Branch Manager authorization lives in
+  // front-desk/manage-front-desk.ts, shared with the MCP front-desk tools.
+  registerAuthenticatedRoute(
+    app,
+    '/branches/:id/front-desk',
+    createBranchFrontDeskRoute({ db, allowSuperadmin: () => superadminOpts.allowSuperadmin }),
+    {
+      find: { role: ROLES.VIEWER, action: 'view a teammate front desk' },
+      create: { role: ROLES.MEMBER, action: 'pin a teammate front desk' },
+      remove: { role: ROLES.MEMBER, action: 'clear a teammate front desk' },
     },
     requireAuth
   );
@@ -1951,6 +1995,55 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     },
     {
       create: { role: ROLES.MEMBER, action: 'unarchive sessions' },
+    },
+    requireAuth
+  );
+
+  // Human controls for the fork's routing/genealogy transfers. Same service
+  // methods and authority as agor_sessions_retarget_callback/_reparent.
+  registerAuthenticatedRoute(
+    app,
+    '/sessions/:id/retarget-callback',
+    {
+      async create(data: { callbackSessionId?: unknown } | undefined, params: RouteParams) {
+        const id = params.route?.id;
+        if (!id) throw new BadRequest('Session ID required');
+        if (typeof data?.callbackSessionId !== 'string' || !data.callbackSessionId) {
+          throw new BadRequest('callbackSessionId is required');
+        }
+        return sessionsService.retargetCallback(
+          id,
+          { callbackSessionId: data.callbackSessionId as SessionID },
+          params
+        );
+      },
+    },
+    {
+      create: { role: ROLES.MEMBER, action: 'retarget session callbacks' },
+    },
+    requireAuth
+  );
+
+  registerAuthenticatedRoute(
+    app,
+    '/sessions/:id/reparent',
+    {
+      async create(data: { parentSessionId?: unknown } | undefined, params: RouteParams) {
+        const id = params.route?.id;
+        if (!id) throw new BadRequest('Session ID required');
+        const parentSessionId = data?.parentSessionId;
+        if (parentSessionId !== null && (typeof parentSessionId !== 'string' || !parentSessionId)) {
+          throw new BadRequest('parentSessionId must be a Session ID or null');
+        }
+        return sessionsService.reparent(
+          id,
+          { parentSessionId: parentSessionId as SessionID | null },
+          params
+        );
+      },
+    },
+    {
+      create: { role: ROLES.MEMBER, action: 'reparent sessions' },
     },
     requireAuth
   );
@@ -3107,52 +3200,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   registerAuthenticatedRoute(
     app,
     '/sessions/:id/spawn-prompt',
-    {
-      async create(
-        data: {
-          userPrompt?: string;
-          /**
-           * Permission mode for the *parent* session's prompt. The spawn
-           * config's `permissionMode` (child's intended mode) is rendered into
-           * the meta-prompt; this field governs how the parent prompt is sent.
-           */
-          parentPermissionMode?: import('@agor/core/types').PermissionMode;
-          // Remaining fields are spawn-subsession context (incl. the *child*
-          // session's permissionMode/modelConfig/etc) — see
-          // `SpawnSubsessionContext` in @agor/core for the shape.
-          [key: string]: unknown;
-        },
-        params: RouteParams
-      ) {
-        const id = params.route?.id;
-        if (!id) throw new BadRequest('Session ID required');
-        if (typeof data?.userPrompt !== 'string') {
-          throw new BadRequest('userPrompt (string) is required');
-        }
-
-        const { renderSpawnSubsessionPrompt } = await import(
-          '@agor/core/templates/spawn-subsession-template'
-        );
-        // Render the meta-prompt against the child-session config (the rest
-        // of `data`). `parentPermissionMode` is intentionally excluded — it's
-        // the parent's send-mode, not part of the template.
-        const { parentPermissionMode, ...spawnContext } = data;
-        const metaPrompt = renderSpawnSubsessionPrompt(
-          spawnContext as unknown as import('@agor/core/templates/spawn-subsession-template').SpawnSubsessionContext
-        );
-
-        const promptService = app.service('/sessions/:id/prompt');
-        return promptService.create(
-          {
-            prompt: metaPrompt,
-            permissionMode: parentPermissionMode,
-            messageSource: 'agor',
-            metadata: { system_authored: true },
-          },
-          { ...params, provider: undefined, route: { id } }
-        );
-      },
-    },
+    createSpawnPromptService(app),
     {
       create: { role: ROLES.MEMBER, action: 'send spawn-subsession prompts' },
     },
@@ -3544,6 +3592,13 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   const uploadAuthMiddleware = createUploadAuthMiddleware({
     authentication: app.service('authentication'),
     multiTenancy,
+  });
+
+  registerProfileImageRoutes({
+    app,
+    db,
+    authMiddleware: uploadAuthMiddleware,
+    allowSuperadmin: superadminOpts.allowSuperadmin,
   });
 
   // biome-ignore lint/suspicious/noExplicitAny: Express route method not on FeathersJS Application type
@@ -4821,7 +4876,10 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
-  registerAuthenticatedRoute(
+  // Long route: `.agor.yml` is read by an executor, so tenant identity is armed
+  // without a request-long transaction and the service opens a short unit per
+  // database access (see ReposService.importFromAgorYml).
+  registerLongAuthenticatedRoute(
     app,
     '/repos/:id/import-agor-yml',
     {
@@ -4858,6 +4916,26 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
+  // Long route: the launch file is read by an executor, so tenant identity is
+  // armed without a request-long transaction and the service opens a short
+  // unit per database access (see ReposService.importFromLaunchJson).
+  registerLongAuthenticatedRoute(
+    app,
+    '/repos/:id/import-launch-json',
+    {
+      async create(data: { branch_id: string }, params: RouteParams) {
+        const id = params.route?.id;
+        if (!id) throw new Error('Repo ID required');
+        if (!data?.branch_id) throw new Error('branch_id is required');
+        return reposService.importFromLaunchJson(id, data, params);
+      },
+    },
+    {
+      create: { role: ROLES.ADMIN, action: 'import environment config from launch.json' },
+    },
+    requireAuth
+  );
+
   // ============================================================================
   // User API Keys routes
   // ============================================================================
@@ -4866,12 +4944,14 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
 
   registerAuthenticatedRoute(
     app,
+    // Literal on purpose: the realtime-publish and tenant-classification source
+    // scans read registered paths from this file (USER_API_KEYS_SERVICE_PATH).
     '/api/v1/user/api-keys',
     {
       async find(params: AuthenticatedParams) {
         return userApiKeysService.find(params);
       },
-      async create(data: { name: string }, params: AuthenticatedParams) {
+      async create(data: CreateUserApiKeyRequest, params: AuthenticatedParams) {
         return userApiKeysService.create(data, params);
       },
       async patch(id: string, data: { name?: string }, params: AuthenticatedParams) {
@@ -4889,6 +4969,43 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       patch: { role: ROLES.MEMBER, action: 'update API keys' },
       remove: { role: ROLES.MEMBER, action: 'delete API keys' },
     },
+    requireAuth
+  );
+
+  // Credential self-check for non-browser clients (`agor login --api-key`).
+  // Returns only the caller's own identity and the tenant the request was
+  // authenticated in, so a raw key can be validated without exchanging it for
+  // refresh-capable browser tokens.
+  registerAuthenticatedRoute(
+    app,
+    '/api/v1/user/me', // USER_IDENTITY_SERVICE_PATH; literal for the source scans
+    {
+      async find(params: AuthenticatedParams): Promise<CurrentUserIdentity> {
+        const user = params.user;
+        if (!user) throw new NotAuthenticated('Authentication required');
+        const authentication = params.authentication as
+          | { strategy?: string; api_key_id?: unknown; api_key_source?: unknown }
+          | undefined;
+        return {
+          user_id: user.user_id as UserID,
+          email: user.email,
+          name: (user as { name?: string }).name,
+          role: normalizeRole(user.role),
+          tenant_id: params.tenant?.tenant_id,
+          auth_strategy: authentication?.strategy,
+          ...(authentication?.strategy === 'api-key' &&
+          typeof authentication.api_key_id === 'string'
+            ? {
+                api_key_id: authentication.api_key_id,
+                api_key_source: isUserApiKeySource(authentication.api_key_source)
+                  ? authentication.api_key_source
+                  : 'manual',
+              }
+            : {}),
+        };
+      },
+    },
+    { find: { role: ROLES.VIEWER, action: 'read own identity' } },
     requireAuth
   );
 
@@ -5094,7 +5211,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   );
 
   // Explicit, non-destructive repair for a branch whose filesystem provisioning
-  // landed in 'failed'. A stranded 'creating' attempt is not retryable. Shares
+  // landed in 'failed', or an active stale archive outcome. Creating is not retryable. Shares
   // the exact same service implementation the MCP tool and UI use, so REST, MCP
   // and UI can never drift. A live 'creating' attempt conflicts, 'ready' no-ops;
   // the transition is an atomic claim. Returns the (possibly-updated) branch row.
@@ -5117,11 +5234,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       // in the service (not here) is what keeps REST, MCP and the UI on one
       // check.
       //
-      // Identity split (intentional): the caller must hold branch control, but
-      // the executor runs as `branch.created_by`, not as the caller. That
-      // mirrors the create path (the directory must be materialized as its
-      // owner to be usable) and re-runs provisioning the owner already
-      // initiated, so it grants no capability the owner had not exercised.
+      // Recovery uses the authorized caller's execution identity and credentials.
       create: { role: ROLES.MEMBER, action: 'retry branch provisioning' },
     },
     requireAuth
@@ -5201,6 +5314,28 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   app.service('/branches/:id/clean').hooks({
     around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
     before: { create: [requireAuth, requireMinimumRole(ROLES.MEMBER, 'clean branches')] },
+  });
+
+  // Explicit, metadata-only retirement: same tenant/write boundary as cleanup.
+  app.use('/branches/:id/retire-teammate', {
+    async create(data: unknown, params: RouteParams) {
+      if (
+        !params.route?.id ||
+        !data ||
+        typeof data !== 'object' ||
+        Array.isArray(data) ||
+        Object.keys(data).length
+      )
+        throw new BadRequest('Retirement accepts an empty body and branch route ID only');
+      return branchesService.retireTeammate(
+        params.route.id as import('@agor/core/types').BranchID,
+        params
+      );
+    },
+  });
+  app.service('/branches/:id/retire-teammate').hooks({
+    around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
+    before: { create: [requireAuth, requireMinimumRole(ROLES.MEMBER, 'retire teammates')] },
   });
 
   // Archive/delete branch
@@ -5321,8 +5456,12 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     },
   });
 
+  // Identity-only (see TENANT_SERVICE_CLASSIFICATIONS): the scheduler opens a
+  // short unit per access and the spawned prompt dispatch defers its executor
+  // launch out of any scope. Write admission refuses a frozen tenant before
+  // any of that starts, as registerLongAuthenticatedRoute does.
   app.service('/schedules/:id/run-now').hooks({
-    around: { all: [tenantIdentityAround] },
+    around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
     before: {
       create: [
         requireAuth,
@@ -7587,6 +7726,9 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             unixUserMode: config.execution?.unix_user_mode ?? 'simple',
             managedEnvsExecutionMode:
               config.execution?.managed_envs_execution_mode ?? MANAGED_ENV_EXECUTION_MODE_DEFAULT,
+            // Boot-time opt-in; results are logged per start, so this is the
+            // only place an operator can confirm what the daemon resolved.
+            restartRecovery: resolveRestartRecoverySettings(config.execution),
           },
           deployment: {
             mode: deployment.mode,

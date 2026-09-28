@@ -33,11 +33,31 @@ export interface OAuthConfig {
   oauth_dcr_mode?: MCPOAuthDCRMode;
 }
 
+export interface ExtractOAuthConfigOptions {
+  /**
+   * Whether an absent or unrecognized policy value becomes an explicit default.
+   *
+   * A create needs one: the new row has no stored value to fall back to. A
+   * PATCH must not have one. `mergeMCPAuth` keeps the stored value for a field
+   * the patch omits, so a default invented here is not a no-op — it overwrites
+   * whatever the user saved. Writing `advertised` over a stored `disabled` (or
+   * `strict` over `legacy`) is a real auth-configuration change to the daemon,
+   * and `hasMCPOAuthRelevantServerConfigurationChanged` answers it by deleting
+   * every OAuth grant on the server. A save must never send a policy field the
+   * form was not actually holding a value for.
+   */
+  applyDefaults?: boolean;
+}
+
 /**
  * Extract OAuth configuration from form values.
  * Only includes fields that have actual values (not empty or template-only).
  */
-export function extractOAuthConfig(values: Record<string, unknown>): OAuthConfig {
+export function extractOAuthConfig(
+  values: Record<string, unknown>,
+  options: ExtractOAuthConfigOptions = {}
+): OAuthConfig {
+  const { applyDefaults = true } = options;
   const config: OAuthConfig = {};
 
   // Only include authorization URL if it's provided
@@ -69,21 +89,46 @@ export function extractOAuthConfig(values: Record<string, unknown>): OAuthConfig
     config.oauth_scope = values.oauth_scope;
   }
 
-  // Grant type defaults to client_credentials
-  config.oauth_grant_type =
-    typeof values.oauth_grant_type === 'string' ? values.oauth_grant_type : 'client_credentials';
+  // The four policy fields below are selects with a recommended default rather
+  // than free text, so an absent or unrecognized value means "the form is not
+  // holding one" — never "the user chose the default". Each is emitted only for
+  // a value the form actually had; `applyDefaults` decides what an absence
+  // means, and only a create may turn it into an explicit default.
 
-  // OAuth mode defaults to per_user — matches the form's initialValue and
-  // the recommended behavior for multi-user instances. (The Advanced panel
-  // is collapsed by default; combined with forceRender on the panel so the
-  // initialValue actually applies, this default is a defensive fallback.)
-  config.oauth_mode = values.oauth_mode === 'shared' ? 'shared' : 'per_user';
-  config.oauth_compatibility_mode =
-    values.oauth_compatibility_mode === 'legacy' ? 'legacy' : 'strict';
-  config.oauth_dcr_mode =
-    values.oauth_dcr_mode === 'disabled' || values.oauth_dcr_mode === 'fallback'
-      ? values.oauth_dcr_mode
-      : 'advertised';
+  if (typeof values.oauth_grant_type === 'string') {
+    config.oauth_grant_type = values.oauth_grant_type;
+  } else if (applyDefaults) {
+    config.oauth_grant_type = 'client_credentials';
+  }
+
+  // A create defaults OAuth mode to per_user — matches the form's initialValue
+  // and the recommended behavior for multi-user instances.
+  if (values.oauth_mode === 'shared' || values.oauth_mode === 'per_user') {
+    config.oauth_mode = values.oauth_mode;
+  } else if (applyDefaults) {
+    config.oauth_mode = 'per_user';
+  }
+
+  // `marketplace` is a read-only display value for catalog-managed policy and
+  // is not caller-selectable public data, so it is never a value to emit.
+  if (
+    values.oauth_compatibility_mode === 'legacy' ||
+    values.oauth_compatibility_mode === 'strict'
+  ) {
+    config.oauth_compatibility_mode = values.oauth_compatibility_mode;
+  } else if (applyDefaults) {
+    config.oauth_compatibility_mode = 'strict';
+  }
+
+  if (
+    values.oauth_dcr_mode === 'disabled' ||
+    values.oauth_dcr_mode === 'fallback' ||
+    values.oauth_dcr_mode === 'advertised'
+  ) {
+    config.oauth_dcr_mode = values.oauth_dcr_mode;
+  } else if (applyDefaults) {
+    config.oauth_dcr_mode = 'advertised';
+  }
 
   return config;
 }
@@ -242,7 +287,11 @@ export function buildAuthFromValues(
       auth.api_secret = sanitizeSecretValue(values.jwt_api_secret);
     }
   } else {
-    Object.assign(auth, extractOAuthConfig(values));
+    // A PATCH merges field by field, so omitting a policy field keeps the
+    // stored one and inventing a default silently overwrites it — which the
+    // daemon reads as an auth-configuration change and answers by deleting
+    // every OAuth grant on the server. Only a create may default.
+    Object.assign(auth, extractOAuthConfig(values, { applyDefaults: !options.forPatch }));
     if (options.preserveAbsentDcrMode && values.oauth_dcr_mode === 'advertised') {
       delete auth.oauth_dcr_mode;
     }

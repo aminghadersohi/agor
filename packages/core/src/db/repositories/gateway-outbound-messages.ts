@@ -5,6 +5,7 @@
  */
 
 import type {
+  BranchID,
   ChannelType,
   GatewayChannelID,
   GatewayOutboundMessage,
@@ -14,7 +15,7 @@ import type {
   SessionID,
 } from '@agor/core/types';
 import { prefixToLikePattern } from '@agor/core/types';
-import { and, eq, isNotNull, isNull, like, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, isNotNull, isNull, like, or, type SQL, sql } from 'drizzle-orm';
 import { generateId } from '../../lib/ids';
 import type { Database } from '../client';
 import {
@@ -31,6 +32,15 @@ import {
   gatewayOutboundMessages,
 } from '../schema';
 import { AmbiguousIdError, EntityNotFoundError, RepositoryError } from './base';
+
+/** Filters for {@link GatewayOutboundMessageRepository.list}; all are exact, full IDs. */
+export interface GatewayOutboundMessageListFilter {
+  gatewayChannelId?: GatewayChannelID;
+  platformThreadId?: string;
+  /** Matches rows the session emitted or whose reply it consumed. */
+  sessionId?: SessionID;
+  targetBranchId?: BranchID;
+}
 
 function isSqliteBusy(error: unknown): boolean {
   return (
@@ -209,6 +219,56 @@ export class GatewayOutboundMessageRepository {
       if (error instanceof AmbiguousIdError) throw error;
       throw new RepositoryError(
         `Failed to find gateway outbound message: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /**
+   * One page of the outbound audit trail, newest first. Reads run on the
+   * caller's handle, so tenant isolation is whatever scope that handle carries
+   * (RLS on PostgreSQL, one tenant per database on SQLite).
+   */
+  async list(
+    filter: GatewayOutboundMessageListFilter,
+    page: { limit: number; offset: number }
+  ): Promise<{ data: GatewayOutboundMessage[]; total: number }> {
+    const conditions: SQL[] = [];
+    if (filter.gatewayChannelId) {
+      conditions.push(eq(gatewayOutboundMessages.gateway_channel_id, filter.gatewayChannelId));
+    }
+    if (filter.platformThreadId) {
+      conditions.push(eq(gatewayOutboundMessages.platform_thread_id, filter.platformThreadId));
+    }
+    if (filter.targetBranchId) {
+      conditions.push(eq(gatewayOutboundMessages.target_branch_id, filter.targetBranchId));
+    }
+    if (filter.sessionId) {
+      const sessionMatch = or(
+        eq(gatewayOutboundMessages.emitted_by_session_id, filter.sessionId),
+        eq(gatewayOutboundMessages.consumed_by_session_id, filter.sessionId)
+      );
+      if (sessionMatch) conditions.push(sessionMatch);
+    }
+    const where = conditions.length > 0 ? and(...conditions) : undefined;
+    try {
+      let totalQuery = select(this.db, { value: count() }).from(gatewayOutboundMessages);
+      if (where) totalQuery = totalQuery.where(where);
+      const totalRow = await totalQuery.one();
+      let dataQuery = select(this.db).from(gatewayOutboundMessages);
+      if (where) dataQuery = dataQuery.where(where);
+      const rows = await dataQuery
+        .orderBy(desc(gatewayOutboundMessages.created_at), desc(gatewayOutboundMessages.id))
+        .limit(page.limit)
+        .offset(page.offset)
+        .all();
+      return {
+        data: rows.map((row: GatewayOutboundMessageRow) => this.rowToMessage(row)),
+        total: Number(totalRow?.value ?? 0),
+      };
+    } catch (error) {
+      throw new RepositoryError(
+        `Failed to list gateway outbound messages: ${error instanceof Error ? error.message : String(error)}`,
         error
       );
     }

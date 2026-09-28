@@ -1,11 +1,13 @@
-import type { ArtifactPayload } from '@agor-live/client';
+import type { ArtifactInteractionConfig, ArtifactPayload } from '@agor-live/client';
 import { SafetyOutlined, WarningOutlined } from '@ant-design/icons';
 import { useSandpack, useSandpackConsole } from '@codesandbox/sandpack-react';
-import { Tooltip, theme } from 'antd';
-import type { CSSProperties } from 'react';
+import { App, Tooltip, theme } from 'antd';
+import type { CSSProperties, RefObject } from 'react';
 import { useEffect, useRef } from 'react';
 import { getDaemonUrl } from '@/config/daemon';
+import { fetchArtifactDataBinding, runArtifactActionBinding } from '@/utils/artifactActions';
 import { getAuthHeaders, getCurrentUserIdFromJwt } from '@/utils/authHeaders';
+import { confirmArtifactAction, notifyArtifactBindingAction } from './ArtifactBindingControls';
 
 /** Max console entries to send per batch, and minimum interval between sends. */
 const CONSOLE_BATCH_MAX = 50;
@@ -87,7 +89,18 @@ export { ArtifactSandpackErrorReporter } from './ArtifactSandpackErrorReporter';
  * Sandpack iframe via postMessage → daemon response endpoint.
  * Must be rendered inside a SandpackProvider.
  */
-export function ArtifactRuntimeBridge({ artifactId }: { artifactId: string }) {
+export function ArtifactRuntimeBridge({
+  artifactId,
+  fallbackIframe,
+}: {
+  artifactId: string;
+  /**
+   * Preview iframe to target when no Sandpack bundler client is registered.
+   * The static template renders its own iframe instead of a SandpackPreview,
+   * so `sandpack.clients` is empty and there is no client iframe to find.
+   */
+  fallbackIframe?: RefObject<HTMLIFrameElement | null>;
+}) {
   // CRITICAL: read existing clients rather than registering a new Sandpack client;
   // the sibling SandpackPreview owns the actual iframe ref.
   const { sandpack } = useSandpack();
@@ -117,7 +130,8 @@ export function ArtifactRuntimeBridge({ artifactId }: { artifactId: string }) {
       const currentSandpack = sandpackRef.current;
       const clientIds = Object.keys(currentSandpack.clients);
       const firstClient = clientIds.length > 0 ? currentSandpack.clients[clientIds[0]] : null;
-      const target = firstClient?.iframe?.contentWindow ?? null;
+      const target =
+        firstClient?.iframe?.contentWindow ?? fallbackIframe?.current?.contentWindow ?? null;
       if (!target) return;
 
       const postResult = async (body: { ok: boolean; result?: unknown; error?: string }) => {
@@ -163,7 +177,123 @@ export function ArtifactRuntimeBridge({ artifactId }: { artifactId: string }) {
 
     window.addEventListener('agor:artifact-runtime-query', handleQuery);
     return () => window.removeEventListener('agor:artifact-runtime-query', handleQuery);
-  }, [artifactId]);
+  }, [artifactId, fallbackIframe]);
+
+  return null;
+}
+
+/**
+ * Constrained iframe → Agor bridge for human-triggered artifact controls.
+ * The iframe can only invoke bindings declared in persisted metadata; the
+ * resulting schedule request still passes through the normal authenticated
+ * schedule RBAC route.
+ */
+export function ArtifactInteractionBridge({
+  artifactId,
+  config,
+  onOpenSession,
+}: {
+  artifactId: string;
+  config?: ArtifactInteractionConfig;
+  onOpenSession?: (sessionId: string) => void;
+}) {
+  const { sandpack } = useSandpack();
+  const { modal } = App.useApp();
+  const sandpackRef = useRef(sandpack);
+  sandpackRef.current = sandpack;
+
+  useEffect(() => {
+    const reply = (
+      target: Window,
+      requestId: string,
+      body: { ok: boolean; result?: unknown; error?: string }
+    ) => {
+      target.postMessage({ type: 'agor:interaction-result', requestId, ...body }, '*');
+    };
+
+    const handler = async (event: MessageEvent) => {
+      const current = sandpackRef.current;
+      const firstClientId = Object.keys(current.clients)[0];
+      const target = firstClientId ? current.clients[firstClientId]?.iframe?.contentWindow : null;
+      if (!target || event.source !== target) return;
+      const message = event.data as
+        | {
+            type?: unknown;
+            requestId?: unknown;
+            actionId?: unknown;
+            dataId?: unknown;
+            chatId?: unknown;
+          }
+        | undefined;
+      if (!message || typeof message.requestId !== 'string') return;
+
+      if (message.type === 'agor:open-chat') {
+        // A chat is opened in the parent surface, never inside the iframe —
+        // rendering the real conversation in the artifact would require
+        // handing it a token.
+        const chats = config?.chats ?? [];
+        const chat =
+          typeof message.chatId === 'string'
+            ? chats.find((item) => item.id === message.chatId)
+            : chats[0];
+        if (!chat || !onOpenSession) {
+          reply(target, message.requestId, { ok: false, error: 'No chat is configured' });
+          return;
+        }
+        onOpenSession(chat.session_id);
+        reply(target, message.requestId, {
+          ok: true,
+          result: { chat_id: chat.id, session_id: chat.session_id },
+        });
+        return;
+      }
+
+      if (message.type === 'agor:fetch-data') {
+        if (typeof message.dataId !== 'string') return;
+        // Presence in the payload is only a fast local reject; the daemon
+        // re-resolves the binding and is the authority for what may be read.
+        const binding = config?.data?.find((item) => item.id === message.dataId);
+        if (!binding) {
+          reply(target, message.requestId, { ok: false, error: 'Data binding is not configured' });
+          return;
+        }
+        try {
+          const result = await fetchArtifactDataBinding(artifactId, binding.id);
+          reply(target, message.requestId, { ok: true, result });
+        } catch (error) {
+          reply(target, message.requestId, {
+            ok: false,
+            error: error instanceof Error ? error.message : 'Data binding failed',
+          });
+        }
+        return;
+      }
+
+      if (message.type !== 'agor:run-action' || typeof message.actionId !== 'string') return;
+      const action = config?.actions?.find((item) => item.id === message.actionId);
+      if (!action) {
+        reply(target, message.requestId, { ok: false, error: 'Action is not configured' });
+        return;
+      }
+      if (action.confirm && !(await confirmArtifactAction(modal, action))) {
+        reply(target, message.requestId, { ok: false, error: 'Action cancelled' });
+        return;
+      }
+      try {
+        const result = await runArtifactActionBinding(artifactId, action.id);
+        reply(target, message.requestId, { ok: true, result });
+        notifyArtifactBindingAction(artifactId);
+      } catch (error) {
+        reply(target, message.requestId, {
+          ok: false,
+          error: error instanceof Error ? error.message : 'Action failed',
+        });
+      }
+    };
+
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [artifactId, config, modal, onOpenSession]);
 
   return null;
 }

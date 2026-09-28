@@ -48,6 +48,27 @@ export interface AttachmentIngestResult {
   skipped?: number;
   /** Normalized MIME types of the `skipped` attachments, in arrival order. */
   skippedMimeTypes?: string[];
+  /**
+   * Per-file account of every attachment that did not reach the session
+   * (skipped or failed), for the reply the gateway posts back to the sender.
+   * Optional for the same upstream-sync reason as `skipped`.
+   */
+  undelivered?: UndeliveredAttachment[];
+}
+
+/** Why one inbound attachment did not reach the session. */
+export type UndeliveredAttachmentReason =
+  | 'unsupported_type'
+  | 'too_large'
+  | 'too_many'
+  | 'fetch_failed';
+
+export interface UndeliveredAttachment {
+  /** Provider-supplied file name, unsanitized; format it before display. */
+  name: string;
+  reason: UndeliveredAttachmentReason;
+  /** Reported MIME type (`describeMime` output) for `unsupported_type`. */
+  mimeType?: string;
 }
 
 const MAX_REDIRECT_HOPS = 3;
@@ -447,9 +468,16 @@ export async function ingestInboundAttachments(args: {
   const store = args.store ?? getUploadStagingStore();
 
   const ingestable = args.files.filter(isIngestableFile);
-  const skippedMimeTypes = args.files
+  const undelivered = args.files
     .filter((file) => !isIngestableFile(file))
-    .map((file) => describeMime(file.mimetype));
+    .map(
+      (file): UndeliveredAttachment => ({
+        name: file.name,
+        reason: 'unsupported_type',
+        mimeType: describeMime(file.mimetype),
+      })
+    );
+  const skippedMimeTypes = undelivered.map((entry) => entry.mimeType ?? 'unknown');
   for (const mimeType of skippedMimeTypes) {
     console.warn(`[gateway] Not downloading attachment of unsupported type ${mimeType}`);
   }
@@ -459,6 +487,7 @@ export async function ingestInboundAttachments(args: {
   for (const [index, file] of ingestable.entries()) {
     if (index >= MAX_UPLOAD_FILES_PER_REQUEST) {
       failed++;
+      undelivered.push({ name: file.name, reason: 'too_many' });
       console.warn(
         `[gateway] Skipping attachment "${file.name}": message exceeds ${MAX_UPLOAD_FILES_PER_REQUEST}-file limit`
       );
@@ -467,6 +496,7 @@ export async function ingestInboundAttachments(args: {
     const maxFileBytes = getUploadLimits().maxFileBytes;
     if (file.size > maxFileBytes) {
       failed++;
+      undelivered.push({ name: file.name, reason: 'too_large' });
       console.warn(
         `[gateway] Skipping attachment "${file.name}": ${file.size} bytes exceeds per-file limit ${maxFileBytes}`
       );
@@ -474,6 +504,7 @@ export async function ingestInboundAttachments(args: {
     }
     if (!isAllowedSlackFileUrl(file.url_private_download)) {
       failed++;
+      undelivered.push({ name: file.name, reason: 'fetch_failed' });
       console.warn(`[gateway] Skipping attachment "${file.name}": download URL host not allowed`);
       continue;
     }
@@ -518,9 +549,73 @@ export async function ingestInboundAttachments(args: {
       uploads.push(staged);
     } catch (error) {
       failed++;
+      undelivered.push({ name: file.name, reason: 'fetch_failed' });
       console.warn(`[gateway] Failed to ingest attachment "${file.name}":`, error);
     }
   }
 
-  return { uploads, failed, skipped: skippedMimeTypes.length, skippedMimeTypes };
+  return {
+    uploads,
+    failed,
+    skipped: skippedMimeTypes.length,
+    skippedMimeTypes,
+    undelivered,
+  };
+}
+
+const UNDELIVERED_REPLY_MAX_FILES = 10;
+const UNDELIVERED_NAME_MAX_CHARS = 80;
+
+/**
+ * Provider file names are untrusted: drop control characters, backticks and
+ * Slack's control-sequence delimiters (`<`, `>`, `&`) so a name cannot break
+ * out of its code span or smuggle a mention, then bound the length.
+ */
+function displayAttachmentName(name: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control characters is the point
+  const cleaned = name.replace(/[\u0000-\u001f\u007f`<>&]/g, '').trim();
+  if (!cleaned) return 'attachment';
+  return cleaned.length > UNDELIVERED_NAME_MAX_CHARS
+    ? `${cleaned.slice(0, UNDELIVERED_NAME_MAX_CHARS - 1)}…`
+    : cleaned;
+}
+
+function describeUndeliveredReason(entry: UndeliveredAttachment, maxFileBytes: number): string {
+  switch (entry.reason) {
+    case 'unsupported_type':
+      return entry.mimeType && entry.mimeType !== 'unknown'
+        ? `unsupported type (${entry.mimeType})`
+        : 'unsupported type';
+    case 'too_large':
+      return `too large (limit ${Math.floor(maxFileBytes / (1024 * 1024))} MB)`;
+    case 'too_many':
+      return `too many files (limit ${MAX_UPLOAD_FILES_PER_REQUEST} per message)`;
+    default:
+      return 'could not be fetched';
+  }
+}
+
+/**
+ * Short reply to the sender listing the attachments that did not reach the
+ * agent and why. The prompt note tells the agent; this tells the person who
+ * attached them. Returns null when everything was delivered.
+ */
+export function formatUndeliveredAttachmentReply(
+  undelivered: UndeliveredAttachment[] | undefined
+): string | null {
+  if (!undelivered || undelivered.length === 0) return null;
+  const maxFileBytes = getUploadLimits().maxFileBytes;
+  const lines = undelivered
+    .slice(0, UNDELIVERED_REPLY_MAX_FILES)
+    .map(
+      (entry) =>
+        `- \`${displayAttachmentName(entry.name)}\`: ${describeUndeliveredReason(entry, maxFileBytes)}`
+    );
+  const hidden = undelivered.length - lines.length;
+  if (hidden > 0) lines.push(`- and ${hidden} more`);
+  const subject =
+    undelivered.length === 1
+      ? 'This attachment was not delivered to the agent:'
+      : 'These attachments were not delivered to the agent:';
+  return `${subject}\n${lines.join('\n')}`;
 }

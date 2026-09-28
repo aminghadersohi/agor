@@ -180,5 +180,32 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       expect(roleA.role).toBe('thread_seed');
       expect(roleB.role).toBe('thread_seed');
     });
+
+    it('lists only the scoped tenant audit rows, even when filtered by a foreign channel', async () => {
+      const tenantA = `outbound-list-a-${generateId()}` as TenantID;
+      const tenantB = `outbound-list-b-${generateId()}` as TenantID;
+      const seededA = await seedChannel(tenantA);
+      await seedChannel(tenantB);
+      const sent = await runWithTenantDatabaseScope(dbA, tenantA, (scoped) =>
+        new GatewayOutboundMessageRepository(scoped).recordSend(sendData(seededA, THREAD_TS))
+      );
+
+      const page = { limit: 10, offset: 0 };
+      const ownView = await runWithTenantDatabaseScope(dbA, tenantA, (scoped) =>
+        new GatewayOutboundMessageRepository(scoped).list(
+          { gatewayChannelId: seededA.channel.id },
+          page
+        )
+      );
+      const foreignView = await runWithTenantDatabaseScope(dbA, tenantB, (scoped) =>
+        new GatewayOutboundMessageRepository(scoped).list(
+          { gatewayChannelId: seededA.channel.id, platformThreadId: THREAD_ID },
+          page
+        )
+      );
+
+      expect(ownView.data.map((row) => row.id)).toEqual([sent.message.id]);
+      expect(foreignView).toEqual({ data: [], total: 0 });
+    });
   }
 );

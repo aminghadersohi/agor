@@ -1,7 +1,16 @@
 import type { User } from '@agor-live/client';
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { getUserInitials, UserIdentityAvatar } from './UserIdentityAvatar';
+
+const profileImage = vi.hoisted(() => ({
+  urlFor: (user?: { profile_image_id?: string } | null) =>
+    user?.profile_image_id ? `blob:profile-${user.profile_image_id}` : undefined,
+}));
+
+vi.mock('./ProfileImage/useUserProfileImageUrl', () => ({
+  useUserProfileImageUrl: profileImage.urlFor,
+}));
 
 const makeUser = (overrides: Partial<User> = {}): User =>
   ({ user_id: 'u1', name: 'Ada Lovelace', email: 'ada@example.com', ...overrides }) as User;
@@ -43,6 +52,19 @@ describe('UserIdentityAvatar fallback', () => {
       />
     );
     expect(screen.getByRole('img')).toHaveAttribute('src', 'https://img/avatar.png');
+  });
+
+  it('prefers an uploaded gallery photo over the synced avatar', () => {
+    render(
+      <UserIdentityAvatar
+        user={makeUser({
+          avatar_url: 'https://img/avatar.png',
+          avatar_source: 'slack',
+          profile_image_id: 'image-1',
+        })}
+      />
+    );
+    expect(screen.getByRole('img')).toHaveAttribute('src', 'blob:profile-image-1');
   });
 
   it('renders users on a circle so they are never mistaken for boards', () => {

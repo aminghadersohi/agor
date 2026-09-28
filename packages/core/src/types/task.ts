@@ -389,15 +389,56 @@ export interface TaskMetadata {
   widget_id?: MessageID;
   /** User who resolved the widget; Task execution remains session-owner attributed. */
   widget_resolved_by_user_id?: UserID;
+  /**
+   * Durable restart-continuation state. A terminal source Task stays pending
+   * until its deterministic continuation Task has been admitted. The
+   * continuation carries the same source ID for transcript/audit context.
+   */
+  restart_recovery?: {
+    source_task_id: TaskID;
+    state: 'pending' | 'admitted' | 'superseded';
+    requested_at: string;
+    admitted_task_id?: TaskID;
+    admitted_at?: string;
+    disposition_reason?: 'session_advanced' | 'session_archived';
+  };
   /** Provider-event occurrence that durably admitted this gateway prompt. */
   gateway_inbound_event_id?: GatewayInboundEventID;
   /** Provider reply target captured for this gateway Task (for example an editable ack ID). */
   gateway_reply_metadata?: Record<string, unknown>;
+  /**
+   * Inbound gateway attachments that never reached the agent. The prompt text
+   * carries a matching note for the agent; this is the structured copy the
+   * transcript renders. Absent when every attachment was delivered.
+   */
+  gateway_skipped_attachments?: {
+    /** Files refused because their type is unsupported. */
+    skipped: number;
+    /** Sanitized MIME types of the refused files (`unknown` when unrecognized). */
+    skipped_mime_types: string[];
+    /** Files that could not be fetched (download error or missing bot token). */
+    failed: number;
+  };
   /** Immutable gateway coordinates; stripped from API/realtime Task DTOs. */
   gateway_task_source?: {
     gateway_channel_id: string;
     channel_type: import('./gateway').ChannelType;
     thread_id: string;
+    /**
+     * The `thread_session_map` row this prompt was admitted through — the
+     * Task's reply address.
+     *
+     * Outbound routing used to ask which thread a *Session* belongs to, which
+     * is only answerable while a session has exactly one mapping. This is the
+     * per-Task answer, resolved once at admission and never re-derived.
+     *
+     * It is stamped rather than recomputed from `thread_id` because the
+     * mapping is keyed on the outbound seed's platform thread when there is
+     * one, plus reply aliases — so a seed-originated thread does not find its
+     * own mapping by the inbound thread id. Absent on Tasks admitted before
+     * this was persisted; readers must fall back rather than refuse.
+     */
+    thread_session_map_id?: import('./gateway').ThreadSessionMapID;
     provider_user_id: string;
     provider_message_id?: string;
     slack_team_id?: string;

@@ -478,3 +478,47 @@ it.each([390, 220])(
     });
   }
 );
+
+it('says how many busy-session requests a queued prompt merged', async () => {
+  const merged = {
+    ...tasks(1)[0],
+    metadata: {
+      prompt_compaction: {
+        version: 1,
+        max_combined_prompt_bytes: 1000,
+        requests: [1, 2, 3].map((n) => ({
+          request_id: `request-${n}`,
+          submitted_at: '2026-09-27T12:00:00.000Z',
+          created_by: 'user-1',
+          text: `prompt ${n}`,
+          normalized_text: `prompt ${n}`,
+        })),
+        unique_prompt_count: 3,
+        duplicate_request_count: 0,
+        last_admitted_request_id: 'request-3',
+      },
+    },
+  } as unknown as Task;
+  render(
+    <App>
+      <AppActionsProvider value={{}}>
+        <SessionPanelContent
+          client={client}
+          session={session}
+          queuedTasks={[merged, ...tasks(2).slice(1)]}
+          scrollToBottom={null}
+          scrollToTop={null}
+          setScrollToBottom={noop}
+          setScrollToTop={noop}
+          spawnModalOpen={false}
+          setSpawnModalOpen={noop}
+          onSpawnModalConfirm={async () => {}}
+          inputValueRef={{ current: '' }}
+          isOpen
+        />
+      </AppActionsProvider>
+    </App>
+  );
+  expect(await screen.findByText('3 requests merged into this prompt')).toBeInTheDocument();
+  expect(screen.getAllByText(/requests merged into this prompt/)).toHaveLength(1);
+});

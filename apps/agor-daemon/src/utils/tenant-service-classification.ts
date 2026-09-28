@@ -181,6 +181,10 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
   // Operator surfaces the lanes read. Registered through the tenant-scoped
   // route registrar, so the scope is armed at registration.
   // --------------------------------------------------------------------------
+  'api/v1/user/me': {
+    scopeClass: 'scoped',
+    why: 'Registered through createTenantScopedAuthenticatedRouteRegistrar; returns the authenticated caller projection only.',
+  },
   'mcp-slack-connect/card': {
     scopeClass: 'scoped',
     why: 'Registered through createTenantScopedAuthenticatedRouteRegistrar; reads and writes one app variable in the request scope.',
@@ -191,7 +195,7 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
   },
 
   // --------------------------------------------------------------------------
-  // Fork-only surfaces. All five register through
+  // Fork-only surfaces. All of these register through
   // createTenantScopedAuthenticatedRouteRegistrar, so the scope is armed at
   // registration exactly as it is for the upstream `scoped` entries above.
   // They are declared here rather than in TENANT_OWNED_SERVICE_PATHS because
@@ -202,6 +206,10 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
     scopeClass: 'scoped',
     why: 'Fork power management. Registered through createTenantScopedAuthenticatedRouteRegistrar (transaction: false, because refreshOwnership awaits a host UPS probe); each read/write runs in the armed request scope.',
   },
+  'power-management/admission': {
+    scopeClass: 'scoped',
+    why: 'Fork power management. Registered through createTenantScopedAuthenticatedRouteRegistrar (transaction: false); returns the redacted in-memory admission projection and reads no rows.',
+  },
   'power-management/essential-sessions': {
     scopeClass: 'scoped',
     why: 'Fork power management. Registered through createTenantScopedAuthenticatedRouteRegistrar; a tenant-scoped session search in the armed request scope.',
@@ -209,6 +217,18 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
   'sessions/:id/power-priority': {
     scopeClass: 'scoped',
     why: 'Fork power management. Registered through createTenantScopedAuthenticatedRouteRegistrar (transaction: false); reads and patches one tenant-owned Session row in the armed request scope.',
+  },
+  'branches/:id/front-desk': {
+    scopeClass: 'scoped',
+    why: 'Fork teammate front desk. Registered through createTenantScopedAuthenticatedRouteRegistrar; reads and compare-and-swaps tenant-owned branch_front_desk_sessions rows under the tenant authorization fence in the armed request scope.',
+  },
+  'sessions/:id/retarget-callback': {
+    scopeClass: 'scoped',
+    why: 'Fork callback routing. Registered through createTenantScopedAuthenticatedRouteRegistrar; one SessionsService.retargetCallback unit (same as agor_sessions_retarget_callback) that rejects cross-tenant destinations and writes tenant-owned session/relationship rows in the armed request scope.',
+  },
+  'sessions/:id/reparent': {
+    scopeClass: 'scoped',
+    why: 'Fork genealogy. Registered through createTenantScopedAuthenticatedRouteRegistrar; one SessionsService.reparent unit (same as agor_sessions_reparent) that rejects cross-tenant and cross-branch parents and writes one tenant-owned Session row in the armed request scope.',
   },
   'tasks/:id/queued-prompt': {
     scopeClass: 'scoped',
@@ -239,9 +259,46 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
   // predate this mechanism and sit in the baseline; this one is new, so it
   // answers.
   // --------------------------------------------------------------------------
+  'branches/:id/retire-teammate': {
+    scopeClass: 'identity-only',
+    why: 'Metadata-only retirement carries authenticated tenant identity and the write gate at registration. Branch/repo reads, the authority-fenced preference-and-archive admission, session archival and final read each open short tenant units in requestWorkspaceOperation; terminal closure and realtime delivery happen outside those units. No global or creator authority is used.',
+  },
   'branches/:id/retry-provisioning': {
     scopeClass: 'identity-only',
     why: 'Long route that crosses the executor spawn boundary: the authorization read, the repo lookup, the failed -> creating CAS and the dispatch each open their own short unit via reposService.withTenantDatabase, so no transaction is held across the spawn.',
+  },
+
+  // --------------------------------------------------------------------------
+  // Repository environment imports that read a branch file through an
+  // executor. launch.json (#42) was classified at landing; its `.agor.yml`
+  // sibling predated this mechanism and sat in the baseline holding a request
+  // transaction across its executor spawn until it was moved to the same shape.
+  // --------------------------------------------------------------------------
+  'repos/:id/import-agor-yml': {
+    scopeClass: 'identity-only',
+    why: 'Long route across the executor spawn that reads .agor.yml: registered with tenant identity and write admission only. The repo read, branch authorization (branches service), pre-spawn workspace-access check and delegated-home lookup each open their own short unit; the executor reaches the daemon only through a command token carrying the tenant_id claim; the environment write runs in withFreshTenantWrite after the spawn. Admin-only, enforced in the route hook and again in ReposService.importFromAgorYml.',
+  },
+  'repos/:id/import-launch-json': {
+    scopeClass: 'identity-only',
+    why: 'Long route across the executor spawn that reads the launch file: registered with tenant identity and write admission only. The repo read, branch authorization (branches service), pre-spawn workspace-access check and delegated-home lookup each open their own short unit; the executor reaches the daemon only through a command token carrying the tenant_id claim; the environment write runs in withFreshTenantWrite after the spawn. Admin-only, enforced in the route hook and again in ReposService.importFromLaunchJson.',
+  },
+
+  // --------------------------------------------------------------------------
+  // Artifact interaction bindings (#47), and the run-now route its actions
+  // dispatch into — reviewed and classified here rather than depended on from
+  // the baseline.
+  // --------------------------------------------------------------------------
+  'artifacts/:id/actions/:actionId': {
+    scopeClass: 'identity-only',
+    why: 'A schedule_run action dispatches schedules/:id/run-now, which spawns a session and its executor; runWithTenantDatabaseScope re-enters an outer transaction, so a scoped registration would hold the schedule lock, session insert and prompt admission until this request commits. Registered with tenant identity and write admission only; the binding lookup uses repositories bound to the tenant unit of work, and the delegated schedules / run-now services open their own units under the forwarded caller params.',
+  },
+  'artifacts/:id/data/:dataId': {
+    scopeClass: 'scoped',
+    why: 'Registered through createTenantScopedAuthenticatedRouteRegistrar. Read-only: the binding lookup and the delegated schedules.get / sessions.get join the armed request scope; no spawn, network call or write.',
+  },
+  'schedules/:id/run-now': {
+    scopeClass: 'identity-only',
+    why: 'Around hooks are tenantIdentityAround (no transaction) and tenantWriteAdmissionAround. loadScheduleAndBranch runs in its own short scope; SchedulerService.executeScheduleNow / spawnScheduledSession wrap every access in withTenantDatabase (bound repositories on PostgreSQL), with run admission in one short unit; the prompt dispatch is the long identity-only sessions/:id/prompt route, which defers the executor launch out of any scope via deferWithTenantContext. RBAC: member floor, runs-as-caller, branch all, and created_by === caller in executeScheduleNow.',
   },
 };
 
@@ -309,7 +366,6 @@ export const UNCLASSIFIED_SERVICE_BASELINE: readonly string[] = [
   'branches/:id/unarchive', // BASELINE-ENTRY
   'branches/:id/execute-schedule-now', // BASELINE-ENTRY
   'branches/:id/fire-zone-trigger', // BASELINE-ENTRY
-  'schedules/:id/run-now', // BASELINE-ENTRY
   'boards/:id/sessions', // BASELINE-ENTRY
   'board-comments/:id/reply', // BASELINE-ENTRY
   'board-comments/:id/toggle-reaction', // BASELINE-ENTRY
@@ -318,7 +374,6 @@ export const UNCLASSIFIED_SERVICE_BASELINE: readonly string[] = [
   'repos/clone', // BASELINE-ENTRY
   'repos/:id/branches', // BASELINE-ENTRY
   'repos/:id/branches/:name', // BASELINE-ENTRY
-  'repos/:id/import-agor-yml', // BASELINE-ENTRY
   'repos/:id/export-agor-yml', // BASELINE-ENTRY
   'artifacts/:id/payload', // BASELINE-ENTRY
   'artifacts/:id/console', // BASELINE-ENTRY

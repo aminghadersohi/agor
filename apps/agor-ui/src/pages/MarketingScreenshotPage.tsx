@@ -4,6 +4,7 @@ import { App as AntdApp, ConfigProvider, Layout, theme } from 'antd';
 import { useEffect, useMemo } from 'react';
 import { ReactFlowProvider } from 'reactflow';
 import { AppHeader } from '../components/AppHeader';
+import { ProfileImageNetworkProvider } from '../components/ProfileImage/ProfileImageNetworkContext';
 import { SessionCanvas } from '../components/SessionCanvas';
 import { ConnectionProvider } from '../contexts/ConnectionContext';
 import { agorStore } from '../store/agorStore';
@@ -73,33 +74,36 @@ export const MarketingScreenshotPage = () => {
             currentSha: null,
           }}
         >
-          <Layout className="marketing-product-page" data-testid="marketing-screenshot-page">
-            <AppHeader
-              user={users[0]}
-              presenceClient={null}
-              currentUserId={users[0].user_id}
-              staticActiveUsers={activeUsers}
-              connected={true}
-              connecting={false}
-              eventStreamEnabled={true}
-              currentBoardId={boardId}
-            />
-            <main className="marketing-product-canvas">
-              <ReactFlowProvider>
-                <SessionCanvas
-                  board={board}
-                  client={null}
-                  branches={branches}
-                  currentUserId={users[0].user_id}
-                  selectedSessionId={null}
-                  availableAgents={[]}
-                  staticCursors={staticCursors}
-                  staticCursorScale={1.3}
-                  height="calc(100vh - 64px)"
-                />
-              </ReactFlowProvider>
-            </main>
-          </Layout>
+          {/* Fixture identities must never resolve against a live daemon. */}
+          <ProfileImageNetworkProvider value={false}>
+            <Layout className="marketing-product-page" data-testid="marketing-screenshot-page">
+              <AppHeader
+                user={users[0]}
+                presenceClient={null}
+                currentUserId={users[0].user_id}
+                staticActiveUsers={activeUsers}
+                connected={true}
+                connecting={false}
+                eventStreamEnabled={true}
+                currentBoardId={boardId}
+              />
+              <main className="marketing-product-canvas">
+                <ReactFlowProvider>
+                  <SessionCanvas
+                    board={board}
+                    client={null}
+                    branches={branches}
+                    currentUserId={users[0].user_id}
+                    selectedSessionId={null}
+                    availableAgents={[]}
+                    staticCursors={staticCursors}
+                    staticCursorScale={1.3}
+                    height="calc(100vh - 64px)"
+                  />
+                </ReactFlowProvider>
+              </main>
+            </Layout>
+          </ProfileImageNetworkProvider>
         </ConnectionProvider>
       </AntdApp>
     </ConfigProvider>

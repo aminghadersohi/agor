@@ -5,6 +5,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { __setAuthConfigForTests } from '../../hooks/useAuthConfig';
 import { BoardEditModal } from './BoardEditModal';
 
+// Profile galleries and portraits load from the daemon; keep these tests hermetic.
+vi.mock('../ProfileImage/profileImageApi', () => ({
+  listProfileImages: vi.fn(async () => ({ images: [], max_images: 24 })),
+  fetchProfileImageBlob: vi.fn(),
+  uploadProfileImage: vi.fn(),
+  patchProfileImage: vi.fn(),
+  deleteProfileImage: vi.fn(),
+}));
+
 vi.mock('@/utils/message', () => ({ useThemedMessage: () => ({ showError: vi.fn() }) }));
 vi.mock('../JSONEditor', () => ({
   JSONEditor: () => <textarea aria-label="Custom Context (JSON)" />,

@@ -23,7 +23,7 @@ import { mcpValidationFailure } from './validation-errors.js';
  * custom routes apply via `tenantWriteGateAround`.
  */
 export async function runWithMcpTenantDatabaseScope<T>(
-  ctx: McpContext,
+  ctx: Pick<McpContext, 'db' | 'baseServiceParams'>,
   work: (db: TenantScopeAwareDatabase) => Promise<T>
 ): Promise<T> {
   const tenantId = ctx.baseServiceParams.tenant?.tenant_id;
@@ -59,7 +59,7 @@ export async function runWithMcpTenantDatabaseUnit<T>(
  * for non-Postgres), so behavior there is identical to the read-only variant.
  */
 export async function runWithMcpTenantDatabaseWrite<T>(
-  ctx: McpContext,
+  ctx: Pick<McpContext, 'db' | 'baseServiceParams'>,
   work: (db: TenantScopeAwareDatabase) => Promise<T>
 ): Promise<T> {
   const tenantId = ctx.baseServiceParams.tenant?.tenant_id;

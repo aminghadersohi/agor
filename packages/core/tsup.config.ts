@@ -36,11 +36,13 @@ export default defineConfig({
     'templates/teammate-welcome-note': 'src/templates/teammate-welcome-note.ts', // Teammate board welcome note renderer
     'templates/zone-trigger-context': 'src/templates/zone-trigger-context.ts', // Canonical zone-trigger context builder
     'environment/variable-resolver': 'src/environment/variable-resolver.ts', // Environment variable resolution
+    'environment/lifecycle-result': 'src/environment/lifecycle-result.ts', // Tiny dynamic managed-environment Start result
     'environment/render-snapshot': 'src/environment/render-snapshot.ts', // v2 branch env snapshot rendering
     'environment/access-urls': 'src/environment/access-urls.ts', // Browser-safe command result contract
     'environment/webhook': 'src/environment/webhook.ts', // Managed environment webhook execution policy
     'utils/errors': 'src/utils/errors.ts', // Error handling and formatting utilities
     'utils/url': 'src/utils/url.ts', // Shared URL validation helpers
+    'utils/pinned-fetch': 'src/utils/pinned-fetch.ts', // Public-only DNS-pinned managed environment health
     'utils/safe-outbound-fetch': 'src/utils/safe-outbound-fetch.ts', // Pinned SSRF-safe OAuth/JWT egress
     'utils/permission-mode-mapper': 'src/utils/permission-mode-mapper.ts', // Permission mode mapping for cross-agent compatibility
     'utils/cron': 'src/utils/cron.ts', // Cron validation and parsing utilities
@@ -85,7 +87,11 @@ export default defineConfig({
   format: ['cjs', 'esm'],
   dts: false,
   clean: process.env.TSUP_CLEAN !== 'false',
-  splitting: false,
+  // `splitting` is deliberately unset: tsup then splits the ESM build into
+  // shared root-level chunks (so the schema and repositories are not copied
+  // into every entry) and leaves CJS unsplit, avoiding tsup's experimental CJS
+  // splitting. Asset lookups that use __dirname/import.meta.url must accept
+  // both the entry directory and the dist root.
   esbuildOptions(options) {
     options.define = {
       ...options.define,

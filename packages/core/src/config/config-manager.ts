@@ -38,6 +38,7 @@ import {
   assertPowerManagementActivationSupported,
   resolvePowerManagementConfig,
 } from './power-management';
+import { resolveRestartRecoverySettings } from './restart-recovery';
 import {
   type AgorApmSettings,
   type AgorConfig,
@@ -844,6 +845,7 @@ function validateConfig(config: AgorConfig): void {
     'sdk_watchdog',
     'dispatch_connect_timeout_ms',
     'unix_user_mode',
+    'restart_recovery',
     'branch_rbac',
     'allow_web_terminal',
     'allow_superadmin',
@@ -855,6 +857,7 @@ function validateConfig(config: AgorConfig): void {
     'permission_timeout_ms',
     'executor_command_template',
     'executor_storage',
+    'delegated_branch_deletion',
     'executor_command_nonzero_may_have_dispatched',
     'required_user_env_vars',
     ...RETIRED_CONFIG_KEYS.execution,
@@ -887,6 +890,13 @@ function validateConfig(config: AgorConfig): void {
     ['last_on_battery_critical_after_ms']
   );
   resolvePowerManagementConfig(config.execution?.power_management);
+  only(config.execution?.restart_recovery, 'execution.restart_recovery', [
+    'enabled',
+    'delay_ms',
+    'max_tasks_per_start',
+    'resume_after_crash',
+  ]);
+  resolveRestartRecoverySettings(config.execution);
   only(config.execution?.executor_heartbeat, 'execution.executor_heartbeat', [
     'enabled',
     'interval_ms',
@@ -964,6 +974,12 @@ function validateConfig(config: AgorConfig): void {
     'branch_workspace',
     'base_repository',
   ]);
+  if (
+    config.execution?.delegated_branch_deletion !== undefined &&
+    typeof config.execution.delegated_branch_deletion !== 'boolean'
+  ) {
+    throw new Error('Config error: execution.delegated_branch_deletion must be a boolean');
+  }
   if (
     config.execution?.executor_storage?.user_home !== undefined &&
     !['replica-local', 'shared', 'persistent-per-user'].includes(
@@ -1724,6 +1740,15 @@ export function assertValidEffectiveExecutionConfig(
   if (execution.unix_user_mode === 'delegated' && !execution.executor_command_template) {
     throw new Error(
       "execution.unix_user_mode 'delegated' requires execution.executor_command_template so execution is actually delegated to an external substrate."
+    );
+  }
+
+  if (
+    execution.delegated_branch_deletion &&
+    (execution.unix_user_mode !== 'delegated' || !execution.executor_command_template)
+  ) {
+    throw new Error(
+      'execution.delegated_branch_deletion requires delegated mode and an external executor command template'
     );
   }
 

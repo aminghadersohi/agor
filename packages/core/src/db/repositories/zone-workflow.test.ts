@@ -1,6 +1,9 @@
 import type { BoardID, CardID, UUID } from '@agor/core/types';
+import { eq } from 'drizzle-orm';
 import { describe, expect } from 'vitest';
 import { generateId } from '../../lib/ids';
+import { select, update } from '../database-wrapper';
+import { boardObjects } from '../schema';
 import { ownedDbTest as dbTest } from '../test-helpers';
 import { RepositoryError } from './base';
 import { BoardObjectRepository } from './board-objects';
@@ -168,4 +171,121 @@ describe('ZoneWorkflowRepository', () => {
       expect(placement?.zone_id).toBe('right');
     }
   );
+
+  dbTest(
+    'merges the advanced placement into existing board-object data instead of replacing it',
+    async ({ db }) => {
+      const boardId = generateId() as BoardID;
+      await new BoardRepository(db).create({
+        board_id: boardId,
+        name: 'Layout board',
+        created_by: 'test-user',
+        objects: {
+          todo: { type: 'zone', x: 0, y: 0, width: 400, height: 300, label: 'Todo' },
+          done: { type: 'zone', x: 500, y: 0, width: 400, height: 300, label: 'Done' },
+        },
+      });
+      const card = await new CardRepository(db).create({ board_id: boardId, title: 'Sized' });
+      const placement = await new BoardObjectRepository(db).create({
+        board_id: boardId,
+        card_id: card.card_id as CardID,
+        position: { x: 30, y: 50 },
+        zone_id: 'todo',
+      });
+      // Placement fields this move does not own (e.g. card layout state).
+      await update(db, boardObjects)
+        .set({
+          data: {
+            position: { x: 30, y: 50 },
+            zone_id: 'todo',
+            size: { width: 320, height: 180 },
+            compact: true,
+          },
+        })
+        .where(eq(boardObjects.object_id, placement.object_id))
+        .run();
+
+      const repo = new ZoneWorkflowRepository(db);
+      const transition = await repo.createTransition(
+        { board_id: boardId, source_zone_id: 'todo', target_zone_id: 'done', label: 'Ship' },
+        'test-user' as UUID
+      );
+      await repo.advance({
+        transitionId: transition.transition_id,
+        idempotencyKey: generateId() as UUID,
+        entities: [{ entity_type: 'card', entity_id: card.card_id as CardID }],
+        requestedBy: 'test-user' as UUID,
+      });
+
+      const row = await select(db)
+        .from(boardObjects)
+        .where(eq(boardObjects.object_id, placement.object_id))
+        .one();
+      const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
+      expect(data).toEqual({
+        position: { x: 30, y: 50 },
+        zone_id: 'done',
+        size: { width: 320, height: 180 },
+        compact: true,
+      });
+    }
+  );
+
+  dbTest('pages advance history newest first and narrows to one transition', async ({ db }) => {
+    const boardId = generateId() as BoardID;
+    await new BoardRepository(db).create({
+      board_id: boardId,
+      name: 'History board',
+      created_by: 'test-user',
+      objects: {
+        a: { type: 'zone', x: 0, y: 0, width: 300, height: 200, label: 'A' },
+        b: { type: 'zone', x: 400, y: 0, width: 300, height: 200, label: 'B' },
+      },
+    });
+    const card = await new CardRepository(db).create({ board_id: boardId, title: 'Ping-pong' });
+    await new BoardObjectRepository(db).create({
+      board_id: boardId,
+      card_id: card.card_id as CardID,
+      position: { x: 40, y: 60 },
+      zone_id: 'a',
+    });
+    const repo = new ZoneWorkflowRepository(db);
+    const forward = await repo.createTransition(
+      { board_id: boardId, source_zone_id: 'a', target_zone_id: 'b', label: 'Forward' },
+      'test-user' as UUID
+    );
+    const back = await repo.createTransition(
+      { board_id: boardId, source_zone_id: 'b', target_zone_id: 'a', label: 'Back' },
+      'test-user' as UUID
+    );
+    const entities = [{ entity_type: 'card' as const, entity_id: card.card_id as CardID }];
+    const advanced: string[] = [];
+    for (const transition of [forward, back, forward]) {
+      const result = await repo.advance({
+        transitionId: transition.transition_id,
+        idempotencyKey: generateId() as UUID,
+        entities,
+        requestedBy: 'test-user' as UUID,
+      });
+      advanced.push(result.audit.advance_id);
+      // requested_at has millisecond resolution; keep the order unambiguous.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    const all = await repo.findAdvancePage({ boardId, limit: 10 });
+    expect(all.total).toBe(3);
+    expect(all.data.map((row) => row.advance_id)).toEqual([...advanced].reverse());
+
+    const forwardOnly = await repo.findAdvancePage({
+      boardId,
+      transitionId: forward.transition_id,
+      limit: 1,
+      offset: 1,
+    });
+    expect(forwardOnly.total).toBe(2);
+    expect(forwardOnly.data.map((row) => row.advance_id)).toEqual([advanced[0]]);
+
+    const otherBoard = await repo.findAdvancePage({ boardId: generateId() as BoardID, limit: 10 });
+    expect(otherBoard).toEqual({ data: [], total: 0 });
+  });
 });

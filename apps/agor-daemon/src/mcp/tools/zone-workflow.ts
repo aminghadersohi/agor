@@ -1,9 +1,17 @@
+import { PAGINATION } from '@agor/core/config';
 import { generateId } from '@agor/core/db';
 import type { ZoneWorkflowEntityRef } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { resolveBoardId, resolveBranchId, resolveCardId } from '../resolve-ids.js';
-import { mcpOptionalString, mcpRequiredId, mcpRequiredString } from '../schema.js';
+import {
+  mcpListLimit,
+  mcpOffset,
+  mcpOptionalString,
+  mcpPageResult,
+  mcpRequiredId,
+  mcpRequiredString,
+} from '../schema.js';
 import type { McpContext } from '../server.js';
 import { coerceString, textResult } from '../server.js';
 
@@ -28,6 +36,37 @@ export function registerZoneWorkflowTools(server: McpServer, ctx: McpContext): v
         query: { board_id: boardId },
       });
       return textResult(result);
+    }
+  );
+
+  server.registerTool(
+    'agor_zone_workflow_advances_list',
+    {
+      description:
+        'List the durable advance history (audit trail) for one board, newest first: which branches/cards were advanced along which transition, by whom, when, and the target-zone prompt outcome. Optionally narrow to one transition. Rows outlive deleted transitions (transition_label is snapshotted). Advance with offset=nextOffset while hasMore is true.',
+      annotations: { readOnlyHint: true },
+      inputSchema: z.object({
+        boardId: mcpRequiredId('boardId', 'Board'),
+        transitionId: mcpOptionalString(
+          'transitionId',
+          'Canonical workflow transition UUID to narrow the history to (optional)'
+        ),
+        limit: mcpListLimit(),
+        offset: mcpOffset(0, PAGINATION.MAX_SKIP),
+      }),
+    },
+    async (args) => {
+      const boardId = await resolveBoardId(ctx, coerceString(args.boardId)!);
+      const limit = args.limit ?? 25;
+      const offset = args.offset ?? 0;
+      const query: Record<string, unknown> = { board_id: boardId, $limit: limit, $skip: offset };
+      const transitionId = coerceString(args.transitionId);
+      if (transitionId) query.transition_id = transitionId;
+      const result = await ctx.app.service('zone-workflow-advances').find({
+        ...ctx.baseServiceParams,
+        query,
+      });
+      return textResult(mcpPageResult(result, limit, offset));
     }
   );
 

@@ -29,6 +29,8 @@ import {
   EditOutlined,
   EllipsisOutlined,
   InboxOutlined,
+  PushpinFilled,
+  PushpinOutlined,
   RobotOutlined,
   SearchOutlined,
   SettingOutlined,
@@ -58,6 +60,7 @@ import { useIsMobileViewport } from '../../hooks/useIsMobileViewport';
 import { ARCHIVE_REFRESH_WARNING, useSessionActions } from '../../hooks/useSessionActions';
 import { useSessionSearch } from '../../hooks/useSessionSearch';
 import { useSharedReactiveSession } from '../../hooks/useSharedReactiveSession';
+import { useTeammateFrontDesk } from '../../hooks/useTeammateFrontDesk';
 import { useAgorStore } from '../../store/agorStore';
 import {
   selectMcpServerById,
@@ -84,6 +87,7 @@ import { ForkSpawnModal } from '../ForkSpawnModal/ForkSpawnModal';
 import type { ModelConfig } from '../ModelSelector';
 import { CreatedByTag } from '../metadata';
 import { getUrlDisplayLabel } from '../Pill/url-helpers';
+import { Tag } from '../Tag';
 import { ToolIcon } from '../ToolIcon';
 import {
   buildPromptWithAttachments,
@@ -98,6 +102,7 @@ import { SessionAttachmentTray } from './SessionAttachmentTray';
 import { SessionComposerDropZone } from './SessionComposerDropZone';
 import { SessionFooter } from './SessionFooter';
 import { SessionPanelContent } from './SessionPanelContent';
+import { buildSpawnPromptContext } from './spawn-prompt-context';
 import {
   isStopTransportAmbiguous,
   reconcileStopTransportFailure,
@@ -390,6 +395,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   } = useAppActions();
 
   const { archiveSession } = useSessionActions(client);
+  // Teammate branches only: which session name-addressing reaches, and
+  // whether this caller (a Branch Manager) may move it.
+  const frontDesk = useTeammateFrontDesk(client, branch);
 
   // Click-to-edit session title, inline in the header — see render below.
   // Draft is seeded from the *explicit* title only (not the description
@@ -939,7 +947,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     modal.confirm({
       title: 'Archive session and same-branch children?',
       content:
-        'This archives the session and its same-branch forked or spawned descendants. Remote-created sessions remain active.',
+        'This archives the session and its same-branch forked or spawned descendants. Remote-created sessions stay active in their own branch.',
       okText: 'Archive',
       cancelText: 'Cancel',
       onOk: async () => {
@@ -969,6 +977,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       setSwitchingTool(null);
     }
   };
+  const isFrontDesk = frontDesk.view?.front_desk?.session_id === session.session_id;
+  const canManageFrontDesk =
+    frontDesk.view?.can_manage === true && (isFrontDesk || !session.archived);
   const moreMenuItems: MenuProps['items'] = [
     ...(branch
       ? [
@@ -998,6 +1009,19 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             icon: <SettingOutlined />,
             label: 'Session settings',
             onClick: () => onOpenSettings(session.session_id),
+          },
+        ]
+      : []),
+    ...(canManageFrontDesk
+      ? [
+          {
+            key: 'front-desk',
+            icon: isFrontDesk ? <PushpinOutlined /> : <PushpinFilled />,
+            label: isFrontDesk ? 'Unpin front desk' : 'Pin as front desk',
+            disabled: connectionDisabled || !client || frontDesk.saving,
+            onClick: () => {
+              void (isFrontDesk ? frontDesk.unpin() : frontDesk.pin(session.session_id));
+            },
           },
         ]
       : []),
@@ -1292,27 +1316,21 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     // forwarding prompt; the spawn config's `permissionMode` is rendered into
     // the meta-prompt as the *child* session's intended mode. They're distinct
     // — don't reuse one for the other.
+    const baseSpawnConfig = buildSpawnPromptContext(config);
+    // Fork delta: callback mode/delivery and child auto-archive ride the same
+    // prompt context as upstream's modal selection.
     const spawnConfig =
-      typeof config === 'string'
-        ? { userPrompt: config }
+      typeof config === 'string' || !('callbackConfig' in baseSpawnConfig)
+        ? baseSpawnConfig
         : {
-            userPrompt: config.prompt || '',
-            agenticTool: config.agent,
-            permissionMode: config.permissionMode,
-            modelConfig: config.modelConfig,
-            codexSandboxMode: config.codexSandboxMode,
-            codexApprovalPolicy: config.codexApprovalPolicy,
-            codexNetworkAccess: config.codexNetworkAccess,
-            mcpServerIds: config.mcpServerIds,
+            ...baseSpawnConfig,
             callbackConfig: {
-              enableCallback: config.enableCallback,
+              ...baseSpawnConfig.callbackConfig,
+              callbackMode: config.callbackMode,
               callbackDelivery: config.callbackDelivery,
-              includeLastMessage: config.includeLastMessage,
-              includeOriginalPrompt: config.includeOriginalPrompt,
             },
             autoArchive: config.autoArchive,
             autoArchiveAfterSeconds: config.autoArchiveAfterSeconds,
-            extraInstructions: config.extraInstructions,
           };
 
     await client
@@ -1574,6 +1592,17 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
                 </Tooltip>
               )}
               <Badge status={getStatusColor()} text={session.status.toUpperCase()} />
+              {isFrontDesk && (
+                <Tooltip title="Messages addressed to this teammate by name reach this session">
+                  <Tag
+                    color="gold"
+                    icon={<PushpinFilled />}
+                    style={{ marginLeft: token.sizeUnit * 2 }}
+                  >
+                    Front desk
+                  </Tag>
+                </Tooltip>
+              )}
               {session.created_by && (
                 <div style={{ marginTop: token.sizeUnit }}>
                   <CreatedByTag

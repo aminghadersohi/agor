@@ -41,6 +41,7 @@ import {
   PlayCircleOutlined,
   PoweroffOutlined,
   ReloadOutlined,
+  RocketOutlined,
   SaveOutlined,
   ThunderboltOutlined,
   UploadOutlined,
@@ -467,6 +468,41 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({
   };
 
   // ----- Import / export (admin only) -----
+  const handleImportLaunchJson = () => {
+    if (!client || !onUpdateRepo) return;
+    confirm({
+      title: 'Import launch profiles?',
+      icon: <RocketOutlined />,
+      content: (
+        <div>
+          <p>
+            This reads <code>.agor/launch.json</code>, or falls back to{' '}
+            <code>.vscode/launch.json</code>, from this branch and replaces the repository&apos;s
+            environment variants.
+          </p>
+          <p>
+            Launch profiles are compiled into supervised Start, Stop, Nuke, and Logs commands.
+            Existing <code>template_overrides</code> and branch snapshots are preserved.
+          </p>
+        </div>
+      ),
+      okText: 'Import profiles',
+      cancelText: 'Cancel',
+      onOk: async () => {
+        try {
+          const updated = (await client
+            .service(`repos/${repo.repo_id}/import-launch-json`)
+            .create({ branch_id: branch.branch_id })) as Repo;
+          if (updated.environment) setRepoYamlText(prettyYaml(updated.environment));
+          onUpdateRepo(repo.repo_id, { environment: updated.environment });
+          showSuccess('Imported launch profiles');
+        } catch (error) {
+          showError(error instanceof Error ? error.message : 'Failed to import launch profiles');
+        }
+      },
+    });
+  };
+
   const handleImport = () => {
     if (!client || !onUpdateRepo) return;
     const variantNamesToOverwrite = repo.environment ? Object.keys(repo.environment.variants) : [];
@@ -847,9 +883,12 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({
                     : 'Ask an admin to set up environment commands in the repo editor below.'}
                 </p>
                 {isAdmin && (
-                  <Space>
+                  <Space wrap>
                     <Button size="small" icon={<DownloadOutlined />} onClick={handleImport}>
                       Import from .agor.yml
+                    </Button>
+                    <Button size="small" icon={<RocketOutlined />} onClick={handleImportLaunchJson}>
+                      Import launch.json
                     </Button>
                   </Space>
                 )}
@@ -892,6 +931,23 @@ export const EnvironmentTab: React.FC<EnvironmentTabProps> = ({
                   disabled={!isAdmin}
                 >
                   Import
+                </Button>
+              </Tooltip>
+              <Tooltip
+                title={
+                  isAdmin
+                    ? 'Import .agor/launch.json or .vscode/launch.json from this branch'
+                    : 'Only admins can import launch profiles'
+                }
+              >
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<RocketOutlined />}
+                  onClick={handleImportLaunchJson}
+                  disabled={!isAdmin}
+                >
+                  Launch JSON
                 </Button>
               </Tooltip>
               <Tooltip
