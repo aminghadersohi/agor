@@ -225,4 +225,38 @@ describe('getTaskAuditTags', () => {
         .label
     ).toBe('1 attachment not delivered');
   });
+
+  it('marks MCP-relayed prompts and says the stamp attests the hop, not approval', () => {
+    const provenance = (
+      overrides: Partial<NonNullable<TaskMetadata['prompt_provenance']>>
+    ): TaskMetadata => ({
+      prompt_provenance: {
+        version: 1,
+        authenticated_by: 'session_token',
+        origin_session_id: PARENT,
+        origin_user_id: USER,
+        origin_agentic_tool: 'claude-code',
+        tool: 'agor_sessions_prompt',
+        mode: 'continue',
+        stamped_at: AT,
+        rendered_block: '<agor_prompt_provenance/>',
+        placement: 'prefix',
+        ...overrides,
+      },
+    });
+
+    const [signed] = tagsFor(provenance({}));
+    expect(signed.label).toBe('Relayed by agent');
+    expect(signed.session).toBe(PARENT);
+    expect(signed.tooltip).toContain('claude-code via agor_sessions_prompt (continue)');
+    expect(signed.tooltip).toContain('signed session token');
+    expect(signed.tooltip).toContain('not that a human read or approved');
+
+    const [apiKey] = tagsFor(
+      provenance({ authenticated_by: 'personal_api_key', origin_session_id: undefined })
+    );
+    expect(apiKey.label).toBe('Relayed by agent (unattributed)');
+    expect(apiKey.session).toBeUndefined();
+    expect(apiKey.tooltip).toContain('personal API key');
+  });
 });
