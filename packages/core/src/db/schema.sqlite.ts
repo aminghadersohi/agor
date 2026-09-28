@@ -801,6 +801,7 @@ export const boards = sqliteTable(
         custom_css?: string; // Custom CSS for animations, keyframes, etc. (rendered in scoped <style> tag)
         objects?: Record<string, import('@agor/core/types').BoardObject>; // Board objects (text, zone)
         custom_context?: Record<string, unknown>; // Custom context for Handlebars templates
+        profile_image_id?: import('@agor/core/types').ProfileImageID; // Primary board gallery image
       }>()
       .notNull(),
 

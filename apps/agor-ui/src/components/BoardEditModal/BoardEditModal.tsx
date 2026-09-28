@@ -14,6 +14,7 @@ import { useAgorStore } from '../../store/agorStore';
 import { selectUserById } from '../../store/selectors';
 import { BoardFormFields, extractBoardFormValues } from '../forms/BoardFormFields';
 import { JSONEditor, validateJSON } from '../JSONEditor';
+import { ProfileImageGalleryEditor } from '../ProfileImage';
 import { BoardCapabilityPolicyModalEditor } from '../permissions/CapabilityPolicyEditor';
 import { OwnershipTransfer } from '../permissions/CapabilityPolicyEditor/OwnershipTransfer';
 
@@ -254,6 +255,13 @@ export function BoardEditModal({
                 />
               </Form.Item>
             }
+          />
+          {/* Gallery changes save immediately through the profile-image routes,
+              independent of this modal's Save. */}
+          <ProfileImageGalleryEditor
+            subject={{ type: 'board', id: loadedBoard.board_id }}
+            canEdit={canEditGeneral}
+            label="Board images"
           />
         </Form>
       )}
