@@ -1,7 +1,7 @@
 // src/types/task.ts
 import type { PersistedAgenticToolName } from './agentic-tool';
 import type { GatewayInboundEventID } from './gateway';
-import type { MessageID, SessionID, TaskID, UserID } from './id';
+import type { BranchID, MessageID, SessionID, TaskID, UserID } from './id';
 import type { PersistedMessageSource } from './message';
 import type { PowerTaskHold } from './power-management';
 import type { ReportPath, ReportTemplate } from './report';
@@ -453,6 +453,59 @@ export interface TaskMetadata {
 
   /** Internal Slack delivery projection for the structured MCP recovery above. */
   mcp_slack_recovery_notice?: import('./mcp').MCPSlackRecoveryNotice;
+
+  /**
+   * Immutable origin of an agent-originated prompt, stamped server-side at
+   * admission from the daemon's own authenticated request context.
+   *
+   * Callers cannot supply or influence any field: the key is stripped from
+   * caller metadata unconditionally in `buildPromptTaskMetadata` (including
+   * for trusted daemon-internal producers, which is strictly stronger than the
+   * treatment of `source`), and the value is applied from a trusted param that
+   * only the MCP layer sets. The same reviewed shape as `completion_callback`.
+   *
+   * Presence means an MCP caller delivered this prompt. Absence means it came
+   * from an authenticated browser/REST transport session or a daemon-internal
+   * producer - neither of which an agent holding a session token or personal
+   * API key can reach. So an agent cannot suppress its own stamp.
+   *
+   * IDs only, deliberately. Display names are resolved and RBAC-gated at
+   * render time against the recipient Session owner's branch access, so this
+   * row cannot become a channel for a branch name the reader may not see.
+   */
+  prompt_provenance?: {
+    version: 1;
+    /**
+     * How the origin Session identity was established. Never flattened: the
+     * MCP session-token path carries a signed session binding, while the
+     * personal-API-key path only re-authorizes an `X-Agor-Session-Id` the
+     * caller chose. Emitting one value for both would launder the weaker
+     * claim into the stronger one.
+     */
+    authenticated_by: 'session_token' | 'personal_api_key';
+    /** Absent when the caller named no Agor session (P2: admit, render unattributed). */
+    origin_session_id?: SessionID;
+    origin_branch_id?: BranchID;
+    /**
+     * No `origin_task_id`. The session MCP token binds a Session, not a Task,
+     * and nothing else on the authenticated request names one - so the only
+     * way to fill it would be to query the origin Session's current Task and
+     * attest a guess. An envelope that exists to stop inferred identity from
+     * looking attested must not do that. See the follow-up note in the PR.
+     */
+    /** Agor account the calling agent ran under. Not evidence of human approval. */
+    origin_user_id: UserID;
+    origin_agentic_tool?: PersistedAgenticToolName;
+    tool: string;
+    mode?: string;
+    stamped_at: string;
+    /** Exact block text rendered into `full_prompt`, for audit and re-application. */
+    rendered_block: string;
+    /** Where the block sits relative to the caller body. */
+    placement: 'prefix' | 'suffix';
+    /** Sentinel occurrences neutralized out of the caller body, when any. */
+    escaped_sentinels?: number;
+  };
 
   /**
    * Immutable one-shot completion callback requested for this exact task.
