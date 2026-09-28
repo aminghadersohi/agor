@@ -58,6 +58,30 @@ describe('useBranchModalForm normalized permission package', () => {
     expect(result.current.canEditPermissions).toBe(true);
   });
 
+  it.each([
+    ['write', true],
+    ['read', false],
+    [undefined, false],
+  ] as const)(
+    'derives file write access from effective fs_access %s',
+    async (fsAccess, expected) => {
+      const user = makeUser({ user_id: 'collab-1', role: 'member' });
+      const branch = makeBranch();
+      const { client } = makeStubClient({
+        users: [user],
+        effectiveAccess: { can: 'session', fs_access: fsAccess, is_owner: false, source: 'others' },
+      });
+      const { result } = renderHook(
+        () => useBranchModalForm({ branch, client, currentUser: user, open: true }),
+        { wrapper }
+      );
+
+      expect(result.current.canWriteFiles).toBe(false);
+      await waitFor(() => expect(result.current.permissionsLoading).toBe(false));
+      expect(result.current.canWriteFiles).toBe(expected);
+    }
+  );
+
   it('saves general changes and the canonical permission package without legacy owner calls', async () => {
     const owner = makeUser({ user_id: 'user-1', role: 'member' });
     const branch = makeBranch();
