@@ -89,3 +89,25 @@ export function formatTimestampWithRelative(
 
   return `${relative}\n${absolute}`;
 }
+
+/**
+ * Format a future timestamp as a short countdown ("in 4m", "in 2h"). A
+ * deadline that has passed but not yet been acted on reads "any moment now".
+ * Returns `undefined` for a missing or unparseable timestamp.
+ */
+export function formatTimeUntil(
+  timestamp: string | Date | undefined | null,
+  now: Date = new Date()
+): string | undefined {
+  if (!timestamp) return undefined;
+  const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
+  if (Number.isNaN(date.getTime())) return undefined;
+  const diffSec = Math.floor((date.getTime() - now.getTime()) / 1000);
+  if (diffSec <= 0) return 'any moment now';
+  if (diffSec < 60) return `in ${diffSec}s`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `in ${diffMin}m`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return `in ${diffHour}h ${diffMin % 60}m`;
+  return `in ${Math.floor(diffHour / 24)}d`;
+}

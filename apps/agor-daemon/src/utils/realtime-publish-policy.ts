@@ -145,6 +145,10 @@ export const REALTIME_PUBLISH_POLICY = {
     minimumRole: 'admin',
     why: 'The admin power banner tracks the redacted host policy projection live.',
   },
+  'power-management/admission': {
+    audience: 'tenant',
+    why: 'The session footer "held" tag tracks the redacted {held, state, reason} admission projection live.',
+  },
   'power-management/essential-sessions': {
     audience: 'none',
     why: 'Bounded admin picker RPC; canonical sessions events trigger caller-scoped refreshes.',
@@ -483,6 +487,11 @@ export const REALTIME_PUBLISH_POLICY = {
   'sessions/:id/archive': { audience: 'none', why: `${NO_CONSUMER} Lands as sessions.patched.` },
   'sessions/:id/unarchive': { audience: 'none', why: `${NO_CONSUMER} Lands as sessions.patched.` },
   'sessions/:id/genealogy': { audience: 'none', why: NO_CONSUMER },
+  'sessions/:id/retarget-callback': {
+    audience: 'none',
+    why: `${NO_CONSUMER} Lands as sessions.patched.`,
+  },
+  'sessions/:id/reparent': { audience: 'none', why: `${NO_CONSUMER} Lands as sessions.patched.` },
   'sessions/:id/env-selections': {
     audience: 'none',
     why: `${NO_CONSUMER} Lands as session-env-selections.`,

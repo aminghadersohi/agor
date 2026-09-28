@@ -206,6 +206,10 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
     scopeClass: 'scoped',
     why: 'Fork power management. Registered through createTenantScopedAuthenticatedRouteRegistrar (transaction: false, because refreshOwnership awaits a host UPS probe); each read/write runs in the armed request scope.',
   },
+  'power-management/admission': {
+    scopeClass: 'scoped',
+    why: 'Fork power management. Registered through createTenantScopedAuthenticatedRouteRegistrar (transaction: false); returns the redacted in-memory admission projection and reads no rows.',
+  },
   'power-management/essential-sessions': {
     scopeClass: 'scoped',
     why: 'Fork power management. Registered through createTenantScopedAuthenticatedRouteRegistrar; a tenant-scoped session search in the armed request scope.',
@@ -217,6 +221,14 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
   'branches/:id/front-desk': {
     scopeClass: 'scoped',
     why: 'Fork teammate front desk. Registered through createTenantScopedAuthenticatedRouteRegistrar; reads and compare-and-swaps tenant-owned branch_front_desk_sessions rows under the tenant authorization fence in the armed request scope.',
+  },
+  'sessions/:id/retarget-callback': {
+    scopeClass: 'scoped',
+    why: 'Fork callback routing. Registered through createTenantScopedAuthenticatedRouteRegistrar; one SessionsService.retargetCallback unit (same as agor_sessions_retarget_callback) that rejects cross-tenant destinations and writes tenant-owned session/relationship rows in the armed request scope.',
+  },
+  'sessions/:id/reparent': {
+    scopeClass: 'scoped',
+    why: 'Fork genealogy. Registered through createTenantScopedAuthenticatedRouteRegistrar; one SessionsService.reparent unit (same as agor_sessions_reparent) that rejects cross-tenant and cross-branch parents and writes one tenant-owned Session row in the armed request scope.',
   },
   'tasks/:id/queued-prompt': {
     scopeClass: 'scoped',

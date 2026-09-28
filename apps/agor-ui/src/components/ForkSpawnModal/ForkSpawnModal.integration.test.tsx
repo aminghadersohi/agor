@@ -23,11 +23,13 @@ vi.mock('../AutocompleteTextarea', () => ({
 vi.mock('../SessionEnvVarsSelector', () => ({ SessionEnvVarsSelector: () => null }));
 
 // Fork delta: every spawn carries the child auto-archive default and the
-// parent's callback delivery (sessions without a callback_config deliver direct).
+// parent's callback delivery (sessions without a callback_config deliver direct),
+// plus the one-shot callback mode spawned children default to.
 const FORK_SPAWN_DEFAULTS = {
   autoArchive: 'after_completion',
   autoArchiveAfterSeconds: 3600,
   callbackDelivery: 'direct',
+  callbackMode: 'once',
 };
 
 const parent = {

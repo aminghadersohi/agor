@@ -108,6 +108,34 @@ describe('SessionSettingsModal configuration', { timeout: 10_000 }, () => {
     expect(screen.queryByTestId('effort-chip')).not.toBeInTheDocument();
   });
 
+  it.each([
+    ['keeps an explicit once mode', { enabled: true, callback_mode: 'once' }, 'once'],
+    ['writes the persistent default when the mode was omitted', { enabled: true }, 'persistent'],
+  ])('%s on save', async (_label, callbackConfig, expectedMode) => {
+    const onUpdate = vi.fn();
+    render(
+      <SessionSettingsModal
+        open
+        onClose={vi.fn()}
+        session={{ ...claudeSession, callback_config: callbackConfig } as Session}
+        client={null}
+        currentUser={null}
+        onUpdate={onUpdate}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(onUpdate).toHaveBeenCalledWith(
+        's1',
+        expect.objectContaining({
+          callback_config: expect.objectContaining({ callback_mode: expectedMode }),
+        })
+      )
+    );
+  });
+
   it('persists MCP changes while a preset is selected', async () => {
     const onUpdateSessionMcpServers = vi.fn();
     render(
