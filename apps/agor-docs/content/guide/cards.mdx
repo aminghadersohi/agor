@@ -70,7 +70,7 @@ A Card Type has:
 - **Color.** Default color for the card's visual treatment
 - **JSON Schema** (optional) validates the structured `data` field on cards. No auto-form generation. Agents set data directly via MCP
 
-Individual cards can override the emoji and color (e.g., to flag a critical ticket red), but normally they inherit from their type.
+Individual cards can override the emoji and color (e.g., to flag a critical ticket red), but normally they inherit from their type. A card color override must be hex (`#rgb`, `#rrggbb`, or `#rrggbbaa`), the same as a branch color. The MCP card tools reject anything else.
 
 ---
 
