@@ -11,6 +11,7 @@ import { App as AntdApp, ConfigProvider, Layout, theme } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ReactFlowProvider, useReactFlow, useViewport } from 'reactflow';
 import { AppHeader } from '../../components/AppHeader';
+import { ProfileImageNetworkProvider } from '../../components/ProfileImage/ProfileImageNetworkContext';
 import { SessionCanvas } from '../../components/SessionCanvas';
 import type { StaticRemoteCursor } from '../../components/SessionCanvas/canvas/RemoteCursorLayer';
 import { SessionSettingsModal } from '../../components/SessionSettingsModal';
@@ -479,59 +480,62 @@ export const MarketingVideoPage = () => {
             currentSha: null,
           }}
         >
-          <Layout className="marketing-video-page" data-testid="marketing-video-page">
-            <AppHeader
-              user={demoUsers[0]}
-              presenceClient={null}
-              currentUserId={demoUsers[0].user_id}
-              staticActiveUsers={demoActiveUsers}
-              connected={true}
-              connecting={false}
-              eventStreamEnabled={true}
-              currentBoardId={demoBoardId}
-            />
-            <main className="marketing-video-canvas">
-              <ReactFlowProvider>
-                <DemoViewportDirector scene={scene} t={t} />
-                <SessionCanvas
-                  board={demoBoard}
-                  client={null}
-                  branches={demoBranches}
-                  currentUserId={demoUsers[0].user_id}
-                  selectedSessionId={null}
-                  availableAgents={[]}
-                  staticCursors={cursors}
-                  staticCursorScale={1.3}
-                  height="calc(100vh - 64px)"
-                />
-                <ArtifactRevealOverlay scene={scene} t={t} />
-              </ReactFlowProvider>
-              {/* Scenes "session"/"sessions"/"gateway"/"multiplayer": staged panel on the right */}
-              {scene.uiFlags.sessionPhase && (
-                <DemoSessionStage
-                  scene={scene}
-                  t={t}
-                  variant={STAGE_VARIANT_BY_SCENE[scene.name] ?? 'coding'}
-                />
-              )}
-              {/* Scene "gateway": Slack-style channel stage on the left */}
-              {scene.uiFlags.slackPhase && (
-                <DemoSlackStage scene={scene} t={t} prompt={GATEWAY_PROMPT} />
-              )}
-            </main>
-            {settingsSession && scene.uiFlags.settingsOpen && (
-              <SessionSettingsModal
-                open={settingsOpen}
-                onClose={() => undefined}
-                session={settingsSession}
-                client={null}
-                currentUser={demoUsers[0]}
+          {/* Fixture identities must never resolve against a live daemon. */}
+          <ProfileImageNetworkProvider value={false}>
+            <Layout className="marketing-video-page" data-testid="marketing-video-page">
+              <AppHeader
+                user={demoUsers[0]}
+                presenceClient={null}
+                currentUserId={demoUsers[0].user_id}
+                staticActiveUsers={demoActiveUsers}
+                connected={true}
+                connecting={false}
+                eventStreamEnabled={true}
+                currentBoardId={demoBoardId}
               />
-            )}
-            <DemoScreenPointer scene={scene} t={t} />
-            <DemoScreenCursors scene={scene} t={t} />
-            <DemoGlobalVeil scene={scene} t={t} />
-          </Layout>
+              <main className="marketing-video-canvas">
+                <ReactFlowProvider>
+                  <DemoViewportDirector scene={scene} t={t} />
+                  <SessionCanvas
+                    board={demoBoard}
+                    client={null}
+                    branches={demoBranches}
+                    currentUserId={demoUsers[0].user_id}
+                    selectedSessionId={null}
+                    availableAgents={[]}
+                    staticCursors={cursors}
+                    staticCursorScale={1.3}
+                    height="calc(100vh - 64px)"
+                  />
+                  <ArtifactRevealOverlay scene={scene} t={t} />
+                </ReactFlowProvider>
+                {/* Scenes "session"/"sessions"/"gateway"/"multiplayer": staged panel on the right */}
+                {scene.uiFlags.sessionPhase && (
+                  <DemoSessionStage
+                    scene={scene}
+                    t={t}
+                    variant={STAGE_VARIANT_BY_SCENE[scene.name] ?? 'coding'}
+                  />
+                )}
+                {/* Scene "gateway": Slack-style channel stage on the left */}
+                {scene.uiFlags.slackPhase && (
+                  <DemoSlackStage scene={scene} t={t} prompt={GATEWAY_PROMPT} />
+                )}
+              </main>
+              {settingsSession && scene.uiFlags.settingsOpen && (
+                <SessionSettingsModal
+                  open={settingsOpen}
+                  onClose={() => undefined}
+                  session={settingsSession}
+                  client={null}
+                  currentUser={demoUsers[0]}
+                />
+              )}
+              <DemoScreenPointer scene={scene} t={t} />
+              <DemoScreenCursors scene={scene} t={t} />
+              <DemoGlobalVeil scene={scene} t={t} />
+            </Layout>
+          </ProfileImageNetworkProvider>
         </ConnectionProvider>
       </AntdApp>
     </ConfigProvider>

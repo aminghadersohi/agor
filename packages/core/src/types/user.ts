@@ -436,6 +436,18 @@ export interface EventStreamPreferences {
 }
 
 /**
+ * Idle screensaver preferences. Automatic activation is opt-in: an unset or
+ * disabled preference never starts the screensaver on idle, though it can
+ * still be previewed from the user menu.
+ */
+export interface ScreensaverPreferences {
+  /** Start the screensaver automatically after `idleMinutes` without input. */
+  enabled: boolean;
+  /** Minutes without input before the screensaver starts (UI default: 5). */
+  idleMinutes?: number;
+}
+
+/**
  * Per-user onboarding state (stored in user.preferences)
  */
 export interface OnboardingState {
@@ -480,6 +492,7 @@ export interface OnboardingState {
 export interface UserPreferences {
   audio?: AudioPreferences;
   eventStream?: EventStreamPreferences;
+  screensaver?: ScreensaverPreferences;
   onboarding?: OnboardingState;
   /** The user's personal/main board ID (created during onboarding or later) */
   mainBoardId?: string;

@@ -1,8 +1,12 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  DEFAULT_SCREENSAVER_IDLE_MINUTES,
   DEFAULT_SCREENSAVER_IDLE_MS,
   IdleGlyphScreensaver,
+  MAX_SCREENSAVER_IDLE_MINUTES,
+  MIN_SCREENSAVER_IDLE_MINUTES,
+  resolveScreensaverIdleMinutes,
   startIdleGlyphScreensaver,
 } from './IdleGlyphScreensaver';
 
@@ -62,5 +66,26 @@ describe('IdleGlyphScreensaver', () => {
     render(<IdleGlyphScreensaver />);
     act(() => startIdleGlyphScreensaver());
     expect(screen.getByRole('dialog', { name: /idle screensaver/i })).toBeInTheDocument();
+  });
+
+  it('never starts on idle when automatic activation is off, but can still be previewed', () => {
+    render(<IdleGlyphScreensaver idleMs={1_000} idleEnabled={false} />);
+    act(() => vi.advanceTimersByTime(DEFAULT_SCREENSAVER_IDLE_MS * 2));
+    expect(screen.queryByRole('dialog', { name: /idle screensaver/i })).not.toBeInTheDocument();
+
+    act(() => startIdleGlyphScreensaver());
+    expect(screen.getByRole('dialog', { name: /idle screensaver/i })).toBeInTheDocument();
+  });
+
+  it('clamps the stored idle delay to the supported range', () => {
+    expect(resolveScreensaverIdleMinutes(undefined)).toBe(DEFAULT_SCREENSAVER_IDLE_MINUTES);
+    expect(resolveScreensaverIdleMinutes({ enabled: true })).toBe(DEFAULT_SCREENSAVER_IDLE_MINUTES);
+    expect(resolveScreensaverIdleMinutes({ enabled: true, idleMinutes: 0 })).toBe(
+      MIN_SCREENSAVER_IDLE_MINUTES
+    );
+    expect(resolveScreensaverIdleMinutes({ enabled: true, idleMinutes: 10_000 })).toBe(
+      MAX_SCREENSAVER_IDLE_MINUTES
+    );
+    expect(resolveScreensaverIdleMinutes({ enabled: true, idleMinutes: 12.4 })).toBe(12);
   });
 });
