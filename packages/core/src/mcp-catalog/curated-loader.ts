@@ -7,6 +7,7 @@
  * rather than silently putting a half-populated card into the marketplace.
  */
 
+import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { MCPCatalogEntry, MCPCatalogTransport } from '@agor/core/types';
@@ -92,6 +93,7 @@ const catalogEntryCredentialsSchema = z
 const catalogEntrySchema = z
   .object({
     name: nonEmpty,
+    hidden: z.boolean().optional(),
     category: z.enum(MCP_CATALOG_CATEGORIES),
     capabilities: z.array(z.enum(MCP_CATALOG_CAPABILITIES)).min(1).max(6),
     benefit: nonEmpty,
@@ -149,9 +151,17 @@ const catalogFileSchema = z
   })
   .strict();
 
-/** Absolute path of the checked-in catalog file, alongside its loader. */
+/**
+ * Absolute path of the checked-in catalog file. Source and CJS builds keep it
+ * beside this loader; the split ESM build may hoist the loader into a root
+ * chunk, which finds the copied file under mcp-catalog/.
+ */
 export function curatedCatalogPath(): string {
-  return path.join(__dirname, 'curated.yaml');
+  const candidates = [
+    path.join(__dirname, 'curated.yaml'),
+    path.join(__dirname, 'mcp-catalog', 'curated.yaml'),
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
 }
 
 /**
@@ -206,7 +216,8 @@ function assertEntryIsServable(entry: {
 /**
  * Parse the catalog file.
  *
- * Both top-level lists are one catalog: every entry in either is offered. The
+ * Both top-level lists are one catalog, including hidden definitions. Visibility
+ * is applied after validation, never instead of it. The
  * split records how the entry's `name` was arrived at — the registry publishes
  * a server under exactly that name, or Agor inferred it from the vendor's
  * domain. That is a curation fact, checked by a reviewer against a diff, and it

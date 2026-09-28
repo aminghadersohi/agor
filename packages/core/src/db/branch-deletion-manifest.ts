@@ -24,9 +24,30 @@ export const BRANCH_DELETION_RELATIONS: Readonly<Record<string, BranchDeletionRe
     'Preserve foreign-branch sessions; clear deleted schedule provenance.'
   ),
   'tasks.session_id': owned('Settle runtime containment before deleting tasks in bounded chunks.'),
+  'completion_subscriptions.callback_session_id': clear(
+    'Retain inert draft rows; clear the deleted callback reference.'
+  ),
+  'completion_subscriptions.root_session_id': clear(
+    'Historical root provenance does not own other branches.'
+  ),
+  'completion_subscriptions.root_task_id': clear(
+    'Historical root provenance does not own other branches.'
+  ),
+  'completion_subscriptions.active_session_id': clear(
+    'Preserve inert draft rows; clear deleted work references.'
+  ),
+  'completion_subscriptions.active_task_id': clear(
+    'Preserve inert draft rows; clear deleted work references.'
+  ),
+  'completion_subscriptions.delivery_task_id': clear(
+    'Clear deleted delivery provenance without deleting a foreign draft row.'
+  ),
   'messages.session_id': owned('Batch by session, including messages without a task.'),
   'messages.task_id': classify(
     'Delete branch-owned messages; a foreign-session reference is not ownership.'
+  ),
+  'profile_images.branch_id': owned(
+    'Only branch-owned profile bytes; preserve board and user galleries.'
   ),
   'schedules.branch_id': owned('Fence production before deleting schedules.'),
   'schedules.last_run_session_id': clear('Preserve schedules owned by other branches.'),
@@ -79,6 +100,12 @@ export const BRANCH_DELETION_RELATIONS: Readonly<Record<string, BranchDeletionRe
   'session_reminders.session_id': owned('Drain reminders before their owning Session and Tasks.'),
   'session_reminders.task_id': classify(
     'Delete Session-owned reminders first; a foreign reminder task reference blocks deletion rather than erasing unrelated provenance.'
+  ),
+  'branch_front_desk_sessions.branch_id': owned(
+    'A front-desk declaration is a routing preference of its branch; history goes with it.'
+  ),
+  'branch_front_desk_sessions.session_id': owned(
+    'Promotion pins only same-branch Sessions, so the declaration dies with its Session.'
   ),
   'session_env_selections.session_id': owned(
     'Delete selection, preserve user-owned environment values.'
@@ -195,6 +222,18 @@ export const BRANCH_DELETION_NON_FK_RELATIONS: Readonly<
   ),
   'executor_session_token_authorities.task_id': classify(
     'Include task-bound authorities before deleting their lookup rows.'
+  ),
+  'completion_subscriptions.origin_session_id': retain(
+    'Immutable audit identity, not branch ownership or live delivery authority.'
+  ),
+  'completion_subscriptions.origin_task_id': retain(
+    'Immutable audit identity, not branch ownership or live delivery authority.'
+  ),
+  'completion_subscriptions.path': retain(
+    'Cross-branch chain audit history; never cascade deletion through its plain IDs.'
+  ),
+  'completion_subscriptions.terminal_snapshot': retain(
+    'Retain the cross-branch terminal outcome under the subscription owner; not a live resource grant.'
   ),
   'sessions.parent_session_id': clear(
     'Detach surviving sessions; ancestry never grants deletion ownership.'

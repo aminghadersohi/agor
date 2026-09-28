@@ -1,5 +1,6 @@
 import type { UserMCPOAuthToken } from '@agor/core/db';
-import type { MCPServer, MCPServerID } from '@agor/core/types';
+import { mergeMCPAuth } from '@agor/core/mcp';
+import type { MCPAuthPatch, MCPServer, MCPServerID } from '@agor/core/types';
 import { describe, expect, it } from 'vitest';
 import {
   fingerprintMCPOAuthGrantConfiguration,
@@ -384,6 +385,89 @@ describe('MCP OAuth grant configuration binding', () => {
         source: 'catalog',
         catalog_entry_name: 'com.example/provider',
       })
+    ).toBe(true);
+  });
+});
+
+/**
+ * The daemon half of the "phantom auth field" regression. The UI half lives in
+ * apps/agor-ui/src/components/MCPServer/mcp-oauth-utils.test.ts, which pins the
+ * exact patch payload an Advanced-panel-untouched save produces; this asserts
+ * what that payload costs once it reaches `mcp-servers` PATCH. The two are
+ * coupled by the literals below — change one and the other should be updated.
+ */
+describe('a save that touched no OAuth policy field keeps its grants', () => {
+  const stored: MCPServer = {
+    ...(server as unknown as MCPServer),
+    auth: {
+      type: 'oauth',
+      oauth_mode: 'per_user',
+      oauth_grant_type: 'client_credentials',
+      oauth_client_id: 'pre-registered-client',
+      // What the user deliberately configured, and what a phantom write reverts.
+      oauth_compatibility_mode: 'legacy',
+      oauth_dcr_mode: 'disabled',
+    },
+  };
+
+  /** `mcp-servers` PATCH merges auth field by field — the real write path. */
+  const patched = (patch: MCPAuthPatch): MCPServer => ({
+    ...stored,
+    auth: mergeMCPAuth(stored.auth, patch),
+  });
+
+  it('leaves the configuration unchanged, so deleteAllForServer is never reached', () => {
+    // buildAuthFromValues(..., { forPatch: true }) for a form holding the
+    // stored policy: every field round-trips as the value the user chose.
+    const roundTripped = patched({
+      type: 'oauth',
+      oauth_client_id: 'pre-registered-client',
+      oauth_grant_type: 'client_credentials',
+      oauth_mode: 'per_user',
+      oauth_compatibility_mode: 'legacy',
+      oauth_dcr_mode: 'disabled',
+    });
+    expect(roundTripped.auth).toMatchObject({
+      oauth_compatibility_mode: 'legacy',
+      oauth_dcr_mode: 'disabled',
+    });
+    expect(hasMCPOAuthRelevantServerConfigurationChanged(stored, roundTripped)).toBe(false);
+
+    // And for a form that was not holding those values at all: an omitted
+    // field keeps the stored one, so an untouched policy is still a no-op.
+    const omitted = patched({ type: 'oauth', oauth_scope: undefined });
+    expect(omitted.auth).toMatchObject({
+      oauth_compatibility_mode: 'legacy',
+      oauth_dcr_mode: 'disabled',
+    });
+    expect(hasMCPOAuthRelevantServerConfigurationChanged(stored, omitted)).toBe(false);
+  });
+
+  it('would have destroyed them had the save invented the defaults', () => {
+    // The pre-fix payload: an absent form field coerced to an explicit default.
+    const phantom = patched({
+      type: 'oauth',
+      oauth_client_id: 'pre-registered-client',
+      oauth_grant_type: 'client_credentials',
+      oauth_mode: 'per_user',
+      oauth_compatibility_mode: 'strict',
+      oauth_dcr_mode: 'advertised',
+    });
+    expect(hasMCPOAuthRelevantServerConfigurationChanged(stored, phantom)).toBe(true);
+
+    // Either field is destructive on its own, which is why a partial revert —
+    // DCR back to advertised while legacy survived — costs just as much.
+    expect(
+      hasMCPOAuthRelevantServerConfigurationChanged(
+        stored,
+        patched({ type: 'oauth', oauth_dcr_mode: 'advertised' })
+      )
+    ).toBe(true);
+    expect(
+      hasMCPOAuthRelevantServerConfigurationChanged(
+        stored,
+        patched({ type: 'oauth', oauth_compatibility_mode: 'strict' })
+      )
     ).toBe(true);
   });
 });

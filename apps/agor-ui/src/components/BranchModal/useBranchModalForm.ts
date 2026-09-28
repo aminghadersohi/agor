@@ -86,6 +86,8 @@ export interface BranchModalFormApi {
   canManagePolicy: boolean;
   canEditPermissions: boolean;
   canControlEnvironment: boolean;
+  /** Branch file `write` access; false while effective access is loading or unavailable. */
+  canWriteFiles: boolean;
 
   // Board-move validation: `board_id` is a Select of every board the caller
   // can VIEW, not just the ones they can attach a branch to, so a selection
@@ -359,6 +361,7 @@ export function useBranchModalForm({
     capabilityPolicy && (isSuperAdmin || effectiveAccess?.can === 'all' || isPrimaryOwner)
   );
   const canControlEnvironment = canManagePolicy;
+  const canWriteFiles = effectiveAccess?.fs_access === 'write';
   const canViewPermissions = Boolean(capabilityPolicy);
   const canEditGeneral = canManagePolicy;
   // Every authenticated viewer may author their own personal session-sharing
@@ -466,6 +469,7 @@ export function useBranchModalForm({
     canManagePolicy,
     canEditPermissions,
     canControlEnvironment,
+    canWriteFiles,
     boardAttachChecking,
     boardAttachError,
     hasChanges,

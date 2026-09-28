@@ -119,4 +119,59 @@ describe('zone workflow services', () => {
       expect.objectContaining({ path: 'board-objects', method: 'patch' })
     );
   });
+
+  it('lists board advance history newest first with transition filter and paging', async () => {
+    const { db, userId, boardId, card } = await fixture();
+    const params = { user: { user_id: userId, role: 'member' } } as never;
+    const transitions = new ZoneWorkflowTransitionsService(db);
+    const forward = await transitions.create(
+      { board_id: boardId, source_zone_id: 'source', target_zone_id: 'target', label: 'Forward' },
+      params
+    );
+    const back = await transitions.create(
+      { board_id: boardId, source_zone_id: 'target', target_zone_id: 'source', label: 'Back' },
+      params
+    );
+    const app = { service: vi.fn(() => ({ emit: vi.fn() })) } as unknown as Application;
+    const advances = new ZoneWorkflowAdvancesService(db, app);
+    const ids: string[] = [];
+    for (const transition of [forward, back]) {
+      const audit = await advances.create(
+        {
+          transition_id: transition.transition_id,
+          idempotency_key: generateId() as UUID,
+          entities: [{ entity_type: 'card', entity_id: card.card_id as CardID }],
+        },
+        params
+      );
+      ids.push(audit.advance_id);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    const all = await advances.find({ ...params, query: { board_id: boardId } });
+    expect(all.total).toBe(2);
+    expect(all.data.map((row) => row.advance_id)).toEqual([ids[1], ids[0]]);
+
+    // Query strings arrive as text over REST.
+    const firstPage = await advances.find({
+      ...params,
+      query: { board_id: boardId, $limit: '1', $skip: '1' },
+    });
+    expect(firstPage).toMatchObject({ total: 2, limit: 1, skip: 1 });
+    expect(firstPage.data.map((row) => row.advance_id)).toEqual([ids[0]]);
+
+    const backOnly = await advances.find({
+      ...params,
+      query: { board_id: boardId, transition_id: back.transition_id },
+    });
+    expect(backOnly.data.map((row) => row.transition_label)).toEqual(['Back']);
+
+    await expect(advances.find({ ...params, query: {} })).rejects.toThrow('board_id is required');
+    await expect(
+      advances.find({ ...params, query: { board_id: boardId, transition_id: 'nope' } })
+    ).rejects.toThrow('transition_id must be a UUID');
+    await expect(
+      advances.find({ ...params, query: { board_id: boardId, $limit: -1 } })
+    ).rejects.toThrow('$limit must be an integer');
+  });
 });

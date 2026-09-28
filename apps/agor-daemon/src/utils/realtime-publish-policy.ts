@@ -132,6 +132,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: 'Selection names are credential metadata; there is no subscriber, and any future consumer needs an owner-aware disclosure decision.',
   },
+  'branches/:id/front-desk': {
+    audience: 'none',
+    why: 'Pin/clear return the fresh front-desk view to the caller; other viewers refetch when they open the teammate.',
+  },
   'sessions/:id/power-priority': {
     audience: 'none',
     why: 'The dedicated mutation returns its projection; the canonical sessions.patched event refreshes viewers.',
@@ -140,6 +144,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'tenant',
     minimumRole: 'admin',
     why: 'The admin power banner tracks the redacted host policy projection live.',
+  },
+  'power-management/admission': {
+    audience: 'tenant',
+    why: 'The session footer "held" tag tracks the redacted {held, state, reason} admission projection live.',
   },
   'power-management/essential-sessions': {
     audience: 'none',
@@ -299,6 +307,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: 'Invocation-scoped workspace reports; branch state publishes through branches.',
   },
+  'branches/:id/retire-teammate': {
+    audience: 'none',
+    why: 'Retirement admission response; archived branch state publishes through branches.',
+  },
   'branches/:id/clean': {
     audience: 'none',
     why: 'Cleanup admission response; status publishes through branches.',
@@ -316,6 +328,7 @@ export const REALTIME_PUBLISH_POLICY = {
     why: 'Returns a command-scoped Git credential DTO to one executor.',
   },
   'api/v1/user/api-keys': { audience: 'none', why: 'Returns a freshly minted user API key.' },
+  'api/v1/user/me': { audience: 'none', why: 'Returns the caller identity to that caller only.' },
   terminals: {
     audience: 'none',
     why: 'Shell control plane; output rides native terminal:* socket packets.',
@@ -474,6 +487,11 @@ export const REALTIME_PUBLISH_POLICY = {
   'sessions/:id/archive': { audience: 'none', why: `${NO_CONSUMER} Lands as sessions.patched.` },
   'sessions/:id/unarchive': { audience: 'none', why: `${NO_CONSUMER} Lands as sessions.patched.` },
   'sessions/:id/genealogy': { audience: 'none', why: NO_CONSUMER },
+  'sessions/:id/retarget-callback': {
+    audience: 'none',
+    why: `${NO_CONSUMER} Lands as sessions.patched.`,
+  },
+  'sessions/:id/reparent': { audience: 'none', why: `${NO_CONSUMER} Lands as sessions.patched.` },
   'sessions/:id/env-selections': {
     audience: 'none',
     why: `${NO_CONSUMER} Lands as session-env-selections.`,
@@ -544,11 +562,20 @@ export const REALTIME_PUBLISH_POLICY = {
   'repos/:id/branches': { audience: 'none', why: `${NO_CONSUMER} Lands as branches.created.` },
   'repos/:id/branches/:name': { audience: 'none', why: NO_CONSUMER },
   'repos/:id/import-agor-yml': { audience: 'none', why: NO_CONSUMER },
+  'repos/:id/import-launch-json': { audience: 'none', why: NO_CONSUMER },
   'repos/:id/export-agor-yml': { audience: 'none', why: NO_CONSUMER },
   'artifacts/:id/payload': { audience: 'none', why: `${NO_CONSUMER} Lands as artifacts.patched.` },
   'artifacts/:id/console': {
     audience: 'none',
     why: 'Artifact console output is fetched by the viewing tab.',
+  },
+  'artifacts/:id/actions/:actionId': {
+    audience: 'none',
+    why: `${NO_CONSUMER} The effect lands as schedules.patched / sessions.created.`,
+  },
+  'artifacts/:id/data/:dataId': {
+    audience: 'none',
+    why: 'A binding read answers the one viewing tab that asked; it is never broadcast.',
   },
   'artifacts/:id/sandpack-error': { audience: 'none', why: NO_CONSUMER },
   'artifacts/:id/runtime-response/:requestId': {

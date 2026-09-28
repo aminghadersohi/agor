@@ -531,6 +531,86 @@ export const sessionReminders = sqliteTable(
 );
 
 /**
+ * One durable requested unit of work whose terminal result may move through a
+ * designated chain of delegated Tasks before being delivered to its origin.
+ */
+export const completionSubscriptions = sqliteTable(
+  'completion_subscriptions',
+  {
+    subscription_id: text('subscription_id', { length: 36 }).primaryKey(),
+    propagation_mode: text('propagation_mode', { enum: ['root'] })
+      .notNull()
+      .default('root'),
+    join_policy: text('join_policy', { enum: ['designated_child'] })
+      .notNull()
+      .default('designated_child'),
+    state: text('state', {
+      enum: [
+        'pending',
+        'delegated',
+        'running_downstream',
+        'terminal_pending',
+        'delivered',
+        'delivery_failed',
+      ],
+    })
+      .notNull()
+      .default('pending'),
+    requested_by_user_id: text('requested_by_user_id', { length: 36 }).notNull(),
+    // Immutable audit identities: no FK, so deletion cannot erase provenance.
+    origin_session_id: text('origin_session_id', { length: 36 }).notNull(),
+    origin_task_id: text('origin_task_id', { length: 36 }).notNull(),
+    callback_session_id: text('callback_session_id', { length: 36 }).references(
+      () => sessions.session_id,
+      { onDelete: 'set null' }
+    ),
+    root_session_id: text('root_session_id', { length: 36 }).references(() => sessions.session_id, {
+      onDelete: 'set null',
+    }),
+    root_task_id: text('root_task_id', { length: 36 }).references(() => tasks.task_id, {
+      onDelete: 'set null',
+    }),
+    active_session_id: text('active_session_id', { length: 36 }).references(
+      () => sessions.session_id,
+      { onDelete: 'set null' }
+    ),
+    active_task_id: text('active_task_id', { length: 36 }).references(() => tasks.task_id, {
+      onDelete: 'set null',
+    }),
+    path: t.json<unknown[]>('path').notNull(),
+    max_depth: integer('max_depth').notNull().default(8),
+    terminal_status: text('terminal_status', {
+      enum: ['completed', 'failed', 'cancelled', 'timed_out'],
+    }),
+    terminal_snapshot: t.json<unknown>('terminal_snapshot'),
+    delivery_task_id: text('delivery_task_id', { length: 36 }).references(() => tasks.task_id, {
+      onDelete: 'set null',
+    }),
+    delivery_attempt_count: integer('delivery_attempt_count').notNull().default(0),
+    next_delivery_at: t.timestamp('next_delivery_at'),
+    last_delivery_error_code: text('last_delivery_error_code'),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+    delegated_at: t.timestamp('delegated_at'),
+    terminal_at: t.timestamp('terminal_at'),
+    delivered_at: t.timestamp('delivered_at'),
+  },
+  (table) => ({
+    rootTaskUnique: uniqueIndex('completion_subscriptions_root_task_unique').on(table.root_task_id),
+    activeTaskIdx: index('completion_subscriptions_active_task_idx').on(
+      table.active_task_id,
+      table.state
+    ),
+    callbackIdx: index('completion_subscriptions_callback_idx').on(table.callback_session_id),
+    deliveryDueIdx: index('completion_subscriptions_delivery_due_idx').on(
+      table.state,
+      table.next_delivery_at,
+      table.subscription_id
+    ),
+  })
+);
+
+/**
  * Schema mirror for PostgreSQL executor-session token authority.
  *
  * Standalone SQLite intentionally continues to use SessionTokenService's
@@ -721,6 +801,7 @@ export const boards = sqliteTable(
         custom_css?: string; // Custom CSS for animations, keyframes, etc. (rendered in scoped <style> tag)
         objects?: Record<string, import('@agor/core/types').BoardObject>; // Board objects (text, zone)
         custom_context?: Record<string, unknown>; // Custom context for Handlebars templates
+        profile_image_id?: import('@agor/core/types').ProfileImageID; // Primary board gallery image
       }>()
       .notNull(),
 
@@ -1188,6 +1269,7 @@ export const users = sqliteTable(
         avatar_source?: string;
         avatar_source_id?: string;
         avatar_synced_at?: string;
+        profile_image_id?: import('@agor/core/types').ProfileImageID;
         preferences?: Record<string, unknown>;
         // Stable external-auth identity mappings used by generic launch-code auth.
         external_identities?: UserExternalIdentity[];
@@ -1689,6 +1771,8 @@ export const userApiKeys = sqliteTable(
     name: text('name').notNull(),
     prefix: text('prefix').notNull(), // first 12 chars: 'agor_sk_XXXX' for identification
     key_hash: text('key_hash').notNull(), // bcrypt hash of full key
+    // 'manual' (created in settings) | 'cli_login' (minted by `agor login`)
+    source: text('source').notNull().default('manual'),
     created_at: t.timestamp('created_at').notNull(),
     last_used_at: t.timestamp('last_used_at'),
   },
@@ -3434,3 +3518,94 @@ export const kbImportReceipts = sqliteTable(
     ),
   })
 );
+
+/**
+ * Declared front-desk session per `(branch, scope, slot)`. Retired rows are
+ * rotation history; the partial unique index admits one occupying row.
+ */
+export const branchFrontDeskSessions = sqliteTable(
+  'branch_front_desk_sessions',
+  {
+    id: text('id', { length: 36 }).primaryKey(),
+    branch_id: text('branch_id', { length: 36 })
+      .notNull()
+      .references(() => branches.branch_id, { onDelete: 'cascade' }),
+    scope: text('scope').notNull(),
+    slot: integer('slot').notNull(),
+    session_id: text('session_id', { length: 36 })
+      .notNull()
+      .references(() => sessions.session_id, { onDelete: 'cascade' }),
+    status: text('status', { enum: ['active', 'retiring', 'retired', 'failed'] }).notNull(),
+    promoted_at: t.timestamp('promoted_at').notNull(),
+    promoted_by: text('promoted_by', { length: 36 }).references(() => users.user_id, {
+      onDelete: 'set null',
+    }),
+    retired_at: t.timestamp('retired_at'),
+    retired_reason: text('retired_reason', {
+      enum: ['context', 'dead', 'manual', 'archived', 'replaced'],
+    }),
+    metadata: t.json<Record<string, unknown>>('metadata'),
+  },
+  (table) => ({
+    occupiedSlotUnique: uniqueIndex('uniq_front_desk_slot')
+      .on(table.branch_id, table.scope, table.slot)
+      .where(sql`${table.status} IN ('active', 'retiring')`),
+    sessionIdx: index('idx_front_desk_session').on(table.session_id),
+  })
+);
+
+export type BranchFrontDeskSessionRow = typeof branchFrontDeskSessions.$inferSelect;
+export type BranchFrontDeskSessionInsert = typeof branchFrontDeskSessions.$inferInsert;
+
+export const profileImages = sqliteTable(
+  'profile_images',
+  {
+    image_id: text('image_id', { length: 36 }).primaryKey(),
+    user_id: text('user_id', { length: 36 }).references(() => users.user_id, {
+      onDelete: 'cascade',
+    }),
+    branch_id: text('branch_id', { length: 36 }).references(() => branches.branch_id, {
+      onDelete: 'cascade',
+    }),
+    board_id: text('board_id', { length: 36 }).references(() => boards.board_id, {
+      onDelete: 'cascade',
+    }),
+    created_by: text('created_by', { length: 36 }).notNull(),
+    original_name: text('original_name').notNull(),
+    alt_text: text('alt_text'),
+    position: integer('position').notNull().default(0),
+    is_primary: t.bool('is_primary').notNull().default(false),
+    small_data: blob('small_data').notNull(),
+    small_content_type: text('small_content_type').notNull(),
+    small_width: integer('small_width').notNull(),
+    small_height: integer('small_height').notNull(),
+    large_data: blob('large_data').notNull(),
+    large_content_type: text('large_content_type').notNull(),
+    large_width: integer('large_width').notNull(),
+    large_height: integer('large_height').notNull(),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+  },
+  (table) => ({
+    subjectXor: check(
+      'profile_images_subject_xor_check',
+      sql`((${table.user_id} IS NOT NULL AND ${table.branch_id} IS NULL AND ${table.board_id} IS NULL) OR (${table.user_id} IS NULL AND ${table.branch_id} IS NOT NULL AND ${table.board_id} IS NULL) OR (${table.user_id} IS NULL AND ${table.branch_id} IS NULL AND ${table.board_id} IS NOT NULL))`
+    ),
+    userPositionIdx: index('profile_images_user_position_idx').on(table.user_id, table.position),
+    branchPositionIdx: index('profile_images_branch_position_idx').on(
+      table.branch_id,
+      table.position
+    ),
+    boardPositionIdx: index('profile_images_board_position_idx').on(table.board_id, table.position),
+    onePrimaryUser: uniqueIndex('profile_images_one_primary_user_idx')
+      .on(table.user_id)
+      .where(sql`${table.user_id} IS NOT NULL AND ${table.is_primary} = 1`),
+    onePrimaryBranch: uniqueIndex('profile_images_one_primary_branch_idx')
+      .on(table.branch_id)
+      .where(sql`${table.branch_id} IS NOT NULL AND ${table.is_primary} = 1`),
+    onePrimaryBoard: uniqueIndex('profile_images_one_primary_board_idx')
+      .on(table.board_id)
+      .where(sql`${table.board_id} IS NOT NULL AND ${table.is_primary} = 1`),
+  })
+);
+export type ProfileImageRow = typeof profileImages.$inferSelect;

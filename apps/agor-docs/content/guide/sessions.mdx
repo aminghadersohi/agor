@@ -39,15 +39,9 @@ turn never automatically collapses text you were already reading. Your explicit
 **show more / show less** choices last while that conversation is mounted, including
 reconnects and tool-detail loading. Reopening it applies the history defaults again.
 
-Messages over 1,200 source characters **or** 15 source lines are eligible for
-collapse. The preview stops at 10 source lines or roughly 600 characters, whichever
-comes first. The character boundary prefers a newline within the next 100
-characters, then whitespace in that window; otherwise it cuts at the target.
-These are literal source newlines, not estimates of wrapped lines or screen height.
-Streamdown handles incomplete Markdown in the preview. Partial
-code/table export controls are hidden until expansion; the message copy action
-still copies the full source. All fetched text remains available for expansion and
-copying; this is a display preference, not a payload reduction.
+Collapsed messages show a shortened preview. Expand the message to use code or
+table export controls. The message copy action still copies the full source;
+collapsing is a display preference, not a reduction in saved content.
 
 ---
 
@@ -109,6 +103,11 @@ Automatic archival is intentionally conservative:
 - workers retry from the persisted deadline after daemon restarts, and concurrent workers converge on one archive transition;
 - manual archive/unarchive wins. Unarchive clears the current deadline but retains the policy, which is scheduled again only after a later task completes.
 
+While a deadline is pending, **Session settings → Automatic Archival** and the session's info
+popover show a live **Archives in …** countdown. Once archived, the popover says why: manually,
+with its branch, with its parent session, after its btw answer was delivered, or automatically after
+completion.
+
 Archival is reversible metadata cleanup. It hides the session from normal trees and board views; it does **not** delete transcripts, tasks, reports, branches, worktrees, or environments. Archived sessions remain available through history and `includeArchived` queries.
 
 ---
@@ -152,8 +151,8 @@ These limits change only saved history/UI projections, not tool execution or
 model inputs. They do not promise retrieval from provider-local history. Pagination
 and filtering can reduce large tool outputs, but cannot fix generated enrichment
 or every legitimate large payload. Full-payload upload, storage, retrieval,
-permissions, retention, and cleanup require a separate future design; no payload
-archive or retrieval mechanism is provided by this fallback. The final transport
+permissions, retention, and cleanup are not provided by this fallback; it has no
+payload archive or retrieval mechanism. The final transport
 guard and finite acknowledgement timeout remain in effect.
 
 If omitted fields are needed to reconstruct the sticky task list, Agor shows
@@ -163,10 +162,7 @@ than displaying an empty or apparently current list.
 ### Large session lists
 
 Branch cards and the branch teammate panel keep manual and gateway genealogy
-trees in a virtual, scrollable viewport. Board cards keep a 400-pixel maximum;
-the teammate panel sizes trees to its available height and resizes with its
-container. Expanded manual and gateway trees share the remaining space; short
-trees release unused space to overflowing siblings. On board cards,
+trees in a bounded, scrollable viewport. On board cards,
 two-finger scrolling over a session tree pans the canvas, and pinching zooms it;
 drag the tree's scrollbar to reach older sessions. In the branch teammate panel,
 scroll inside the tree normally. Collapsing a parent still hides its descendants.
@@ -219,6 +215,27 @@ When spawning, you can override:
 - **MCP servers**: Different tool sets (Codex MCP support pending)
 - **Callback content**: Include last message (default on), include original prompt (default off), extra formatting instructions
 - **Callback delivery**: `direct` (default), `btw`, or `auto`
+- **Callback mode**: `once` (default for spawned children) notifies the parent on the next
+  completion, then turns the callback off; `persistent` notifies on every completion until turned
+  off. Set it in the spawn modal's **Mode** field, with `callbackMode` on `agor_sessions_spawn` or
+  `agor_sessions_prompt` (subsession mode), and change it later in **Session settings → Callbacks**.
+
+### Moving a callback or changing a parent
+
+**Session settings → Callbacks** has two controls for people, matching the
+`agor_sessions_retarget_callback` and `agor_sessions_reparent` MCP tools:
+
+- **Change callback target…** moves where the session reports on completion. It is routing only:
+  the parent is unchanged, and callbacks already requested for one specific task keep their
+  original destination. The new target can be in another branch of the same workspace.
+- **Change parent…** moves the session to another parent in the same branch, or detaches it as a
+  root. It is genealogy only: the callback target is unchanged. Sessions that would form a cycle
+  are not offered.
+
+Both require Manager access on the session's branch and permission to prompt the new
+target or parent. Over REST they are `POST /sessions/:id/retarget-callback` with
+`{ callbackSessionId }` and `POST /sessions/:id/reparent` with `{ parentSessionId }` (`null`
+detaches).
 
 ### Direct, BTW, and auto delivery
 

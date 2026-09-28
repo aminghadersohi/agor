@@ -115,6 +115,12 @@ describe.skipIf(!enabled)('zone workflow fresh schema and PostgreSQL tenant RLS'
       expect(await repo.findTransition(b.transition.transition_id)).toBeNull();
       expect(await repo.findAdvance(auditB.advance_id)).toBeNull();
       expect(await repo.findAdvances()).toEqual([auditA]);
+      expect(
+        await repo.findAdvancePage({ boardId: b.board.board_id as BoardID, limit: 10 })
+      ).toEqual({ data: [], total: 0 });
+      expect(
+        await repo.findAdvancePage({ boardId: a.board.board_id as BoardID, limit: 10 })
+      ).toEqual({ data: [auditA], total: 1 });
       await expect(
         repo.advance({
           transitionId: b.transition.transition_id,

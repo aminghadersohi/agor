@@ -13,6 +13,7 @@ import {
   BranchRepository,
   CapabilityPolicyRepository,
   getCurrentTenantId,
+  lockBranchReferenceMutation,
   mapBoardExportBlobToCreateData,
   runWithTenantDatabaseTransaction,
   type TenantScopeAwareDatabase,
@@ -246,6 +247,16 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
   }
 
   /**
+   * Replace a point read's neutral `0` counts with the same caller-scoped
+   * aggregates the list read returns. `visibleToUserId` is the RBAC SQL marker
+   * (unset for superadmin/internal callers, matching `find`).
+   */
+  async attachCallerCounts(board: Board, visibleToUserId?: UUID): Promise<Board> {
+    const [withCounts] = await this.boardRepo.attachBoardListCounts([board], visibleToUserId);
+    return withCounts;
+  }
+
+  /**
    * Custom method: Find board by slug
    */
   async findBySlug(slug: string, _params?: BoardParams): Promise<Board | null> {
@@ -429,6 +440,9 @@ export class BoardsService extends DrizzleService<Board, Partial<Board>, BoardPa
       typeof data === 'string' ? _maybeParams : (branchIdOrParams as BoardParams | undefined);
     return runWithTenantDatabaseTransaction(this.db, params?.tenant?.tenant_id, async (db) => {
       await lockTenantAuthorizationFence(db, params);
+      // Match branch relocation: reference writers may also update User rows.
+      // Never hold the human actor row while waiting for their reference lock.
+      await lockBranchReferenceMutation(db);
       const current = await resolveCurrentTenantAuthorityActor(db, params, {
         allowActorlessTrusted: true,
       });

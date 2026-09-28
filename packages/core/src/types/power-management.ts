@@ -121,6 +121,43 @@ export interface PowerEssentialSessionSearchResult {
   selected?: PowerEssentialSessionOption;
 }
 
+/**
+ * Redacted admission projection every authenticated tenant member may read.
+ *
+ * It answers only "is ordinary work being held right now, and why". It never
+ * carries the observation (charge/runtime), provider support, ownership, or
+ * the policy configuration — those stay on the admin-only
+ * `PowerManagementStatus`.
+ */
+export interface PowerAdmissionStatus {
+  /** Whether ordinary (non-Essential) dispatch is held right now. */
+  held: boolean;
+  state: PowerPolicyState;
+  reason: PowerPolicyReason;
+  transitioned_at: string;
+}
+
+export function toPowerAdmissionStatus(status: PowerManagementStatus): PowerAdmissionStatus {
+  return {
+    held: status.held,
+    state: status.state,
+    reason: status.reason,
+    transitioned_at: status.transitioned_at,
+  };
+}
+
+/**
+ * Whether a held admission status holds a session of the given priority.
+ * Mirrors the dispatch decision: `conserve` still admits the Essential session.
+ */
+export function powerAdmissionHoldsPriority(
+  admission: Pick<PowerAdmissionStatus, 'held' | 'state'>,
+  priority: SessionPowerPriority | undefined
+): boolean {
+  if (!admission.held) return false;
+  return !(admission.state === 'conserve' && priority === 'essential');
+}
+
 /** Transient response annotation. The durable Task itself remains queued. */
 export interface PowerTaskHold {
   state: PowerPolicyState;

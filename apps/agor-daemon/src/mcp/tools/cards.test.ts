@@ -234,3 +234,112 @@ describe('card MCP realtime events', () => {
     );
   });
 });
+
+describe('card MCP color overrides', () => {
+  function colorCtx() {
+    const createWithPlacement = vi.fn(async (data: Record<string, unknown>) => ({
+      card: { card_id: 'card-1', ...data },
+      boardObject: { object_id: 'object-1' },
+    }));
+    const patch = vi.fn(async (id: string, data: Record<string, unknown>) => ({
+      card_id: id,
+      ...data,
+    }));
+    const app = {
+      service(name: string) {
+        if (name === 'cards') return { createWithPlacement, patch, emit: vi.fn() };
+        if (name === 'boards') return { get: vi.fn(async () => ({ board_id: 'board-1' })) };
+        if (name === 'board-objects') return { emit: vi.fn() };
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+    const ctx = {
+      app,
+      db: {},
+      userId: 'user-1',
+      baseServiceParams: {},
+    } as unknown as Parameters<typeof registerCardTools>[1];
+    return { ctx, createWithPlacement, patch };
+  }
+
+  it('normalizes hex, clears on null, and rejects non-hex on create and update', async () => {
+    const { ctx, createWithPlacement, patch } = colorCtx();
+
+    await captureHandler(
+      'agor_cards_create',
+      ctx
+    )({
+      boardId: 'board-1',
+      title: 'Card',
+      colorOverride: '#FF5630',
+    });
+    expect(createWithPlacement).toHaveBeenCalledWith(
+      expect.objectContaining({ color_override: '#ff5630' }),
+      {}
+    );
+    await expect(
+      captureHandler(
+        'agor_cards_create',
+        ctx
+      )({
+        boardId: 'board-1',
+        title: 'Card',
+        colorOverride: 'red',
+      })
+    ).rejects.toThrow('colorOverride must be a hex color like #ff5630 (received "red")');
+
+    await captureHandler('agor_cards_update', ctx)({ cardId: 'card-1', colorOverride: null });
+    expect(patch).toHaveBeenLastCalledWith('card-1', { color_override: null }, {});
+    await expect(
+      captureHandler('agor_cards_update', ctx)({ cardId: 'card-1', colorOverride: 'blue' })
+    ).rejects.toThrow('colorOverride must be a hex color');
+    expect(patch).toHaveBeenCalledTimes(1);
+  });
+
+  it('validates every bulk color before writing any card', async () => {
+    const { ctx, createWithPlacement, patch } = colorCtx();
+
+    await expect(
+      captureHandler(
+        'agor_cards_bulk_create',
+        ctx
+      )({
+        boardId: 'board-1',
+        cards: [
+          { title: 'Good', colorOverride: '#abc' },
+          { title: 'Bad', colorOverride: 'tomato' },
+        ],
+      })
+    ).rejects.toThrow('cards[1].colorOverride must be a hex color');
+    expect(createWithPlacement).not.toHaveBeenCalled();
+
+    await expect(
+      captureHandler(
+        'agor_cards_bulk_update',
+        ctx
+      )({
+        updates: [
+          { cardId: 'card-1', colorOverride: '#123456' },
+          { cardId: 'card-2', colorOverride: 'rgb(0,0,0)' },
+        ],
+      })
+    ).rejects.toThrow('updates[1].colorOverride must be a hex color');
+    expect(patch).not.toHaveBeenCalled();
+
+    await captureHandler(
+      'agor_cards_bulk_update',
+      ctx
+    )({
+      updates: [
+        { cardId: 'card-1', colorOverride: '#123456' },
+        { cardId: 'card-2', colorOverride: null },
+        { cardId: 'card-3', title: 'No color change' },
+      ],
+    });
+    expect(patch.mock.calls.map(([id, data]) => [id, data])).toEqual([
+      ['card-1', { color_override: '#123456' }],
+      ['card-2', { color_override: null }],
+      ['card-3', { title: 'No color change' }],
+    ]);
+  });
+});

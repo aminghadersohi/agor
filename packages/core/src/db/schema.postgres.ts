@@ -587,6 +587,98 @@ export const sessionReminders = pgTable(
 );
 
 /**
+ * Inert compatibility storage from the withdrawn root-propagation draft.
+ * Retain rows, tenant isolation, and portability; no runtime creates or delivers them.
+ * Keep the original migration ledger intact rather than rewriting applied history.
+ */
+export const completionSubscriptions = pgTable(
+  'completion_subscriptions',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    subscription_id: varchar('subscription_id', { length: 36 }).primaryKey(),
+    propagation_mode: text('propagation_mode', { enum: ['root'] })
+      .notNull()
+      .default('root'),
+    join_policy: text('join_policy', { enum: ['designated_child'] })
+      .notNull()
+      .default('designated_child'),
+    state: text('state', {
+      enum: [
+        'pending',
+        'delegated',
+        'running_downstream',
+        'terminal_pending',
+        'delivered',
+        'delivery_failed',
+      ],
+    })
+      .notNull()
+      .default('pending'),
+    requested_by_user_id: varchar('requested_by_user_id', { length: 36 }).notNull(),
+    // Immutable audit identities: no FK, so deletion cannot erase provenance.
+    origin_session_id: varchar('origin_session_id', { length: 36 }).notNull(),
+    origin_task_id: varchar('origin_task_id', { length: 36 }).notNull(),
+    callback_session_id: varchar('callback_session_id', { length: 36 }).references(
+      () => sessions.session_id,
+      { onDelete: 'set null' }
+    ),
+    root_session_id: varchar('root_session_id', { length: 36 }).references(
+      () => sessions.session_id,
+      { onDelete: 'set null' }
+    ),
+    root_task_id: varchar('root_task_id', { length: 36 }).references(() => tasks.task_id, {
+      onDelete: 'set null',
+    }),
+    active_session_id: varchar('active_session_id', { length: 36 }).references(
+      () => sessions.session_id,
+      { onDelete: 'set null' }
+    ),
+    active_task_id: varchar('active_task_id', { length: 36 }).references(() => tasks.task_id, {
+      onDelete: 'set null',
+    }),
+    path: t.json<unknown[]>('path').notNull(),
+    max_depth: integer('max_depth').notNull().default(8),
+    terminal_status: text('terminal_status', {
+      enum: ['completed', 'failed', 'cancelled', 'timed_out'],
+    }),
+    terminal_snapshot: t.json<unknown>('terminal_snapshot'),
+    delivery_task_id: varchar('delivery_task_id', { length: 36 }).references(() => tasks.task_id, {
+      onDelete: 'set null',
+    }),
+    delivery_attempt_count: integer('delivery_attempt_count').notNull().default(0),
+    next_delivery_at: t.timestamp('next_delivery_at'),
+    last_delivery_error_code: text('last_delivery_error_code'),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+    delegated_at: t.timestamp('delegated_at'),
+    terminal_at: t.timestamp('terminal_at'),
+    delivered_at: t.timestamp('delivered_at'),
+  },
+  (table) => ({
+    tenantIdx: index('completion_subscriptions_tenant_id_idx').on(table.tenant_id),
+    rootTaskUnique: uniqueIndex('completion_subscriptions_root_task_unique').on(
+      table.tenant_id,
+      table.root_task_id
+    ),
+    activeTaskIdx: index('completion_subscriptions_active_task_idx').on(
+      table.tenant_id,
+      table.active_task_id,
+      table.state
+    ),
+    callbackIdx: index('completion_subscriptions_callback_idx').on(
+      table.tenant_id,
+      table.callback_session_id
+    ),
+    deliveryDueIdx: index('completion_subscriptions_delivery_due_idx').on(
+      table.tenant_id,
+      table.state,
+      table.next_delivery_at,
+      table.subscription_id
+    ),
+  })
+);
+
+/**
  * Durable authority for executor-session JWTs in shared PostgreSQL deployments.
  *
  * The bearer JWT is never stored. `token_fingerprint` is SHA-256 over the
@@ -781,6 +873,7 @@ export const boards = pgTable(
         custom_css?: string; // Custom CSS for animations, keyframes, etc. (rendered in scoped <style> tag)
         objects?: Record<string, import('@agor/core/types').BoardObject>; // Board objects (text, zone)
         custom_context?: Record<string, unknown>; // Custom context for Handlebars templates
+        profile_image_id?: import('@agor/core/types').ProfileImageID; // Primary board gallery image
       }>()
       .notNull(),
 
@@ -1276,6 +1369,7 @@ export const users = pgTable(
         avatar_source?: string;
         avatar_source_id?: string;
         avatar_synced_at?: string;
+        profile_image_id?: import('@agor/core/types').ProfileImageID;
         preferences?: Record<string, unknown>;
         // Stable external-auth identity mappings used by generic launch-code auth.
         external_identities?: UserExternalIdentity[];
@@ -1885,6 +1979,8 @@ export const userApiKeys = pgTable(
     name: text('name').notNull(),
     prefix: text('prefix').notNull(), // first 12 chars: 'agor_sk_XXXX' for identification
     key_hash: text('key_hash').notNull(), // bcrypt hash of full key
+    // 'manual' (created in settings) | 'cli_login' (minted by `agor login`)
+    source: text('source').notNull().default('manual'),
     created_at: t.timestamp('created_at').notNull(),
     last_used_at: t.timestamp('last_used_at'),
   },
@@ -3897,3 +3993,109 @@ export const kbImportReceipts = pgTable(
     ),
   })
 );
+
+/**
+ * Declared front-desk session per `(branch, scope, slot)`. Retired rows are
+ * rotation history; the partial unique index admits one occupying row.
+ */
+export const branchFrontDeskSessions = pgTable(
+  'branch_front_desk_sessions',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    id: varchar('id', { length: 36 }).primaryKey(),
+    branch_id: varchar('branch_id', { length: 36 }).notNull(),
+    scope: text('scope').notNull(),
+    slot: integer('slot').notNull(),
+    session_id: varchar('session_id', { length: 36 }).notNull(),
+    status: text('status', { enum: ['active', 'retiring', 'retired', 'failed'] }).notNull(),
+    promoted_at: t.timestamp('promoted_at').notNull(),
+    promoted_by: varchar('promoted_by', { length: 36 }).references(() => users.user_id, {
+      onDelete: 'set null',
+    }),
+    retired_at: t.timestamp('retired_at'),
+    retired_reason: text('retired_reason', {
+      enum: ['context', 'dead', 'manual', 'archived', 'replaced'],
+    }),
+    metadata: t.json<Record<string, unknown>>('metadata'),
+  },
+  (table) => ({
+    tenantIdx: index('branch_front_desk_sessions_tenant_id_idx').on(table.tenant_id),
+    occupiedSlotUnique: uniqueIndex('uniq_front_desk_slot')
+      .on(table.tenant_id, table.branch_id, table.scope, table.slot)
+      .where(sql`${table.status} IN ('active', 'retiring')`),
+    sessionIdx: index('idx_front_desk_session').on(table.tenant_id, table.session_id),
+    branchFk: foreignKey({
+      columns: [table.tenant_id, table.branch_id],
+      foreignColumns: [branches.tenant_id, branches.branch_id],
+      name: 'branch_front_desk_sessions_tenant_branch_fk',
+    }).onDelete('cascade'),
+    sessionFk: foreignKey({
+      columns: [table.tenant_id, table.session_id],
+      foreignColumns: [sessions.tenant_id, sessions.session_id],
+      name: 'branch_front_desk_sessions_tenant_session_fk',
+    }).onDelete('cascade'),
+  })
+);
+
+export const profileImages = pgTable(
+  'profile_images',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    image_id: varchar('image_id', { length: 36 }).primaryKey(),
+    user_id: varchar('user_id', { length: 36 }).references(() => users.user_id, {
+      onDelete: 'cascade',
+    }),
+    branch_id: varchar('branch_id', { length: 36 }).references(() => branches.branch_id, {
+      onDelete: 'cascade',
+    }),
+    board_id: varchar('board_id', { length: 36 }).references(() => boards.board_id, {
+      onDelete: 'cascade',
+    }),
+    created_by: varchar('created_by', { length: 36 }).notNull(),
+    original_name: text('original_name').notNull(),
+    alt_text: text('alt_text'),
+    position: integer('position').notNull().default(0),
+    is_primary: t.bool('is_primary').notNull().default(false),
+    small_data: bytea('small_data').notNull(),
+    small_content_type: text('small_content_type').notNull(),
+    small_width: integer('small_width').notNull(),
+    small_height: integer('small_height').notNull(),
+    large_data: bytea('large_data').notNull(),
+    large_content_type: text('large_content_type').notNull(),
+    large_width: integer('large_width').notNull(),
+    large_height: integer('large_height').notNull(),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+  },
+  (table) => ({
+    subjectXor: check(
+      'profile_images_subject_xor_check',
+      sql`((${table.user_id} IS NOT NULL AND ${table.branch_id} IS NULL AND ${table.board_id} IS NULL) OR (${table.user_id} IS NULL AND ${table.branch_id} IS NOT NULL AND ${table.board_id} IS NULL) OR (${table.user_id} IS NULL AND ${table.branch_id} IS NULL AND ${table.board_id} IS NOT NULL))`
+    ),
+    tenantUserPositionIdx: index('profile_images_tenant_user_position_idx').on(
+      table.tenant_id,
+      table.user_id,
+      table.position
+    ),
+    tenantBranchPositionIdx: index('profile_images_tenant_branch_position_idx').on(
+      table.tenant_id,
+      table.branch_id,
+      table.position
+    ),
+    tenantBoardPositionIdx: index('profile_images_tenant_board_position_idx').on(
+      table.tenant_id,
+      table.board_id,
+      table.position
+    ),
+    onePrimaryUser: uniqueIndex('profile_images_one_primary_user_idx')
+      .on(table.tenant_id, table.user_id)
+      .where(sql`${table.user_id} IS NOT NULL AND ${table.is_primary} = true`),
+    onePrimaryBranch: uniqueIndex('profile_images_one_primary_branch_idx')
+      .on(table.tenant_id, table.branch_id)
+      .where(sql`${table.branch_id} IS NOT NULL AND ${table.is_primary} = true`),
+    onePrimaryBoard: uniqueIndex('profile_images_one_primary_board_idx')
+      .on(table.tenant_id, table.board_id)
+      .where(sql`${table.board_id} IS NOT NULL AND ${table.is_primary} = true`),
+  })
+);
+export type ProfileImageRow = typeof profileImages.$inferSelect;

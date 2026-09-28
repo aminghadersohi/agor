@@ -22,7 +22,6 @@ import type { ExpressApplication, Service } from '@agor/core/feathers';
 import type {
   Board,
   Branch,
-  BranchEnvironmentUpdate,
   BranchID,
   CancelQueuedTasksInput,
   CloneRepositoryResult,
@@ -312,6 +311,11 @@ export interface ReposServiceImpl extends Service<Repo, Partial<Repo>, FeathersP
     data: { branch_id: string },
     params?: FeathersParams
   ): Promise<Repo>;
+  importFromLaunchJson(
+    id: string,
+    data: { branch_id: string },
+    params?: FeathersParams
+  ): Promise<Repo>;
   exportToAgorYml(
     id: string,
     data: { branch_id: string },
@@ -370,6 +374,11 @@ export interface BoardsServiceImpl extends Service<Board, Partial<Board>, Feathe
   clearPrimaryTeammate(boardId: string, params?: FeathersParams): Promise<Board>;
   archive(id: string, params?: FeathersParams): Promise<Board>;
   unarchive(id: string, params?: FeathersParams): Promise<Board>;
+  /** Internal (not a registered transport method): caller-scoped point-read counts. */
+  attachCallerCounts(
+    board: Board,
+    visibleToUserId?: import('@agor/core/types').UUID
+  ): Promise<Board>;
 }
 
 /**
@@ -389,22 +398,14 @@ export interface MessagesServiceImpl
  * Branches service with custom methods (server-side implementation)
  */
 export interface BranchesServiceImpl extends Service<Branch, Partial<Branch>, FeathersParams> {
+  retireTeammate(
+    id: BranchID,
+    params?: FeathersParams
+  ): Promise<import('@agor/core/types').BranchCleanAccepted>;
   clean(
     input: { branchId: import('@agor/core/types').BranchID },
     params?: FeathersParams
   ): Promise<import('@agor/core/types').BranchCleanAccepted>;
-  updateEnvironment(
-    id:
-      | BranchID
-      | {
-          branch_id?: BranchID;
-          branchId?: BranchID;
-          environment_update?: BranchEnvironmentUpdate;
-          environmentUpdate?: BranchEnvironmentUpdate;
-        },
-    environmentUpdate?: BranchEnvironmentUpdate | FeathersParams,
-    params?: FeathersParams
-  ): Promise<Branch>;
   startEnvironment(id: BranchID, params?: FeathersParams, confirmationOf?: string): Promise<Branch>;
   stopEnvironment(id: BranchID, params?: FeathersParams): Promise<Branch>;
   restartEnvironment(id: BranchID, params?: FeathersParams): Promise<Branch>;

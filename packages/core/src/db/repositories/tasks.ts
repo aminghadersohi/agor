@@ -630,6 +630,8 @@ export type TerminationSettlementInput =
   | (TerminationSettlementInputBase & {
       outcome: 'restart_unverified';
       coordinationToken?: never;
+      /** Atomically persist a pending continuation alongside restart settlement. */
+      restartRecovery?: TaskMetadata['restart_recovery'];
     });
 
 export interface TerminationSettlementResult {
@@ -1221,6 +1223,36 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
     } catch (error) {
       throw new RepositoryError(
         `Failed to inspect unfinished session tasks: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
+  }
+
+  /**
+   * The Session's most recently settled Task that actually ran to an outcome
+   * (`completed` or `failed`). Stopped and timed-out Tasks are skipped: they
+   * say nothing about whether the executor can still complete a turn.
+   */
+  async findLastSettledOutcome(sessionId: SessionID): Promise<Task | null> {
+    try {
+      const row = await select(this.db)
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.session_id, sessionId),
+            inArray(tasks.status, [TaskStatus.COMPLETED, TaskStatus.FAILED])
+          )
+        )
+        .orderBy(
+          desc(sql`COALESCE(${tasks.completed_at}, ${tasks.created_at})`),
+          desc(tasks.task_id)
+        )
+        .limit(1)
+        .one();
+      return row ? this.rowToTask(row as TaskRow) : null;
+    } catch (error) {
+      throw new RepositoryError(
+        `Failed to find the last settled session task: ${error instanceof Error ? error.message : String(error)}`,
         error
       );
     }
@@ -2226,6 +2258,14 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         recorded_tool_count: await countRecordedTools(txDb, fullId),
         duration_ms: terminal.duration_ms,
         message_range: terminal.message_range ?? current.message_range,
+        ...(restartRelease && input.restartRecovery
+          ? {
+              metadata: {
+                ...(current.metadata ?? {}),
+                restart_recovery: input.restartRecovery,
+              },
+            }
+          : {}),
         ...(failure
           ? {
               sdk_failure: {
@@ -2293,6 +2333,29 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         }),
       };
     });
+  }
+
+  /** Oldest restart-interrupted terminal Tasks still awaiting continuation admission. */
+  async findPendingRestartRecoveries(limit = 50): Promise<Task[]> {
+    try {
+      const rows = await select(this.db)
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.status, TaskStatus.STOPPED),
+            eq(jsonExtract(this.db, tasks.data, 'metadata.restart_recovery.state'), 'pending')
+          )
+        )
+        .orderBy(asc(tasks.created_at), asc(tasks.task_id))
+        .limit(limit)
+        .all();
+      return rows.map((row: TaskRow) => this.rowToTask(row));
+    } catch (error) {
+      throw new RepositoryError(
+        `Failed to find pending restart recoveries: ${error instanceof Error ? error.message : String(error)}`,
+        error
+      );
+    }
   }
 
   /**

@@ -7,6 +7,15 @@ import { EMPTY_MAPS } from '../../store/agorMaps';
 import { agorStore } from '../../store/agorStore';
 import { BoardTeammatePanel } from './BoardTeammatePanel';
 
+// Profile galleries and portraits load from the daemon; keep these tests hermetic.
+vi.mock('../ProfileImage/profileImageApi', () => ({
+  listProfileImages: vi.fn(async () => ({ images: [], max_images: 24 })),
+  fetchProfileImageBlob: vi.fn(),
+  uploadProfileImage: vi.fn(),
+  patchProfileImage: vi.fn(),
+  deleteProfileImage: vi.fn(),
+}));
+
 // BoardTeammatePanel renders the active tab's content. With activeTab="comments"
 // the comments pane mounts CommentsPanel, mocked here to a bare render counter so
 // its invocation count is a faithful proxy for how many times the (memoized)

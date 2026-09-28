@@ -19,6 +19,20 @@ describe('power-management API boundaries', () => {
     expect(status).not.toMatch(/device_name|hostname|raw_output|provider_output/);
   });
 
+  it('gives every tenant member only the redacted admission projection', () => {
+    const admissionStart = source.indexOf("'/power-management/admission'");
+    expect(admissionStart).toBeGreaterThan(statusStart);
+    const admission = source.slice(
+      admissionStart,
+      source.indexOf('powerPolicyController.subscribe', admissionStart)
+    );
+    expect(admission).toContain('return toPowerAdmissionStatus(powerPolicyController.status())');
+    expect(admission).toContain("find: { role: ROLES.VIEWER, action: 'view power admission' }");
+    expect(admission).not.toMatch(/patch|create|remove/);
+    expect(status).toContain("path: 'power-management/admission'");
+    expect(status).toContain('data: toPowerAdmissionStatus(transition.status)');
+  });
+
   it('applies only revisioned mutable policy through the tenant-owned repository', () => {
     expect(status).toContain("patch: { role: ROLES.ADMIN, action: 'apply host power policy' }");
     expect(status).toContain('powerPolicyController.applyRuntimeMutation(');
