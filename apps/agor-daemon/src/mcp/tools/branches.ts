@@ -35,7 +35,6 @@ import type {
 } from '../../declarations.js';
 import type { BranchParams } from '../../services/branches.js';
 import { issueExecutorCommandToken } from '../../services/session-token-service.js';
-import { isSuperAdmin } from '../../utils/branch-authorization.js';
 import { ensureBranchWorkspaceAccess } from '../../utils/branch-workspace-path.js';
 import { resolveDelegatedExecutionHomeKey } from '../../utils/executor-delegated-home.js';
 import { getDaemonUrl, requestExecutor } from '../../utils/spawn-executor.js';
@@ -76,7 +75,12 @@ import {
   FRONT_DESK_CLEAR_DESCRIPTION,
   FRONT_DESK_SET_DESCRIPTION,
   FRONT_DESK_TEAMMATE_ARG_DESCRIPTION,
+  TEAMMATE_RESOLVE_DESCRIPTION,
 } from './front-desk.js';
+import {
+  assessTeammateAddressability,
+  shouldScopeTeammateDiscoveryToUser,
+} from './teammate-addressing.js';
 
 const BRANCH_NAME_PATTERN = /^[a-z0-9-]+$/;
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;
@@ -230,14 +234,6 @@ function notesPreview(notes: string | undefined, maxLength = 200): string | null
   const singleLine = notes.replace(/\s+/g, ' ').trim();
   if (singleLine.length <= maxLength) return singleLine;
   return `${singleLine.slice(0, maxLength - 1)}…`;
-}
-
-async function shouldScopeTeammateDiscoveryToUser(ctx: McpContext): Promise<boolean> {
-  if (ctx.authenticatedUser?._isServiceAccount) return false;
-
-  const config = ctx.app.get('config');
-  const allowSuperadmin = config.execution?.allow_superadmin === true;
-  return !isSuperAdmin(ctx.authenticatedUser?.role, allowSuperadmin);
 }
 
 async function findAllArchivedBranchesForCleanup(
@@ -1810,7 +1806,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     const offset = args.offset ?? 0;
     const repoId = args.repoId ? await resolveRepoId(ctx, args.repoId) : undefined;
 
-    const userScoped = await shouldScopeTeammateDiscoveryToUser(ctx);
+    const userScoped = shouldScopeTeammateDiscoveryToUser(ctx);
     const teammates = await runWithMcpTenantDatabaseScope(ctx, (db) =>
       new BranchRepository(db).findTeammateBranches({
         archived: false,
@@ -1823,8 +1819,15 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
       })
     );
 
-    const shaped = teammates.map((w) => {
+    const hasMore = teammates.length > limit;
+    const pageRows = teammates.slice(0, limit);
+    // Listing needs only `view`; name addressing needs `session` and a unique
+    // name. Say per row which of these teammates a name would actually reach.
+    const addressability = await assessTeammateAddressability(ctx, pageRows);
+
+    const page = pageRows.map((w) => {
       const config = getTeammateConfig(w);
+      const verdict = addressability.get(w.branch_id);
       return {
         branch_id: w.branch_id,
         name: w.name,
@@ -1834,11 +1837,17 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
         board_id: w.board_id || null,
         repo_id: w.repo_id,
         last_used: w.last_used,
+        addressable: verdict?.addressable ?? false,
+        ...(verdict?.addressable
+          ? { address: verdict.address }
+          : {
+              not_addressable_reason: verdict?.reason,
+              not_addressable_detail: verdict?.detail,
+              ...(verdict?.conflicts_with ? { conflicts_with: verdict.conflicts_with } : {}),
+            }),
       };
     });
 
-    const hasMore = shaped.length > limit;
-    const page = shaped.slice(0, limit);
     return textResult({
       total: hasMore ? null : offset + page.length,
       limit,
@@ -1854,7 +1863,8 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     'agor_teammates_list',
     {
       description:
-        'List a page of teammates (long-lived AI teammates with schedules). Authorization is applied before paging. Advance with offset=nextOffset while hasMore is true.',
+        'List a page of teammates (long-lived AI teammates with schedules). Authorization is applied before paging. Advance with offset=nextOffset while hasMore is true. ' +
+        'Listing needs only view access, so each row says whether agor_sessions_prompt { teammate } would reach it for you: addressable with the address to pass, or not_addressable_reason (no_prompt_permission, ambiguous_name, beyond_scan_limit). Use agor_teammates_resolve to see which session an address reaches.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         repoId: mcpOptionalId('repoId', 'Repository', 'Filter teammates by repository ID'),
@@ -1865,7 +1875,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
     listTeammatesHandler
   );
 
-  // agor_teammates_front_desk_set / agor_teammates_front_desk_clear
+  // agor_teammates_resolve / agor_teammates_front_desk_set / agor_teammates_front_desk_clear
   registerFrontDeskTools(server, ctx);
 
   // Tool: agor_branches_retry_provisioning
@@ -1900,7 +1910,7 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
 }
 
 /**
- * agor_teammates_front_desk_set / agor_teammates_front_desk_clear.
+ * agor_teammates_resolve / agor_teammates_front_desk_set / agor_teammates_front_desk_clear.
  *
  * Registered here rather than in `front-desk.ts` so the zod schemas live in an
  * entry that already bundles zod — see the note at the top of `front-desk.ts`.
@@ -1912,6 +1922,24 @@ export function registerFrontDeskTools(server: McpServer, ctx: McpContext): void
     'branchId',
     'Branch',
     'Teammate branch ID (UUIDv7 or short ID). Provide exactly one of teammate or branchId.'
+  );
+
+  server.registerTool(
+    'agor_teammates_resolve',
+    {
+      description: TEAMMATE_RESOLVE_DESCRIPTION,
+      annotations: { readOnlyHint: true },
+      inputSchema: z.object({
+        teammate,
+        branchId,
+        sessionId: mcpOptionalId(
+          'sessionId',
+          'Session',
+          'Preview an explicit sessionId address (UUIDv7 or short ID); it takes precedence over the front desk and recency.'
+        ),
+      }),
+    },
+    (args) => handlers.resolve(args)
   );
 
   server.registerTool(

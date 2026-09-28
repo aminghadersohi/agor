@@ -1,9 +1,11 @@
 /**
  * Handlers for the MCP tools that pin and clear a teammate's front desk — the
  * session that `agor_sessions_prompt { teammate }` reaches instead of the most
- * recently active one. Both are thin: addressing lives in
- * `teammate-addressing.ts`, authorization and the compare-and-swap in
- * `front-desk/manage-front-desk.ts`.
+ * recently active one — and for `agor_teammates_resolve`, the dry run that
+ * reports which session an address would reach and why. All are thin:
+ * addressing lives in `teammate-addressing.ts`, precedence in
+ * `front-desk/resolve-target-session.ts`, authorization and the
+ * compare-and-swap in `front-desk/manage-front-desk.ts`.
  *
  * The tools are registered, with their zod input schemas, by
  * `registerFrontDeskTools` in `branches.ts`. This module deliberately imports
@@ -18,17 +20,26 @@ import {
   getCurrentTenantId,
   runWithTenantDatabaseTransaction,
 } from '@agor/core/db';
-import type { BranchFrontDeskSession, BranchID, SessionID } from '@agor/core/types';
+import type {
+  Branch,
+  BranchFrontDeskSession,
+  BranchID,
+  Session,
+  SessionID,
+} from '@agor/core/types';
 import {
   clearTeammateFrontDesk,
   findTeammateFrontDesk,
   setTeammateFrontDesk,
 } from '../../front-desk/manage-front-desk.js';
+import type { FrontDeskTarget } from '../../front-desk/resolve-target-session.js';
 import { resolveBranchId, resolveSessionId } from '../resolve-ids.js';
 import type { McpContext } from '../server.js';
 import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
 import { textResult } from '../tool-result.js';
 import {
+  describeTeammateBranch,
+  previewTeammateAddress,
   resolveTeammateName,
   teammateAmbiguousPayload,
   teammateNotFoundPayload,
@@ -45,6 +56,9 @@ export const FRONT_DESK_SET_DESCRIPTION =
 export const FRONT_DESK_CLEAR_DESCRIPTION =
   "Remove a teammate's front-desk pin. agor_sessions_prompt { teammate } goes back to reaching the teammate's most recently active session. No session is archived or changed. Requires Branch Manager access.";
 
+export const TEAMMATE_RESOLVE_DESCRIPTION =
+  "Dry run of addressing a teammate: reports which session agor_sessions_prompt would reach and why, without prompting, creating, or changing anything. Precedence: an explicit sessionId, then the teammate's healthy front desk, then its most recently active session, else needs_session. Also reports whether the teammate is addressable by name for you (addressable, address to use, or the reason it is not), and any front desk that was skipped as unhealthy. Provide exactly one of teammate or branchId.";
+
 export interface FrontDeskTargetArgs {
   teammate?: string;
   branchId?: string;
@@ -52,6 +66,40 @@ export interface FrontDeskTargetArgs {
 
 function errorResult(payload: Record<string, unknown>): ToolResult {
   return { ...textResult(payload), isError: true };
+}
+
+/** Project a session to what a caller needs to recognise it. */
+function describeResolvedSession(session: Session | null) {
+  return session
+    ? {
+        session_id: session.session_id,
+        title: session.title ?? null,
+        status: session.status,
+        agentic_tool: session.agentic_tool,
+        branch_id: session.branch_id,
+        last_updated: session.last_updated,
+      }
+    : null;
+}
+
+/** One sentence per precedence rule, so the answer carries its own "why". */
+function explainTarget(target: FrontDeskTarget): string {
+  const bypassed =
+    'bypassedFrontDesk' in target && target.bypassedFrontDesk
+      ? ` The pinned front desk (session ${target.bypassedFrontDesk.sessionId}) was skipped as unhealthy (${target.bypassedFrontDesk.reason}); a real address would demote it to ${target.bypassedFrontDesk.demoteTo}.`
+      : '';
+  switch (target.via) {
+    case 'explicit':
+      return 'An explicit sessionId always wins; front desk and recency are not consulted.';
+    case 'front_desk':
+      return "Reaches the teammate's pinned front desk, which passed the health gate.";
+    case 'recency':
+      return `No usable front desk, so this reaches the teammate's most recently active session.${bypassed}`;
+    case 'needs_session':
+      return `No usable front desk and no active session you can reach. agor_sessions_prompt would return needs_session; start one with agor_sessions_create (it starts cold).${bypassed}`;
+    default:
+      return `Resolved via ${target.via}.`;
+  }
 }
 
 /** Project a declaration to the fields a caller acts on. */
@@ -75,7 +123,7 @@ export function createFrontDeskToolHandlers(ctx: McpContext) {
   /** Exactly one of `teammate` / `branchId`, resolved to a branch id or an error result. */
   async function resolveTarget(
     args: FrontDeskTargetArgs
-  ): Promise<{ branchId: BranchID } | { result: ToolResult }> {
+  ): Promise<{ branchId: BranchID; branch?: Branch } | { result: ToolResult }> {
     if (Boolean(args.teammate) === Boolean(args.branchId)) {
       return {
         result: errorResult({
@@ -93,7 +141,7 @@ export function createFrontDeskToolHandlers(ctx: McpContext) {
     if (resolution.outcome === 'not_found') {
       return { result: errorResult(teammateNotFoundPayload(args.teammate!, resolution)) };
     }
-    return { branchId: resolution.branch.branch_id };
+    return { branchId: resolution.branch.branch_id, branch: resolution.branch };
   }
 
   /** Expected refusals become caller-facing payloads; anything else propagates. */
@@ -117,6 +165,59 @@ export function createFrontDeskToolHandlers(ctx: McpContext) {
   }
 
   return {
+    /** `agor_teammates_resolve` — read-only; the resolver runs as a dry run. */
+    async resolve(args: FrontDeskTargetArgs & { sessionId?: string }): Promise<ToolResult> {
+      const target = await resolveTarget(args);
+      if ('result' in target) return target.result;
+      const branch: Branch =
+        target.branch ??
+        (await ctx.app.service('branches').get(target.branchId, ctx.baseServiceParams));
+
+      // Fetched through the sessions service, so an explicit id the caller
+      // cannot view fails here exactly as it would when prompting.
+      const explicitSession: Session | undefined = args.sessionId
+        ? await ctx.app.service('sessions').get(args.sessionId, ctx.baseServiceParams)
+        : undefined;
+      const { nameAddressing, target: resolved } = await previewTeammateAddress(ctx, branch, {
+        explicitSessionId: explicitSession?.session_id,
+      });
+
+      let session: Session | null = null;
+      if (resolved.via === 'explicit') session = explicitSession ?? null;
+      else if (resolved.via === 'front_desk' || resolved.via === 'recency') {
+        session = resolved.session;
+      }
+      const bypassed =
+        'bypassedFrontDesk' in resolved && resolved.bypassedFrontDesk
+          ? resolved.bypassedFrontDesk
+          : null;
+      return textResult({
+        dry_run: true,
+        teammate: describeTeammateBranch(branch),
+        name_addressing: nameAddressing,
+        via: resolved.via,
+        session: describeResolvedSession(session),
+        ...(resolved.via === 'front_desk' ? { front_desk_id: resolved.frontDeskId } : {}),
+        ...(bypassed
+          ? {
+              bypassed_front_desk: {
+                front_desk_id: bypassed.frontDeskId,
+                session_id: bypassed.sessionId,
+                status: bypassed.status,
+                reason: bypassed.reason,
+                would_demote_to: bypassed.demoteTo,
+              },
+            }
+          : {}),
+        ...(explicitSession && explicitSession.branch_id !== branch.branch_id
+          ? {
+              warning: `Session ${explicitSession.session_id} belongs to branch ${explicitSession.branch_id}, not to this teammate. An explicit sessionId is delivered as given.`,
+            }
+          : {}),
+        explanation: explainTarget(resolved),
+      });
+    },
+
     /** `agor_teammates_front_desk_set` */
     async set(
       args: FrontDeskTargetArgs & { sessionId: string; expectedSessionId?: string }

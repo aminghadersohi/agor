@@ -71,6 +71,52 @@ export interface TeammateFrontDeskView {
   branch_id: BranchID;
   front_desk: BranchFrontDeskSession | null;
   can_manage: boolean;
+  /** Present only when requested with `?include_addressing=true`. */
+  addressing?: TeammateAddressingPreview;
+}
+
+/** Compact teammate identity echoed back by addressing. */
+export interface TeammateCandidate {
+  branch_id: BranchID;
+  /** Branch slug, e.g. "front-desk". */
+  name: string;
+  /** Teammate display name when configured, else the slug. */
+  display_name: string;
+}
+
+/** Why `agor_sessions_prompt { teammate }` will not reach a teammate for this caller. */
+export type TeammateNotAddressableReason =
+  | 'archived'
+  | 'not_a_teammate'
+  | 'no_prompt_permission'
+  | 'beyond_scan_limit'
+  | 'ambiguous_name';
+
+/** Whether name addressing reaches a teammate for the caller, and by which name. */
+export type TeammateAddressability =
+  | {
+      addressable: true;
+      /** A name that resolves to exactly this teammate: the slug when unique, else the display name. */
+      address: string;
+    }
+  | {
+      addressable: false;
+      reason: TeammateNotAddressableReason;
+      detail: string;
+      /** For `ambiguous_name`: the other teammates sharing this one's names. */
+      conflicts_with?: TeammateCandidate[];
+    };
+
+/**
+ * Dry-run answer to "who would a name address reach right now, for me?" —
+ * the same resolver addressing uses, minus its one write (demoting an
+ * unhealthy front desk), which is reported as `bypassed_front_desk` instead.
+ */
+export interface TeammateAddressingPreview {
+  via: 'front_desk' | 'recency' | 'needs_session';
+  session_id: SessionID | null;
+  name_addressing: TeammateAddressability;
+  bypassed_front_desk: { session_id: SessionID; reason: FrontDeskRetiredReason } | null;
 }
 
 /** `POST /branches/:id/front-desk` — pin a session, replacing any current pin. */
