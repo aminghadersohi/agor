@@ -381,6 +381,8 @@ function makeGatewayHarness(args: {
       : null
   );
   const completeReplyAdmission = vi.fn(async () => args.outboundSeed ?? undefined);
+  const taskRepo = { findById: vi.fn(async () => null) };
+  (service as unknown as { taskRepo: typeof taskRepo }).taskRepo = taskRepo;
   (service as unknown as { channelRepo: typeof channelRepo }).channelRepo = channelRepo;
   (service as unknown as { branchRepo: typeof branchRepo }).branchRepo = branchRepo;
   (service as unknown as { sessionRepo: typeof sessionRepo }).sessionRepo = sessionRepo;

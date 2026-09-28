@@ -3913,9 +3913,9 @@ export class GatewayService {
    *
    * The per-Task answer is durable: admission stamps the mapping it resolved
    * onto `gateway_task_source.thread_session_map_id`. Resolution order is
-   * therefore the stamp, then the Task's own channel+thread coordinates (which
-   * are uniquely indexed), and only then the Session, which is a guess and is
-   * logged as one.
+   * therefore the stamp, or the Task's channel+thread coordinates for older
+   * Tasks. A known destination that is no longer valid must not fall back to
+   * another audience. Only Tasks without gateway provenance use the Session.
    *
    * The stamped row is re-checked against the Task's Session rather than
    * trusted outright: a mapping that has since been repointed at another
@@ -3932,9 +3932,7 @@ export class GatewayService {
     const source = await this.gatewayTaskSource(input);
 
     if (source?.thread_session_map_id) {
-      const stamped = await this.threadMapRepo
-        .findById(source.thread_session_map_id)
-        .catch(() => null);
+      const stamped = await this.threadMapRepo.findById(source.thread_session_map_id);
       if (stamped && stamped.session_id === input.sessionId) return stamped;
       this.logOutboundAddressingOnce(
         `stamp:${input.purpose}:${input.sessionId}`,
@@ -3942,13 +3940,17 @@ export class GatewayService {
           `session_id=${shortId(input.sessionId)} reason=${stamped ? 'session_mismatch' : 'missing'}`,
         'warn'
       );
+      return null;
     }
 
     if (source?.gateway_channel_id && source.thread_id) {
-      const byThread = await this.threadMapRepo
-        .findByChannelAndThread(source.gateway_channel_id, source.thread_id)
-        .catch(() => null);
-      if (byThread && byThread.session_id === input.sessionId) return byThread;
+      const byThread =
+        (await this.threadMapRepo.findByChannelAndThread(
+          source.gateway_channel_id,
+          source.thread_id
+        )) ??
+        (await this.findGatewayReplyAliasMapping(source.gateway_channel_id, source.thread_id));
+      return byThread?.session_id === input.sessionId ? byThread : null;
     }
 
     const { mapping, ambiguous } = await this.threadMapRepo.findBySessionAmbiguityAware(
@@ -3991,7 +3993,7 @@ export class GatewayService {
     const cached = this.gatewayTaskSources.get(cacheKey);
     if (cached !== undefined) return cached ?? undefined;
 
-    const task = await this.taskRepo.findById(input.taskId).catch(() => null);
+    const task = await this.taskRepo.findById(input.taskId);
     if (!task) return undefined;
     const source = task.metadata?.gateway_task_source;
     if (this.gatewayTaskSources.size >= GatewayService.GATEWAY_TASK_SOURCE_CACHE_MAX) {

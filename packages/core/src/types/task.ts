@@ -224,7 +224,9 @@ export interface TaskMetadata {
      * mapping is keyed on the outbound seed's platform thread when there is
      * one, plus reply aliases — so a seed-originated thread does not find its
      * own mapping by the inbound thread id. Absent on Tasks admitted before
-     * this was persisted; readers must fall back rather than refuse.
+     * this was persisted; readers resolve those older Tasks by their recorded
+     * channel/thread coordinates (including reply aliases). An invalid stamp
+     * must not fall back to a different thread of the Session.
      */
     thread_session_map_id?: import('./gateway').ThreadSessionMapID;
     provider_user_id: string;
