@@ -788,6 +788,20 @@ describe('BoardRepository.update', () => {
     expect(updated.board_id).toBe(data.board_id);
   });
 
+  dbTest('persists and clears the primary gallery image projection', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const data = createBoardData();
+    await repo.create(data);
+    const imageId = generateId();
+
+    await repo.update(data.board_id!, { profile_image_id: imageId });
+    expect((await repo.findById(data.board_id!))?.profile_image_id).toBe(imageId);
+    expect((await repo.findAll({ lean: true })).at(0)?.profile_image_id).toBe(imageId);
+
+    await repo.update(data.board_id!, { profile_image_id: undefined });
+    expect((await repo.findById(data.board_id!))?.profile_image_id).toBeUndefined();
+  });
+
   dbTest('should update multiple fields', async ({ db }) => {
     const repo = new BoardRepository(db);
     const data = createBoardData({

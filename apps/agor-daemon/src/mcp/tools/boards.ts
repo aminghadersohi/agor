@@ -849,7 +849,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         'The response includes a `url` field with a clickable link to view the board in the UI. ' +
         'By default, returns board metadata and canvas objects only (no positioned branch/card entities). ' +
         'Use objectTypes=["zone"] for a lean board definition with just zones. ' +
-        'Set includeEntities=true to include positioned branch/card entities, optionally filtered by entityZoneId/entityType and paginated with entitiesLimit/entitiesSkip.',
+        'Set includeEntities=true to include positioned branch/card entities, optionally filtered by entityZoneId/entityType and paginated with entitiesLimit/entitiesSkip. ' +
+        'worktree_count, total_session_count, and active_session_count are the same caller-scoped aggregates agor_boards_list returns (non-archived branches/sessions you can see). ' +
+        'Zone-to-zone workflow edges and their advance history live in agor_zone_workflow_transitions_list and agor_zone_workflow_advances_list.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
@@ -940,7 +942,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_list',
     {
       description:
-        'List a lean page of boards accessible to the current user (heavy canvas objects and custom CSS are omitted; use agor_boards_get for details). By default archived boards are excluded. Advance with offset=nextOffset while hasMore is true.',
+        'List a lean page of boards accessible to the current user (heavy canvas objects and custom CSS are omitted; use agor_boards_get for details). Each board carries caller-scoped worktree_count, total_session_count, and active_session_count (non-archived branches/sessions you can see; active = executing). By default archived boards are excluded. Advance with offset=nextOffset while hasMore is true.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         limit: mcpListLimit(),

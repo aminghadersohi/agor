@@ -88,6 +88,26 @@ vi.mock('../../hooks/useSharedReactiveSession', () => ({
   useSharedReactiveSession: reactive.useSharedReactiveSession,
 }));
 
+// Front-desk transport has dedicated hook tests; here only the panel's use of it.
+const frontDesk = vi.hoisted(() => {
+  const idle = () => ({
+    view: null as null | {
+      branch_id: string;
+      front_desk: { session_id: string; status: string } | null;
+      can_manage: boolean;
+    },
+    loading: false,
+    error: null,
+    saving: false,
+    pin: vi.fn(async () => true),
+    unpin: vi.fn(async () => true),
+  });
+  return { idle, state: idle() };
+});
+vi.mock('../../hooks/useTeammateFrontDesk', () => ({
+  useTeammateFrontDesk: () => frontDesk.state,
+}));
+
 const viewport = vi.hoisted(() => ({ isMobile: false }));
 vi.mock('../../hooks/useIsMobileViewport', () => ({
   useIsMobileViewport: () => viewport.isMobile,
@@ -664,4 +684,60 @@ describe('SessionPanel archive feedback', () => {
       }
     }
   );
+});
+
+describe('SessionPanel teammate front desk', () => {
+  afterEach(() => {
+    frontDesk.state = frontDesk.idle();
+  });
+
+  function setDesk(pinnedSessionId: string | null, canManage: boolean) {
+    frontDesk.state.view = {
+      branch_id: branch.branch_id,
+      front_desk: pinnedSessionId ? { session_id: pinnedSessionId, status: 'active' } : null,
+      can_manage: canManage,
+    };
+  }
+
+  async function openMoreMenu() {
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    await screen.findByRole('menuitem', { name: /Archive session/ });
+  }
+
+  it('offers a Branch Manager "Pin as front desk" on an unpinned session', async () => {
+    setDesk('another-session', true);
+    renderPanel({ client: {} as AgorClient });
+    expect(screen.queryByText('Front desk')).not.toBeInTheDocument();
+
+    await openMoreMenu();
+    fireEvent.click(screen.getByRole('menuitem', { name: /Pin as front desk/ }));
+    expect(frontDesk.state.pin).toHaveBeenCalledWith(session.session_id);
+    expect(frontDesk.state.unpin).not.toHaveBeenCalled();
+  });
+
+  it('tags the pinned session and offers Unpin', async () => {
+    setDesk(session.session_id, true);
+    renderPanel({ client: {} as AgorClient });
+    expect(screen.getByText('Front desk')).toBeInTheDocument();
+
+    await openMoreMenu();
+    fireEvent.click(screen.getByRole('menuitem', { name: /Unpin front desk/ }));
+    expect(frontDesk.state.unpin).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the tag but no pin action to a caller who cannot manage the desk', async () => {
+    setDesk(session.session_id, false);
+    renderPanel({ client: {} as AgorClient });
+    expect(screen.getByText('Front desk')).toBeInTheDocument();
+
+    await openMoreMenu();
+    expect(screen.queryByRole('menuitem', { name: /front desk/i })).not.toBeInTheDocument();
+  });
+
+  it('offers nothing when the branch has no front-desk view (not a teammate)', async () => {
+    renderPanel({ client: {} as AgorClient });
+    expect(screen.queryByText('Front desk')).not.toBeInTheDocument();
+    await openMoreMenu();
+    expect(screen.queryByRole('menuitem', { name: /front desk/i })).not.toBeInTheDocument();
+  });
 });

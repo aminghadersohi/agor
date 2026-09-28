@@ -16,6 +16,13 @@ vi.mock('../../ScheduleRunsPanel', () => ({
   ScheduleRunsPanel: () => null,
 }));
 
+const messages = vi.hoisted(() => ({
+  showError: vi.fn(),
+  showSuccess: vi.fn(),
+  showWarning: vi.fn(),
+}));
+vi.mock('../../../utils/message', () => ({ useThemedMessage: () => messages }));
+
 const makeSchedule = (overrides: Partial<Schedule> = {}): Schedule =>
   ({
     schedule_id: '018f0000-0000-7000-8000-000000000001',
@@ -39,9 +46,13 @@ const makeSchedule = (overrides: Partial<Schedule> = {}): Schedule =>
     ...overrides,
   }) as Schedule;
 
-const makeScheduleClient = (schedules: Schedule[]): AgorClient =>
+const makeScheduleClient = (
+  schedules: Schedule[],
+  runNow: () => Promise<unknown> = async () => ({})
+): AgorClient =>
   ({
     service(path: string) {
+      if (path.endsWith('/run-now')) return { create: runNow };
       return {
         async find() {
           if (path === 'schedules') return { data: schedules };
@@ -68,17 +79,19 @@ function renderScheduleTab({
   onOpenSession = vi.fn(),
   currentUser,
   userById,
+  runNow,
 }: {
   branch?: Branch;
   schedules?: Schedule[];
   onOpenSession?: (sessionId: string) => void;
   currentUser?: User;
   userById?: Map<string, User>;
+  runNow?: () => Promise<unknown>;
 } = {}) {
   renderWithApp(
     <ScheduleTab
       branch={branch}
-      client={makeScheduleClient(schedules)}
+      client={makeScheduleClient(schedules, runNow)}
       onOpenSession={onOpenSession}
       currentUser={currentUser}
       userById={userById}
@@ -90,6 +103,7 @@ function renderScheduleTab({
 describe('ScheduleTab compact list', () => {
   beforeEach(() => {
     scheduleModalProps.mockClear();
+    for (const fn of Object.values(messages)) fn.mockClear();
   });
 
   it('keeps secondary schedule details out of full-width columns', async () => {
@@ -104,6 +118,20 @@ describe('ScheduleTab compact list', () => {
 
     const title = screen.getByLabelText(/schedule title:/i);
     expect(title).toHaveStyle({ textOverflow: 'ellipsis', overflow: 'hidden' });
+  });
+
+  it('explains a power-held run-now as a host condition, not an error', async () => {
+    const heldError = Object.assign(new Error('held'), { data: { code: 'schedule_power_held' } });
+    renderScheduleTab({ runNow: vi.fn().mockRejectedValue(heldError) });
+
+    fireEvent.click(await screen.findByRole('button', { name: /run schedule .* now/i }));
+
+    await waitFor(() => {
+      expect(messages.showWarning).toHaveBeenCalledWith(
+        expect.stringContaining('host power policy is holding new work')
+      );
+    });
+    expect(messages.showError).not.toHaveBeenCalled();
   });
 
   it('opens the last run from a row action', async () => {

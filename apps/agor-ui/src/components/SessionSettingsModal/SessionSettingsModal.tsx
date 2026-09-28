@@ -56,11 +56,13 @@ import { CallbackConfigForm } from '../CallbackConfigForm';
 import { CallbackTargetDisplay } from '../CallbackToggleButton';
 import { CodexSettingsForm } from '../CodexSettingsForm';
 import { ErrorBoundary } from '../ErrorBoundary';
+import { SessionArchiveStatus } from '../SessionArchiveStatus';
 import { SessionEnvVarsSelector } from '../SessionEnvVarsSelector';
 import { SessionIdsList } from '../SessionIds';
 import { SessionMetadataForm } from '../SessionMetadataForm';
 import { SessionMemoryReminders } from './SessionMemoryReminders';
 import { SessionPowerPriorityControl } from './SessionPowerPriorityControl';
+import { SessionRoutingControls } from './SessionRoutingControls';
 
 export interface SessionSettingsModalProps {
   open: boolean;
@@ -95,9 +97,9 @@ interface FormValues {
   custom_context: string;
   callbackConfig: {
     enabled: boolean;
+    mode: NonNullable<NonNullable<Session['callback_config']>['callback_mode']>;
     delivery: NonNullable<Session['callback_config']>['delivery'];
     includeLastMessage: boolean;
-    mode: NonNullable<Session['callback_config']>['callback_mode'];
     template?: string;
   };
   autoArchive: Session['auto_archive'];
@@ -139,8 +141,9 @@ function buildInitialValues(session: Session, sessionMcpServerIds: string[]): Fo
     custom_context: formatCustomContext(session.custom_context),
     callbackConfig: {
       enabled: session.callback_config?.enabled ?? true,
-      delivery: session.callback_config?.delivery ?? 'direct',
+      // Omitted means persistent, matching completion-callback dispatch.
       mode: session.callback_config?.callback_mode ?? 'persistent',
+      delivery: session.callback_config?.delivery ?? 'direct',
       includeLastMessage: session.callback_config?.include_last_message ?? true,
       template: session.callback_config?.template,
     },
@@ -221,8 +224,8 @@ function buildUpdates(
   if (values.callbackConfig) {
     updates.callback_config = {
       ...session.callback_config,
-      callback_mode: values.callbackConfig.mode,
       enabled: values.callbackConfig.enabled ?? true,
+      callback_mode: values.callbackConfig.mode ?? 'persistent',
       delivery: values.callbackConfig.delivery ?? 'direct',
       include_last_message: values.callbackConfig.includeLastMessage ?? true,
       template: values.callbackConfig.template || undefined,
@@ -496,6 +499,7 @@ export const SessionSettingsModal: React.FC<SessionSettingsModalProps> = ({
     children: (
       <>
         <CallbackTargetDisplay session={session} onNavigate={onClose} />
+        {client && <SessionRoutingControls client={client} session={session} />}
         <CallbackConfigForm showHelpText />
       </>
     ),
@@ -542,6 +546,11 @@ export const SessionSettingsModal: React.FC<SessionSettingsModalProps> = ({
               )
             }
           </Form.Item>
+          {session.auto_archive_at && !session.archived && (
+            <div style={{ marginBottom: 8 }}>
+              <SessionArchiveStatus session={session} />
+            </div>
+          )}
           <Typography.Text type="secondary">
             Re-prompting cancels a pending deadline. Unarchiving keeps the policy but waits for the
             next completion before scheduling again.

@@ -20,6 +20,12 @@
  * listed in an ambiguity error — teammates they are allowed to prompt. The
  * prompt itself is authorized again downstream by the `/sessions/:id/prompt`
  * route's branch-RBAC check; nothing here is a substitute for that.
+ *
+ * `agor_teammates_list` discovers at `view`, so it can show teammates this
+ * module will not resolve. `assessTeammateAddressability` answers, per listed
+ * teammate, whether name addressing reaches it and why not — from the same
+ * scan and the same name index `resolveTeammateName` uses, so the two cannot
+ * disagree.
  */
 
 import { BranchRepository } from '@agor/core/db';
@@ -28,10 +34,17 @@ import {
   type BranchID,
   getTeammateConfig,
   type Session,
+  type SessionID,
+  type TeammateAddressability,
+  type TeammateCandidate,
+  type TeammateNotAddressableReason,
   type UserID,
   type UUID,
 } from '@agor/core/types';
-import { resolveTargetSession } from '../../front-desk/resolve-target-session.js';
+import {
+  type FrontDeskTarget,
+  resolveTargetSession,
+} from '../../front-desk/resolve-target-session.js';
 import { isSuperAdmin } from '../../utils/branch-authorization.js';
 import type { McpContext } from '../server.js';
 import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
@@ -49,13 +62,17 @@ export const TEAMMATE_NAME_SCAN_LIMIT = 500;
 /** How many candidate names an error message is willing to list. */
 const MAX_LISTED_CANDIDATES = 25;
 
-export interface TeammateCandidate {
-  branch_id: BranchID;
-  /** Branch slug, e.g. "front-desk". */
-  name: string;
-  /** Teammate display name when configured, else the slug. */
-  display_name: string;
-}
+export type { TeammateAddressability, TeammateCandidate };
+
+/**
+ * What addressing reads from its caller. An MCP context satisfies it; the
+ * `branches/:id/front-desk` route builds one from request params so the UI
+ * preview runs this same code.
+ */
+export type TeammateAddressingContext = Pick<
+  McpContext,
+  'app' | 'db' | 'userId' | 'authenticatedUser' | 'baseServiceParams'
+>;
 
 export type TeammateNameResolution =
   | { outcome: 'matched'; branch: Branch }
@@ -90,17 +107,62 @@ function foldName(value: string): string {
 }
 
 /**
- * Superadmins and service accounts resolve across every teammate in the
- * tenant; everyone else resolves only teammates they may prompt.
- *
- * Mirrors `shouldScopeTeammateDiscoveryToUser` in branches.ts — kept in step
- * with it so `agor_teammates_list` and name addressing agree on who exists.
+ * Superadmins and service accounts discover and resolve across every teammate
+ * in the tenant; everyone else is scoped to their own branch access. Shared by
+ * `agor_teammates_list` and name addressing so they agree on who exists.
  */
-function shouldScopeToUser(ctx: McpContext): boolean {
+export function shouldScopeTeammateDiscoveryToUser(ctx: TeammateAddressingContext): boolean {
   if (ctx.authenticatedUser?._isServiceAccount) return false;
   const config = ctx.app.get('config');
   const allowSuperadmin = config?.execution?.allow_superadmin === true;
   return !isSuperAdmin(ctx.authenticatedUser?.role, allowSuperadmin);
+}
+
+interface TeammateNameScan {
+  /** Teammates the caller may prompt, in discovery order, capped at the scan limit. */
+  scanned: Branch[];
+  scanTruncated: boolean;
+  /** Folded name → every scanned teammate answering to it, in scan order. */
+  byName: Map<string, Branch[]>;
+}
+
+/** The folded names a teammate answers to: its slug and, if set, its display name. */
+function foldedNamesOf(branch: Branch): string[] {
+  const names = new Set([foldName(branch.name)]);
+  const displayName = getTeammateConfig(branch)?.displayName;
+  if (displayName !== undefined) names.add(foldName(displayName));
+  return [...names];
+}
+
+/**
+ * The candidate set name addressing matches against: non-archived teammates
+ * the caller may prompt (`session` permission), bounded by
+ * {@link TEAMMATE_NAME_SCAN_LIMIT}.
+ */
+async function scanNameableTeammates(ctx: TeammateAddressingContext): Promise<TeammateNameScan> {
+  const userScoped = shouldScopeTeammateDiscoveryToUser(ctx);
+
+  const branches = await runWithMcpTenantDatabaseScope(ctx, (db) =>
+    new BranchRepository(db).findTeammateBranches({
+      archived: false,
+      ...(userScoped ? { userId: ctx.userId as UUID, minimumPermission: 'session' as const } : {}),
+      // One-row look-ahead distinguishes "scanned everything and found
+      // nothing" from "stopped looking at the cap".
+      limit: TEAMMATE_NAME_SCAN_LIMIT + 1,
+    })
+  );
+
+  const scanTruncated = branches.length > TEAMMATE_NAME_SCAN_LIMIT;
+  const scanned = scanTruncated ? branches.slice(0, TEAMMATE_NAME_SCAN_LIMIT) : branches;
+  const byName = new Map<string, Branch[]>();
+  for (const branch of scanned) {
+    for (const name of foldedNamesOf(branch)) {
+      const bucket = byName.get(name);
+      if (bucket) bucket.push(branch);
+      else byName.set(name, [branch]);
+    }
+  }
+  return { scanned, scanTruncated, byName };
 }
 
 /**
@@ -118,30 +180,11 @@ function shouldScopeToUser(ctx: McpContext): boolean {
  * this returns it rather than guessing.
  */
 export async function resolveTeammateName(
-  ctx: McpContext,
+  ctx: TeammateAddressingContext,
   rawName: string
 ): Promise<TeammateNameResolution> {
-  const wanted = foldName(rawName);
-  const userScoped = shouldScopeToUser(ctx);
-
-  const branches = await runWithMcpTenantDatabaseScope(ctx, (db) =>
-    new BranchRepository(db).findTeammateBranches({
-      archived: false,
-      ...(userScoped ? { userId: ctx.userId as UUID, minimumPermission: 'session' as const } : {}),
-      // One-row look-ahead distinguishes "scanned everything and found
-      // nothing" from "stopped looking at the cap".
-      limit: TEAMMATE_NAME_SCAN_LIMIT + 1,
-    })
-  );
-
-  const scanTruncated = branches.length > TEAMMATE_NAME_SCAN_LIMIT;
-  const scanned = scanTruncated ? branches.slice(0, TEAMMATE_NAME_SCAN_LIMIT) : branches;
-
-  const matches = scanned.filter((branch) => {
-    if (foldName(branch.name) === wanted) return true;
-    const displayName = getTeammateConfig(branch)?.displayName;
-    return displayName !== undefined && foldName(displayName) === wanted;
-  });
+  const { scanned, scanTruncated, byName } = await scanNameableTeammates(ctx);
+  const matches = byName.get(foldName(rawName)) ?? [];
 
   if (matches.length === 1) return { outcome: 'matched', branch: matches[0] };
   if (matches.length > 1) {
@@ -151,6 +194,108 @@ export async function resolveTeammateName(
     outcome: 'not_found',
     scanTruncated,
     known: scanned.slice(0, MAX_LISTED_CANDIDATES).map(describeTeammateBranch),
+  };
+}
+
+function notAddressable(
+  reason: Exclude<TeammateNotAddressableReason, 'ambiguous_name'>
+): TeammateAddressability {
+  const detail: Record<typeof reason, string> = {
+    archived: 'The teammate is archived; name addressing only reaches active teammates.',
+    not_a_teammate:
+      'The branch is not a teammate (no teammate marker or enabled schedule), so name addressing does not consider it.',
+    no_prompt_permission:
+      'You can see this teammate but lack session permission on its branch, so name addressing will not resolve it for you.',
+    beyond_scan_limit: `More than ${TEAMMATE_NAME_SCAN_LIMIT} teammates are addressable, and name addressing only checks the first ${TEAMMATE_NAME_SCAN_LIMIT}. Address one of its sessions by sessionId instead.`,
+  };
+  return { addressable: false, reason, detail: detail[reason] };
+}
+
+/**
+ * Whether `agor_sessions_prompt { teammate }` would reach each branch for this
+ * caller, and by which name.
+ *
+ * Name addressing succeeds exactly when the branch is in the scan
+ * `resolveTeammateName` matches against and one of its names maps to it
+ * alone, so this reads the same scan rather than restating the rule. Branches
+ * outside the scan are classified with one bounded lookup each for
+ * teammate-ness and prompt permission.
+ */
+export async function assessTeammateAddressability(
+  ctx: TeammateAddressingContext,
+  branches: Branch[]
+): Promise<Map<BranchID, TeammateAddressability>> {
+  const { scanned, byName } = await scanNameableTeammates(ctx);
+  const scannedIds = new Set(scanned.map((branch) => branch.branch_id));
+  const unscannedIds = branches
+    .filter((branch) => !branch.archived && !scannedIds.has(branch.branch_id))
+    .map((branch) => branch.branch_id);
+
+  let teammateIds = new Set<BranchID>();
+  let promptableIds = new Set<BranchID>();
+  if (unscannedIds.length > 0) {
+    const userScoped = shouldScopeTeammateDiscoveryToUser(ctx);
+    const ids = (rows: Branch[]) => new Set(rows.map((row) => row.branch_id));
+    [teammateIds, promptableIds] = await runWithMcpTenantDatabaseScope(ctx, async (db) => {
+      const repo = new BranchRepository(db);
+      const base = { archived: false, branchIds: unscannedIds, limit: unscannedIds.length };
+      const teammates = ids(await repo.findTeammateBranches(base));
+      const promptable = userScoped
+        ? ids(
+            await repo.findTeammateBranches({
+              ...base,
+              userId: ctx.userId as UUID,
+              minimumPermission: 'session',
+            })
+          )
+        : teammates;
+      return [teammates, promptable];
+    });
+  }
+
+  const unscannedReason = (branchId: BranchID) => {
+    if (!teammateIds.has(branchId)) return 'not_a_teammate' as const;
+    if (!promptableIds.has(branchId)) return 'no_prompt_permission' as const;
+    // Promptable yet outside the scan: it fell past the cap.
+    return 'beyond_scan_limit' as const;
+  };
+
+  const verdicts = new Map<BranchID, TeammateAddressability>();
+  for (const branch of branches) {
+    if (branch.archived) {
+      verdicts.set(branch.branch_id, notAddressable('archived'));
+    } else if (!scannedIds.has(branch.branch_id)) {
+      verdicts.set(branch.branch_id, notAddressable(unscannedReason(branch.branch_id)));
+    } else {
+      verdicts.set(branch.branch_id, assessScannedName(branch, byName));
+    }
+  }
+  return verdicts;
+}
+
+/** A scanned teammate is addressable by whichever of its names nobody else shares. */
+function assessScannedName(
+  branch: Branch,
+  byName: TeammateNameScan['byName']
+): TeammateAddressability {
+  const displayName = getTeammateConfig(branch)?.displayName;
+  for (const name of [branch.name, displayName]) {
+    if (name !== undefined && byName.get(foldName(name))?.length === 1) {
+      return { addressable: true, address: name };
+    }
+  }
+  const others = new Map<BranchID, Branch>();
+  for (const name of foldedNamesOf(branch)) {
+    for (const other of byName.get(name) ?? []) {
+      if (other.branch_id !== branch.branch_id) others.set(other.branch_id, other);
+    }
+  }
+  return {
+    addressable: false,
+    reason: 'ambiguous_name',
+    detail:
+      'Every name this teammate answers to also matches another teammate you can address, so name addressing refuses to guess. Address one of its sessions by sessionId instead.',
+    conflicts_with: [...others.values()].map(describeTeammateBranch),
   };
 }
 
@@ -165,7 +310,7 @@ export async function resolveTeammateName(
  * timestamps resolve deterministically instead of by physical row order.
  */
 async function findMostRecentTeammateSession(
-  ctx: McpContext,
+  ctx: TeammateAddressingContext,
   branch: Branch
 ): Promise<Session | null> {
   const result = await ctx.app.service('sessions').find({
@@ -201,21 +346,10 @@ async function findMostRecentTeammateSession(
  * rules live in the shared resolver so gateway routing cannot drift from it.
  */
 export async function resolveTeammateSession(
-  ctx: McpContext,
+  ctx: TeammateAddressingContext,
   branch: Branch
 ): Promise<TeammateSessionResolution> {
-  const target = await resolveTargetSession(
-    {
-      branchId: branch.branch_id,
-      callerUserId: ctx.userId as UserID,
-      scope: { kind: 'teammate' },
-    },
-    {
-      read: (work) => runWithMcpTenantDatabaseScope(ctx, work),
-      write: (work) => runWithMcpTenantDatabaseWrite(ctx, work),
-      mostRecentSession: () => findMostRecentTeammateSession(ctx, branch),
-    }
-  );
+  const target = await resolveTeammateTarget(ctx, branch);
 
   if (target.via === 'front_desk' || target.via === 'recency') {
     return { outcome: 'session', branch, session: target.session, via: target.via };
@@ -223,6 +357,50 @@ export async function resolveTeammateSession(
   if (target.via === 'needs_session') return { outcome: 'no_session', branch };
   // Explicit and thread-mapping targets are not produced for teammate scope.
   throw new Error(`Unexpected teammate session resolution: ${target.via}`);
+}
+
+/**
+ * The shared resolver, wired to this caller's tenant scope and access-scoped
+ * recency read. `resolveTeammateSession` is the prompting path; the dry-run
+ * preview (`agor_teammates_resolve`) calls this directly so it can also show
+ * the explicit rule and a bypassed front desk without demoting it.
+ */
+export function resolveTeammateTarget(
+  ctx: TeammateAddressingContext,
+  branch: Branch,
+  options: { explicitSessionId?: SessionID; dryRun?: boolean } = {}
+): Promise<FrontDeskTarget> {
+  return resolveTargetSession(
+    {
+      branchId: branch.branch_id,
+      callerUserId: ctx.userId as UserID,
+      scope: { kind: 'teammate' },
+      ...options,
+    },
+    {
+      read: (work) => runWithMcpTenantDatabaseScope(ctx, work),
+      write: (work) => runWithMcpTenantDatabaseWrite(ctx, work),
+      mostRecentSession: () => findMostRecentTeammateSession(ctx, branch),
+    }
+  );
+}
+
+/**
+ * The dry run behind `agor_teammates_resolve` and the UI's Front desk preview:
+ * whether the caller can address this teammate by name, and which session an
+ * address would reach. Never writes — an unhealthy front desk is reported on
+ * the target, not demoted.
+ */
+export async function previewTeammateAddress(
+  ctx: TeammateAddressingContext,
+  branch: Branch,
+  options: { explicitSessionId?: SessionID } = {}
+): Promise<{ nameAddressing: TeammateAddressability; target: FrontDeskTarget }> {
+  const [addressability, target] = await Promise.all([
+    assessTeammateAddressability(ctx, [branch]),
+    resolveTeammateTarget(ctx, branch, { ...options, dryRun: true }),
+  ]);
+  return { nameAddressing: addressability.get(branch.branch_id)!, target };
 }
 
 /** Render `not_found` as a caller-facing MCP error payload. */

@@ -41,6 +41,7 @@ import type {
   SpawnConfig,
   User,
   ZoneTrigger,
+  ZoneWorkflowAdvancedEntity,
   ZoneWorkflowEntityRef,
   ZoneWorkflowTransition,
 } from '@agor-live/client';
@@ -58,6 +59,7 @@ import {
   DeleteOutlined,
   EditOutlined,
   FileMarkdownOutlined,
+  HistoryOutlined,
   MinusOutlined,
   MoreOutlined,
   PlusOutlined,
@@ -218,6 +220,7 @@ import { getValidZoneParentId, sanitizeOrphanedNodeParents } from './canvas/util
 import { mergePendingZoneGeometry, type ZoneGeometry } from './canvas/utils/pendingZoneGeometry';
 import { persistedResizeRect, type ResizeRect } from './canvas/utils/resizeGeometry';
 import { ZoneTriggerModal } from './canvas/ZoneTriggerModal';
+import { ZoneWorkflowAdvanceHistoryModal } from './canvas/ZoneWorkflowAdvanceHistoryModal';
 import {
   ZoneWorkflowTransitionModal,
   type ZoneWorkflowTransitionValues,
@@ -687,6 +690,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       targetZoneId: string;
       transition?: ZoneWorkflowTransition;
     } | null>(null);
+    // Mounted entity is separate from `open` so the modal's exit motion runs.
+    const [historyTransition, setHistoryTransition] = useState<ZoneWorkflowTransition | null>(null);
+    const [historyOpen, setHistoryOpen] = useState(false);
 
     // Zone drawing state (drag-to-draw)
     const [drawingZone, setDrawingZone] = useState<{
@@ -4292,6 +4298,28 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       });
     }, [selectedTransition, canMutateBoard]);
 
+    const openSelectedTransitionHistory = useCallback(() => {
+      if (!selectedTransition) return;
+      setHistoryTransition(selectedTransition);
+      setHistoryOpen(true);
+    }, [selectedTransition]);
+
+    const describeAdvancedEntity = useCallback(
+      (entity: ZoneWorkflowAdvancedEntity) =>
+        entity.entity_type === 'branch'
+          ? (branchById.get(entity.entity_id)?.name ?? shortId(entity.entity_id))
+          : (cardById.get(entity.entity_id)?.title ?? shortId(entity.entity_id)),
+      [branchById, cardById]
+    );
+
+    const describeAdvanceUser = useCallback(
+      (userId: string) => {
+        const user = userById.get(userId);
+        return user?.name || user?.email || shortId(userId);
+      },
+      [userById]
+    );
+
     const deleteSelectedTransition = useCallback(() => {
       if (!selectedTransition || !canMutateBoard) return;
       Modal.confirm({
@@ -5011,6 +5039,13 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                       </Button>
                       <Button
                         size="small"
+                        icon={<HistoryOutlined />}
+                        onClick={openSelectedTransitionHistory}
+                      >
+                        History
+                      </Button>
+                      <Button
+                        size="small"
                         danger
                         icon={<DeleteOutlined />}
                         disabled={!canMutateBoard}
@@ -5201,6 +5236,19 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             disabled={!canMutateBoard}
             onCancel={() => setTransitionModal(null)}
             onSave={saveWorkflowTransition}
+          />
+        )}
+
+        {historyTransition && boardId && (
+          <ZoneWorkflowAdvanceHistoryModal
+            open={historyOpen}
+            client={client}
+            boardId={boardId}
+            transition={historyTransition}
+            describeEntity={describeAdvancedEntity}
+            describeUser={describeAdvanceUser}
+            onClose={() => setHistoryOpen(false)}
+            afterClose={() => setHistoryTransition(null)}
           />
         )}
 
