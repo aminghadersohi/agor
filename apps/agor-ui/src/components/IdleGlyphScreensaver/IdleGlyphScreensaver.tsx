@@ -1,7 +1,11 @@
 // biome-ignore-all lint/plugin/noHardcodedColorLiteral: canvas artwork uses a fixed phosphor palette outside Ant Design's DOM styling boundary
+import type { ScreensaverPreferences } from '@agor-live/client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-export const DEFAULT_SCREENSAVER_IDLE_MS = 5 * 60 * 1000;
+export const DEFAULT_SCREENSAVER_IDLE_MINUTES = 5;
+export const MIN_SCREENSAVER_IDLE_MINUTES = 1;
+export const MAX_SCREENSAVER_IDLE_MINUTES = 120;
+export const DEFAULT_SCREENSAVER_IDLE_MS = DEFAULT_SCREENSAVER_IDLE_MINUTES * 60 * 1000;
 
 const ACTIVITY_EVENTS = ['pointerdown', 'pointermove', 'keydown', 'touchstart', 'wheel'] as const;
 const GLYPHS = 'AGOR<>/{}[]01:+*·◇△○⌁⌘';
@@ -27,6 +31,23 @@ interface SignalStream {
 
 export interface IdleGlyphScreensaverProps {
   idleMs?: number;
+  /**
+   * Start automatically after `idleMs` without input. When false the
+   * screensaver only appears when previewed from the user menu.
+   */
+  idleEnabled?: boolean;
+}
+
+/** Idle minutes from a stored preference, clamped to the supported range. */
+export function resolveScreensaverIdleMinutes(preferences?: ScreensaverPreferences): number {
+  const minutes = preferences?.idleMinutes;
+  if (typeof minutes !== 'number' || !Number.isFinite(minutes)) {
+    return DEFAULT_SCREENSAVER_IDLE_MINUTES;
+  }
+  return Math.min(
+    MAX_SCREENSAVER_IDLE_MINUTES,
+    Math.max(MIN_SCREENSAVER_IDLE_MINUTES, Math.round(minutes))
+  );
 }
 
 function createStreams(width: number, height: number): SignalStream[] {
@@ -114,6 +135,7 @@ function drawFrame(
 
 export function IdleGlyphScreensaver({
   idleMs = DEFAULT_SCREENSAVER_IDLE_MS,
+  idleEnabled = true,
 }: IdleGlyphScreensaverProps) {
   const [active, setActive] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -131,7 +153,7 @@ export function IdleGlyphScreensaver({
 
     const arm = () => {
       if (timer) clearTimeout(timer);
-      if (document.visibilityState === 'hidden' || reducedMotion.matches) return;
+      if (!idleEnabled || document.visibilityState === 'hidden' || reducedMotion.matches) return;
       timer = setTimeout(() => {
         activeRef.current = true;
         setActive(true);
@@ -182,7 +204,7 @@ export function IdleGlyphScreensaver({
       reducedMotion.removeEventListener('change', onMotionPreferenceChange);
       window.removeEventListener(START_SCREENSAVER_EVENT, onManualStart);
     };
-  }, [dismiss, idleMs]);
+  }, [dismiss, idleEnabled, idleMs]);
 
   useEffect(() => {
     if (!active) return;

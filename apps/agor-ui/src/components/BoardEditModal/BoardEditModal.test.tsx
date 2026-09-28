@@ -2,7 +2,17 @@ import type { AgorClient, Board, BoardCapabilityPolicies, User, UserID } from '@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { Form, Input } from 'antd';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { listProfileImages } from '../ProfileImage/profileImageApi';
 import { BoardEditModal } from './BoardEditModal';
+
+// Profile galleries and portraits load from the daemon; keep these tests hermetic.
+vi.mock('../ProfileImage/profileImageApi', () => ({
+  listProfileImages: vi.fn(async () => ({ images: [], max_images: 24 })),
+  fetchProfileImageBlob: vi.fn(),
+  uploadProfileImage: vi.fn(),
+  patchProfileImage: vi.fn(),
+  deleteProfileImage: vi.fn(),
+}));
 
 const showError = vi.hoisted(() => vi.fn());
 vi.mock('@/utils/message', () => ({
@@ -269,6 +279,8 @@ describe('BoardEditModal', () => {
     expect(await screen.findByDisplayValue('Fresh name')).toBeInTheDocument();
     expect(screen.getByTestId('board-modal-policy-editor')).toBeInTheDocument();
     expect(get).toHaveBeenCalledWith(listedBoard.board_id);
+    expect(await screen.findByText('Board images')).toBeInTheDocument();
+    expect(listProfileImages).toHaveBeenCalledWith({ id: 'board-1', type: 'board' });
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Renamed' } });
     fireEvent.click(await screen.findByRole('button', { name: 'Save' }));
 

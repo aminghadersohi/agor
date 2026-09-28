@@ -1,6 +1,7 @@
 # Operator configuration (`config.yaml`)
 
-Agor reads `~/.agor/config.yaml` as **deployment-owned, immutable runtime input**. `agor init`
+Agor reads `~/.agor/config.yaml` as **deployment-owned, immutable runtime input**. Set
+[`AGOR_HOME`](#the-agor-home-agor_home) to relocate that directory. `agor init`
 creates it once with mode `0600`. After initialization Agor does not silently rewrite it, preserving
 comments, formatting, key order, YAML anchors, read-only ConfigMaps, and infrastructure-as-code
 ownership.
@@ -322,6 +323,23 @@ pages, or issue per-result lookups. It uses the existing atomic priority API for
 alone does not grant foreign-branch access. Clear an existing Essential designation before choosing
 a replacement; the UI never silently demotes an inaccessible Session.
 
+### What members and agents see
+
+Everyone else gets one bounded answer: whether ordinary work is held right now, plus the policy
+state and reason. `GET /power-management/admission` returns only `held`, `state`, `reason`, and
+`transitioned_at` to any authenticated member of the tenant, and publishes the same projection live
+on each transition. It never includes telemetry, provider support, ownership, or configuration.
+
+- **Session footer:** while a Session has queued prompts that the policy is holding, a **Held by host
+  power policy** tag appears beside the Send button. The Essential Session is not marked while the
+  policy is Conserving, because it still dispatches.
+- **Schedules:** **Run now** on a held schedule shows a warning that the host is holding new work,
+  instead of an error.
+- **MCP:** `agor_power_status` is read-only; admins also receive the full status. `agor_sessions_prompt`,
+  `agor_sessions_spawn`, and `agor_sessions_create` (with an initial prompt) add a `power_hold`
+  object to their result when the prompt is held, and the result says the prompt will dispatch after
+  recovery and must not be retried, stopped, or cancelled. MCP cannot change the power policy.
+
 Fresh interactive init always writes `agentic_tools.installed` once, then installs the selected
 packages before returning. Fresh headless init requires `--agentic-tools` (or
 `AGOR_AGENTIC_TOOLS`); `all` and `none` are explicit shorthands.
@@ -332,9 +350,72 @@ change it; the packaged daemon refuses to start while both policy sources are ab
 is never exposed for mutation through API, UI, or MCP. Headless deployments should use an explicit
 YAML list, including `[]` when a tool-free deployment is intentional.
 
+## The Agor home (`AGOR_HOME`)
+
+Agor keeps its state in one directory: `config.yaml`, the standalone SQLite database,
+`admin-credentials`, logs, the managed agentic-tool tree, and runtime files. That directory
+defaults to `~/.agor` and is relocated wholesale by the `AGOR_HOME` environment variable:
+
+```bash
+AGOR_HOME=/srv/agor-staging agor daemon start
+```
+
+The value names the state directory itself, not its parent: `AGOR_HOME=/app/agor`
+uses `/app/agor/config.yaml`, not `/app/agor/.agor/config.yaml`.
+In sandbox execution, this state root is hidden independently of the git-data root,
+including when it is outside the operating-system home or reached through a symlink.
+Only explicitly authorized runtime paths, such as the read-only managed tool tree,
+are re-exposed.
+
+Resolution is `AGOR_HOME`, else `<home directory>/.agor`. A value may be absolute or start with
+`~`, and is resolved to an absolute path; a relative value resolves against the process working
+directory. A value that is empty or only whitespace is treated as **unset** rather than as `/`, so
+an `AGOR_HOME=` line in an env file cannot redirect Agor's state to the filesystem root.
+
+Every Agor-owned path derives from this root, so they always move together — there is no
+configuration in which `config.yaml` is read from one home and the database from another. Set
+`AGOR_HOME` to run a second, throwaway daemon without it reading or writing the state of the
+deployment already installed under `~/.agor`.
+
+`AGOR_DATA_HOME` (or `paths.data_home`) still separates the *git data* — `repos/` and `worktrees/` —
+from the daemon's operating files, and defaults to `AGOR_HOME`. `AGOR_DB_PATH`, `DATABASE_URL`, and
+`database.sqlite.path` still override the database location specifically; a `~` in any of those is
+the operating-system home, not the Agor home.
+
+## Restart recovery (opt-in)
+
+When the daemon restarts, it releases Tasks that were still dispatching or running, because it
+cannot verify their executors. Queued prompts are kept either way. With restart recovery on, the
+daemon then starts a new, system-authored **continuation** Task in each affected Session. It asks
+the agent to inspect the previous task state and continue safely. It never replays the interrupted
+prompt.
+
+```yaml
+execution:
+  restart_recovery:
+    enabled: false # default; set true to opt in
+    delay_ms: 2000 # pause between continuations, 250–60000
+    max_tasks_per_start: 50 # cap per daemon start, 1–500
+    resume_after_crash: false # also recover after an unclean exit
+```
+
+- Recovery runs once per daemon start, pacing admissions by `delay_ms` and admitting at most
+  `max_tasks_per_start`.
+- After an abrupt crash Agor cannot verify that the old executor stopped, so crash recovery is
+  gated separately behind `resume_after_crash`.
+- A Session that already moved on (a newer prompt, or archived) is skipped and the source Task
+  records why.
+- Settings are read at startup; change `config.yaml` and restart to apply them. Out-of-range values
+  stop the daemon at boot with the offending key.
+
+To confirm what the daemon resolved, open **Settings → About → Daemon Config (Admin Only)** and
+check **Restart Recovery**, or read `execution.restartRecovery` from authenticated `GET /health`.
+Per-start results are written to the daemon log.
+
 ## Environment precedence
 
-Supported environment overrides still win over YAML. Important examples are `PORT`,
+Supported environment overrides still win over YAML. Important examples are `AGOR_HOME`,
+`AGOR_DATA_HOME`, `PORT`,
 `DAEMON_HOST`, `DAEMON_URL`, `AGOR_JWT_SECRET`, `AGOR_MASTER_SECRET`, `AGOR_TELEMETRY`,
 `AGOR_UNIX_USER_MODE`, `AGOR_SANDBOX_HOME_MODE`, and
 `AGOR_SANDBOX_SDK_HOME_MODE`. They are

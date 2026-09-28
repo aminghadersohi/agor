@@ -53,6 +53,7 @@ import { requireActiveAgenticTool } from '../../utils/agentic-tool-runtime.js';
 import { ensureCanPromptTargetSession } from '../../utils/branch-authorization.js';
 import { interruptCorrectionTaskId } from '../../utils/durable-task-id.js';
 import { emitServiceEvent } from '../../utils/emit-service-event.js';
+import { withPromptProvenanceTool } from '../../utils/prompt-provenance.js';
 import {
   resolveBoardId,
   resolveBranchId,
@@ -76,6 +77,8 @@ import type { McpContext } from '../server.js';
 import { sessionContextRequiredResult, structuredResult, textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
 import { listAttachedMcpServers } from './mcp-servers.js';
+import { readOpenCodeModelReadiness } from './opencode-models.js';
+import { resolvePromptPowerHold } from './power.js';
 import {
   describeTeammateBranch,
   resolveTeammateName,
@@ -148,6 +151,13 @@ const modelConfigInputSchema = z
   .optional()
   .describe(
     "Model override for this session. Pass either a model ID string (e.g. 'claude-opus-4-6') or a full { mode, model, effort, advisorModel, provider } object. Overrides the user default model_config and is threaded through to the spawned agent process. Call agor_models_list to discover valid model IDs per agenticTool."
+  );
+
+const spawnCallbackModeSchema = z
+  .enum(['once', 'persistent'])
+  .optional()
+  .describe(
+    'Child callback firing mode: "once" (default for spawned children) notifies the parent on the next completion then auto-disables; "persistent" notifies on every completion until disabled.'
   );
 
 const callbackDeliverySchema = z
@@ -770,6 +780,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           .boolean()
           .optional()
           .describe('Enable callback to parent on completion (default: true)'),
+        callbackMode: spawnCallbackModeSchema,
         callbackDelivery: callbackDeliverySchema,
         includeLastMessage: z
           .boolean()
@@ -837,6 +848,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         title: args.title,
         agent: args.agenticTool as AgenticToolName | undefined,
         enableCallback: args.enableCallback,
+        callbackMode: args.callbackMode,
         callbackDelivery: args.callbackDelivery,
         includeLastMessage: args.includeLastMessage,
         includeOriginalPrompt: args.includeOriginalPrompt,
@@ -869,17 +881,21 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           metadata: { system_authored: true },
         },
         {
-          ...ctx.baseServiceParams,
+          ...withPromptProvenanceTool(ctx.baseServiceParams, 'agor_sessions_spawn'),
           provider: undefined,
           route: { id: childSession.session_id },
         }
       );
 
+      const powerHold = await resolvePromptPowerHold(ctx, task, childSession.session_id);
       return textResult({
         session: redactSessionForMcp(childSession),
         taskId: task.task_id,
         status: task.status,
-        note: 'Subsession created and prompt execution started in background.',
+        ...(powerHold ? { power_hold: powerHold } : {}),
+        note: powerHold
+          ? `Subsession created; its prompt is queued. ${powerHold.note}`
+          : 'Subsession created and prompt execution started in background.',
       });
     }
   );
@@ -924,6 +940,9 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         modelConfig: modelConfigInputSchema,
         callbackDelivery: callbackDeliverySchema.describe(
           'Standing callback delivery for subsession mode. Ignored by continue/fork/btw; the separate callback:true exact-task subscription always stays direct.'
+        ),
+        callbackMode: spawnCallbackModeSchema.describe(
+          'Standing callback firing mode for subsession mode: "once" (default) or "persistent". Ignored by continue/fork/btw.'
         ),
         callback: z
           .boolean()
@@ -1059,16 +1078,24 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           )
         );
       }
+      // Name the delivering tool on the inherited server-stamped origin. The
+      // stamp itself rides on `ctx.baseServiceParams`, so forgetting this line
+      // would only blur a label, never drop the block.
+      const provenanceParams = withPromptProvenanceTool(
+        ctx.baseServiceParams,
+        'agor_sessions_prompt',
+        mode
+      );
       const callbackParams = args.callback
         ? {
-            ...ctx.baseServiceParams,
+            ...provenanceParams,
             _taskCompletionCallback: {
               target_session_id: ctx.sessionId!,
               requested_from_session_id: ctx.sessionId!,
               requested_by_user_id: ctx.userId,
             },
           }
-        : ctx.baseServiceParams;
+        : provenanceParams;
 
       if (mode === 'continue') {
         // The prompt route returns the Task entity directly. Whether it ran
@@ -1081,14 +1108,20 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             { ...callbackParams, provider: undefined, route: { id: sessionId } }
           );
 
+        const powerHold = await resolvePromptPowerHold(ctx, task, sessionId);
         if (task.status === 'queued') {
           const compaction = task.metadata?.prompt_compaction;
+          const busyNote =
+            compaction && compaction.requests.length > 1
+              ? 'Session is busy. This ordinary prompt was coalesced into a queued execution; provenance and duplicate counts are attached to the Task.'
+              : 'Session is busy. Prompt has been queued and will execute automatically when the session becomes idle.';
           return textResult({
             success: true,
             queued: true,
             ...addressedEcho,
             taskId: task.task_id,
             queue_position: task.queue_position,
+            ...(powerHold ? { power_hold: powerHold } : {}),
             ...(compaction
               ? {
                   admissionRequestId: compaction.last_admitted_request_id,
@@ -1104,10 +1137,13 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
                   duplicateRequestCount: compaction.duplicate_request_count,
                 }
               : {}),
-            note:
-              compaction && compaction.requests.length > 1
-                ? 'Session is busy. This ordinary prompt was coalesced into a queued execution; provenance and duplicate counts are attached to the Task.'
-                : 'Session is busy. Prompt has been queued and will execute automatically when the session becomes idle.',
+            // A power hold is the actual reason when the task never reached
+            // the executor; "busy" would send orchestrators into retries.
+            note: powerHold
+              ? task.power_hold?.held
+                ? powerHold.note
+                : `${busyNote} ${powerHold.note}`
+              : busyNote,
           });
         }
         return textResult({
@@ -1182,17 +1218,21 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           { ...callbackParams, provider: undefined, route: { id: forkedSession.session_id } }
         );
 
+        const powerHold = await resolvePromptPowerHold(ctx, task, forkedSession.session_id);
         const note =
           mode === 'btw'
             ? 'Ephemeral "btw" fork created. Result will be sent back via callback when done, then the fork will auto-archive.'
-            : 'Forked session created and prompt execution started.';
+            : powerHold
+              ? 'Forked session created; its prompt is queued.'
+              : 'Forked session created and prompt execution started.';
 
         return textResult({
           ...addressedEcho,
           session: redactSessionForMcp(updatedSession),
           taskId: task.task_id,
           status: task.status,
-          note,
+          ...(powerHold ? { power_hold: powerHold } : {}),
+          note: powerHold ? `${note} ${powerHold.note}` : note,
         });
       } else if (mode === 'subsession') {
         const spawnData: Partial<import('@agor/core/types').SpawnConfig> = {
@@ -1201,6 +1241,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           modelConfig: coerceModelConfig(args.modelConfig),
           autoArchive: args.autoArchive,
           autoArchiveAfterSeconds: args.autoArchiveAfterSeconds,
+          callbackMode: args.callbackMode,
           callbackDelivery: args.callbackDelivery,
         };
         if (args.title) spawnData.title = args.title;
@@ -1222,11 +1263,15 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           { ...callbackParams, provider: undefined, route: { id: childSession.session_id } }
         );
 
+        const powerHold = await resolvePromptPowerHold(ctx, task, childSession.session_id);
         return textResult({
           session: redactSessionForMcp(childSession),
           taskId: task.task_id,
           status: task.status,
-          note: 'Subsession created and prompt execution started.',
+          ...(powerHold ? { power_hold: powerHold } : {}),
+          note: powerHold
+            ? `Subsession created; its prompt is queued. ${powerHold.note}`
+            : 'Subsession created and prompt execution started.',
         });
       }
 
@@ -1290,12 +1335,26 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           ctx.baseServiceParams
         )
       );
-      const task = await ctx.app
-        .service('/sessions/:id/prompt')
-        .create(
-          { prompt: args.message, stream: true },
-          { ...ctx.baseServiceParams, route: { id: resolution.destination_session_id } }
-        );
+      // A relayed report is agent-composed, not typed by the caller's human.
+      // Dropping the provider is what lets the daemon accept internal metadata
+      // at all, and `system_authored` is what keeps `resolvePromptOrigin` from
+      // handing this text human trust authority in the destination Session.
+      const task = await ctx.app.service('/sessions/:id/prompt').create(
+        {
+          prompt: args.message,
+          stream: true,
+          metadata: { system_authored: true },
+        },
+        {
+          ...withPromptProvenanceTool(
+            ctx.baseServiceParams,
+            'agor_session_relationships_report',
+            args.destination
+          ),
+          provider: undefined,
+          route: { id: resolution.destination_session_id },
+        }
+      );
       return structuredResult({
         ...resolution,
         task_id: task.task_id,
@@ -1764,7 +1823,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_retarget_callback',
     {
       description:
-        "Move an existing Session's standing/direct completion callback to another Session. This is routing, not genealogy: it does not change parent_session_id. For cross-branch remote_create links, the Session route and matching durable relationship rows change atomically while enabled/once/persistent/include flags are preserved. A running Task that completes after this transfer commits resolves the standing route to the new destination only. Exact-Task callbacks requested with agor_sessions_prompt callback:true (the durable caller/root-propagated subscription mechanism) remain unchanged and may independently report to their original destination.",
+        "Move an existing Session's standing/direct completion callback to another Session. This is routing, not genealogy: it does not change parent_session_id. For cross-branch remote_create links, the Session route and matching durable relationship rows change atomically while enabled/once/persistent/include flags are preserved. A running Task that completes after this transfer commits resolves the standing route to the new destination only. Exact-Task callbacks requested with agor_sessions_prompt callback:true (an immutable one-shot callback bound to that Task and its calling Session) remain unchanged and may independently report to their original destination.",
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         sessionId: mcpRequiredId(
@@ -2183,7 +2242,11 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             stream: true,
             metadata: { system_authored: true },
           },
-          { ...ctx.baseServiceParams, provider: undefined, route: { id: session.session_id } }
+          {
+            ...withPromptProvenanceTool(ctx.baseServiceParams, 'agor_sessions_create'),
+            provider: undefined,
+            route: { id: session.session_id },
+          }
         );
       }
 
@@ -2202,12 +2265,18 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           ? ` Warning: ${mcpAttachFailures.length} requested MCP server(s) failed to attach — see mcpAttachFailures.`
           : '';
 
+      const powerHold = initialTask
+        ? await resolvePromptPowerHold(ctx, initialTask, session.session_id)
+        : undefined;
       return textResult({
         session: redactSessionForMcp(session),
         taskId: initialTask?.task_id,
-        note: args.initialPrompt
-          ? `Session created and initial prompt execution started.${parentNote}${callbackNote}${mcpFailureNote}`
-          : `Session created successfully.${parentNote}${callbackNote}${mcpFailureNote}`,
+        ...(powerHold ? { power_hold: powerHold } : {}),
+        note: powerHold
+          ? `Session created; its initial prompt is queued. ${powerHold.note}${parentNote}${callbackNote}${mcpFailureNote}`
+          : args.initialPrompt
+            ? `Session created and initial prompt execution started.${parentNote}${callbackNote}${mcpFailureNote}`
+            : `Session created successfully.${parentNote}${callbackNote}${mcpFailureNote}`,
         ...(remoteRelationship && { remoteRelationship }),
         ...(mcpAttachFailures.length > 0 && { mcpAttachFailures }),
       });
@@ -2690,7 +2759,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_models_list',
     {
       description:
-        'List selectable model aliases grouped by agenticTool. Use this to discover what to pass for `modelConfig` (or its string shorthand) in agor_sessions_create / spawn / prompt. Lists the registry loaded by the running daemon; provider-specific exact IDs may be account-dependent.',
+        'List selectable model aliases grouped by agenticTool. Use this to discover what to pass for `modelConfig` (or its string shorthand) in agor_sessions_create / spawn / prompt. Lists the registry loaded by the running daemon; provider-specific exact IDs may be account-dependent. With agenticTool "opencode", also returns `readiness`: the providers and exact models you can select right now (including the experimental local Ollama preset) and why other providers are unavailable. Provider settings are changed in User Settings, not here.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         agenticTool: z
@@ -2751,7 +2820,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         opencode: {
           default: null,
           models: [],
-          note: 'OpenCode models are provider-specific and are discovered after selecting a provider. Pass both modelConfig.provider and modelConfig.model from the OpenCode provider catalog.',
+          note: 'OpenCode models are provider-specific and are discovered after selecting a provider. Pass both modelConfig.provider and modelConfig.model from the OpenCode provider catalog. Call with agenticTool: "opencode" for your ready providers and models (including the experimental Ollama preset).',
         },
         copilot: {
           default: DEFAULT_COPILOT_MODEL,
@@ -2774,6 +2843,12 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         { default: string | null; models: unknown[]; note: string }
       >;
 
+      if (args.agenticTool === 'opencode') {
+        // Caller-specific readiness probes providers, so only on explicit request.
+        return textResult({
+          opencode: { ...all.opencode, readiness: await readOpenCodeModelReadiness(ctx) },
+        });
+      }
       if (args.agenticTool) {
         return textResult({ [args.agenticTool]: all[args.agenticTool] });
       }

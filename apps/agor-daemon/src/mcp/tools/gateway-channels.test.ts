@@ -5,6 +5,8 @@ import { Readable } from 'node:stream';
 import {
   BranchRepository,
   GatewayChannelRepository,
+  GatewayOutboundMessageRepository,
+  getCurrentTenantId,
   SessionRepository,
   ThreadSessionMapRepository,
   UsersRepository,
@@ -3601,5 +3603,152 @@ describe('Discord channel history agent tool (MCP)', () => {
     });
     const payload = JSON.parse(result.content[0].text);
     expect(JSON.stringify(payload)).toContain('"agent_tools":{"channel_history":true}');
+  });
+});
+
+describe('agor_gateway_outbound_messages_list MCP tool', () => {
+  const outboundRow = {
+    id: 'out-1',
+    gateway_channel_id: 'chan-1',
+    channel_type: 'slack',
+    platform_channel_id: 'C123',
+    platform_message_id: '100.000002',
+    platform_thread_id: 'C123-100.000001',
+    platform_permalink: 'https://slack.example/archives/C123/p100000002',
+    seed_thread_id: null,
+    target_branch_id: 'branch-1',
+    emitted_by_user_id: 'user-1',
+    emitted_by_session_id: 'sess-1',
+    emitted_by_task_id: 'task-1',
+    emitted_by_schedule_id: null,
+    message_text: 'Full status update body',
+    message_preview: 'Full status…',
+    metadata: {
+      target: 'channel:C123',
+      purpose: 'status',
+      provider_target: { resolved_channel_id: 'C123' },
+      provider_reply_aliases: ['C123-100.000009'],
+      reply_session_admission_id: 'sess-reserved',
+    },
+    consumed_by_session_id: null,
+    consumed_at: null,
+    created_at: '2026-09-01T00:00:00.000Z',
+    updated_at: '2026-09-01T00:00:00.000Z',
+  };
+
+  it('returns role, permalink and attribution without text or provider internals', async () => {
+    let tenantDuringList: unknown;
+    const list = vi
+      .spyOn(GatewayOutboundMessageRepository.prototype, 'list')
+      .mockImplementation(async () => {
+        tenantDuringList = getCurrentTenantId();
+        return {
+          data: [
+            outboundRow,
+            { ...outboundRow, id: 'out-0', seed_thread_id: 'C123-100.000001' },
+          ] as any,
+          total: 3,
+        };
+      });
+
+    const tools = await captureTools('admin', makeFakeApp({}), null);
+    const result = await tools.agor_gateway_outbound_messages_list.handler({ limit: 2 });
+    const payload = JSON.parse(result.content[0].text);
+
+    expect(list).toHaveBeenCalledWith({}, { limit: 2, offset: 0 });
+    // The read runs inside the caller's tenant database scope.
+    expect(tenantDuringList).toBe('tenant-test');
+    expect(payload).toMatchObject({ total: 3, limit: 2, offset: 0, hasMore: true, nextOffset: 2 });
+    expect(payload.binding).toBeUndefined();
+    expect(payload.outbound_messages[0]).toEqual({
+      gateway_outbound_message_id: 'out-1',
+      gateway_channel_id: 'chan-1',
+      channel_type: 'slack',
+      role: 'thread_followup',
+      platform_channel_id: 'C123',
+      platform_message_id: '100.000002',
+      platform_thread_id: 'C123-100.000001',
+      platform_permalink: 'https://slack.example/archives/C123/p100000002',
+      target_branch_id: 'branch-1',
+      emitted_by_user_id: 'user-1',
+      emitted_by_session_id: 'sess-1',
+      emitted_by_task_id: 'task-1',
+      emitted_by_schedule_id: null,
+      target: 'channel:C123',
+      purpose: 'status',
+      message_preview: 'Full status…',
+      reply_session_id: null,
+      reply_consumed_at: null,
+      created_at: '2026-09-01T00:00:00.000Z',
+    });
+    expect(payload.outbound_messages[1].role).toBe('thread_seed');
+    const text = result.content[0].text;
+    for (const leaked of ['Full status update body', 'provider_reply_aliases', 'sess-reserved']) {
+      expect(text).not.toContain(leaked);
+    }
+  });
+
+  it('resolves channel and session filters and includes text on request', async () => {
+    const list = vi
+      .spyOn(GatewayOutboundMessageRepository.prototype, 'list')
+      .mockResolvedValue({ data: [outboundRow] as any, total: 1 });
+    vi.spyOn(GatewayChannelRepository.prototype, 'findById').mockResolvedValue(slackChannel as any);
+    const sessionsGet = vi.fn(async () => ({ session_id: 'sess-full-id' }));
+
+    const tools = await captureTools(
+      'admin',
+      makeFakeApp({ sessions: { get: sessionsGet } }),
+      null
+    );
+    const result = await tools.agor_gateway_outbound_messages_list.handler({
+      gatewayChannelId: 'chan',
+      threadId: 'C123-100.000001',
+      sessionId: 'sess',
+      includeText: true,
+      offset: 5,
+    });
+
+    expect(sessionsGet).toHaveBeenCalledWith('sess', expect.anything());
+    expect(list).toHaveBeenCalledWith(
+      {
+        gatewayChannelId: 'chan-1',
+        platformThreadId: 'C123-100.000001',
+        sessionId: 'sess-full-id',
+      },
+      { limit: 25, offset: 5 }
+    );
+    expect(JSON.parse(result.content[0].text).outbound_messages[0].message_text).toBe(
+      'Full status update body'
+    );
+  });
+
+  it('scopes session callers to their own branch even as admins', async () => {
+    spyCallerSessionBranch('branch-2');
+    const list = vi
+      .spyOn(GatewayOutboundMessageRepository.prototype, 'list')
+      .mockResolvedValue({ data: [], total: 0 });
+
+    const tools = await captureTools('admin');
+    const result = await tools.agor_gateway_outbound_messages_list.handler({});
+
+    expect(list).toHaveBeenCalledWith({ targetBranchId: 'branch-2' }, { limit: 25, offset: 0 });
+    expect(JSON.parse(result.content[0].text).binding).toContain("calling session's branch");
+  });
+
+  it('refuses non-admins and unknown or foreign-tenant channels', async () => {
+    const list = vi.spyOn(GatewayOutboundMessageRepository.prototype, 'list');
+
+    const memberTools = await captureTools('member', makeFakeApp({}), null);
+    await expect(memberTools.agor_gateway_outbound_messages_list.handler({})).rejects.toThrow(
+      'admin role required'
+    );
+
+    // A foreign tenant's channel is invisible to the tenant-scoped repository.
+    vi.spyOn(GatewayChannelRepository.prototype, 'findById').mockResolvedValue(null as any);
+    const adminTools = await captureTools('admin', makeFakeApp({}), null);
+    await expect(
+      adminTools.agor_gateway_outbound_messages_list.handler({ gatewayChannelId: 'chan-other' })
+    ).rejects.toThrow('Gateway channel not found');
+    expect(list).not.toHaveBeenCalled();
   });
 });

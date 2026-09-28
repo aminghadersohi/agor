@@ -63,6 +63,10 @@ const ALLOWED_UNWRAPPED: Record<string, string> = {
   // awaits a git.repo.inspect executor round-trip before its writes — wrapping
   // would risk a transaction across network I/O. See repos.ts.
   'reposService.addLocalRepository': 'HA-forbidden before any DB touch; intentional',
+  // Registered as a long (identity-only) HTTP route for the same reason: it
+  // reads launch.json through an executor, opens its own short tenant units,
+  // and re-checks the write gate in withFreshTenantWrite after the spawn.
+  'reposService.importFromLaunchJson': 'short tenant units + withFreshTenantWrite; intentional',
 };
 
 /**
@@ -91,6 +95,7 @@ const MUTATION_TOKENS = new Set([
   'reposService.cloneRepository',
   'reposService.retryBranchProvisioning',
   'reposService.updateMetadata',
+  'reposService.importFromAgorYml',
   'boardsService.archive',
   'boardsService.unarchive',
   'sessionsService.archive',

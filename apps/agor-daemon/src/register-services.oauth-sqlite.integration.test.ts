@@ -196,6 +196,13 @@ async function createTestProvider(
     registrationStoresRedirectUri?: string;
     resourceScopes?: string[];
     resourcePath?: string;
+    /**
+     * Also serve the RFC 9728 path-aware location for `/saved/mcp`, declaring
+     * the saved MCP URL. Google's Gmail/Calendar servers are shaped this way:
+     * the advertised pointer describes a different resource and only the
+     * path-aware document describes the one that was saved.
+     */
+    servePathAwareResource?: boolean;
     metadataIssuer?: string;
     pkceMethods?: readonly string[];
     callbackIssuerSupported?: boolean;
@@ -254,6 +261,19 @@ async function createTestProvider(
     if (options.clientCredentialsOnly && url.pathname.includes('.well-known')) {
       response.writeHead(404);
       response.end();
+      return;
+    }
+    if (
+      options.servePathAwareResource &&
+      url.pathname === '/.well-known/oauth-protected-resource/saved/mcp'
+    ) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          resource: `${baseUrl}/saved/mcp`,
+          authorization_servers: [baseUrl],
+        })
+      );
       return;
     }
     if (url.pathname === '/.well-known/oauth-protected-resource') {
@@ -2979,6 +2999,71 @@ describe('SQLite saved-row OAuth authority', () => {
       ).resolves.toMatchObject({ oauth_access_token: 'sqlite-access-token' });
     }
   );
+
+  it('completes a grant from the path-aware document when the advertised one describes another resource', async () => {
+    const provider = await createTestProvider({
+      resourcePath: '/wrong/mcp',
+      servePathAwareResource: true,
+    });
+    providers.push(provider);
+    const harness = await createHarness(provider, 'per_user');
+    databases.push(harness.rawDb);
+
+    const started = await harness.app
+      .service('mcp-servers/oauth-start')
+      .create({ mcp_server_id: harness.server.mcp_server_id }, paramsFor(harness));
+
+    expect(started.success).toBe(true);
+    const state = new URL(started.authorizationUrl).searchParams.get('state');
+    expect(state).toBeTruthy();
+    // RFC 8707 keeps carrying the exact saved MCP URL, not the resource the
+    // advertised document named.
+    expect(new URL(started.authorizationUrl).searchParams.get('resource')).toBe(
+      `${provider.baseUrl}/saved/mcp`
+    );
+    expect((await harness.callback(state!)).status).toBe(200);
+
+    const grant = await new UserMCPOAuthTokenRepository(harness.rawDb).getToken(
+      harness.user.user_id as UserID,
+      harness.server.mcp_server_id as MCPServerID
+    );
+    expect(grant).toMatchObject({ oauth_access_token: 'sqlite-access-token' });
+    // The binding records the document that actually described the saved
+    // resource, so validation and grant binding cannot come from two
+    // different documents.
+    expect(grant?.oauth_metadata_uri).toBe(
+      `${provider.baseUrl}/.well-known/oauth-protected-resource/saved/mcp`
+    );
+    expect(grant?.oauth_resource_uri).toBe(`${provider.baseUrl}/saved/mcp`);
+  });
+
+  it('still refuses when neither document describes the saved resource, naming both', async () => {
+    const provider = await createTestProvider({ resourcePath: '/wrong/mcp' });
+    providers.push(provider);
+    const harness = await createHarness(provider, 'per_user');
+    databases.push(harness.rawDb);
+
+    const result = await harness.app
+      .service('mcp-servers/oauth-start')
+      .create({ mcp_server_id: harness.server.mcp_server_id }, paramsFor(harness));
+
+    expect(result).toMatchObject({
+      success: false,
+      recovery: { failure_reason: 'protected_resource_mismatch' },
+    });
+    // The advertised document and what it declared, so nobody has to fetch a
+    // candidate by hand to find out which one Agor compared.
+    expect(result.recovery?.message).toContain(
+      `${provider.baseUrl}/.well-known/oauth-protected-resource`
+    );
+    expect(result.recovery?.message).toContain(`${provider.baseUrl}/wrong/mcp`);
+    expect(result.recovery?.message).toContain(`${provider.baseUrl}/saved/mcp`);
+    expect(
+      await new UserMCPOAuthTokenRepository(harness.rawDb).listForUser(
+        harness.user.user_id as UserID
+      )
+    ).toEqual([]);
+  });
 
   it.each([
     [{}, 'disabled', 'dcr_disabled'],

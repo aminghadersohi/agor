@@ -94,6 +94,12 @@
       "import": "./dist/config/index.js",
       "require": "./dist/config/index.cjs"
     },
+    "./config/agor-home": {
+      "source": "./src/config/agor-home.ts",
+      "types": "./dist/config/agor-home.d.ts",
+      "import": "./dist/config/agor-home.js",
+      "require": "./dist/config/agor-home.cjs"
+    },
     "./config/node": {
       "source": "./src/config/agor-yml.ts",
       "types": "./dist/config/agor-yml.d.ts",
@@ -147,6 +153,12 @@
       "types": "./dist/templates/handlebars-helpers.d.ts",
       "import": "./dist/templates/handlebars-helpers.js",
       "require": "./dist/templates/handlebars-helpers.cjs"
+    },
+    "./templates/prompt-provenance": {
+      "source": "./src/templates/prompt-provenance.ts",
+      "types": "./dist/templates/prompt-provenance.d.ts",
+      "import": "./dist/templates/prompt-provenance.js",
+      "require": "./dist/templates/prompt-provenance.cjs"
     },
     "./templates/session-context": {
       "source": "./src/templates/session-context.ts",

@@ -773,6 +773,36 @@ describe('BoardsService.find SQL pushdown', () => {
     });
   });
 
+  dbTest('attaches the same counts to a point read on request', async ({ db }) => {
+    const service = new BoardsService(db);
+    const repo = await new RepoRepository(db).create(createRepoData());
+    const board = (await service.create({
+      name: 'Point read board',
+      created_by: TEST_USER,
+    })) as Board;
+    const branch = await new BranchRepository(db).create({
+      ...createBranchData({ repo_id: repo.repo_id, name: 'point-read' }),
+      board_id: board.board_id,
+    });
+    await new SessionRepository(db).create({
+      branch_id: branch.branch_id,
+      created_by: TEST_USER,
+      agentic_tool: 'claude-code',
+      status: SessionStatus.RUNNING,
+    });
+
+    // Internal point reads keep the neutral defaults (no aggregate query).
+    const plain = await service.get(board.board_id);
+    expect(plain).toMatchObject({ worktree_count: 0, total_session_count: 0 });
+
+    await expect(service.attachCallerCounts(plain)).resolves.toMatchObject({
+      board_id: board.board_id,
+      worktree_count: 1,
+      total_session_count: 1,
+      active_session_count: 1,
+    });
+  });
+
   dbTest(
     'pages the whole authorized tenant scope in SQL when no filter is present',
     async ({ db }) => {

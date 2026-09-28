@@ -319,6 +319,38 @@ describe('UsersService role authority', () => {
         envParams
       )
     ).rejects.toMatchObject({ code: 403 });
+
+    // The primary photo is a gallery projection: ordinary patches cannot move it.
+    await expect(
+      service.patch(
+        admin.user_id as UserID,
+        { profile_image_id: admin.user_id as never },
+        externalParams(admin)
+      )
+    ).rejects.toMatchObject({ code: 403 });
+
+    const profileProjectionParams = externalParams(admin) as Params;
+    delete profileProjectionParams.provider;
+    markTrustedUserMutation(profileProjectionParams, 'profile-image-projection');
+    await expect(
+      service.patch(
+        admin.user_id as UserID,
+        { profile_image_id: admin.user_id as never },
+        profileProjectionParams
+      )
+    ).resolves.toMatchObject({ profile_image_id: admin.user_id });
+    await expect(service.get(admin.user_id as UserID)).resolves.toMatchObject({
+      profile_image_id: admin.user_id,
+    });
+    await expect(
+      service.patch(admin.user_id as UserID, { name: 'smuggled' }, profileProjectionParams)
+    ).rejects.toMatchObject({ code: 403 });
+    const cleared = await service.patch(
+      admin.user_id as UserID,
+      { profile_image_id: null },
+      profileProjectionParams
+    );
+    expect(cleared.profile_image_id).toBeUndefined();
   });
 
   dbTest('enforces authority after permissive before hooks run', async ({ db }) => {
