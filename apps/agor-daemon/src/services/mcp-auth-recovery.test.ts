@@ -208,6 +208,73 @@ describe('MCP auth recovery contract', () => {
     );
   });
 
+  it('names the document it read and the resource it compared on a resource mismatch', () => {
+    const resourceUri = 'https://gmailmcp.googleapis.test/mcp/v1';
+    const advertisedMetadataUrl =
+      'https://gmailmcp.googleapis.test/.well-known/oauth-protected-resource/list_drafts';
+    const pathAwareMetadataUrl =
+      'https://gmailmcp.googleapis.test/.well-known/oauth-protected-resource/mcp/v1';
+    const recovery = classifyMCPAuthRecovery(
+      new OAuthConfigurationError(
+        'metadata_incompatible',
+        'SECRET',
+        'protected_resource_mismatch',
+        {
+          resourceUri,
+          attempts: [
+            {
+              metadataUrl: advertisedMetadataUrl,
+              source: 'header',
+              statedResource: 'https://gmailmcp.googleapis.test/mcp',
+            },
+            {
+              metadataUrl: pathAwareMetadataUrl,
+              source: 'path-aware-fallback',
+              statedResource: 'https://gmailmcp.googleapis.test/mcp/v2',
+            },
+          ],
+        }
+      )
+    );
+
+    expect(recovery).toMatchObject({
+      category: 'metadata_incompatible',
+      failure_reason: 'protected_resource_mismatch',
+    });
+    // The unactionable part of this failure was never the classification: it
+    // was that the message named neither the document Agor read nor the
+    // identifier it compared, so checking it meant guessing and fetching by
+    // hand. Both now travel, and the provider's own exception text still does
+    // not.
+    expect(recovery.message).toContain('does not match the saved MCP resource URL');
+    expect(recovery.message).toContain(resourceUri);
+    expect(recovery.message).toContain(advertisedMetadataUrl);
+    expect(recovery.message).toContain('https://gmailmcp.googleapis.test/mcp');
+    expect(recovery.message).toContain(pathAwareMetadataUrl);
+    expect(recovery.message).toContain('https://gmailmcp.googleapis.test/mcp/v2');
+    expect(JSON.stringify(recovery)).not.toContain('SECRET');
+  });
+
+  it('falls back to the unconditional guidance when no mismatch evidence travels', () => {
+    for (const error of [
+      new OAuthConfigurationError('metadata_incompatible', 'SECRET', 'protected_resource_mismatch'),
+      // A shape the classifier does not trust: it reads the field off an error
+      // object and must not render whatever happens to be there.
+      new OAuthConfigurationError(
+        'metadata_incompatible',
+        'SECRET',
+        'protected_resource_mismatch',
+        { resourceUri: 'https://mcp.example.test/mcp', attempts: [] } as never
+      ),
+    ]) {
+      const recovery = classifyMCPAuthRecovery(error);
+      expect(recovery.failure_reason).toBe('protected_resource_mismatch');
+      expect(recovery.message).toBe(
+        'The protected-resource metadata does not match the saved MCP resource URL. Verify the MCP URL and provider resource metadata; no weaker policy is retried automatically.'
+      );
+    }
+  });
+
   it('classifies an authorize-time redirect binding refusal as its own reason', () => {
     expect(
       classifyMCPAuthRecovery(
