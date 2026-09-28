@@ -3,6 +3,7 @@ import type { Repo } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ReposServiceImpl } from '../../declarations.js';
+import { resolveBranchId, resolveRepoId } from '../resolve-ids.js';
 import {
   mcpListLimit,
   mcpOffset,
@@ -238,6 +239,49 @@ export function registerRepoTools(server: McpServer, ctx: McpContext): void {
       const updated = await runWithMcpTenantDatabaseWrite(ctx, () =>
         reposService.updateMetadata(repoId, patch, ctx.baseServiceParams)
       );
+      return textResult(updated);
+    }
+  );
+
+  // Tool 6: agor_repos_import_environment
+  //
+  // MCP twin of the Environment tab's Import buttons. Both service methods
+  // enforce admin, branch authorization and tenant scoping themselves.
+  server.registerTool(
+    'agor_repos_import_environment',
+    {
+      description:
+        "Admin only. Import a repository's environment configuration from a file in one branch's working tree: " +
+        '`agor_yml` reads `.agor.yml`; `launch_json` reads `.agor/launch.json` (falling back to ' +
+        '`.vscode/launch.json`) and compiles its launch profiles, plus any `agor` block, into variants. ' +
+        'WARNING: this REPLACES all existing environment variants on the repository (DB-only template ' +
+        'overrides are kept). Returns the updated repository.',
+      annotations: { destructiveHint: true, idempotentHint: true },
+      inputSchema: z.object({
+        repoId: mcpRequiredId('repoId', 'Repository'),
+        branchId: mcpRequiredId('branchId', 'Branch whose working tree holds the file'),
+        source: z
+          .enum(['agor_yml', 'launch_json'])
+          .describe('Which file to import: `agor_yml` (.agor.yml) or `launch_json` (launch.json).'),
+      }),
+    },
+    async (args) => {
+      const repoId = await resolveRepoId(ctx, args.repoId);
+      const branchId = await resolveBranchId(ctx, args.branchId);
+      const reposService = ctx.app.service('repos') as unknown as ReposServiceImpl;
+      const updated =
+        args.source === 'launch_json'
+          ? // Long route: the service opens its own short tenant units around the
+            // executor spawn, so it must not run inside one.
+            await reposService.importFromLaunchJson(
+              repoId,
+              { branch_id: branchId },
+              ctx.baseServiceParams
+            )
+          : // Matches the HTTP route's tenant scope and write gate.
+            await runWithMcpTenantDatabaseWrite(ctx, () =>
+              reposService.importFromAgorYml(repoId, { branch_id: branchId }, ctx.baseServiceParams)
+            );
       return textResult(updated);
     }
   );

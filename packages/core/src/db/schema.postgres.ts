@@ -877,6 +877,7 @@ export const boards = pgTable(
         zone_layout_defaults?: ZoneLayoutPolicy;
         layout_context?: import('@agor/core/types').BoardLayoutContext;
         custom_context?: Record<string, unknown>; // Custom context for Handlebars templates
+        profile_image_id?: import('@agor/core/types').ProfileImageID; // Primary board gallery image
       }>()
       .notNull(),
 

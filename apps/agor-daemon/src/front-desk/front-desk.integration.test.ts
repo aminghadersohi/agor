@@ -11,7 +11,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDatabase, type Database, initializeDatabase } from '@agor/core/db';
 import { afterAll, describe } from 'vitest';
-import { frontDeskFixture, frontDeskSuite } from '../../test/front-desk-fixture';
+import {
+  frontDeskFixture,
+  frontDeskSuite,
+  teammateAddressingPreviewSuite,
+} from '../../test/front-desk-fixture';
 
 const tempDirs: string[] = [];
 
@@ -34,5 +38,8 @@ afterAll(() => {
   }
 });
 
-describe('pinned front desk (SQLite)', () =>
-  frontDeskSuite(async () => frontDeskFixture(await migratedSqliteDatabase())));
+const freshFixture = async () => frontDeskFixture(await migratedSqliteDatabase());
+
+describe('pinned front desk (SQLite)', () => frontDeskSuite(freshFixture));
+describe('teammate addressing preview (SQLite)', () =>
+  teammateAddressingPreviewSuite(freshFixture));

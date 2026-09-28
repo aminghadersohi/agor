@@ -7,10 +7,11 @@
  */
 
 import type { AgorClient, Branch, TeammateConfig, User } from '@agor-live/client';
-import { screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_MAPS } from '../../store/agorMaps';
 import { agorStore } from '../../store/agorStore';
+import { listProfileImages } from '../ProfileImage/profileImageApi';
 import { BranchModal } from './BranchModal';
 import { buildTeammateKnowledgePatch } from './tabs/KnowledgeTab';
 import {
@@ -21,6 +22,15 @@ import {
   makeUser,
   renderWithApp,
 } from './testUtils';
+
+// Profile galleries and portraits load from the daemon; keep these tests hermetic.
+vi.mock('../ProfileImage/profileImageApi', () => ({
+  listProfileImages: vi.fn(async () => ({ images: [], max_images: 24 })),
+  fetchProfileImageBlob: vi.fn(),
+  uploadProfileImage: vi.fn(),
+  patchProfileImage: vi.fn(),
+  deleteProfileImage: vi.fn(),
+}));
 
 const scheduleTabProps = vi.hoisted(() => vi.fn());
 vi.mock('./tabs/ScheduleTab', () => ({
@@ -166,6 +176,21 @@ describe('BranchModal — permissions tab visibility', () => {
 
     expect(await screen.findByRole('tab', { name: /^teammate$/i })).toBeInTheDocument();
     expect(await screen.findByRole('tab', { name: /permissions/i })).toBeInTheDocument();
+  });
+
+  it('offers the teammate photo gallery on the Teammate tab', async () => {
+    const seb = makeUser({ user_id: 'seb', role: 'admin' });
+    const branch = makeTeammateBranch();
+
+    renderBranchModal({
+      branch,
+      currentUser: seb,
+      client: makeStubClient({ owners: [seb], users: [seb] }).client,
+    });
+
+    fireEvent.click(await screen.findByRole('tab', { name: /^teammate$/i }));
+    expect(await screen.findByText('Teammate photos')).toBeInTheDocument();
+    expect(listProfileImages).toHaveBeenCalledWith({ id: branch.branch_id, type: 'teammate' });
   });
 
   it('builds Knowledge patches against modern custom_context.teammate storage', () => {

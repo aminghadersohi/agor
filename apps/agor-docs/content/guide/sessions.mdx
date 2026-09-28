@@ -103,6 +103,11 @@ Automatic archival is intentionally conservative:
 - workers retry from the persisted deadline after daemon restarts, and concurrent workers converge on one archive transition;
 - manual archive/unarchive wins. Unarchive clears the current deadline but retains the policy, which is scheduled again only after a later task completes.
 
+While a deadline is pending, **Session settings → Automatic Archival** and the session's info
+popover show a live **Archives in …** countdown. Once archived, the popover says why: manually,
+with its branch, with its parent session, after its btw answer was delivered, or automatically after
+completion.
+
 Archival is reversible metadata cleanup. It hides the session from normal trees and board views; it does **not** delete transcripts, tasks, reports, branches, worktrees, or environments. Archived sessions remain available through history and `includeArchived` queries.
 
 ---
@@ -210,6 +215,27 @@ When spawning, you can override:
 - **MCP servers**: Different tool sets (Codex MCP support pending)
 - **Callback content**: Include last message (default on), include original prompt (default off), extra formatting instructions
 - **Callback delivery**: `direct` (default), `btw`, or `auto`
+- **Callback mode**: `once` (default for spawned children) notifies the parent on the next
+  completion, then turns the callback off; `persistent` notifies on every completion until turned
+  off. Set it in the spawn modal's **Mode** field, with `callbackMode` on `agor_sessions_spawn` or
+  `agor_sessions_prompt` (subsession mode), and change it later in **Session settings → Callbacks**.
+
+### Moving a callback or changing a parent
+
+**Session settings → Callbacks** has two controls for people, matching the
+`agor_sessions_retarget_callback` and `agor_sessions_reparent` MCP tools:
+
+- **Change callback target…** moves where the session reports on completion. It is routing only:
+  the parent is unchanged, and callbacks already requested for one specific task keep their
+  original destination. The new target can be in another branch of the same workspace.
+- **Change parent…** moves the session to another parent in the same branch, or detaches it as a
+  root. It is genealogy only: the callback target is unchanged. Sessions that would form a cycle
+  are not offered.
+
+Both require Manager access on the session's branch and permission to prompt the new
+target or parent. Over REST they are `POST /sessions/:id/retarget-callback` with
+`{ callbackSessionId }` and `POST /sessions/:id/reparent` with `{ parentSessionId }` (`null`
+detaches).
 
 ### Direct, BTW, and auto delivery
 

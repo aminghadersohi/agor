@@ -93,6 +93,9 @@ vi.mock('../utils/gateway-attachments.js', async (importOriginal) => ({
   formatSkippedAttachmentNote: (
     await importOriginal<typeof import('../utils/gateway-attachments.js')>()
   ).formatSkippedAttachmentNote,
+  formatUndeliveredAttachmentReply: (
+    await importOriginal<typeof import('../utils/gateway-attachments.js')>()
+  ).formatUndeliveredAttachmentReply,
 }));
 
 const user: User = {
@@ -3197,6 +3200,9 @@ describe('GatewayService Discord beta routing', () => {
     expect(harness.promptCreate.mock.calls[0][0].prompt).toContain(
       'upl_00000000-0000-4000-8000-000000000011'
     );
+    expect(harness.promptCreate.mock.calls[0][0].metadata).not.toHaveProperty(
+      'gateway_skipped_attachments'
+    );
   });
 
   it('does not stage Discord files when the channel keeps the text-only default', async () => {
@@ -5091,6 +5097,11 @@ describe('GatewayService Slack attachment ingestion', () => {
     expect(prompt).toContain('here are the logs');
     expect(prompt).toContain('(1 attachment was not delivered: unsupported type application/zip)');
     expect(prompt).not.toContain('an attachment could not be fetched');
+    expect(promptCreate.mock.calls[0][0].metadata.gateway_skipped_attachments).toEqual({
+      skipped: 1,
+      skipped_mime_types: ['application/zip'],
+      failed: 0,
+    });
   });
 
   it('reports fetch failures and unsupported types as separate notes', async () => {
@@ -5117,6 +5128,113 @@ describe('GatewayService Slack attachment ingestion', () => {
     const prompt = promptCreate.mock.calls[0][0].prompt as string;
     expect(prompt).toContain('(an attachment could not be fetched)');
     expect(prompt).toContain('(1 attachment was not delivered: unsupported type application/zip)');
+    expect(promptCreate.mock.calls[0][0].metadata.gateway_skipped_attachments).toEqual({
+      skipped: 1,
+      skipped_mime_types: ['application/zip'],
+      failed: 1,
+    });
+  });
+
+  it('replies in the sender thread listing undelivered attachments and why', async () => {
+    vi.mocked(ingestInboundAttachments).mockResolvedValue({
+      uploads: [],
+      failed: 1,
+      skipped: 1,
+      skippedMimeTypes: ['application/zip'],
+      undelivered: [
+        { name: 'logs.zip', reason: 'unsupported_type', mimeType: 'application/zip' },
+        { name: 'huge.pdf', reason: 'too_large' },
+      ],
+    });
+    const sendMessage = vi.fn(async () => undefined);
+    const { service, promptCreate } = makeGatewayHarness({
+      channel: ingestChannel,
+      existingMapping: makeMapping({ thread_id: 'D123-100.000000' }),
+      connector: { sendMessage },
+    });
+
+    const result = await service.create({
+      channel_key: 'slack-key',
+      thread_id: 'D123-100.000000',
+      text: 'take a look',
+      files: inboundFiles,
+      metadata: dmMetadata,
+    });
+
+    expect(result).toMatchObject({ success: true, sessionId: 'sess-1' });
+    expect(promptCreate).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      const replies = (sendMessage.mock.calls as unknown as Array<[{ text: string }]>).filter(
+        ([payload]) => payload.text.includes('not delivered to the agent')
+      );
+      expect(replies).toHaveLength(1);
+      expect(replies[0][0]).toMatchObject({ threadId: 'D123-100.000000' });
+      expect(replies[0][0].text).toContain('logs.zip');
+      expect(replies[0][0].text).toContain('unsupported type (application/zip)');
+      expect(replies[0][0].text).toContain('huge.pdf');
+      expect(replies[0][0].text).toContain('too large');
+    });
+  });
+
+  it('still delivers the prompt when the undelivered-attachment reply fails', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.mocked(ingestInboundAttachments).mockResolvedValue({
+      uploads: [],
+      failed: 0,
+      skipped: 1,
+      skippedMimeTypes: ['application/zip'],
+      undelivered: [{ name: 'logs.zip', reason: 'unsupported_type', mimeType: 'application/zip' }],
+    });
+    const sendMessage = vi.fn(async () => {
+      throw new Error('slack down');
+    });
+    const { service, promptCreate } = makeGatewayHarness({
+      channel: ingestChannel,
+      existingMapping: makeMapping({ thread_id: 'D123-100.000000' }),
+      connector: { sendMessage },
+    });
+
+    const result = await service.create({
+      channel_key: 'slack-key',
+      thread_id: 'D123-100.000000',
+      text: 'here are the logs',
+      files: inboundFiles,
+      metadata: dmMetadata,
+    });
+
+    expect(result).toMatchObject({ success: true, sessionId: 'sess-1' });
+    const prompt = promptCreate.mock.calls[0][0].prompt as string;
+    expect(prompt).toContain('(1 attachment was not delivered: unsupported type application/zip)');
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalled());
+  });
+
+  it('posts no attachment reply when every attachment was delivered', async () => {
+    vi.mocked(ingestInboundAttachments).mockResolvedValue({
+      uploads: [],
+      failed: 0,
+      skipped: 0,
+      skippedMimeTypes: [],
+      undelivered: [],
+    });
+    const sendMessage = vi.fn(async () => undefined);
+    const { service } = makeGatewayHarness({
+      channel: ingestChannel,
+      existingMapping: makeMapping({ thread_id: 'D123-100.000000' }),
+      connector: { sendMessage },
+    });
+
+    await service.create({
+      channel_key: 'slack-key',
+      thread_id: 'D123-100.000000',
+      text: 'hi',
+      files: inboundFiles,
+      metadata: dmMetadata,
+    });
+
+    const replies = (sendMessage.mock.calls as unknown as Array<[{ text: string }]>).filter(
+      ([payload]) => payload.text.includes('not delivered')
+    );
+    expect(replies).toHaveLength(0);
   });
 });
 

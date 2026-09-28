@@ -355,6 +355,77 @@ Because the target is always the file in the **currently open branch**, the norm
 3. Commit and PR it like any other repo change.
 4. On merge, other branches can `Import` on their next sync.
 
+Agents with an admin account can run the same imports through MCP with
+`agor_repos_import_environment` (`source: "agor_yml"` or `"launch_json"`). It
+has the same replace semantics as the buttons.
+
+### Import from `launch.json` {/* #launch-json */}
+
+<a id="launch-json" />
+
+If a project already describes how to run itself in an editor launch file,
+**Import launch.json** on the branch Environment tab (admin-only) compiles it
+into variants instead of making you write `.agor.yml` by hand. Agor reads
+`.agor/launch.json` first and falls back to `.vscode/launch.json`, so you can
+keep Agor-specific settings out of the file your editor uses. Both are parsed as
+JSONC, so comments and trailing commas are fine.
+
+Like `.agor.yml` import, this **replaces** every variant and keeps
+`template_overrides`.
+
+Each `configurations[]` entry becomes one variant named after its `name`:
+
+- **Start** runs `command` if set. Otherwise it runs `runtimeExecutable` +
+  `runtimeArgs` + `program` + `args`; Node profiles (`type: "node"` /
+  `"pwa-node"`) may give only `program`. `env` and `cwd` apply.
+  `${workspaceFolder}` and `${workspaceRoot}` become the branch root.
+- By default the process runs in the background under a small supervisor. Agor
+  then generates **Stop** (stops that process tree only), **Nuke** (Stop plus
+  removing its runtime directory) and **Logs** (the last 100 lines of its
+  output).
+- Only `request: "launch"` is supported. `preLaunchTask`, `postDebugTask`,
+  `envFile` and the `${env:…}`, `${config:…}`, `${command:…}` and `${input:…}`
+  variables are rejected with an error naming the profile.
+
+Add an optional `agor` object to a configuration for anything the launch format
+can't express:
+
+```jsonc
+// .agor/launch.json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "dev",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev", "--port", "{{add 3000 branch.unique_id}}"],
+      "agor": {
+        "default": true, // this variant becomes environment.default
+        "description": "Vite dev server",
+        "health": "http://localhost:{{add 3000 branch.unique_id}}/health",
+        "app": "http://localhost:{{add 3000 branch.unique_id}}",
+      },
+    },
+  ],
+}
+```
+
+| `agor` field  | Type    | Effect                                                                                                    |
+| ------------- | ------- | --------------------------------------------------------------------------------------------------------- |
+| `default`     | boolean | Make this the default variant. At most one configuration may set it; otherwise the first one is default. |
+| `description` | string  | Variant description (default: `Launch profile imported from <file>`).                                     |
+| `background`  | boolean | `false` runs Start in the foreground and **requires** `agor.stop`. Default `true`.                        |
+| `stop`        | string  | Replaces the generated Stop command.                                                                      |
+| `nuke`        | string  | Replaces the generated Nuke command.                                                                      |
+| `logs`        | string  | Replaces the generated Logs command. Foreground profiles have none unless set.                            |
+| `health`      | string  | Health-check URL template.                                                                                |
+| `app`         | string  | App URL template.                                                                                         |
+
+String fields and profile values accept the same [template variables](#template-vars)
+as `.agor.yml`.
+
 ---
 
 ## Deployment-local overrides {/* #template-overrides */}

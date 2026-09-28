@@ -1,17 +1,21 @@
-import type { AgorClient, Branch } from '@agor-live/client';
+import type { AgorClient, Branch, Session } from '@agor-live/client';
 import { getTeammateConfig } from '@agor-live/client';
-import { RobotOutlined } from '@ant-design/icons';
 import { Button, Descriptions, Form, Input, Popconfirm, Space, Typography } from 'antd';
 import { useState } from 'react';
 import { useConnectionDisabled } from '../../../contexts/ConnectionContext';
 import { useThemedMessage } from '../../../utils/message';
 import { EmojiPickerInput } from '../../EmojiPickerInput/EmojiPickerInput';
+import { ProfileImageGalleryEditor } from '../../ProfileImage';
 import { Tag } from '../../Tag';
+import { TeammateIdentityAvatar } from '../../TeammateIdentityAvatar';
 import type { TeammateFormState } from '../useBranchModalForm';
+import { TeammateFrontDeskSection } from './TeammateFrontDeskSection';
 
 interface TeammateTabProps {
   branch: Branch;
   client?: AgorClient | null;
+  /** The teammate branch's sessions, offered as front-desk candidates. */
+  sessions?: Session[];
   onRetired?: () => void;
   canEdit: boolean;
   state: TeammateFormState;
@@ -24,6 +28,7 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
   state,
   setField,
   client,
+  sessions = [],
   onRetired,
 }) => {
   const [retiring, setRetiring] = useState(false);
@@ -49,15 +54,17 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
     <div style={{ width: '100%', maxHeight: '70vh', overflowY: 'auto' }}>
       <Space orientation="vertical" size="large" style={{ width: '100%' }}>
         <Space>
-          {config.emoji ? (
-            <span style={{ fontSize: 20 }}>{config.emoji}</span>
-          ) : (
-            <RobotOutlined style={{ fontSize: 20 }} />
-          )}
+          <TeammateIdentityAvatar branch={branch} size={32} />
           <Typography.Text strong style={{ fontSize: 16 }}>
             Teammate Configuration
           </Typography.Text>
         </Space>
+
+        <ProfileImageGalleryEditor
+          subject={{ type: 'teammate', id: branch.branch_id }}
+          canEdit={canEdit}
+          label="Teammate photos"
+        />
 
         {/* Editable fields */}
         <Form layout="horizontal" colon={false}>
@@ -92,6 +99,8 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
             />
           </Form.Item>
         </Form>
+
+        <TeammateFrontDeskSection branch={branch} client={client} sessions={sessions} />
 
         {!branch.archived && (
           <Popconfirm

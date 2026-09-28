@@ -1,4 +1,11 @@
-import type { Artifact, ArtifactID, Board, Branch } from '@agor-live/client';
+import type {
+  AgorClient,
+  Artifact,
+  ArtifactID,
+  ArtifactInteractionConfig,
+  Board,
+  Branch,
+} from '@agor-live/client';
 import { artifactFullscreenPath, shortId } from '@agor-live/client';
 import { AimOutlined, DeleteOutlined, EditOutlined, ExportOutlined } from '@ant-design/icons';
 import {
@@ -10,17 +17,19 @@ import {
   Popconfirm,
   Select,
   Space,
+  Spin,
   Tag,
   Tooltip,
   Typography,
   theme,
 } from 'antd';
 import type { CSSProperties } from 'react';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { mapToArray, mapToSortedArray } from '@/utils/mapHelpers';
 import { filterBySettingsSearch } from '@/utils/settingsSearch';
 import { uiRouteHref } from '@/utils/uiRoutes';
 import { useAppNavigation } from '../../hooks/useAppNavigation';
+import { ArtifactBindingsList } from '../artifacts/ArtifactBindingsList';
 import { boardSelectFilter, boardSelectOptions, getBoardEmoji } from '../BoardTile';
 import { HighlightMatch } from '../HighlightMatch';
 import { AdaptiveSettingsModal } from './AdaptiveSettingsModal';
@@ -29,6 +38,8 @@ import { ResponsiveTable } from './ResponsiveTable';
 import { SettingsActionGroup } from './SettingsActionGroup';
 
 interface ArtifactsTableProps {
+  /** Loads the edited artifact's declared bindings, which the list payload omits. */
+  client?: AgorClient | null;
   artifactById: Map<string, Artifact>;
   branchById: Map<string, Branch>;
   boardById: Map<string, Board>;
@@ -52,7 +63,13 @@ const artifactTextStyle: CSSProperties = {
   maxWidth: '100%',
 };
 
+type BindingsState =
+  | { status: 'loading' }
+  | { status: 'loaded'; config?: ArtifactInteractionConfig }
+  | { status: 'error'; message: string };
+
 export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
+  client,
   artifactById,
   branchById,
   boardById,
@@ -63,6 +80,8 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editingArtifact, setEditingArtifact] = useState<Artifact | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [bindings, setBindings] = useState<BindingsState | null>(null);
+  const bindingsRequestRef = useRef(0);
   const [form] = Form.useForm();
   const { token } = theme.useToken();
 
@@ -81,6 +100,28 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
     [onClose, navigation]
   );
 
+  // The canvas list hydrates metadata only, so the declared bindings
+  // (`agor_runtime.interactions`) come from a point read when the modal opens.
+  const loadBindings = async (artifactId: string) => {
+    const requestId = ++bindingsRequestRef.current;
+    if (!client) {
+      setBindings(null);
+      return;
+    }
+    setBindings({ status: 'loading' });
+    try {
+      const artifact = await client.service('artifacts').get(artifactId);
+      if (bindingsRequestRef.current !== requestId) return;
+      setBindings({ status: 'loaded', config: artifact.agor_runtime?.interactions });
+    } catch (error) {
+      if (bindingsRequestRef.current !== requestId) return;
+      setBindings({
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Failed to load bindings',
+      });
+    }
+  };
+
   const handleEdit = (artifact: Artifact) => {
     setEditingArtifact(artifact);
     form.setFieldsValue({
@@ -89,6 +130,7 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
       board_id: artifact.board_id,
     });
     setEditModalOpen(true);
+    void loadBindings(artifact.artifact_id);
   };
 
   const handleUpdate = () => {
@@ -334,6 +376,8 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
           afterClose={() => {
             form.resetFields();
             setEditingArtifact(null);
+            bindingsRequestRef.current += 1;
+            setBindings(null);
           }}
           okText="Save"
         >
@@ -361,6 +405,20 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
                 filterOption={boardSelectFilter}
               />
             </Form.Item>
+            {bindings && (
+              <Form.Item
+                label="Interaction bindings"
+                tooltip="What this artifact's buttons and live data can do. Read-only here; agents change bindings with agor_artifacts_update."
+              >
+                {bindings.status === 'loading' ? (
+                  <Spin size="small" />
+                ) : bindings.status === 'error' ? (
+                  <Typography.Text type="danger">{bindings.message}</Typography.Text>
+                ) : (
+                  <ArtifactBindingsList config={bindings.config} />
+                )}
+              </Form.Item>
+            )}
           </Form>
         </AdaptiveSettingsModal>
       )}

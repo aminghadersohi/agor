@@ -6,7 +6,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { __resetAuthConfigForTests, __setAuthConfigForTests } from '../../hooks/useAuthConfig';
 import { agorStore } from '../../store/agorStore';
+import { listProfileImages } from '../ProfileImage/profileImageApi';
 import { UserSettingsModal, type UserSettingsModalProps } from './UserSettingsModal';
+
+// Profile galleries and portraits load from the daemon; keep these tests hermetic.
+vi.mock('../ProfileImage/profileImageApi', () => ({
+  listProfileImages: vi.fn(async () => ({ images: [], max_images: 24 })),
+  fetchProfileImageBlob: vi.fn(),
+  uploadProfileImage: vi.fn(),
+  patchProfileImage: vi.fn(),
+  deleteProfileImage: vi.fn(),
+}));
 
 const { syncGroupsForUser } = vi.hoisted(() => ({ syncGroupsForUser: vi.fn() }));
 vi.mock('./groupMembershipSync', () => ({ syncGroupsForUser }));
@@ -1803,6 +1813,60 @@ describe('UserSettingsModal — socket authority generations', () => {
       volume: 0.4,
       minDurationSeconds: 17,
     });
+  });
+
+  it('keeps the idle screensaver off by default and saves an opt-in with its idle time', async () => {
+    const user = makeUser();
+    const onUpdate = vi.fn<NonNullable<UserSettingsModalProps['onUpdate']>>(
+      async (_userId: string, _updates: UpdateUserInput) => {}
+    );
+    renderWithApp(
+      <UserSettingsModal
+        open
+        user={user}
+        currentUser={user}
+        client={null}
+        onUpdate={onUpdate}
+        onClose={vi.fn()}
+        initialTab="preferences"
+      />
+    );
+
+    const toggle = await screen.findByLabelText('Start when idle');
+    const idleTime = screen.getByLabelText('Idle time');
+    expect(toggle).not.toBeChecked();
+    expect(idleTime).toBeDisabled();
+    expect(idleTime).toHaveValue('5');
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(idleTime).toBeEnabled(), ASYNC);
+    fireEvent.change(idleTime, { target: { value: '12' } });
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalled(), ASYNC);
+    expect(onUpdate.mock.calls[0][1].preferences?.screensaver).toEqual({
+      enabled: true,
+      idleMinutes: 12,
+    });
+  });
+
+  it('shows the profile photo gallery for the edited user', async () => {
+    const user = makeUser();
+    renderWithApp(
+      <UserSettingsModal
+        open
+        user={user}
+        currentUser={user}
+        client={null}
+        onUpdate={vi.fn()}
+        onClose={vi.fn()}
+        initialTab="profile"
+      />
+    );
+
+    expect(await screen.findByText('Profile photos')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /add images/i })).toBeInTheDocument();
+    expect(listProfileImages).toHaveBeenCalledWith({ id: user.user_id, type: 'user' });
   });
 
   it('preserves a provider source and MCP draft through navigation and a user refresh', async () => {

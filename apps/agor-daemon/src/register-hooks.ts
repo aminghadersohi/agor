@@ -3125,8 +3125,10 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     },
   });
 
-  // /file (singular): read-only branch filesystem browser. Takes branch_id
-  // as a query param. Gate with branch RBAC 'view' permission.
+  // /file (singular): branch filesystem browser and editor. Takes branch_id
+  // as a query param. Every method needs branch RBAC 'view' here; `patch`
+  // (save) additionally requires branch file `write` access, enforced in
+  // FileService.resolveBranchWrite.
   safeService('/file')?.hooks({
     before: {
       all: [
@@ -3926,6 +3928,20 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     return context;
   };
 
+  // External point reads (REST, socket, MCP) carry the same caller-scoped
+  // worktree/session counts as the list read instead of rowToBoard's neutral
+  // zeros. Hooks do not run for the adapter's internal this.get() inside
+  // patch/remove, so writes never pay for the aggregate.
+  const attachBoardPointReadCounts = async (context: HookContext<Board>) => {
+    if (!context.params.provider || !context.result) return context;
+    const service = context.service as unknown as BoardsServiceImpl;
+    context.result = await service.attachCallerCounts(
+      context.result as Board,
+      (context.params as { _agorSqlBoardAccessUserId?: UUID })._agorSqlBoardAccessUserId
+    );
+    return context;
+  };
+
   const boardUpdateAuthorization = [
     requireMinimumRole(ROLES.MEMBER, 'update boards'),
     ensureCanMutateBoard('update this board'),
@@ -3936,7 +3952,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     before: {
       all: [typedValidateQuery(boardQueryValidator), requireAuth],
       find: [scopeFindToAccessibleBoardsSql(superadminOpts)],
-      get: [ensureCanViewBoard('view this board')],
+      get: [scopeReadToAccessibleBoardsSql(superadminOpts), ensureCanViewBoard('view this board')],
       findBySlug: [ensureCanViewBoard('view this board')],
       findBySlugOrId: [ensureCanViewBoard('view this board')],
       create: [
@@ -4201,7 +4217,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     },
     after: {
       // Batch minimal visibility reads across the complete returned board page.
-      get: [filterBoardArtifactObjects(new ArtifactRepository(db))],
+      get: [attachBoardPointReadCounts, filterBoardArtifactObjects(new ArtifactRepository(db))],
       find: [filterBoardArtifactObjects(new ArtifactRepository(db))],
       update: [clearRealtimeBranchVisibility, publishMarketplaceInvalidation],
       patch: [clearRealtimeBranchVisibility, publishMarketplaceInvalidation],

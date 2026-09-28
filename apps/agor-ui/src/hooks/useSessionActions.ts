@@ -9,7 +9,9 @@ import type {
   AgorClient,
   PermissionMode,
   Session,
+  SessionCallbackRetargetResult,
   SessionID,
+  SessionReparentResult,
   SpawnConfig,
 } from '@agor-live/client';
 import {
@@ -49,6 +51,16 @@ interface UseSessionActionsResult {
   forkSession: (sessionId: SessionID, prompt: string) => Promise<Session>;
   btwForkSession: (sessionId: SessionID, prompt: string) => Promise<Session>;
   spawnSession: (sessionId: SessionID, config: Partial<SpawnConfig>) => Promise<Session>;
+  // Throw on failure so the routing controls can keep the picker open and show
+  // the server's reason (authority, cross-branch parent, cycle).
+  retargetCallback: (
+    sessionId: SessionID,
+    callbackSessionId: SessionID
+  ) => Promise<SessionCallbackRetargetResult>;
+  reparentSession: (
+    sessionId: SessionID,
+    parentSessionId: SessionID | null
+  ) => Promise<SessionReparentResult>;
   creating: boolean;
   error: string | null;
 }
@@ -332,6 +344,26 @@ export function useSessionActions(client: AgorClient | null): UseSessionActionsR
     }
   };
 
+  const retargetCallback = async (
+    sessionId: SessionID,
+    callbackSessionId: SessionID
+  ): Promise<SessionCallbackRetargetResult> => {
+    if (!client) throw new Error('Client not connected');
+    return (await client
+      .service(`sessions/${sessionId}/retarget-callback`)
+      .create({ callbackSessionId })) as SessionCallbackRetargetResult;
+  };
+
+  const reparentSession = async (
+    sessionId: SessionID,
+    parentSessionId: SessionID | null
+  ): Promise<SessionReparentResult> => {
+    if (!client) throw new Error('Client not connected');
+    return (await client
+      .service(`sessions/${sessionId}/reparent`)
+      .create({ parentSessionId })) as SessionReparentResult;
+  };
+
   return {
     createSession,
     updateSession,
@@ -341,6 +373,8 @@ export function useSessionActions(client: AgorClient | null): UseSessionActionsR
     forkSession,
     btwForkSession,
     spawnSession,
+    retargetCallback,
+    reparentSession,
     creating,
     error,
   };

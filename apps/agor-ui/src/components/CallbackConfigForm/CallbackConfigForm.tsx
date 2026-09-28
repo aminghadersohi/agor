@@ -3,10 +3,12 @@
  *
  * Allows configuring parent session callback behavior for child session completions:
  * - Enable/disable callbacks
+ * - Fire on every completion or only once
  * - Customize callback message template
  * - Control last message inclusion
  */
 
+import type { Session } from '@agor-live/client';
 import { Form, Input, Select, Switch, Typography } from 'antd';
 import type React from 'react';
 
@@ -16,6 +18,15 @@ const { TextArea } = Input;
 export interface CallbackConfigFormProps {
   showHelpText?: boolean;
 }
+
+/** Standing-callback firing modes. Shared by session settings and the spawn modal. */
+export const CALLBACK_MODE_OPTIONS: Array<{
+  value: NonNullable<NonNullable<Session['callback_config']>['callback_mode']>;
+  label: string;
+}> = [
+  { value: 'persistent', label: 'Every completion' },
+  { value: 'once', label: 'Once, then turn off' },
+];
 
 /**
  * Callback Configuration Form Component
@@ -53,6 +64,7 @@ export const CallbackConfigForm: React.FC<CallbackConfigFormProps> = ({ showHelp
           ]}
         />
       </Form.Item>
+
       <Form.Item name={['callbackConfig', 'delivery']} label="Callback Delivery">
         <Select
           options={[

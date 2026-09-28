@@ -124,7 +124,7 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({
   userById = new Map(),
   onOpenSession,
 }) => {
-  const { showError, showSuccess } = useThemedMessage();
+  const { showError, showSuccess, showWarning } = useThemedMessage();
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -218,6 +218,13 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({
       await client.service(`schedules/${schedule.schedule_id}/run-now`).create({});
       showSuccess(`Triggered "${schedule.name}"`);
     } catch (err) {
+      // A power hold is a host condition, not a broken schedule.
+      if ((err as { data?: { code?: string } } | null)?.data?.code === 'schedule_power_held') {
+        showWarning(
+          `"${schedule.name}" was not run: the host power policy is holding new work. Try again after power recovers.`
+        );
+        return;
+      }
       showError(err instanceof Error ? err.message : 'Failed to trigger run');
     } finally {
       setRunningId(null);

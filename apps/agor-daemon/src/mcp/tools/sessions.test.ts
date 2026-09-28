@@ -2326,6 +2326,7 @@ describe('agor_sessions_prompt (subsession mode)', () => {
       modelConfig: { model: 'claude-opus-4-6', effort: 'max', provider: 'anthropic' },
       autoArchive: 'after_completion',
       autoArchiveAfterSeconds: 1800,
+      callbackMode: 'persistent',
     });
 
     expect(spawnCalls).toHaveLength(1);
@@ -2338,6 +2339,7 @@ describe('agor_sessions_prompt (subsession mode)', () => {
     expect(spawnCalls[0].data).toMatchObject({
       autoArchive: 'after_completion',
       autoArchiveAfterSeconds: 1800,
+      callbackMode: 'persistent',
     });
   });
 });
@@ -2385,6 +2387,39 @@ describe('agor_sessions_prompt task callback', () => {
       uniquePromptCount: 1,
       duplicateRequestCount: 1,
     });
+  });
+
+  it('reports a power hold instead of "busy" when the dispatch permit held the prompt', async () => {
+    const app = makeFakeApp({
+      '/sessions/:id/prompt': {
+        create: vi.fn(async () => ({
+          task_id: 'task-held',
+          status: 'queued',
+          queue_position: 1,
+          power_hold: { held: true, would_hold: true, state: 'conserve', reason: 'on_battery' },
+        })),
+      },
+    });
+    const { agor_sessions_prompt } = await registerAndCaptureHandlers(
+      { app, userId: 'user-1', sessionId: 'sess-caller' },
+      ['agor_sessions_prompt']
+    );
+
+    const response = await agor_sessions_prompt({
+      sessionId: 'sess-target',
+      prompt: 'work while on battery',
+      mode: 'continue',
+    });
+    const body = JSON.parse(response.content[0]!.text);
+
+    expect(body).toMatchObject({
+      queued: true,
+      taskId: 'task-held',
+      power_hold: { held: true, state: 'conserve', reason: 'on_battery' },
+    });
+    expect(body.note).toContain('Held by host power policy');
+    expect(body.note).toContain('Do not retry');
+    expect(body.note).not.toContain('Session is busy');
   });
 
   it('binds callback:true to trusted calling session context', async () => {
@@ -2726,6 +2761,107 @@ describe('agor_models_list', () => {
       status: 'known',
       availability: 'provider-dependent',
     });
+  });
+  it('returns caller-specific OpenCode readiness only when opencode is requested', async () => {
+    const find = vi.fn(async () => ({
+      runtimeVersion: '1.2.3',
+      suggestedSelection: { providerId: 'ollama', modelId: 'qwen3:8b' },
+      providers: [
+        {
+          id: 'ollama',
+          name: 'Ollama (local via OpenCode)',
+          availableForSelection: true,
+          availabilityStatus: 'available',
+          availabilityMessage: 'Ready.',
+          suggestedModel: 'qwen3:8b',
+          models: [
+            {
+              id: 'qwen3:8b',
+              name: 'qwen3:8b',
+              status: 'active',
+              sizeBytes: 123,
+              contextTokens: 32768,
+              tools: true,
+            },
+          ],
+        },
+        {
+          id: 'anthropic',
+          name: 'Anthropic',
+          availableForSelection: false,
+          availabilityStatus: 'not-configured',
+          models: [{ id: 'claude', name: 'Claude', status: 'active' }],
+        },
+      ],
+    }));
+    const baseServiceParams = { user: { user_id: 'user-1' }, provider: 'mcp' };
+    const { agor_models_list } = await registerAndCaptureHandlers(
+      {
+        app: makeFakeApp({ 'opencode-models': { find } }),
+        userId: 'user-1',
+        baseServiceParams,
+      },
+      ['agor_models_list']
+    );
+
+    const all = JSON.parse((await agor_models_list({})).content[0].text);
+    expect(all.opencode.readiness).toBeUndefined();
+    expect(find).not.toHaveBeenCalled();
+
+    const text = (await agor_models_list({ agenticTool: 'opencode' })).content[0].text;
+    const parsed = JSON.parse(text);
+    expect(find).toHaveBeenCalledWith(baseServiceParams);
+    expect(parsed.opencode.readiness).toEqual({
+      discovery: 'ok',
+      runtimeVersion: '1.2.3',
+      suggestedSelection: { providerId: 'ollama', modelId: 'qwen3:8b' },
+      readyProviders: [
+        {
+          id: 'ollama',
+          name: 'Ollama (local via OpenCode)',
+          availabilityStatus: 'available',
+          availabilityMessage: 'Ready.',
+          suggestedModel: 'qwen3:8b',
+          models: [
+            {
+              id: 'qwen3:8b',
+              name: 'qwen3:8b',
+              status: 'active',
+              contextTokens: 32768,
+              tools: true,
+            },
+          ],
+        },
+      ],
+      unavailableProviders: [
+        { id: 'anthropic', name: 'Anthropic', availabilityStatus: 'not-configured' },
+      ],
+    });
+    expect(text).not.toMatch(/https?:\/\//);
+  });
+
+  it('reports OpenCode discovery failures without leaking internal errors', async () => {
+    const disabled = Object.assign(new Error('OpenCode is disabled for this workspace.'), {
+      code: 400,
+    });
+    for (const [error, expected] of [
+      [disabled, 'OpenCode is disabled for this workspace.'],
+      [new Error('connect ECONNREFUSED http://127.0.0.1:11434'), 'could not be read'],
+    ] as const) {
+      const { agor_models_list } = await registerAndCaptureHandlers(
+        {
+          app: makeFakeApp({ 'opencode-models': { find: async () => Promise.reject(error) } }),
+          userId: 'user-1',
+        },
+        ['agor_models_list']
+      );
+      const text = (await agor_models_list({ agenticTool: 'opencode' })).content[0].text;
+      expect(JSON.parse(text).opencode.readiness).toEqual({
+        discovery: 'failed',
+        error: expect.stringContaining(expected),
+      });
+      expect(text).not.toContain('11434');
+    }
   });
 });
 
