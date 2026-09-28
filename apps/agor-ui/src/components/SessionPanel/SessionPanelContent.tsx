@@ -41,6 +41,7 @@ import { BranchHeaderPill } from '../BranchHeaderPill';
 import { BranchMetadataRow } from '../BranchMetadataRow';
 import { ConversationView } from '../ConversationView';
 import { ForkSpawnModal } from '../ForkSpawnModal';
+import { mergedRequestCount } from '../TaskBlock/taskAudit';
 import {
   EDITABLE_QUEUED_PROMPT_MAX_BYTES,
   queuedPromptPreviewIsStale,
@@ -515,6 +516,14 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
                             {task.metadata.coordinator_queue_batch.source_request_count} requests
                             became one execution turn (
                             {task.metadata.coordinator_queue_batch.strategy})
+                          </Typography.Text>
+                        )}
+                        {mergedRequestCount(task) > 1 && (
+                          <Typography.Text
+                            type="secondary"
+                            style={{ fontSize: token.fontSizeSM, display: 'block' }}
+                          >
+                            {mergedRequestCount(task)} requests merged into this prompt
                           </Typography.Text>
                         )}
                         <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>

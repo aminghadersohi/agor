@@ -96,3 +96,7 @@ export const useAppActions = (): AppActionsContextValue => {
   }
   return context;
 };
+
+/** For leaf components that also render outside the app shell (tests, standalone views). */
+export const useOptionalAppActions = (): AppActionsContextValue | undefined =>
+  useContext(AppActionsContext);
