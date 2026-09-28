@@ -374,6 +374,11 @@ export interface BoardsServiceImpl extends Service<Board, Partial<Board>, Feathe
   clearPrimaryTeammate(boardId: string, params?: FeathersParams): Promise<Board>;
   archive(id: string, params?: FeathersParams): Promise<Board>;
   unarchive(id: string, params?: FeathersParams): Promise<Board>;
+  /** Internal (not a registered transport method): caller-scoped point-read counts. */
+  attachCallerCounts(
+    board: Board,
+    visibleToUserId?: import('@agor/core/types').UUID
+  ): Promise<Board>;
 }
 
 /**
