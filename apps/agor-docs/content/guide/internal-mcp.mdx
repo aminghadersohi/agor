@@ -330,9 +330,10 @@ and session context is absent unless you add it.
 
 ### Prompt provenance
 
-Every prompt an MCP caller delivers — `agor_sessions_prompt` in any mode, the
-initial prompt of `agor_sessions_create` / `agor_sessions_spawn`, and a zone
-trigger fired by `agor_branches_set_zone` — arrives at the recipient with an
+Every prompt an MCP caller delivers — `agor_sessions_prompt` in any mode,
+`agor_session_relationships_report`, the initial prompt of
+`agor_sessions_create` / `agor_sessions_spawn`, and a zone trigger fired by
+`agor_branches_set_zone` — arrives at the recipient with an
 `<agor_prompt_provenance>` block in front of it (behind the body, when the body
 is a slash command so provider dispatch still works).
 

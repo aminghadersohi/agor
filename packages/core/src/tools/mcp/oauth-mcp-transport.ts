@@ -174,6 +174,123 @@ export class OAuthDCRFailure extends Error {
   }
 }
 
+/** Which protected-resource metadata document Agor fetched, and why that one. */
+export type MCPOAuthResourceMetadataSource = 'header' | 'well-known' | 'path-aware-fallback';
+
+/**
+ * One protected-resource metadata document Agor fetched and compared.
+ *
+ * `statedResource` is the document's `resource` narrowed to the single
+ * identifier the comparison actually used, or null when the document carried
+ * no single comparable identifier at all (absent, empty-shaped, or a list of
+ * alternatives — all of which every mode rejects).
+ */
+export interface MCPOAuthResourceMetadataAttempt {
+  metadataUrl: string;
+  source: MCPOAuthResourceMetadataSource;
+  statedResource: string | null;
+}
+
+/**
+ * Closed evidence for a `protected_resource_mismatch`.
+ *
+ * The message alone ("does not match the saved MCP resource URL") is accurate
+ * and unactionable: it names neither the document Agor read nor the identifier
+ * that document declared, so the only way to check it was to guess which
+ * candidate Agor used and fetch it by hand. These are the two values Agor's
+ * own equality check consumed, carried as fields rather than prose so no
+ * caller has to parse a sentence — and so the provider's exception text still
+ * plays no part in what any destination is told.
+ */
+export interface MCPOAuthResourceMismatchDiagnostic {
+  /** The saved MCP URL, i.e. the left side of the comparison. */
+  resourceUri: string;
+  /** Every document fetched, in order, each with what it declared. */
+  attempts: MCPOAuthResourceMetadataAttempt[];
+}
+
+const RESOURCE_METADATA_SOURCE_LABELS: Record<MCPOAuthResourceMetadataSource, string> = {
+  header: 'the pointer advertised in the provider’s WWW-Authenticate challenge',
+  'well-known': 'the discovered well-known location',
+  'path-aware-fallback': 'the RFC 9728 path-aware location derived from the saved MCP URL',
+};
+
+/**
+ * Longest value rendered into a user-facing sentence. A `resource_metadata`
+ * pointer and a document's `resource` are provider-controlled strings of
+ * unbounded length; a bound keeps one from becoming a wall of text in a UI
+ * that expects a sentence.
+ */
+const MAX_DESCRIBED_URL_LENGTH = 256;
+
+const NOT_SHOWN = 'a value that is not a URL on the saved MCP server’s origin (not shown)';
+
+const resourceMismatchDiagnosticSchema = z.object({
+  resourceUri: z.string().min(1).max(MAX_DESCRIBED_URL_LENGTH),
+  attempts: z
+    .array(
+      z.object({
+        metadataUrl: z.string().min(1),
+        source: z.enum(['header', 'well-known', 'path-aware-fallback']),
+        statedResource: z.string().nullable(),
+      })
+    )
+    .min(1)
+    .max(4),
+});
+
+/**
+ * Render a provider-supplied string only when Agor can vouch for it.
+ *
+ * Both values in this diagnostic reached Agor from the provider: the pointer
+ * out of a `WWW-Authenticate` header and the `resource` out of a JSON
+ * document. In the case this exists to explain they are ordinary
+ * same-origin metadata, and naming them is the whole point. A value on
+ * another origin is a different situation — the actionable fact is that the
+ * provider pointed off-origin, not the string itself, and echoing an arbitrary
+ * off-origin URL into a message a user reads as Agor's own is a lure Agor
+ * should not carry. So same-origin values are shown and everything else is
+ * described rather than reproduced.
+ */
+function describedProviderValue(value: string, resourceUri: string): string {
+  if (value.length > MAX_DESCRIBED_URL_LENGTH) return NOT_SHOWN;
+  try {
+    if (new URL(value).origin === new URL(resourceUri).origin) return value;
+  } catch {
+    // Not a URL at all; fall through to the description.
+  }
+  return NOT_SHOWN;
+}
+
+/**
+ * Turn mismatch evidence into one sentence for the user who owns the server.
+ *
+ * Returns undefined for anything that is not a well-formed diagnostic, so a
+ * caller can fall back to its unconditional guidance. Accepts `unknown`
+ * because the daemon classifier reads it off an error object defensively.
+ *
+ * The destination matters. This is for the person who typed the MCP URL and
+ * can act on it, not for the operational log — `context/guidelines/logging.md`
+ * prohibits URLs and user-authored values there, and that rule is not relaxed
+ * by the values happening to be published metadata.
+ */
+export function describeMCPOAuthResourceMismatch(diagnostic: unknown): string | undefined {
+  const parsed = resourceMismatchDiagnosticSchema.safeParse(diagnostic);
+  if (!parsed.success) return undefined;
+  const { resourceUri, attempts } = parsed.data;
+  const described = attempts.map((attempt) => {
+    const declared =
+      attempt.statedResource === null
+        ? 'which declares no single resource identifier'
+        : `which declares ${describedProviderValue(attempt.statedResource, resourceUri)}`;
+    return `${RESOURCE_METADATA_SOURCE_LABELS[attempt.source]} (${describedProviderValue(
+      attempt.metadataUrl,
+      resourceUri
+    )}), ${declared}`;
+  });
+  return `Agor compared the saved MCP URL ${resourceUri} against ${described.join('; and against ')}.`;
+}
+
 /** Stable classification for OAuth discovery/configuration policy failures. */
 export class OAuthConfigurationError extends Error {
   constructor(
@@ -190,7 +307,13 @@ export class OAuthConfigurationError extends Error {
     readonly failureReason?: Extract<
       MCPOAuthFailureReason,
       'dcr_disabled' | 'protected_resource_mismatch' | 'redirect_uri_mismatch'
-    >
+    >,
+    /**
+     * Present only on `protected_resource_mismatch`. An own data property, so
+     * the daemon classifier can read it through `safeOwnDataValue` without
+     * invoking a getter on an object it does not trust.
+     */
+    readonly resourceMismatch?: MCPOAuthResourceMismatchDiagnostic
   ) {
     super(message);
     this.name = 'OAuthConfigurationError';
@@ -233,6 +356,30 @@ function parseWWWAuthenticate(header: string): string | null {
 }
 
 /**
+ * The RFC 9728 §3.1 path-aware well-known location for a protected resource.
+ *
+ * `.well-known/oauth-protected-resource` is inserted between the host and the
+ * resource's own path, so a resource at `/mcp/v1` publishes its metadata at
+ * `/.well-known/oauth-protected-resource/mcp/v1`. Returns null for a path-less
+ * resource, whose path-aware location IS the root one, and for a URL that does
+ * not parse.
+ *
+ * One derivation, used both by well-known discovery and by the mismatch
+ * fallback in `resolveProtectedResourceMetadata`, so the location Agor probes
+ * when no pointer was advertised cannot drift from the one it falls back to.
+ */
+export function pathAwareResourceMetadataUrl(mcpUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(mcpUrl);
+  } catch {
+    return null;
+  }
+  const path = url.pathname === '/' ? '' : url.pathname.replace(/\/$/, '');
+  return path ? `${url.origin}/.well-known/oauth-protected-resource${path}` : null;
+}
+
+/**
  * Discover the OAuth Protected Resource Metadata URL for an MCP server.
  *
  * Many MCP servers (e.g. Notion) return a 401 with a plain Bearer challenge
@@ -251,15 +398,14 @@ export async function discoverResourceMetadataUrl(
   options: { allowLocalhostHttp?: boolean; assertCurrent?: () => void } = {}
 ): Promise<string | null> {
   options.assertCurrent?.();
-  const url = new URL(mcpUrl);
-  const origin = url.origin;
-  const path = url.pathname === '/' ? '' : url.pathname.replace(/\/$/, '');
+  const origin = new URL(mcpUrl).origin;
 
   // Path-aware first (more specific), then root fallback.
   // Per RFC 9728, path-scoped resources should match their specific metadata endpoint.
+  const pathAware = pathAwareResourceMetadataUrl(mcpUrl);
   const candidates: string[] = [];
-  if (path) {
-    candidates.push(`${origin}/.well-known/oauth-protected-resource${path}`);
+  if (pathAware) {
+    candidates.push(pathAware);
   }
   candidates.push(`${origin}/.well-known/oauth-protected-resource`);
 
@@ -1906,24 +2052,146 @@ function marketplaceResourceMetadataMatches(
   }
 }
 
-function assertOAuthProtectedResourceMetadata(
+/**
+ * The RFC 9728 resource rule, unchanged, as a predicate.
+ *
+ * Exact equality under strict/default, the bounded marketplace allowance under
+ * marketplace, nothing under legacy — the same rule the single throw site
+ * below has always applied. It is a predicate rather than an assertion only so
+ * that one caller can apply the identical rule to a second candidate document
+ * without routing a decision through an exception; no mode's meaning moves.
+ */
+function protectedResourceMetadataMatches(
   metadataUrl: string,
   statedResource: OAuthMetadata['resource'],
   resourceUri: string,
   compatibilityMode: MCPOAuthRuntimeCompatibilityMode
-): void {
+): boolean {
+  return compatibilityMode === 'strict'
+    ? statedResource === resourceUri
+    : compatibilityMode === 'marketplace'
+      ? marketplaceResourceMetadataMatches(metadataUrl, statedResource, resourceUri)
+      : true;
+}
+
+/**
+ * Narrow a document's `resource` to the one identifier the comparison used.
+ *
+ * Mirrors the marketplace singleton-array allowance so the reported value is
+ * the value compared. Anything else has no single identifier to report, and is
+ * rejected by the rule above in every mode that checks.
+ */
+function statedResourceIdentifier(statedResource: OAuthMetadata['resource']): string | null {
+  if (typeof statedResource === 'string') return statedResource;
   if (
-    compatibilityMode === 'strict'
-      ? statedResource !== resourceUri
-      : compatibilityMode === 'marketplace' &&
-        !marketplaceResourceMetadataMatches(metadataUrl, statedResource, resourceUri)
+    Array.isArray(statedResource) &&
+    statedResource.length === 1 &&
+    typeof statedResource[0] === 'string'
   ) {
-    throw new OAuthConfigurationError(
-      'metadata_incompatible',
-      'Protected resource metadata does not match the MCP resource URI',
-      'protected_resource_mismatch'
-    );
+    return statedResource[0];
   }
+  return null;
+}
+
+/** The single `protected_resource_mismatch` throw site. */
+function resourceMismatchFailure(
+  diagnostic: MCPOAuthResourceMismatchDiagnostic
+): OAuthConfigurationError {
+  return new OAuthConfigurationError(
+    'metadata_incompatible',
+    'Protected resource metadata does not match the MCP resource URI',
+    'protected_resource_mismatch',
+    diagnostic
+  );
+}
+
+/**
+ * Fetch the protected-resource metadata document that describes the saved MCP
+ * URL, and hold it to the unchanged per-mode resource rule.
+ *
+ * A provider can advertise a `resource_metadata` pointer that is correct for
+ * whatever endpoint issued the challenge yet wrong for the saved MCP URL.
+ * Google's Gmail/Calendar MCP servers do exactly that: the handshake returns
+ * 200, a read-only tool call is what challenges, and the pointer it carries is
+ * per-tool (`.../oauth-protected-resource/list_drafts`) and declares the
+ * origin's `/mcp` while the saved URL is `/mcp/v1`. The document that does
+ * describe the saved URL sits at its RFC 9728 path-aware location and matches
+ * exactly — but preferring the header hint means Agor never fetches it.
+ *
+ * So on a mismatch, and only on a mismatch, retry at exactly one further
+ * candidate: the path-aware location derived from the saved MCP URL itself.
+ * Not a candidate sweep — one deterministic URL on the resource's own origin,
+ * skipped entirely when it is the document already fetched.
+ *
+ * This changes WHICH document is authoritative, never what counts as a match.
+ * The returned document is the one that satisfied the rule, and the caller
+ * takes its `authorization_servers` and (in the production flow) the grant's
+ * metadata URI from that same document, so validation and binding can never
+ * come from two different documents.
+ */
+async function resolveProtectedResourceMetadata(
+  advertised: { metadataUrl: string; source: 'header' | 'well-known' },
+  resourceUri: string,
+  compatibilityMode: MCPOAuthRuntimeCompatibilityMode,
+  options: { allowLocalhostHttp?: boolean; assertCurrent?: () => void } = {}
+): Promise<{ metadataUrl: string; metadata: OAuthMetadata }> {
+  options.assertCurrent?.();
+  const metadata = await fetchResourceMetadata(advertised.metadataUrl, options);
+  options.assertCurrent?.();
+  const attempts: MCPOAuthResourceMetadataAttempt[] = [
+    {
+      metadataUrl: advertised.metadataUrl,
+      source: advertised.source,
+      statedResource: statedResourceIdentifier(metadata.resource),
+    },
+  ];
+  if (
+    protectedResourceMetadataMatches(
+      advertised.metadataUrl,
+      metadata.resource,
+      resourceUri,
+      compatibilityMode
+    )
+  ) {
+    return { metadataUrl: advertised.metadataUrl, metadata };
+  }
+
+  const fallbackUrl = pathAwareResourceMetadataUrl(resourceUri);
+  if (!fallbackUrl || fallbackUrl === advertised.metadataUrl) {
+    throw resourceMismatchFailure({ resourceUri, attempts });
+  }
+  console.log(
+    '[MCP OAuth] Advertised protected-resource metadata does not describe the saved resource; ' +
+      'retrying the RFC 9728 path-aware location'
+  );
+  let fallbackMetadata: OAuthMetadata;
+  try {
+    fallbackMetadata = await fetchResourceMetadata(fallbackUrl, options);
+  } catch {
+    // The failure worth reporting is the mismatch that sent us here, not a
+    // second provider error from a candidate the provider never advertised.
+    // The authority/deadline check stays outside that reasoning: an expired
+    // daemon reservation is terminal, never a resource mismatch.
+    options.assertCurrent?.();
+    throw resourceMismatchFailure({ resourceUri, attempts });
+  }
+  options.assertCurrent?.();
+  attempts.push({
+    metadataUrl: fallbackUrl,
+    source: 'path-aware-fallback',
+    statedResource: statedResourceIdentifier(fallbackMetadata.resource),
+  });
+  if (
+    !protectedResourceMetadataMatches(
+      fallbackUrl,
+      fallbackMetadata.resource,
+      resourceUri,
+      compatibilityMode
+    )
+  ) {
+    throw resourceMismatchFailure({ resourceUri, attempts });
+  }
+  return { metadataUrl: fallbackUrl, metadata: fallbackMetadata };
 }
 
 function assertOAuthDirectDiscoveryIssuer(
@@ -2088,17 +2356,15 @@ export async function validateMCPOAuthMetadata(
     issuer = authServerMetadata.issuer;
   } else {
     options.assertCurrent?.();
-    const resourceMetadata = await fetchResourceMetadata(discovery.metadataUrl, {
-      allowLocalhostHttp,
-      assertCurrent: options.assertCurrent,
-    });
-    options.assertCurrent?.();
-    assertOAuthProtectedResourceMetadata(
-      discovery.metadataUrl,
-      resourceMetadata.resource,
+    // Same resolver as `startMCPOAuthFlow`: the production flow and the
+    // catalog audit deliberately apply one rule to one authoritative document.
+    const { metadata: resourceMetadata } = await resolveProtectedResourceMetadata(
+      { metadataUrl: discovery.metadataUrl, source: discovery.source },
       resourceUri,
-      compatibilityMode
+      compatibilityMode,
+      { allowLocalhostHttp, assertCurrent: options.assertCurrent }
     );
+    options.assertCurrent?.();
     if (
       !Array.isArray(resourceMetadata.authorization_servers) ||
       typeof resourceMetadata.authorization_servers[0] !== 'string'
@@ -2180,6 +2446,15 @@ async function startMCPOAuthFlowWithAS(opts: {
   compatibilityMode: MCPOAuthRuntimeCompatibilityMode;
   dcrMode: MCPOAuthDCRMode;
   allowLocalhostHttp: boolean;
+  /**
+   * Loopback-HTTP exception for the browser `redirect_uri` only. Separate from
+   * `allowLocalhostHttp`, which governs where this process will open a socket:
+   * the redirect URI is resolved by the user's browser and is never an outbound
+   * fetch destination, so its policy follows the deployment's callback decision
+   * rather than the daemon's egress policy. Defaults to `allowLocalhostHttp`
+   * so legacy CLI/loopback callers keep their existing behavior.
+   */
+  allowLocalhostRedirectUri?: boolean;
   /** Daemon-owned authority/deadline assertion around provider side effects. */
   assertCurrent?: () => void;
 }): Promise<OAuthFlowContext> {
@@ -2198,6 +2473,7 @@ async function startMCPOAuthFlowWithAS(opts: {
     dcrMode,
     allowLocalhostHttp,
   } = opts;
+  const allowLocalhostRedirectUri = opts.allowLocalhostRedirectUri ?? allowLocalhostHttp;
 
   const hasFullOverrides = !!(authorizationUrlOverride && tokenUrlOverride);
   opts.assertCurrent?.();
@@ -2209,8 +2485,12 @@ async function startMCPOAuthFlowWithAS(opts: {
   const actualRedirectUri = redirectUri || 'http://127.0.0.1:0/oauth/callback';
   // Validate before registration: DCR sends this value to an external service
   // and must not turn an unsafe configured callback into durable provider-side
-  // client metadata.
-  assertSafeOAuthUrl(actualRedirectUri, { allowLocalhostHttp });
+  // client metadata. It travels as a request *body* value, not as a fetch
+  // destination, so the loopback exception here is the deployment's callback
+  // policy rather than this daemon's egress policy. Every other rule
+  // `assertSafeOAuthUrl` applies (embedded credentials, fragments, blocked and
+  // private subnets, non-loopback plaintext) still holds either way.
+  assertSafeOAuthUrl(actualRedirectUri, { allowLocalhostHttp: allowLocalhostRedirectUri });
 
   // Scope: explicit option > resource-metadata advertised scopes > none
   // (Skip auto-populating when client_id is pre-registered — see comment in
@@ -2353,6 +2633,14 @@ export async function startMCPOAuthFlow(
     /** Exact loopback HTTP exception for standalone development only. */
     allowLocalhostHttp?: boolean;
     /**
+     * Loopback-HTTP exception applied only to the browser `redirect_uri`.
+     * Deployments whose egress policy forbids plaintext loopback can still
+     * advertise the localhost callback their own configuration layer admitted;
+     * the redirect URI is never fetched by this process. Defaults to
+     * `allowLocalhostHttp`.
+     */
+    allowLocalhostRedirectUri?: boolean;
+    /**
      * Optional daemon authority/deadline assertion. Called before and after
      * discovery and DCR boundaries; standalone/CLI callers omit it.
      */
@@ -2418,12 +2706,14 @@ export async function startMCPOAuthFlow(
       compatibilityMode,
       dcrMode,
       allowLocalhostHttp,
+      allowLocalhostRedirectUri: options.allowLocalhostRedirectUri,
       assertCurrent: options.assertCurrent,
     });
   }
 
   // Step 1: Parse WWW-Authenticate header, fall back to pre-discovered URL
-  const metadataUrl = parseWWWAuthenticate(wwwAuthenticateHeader) || options?.resourceMetadataUrl;
+  const headerMetadataUrl = parseWWWAuthenticate(wwwAuthenticateHeader);
+  const metadataUrl = headerMetadataUrl || options?.resourceMetadataUrl;
   if (!metadataUrl) {
     throw new OAuthConfigurationError(
       'metadata_unavailable',
@@ -2436,18 +2726,18 @@ export async function startMCPOAuthFlow(
 
   // Step 2: Fetch Protected Resource Metadata (RFC 9728)
   options?.assertCurrent?.();
-  const resourceMetadata = await fetchResourceMetadata(metadataUrl, {
-    allowLocalhostHttp,
-    assertCurrent: options?.assertCurrent,
-  });
+  // `resolvedMetadataUrl` is the document that actually described the saved
+  // resource, which is not always the one advertised. Everything downstream —
+  // `authorization_servers`, the token cache key, and the metadata URI the
+  // daemon persists as the grant's binding — comes from that same document.
+  const { metadataUrl: resolvedMetadataUrl, metadata: resourceMetadata } =
+    await resolveProtectedResourceMetadata(
+      { metadataUrl, source: headerMetadataUrl ? 'header' : 'well-known' },
+      resourceUri,
+      compatibilityMode,
+      { allowLocalhostHttp, assertCurrent: options?.assertCurrent }
+    );
   options?.assertCurrent?.();
-
-  assertOAuthProtectedResourceMetadata(
-    metadataUrl,
-    resourceMetadata.resource,
-    resourceUri,
-    compatibilityMode
-  );
 
   if (
     !resourceMetadata.authorization_servers ||
@@ -2504,7 +2794,7 @@ export async function startMCPOAuthFlow(
   // that omit a registration_endpoint in their AS metadata still get probed.
   return startMCPOAuthFlowWithAS({
     authServerMetadata,
-    cacheKey: metadataUrl,
+    cacheKey: resolvedMetadataUrl,
     clientId,
     redirectUri,
     authorizationUrlOverride: options?.authorizationUrlOverride,
@@ -2523,6 +2813,7 @@ export async function startMCPOAuthFlow(
     compatibilityMode,
     dcrMode,
     allowLocalhostHttp,
+    allowLocalhostRedirectUri: options?.allowLocalhostRedirectUri,
     assertCurrent: options?.assertCurrent,
   });
 }

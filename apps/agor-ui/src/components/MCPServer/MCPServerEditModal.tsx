@@ -191,6 +191,14 @@ const MCPServerEditModalForIdentity: React.FC<MCPServerEditModalProps> = ({
           ? managedCompatibilityMode
           : undefined
       );
+      // The policy selects below are filled with the effective default when the
+      // row stores none, so the user can read what applies. That display value
+      // must not be saved as an explicit choice, which is what these flags
+      // strip back out on save. Filling them also has to stay unconditional:
+      // the Form.Items carry an `initialValue`, and AntD applies a field's
+      // initialValue only over an `undefined` store slot, so writing every one
+      // here is what stops a late-mounting Advanced panel from replacing a
+      // stored `disabled`/`legacy` with the panel's own default.
       setPreserveAbsentDcrMode(server.auth?.oauth_dcr_mode === undefined);
       setPreserveAbsentCompatibilityMode(server.auth?.oauth_compatibility_mode === undefined);
       setPreserveAbsentGrantType(server.auth?.oauth_grant_type === undefined);

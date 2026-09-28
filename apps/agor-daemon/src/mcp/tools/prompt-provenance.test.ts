@@ -87,7 +87,7 @@ describe('MCP tool prompt provenance', () => {
    */
   it.each(callSites)('$id passes the request params through, keeping the stamp', ({ call }) => {
     expect(call).toMatch(
-      /\.\.\.(ctx\.baseServiceParams|callbackParams|withPromptProvenanceTool\(|freshMcpServiceParams\()/
+      /\.\.\.(ctx\.baseServiceParams|callbackParams|provenanceParams|withPromptProvenanceTool\(|freshMcpServiceParams\()/
     );
   });
 });

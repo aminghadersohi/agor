@@ -1346,7 +1346,11 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           metadata: { system_authored: true },
         },
         {
-          ...ctx.baseServiceParams,
+          ...withPromptProvenanceTool(
+            ctx.baseServiceParams,
+            'agor_session_relationships_report',
+            args.destination
+          ),
           provider: undefined,
           route: { id: resolution.destination_session_id },
         }

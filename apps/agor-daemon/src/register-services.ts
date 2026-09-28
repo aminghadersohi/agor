@@ -2057,6 +2057,19 @@ export async function registerMCPServices(
   const { db, app } = ctx;
   const sessionsRepository = new SessionRepository(db);
   const postgresOAuthDeployment = isPostgresDatabaseHandle(db);
+  // `postgresOAuthDeployment` is an *egress* policy: a multi-daemon/hosted
+  // deployment must not let an admin-supplied endpoint turn into daemon-local
+  // outbound traffic. The browser `redirect_uri` is not an egress destination —
+  // it is handed to the provider and resolved by the user's browser — so its
+  // loopback-HTTP policy is the deployment's own callback decision instead.
+  //
+  // This is the same predicate `apps/agor-daemon/src/index.ts` uses to choose
+  // between `standaloneCallbackUrl` (admitted with the loopback-HTTP exception)
+  // and the HA callback (https + public host required) when it populates
+  // `ctx.mcpOAuthCallbackUrl`. Keying it on the database engine instead made a
+  // standalone-on-PostgreSQL deployment reject the very callback its own
+  // configuration layer had already admitted.
+  const allowLoopbackOAuthRedirectUri = ctx.deployment.mode !== 'ha';
   const durableOAuthFlows =
     ctx.mcpOAuthPendingFlowAuthority ??
     (postgresOAuthDeployment ? new MCPOAuthPendingFlowAuthority(db) : null);
@@ -2667,6 +2680,7 @@ export async function registerMCPServices(
         compatibilityMode: effectiveCompatibilityMode,
         dcrMode: effectiveDcrMode,
         allowLocalhostHttp: !postgresOAuthDeployment,
+        allowLocalhostRedirectUri: allowLoopbackOAuthRedirectUri,
         // The reservation is consumed before provider work starts, but its
         // deadline remains authoritative throughout discovery/DCR/flow setup.
         assertCurrent: assertFlowAuthority,
