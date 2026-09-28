@@ -157,6 +157,13 @@ defaults to `~/.agor` and is relocated wholesale by the `AGOR_HOME` environment 
 AGOR_HOME=/srv/agor-staging agor daemon start
 ```
 
+The value names the state directory itself, not its parent: `AGOR_HOME=/app/agor`
+uses `/app/agor/config.yaml`, not `/app/agor/.agor/config.yaml`.
+In sandbox execution, this state root is hidden independently of the git-data root,
+including when it is outside the operating-system home or reached through a symlink.
+Only explicitly authorized runtime paths, such as the read-only managed tool tree,
+are re-exposed.
+
 Resolution is `AGOR_HOME`, else `<home directory>/.agor`. A value may be absolute or start with
 `~`, and is resolved to an absolute path; a relative value resolves against the process working
 directory. A value that is empty or only whitespace is treated as **unset** rather than as `/`, so
