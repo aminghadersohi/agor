@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getAgenticToolsRoot } from '../agentic-integrations.js';
-import { resolveDefaultDatabaseUrl } from '../db/client.js';
+import { resolveDatabaseUrl, resolveDefaultDatabaseUrl } from '../db/client.js';
 import { agorHomePath, getAgorHome, getConfigPath } from './agor-home.js';
 import {
   getBranchesDir,
@@ -104,6 +104,10 @@ describe('getAgorHome', () => {
 const DERIVED_PATHS: ReadonlyArray<{ name: string; resolve: () => string }> = [
   { name: 'operator config', resolve: () => getConfigPath() },
   { name: 'standalone database', resolve: () => resolveDefaultDatabaseUrl().replace(/^file:/, '') },
+  {
+    name: 'resolved database URL without config',
+    resolve: () => resolveDatabaseUrl({ config: {}, env: {} }).replace(/^file:/, ''),
+  },
   { name: 'data home', resolve: () => getDataHome() },
   { name: 'repos', resolve: () => getReposDir() },
   { name: 'branch worktrees', resolve: () => getBranchesDir() },
