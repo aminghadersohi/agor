@@ -406,6 +406,19 @@ export interface TaskMetadata {
   gateway_inbound_event_id?: GatewayInboundEventID;
   /** Provider reply target captured for this gateway Task (for example an editable ack ID). */
   gateway_reply_metadata?: Record<string, unknown>;
+  /**
+   * Inbound gateway attachments that never reached the agent. The prompt text
+   * carries a matching note for the agent; this is the structured copy the
+   * transcript renders. Absent when every attachment was delivered.
+   */
+  gateway_skipped_attachments?: {
+    /** Files refused because their type is unsupported. */
+    skipped: number;
+    /** Sanitized MIME types of the refused files (`unknown` when unrecognized). */
+    skipped_mime_types: string[];
+    /** Files that could not be fetched (download error or missing bot token). */
+    failed: number;
+  };
   /** Immutable gateway coordinates; stripped from API/realtime Task DTOs. */
   gateway_task_source?: {
     gateway_channel_id: string;
