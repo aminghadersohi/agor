@@ -9,6 +9,7 @@
     "build": "tsc -b && vite build",
     "lint": "biome check .",
     "preview": "vite preview",
+    "serve:bundled": "node scripts/serve-bundled.mjs",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "test:watch": "vitest",
