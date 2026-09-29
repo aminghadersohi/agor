@@ -224,13 +224,6 @@ exactly-once or crash-recovery guarantee: a daemon loss before callback admissio
 can leave a terminal task without a queued callback. Once admitted, the callback
 is a durable queued task. Do not infer aggregate completion from genealogy.
 
-The withdrawn root-propagation draft's `callbackPropagation`, `continueCompletion`,
-and completion-subscription lookup tool are not supported. Its historical migration SQL
-and tenant-isolated stored rows are retained only for compatibility and portability;
-no worker creates or delivers subscriptions. PostgreSQL retirement removes the old
-cross-tenant discovery policies without deleting rows. Do not run mixed versions
-or expect an older draft binary to leave those rows inert.
-
 ### Comparison with Claude Code's native subagents
 
 If you've used [Claude Code's subagent feature](https://docs.claudecode.com/subagents), Agor's subsessions go further:

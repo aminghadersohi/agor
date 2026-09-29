@@ -33,7 +33,6 @@ import {
   isSQLiteDatabase,
   runDatabaseTransaction,
 } from './database-wrapper';
-import { migrateSQLiteWithCallbackReconciliation } from './migrate-sqlite';
 import { sanitizeDbError } from './sanitize-error';
 import { boards } from './schema';
 import type { DatabaseDialect } from './schema-factory';
@@ -253,26 +252,6 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
       }),
     },
   ],
-  ...[
-    '0111_transitive_completion_subscriptions',
-    '0112_retire_completion_discovery',
-    '0117_callback_ownership_reconciliation',
-  ].map(
-    (name) =>
-      [
-        name,
-        {
-          requiresOfflineCutover: false,
-          impact: defineMigrationImpact({
-            classification: 'schema',
-            userAction: 'none',
-            rollbackCompatibility: 'compatible',
-            summary:
-              'Retains inert storage from the withdrawn root-propagation draft; no completion subscriptions are created or delivered.',
-          }),
-        },
-      ] as const
-  ),
 ]);
 
 const NO_OFFLINE_ACTION_SUMMARY =
@@ -654,11 +633,7 @@ export async function runMigrations(
     // 3. Runs them in order within transaction
     // 4. Updates tracking table
     if (isSQLiteDatabase(db)) {
-      if (status.pending.includes('0117_callback_ownership_reconciliation')) {
-        await migrateSQLiteWithCallbackReconciliation(db, migrationsFolder);
-      } else {
-        await migrateSQLite(db, { migrationsFolder });
-      }
+      await migrateSQLite(db, { migrationsFolder });
     } else if (isPostgresDatabase(db)) {
       await migratePostgres(db, { migrationsFolder });
     } else {
