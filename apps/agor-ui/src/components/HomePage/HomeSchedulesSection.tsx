@@ -24,7 +24,8 @@ import {
   Typography,
   theme,
 } from 'antd';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useConnectionState } from '../../contexts/ConnectionContext';
 import { useAgorStore } from '../../store/agorStore';
 import { selectBranchById, selectSessionById, selectUserById } from '../../store/selectors';
 import { formatRelativeTime } from '../../utils/time';
@@ -76,7 +77,11 @@ export function HomeSchedulesSection({
   const [draftIds, setDraftIds] = useState<ScheduleID[]>([]);
   const [saving, setSaving] = useState(false);
 
+  const { authGeneration } = useConnectionState();
+  const fetchGenerationRef = useRef(0);
+
   const fetchSchedules = useCallback(async () => {
+    const generation = ++fetchGenerationRef.current;
     if (!client) {
       setSchedules([]);
       setLoading(false);
@@ -88,17 +93,23 @@ export function HomeSchedulesSection({
       const result = await client.service('schedules').find({
         query: { $limit: 200, $sort: { next_run_at: 1, created_at: -1 } },
       });
+      if (generation !== fetchGenerationRef.current) return;
       setSchedules((Array.isArray(result) ? result : result.data).sort(scheduleSort));
     } catch (nextError) {
+      if (generation !== fetchGenerationRef.current) return;
       setError(nextError instanceof Error ? nextError.message : 'Schedules could not load');
     } finally {
-      setLoading(false);
+      if (generation === fetchGenerationRef.current) setLoading(false);
     }
   }, [client]);
 
+  // Refetch on every socket (re)connect: the client object survives a
+  // reconnect, a call in flight when the socket dropped is lost, and
+  // realtime events missed while disconnected are not replayed.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: authGeneration is the reconnect trigger
   useEffect(() => {
     void fetchSchedules();
-  }, [fetchSchedules]);
+  }, [fetchSchedules, authGeneration]);
 
   useEffect(() => {
     if (!client) return;

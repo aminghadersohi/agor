@@ -1,4 +1,5 @@
-import type { Server } from 'node:http';
+import { randomBytes } from 'node:crypto';
+import { request, type Server } from 'node:http';
 import type { Socket as NetSocket } from 'node:net';
 import { type AgorClient, createClient } from '@agor/core/api';
 import { feathers, feathersExpress, socketio } from '@agor/core/feathers';
@@ -36,6 +37,69 @@ describe('Socket.IO WebSocket compression', () => {
       );
       server = undefined;
     }
+  });
+
+  async function listen(app: ReturnType<typeof feathersExpress>) {
+    server = await new Promise<Server>((resolve) => {
+      const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+    });
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Expected a TCP test server');
+    return address.port;
+  }
+
+  /** Raw WebSocket upgrade with an exact Sec-WebSocket-Extensions offer. */
+  async function upgradeWithOffer(offer: string) {
+    const app = feathersExpress(feathers());
+    app.configure(
+      socketio({ transports: ['websocket'], perMessageDeflate: SOCKET_IO_PER_MESSAGE_DEFLATE })
+    );
+    const port = await listen(app);
+
+    return new Promise<{ status: number; extensions?: string }>((resolve, reject) => {
+      const req = request({
+        host: '127.0.0.1',
+        port,
+        path: '/socket.io/?EIO=4&transport=websocket',
+        headers: {
+          Connection: 'Upgrade',
+          Upgrade: 'websocket',
+          'Sec-WebSocket-Version': '13',
+          'Sec-WebSocket-Key': randomBytes(16).toString('base64'),
+          'Sec-WebSocket-Extensions': offer,
+        },
+      });
+      req.on('upgrade', (res, socket) => {
+        socket.destroy();
+        resolve({
+          status: res.statusCode ?? 0,
+          extensions: res.headers['sec-websocket-extensions'] as string | undefined,
+        });
+      });
+      req.on('response', (res) => {
+        res.resume();
+        resolve({ status: res.statusCode ?? 0 });
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  }
+
+  it('accepts a bare permessage-deflate offer (Safari) with compression negotiated', async () => {
+    const { status, extensions } = await upgradeWithOffer('permessage-deflate');
+
+    expect(status).toBe(101);
+    expect(extensions).toMatch(/^permessage-deflate\b/);
+    expect(extensions).not.toMatch(/client_max_window_bits/);
+  });
+
+  it('accepts an offer advertising client_max_window_bits (Chromium, Firefox)', async () => {
+    const { status, extensions } = await upgradeWithOffer(
+      'permessage-deflate; client_max_window_bits'
+    );
+
+    expect(status).toBe(101);
+    expect(extensions).toMatch(/^permessage-deflate\b/);
   });
 
   async function bytesToFetchSnapshot(serverOptions: object) {
