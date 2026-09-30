@@ -2,7 +2,13 @@ import type { Board, Branch } from '@agor-live/client';
 import { render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useCyclingProfileImageUrl } from '../ProfileImage/useCyclingProfileImage';
-import { BoardTile, boardSelectFilter, boardSelectOptions, getBoardEmoji } from './BoardTile';
+import {
+  BoardTile,
+  boardSelectFilter,
+  boardSelectOptions,
+  getBoardEmoji,
+  getBoardTeammate,
+} from './BoardTile';
 
 vi.mock('../ProfileImage/useCyclingProfileImage', () => ({ useCyclingProfileImageUrl: vi.fn() }));
 
@@ -11,8 +17,18 @@ beforeEach(() => {
   vi.mocked(useCyclingProfileImageUrl).mockReturnValue(undefined);
 });
 
-const teammateBranch = (emoji: string): Branch =>
-  ({ custom_context: { teammate: { kind: 'teammate', emoji } } }) as unknown as Branch;
+const teammateBranch = (emoji: string, profileImageId?: string, branchId = 'b1'): Branch =>
+  ({
+    branch_id: branchId,
+    custom_context: { teammate: { kind: 'teammate', emoji, profileImageId } },
+  }) as unknown as Branch;
+
+/** Mock the board gallery and teammate gallery hook calls independently. */
+const mockImageBySubject = (urls: Partial<Record<'board' | 'teammate', string>>) => {
+  vi.mocked(useCyclingProfileImageUrl).mockImplementation((subject) =>
+    subject ? urls[subject.type as 'board' | 'teammate'] : undefined
+  );
+};
 
 const board = (id: string, name: string, primary_teammate_id?: string): Board =>
   ({ board_id: id, name, primary_teammate_id }) as unknown as Board;
@@ -71,6 +87,84 @@ describe('BoardTile', () => {
 
     expect(screen.getByText('🦊')).toBeInTheDocument();
     expect(useCyclingProfileImageUrl).toHaveBeenCalledWith(undefined, undefined, 'small', false);
+    expect(useCyclingProfileImageUrl).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      true
+    );
+  });
+
+  it('falls back to the primary teammate photo when the board has no image', () => {
+    mockImageBySubject({ teammate: 'blob:teammate-image' });
+    const { container } = render(
+      <BoardTile
+        board={{ board_id: 'board-1' } as Board}
+        teammate={teammateBranch('🦊', 'tm-image')}
+        emoji="🦊"
+      />
+    );
+
+    expect(container.querySelector('img')).toHaveAttribute('src', 'blob:teammate-image');
+    expect(screen.queryByText('🦊')).not.toBeInTheDocument();
+    expect(useCyclingProfileImageUrl).toHaveBeenCalledWith(
+      { type: 'teammate', id: 'b1' },
+      'tm-image',
+      'small',
+      true
+    );
+  });
+
+  it('prefers the board image and skips the teammate gallery read', () => {
+    mockImageBySubject({ board: 'blob:board-image', teammate: 'blob:teammate-image' });
+    const { container } = render(
+      <BoardTile
+        board={{ board_id: 'board-1', profile_image_id: 'image-1' } as Board}
+        teammate={teammateBranch('🦊', 'tm-image')}
+      />
+    );
+
+    expect(container.querySelector('img')).toHaveAttribute('src', 'blob:board-image');
+    expect(useCyclingProfileImageUrl).toHaveBeenCalledWith(undefined, undefined, 'small', false);
+    expect(useCyclingProfileImageUrl).not.toHaveBeenCalledWith(
+      { type: 'teammate', id: 'b1' },
+      expect.anything(),
+      expect.anything(),
+      expect.anything()
+    );
+  });
+
+  it('does not read a gallery for a teammate without a photo', () => {
+    render(
+      <BoardTile
+        board={{ board_id: 'board-1' } as Board}
+        teammate={teammateBranch('🦊')}
+        emoji="🦊"
+      />
+    );
+
+    expect(screen.getByText('🦊')).toBeInTheDocument();
+    for (const call of vi.mocked(useCyclingProfileImageUrl).mock.calls) {
+      expect(call).toEqual([undefined, undefined, 'small', false]);
+    }
+  });
+});
+
+describe('getBoardTeammate', () => {
+  it('resolves the loaded primary teammate branch', () => {
+    const tm = teammateBranch('🦊');
+    expect(getBoardTeammate({ primary_teammate_id: 'b1' } as Board, new Map([['b1', tm]]))).toBe(
+      tm
+    );
+  });
+
+  it('ignores missing or non-teammate branches', () => {
+    const plain = { branch_id: 'b2', custom_context: {} } as unknown as Branch;
+    expect(getBoardTeammate({ primary_teammate_id: 'b1' } as Board, new Map())).toBeUndefined();
+    expect(
+      getBoardTeammate({ primary_teammate_id: 'b2' } as Board, new Map([['b2', plain]]))
+    ).toBeUndefined();
+    expect(getBoardTeammate({} as Board, new Map([['b1', teammateBranch('🦊')]]))).toBeUndefined();
   });
 });
 
@@ -91,6 +185,16 @@ describe('boardSelectOptions', () => {
     );
     const { container } = render(<>{opt.label}</>);
     expect(container.querySelector('img')).toHaveAttribute('src', 'blob:board-image');
+  });
+
+  it('renders the primary teammate photo for a board without its own image', () => {
+    mockImageBySubject({ teammate: 'blob:teammate-image' });
+    const [opt] = boardSelectOptions(
+      [board('1', 'Alpha', 'b1')],
+      new Map([['b1', teammateBranch('🦊', 'tm-image')]])
+    );
+    const { container } = render(<>{opt.label}</>);
+    expect(container.querySelector('img')).toHaveAttribute('src', 'blob:teammate-image');
   });
 
   it('renders the assistant emoji for a board that has one', () => {

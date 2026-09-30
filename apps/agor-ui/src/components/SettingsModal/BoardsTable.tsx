@@ -22,7 +22,7 @@ import { filterBySettingsSearch } from '@/utils/settingsSearch';
 import { ArchiveToggleButton } from '../ArchiveButton';
 import { BoardEditModal } from '../BoardEditModal';
 import { BoardListCounts } from '../BoardListCounts';
-import { BoardTile, getBoardEmoji } from '../BoardTile';
+import { BoardTile, getBoardEmoji, getBoardTeammate } from '../BoardTile';
 import { BoardFormFields, extractBoardFormValues } from '../forms/BoardFormFields';
 import { HighlightMatch } from '../HighlightMatch';
 import { JSONEditor, validateJSON } from '../JSONEditor';
@@ -215,7 +215,12 @@ export const BoardsTable: React.FC<BoardsTableProps> = ({
       key: 'tile',
       width: 80,
       render: (_: unknown, board: Board) => (
-        <BoardTile board={board} emoji={getBoardEmoji(board, branchById)} size={32} />
+        <BoardTile
+          board={board}
+          teammate={getBoardTeammate(board, branchById)}
+          emoji={getBoardEmoji(board, branchById)}
+          size={32}
+        />
       ),
     },
     {
