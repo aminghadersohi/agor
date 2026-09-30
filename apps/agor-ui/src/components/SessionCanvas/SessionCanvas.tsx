@@ -124,6 +124,7 @@ import {
   useRegisterRecenter,
 } from '../../contexts/CanvasNavigationContext';
 import { useConnectionState, useMutationGate } from '../../contexts/ConnectionContext';
+import { getSessionCreationWarning } from '../../domain/sessionCreation';
 import { useCanManageBoard } from '../../hooks/useCanManageBoard';
 import { useCursorTracking } from '../../hooks/useCursorTracking';
 import { useStableCallback } from '../../hooks/useStableCallback';
@@ -776,6 +777,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               mcpServerIds,
             });
             targetSessionId = newSession.session_id;
+            const warning = getSessionCreationWarning(newSession);
+            if (warning) showWarning(warning, { duration: 10 });
           }
 
           // Execute action and capture the session the user should land on so
@@ -3052,9 +3055,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                       // agent, and label.
                       (async () => {
                         try {
-                          await client
+                          const { session } = (await client
                             .service(`branches/${nodeId}/fire-zone-trigger`)
-                            .create({ zoneId });
+                            .create({ zoneId })) as { session: Session };
+                          const warning = getSessionCreationWarning(session);
+                          if (warning) showWarning(warning, { duration: 10 });
                         } catch (error) {
                           console.error('❌ Failed to execute always_new trigger:', error);
                         }
@@ -3170,7 +3175,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           }
         }, 500);
       },
-      [board, client, nodes, placementWrites, commentById, setNodes]
+      [board, client, nodes, placementWrites, commentById, setNodes, showWarning]
     );
 
     const selectedLayoutNodes = useMemo(() => getSelectedLayoutNodes(nodes), [nodes]);

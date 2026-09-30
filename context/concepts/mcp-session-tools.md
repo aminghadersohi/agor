@@ -169,7 +169,7 @@ over completion ownership. The UI selector is in Session Settings → Callbacks.
 `agor_sessions_create`, `agor_sessions_spawn`, and `agor_sessions_prompt` with `mode: "subsession"` all accept:
 
 - **`modelConfig`** — `{ model: string, mode?: 'alias' | 'exact', effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max', provider?: string }`. `model` is required when the object is provided. Threaded into `session.model_config` and consumed by `packages/executor/src/sdk-handlers/claude/query-builder.ts`.
-- **`mcpServerIds`** — pins which MCP servers attach. `[]` = no MCPs. Omit to inherit (branch → parent → user default). Failed attachments surface as `mcpAttachFailures: [{ mcp_server_id, reason }]` in the response (not silently logged).
+- **`mcpServerIds`** — pins which MCP servers attach. `[]` = no MCPs. For fresh `agor_sessions_create`, omit to inherit branch → user defaults; spawn/subsession use their existing parent policy. Fresh create attaches atomically through `SessionsService`: explicit failures reject creation, while only tenant-scoped missing inherited MCP servers are skipped and reported as `mcp_defaults_skipped` plus a warning note. Private-server refusals, missing sessions, and infrastructure errors are not skipped.
 - **`callbackDelivery`** — standing callback policy (`direct`, `btw`, or `auto`). Exact-Task `callback:true` remains direct.
 
 ## Security note for spawn/fork
