@@ -4,4 +4,5 @@ export {
   boardSelectFilter,
   boardSelectOptions,
   getBoardEmoji,
+  getBoardTeammate,
 } from './BoardTile';
