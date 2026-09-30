@@ -13,7 +13,7 @@ import {
 } from '../../store/agorStore';
 import { selectBoardById, selectBranchById } from '../../store/selectors';
 import { isDarkTheme } from '../../utils/theme';
-import { BoardTile, getBoardEmoji } from '../BoardTile';
+import { BoardTile, getBoardEmoji, getBoardTeammate } from '../BoardTile';
 import { HomeActivitySection } from './HomeActivitySection';
 import { HomeBoardsSection } from './HomeBoardsSection';
 import { HomeKnowledgeSection } from './HomeKnowledgeSection';
@@ -248,7 +248,12 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
           value: b.board_id,
           label: (
             <Space size={8}>
-              <BoardTile board={b} emoji={getBoardEmoji(b, branchById)} size={20} />
+              <BoardTile
+                board={b}
+                teammate={getBoardTeammate(b, branchById)}
+                emoji={getBoardEmoji(b, branchById)}
+                size={20}
+              />
               <span>{b.name}</span>
             </Space>
           ),
