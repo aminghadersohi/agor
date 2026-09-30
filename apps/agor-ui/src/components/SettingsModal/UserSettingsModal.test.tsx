@@ -11,7 +11,7 @@ import { UserSettingsModal, type UserSettingsModalProps } from './UserSettingsMo
 
 // Profile galleries and portraits load from the daemon; keep these tests hermetic.
 vi.mock('../ProfileImage/profileImageApi', () => ({
-  listProfileImages: vi.fn(async () => ({ images: [], max_images: 24 })),
+  listProfileImages: vi.fn(async () => ({ images: [], max_images: 100 })),
   fetchProfileImageBlob: vi.fn(),
   uploadProfileImage: vi.fn(),
   patchProfileImage: vi.fn(),
@@ -1847,6 +1847,38 @@ describe('UserSettingsModal — socket authority generations', () => {
     expect(onUpdate.mock.calls[0][1].preferences?.screensaver).toEqual({
       enabled: true,
       idleMinutes: 12,
+      style: 'teammate-photos',
+    });
+  });
+
+  it('keeps a stored signal-field screensaver style when saving other changes', async () => {
+    const user = makeUser({
+      preferences: { screensaver: { enabled: true, idleMinutes: 5, style: 'signal-field' } },
+    });
+    const onUpdate = vi.fn<NonNullable<UserSettingsModalProps['onUpdate']>>(
+      async (_userId: string, _updates: UpdateUserInput) => {}
+    );
+    renderWithApp(
+      <UserSettingsModal
+        open
+        user={user}
+        currentUser={user}
+        client={null}
+        onUpdate={onUpdate}
+        onClose={vi.fn()}
+        initialTab="preferences"
+      />
+    );
+
+    expect(await screen.findByText('Signal field')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Idle time'), { target: { value: '9' } });
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalled(), ASYNC);
+    expect(onUpdate.mock.calls[0][1].preferences?.screensaver).toEqual({
+      enabled: true,
+      idleMinutes: 9,
+      style: 'signal-field',
     });
   });
 

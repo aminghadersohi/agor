@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { App, ConfigProvider } from 'antd';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ProfileImageGalleryEditor } from './ProfileImageGalleryEditor';
+import { ProfileImageGalleryEditor, validateProfileImageFile } from './ProfileImageGalleryEditor';
 import {
   deleteProfileImage,
   listProfileImages,
@@ -237,5 +237,22 @@ describe('ProfileImageGalleryEditor', () => {
 
     expect(await screen.findByText('This gallery already has 30 images')).toBeVisible();
     expect(uploadProfileImage).not.toHaveBeenCalled();
+  });
+});
+
+describe('validateProfileImageFile', () => {
+  const sized = (bytes: number, type = 'image/jpeg') => {
+    const file = new File(['x'], 'photo.jpg', { type });
+    Object.defineProperty(file, 'size', { value: bytes });
+    return file;
+  };
+
+  it('accepts camera-sized uploads up to 25 MB and rejects larger ones', () => {
+    expect(validateProfileImageFile(sized(12 * 1024 * 1024))).toBeUndefined();
+    expect(validateProfileImageFile(sized(25 * 1024 * 1024))).toBeUndefined();
+    expect(validateProfileImageFile(sized(25 * 1024 * 1024 + 1))).toBe(
+      'Images must be 25 MB or smaller'
+    );
+    expect(validateProfileImageFile(sized(10, 'image/gif'))).toBe('Use a JPEG, PNG, or WebP image');
   });
 });

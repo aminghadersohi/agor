@@ -24,6 +24,7 @@ import {
 import {
   PROFILE_IMAGE_MAX_BYTES,
   PROFILE_IMAGE_MAX_GALLERY_ITEMS,
+  PROFILE_IMAGE_MAX_MB,
 } from '../../utils/profile-image-processing.js';
 import { resolveBranchId } from '../resolve-ids.js';
 import { mcpOptionalId, mcpOptionalString, mcpRequiredId, mcpRequiredString } from '../schema.js';
@@ -422,8 +423,14 @@ async function authorizeImage(ctx: McpContext, image: ProfileImage): Promise<voi
   await authorizeSubject(ctx, image.subject_type, image.subject_id);
 }
 
-/** Base64 of the largest accepted upload, plus room for a `data:` URL prefix. */
-const PROFILE_IMAGE_MAX_BASE64_LENGTH = Math.ceil(PROFILE_IMAGE_MAX_BYTES / 3) * 4 + 64;
+/**
+ * Inline base64 travels inside the daemon's 10 MB JSON body limit, which stays
+ * tight on purpose, so inline images cap at 7 MB (≈9.4 MB encoded). Larger
+ * images up to PROFILE_IMAGE_MAX_BYTES go through branchId + path instead.
+ */
+const PROFILE_IMAGE_MAX_INLINE_BYTES = 7 * 1024 * 1024;
+/** Base64 of the largest inline upload, plus room for a `data:` URL prefix. */
+const PROFILE_IMAGE_MAX_BASE64_LENGTH = Math.ceil(PROFILE_IMAGE_MAX_INLINE_BYTES / 3) * 4 + 64;
 const BASE64_PAYLOAD = /^[A-Za-z0-9+/_-]*={0,2}$/;
 
 function profileImageCaller(ctx: McpContext) {
@@ -439,8 +446,10 @@ function decodeProfileImageBase64(value: string): Buffer {
     throw new BadRequest('imageBase64 must be base64-encoded image bytes');
   }
   const data = Buffer.from(payload, 'base64');
-  if (data.byteLength > PROFILE_IMAGE_MAX_BYTES) {
-    throw new BadRequest('Images must be 5 MB or smaller');
+  if (data.byteLength > PROFILE_IMAGE_MAX_INLINE_BYTES) {
+    throw new BadRequest(
+      'Inline images must be 7 MB or smaller; use branchId + path for larger images'
+    );
   }
   return data;
 }
@@ -463,7 +472,7 @@ async function readBranchImage(
     throw new BadRequest('path must point to a JPEG, PNG, or WebP image');
   }
   if (file.size > PROFILE_IMAGE_MAX_BYTES) {
-    throw new BadRequest('Images must be 5 MB or smaller');
+    throw new BadRequest(`Images must be ${PROFILE_IMAGE_MAX_MB} MB or smaller`);
   }
   return { data: Buffer.from(file.content, 'base64'), name: path.split('/').pop() || path };
 }
@@ -566,7 +575,7 @@ export function registerProfileImageTools(server: McpServer, ctx: McpContext): v
   server.registerTool(
     'agor_profile_images_upload',
     {
-      description: `Add an image to the gallery of an Agor user, teammate, or board. The first image becomes the main (primary) image and is what avatars show. The daemon re-encodes the upload into small and large WebP variants and strips its metadata; JPEG, PNG, and WebP up to 5 MB are accepted, ${PROFILE_IMAGE_MAX_GALLERY_ITEMS} images per gallery.
+      description: `Add an image to the gallery of an Agor user, teammate, or board. The first image becomes the main (primary) image and is what avatars show. The daemon re-encodes the upload into small and large WebP variants and strips its metadata; JPEG, PNG, and WebP up to ${PROFILE_IMAGE_MAX_MB} MB are accepted via branchId + path (7 MB via imageBase64), ${PROFILE_IMAGE_MAX_GALLERY_ITEMS} images per gallery.
 
 Provide exactly one source:
 - branchId + path: a branch-relative image file, read with your branch file access (preferred for anything but tiny images).
@@ -591,7 +600,10 @@ Managing a user gallery requires being that user or an admin; a board gallery re
           path: mcpOptionalString('path', 'Branch-relative image file path (use with branchId)'),
           imageBase64: z
             .string()
-            .max(PROFILE_IMAGE_MAX_BASE64_LENGTH, 'imageBase64 exceeds the 5 MB image limit.')
+            .max(
+              PROFILE_IMAGE_MAX_BASE64_LENGTH,
+              'imageBase64 exceeds the 7 MB inline limit; use branchId + path for larger images.'
+            )
             .optional()
             .describe('Base64 image bytes or a data: URL (alternative to branchId + path)'),
           originalName: mcpOptionalString(

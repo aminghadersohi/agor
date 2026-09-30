@@ -42,10 +42,7 @@ import { DaemonConfigurationAlert, DaemonConnectionAlert } from './components/Da
 import { ErrorBoundary, setCrashContext } from './components/ErrorBoundary';
 import { uploadFilesToSession } from './components/FileUpload/upload';
 import { ForcePasswordChangeModal } from './components/ForcePasswordChangeModal';
-import {
-  IdleGlyphScreensaver,
-  resolveScreensaverIdleMinutes,
-} from './components/IdleGlyphScreensaver';
+import { IdleScreensaverHost } from './components/IdleGlyphScreensaver';
 import { InitialLoadingScreen } from './components/InitialLoadingScreen';
 import { LoginPage } from './components/LoginPage';
 import { lazyWhenOpened } from './components/lazyWhenOpened';
@@ -2215,10 +2212,7 @@ function AppContent() {
   return (
     <ConnectionProvider value={connectionContextValue}>
       {/* Idle activation is opt-in (Preferences → Screensaver); the user menu can always preview it. */}
-      <IdleGlyphScreensaver
-        idleEnabled={currentUser?.preferences?.screensaver?.enabled === true}
-        idleMs={resolveScreensaverIdleMinutes(currentUser?.preferences?.screensaver) * 60_000}
-      />
+      <IdleScreensaverHost preferences={currentUser?.preferences?.screensaver} />
       <MCPCatalogModalProvider
         key={`${currentUser?.user_id ?? 'anonymous'}:${currentUser?.role ?? 'none'}`}
       >

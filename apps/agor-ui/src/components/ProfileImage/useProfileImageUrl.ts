@@ -16,7 +16,14 @@ function cacheKey(imageId: string, variant: ProfileImageVariant): string {
   return `${imageId}:${variant}`;
 }
 
-async function acquireImageUrl(imageId: string, variant: ProfileImageVariant): Promise<string> {
+/**
+ * Reference-counted object URL for one variant, shared with every image hook.
+ * Pair each successful or failed call with `releaseProfileImageUrl`.
+ */
+export async function acquireProfileImageUrl(
+  imageId: string,
+  variant: ProfileImageVariant
+): Promise<string> {
   const key = cacheKey(imageId, variant);
   let entry = imageCache.get(key);
   if (!entry) {
@@ -45,7 +52,7 @@ async function acquireImageUrl(imageId: string, variant: ProfileImageVariant): P
   }
 }
 
-function releaseImageUrl(imageId: string, variant: ProfileImageVariant): void {
+export function releaseProfileImageUrl(imageId: string, variant: ProfileImageVariant): void {
   const key = cacheKey(imageId, variant);
   const entry = imageCache.get(key);
   if (!entry) return;
@@ -78,7 +85,7 @@ export function useProfileImageUrl(
       return;
     }
     let active = true;
-    void acquireImageUrl(imageId, variant)
+    void acquireProfileImageUrl(imageId, variant)
       .then((nextUrl) => {
         if (active) setLoaded({ imageId, continuityKey, url: nextUrl });
       })
@@ -87,7 +94,7 @@ export function useProfileImageUrl(
       });
     return () => {
       active = false;
-      releaseImageUrl(imageId, variant);
+      releaseProfileImageUrl(imageId, variant);
     };
   }, [continuityKey, imageId, variant, networkEnabled]);
 

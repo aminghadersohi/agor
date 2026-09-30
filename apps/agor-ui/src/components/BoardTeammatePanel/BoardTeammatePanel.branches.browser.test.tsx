@@ -11,7 +11,7 @@ import { BoardTeammatePanel } from './BoardTeammatePanel';
 
 // Profile galleries and portraits load from the daemon; keep these tests hermetic.
 vi.mock('../ProfileImage/profileImageApi', () => ({
-  listProfileImages: vi.fn(async () => ({ images: [], max_images: 24 })),
+  listProfileImages: vi.fn(async () => ({ images: [], max_images: 100 })),
   fetchProfileImageBlob: vi.fn(),
   uploadProfileImage: vi.fn(),
   patchProfileImage: vi.fn(),

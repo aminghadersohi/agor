@@ -11,7 +11,8 @@ function subjectKey(subject: ProfileImageSubject): string {
   return `${subject.type}:${subject.id}`;
 }
 
-async function loadGallery(
+/** Cached, de-duplicated gallery metadata for one subject; shared with every gallery hook. */
+export async function loadProfileImageGallery(
   subject: ProfileImageSubject,
   force = false
 ): Promise<ProfileImageListResult> {
@@ -92,7 +93,7 @@ export function useProfileImageGallery(
     const update = (result: ProfileImageListResult) => {
       if (active) setImages(result.images);
     };
-    void loadGallery(stableSubject)
+    void loadProfileImageGallery(stableSubject)
       .then(update)
       .catch(() => {
         if (active) setImages([]);
@@ -105,13 +106,13 @@ export function useProfileImageGallery(
       if (!detail || subjectKey(detail) !== subjectKey(stableSubject)) return;
       if (detail.result) update(detail.result);
       else
-        void loadGallery(stableSubject, true)
+        void loadProfileImageGallery(stableSubject, true)
           .then(update)
           .catch(() => undefined);
     };
     window.addEventListener('agor:profile-images-changed', onChanged);
     const onTokensRefreshed = () => {
-      void loadGallery(stableSubject, true)
+      void loadProfileImageGallery(stableSubject, true)
         .then(update)
         .catch(() => undefined);
     };
