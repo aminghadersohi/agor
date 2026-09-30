@@ -112,6 +112,8 @@ export interface SessionFooterProps {
   promptInputSlot: React.ReactNode;
   /** Minimal composer presentation for conversation-first mode. */
   simple?: boolean;
+  /** Keep the compact presentation while exposing the normal session actions. */
+  showSessionActions?: boolean;
 }
 
 // Height of the mobile info-bar chips (MCP / effort / model) so they line up.
@@ -162,6 +164,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   onCodexPermissionChange,
   promptInputSlot,
   simple = false,
+  showSessionActions = false,
 }) => {
   const managedByPreset = Boolean(session.agentic_tool_preset_id);
   const supportsLiveEffort = Boolean(toolCaps?.reasoningEffortLevels?.length);
@@ -187,8 +190,9 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   const [prefs, setPref] = useFooterPreferences();
   const pinnedItems = prefs.pinnedItems;
   // The phone bar keeps only Attach; the other pinned actions stay in the controls sheet.
-  // Focus chat additionally hides the pinned session actions from the bar.
-  const gatedPinnedItems = simple ? [] : pinnedItems;
+  // Focus chat additionally hides the pinned session actions from the bar
+  // unless the host (the chat workspace) explicitly asks to keep them.
+  const gatedPinnedItems = !simple || showSessionActions ? pinnedItems : [];
   const barPinnedItems = isMobile
     ? gatedPinnedItems.filter((item) => item === 'upload')
     : gatedPinnedItems;

@@ -8,6 +8,7 @@ import { isOwnActiveSession, sortSessions } from '../../utils/sessionSearch';
 import { BoardTile, getBoardEmoji } from '../BoardTile';
 import { GlassPanel } from '../GlassSurface/GlassPanel';
 import { HomeSchedulesSection } from '../HomePage/HomeSchedulesSection';
+import { HomeTeammateChatsSection } from '../HomePage/HomeTeammateChatsSection';
 import { JumpBackInSection } from '../HomePage/JumpBackInSection';
 import { mobilePageStyle, mobileScrollAreaStyle } from './constants';
 import { MobileHeader } from './MobileHeader';
@@ -16,6 +17,8 @@ import { MobileSessionRow } from './MobileSessionRow';
 
 interface MobileHomePageProps {
   client?: AgorClient | null;
+  /** Opens the chat-collections manager. */
+  onManageTeammateChats?: (sessionId?: string) => void;
   sessionById: Map<string, Session>;
   branchById: Map<string, Branch>;
   boardById: Map<string, Board>;
@@ -44,6 +47,7 @@ const RECENT_LIMIT = 5;
  */
 export const MobileHomePage: React.FC<MobileHomePageProps> = ({
   client,
+  onManageTeammateChats,
   sessionById,
   branchById,
   boardById,
@@ -171,6 +175,15 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
             currentUserId={currentUser?.user_id}
             onSessionClick={(id) => navigate(`/m/session/${id}`)}
           />
+
+          {onManageTeammateChats && (
+            <HomeTeammateChatsSection
+              hideWhenEmpty
+              currentUserId={currentUser?.user_id}
+              onSessionClick={(sessionId) => navigate(`/m/session/${sessionId}`)}
+              onManageTeammateChats={onManageTeammateChats}
+            />
+          )}
 
           {client && (
             <HomeSchedulesSection

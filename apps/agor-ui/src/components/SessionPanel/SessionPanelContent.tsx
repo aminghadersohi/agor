@@ -68,6 +68,8 @@ export interface SessionPanelContentProps {
   isOpen: boolean;
   /** Conversation-first presentation that hides branch and task chrome. */
   simple?: boolean;
+  /** Preserve per-chat reading positions inside the dedicated chat workspace. */
+  rememberScrollPosition?: boolean;
 }
 
 export const SessionPanelContent = React.memo<SessionPanelContentProps>(
@@ -87,6 +89,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
     inputValueRef,
     isOpen,
     simple = false,
+    rememberScrollPosition = false,
   }) => {
     const { token } = theme.useToken();
     const teammateAvatarUrl = useTeammateProfileImageUrl(branch, 'small');
@@ -635,6 +638,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
             teammateAvatarUrl={teammateAvatarUrl}
             onOpenAgenticToolSettings={onOpenAgenticToolSettings}
             simple={simple}
+            rememberScrollPosition={rememberScrollPosition}
           />
         </SessionConversationLayout>
 

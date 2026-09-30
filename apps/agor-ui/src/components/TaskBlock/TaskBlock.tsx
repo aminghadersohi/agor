@@ -697,6 +697,8 @@ export const TaskBlock = React.memo<TaskBlockProps>(
   }) => {
     const { token } = theme.useToken();
     const runtimeLive = shouldRenderLiveTaskProgress(task);
+    // Focus chat keeps child-session callbacks visible but subdued.
+    const isSimpleCallback = simple && task.metadata?.is_agor_callback === true;
     const currentUser = currentUserId ? userById.get(currentUserId) : undefined;
     const canRequestMcpReconnect =
       currentUserId === task.created_by || hasMinimumRole(currentUser?.role, ROLES.ADMIN);
@@ -1069,7 +1071,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
                 teammateAvatarUrl={teammateAvatarUrl}
                 client={client}
                 onOpenAgenticToolSettings={onOpenAgenticToolSettings}
-                compact={compact}
+                compact={compact || isSimpleCallback}
                 defaultTextExpanded={defaultTextExpanded}
               />
             );
@@ -1247,7 +1249,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
       </div>
     );
     return (
-      <div data-task-block={task.task_id}>
+      <div data-task-block={task.task_id} style={isSimpleCallback ? { opacity: 0.84 } : undefined}>
         {!simple && !promptMessageId && toolDisclosure}
         {taskContent}
         {isAuthorizationRevokedFailure(task) ? (

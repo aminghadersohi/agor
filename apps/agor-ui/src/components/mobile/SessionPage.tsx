@@ -40,6 +40,8 @@ interface SessionPageProps {
   onUpdateSessionEnvSelections?: (sessionId: string, envVarNames: string[]) => void;
   onOpenBranch?: AppActionsContextValue['onOpenBranch'];
   onOpenAgenticToolSettings?: AppActionsContextValue['onOpenAgenticToolSettings'];
+  /** Pin this session into a Home chat collection. */
+  onPinToChatCollection?: (sessionId: string) => void;
 }
 
 const EMPTY_MCP_IDS: string[] = [];
@@ -66,6 +68,7 @@ export const SessionPage: React.FC<SessionPageProps> = ({
   onUpdateSessionEnvSelections,
   onOpenBranch,
   onOpenAgenticToolSettings,
+  onPinToChatCollection,
 }) => {
   const { sessionId } = useParams<{ sessionId: string }>();
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -164,6 +167,7 @@ export const SessionPage: React.FC<SessionPageProps> = ({
           sessionMcpServerIds={sessionMcpServerIds}
           open
           onClose={closeSession}
+          onPinToChatCollection={onPinToChatCollection}
         />
       </div>
       <SessionSettingsModal

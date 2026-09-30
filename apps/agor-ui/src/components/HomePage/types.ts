@@ -9,6 +9,12 @@ export interface HomePageProps {
   onBoardClick: (boardId: string) => void;
   onBranchClick: (branchId: string) => void;
   onSessionClick: (sessionId: string) => void;
+  onChatWorkspaceSessionClick: (sessionId: string) => void;
+  onShowChatSessionOnBoard?: (sessionId: string) => void;
+  onManageTeammateChats: (sessionId?: string) => void;
+  chatWorkspace?: boolean;
+  activeSessionId?: string | null;
+  onExitChatWorkspace?: () => void;
   onOpenCreateDialog: (
     tab: 'teammate' | 'branch' | 'board' | 'repository',
     boardId?: string
