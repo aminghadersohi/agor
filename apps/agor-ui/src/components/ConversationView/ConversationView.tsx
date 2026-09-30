@@ -137,6 +137,9 @@ export interface ConversationViewProps {
 
   /** Use the denser, full-width task treatment for phone-sized session routes. */
   compact?: boolean;
+
+  /** Hide operational detail and keep the transcript conversation-first. */
+  simple?: boolean;
 }
 
 const ConversationViewInner = React.memo<ConversationViewProps>(
@@ -159,6 +162,7 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
     teammateAvatarUrl,
     onOpenAgenticToolSettings,
     compact = false,
+    simple = false,
   }) => {
     const { token } = theme.useToken();
     const [copied, copy] = useCopyToClipboard();
@@ -550,7 +554,7 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
         <HistoryTextChoices.Provider value={textChoiceContext}>
           <div ref={contentRef}>
             {/* Genealogy Banner */}
-            <GenealogyBanner />
+            {!simple && <GenealogyBanner />}
 
             {error && <Alert type="error" title={error} />}
             {currentReactiveState?.hasOlderTasks && (
@@ -585,6 +589,7 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
                 client={client}
                 onOpenAgenticToolSettings={onOpenAgenticToolSettings}
                 compact={compact}
+                simple={simple}
                 defaultTextExpanded={protectedTurns.has(task.task_id)}
               />
             ))}

@@ -110,6 +110,8 @@ export interface SessionFooterProps {
   onCodexPermissionChange: (sandbox: CodexSandboxMode, approval: CodexApprovalPolicy) => void;
   // Prompt textarea rendered between the two bars
   promptInputSlot: React.ReactNode;
+  /** Minimal composer presentation for conversation-first mode. */
+  simple?: boolean;
 }
 
 // Height of the mobile info-bar chips (MCP / effort / model) so they line up.
@@ -159,6 +161,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   onPermissionModeChange,
   onCodexPermissionChange,
   promptInputSlot,
+  simple = false,
 }) => {
   const managedByPreset = Boolean(session.agentic_tool_preset_id);
   const supportsLiveEffort = Boolean(toolCaps?.reasoningEffortLevels?.length);
@@ -184,7 +187,11 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   const [prefs, setPref] = useFooterPreferences();
   const pinnedItems = prefs.pinnedItems;
   // The phone bar keeps only Attach; the other pinned actions stay in the controls sheet.
-  const barPinnedItems = isMobile ? pinnedItems.filter((item) => item === 'upload') : pinnedItems;
+  // Focus chat additionally hides the pinned session actions from the bar.
+  const gatedPinnedItems = simple ? [] : pinnedItems;
+  const barPinnedItems = isMobile
+    ? gatedPinnedItems.filter((item) => item === 'upload')
+    : gatedPinnedItems;
   const togglePin = (id: string) => {
     setPref({
       pinnedItems: pinnedItems.includes(id)
@@ -1339,16 +1346,16 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
         flexShrink: 0,
         background: token.colorBgContainer,
         borderTop: `1px solid ${token.colorBorder}`,
-        padding: `${token.sizeUnit * 2}px ${isMobile ? token.padding : token.sizeUnit * 6}px ${token.sizeUnit * 3}px`,
+        padding: `${token.sizeUnit * 2}px ${isMobile ? token.padding : token.sizeUnit * (simple ? 4 : 6)}px ${token.sizeUnit * 3}px`,
         paddingBottom: isMobile
           ? `max(${token.sizeUnit * 3}px, env(safe-area-inset-bottom))`
           : undefined,
-        marginLeft: -token.sizeUnit * 6,
-        marginRight: -token.sizeUnit * 6,
+        marginLeft: -token.sizeUnit * (simple ? 4 : 6),
+        marginRight: -token.sizeUnit * (simple ? 4 : 6),
       }}
     >
       {/* Context window gradient overlay */}
-      {footerGradient && (
+      {!simple && footerGradient && (
         <div
           style={{
             position: 'absolute',
@@ -1376,7 +1383,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
           pinnedChips.includes('session-ids')) && (
           <div
             style={{
-              display: 'flex',
+              display: simple ? 'none' : 'flex',
               gap: token.sizeUnit,
               alignItems: 'center',
               marginBottom: token.sizeUnit * 2,
