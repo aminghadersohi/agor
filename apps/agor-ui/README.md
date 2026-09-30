@@ -51,6 +51,7 @@ We develop and test UI changes against the live Agor dev environment instead of 
 - `pnpm --filter agor-ui test` - Run Vitest tests
 - `pnpm --filter agor-ui build` - Build for production
 - `pnpm --filter agor-ui preview` - Preview production build
+- `pnpm --filter agor-ui serve:bundled` - Serve the built bundle at `/ui` and proxy the daemon, for remote/VPN/mobile clients where the dev server is too slow (rebuild after UI changes; see the Development guide)
 
 ## Linting
 

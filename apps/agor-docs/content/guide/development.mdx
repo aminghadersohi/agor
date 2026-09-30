@@ -144,6 +144,29 @@ cd apps/agor-ui && pnpm dev
 # Visit http://localhost:5173
 ```
 
+### Over a slow link (VPN, phone)
+
+The Vite dev server loads the UI as hundreds of separate modules. Across a
+high-latency connection such as a VPN or a phone on cellular, that can take
+long enough that the page never gets past "Reconnecting to daemon". For those
+clients, serve the production bundle instead:
+
+```bash
+pnpm --filter agor-ui build
+PORT=5180 pnpm --filter agor-ui serve:bundled
+# Visit http://<host>:5180/ui/
+```
+
+`serve:bundled` serves `apps/agor-ui/dist` at `/ui` with precompressed,
+long-cached assets. It proxies everything else, including socket.io websockets,
+to the daemon, so the browser sees one origin. That is the same layout as an
+installed Agor, and the daemon accepts it without any CORS configuration.
+
+The bundle does not hot-reload. Rebuild it after pulling or deploying UI
+changes, or clients will keep getting the old UI. Settings (`PORT`, `HOST`,
+`DAEMON_URL`/`DAEMON_PORT`, `UI_DIST`, `UPSTREAM_ORIGIN`) are documented at the
+top of `apps/agor-ui/scripts/serve-bundled.mjs`.
+
 ## Custom builds
 
 To test the **packaged artifact** end-to-end (the way users actually install Agor), build the `agor-live` npm package locally:
