@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { EXECUTOR_RESPONSE_HARD_MAX_BYTES } from '@agor/core/config';
 import {
   EXECUTOR_RESPONSE_CONTENT_TYPE,
   EXECUTOR_RESPONSE_MAX_EVENT_BYTES,
@@ -161,6 +162,13 @@ export function reserveExecutorResponse(input: {
    * replica holding the reservation.
    */
   originUrl?: string;
+  /**
+   * Call-specific floor for this reservation's response size. The effective
+   * limit is the larger of this and the configured limit, never above the hard
+   * maximum, so a caller can admit a known-large payload without lowering the
+   * operator's setting for everyone else.
+   */
+  minResponseBytes?: number;
 }): ExecutorResponseReservation {
   if (!accepting) {
     metrics.increment('executor.response_rejections', 1, { reason: 'draining' });
@@ -175,6 +183,10 @@ export function reserveExecutorResponse(input: {
     );
   }
 
+  const maxResponseBytes = Math.min(
+    Math.max(runtimeConfig.maxResponseBytes, input.minResponseBytes ?? 0),
+    EXECUTOR_RESPONSE_HARD_MAX_BYTES
+  );
   const requestId = randomUUID();
   const token = randomBytes(32).toString('base64url');
   const createdAt = Date.now();
@@ -193,7 +205,7 @@ export function reserveExecutorResponse(input: {
     sessionId: input.sessionId,
     deadlineAt,
     createdAt,
-    maxResponseBytes: runtimeConfig.maxResponseBytes,
+    maxResponseBytes,
     profile: input.profile ?? 'terminal',
     nextSeq: 0,
     eventCount: 0,
@@ -222,7 +234,7 @@ export function reserveExecutorResponse(input: {
       url,
       token,
       deadlineAt: new Date(deadlineAt).toISOString(),
-      maxResponseBytes: runtimeConfig.maxResponseBytes,
+      maxResponseBytes,
     },
     result,
     fail: (terminal) => settle(record, terminal, { failed: true, closePublisher: true }),

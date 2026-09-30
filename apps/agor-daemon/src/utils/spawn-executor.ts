@@ -247,6 +247,8 @@ export interface RunExecutorCommandOptions
   extends Omit<SpawnExecutorOptions, 'localSandboxFileBinds' | 'onExit' | 'onSpawn'> {
   /** Built-in call-specific timeout; config `timeout_ms.by_command` may override it. */
   timeoutMs?: number;
+  /** Call-specific response-size floor; see `reserveExecutorResponse`. */
+  minResponseBytes?: number;
   /** Suppress child stdout/stderr logs for credential-sensitive operations. */
   sensitiveOutput?: boolean;
 }
@@ -1266,6 +1268,7 @@ export async function requestExecutor(
       ...(typeof params?.sessionId === 'string' ? { sessionId: params.sessionId } : {}),
       timeoutMs,
       timeoutResult,
+      ...(options.minResponseBytes ? { minResponseBytes: options.minResponseBytes } : {}),
       // Off-host executors call back over the configured reachable origin; local
       // subprocesses inherit the loopback origin from the channel config.
       ...(executorCommandTemplate && responseConfig.originUrl
