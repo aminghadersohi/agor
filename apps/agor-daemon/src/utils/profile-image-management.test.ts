@@ -221,14 +221,14 @@ describe('profile image manager', () => {
       })
     ).rejects.toThrow('Choose an image to upload');
 
-    mocks.images.listForSubject.mockResolvedValue(Array.from({ length: 24 }, () => image()));
+    mocks.images.listForSubject.mockResolvedValue(Array.from({ length: 100 }, () => image()));
     await expect(
       manager.upload(makeCaller(), {
         subjectType: 'board',
         subjectId: 'board-1',
         data: Buffer.from('pixels'),
       })
-    ).rejects.toThrow('up to 24 images');
+    ).rejects.toThrow('up to 100 images');
     expect(mocks.images.create).not.toHaveBeenCalled();
   });
 

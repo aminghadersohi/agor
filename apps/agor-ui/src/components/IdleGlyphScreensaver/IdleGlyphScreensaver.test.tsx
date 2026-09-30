@@ -10,7 +10,31 @@ import {
   startIdleGlyphScreensaver,
 } from './IdleGlyphScreensaver';
 
+vi.mock('./TeammatePhotoScreensaver', () => ({
+  default: ({
+    reducedMotion,
+    onUnavailable,
+  }: {
+    reducedMotion: boolean;
+    onUnavailable: () => void;
+  }) => (
+    <button type="button" data-reduced-motion={String(reducedMotion)} onClick={onUnavailable}>
+      teammate slideshow
+    </button>
+  ),
+}));
+
 const motionPreference = { matches: false };
+const TEAMMATES = [{ id: 'lagertha', name: 'Lagertha' }];
+
+/** Resolve the lazy slideshow import; `findBy*` polling stalls under fake timers. */
+async function settleLazyImport() {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
+  }
+}
 
 describe('IdleGlyphScreensaver', () => {
   beforeEach(() => {
@@ -75,6 +99,42 @@ describe('IdleGlyphScreensaver', () => {
 
     act(() => startIdleGlyphScreensaver());
     expect(screen.getByRole('dialog', { name: /idle screensaver/i })).toBeInTheDocument();
+  });
+
+  it('shows the lazily loaded teammate slideshow when teammates exist', async () => {
+    render(<IdleGlyphScreensaver idleMs={1_000} teammates={TEAMMATES} />);
+    act(() => vi.advanceTimersByTime(1_000));
+    await settleLazyImport();
+    expect(screen.getByText('teammate slideshow')).toBeInTheDocument();
+    expect(document.querySelector('canvas')).toBeNull();
+  });
+
+  it('falls back to the signal field when no teammate photo can be shown', async () => {
+    render(<IdleGlyphScreensaver idleMs={1_000} teammates={TEAMMATES} />);
+    act(() => vi.advanceTimersByTime(1_000));
+    await settleLazyImport();
+    const slideshow = screen.getByText('teammate slideshow');
+    fireEvent.click(slideshow);
+    expect(screen.queryByText('teammate slideshow')).not.toBeInTheDocument();
+    expect(document.querySelector('canvas')).not.toBeNull();
+  });
+
+  it('uses the signal field when that style is chosen, even with teammates', () => {
+    render(<IdleGlyphScreensaver idleMs={1_000} style="signal-field" teammates={TEAMMATES} />);
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(document.querySelector('canvas')).not.toBeNull();
+  });
+
+  it('runs the slideshow in reduced-motion mode, and exits if it has no photos', async () => {
+    motionPreference.matches = true;
+    render(<IdleGlyphScreensaver idleMs={1_000} teammates={TEAMMATES} />);
+    act(() => vi.advanceTimersByTime(1_000));
+    await settleLazyImport();
+    const slideshow = screen.getByText('teammate slideshow');
+    expect(slideshow).toHaveAttribute('data-reduced-motion', 'true');
+
+    fireEvent.click(slideshow);
+    expect(screen.queryByRole('dialog', { name: /idle screensaver/i })).not.toBeInTheDocument();
   });
 
   it('clamps the stored idle delay to the supported range', () => {
