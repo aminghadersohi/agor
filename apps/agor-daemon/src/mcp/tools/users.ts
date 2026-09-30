@@ -17,6 +17,7 @@ import type {
 import { isTeammate, ROLES, type User } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
+import { FILE_READ_MIN_RESPONSE_BYTES, type FileParams } from '../../services/file.js';
 import {
   getProfileImageManager,
   profileImageCallerFromParams,
@@ -455,6 +456,13 @@ function decodeProfileImageBase64(value: string): Buffer {
 }
 
 /**
+ * Executor response room for a maximum-size path upload: the binary read comes
+ * back base64-encoded (4/3 inflation) inside a JSON frame with file metadata,
+ * which the default 8 MiB channel limit cannot hold.
+ */
+const PROFILE_IMAGE_READ_RESPONSE_BYTES = Math.ceil(PROFILE_IMAGE_MAX_BYTES / 3) * 4 + 1024 * 1024;
+
+/**
  * Read a gallery upload out of a branch through the `file` service, so the
  * read carries the caller's branch file access and runs in the executor like
  * every other branch file read; the daemon never opens the path itself.
@@ -465,9 +473,12 @@ async function readBranchImage(
   path: string
 ): Promise<{ data: Buffer; name: string }> {
   const branchId = await resolveBranchId(ctx, branchIdInput);
-  const file = (await ctx.app
-    .service('file')
-    .get(path, { ...ctx.baseServiceParams, query: { branch_id: branchId } })) as FileDetail;
+  const params: FileParams = {
+    ...ctx.baseServiceParams,
+    query: { branch_id: branchId },
+    [FILE_READ_MIN_RESPONSE_BYTES]: PROFILE_IMAGE_READ_RESPONSE_BYTES,
+  };
+  const file = (await ctx.app.service('file').get(path, params)) as FileDetail;
   if (file.encoding !== 'base64') {
     throw new BadRequest('path must point to a JPEG, PNG, or WebP image');
   }
