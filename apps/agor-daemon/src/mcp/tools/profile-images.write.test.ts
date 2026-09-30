@@ -26,6 +26,7 @@ vi.mock('../resolve-ids.js', () => ({
 }));
 
 const { registerProfileImageTools } = await import('./users.js');
+const { FILE_READ_MIN_RESPONSE_BYTES } = await import('../../services/file.js');
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
 type ToolConfig = { inputSchema: z.ZodType };
@@ -124,7 +125,14 @@ describe('profile-image MCP write tools', () => {
     expect(fileGet).toHaveBeenCalledWith('assets/cover.webp', {
       ...baseServiceParams,
       query: { branch_id: 'resolved-abc12345' },
+      // A 25 MB image arrives base64-encoded in a JSON frame; the default
+      // 8 MiB executor response limit would reject anything over ~6 MB.
+      [FILE_READ_MIN_RESPONSE_BYTES]: expect.any(Number),
     });
+    const readParams = fileGet.mock.calls[0][1];
+    expect(readParams[FILE_READ_MIN_RESPONSE_BYTES]).toBeGreaterThan(
+      Math.ceil((25 * 1024 * 1024) / 3) * 4
+    );
     const [, input] = managerMocks.upload.mock.calls[0];
     expect(input.originalName).toBe('cover.webp');
     expect(Buffer.compare(input.data, pixels)).toBe(0);
