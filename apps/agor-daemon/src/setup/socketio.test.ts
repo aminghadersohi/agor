@@ -745,10 +745,17 @@ describe('Socket.IO transport ceiling', () => {
         serverNoContextTakeover: true,
         clientNoContextTakeover: true,
         serverMaxWindowBits: 13,
-        clientMaxWindowBits: 13,
         zlibDeflateOptions: { memLevel: 7 },
       },
     });
+  });
+
+  it('does not pin the client window, so offers without client_max_window_bits stay acceptable', () => {
+    const { config } = buildHarness();
+    const deflate = (config.serverOptions as { perMessageDeflate: Record<string, unknown> })
+      .perMessageDeflate;
+
+    expect(deflate).not.toHaveProperty('clientMaxWindowBits');
   });
 });
 

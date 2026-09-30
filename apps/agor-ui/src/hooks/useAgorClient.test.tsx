@@ -5,7 +5,7 @@ import {
   resetRefreshFailureState,
   TOKENS_REFRESH_UNRECOVERABLE_EVENT,
 } from '../utils/singleFlightRefresh';
-import { useAgorClient } from './useAgorClient';
+import { SERVICE_CALL_ACK_TIMEOUT_MS, useAgorClient } from './useAgorClient';
 
 // Keep every real export; only stub the client factory so the hook wires a
 // controllable mock instead of opening a real socket.
@@ -203,6 +203,26 @@ describe('useAgorClient authenticated handshake lifecycle', () => {
     expect(client.authenticate).not.toHaveBeenCalled();
     expect(client.hooks).not.toHaveBeenCalled();
     expect(result.current.authGeneration).toBe(1);
+  });
+
+  it('bounds service calls with an ack timeout so a socket drop rejects in-flight calls', async () => {
+    const { client } = makeSeamClient();
+    vi.mocked(createClient).mockReturnValue(client as never);
+
+    renderHook(() =>
+      useAgorClient({
+        url: 'http://daemon.test',
+        accessToken: 'access-token',
+        authorityGeneration: 1,
+      })
+    );
+
+    await waitFor(() => expect(createClient).toHaveBeenCalled());
+    expect(createClient).toHaveBeenCalledWith(
+      'http://daemon.test',
+      false,
+      expect.objectContaining({ ackTimeout: SERVICE_CALL_ACK_TIMEOUT_MS })
+    );
   });
 
   it('re-announces socket-scoped capability after a normal transport reconnect', async () => {
