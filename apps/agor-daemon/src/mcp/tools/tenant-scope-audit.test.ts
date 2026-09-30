@@ -62,6 +62,8 @@ const ALLOWED_UNWRAPPED: Record<string, string> = {
   // Rejected with BadRequest in required_from_auth BEFORE any DB touch, and it
   // awaits a git.repo.inspect executor round-trip before its writes — wrapping
   // would risk a transaction across network I/O. See repos.ts.
+  // Import owns short read/write units and rechecks the write gate after executor I/O.
+  'reposService.importFromAgorYml': 'withTenantDatabase + withFreshTenantWrite (short units)',
   'reposService.addLocalRepository': 'HA-forbidden before any DB touch; intentional',
   // Registered as a long (identity-only) HTTP route for the same reason: it
   // reads launch.json through an executor, opens its own short tenant units,
@@ -95,7 +97,6 @@ const MUTATION_TOKENS = new Set([
   'reposService.cloneRepository',
   'reposService.retryBranchProvisioning',
   'reposService.updateMetadata',
-  'reposService.importFromAgorYml',
   'boardsService.archive',
   'boardsService.unarchive',
   'sessionsService.archive',

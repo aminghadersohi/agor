@@ -251,36 +251,46 @@ export function registerRepoTools(server: McpServer, ctx: McpContext): void {
     'agor_repos_import_environment',
     {
       description:
-        "Admin only. Import a repository's environment configuration from a file in one branch's working tree: " +
-        '`agor_yml` reads `.agor.yml`; `launch_json` reads `.agor/launch.json` (falling back to ' +
+        "Import a repository's environment configuration from a file in one source branch's working tree (admin-only). " +
+        '`agor_yml` (default) reads `.agor.yml`; `launch_json` reads `.agor/launch.json` (falling back to ' +
         '`.vscode/launch.json`) and compiles its launch profiles, plus any `agor` block, into variants. ' +
-        'WARNING: this REPLACES all existing environment variants on the repository (DB-only template ' +
-        'overrides are kept). Returns the updated repository.',
+        'Replaces all repo-wide variants and the default, removing definitions absent from the file; ' +
+        'preserves deployment-local template_overrides. Review the complete replacement before calling. ' +
+        'The branch must belong to the repo and the caller must have branch filesystem read access. ' +
+        'Does not render or start any branch. Call agor_environment_set afterward to select or re-render ' +
+        'the target branch variant, then agor_environment_start when ready. ' +
+        'See https://agor.live/guide/environment-configuration for the configuration and remote-provider workflow.',
       annotations: { destructiveHint: true, idempotentHint: true },
       inputSchema: z.object({
         repoId: mcpRequiredId('repoId', 'Repository'),
-        branchId: mcpRequiredId('branchId', 'Branch whose working tree holds the file'),
+        branchId: mcpRequiredId('branchId', 'Source branch whose working tree holds the file'),
         source: z
           .enum(['agor_yml', 'launch_json'])
-          .describe('Which file to import: `agor_yml` (.agor.yml) or `launch_json` (launch.json).'),
+          .default('agor_yml')
+          .describe(
+            'Which file to import: `agor_yml` (.agor.yml, default) or `launch_json` (launch.json).'
+          ),
       }),
     },
     async (args) => {
       const repoId = await resolveRepoId(ctx, args.repoId);
       const branchId = await resolveBranchId(ctx, args.branchId);
       const reposService = ctx.app.service('repos') as unknown as ReposServiceImpl;
+      // Match the HTTP long routes' write admission in a short unit. Both service
+      // methods own their read/write units and recheck the gate after executor
+      // file I/O; never hold a database transaction across that executor round-trip.
+      await runWithMcpTenantDatabaseWrite(ctx, async () => undefined);
       const updated =
         args.source === 'launch_json'
-          ? // Long route: the service opens its own short tenant units around the
-            // executor spawn, so it must not run inside one.
-            await reposService.importFromLaunchJson(
+          ? await reposService.importFromLaunchJson(
               repoId,
               { branch_id: branchId },
               ctx.baseServiceParams
             )
-          : // Matches the HTTP route's tenant scope and write gate.
-            await runWithMcpTenantDatabaseWrite(ctx, () =>
-              reposService.importFromAgorYml(repoId, { branch_id: branchId }, ctx.baseServiceParams)
+          : await reposService.importFromAgorYml(
+              repoId,
+              { branch_id: branchId },
+              ctx.baseServiceParams
             );
       return textResult(updated);
     }

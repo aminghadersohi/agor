@@ -453,11 +453,9 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
                 style={{
                   fontSize: token.fontSizeSM,
                   fontWeight: 500,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.5px',
                 }}
               >
-                Queued Tasks ({queuedTasks.length})
+                Queued tasks ({queuedTasks.length})
               </Typography.Text>
               {queuedTasks.length > 1 && availableBatchRelationships.length > 0 && (
                 <Button size="small" onClick={openBatchDialog}>
