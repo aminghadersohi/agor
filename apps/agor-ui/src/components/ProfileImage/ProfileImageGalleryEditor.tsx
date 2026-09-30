@@ -34,7 +34,8 @@ import {
 import { publishProfileImageGallery } from './useProfileImageGallery';
 
 const ACCEPTED_PROFILE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
-const MAX_PROFILE_IMAGE_UPLOAD_BYTES = 5 * 1024 * 1024;
+const MAX_PROFILE_IMAGE_UPLOAD_MB = 25;
+const MAX_PROFILE_IMAGE_UPLOAD_BYTES = MAX_PROFILE_IMAGE_UPLOAD_MB * 1024 * 1024;
 /**
  * Placeholder only, shown for the one frame before the list route answers with
  * the authoritative `max_images`. Mirrors the server's cap so the copy does not
@@ -42,10 +43,11 @@ const MAX_PROFILE_IMAGE_UPLOAD_BYTES = 5 * 1024 * 1024;
  */
 const ASSUMED_MAX_GALLERY_IMAGES = 100;
 
-function validateProfileImageFile(file: File): string | undefined {
+export function validateProfileImageFile(file: File): string | undefined {
   if (!ACCEPTED_PROFILE_IMAGE_TYPES.has(file.type)) return 'Use a JPEG, PNG, or WebP image';
   if (file.size === 0) return 'Choose a non-empty image';
-  if (file.size > MAX_PROFILE_IMAGE_UPLOAD_BYTES) return 'Images must be 5 MB or smaller';
+  if (file.size > MAX_PROFILE_IMAGE_UPLOAD_BYTES)
+    return `Images must be ${MAX_PROFILE_IMAGE_UPLOAD_MB} MB or smaller`;
   return undefined;
 }
 
