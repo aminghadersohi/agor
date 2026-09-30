@@ -909,7 +909,9 @@ describe('GatewayService multi-tenant process state', () => {
         isOwner: vi.fn(async () => true),
         resolveUserPermission: vi.fn(async () => 'all'),
       },
-      threadMapRepo: { findBySession: vi.fn(async () => mapping) },
+      threadMapRepo: {
+        findBySessionAmbiguityAware: vi.fn(async () => ({ mapping, ambiguous: false })),
+      },
       channelRepo: {
         findById: vi.fn(async () => ({
           ...slackChannel,
