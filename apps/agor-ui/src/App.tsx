@@ -51,7 +51,7 @@ import { type OnboardingCompletionResult, OnboardingWizard } from './components/
 import { buildPromptWithAttachments } from './components/SessionPanel/composerAttachments';
 import { SettingsModal } from './components/SettingsModal';
 import { StreamdownPortalApp } from './components/StreamdownPortalApp';
-import { getDaemonUrl } from './config/daemon';
+import { describeUnreachableDaemonOrigin, getDaemonUrl } from './config/daemon';
 import { CanvasNavigationProvider } from './contexts/CanvasNavigationContext';
 import { ConnectionProvider } from './contexts/ConnectionContext';
 import { MCPCatalogModalProvider } from './contexts/MCPCatalogModalContext';
@@ -1107,6 +1107,15 @@ function AppContent() {
   // If we already have a config cached, continue with that even if there's an error
   if (authConfigError && !authConfig) {
     const unsupportedIdentityContract = identityContractState === IdentityContractState.UNSUPPORTED;
+    // A loopback daemon URL served to a remote browser can never connect, no
+    // matter how healthy the daemon is. Say so, instead of a generic retry.
+    const unreachableDaemonHint =
+      typeof window === 'undefined'
+        ? null
+        : describeUnreachableDaemonOrigin({
+            daemonUrl: getDaemonUrl(),
+            pageOrigin: window.location.origin,
+          });
     return (
       <div
         style={{
@@ -1119,6 +1128,7 @@ function AppContent() {
       >
         <DaemonConfigurationAlert
           unsupportedIdentityContract={unsupportedIdentityContract}
+          unreachableDaemonHint={unreachableDaemonHint}
           onRetry={retryAuthConfig}
         />
       </div>
