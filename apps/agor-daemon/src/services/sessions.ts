@@ -20,8 +20,12 @@ import {
   BranchRepository,
   bindRepositoryToTenantUnitOfWork,
   EntityNotFoundError,
+  eq,
   getCurrentTenantId,
   getHiddenTenantId,
+  lockRowForUpdate,
+  MCPServerRepository,
+  mcpServers,
   runWithTenantDatabaseScope,
   runWithTenantDatabaseTransaction,
   SessionEnvSelectionRepository,
@@ -44,7 +48,7 @@ import {
   NotFound,
   Unavailable,
 } from '@agor/core/feathers';
-import { MCPServerNotUsableError } from '@agor/core/mcp';
+import { isMCPServerNotUsableError } from '@agor/core/mcp';
 import {
   formatModelToolMismatchWarning,
   getCodexModelSelectionError,
@@ -52,6 +56,7 @@ import {
   isResolvedModelConfig,
   lintModelToolMatch,
 } from '@agor/core/models';
+import { resolveSessionMcpServerIds } from '@agor/core/sessions';
 import type {
   AgenticToolName,
   AuthenticatedParams,
@@ -876,8 +881,9 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       agentic_tool_preset_id: configurationReference,
       model_config: originalModelConfig,
       mcpServerIds: _requestedMcpServerIds,
+      mcp_defaults_skipped: _ignoredMcpWarning,
       ...sessionData
-    } = data as CreateSessionInput;
+    } = data as CreateSessionInput & Pick<Session, 'mcp_defaults_skipped'>;
     let createData: Partial<Session> = { ...sessionData };
     assertAutoArchivePolicy(createData.auto_archive);
     const isSpawnedChild = Boolean(createData.genealogy?.parent_session_id);
@@ -973,6 +979,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     // the session that caused adoption (or the inverse). The live deployment
     // flag is consulted only here; executor startup reads the immutable stamp.
     const tenantId = params?.tenant?.tenant_id ?? getCurrentTenantId();
+    const attachedMcpServerIds: MCPServerID[] = [];
+    let skippedMcpDefaults = 0;
     const created = await runWithTenantDatabaseTransaction(this.db, tenantId, async (scoped) => {
       const branchRepo = new BranchRepository(scoped);
       const branch = await branchRepo.findById(createData.branch_id as BranchID);
@@ -1021,21 +1029,66 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         sdk_home_scope: admission.scope,
       });
 
-      // Attach in-transaction: a bad server rolls the create back, not a silent drop (#2629).
-      if (explicitMcpServerIds && explicitMcpServerIds.length > 0) {
-        const mcpRepo = new SessionMCPServerRepository(scoped);
+      // Omission preserves provenance: only defaults read here may be skipped.
+      // Never accept a client-supplied "inherited" list or fall through to user
+      // defaults after a configured branch list turns out to be entirely stale.
+      const user =
+        explicitMcpServerIds === undefined && createdSession.created_by
+          ? await new UsersRepository(scoped).findById(createdSession.created_by)
+          : undefined;
+      const serverIds = normalizeCreateMcpServerIds(
+        resolveSessionMcpServerIds({
+          explicit: explicitMcpServerIds,
+          branch,
+          user,
+        })
+      )!;
+      const mcpRepo = new SessionMCPServerRepository(scoped);
+      // Resolve and deduplicate before sorting: mixed UUID/prefix spellings
+      // must not give concurrent creators opposite canonical lock orders.
+      // Keep the number of distinct requested defaults per canonical ID so a
+      // deletion after resolution preserves the skipped-default count.
+      const canonicalIds = new Map<MCPServerID, number>();
+      const handleMcpError = (error: unknown, count: number) => {
+        if (isMCPServerNotUsableError(error)) {
+          throw new Forbidden('That MCP server is private to another user');
+        }
+        if (error instanceof EntityNotFoundError && error.entityType === 'MCPServer') {
+          if (explicitMcpServerIds === undefined) {
+            skippedMcpDefaults += count;
+            return;
+          }
+          throw new NotFound(
+            'That MCP server was not found. Remove the unavailable selection from MCP Servers and try again.'
+          );
+        }
+        throw error;
+      };
+      const serverRepo = new MCPServerRepository(scoped);
+      for (const requestedId of serverIds) {
         try {
-          for (const serverId of explicitMcpServerIds) {
-            await mcpRepo.addServer(createdSession.session_id, serverId);
-          }
+          const serverId = await serverRepo.resolveCanonicalId(requestedId);
+          canonicalIds.set(serverId, (canonicalIds.get(serverId) ?? 0) + 1);
         } catch (error) {
-          if (error instanceof MCPServerNotUsableError) {
-            throw new Forbidden('That MCP server is private to another user');
-          }
-          if (error instanceof EntityNotFoundError) {
-            throw new NotFound('That MCP server was not found');
-          }
-          throw error;
+          handleMcpError(error, 1);
+        }
+      }
+      // Lock in canonical order, in this same tenant transaction. A concurrent
+      // delete either wins first (typed missing below) or waits for attachment.
+      // SQLite's IMMEDIATE transaction already serializes writers. Do not catch
+      // FK/storage errors: PostgreSQL would have aborted the transaction.
+      for (const serverId of [...canonicalIds.keys()].sort()) {
+        try {
+          await lockRowForUpdate(
+            scoped,
+            scoped,
+            mcpServers,
+            eq(mcpServers.mcp_server_id, serverId)
+          );
+          await mcpRepo.addServer(createdSession.session_id, serverId);
+          attachedMcpServerIds.push(serverId);
+        } catch (error) {
+          handleMcpError(error, canonicalIds.get(serverId)!);
         }
       }
 
@@ -1044,8 +1097,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (Array.isArray(created)) {
       throw new Error('Single-session creation returned multiple sessions');
     }
-    if (explicitMcpServerIds && explicitMcpServerIds.length > 0) {
-      for (const serverId of explicitMcpServerIds) {
+    if (attachedMcpServerIds.length > 0) {
+      for (const serverId of attachedMcpServerIds) {
         emitServiceEvent(this.app, {
           path: 'session-mcp-servers',
           event: 'created',
@@ -1060,6 +1113,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         });
       }
     }
+    // Enrich the fresh DTO without losing its non-enumerable tenant marker.
+    if (skippedMcpDefaults > 0) created.mcp_defaults_skipped = skippedMcpDefaults;
     return created;
   }
 
@@ -1443,6 +1498,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       this.create(
         {
           ...(data.stableSessionId ? { session_id: data.stableSessionId } : {}),
+          mcpServerIds: [], // Fork copies its parent below, not fresh-session defaults.
           agentic_tool: parentTool,
           agentic_tool_preset_id: inherited.agentic_tool_preset_id,
           status: SessionStatus.IDLE,
@@ -1657,6 +1713,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
 
     const spawnedSession = await this.create(
       {
+        mcpServerIds: [], // Spawn applies its separate explicit/parent policy below.
         agentic_tool: targetTool,
         agentic_tool_preset_id: resolved.agentic_tool_preset_id,
         status: SessionStatus.IDLE,
