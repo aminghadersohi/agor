@@ -8,3 +8,5 @@ export {
   resolveScreensaverIdleMinutes,
   startIdleGlyphScreensaver,
 } from './IdleGlyphScreensaver';
+export { IdleScreensaverHost } from './IdleScreensaverHost';
+export { DEFAULT_SCREENSAVER_STYLE, resolveScreensaverStyle } from './teammatePhotoSlides';

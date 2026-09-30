@@ -1,7 +1,14 @@
 import sharp from 'sharp';
 
-export const PROFILE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
-export const PROFILE_IMAGE_MAX_PIXELS = 25_000_000;
+/**
+ * Largest accepted upload. Originals are never stored — every upload is
+ * re-encoded to the two WebP variants below — so this bounds request size and
+ * decode work, not storage. 25 MB admits full-resolution camera JPEGs.
+ */
+export const PROFILE_IMAGE_MAX_BYTES = 25 * 1024 * 1024;
+export const PROFILE_IMAGE_MAX_MB = PROFILE_IMAGE_MAX_BYTES / (1024 * 1024);
+/** Decoded-pixel ceiling: ~64 MP covers current camera sensors (e.g. 8256×5504). */
+export const PROFILE_IMAGE_MAX_PIXELS = 64_000_000;
 export const PROFILE_IMAGE_SMALL_SIZE = 96;
 export const PROFILE_IMAGE_LARGE_SIZE = 768;
 export const PROFILE_IMAGE_CONTENT_TYPE = 'image/webp';
@@ -9,15 +16,15 @@ export const PROFILE_IMAGE_CONTENT_TYPE = 'image/webp';
  * Gallery cap, and the only authority for it: the list route reports this as
  * `max_images` and the upload route enforces it, so the client never decides.
  *
- * 24 is bounded by what a gallery costs once stored, not by what a user
+ * 100 is bounded by what a gallery costs once stored, not by what a user
  * uploads. Every accepted file is re-encoded to the two WebP variants below and
- * the 5 MB original is discarded, so the ceiling is the ~400 KB an
- * incompressible source costs at PROFILE_IMAGE_LARGE_SIZE — under 12 MB of blob
- * for a full gallery of pure noise, and nearer 3 MB for real photographs. It
+ * the original (up to PROFILE_IMAGE_MAX_BYTES) is discarded, so the ceiling is the ~400 KB an
+ * incompressible source costs at PROFILE_IMAGE_LARGE_SIZE — under 48 MB of blob
+ * for a full gallery of pure noise, and nearer 12 MB for real photographs. It
  * also lands on whole rows in the editor's grid at both breakpoints.
  * `profile-image-processing.test.ts` holds both halves of that arithmetic.
  */
-export const PROFILE_IMAGE_MAX_GALLERY_ITEMS = 24;
+export const PROFILE_IMAGE_MAX_GALLERY_ITEMS = 100;
 
 const ACCEPTED_FORMATS = new Set(['jpeg', 'png', 'webp']);
 
@@ -64,7 +71,7 @@ async function renderVariant(input: Buffer, size: number): Promise<ProcessedImag
 export async function processProfileImage(input: Buffer): Promise<ProcessedProfileImage> {
   if (input.length === 0) throw new Error('Choose an image to upload');
   if (input.length > PROFILE_IMAGE_MAX_BYTES) {
-    throw new Error('Profile images must be 5 MB or smaller');
+    throw new Error(`Profile images must be ${PROFILE_IMAGE_MAX_MB} MB or smaller`);
   }
   const metadata = await sharp(input, {
     animated: false,
