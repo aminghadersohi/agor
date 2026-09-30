@@ -20,6 +20,7 @@ import type { TableColumnsType } from 'antd';
 import { Button, Empty, Popconfirm, Space, Spin, Switch, Table, Tooltip, Typography } from 'antd';
 import type { ReactNode } from 'react';
 import { useCallback, useEffect, useState } from 'react';
+import { useConnectionState } from '../../../contexts/ConnectionContext';
 import { useThemedMessage } from '../../../utils/message';
 import { ScheduleModal } from '../../ScheduleModal';
 import { ScheduleRunsPanel } from '../../ScheduleRunsPanel';
@@ -160,9 +161,12 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({
     }
   }, [client, branch.branch_id, showError]);
 
+  // Refetch on every socket (re)connect; see HomeSchedulesSection.
+  const { authGeneration } = useConnectionState();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: authGeneration is the reconnect trigger
   useEffect(() => {
     fetchSchedules();
-  }, [fetchSchedules]);
+  }, [fetchSchedules, authGeneration]);
 
   // Live updates via Feathers events. The service emits these for every
   // CRUD op, including ones on other branches — filter to ours.

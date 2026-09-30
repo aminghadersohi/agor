@@ -17,6 +17,16 @@ import {
 import { getStoredRefreshToken } from '../utils/tokenRefresh';
 import { announceSessionStreamsCapability } from './sessionStreamsCapability';
 
+/**
+ * Socket.IO silently drops a plain acknowledgement callback when the socket
+ * disconnects, so a Feathers call in flight during a drop (mobile network
+ * change, VPN flap) never settles and its panel spins forever. An ack
+ * timeout marks every callback as error-aware: a disconnect rejects it
+ * immediately, and the timeout bounds a call whose reply never comes. It is
+ * generous so large hydration reads on slow links still complete.
+ */
+export const SERVICE_CALL_ACK_TIMEOUT_MS = 120_000;
+
 interface UseAgorClientResult {
   client: AgorClient | null;
   connected: boolean;
@@ -215,6 +225,7 @@ export function useAgorClient(options: UseAgorClientOptions): UseAgorClientResul
       // Create client (autoConnect: false, so we control connection timing)
       const socketClient = createClient(url, false, {
         socketAuthentication: { accessToken: () => connectionAccessTokenRef.current },
+        ackTimeout: SERVICE_CALL_ACK_TIMEOUT_MS,
       });
       client = socketClient;
       binding = {
