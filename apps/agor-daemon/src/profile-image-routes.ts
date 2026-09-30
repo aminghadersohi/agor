@@ -84,8 +84,10 @@ export function registerProfileImageRoutes({
     }
   );
 
+  // GET, not POST: the UI loads variants with GET, and the ETag/immutable cache headers
+  // below only work for a safe, cacheable read.
   // biome-ignore lint/suspicious/noExplicitAny: Express methods are not declared on Feathers Application.
-  (app as any).post(
+  (app as any).get(
     '/profile-images/:imageId/:variant',
     authMiddleware,
     async (req: AuthenticatedProfileImageRequest, res: Response, next: NextFunction) => {
