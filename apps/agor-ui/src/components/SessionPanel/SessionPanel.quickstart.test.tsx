@@ -1,5 +1,5 @@
 // biome-ignore-all lint/plugin/noHardcodedColorLiteral: pins AgentSelectionCard's selected-tile border color to verify the switch-tool highlight
-import type { Branch, Session } from '@agor-live/client';
+import type { Branch, Session, User } from '@agor-live/client';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -114,6 +114,9 @@ function renderPanel(
   actions: {
     onUpdateSession?: ReturnType<typeof vi.fn>;
     onChooseAgenticTool?: ReturnType<typeof vi.fn>;
+    onPinToChatCollection?: ReturnType<typeof vi.fn>;
+    onOpenChatWorkspace?: ReturnType<typeof vi.fn>;
+    currentUserId?: string;
   } = {}
 ) {
   render(
@@ -126,7 +129,16 @@ function renderPanel(
         }}
       >
         <AntApp>
-          <SessionPanel client={null} session={session} branch={branch} open onClose={vi.fn()} />
+          <SessionPanel
+            client={null}
+            session={session}
+            branch={branch}
+            currentUserId={actions.currentUserId}
+            open
+            onClose={vi.fn()}
+            onPinToChatCollection={actions.onPinToChatCollection}
+            onOpenChatWorkspace={actions.onOpenChatWorkspace}
+          />
         </AntApp>
       </AppActionsProvider>
     </ConnectionProvider>
@@ -162,6 +174,57 @@ describe('SessionPanel inline title edit', () => {
 
     expect(onUpdateSession).not.toHaveBeenCalled();
     expect(screen.getByText('Original title')).toBeInTheDocument();
+  });
+});
+
+describe('SessionPanel chat collections', () => {
+  it('adds the current session from a visible header action', () => {
+    const onPinToChatCollection = vi.fn();
+    renderPanel(makeSession({ title: 'Release planning' }), { onPinToChatCollection });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add to chat collection' }));
+
+    expect(onPinToChatCollection).toHaveBeenCalledWith('session-1');
+  });
+
+  it('opens the current session in the chat workspace', () => {
+    const onOpenChatWorkspace = vi.fn();
+    renderPanel(makeSession({ title: 'Release planning' }), { onOpenChatWorkspace });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open in chat workspace' }));
+    expect(onOpenChatWorkspace).toHaveBeenCalledWith('session-1');
+  });
+
+  it('shows the linked state when the session is already in a collection', () => {
+    agorStore.setState({
+      userById: new Map([
+        [
+          'user-1',
+          {
+            user_id: 'user-1',
+            preferences: {
+              chat_collections: {
+                collections: [
+                  {
+                    collection_id: 'release',
+                    name: 'Release crew',
+                    session_ids: ['session-1'],
+                  },
+                ],
+              },
+            },
+          } as unknown as User,
+        ],
+      ]),
+    });
+
+    renderPanel(makeSession(), {
+      currentUserId: 'user-1',
+      onPinToChatCollection: vi.fn(),
+    });
+
+    expect(screen.getByRole('button', { name: 'Manage chat collections' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Add to chat collection' })).toBeNull();
   });
 });
 

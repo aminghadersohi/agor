@@ -4,6 +4,13 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import { MobileHomePage } from './MobileHomePage';
 
+// The shared collection surface has focused coverage of its own.
+vi.mock('../HomePage/HomeTeammateChatsSection', () => ({
+  HomeTeammateChatsSection: ({ hideWhenEmpty }: { hideWhenEmpty?: boolean }) => (
+    <section aria-label="Chat collections" data-hide-when-empty={String(Boolean(hideWhenEmpty))} />
+  ),
+}));
+
 function renderHome(props: Partial<React.ComponentProps<typeof MobileHomePage>> = {}) {
   return render(
     <MemoryRouter initialEntries={['/m']}>
@@ -20,6 +27,7 @@ function renderHome(props: Partial<React.ComponentProps<typeof MobileHomePage>> 
               primaryTeammateName={props.primaryTeammateName}
               assistantSessionCount={props.assistantSessionCount}
               onOpenAssistantSessions={props.onOpenAssistantSessions}
+              onManageTeammateChats={props.onManageTeammateChats}
             />
           }
         />
@@ -31,6 +39,18 @@ function renderHome(props: Partial<React.ComponentProps<typeof MobileHomePage>> 
 }
 
 describe('MobileHomePage', () => {
+  it('shows chat collections only when they can be managed', () => {
+    const { unmount } = renderHome();
+    expect(screen.queryByRole('region', { name: 'Chat collections' })).not.toBeInTheDocument();
+    unmount();
+
+    renderHome({ onManageTeammateChats: vi.fn() });
+    expect(screen.getByRole('region', { name: 'Chat collections' })).toHaveAttribute(
+      'data-hide-when-empty',
+      'true'
+    );
+  });
+
   it('greets the user and triggers Ask primary', () => {
     const onAsk = vi.fn();
     renderHome({ onAsk, primaryTeammateName: 'Fable' });

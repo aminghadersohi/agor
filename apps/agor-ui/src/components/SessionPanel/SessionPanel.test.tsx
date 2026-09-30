@@ -53,7 +53,7 @@ vi.mock('../ToolIcon', () => ({
 }));
 
 vi.mock('./SessionAttachmentsDropdown', () => ({
-  SessionAttachmentsDropdown: () => null,
+  SessionAttachmentsDropdown: () => <button type="button">Attachments</button>,
 }));
 
 vi.mock('./SessionMcpFooterControl', () => ({
@@ -154,6 +154,7 @@ function renderPanel({
   activeSession = session,
   open = true,
   onClose = vi.fn(),
+  preferFocusChat = false,
 }: {
   onOpenTerminal?: ReturnType<typeof vi.fn>;
   onChooseAgenticTool?: ReturnType<typeof vi.fn>;
@@ -161,6 +162,7 @@ function renderPanel({
   activeSession?: Session;
   open?: boolean;
   onClose?: ReturnType<typeof vi.fn>;
+  preferFocusChat?: boolean;
 } = {}) {
   render(
     <ConnectionProvider value={connected}>
@@ -172,6 +174,7 @@ function renderPanel({
             branch={branch}
             open={open}
             onClose={onClose}
+            preferFocusChat={preferFocusChat}
           />
         </AntApp>
       </AppActionsProvider>
@@ -328,6 +331,24 @@ describe('SessionPanel search control', () => {
     expect(screen.getByRole('button', { name: 'Focus chat' })).toBeVisible();
     expect(localStorage.getItem('agor.session.focus-chat.v2')).toBe('false');
     localStorage.removeItem('agor.session.focus-chat.v2');
+  });
+
+  it('uses focus chat temporarily in the chat workspace without leaking it to other sessions', () => {
+    localStorage.removeItem('agor.session.focus-chat.v2');
+    renderPanel({
+      preferFocusChat: true,
+      activeSession: { ...session, agentic_tool: 'codex' },
+    });
+
+    expect(screen.queryByRole('button', { name: 'Show full session details' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Focus chat' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Attachments' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'More actions' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Search session' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Fork session' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'More options' })).toBeVisible();
+    expect(localStorage.getItem('agor.session.focus-chat.v2')).toBeNull();
   });
 });
 

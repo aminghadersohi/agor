@@ -47,6 +47,8 @@ function renderHome() {
         onBoardClick={() => {}}
         onBranchClick={() => {}}
         onSessionClick={() => {}}
+        onChatWorkspaceSessionClick={() => {}}
+        onManageTeammateChats={() => {}}
         onOpenCreateDialog={() => {}}
         onOpenSettings={() => {}}
       />
@@ -155,6 +157,8 @@ const STABLE_HOME_PROPS = {
   currentUserId: 'u1',
   onBoardClick: noop,
   onBranchClick: noop,
+  onChatWorkspaceSessionClick: noop,
+  onManageTeammateChats: noop,
   onOpenCreateDialog: noop,
   onOpenSettings: noop,
 } as const;

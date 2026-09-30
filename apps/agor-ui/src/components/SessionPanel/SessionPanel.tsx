@@ -23,8 +23,10 @@ import {
 } from '@agor-live/client';
 import {
   AimOutlined,
+  CheckOutlined,
   CloseOutlined,
   CodeOutlined,
+  CommentOutlined,
   DownOutlined,
   EditOutlined,
   EllipsisOutlined,
@@ -37,6 +39,7 @@ import {
   SearchOutlined,
   SettingOutlined,
   UpOutlined,
+  UsergroupAddOutlined,
 } from '@ant-design/icons';
 import type { InputRef, MenuProps } from 'antd';
 import {
@@ -95,6 +98,7 @@ import type { ModelConfig } from '../ModelSelector';
 import { CreatedByTag } from '../metadata';
 import { getUrlDisplayLabel } from '../Pill/url-helpers';
 import { Tag } from '../Tag';
+import { readTeammateChatPreferences } from '../TeammateChatCollections/preferences';
 import { ToolIcon } from '../ToolIcon';
 import {
   buildPromptWithAttachments,
@@ -356,6 +360,10 @@ export interface SessionPanelProps {
   sessionMcpServerIds?: string[];
   open: boolean;
   onClose: () => void;
+  onPinToChatCollection?: (sessionId: string) => void;
+  onOpenChatWorkspace?: (sessionId: string) => void;
+  /** Start focused inside the dedicated chat workspace without changing the user's global choice. */
+  preferFocusChat?: boolean;
   uploadPolicy?: import('@agor/core/types').UploadIngressPolicy;
 }
 
@@ -367,6 +375,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   sessionMcpServerIds = [],
   open,
   onClose,
+  onPinToChatCollection,
+  onOpenChatWorkspace,
+  preferFocusChat = false,
   uploadPolicy,
 }) => {
   const { token } = theme.useToken();
@@ -379,8 +390,10 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   const { showSuccess, showInfo, showError, showWarning } = useThemedMessage();
   const connectionDisabled = useConnectionDisabled();
   const recenterMap = useRecenterMap();
-  const [simpleChat, setSimpleChat] = React.useState(readFocusChatPreference);
-  React.useEffect(() => subscribeToFocusChatPreference(setSimpleChat), []);
+  const [storedSimpleChat, setStoredSimpleChat] = React.useState(readFocusChatPreference);
+  // The chat workspace forces focus mode without writing the user's global choice.
+  const simpleChat = preferFocusChat || storedSimpleChat;
+  React.useEffect(() => subscribeToFocusChatPreference(setStoredSimpleChat), []);
   const toggleSimpleChat = React.useCallback(() => {
     writeFocusChatPreference(!simpleChat);
   }, [simpleChat]);
@@ -949,6 +962,9 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   const activeSession = isAgenticToolName(session.agentic_tool)
     ? (session as Session & { agentic_tool: AgenticToolName })
     : null;
+  const sessionInChatCollection = readTeammateChatPreferences(
+    currentUserId ? userById.get(currentUserId)?.preferences : undefined
+  ).collections.some((collection) => collection.session_ids.includes(session.session_id));
 
   const handleArchive = () => {
     if (!client || connectionDisabled) {
@@ -1044,6 +1060,16 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             icon: <RobotOutlined />,
             label: 'Switch tool…',
             onClick: () => setSwitchToolOpen(true),
+          },
+        ]
+      : []),
+    ...(onPinToChatCollection
+      ? [
+          {
+            key: 'add-to-teammate-chats',
+            icon: sessionInChatCollection ? <CheckOutlined /> : <UsergroupAddOutlined />,
+            label: sessionInChatCollection ? 'Manage chat collections…' : 'Add to chat collection…',
+            onClick: () => onPinToChatCollection(session.session_id),
           },
         ]
       : []),
@@ -1496,6 +1522,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       onCodexPermissionChange={stableFooterHandlers.onCodexPermissionChange}
       promptInputSlot={promptInputSlot}
       simple={simpleChat}
+      showSessionActions={preferFocusChat}
     />
   ) : null;
 
@@ -1638,7 +1665,34 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             </div>
           </div>
           <Space size={4}>
-            {simpleChat && (
+            {onPinToChatCollection && (
+              <Tooltip
+                title={
+                  sessionInChatCollection ? 'Manage chat collections' : 'Add to chat collection'
+                }
+              >
+                <Button
+                  type="text"
+                  aria-label={
+                    sessionInChatCollection ? 'Manage chat collections' : 'Add to chat collection'
+                  }
+                  icon={sessionInChatCollection ? <CheckOutlined /> : <UsergroupAddOutlined />}
+                  onClick={() => onPinToChatCollection(session.session_id)}
+                  style={mobileHeaderButtonStyle}
+                />
+              </Tooltip>
+            )}
+            {onOpenChatWorkspace && !preferFocusChat && (
+              <Tooltip title="Open in chat workspace">
+                <Button
+                  type="text"
+                  aria-label="Open in chat workspace"
+                  icon={<CommentOutlined />}
+                  onClick={() => onOpenChatWorkspace(session.session_id)}
+                />
+              </Tooltip>
+            )}
+            {simpleChat && !preferFocusChat && (
               <Tooltip title="Show full session details">
                 <Button
                   type="text"
@@ -1649,8 +1703,10 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
                 />
               </Tooltip>
             )}
-            {!simpleChat && <SessionAttachmentsDropdown items={attachmentItems} />}
-            {!simpleChat && (
+            {(!simpleChat || preferFocusChat) && (
+              <SessionAttachmentsDropdown items={attachmentItems} />
+            )}
+            {(!simpleChat || preferFocusChat) && (
               <Dropdown menu={{ items: moreMenuItems }} trigger={['click']} placement="bottomRight">
                 <Tooltip title="More actions">
                   <Button
@@ -1662,7 +1718,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
                 </Tooltip>
               </Dropdown>
             )}
-            {!simpleChat && (
+            {(!simpleChat || preferFocusChat) && (
               <Tooltip title="Search session">
                 <Button
                   type="text"
@@ -1701,7 +1757,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
         {/* Row 2: search bar — always in DOM, animates in/out */}
         <div
           style={{
-            display: simpleChat ? 'none' : undefined,
+            display: simpleChat && !preferFocusChat ? 'none' : undefined,
             overflow: 'hidden',
             maxHeight: searchOpen ? '36px' : '0px',
             opacity: searchOpen ? 1 : 0,
@@ -1865,6 +1921,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             inputValueRef={inputValueRef}
             isOpen={open}
             simple={simpleChat}
+            rememberScrollPosition={preferFocusChat}
           />
         </div>
 

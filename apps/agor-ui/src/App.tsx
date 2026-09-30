@@ -26,6 +26,7 @@ import type {
 } from '@agor-live/client';
 import {
   boardPath,
+  CHAT_WORKSPACE_PATH_SEGMENT,
   ENTITY_PATH_SEGMENTS,
   hasMinimumRole,
   isAgenticToolName,
@@ -2402,6 +2403,7 @@ function AppContent() {
                   onUpdateRepo={handleUpdateRepo}
                   onArchiveOrDeleteBranch={handleArchiveOrDeleteBranch}
                   onExecuteScheduleNow={handleExecuteScheduleNow}
+                  onUpdateUser={handleUpdateUser}
                 />
               }
             />
@@ -2429,6 +2431,11 @@ function AppContent() {
             />
             <Route
               path={`/${ENTITY_PATH_SEGMENTS.artifact}/:artifactShortId/`}
+              element={desktopAppElement}
+            />
+            <Route path={`/${CHAT_WORKSPACE_PATH_SEGMENT}/`} element={desktopAppElement} />
+            <Route
+              path={`/${CHAT_WORKSPACE_PATH_SEGMENT}/:sessionShortId/`}
               element={desktopAppElement}
             />
 
