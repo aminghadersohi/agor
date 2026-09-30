@@ -48,9 +48,10 @@ user disappear while another remains active.
 ### Profile photos
 
 People, teammates, and boards can each keep a small gallery of photos (up to
-24). The first photo becomes the main one; you can pick another, remove
-photos, and avatars slowly cycle through the gallery. Uploads are re-encoded
-on the server, so originals and their metadata are never stored.
+100). The first photo becomes the main one; you can pick another, remove
+photos, and avatars slowly cycle through the gallery. JPEG, PNG, and WebP
+uploads up to 25 MB are accepted; they are re-encoded on the server, so
+originals and their metadata are never stored.
 
 - **Your photos**: User Settings → Profile → Photos. Admins can manage another
   user's photos from that user's settings.
@@ -68,12 +69,21 @@ Agents can do the same through the Agor MCP server:
 
 ### Idle screensaver
 
-User Settings → Preferences → Screensaver can start an ambient screensaver
-after a period without input. It is **off by default**; turn on **Start when
-idle** and choose the idle time (1–120 minutes). You can preview it anytime
-from the user menu with **Start screensaver**. Any key, click, or pointer
-movement dismisses it, and it never starts while your system requests reduced
-motion.
+User Settings → Preferences → Screensaver can start a screensaver after a
+period without input. It is **off by default**; turn on **Start when idle** and
+choose the idle time (1–120 minutes). You can preview it anytime from the user
+menu with **Start screensaver**. Any key, click, tap, or pointer movement
+dismisses it.
+
+**Show** picks what it displays:
+
+- **Teammate photos** (default) — a slideshow of every teammate gallery photo
+  you can see, mixing cross-fades, Ken Burns pan-and-zoom, slides, blur-ins,
+  zooms, and a four-photo mosaic. Photos are fetched only once it starts. When
+  your system requests reduced motion it uses plain cross-fades only. With no
+  teammate photos available it falls back to the signal field.
+- **Signal field** — the animated Agor glyph field. It never starts while your
+  system requests reduced motion.
 
 ---
 
