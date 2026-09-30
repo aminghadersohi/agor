@@ -1,6 +1,6 @@
 import type { CodexApprovalPolicy, CodexNetworkAccess, CodexSandboxMode } from './agentic-tool';
 import { type AgenticToolName, DEFAULT_AGENTIC_TOOL_NAME, isAgenticToolName } from './agentic-tool';
-import type { BranchID, UserID } from './id';
+import type { ArtifactID, BranchID, UserID } from './id';
 import type { OpenCodeConfig } from './opencode-ollama';
 import type { ProfileImageID } from './profile-image';
 import type { ScheduleID } from './schedule';
@@ -520,6 +520,8 @@ export interface UserPreferences {
   home_schedules?: HomeSchedulePreferences;
   /** Home "My work" layout. Undefined defaults to list. */
   homeWorkView?: HomeWorkView;
+  /** Artifact shortcuts pinned to Home by this user. */
+  home_artifact_ids?: ArtifactID[];
   // Future preferences can be added here
   [key: string]: unknown;
 }
