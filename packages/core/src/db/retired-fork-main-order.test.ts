@@ -178,11 +178,16 @@ describe('retired fork-main front desk / profile image order', () => {
     }
   }
 
-  // Upstream migrations this fork journals above the deployed tail. Neither
-  // retired order ran them, so the repair replays them after the slice.
-  const UPSTREAM_TAIL = ['0115_user_api_key_source'];
-  const dropUpstreamTail = (db: ReturnType<typeof createDatabase>) =>
-    executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
+  // Migrations this fork journals above the deployed tail (upstream's API-key
+  // source, then the restored session attention). Neither retired order ran
+  // them, so the repair replays them after the slice. SQLite cannot add a
+  // column conditionally, so both column adds are undone before the replay.
+  const UPSTREAM_TAIL = ['0115_user_api_key_source', '9031_session_attention_states'];
+  const dropUpstreamTail = async (db: ReturnType<typeof createDatabase>) => {
+    await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
+    await executeRaw(db, sql`DROP TABLE session_attention_states`);
+    await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
+  };
 
   const ALL_OBJECTS = [
     'branch_front_desk_sessions',

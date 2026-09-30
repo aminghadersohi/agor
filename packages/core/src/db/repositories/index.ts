@@ -48,6 +48,7 @@ export * from './power-policy-runtime-settings';
 export * from './profile-images';
 export * from './repos';
 export * from './schedules';
+export * from './session-attention-states';
 export * from './session-env-selections';
 export * from './session-mcp-servers';
 export * from './session-memory';

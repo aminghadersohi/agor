@@ -12,7 +12,7 @@
  * array reference untouched, so the subscription doesn't fire.
  */
 import type { Board, BoardEntityObject, Branch, Repo, Session } from '@agor-live/client';
-import { SessionStatus } from '@agor-live/client';
+import { SessionStatus, sessionHasUnseenAttention } from '@agor-live/client';
 import type { AgorState } from './agorStore';
 
 export const selectSessionById = (s: AgorState) => s.sessionById;
@@ -196,7 +196,8 @@ export function makeBoardSessionActivitySelector(
       for (const session of sessions) {
         if (session.archived) continue;
         if (session.status === SessionStatus.RUNNING) hasRunning = true;
-        if (session.ready_for_prompt) hasReady = true;
+        // Per-viewer: a result this user has not opened yet.
+        if (sessionHasUnseenAttention(session)) hasReady = true;
         if (hasRunning && hasReady) return { hasRunning, hasReady };
       }
     }

@@ -146,6 +146,7 @@ export const sessions = pgTable(
 
     // UI state (materialized for efficient highlighting queries)
     ready_for_prompt: t.bool('ready_for_prompt').notNull().default(false),
+    attention_generation: integer('attention_generation').notNull().default(0),
 
     // Kept in schema parity even though V1 activation is standalone SQLite.
     power_priority: text('power_priority', { enum: ['normal', 'essential'] })
@@ -1491,6 +1492,35 @@ export const users = pgTable(
     executionHomeTenantUnique: uniqueIndex('users_tenant_unix_username_unique').on(
       table.tenant_id,
       table.unix_username
+    ),
+  })
+);
+
+/** Per-user acknowledgement of a session's latest attention-producing result. */
+export const sessionAttentionStates = pgTable(
+  'session_attention_states',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    user_id: varchar('user_id', { length: 36 }).notNull(),
+    session_id: varchar('session_id', { length: 36 }).notNull(),
+    seen_attention_generation: integer('seen_attention_generation').notNull().default(0),
+    seen_at: t.timestamp('seen_at').notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.tenant_id, table.user_id, table.session_id] }),
+    tenantUserFk: foreignKey({
+      name: 'session_attention_states_tenant_user_fk',
+      columns: [table.tenant_id, table.user_id],
+      foreignColumns: [users.tenant_id, users.user_id],
+    }).onDelete('cascade'),
+    tenantSessionFk: foreignKey({
+      name: 'session_attention_states_tenant_session_fk',
+      columns: [table.tenant_id, table.session_id],
+      foreignColumns: [sessions.tenant_id, sessions.session_id],
+    }).onDelete('cascade'),
+    sessionIdx: index('session_attention_states_tenant_session_idx').on(
+      table.tenant_id,
+      table.session_id
     ),
   })
 );
@@ -3798,6 +3828,8 @@ export const kbGraphEdges = pgTable(
  */
 export type SessionRow = typeof sessions.$inferSelect;
 export type SessionInsert = typeof sessions.$inferInsert;
+export type SessionAttentionStateRow = typeof sessionAttentionStates.$inferSelect;
+export type SessionAttentionStateInsert = typeof sessionAttentionStates.$inferInsert;
 export type SessionRelationshipRow = typeof sessionRelationships.$inferSelect;
 export type SessionRelationshipInsert = typeof sessionRelationships.$inferInsert;
 export type TaskRow = typeof tasks.$inferSelect;

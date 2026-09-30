@@ -234,6 +234,10 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
     scopeClass: 'scoped',
     why: 'Fork queued-prompt amendment. Registered through createTenantScopedAuthenticatedRouteRegistrar; preview and apply both run against tenant-owned Task/Session rows in the armed request scope.',
   },
+  'sessions/:id/acknowledge-attention': {
+    scopeClass: 'scoped',
+    why: 'Fork per-user session attention. Registered through createTenantScopedAuthenticatedRouteRegistrar; reads the Session through the hooked sessions service (tenant + branch-view authorization), upserts one caller-owned session_attention_states row in the armed request scope, and emits to the caller room only after commit.',
+  },
   'sessions/:id/tasks/queue/batch': {
     scopeClass: 'scoped',
     why: 'Fork coordinator queue batching. Registered through createTenantScopedAuthenticatedRouteRegistrar; preview and apply hold the same tenant-owned Session row lock admission and dispatch use.',

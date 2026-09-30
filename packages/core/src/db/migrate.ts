@@ -133,6 +133,19 @@ export function createMigrationImpactRegistry(
 
 const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
   [
+    '9031_session_attention_states',
+    {
+      requiresOfflineCutover: false,
+      impact: defineMigrationImpact({
+        classification: 'schema',
+        userAction: 'none',
+        rollbackCompatibility: 'compatible',
+        summary:
+          'Adds per-user session attention storage if absent, verifies its shape, and seeds it from the shared ready flag. Older binaries ignore the defaulted column and the table.',
+      }),
+    },
+  ],
+  [
     '9030_branch_front_desk_sessions',
     {
       requiresOfflineCutover: false,
