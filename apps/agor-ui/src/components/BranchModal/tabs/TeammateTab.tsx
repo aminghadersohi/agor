@@ -1,6 +1,6 @@
 import type { AgorClient, Branch, Session } from '@agor-live/client';
 import { getTeammateConfig } from '@agor-live/client';
-import { Button, Descriptions, Form, Input, Popconfirm, Space, Typography } from 'antd';
+import { Button, Descriptions, Form, Grid, Input, Popconfirm, Space, Typography } from 'antd';
 import { useState } from 'react';
 import { useConnectionDisabled } from '../../../contexts/ConnectionContext';
 import { useThemedMessage } from '../../../utils/message';
@@ -32,6 +32,11 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
   onRetired,
 }) => {
   const [retiring, setRetiring] = useState(false);
+  const screens = Grid.useBreakpoint();
+  // Stack labels above fields on narrow screens instead of squeezing a 6/18 grid.
+  const compact = !screens.md;
+  const labelCol = compact ? undefined : { span: 6 };
+  const wrapperCol = compact ? undefined : { span: 18 };
   const disabled = useConnectionDisabled();
   const { showSuccess, showError } = useThemedMessage();
   const retire = async () => {
@@ -67,8 +72,8 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
         />
 
         {/* Editable fields */}
-        <Form layout="horizontal" colon={false}>
-          <Form.Item label="Display Name" labelCol={{ span: 6 }} wrapperCol={{ span: 18 }}>
+        <Form layout={compact ? 'vertical' : 'horizontal'} colon={false}>
+          <Form.Item label="Display Name" labelCol={labelCol} wrapperCol={wrapperCol}>
             <Input
               value={state.displayName}
               onChange={(e) => setField('displayName', e.target.value)}
@@ -76,7 +81,7 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
               disabled={!canEdit}
             />
           </Form.Item>
-          <Form.Item label="Icon" labelCol={{ span: 6 }} wrapperCol={{ span: 18 }}>
+          <Form.Item label="Icon" labelCol={labelCol} wrapperCol={wrapperCol}>
             <EmojiPickerInput
               value={state.emoji}
               onChange={(val) => setField('emoji', val)}
@@ -86,8 +91,8 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
           </Form.Item>
           <Form.Item
             label="Description"
-            labelCol={{ span: 6 }}
-            wrapperCol={{ span: 18 }}
+            labelCol={labelCol}
+            wrapperCol={wrapperCol}
             tooltip="What does this AI teammate do? Visible to other agents via MCP."
           >
             <Input.TextArea
