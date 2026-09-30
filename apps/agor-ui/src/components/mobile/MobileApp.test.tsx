@@ -29,6 +29,8 @@ vi.mock('../BranchModal', () => ({
 }));
 
 vi.mock('./MobileNavTree', () => ({ MobileNavTree: () => null }));
+// Mobile Home renders the self-subscribing schedules section; it has its own tests.
+vi.mock('../HomePage/HomeSchedulesSection', () => ({ HomeSchedulesSection: () => null }));
 
 // Counts mounts so a test can prove the picker is re-created (keyed) per signed-in identity.
 const teammatePicker = vi.hoisted(() => ({ mounts: 0, props: {} as Record<string, unknown> }));
