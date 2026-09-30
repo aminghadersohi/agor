@@ -21,6 +21,7 @@ import type {
   MCPOAuthFailureReason,
   MCPServerID,
 } from '@agor/core/types';
+import { MCPOAuthClientTemplateError } from '../utils/mcp-oauth-client-templates.js';
 import { MCPClientCredentialsConfigurationError, MCPOAuthRefreshBusyError } from './mcp-oauth-use';
 
 /**
@@ -52,6 +53,7 @@ function target(mcpServerId?: string) {
 type TrustedRecoveryErrorConstructor =
   | typeof MCPLinkAdmissionError
   | typeof MCPClientCredentialsConfigurationError
+  | typeof MCPOAuthClientTemplateError
   | typeof MCPOAuthRefreshBusyError
   | typeof AmbiguousRefreshError
   | typeof InvalidGrantError
@@ -139,6 +141,15 @@ export function classifyMCPAuthRecovery(
       action: 'review_configuration',
       message:
         'No bound OAuth grant is available. Legacy client-credential fields alone do not establish a saved machine-token connection. For browser-capable providers, configure authorization-code OAuth and reconnect. For a client-credentials-only server, use a supported bearer credential instead; browser sign-in cannot repair it.',
+    };
+  }
+  if (safeInstanceOf(error, MCPOAuthClientTemplateError)) {
+    // The message names env-var keys and auth field names only, never values.
+    return {
+      ...common,
+      category: 'configuration_required',
+      action: 'configure_client',
+      message: (error as MCPOAuthClientTemplateError).message,
     };
   }
   // Before the `Forbidden` branch, which it is a subclass of: a spent link is

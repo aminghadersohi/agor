@@ -97,7 +97,12 @@ describe('register-services OAuth callback URL regression', () => {
       codeOnly.indexOf('const tenantIdFromParams')
     );
     expect(flowHelper).toMatch(/resolveMCPOAuthCompatibilityPolicy\s*\(\s*server\s*\)/);
-    expect(flowHelper).toMatch(/effectiveClientId\s*=\s*server\.auth\.oauth_client_id/);
+    // The reloaded row's client fields bind the flow, rendered for the
+    // initiating user (`{{ user.env.X }}`) rather than sent as template text.
+    expect(flowHelper).toMatch(
+      /resolveMCPOAuthClientAuthForUser\(\s*server\.auth,\s*opts\.userId,/
+    );
+    expect(flowHelper).toMatch(/effectiveClientId\s*=\s*clientAuth\.oauth_client_id/);
     expect(flowHelper).toMatch(/effectiveCompatibilityMode\s*=\s*compatibilityPolicy\.mode/);
     expect(flowHelper).toMatch(/compatibilityMode:\s*context\.compatibilityMode/);
 
