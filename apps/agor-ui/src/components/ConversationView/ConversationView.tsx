@@ -130,6 +130,9 @@ export interface ConversationViewProps {
    */
   teammateEmoji?: string;
 
+  /** Authenticated object URL for the teammate's private profile image. */
+  teammateAvatarUrl?: string;
+
   onOpenAgenticToolSettings?: (tool: AgenticToolName) => void;
 
   /** Use the denser, full-width task treatment for phone-sized session routes. */
@@ -153,6 +156,7 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
     isActive = true,
     genealogy,
     teammateEmoji,
+    teammateAvatarUrl,
     onOpenAgenticToolSettings,
     compact = false,
   }) => {
@@ -576,6 +580,7 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
                 taskMessagesLoaded={!!currentReactiveState?.loadedTaskIds.has(task.task_id)}
                 onLoadTaskMessages={handleLoadTaskMessages}
                 teammateEmoji={teammateEmoji}
+                teammateAvatarUrl={teammateAvatarUrl}
                 isLatestTask={taskIndex === tasks.length - 1}
                 client={client}
                 onOpenAgenticToolSettings={onOpenAgenticToolSettings}
