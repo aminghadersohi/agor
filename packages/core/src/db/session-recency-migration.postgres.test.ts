@@ -77,7 +77,12 @@ it.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
           expect(
             rawRows(await executeRaw(scoped, sql`SELECT * FROM sessions ORDER BY session_id`))
           ).toEqual(
-            fixture.rows.map((row) => ({ ...row, updated_at: row.updated_at ?? row.created_at }))
+            fixture.rows.map((row) => ({
+              ...row,
+              updated_at: row.updated_at ?? row.created_at,
+              // Added after this schema by 9031_session_attention_states.
+              attention_generation: 0,
+            }))
           );
           expect(
             rawRows(

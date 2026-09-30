@@ -13,7 +13,7 @@ import { seedEnvironmentCommandBranch } from './repositories/environment-command
 import { SessionMemoryRepository, SessionReminderRepository } from './repositories/session-memory';
 import { SessionRepository } from './repositories/sessions';
 import { TaskRepository } from './repositories/tasks';
-import { branches, messages } from './schema';
+import { branches, messages, sessionAttentionStates } from './schema';
 import { ownedDbTest as test } from './test-helpers';
 
 test('drains a large single session in bounded transactions, preserves shared neighbors and keeps branch last', async ({
@@ -43,6 +43,14 @@ test('drains a large single session in bounded transactions, preserves shared ne
     [session, user],
     [foreign, neighborUser],
   ] as const) {
+    await insert(db, sessionAttentionStates)
+      .values({
+        user_id: creator.user_id,
+        session_id: target.session_id,
+        seen_attention_generation: 1,
+        seen_at: new Date(),
+      })
+      .run();
     await memories.create({
       session_id: target.session_id,
       text: 'fictional memory',
@@ -127,6 +135,9 @@ test('drains a large single session in bounded transactions, preserves shared ne
   expect(await new BranchRepository(db).findById(branch.branch_id)).not.toBeNull();
   expect(await new SessionRepository(db).findById(session.session_id)).toBeNull();
   expect(await new SessionRepository(db).findById(foreign.session_id)).not.toBeNull();
+  expect(await select(db).from(sessionAttentionStates).all()).toMatchObject([
+    { session_id: foreign.session_id, user_id: neighborUser.user_id },
+  ]);
   expect(
     (await memories.findPage({ session_id: foreign.session_id, limit: 10, skip: 0 })).total
   ).toBe(1);

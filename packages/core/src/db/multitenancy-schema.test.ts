@@ -84,6 +84,9 @@ function migrationTenantTables(): string[] {
   const profileImagesMigration = readRepoFile(
     'packages/core/drizzle/postgres/9028_profile_image_galleries.sql'
   );
+  const sessionAttentionMigration = readRepoFile(
+    'packages/core/drizzle/postgres/9031_session_attention_states.sql'
+  );
   const retiredTables = retiredTenantTables();
   return [
     ...new Set(
@@ -115,6 +118,9 @@ function migrationTenantTables(): string[] {
         ...profileImagesMigration.matchAll(
           /CREATE TABLE IF NOT EXISTS "([^"]+)" \([\s\S]*?"tenant_id"/g
         ),
+        ...sessionAttentionMigration.matchAll(
+          /CREATE TABLE IF NOT EXISTS "([^"]+)" \([\s\S]*?"tenant_id"/g
+        ),
       ]
         .map((m) => m[1])
         .filter((table) => !retiredTables.has(table))
@@ -144,6 +150,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0112_kb_import_receipts.sql'),
     readRepoFile('packages/core/drizzle/postgres/9030_branch_front_desk_sessions.sql'),
     readRepoFile('packages/core/drizzle/postgres/9028_profile_image_galleries.sql'),
+    readRepoFile('packages/core/drizzle/postgres/9031_session_attention_states.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
   return [
@@ -192,6 +199,28 @@ describe('Postgres multitenancy schema coverage', () => {
       expect(migration).toContain(`FOREIGN KEY ("tenant_id","session_id")`);
     }
     expect(migration.match(/DEFERRABLE INITIALLY IMMEDIATE/g)).toHaveLength(5);
+  });
+
+  it('binds session attention acknowledgements to the same tenant as user and session', () => {
+    const migration = readRepoFile(
+      'packages/core/drizzle/postgres/9031_session_attention_states.sql'
+    );
+
+    expect(migration).toContain('PRIMARY KEY("tenant_id", "user_id", "session_id")');
+    expect(migration).toContain('FOREIGN KEY ("tenant_id", "user_id")');
+    expect(migration).toContain('REFERENCES "public"."users"("tenant_id", "user_id")');
+    expect(migration).toContain('FOREIGN KEY ("tenant_id", "session_id")');
+    expect(migration).toContain('REFERENCES "public"."sessions"("tenant_id", "session_id")');
+    expect(migration).toContain('FORCE ROW LEVEL SECURITY');
+  });
+
+  it('stamps acknowledgement inserts from trusted tenant context', () => {
+    const repository = readRepoFile(
+      'packages/core/src/db/repositories/session-attention-states.ts'
+    );
+
+    expect(repository).toContain('...(postgres ? currentTenantInsert() : {})');
+    expect(repository).not.toMatch(/tenant_id:\s*sessionTenantId/);
   });
 
   it('limits cross-tenant gateway discovery to enabled rows and an explicit capability', () => {

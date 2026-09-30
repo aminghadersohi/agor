@@ -17,6 +17,7 @@ import {
 } from '@agor/core/config';
 import {
   assertTenantWritable,
+  attachHiddenTenant,
   BranchRepository,
   bindRepositoryToTenantUnitOfWork,
   EntityNotFoundError,
@@ -24,6 +25,7 @@ import {
   getHiddenTenantId,
   runWithTenantDatabaseScope,
   runWithTenantDatabaseTransaction,
+  SessionAttentionStateRepository,
   SessionEnvSelectionRepository,
   SessionMCPServerRepository,
   SessionRelationshipRepository,
@@ -63,6 +65,7 @@ import type {
   Paginated,
   QueryParams,
   Session,
+  SessionAttentionAcknowledgement,
   SessionCallbackRetargetResult,
   SessionID,
   SessionInterruptAuthority,
@@ -393,6 +396,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
   private sessionMCPRepo: SessionMCPServerRepository;
   private sessionRelationshipRepo: SessionRelationshipRepository;
   private sessionEnvSelectionRepo: SessionEnvSelectionRepository;
+  private sessionAttentionRepo: SessionAttentionStateRepository;
   private usersRepo: UsersRepository;
   private branchRepo: BranchRepository;
   private taskRepo: TaskRepository;
@@ -779,6 +783,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     this.sessionMCPRepo = bindRepositoryToTenantUnitOfWork(db, new SessionMCPServerRepository(db));
     this.sessionRelationshipRepo = new SessionRelationshipRepository(db);
     this.sessionEnvSelectionRepo = new SessionEnvSelectionRepository(db);
+    this.sessionAttentionRepo = new SessionAttentionStateRepository(db);
     this.branchRepo = new BranchRepository(db);
     // Used by resolveChildIdentity to stamp unix_username on fork/spawn children
     // without going through app.service('users') — matches the convention used
@@ -1220,8 +1225,29 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     return sessionList.map((session) => {
       const remoteRelationships = bySessionId.get(session.session_id);
       if (!remoteRelationships) return session;
-      return { ...session, remote_relationships: remoteRelationships };
+      return attachHiddenTenant({ ...session, remote_relationships: remoteRelationships }, session);
     });
+  }
+
+  private async enrichForRead(sessionList: Session[], params?: SessionParams): Promise<Session[]> {
+    const withRelationships = await this.enrichRemoteRelationships(sessionList);
+    const userId = params?.user?.user_id as import('@agor/core/types').UserID | undefined;
+    return userId
+      ? this.sessionAttentionRepo.enrichForViewer(withRelationships, userId)
+      : withRelationships;
+  }
+
+  async acknowledgeAttention(
+    id: string,
+    params?: SessionParams
+  ): Promise<SessionAttentionAcknowledgement> {
+    const userId = params?.user?.user_id as import('@agor/core/types').UserID | undefined;
+    if (!userId) throw new NotAuthenticated('Authentication required');
+
+    // Go through the registered service so branch-view authorization and tenant
+    // scoping are enforced before caller-private acknowledgement is written.
+    const session = await this.app.service('sessions').get(id, params);
+    return this.sessionAttentionRepo.acknowledge(session, userId);
   }
 
   /**
@@ -2414,7 +2440,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     const includeLastMessage = includeLastMessageRoot ?? includeLastMessageQuery;
 
     const session = await super.get(id, params);
-    const [enrichedSession] = await this.enrichRemoteRelationships([session]);
+    const [enrichedSession] = await this.enrichForRead([session], params);
     const sessionWithRelationships = enrichedSession ?? session;
     if (params?.query?.include_usage === true || params?.query?.include_usage === 'true') {
       sessionWithRelationships.usage_summary = await this.taskRepo.getSessionUsage(
@@ -2498,7 +2524,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         skip,
         visibleToUserId: params?._agorSqlSessionAccessUserId,
       });
-      const enriched = await this.enrichRemoteRelationships(data);
+      const enriched = await this.enrichForRead(data, params);
       if (query?.$count === false) return markRemoteRelationshipsEnrichedResult(enriched);
       if (total === undefined) throw new Error('Counted session page is missing its total');
       return markRemoteRelationshipsEnrichedResult({ total, limit, skip, data: enriched });
@@ -2527,10 +2553,10 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       const paged = this.paginateData(selected as Session[], residual, total);
 
       if (Array.isArray(paged)) {
-        const enriched = await this.enrichRemoteRelationships(paged);
+        const enriched = await this.enrichForRead(paged, params);
         return markRemoteRelationshipsEnrichedResult(enriched);
       }
-      const enrichedData = await this.enrichRemoteRelationships(paged.data);
+      const enrichedData = await this.enrichForRead(paged.data, params);
       return markRemoteRelationshipsEnrichedResult({ ...paged, data: enrichedData });
     }
 
@@ -2564,21 +2590,21 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       const selected = this.selectFields(sorted, residual.$select);
       const paged = this.paginateData(selected as Session[], residual, total);
       if (Array.isArray(paged)) {
-        const enriched = await this.enrichRemoteRelationships(paged);
+        const enriched = await this.enrichForRead(paged, params);
         return markRemoteRelationshipsEnrichedResult(enriched);
       }
-      const enrichedData = await this.enrichRemoteRelationships(paged.data);
+      const enrichedData = await this.enrichForRead(paged.data, params);
       return markRemoteRelationshipsEnrichedResult({ ...paged, data: enrichedData });
     }
 
     const result = await super.find(params);
 
     if (Array.isArray(result)) {
-      const enriched = await this.enrichRemoteRelationships(result);
+      const enriched = await this.enrichForRead(result, params);
       return markRemoteRelationshipsEnrichedResult(enriched);
     }
 
-    const enrichedData = await this.enrichRemoteRelationships(result.data);
+    const enrichedData = await this.enrichForRead(result.data, params);
     return markRemoteRelationshipsEnrichedResult({
       ...result,
       data: enrichedData,

@@ -136,6 +136,15 @@ verified in place (Postgres raises on a different shape). A ledger that carries
 the retired hashes next to anything else in that range is refused rather than
 rewound; reconcile it by hand or restore a backup.
 
+`9031_session_attention_states` (both journals at `1790208000004`, idx 9038)
+restores per-user session attention. Some fork databases already carry its
+table and `sessions.attention_generation` from an earlier deploy journalled
+below their watermark, so the Postgres file is conditional and verifies the
+shape before its backfill. SQLite cannot add a column conditionally: tests that
+rewind the SQLite ledger below it must drop `session_attention_states` and
+`sessions.attention_generation` first, as they already do for
+`user_api_keys.source`.
+
 ### New tenant-table FKs must be made `DEFERRABLE INITIALLY IMMEDIATE` (Postgres)
 
 `agor tenant import` restores a whole tenant inside one transaction with

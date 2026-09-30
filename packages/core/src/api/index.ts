@@ -86,6 +86,7 @@ import type {
   SchedulePatchData,
   SdkHealthFailureInput,
   Session,
+  SessionAttentionAcknowledgement,
   SessionID,
   SessionMemory,
   SessionMemoryCreateData,
@@ -220,6 +221,10 @@ export interface SessionInitializationResult {
 
 export interface SessionsClientHelpers {
   prompt(sessionId: string, prompt: string, options?: SessionPromptOptions): Promise<Task>;
+  acknowledgeAttention(
+    sessionId: string,
+    params?: Params
+  ): Promise<SessionAttentionAcknowledgement>;
   initialize(
     sessionId: string,
     options: SessionInitializationOptions
@@ -1554,6 +1559,12 @@ function extendSessionsHelpers(client: AgorClient): void {
   }
 
   client.sessions = {
+    acknowledgeAttention: async (sessionId: string, params?: Params) => {
+      const response = await client
+        .service(`sessions/${sessionId}/acknowledge-attention`)
+        .create({}, params);
+      return response as SessionAttentionAcknowledgement;
+    },
     prompt: async (sessionId: string, prompt: string, options?: SessionPromptOptions) => {
       const { params, ...requestOptions } = options ?? {};
       const response = await client
