@@ -39,6 +39,7 @@ import { HomeAskBox } from './HomeAskBox';
 import { HomeKnowledgeSection } from './HomeKnowledgeSection';
 import { HomeMyWork, MY_WORK_PAGE, type MyWorkTab } from './HomeMyWork';
 import { HomeNeedsYou, NEEDS_MAX, NEEDS_PREVIEW, type NeedsFilter } from './HomeNeedsYou';
+import { HomePinnedArtifactsSection } from './HomePinnedArtifactsSection';
 import { HomeRecentBoards } from './HomeRecentBoards';
 import { HomeSchedulesSection } from './HomeSchedulesSection';
 import { HomeFrame } from './HomeSection';
@@ -516,6 +517,12 @@ export const HomePage = memo(function HomePage({
             />
           )}
           {onboarding}
+          <HomePinnedArtifactsSection
+            client={client}
+            currentUserId={userId}
+            onBoardClick={onBoardClick}
+            onSessionClick={onSessionClick}
+          />
           <HomeMyWork
             recent={buckets.recent}
             recentCount={buckets.recentCount}

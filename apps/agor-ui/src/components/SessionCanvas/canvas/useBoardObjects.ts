@@ -30,6 +30,8 @@ interface UseBoardObjectsProps {
   canEdit?: boolean;
   /** Open a session in the normal session surface (artifact chat bindings). */
   onOpenSession?: (sessionId: string) => void;
+  /** Viewer id; lets artifact nodes toggle the viewer's own Home pins. */
+  currentUserId?: string;
 }
 
 function zonesOverlap(
@@ -50,6 +52,7 @@ export const useBoardObjects = ({
   onEditMarkdown,
   canEdit = true,
   onOpenSession,
+  currentUserId,
 }: UseBoardObjectsProps) => {
   // Use ref to avoid recreating callbacks when board changes
   const boardRef = useRef(board);
@@ -346,6 +349,8 @@ export const useBoardObjects = ({
               onUpdate: handleUpdateObject,
               onDeleteArtifact: deleteArtifact,
               onOpenSession: canOpenSession ? openSession : undefined,
+              client,
+              currentUserId,
             },
           };
         }
@@ -460,6 +465,8 @@ export const useBoardObjects = ({
     canEdit,
     canOpenSession,
     openSession,
+    client,
+    currentUserId,
   ]);
 
   /**
