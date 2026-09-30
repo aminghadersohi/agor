@@ -97,6 +97,7 @@ import {
   MAX_SCREENSAVER_IDLE_MINUTES,
   MIN_SCREENSAVER_IDLE_MINUTES,
   resolveScreensaverIdleMinutes,
+  resolveScreensaverStyle,
 } from '../IdleGlyphScreensaver';
 import { SessionMcpServersField } from '../MCPServerSelect';
 import { ProfileImageGalleryEditor } from '../ProfileImage';
@@ -229,7 +230,7 @@ const PANEL_META: Record<string, { title: string; icon: React.ReactNode; keyword
     title: 'Preferences',
     icon: <BellOutlined />,
     keywords:
-      'assistant teammate primary coding agent agentic tool audio sound notification chime event stream screensaver idle',
+      'assistant teammate primary coding agent agentic tool audio sound notification chime event stream screensaver idle photos slideshow',
   },
   security: { title: 'Security', icon: <LockOutlined />, keywords: 'account password credentials' },
   tokens: { title: 'API tokens', icon: <KeyOutlined />, keywords: 'api token key ci pipeline' },
@@ -527,6 +528,7 @@ const UserSettingsModalForIdentity: React.FC<UserSettingsModalProps> = ({
         eventStreamEnabled: userData.preferences?.eventStream?.enabled ?? true,
         screensaverEnabled: userData.preferences?.screensaver?.enabled === true,
         screensaverIdleMinutes: resolveScreensaverIdleMinutes(userData.preferences?.screensaver),
+        screensaverStyle: resolveScreensaverStyle(userData.preferences?.screensaver),
         useSlackAvatar: userData.preferences?.use_slack_avatar !== false,
         must_change_password: userData.must_change_password ?? false,
       });
@@ -894,6 +896,10 @@ const UserSettingsModalForIdentity: React.FC<UserSettingsModalProps> = ({
           idleMinutes: resolveScreensaverIdleMinutes({
             enabled: true,
             idleMinutes: form.getFieldValue('screensaverIdleMinutes'),
+          }),
+          style: resolveScreensaverStyle({
+            enabled: true,
+            style: form.getFieldValue('screensaverStyle'),
           }),
         };
         const primaryAgenticTool = primaryToolForm.getFieldValue('primaryAgenticTool') as
@@ -2007,6 +2013,20 @@ const UserSettingsModalForIdentity: React.FC<UserSettingsModalProps> = ({
             suffix="minutes"
             disabled={saving || !screensaverEnabled}
             style={{ width: 160 }}
+          />
+        </FieldRow>
+        <FieldRow
+          label="Show"
+          name="screensaverStyle"
+          help="Teammate photos cycle through every teammate gallery you can see, with a mix of transitions (cross-fades only when your system requests reduced motion). Without any photos it shows the signal field."
+        >
+          <Select
+            disabled={saving}
+            style={{ width: 220 }}
+            options={[
+              { value: 'teammate-photos', label: 'Teammate photos' },
+              { value: 'signal-field', label: 'Signal field' },
+            ]}
           />
         </FieldRow>
       </SettingsSection>

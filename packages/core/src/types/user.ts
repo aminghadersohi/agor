@@ -446,7 +446,14 @@ export interface ScreensaverPreferences {
   enabled: boolean;
   /** Minutes without input before the screensaver starts (UI default: 5). */
   idleMinutes?: number;
+  /**
+   * What the screensaver shows (UI default: `teammate-photos`). The photo
+   * slideshow falls back to the signal field when no teammate has a photo.
+   */
+  style?: ScreensaverStyle;
 }
+
+export type ScreensaverStyle = 'teammate-photos' | 'signal-field';
 
 /**
  * Per-user onboarding state (stored in user.preferences)

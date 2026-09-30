@@ -40,7 +40,7 @@ const MAX_PROFILE_IMAGE_UPLOAD_BYTES = 5 * 1024 * 1024;
  * the authoritative `max_images`. Mirrors the server's cap so the copy does not
  * flash a smaller number, but the server remains the one that enforces it.
  */
-const ASSUMED_MAX_GALLERY_IMAGES = 24;
+const ASSUMED_MAX_GALLERY_IMAGES = 100;
 
 function validateProfileImageFile(file: File): string | undefined {
   if (!ACCEPTED_PROFILE_IMAGE_TYPES.has(file.type)) return 'Use a JPEG, PNG, or WebP image';

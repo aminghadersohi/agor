@@ -1,6 +1,11 @@
 // biome-ignore-all lint/plugin/noHardcodedColorLiteral: canvas artwork uses a fixed phosphor palette outside Ant Design's DOM styling boundary
-import type { ScreensaverPreferences } from '@agor-live/client';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ScreensaverPreferences, ScreensaverStyle } from '@agor-live/client';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import type { ScreensaverTeammate } from './TeammatePhotoScreensaver';
+import { DEFAULT_SCREENSAVER_STYLE } from './teammatePhotoSlides';
+
+// Loaded on first activation only; the slideshow never ships with the app shell.
+const TeammatePhotoScreensaver = lazy(() => import('./TeammatePhotoScreensaver'));
 
 export const DEFAULT_SCREENSAVER_IDLE_MINUTES = 5;
 export const MIN_SCREENSAVER_IDLE_MINUTES = 1;
@@ -36,7 +41,13 @@ export interface IdleGlyphScreensaverProps {
    * screensaver only appears when previewed from the user menu.
    */
   idleEnabled?: boolean;
+  /** What to show; `teammate-photos` falls back to the signal field without photos. */
+  style?: ScreensaverStyle;
+  /** Teammates whose galleries feed the photo slideshow. */
+  teammates?: ScreensaverTeammate[];
 }
+
+const NO_TEAMMATES: ScreensaverTeammate[] = [];
 
 /** Idle minutes from a stored preference, clamped to the supported range. */
 export function resolveScreensaverIdleMinutes(preferences?: ScreensaverPreferences): number {
@@ -136,28 +147,53 @@ function drawFrame(
 export function IdleGlyphScreensaver({
   idleMs = DEFAULT_SCREENSAVER_IDLE_MS,
   idleEnabled = true,
+  style = DEFAULT_SCREENSAVER_STYLE,
+  teammates = NO_TEAMMATES,
 }: IdleGlyphScreensaverProps) {
   const [active, setActive] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(false);
+  // Set when the slideshow finds nothing to show; cleared on every activation.
+  const [photosUnavailable, setPhotosUnavailable] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const activeRef = useRef(false);
+  const wantsPhotos = style === 'teammate-photos' && teammates.length > 0;
+  // Read from the idle listeners without re-arming them on every teammate edit.
+  const wantsPhotosRef = useRef(wantsPhotos);
+  wantsPhotosRef.current = wantsPhotos;
+  const showPhotos = wantsPhotos && !photosUnavailable;
 
   const dismiss = useCallback(() => {
     activeRef.current = false;
     setActive(false);
   }, []);
 
+  const onPhotosUnavailable = useCallback(() => setPhotosUnavailable(true), []);
+
+  // The signal field is all motion, so it never runs under reduced motion; the
+  // slideshow narrows itself to plain cross-fades instead.
   useEffect(() => {
-    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    if (active && !showPhotos && reducedMotion) dismiss();
+  }, [active, dismiss, reducedMotion, showPhotos]);
+
+  useEffect(() => {
+    const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    setReducedMotion(motionQuery.matches);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let lastPointerMove = 0;
 
+    const activate = () => {
+      activeRef.current = true;
+      setPhotosUnavailable(false);
+      setActive(true);
+    };
+
+    const canShow = () =>
+      document.visibilityState !== 'hidden' && (!motionQuery.matches || wantsPhotosRef.current);
+
     const arm = () => {
       if (timer) clearTimeout(timer);
-      if (!idleEnabled || document.visibilityState === 'hidden' || reducedMotion.matches) return;
-      timer = setTimeout(() => {
-        activeRef.current = true;
-        setActive(true);
-      }, idleMs);
+      if (!idleEnabled || !canShow()) return;
+      timer = setTimeout(activate, idleMs);
     };
 
     const onActivity = (event: Event) => {
@@ -176,22 +212,22 @@ export function IdleGlyphScreensaver({
     };
 
     const onMotionPreferenceChange = () => {
+      setReducedMotion(motionQuery.matches);
       dismiss();
       arm();
     };
 
     const onManualStart = () => {
-      if (reducedMotion.matches || document.visibilityState === 'hidden') return;
+      if (!canShow()) return;
       if (timer) clearTimeout(timer);
-      activeRef.current = true;
-      setActive(true);
+      activate();
     };
 
     for (const eventName of ACTIVITY_EVENTS) {
       window.addEventListener(eventName, onActivity, { passive: true, capture: true });
     }
     document.addEventListener('visibilitychange', onVisibilityChange);
-    reducedMotion.addEventListener('change', onMotionPreferenceChange);
+    motionQuery.addEventListener('change', onMotionPreferenceChange);
     window.addEventListener(START_SCREENSAVER_EVENT, onManualStart);
     arm();
 
@@ -201,13 +237,13 @@ export function IdleGlyphScreensaver({
         window.removeEventListener(eventName, onActivity, { capture: true });
       }
       document.removeEventListener('visibilitychange', onVisibilityChange);
-      reducedMotion.removeEventListener('change', onMotionPreferenceChange);
+      motionQuery.removeEventListener('change', onMotionPreferenceChange);
       window.removeEventListener(START_SCREENSAVER_EVENT, onManualStart);
     };
   }, [dismiss, idleEnabled, idleMs]);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || showPhotos) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const context = canvas.getContext('2d');
@@ -247,7 +283,7 @@ export function IdleGlyphScreensaver({
       cancelAnimationFrame(animationFrame);
       window.removeEventListener('resize', resize);
     };
-  }, [active]);
+  }, [active, showPhotos]);
 
   if (!active) return null;
 
@@ -266,7 +302,17 @@ export function IdleGlyphScreensaver({
         background: '#010706',
       }}
     >
-      <canvas ref={canvasRef} style={{ display: 'block' }} />
+      {showPhotos ? (
+        <Suspense fallback={null}>
+          <TeammatePhotoScreensaver
+            teammates={teammates}
+            reducedMotion={reducedMotion}
+            onUnavailable={onPhotosUnavailable}
+          />
+        </Suspense>
+      ) : (
+        <canvas ref={canvasRef} style={{ display: 'block' }} />
+      )}
       <div
         style={{
           position: 'absolute',
@@ -281,7 +327,7 @@ export function IdleGlyphScreensaver({
           pointerEvents: 'none',
         }}
       >
-        Agor signal field · move or press any key to return
+        {showPhotos ? 'Agor teammates' : 'Agor signal field'} · move or press any key to return
       </div>
     </div>
   );

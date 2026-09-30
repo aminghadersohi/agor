@@ -97,7 +97,7 @@ describe('gallery cap storage budget', () => {
   // that arithmetic are pinned here: raising PROFILE_IMAGE_LARGE_SIZE breaks the
   // per-image half, and raising the cap breaks the per-gallery half.
   const PER_IMAGE_STORAGE_BUDGET_BYTES = 450 * 1024;
-  const PER_GALLERY_STORAGE_BUDGET_BYTES = 12 * 1024 * 1024;
+  const PER_GALLERY_STORAGE_BUDGET_BYTES = 48 * 1024 * 1024;
 
   it('keeps an incompressible source inside the per-image budget', async () => {
     // Deterministic noise, not a flat fill: WebP crushes flat colour to nothing

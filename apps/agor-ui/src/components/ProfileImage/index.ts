@@ -8,10 +8,15 @@ export {
   useCyclingProfileImageUrl,
 } from './useCyclingProfileImage';
 export {
+  loadProfileImageGallery,
   publishProfileImageGallery,
   publishProfileImageMetadata,
   useProfileImageGallery,
 } from './useProfileImageGallery';
-export { useProfileImageUrl } from './useProfileImageUrl';
+export {
+  acquireProfileImageUrl,
+  releaseProfileImageUrl,
+  useProfileImageUrl,
+} from './useProfileImageUrl';
 export { useTeammateProfileImageUrl } from './useTeammateProfileImageUrl';
 export { useUserProfileImageUrl } from './useUserProfileImageUrl';
