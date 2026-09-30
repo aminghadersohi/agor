@@ -9,15 +9,15 @@ export const PROFILE_IMAGE_CONTENT_TYPE = 'image/webp';
  * Gallery cap, and the only authority for it: the list route reports this as
  * `max_images` and the upload route enforces it, so the client never decides.
  *
- * 24 is bounded by what a gallery costs once stored, not by what a user
+ * 100 is bounded by what a gallery costs once stored, not by what a user
  * uploads. Every accepted file is re-encoded to the two WebP variants below and
  * the 5 MB original is discarded, so the ceiling is the ~400 KB an
- * incompressible source costs at PROFILE_IMAGE_LARGE_SIZE — under 12 MB of blob
- * for a full gallery of pure noise, and nearer 3 MB for real photographs. It
+ * incompressible source costs at PROFILE_IMAGE_LARGE_SIZE — under 48 MB of blob
+ * for a full gallery of pure noise, and nearer 12 MB for real photographs. It
  * also lands on whole rows in the editor's grid at both breakpoints.
  * `profile-image-processing.test.ts` holds both halves of that arithmetic.
  */
-export const PROFILE_IMAGE_MAX_GALLERY_ITEMS = 24;
+export const PROFILE_IMAGE_MAX_GALLERY_ITEMS = 100;
 
 const ACCEPTED_FORMATS = new Set(['jpeg', 'png', 'webp']);
 
