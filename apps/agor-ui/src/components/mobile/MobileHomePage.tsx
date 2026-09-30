@@ -1,12 +1,13 @@
-import type { Board, Branch, Session, User } from '@agor-live/client';
+import type { AgorClient, Board, Branch, Session, User } from '@agor-live/client';
 import { RightOutlined, RobotOutlined } from '@ant-design/icons';
 import { Button, Empty, Flex, List, Typography, theme } from 'antd';
 import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { MOBILE_TOUCH_TARGET } from '../../utils/deviceDetection';
 import { isOwnActiveSession, sortSessions } from '../../utils/sessionSearch';
-import { getBoardEmoji } from '../BoardTile';
+import { BoardTile, getBoardEmoji } from '../BoardTile';
 import { GlassPanel } from '../GlassSurface/GlassPanel';
+import { HomeSchedulesSection } from '../HomePage/HomeSchedulesSection';
 import { JumpBackInSection } from '../HomePage/JumpBackInSection';
 import { mobilePageStyle, mobileScrollAreaStyle } from './constants';
 import { MobileHeader } from './MobileHeader';
@@ -14,6 +15,7 @@ import { MobileListRow } from './MobileListRow';
 import { MobileSessionRow } from './MobileSessionRow';
 
 interface MobileHomePageProps {
+  client?: AgorClient | null;
   sessionById: Map<string, Session>;
   branchById: Map<string, Branch>;
   boardById: Map<string, Board>;
@@ -41,6 +43,7 @@ const RECENT_LIMIT = 5;
  * shared MobileSessionRow, board selectors, and the glass surface components.
  */
 export const MobileHomePage: React.FC<MobileHomePageProps> = ({
+  client,
   sessionById,
   branchById,
   boardById,
@@ -169,6 +172,18 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
             onSessionClick={(id) => navigate(`/m/session/${id}`)}
           />
 
+          {client && (
+            <HomeSchedulesSection
+              client={client}
+              currentUserId={currentUser?.user_id}
+              compact
+              onBranchClick={(branchId) => {
+                const branch = branchById.get(branchId);
+                if (branch?.board_id) navigate(`/m/board/${branch.board_id}`);
+              }}
+            />
+          )}
+
           <GlassPanel
             size="small"
             blur={false}
@@ -215,9 +230,7 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
                     ariaLabel={`Open ${board.name}`}
                     onPress={() => navigate(`/m/board/${board.board_id}`)}
                     avatar={
-                      <span aria-hidden style={{ fontSize: token.fontSizeHeading4 }}>
-                        {getBoardEmoji(board, branchById)}
-                      </span>
+                      <BoardTile board={board} emoji={getBoardEmoji(board, branchById)} size={32} />
                     }
                     trailing={
                       <RightOutlined aria-hidden style={{ color: token.colorTextTertiary }} />
