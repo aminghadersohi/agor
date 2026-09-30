@@ -2,6 +2,7 @@ import type { Branch, Schedule, User } from '@agor-live/client';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { App } from 'antd';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { EMPTY_MAPS } from '../../store/agorMaps';
 import { agorStore } from '../../store/agorStore';
 import { HomeSchedulesSection } from './HomeSchedulesSection';
@@ -138,5 +139,46 @@ describe('HomeSchedulesSection', () => {
     await screen.findByText('Daily review');
     listeners.get('patched')?.({ ...first, name: 'Daily shipping review' });
     expect(await screen.findByText('Daily shipping review')).toBeVisible();
+  });
+
+  it('refetches after a socket reconnect and ignores the call lost in the drop', async () => {
+    const { client } = clientWith([]);
+    const find = (
+      client as { service: (name: string) => { find: ReturnType<typeof vi.fn> } }
+    ).service('schedules').find;
+    let rejectLost: (error: Error) => void = () => {};
+    find
+      .mockReturnValueOnce(new Promise((_resolve, reject) => (rejectLost = reject)))
+      .mockResolvedValueOnce({ data: [schedule('schedule-1', 'Nightly sync', 'branch-1')] });
+    agorStore.setState({
+      userById: new Map([['user-1', { user_id: 'user-1', preferences: {} } as User]]),
+    });
+    const connection = (authGeneration: number) => ({
+      connected: true,
+      connecting: false,
+      authGeneration,
+      outOfSync: false,
+      capturedSha: null,
+      currentSha: null,
+    });
+    const tree = (authGeneration: number) => (
+      <ConnectionProvider value={connection(authGeneration)}>
+        <App>
+          <HomeSchedulesSection client={client} currentUserId="user-1" />
+        </App>
+      </ConnectionProvider>
+    );
+
+    const { rerender } = render(tree(1));
+    await waitFor(() => expect(find).toHaveBeenCalledTimes(1));
+
+    rerender(tree(2));
+    expect(await screen.findByText('Nightly sync')).toBeVisible();
+    expect(find).toHaveBeenCalledTimes(2);
+
+    rejectLost(new Error('socket has been disconnected'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText('Nightly sync')).toBeVisible();
+    expect(screen.queryByText('socket has been disconnected')).toBeNull();
   });
 });

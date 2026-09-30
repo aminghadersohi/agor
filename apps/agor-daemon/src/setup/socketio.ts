@@ -453,6 +453,40 @@ function bearerTokenFromHeader(value: string | string[] | undefined): string | u
 }
 
 /**
+ * WebSocket per-message compression (RFC 7692).
+ *
+ * Every UI service call and realtime event rides the socket, and engine.io
+ * leaves WebSocket frames uncompressed by default (its `httpCompression` only
+ * covers long-polling; REST gets the `compression` middleware). Workspace
+ * snapshots are repetitive JSON that deflates 4-5x, which matters most on
+ * slow links such as a VPN.
+ *
+ * - `threshold` skips small frames (streaming chunks, cursor presence) where
+ *   zlib overhead outweighs the saving.
+ * - No context takeover in either direction: each message is compressed
+ *   independently, so no compression dictionary spans two messages.
+ * - Cost: ws keeps a socket's zlib streams allocated (reset, not freed)
+ *   until it closes once it has compressed a frame. A 13-bit server window
+ *   and memLevel 7 bound the deflate side to ~96 KiB per socket (vs ~256 KiB
+ *   at zlib defaults) for ~4.8x instead of ~5.2x on real session lists.
+ *   Broadcasts above the threshold are compressed once per recipient
+ *   (engine.io cannot reuse a pre-encoded frame).
+ * - `clientMaxWindowBits` is deliberately unset. A numeric value makes ws
+ *   reject every offer that lacks `client_max_window_bits`, and Safari
+ *   (macOS and iOS) offers a bare `permessage-deflate`: the upgrade fails
+ *   with HTTP 400 and the client never connects. Unset, ws accepts both
+ *   offer shapes; the cost is a 32 KiB inflate window for client frames,
+ *   which are small service calls.
+ */
+export const SOCKET_IO_PER_MESSAGE_DEFLATE = {
+  threshold: 1024,
+  serverNoContextTakeover: true,
+  clientNoContextTakeover: true,
+  serverMaxWindowBits: 13,
+  zlibDeflateOptions: { memLevel: 7 },
+} as const;
+
+/**
  * Create Socket.io configuration callback for FeathersJS
  *
  * This returns the configuration object and callback function that can be passed
@@ -498,6 +532,7 @@ export function createSocketIOConfig(
     pingInterval: 25000, // How often to ping clients
     maxHttpBufferSize: SOCKET_IO_MAX_BUFFER_SIZE_BYTES,
     transports: ['websocket', 'polling'], // Prefer WebSocket
+    perMessageDeflate: SOCKET_IO_PER_MESSAGE_DEFLATE,
     ...(options.adapter ? { adapter: options.adapter } : {}),
   };
 
