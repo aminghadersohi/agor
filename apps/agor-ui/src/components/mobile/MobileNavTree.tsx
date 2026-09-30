@@ -18,7 +18,7 @@ import { mapToArray } from '@/utils/mapHelpers';
 import { getSessionDisplayTitle } from '@/utils/sessionTitle';
 import { BoardCollapse } from '../BoardCollapse';
 import { BoardListCounts } from '../BoardListCounts';
-import { getBoardEmoji } from '../BoardTile';
+import { getBoardEmoji, getBoardTeammate } from '../BoardTile';
 
 const { Text } = Typography;
 
@@ -151,6 +151,7 @@ export const MobileNavTree: React.FC<MobileNavTreeProps> = ({
             key: board.board_id,
             board,
             emoji: getBoardEmoji(board, branchById),
+            teammate: getBoardTeammate(board, branchById),
             avatarSize: 32,
             meta: <BoardListCounts counts={board} wrap />,
             badge: (

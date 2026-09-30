@@ -8,7 +8,7 @@ import { selectBoardById, selectBranchById, selectSessionsByBranch } from '../..
 import { getTimeMs } from '../../utils/entityTime';
 import { formatRelativeTime } from '../../utils/time';
 import { BoardListCounts } from '../BoardListCounts';
-import { BoardTile, getBoardEmoji } from '../BoardTile';
+import { BoardTile, getBoardEmoji, getBoardTeammate } from '../BoardTile';
 import { glassSurfaceStyle, withAlpha } from './homeStyles';
 import type { HomePageProps } from './types';
 
@@ -26,6 +26,8 @@ const BOARDS_PER_PAGE = 4;
 interface BoardHomeRow {
   board: Board;
   emoji: string | undefined;
+  /** Branch objects are stable per id, so this only changes with the teammate. */
+  teammate: Branch | undefined;
   latestSessionAt: Session['last_updated'] | null;
   latest: number;
   visitRank: number;
@@ -70,11 +72,13 @@ const groupVisibleSessionsByBranch = (
 const BoardHomeCard = memo(function BoardHomeCard({
   board,
   emoji,
+  teammate,
   latestSessionAt,
   onBoardClick,
 }: {
   board: Board;
   emoji: string | undefined;
+  teammate: Branch | undefined;
   latestSessionAt: Session['last_updated'] | null;
   onBoardClick: (boardId: string) => void;
 }) {
@@ -125,7 +129,7 @@ const BoardHomeCard = memo(function BoardHomeCard({
         }}
       >
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-          <BoardTile board={board} emoji={emoji} size={36} />
+          <BoardTile board={board} teammate={teammate} emoji={emoji} size={36} />
 
           {/* Name + meta — all aligned under each other, to the right of the icon */}
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -198,6 +202,7 @@ export const HomeBoardsSection: React.FC<
         return {
           board,
           emoji: getBoardEmoji(board, branchById),
+          teammate: getBoardTeammate(board, branchById),
           latestSessionAt,
           latest: Number.isFinite(latest) ? latest : 0,
           visitRank: visitRank.get(board.board_id) ?? Number.POSITIVE_INFINITY,
@@ -285,11 +290,12 @@ export const HomeBoardsSection: React.FC<
             gap: 12,
           }}
         >
-          {visibleRows.map(({ board, emoji, latestSessionAt }) => (
+          {visibleRows.map(({ board, emoji, teammate, latestSessionAt }) => (
             <BoardHomeCard
               key={board.board_id}
               board={board}
               emoji={emoji}
+              teammate={teammate}
               latestSessionAt={latestSessionAt}
               onBoardClick={onBoardClick}
             />

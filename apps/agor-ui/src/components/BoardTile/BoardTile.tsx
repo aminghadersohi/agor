@@ -1,5 +1,5 @@
 import type { Board, Branch } from '@agor-live/client';
-import { getTeammateConfig } from '@agor-live/client';
+import { getTeammateConfig, isTeammate } from '@agor-live/client';
 import { AppstoreOutlined } from '@ant-design/icons';
 import { theme } from 'antd';
 import type { CSSProperties } from 'react';
@@ -26,11 +26,31 @@ export function getBoardEmoji(
   return branch ? getTeammateConfig(branch)?.emoji || undefined : undefined;
 }
 
+/**
+ * The primary teammate branch whose photo a board without its own gallery
+ * image falls back to. Undefined when the board has no primary teammate or its
+ * branch is not loaded.
+ */
+export function getBoardTeammate(
+  board: Pick<Board, 'primary_teammate_id'>,
+  branchById?: Map<string, Branch> | null
+): Branch | undefined {
+  const teammateId = board.primary_teammate_id;
+  if (!teammateId || !branchById) return undefined;
+  const branch = branchById.get(teammateId);
+  return branch && isTeammate(branch) ? branch : undefined;
+}
+
 export interface BoardTileProps {
   /** Pre-resolved board emoji (see {@link getBoardEmoji}). */
   emoji?: string;
   /** Board whose primary gallery image, when set, is shown ahead of the emoji. */
   board?: Pick<Board, 'board_id' | 'profile_image_id'>;
+  /**
+   * Primary teammate (see {@link getBoardTeammate}) whose photo is shown when
+   * the board has no gallery image of its own, ahead of the emoji.
+   */
+  teammate?: Branch | null;
   size?: number;
   style?: CSSProperties;
 }
@@ -40,17 +60,35 @@ export interface BoardTileProps {
  * it keeps boards visually distinct from the circular user avatars so a board
  * is never mistaken for a person.
  */
-export const BoardTile: React.FC<BoardTileProps> = ({ board, emoji, size = 36, style }) => {
+export const BoardTile: React.FC<BoardTileProps> = ({
+  board,
+  teammate,
+  emoji,
+  size = 36,
+  style,
+}) => {
   const { token } = theme.useToken();
-  // Only boards with a projected primary have a gallery, so image-less boards
-  // never trigger a gallery read — lists render one tile per board.
-  const hasGallery = Boolean(board?.profile_image_id);
-  const imageUrl = useCyclingProfileImageUrl(
-    board && hasGallery ? { type: 'board', id: board.board_id } : undefined,
+  const variant = size > 96 ? 'large' : 'small';
+  // Only subjects with a projected primary have a gallery, so image-less boards
+  // and teammates never trigger a gallery read — lists render one tile per board.
+  const hasBoardGallery = Boolean(board?.profile_image_id);
+  const boardImageUrl = useCyclingProfileImageUrl(
+    board && hasBoardGallery ? { type: 'board', id: board.board_id } : undefined,
     board?.profile_image_id,
-    size > 96 ? 'large' : 'small',
-    hasGallery
+    variant,
+    hasBoardGallery
   );
+  // The teammate gallery is only read when the board has none of its own.
+  const teammateImageId =
+    teammate && isTeammate(teammate) ? getTeammateConfig(teammate)?.profileImageId : undefined;
+  const hasTeammateGallery = !hasBoardGallery && Boolean(teammate && teammateImageId);
+  const teammateImageUrl = useCyclingProfileImageUrl(
+    teammate && hasTeammateGallery ? { type: 'teammate', id: teammate.branch_id } : undefined,
+    hasTeammateGallery ? teammateImageId : undefined,
+    variant,
+    hasTeammateGallery
+  );
+  const imageUrl = boardImageUrl ?? teammateImageUrl;
   return (
     <div
       aria-hidden
@@ -94,7 +132,7 @@ export interface BoardSelectOption {
 
 /**
  * Options for an AntD board `Select` where every board wears its face — the
- * board emoji, primary-teammate fallback, or neutral {@link BoardTile} — so an
+ * board image, primary-teammate photo or emoji, or neutral {@link BoardTile} — so an
  * assistant-less board never shows as a bare name. Pair with
  * `filterOption={boardSelectFilter}` to keep text search working against `name`.
  */
@@ -109,7 +147,12 @@ export function boardSelectOptions(
       value: board.board_id,
       label: (
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-          <BoardTile board={board} emoji={getBoardEmoji(board, branchById)} size={18} />
+          <BoardTile
+            board={board}
+            teammate={getBoardTeammate(board, branchById)}
+            emoji={getBoardEmoji(board, branchById)}
+            size={18}
+          />
           {board.name}
         </span>
       ),

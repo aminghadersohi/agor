@@ -5,7 +5,7 @@ import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { MOBILE_TOUCH_TARGET } from '../../utils/deviceDetection';
 import { isOwnActiveSession, sortSessions } from '../../utils/sessionSearch';
-import { BoardTile, getBoardEmoji } from '../BoardTile';
+import { BoardTile, getBoardEmoji, getBoardTeammate } from '../BoardTile';
 import { GlassPanel } from '../GlassSurface/GlassPanel';
 import { HomeSchedulesSection } from '../HomePage/HomeSchedulesSection';
 import { JumpBackInSection } from '../HomePage/JumpBackInSection';
@@ -230,7 +230,12 @@ export const MobileHomePage: React.FC<MobileHomePageProps> = ({
                     ariaLabel={`Open ${board.name}`}
                     onPress={() => navigate(`/m/board/${board.board_id}`)}
                     avatar={
-                      <BoardTile board={board} emoji={getBoardEmoji(board, branchById)} size={32} />
+                      <BoardTile
+                        board={board}
+                        teammate={getBoardTeammate(board, branchById)}
+                        emoji={getBoardEmoji(board, branchById)}
+                        size={32}
+                      />
                     }
                     trailing={
                       <RightOutlined aria-hidden style={{ color: token.colorTextTertiary }} />
