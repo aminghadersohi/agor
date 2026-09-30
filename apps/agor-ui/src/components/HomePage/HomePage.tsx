@@ -17,6 +17,7 @@ import { BoardTile, getBoardEmoji } from '../BoardTile';
 import { HomeActivitySection } from './HomeActivitySection';
 import { HomeBoardsSection } from './HomeBoardsSection';
 import { HomeKnowledgeSection } from './HomeKnowledgeSection';
+import { HomeSchedulesSection } from './HomeSchedulesSection';
 import { HomeSessionsSection } from './HomeSessionsSection';
 import { HomeStatsBar } from './HomeStatsBar';
 import { glassCardStyle } from './homeStyles';
@@ -357,6 +358,12 @@ export const HomePage = memo(function HomePage(props: HomePageProps) {
               <HomeSessionsSection
                 currentUserId={props.currentUserId}
                 onSessionClick={props.onSessionClick}
+              />
+
+              <HomeSchedulesSection
+                client={props.client}
+                currentUserId={props.currentUserId}
+                onBranchClick={props.onBranchClick}
               />
 
               {/* Boards grid */}

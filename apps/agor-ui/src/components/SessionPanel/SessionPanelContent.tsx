@@ -41,6 +41,7 @@ import { BranchHeaderPill } from '../BranchHeaderPill';
 import { BranchMetadataRow } from '../BranchMetadataRow';
 import { ConversationView } from '../ConversationView';
 import { ForkSpawnModal } from '../ForkSpawnModal';
+import { useTeammateProfileImageUrl } from '../ProfileImage';
 import { mergedRequestCount } from '../TaskBlock/taskAudit';
 import {
   EDITABLE_QUEUED_PROMPT_MAX_BYTES,
@@ -86,6 +87,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
     isOpen,
   }) => {
     const { token } = theme.useToken();
+    const teammateAvatarUrl = useTeammateProfileImageUrl(branch, 'small');
     const isMobileShell = useIsMobileViewport();
     const { showSuccess, showError } = useThemedMessage();
     const [resumeQueueInFlight, setResumeQueueInFlight] = React.useState(false);
@@ -623,6 +625,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
             teammateEmoji={
               branch && isTeammate(branch) ? getTeammateConfig(branch)?.emoji : undefined
             }
+            teammateAvatarUrl={teammateAvatarUrl}
             onOpenAgenticToolSettings={onOpenAgenticToolSettings}
           />
         </SessionConversationLayout>

@@ -3,6 +3,7 @@ import { type AgenticToolName, DEFAULT_AGENTIC_TOOL_NAME, isAgenticToolName } fr
 import type { BranchID, UserID } from './id';
 import type { OpenCodeConfig } from './opencode-ollama';
 import type { ProfileImageID } from './profile-image';
+import type { ScheduleID } from './schedule';
 import type { EffortLevel, PermissionMode } from './session';
 
 /** Canonical syntax for the transitional delegated execution-home key. */
@@ -498,8 +499,15 @@ export interface UserPreferences {
   mainBoardId?: string;
   /** Whether to render Slack-synced avatar_url when available. Undefined defaults to true. */
   use_slack_avatar?: boolean;
+  /** User-owned choice of which canonical schedules appear in the Home overview. */
+  home_schedules?: HomeSchedulePreferences;
   // Future preferences can be added here
   [key: string]: unknown;
+}
+
+export interface HomeSchedulePreferences {
+  mode: 'all' | 'selected';
+  schedule_ids: ScheduleID[];
 }
 
 /** Stable external identity link stored with a local user. */

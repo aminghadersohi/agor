@@ -385,6 +385,7 @@ export const MobileApp: React.FC<MobileAppProps> = ({
               index
               element={
                 <MobileHomePage
+                  client={client}
                   sessionById={sessionById}
                   branchById={branchById}
                   boardById={boardById}
