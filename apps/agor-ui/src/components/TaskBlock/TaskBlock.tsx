@@ -93,6 +93,8 @@ interface TaskBlockProps {
   isLatestTask?: boolean;
   /** Phone-sized transcript presentation without desktop-only indents or gradients. */
   compact?: boolean;
+  /** Conversation-first mode: keep messages, hide tool and accounting chrome. */
+  simple?: boolean;
   latestActivity?: ToolExecutionState;
   defaultTextExpanded?: boolean;
 }
@@ -622,6 +624,11 @@ export function groupMessagesIntoBlocks(messages: Message[]): Block[] {
   return blocks;
 }
 
+/** Focus chat keeps user-facing message blocks and omits operational timelines. */
+export function isBlockVisibleInSimpleChat(block: Block): boolean {
+  return block.type === 'message';
+}
+
 /**
  * Identity key for reconciling a block across renders — mirrors the React
  * `key` each block type renders with.
@@ -684,6 +691,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
     isLatestTask = false,
     client = null,
     compact = false,
+    simple = false,
     latestActivity,
     defaultTextExpanded = true,
   }) => {
@@ -1008,6 +1016,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
                       task hydration, a block settling after streaming) apart
                       from per-frame streaming churn inside a block. */}
         {displayBlocks.map((block, blockIndex) => {
+          if (simple && !isBlockVisibleInSimpleChat(block)) return null;
           if (block.type === 'message') {
             // Find if this is a permission request and if it's the first pending one
             const isPermissionRequest = block.message.type === 'permission_request';
@@ -1069,7 +1078,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
                 key={isPrompt ? promptKey : block.message.message_id}
                 data-conversation-block={getBlockMarker(block)}
               >
-                {isPrompt ? (
+                {isPrompt && !simple ? (
                   <>
                     <LeanTurnMetadata
                       metadata={metadataPills}
@@ -1145,7 +1154,8 @@ export const TaskBlock = React.memo<TaskBlockProps>(
         {/* Before the first chain (or after a real boundary), an unrecorded
             event still needs its own disclosure. Contiguous tail activity is
             owned by AgentChain above, including during partial persistence. */}
-        {latestActivity &&
+        {!simple &&
+          latestActivity &&
           runtimeLive &&
           !activityIsRecorded &&
           pendingActivityChainIndex === -1 && (
@@ -1163,7 +1173,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
         )}
 
         {/* Keep latest TODO visible even after completion (Claude parity). */}
-        <StickyTodoRenderer messages={messages} taskStatus={task.status} />
+        {!simple && <StickyTodoRenderer messages={messages} taskStatus={task.status} />}
 
         {/* Show typing indicator whenever the executor may still be live.
                       Marked as a conversation block so its unmount at stream
@@ -1193,7 +1203,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
         )}
 
         {/* Show commit message if available */}
-        {task.git_state.commit_message && (
+        {!simple && task.git_state.commit_message && (
           <div
             style={{
               marginTop: token.sizeUnit * 1.5,
@@ -1214,7 +1224,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
         )}
 
         {/* Show report if available */}
-        {task.report && (
+        {!simple && task.report && (
           <div style={{ marginTop: token.sizeUnit * 1.5 }}>
             <Tag icon={<FileTextOutlined />} color="green">
               Task Report
@@ -1238,7 +1248,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
     );
     return (
       <div data-task-block={task.task_id}>
-        {!promptMessageId && toolDisclosure}
+        {!simple && !promptMessageId && toolDisclosure}
         {taskContent}
         {isAuthorizationRevokedFailure(task) ? (
           <AuthorizationRevokedNotice task={task} />

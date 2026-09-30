@@ -61,8 +61,12 @@ vi.mock('../../hooks/useSharedReactiveSession', () => ({
 }));
 
 vi.mock('../TaskBlock', () => ({
-  TaskBlock: ({ task, onLoadTaskMessages, taskMessagesLoaded }: any) => (
-    <section data-testid={`task-${task.task_id}`} data-continuous="true">
+  TaskBlock: ({ task, onLoadTaskMessages, taskMessagesLoaded, simple }: any) => (
+    <section
+      data-testid={`task-${task.task_id}`}
+      data-continuous="true"
+      data-simple={String(Boolean(simple))}
+    >
       <h2>{task.full_prompt}</h2>
       <button type="button" onClick={() => onLoadTaskMessages(task.task_id)}>
         load tools {task.task_id}
@@ -231,6 +235,27 @@ describe('ConversationView auto-scroll integration', () => {
     render(<ConversationView client={null} sessionId={'session-1' as any} sessionModel="loaded" />);
 
     expect(mockScrollToBottom).toHaveBeenCalledTimes(1);
+  });
+
+  it('forwards conversation-first mode and hides the genealogy banner', () => {
+    const tasks = [makeTask('task-1', 'first task'), makeTask('task-2', 'latest task')];
+    const state = makeState({ loading: false, tasks });
+    mockUseSharedReactiveSession.mockImplementation(() => ({ handle: null, state }));
+    const genealogy = { forked_from_session_id: 'parent-session', fork_point_message_index: 3 };
+
+    const { rerender } = render(
+      <ConversationView client={null} sessionId={'session-1' as any} genealogy={genealogy} />
+    );
+    expect(screen.getByText(/Forked from session/)).toBeInTheDocument();
+
+    rerender(
+      <ConversationView client={null} sessionId={'session-1' as any} genealogy={genealogy} simple />
+    );
+
+    expect(screen.queryByText(/Forked from session/)).not.toBeInTheDocument();
+    for (const task of tasks) {
+      expect(screen.getByTestId(`task-${task.task_id}`)).toHaveAttribute('data-simple', 'true');
+    }
   });
 
   it('re-engages the bottom lock when the session switches', () => {
