@@ -5,6 +5,7 @@ import {
   BranchRepository,
   createDatabaseAsync,
   createTenantScopedDatabaseProxy,
+  encryptApiKey,
   eq,
   GatewayChannelRepository,
   generateId,
@@ -29,6 +30,7 @@ import {
   UsersRepository,
   update,
   userMcpOauthTokens,
+  users,
 } from '@agor/core/db';
 import {
   type Application,
@@ -5818,5 +5820,142 @@ describe('SQLite saved-row OAuth authority', () => {
       grant_generation: 3,
       oauth_access_token: 'sqlite-access-token-2',
     });
+  });
+});
+
+describe('templated OAuth client fields ({{ user.env.X }})', () => {
+  const CLIENT_ID_VAR = 'GOOGLE_FUCHSTRAVELS_CLIENT_ID';
+  const CLIENT_SECRET_VAR = 'GOOGLE_FUCHSTRAVELS_CLIENT_SECRET';
+
+  async function templatedHarness(env: Record<string, string>) {
+    const provider = await createTestProvider();
+    providers.push(provider);
+    const harness = await createHarness(provider, 'per_user');
+    databases.push(harness.rawDb);
+    // Shape of the live repro row: pre-registered Google client whose id and
+    // secret are both user-env templates.
+    await new MCPServerRepository(harness.rawDb).update(harness.server.mcp_server_id, {
+      auth: {
+        type: 'oauth',
+        oauth_mode: 'per_user',
+        oauth_client_id: `{{ user.env.${CLIENT_ID_VAR} }}`,
+        oauth_client_secret: `{{ user.env.${CLIENT_SECRET_VAR} }}`,
+      },
+    });
+    await update(harness.rawDb, users)
+      .set({
+        data: {
+          env_vars: Object.fromEntries(
+            Object.entries(env).map(([key, value]) => [
+              key,
+              { value_encrypted: encryptApiKey(value), scope: 'global' as const },
+            ])
+          ),
+        },
+      })
+      .where(eq(users.user_id, harness.user.user_id))
+      .run();
+    return { provider, harness };
+  }
+
+  it("renders client_id/secret from the initiating user's env through start, exchange, and refresh", async () => {
+    const { provider, harness } = await templatedHarness({
+      [CLIENT_ID_VAR]: 'rendered-client-id',
+      [CLIENT_SECRET_VAR]: 'rendered-client-secret',
+    });
+    const basic = `Basic ${Buffer.from('rendered-client-id:rendered-client-secret').toString('base64')}`;
+
+    const started = (await harness.app
+      .service('mcp-servers/oauth-start')
+      .create({ mcp_server_id: harness.server.mcp_server_id }, paramsFor(harness))) as {
+      success: boolean;
+      authorizationUrl: string;
+    };
+    expect(started.success).toBe(true);
+    const authorizationUrl = new URL(started.authorizationUrl);
+    expect(authorizationUrl.searchParams.get('client_id')).toBe('rendered-client-id');
+    expect(started.authorizationUrl).not.toContain('user.env');
+
+    // Code exchange: the pending flow carries the rendered client.
+    const state = authorizationUrl.searchParams.get('state');
+    expect((await harness.callback(state!)).status).toBe(200);
+    const exchange = provider.requests.filter((entry) => entry.path === '/token');
+    expect(exchange).toHaveLength(1);
+    expect(exchange[0]!.authorization).toBe(basic);
+
+    // The grant stores the rendered client, which is what refresh uses.
+    await expect(
+      new UserMCPOAuthTokenRepository(harness.rawDb).getToken(
+        harness.user.user_id as UserID,
+        harness.server.mcp_server_id as MCPServerID
+      )
+    ).resolves.toMatchObject({
+      oauth_client_id: 'rendered-client-id',
+      oauth_client_secret: 'rendered-client-secret',
+    });
+
+    const refreshed = (await harness.app
+      .service('mcp-servers/oauth-auth-headers')
+      .create({ mcp_server_ids: [harness.server.mcp_server_id], force_refresh: true }, {
+        provider: undefined,
+        user: harness.user,
+        tenant: { tenant_id: 'default', source: 'static' },
+        authentication: { _isServiceAccount: true },
+      } as unknown as AuthenticatedParams)) as {
+      headers: Record<string, { authorization?: string; error?: string }>;
+    };
+    expect(refreshed.headers[harness.server.mcp_server_id]).toEqual({
+      authorization: 'Bearer stale-refreshed-access-token',
+    });
+    const tokenRequests = provider.requests.filter((entry) => entry.path === '/token');
+    expect(tokenRequests).toHaveLength(2);
+    expect(tokenRequests[1]!.authorization).toBe(basic);
+    expect(JSON.stringify(provider.requests)).not.toContain('user.env');
+  });
+
+  it('refuses to start before any provider contact when a referenced variable is missing', async () => {
+    const { provider, harness } = await templatedHarness({
+      [CLIENT_SECRET_VAR]: 'present-secret-value',
+    });
+
+    const started = (await harness.app
+      .service('mcp-servers/oauth-start')
+      .create({ mcp_server_id: harness.server.mcp_server_id }, paramsFor(harness))) as {
+      success: boolean;
+      error: string;
+      recovery?: Record<string, unknown>;
+    };
+    expect(started).toMatchObject({
+      success: false,
+      recovery: {
+        category: 'configuration_required',
+        action: 'configure_client',
+        mcp_server_id: harness.server.mcp_server_id,
+      },
+    });
+    expect(started.error).toContain(CLIENT_ID_VAR);
+    expect(started.error).not.toContain(CLIENT_SECRET_VAR);
+    expect(started.error).not.toContain('present-secret-value');
+    expect(started.recovery?.message).toBe(started.error);
+    expect(provider.requests).toEqual([]);
+  });
+
+  it('/test-oauth reports the missing variable instead of sending the template', async () => {
+    const { provider, harness } = await templatedHarness({});
+
+    const result = (await harness.app.service('mcp-servers/test-oauth').create(
+      {
+        mcp_url: provider.savedMcpUrl,
+        mcp_server_id: harness.server.mcp_server_id,
+      },
+      paramsFor(harness)
+    )) as { success: boolean; error: string; recovery?: Record<string, unknown> };
+    expect(result).toMatchObject({
+      success: false,
+      recovery: { category: 'configuration_required', action: 'configure_client' },
+    });
+    expect(result.error).toContain(CLIENT_ID_VAR);
+    expect(result.error).toContain(CLIENT_SECRET_VAR);
+    expect(provider.requests).toEqual([]);
   });
 });

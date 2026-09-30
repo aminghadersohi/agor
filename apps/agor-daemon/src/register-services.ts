@@ -396,6 +396,11 @@ import {
 } from './utils/mcp-header-secrets.js';
 import { logOAuthAuthorizeBuilt } from './utils/mcp-oauth-authorize-log.js';
 import {
+  hasMCPOAuthClientTemplates,
+  MCPOAuthClientTemplateError,
+  resolveMCPOAuthClientTemplates,
+} from './utils/mcp-oauth-client-templates.js';
+import {
   mcpOAuthConnectClaimsMatchCaller,
   mcpOAuthConnectClaimsMatchDelivery,
   verifyMCPOAuthConnectToken,
@@ -2369,6 +2374,29 @@ export async function registerMCPServices(
     '(3) /.well-known/oauth-authorization-server at MCP origin (RFC 8414), ' +
     '(4) /.well-known/openid-configuration at MCP origin (OIDC).';
 
+  /**
+   * Render `{{ user.env.X }}` in a saved row's OAuth client fields from the
+   * initiating user's env. The daemon's process env never holds user secrets,
+   * so without this the literal template is sent upstream as `client_id` /
+   * `client_secret`. Throws {@link MCPOAuthClientTemplateError} (names the
+   * missing variables, never values) instead of sending an unresolved field.
+   */
+  async function resolveMCPOAuthClientAuthForUser(
+    auth: MCPAuth,
+    userId: string | undefined,
+    tenantId: string | undefined,
+    assertCurrent: (() => void) | undefined
+  ): Promise<MCPAuth> {
+    if (!hasMCPOAuthClientTemplates(auth)) return auth;
+    // No initiating user means no env: fail naming the referenced variables.
+    if (!userId) return resolveMCPOAuthClientTemplates(auth, {});
+    const { resolveUserEnvironment } = await import('@agor/core/config');
+    const userEnv = await runWithinOAuthAuthority(assertCurrent, () =>
+      runInOAuthTenantScope(db, tenantId, () => resolveUserEnvironment(userId as UserID, db))
+    );
+    return resolveMCPOAuthClientTemplates(auth, userEnv);
+  }
+
   async function resolveMCPOAuthRedirectUri(): Promise<string> {
     if (!ctx.mcpOAuthCallbackUrl) {
       throw new PublicBaseUrlNotConfiguredError(
@@ -2574,12 +2602,21 @@ export async function registerMCPServices(
       // The row reloaded in the tenant scope is the only durable authority.
       // Callers may have discovered metadata from a transient form snapshot,
       // but no grant may bind values that differ from the saved definition.
+      // Templated client fields render from the initiating user's env; the
+      // pending flow, code exchange, and persisted grant carry the rendered
+      // values while `savedServerAuthority` keeps the templated row.
+      const clientAuth = await resolveMCPOAuthClientAuthForUser(
+        server.auth,
+        opts.userId,
+        opts.tenantId,
+        assertFlowAuthority
+      );
       effectiveMcpUrl = server.url;
-      effectiveClientId = server.auth.oauth_client_id;
-      effectiveClientSecret = server.auth.oauth_client_secret;
-      effectiveAuthorizationUrlOverride = server.auth.oauth_authorization_url;
-      effectiveTokenUrlOverride = server.auth.oauth_token_url;
-      effectiveScope = server.auth.oauth_scope;
+      effectiveClientId = clientAuth.oauth_client_id;
+      effectiveClientSecret = clientAuth.oauth_client_secret;
+      effectiveAuthorizationUrlOverride = clientAuth.oauth_authorization_url;
+      effectiveTokenUrlOverride = clientAuth.oauth_token_url;
+      effectiveScope = clientAuth.oauth_scope;
       effectiveCompatibilityMode = compatibilityPolicy.mode;
       effectiveDcrMode = server.auth.oauth_dcr_mode;
       effectiveOAuthMode = server.auth.oauth_mode ?? 'per_user';
@@ -2604,6 +2641,27 @@ export async function registerMCPServices(
           oauthMode: effectiveOAuthMode,
         };
       }
+    } else {
+      // An unsaved (inline) probe cannot persist a grant, but its client
+      // fields still reach the provider and get the same rendering.
+      const clientAuth = await resolveMCPOAuthClientAuthForUser(
+        {
+          type: 'oauth',
+          oauth_client_id: effectiveClientId,
+          oauth_client_secret: effectiveClientSecret,
+          oauth_authorization_url: effectiveAuthorizationUrlOverride,
+          oauth_token_url: effectiveTokenUrlOverride,
+          oauth_scope: effectiveScope,
+        },
+        opts.userId,
+        opts.tenantId,
+        assertFlowAuthority
+      );
+      effectiveClientId = clientAuth.oauth_client_id;
+      effectiveClientSecret = clientAuth.oauth_client_secret;
+      effectiveAuthorizationUrlOverride = clientAuth.oauth_authorization_url;
+      effectiveTokenUrlOverride = clientAuth.oauth_token_url;
+      effectiveScope = clientAuth.oauth_scope;
     }
 
     // Local reservations are attempt-aware, so establish identity before
@@ -4630,7 +4688,21 @@ export async function registerMCPServices(
         }
 
         const effectiveMcpUrl = authoritativeServer?.url ?? data.mcp_url;
-        const effectiveAuth = authoritativeServer?.auth;
+        let effectiveAuth = authoritativeServer?.auth;
+        if (effectiveAuth) {
+          try {
+            effectiveAuth = await resolveMCPOAuthClientAuthForUser(
+              effectiveAuth,
+              params?.user?.user_id,
+              tenantIdFromParams(params),
+              assertInitialRequestAuthority
+            );
+          } catch (error) {
+            if (!(error instanceof MCPOAuthClientTemplateError)) throw error;
+            const recovery = classifyMCPAuthRecovery(error, { mcpServerId: data.mcp_server_id });
+            return { success: false, error: recovery.message, recovery };
+          }
+        }
         const compatibilityPolicy = authoritativeServer
           ? await runWithinOAuthAuthority(assertInitialRequestAuthority, () =>
               resolveMCPOAuthCompatibilityPolicy(authoritativeServer)
@@ -5879,12 +5951,20 @@ export async function registerMCPServices(
         }
 
         if (savedServer?.auth?.type === 'oauth') {
+          // Resolve before any provider contact, so a missing variable fails
+          // here with a recovery naming it instead of at the provider.
+          const clientAuth = await resolveMCPOAuthClientAuthForUser(
+            savedServer.auth,
+            userId,
+            tenantId,
+            assertRequestAuthority
+          );
           oauthMode = savedServer.auth.oauth_mode || 'per_user';
-          authorizationUrlOverride = savedServer.auth.oauth_authorization_url;
-          tokenUrlOverride = savedServer.auth.oauth_token_url;
-          clientIdFromConfig = savedServer.auth.oauth_client_id;
-          clientSecretOverride = savedServer.auth.oauth_client_secret;
-          scopeOverride = savedServer.auth.oauth_scope;
+          authorizationUrlOverride = clientAuth.oauth_authorization_url;
+          tokenUrlOverride = clientAuth.oauth_token_url;
+          clientIdFromConfig = clientAuth.oauth_client_id;
+          clientSecretOverride = clientAuth.oauth_client_secret;
+          scopeOverride = clientAuth.oauth_scope;
           const compatibilityPolicy = await runWithinOAuthAuthority(assertRequestAuthority, () =>
             resolveMCPOAuthCompatibilityPolicy(savedServer)
           );

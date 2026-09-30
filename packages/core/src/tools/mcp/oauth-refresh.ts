@@ -9,6 +9,7 @@ import {
   type UserMCPOAuthToken,
   UserMCPOAuthTokenRepository,
 } from '../../db/repositories';
+import { hasTemplateMarker } from '../../mcp/template-patterns';
 import {
   ROTATING_GRANT_OBSERVE_INTERVAL_MS,
   ROTATING_GRANT_OBSERVE_TIMEOUT_MS,
@@ -648,6 +649,16 @@ async function refreshStandalone(
   );
   const clientId = row.oauth_client_id ?? server?.auth?.oauth_client_id;
   if (!clientId) throw new MissingClientIdError();
+  const clientSecret = row.oauth_client_secret ?? server?.auth?.oauth_client_secret;
+  // Grants store the client they were issued to, already rendered. Only a
+  // historical row without one falls back to the saved server, whose fields
+  // may be `{{ user.env.X }}` templates this layer has no env to render —
+  // never send that text to the token endpoint; the user must reconnect.
+  if (hasTemplateMarker(clientId) || hasTemplateMarker(clientSecret)) {
+    throw new MissingClientIdError(
+      'This OAuth grant predates stored client credentials and the server uses templated client fields. Reconnect to refresh it.'
+    );
+  }
   let tokenEndpoint = row.oauth_token_endpoint ?? server?.auth?.oauth_token_url;
   if (!tokenEndpoint && server?.url) tokenEndpoint = inferOAuthTokenUrl(server.url);
   if (!tokenEndpoint) throw new MissingTokenEndpointError();
@@ -668,7 +679,7 @@ async function refreshStandalone(
       tokenEndpoint,
       refreshToken: row.oauth_refresh_token,
       clientId,
-      clientSecret: row.oauth_client_secret ?? server?.auth?.oauth_client_secret,
+      clientSecret,
       resourceUri: row.oauth_resource_uri,
       redirectUri: row.oauth_redirect_uri,
       allowLocalhostHttp: true,
