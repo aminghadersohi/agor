@@ -5,12 +5,18 @@ export function DaemonConnectionAlert({ message }: { message: string }) {
   return <Alert type="error" title={message} showIcon />;
 }
 
-/** Keep raw health-fetch errors (which may contain URLs) out of the alert. */
+/**
+ * Keep raw health-fetch errors (which may contain URLs) out of the alert. The
+ * optional hint is built from the UI's own configured daemon URL, never from a
+ * transport error.
+ */
 export function DaemonConfigurationAlert({
   unsupportedIdentityContract,
+  unreachableDaemonHint,
   onRetry,
 }: {
   unsupportedIdentityContract: boolean;
+  unreachableDaemonHint?: string | null;
   onRetry: () => void;
 }) {
   return (
@@ -24,7 +30,7 @@ export function DaemonConfigurationAlert({
       description={
         unsupportedIdentityContract
           ? 'Deploy compatible Agor UI and daemon versions, then retry.'
-          : 'Please try again.'
+          : (unreachableDaemonHint ?? 'Please try again.')
       }
       action={<Button onClick={onRetry}>Retry</Button>}
       showIcon
