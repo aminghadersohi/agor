@@ -831,6 +831,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       onEditMarkdown: handleEditMarkdownNote,
       canEdit: canEditBoard,
       onOpenSession: onSessionClick,
+      currentUserId,
     });
 
     // Extract zone labels - memoized to only change when labels actually change
