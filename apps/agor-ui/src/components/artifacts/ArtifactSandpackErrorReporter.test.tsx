@@ -51,6 +51,27 @@ afterEach(() => {
 });
 
 describe('ArtifactSandpackErrorReporter', () => {
+  it('reports native static readiness without pretending the provider compiled it', async () => {
+    mock.sandpack.status = 'idle';
+    const view = render(
+      <ArtifactSandpackErrorReporter artifactId="artifact-a" contentHash="revision-a" />
+    );
+    await flush();
+    expect(messages().at(-1)?.compilation_status).toBe('pending');
+    view.rerender(
+      <ArtifactSandpackErrorReporter artifactId="artifact-a" contentHash="revision-a" staticReady />
+    );
+    await flush();
+    expect(messages().at(-1)).toMatchObject({ status: 'idle', compilation_status: 'success' });
+    view.rerender(
+      <ArtifactSandpackErrorReporter artifactId="artifact-a" contentHash="revision-b" />
+    );
+    await flush();
+    expect(messages().at(-1)).toMatchObject({
+      content_hash: 'revision-b',
+      compilation_status: 'pending',
+    });
+  });
   it('requires done, not provider running or connection, to report success', async () => {
     render(<ArtifactSandpackErrorReporter artifactId="artifact-a" contentHash="revision-a" />);
     await flush();
