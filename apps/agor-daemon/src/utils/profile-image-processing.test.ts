@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   PROFILE_IMAGE_CONTENT_TYPE,
   PROFILE_IMAGE_LARGE_SIZE,
+  PROFILE_IMAGE_MAX_BYTES,
   PROFILE_IMAGE_MAX_GALLERY_ITEMS,
   PROFILE_IMAGE_SMALL_SIZE,
   processProfileImage,
@@ -84,6 +85,30 @@ describe('processProfileImage', () => {
     expect(centerPixel[0]).toBeGreaterThan(200);
     expect(centerPixel[1]).toBeLessThan(40);
     expect(centerPixel[2]).toBeLessThan(40);
+  });
+
+  it('accepts uploads larger than the old 5 MB limit and rejects past 25 MB', async () => {
+    expect(PROFILE_IMAGE_MAX_BYTES).toBe(25 * 1024 * 1024);
+    // Incompressible noise PNG so the encoded file really exceeds 5 MB.
+    const width = 1800;
+    const height = 1200;
+    const raw = Buffer.alloc(width * height * 3);
+    let seed = 99;
+    for (let index = 0; index < raw.length; index += 1) {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      raw[index] = (seed >>> 16) & 255;
+    }
+    const large = await sharp(raw, { raw: { width, height, channels: 3 } })
+      .png({ compressionLevel: 0 })
+      .toBuffer();
+    expect(large.byteLength).toBeGreaterThan(5 * 1024 * 1024);
+
+    const result = await processProfileImage(large);
+    expect(result.large.width).toBe(PROFILE_IMAGE_LARGE_SIZE);
+
+    await expect(processProfileImage(Buffer.alloc(PROFILE_IMAGE_MAX_BYTES + 1))).rejects.toThrow(
+      '25 MB or smaller'
+    );
   });
 
   it('rejects unsupported and empty input', async () => {
