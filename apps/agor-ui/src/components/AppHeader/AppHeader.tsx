@@ -14,7 +14,7 @@ import { useRecentBoards } from '../../hooks/useRecentBoards';
 import { useAgorStore } from '../../store/agorStore';
 import { selectBoardById, selectBranchById, selectUserById } from '../../store/selectors';
 import { BoardSwitcher } from '../BoardSwitcher';
-import { BoardTile, getBoardEmoji } from '../BoardTile';
+import { BoardTile, getBoardEmoji, getBoardTeammate } from '../BoardTile';
 import { BrandLogo } from '../BrandLogo';
 import { BrandMark } from '../BrandMark';
 import { ConnectionStatus } from '../ConnectionStatus';
@@ -99,6 +99,7 @@ const RecentBoardPills: React.FC<{
           >
             <BoardTile
               board={board}
+              teammate={getBoardTeammate(board, branchById)}
               emoji={getBoardEmoji(board, branchById)}
               size={30}
               style={{
