@@ -1,7 +1,15 @@
 import type { Board, Branch } from '@agor-live/client';
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { useCyclingProfileImageUrl } from '../ProfileImage/useCyclingProfileImage';
 import { BoardTile, boardSelectFilter, boardSelectOptions, getBoardEmoji } from './BoardTile';
+
+vi.mock('../ProfileImage/useCyclingProfileImage', () => ({ useCyclingProfileImageUrl: vi.fn() }));
+
+beforeEach(() => {
+  vi.mocked(useCyclingProfileImageUrl).mockReset();
+  vi.mocked(useCyclingProfileImageUrl).mockReturnValue(undefined);
+});
 
 const teammateBranch = (emoji: string): Branch =>
   ({ custom_context: { teammate: { kind: 'teammate', emoji } } }) as unknown as Branch;
@@ -41,6 +49,29 @@ describe('BoardTile', () => {
     const { container } = render(<BoardTile />);
     expect(container.querySelector('.anticon')).toBeInTheDocument();
   });
+
+  it('renders the board primary image ahead of its emoji', () => {
+    vi.mocked(useCyclingProfileImageUrl).mockReturnValue('blob:board-image');
+    const { container } = render(
+      <BoardTile board={{ board_id: 'board-1', profile_image_id: 'image-1' } as Board} emoji="🦊" />
+    );
+
+    expect(container.querySelector('img')).toHaveAttribute('src', 'blob:board-image');
+    expect(screen.queryByText('🦊')).not.toBeInTheDocument();
+    expect(useCyclingProfileImageUrl).toHaveBeenCalledWith(
+      { type: 'board', id: 'board-1' },
+      'image-1',
+      'small',
+      true
+    );
+  });
+
+  it('does not read a gallery for a board without a primary image', () => {
+    render(<BoardTile board={{ board_id: 'board-1' } as Board} emoji="🦊" />);
+
+    expect(screen.getByText('🦊')).toBeInTheDocument();
+    expect(useCyclingProfileImageUrl).toHaveBeenCalledWith(undefined, undefined, 'small', false);
+  });
 });
 
 describe('boardSelectOptions', () => {
@@ -50,6 +81,16 @@ describe('boardSelectOptions', () => {
     const opts = boardSelectOptions([board('2', 'Zebra'), board('1', 'Alpha')], branchById);
     expect(opts.map((o) => o.name)).toEqual(['Alpha', 'Zebra']);
     expect(opts.map((o) => o.value)).toEqual(['1', '2']);
+  });
+
+  it('passes each board so its primary image can render', () => {
+    vi.mocked(useCyclingProfileImageUrl).mockReturnValue('blob:board-image');
+    const [opt] = boardSelectOptions(
+      [{ ...board('1', 'Alpha', 'b1'), profile_image_id: 'image-1' } as Board],
+      branchById
+    );
+    const { container } = render(<>{opt.label}</>);
+    expect(container.querySelector('img')).toHaveAttribute('src', 'blob:board-image');
   });
 
   it('renders the assistant emoji for a board that has one', () => {

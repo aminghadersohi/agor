@@ -97,6 +97,7 @@ interface MessageBlockProps {
   isFirstPendingPermission?: boolean; // For sequencing permission requests
   isLatestMessage?: boolean; // Whether this is the most recent message (for pending tool status)
   teammateEmoji?: string; // Emoji override for teammate avatar (replaces tool icon)
+  teammateAvatarUrl?: string; // Authenticated object URL for teammate profile image
   /** Authenticated Feathers client, forwarded to WidgetBlock for inline-form submission. */
   client?: AgorClient | null;
   onPermissionDecision?: (
@@ -216,11 +217,13 @@ function isTaskToolResult(message: Message): boolean {
  */
 function getAgentAvatar({
   teammateEmoji,
+  teammateAvatarUrl,
   agentic_tool,
   isCallback,
   token,
 }: {
   teammateEmoji?: string;
+  teammateAvatarUrl?: string;
   agentic_tool?: string;
   isCallback?: boolean;
   token: ReturnType<typeof theme.useToken>['token'];
@@ -236,8 +239,8 @@ function getAgentAvatar({
       />
     );
   }
-  if (teammateEmoji) {
-    return <AgorAvatar>{teammateEmoji}</AgorAvatar>;
+  if (teammateAvatarUrl || teammateEmoji) {
+    return <AgorAvatar src={teammateAvatarUrl}>{teammateEmoji}</AgorAvatar>;
   }
   if (agentic_tool) {
     return <ToolIcon tool={agentic_tool} size={32} />;
@@ -341,6 +344,7 @@ const MessageBlockInner: React.FC<MessageBlockProps> = ({
   isLatestMessage = false,
   onPermissionDecision,
   teammateEmoji,
+  teammateAvatarUrl,
   client = null,
   onOpenAgenticToolSettings,
   compact = false,
@@ -712,7 +716,13 @@ const MessageBlockInner: React.FC<MessageBlockProps> = ({
           const avatar = isUser ? (
             <UserIdentityAvatar user={currentUser} size={compact ? 32 : 40} />
           ) : (
-            getAgentAvatar({ teammateEmoji, agentic_tool, isCallback, token })
+            getAgentAvatar({
+              teammateEmoji,
+              teammateAvatarUrl,
+              agentic_tool,
+              isCallback,
+              token,
+            })
           );
 
           return (
@@ -868,7 +878,13 @@ const MessageBlockInner: React.FC<MessageBlockProps> = ({
       {/* Response text after tools */}
       {hasTextAfter &&
         (() => {
-          const avatar = getAgentAvatar({ teammateEmoji, agentic_tool, isCallback, token });
+          const avatar = getAgentAvatar({
+            teammateEmoji,
+            teammateAvatarUrl,
+            agentic_tool,
+            isCallback,
+            token,
+          });
 
           return (
             <div style={{ margin: `${token.sizeUnit}px 0` }}>
