@@ -132,19 +132,20 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
               <BoardTile board={board} emoji={getBoardEmoji(board, branchById)} size={36} />
             </span>
             <Flex vertical gap={6} style={{ flex: 1, minWidth: 0 }}>
-              <Text
-                strong={isActive}
-                ellipsis={{
-                  tooltip:
-                    keyboardTooltipBoardId === board.board_id
-                      ? { title: board.name, open: true }
-                      : board.name,
-                }}
-                style={{ flex: 1, minWidth: 0 }}
-                data-board-name
-              >
-                {board.name}
-              </Text>
+              <Tooltip title={board.name} open={keyboardTooltipBoardId === board.board_id}>
+                <Text
+                  strong={isActive}
+                  // Typography measures its hover tooltip lazily. Menu focus is
+                  // owned by the item, so use our measured keyboard tooltip above.
+                  ellipsis={{
+                    tooltip: keyboardTooltipBoardId === board.board_id ? false : board.name,
+                  }}
+                  style={{ flex: 1, minWidth: 0 }}
+                  data-board-name
+                >
+                  {board.name}
+                </Text>
+              </Tooltip>
               <BoardListCounts counts={board} />
             </Flex>
           </Flex>
