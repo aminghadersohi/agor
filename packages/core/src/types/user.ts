@@ -1,6 +1,6 @@
 import type { CodexApprovalPolicy, CodexNetworkAccess, CodexSandboxMode } from './agentic-tool';
 import { type AgenticToolName, DEFAULT_AGENTIC_TOOL_NAME, isAgenticToolName } from './agentic-tool';
-import type { BranchID, SessionID, UserID } from './id';
+import type { ArtifactID, BranchID, SessionID, UserID } from './id';
 import type { OpenCodeConfig } from './opencode-ollama';
 import type { ProfileImageID } from './profile-image';
 import type { ScheduleID } from './schedule';
@@ -503,6 +503,8 @@ export interface UserPreferences {
   home_schedules?: HomeSchedulePreferences;
   /** Lightweight, user-owned groupings of canonical sessions shown on Home. */
   chat_collections?: ChatCollectionPreferences;
+  /** Artifact shortcuts pinned to Home by this user. */
+  home_artifact_ids?: ArtifactID[];
   // Future preferences can be added here
   [key: string]: unknown;
 }
