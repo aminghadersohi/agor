@@ -18,7 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useCanManageBoard } from '../../hooks/useCanManageBoard';
 import { BoardEditModal } from '../BoardEditModal';
 import { BoardListCounts } from '../BoardListCounts';
-import { BoardTile, getBoardEmoji } from '../BoardTile';
+import { BoardTile, getBoardEmoji, getBoardTeammate } from '../BoardTile';
 
 const { Text } = Typography;
 const { useToken } = theme;
@@ -129,7 +129,12 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
         label: (
           <Flex align="center" gap={12} style={{ padding: '6px 0', minWidth: 0 }}>
             <span data-board-list-avatar style={{ display: 'inline-flex', flexShrink: 0 }}>
-              <BoardTile board={board} emoji={getBoardEmoji(board, branchById)} size={36} />
+              <BoardTile
+                board={board}
+                teammate={getBoardTeammate(board, branchById)}
+                emoji={getBoardEmoji(board, branchById)}
+                size={36}
+              />
             </span>
             <Flex vertical gap={6} style={{ flex: 1, minWidth: 0 }}>
               <Tooltip title={board.name} open={keyboardTooltipBoardId === board.board_id}>
@@ -318,6 +323,7 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
               {currentBoard ? (
                 <BoardTile
                   board={currentBoard}
+                  teammate={getBoardTeammate(currentBoard, branchById)}
                   emoji={getBoardEmoji(currentBoard, branchById)}
                   size={28}
                 />
