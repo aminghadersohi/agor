@@ -16,7 +16,7 @@ import {
   UserMCPOAuthTokenRepository,
   UsersRepository,
 } from '@agor/core/db';
-import { GatewayListenerError, getConnector } from '@agor/core/gateway';
+import { DiscordDirectMessageError, GatewayListenerError, getConnector } from '@agor/core/gateway';
 import type {
   GatewayChannel,
   GatewayOutboundMessage,
@@ -401,6 +401,7 @@ function makeGatewayHarness(args: {
     }
   ).usersRepo = { findByEmailForAlignment };
   const outboundRepo = {
+    listDiscordDirectMessageSends: vi.fn(async () => []),
     admitReplySession,
     completeReplyAdmission,
   };
@@ -901,6 +902,44 @@ describe('GatewayService multi-tenant process state', () => {
     }
   );
 
+  it('refuses a transported routeMessage to a DM even for an authorized branch owner', async () => {
+    const sendMessage = vi.fn();
+    const service = new GatewayService(
+      { run: vi.fn() } as never,
+      { service: vi.fn(), get: vi.fn(() => ({ execution: {} })) } as never
+    );
+    const mapping = makeMapping({ thread_id: 'discord:dm:333333333333333333:444444444444444444' });
+    Object.assign(service as unknown as Record<string, unknown>, {
+      durableListenerOwnership: true,
+      sessionRepo: { findById: vi.fn(async () => ({ branch_id: 'branch-1' })) },
+      branchRepo: {
+        findById: vi.fn(async () => ({ branch_id: 'branch-1' })),
+        isOwner: vi.fn(async () => true),
+        resolveUserPermission: vi.fn(async () => 'all'),
+      },
+      threadMapRepo: {
+        findBySession: vi.fn(async () => mapping),
+        findBySessionAmbiguityAware: vi.fn(async () => ({ mapping, ambiguous: false })),
+        findByChannelAndThread: vi.fn(async () => null),
+      },
+      channelRepo: {
+        findById: vi.fn(async () => ({
+          ...slackChannel,
+          channel_type: 'discord',
+          config: { direct_messages_enabled: true },
+        })),
+      },
+    });
+    vi.mocked(getConnector).mockReturnValue({ sendMessage, channelType: 'discord' });
+    await expect(
+      service.routeMessage({ session_id: mapping.session_id, message: 'refuse' }, {
+        provider: 'rest',
+        user: { user_id: 'owner', role: 'admin' },
+      } as never)
+    ).resolves.toEqual({ routed: false });
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
   it('does not use the local listener cache as PostgreSQL outbound authority', async () => {
     const sendMessage = vi.fn(async () => 'sent-1');
     const service = new GatewayService({ run: vi.fn() } as never, { service: vi.fn() } as never);
@@ -1395,7 +1434,7 @@ describe('GatewayService Slack thread catch-up', () => {
       expect.objectContaining({
         custom_context: expect.objectContaining({ gateway_source: expect.any(Object) }),
       }),
-      { _agenticConfigResolved: true }
+      { _agenticConfigResolved: true, _mcpSelectionExplicit: false }
     );
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -3120,6 +3159,90 @@ describe('GatewayService Discord beta routing', () => {
     },
   });
 
+  const validDm = () => ({
+    ...validDiscordInbound(),
+    thread_id: 'discord:dm:923456789012345678:423456789012345678',
+    metadata: {
+      discord_direct_message: true,
+      discord_channel_id: '923456789012345678',
+      discord_author_id: '423456789012345678',
+      discord_bot_user_id: '123456789012345678',
+      discord_message_id: '523456789012345678',
+      discord_role_ids: [],
+      discord_is_thread: false,
+    } as Record<string, unknown>,
+  });
+  const dmChannel = {
+    ...discordChannel,
+    config: { ...discordChannel.config, direct_messages_enabled: true },
+  } as GatewayChannel;
+
+  it.each([
+    { discord_direct_message: undefined },
+    { discord_direct_message: 'true' },
+    { discord_guild_id: '223456789012345678' },
+    { discord_has_mention: true },
+    { discord_reply_to_message_id: '523456789012345678' },
+    { discord_author_id: '623456789012345678' },
+  ])('rejects contradictory or missing DM authority: %j', async (patch) => {
+    const h = makeGatewayHarness({ channel: dmChannel });
+    const inbound = validDm();
+    inbound.metadata = { ...inbound.metadata, ...patch };
+    await expect(h.service.create(inbound)).resolves.toMatchObject({ success: false });
+    expect(h.threadMapRepo.findByChannelAndThread).not.toHaveBeenCalled();
+    expect(h.promptCreate).not.toHaveBeenCalled();
+  });
+
+  it('ignores a DM when the switch is off', async () => {
+    const h = makeGatewayHarness({ channel: discordChannel });
+    await expect(h.service.create(validDm())).resolves.toMatchObject({ success: false });
+    expect(h.sessionsCreate).not.toHaveBeenCalled();
+  });
+
+  it('keeps the DM key, skips seeds and history, and rejects unmapped aligned identities', async () => {
+    const connector = { sendMessage: vi.fn(), fetchProviderHistory: vi.fn() };
+    vi.mocked(getConnector).mockReturnValue(connector as never);
+    const h = makeGatewayHarness({ channel: dmChannel, connector });
+    await expect(h.service.create(validDm())).resolves.toMatchObject({ success: true });
+    expect(h.threadMapRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({ thread_id: validDm().thread_id })
+    );
+    expect(h.outboundRepo.admitReplySession).not.toHaveBeenCalled();
+    expect(connector.fetchProviderHistory).not.toHaveBeenCalled();
+    const aligned = makeGatewayHarness({
+      channel: {
+        ...dmChannel,
+        config: { ...dmChannel.config, align_discord_users: true, user_map: {} },
+      } as GatewayChannel,
+    });
+    await expect(aligned.service.create(validDm())).resolves.toMatchObject({ success: false });
+    expect(aligned.promptCreate).not.toHaveBeenCalled();
+  });
+
+  it('refuses direct DM routes but echoes committed Agor prompts except callback prompts', async () => {
+    const connector = { sendMessage: vi.fn(async () => undefined) };
+    vi.mocked(getConnector).mockReturnValue(connector as never);
+    const h = makeGatewayHarness({
+      channel: dmChannel,
+      existingMapping: makeMapping({ channel_id: dmChannel.id, thread_id: validDm().thread_id }),
+      connector,
+    });
+    const route = { session_id: 'sess-1', message: '[Ana]: hello', metadata: { source: 'agor' } };
+    await expect(h.service.routeMessage(route)).resolves.toEqual({ routed: false });
+    expect(connector.sendMessage).not.toHaveBeenCalled();
+    h.service.routeMessageAfterCommit(route, { tenant: { tenant_id: 'tenant-channel' } });
+    await vi.waitFor(() => expect(connector.sendMessage).toHaveBeenCalledOnce());
+    h.service.routeMessageAfterCommit(
+      {
+        ...route,
+        metadata: { ...route.metadata, is_agor_callback: true },
+      },
+      { tenant: { tenant_id: 'tenant-channel' } }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(connector.sendMessage).toHaveBeenCalledOnce();
+  });
+
   const discordInboundFiles = [
     {
       id: '623456789012345678',
@@ -4147,6 +4270,30 @@ describe('GatewayService Discord beta routing', () => {
     });
   });
 
+  it.each([
+    'discord_direct_messages_disabled',
+    'discord_dm_target_not_member',
+    'discord_dm_unreachable',
+  ] as const)('preserves %s through emit without recording or retrying', async (code) => {
+    const { service } = makeGatewayHarness({ channel: discordChannel });
+    const outboundRepo = { recordSend: vi.fn() };
+    (service as unknown as { outboundRepo: unknown }).outboundRepo = outboundRepo;
+    const error = new DiscordDirectMessageError(code, 403);
+    const sendDirectMessage = vi.fn().mockRejectedValue(error);
+    vi.mocked(getConnector).mockReturnValue({ sendDirectMessage } as never);
+    await expect(
+      service.emitMessage({
+        gatewayChannelId: discordChannel.id,
+        target: 'user:444444444444444444',
+        message: 'private update',
+        emittedByUserId: user.user_id as UserID,
+        userRole: 'admin',
+      })
+    ).rejects.toBe(error);
+    expect(sendDirectMessage).toHaveBeenCalledOnce();
+    expect(outboundRepo.recordSend).not.toHaveBeenCalled();
+  });
+
   it('rejects Discord threadTs proactive sends before connector admission', async () => {
     const { service } = makeGatewayHarness({ channel: discordChannel });
     vi.mocked(getConnector).mockReturnValue({ sendDirectMessage: vi.fn() } as never);
@@ -4159,7 +4306,7 @@ describe('GatewayService Discord beta routing', () => {
         emittedByUserId: user.user_id as UserID,
         userRole: 'admin',
       })
-    ).rejects.toThrow('fresh channel:<snowflake> seed');
+    ).rejects.toThrow('does not accept thread targets');
   });
 });
 
@@ -4442,6 +4589,7 @@ describe('GatewayService outbound emit session branch binding', () => {
         message: { id: 'out-1', ...data },
         role: 'thread_seed',
       })),
+      listDiscordDirectMessageSends: vi.fn(async () => []),
       admitReplySession: vi.fn(async () => null),
       completeReplyAdmission: vi.fn(async () => undefined),
     };

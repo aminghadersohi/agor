@@ -517,6 +517,7 @@ const MCPServerEditModalForIdentity: React.FC<MCPServerEditModalProps> = ({
             offeredTransports={offeredTransports}
             offeredScopes={offeredScopes}
             mode="edit"
+            savedOwnership={server?.owner_user_id ? 'private' : 'shared'}
             transport={transport}
             onTransportChange={setTransport}
             authType={authType}

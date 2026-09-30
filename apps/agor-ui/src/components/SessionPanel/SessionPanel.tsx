@@ -43,6 +43,7 @@ import {
   Badge,
   Button,
   Dropdown,
+  Flex,
   Input,
   Modal,
   Space,
@@ -84,11 +85,12 @@ import { AgentSelectionGrid } from '../AgentSelectionGrid/AgentSelectionGrid';
 import { AutocompleteTextarea } from '../AutocompleteTextarea';
 import { FileUpload } from '../FileUpload';
 import { ForkSpawnModal } from '../ForkSpawnModal/ForkSpawnModal';
+import { getSessionStatusLabel } from '../HomePage/StatusDot';
 import type { ModelConfig } from '../ModelSelector';
-import { CreatedByTag } from '../metadata';
 import { getUrlDisplayLabel } from '../Pill/url-helpers';
 import { Tag } from '../Tag';
 import { ToolIcon } from '../ToolIcon';
+import { UserIdentityAvatar } from '../UserIdentityAvatar';
 import {
   buildPromptWithAttachments,
   getComposerAttachmentFailureMessage,
@@ -1420,6 +1422,16 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     }
   };
 
+  const creator =
+    session.created_by && session.created_by !== currentUserId
+      ? userById.get(session.created_by)
+      : undefined;
+  const creatorName = creator
+    ? creator.name || creator.email.split('@')[0]
+    : session.created_by === 'anonymous'
+      ? 'Anonymous'
+      : 'Unknown user';
+
   const getStatusColor = () => {
     switch (session.status) {
       case 'running':
@@ -1511,14 +1523,22 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       <div
         style={{
           flexShrink: 0,
-          padding: `${token.sizeUnit * 3}px ${token.sizeUnit * 6}px`,
+          padding: `${token.paddingSM}px ${token.padding}px`,
           borderBottom: `1px solid ${token.colorBorder}`,
           background: token.colorBgContainer,
         }}
       >
         {/* Row 1: icon + title + badge + actions, center-aligned */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ display: 'flex', gap: 12, alignItems: 'center', flex: 1, minWidth: 0 }}>
+          <div
+            style={{
+              display: 'flex',
+              gap: token.marginXS,
+              alignItems: 'center',
+              flex: 1,
+              minWidth: 0,
+            }}
+          >
             {/* Mobile: a full-screen session reads as a dismissible overlay, so a
                 leading Close (X) is the right metaphor. Desktop keeps its
                 trailing Close on the right (below). */}
@@ -1534,7 +1554,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
               </Tooltip>
             )}
             <div style={{ flexShrink: 0 }}>
-              <ToolIcon tool={session.agentic_tool} size={40} />
+              <ToolIcon tool={session.agentic_tool} size={24} />
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               {editingTitle ? (
@@ -1554,7 +1574,11 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
                   }}
                   placeholder="Untitled session"
                   variant="borderless"
-                  style={{ fontSize: 18, fontWeight: 600, padding: 0 }}
+                  style={{
+                    fontSize: token.fontSizeLG,
+                    fontWeight: token.fontWeightStrong,
+                    padding: 0,
+                  }}
                 />
               ) : (
                 <Tooltip title="Click to rename">
@@ -1582,7 +1606,10 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
                   >
                     <Typography.Text
                       strong
-                      style={{ fontSize: 18, ...getSessionTitleStyles(isMobileShell ? 1 : 2) }}
+                      style={{
+                        fontSize: token.fontSizeLG,
+                        ...getSessionTitleStyles(isMobileShell ? 1 : 2),
+                      }}
                     >
                       {session.title || session.description
                         ? getSessionDisplayTitle(session, { includeAgentFallback: false })
@@ -1600,28 +1627,38 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
                   </button>
                 </Tooltip>
               )}
-              <Badge status={getStatusColor()} text={session.status.toUpperCase()} />
-              {isFrontDesk && (
-                <Tooltip title="Messages addressed to this teammate by name reach this session">
-                  <Tag
-                    color="gold"
-                    icon={<PushpinFilled />}
-                    style={{ marginLeft: token.sizeUnit * 2 }}
-                  >
-                    Front desk
-                  </Tag>
-                </Tooltip>
-              )}
-              {session.created_by && (
-                <div style={{ marginTop: token.sizeUnit }}>
-                  <CreatedByTag
-                    createdBy={session.created_by}
-                    currentUserId={currentUserId}
-                    userById={userById}
-                    prefix="Created by"
-                  />
-                </div>
-              )}
+              <Flex align="center" gap={token.marginXXS} wrap>
+                <Badge status={getStatusColor()} />
+                <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                  {getSessionStatusLabel(session.status)}
+                </Typography.Text>
+                {isFrontDesk && (
+                  <Tooltip title="Messages addressed to this teammate by name reach this session">
+                    <Tag
+                      color="gold"
+                      icon={<PushpinFilled />}
+                      style={{ marginLeft: token.sizeUnit * 2 }}
+                    >
+                      Front desk
+                    </Tag>
+                  </Tooltip>
+                )}
+                {session.created_by && session.created_by !== currentUserId && (
+                  <>
+                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                      ·
+                    </Typography.Text>
+                    <Tooltip title={`Created by ${creatorName}`}>
+                      <Flex align="center" gap={token.marginXXS}>
+                        <UserIdentityAvatar user={creator} size={16} style={{ flexShrink: 0 }} />
+                        <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                          {creatorName}
+                        </Typography.Text>
+                      </Flex>
+                    </Tooltip>
+                  </>
+                )}
+              </Flex>
             </div>
           </div>
           <Space size={4}>

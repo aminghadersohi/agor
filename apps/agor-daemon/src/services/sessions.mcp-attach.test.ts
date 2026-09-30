@@ -2,23 +2,26 @@ import { OpenCodeTool } from '@agor/agentic-tool-opencode/runtime';
 import type { AgorConfig } from '@agor/core/config';
 import {
   BranchRepository,
+  createTenantScopedDatabaseProxy,
   type Database,
+  EntityNotFoundError,
   MCPServerRepository,
   RepoRepository,
+  runWithTenantDatabaseScope,
   SessionMCPServerRepository,
   SessionRepository,
-  type TenantScopeAwareDatabase,
   UsersRepository,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
 import { BadRequest, Forbidden, NotFound } from '@agor/core/feathers';
 import { getMcpServersForSession, resolveEffectiveSessionMcpServers } from '@agor/core/mcp';
 import { resolveSessionMcpServerIds } from '@agor/core/sessions';
+import type { CreateSessionInput } from '@agor/core/types';
 import { SessionStatus } from '@agor/core/types';
-import { describe, expect, vi } from 'vitest';
+import { afterEach, describe, expect, vi } from 'vitest';
 import { dbTest } from '../../../../packages/core/src/db/test-helpers';
 import { generateId } from '../../../../packages/core/src/lib/ids';
-import { SessionsService } from './sessions';
+import { type SessionParams, SessionsService } from './sessions';
 
 // Regression coverage for #2629: the create-time MCP selection was persisted by
 // a best-effort follow-up loop that could silently drop servers. It now attaches
@@ -38,6 +41,15 @@ function appStub(events: EmittedEvent[] = []): Application {
       emit: (event: string, data: unknown) => events.push({ path, event, data }),
     }),
   } as unknown as Application;
+}
+
+function createService(db: Database, events: EmittedEvent[] = []) {
+  const scopedDb = createTenantScopedDatabaseProxy(db, { requireScope: true });
+  const service = new SessionsService(scopedDb, appStub(events));
+  return {
+    create: (input: CreateSessionInput, params?: SessionParams) =>
+      runWithTenantDatabaseScope(scopedDb, 'static', () => service.create(input, params)),
+  };
 }
 
 async function fixture(db: Database) {
@@ -76,8 +88,8 @@ async function fixture(db: Database) {
   return { user, branch, servers, sharedServer };
 }
 
-// dbTest supplies an isolated raw SQLite fixture; guarded tenant boundaries have
-// dedicated service tests. The service constructor uses the production handle type.
+afterEach(() => vi.restoreAllMocks());
+
 describe('SessionsService create-time MCP attachment', () => {
   dbTest(
     'explicit [] survives persistence and the production runtime set without global/user/branch fallback',
@@ -93,7 +105,10 @@ describe('SessionsService create-time MCP attachment', () => {
         owner_user_id: user.user_id,
         auth: { type: 'oauth', oauth_mode: 'per_user' },
       });
-      const service = new SessionsService(db as unknown as TenantScopeAwareDatabase, appStub());
+      const scopedDb = createTenantScopedDatabaseProxy(db, { requireScope: true });
+      const service = new SessionsService(scopedDb, appStub());
+      const inScope = <T>(fn: () => Promise<T>) =>
+        runWithTenantDatabaseScope(scopedDb, 'static', fn);
       const base = {
         branch_id: branch.branch_id,
         created_by: user.user_id,
@@ -105,9 +120,11 @@ describe('SessionsService create-time MCP attachment', () => {
         branch: { mcp_server_ids: [gmail.mcp_server_id] },
         user: { default_mcp_server_ids: [gmail.mcp_server_id] },
       });
-      const created = await service.create({ ...base, mcpServerIds: explicit }, {
-        _agenticConfigResolved: true,
-      } as never);
+      const created = await inScope(() =>
+        service.create({ ...base, mcpServerIds: explicit }, {
+          _agenticConfigResolved: true,
+        } as never)
+      );
       const stored = await new SessionRepository(db).findById(created.session_id);
       expect(stored?.mcp_selection_explicit).toBe(true);
       const links = new SessionMCPServerRepository(db);
@@ -154,9 +171,20 @@ describe('SessionsService create-time MCP attachment', () => {
       ).toEqual([gmail]);
       expect(global).not.toHaveBeenCalled();
       await expect(
-        service.patch(created.session_id, { mcp_selection_explicit: false })
+        inScope(() => service.patch(created.session_id, { mcp_selection_explicit: false }))
       ).rejects.toThrow('mcp_selection_explicit is server-managed');
-      const omitted = await service.create(base, { _agenticConfigResolved: true } as never);
+      // Genealogical children skip fresh defaults with an empty list; only the
+      // trusted marker decides whether that selection is explicit.
+      const inheritedChild = await inScope(() =>
+        service.create({ ...base, mcpServerIds: [] }, {
+          _agenticConfigResolved: true,
+          _mcpSelectionExplicit: false,
+        } as never)
+      );
+      expect(inheritedChild.mcp_selection_explicit).toBeUndefined();
+      const omitted = await inScope(() =>
+        service.create(base, { _agenticConfigResolved: true } as never)
+      );
       expect(omitted.mcp_selection_explicit).toBeUndefined();
       expect(await resolveEffectiveSessionMcpServers(omitted, [], global, user.user_id)).toEqual([
         gmail,
@@ -168,10 +196,129 @@ describe('SessionsService create-time MCP attachment', () => {
     }
   );
 
+  dbTest(
+    'default → delete → create keeps valid defaults and warns without rolling back',
+    async ({ db }) => {
+      const { user, branch, servers, sharedServer } = await fixture(db);
+      const removed = await servers.create({
+        name: 'removed-default',
+        transport: 'stdio',
+        command: 'node',
+        scope: 'session',
+        source: 'user',
+        enabled: true,
+      });
+      await new BranchRepository(db).update(branch.branch_id, {
+        mcp_server_ids: [sharedServer.mcp_server_id, removed.mcp_server_id],
+      });
+      await servers.delete(removed.mcp_server_id);
+      const events: EmittedEvent[] = [];
+      const session = await createService(db, events).create(
+        {
+          branch_id: branch.branch_id,
+          created_by: user.user_id,
+          agentic_tool: 'claude-code',
+          status: SessionStatus.IDLE,
+        },
+        { _agenticConfigResolved: true } as never
+      );
+      expect(
+        (await new SessionMCPServerRepository(db).listServers(session.session_id)).map(
+          (server) => server.mcp_server_id
+        )
+      ).toEqual([sharedServer.mcp_server_id]);
+      expect(session).toMatchObject({ mcp_defaults_skipped: 1 });
+      expect(events).toHaveLength(1);
+      expect(await new SessionRepository(db).findById(session.session_id)).not.toHaveProperty(
+        'mcp_defaults_skipped'
+      );
+    }
+  );
+
+  dbTest(
+    'user defaults inherit; an all-missing branch does not fall through to user defaults',
+    async ({ db }) => {
+      const scopedDb = createTenantScopedDatabaseProxy(db, { requireScope: true });
+      await runWithTenantDatabaseScope(scopedDb, 'static', async (scoped) => {
+        const { user, branch, sharedServer } = await fixture(scoped);
+        const missing = generateId();
+        await new UsersRepository(scoped).update(user.user_id, {
+          default_mcp_server_ids: [sharedServer.mcp_server_id, missing],
+        });
+        const service = new SessionsService(scopedDb, appStub());
+        const input = {
+          branch_id: branch.branch_id,
+          created_by: user.user_id,
+          agentic_tool: 'claude-code',
+          status: SessionStatus.IDLE,
+        } as const;
+        const inherited = await service.create(input, { _agenticConfigResolved: true } as never);
+        expect(inherited.mcp_defaults_skipped).toBe(1);
+        expect(
+          await new SessionMCPServerRepository(scoped).listServers(inherited.session_id)
+        ).toHaveLength(1);
+        await new BranchRepository(scoped).update(branch.branch_id, { mcp_server_ids: [missing] });
+        const allMissing = await service.create(input, { _agenticConfigResolved: true } as never);
+        expect(allMissing.mcp_defaults_skipped).toBe(1);
+        expect(
+          await new SessionMCPServerRepository(scoped).listServers(allMissing.session_id)
+        ).toEqual([]);
+        for (const explicit of [[], [sharedServer.mcp_server_id]]) {
+          const overridden = await service.create({ ...input, mcpServerIds: explicit }, {
+            _agenticConfigResolved: true,
+          } as never);
+          expect(overridden.mcp_defaults_skipped).toBeUndefined();
+          expect(
+            (await new SessionMCPServerRepository(scoped).listServers(overridden.session_id)).map(
+              (server) => server.mcp_server_id
+            )
+          ).toEqual(explicit);
+        }
+      });
+    }
+  );
+
+  dbTest(
+    'does not suppress missing sessions, permission, malformed defaults, or infrastructure failures',
+    async ({ db }) => {
+      const { user, branch, sharedServer } = await fixture(db);
+      await new BranchRepository(db).update(branch.branch_id, {
+        mcp_server_ids: [sharedServer.mcp_server_id],
+      });
+      const events: EmittedEvent[] = [];
+      const service = createService(db, events);
+      const input = {
+        branch_id: branch.branch_id,
+        created_by: user.user_id,
+        agentic_tool: 'claude-code',
+        status: SessionStatus.IDLE,
+      } as const;
+      for (const failure of [
+        new EntityNotFoundError('Session', generateId()),
+        new Forbidden('Denied'),
+        new Error('database unavailable'),
+      ]) {
+        const add = vi
+          .spyOn(SessionMCPServerRepository.prototype, 'addServer')
+          .mockRejectedValueOnce(failure);
+        await expect(service.create(input, { _agenticConfigResolved: true } as never)).rejects.toBe(
+          failure
+        );
+        add.mockRestore();
+        expect(await new SessionRepository(db).findAll()).toEqual([]);
+        expect(events).toEqual([]);
+      }
+      await new BranchRepository(db).update(branch.branch_id, { mcp_server_ids: [' '] });
+      await expect(
+        service.create(input, { _agenticConfigResolved: true } as never)
+      ).rejects.toBeInstanceOf(BadRequest);
+    }
+  );
+
   dbTest('deduplicates explicit mcpServerIds for persistence and events', async ({ db }) => {
     const { user, branch, sharedServer } = await fixture(db);
     const events: EmittedEvent[] = [];
-    const service = new SessionsService(db as unknown as TenantScopeAwareDatabase, appStub(events));
+    const service = createService(db, events);
 
     const session = await service.create(
       {
@@ -179,7 +326,11 @@ describe('SessionsService create-time MCP attachment', () => {
         created_by: user.user_id,
         agentic_tool: 'claude-code',
         status: SessionStatus.IDLE,
-        mcpServerIds: [sharedServer.mcp_server_id, sharedServer.mcp_server_id],
+        mcpServerIds: [
+          sharedServer.mcp_server_id,
+          sharedServer.mcp_server_id,
+          sharedServer.mcp_server_id.replaceAll('-', '').slice(0, 31),
+        ],
       },
       { _agenticConfigResolved: true } as never
     );
@@ -200,7 +351,7 @@ describe('SessionsService create-time MCP attachment', () => {
   });
 
   dbTest('rejects malformed mcpServerIds as typed bad requests', async ({ db }) => {
-    const service = new SessionsService(db as unknown as TenantScopeAwareDatabase, appStub());
+    const service = createService(db);
     const base = {
       branch_id: generateId(),
       created_by: generateId(),
@@ -240,33 +391,42 @@ describe('SessionsService create-time MCP attachment', () => {
       owner_user_id: otherUser.user_id,
     });
     const events: EmittedEvent[] = [];
-    const service = new SessionsService(db as unknown as TenantScopeAwareDatabase, appStub(events));
+    const service = createService(db, events);
 
-    await expect(
-      service.create(
-        {
-          branch_id: branch.branch_id,
-          created_by: user.user_id,
-          agentic_tool: 'claude-code',
-          status: SessionStatus.IDLE,
-          mcpServerIds: [privateServer.mcp_server_id],
-        },
-        { _agenticConfigResolved: true } as never
-      )
-    ).rejects.toMatchObject({
-      name: Forbidden.name,
-      code: 403,
-      message: 'That MCP server is private to another user',
+    await new BranchRepository(db).update(branch.branch_id, {
+      mcp_server_ids: [privateServer.mcp_server_id],
     });
+    for (const mcpServerIds of [
+      [privateServer.mcp_server_id],
+      [privateServer.mcp_server_id.replaceAll('-', '').slice(0, 31)],
+      undefined,
+    ]) {
+      await expect(
+        service.create(
+          {
+            branch_id: branch.branch_id,
+            created_by: user.user_id,
+            agentic_tool: 'claude-code',
+            status: SessionStatus.IDLE,
+            mcpServerIds,
+          },
+          { _agenticConfigResolved: true } as never
+        )
+      ).rejects.toMatchObject({
+        name: Forbidden.name,
+        code: 403,
+        message: 'That MCP server is private to another user',
+      });
 
-    await expect(new SessionRepository(db).findAll()).resolves.toHaveLength(0);
-    expect(events).toEqual([]);
+      await expect(new SessionRepository(db).findAll()).resolves.toHaveLength(0);
+      expect(events).toEqual([]);
+    }
   });
 
   dbTest('maps a missing server to NotFound and rolls the session back', async ({ db }) => {
-    const { user, branch } = await fixture(db);
+    const { user, branch, sharedServer } = await fixture(db);
     const events: EmittedEvent[] = [];
-    const service = new SessionsService(db as unknown as TenantScopeAwareDatabase, appStub(events));
+    const service = createService(db, events);
 
     await expect(
       service.create(
@@ -275,14 +435,14 @@ describe('SessionsService create-time MCP attachment', () => {
           created_by: user.user_id,
           agentic_tool: 'claude-code',
           status: SessionStatus.IDLE,
-          mcpServerIds: [generateId()],
+          mcpServerIds: [sharedServer.mcp_server_id, generateId()],
         },
         { _agenticConfigResolved: true } as never
       )
     ).rejects.toMatchObject({
       name: NotFound.name,
       code: 404,
-      message: 'That MCP server was not found',
+      message: expect.stringContaining('Remove the unavailable selection'),
     });
 
     await expect(new SessionRepository(db).findAll()).resolves.toHaveLength(0);

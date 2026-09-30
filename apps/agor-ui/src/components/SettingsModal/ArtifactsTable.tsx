@@ -5,6 +5,7 @@ import type {
   ArtifactInteractionConfig,
   Board,
   Branch,
+  User,
 } from '@agor-live/client';
 import { artifactFullscreenPath, shortId } from '@agor-live/client';
 import { AimOutlined, DeleteOutlined, EditOutlined, ExportOutlined } from '@ant-design/icons';
@@ -16,12 +17,10 @@ import {
   Input,
   Popconfirm,
   Select,
-  Space,
   Spin,
   Tag,
   Tooltip,
   Typography,
-  theme,
 } from 'antd';
 import type { CSSProperties } from 'react';
 import { useCallback, useMemo, useRef, useState } from 'react';
@@ -36,6 +35,7 @@ import { AdaptiveSettingsModal } from './AdaptiveSettingsModal';
 import { ResponsiveSettingsHeader } from './ResponsiveSettingsHeader';
 import { ResponsiveTable } from './ResponsiveTable';
 import { SettingsActionGroup } from './SettingsActionGroup';
+import { SettingsIdentity } from './SettingsIdentity';
 
 interface ArtifactsTableProps {
   /** Loads the edited artifact's declared bindings, which the list payload omits. */
@@ -43,6 +43,7 @@ interface ArtifactsTableProps {
   artifactById: Map<string, Artifact>;
   branchById: Map<string, Branch>;
   boardById: Map<string, Board>;
+  userById: Map<string, User>;
   onUpdate?: (artifactId: string, updates: Partial<Artifact>) => void;
   onDelete?: (artifactId: string) => void;
   /** Close the parent Settings modal so the canvas isn't obscured by it
@@ -73,6 +74,7 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
   artifactById,
   branchById,
   boardById,
+  userById,
   onUpdate,
   onDelete,
   onClose,
@@ -83,7 +85,6 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
   const [bindings, setBindings] = useState<BindingsState | null>(null);
   const bindingsRequestRef = useRef(0);
   const [form] = Form.useForm();
-  const { token } = theme.useToken();
 
   // Reuses the `artifactById` prop so we don't read the same data via
   // both props and context. Only goToArtifact is used from this table.
@@ -159,37 +160,58 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
 
   const columns = [
     {
-      title: 'Name',
+      title: 'Artifact',
       dataIndex: 'name',
       key: 'name',
-      width: '38%',
-      render: (name: string, artifact: Artifact) => {
-        const displayName = name || shortId(artifact.artifact_id);
+      render: (name: string, artifact: Artifact) => (
+        <SettingsIdentity
+          name={name || shortId(artifact.artifact_id)}
+          query={searchTerm}
+          description={artifact.description}
+          metadata={
+            <Tag color={templateColors[artifact.template] || 'default'}>
+              <HighlightMatch text={artifact.template} query={searchTerm} />
+            </Tag>
+          }
+        />
+      ),
+    },
+    {
+      title: 'Board',
+      key: 'board',
+      width: 140,
+      render: (_: unknown, artifact: Artifact) => {
+        const board = boardById.get(artifact.board_id);
+        const emoji = board ? getBoardEmoji(board, branchById) : undefined;
+        const label = board ? `${emoji ? `${emoji} ` : ''}${board.name}` : 'Unavailable board';
         return (
-          <Space orientation="vertical" size={0} style={{ width: '100%' }}>
-            <Typography.Text strong ellipsis={{ tooltip: displayName }} style={artifactTextStyle}>
-              <HighlightMatch text={displayName} query={searchTerm} />
-            </Typography.Text>
-            {artifact.description && (
-              <Typography.Text
-                type="secondary"
-                ellipsis={{ tooltip: artifact.description }}
-                style={{ ...artifactTextStyle, fontSize: token.fontSizeSM }}
-              >
-                <HighlightMatch text={artifact.description} query={searchTerm} />
-              </Typography.Text>
-            )}
-            <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-              Created {new Date(artifact.created_at).toLocaleDateString()}
-            </Typography.Text>
-          </Space>
+          <Typography.Text ellipsis={{ tooltip: label }} style={artifactTextStyle}>
+            <HighlightMatch text={label} query={searchTerm} />
+          </Typography.Text>
         );
       },
     },
     {
-      title: 'Status',
+      title: 'Owner',
+      key: 'owner',
+      width: 140,
+      render: (_: unknown, artifact: Artifact) => {
+        // The artifact service authorizes its creator as owner. Resolve only
+        // from the existing authorized directory; never fetch identities per row.
+        const user = artifact.created_by ? userById.get(artifact.created_by) : undefined;
+        const label =
+          user?.name || user?.email || (artifact.created_by ? 'Unavailable user' : 'Not recorded');
+        return (
+          <Typography.Text ellipsis={{ tooltip: label }} style={artifactTextStyle}>
+            <HighlightMatch text={label} query={searchTerm} />
+          </Typography.Text>
+        );
+      },
+    },
+    {
+      title: 'Build',
       key: 'status',
-      width: 150,
+      width: 100,
       render: (_: unknown, artifact: Artifact) => {
         const map: Record<
           string,
@@ -201,55 +223,14 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
           unknown: { status: 'default', text: 'Unknown' },
         };
         const info = map[artifact.build_status] || map.unknown;
-        return (
-          <Space orientation="vertical" size={0}>
-            <Badge status={info.status} text={info.text} />
-            <Tag
-              color={templateColors[artifact.template] || 'default'}
-              style={{ marginInlineEnd: 0 }}
-            >
-              <HighlightMatch text={artifact.template} query={searchTerm} />
-            </Tag>
-          </Space>
-        );
-      },
-    },
-    {
-      title: 'Location',
-      key: 'location',
-      width: '32%',
-      render: (_: unknown, artifact: Artifact) => {
-        const branch = artifact.branch_id ? branchById.get(artifact.branch_id) : undefined;
-        const branchText = artifact.branch_id ? branch?.name || shortId(artifact.branch_id) : '—';
-        const board = boardById.get(artifact.board_id);
-        const boardEmoji = board ? getBoardEmoji(board, branchById) : undefined;
-        const boardText = board
-          ? `${boardEmoji ? `${boardEmoji} ` : ''}${board.name}`
-          : shortId(artifact.board_id);
-        return (
-          <Space orientation="vertical" size={0} style={{ width: '100%' }}>
-            <Typography.Text
-              type="secondary"
-              ellipsis={{ tooltip: `Board: ${boardText}` }}
-              style={artifactTextStyle}
-            >
-              Board: <HighlightMatch text={boardText} query={searchTerm} />
-            </Typography.Text>
-            <Typography.Text
-              type="secondary"
-              ellipsis={{ tooltip: `Branch: ${branchText}` }}
-              style={artifactTextStyle}
-            >
-              Branch: <HighlightMatch text={branchText} query={searchTerm} />
-            </Typography.Text>
-          </Space>
-        );
+        return <Badge status={info.status} text={info.text} />;
       },
     },
     {
       title: 'Actions',
       key: 'actions',
       width: 124,
+      fixed: 'right' as const,
       render: (_: unknown, artifact: Artifact) => (
         <SettingsActionGroup>
           {artifact.board_id && (
@@ -257,6 +238,7 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
               <Button
                 type="text"
                 size="small"
+                aria-label="Center map on artifact"
                 icon={<AimOutlined />}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -269,6 +251,7 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
             <Button
               type="text"
               size="small"
+              aria-label="Open fullscreen"
               icon={<ExportOutlined />}
               href={uiRouteHref(artifactFullscreenPath(artifact.artifact_id as ArtifactID))}
               target="_blank"
@@ -280,6 +263,7 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
             <Button
               type="text"
               size="small"
+              aria-label="Edit artifact"
               icon={<EditOutlined />}
               onClick={() => handleEdit(artifact)}
             />
@@ -293,7 +277,13 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
             okButtonProps={{ danger: true }}
           >
             <Tooltip title="Delete artifact">
-              <Button type="text" size="small" icon={<DeleteOutlined />} danger />
+              <Button
+                aria-label="Delete artifact"
+                type="text"
+                size="small"
+                icon={<DeleteOutlined />}
+                danger
+              />
             </Tooltip>
           </Popconfirm>
         </SettingsActionGroup>
@@ -302,8 +292,11 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
   ];
 
   const dataSource = useMemo(() => {
-    const activeArtifacts = mapToSortedArray(artifactById, (a, b) =>
-      a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+    const activeArtifacts = mapToSortedArray(
+      artifactById,
+      (a, b) =>
+        a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) ||
+        a.artifact_id.localeCompare(b.artifact_id)
     ).filter((artifact) => !artifact.archived);
     return filterBySettingsSearch(activeArtifacts, searchTerm, [
       (artifact) => artifact.name,
@@ -311,6 +304,10 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
       (artifact) => artifact.template,
       (artifact) => artifact.build_status,
       (artifact) => artifact.artifact_id,
+      (artifact) => {
+        const user = artifact.created_by ? userById.get(artifact.created_by) : undefined;
+        return [user?.name, user?.email];
+      },
       (artifact) => {
         const branch = artifact.branch_id ? branchById.get(artifact.branch_id) : undefined;
         return [branch?.name, branch?.ref, artifact.branch_id];
@@ -320,7 +317,7 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
         return [board?.name, board?.slug, artifact.board_id];
       },
     ]);
-  }, [artifactById, searchTerm, branchById, boardById]);
+  }, [artifactById, searchTerm, branchById, boardById, userById]);
 
   return (
     <div>
@@ -329,10 +326,10 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
         actions={(compact) => (
           <Input
             allowClear
-            placeholder="Search name, description, template, branch, or board"
+            placeholder="Search name, description, template, branch, board, or owner"
             value={searchTerm}
             onChange={(event) => setSearchTerm(event.target.value)}
-            style={{ width: compact ? '100%' : 360 }}
+            style={{ width: compact ? '100%' : 360, maxWidth: '100%' }}
           />
         )}
       />
@@ -346,7 +343,7 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
             minHeight: 400,
           }}
         >
-          <Empty description="No artifacts yet">
+          <Empty description={searchTerm ? 'No matching artifacts' : 'No artifacts yet'}>
             <Typography.Text type="secondary">
               Artifacts are created by agents using the <code>agor_artifacts_publish</code> MCP
               tool.
@@ -355,13 +352,15 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
         </div>
       ) : (
         <ResponsiveTable
+          key={searchTerm}
+          primaryColumnKey="name"
           dataSource={dataSource}
           columns={columns}
           rowKey="artifact_id"
           pagination={false}
           size="small"
           tableLayout="fixed"
-          scroll={{ x: 760 }}
+          scroll={{ x: 700 }}
         />
       )}
 
@@ -381,6 +380,14 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
           }}
           okText="Save"
         >
+          <Typography.Paragraph type="secondary">
+            Created {new Date(editingArtifact.created_at).toLocaleString()}
+            <br />
+            Source branch:{' '}
+            {editingArtifact.branch_id
+              ? branchById.get(editingArtifact.branch_id)?.name || 'Unavailable branch'
+              : 'Not recorded'}
+          </Typography.Paragraph>
           <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
             <Form.Item
               label="Name"

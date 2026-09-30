@@ -13,7 +13,7 @@ import {
   Typography,
   theme,
 } from 'antd';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { NewSessionConfig, SessionCreationResult } from '../../domain/sessionCreation';
 import { useAppNavigation } from '../../hooks/useAppNavigation';
 import { useIdentityGuardedAsync } from '../../hooks/useIdentityGuardedAsync';
@@ -103,8 +103,6 @@ export const NavbarComposeButton: React.FC<NavbarComposeButtonProps> = ({
       scopeKey: `navbar:${currentUser?.user_id ?? 'anonymous'}`,
       showError: (msg) => message.error(msg),
     });
-  const mcpEditedRef = useRef(false);
-  const mcpInitializedBranchIdRef = useRef<string | null>(null);
 
   // One lightweight tinted-box treatment, shared by the tip and the no-primary banner.
   const bannerBox: React.CSSProperties = {
@@ -113,20 +111,6 @@ export const NavbarComposeButton: React.FC<NavbarComposeButtonProps> = ({
     border: `1px solid ${token.colorBorderSecondary}`,
     borderRadius: token.borderRadius,
   };
-
-  const initializeMcpForBranch = useCallback(
-    (branch: Branch) => {
-      if (mcpInitializedBranchIdRef.current === branch.branch_id) return;
-      if (!mcpEditedRef.current) {
-        form.setFieldValue(
-          'mcpServerIds',
-          resolveSessionMcpServerIds(currentUser?.default_mcp_server_ids, branch)
-        );
-      }
-      mcpInitializedBranchIdRef.current = branch.branch_id;
-    },
-    [currentUser?.default_mcp_server_ids, form]
-  );
 
   // Resolve eagerly once the client exists (so the collapsed trigger shows the
   // teammate's emoji before first open) and re-resolve on open to catch changes
@@ -144,8 +128,6 @@ export const NavbarComposeButton: React.FC<NavbarComposeButtonProps> = ({
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset only on open
   useEffect(() => {
     if (!open) return;
-    mcpEditedRef.current = false;
-    mcpInitializedBranchIdRef.current = null;
     const primaryTool = resolveAvailableUserAgenticTool(
       currentUser,
       agenticToolSettings,
@@ -155,13 +137,6 @@ export const NavbarComposeButton: React.FC<NavbarComposeButtonProps> = ({
     form.resetFields();
     form.setFieldsValue(getNewSessionDefaultValues(currentUser, primaryTool));
   }, [open, form]);
-
-  // Initialize branch inheritance once. Later branch resolution must not wipe
-  // a value the caller already edited while choosing an assistant.
-  useEffect(() => {
-    if (!open || !primaryBranch) return;
-    initializeMcpForBranch(primaryBranch);
-  }, [open, primaryBranch, initializeMcpForBranch]);
 
   // Re-seed config defaults when the picked tool changes (same helper as NewSessionModal).
   useEffect(() => {
@@ -249,7 +224,6 @@ export const NavbarComposeButton: React.FC<NavbarComposeButtonProps> = ({
   };
 
   const handlePicked = (branch: Branch) => {
-    initializeMcpForBranch(branch);
     setPrimaryBranch(branch);
     if (pendingSend) {
       const mode = pendingSend;
@@ -323,14 +297,7 @@ export const NavbarComposeButton: React.FC<NavbarComposeButtonProps> = ({
           description="Check the connection and reopen this composer to retry."
         />
       ) : (
-        <Form
-          form={form}
-          layout="vertical"
-          requiredMark={false}
-          onValuesChange={(changedValues) => {
-            if (Object.hasOwn(changedValues, 'mcpServerIds')) mcpEditedRef.current = true;
-          }}
-        >
+        <Form form={form} layout="vertical" requiredMark={false}>
           {!primaryBranch && (
             <div style={{ marginBottom: token.marginSM }}>
               <div style={{ ...bannerBox, marginBottom: token.marginSM }}>
@@ -358,6 +325,10 @@ export const NavbarComposeButton: React.FC<NavbarComposeButtonProps> = ({
             currentUser={currentUser}
             client={client}
             branchId={primaryBranch?.branch_id}
+            inheritedMcpServerIds={resolveSessionMcpServerIds(
+              currentUser?.default_mcp_server_ids,
+              primaryBranch
+            )}
             validateModelSelection
             showEffort
             collapsibleChips
