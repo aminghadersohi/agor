@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import { PassThrough } from 'node:stream';
+import { EXECUTOR_RESPONSE_HARD_MAX_BYTES } from '@agor/core/config';
 import {
   EXECUTOR_RESPONSE_CONTENT_TYPE,
   EXECUTOR_RESPONSE_PROTOCOL,
@@ -36,6 +37,7 @@ function reserve(
     timeoutMs?: number;
     profile?: 'terminal' | 'events';
     tenantId?: string;
+    minResponseBytes?: number;
   } = {}
 ) {
   return reserveExecutorResponse({
@@ -48,6 +50,7 @@ function reserve(
       error: { code: 'EXECUTOR_TIMEOUT', message: 'timed out' },
     },
     ...(options.profile ? { profile: options.profile } : {}),
+    ...(options.minResponseBytes ? { minResponseBytes: options.minResponseBytes } : {}),
     onEvent: options.onEvent,
   });
 }
@@ -360,6 +363,37 @@ describe('executor response receiver', () => {
       success: false,
       error: { code: 'EXECUTOR_RESPONSE_TOO_LARGE' },
     });
+  });
+
+  it('lets one reservation raise its byte limit without changing the configured default', async () => {
+    const large = reserve({ minResponseBytes: 4096 });
+    const standard = reserve();
+    expect(large.descriptor.maxResponseBytes).toBe(4096);
+    expect(standard.descriptor.maxResponseBytes).toBe(1024);
+
+    const data = 'x'.repeat(2048);
+    const response = await fetch(large.descriptor.url, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${large.descriptor.token}`,
+        'content-type': EXECUTOR_RESPONSE_CONTENT_TYPE,
+        [EXECUTOR_RESPONSE_PROTOCOL_HEADER]: EXECUTOR_RESPONSE_PROTOCOL,
+      },
+      body: `${terminal(large.descriptor.requestId, 0, { success: true, data })}\n`,
+    });
+    expect(response.status).toBe(204);
+    await expect(large.result).resolves.toEqual({ success: true, data });
+    standard.fail({ success: false, error: { code: 'TEST_DONE', message: 'done' } });
+  });
+
+  it('never lowers the configured limit or exceeds the hard maximum', () => {
+    const lower = reserve({ minResponseBytes: 16 });
+    const huge = reserve({ minResponseBytes: Number.MAX_SAFE_INTEGER });
+    expect(lower.descriptor.maxResponseBytes).toBe(1024);
+    expect(huge.descriptor.maxResponseBytes).toBe(EXECUTOR_RESPONSE_HARD_MAX_BYTES);
+    for (const request of [lower, huge]) {
+      request.fail({ success: false, error: { code: 'TEST_DONE', message: 'done' } });
+    }
   });
 
   it('bounds admission and rejects late frames after timeout', async () => {

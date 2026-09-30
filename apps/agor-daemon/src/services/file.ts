@@ -32,11 +32,17 @@ import { resolveDelegatedExecutionHomeKey } from '../utils/executor-delegated-ho
 import { getDaemonUrl, requestExecutor } from '../utils/spawn-executor.js';
 import { issueExecutorCommandToken } from './session-token-service.js';
 
+/**
+ * In-process-only params key raising the executor response limit for one
+ * `get`. A Symbol cannot cross a REST/socket transport, so clients can't set it.
+ */
+export const FILE_READ_MIN_RESPONSE_BYTES = Symbol('agor.file.readMinResponseBytes');
+
 export type FileParams = QueryParams<{
   branch_id?: string;
   git_status_source?: GitFileStatusSource;
 }> &
-  Partial<AuthenticatedParams>;
+  Partial<AuthenticatedParams> & { [FILE_READ_MIN_RESPONSE_BYTES]?: number };
 
 function resolveGitStatusSource(value: unknown): GitFileStatusSource {
   if (value === undefined) return 'combined';
@@ -107,7 +113,8 @@ export class FileService
       {
         filePath: id.toString(),
         gitStatusSource,
-      }
+      },
+      params?.[FILE_READ_MIN_RESPONSE_BYTES]
     );
     if (!result.success) {
       throw new Error(`Failed to read file: ${result.error?.message ?? 'unknown executor error'}`);
@@ -170,7 +177,8 @@ export class FileService
     branchPath: string,
     fsAccess: 'read' | 'write',
     sandboxMounts: BranchExecutorSandboxMounts,
-    extraParams: Record<string, unknown> = {}
+    extraParams: Record<string, unknown> = {},
+    minResponseBytes?: number
   ) {
     const sessionToken = await issueExecutorCommandToken(this.app, command, userId, branchId);
     return requestExecutor(
@@ -189,6 +197,7 @@ export class FileService
       {
         logPrefix: `[FileService ${branchId}]`,
         delegatedHomeKey: delegatedHomeKey,
+        ...(minResponseBytes ? { minResponseBytes } : {}),
         templateVariables: {
           branch_id: branchId,
           user_id: userId,

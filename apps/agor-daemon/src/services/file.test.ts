@@ -6,7 +6,7 @@ import {
 } from '@agor/core/db';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { requestExecutor } from '../utils/spawn-executor.js';
-import { FileService } from './file.js';
+import { FILE_READ_MIN_RESPONSE_BYTES, FileService } from './file.js';
 
 const impersonationMocks = vi.hoisted(() => ({
   resolveDelegatedExecutionHomeKey: vi.fn(),
@@ -156,6 +156,33 @@ describe('FileService executor failures', () => {
       }),
       expect.anything()
     );
+  });
+
+  it('forwards an in-process response floor to the executor only when set', async () => {
+    const file = {
+      path: 'photo.png',
+      title: 'photo.png',
+      size: 4,
+      lastModified: '',
+      isText: false,
+      content: 'AAAA',
+      encoding: 'base64',
+    };
+    vi.mocked(requestExecutor).mockResolvedValue({ success: true, data: { file } });
+    const service = new FileService(createBranchRepo(), { run: vi.fn() } as never, createApp());
+    const base = {
+      query: { branch_id: 'branch-1' },
+      user: { user_id: 'user-1', email: 'member@example.com', role: 'member' as const },
+    };
+
+    await runWithTenantContext('tenant-a', async () => {
+      await service.get('photo.png', { ...base, [FILE_READ_MIN_RESPONSE_BYTES]: 40_000_000 });
+      await service.get('photo.png', base);
+    });
+
+    const [large, standard] = vi.mocked(requestExecutor).mock.calls;
+    expect(large[1]).toMatchObject({ minResponseBytes: 40_000_000 });
+    expect(standard[1]).not.toHaveProperty('minResponseBytes');
   });
 
   it.each([
