@@ -14,6 +14,10 @@ vi.mock('../ProfileImage/profileImageApi', () => ({
   uploadProfileImage: vi.fn(),
   patchProfileImage: vi.fn(),
   deleteProfileImage: vi.fn(),
+  reorderProfileImages: vi.fn(),
+  bulkDeleteProfileImages: vi.fn(),
+  bulkSetProfileImageTheme: vi.fn(),
+  setTeammateActiveTheme: vi.fn(),
 }));
 
 const branch = {

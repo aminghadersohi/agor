@@ -21,6 +21,8 @@ dbTest('retains inert draft completion rows across SQLite initialization', async
   // Upstream's user_api_keys.source is journalled above that boundary, so the
   // rewound ledger replays its plain ADD COLUMN.
   await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
+  // Likewise profile_images.theme, journalled above that boundary.
+  await executeRaw(db, sql`ALTER TABLE profile_images DROP COLUMN theme`);
   await executeRaw(
     db,
     sql`CREATE TRIGGER boards_primary_owner_immutable BEFORE UPDATE OF primary_owner_user_id ON boards BEGIN SELECT RAISE(ABORT, 'immutable'); END`
@@ -52,6 +54,8 @@ dbTest('adds inert completion storage after main ownership transfer', async ({ d
   // Upstream's user_api_keys.source is journalled above that boundary, so the
   // rewound ledger replays its plain ADD COLUMN.
   await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
+  // Likewise profile_images.theme, journalled above that boundary.
+  await executeRaw(db, sql`ALTER TABLE profile_images DROP COLUMN theme`);
   await runMigrations(db, { allowOfflineCutover: true });
   expect(rawRows(await executeRaw(db, sql`SELECT * FROM completion_subscriptions`))).toEqual([]);
 });

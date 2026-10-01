@@ -6,6 +6,7 @@ const managerMocks = vi.hoisted(() => ({
   upload: vi.fn(),
   update: vi.fn(),
   remove: vi.fn(),
+  setActiveTheme: vi.fn(),
 }));
 
 vi.mock('../../utils/profile-image-management.js', () => ({
@@ -186,6 +187,58 @@ describe('profile-image MCP write tools', () => {
       'image-1',
       { is_primary: true, position: 2, alt_text: '' }
     );
+  });
+
+  it('passes a theme on upload and maps update themes, clearing on null', async () => {
+    managerMocks.update.mockResolvedValue({ image_id: 'image-1' });
+    const { ctx } = makeContext();
+    await capture('agor_profile_images_upload', ctx).handler({
+      subjectType: 'teammate',
+      subjectId: 'branch-1',
+      imageBase64: Buffer.from('x').toString('base64'),
+      theme: 'Winter',
+    });
+    expect(managerMocks.upload.mock.calls[0][1]).toMatchObject({ theme: 'Winter' });
+
+    const update = capture('agor_profile_images_update', ctx);
+    await update.handler({ imageId: 'image-1', theme: 'Summer' });
+    expect(managerMocks.update).toHaveBeenLastCalledWith(
+      expect.objectContaining({ tenantId: 'tenant-a' }),
+      'image-1',
+      { theme: 'Summer' }
+    );
+    await update.handler({ imageId: 'image-1', theme: null });
+    expect(managerMocks.update).toHaveBeenLastCalledWith(
+      expect.objectContaining({ tenantId: 'tenant-a' }),
+      'image-1',
+      { theme: '' }
+    );
+    expect(update.schema.safeParse({ imageId: 'image-1', theme: 'x'.repeat(41) }).success).toBe(
+      false
+    );
+  });
+
+  it('sets the active theme through the shared manager', async () => {
+    managerMocks.setActiveTheme.mockResolvedValue({ active_theme: 'Winter' });
+    const { ctx } = makeContext();
+    const { handler, schema } = capture('agor_profile_images_set_active_theme', ctx);
+
+    const result = await handler({ teammateId: 'branch-1', theme: 'Winter' });
+    expect(managerMocks.setActiveTheme).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantId: 'tenant-a', userId: 'user-1' }),
+      'branch-1',
+      'Winter'
+    );
+    expect(JSON.parse(result.content[0].text)).toEqual({ active_theme: 'Winter' });
+
+    await handler({ teammateId: 'branch-1', theme: null });
+    expect(managerMocks.setActiveTheme).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'branch-1',
+      null
+    );
+    // The theme is required: omitting it must be explicit (null) rather than a silent no-op.
+    expect(schema.safeParse({ teammateId: 'branch-1' }).success).toBe(false);
   });
 
   it('deletes through the shared manager', async () => {

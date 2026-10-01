@@ -1,4 +1,6 @@
 // biome-ignore-all lint/plugin/noHardcodedColorLiteral: full-screen artwork uses a fixed dark palette outside Ant Design's themed surfaces
+
+import { selectProfileImagesForTheme } from '@agor-live/client';
 import { type CSSProperties, useEffect, useRef, useState } from 'react';
 import {
   acquireProfileImageUrl,
@@ -19,6 +21,8 @@ const VARIANT = 'large';
 export interface ScreensaverTeammate {
   id: string;
   name: string;
+  /** The teammate's active photo theme; only images carrying it are shown. */
+  activeTheme?: string;
 }
 
 export interface TeammatePhotoScreensaverProps {
@@ -43,7 +47,7 @@ export async function loadTeammatePhotos(
       const teammate = teammates[cursor++];
       try {
         const { images } = await loadProfileImageGallery({ type: 'teammate', id: teammate.id });
-        for (const image of images) {
+        for (const image of selectProfileImagesForTheme(images, teammate.activeTheme)) {
           photos.push({
             imageId: image.image_id,
             teammateId: teammate.id,

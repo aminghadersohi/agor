@@ -8,8 +8,9 @@ import type {
   TenantID,
   UserID,
 } from '@agor/core/types';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import { generateId } from '../../lib/ids';
+import { normalizeProfileImageTheme } from '../../types/profile-image';
 import type { Database } from '../client';
 import { deleteFrom, insert, runDatabaseTransaction, select, update } from '../database-wrapper';
 import { type ProfileImageRow, profileImages } from '../schema';
@@ -26,6 +27,7 @@ export interface ProcessedProfileImageInput {
   createdBy: UserID;
   originalName: string;
   altText?: string;
+  theme?: string;
   small: { data: Buffer; contentType: string; width: number; height: number };
   large: { data: Buffer; contentType: string; width: number; height: number };
 }
@@ -58,6 +60,7 @@ function logical(row: ProfileImageRow): ProfileImage {
     created_by: row.created_by as UserID,
     original_name: row.original_name,
     alt_text: row.alt_text ?? undefined,
+    theme: normalizeProfileImageTheme(row.theme),
     position: row.position,
     is_primary: row.is_primary,
     small_width: row.small_width,
@@ -114,6 +117,7 @@ export class ProfileImageRepository {
           created_by: input.createdBy,
           original_name: input.originalName,
           alt_text: input.altText ?? null,
+          theme: normalizeProfileImageTheme(input.theme) ?? null,
           position,
           is_primary: isPrimary,
           small_data: input.small.data,
@@ -137,7 +141,12 @@ export class ProfileImageRepository {
   async patch(
     tenantId: TenantID,
     imageId: ProfileImageID,
-    patch: { altText?: string | null; position?: number; isPrimary?: boolean }
+    patch: {
+      altText?: string | null;
+      theme?: string | null;
+      position?: number;
+      isPrimary?: boolean;
+    }
   ): Promise<ProfileImage | null> {
     const existing = await this.findById(tenantId, imageId);
     if (!existing) return null;
@@ -155,6 +164,9 @@ export class ProfileImageRepository {
       await update(tx, profileImages)
         .set({
           ...(patch.altText !== undefined ? { alt_text: patch.altText } : {}),
+          ...(patch.theme !== undefined
+            ? { theme: normalizeProfileImageTheme(patch.theme) ?? null }
+            : {}),
           ...(patch.position !== undefined ? { position: patch.position } : {}),
           ...(patch.isPrimary !== undefined ? { is_primary: patch.isPrimary } : {}),
           updated_at: new Date(),
@@ -192,6 +204,100 @@ export class ProfileImageRepository {
       replacementPrimary = logical({ ...replacement, is_primary: true, updated_at: new Date() });
     });
     return { removed: existing, replacementPrimary };
+  }
+
+  /**
+   * Rewrite gallery order. `orderedIds` lead (unknown or repeated ids are
+   * ignored); every image it omits keeps its relative order after them, so a
+   * partial list can never drop or duplicate a position.
+   */
+  async reorder(
+    tenantId: TenantID,
+    subject: ProfileImageSubject,
+    orderedIds: ProfileImageID[]
+  ): Promise<ProfileImage[]> {
+    await runDatabaseTransaction(this.db, async (tx) => {
+      const existing = await select(tx)
+        .from(profileImages)
+        .where(subjectPredicate(subject))
+        .orderBy(asc(profileImages.position), asc(profileImages.created_at))
+        .all();
+      const known = new Set(existing.map((row: ProfileImageRow) => row.image_id));
+      const leading = [...new Set(orderedIds)].filter((id) => known.has(id));
+      const leadingSet = new Set<string>(leading);
+      const next = [
+        ...leading,
+        ...existing
+          .map((row: ProfileImageRow) => row.image_id)
+          .filter((id: string) => !leadingSet.has(id)),
+      ];
+      const now = new Date();
+      for (const [position, imageId] of next.entries()) {
+        const current = existing.find((row: ProfileImageRow) => row.image_id === imageId);
+        if (current?.position === position) continue;
+        await update(tx, profileImages)
+          .set({ position, updated_at: now })
+          .where(and(eq(profileImages.image_id, imageId), subjectPredicate(subject)))
+          .run();
+      }
+    });
+    return this.listForSubject(tenantId, subject);
+  }
+
+  /** Set (or with null clear) the theme of several images of one subject at once. */
+  async setThemes(
+    tenantId: TenantID,
+    subject: ProfileImageSubject,
+    imageIds: ProfileImageID[],
+    theme: string | null
+  ): Promise<ProfileImage[]> {
+    if (imageIds.length > 0) {
+      await update(this.db, profileImages)
+        .set({ theme: normalizeProfileImageTheme(theme) ?? null, updated_at: new Date() })
+        .where(and(inArray(profileImages.image_id, imageIds), subjectPredicate(subject)))
+        .run();
+    }
+    return this.listForSubject(tenantId, subject);
+  }
+
+  /**
+   * Delete several images of one subject. When the primary is among them the
+   * first survivor in gallery order takes over, as in {@link remove}.
+   */
+  async removeMany(
+    tenantId: TenantID,
+    subject: ProfileImageSubject,
+    imageIds: ProfileImageID[]
+  ): Promise<{ removed: ProfileImage[]; replacementPrimary: ProfileImage | null }> {
+    const before = await this.listForSubject(tenantId, subject);
+    const doomed = new Set<string>(imageIds);
+    const removed = before.filter((image) => doomed.has(image.image_id));
+    if (removed.length === 0) return { removed, replacementPrimary: null };
+    const removedPrimary = removed.some((image) => image.is_primary);
+    const survivor = before.find((image) => !doomed.has(image.image_id)) ?? null;
+    await runDatabaseTransaction(this.db, async (tx) => {
+      await deleteFrom(tx, profileImages)
+        .where(
+          and(
+            inArray(
+              profileImages.image_id,
+              removed.map((image) => image.image_id)
+            ),
+            subjectPredicate(subject)
+          )
+        )
+        .run();
+      if (removedPrimary && survivor) {
+        await update(tx, profileImages)
+          .set({ is_primary: true, updated_at: new Date() })
+          .where(eq(profileImages.image_id, survivor.image_id))
+          .run();
+      }
+    });
+    return {
+      removed,
+      replacementPrimary: removedPrimary && survivor ? { ...survivor, is_primary: true } : null,
+    };
   }
 
   async readVariant(

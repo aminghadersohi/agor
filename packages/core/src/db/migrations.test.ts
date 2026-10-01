@@ -170,6 +170,46 @@ describe('Postgres migrations', () => {
     }
   });
 
+  it('appends the profile image theme column above every prior watermark in both journals', async () => {
+    for (const journal of await readJournals()) {
+      const index = journal.entries.findIndex(({ tag }) => tag === '9031_profile_image_themes');
+      expect(index).toBeGreaterThan(0);
+      const added = journal.entries[index]!;
+      const watermark = Math.max(...journal.entries.slice(0, index).map(({ when }) => when));
+      expect(added.when).toBeGreaterThan(watermark);
+      expect(classifyMigrationWatermark(journal.entries, watermark).pending[0]).toBe(
+        '9031_profile_image_themes'
+      );
+      expect(new Set(journal.entries.map(({ idx }) => idx)).size).toBe(journal.entries.length);
+    }
+    for (const dialect of ['postgresql', 'sqlite'] as const) {
+      expect(
+        pendingOfflineCutoverMigrations(dialect, {
+          applied: ['9026_branch_color_override'],
+          pending: ['9031_profile_image_themes'],
+        })
+      ).toEqual([]);
+    }
+    const sqlite = await readFile(
+      new URL('../../drizzle/sqlite/9031_profile_image_themes.sql', import.meta.url),
+      'utf8'
+    );
+    expect(sqlite).toContain('ALTER TABLE `profile_images` ADD `theme` text;');
+    const postgres = await readFile(
+      new URL('../../drizzle/postgres/9031_profile_image_themes.sql', import.meta.url),
+      'utf8'
+    );
+    const statements = postgres
+      .split('--> statement-breakpoint')
+      .map((statement) => statement.replace(/^--.*$/gm, '').trim())
+      .filter(Boolean);
+    expect(statements[0]).toBe("SET LOCAL lock_timeout = '3s';");
+    // Idempotent so a database that already carries the column is not aborted.
+    expect(statements[1]).toBe(
+      'ALTER TABLE "profile_images" ADD COLUMN IF NOT EXISTS "theme" text;'
+    );
+  });
+
   it('appends the branch color column above every prior watermark in both journals', async () => {
     for (const journal of await readJournals()) {
       const index = journal.entries.findIndex(({ tag }) => tag === '9026_branch_color_override');
@@ -1743,6 +1783,8 @@ describe('front desk / profile image watermark reconciliation', () => {
       // Upstream's user_api_keys.source is journalled above front desk, so the
       // rewound ledger replays its plain ADD COLUMN.
       await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
+      // Likewise profile_images.theme, journalled above front desk.
+      await executeRaw(db, sql`ALTER TABLE profile_images DROP COLUMN theme`);
       await runMigrations(db, { allowOfflineCutover: true });
       expect(Number(await tableCount())).toBe(1);
 
@@ -1754,6 +1796,8 @@ describe('front desk / profile image watermark reconciliation', () => {
       // Upstream's user_api_keys.source is journalled above front desk, so the
       // rewound ledger replays its plain ADD COLUMN.
       await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
+      // Likewise profile_images.theme, journalled above front desk.
+      await executeRaw(db, sql`ALTER TABLE profile_images DROP COLUMN theme`);
       await runMigrations(db, { allowOfflineCutover: true });
       expect(Number(await tableCount())).toBe(1);
     } finally {

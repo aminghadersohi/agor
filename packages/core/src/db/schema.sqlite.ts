@@ -3573,6 +3573,7 @@ export const profileImages = sqliteTable(
     created_by: text('created_by', { length: 36 }).notNull(),
     original_name: text('original_name').notNull(),
     alt_text: text('alt_text'),
+    theme: text('theme'),
     position: integer('position').notNull().default(0),
     is_primary: t.bool('is_primary').notNull().default(false),
     small_data: blob('small_data').notNull(),

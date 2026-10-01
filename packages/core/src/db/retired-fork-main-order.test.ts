@@ -178,11 +178,17 @@ describe('retired fork-main front desk / profile image order', () => {
     }
   }
 
-  // Upstream migrations this fork journals above the deployed tail. Neither
-  // retired order ran them, so the repair replays them after the slice.
-  const UPSTREAM_TAIL = ['0115_user_api_key_source'];
-  const dropUpstreamTail = (db: ReturnType<typeof createDatabase>) =>
-    executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
+  // Migrations journalled above the deployed tail (upstream's api-key source,
+  // then the fork's profile image theme). Neither retired order ran them, so
+  // the repair replays them after the slice; their plain ADD COLUMNs need the
+  // columns gone first.
+  const UPSTREAM_TAIL = ['0115_user_api_key_source', '9031_profile_image_themes'];
+  const dropUpstreamTail = async (db: ReturnType<typeof createDatabase>) => {
+    await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
+    // A database that stopped before the profile slice has no table to alter;
+    // the replay then creates it before adding the column.
+    await executeRaw(db, sql`ALTER TABLE profile_images DROP COLUMN theme`).catch(() => undefined);
+  };
 
   const ALL_OBJECTS = [
     'branch_front_desk_sessions',
