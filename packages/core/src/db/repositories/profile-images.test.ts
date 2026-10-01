@@ -153,4 +153,174 @@ describe('ProfileImageRepository galleries', () => {
     expect(removed?.replacementPrimary?.image_id).toBe(first.image_id);
     expect((await repository.findById(tenantId, first.image_id))?.is_primary).toBe(true);
   });
+
+  dbTest('stores a normalized theme and lets a patch set, change, or clear it', async ({ db }) => {
+    const subjects = await makeSubjects(db);
+    const repository = new ProfileImageRepository(db);
+    const created = await repository.create({
+      tenantId,
+      subject: subjects.teammate,
+      createdBy: subjects.userId,
+      originalName: 'winter.webp',
+      theme: '  Winter   Holiday ',
+      ...variants(1),
+    });
+    expect(created.theme).toBe('Winter Holiday');
+    const unlabeled = await repository.create({
+      tenantId,
+      subject: subjects.teammate,
+      createdBy: subjects.userId,
+      originalName: 'plain.webp',
+      ...variants(2),
+    });
+    expect(unlabeled.theme).toBeUndefined();
+
+    expect((await repository.patch(tenantId, unlabeled.image_id, { theme: 'Summer' }))?.theme).toBe(
+      'Summer'
+    );
+    // A patch that does not mention the theme leaves it alone; blank clears it.
+    expect((await repository.patch(tenantId, unlabeled.image_id, { altText: 'x' }))?.theme).toBe(
+      'Summer'
+    );
+    expect(
+      (await repository.patch(tenantId, unlabeled.image_id, { theme: '  ' }))?.theme
+    ).toBeUndefined();
+    expect(
+      (await repository.patch(tenantId, created.image_id, { theme: null }))?.theme
+    ).toBeUndefined();
+  });
+
+  dbTest('reorders a gallery, ignoring unknown ids and keeping omitted images', async ({ db }) => {
+    const subjects = await makeSubjects(db);
+    const repository = new ProfileImageRepository(db);
+    const created = [];
+    for (const marker of [1, 2, 3, 4]) {
+      created.push(
+        await repository.create({
+          tenantId,
+          subject: subjects.teammate,
+          createdBy: subjects.userId,
+          originalName: `${marker}.webp`,
+          ...variants(marker),
+        })
+      );
+    }
+    const [a, b, c, d] = created;
+    const other = await repository.create({
+      tenantId,
+      subject: subjects.user,
+      createdBy: subjects.userId,
+      originalName: 'other.webp',
+      ...variants(9),
+    });
+
+    const reordered = await repository.reorder(tenantId, subjects.teammate, [
+      d.image_id,
+      other.image_id,
+      b.image_id,
+      d.image_id,
+    ]);
+    expect(reordered.map((image) => image.image_id)).toEqual([
+      d.image_id,
+      b.image_id,
+      a.image_id,
+      c.image_id,
+    ]);
+    expect(reordered.map((image) => image.position)).toEqual([0, 1, 2, 3]);
+    // Another subject's gallery is untouched.
+    expect((await repository.findById(tenantId, other.image_id))?.position).toBe(0);
+  });
+
+  dbTest('bulk-sets themes only within the named subject', async ({ db }) => {
+    const subjects = await makeSubjects(db);
+    const repository = new ProfileImageRepository(db);
+    const mine = [];
+    for (const marker of [1, 2, 3]) {
+      mine.push(
+        await repository.create({
+          tenantId,
+          subject: subjects.teammate,
+          createdBy: subjects.userId,
+          originalName: `${marker}.webp`,
+          ...variants(marker),
+        })
+      );
+    }
+    const foreign = await repository.create({
+      tenantId,
+      subject: subjects.user,
+      createdBy: subjects.userId,
+      originalName: 'foreign.webp',
+      ...variants(7),
+    });
+
+    const labeled = await repository.setThemes(
+      tenantId,
+      subjects.teammate,
+      [mine[0].image_id, mine[2].image_id, foreign.image_id],
+      ' Winter '
+    );
+    expect(labeled.map((image) => image.theme)).toEqual(['Winter', undefined, 'Winter']);
+    expect((await repository.findById(tenantId, foreign.image_id))?.theme).toBeUndefined();
+
+    const cleared = await repository.setThemes(
+      tenantId,
+      subjects.teammate,
+      [mine[0].image_id],
+      null
+    );
+    expect(cleared.map((image) => image.theme)).toEqual([undefined, undefined, 'Winter']);
+  });
+
+  dbTest(
+    'bulk-removes images and promotes the first survivor when the primary goes',
+    async ({ db }) => {
+      const subjects = await makeSubjects(db);
+      const repository = new ProfileImageRepository(db);
+      const created = [];
+      for (const marker of [1, 2, 3, 4]) {
+        created.push(
+          await repository.create({
+            tenantId,
+            subject: subjects.teammate,
+            createdBy: subjects.userId,
+            originalName: `${marker}.webp`,
+            ...variants(marker),
+          })
+        );
+      }
+      const foreign = await repository.create({
+        tenantId,
+        subject: subjects.user,
+        createdBy: subjects.userId,
+        originalName: 'foreign.webp',
+        ...variants(8),
+      });
+
+      const result = await repository.removeMany(tenantId, subjects.teammate, [
+        created[0].image_id,
+        created[1].image_id,
+        foreign.image_id,
+      ]);
+      expect(result.removed.map((image) => image.image_id)).toEqual([
+        created[0].image_id,
+        created[1].image_id,
+      ]);
+      expect(result.replacementPrimary?.image_id).toBe(created[2].image_id);
+      const remaining = await repository.listForSubject(tenantId, subjects.teammate);
+      expect(remaining.map((image) => [image.image_id, image.is_primary])).toEqual([
+        [created[2].image_id, true],
+        [created[3].image_id, false],
+      ]);
+      expect(await repository.findById(tenantId, foreign.image_id)).not.toBeNull();
+
+      const all = await repository.removeMany(
+        tenantId,
+        subjects.teammate,
+        remaining.map((image) => image.image_id)
+      );
+      expect(all.replacementPrimary).toBeNull();
+      expect(await repository.listForSubject(tenantId, subjects.teammate)).toEqual([]);
+    }
+  );
 });

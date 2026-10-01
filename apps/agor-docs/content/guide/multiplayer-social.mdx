@@ -61,11 +61,33 @@ originals and their metadata are never stored.
 - **Board images**: board settings (Edit Board). Requires permission to edit
   the board.
 
+The gallery editor shows a responsive thumbnail grid. Drop several files onto
+it (or use **Add images**) to upload them one after another with per-file
+progress; drag thumbnails to reorder them, click one for a larger preview with
+previous/next paging, and tick thumbnails to select several at once for a bulk
+theme label or bulk delete. The star marks the main photo.
+
+#### Photo themes
+
+Teammate photos can carry a free-text **theme** label (for example "Winter" or
+"Work"). Label a photo in its preview, label several at once from the bulk bar,
+or set the theme for new uploads before adding them; the field completes from
+themes already used in that gallery. Matching ignores case and extra spaces.
+
+Choosing a theme in **Theme shown everywhere** (Teammate tab) restricts every
+surface that shows that teammate's photos — avatars, board tiles, the board
+teammate panel, and the screensaver — to photos with that theme. **All** shows
+every photo. If no photo carries the chosen theme, every photo is used, so a
+teammate is never left without one. Changing the theme needs Manager access to
+the teammate branch, like the rest of the gallery.
+
 Agents can do the same through the Agor MCP server:
-`agor_profile_images_list` / `agor_profile_images_get` read galleries, and
+`agor_profile_images_list` / `agor_profile_images_get` read galleries
+(including each photo's `theme` and the teammate's `active_theme`), and
 `agor_profile_images_upload` (from a branch-relative image file or base64),
-`agor_profile_images_update` (main image, order, alt text), and
-`agor_profile_images_delete` manage them with the calling user's permissions.
+`agor_profile_images_update` (main image, order, alt text, theme),
+`agor_profile_images_set_active_theme`, and `agor_profile_images_delete` manage
+them with the calling user's permissions.
 
 ### Idle screensaver
 

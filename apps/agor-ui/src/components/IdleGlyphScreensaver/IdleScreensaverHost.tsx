@@ -21,13 +21,17 @@ export function IdleScreensaverHost({ preferences }: { preferences?: Screensaver
           .map((branch) => [
             branch.branch_id,
             getTeammateConfig(branch)?.displayName || branch.name,
+            getTeammateConfig(branch)?.activePhotoTheme ?? null,
           ])
       ),
     [branchById]
   );
   // Keyed on content so unrelated branch patches keep the same array identity.
   const teammates = useMemo<ScreensaverTeammate[]>(
-    () => (JSON.parse(teammateKey) as [string, string][]).map(([id, name]) => ({ id, name })),
+    () =>
+      (JSON.parse(teammateKey) as [string, string, string | null][]).map(
+        ([id, name, activeTheme]) => ({ id, name, ...(activeTheme ? { activeTheme } : {}) })
+      ),
     [teammateKey]
   );
 

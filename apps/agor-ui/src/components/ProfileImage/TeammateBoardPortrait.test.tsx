@@ -122,4 +122,41 @@ describe('TeammateBoardPortrait', () => {
     const avatar = document.querySelector('.ant-avatar') as HTMLElement;
     expect(avatar).toHaveStyle({ width: 'calc(100% - 28px)', aspectRatio: '1' });
   });
+
+  it("shows only alternates from the teammate's active theme, falling back when none match", () => {
+    const themedBranch = {
+      branch_id: 'branch-1',
+      custom_context: {
+        teammate: { ...(branch.custom_context as never as { teammate: object }).teammate },
+      },
+    } as unknown as Branch;
+    const config = (themedBranch.custom_context as { teammate: Record<string, unknown> }).teammate;
+    vi.mocked(useProfileImageGallery).mockReturnValue([
+      { ...image('image-main', 0, true), theme: 'Winter' },
+      { ...image('image-summer', 1), theme: 'Summer' },
+      { ...image('image-winter', 2), theme: 'winter' },
+    ]);
+    vi.mocked(useProfileImageUrl).mockImplementation((imageId) =>
+      imageId ? `blob:${imageId}` : undefined
+    );
+
+    config.activePhotoTheme = 'Winter';
+    const { unmount } = render(
+      <ConfigProvider>
+        <TeammateBoardPortrait branch={themedBranch} />
+      </ConfigProvider>
+    );
+    expect(screen.getByTitle('1 alternate teammate photo')).toBeVisible();
+    expect(screen.getByAltText('image-winter.webp')).toBeVisible();
+    expect(screen.queryByAltText('image-summer.webp')).not.toBeInTheDocument();
+    unmount();
+
+    config.activePhotoTheme = 'Autumn';
+    render(
+      <ConfigProvider>
+        <TeammateBoardPortrait branch={themedBranch} />
+      </ConfigProvider>
+    );
+    expect(screen.getByTitle('2 alternate teammate photos')).toBeVisible();
+  });
 });
