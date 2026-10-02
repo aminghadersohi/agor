@@ -57,6 +57,58 @@ describe('profile image cycling', () => {
     ]);
   });
 
+  describe('active theme', () => {
+    const themed = (id: string, position: number, theme?: string, isPrimary = false) => ({
+      ...image(id, position, isPrimary),
+      theme,
+    });
+    const gallery = [
+      themed('winter-a', 0, 'Winter', true),
+      themed('summer-a', 1, 'Summer'),
+      themed('winter-b', 2, 'winter'),
+      themed('plain', 3),
+    ];
+
+    it('rotates only through images carrying the active theme, ignoring case', () => {
+      expect(orderedProfileImageIds(gallery, undefined, 'WINTER')).toEqual([
+        'winter-a',
+        'winter-b',
+      ]);
+    });
+
+    it('replaces a projected primary outside the theme with the first themed image', () => {
+      expect(orderedProfileImageIds(gallery, 'plain' as ProfileImageID, 'Summer')).toEqual([
+        'summer-a',
+      ]);
+      expect(orderedProfileImageIds(gallery, 'winter-b' as ProfileImageID, 'Winter')).toEqual([
+        'winter-b',
+        'winter-a',
+      ]);
+    });
+
+    it('falls back to the whole gallery when no image carries the theme or none is set', () => {
+      const all = ['winter-a', 'summer-a', 'winter-b', 'plain'];
+      expect(orderedProfileImageIds(gallery, undefined, 'Autumn')).toEqual(all);
+      expect(orderedProfileImageIds(gallery, undefined, null)).toEqual(all);
+      expect(orderedProfileImageIds(gallery, undefined, undefined)).toEqual(all);
+    });
+
+    it('cycles only the themed images', () => {
+      const { result } = renderHook(() =>
+        useCyclingProfileImageId(gallery, undefined, true, 'Winter')
+      );
+      expect(result.current).toBe('winter-a');
+      act(() => {
+        vi.advanceTimersByTime(PROFILE_IMAGE_CYCLE_INTERVAL_MS);
+      });
+      expect(result.current).toBe('winter-b');
+      act(() => {
+        vi.advanceTimersByTime(PROFILE_IMAGE_CYCLE_INTERVAL_MS);
+      });
+      expect(result.current).toBe('winter-a');
+    });
+  });
+
   it('uses authoritative gallery metadata when a projected primary is stale', () => {
     const images = [image('second', 1), image('primary', 0, true)];
     expect(orderedProfileImageIds(images, 'removed' as ProfileImageID)).toEqual([

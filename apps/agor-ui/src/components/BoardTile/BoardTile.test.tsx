@@ -86,12 +86,16 @@ describe('BoardTile', () => {
     render(<BoardTile board={{ board_id: 'board-1' } as Board} emoji="🦊" />);
 
     expect(screen.getByText('🦊')).toBeInTheDocument();
-    expect(useCyclingProfileImageUrl).toHaveBeenCalledWith(undefined, undefined, 'small', false);
-    expect(useCyclingProfileImageUrl).not.toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-      true
+    expect(useCyclingProfileImageUrl).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      'small',
+      false,
+      undefined
+    );
+    // No gallery hook runs enabled (the 4th argument is its `enabled` flag).
+    expect(vi.mocked(useCyclingProfileImageUrl).mock.calls.some((call) => call[3] === true)).toBe(
+      false
     );
   });
 
@@ -111,7 +115,24 @@ describe('BoardTile', () => {
       { type: 'teammate', id: 'b1' },
       'tm-image',
       'small',
-      true
+      true,
+      undefined
+    );
+  });
+
+  it("restricts the teammate fallback to the teammate's active photo theme", () => {
+    mockImageBySubject({ teammate: 'blob:teammate-image' });
+    const branch = teammateBranch('🦊', 'tm-image');
+    (branch.custom_context as { teammate: Record<string, unknown> }).teammate.activePhotoTheme =
+      'Winter';
+    render(<BoardTile board={{ board_id: 'board-1' } as Board} teammate={branch} />);
+
+    expect(useCyclingProfileImageUrl).toHaveBeenCalledWith(
+      { type: 'teammate', id: 'b1' },
+      'tm-image',
+      'small',
+      true,
+      'Winter'
     );
   });
 
@@ -125,13 +146,16 @@ describe('BoardTile', () => {
     );
 
     expect(container.querySelector('img')).toHaveAttribute('src', 'blob:board-image');
-    expect(useCyclingProfileImageUrl).toHaveBeenCalledWith(undefined, undefined, 'small', false);
-    expect(useCyclingProfileImageUrl).not.toHaveBeenCalledWith(
-      { type: 'teammate', id: 'b1' },
-      expect.anything(),
-      expect.anything(),
-      expect.anything()
+    expect(useCyclingProfileImageUrl).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      'small',
+      false,
+      undefined
     );
+    expect(
+      vi.mocked(useCyclingProfileImageUrl).mock.calls.some((call) => call[0]?.type === 'teammate')
+    ).toBe(false);
   });
 
   it('does not read a gallery for a teammate without a photo', () => {
@@ -145,7 +169,7 @@ describe('BoardTile', () => {
 
     expect(screen.getByText('🦊')).toBeInTheDocument();
     for (const call of vi.mocked(useCyclingProfileImageUrl).mock.calls) {
-      expect(call).toEqual([undefined, undefined, 'small', false]);
+      expect(call.slice(0, 4)).toEqual([undefined, undefined, 'small', false]);
     }
   });
 });
