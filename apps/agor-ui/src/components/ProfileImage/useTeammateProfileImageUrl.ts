@@ -2,7 +2,10 @@ import type { Branch, ProfileImageVariant } from '@agor-live/client';
 import { getTeammateConfig, isTeammate } from '@agor-live/client';
 import { useCyclingProfileImageUrl } from './useCyclingProfileImage';
 
-/** Resolve the projected primary photo, falling back to authoritative gallery metadata. */
+/**
+ * Resolve the projected primary photo, falling back to authoritative gallery metadata,
+ * restricted to the teammate's active photo theme.
+ */
 export function useTeammateProfileImageUrl(
   branch: Branch | null | undefined,
   variant: ProfileImageVariant
@@ -13,6 +16,7 @@ export function useTeammateProfileImageUrl(
     teammate ? { type: 'teammate', id: teammate.branch_id } : undefined,
     config?.profileImageId,
     variant,
-    Boolean(teammate)
+    Boolean(teammate),
+    config?.activePhotoTheme
   );
 }

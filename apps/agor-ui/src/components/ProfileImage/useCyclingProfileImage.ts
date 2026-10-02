@@ -1,4 +1,5 @@
 import type { ProfileImage, ProfileImageID, ProfileImageVariant } from '@agor-live/client';
+import { selectProfileImagesForTheme } from '@agor-live/client';
 import { useEffect, useMemo, useState } from 'react';
 import type { ProfileImageSubject } from './profileImageApi';
 import { useProfileImageGallery } from './useProfileImageGallery';
@@ -7,11 +8,20 @@ import { useProfileImageUrl } from './useProfileImageUrl';
 /** Slow, ambient rotation so identity photos never feel like animated badges. */
 export const PROFILE_IMAGE_CYCLE_INTERVAL_MS = 30_000;
 
+/**
+ * Gallery ids in rotation order, primary first. With an `activeTheme` only
+ * images carrying it take part (the whole gallery when none do), and a
+ * projected primary outside that set yields to the first themed image.
+ */
 export function orderedProfileImageIds(
   images: ProfileImage[],
-  projectedPrimaryId?: ProfileImageID | null
+  projectedPrimaryId?: ProfileImageID | null,
+  activeTheme?: string | null
 ): ProfileImageID[] {
-  const sortedImages = images.slice().sort((a, b) => a.position - b.position);
+  const sortedImages = selectProfileImagesForTheme(
+    images.slice().sort((a, b) => a.position - b.position),
+    activeTheme
+  );
   const galleryPrimary =
     sortedImages.find((image) => image.is_primary)?.image_id ?? sortedImages[0]?.image_id;
   const projectedPrimaryIsCurrent =
@@ -32,11 +42,12 @@ export function orderedProfileImageIds(
 export function useCyclingProfileImageId(
   images: ProfileImage[],
   projectedPrimaryId?: ProfileImageID | null,
-  enabled = true
+  enabled = true,
+  activeTheme?: string | null
 ): ProfileImageID | undefined {
   const imageIds = useMemo(
-    () => orderedProfileImageIds(images, projectedPrimaryId),
-    [images, projectedPrimaryId]
+    () => orderedProfileImageIds(images, projectedPrimaryId, activeTheme),
+    [images, projectedPrimaryId, activeTheme]
   );
   const signature = imageIds.join(':');
   const [rotation, setRotation] = useState({ signature, index: 0 });
@@ -98,13 +109,15 @@ export function useCyclingProfileImageUrl(
   subject: ProfileImageSubject | null | undefined,
   projectedPrimaryId: ProfileImageID | null | undefined,
   variant: ProfileImageVariant,
-  enabled = true
+  enabled = true,
+  activeTheme?: string | null
 ): string | undefined {
   const images = useProfileImageGallery(subject, Boolean(subject && enabled));
   const imageId = useCyclingProfileImageId(
     images,
     enabled ? projectedPrimaryId : undefined,
-    enabled
+    enabled,
+    activeTheme
   );
   const continuityKey = subject ? `${subject.type}:${subject.id}` : undefined;
   return useProfileImageUrl(imageId, variant, continuityKey);

@@ -4,7 +4,7 @@ import { Badge, Button, Empty, Popover, Typography, theme } from 'antd';
 import { useMemo, useState } from 'react';
 import { REACT_FLOW_NO_DRAG_CLASS } from '../../utils/reactFlowDragClasses';
 import { formatRelativeTimeSafe } from '../../utils/time';
-import { StatusDot } from '../HomePage/StatusDot';
+import { StatusDot } from './StatusDot';
 
 const { Text } = Typography;
 

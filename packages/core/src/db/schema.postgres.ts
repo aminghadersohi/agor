@@ -1407,7 +1407,7 @@ export const users = pgTable(
           copilot?: {
             COPILOT_GITHUB_TOKEN?: string;
           };
-          opencode?: Record<string, never>;
+          opencode?: Record<string, string>;
         };
         agentic_auth_methods?: import('../types/user').AgenticAuthMethods;
         agentic_credential_sources?: import('../types/user').AgenticCredentialSources;
@@ -4060,6 +4060,7 @@ export const profileImages = pgTable(
     created_by: varchar('created_by', { length: 36 }).notNull(),
     original_name: text('original_name').notNull(),
     alt_text: text('alt_text'),
+    theme: text('theme'),
     position: integer('position').notNull().default(0),
     is_primary: t.bool('is_primary').notNull().default(false),
     small_data: bytea('small_data').notNull(),
@@ -4105,3 +4106,35 @@ export const profileImages = pgTable(
   })
 );
 export type ProfileImageRow = typeof profileImages.$inferSelect;
+
+/** Hosted OpenCode checkpoints; no FKs so deleted Sessions' rows survive until their files are cleaned. */
+export const opencodeCheckpointAttempts = pgTable(
+  'opencode_checkpoint_attempts',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    attempt_id: varchar('attempt_id', { length: 36 }).primaryKey(),
+    session_id: varchar('session_id', { length: 36 }).notNull(),
+    task_id: varchar('task_id', { length: 36 }).notNull(),
+    owner_user_id: varchar('owner_user_id', { length: 36 }).notNull(),
+    holder_instance_id: varchar('holder_instance_id', { length: 36 }).notNull(),
+    input_task_id: varchar('input_task_id', { length: 36 }),
+    state: text('state', { enum: ['open', 'accepted', 'superseded'] }).notNull(),
+    manifest: t.json<import('@agor/core/types').OpenCodeCheckpointManifest>('manifest'),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+  },
+  (table) => ({
+    tenantIdx: index('opencode_checkpoint_attempts_tenant_idx').on(table.tenant_id),
+    taskUnique: uniqueIndex('opencode_checkpoint_attempts_task_unique').on(
+      table.tenant_id,
+      table.task_id
+    ),
+    acceptedUnique: uniqueIndex('opencode_checkpoint_attempts_accepted_unique')
+      .on(table.tenant_id, table.session_id)
+      .where(sql`${table.state} = 'accepted'`),
+    ownerIdx: index('opencode_checkpoint_attempts_owner_idx').on(
+      table.tenant_id,
+      table.owner_user_id
+    ),
+  })
+);

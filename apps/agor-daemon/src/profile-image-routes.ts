@@ -3,6 +3,7 @@ import type { Application } from '@agor/core/feathers';
 import { BadRequest, NotFound } from '@agor/core/feathers';
 import type {
   AuthenticatedParams,
+  BranchID,
   ProfileImageID,
   ProfileImagePatch,
   ProfileImageVariant,
@@ -11,6 +12,7 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import multer from 'multer';
 import {
   createProfileImageManager,
+  parseProfileImageIds,
   parseProfileImageSubjectId,
   parseProfileImageSubjectType,
   profileImageCallerFromParams,
@@ -41,7 +43,7 @@ export function registerProfileImageRoutes({
   registerProfileImageManager(app, manager);
   const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: PROFILE_IMAGE_MAX_BYTES, files: 1, fields: 4 },
+    limits: { fileSize: PROFILE_IMAGE_MAX_BYTES, files: 1, fields: 5 },
   }).single('image');
 
   const callerFor = (req: AuthenticatedProfileImageRequest) =>
@@ -76,6 +78,7 @@ export function registerProfileImageRoutes({
           data: req.file?.buffer ?? Buffer.alloc(0),
           originalName: req.file?.originalname,
           altText: req.body?.altText,
+          theme: req.body?.theme,
         });
         res.status(201).json(created);
       } catch (error) {
@@ -127,6 +130,79 @@ export function registerProfileImageRoutes({
           (req.body ?? {}) as ProfileImagePatch
         );
         res.json(updated);
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  // Bulk and ordering routes use fixed single-segment paths, so they cannot
+  // collide with `/profile-images/:imageId` (PATCH/DELETE) or the two-segment
+  // variant GET above.
+  // biome-ignore lint/suspicious/noExplicitAny: Express methods are not declared on Feathers Application.
+  (app as any).put(
+    '/profile-images/order',
+    authMiddleware,
+    async (req: AuthenticatedProfileImageRequest, res: Response, next: NextFunction) => {
+      try {
+        res.json(
+          await manager.reorder(
+            callerFor(req),
+            parseProfileImageSubjectType(req.body?.subjectType),
+            parseProfileImageSubjectId(req.body?.subjectId),
+            parseProfileImageIds(req.body?.imageIds)
+          )
+        );
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  // biome-ignore lint/suspicious/noExplicitAny: Express methods are not declared on Feathers Application.
+  (app as any).post(
+    '/profile-images/bulk',
+    authMiddleware,
+    async (req: AuthenticatedProfileImageRequest, res: Response, next: NextFunction) => {
+      try {
+        const subjectType = parseProfileImageSubjectType(req.body?.subjectType);
+        const subjectId = parseProfileImageSubjectId(req.body?.subjectId);
+        const imageIds = parseProfileImageIds(req.body?.imageIds);
+        const action = req.body?.action;
+        if (action === 'delete') {
+          res.json(await manager.bulkRemove(callerFor(req), subjectType, subjectId, imageIds));
+        } else if (action === 'set-theme') {
+          res.json(
+            await manager.bulkSetTheme(
+              callerFor(req),
+              subjectType,
+              subjectId,
+              imageIds,
+              typeof req.body?.theme === 'string' ? req.body.theme : null
+            )
+          );
+        } else {
+          throw new BadRequest('action must be delete or set-theme');
+        }
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  // biome-ignore lint/suspicious/noExplicitAny: Express methods are not declared on Feathers Application.
+  (app as any).put(
+    '/profile-images/active-theme',
+    authMiddleware,
+    async (req: AuthenticatedProfileImageRequest, res: Response, next: NextFunction) => {
+      try {
+        res.json(
+          await manager.setActiveTheme(
+            callerFor(req),
+            parseProfileImageSubjectId(req.body?.subjectId) as BranchID,
+            typeof req.body?.theme === 'string' ? req.body.theme : null
+          )
+        );
       } catch (error) {
         next(error);
       }

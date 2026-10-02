@@ -711,7 +711,12 @@ export function OnboardingWizard({
       }
       if (agent === 'gemini') return !!(gemini?.GEMINI_API_KEY || user.env_vars?.GEMINI_API_KEY);
       if (agent === 'opencode') {
-        return user.agentic_tools_public_values?.opencode?.ollama_enabled === 'true';
+        // Local mode: the fork's experimental Ollama preset. Hosted OpenCode
+        // stores one key per provider id in the same envelope.
+        if (user.agentic_tools_public_values?.opencode?.ollama_enabled === 'true') return true;
+        return Object.entries(user.agentic_tools?.opencode ?? {}).some(
+          ([field, value]) => !field.startsWith('ollama_') && Boolean(value)
+        );
       }
       return false;
     },
