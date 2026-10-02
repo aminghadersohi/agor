@@ -231,3 +231,53 @@ describe('AppHeader settings dropdown', () => {
     expect(onThemeEditorClick).toHaveBeenCalledOnce();
   });
 });
+
+describe('AppHeader instance label', () => {
+  it('bounds a long label with an ellipsis and keeps the full text in the title', () => {
+    const label = `Data team sandbox ${'x'.repeat(62)}`;
+    renderHeader({ instanceLabel: label });
+
+    const tag = screen.getByText(label);
+    expect(tag).toHaveAttribute('title', label);
+    // Inline style: jsdom cannot compute antd's CSS-variable border shorthands.
+    expect(tag.style).toMatchObject({
+      maxWidth: '200px',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+    });
+  });
+
+  it('renders no badge without a label', () => {
+    renderHeader({ instanceLabel: undefined });
+    expect(document.querySelector('.ant-tag-cyan')).toBeNull();
+  });
+});
+
+describe('AppHeader navbar logo', () => {
+  it('goes Home by default', () => {
+    const onHomeClick = vi.fn();
+    renderHeader({ onHomeClick });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Go to Home' }));
+    expect(onHomeClick).toHaveBeenCalledOnce();
+  });
+
+  it('links to the configured destination with its tooltip as the name', () => {
+    renderHeader({
+      navbarLogoLink: 'https://console.example.test',
+      navbarLogoTooltip: 'Back to Agor Cloud console',
+    });
+
+    expect(screen.getByRole('link', { name: 'Back to Agor Cloud console' })).toHaveAttribute(
+      'href',
+      'https://console.example.test'
+    );
+    expect(screen.queryByRole('button', { name: 'Go to Home' })).not.toBeInTheDocument();
+  });
+
+  it('ignores a non-http(s) destination', () => {
+    renderHeader({ navbarLogoLink: 'javascript:alert(1)' });
+
+    expect(screen.getByRole('button', { name: 'Go to Home' })).toBeInTheDocument();
+  });
+});

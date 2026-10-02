@@ -29,6 +29,7 @@ export * from './mcp-marketplace';
 export * from './message';
 export * from './opencode-auth';
 export * from './opencode-models';
+export * from './opencode-native-state';
 export * from './opencode-ollama';
 export * from './power-management';
 export * from './presence';

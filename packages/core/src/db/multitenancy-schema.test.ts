@@ -84,6 +84,9 @@ function migrationTenantTables(): string[] {
   const profileImagesMigration = readRepoFile(
     'packages/core/drizzle/postgres/9028_profile_image_galleries.sql'
   );
+  const openCodeCheckpointMigration = readRepoFile(
+    'packages/core/drizzle/postgres/0117_opencode_checkpoint_attempts.sql'
+  );
   const retiredTables = retiredTenantTables();
   return [
     ...new Set(
@@ -106,6 +109,7 @@ function migrationTenantTables(): string[] {
         ...codexDeviceAuthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...claudeOauthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...transferMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...openCodeCheckpointMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...capabilityPoliciesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...zoneWorkflowMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...sessionMemoryMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
@@ -144,6 +148,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0112_kb_import_receipts.sql'),
     readRepoFile('packages/core/drizzle/postgres/9030_branch_front_desk_sessions.sql'),
     readRepoFile('packages/core/drizzle/postgres/9028_profile_image_galleries.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0117_opencode_checkpoint_attempts.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
   return [

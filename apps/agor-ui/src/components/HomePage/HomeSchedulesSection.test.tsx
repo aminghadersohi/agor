@@ -56,7 +56,9 @@ describe('HomeSchedulesSection', () => {
     const onBranchClick = vi.fn();
     agorStore.setState({
       userById: new Map([['user-1', { user_id: 'user-1', preferences: {} } as User]]),
-      branchById: new Map([['branch-1', { branch_id: 'branch-1', name: 'release' } as Branch]]),
+      branchById: new Map([
+        ['branch-1', { branch_id: 'branch-1', name: 'release', board_id: 'board-1' } as Branch],
+      ]),
     });
 
     render(
@@ -74,7 +76,7 @@ describe('HomeSchedulesSection', () => {
     expect(screen.getByText('Worktree')).toBeVisible();
     expect(screen.getByText('Next run')).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'release' }));
-    expect(onBranchClick).toHaveBeenCalledWith('branch-1');
+    expect(onBranchClick).toHaveBeenCalledWith('branch-1', 'board-1');
   });
 
   it('selects a subset without discarding unrelated user preferences', async () => {
@@ -129,7 +131,9 @@ describe('HomeSchedulesSection', () => {
     const { client, listeners } = clientWith([first]);
     agorStore.setState({
       userById: new Map([['user-1', { user_id: 'user-1', preferences: {} } as User]]),
-      branchById: new Map([['branch-1', { branch_id: 'branch-1', name: 'release' } as Branch]]),
+      branchById: new Map([
+        ['branch-1', { branch_id: 'branch-1', name: 'release', board_id: 'board-1' } as Branch],
+      ]),
     });
     render(
       <App>

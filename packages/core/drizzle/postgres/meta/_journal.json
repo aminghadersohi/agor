@@ -890,6 +890,13 @@
       "when": 1790208000010,
       "tag": "9031_profile_image_themes",
       "breakpoints": true
+    },
+    {
+      "idx": 9038,
+      "version": "7",
+      "when": 1790208000011,
+      "tag": "0117_opencode_checkpoint_attempts",
+      "breakpoints": true
     }
   ]
 }

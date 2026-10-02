@@ -65,6 +65,7 @@ import {
   createTokenBucket,
   getSocketAuthState,
   parseTerminalChannel,
+  SOCKET_IO_PER_MESSAGE_DEFLATE,
   type SocketIOOptions,
 } from './socketio';
 
@@ -739,23 +740,23 @@ describe('Socket.IO transport ceiling', () => {
   it('compresses WebSocket frames without cross-message context', () => {
     const { config } = buildHarness();
 
-    expect(config.serverOptions).toMatchObject({
-      perMessageDeflate: {
-        threshold: 1024,
-        serverNoContextTakeover: true,
-        clientNoContextTakeover: true,
-        serverMaxWindowBits: 13,
-        zlibDeflateOptions: { memLevel: 7 },
-      },
+    // Exact match: a numeric serverMaxWindowBits/clientMaxWindowBits makes ws
+    // reject browser offers (Firefox) with HTTP 400 instead of declining.
+    expect((config.serverOptions as { perMessageDeflate: unknown }).perMessageDeflate).toEqual({
+      threshold: 1024,
+      serverNoContextTakeover: true,
+      clientNoContextTakeover: true,
+      zlibDeflateOptions: { memLevel: 7 },
+    });
+    expect(buildHarness({ websocketCompression: true }).config.serverOptions).toMatchObject({
+      perMessageDeflate: SOCKET_IO_PER_MESSAGE_DEFLATE,
     });
   });
 
-  it('does not pin the client window, so offers without client_max_window_bits stay acceptable', () => {
-    const { config } = buildHarness();
-    const deflate = (config.serverOptions as { perMessageDeflate: Record<string, unknown> })
-      .perMessageDeflate;
+  it('disables WebSocket compression when daemon.websocket_compression is false', () => {
+    const { config } = buildHarness({ websocketCompression: false });
 
-    expect(deflate).not.toHaveProperty('clientMaxWindowBits');
+    expect(config.serverOptions).toMatchObject({ perMessageDeflate: false });
   });
 });
 
