@@ -124,6 +124,36 @@ describe('profile-image MCP tools', () => {
     });
   });
 
+  it("lists theme labels and the teammate's active theme", async () => {
+    repositoryMocks.listForSubject.mockResolvedValue([{ ...image, theme: 'Winter' }]);
+    const ctx = makeContext({
+      branchGet: vi.fn(async () => ({
+        branch_id: 'branch-1',
+        custom_context: {
+          teammate: { kind: 'teammate', displayName: 'Designer', activePhotoTheme: 'Winter' },
+        },
+      })),
+    });
+    const result = (await captureHandler(
+      'agor_profile_images_list',
+      ctx
+    )({ subjectType: 'teammate', subjectId: 'branch-1' })) as { content: Array<{ text: string }> };
+
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      images: [{ image_id: 'image-1', theme: 'Winter' }],
+      active_theme: 'Winter',
+    });
+  });
+
+  it('omits active_theme when none is set', async () => {
+    repositoryMocks.listForSubject.mockResolvedValue([image]);
+    const result = (await captureHandler(
+      'agor_profile_images_list',
+      makeContext()
+    )({ subjectType: 'teammate', subjectId: 'branch-1' })) as { content: Array<{ text: string }> };
+    expect(JSON.parse(result.content[0].text)).not.toHaveProperty('active_theme');
+  });
+
   it('lists a board gallery only after board authorization succeeds', async () => {
     const boardImage = { ...image, subject_type: 'board', subject_id: 'board-1' };
     repositoryMocks.listForSubject.mockResolvedValue([boardImage]);

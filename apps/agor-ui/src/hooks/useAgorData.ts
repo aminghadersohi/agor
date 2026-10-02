@@ -118,9 +118,11 @@ export type InitialLoadItemKey = (typeof INITIAL_LOAD_ITEMS)[number]['key'];
 // single most important cap for first-paint latency on a busy workspace.
 //
 // Every session list read that feeds the store is `lean: true`: rows omit the
-// bulky single-session `custom_context` keys (LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS),
-// so `sessionById` must never be the source for those. The open session reads
-// them from its full `sessions.get` (the reactive session / settings modal).
+// bulky single-session `custom_context` keys (LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS)
+// and carry the `read_shape` marker, so `sessionById` holds summaries and must
+// never be the source for those keys (see `DataMaps.sessionById`). The open
+// session reads them from its full `sessions.get` (the reactive session /
+// settings modal / zone trigger).
 const RECENT_SESSIONS_LIMIT = 50;
 
 // One row in the loading checklist. `count` is captured atomically with
@@ -444,10 +446,15 @@ export function useAgorData(
    * One latest-request-wins coordinator for initial hydration and
    * realtime OAuth hints. A later request invalidates every earlier response,
    * preventing an old read from overwriting a newer disconnect/re-auth result.
+   * Like a load, a response is also dropped once the hydration cancellation
+   * epoch moves (unmount, authority change, logout): an unmount leaves
+   * `authorityScopeKeyRef` as it was, so the scope check alone would let a
+   * late answer write one user's OAuth grants into the next user's store.
    */
   const refetchOAuthDurableState = useCallback(
     async (requestAuthorityScope: string, mcpServerId?: string): Promise<boolean> => {
       if (!client) return false;
+      const requestEpoch = getHydrationCancellationEpoch();
       return runLatestMCPOAuthStatusRequest(
         oauthStatusRequestGenerationRef,
         async () => {
@@ -459,7 +466,9 @@ export function useAgorData(
           ]);
           return { status, freshServer };
         },
-        () => authorityScopeKeyRef.current === requestAuthorityScope,
+        () =>
+          authorityScopeKeyRef.current === requestAuthorityScope &&
+          getHydrationCancellationEpoch() === requestEpoch,
         ({ status, freshServer }) => {
           const ids =
             (status as { authenticated_server_ids?: string[] })?.authenticated_server_ids ?? [];
@@ -495,7 +504,16 @@ export function useAgorData(
       if (!client || !enabled || !fetchAuthorityScope) {
         return false;
       }
-      const authorityIsCurrent = () => authorityScopeKeyRef.current === fetchAuthorityScope;
+      // Load-lifetime cancellation token, captured BEFORE the first await.
+      // Every cancellation path (unmount, authority change, logout) bumps the
+      // hydration epoch, and an unmount leaves `authorityScopeKeyRef` as it
+      // was — so the scope check alone would let a load suspended in the
+      // light/heavy batch resume after teardown, retain a transcript prefetch,
+      // repopulate the singleton store and start deferred hydrations.
+      const loadEpoch = getHydrationCancellationEpoch();
+      const authorityIsCurrent = () =>
+        authorityScopeKeyRef.current === fetchAuthorityScope &&
+        getHydrationCancellationEpoch() === loadEpoch;
       const runAuthorityHydration = (
         name: string,
         revisions: Parameters<typeof runHydration>[1],
@@ -703,6 +721,8 @@ export function useAgorData(
             ? resolveSessionFromShortIdPure(directSessionId, interimSessionById)
             : null;
         let openedTranscriptReady: Promise<void> | null = null;
+        // The direct-session get above awaited; never retain after teardown.
+        if (!authorityIsCurrent()) return false;
         if (openedSessionId) {
           // Retain before releasing any earlier prefetch: for the same session
           // the shared handle stays warm instead of dropping to zero refs.
@@ -930,6 +950,11 @@ export function useAgorData(
         // The background hydrations kicked off below re-snapshot AFTER this bump,
         // so they're unaffected.
         bumpFirstPaintMergeRevisions();
+        if (silent) {
+          // A silent resync just applied the full active session and branch sets.
+          agorStore.getState().markHydrated('sessionsHydrated');
+          agorStore.getState().markHydrated('branchesHydrated');
+        }
         debugTimer?.endIndexing();
         debugFinishStatus = 'success';
 
@@ -1056,7 +1081,7 @@ export function useAgorData(
                   $limit: PAGINATION.DEFAULT_LIMIT,
                   $sort: { updated_at: -1 },
                 }),
-              (allSessions) =>
+              (allSessions) => {
                 agorStore.getState().applyMaps((prev) => {
                   // The hydration fetches active sessions only. Deep-link-healed
                   // archived sessions (added to `sessionById` so a direct /s/<id>
@@ -1082,7 +1107,9 @@ export function useAgorData(
                     }
                   );
                   return { ...prev, sessionById, sessionsByBranch };
-                })
+                });
+                agorStore.getState().markHydrated('sessionsHydrated');
+              }
             );
             void runAuthorityHydration(
               'branches',
@@ -1092,7 +1119,7 @@ export function useAgorData(
                   archived: false,
                   $limit: PAGINATION.DEFAULT_LIMIT,
                 }),
-              (allBranches) =>
+              (allBranches) => {
                 // Quiet window proven by runHydration → apply wholesale. Branches
                 // are active-only (the snapshot query is archived:false and the
                 // handlers never keep an archived branch), so a wholesale replace
@@ -1100,7 +1127,9 @@ export function useAgorData(
                 agorStore.getState().applyMaps((prev) => ({
                   ...prev,
                   branchById: buildById(allBranches, 'branch_id', prev.branchById),
-                }))
+                }));
+                agorStore.getState().markHydrated('branchesHydrated');
+              }
             );
           }
 
@@ -1183,12 +1212,12 @@ export function useAgorData(
           }
         };
         // On a session route, the global sets wait for the opened transcript
-        // (bounded by the prefetch timeout). A cancellation in the meantime
-        // (unmount, authority change, logout) skips the deferred start.
+        // (bounded by the prefetch timeout). A cancellation at any point of
+        // this load (unmount, authority change, logout) skips the deferred
+        // start — `authorityIsCurrent` includes the load's epoch.
         if (openedTranscriptReady) {
-          const epoch = getHydrationCancellationEpoch();
           void openedTranscriptReady.then(() => {
-            if (epoch !== getHydrationCancellationEpoch() || !authorityIsCurrent()) return;
+            if (!authorityIsCurrent()) return;
             hydrateGlobalSets();
           });
         } else {

@@ -26,7 +26,13 @@ import type {
   UserID,
   UUID,
 } from '@agor/core/types';
-import { getTeammateConfig, hasMinimumRole, isTeammate, ROLES } from '@agor/core/types';
+import {
+  getTeammateConfig,
+  hasMinimumRole,
+  isTeammate,
+  normalizeProfileImageTheme,
+  ROLES,
+} from '@agor/core/types';
 import { markTrustedUserMutation } from '../services/user-mutation-trust.js';
 import { ensureMinimumRole } from './authorization.js';
 import { hasBranchPermission } from './branch-authorization.js';
@@ -66,7 +72,11 @@ export interface ProfileImageUploadInput {
   data: Buffer;
   originalName?: unknown;
   altText?: unknown;
+  theme?: unknown;
 }
+
+/** Most images one bulk call may name; a gallery never holds more. */
+export const PROFILE_IMAGE_MAX_BULK_ITEMS = PROFILE_IMAGE_MAX_GALLERY_ITEMS;
 
 export interface ProfileImageManager {
   authorizeSubject(
@@ -92,6 +102,48 @@ export interface ProfileImageManager {
     patch: ProfileImagePatch
   ): Promise<ProfileImage>;
   remove(caller: ProfileImageCaller, imageId: ProfileImageID): Promise<void>;
+  /** Put `imageIds` first in gallery order; omitted images keep their order after them. */
+  reorder(
+    caller: ProfileImageCaller,
+    subjectType: ProfileImageSubjectType,
+    subjectId: ProfileImageSubjectId,
+    imageIds: ProfileImageID[]
+  ): Promise<ProfileImageListResult>;
+  /** Set (or with null clear) the theme of several images at once. */
+  bulkSetTheme(
+    caller: ProfileImageCaller,
+    subjectType: ProfileImageSubjectType,
+    subjectId: ProfileImageSubjectId,
+    imageIds: ProfileImageID[],
+    theme: string | null
+  ): Promise<ProfileImageListResult>;
+  bulkRemove(
+    caller: ProfileImageCaller,
+    subjectType: ProfileImageSubjectType,
+    subjectId: ProfileImageSubjectId,
+    imageIds: ProfileImageID[]
+  ): Promise<ProfileImageListResult>;
+  /** Restrict a teammate's photo surfaces to one theme; null shows the whole gallery. */
+  setActiveTheme(
+    caller: ProfileImageCaller,
+    teammateId: BranchID,
+    theme: string | null
+  ): Promise<{ active_theme: string | null }>;
+}
+
+/** Parse the `imageIds` of a bulk body: a bounded, non-empty list of ids. */
+export function parseProfileImageIds(value: unknown): ProfileImageID[] {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((id) => typeof id !== 'string' || !id.trim())
+  ) {
+    throw new BadRequest('imageIds must be a non-empty list of image ids');
+  }
+  if (value.length > PROFILE_IMAGE_MAX_BULK_ITEMS) {
+    throw new BadRequest(`At most ${PROFILE_IMAGE_MAX_BULK_ITEMS} images can be changed at once`);
+  }
+  return [...new Set(value.map((id: string) => id.trim() as ProfileImageID))];
 }
 
 const PROFILE_IMAGE_MANAGER_SETTING = 'profileImageManager';
@@ -314,6 +366,7 @@ export function createProfileImageManager({
           createdBy: caller.userId,
           originalName: sanitizeProfileImageName(input.originalName),
           altText: sanitizeProfileImageAlt(input.altText),
+          theme: normalizeProfileImageTheme(input.theme),
           small: processed.small,
           large: processed.large,
         })
@@ -335,6 +388,9 @@ export function createProfileImageManager({
       const patch = {
         ...(Object.hasOwn(body, 'alt_text')
           ? { altText: sanitizeProfileImageAlt(body.alt_text) ?? null }
+          : {}),
+        ...(Object.hasOwn(body, 'theme')
+          ? { theme: normalizeProfileImageTheme(body.theme) ?? null }
           : {}),
         ...(Number.isInteger(body.position) && Number(body.position) >= 0
           ? { position: Number(body.position) }
@@ -385,6 +441,74 @@ export function createProfileImageManager({
         throw error;
       }
       if (!removed) throw new NotFound('Profile image unavailable');
+    },
+
+    async reorder(caller, subjectType, subjectId, imageIds) {
+      await assertWritable(caller);
+      const subject = await authorizeSubject(caller, subjectType, subjectId, 'manage');
+      const images = await inTenant(caller, () =>
+        repository.reorder(caller.tenantId, subject, imageIds)
+      );
+      return { images, max_images: PROFILE_IMAGE_MAX_GALLERY_ITEMS };
+    },
+
+    async bulkSetTheme(caller, subjectType, subjectId, imageIds, theme) {
+      await assertWritable(caller);
+      const subject = await authorizeSubject(caller, subjectType, subjectId, 'manage');
+      const images = await inTenant(caller, () =>
+        repository.setThemes(
+          caller.tenantId,
+          subject,
+          imageIds,
+          normalizeProfileImageTheme(theme) ?? null
+        )
+      );
+      return { images, max_images: PROFILE_IMAGE_MAX_GALLERY_ITEMS };
+    },
+
+    async bulkRemove(caller, subjectType, subjectId, imageIds) {
+      await assertWritable(caller);
+      const subject = await authorizeSubject(caller, subjectType, subjectId, 'manage');
+      const before = await inTenant(caller, () =>
+        repository.listForSubject(caller.tenantId, subject)
+      );
+      const doomed = new Set<string>(imageIds);
+      const removesPrimary = before.some((image) => image.is_primary && doomed.has(image.image_id));
+      const primaryId = before.find((image) => image.is_primary)?.image_id ?? null;
+      if (removesPrimary) {
+        const survivor = before.find((image) => !doomed.has(image.image_id));
+        await syncPrimaryProjection(caller, subject, survivor?.image_id ?? null);
+      }
+      try {
+        await inTenant(caller, () => repository.removeMany(caller.tenantId, subject, imageIds));
+      } catch (error) {
+        if (removesPrimary) await syncPrimaryProjection(caller, subject, primaryId);
+        throw error;
+      }
+      const images = await inTenant(caller, () =>
+        repository.listForSubject(caller.tenantId, subject)
+      );
+      return { images, max_images: PROFILE_IMAGE_MAX_GALLERY_ITEMS };
+    },
+
+    async setActiveTheme(caller, teammateId, theme) {
+      await assertWritable(caller);
+      const subject = await authorizeSubject(caller, 'teammate', teammateId, 'manage');
+      const branch = await inTenant(caller, () => branches.findById(subject.id as BranchID));
+      const current = branch ? getTeammateConfig(branch) : null;
+      if (!branch || !current) throw new NotFound('Profile unavailable');
+      const activePhotoTheme = normalizeProfileImageTheme(theme);
+      const { activePhotoTheme: _previous, ...withoutTheme } = current;
+      const customContext = {
+        ...(branch.custom_context ?? {}),
+        teammate: activePhotoTheme ? { ...withoutTheme, activePhotoTheme } : withoutTheme,
+      };
+      await inTenant(caller, () =>
+        app
+          .service('branches')
+          .patch(branch.branch_id, { custom_context: customContext }, caller.params)
+      );
+      return { active_theme: activePhotoTheme ?? null };
     },
   };
 }

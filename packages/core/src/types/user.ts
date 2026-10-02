@@ -253,7 +253,12 @@ export interface AgenticToolsConfig {
   gemini?: GeminiConfig;
   copilot?: CopilotConfig;
   cursor?: CursorConfig;
-  opencode?: OpenCodeConfig;
+  /**
+   * One encrypted envelope, two writers: hosted OpenCode API keys by provider
+   * id (upstream), and this fork's local Ollama preset fields (`ollama_*`),
+   * which only local mode writes.
+   */
+  opencode?: OpenCodeConfig & Record<string, string>;
 }
 
 /** Union of all valid env-var-named fields across all tool configs. */
@@ -494,6 +499,11 @@ export interface OnboardingState {
   assistantEmoji?: string;
 }
 
+/** Home "My work" layouts; the first is the default. */
+export const HOME_WORK_VIEWS = ['list', 'board'] as const;
+
+export type HomeWorkView = (typeof HOME_WORK_VIEWS)[number];
+
 /**
  * User preferences structure
  */
@@ -508,6 +518,8 @@ export interface UserPreferences {
   use_slack_avatar?: boolean;
   /** User-owned choice of which canonical schedules appear in the Home overview. */
   home_schedules?: HomeSchedulePreferences;
+  /** Home "My work" layout. Undefined defaults to list. */
+  homeWorkView?: HomeWorkView;
   // Future preferences can be added here
   [key: string]: unknown;
 }

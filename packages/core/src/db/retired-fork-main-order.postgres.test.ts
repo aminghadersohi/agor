@@ -15,7 +15,12 @@ const REPLAYED = [
 ];
 // Upstream migrations this fork journals above the deployed tail. Neither
 // retired order ran them, so the repair replays them after the slice.
-const UPSTREAM_TAIL = ['0115_api_key_host_tenant_discovery', '0116_user_api_key_source'];
+const UPSTREAM_TAIL = [
+  '0115_api_key_host_tenant_discovery',
+  '0116_user_api_key_source',
+  '9031_profile_image_themes',
+  '0117_opencode_checkpoint_attempts',
+];
 
 // Fork main journalled front desk at 1790129000214 and profile images at
 // 1790129000215, the slots deployed amin_dev history uses for profile images
@@ -52,6 +57,9 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
         sql`DROP POLICY IF EXISTS "api_key_host_tenant_discovery" ON app_variables`
       );
       await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
+      // Upstream's checkpoint table is re-stamped above the fork tail; its plain
+      // CREATE TABLE (and policy) replays only once the table is gone.
+      await executeRaw(db, sql`DROP TABLE opencode_checkpoint_attempts`);
     }
 
     async function recordRetiredOrder(count: 1 | 2) {

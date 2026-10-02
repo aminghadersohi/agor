@@ -1,6 +1,9 @@
 export {
   createOpenCodeExecutorContext,
+  createOpenCodeManagedExecutorContext,
+  isOpenCodeManagedExecutorContext,
   type OpenCodeExecutorContext,
+  type OpenCodeNativeFileExecutorContext,
   parseOpenCodeExecutorContext,
 } from './executor-context.js';
 export { createOpenCodeKnownModelCatalog, OPENCODE_VERSION } from './known-models.js';

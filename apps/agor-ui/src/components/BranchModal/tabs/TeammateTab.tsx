@@ -1,6 +1,16 @@
 import type { AgorClient, Branch, Session } from '@agor-live/client';
 import { getTeammateConfig } from '@agor-live/client';
-import { Button, Descriptions, Form, Grid, Input, Popconfirm, Space, Typography } from 'antd';
+import {
+  Button,
+  Descriptions,
+  Form,
+  Grid,
+  Input,
+  Popconfirm,
+  Space,
+  Typography,
+  theme,
+} from 'antd';
 import { useState } from 'react';
 import { useConnectionDisabled } from '../../../contexts/ConnectionContext';
 import { useThemedMessage } from '../../../utils/message';
@@ -31,6 +41,7 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
   sessions = [],
   onRetired,
 }) => {
+  const { token } = theme.useToken();
   const [retiring, setRetiring] = useState(false);
   const screens = Grid.useBreakpoint();
   // Stack labels above fields on narrow screens instead of squeezing a 6/18 grid.
@@ -60,8 +71,8 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
       <Space orientation="vertical" size="large" style={{ width: '100%' }}>
         <Space>
           <TeammateIdentityAvatar branch={branch} size={32} />
-          <Typography.Text strong style={{ fontSize: 16 }}>
-            Teammate Configuration
+          <Typography.Text strong style={{ fontSize: token.fontSizeLG }}>
+            Teammate configuration
           </Typography.Text>
         </Space>
 
@@ -69,6 +80,7 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
           subject={{ type: 'teammate', id: branch.branch_id }}
           canEdit={canEdit}
           label="Teammate photos"
+          activeTheme={config.activePhotoTheme}
         />
 
         {/* Editable fields */}

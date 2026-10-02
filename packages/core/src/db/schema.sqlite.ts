@@ -1307,7 +1307,7 @@ export const users = sqliteTable(
           copilot?: {
             COPILOT_GITHUB_TOKEN?: string;
           };
-          opencode?: Record<string, never>;
+          opencode?: Record<string, string>;
         };
         agentic_auth_methods?: import('../types/user').AgenticAuthMethods;
         agentic_credential_sources?: import('../types/user').AgenticCredentialSources;
@@ -3579,6 +3579,7 @@ export const profileImages = sqliteTable(
     created_by: text('created_by', { length: 36 }).notNull(),
     original_name: text('original_name').notNull(),
     alt_text: text('alt_text'),
+    theme: text('theme'),
     position: integer('position').notNull().default(0),
     is_primary: t.bool('is_primary').notNull().default(false),
     small_data: blob('small_data').notNull(),
@@ -3615,3 +3616,27 @@ export const profileImages = sqliteTable(
   })
 );
 export type ProfileImageRow = typeof profileImages.$inferSelect;
+
+/** Hosted OpenCode checkpoints; no FKs so deleted Sessions' rows survive until their files are cleaned. */
+export const opencodeCheckpointAttempts = sqliteTable(
+  'opencode_checkpoint_attempts',
+  {
+    attempt_id: text('attempt_id', { length: 36 }).primaryKey(),
+    session_id: text('session_id', { length: 36 }).notNull(),
+    task_id: text('task_id', { length: 36 }).notNull(),
+    owner_user_id: text('owner_user_id', { length: 36 }).notNull(),
+    holder_instance_id: text('holder_instance_id', { length: 36 }).notNull(),
+    input_task_id: text('input_task_id', { length: 36 }),
+    state: text('state', { enum: ['open', 'accepted', 'superseded'] }).notNull(),
+    manifest: t.json<import('@agor/core/types').OpenCodeCheckpointManifest>('manifest'),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+  },
+  (table) => ({
+    taskUnique: uniqueIndex('opencode_checkpoint_attempts_task_unique').on(table.task_id),
+    acceptedUnique: uniqueIndex('opencode_checkpoint_attempts_accepted_unique')
+      .on(table.session_id)
+      .where(sql`${table.state} = 'accepted'`),
+    ownerIdx: index('opencode_checkpoint_attempts_owner_idx').on(table.owner_user_id),
+  })
+);

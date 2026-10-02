@@ -1031,13 +1031,16 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         // IMPORTANT: Receiver-side merge for nested objects (permission_config, model_config, etc.)
         // This prevents partial updates from losing existing nested fields.
         // Strategy: Objects = deep merge, Arrays = replace, Primitives = replace
+        // `read_shape` is a lean-list read marker, never a stored field: drop it
+        // so the merged (returned) session cannot be mistaken for a lean row.
         const {
           sdk_session_id: sdkSessionIdUpdate,
           archived_reason: archivedReasonUpdate,
           auto_archive_at: autoArchiveAtUpdate,
           auto_archive_after_seconds: autoArchiveAfterSecondsUpdate,
+          read_shape: _readShape,
           ...genericUpdates
-        } = updates;
+        } = updates as Partial<Session> & { read_shape?: unknown };
         const merged = deepMerge(current, genericUpdates);
         if (sdkSessionIdUpdate === null) {
           delete merged.sdk_session_id;

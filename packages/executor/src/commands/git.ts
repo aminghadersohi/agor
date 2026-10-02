@@ -48,6 +48,7 @@ import {
   isValidGitRepo,
   redactGitUrlCredentials,
   removeBranchWorkspace,
+  resolveContainedRepoPath,
   resolveGitRef,
   restoreBranchFilesystem,
   scanGitConfigRemoteCredentials,
@@ -473,7 +474,7 @@ export async function handleGitRepoRealignOrigin(
   payload: GitRepoRealignOriginPayload,
   options: CommandOptions
 ): Promise<ExecutorResult> {
-  const { repoId, repoPath, remoteUrl, repoSlug } = payload.params;
+  const { repoId, repoPath, remoteUrl, repoSlug, reposRoot } = payload.params;
 
   if (options.dryRun) {
     return {
@@ -487,7 +488,8 @@ export async function handleGitRepoRealignOrigin(
   }
 
   try {
-    const result = await ensureGitRemoteUrl(repoPath, 'origin', remoteUrl);
+    const managedRepoPath = await resolveContainedRepoPath(repoPath, reposRoot);
+    const result = await ensureGitRemoteUrl(managedRepoPath, 'origin', remoteUrl);
     if (result.changed) {
       const { redactUrlUserinfo } = await import('@agor/core/config');
       console.warn(
@@ -712,11 +714,12 @@ export async function handleGitClone(
 
       if (payload.params.repoId) {
         // Daemon pre-created the row in `cloneRepository` so failures stay
-        // queryable. Fill post-clone fields but keep it `cloning` until the
-        // synchronous operator permission handoff below completes.
+        // queryable. Fill post-clone fields and mark it `ready` in ONE patch:
+        // two patches publish independently and can reach clients out of
+        // order, leaving them stuck on `cloning` (#2941).
         repoId = payload.params.repoId;
         console.log(
-          `[git.clone] Patching pre-created repo ${shortId(repoId)} with cloned metadata: ` +
+          `[git.clone] Patching pre-created repo ${shortId(repoId)} to ready: ` +
             `slug=${slug} default_branch=${defaultBranch}` +
             (payload.params.default_branch ? ' (user-supplied)' : ' (auto-detected)')
         );
@@ -724,7 +727,7 @@ export async function handleGitClone(
           name: repoName,
           local_path: cloneResult.path,
           default_branch: defaultBranch,
-          clone_status: 'cloning',
+          clone_status: 'ready',
           // Explicit null clears any prior `clone_error` (e.g. from a retry
           // through the daemon's failed-row replace path). `deepMerge` in
           // `RepoRepository.update` propagates the null; `repoToInsert`
@@ -755,9 +758,6 @@ export async function handleGitClone(
         });
         repoId = repoRecord.repo_id;
         console.log(`[git.clone] Repo record created: ${repoId}`);
-      }
-
-      if (repoId) {
         await client.service('repos').patch(repoId, { clone_status: 'ready' });
       }
     }

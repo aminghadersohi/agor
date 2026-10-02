@@ -3,7 +3,7 @@ import { hasMinimumRole, ROLES } from '@agor-live/client';
 import { BulbOutlined, PlayCircleOutlined, ShopOutlined } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import { Button, Divider, Layout, Popover, Space, Tag, Tooltip, theme } from 'antd';
-import { memo, useMemo } from 'react';
+import { type CSSProperties, memo, useMemo } from 'react';
 import { useHref, useNavigate } from 'react-router-dom';
 import { mapToArray } from '@/utils/mapHelpers';
 import { useConnectionDisabled } from '../../contexts/ConnectionContext';
@@ -29,6 +29,26 @@ import { NavbarComposeButton } from './NavbarComposeButton';
 import { SettingsDropdown } from './SettingsDropdown';
 
 const { Header } = Layout;
+
+/** Labels can be up to 80 characters; the full text stays in the title/popover. */
+const INSTANCE_LABEL_STYLE: CSSProperties = {
+  marginLeft: 8,
+  maxWidth: 200,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  verticalAlign: 'middle',
+};
+
+const logoStyle: CSSProperties = {
+  height: 54,
+  padding: 0,
+  display: 'flex',
+  alignItems: 'center',
+  gap: 10,
+  background: 'transparent',
+  border: 0,
+  cursor: 'pointer',
+};
 
 export interface AppHeaderProps {
   user?: User | null;
@@ -63,6 +83,9 @@ export interface AppHeaderProps {
   instanceLabel?: string;
   /** Instance description (markdown) shown in popover around the instance label */
   instanceDescription?: string;
+  /** Navbar logo destination (e.g. a hosting console); the logo goes Home when unset */
+  navbarLogoLink?: string;
+  navbarLogoTooltip?: string;
   /** Session-creation seam behind the navbar compose affordance. */
   onCreateSession?: (
     config: NewSessionConfig,
@@ -148,6 +171,8 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
   onUserClick,
   instanceLabel,
   instanceDescription,
+  navbarLogoLink,
+  navbarLogoTooltip,
   onCreateSession,
 }) => {
   const { token } = theme.useToken();
@@ -171,11 +196,21 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
   // store-derived `boards`, so unrelated App re-renders can't hand us a fresh
   // recents array and defeat React.memo. The localStorage-backed recents list is
   // shared across hook instances, so this stays in sync with App's visit tracker.
-  const { recentBoards } = useRecentBoards(boards, currentBoardId ?? '');
+  const { recentBoards } = useRecentBoards(boards, currentBoardId ?? '', user?.user_id);
   // Single source of truth for "is the daemon usable right now?". Captures
   // disconnected, the 1.5s reconnect grace window, and out-of-sync. Don't
   // gate off raw `connected` — it stays true through the grace window.
   const mutationDisabled = useConnectionDisabled();
+
+  // Deployment-configured logo destination; only absolute http(s) URLs are honored.
+  const logoLink =
+    navbarLogoLink && /^https?:\/\//i.test(navbarLogoLink) ? navbarLogoLink : undefined;
+  const logo = (
+    <>
+      <BrandMark size={50} />
+      <BrandLogo level={3} style={{ marginTop: -6 }} />
+    </>
+  );
 
   const settingsItems: MenuProps['items'] = [
     ...(eventStreamEnabled
@@ -229,24 +264,17 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
       }}
     >
       <Space size={16} align="center">
-        <button
-          type="button"
-          aria-label="Go to Home"
-          onClick={onHomeClick}
-          style={{
-            height: 54,
-            padding: 0,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            background: 'transparent',
-            border: 0,
-            cursor: 'pointer',
-          }}
-        >
-          <BrandMark size={50} />
-          <BrandLogo level={3} style={{ marginTop: -6 }} />
-        </button>
+        {logoLink ? (
+          <Tooltip title={navbarLogoTooltip} placement="bottomLeft">
+            <a href={logoLink} aria-label={navbarLogoTooltip || 'Agor'} style={logoStyle}>
+              {logo}
+            </a>
+          </Tooltip>
+        ) : (
+          <button type="button" aria-label="Go to Home" onClick={onHomeClick} style={logoStyle}>
+            {logo}
+          </button>
+        )}
         {instanceLabel &&
           (instanceDescription ? (
             <Popover
@@ -259,12 +287,12 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
               trigger="hover"
               placement="bottomLeft"
             >
-              <Tag color="cyan" style={{ cursor: 'help', marginLeft: 8 }}>
+              <Tag color="cyan" style={{ ...INSTANCE_LABEL_STYLE, cursor: 'help' }}>
                 {instanceLabel}
               </Tag>
             </Popover>
           ) : (
-            <Tag color="cyan" style={{ marginLeft: 8 }}>
+            <Tag color="cyan" title={instanceLabel} style={INSTANCE_LABEL_STYLE}>
               {instanceLabel}
             </Tag>
           ))}

@@ -9,6 +9,7 @@ import { createDatabase } from './client';
 import { executeRaw, isSQLiteDatabase, rawRows } from './database-wrapper';
 import {
   classifyMigrationWatermark,
+  OWNER_ATTRIBUTION_SQLSTATE,
   pendingOfflineCutoverMigrations,
   preflightSQLiteCapabilityPolicyOwners,
   runMigrations,
@@ -168,6 +169,46 @@ describe('Postgres migrations', () => {
         '0110_user_provider_oauth_grants'
       );
     }
+  });
+
+  it('appends the profile image theme column above every prior watermark in both journals', async () => {
+    for (const journal of await readJournals()) {
+      const index = journal.entries.findIndex(({ tag }) => tag === '9031_profile_image_themes');
+      expect(index).toBeGreaterThan(0);
+      const added = journal.entries[index]!;
+      const watermark = Math.max(...journal.entries.slice(0, index).map(({ when }) => when));
+      expect(added.when).toBeGreaterThan(watermark);
+      expect(classifyMigrationWatermark(journal.entries, watermark).pending[0]).toBe(
+        '9031_profile_image_themes'
+      );
+      expect(new Set(journal.entries.map(({ idx }) => idx)).size).toBe(journal.entries.length);
+    }
+    for (const dialect of ['postgresql', 'sqlite'] as const) {
+      expect(
+        pendingOfflineCutoverMigrations(dialect, {
+          applied: ['9026_branch_color_override'],
+          pending: ['9031_profile_image_themes'],
+        })
+      ).toEqual([]);
+    }
+    const sqlite = await readFile(
+      new URL('../../drizzle/sqlite/9031_profile_image_themes.sql', import.meta.url),
+      'utf8'
+    );
+    expect(sqlite).toContain('ALTER TABLE `profile_images` ADD `theme` text;');
+    const postgres = await readFile(
+      new URL('../../drizzle/postgres/9031_profile_image_themes.sql', import.meta.url),
+      'utf8'
+    );
+    const statements = postgres
+      .split('--> statement-breakpoint')
+      .map((statement) => statement.replace(/^--.*$/gm, '').trim())
+      .filter(Boolean);
+    expect(statements[0]).toBe("SET LOCAL lock_timeout = '3s';");
+    // Idempotent so a database that already carries the column is not aborted.
+    expect(statements[1]).toBe(
+      'ALTER TABLE "profile_images" ADD COLUMN IF NOT EXISTS "theme" text;'
+    );
   });
 
   it('appends the branch color column above every prior watermark in both journals', async () => {
@@ -603,7 +644,7 @@ describe('Board and branch capability-policy migration', () => {
   const createLegacyTables = async (client: ReturnType<typeof createClient>) => {
     await client.executeMultiple(`
       PRAGMA foreign_keys = ON;
-      CREATE TABLE users (user_id text PRIMARY KEY NOT NULL);
+      CREATE TABLE users (user_id text PRIMARY KEY NOT NULL, role text NOT NULL DEFAULT 'member', created_at integer NOT NULL DEFAULT 1);
       CREATE TABLE groups (group_id text PRIMARY KEY NOT NULL);
       CREATE TABLE boards (
         board_id text PRIMARY KEY NOT NULL, created_at integer NOT NULL, updated_at integer,
@@ -641,7 +682,7 @@ describe('Board and branch capability-policy migration', () => {
     try {
       await createLegacyTables(client);
       await client.executeMultiple(`
-        INSERT INTO users VALUES ('owner'),('manager'),('member');
+        INSERT INTO users (user_id) VALUES ('owner'),('manager'),('member');
         INSERT INTO groups VALUES ('design');
         INSERT INTO boards VALUES (
           'board-1',1,2,'owner',
@@ -849,7 +890,7 @@ describe('Board and branch capability-policy migration', () => {
     try {
       await createLegacyTables(client);
       await client.executeMultiple(`
-        INSERT INTO users VALUES ('owner'),('manager'),('removed-creator'),('unmatched');
+        INSERT INTO users (user_id) VALUES ('owner'),('manager'),('removed-creator'),('unmatched');
         INSERT INTO groups VALUES ('design');
         INSERT INTO boards VALUES (
           'private-board',1,2,'removed-creator',
@@ -968,6 +1009,56 @@ describe('Board and branch capability-policy migration', () => {
     }
   });
 
+  it('uses the oldest admin only after existing ownership and passes the SQLite preflight', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agor-rbac-admin-fallback-'));
+    const url = `file:${join(directory, 'migration.db')}`;
+    const client = createClient({ url });
+    const db = createDatabase({ url });
+    try {
+      await createLegacyTables(client);
+      await client.executeMultiple(`
+        INSERT INTO users VALUES ('z-admin','admin',2),('a-admin','admin',2),
+          ('new-superadmin','superadmin',3),('member','member',1);
+        INSERT INTO boards VALUES ('orphan',1,1,'anonymous','{"keep":42}'),
+          ('creator',1,1,'member','{}'),('owned',1,1,'a-admin','{}');
+        INSERT INTO board_owners VALUES ('owned','member',1);
+        INSERT INTO branches VALUES ('orphan-branch','orphan',1,1,'missing','override','none','none','{"keep":true}');
+      `);
+      await expect(preflightSQLiteCapabilityPolicyOwners(db)).resolves.toBeUndefined();
+      const migration = await readFile(
+        new URL('../../drizzle/sqlite/0098_board_branch_capability_policies.sql', import.meta.url),
+        'utf8'
+      );
+      for (const statement of migration.split('--> statement-breakpoint')) {
+        if (statement.trim()) await client.execute(statement);
+      }
+      expect(
+        (
+          await client.execute(
+            'SELECT board_id, primary_owner_user_id FROM boards ORDER BY board_id'
+          )
+        ).rows
+      ).toEqual([
+        { board_id: 'creator', primary_owner_user_id: 'member' },
+        { board_id: 'orphan', primary_owner_user_id: 'a-admin' },
+        { board_id: 'owned', primary_owner_user_id: 'member' },
+      ]);
+      expect(
+        (await client.execute('SELECT created_by,data,primary_owner_user_id FROM branches')).rows
+      ).toEqual([
+        {
+          created_by: 'missing',
+          data: '{"keep":true,"dangerously_allow_session_sharing":false}',
+          primary_owner_user_id: 'a-admin',
+        },
+      ]);
+    } finally {
+      client.close();
+      (db as unknown as { $client: { close(): void } }).$client.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('fails closed when SQLite cannot attribute a primary owner', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agor-rbac-owner-preflight-'));
     const client = createClient({ url: `file:${join(directory, 'migration.db')}` });
@@ -1018,8 +1109,9 @@ describe('Board and branch capability-policy migration', () => {
       expect(migration).toContain(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
       expect(migration).toContain(`tenant_isolation_${table}`);
     }
-    expect(migration).toContain("string_agg(kind||':'||id");
+    expect(migration).toContain("string_agg('tenant='||tenant_id");
     expect(migration).toContain('RBAC migration cannot attribute primary owners');
+    expect(migration).toContain(`ERRCODE = '${OWNER_ATTRIBUTION_SQLSTATE}'`);
     expect(migration).toContain("SET LOCAL lock_timeout = '3s'");
     expect(migration).toContain('ORDER BY bo.created_at NULLS LAST,bo.user_id');
     expect(migration).toContain('CONSTRAINT "boards_tenant_primary_owner_fk"');
@@ -1755,6 +1847,10 @@ describe('front desk / profile image watermark reconciliation', () => {
       // Upstream's user_api_keys.source is journalled above front desk, so the
       // rewound ledger replays its plain ADD COLUMN.
       await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
+      // Likewise profile_images.theme, journalled above front desk.
+      await executeRaw(db, sql`ALTER TABLE profile_images DROP COLUMN theme`);
+      // And upstream's OpenCode checkpoint table, re-stamped above it.
+      await executeRaw(db, sql`DROP TABLE opencode_checkpoint_attempts`);
       await runMigrations(db, { allowOfflineCutover: true });
       expect(Number(await tableCount())).toBe(1);
 
@@ -1766,6 +1862,10 @@ describe('front desk / profile image watermark reconciliation', () => {
       // Upstream's user_api_keys.source is journalled above front desk, so the
       // rewound ledger replays its plain ADD COLUMN.
       await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
+      // Likewise profile_images.theme, journalled above front desk.
+      await executeRaw(db, sql`ALTER TABLE profile_images DROP COLUMN theme`);
+      // And upstream's OpenCode checkpoint table, re-stamped above it.
+      await executeRaw(db, sql`DROP TABLE opencode_checkpoint_attempts`);
       await runMigrations(db, { allowOfflineCutover: true });
       expect(Number(await tableCount())).toBe(1);
     } finally {

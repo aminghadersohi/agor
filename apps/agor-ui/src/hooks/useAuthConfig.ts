@@ -39,9 +39,11 @@ export interface AuthConfig {
   };
 }
 
-interface InstanceConfig {
+export interface InstanceConfig {
   label?: string;
   description?: string;
+  navbarLogoLink?: string;
+  navbarLogoTooltip?: string;
 }
 
 export interface FeaturesConfig {

@@ -16,6 +16,7 @@ import {
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useCanManageBoard } from '../../hooks/useCanManageBoard';
+import { OPEN_BOARD_SWITCHER_EVENT, onShellPicker } from '../../utils/shellEvents';
 import { BoardEditModal } from '../BoardEditModal';
 import { BoardListCounts } from '../BoardListCounts';
 import { BoardTile, getBoardEmoji, getBoardTeammate } from '../BoardTile';
@@ -80,6 +81,15 @@ export const BoardSwitcher: React.FC<BoardSwitcherProps> = ({
   const canManage = useCanManageBoard(client, currentBoard, currentUser);
 
   const showFilter = boards.length >= FILTER_THRESHOLD;
+
+  useEffect(
+    () =>
+      onShellPicker(OPEN_BOARD_SWITCHER_EVENT, () => {
+        triggerRef.current?.focus();
+        setDropdownOpen(true);
+      }),
+    []
+  );
 
   const closeDropdown = useCallback(() => {
     setDropdownOpen(false);

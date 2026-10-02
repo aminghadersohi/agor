@@ -36,7 +36,7 @@ const HOME_SCHEDULE_LIMIT = 12;
 interface HomeSchedulesSectionProps {
   client: AgorClient | null;
   currentUserId?: string;
-  onBranchClick?: (branchId: string) => void;
+  onBranchClick?: (branchId: string, boardId: string) => void;
   compact?: boolean;
 }
 
@@ -303,7 +303,7 @@ export function HomeSchedulesSection({
                               type="link"
                               size="small"
                               style={{ height: 'auto', padding: 0 }}
-                              onClick={() => onBranchClick(branch.branch_id)}
+                              onClick={() => onBranchClick(branch.branch_id, branch.board_id ?? '')}
                             >
                               <Typography.Text ellipsis={{ tooltip: branch.name }}>
                                 {branch.name}

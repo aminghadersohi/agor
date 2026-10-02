@@ -31,7 +31,8 @@ describe('useTeammateProfileImageUrl', () => {
       { type: 'teammate', id: 'branch-projected' },
       'image-projected',
       'small',
-      true
+      true,
+      undefined
     );
   });
 
@@ -42,7 +43,23 @@ describe('useTeammateProfileImageUrl', () => {
       { type: 'teammate', id: 'branch-gallery' },
       undefined,
       'large',
-      true
+      true,
+      undefined
+    );
+  });
+
+  it("passes the teammate's active photo theme so only matching photos cycle", () => {
+    const branch = teammate('branch-themed', 'image-projected');
+    (branch.custom_context as { teammate: Record<string, unknown> }).teammate.activePhotoTheme =
+      'Winter';
+    renderHook(() => useTeammateProfileImageUrl(branch, 'small'));
+
+    expect(useCyclingProfileImageUrl).toHaveBeenCalledWith(
+      { type: 'teammate', id: 'branch-themed' },
+      'image-projected',
+      'small',
+      true,
+      'Winter'
     );
   });
 });

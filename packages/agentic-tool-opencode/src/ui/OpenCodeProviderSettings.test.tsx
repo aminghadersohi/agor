@@ -197,6 +197,22 @@ describe('OpenCodeProviderSettings', () => {
     expect(await screen.findByText(/Ready with a 32,768-token/i)).toBeInTheDocument();
   });
 
+  it('renders an unsupported deployment as a permanent notice without Retry or a form', async () => {
+    const message = 'OpenCode is unavailable in hosted multi-tenant mode.';
+    const service = createAuthService({
+      find: vi.fn().mockResolvedValue({
+        runtime: 'unsupported',
+        runtimeVersion: '1.14.33',
+        unsupported: { code: 'hosted_tenancy', message },
+        providers: [],
+      } satisfies Settings),
+    });
+    renderSettings(service);
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Provider to connect')).not.toBeInTheDocument();
+  });
+
   it('keeps the selected provider credential draft isolated from visible runtime providers', async () => {
     const providers: Settings = {
       ...initial,
