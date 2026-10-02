@@ -69,6 +69,7 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
           subject={{ type: 'teammate', id: branch.branch_id }}
           canEdit={canEdit}
           label="Teammate photos"
+          activeTheme={config.activePhotoTheme}
         />
 
         {/* Editable fields */}

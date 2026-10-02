@@ -1,5 +1,5 @@
 import type { Branch } from '@agor-live/client';
-import { getTeammateConfig } from '@agor-live/client';
+import { getTeammateConfig, selectProfileImagesForTheme } from '@agor-live/client';
 import { theme } from 'antd';
 import { useMemo } from 'react';
 import { TeammateIdentityAvatar } from '../TeammateIdentityAvatar';
@@ -32,10 +32,10 @@ export function TeammateBoardPortrait({
   const images = useProfileImageGallery({ type: 'teammate', id: branch.branch_id });
   const alternatives = useMemo(
     () =>
-      images
+      selectProfileImagesForTheme(images, config?.activePhotoTheme)
         .filter((image) => image.image_id !== config?.profileImageId && !image.is_primary)
         .slice(0, maxAlternatives),
-    [config?.profileImageId, images, maxAlternatives]
+    [config?.activePhotoTheme, config?.profileImageId, images, maxAlternatives]
   );
 
   // The strip straddles the main portrait's trailing edge by 0.55 alternatives,

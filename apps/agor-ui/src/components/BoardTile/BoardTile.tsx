@@ -79,14 +79,15 @@ export const BoardTile: React.FC<BoardTileProps> = ({
     hasBoardGallery
   );
   // The teammate gallery is only read when the board has none of its own.
-  const teammateImageId =
-    teammate && isTeammate(teammate) ? getTeammateConfig(teammate)?.profileImageId : undefined;
+  const teammateConfig = teammate && isTeammate(teammate) ? getTeammateConfig(teammate) : undefined;
+  const teammateImageId = teammateConfig?.profileImageId;
   const hasTeammateGallery = !hasBoardGallery && Boolean(teammate && teammateImageId);
   const teammateImageUrl = useCyclingProfileImageUrl(
     teammate && hasTeammateGallery ? { type: 'teammate', id: teammate.branch_id } : undefined,
     hasTeammateGallery ? teammateImageId : undefined,
     variant,
-    hasTeammateGallery
+    hasTeammateGallery,
+    teammateConfig?.activePhotoTheme
   );
   const imageUrl = boardImageUrl ?? teammateImageUrl;
   return (

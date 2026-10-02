@@ -9,6 +9,9 @@ const mocks = vi.hoisted(() => ({
     create: vi.fn(),
     patch: vi.fn(),
     remove: vi.fn(),
+    reorder: vi.fn(),
+    setThemes: vi.fn(),
+    removeMany: vi.fn(),
     readVariant: vi.fn(),
   },
   users: { findById: vi.fn() },
@@ -35,6 +38,9 @@ vi.mock('@agor/core/db', () => {
       create = mocks.images.create;
       patch = mocks.images.patch;
       remove = mocks.images.remove;
+      reorder = mocks.images.reorder;
+      setThemes = mocks.images.setThemes;
+      removeMany = mocks.images.removeMany;
       readVariant = mocks.images.readVariant;
     },
     UsersRepository: class {
@@ -65,6 +71,7 @@ vi.mock('./profile-image-processing.js', async (importOriginal) => ({
 const {
   createProfileImageManager,
   getProfileImageManager,
+  parseProfileImageIds,
   profileImageCallerFromParams,
   registerProfileImageManager,
 } = await import('./profile-image-management.js');
@@ -307,6 +314,201 @@ describe('profile image manager', () => {
       expect.anything()
     );
     expect(mocks.images.remove).toHaveBeenCalledWith(TENANT, 'image-1');
+  });
+
+  describe('themes', () => {
+    const teammateImage = (overrides: Record<string, unknown> = {}) =>
+      image({ subject_type: 'teammate', subject_id: 'branch-1', ...overrides });
+
+    beforeEach(() => {
+      mocks.branches.findById.mockResolvedValue(teammate);
+      mocks.hasBranchPermission.mockReturnValue(true);
+    });
+
+    it('normalizes the theme on upload and on a single-image update', async () => {
+      mocks.images.create.mockResolvedValue(teammateImage());
+      const { manager } = makeManager();
+      await manager.upload(makeCaller(), {
+        subjectType: 'teammate',
+        subjectId: 'branch-1',
+        data: Buffer.from('pixels'),
+        theme: '  Winter  ',
+      });
+      expect(mocks.images.create).toHaveBeenCalledWith(
+        expect.objectContaining({ theme: 'Winter' })
+      );
+
+      const target = teammateImage({ is_primary: false });
+      mocks.images.findById.mockResolvedValue(target);
+      mocks.images.patch.mockResolvedValue({ ...target, theme: 'Summer' });
+      await manager.update(makeCaller(), 'image-1', { theme: ' Summer ' });
+      expect(mocks.images.patch).toHaveBeenLastCalledWith(TENANT, 'image-1', { theme: 'Summer' });
+
+      await manager.update(makeCaller(), 'image-1', { theme: '   ' });
+      expect(mocks.images.patch).toHaveBeenLastCalledWith(TENANT, 'image-1', { theme: null });
+    });
+
+    it('sets and clears the active theme on the teammate config', async () => {
+      const { manager, patches } = makeManager();
+      await expect(manager.setActiveTheme(makeCaller(), 'branch-1', ' Winter ')).resolves.toEqual({
+        active_theme: 'Winter',
+      });
+      expect(patches.branches).toHaveBeenLastCalledWith(
+        'branch-1',
+        {
+          custom_context: {
+            teammate: {
+              kind: 'teammate',
+              displayName: 'Designer',
+              emoji: '🎨',
+              activePhotoTheme: 'Winter',
+            },
+          },
+        },
+        expect.anything()
+      );
+
+      mocks.branches.findById.mockResolvedValue({
+        ...teammate,
+        custom_context: {
+          teammate: { ...teammate.custom_context.teammate, activePhotoTheme: 'Winter' },
+        },
+      });
+      await expect(manager.setActiveTheme(makeCaller(), 'branch-1', null)).resolves.toEqual({
+        active_theme: null,
+      });
+      expect(patches.branches).toHaveBeenLastCalledWith(
+        'branch-1',
+        {
+          custom_context: {
+            teammate: { kind: 'teammate', displayName: 'Designer', emoji: '🎨' },
+          },
+        },
+        expect.anything()
+      );
+    });
+
+    it('keeps the active-theme write behind manage access and the tenant write gate', async () => {
+      const { manager, patches } = makeManager();
+      mocks.hasBranchPermission.mockReturnValue(false);
+      await expect(manager.setActiveTheme(makeCaller(), 'branch-1', 'Winter')).rejects.toThrow(
+        'Profile unavailable'
+      );
+      mocks.hasBranchPermission.mockReturnValue(true);
+      mocks.writeGateActive = true;
+      await expect(manager.setActiveTheme(makeCaller(), 'branch-1', 'Winter')).rejects.toThrow(
+        'Tenant is frozen'
+      );
+      expect(patches.branches).not.toHaveBeenCalled();
+      // Viewers cannot choose what everyone sees.
+      mocks.writeGateActive = false;
+      await expect(
+        manager.setActiveTheme(makeCaller('viewer'), 'branch-1', 'Winter')
+      ).rejects.toThrow();
+    });
+
+    it('refuses an active theme on a branch that is not a teammate', async () => {
+      mocks.branches.findById.mockResolvedValue({ branch_id: 'branch-2', custom_context: {} });
+      const { manager, patches } = makeManager();
+      await expect(manager.setActiveTheme(makeCaller(), 'branch-2', 'Winter')).rejects.toThrow(
+        'Profile unavailable'
+      );
+      expect(patches.branches).not.toHaveBeenCalled();
+    });
+
+    it('reorders and bulk-labels through the repository after authorizing the subject', async () => {
+      mocks.images.reorder.mockResolvedValue([teammateImage()]);
+      mocks.images.setThemes.mockResolvedValue([teammateImage({ theme: 'Winter' })]);
+      const { manager } = makeManager();
+
+      await manager.reorder(makeCaller(), 'teammate', 'branch-1', ['b', 'a']);
+      expect(mocks.images.reorder).toHaveBeenCalledWith(
+        TENANT,
+        expect.objectContaining({ type: 'teammate', id: 'branch-1' }),
+        ['b', 'a']
+      );
+
+      const labeled = await manager.bulkSetTheme(
+        makeCaller(),
+        'teammate',
+        'branch-1',
+        ['a', 'b'],
+        ' Winter '
+      );
+      expect(mocks.images.setThemes).toHaveBeenCalledWith(
+        TENANT,
+        expect.objectContaining({ id: 'branch-1' }),
+        ['a', 'b'],
+        'Winter'
+      );
+      expect(labeled.images[0]?.theme).toBe('Winter');
+
+      mocks.hasBranchPermission.mockReturnValue(false);
+      await expect(manager.reorder(makeCaller(), 'teammate', 'branch-1', ['a'])).rejects.toThrow(
+        'Profile unavailable'
+      );
+    });
+
+    it('moves the main-photo projection before a bulk delete removes the primary', async () => {
+      mocks.images.listForSubject
+        .mockResolvedValueOnce([
+          teammateImage({ image_id: 'a', is_primary: true }),
+          teammateImage({ image_id: 'b', is_primary: false }),
+          teammateImage({ image_id: 'c', is_primary: false }),
+        ])
+        .mockResolvedValueOnce([teammateImage({ image_id: 'c', is_primary: true })]);
+      mocks.images.removeMany.mockResolvedValue({ removed: [], replacementPrimary: null });
+      const { manager, patches } = makeManager();
+
+      const result = await manager.bulkRemove(makeCaller(), 'teammate', 'branch-1', ['a', 'b']);
+
+      expect(patches.branches).toHaveBeenCalledWith(
+        'branch-1',
+        expect.objectContaining({
+          custom_context: {
+            teammate: expect.objectContaining({ profileImageId: 'c' }),
+          },
+        }),
+        expect.anything()
+      );
+      expect(mocks.images.removeMany).toHaveBeenCalledWith(
+        TENANT,
+        expect.objectContaining({ id: 'branch-1' }),
+        ['a', 'b']
+      );
+      expect(result.images.map((candidate) => candidate.image_id)).toEqual(['c']);
+    });
+
+    it('restores the projection when a bulk delete fails after the primary moved', async () => {
+      mocks.images.listForSubject.mockResolvedValue([
+        teammateImage({ image_id: 'a', is_primary: true }),
+        teammateImage({ image_id: 'b', is_primary: false }),
+      ]);
+      mocks.images.removeMany.mockRejectedValue(new Error('boom'));
+      const { manager, patches } = makeManager();
+
+      await expect(manager.bulkRemove(makeCaller(), 'teammate', 'branch-1', ['a'])).rejects.toThrow(
+        'boom'
+      );
+      expect(patches.branches).toHaveBeenCalledTimes(2);
+      expect(patches.branches).toHaveBeenLastCalledWith(
+        'branch-1',
+        expect.objectContaining({
+          custom_context: { teammate: expect.objectContaining({ profileImageId: 'a' }) },
+        }),
+        expect.anything()
+      );
+    });
+
+    it('validates bulk id lists', () => {
+      expect(parseProfileImageIds([' a ', 'a', 'b'])).toEqual(['a', 'b']);
+      expect(() => parseProfileImageIds([])).toThrow('imageIds');
+      expect(() => parseProfileImageIds('a')).toThrow('imageIds');
+      expect(() => parseProfileImageIds([1])).toThrow('imageIds');
+      expect(() => parseProfileImageIds(Array.from({ length: 101 }, (_, i) => `i${i}`))).toThrow(
+        'At most 100'
+      );
+    });
   });
 
   it('scopes every read to the caller tenant and treats foreign images as missing', async () => {

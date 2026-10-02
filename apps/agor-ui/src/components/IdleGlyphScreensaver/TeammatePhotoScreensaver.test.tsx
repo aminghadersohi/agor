@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   galleries: new Map<string, string[]>(),
+  themes: new Map<string, string>(),
   acquire: vi.fn(async (imageId: string) => `blob:${imageId}`),
   release: vi.fn(),
 }));
@@ -11,7 +12,10 @@ vi.mock('../ProfileImage', () => ({
   loadProfileImageGallery: vi.fn(async ({ id }: { id: string }) => {
     const ids = mocks.galleries.get(id);
     if (!ids) throw new Error('forbidden');
-    return { images: ids.map((image_id) => ({ image_id })), max_images: 100 };
+    return {
+      images: ids.map((image_id) => ({ image_id, theme: mocks.themes.get(image_id) })),
+      max_images: 100,
+    };
   }),
   acquireProfileImageUrl: mocks.acquire,
   releaseProfileImageUrl: mocks.release,
@@ -37,6 +41,7 @@ describe('TeammatePhotoScreensaver', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     mocks.galleries.clear();
+    mocks.themes.clear();
     mocks.galleries.set('lagertha', ['l1', 'l2']);
     mocks.galleries.set('ragnar', ['r1']);
     mocks.acquire.mockClear();
@@ -51,6 +56,21 @@ describe('TeammatePhotoScreensaver', () => {
     const photos = await loadTeammatePhotos(TEAMMATES);
     expect(photos.map((photo) => photo.imageId).sort()).toEqual(['l1', 'l2', 'r1']);
     expect(photos.find((photo) => photo.imageId === 'r1')?.teammateName).toBe('Ragnar');
+  });
+
+  it('limits each teammate to the photos of their active theme, falling back when none match', async () => {
+    mocks.galleries.set('lagertha', ['l1', 'l2', 'l3']);
+    mocks.themes.set('l1', 'Winter');
+    mocks.themes.set('l3', 'winter');
+    mocks.themes.set('r1', 'Summer');
+
+    const photos = await loadTeammatePhotos([
+      { id: 'lagertha', name: 'Lagertha', activeTheme: 'Winter' },
+      // Ragnar's only photo is not "Autumn", so the whole gallery is used.
+      { id: 'ragnar', name: 'Ragnar', activeTheme: 'Autumn' },
+    ]);
+
+    expect(photos.map((photo) => photo.imageId).sort()).toEqual(['l1', 'l3', 'r1']);
   });
 
   it('shows teammate photos, advances, and releases every image on unmount', async () => {

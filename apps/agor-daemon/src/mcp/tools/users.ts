@@ -14,7 +14,13 @@ import type {
   TenantID,
   UserID,
 } from '@agor/core/types';
-import { isTeammate, ROLES, type User } from '@agor/core/types';
+import {
+  getTeammateConfig,
+  isTeammate,
+  PROFILE_IMAGE_THEME_MAX_LENGTH,
+  ROLES,
+  type User,
+} from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { FILE_READ_MIN_RESPONSE_BYTES, type FileParams } from '../../services/file.js';
@@ -420,6 +426,11 @@ async function authorizeSubject(
   throw new NotFound('Profile unavailable');
 }
 
+async function activeThemeOf(ctx: McpContext, branchId: BranchID): Promise<string | undefined> {
+  const branch = (await ctx.app.service('branches').get(branchId, ctx.baseServiceParams)) as Branch;
+  return getTeammateConfig(branch)?.activePhotoTheme;
+}
+
 async function authorizeImage(ctx: McpContext, image: ProfileImage): Promise<void> {
   await authorizeSubject(ctx, image.subject_type, image.subject_id);
 }
@@ -498,7 +509,7 @@ export function registerProfileImageTools(server: McpServer, ctx: McpContext): v
     'agor_profile_images_list',
     {
       description:
-        'List processed image-gallery metadata for an accessible Agor user, teammate, or board. Returns image IDs, primary ordering, alt text, and small/large dimensions; use agor_profile_images_get to load pixels for artifact work.',
+        'List processed image-gallery metadata for an accessible Agor user, teammate, or board. Returns image IDs, primary ordering, alt text, theme labels, and small/large dimensions (plus the teammate active_theme, when set); use agor_profile_images_get to load pixels for artifact work.',
       annotations: { readOnlyHint: true },
       inputSchema: z.strictObject({
         subjectType: z
@@ -520,7 +531,13 @@ export function registerProfileImageTools(server: McpServer, ctx: McpContext): v
       const images = await runWithMcpTenantDatabaseScope(ctx, (db) =>
         new ProfileImageRepository(db).listForSubject(tenantIdFor(ctx), subject)
       );
-      return textResult({ images, max_images: PROFILE_IMAGE_MAX_GALLERY_ITEMS });
+      const activeTheme =
+        subject.type === 'teammate' ? await activeThemeOf(ctx, subject.id as BranchID) : undefined;
+      return textResult({
+        images,
+        max_images: PROFILE_IMAGE_MAX_GALLERY_ITEMS,
+        ...(activeTheme ? { active_theme: activeTheme } : {}),
+      });
     }
   );
 
@@ -622,6 +639,14 @@ Managing a user gallery requires being that user or an admin; a board gallery re
             'File name recorded for the image (default: the path basename)'
           ),
           altText: mcpOptionalString('altText', 'Accessible description of the image'),
+          theme: z
+            .string()
+            .max(
+              PROFILE_IMAGE_THEME_MAX_LENGTH,
+              `theme must be ${PROFILE_IMAGE_THEME_MAX_LENGTH} characters or fewer.`
+            )
+            .optional()
+            .describe('Theme label for the image (e.g. "Winter"); omit for an unlabeled image'),
         })
         .refine((args) => Boolean(args.imageBase64) !== Boolean(args.branchId || args.path), {
           message: 'Provide either imageBase64 or branchId + path, not both.',
@@ -641,6 +666,7 @@ Managing a user gallery requires being that user or an admin; a board gallery re
         data: source.data,
         originalName: args.originalName ?? source.name,
         altText: args.altText,
+        theme: args.theme,
       });
       return textResult(created);
     }
@@ -650,7 +676,7 @@ Managing a user gallery requires being that user or an admin; a board gallery re
     'agor_profile_images_update',
     {
       description:
-        'Update one gallery image of an Agor user, teammate, or board: make it the main (primary) image, move it to another position, or change its alt text. Requires the same manage access as agor_profile_images_upload.',
+        'Update one gallery image of an Agor user, teammate, or board: make it the main (primary) image, move it to another position, or change its alt text or theme label. Requires the same manage access as agor_profile_images_upload.',
       inputSchema: z.strictObject({
         imageId: mcpRequiredId('imageId', 'Profile image'),
         isPrimary: z
@@ -669,6 +695,15 @@ Managing a user gallery requires being that user or an admin; a board gallery re
           .nullable()
           .optional()
           .describe('Accessible description; null or an empty string clears it'),
+        theme: z
+          .string()
+          .max(
+            PROFILE_IMAGE_THEME_MAX_LENGTH,
+            `theme must be ${PROFILE_IMAGE_THEME_MAX_LENGTH} characters or fewer.`
+          )
+          .nullable()
+          .optional()
+          .describe('Theme label (e.g. "Winter"); null or an empty string clears it'),
       }),
     },
     async (args) => {
@@ -676,6 +711,7 @@ Managing a user gallery requires being that user or an admin; a board gallery re
         ...(args.isPrimary ? { is_primary: true } : {}),
         ...(args.position !== undefined ? { position: args.position } : {}),
         ...(args.altText !== undefined ? { alt_text: args.altText ?? '' } : {}),
+        ...(args.theme !== undefined ? { theme: args.theme ?? '' } : {}),
       };
       const updated = await getProfileImageManager(ctx.app).update(
         profileImageCaller(ctx),
@@ -683,6 +719,33 @@ Managing a user gallery requires being that user or an admin; a board gallery re
         patch
       );
       return textResult(updated);
+    }
+  );
+
+  server.registerTool(
+    'agor_profile_images_set_active_theme',
+    {
+      description:
+        "Choose which theme label a teammate's photos are restricted to. While a theme is active, every surface that shows the teammate's photos (avatar, board tiles, screensaver, gallery views) uses only images carrying that theme; if no image carries it, all images are used. Pass theme null (or an empty string) to show every image. Requires Manager access to the teammate branch.",
+      inputSchema: z.strictObject({
+        teammateId: mcpRequiredId('teammateId', 'Teammate branch'),
+        theme: z
+          .string()
+          .max(
+            PROFILE_IMAGE_THEME_MAX_LENGTH,
+            `theme must be ${PROFILE_IMAGE_THEME_MAX_LENGTH} characters or fewer.`
+          )
+          .nullable()
+          .describe('Theme label to restrict to; null or an empty string shows every image'),
+      }),
+    },
+    async (args) => {
+      const result = await getProfileImageManager(ctx.app).setActiveTheme(
+        profileImageCaller(ctx),
+        args.teammateId as BranchID,
+        args.theme
+      );
+      return textResult(result);
     }
   );
 
