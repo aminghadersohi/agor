@@ -59,6 +59,7 @@ import {
   setMcpMemberPolicy,
   shortId,
   TaskRepository,
+  TenantDisplayRepository,
   type TenantScopeAwareDatabase,
   type TenantScopedDatabase,
   UploadRepository,
@@ -180,6 +181,7 @@ import type {
 } from './declarations.js';
 import { registerExecutorResponseRoutes } from './executor-response-channel.js';
 import { probeDatabase, probePendingMigrations } from './health/db-probe.js';
+import { authenticatedHealthInstance, publicHealthInstance } from './health/instance.js';
 import {
   authenticatedHealthDb,
   healthMigrations,
@@ -7624,10 +7626,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           identity: identityAuthority,
           passwordPolicy,
         },
-        instance: {
-          label: config.daemon?.instanceLabel,
-          description: config.daemon?.instanceDescription,
-        },
+        instance: publicHealthInstance(config),
         realtime: realtimeRuntime
           ? { required: true, ready: realtimeRuntime.isReady() }
           : { required: false, ready: true },
@@ -7696,6 +7695,11 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           getMCPEgressGatewayMode(tenantDb)
         );
         const mcpEgressRuntime = mcpEgressGateway.status(healthTenantId);
+        const instance = await authenticatedHealthInstance(config, () =>
+          runWithTenantDatabaseScope(db, healthTenantId, (tenantDb) =>
+            new TenantDisplayRepository(tenantDb).find()
+          )
+        );
 
         return {
           ...publicResponse,
@@ -7703,6 +7707,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           // (never in the public payload).
           db: authenticatedHealthDb(dbProbe),
           migrations: healthMigrations(migrations),
+          instance,
           database: databaseInfo,
           auth: {
             ...publicResponse.auth,

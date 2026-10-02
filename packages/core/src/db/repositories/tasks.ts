@@ -100,6 +100,7 @@ import {
 } from './branch-access';
 import { ExecutorSessionTokenAuthorityRepository } from './executor-session-token-authorities';
 import { deepMerge } from './merge-utils';
+import { acceptOpenCodeCheckpoint, assertNoOpenOpenCodeCheckpoint } from './opencode-checkpoints';
 import { countRecordedTools } from './recorded-tool-count';
 
 export const MAX_COMPACTED_PROMPT_BYTES = 32 * 1024;
@@ -2367,7 +2368,8 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
   private async updateTask(
     id: string,
     updates: Partial<Task>,
-    executorUpdate: boolean
+    executorUpdate: boolean,
+    openCodeCheckpoint?: { holderId: string; manifest: unknown }
   ): Promise<Task> {
     try {
       return await this.mutateLockedTask(id, async (txDb, currentRow, fullId) => {
@@ -2425,6 +2427,20 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           throw new RepositoryError(
             'termination-owned tasks must be settled through settleTermination'
           );
+        }
+        if (openCodeCheckpoint) {
+          if (updates.status !== TaskStatus.COMPLETED) {
+            throw new RepositoryError('An OpenCode checkpoint is accepted only with completion');
+          }
+          await acceptOpenCodeCheckpoint(
+            txDb,
+            this.db,
+            currentRow,
+            openCodeCheckpoint.holderId,
+            openCodeCheckpoint.manifest
+          );
+        } else if (executorUpdate && updates.status === TaskStatus.COMPLETED) {
+          await assertNoOpenOpenCodeCheckpoint(txDb, fullId);
         }
 
         const merged = {
@@ -2916,8 +2932,12 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
   }
 
   /** Apply executor-owned result fields only while the executor still owns the locked row. */
-  async updateFromExecutor(id: string, updates: Partial<Task>): Promise<Task> {
-    return this.updateTask(id, updates, true);
+  async updateFromExecutor(
+    id: string,
+    updates: Partial<Task>,
+    openCodeCheckpoint?: { holderId: string; manifest: unknown }
+  ): Promise<Task> {
+    return this.updateTask(id, updates, true, openCodeCheckpoint);
   }
 
   /**

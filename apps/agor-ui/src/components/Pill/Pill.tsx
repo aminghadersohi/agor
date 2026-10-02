@@ -875,6 +875,8 @@ interface EntityPillProps extends BasePillProps {
   code?: boolean;
   ariaLabel?: string;
   'aria-label'?: string;
+  /** Neutral fill for dense lists where the pill sits below the row title. */
+  quiet?: boolean;
 }
 
 export const EntityPill: React.FC<EntityPillProps> = ({
@@ -889,6 +891,7 @@ export const EntityPill: React.FC<EntityPillProps> = ({
   code = false,
   ariaLabel,
   'aria-label': ariaLabelProp,
+  quiet = false,
   style,
 }) => {
   const { token } = theme.useToken();
@@ -905,7 +908,8 @@ export const EntityPill: React.FC<EntityPillProps> = ({
   return (
     <Tag
       icon={emoji ? undefined : icon}
-      color={color}
+      color={quiet ? undefined : color}
+      variant={quiet ? 'filled' : undefined}
       title={title}
       aria-label={resolvedAriaLabel}
       role={interactive ? 'button' : undefined}
@@ -915,6 +919,7 @@ export const EntityPill: React.FC<EntityPillProps> = ({
         maxWidth: compact ? '100%' : undefined,
         marginInlineEnd: compact ? 0 : undefined,
         cursor: interactive ? 'pointer' : 'default',
+        color: quiet ? token.colorTextSecondary : undefined,
         ...style,
       }}
       onClick={onClick}
@@ -942,11 +947,13 @@ export const EntityPill: React.FC<EntityPillProps> = ({
 };
 
 interface BranchPillProps extends BasePillProps {
+  quiet?: boolean;
   branch: string;
   compact?: boolean;
   title?: string;
   emoji?: string | null;
   onClick?: (e: EntityPillInteractionEvent) => void;
+  maxWidth?: number;
 }
 
 export const BranchPill: React.FC<BranchPillProps> = ({
@@ -955,9 +962,12 @@ export const BranchPill: React.FC<BranchPillProps> = ({
   title,
   emoji,
   onClick,
+  maxWidth,
+  quiet,
   style,
 }) => (
   <EntityPill
+    quiet={quiet}
     icon={<BranchesOutlined />}
     color={ENTITY_PILL_COLORS.branch}
     label={branch}
@@ -965,12 +975,15 @@ export const BranchPill: React.FC<BranchPillProps> = ({
     compact={compact}
     title={title}
     onClick={onClick}
+    maxWidth={maxWidth}
     code
     style={style}
   />
 );
 
 interface BoardPillProps extends BasePillProps {
+  quiet?: boolean;
+  maxWidth?: number;
   board: {
     name: string;
   };
@@ -988,9 +1001,13 @@ export const BoardPill: React.FC<BoardPillProps> = ({
   compact = false,
   title,
   onClick,
+  maxWidth,
+  quiet,
   style,
 }) => (
   <EntityPill
+    quiet={quiet}
+    maxWidth={maxWidth}
     icon={<NeutralBoardIcon />}
     color={ENTITY_PILL_COLORS.board}
     label={board.name}
@@ -1033,12 +1050,14 @@ export const UserPill: React.FC<UserPillProps> = ({
 };
 
 interface TeammatePillProps extends BasePillProps {
+  quiet?: boolean;
   name: string;
   branch?: Branch;
   emoji?: string | null;
   compact?: boolean;
   title?: string;
   onClick?: (e: EntityPillInteractionEvent) => void;
+  maxWidth?: number;
 }
 
 export const TeammatePill: React.FC<TeammatePillProps> = ({
@@ -1048,9 +1067,12 @@ export const TeammatePill: React.FC<TeammatePillProps> = ({
   compact = false,
   title,
   onClick,
+  maxWidth,
+  quiet,
   style,
 }) => (
   <EntityPill
+    quiet={quiet}
     icon={branch ? <TeammateIdentityAvatar branch={branch} size={14} /> : <RobotOutlined />}
     color={ENTITY_PILL_COLORS.teammate}
     label={name}
@@ -1058,6 +1080,7 @@ export const TeammatePill: React.FC<TeammatePillProps> = ({
     compact={compact}
     title={title ?? name}
     onClick={onClick}
+    maxWidth={maxWidth}
     code
     style={style}
   />
