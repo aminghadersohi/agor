@@ -41,6 +41,8 @@ import {
   ArtifactSandpackErrorReporter,
   ArtifactTrustStatusIcon,
 } from '@/components/artifacts/ArtifactRenderSupport';
+import { ArtifactStaticPreview } from '@/components/artifacts/ArtifactStaticPreview';
+import { useStaticPreviewReadiness } from '@/components/artifacts/useStaticPreviewReadiness';
 import { getDaemonUrl } from '@/config/daemon';
 import { getAuthHeaders } from '@/utils/authHeaders';
 import { copyToClipboard } from '@/utils/clipboard';
@@ -187,6 +189,7 @@ export const ArtifactNode = ({
   const [error, setError] = useState<string | null>(null);
   const [consentOpen, setConsentOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const staticIframeRef = useRef<HTMLIFrameElement | null>(null);
   const lastHashRef = useRef<string | null>(null);
   const sandpackConfig = payload?.sandpack_config;
   const sandpackOptions = sandpackConfig?.options;
@@ -201,6 +204,10 @@ export const ArtifactNode = ({
     entryFile: payload?.entry,
     options: sandpackOptions,
   });
+  const staticPreview = useStaticPreviewReadiness(
+    payload?.runtime_report_hash ?? payload?.content_hash,
+    sandpackInputs.template === 'static'
+  );
 
   // Fetch artifact payload from daemon
   const fetchPayload = useCallback(async () => {
@@ -652,15 +659,32 @@ export const ArtifactNode = ({
             theme={sandpackConfig?.theme as never}
             options={sandpackInputs.options}
           >
-            <SandpackPreview
-              style={{
-                height: '100%',
-                border: 'none',
-              }}
-              showNavigator={false}
-              showOpenInCodeSandbox={false}
-              showRefreshButton={interactMode}
-            />
+            {sandpackInputs.template === 'static' ? (
+              <ArtifactStaticPreview
+                files={sandpackInputs.files}
+                entry={payload.entry}
+                externalResources={
+                  Array.isArray(sandpackOptions?.externalResources)
+                    ? sandpackOptions.externalResources.filter(
+                        (resource): resource is string => typeof resource === 'string'
+                      )
+                    : undefined
+                }
+                title={`${payload.name} preview`}
+                onReady={staticPreview.onReady}
+                iframeRef={staticIframeRef}
+              />
+            ) : (
+              <SandpackPreview
+                style={{
+                  height: '100%',
+                  border: 'none',
+                }}
+                showNavigator={false}
+                showOpenInCodeSandbox={false}
+                showRefreshButton={interactMode}
+              />
+            )}
             <ArtifactConsoleReporter
               artifactId={data.artifactId}
               contentHash={payload.runtime_report_hash ?? payload.content_hash}
@@ -668,9 +692,11 @@ export const ArtifactNode = ({
             <ArtifactSandpackErrorReporter
               artifactId={data.artifactId}
               contentHash={payload.runtime_report_hash ?? payload.content_hash}
+              compilationStatusOverride={staticPreview.compilationStatusOverride}
             />
-            <ArtifactRuntimeBridge artifactId={data.artifactId} />
+            <ArtifactRuntimeBridge artifactId={data.artifactId} fallbackIframe={staticIframeRef} />
             <ArtifactInteractionBridge
+              fallbackIframe={staticIframeRef}
               artifactId={data.artifactId}
               config={payload.interaction_config}
               onOpenSession={data.onOpenSession}
