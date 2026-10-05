@@ -10,9 +10,16 @@ const SANDPACK_ERROR_THROTTLE_MS = 1000;
 export function ArtifactSandpackErrorReporter({
   artifactId,
   contentHash,
+  compilationStatusOverride,
 }: {
   artifactId: string;
   contentHash?: string;
+  /**
+   * Compilation outcome for renderers that never start a Sandpack bundler (the
+   * static HTML preview), so no `start`/`done` message will ever arrive. A
+   * Sandpack error still wins.
+   */
+  compilationStatusOverride?: ArtifactCompilationStatus;
 }) {
   const { sandpack, listen } = useSandpack();
   const [compilation, setCompilation] = useState<{
@@ -52,9 +59,11 @@ export function ArtifactSandpackErrorReporter({
 
   const compilationStatus: ArtifactCompilationStatus = sandpack.error
     ? 'error'
-    : sandpack.status !== 'running' || compilation.contentHash !== contentHash
-      ? 'pending'
-      : compilation.status;
+    : compilationStatusOverride
+      ? compilationStatusOverride
+      : sandpack.status !== 'running' || compilation.contentHash !== contentHash
+        ? 'pending'
+        : compilation.status;
 
   useEffect(() => {
     const payload: ArtifactSandpackReport = {

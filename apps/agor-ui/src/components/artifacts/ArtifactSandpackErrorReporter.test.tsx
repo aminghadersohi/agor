@@ -154,4 +154,27 @@ describe('ArtifactSandpackErrorReporter', () => {
       error: mock.sandpack.error,
     });
   });
+
+  it('reports the static preview override without a Sandpack completion message, but lets errors win', async () => {
+    mock.sandpack.status = 'idle';
+    const { rerender } = render(
+      <ArtifactSandpackErrorReporter
+        artifactId="artifact-a"
+        contentHash="revision-a"
+        compilationStatusOverride="success"
+      />
+    );
+    await flush();
+    expect(messages().at(-1)).toMatchObject({ status: 'idle', compilation_status: 'success' });
+    mock.sandpack.error = { message: 'boot failed' };
+    rerender(
+      <ArtifactSandpackErrorReporter
+        artifactId="artifact-a"
+        contentHash="revision-a"
+        compilationStatusOverride="success"
+      />
+    );
+    await flush();
+    expect(messages().at(-1)?.compilation_status).toBe('error');
+  });
 });

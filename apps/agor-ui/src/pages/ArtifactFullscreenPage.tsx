@@ -31,6 +31,7 @@ import {
   ArtifactSandpackErrorReporter,
   ArtifactTrustStatusIcon,
 } from '@/components/artifacts/ArtifactRenderSupport';
+import { ArtifactStaticPreview } from '@/components/artifacts/ArtifactStaticPreview';
 import { getDaemonUrl } from '@/config/daemon';
 import { getAuthHeaders } from '@/utils/authHeaders';
 import { ensureSandpackCryptoSubtle } from '@/utils/sandpackCrypto';
@@ -190,6 +191,7 @@ export function ArtifactFullscreenPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [consentOpen, setConsentOpen] = useState(false);
+  const [staticReady, setStaticReady] = useState(false);
   const lastHashRef = useRef<string | null>(null);
 
   const artifactIdParam = artifactShortId ?? '';
@@ -231,6 +233,10 @@ export function ArtifactFullscreenPage({
   useEffect(() => {
     fetchArtifact();
   }, [fetchArtifact]);
+
+  useEffect(() => {
+    if (payload?.content_hash) setStaticReady(false);
+  }, [payload?.content_hash]);
 
   // Lightweight equivalent of useAgorData's artifact runtime bridge wiring.
   // The fullscreen surface intentionally does not hydrate Workspace data, but
@@ -351,12 +357,22 @@ export function ArtifactFullscreenPage({
             theme={sandpackConfig.theme as never}
             options={sandpackInputs.options}
           >
-            <SandpackPreview
-              style={{ height: '100%', border: 'none' }}
-              showNavigator={false}
-              showOpenInCodeSandbox={false}
-              showRefreshButton
-            />
+            {sandpackInputs.template === 'static' ? (
+              <ArtifactStaticPreview
+                files={sandpackInputs.files}
+                entry={payload.entry}
+                externalResources={sandpackOptions.externalResources}
+                title={`${title} preview`}
+                onReady={() => setStaticReady(true)}
+              />
+            ) : (
+              <SandpackPreview
+                style={{ height: '100%', border: 'none' }}
+                showNavigator={false}
+                showOpenInCodeSandbox={false}
+                showRefreshButton
+              />
+            )}
             <ArtifactConsoleReporter
               artifactId={payload.artifact_id}
               contentHash={payload.runtime_report_hash ?? payload.content_hash}
@@ -364,6 +380,9 @@ export function ArtifactFullscreenPage({
             <ArtifactSandpackErrorReporter
               artifactId={payload.artifact_id}
               contentHash={payload.runtime_report_hash ?? payload.content_hash}
+              compilationStatusOverride={
+                sandpackInputs.template === 'static' && staticReady ? 'success' : undefined
+              }
             />
             <ArtifactRuntimeBridge artifactId={payload.artifact_id} />
             <ArtifactInteractionBridge
