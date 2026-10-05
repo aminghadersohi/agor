@@ -41,6 +41,7 @@ import {
   ArtifactSandpackErrorReporter,
   ArtifactTrustStatusIcon,
 } from '@/components/artifacts/ArtifactRenderSupport';
+import { ArtifactStaticPreview } from '@/components/artifacts/ArtifactStaticPreview';
 import { getDaemonUrl } from '@/config/daemon';
 import { getAuthHeaders } from '@/utils/authHeaders';
 import { copyToClipboard } from '@/utils/clipboard';
@@ -187,6 +188,7 @@ export const ArtifactNode = ({
   const [error, setError] = useState<string | null>(null);
   const [consentOpen, setConsentOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [staticReady, setStaticReady] = useState(false);
   const lastHashRef = useRef<string | null>(null);
   const sandpackConfig = payload?.sandpack_config;
   const sandpackOptions = sandpackConfig?.options;
@@ -231,6 +233,10 @@ export const ArtifactNode = ({
   useEffect(() => {
     if (!mutationGate.canMutate) setDeleteConfirmOpen(false);
   }, [mutationGate.canMutate]);
+
+  useEffect(() => {
+    if (payload?.content_hash) setStaticReady(false);
+  }, [payload?.content_hash]);
 
   // Re-fetch payload when the artifact is updated (via WebSocket 'patched' event)
   useEffect(() => {
@@ -652,15 +658,25 @@ export const ArtifactNode = ({
             theme={sandpackConfig?.theme as never}
             options={sandpackInputs.options}
           >
-            <SandpackPreview
-              style={{
-                height: '100%',
-                border: 'none',
-              }}
-              showNavigator={false}
-              showOpenInCodeSandbox={false}
-              showRefreshButton={interactMode}
-            />
+            {sandpackInputs.template === 'static' ? (
+              <ArtifactStaticPreview
+                files={sandpackInputs.files}
+                entry={payload.entry}
+                externalResources={sandpackOptions?.externalResources}
+                title={`${payload.name} preview`}
+                onReady={() => setStaticReady(true)}
+              />
+            ) : (
+              <SandpackPreview
+                style={{
+                  height: '100%',
+                  border: 'none',
+                }}
+                showNavigator={false}
+                showOpenInCodeSandbox={false}
+                showRefreshButton={interactMode}
+              />
+            )}
             <ArtifactConsoleReporter
               artifactId={data.artifactId}
               contentHash={payload.runtime_report_hash ?? payload.content_hash}
@@ -668,6 +684,9 @@ export const ArtifactNode = ({
             <ArtifactSandpackErrorReporter
               artifactId={data.artifactId}
               contentHash={payload.runtime_report_hash ?? payload.content_hash}
+              compilationStatusOverride={
+                sandpackInputs.template === 'static' && staticReady ? 'success' : undefined
+              }
             />
             <ArtifactRuntimeBridge artifactId={data.artifactId} />
             <ArtifactInteractionBridge
