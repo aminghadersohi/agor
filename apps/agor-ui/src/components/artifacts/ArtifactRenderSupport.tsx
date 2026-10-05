@@ -192,10 +192,13 @@ export function ArtifactInteractionBridge({
   artifactId,
   config,
   onOpenSession,
+  fallbackIframe,
 }: {
   artifactId: string;
   config?: ArtifactInteractionConfig;
   onOpenSession?: (sessionId: string) => void;
+  /** Static-template preview iframe, used when no Sandpack client is registered. */
+  fallbackIframe?: RefObject<HTMLIFrameElement | null>;
 }) {
   const { sandpack } = useSandpack();
   const { modal } = App.useApp();
@@ -214,7 +217,10 @@ export function ArtifactInteractionBridge({
     const handler = async (event: MessageEvent) => {
       const current = sandpackRef.current;
       const firstClientId = Object.keys(current.clients)[0];
-      const target = firstClientId ? current.clients[firstClientId]?.iframe?.contentWindow : null;
+      const target =
+        (firstClientId ? current.clients[firstClientId]?.iframe?.contentWindow : null) ??
+        fallbackIframe?.current?.contentWindow ??
+        null;
       if (!target || event.source !== target) return;
       const message = event.data as
         | {
@@ -293,7 +299,7 @@ export function ArtifactInteractionBridge({
 
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [artifactId, config, modal, onOpenSession]);
+  }, [artifactId, config, fallbackIframe, modal, onOpenSession]);
 
   return null;
 }

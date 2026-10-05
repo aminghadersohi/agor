@@ -142,14 +142,16 @@ describe('useStableSandpackProviderInputs', () => {
     expect(result.current.options.recompileMode).toBe('immediate');
   });
 
-  it('preserves the static HTML entry for both artifact render surfaces', () => {
-    const html = '<main style="font-family: Inter">Styled artifact</main>';
+  it('preserves a JavaScript-free two-file static artifact for both render surfaces', () => {
+    const html =
+      '<!doctype html><html><head><link rel="stylesheet" href="/styles.css"></head><body><main>Styled artifact</main></body></html>';
+    const css = 'main { font-weight: 600; }';
     const { result } = renderHook(() =>
       useStableSandpackProviderInputs({
         template: 'static',
         files: {
-          '/index.js': '// generated entry intentionally left empty\n',
           '/index.html': html,
+          '/styles.css': css,
         },
         customSetup: { entry: '/index.html' },
         entryFile: '/index.html',
@@ -158,6 +160,10 @@ describe('useStableSandpackProviderInputs', () => {
 
     expect(result.current.template).toBe('static');
     expect(result.current.files['/index.html']).toBe(html);
+    expect(result.current.files['/styles.css']).toBe(`body{margin:0}\n${css}`);
+    expect(Object.keys(result.current.files).some((path) => /\.[cm]?[jt]sx?$/.test(path))).toBe(
+      false
+    );
     expect(result.current.customSetup).toMatchObject({ entry: '/index.html' });
     expect(result.current.options).toMatchObject({ activeFile: '/index.html' });
   });
