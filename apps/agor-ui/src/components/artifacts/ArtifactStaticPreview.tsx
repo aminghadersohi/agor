@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { type Ref, useMemo } from 'react';
 
 interface ArtifactStaticPreviewProps {
   files: Record<string, string>;
@@ -6,6 +6,8 @@ interface ArtifactStaticPreviewProps {
   externalResources?: string[];
   title?: string;
   onReady?: () => void;
+  /** Lets the runtime/interaction bridges reach this iframe; no Sandpack client owns it. */
+  iframeRef?: Ref<HTMLIFrameElement>;
 }
 
 const MIME_BY_EXTENSION: Record<string, string> = {
@@ -140,6 +142,7 @@ export function ArtifactStaticPreview({
   externalResources,
   title = 'Static artifact preview',
   onReady,
+  iframeRef,
 }: ArtifactStaticPreviewProps) {
   const srcDoc = useMemo(
     () => buildStaticArtifactDocument({ files, entry, externalResources }),
@@ -148,6 +151,7 @@ export function ArtifactStaticPreview({
 
   return (
     <iframe
+      ref={iframeRef}
       title={title}
       srcDoc={srcDoc}
       sandbox="allow-downloads allow-forms allow-modals allow-pointer-lock allow-popups allow-presentation allow-scripts"

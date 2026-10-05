@@ -1,4 +1,5 @@
 import { fireEvent, render } from '@testing-library/react';
+import { createRef } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { ArtifactStaticPreview, buildStaticArtifactDocument } from './ArtifactStaticPreview';
 
@@ -28,5 +29,14 @@ describe('ArtifactStaticPreview', () => {
     expect(iframe).not.toHaveAttribute('sandbox', expect.stringContaining('allow-same-origin'));
     fireEvent.load(iframe);
     expect(onReady).toHaveBeenCalledOnce();
+  });
+
+  it('exposes the iframe so the runtime and interaction bridges can target it', () => {
+    const iframeRef = createRef<HTMLIFrameElement>();
+    const { getByTitle } = render(
+      <ArtifactStaticPreview files={files} entry="/index.html" iframeRef={iframeRef} />
+    );
+
+    expect(iframeRef.current).toBe(getByTitle('Static artifact preview'));
   });
 });
