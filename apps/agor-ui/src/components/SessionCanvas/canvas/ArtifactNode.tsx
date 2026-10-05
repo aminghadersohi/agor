@@ -42,6 +42,7 @@ import {
   ArtifactTrustStatusIcon,
 } from '@/components/artifacts/ArtifactRenderSupport';
 import { ArtifactStaticPreview } from '@/components/artifacts/ArtifactStaticPreview';
+import { useStaticPreviewReadiness } from '@/components/artifacts/useStaticPreviewReadiness';
 import { getDaemonUrl } from '@/config/daemon';
 import { getAuthHeaders } from '@/utils/authHeaders';
 import { copyToClipboard } from '@/utils/clipboard';
@@ -188,7 +189,6 @@ export const ArtifactNode = ({
   const [error, setError] = useState<string | null>(null);
   const [consentOpen, setConsentOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  const [staticReady, setStaticReady] = useState(false);
   const staticIframeRef = useRef<HTMLIFrameElement | null>(null);
   const lastHashRef = useRef<string | null>(null);
   const sandpackConfig = payload?.sandpack_config;
@@ -204,6 +204,10 @@ export const ArtifactNode = ({
     entryFile: payload?.entry,
     options: sandpackOptions,
   });
+  const staticPreview = useStaticPreviewReadiness(
+    payload?.runtime_report_hash ?? payload?.content_hash,
+    sandpackInputs.template === 'static'
+  );
 
   // Fetch artifact payload from daemon
   const fetchPayload = useCallback(async () => {
@@ -234,10 +238,6 @@ export const ArtifactNode = ({
   useEffect(() => {
     if (!mutationGate.canMutate) setDeleteConfirmOpen(false);
   }, [mutationGate.canMutate]);
-
-  useEffect(() => {
-    if (payload?.content_hash) setStaticReady(false);
-  }, [payload?.content_hash]);
 
   // Re-fetch payload when the artifact is updated (via WebSocket 'patched' event)
   useEffect(() => {
@@ -671,7 +671,7 @@ export const ArtifactNode = ({
                     : undefined
                 }
                 title={`${payload.name} preview`}
-                onReady={() => setStaticReady(true)}
+                onReady={staticPreview.onReady}
                 iframeRef={staticIframeRef}
               />
             ) : (
@@ -692,9 +692,7 @@ export const ArtifactNode = ({
             <ArtifactSandpackErrorReporter
               artifactId={data.artifactId}
               contentHash={payload.runtime_report_hash ?? payload.content_hash}
-              compilationStatusOverride={
-                sandpackInputs.template === 'static' && staticReady ? 'success' : undefined
-              }
+              compilationStatusOverride={staticPreview.compilationStatusOverride}
             />
             <ArtifactRuntimeBridge artifactId={data.artifactId} fallbackIframe={staticIframeRef} />
             <ArtifactInteractionBridge
