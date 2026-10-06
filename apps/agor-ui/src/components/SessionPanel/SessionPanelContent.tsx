@@ -66,7 +66,8 @@ export interface SessionPanelContentProps {
   onSpawnModalConfirm: (config: string | Partial<SpawnConfig>) => Promise<void>;
   inputValueRef: React.RefObject<string>;
   isOpen: boolean;
-  /** When true, all task blocks are force-expanded (used by in-session search) */
+  /** Conversation-first presentation that hides branch and task chrome. */
+  simple?: boolean;
 }
 
 export const SessionPanelContent = React.memo<SessionPanelContentProps>(
@@ -85,6 +86,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
     onSpawnModalConfirm,
     inputValueRef,
     isOpen,
+    simple = false,
   }) => {
     const { token } = theme.useToken();
     const teammateAvatarUrl = useTeammateProfileImageUrl(branch, 'small');
@@ -384,7 +386,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
           style={{
             flexShrink: 0,
             marginBottom: token.sizeUnit,
-            display: 'flex',
+            display: simple ? 'none' : 'flex',
             // Keep navigation aligned with the branch pill's first row when metadata wraps below it.
             alignItems: 'flex-start',
             justifyContent: 'space-between',
@@ -435,7 +437,12 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
           </Space>
         </div>
 
-        <Divider style={{ margin: `${token.sizeUnit * 2}px 0` }} />
+        <Divider
+          style={{
+            display: simple ? 'none' : undefined,
+            margin: `${token.sizeUnit * 2}px 0`,
+          }}
+        />
 
         <SessionConversationLayout
           queueHeader={
@@ -625,6 +632,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
             }
             teammateAvatarUrl={teammateAvatarUrl}
             onOpenAgenticToolSettings={onOpenAgenticToolSettings}
+            simple={simple}
           />
         </SessionConversationLayout>
 
