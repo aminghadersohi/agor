@@ -72,6 +72,11 @@ import {
 } from '../../store/selectors';
 import { getContextWindowGradient } from '../../utils/contextWindow';
 import { MOBILE_TOUCH_TARGET } from '../../utils/deviceDetection';
+import {
+  readFocusChatPreference,
+  subscribeToFocusChatPreference,
+  writeFocusChatPreference,
+} from '../../utils/focusChatPreference';
 import { mcpServerNeedsAuth } from '../../utils/mcpAuth';
 import { useThemedMessage } from '../../utils/message';
 import {
@@ -345,8 +350,6 @@ PromptInput.displayName = 'PromptInput';
 // a fresh array — the memos deriving footer props from `tasks` (and through
 // them the memoized SessionFooter) key on its identity.
 const EMPTY_TASKS: Task[] = [];
-const SIMPLE_CHAT_STORAGE_KEY = 'agor.session.simple-chat';
-
 export interface SessionPanelProps {
   client: AgorClient | null;
   session: Session | null;
@@ -377,24 +380,12 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   const { showSuccess, showInfo, showError } = useThemedMessage();
   const connectionDisabled = useConnectionDisabled();
   const recenterMap = useRecenterMap();
-  const [simpleChat, setSimpleChat] = React.useState(() => {
-    try {
-      return localStorage.getItem(SIMPLE_CHAT_STORAGE_KEY) === 'true';
-    } catch {
-      return false;
-    }
-  });
+  // Shared across open panels and browser tabs, so toggling one keeps the rest in step.
+  const [simpleChat, setSimpleChat] = React.useState(readFocusChatPreference);
+  React.useEffect(() => subscribeToFocusChatPreference(setSimpleChat), []);
   const toggleSimpleChat = React.useCallback(() => {
-    setSimpleChat((current) => {
-      const next = !current;
-      try {
-        localStorage.setItem(SIMPLE_CHAT_STORAGE_KEY, String(next));
-      } catch {
-        // Storage can be unavailable in privacy-restricted browser contexts.
-      }
-      return next;
-    });
-  }, []);
+    writeFocusChatPreference(!simpleChat);
+  }, [simpleChat]);
 
   // Subscribe only to the entity families this panel needs via narrow store
   // selectors. SessionPanel intentionally does NOT subscribe to live (sessions
