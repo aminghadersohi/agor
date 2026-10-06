@@ -16,6 +16,7 @@ import type {
 } from '@agor-live/client';
 import {
   getDefaultPermissionMode,
+  hasFullSessionDetails,
   isAgenticToolName,
   mapToCodexPermissionConfig,
   SessionStatus,
@@ -37,7 +38,6 @@ import {
 import type { InputRef, MenuProps } from 'antd';
 import {
   Alert,
-  App,
   Badge,
   Button,
   Dropdown,
@@ -55,8 +55,8 @@ import { getDaemonUrl } from '../../config/daemon';
 import { useAppActions } from '../../contexts/AppActionsContext';
 import { useRecenterMap } from '../../contexts/CanvasNavigationContext';
 import { useConnectionDisabled } from '../../contexts/ConnectionContext';
+import { useConfirmArchiveSession } from '../../hooks/useConfirmArchiveSession';
 import { useIsMobileViewport } from '../../hooks/useIsMobileViewport';
-import { ARCHIVE_REFRESH_WARNING, useSessionActions } from '../../hooks/useSessionActions';
 import { useSessionSearch } from '../../hooks/useSessionSearch';
 import { useSharedReactiveSession } from '../../hooks/useSharedReactiveSession';
 import { useAgorStore } from '../../store/agorStore';
@@ -65,7 +65,7 @@ import {
   selectUserAuthenticatedMcpServerIds,
   selectUserById,
 } from '../../store/selectors';
-import { getContextWindowGradient } from '../../utils/contextWindow';
+import { getContextWindowGradient, selectLatestContextWindow } from '../../utils/contextWindow';
 import { MOBILE_TOUCH_TARGET } from '../../utils/deviceDetection';
 import { mcpServerNeedsAuth } from '../../utils/mcpAuth';
 import { useThemedMessage } from '../../utils/message';
@@ -77,12 +77,12 @@ import {
   readPromptDraftSeed,
   savePromptDraft,
 } from '../../utils/promptDrafts';
+import { getSessionStatusLabel } from '../../utils/sessionStatus';
 import { getSessionDisplayTitle, getSessionTitleStyles } from '../../utils/sessionTitle';
 import { AgentSelectionGrid } from '../AgentSelectionGrid/AgentSelectionGrid';
 import { AutocompleteTextarea } from '../AutocompleteTextarea';
 import { FileUpload } from '../FileUpload';
 import { ForkSpawnModal } from '../ForkSpawnModal/ForkSpawnModal';
-import { getSessionStatusLabel } from '../HomePage/StatusDot';
 import type { ModelConfig } from '../ModelSelector';
 import { getUrlDisplayLabel } from '../Pill/url-helpers';
 import { ToolIcon } from '../ToolIcon';
@@ -366,8 +366,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   const mobileHeaderButtonStyle: React.CSSProperties | undefined = isMobileShell
     ? { minWidth: MOBILE_TOUCH_TARGET, minHeight: MOBILE_TOUCH_TARGET }
     : undefined;
-  const { modal } = App.useApp();
-  const { showSuccess, showInfo, showError, showWarning } = useThemedMessage();
+  const { showSuccess, showInfo, showError } = useThemedMessage();
   const connectionDisabled = useConnectionDisabled();
   const recenterMap = useRecenterMap();
 
@@ -392,7 +391,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     availableAgents,
   } = useAppActions();
 
-  const { archiveSession } = useSessionActions(client);
+  const confirmArchive = useConfirmArchiveSession(client);
 
   // Click-to-edit session title, inline in the header — see render below.
   // Draft is seeded from the *explicit* title only (not the description
@@ -633,36 +632,16 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     null
   );
 
-  // Get latest context window
-  const latestContextWindow = React.useMemo(() => {
-    if (!session?.agentic_tool) return null;
-
-    for (let i = tasks.length - 1; i >= 0; i--) {
-      const task = tasks[i];
-      if (task.computed_context_window !== undefined && task.normalized_sdk_response) {
-        const { contextWindowLimit, contextUsageSnapshot } = task.normalized_sdk_response;
-
-        if (task.computed_context_window > 0) {
-          return {
-            used: task.computed_context_window,
-            limit: contextUsageSnapshot?.maxTokens ?? contextWindowLimit ?? 0,
-            // Forward the full normalized response so ContextWindowPill can
-            // honor `contextUsageSnapshot.percentage` instead of recomputing
-            // from raw used/limit (which is wrong for Codex's baseline-adjusted
-            // display).
-            taskMetadata: {
-              model: task.model,
-              duration_ms: task.duration_ms,
-              agentic_tool: session.agentic_tool,
-              raw_sdk_response: task.raw_sdk_response,
-              normalized_sdk_response: task.normalized_sdk_response,
-            },
-          };
-        }
-      }
-    }
-    return null;
-  }, [tasks, session?.agentic_tool]);
+  // Survives the lean transcript trimming the turn that reported it.
+  const latestContextWindow = React.useMemo(
+    () =>
+      selectLatestContextWindow(
+        reactiveSessionState?.latestContextWindow,
+        tasks,
+        session?.agentic_tool
+      ),
+    [reactiveSessionState?.latestContextWindow, tasks, session?.agentic_tool]
+  );
 
   const attachmentItems = React.useMemo((): SessionAttachmentItem[] => {
     const acc: SessionAttachmentItem[] = [];
@@ -829,7 +808,17 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   // The composer subtree only depends on composer/draft state — memoize it so
   // ordinary SessionPanel re-renders (reactive-session notifies, store
   // patches) hand the memoized SessionFooter a reference-stable slot.
-  const sessionCustomContext = session?.custom_context as Record<string, unknown> | undefined;
+  // Store rows may be lean list rows that withhold the SDK-reported
+  // slash_commands / skills inventories; the reactive session holds the full
+  // record from `sessions.get` (kept current by realtime patches). Fall back to
+  // the store row only when it is itself a full record.
+  const fullSession =
+    reactiveSessionState?.session?.session_id === session?.session_id
+      ? reactiveSessionState?.session
+      : session && hasFullSessionDetails(session)
+        ? session
+        : null;
+  const sessionCustomContext = fullSession?.custom_context as Record<string, unknown> | undefined;
   const promptInputSlot = React.useMemo(() => {
     if (!session) return null;
     return (
@@ -939,24 +928,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       return;
     }
 
-    modal.confirm({
-      title: 'Archive session and same-branch children?',
-      content:
-        'This archives the session and its same-branch forked or spawned descendants. Remote-created sessions stay active in their own branch.',
-      okText: 'Archive',
-      cancelText: 'Cancel',
-      onOk: async () => {
-        const archived = await archiveSession(session.session_id);
-        if (archived?.reconciliation === 'refresh-required') {
-          showWarning(ARCHIVE_REFRESH_WARNING);
-        } else if (archived) {
-          showSuccess('Session and same-branch children archived');
-          onClose();
-        } else {
-          showError('Failed to archive session');
-        }
-      },
-    });
+    confirmArchive(session.session_id, { onArchived: onClose });
   };
 
   const hasBranchActions = !!branch;

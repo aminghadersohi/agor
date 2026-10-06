@@ -1,4 +1,7 @@
-import { KNOWLEDGE_TRANSFER } from '@agor/core/types';
+import {
+  CODEX_SUBSCRIPTION_CREDENTIALS_UNAVAILABLE_MESSAGE,
+  KNOWLEDGE_TRANSFER,
+} from '@agor/core/types';
 import { BranchCleanupStepsService } from './services/branch-cleanup-steps.js';
 /**
  * Service Registration
@@ -153,6 +156,7 @@ import { getAgenticToolDaemonContribution } from './agentic-tool-daemon-contribu
 import { authenticatedTaskExecutorRuntimeScope } from './auth/executor-runtime-scope.js';
 import {
   hasSecureLocalCredentialOverlay,
+  isHostedOpenCode,
   resolveBranchSdkHomeCompatibility,
   resolveBranchSdkHomeLaunch,
   resolveExecutionSdkHomeEnv,
@@ -173,6 +177,7 @@ import {
   trackExecutorProcess,
 } from './executor-tracking.js';
 import { assertHaTaskPermissionSupported, isConstrainedHa } from './ha-support.js';
+import { createDeploymentToolUnsupportedGate } from './integrations/opencode/deployment-capabilities.js';
 import { registerOpenCodeServices } from './integrations/opencode/index.js';
 import {
   inOpenCodeNativeStateMutationSlot,
@@ -548,8 +553,11 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   // Core services: sessions, tasks, messages
   // ============================================================================
 
-  const sessionsService = createSessionsService(db, app, (tool) =>
-    isDeploymentAgenticToolAvailable(tool, deploymentAgenticToolPolicy)
+  const sessionsService = createSessionsService(
+    db,
+    app,
+    (tool) => isDeploymentAgenticToolAvailable(tool, deploymentAgenticToolPolicy),
+    createDeploymentToolUnsupportedGate(config)
   ) as unknown as SessionsServiceImpl;
   const tasksService = createTasksService(db, app, sessionTokenService);
   app.use('/sessions', sessionsService, {
@@ -782,7 +790,6 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   });
 
   // First-class schedules. RBAC hooks wired in register-hooks.ts.
-  // See docs/internal/schedules-first-class-design-2026-05-24.md §4.4.
   app.use('/schedules', createSchedulesService(db), {
     methods: [...SCHEDULES_SERVICE_TRANSPORT_METHODS],
   });
@@ -1038,7 +1045,6 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   // returns the authorize URL; create({code}) exchanges the pasted CODE#STATE and
   // writes ~/.claude/.credentials.json 0600 as the right Unix identity; find
   // reports status. Tokens stay daemon-side end to end.
-  // See context/explorations/claude-code-oauth-signin.md.
   if (claudeOAuthAuthority) {
     const maintenance = setInterval(() => {
       void claudeOAuthAuthority.maintain().catch((error) => {
@@ -1377,6 +1383,7 @@ function createExecuteHandler(
         config,
         modelConfig: session.model_config ?? undefined,
         sessionOwnerId: session.created_by,
+        sessionSdkHomeScope: session.sdk_home_scope,
         prompterUserId: userId,
       });
     }
@@ -1496,14 +1503,14 @@ function createExecuteHandler(
         throw new Error(`Branch-scoped session ${session.session_id} has no branch`);
       }
       const branchId = session.branch_id as string;
-      // A relocatable directory is necessary but not sufficient: OpenCode's
-      // current XDG data home also contains its native credential file. Until
-      // its actor credential namespace is split from branch-owned state, a
-      // branch home would either lose configured credentials or share them.
+      // A relocatable directory is necessary but not sufficient: local OpenCode's
+      // XDG data home also contains its native credential file, so only hosted
+      // OpenCode (credentials on Job scratch) may use a branch home.
       const compatibility = await runWithTenantDatabaseScope(db, tenantId, (tenantDb) =>
         resolveBranchSdkHomeCompatibility({
           tool: sdkHomeTool,
           delegated: isDelegatedExecution,
+          hostedOpenCode: isHostedOpenCode(config),
           secureLocalCredentialOverlay: hasSecureLocalCredentialOverlay(config),
           userId,
           db: tenantDb,
@@ -1729,7 +1736,9 @@ function createExecuteHandler(
       return contribution.getExecutorLaunch({
         tenantId,
         session,
+        taskId: data.taskId,
         homeDir: executorHomeDir,
+        config,
       });
     })();
 
@@ -1789,9 +1798,7 @@ function createExecuteHandler(
       try {
         branchCodexAuthBind.handle = await openCredentialFileForBind(branchCodexAuthBind.source);
       } catch {
-        throw new BadRequest(
-          'Codex subscription credentials are missing or unsafe to mount. Reconnect Codex in Agent Setup or use an API key.'
-        );
+        throw new BadRequest(CODEX_SUBSCRIPTION_CREDENTIALS_UNAVAILABLE_MESSAGE);
       }
     }
 
@@ -1967,7 +1974,7 @@ function createExecuteHandler(
       },
     });
 
-    if (executorLaunch) {
+    if (executorLaunch?.requiresLocalContainment) {
       const ready = createDeferredSignal();
       const finished = createDeferredSignal();
       let spawned = false;

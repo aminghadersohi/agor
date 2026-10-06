@@ -365,6 +365,10 @@ const agenticConfigSchema = z
       .optional()
       .describe('Codex approval policy for Codex gateway sessions.'),
     codexNetworkAccess: z.boolean().optional().describe('Allow Codex network access.'),
+    codexIncludePlugins: z
+      .boolean()
+      .optional()
+      .describe('Include native Codex plugins (default off).'),
     envVars: z
       .array(envVarSchema)
       .optional()
@@ -1140,7 +1144,9 @@ const discordSetupSchema = z
     allowedRoleIds: z
       .array(z.string().refine(isDiscordSnowflake, 'Must be a Discord role snowflake.'))
       .default([])
-      .describe('Discord role snowflakes allowed to prompt the bot.'),
+      .describe(
+        'Discord role snowflakes allowed to prompt the bot. Include the guild ID to admit every member (@everyone); with a fixed run-as user, prefer alignUsers.'
+      ),
     agorUserId: mcpOptionalId(
       'agorUserId',
       'User',

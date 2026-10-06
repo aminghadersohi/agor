@@ -1,3 +1,4 @@
+import { resolveOpenCodeCapabilities } from '@agor/agentic-tool-opencode/daemon';
 import { getAgenticToolIntegration } from '@agor/agentic-tools';
 import { generateId, shortId } from '@agor/core/db';
 import { type Application, BadRequest, Conflict } from '@agor/core/feathers';
@@ -9,6 +10,7 @@ import type {
   TaskID,
   TerminationCause,
   TerminationCoordinationPendingCode,
+  TerminationRequest,
 } from '@agor/core/types';
 import {
   isAgenticToolName,
@@ -40,6 +42,8 @@ export interface TerminationInput {
   taskId: TaskID | string;
   cause: TerminationCause;
   errorMessage: string;
+  /** Who asked, recorded on the request so the UI can name them. */
+  requestedBy?: Pick<TerminationRequest, 'requested_by_user_id' | 'requested_via'>;
   params?: Params;
   signalDelayMs?: number;
   /** Test/configuration seam for the cooperative socket-stop grace window. */
@@ -172,6 +176,7 @@ async function claimRequest(input: TerminationInput) {
         taskId: String(input.taskId),
         cause: input.cause,
         errorMessage: input.errorMessage,
+        requestedBy: input.requestedBy,
         sdkFailure: input.sdkFailure,
         expectedStatus: input.expectedStatus,
         expectedHeartbeatAt: input.expectedHeartbeatAt,
@@ -293,9 +298,16 @@ async function runContainment(
     return { status: 'terminal', task: current };
   }
   if (!coordinationToken) return { status: 'condition_changed', task: current };
-  const descriptorUnverifiedReason = isAgenticToolName(tool)
-    ? getAgenticToolIntegration(tool).unverifiedTerminationReason
-    : undefined;
+  // Hosted OpenCode runs inside the executor's own Job, so its acknowledged quiescence covers the server.
+  const hostedOpenCodeQuiesced =
+    remoteMode &&
+    executorQuiesced &&
+    tool === 'opencode' &&
+    resolveOpenCodeCapabilities(input.app.get('config') ?? {}).mode === 'managed-projection';
+  const descriptorUnverifiedReason =
+    isAgenticToolName(tool) && !hostedOpenCodeQuiesced
+      ? getAgenticToolIntegration(tool).unverifiedTerminationReason
+      : undefined;
   const unverifiedReason =
     containment.status === 'unverified' ? containment.reason : descriptorUnverifiedReason;
   if (unverifiedReason !== undefined) {

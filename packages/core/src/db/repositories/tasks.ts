@@ -23,6 +23,7 @@ import type {
   TaskPendingDispatchStatus,
   TerminationCause,
   TerminationCoordinationClaim,
+  TerminationRequest,
   UserID,
   UUID,
 } from '@agor/core/types';
@@ -90,6 +91,7 @@ import {
 } from './branch-access';
 import { ExecutorSessionTokenAuthorityRepository } from './executor-session-token-authorities';
 import { deepMerge } from './merge-utils';
+import { acceptOpenCodeCheckpoint, assertNoOpenOpenCodeCheckpoint } from './opencode-checkpoints';
 import { countRecordedTools } from './recorded-tool-count';
 
 function executorOwnsTask(row: Pick<TaskRow, 'status' | 'executor_connected_at'>): boolean {
@@ -195,6 +197,7 @@ export interface TerminationClaimInput {
   taskId: string;
   cause: TerminationCause;
   errorMessage: string;
+  requestedBy?: Pick<TerminationRequest, 'requested_by_user_id' | 'requested_via'>;
   sdkFailure?: SdkFailure;
   expectedStatus?: Task['status'];
   expectedHeartbeatAt?: string;
@@ -345,6 +348,7 @@ export interface TaskRuntimeDiscoveryOptions {
 export interface TaskFindPageOptions {
   excludeQueued?: boolean;
   taskId?: TaskID;
+  taskIds?: TaskID[];
   afterTaskId?: TaskID;
   throughTaskId?: TaskID;
   sessionId?: SessionID;
@@ -716,10 +720,11 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
   async findPage(
     opts: TaskFindPageOptions = {}
   ): Promise<{ data: Partial<Task>[]; total: number }> {
-    if (opts.sessionIds?.length === 0) return { data: [], total: 0 };
+    if (opts.sessionIds?.length === 0 || opts.taskIds?.length === 0) return { data: [], total: 0 };
 
     const conditions: SQL[] = [];
     if (opts.taskId) conditions.push(eq(tasks.task_id, opts.taskId));
+    if (opts.taskIds) conditions.push(inArray(tasks.task_id, opts.taskIds));
     if (opts.afterTaskId) conditions.push(gt(tasks.task_id, opts.afterTaskId));
     if (opts.throughTaskId) conditions.push(lte(tasks.task_id, opts.throughTaskId));
     if (opts.sessionId) conditions.push(eq(tasks.session_id, opts.sessionId));
@@ -1639,9 +1644,20 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         !existing || input.cause === 'user_stop' || existing.cause === input.cause;
       const mutationAt = await this.mutationNow(txDb, fullId, input.now);
       const requestedAt = existing?.requested_at ?? mutationAt.toISOString();
+      const requestedBy =
+        cause === input.cause
+          ? input.requestedBy
+          : {
+              requested_by_user_id: existing?.requested_by_user_id,
+              requested_via: existing?.requested_via,
+            };
       const request = {
         cause,
         requested_at: requestedAt,
+        ...(requestedBy?.requested_by_user_id
+          ? { requested_by_user_id: requestedBy.requested_by_user_id }
+          : {}),
+        ...(requestedBy?.requested_via ? { requested_via: requestedBy.requested_via } : {}),
         error_message:
           cause === input.cause
             ? input.errorMessage
@@ -1920,7 +1936,8 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
   private async updateTask(
     id: string,
     updates: Partial<Task>,
-    executorUpdate: boolean
+    executorUpdate: boolean,
+    openCodeCheckpoint?: { holderId: string; manifest: unknown }
   ): Promise<Task> {
     try {
       const applyUpdate = async (
@@ -1983,6 +2000,20 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           throw new RepositoryError(
             'termination-owned tasks must be settled through settleTermination'
           );
+        }
+        if (openCodeCheckpoint) {
+          if (updates.status !== TaskStatus.COMPLETED) {
+            throw new RepositoryError('An OpenCode checkpoint is accepted only with completion');
+          }
+          await acceptOpenCodeCheckpoint(
+            txDb,
+            this.db,
+            currentRow,
+            openCodeCheckpoint.holderId,
+            openCodeCheckpoint.manifest
+          );
+        } else if (executorUpdate && updates.status === TaskStatus.COMPLETED) {
+          await assertNoOpenOpenCodeCheckpoint(txDb, fullId);
         }
 
         const merged = {
@@ -2510,8 +2541,12 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
   }
 
   /** Apply executor-owned result fields only while the executor still owns the locked row. */
-  async updateFromExecutor(id: string, updates: Partial<Task>): Promise<Task> {
-    return this.updateTask(id, updates, true);
+  async updateFromExecutor(
+    id: string,
+    updates: Partial<Task>,
+    openCodeCheckpoint?: { holderId: string; manifest: unknown }
+  ): Promise<Task> {
+    return this.updateTask(id, updates, true, openCodeCheckpoint);
   }
 
   /**

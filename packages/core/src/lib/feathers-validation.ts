@@ -8,7 +8,7 @@
 import { Ajv } from '@feathersjs/schema';
 import type { TObject, TProperties } from '@feathersjs/typebox';
 import { getValidator, Type } from '@feathersjs/typebox';
-import { MESSAGE_PAGINATION, PAGINATION } from '../config/constants';
+import { MESSAGE_PAGINATION, PAGINATION, TASK_PAGINATION } from '../config/constants';
 import { AGENTIC_TOOL_NAMES, PERSISTED_AGENTIC_TOOL_NAMES } from '../types/agentic-tool';
 import {
   KNOWLEDGE_DOCUMENT_KINDS,
@@ -136,6 +136,9 @@ export const sessionQuerySchema = createQuerySchema(
     // Session-only opt-out of exact totals; coerces REST boolean strings.
     $count: Type.Optional(CommonSchemas.boolean),
     include_usage: Type.Optional(CommonSchemas.boolean),
+    // List-only projection: omit bulky single-session custom_context keys
+    // (see LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS). Not a column filter.
+    lean: Type.Optional(CommonSchemas.boolean),
     session_id: Type.Optional(CommonSchemas.uuid),
     status: Type.Optional(CommonSchemas.sessionStatus),
     agentic_tool: Type.Optional(CommonSchemas.persistedAgenticTool),
@@ -170,6 +173,12 @@ export const taskQuerySchema = Type.Intersect(
             {
               $gt: Type.Optional(CommonSchemas.uuid),
               $lte: CommonSchemas.uuid,
+            },
+            { additionalProperties: false }
+          ),
+          Type.Object(
+            {
+              $in: Type.Array(CommonSchemas.uuid, { maxItems: TASK_PAGINATION.MAX_TASK_IDS }),
             },
             { additionalProperties: false }
           ),

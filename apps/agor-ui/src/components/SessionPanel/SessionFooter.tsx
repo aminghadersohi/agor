@@ -10,13 +10,11 @@ import type {
   Session,
   Task,
 } from '@agor-live/client';
-import { getDefaultModelForTool } from '@agor-live/client';
+import { getDefaultModelForTool, SessionStatus } from '@agor-live/client';
 import {
   BranchesOutlined,
   ClockCircleOutlined,
-  CloseOutlined,
   EllipsisOutlined,
-  ExclamationCircleOutlined,
   ForkOutlined,
   IdcardOutlined,
   LockOutlined,
@@ -52,6 +50,7 @@ import { useIsMobileViewport } from '../../hooks/useIsMobileViewport';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { reducedMotionSurface, usePrefersReducedMotion } from '../../hooks/usePrefersReducedMotion';
 import { MOBILE_TOUCH_TARGET } from '../../utils/deviceDetection';
+import { CompactNotice } from '../CompactNotice';
 import { EffortSelector } from '../EffortSelector';
 import { glassSurfaceStyle } from '../GlassSurface/glassStyles';
 import type { ModelConfig } from '../ModelSelector';
@@ -1331,6 +1330,10 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
         : 'Stop Execution';
 
   const showStop = isRunning || stopRequestInFlight;
+  // isRunning also includes stopping for the action controls. Only advertise
+  // active work here, not permission/input waits or a stale offline state.
+  const showActivity =
+    session.status === SessionStatus.RUNNING && !stopRequestInFlight && !connectionDisabled;
 
   const sendLabel = isRunning && hasInput ? 'Queue' : 'Send';
   const sendTooltip = connectionDisabled
@@ -1348,10 +1351,13 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
         flexShrink: 0,
         background: token.colorBgContainer,
         borderTop: `1px solid ${token.colorBorder}`,
-        padding: `${token.sizeUnit * 2}px ${isMobile ? token.padding : token.sizeUnit * 6}px ${token.sizeUnit * 3}px`,
+        // Keep all padding longhand: an undefined desktop paddingBottom clears
+        // the bottom inset supplied by a padding shorthand in React.
+        paddingTop: token.paddingXS,
+        paddingInline: isMobile ? token.padding : token.paddingLG,
         paddingBottom: isMobile
-          ? `max(${token.sizeUnit * 3}px, env(safe-area-inset-bottom))`
-          : undefined,
+          ? `max(${token.sizeUnit * 2}px, env(safe-area-inset-bottom))`
+          : token.sizeUnit * 2,
         marginLeft: -token.sizeUnit * 6,
         marginRight: -token.sizeUnit * 6,
       }}
@@ -1566,51 +1572,19 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
           </div>
         )}
 
-        {/* Unauthorized MCP servers block their tools silently. Surface it as a
-            gentle, dismissable warning banner above the composer: a compact,
-            contained AntD Alert-style box (warning bg + border + radius) with the
-            close × sitting inside it, not a full-size alarm. Longhand border
-            props keep it token-driven without the CSS-var `border` shorthand that
-            trips jsdom's parser in tests. */}
+        {/* Unauthorized MCP servers block their tools silently; nudge above the composer. */}
         {showMcpNotice && (
-          <Flex
-            align="center"
-            gap={token.sizeXS}
+          <CompactNotice
+            type="warning"
+            message={mcpNoticeMessage}
+            onDismiss={() => setDismissedMcpSignature(unauthedSignature)}
+            dismissLabel="Dismiss MCP connection notice"
             data-testid="mcp-disconnected-notice"
             role="status"
             aria-live="polite"
             aria-atomic="true"
-            style={{
-              marginBottom: token.sizeUnit * 2,
-              padding: `${token.sizeXXS}px ${token.sizeSM}px`,
-              background: token.colorWarningBg,
-              borderWidth: token.lineWidth,
-              borderStyle: 'solid',
-              borderColor: token.colorWarningBorder,
-              borderRadius: token.borderRadiusSM,
-            }}
-          >
-            <ExclamationCircleOutlined
-              style={{ fontSize: 12, color: token.colorWarning, flexShrink: 0 }}
-            />
-            <Typography.Text type="warning" style={{ fontSize: 12, flex: 1, minWidth: 0 }}>
-              {mcpNoticeMessage}
-            </Typography.Text>
-            <Button
-              type="text"
-              size="small"
-              icon={<CloseOutlined style={{ fontSize: 11 }} />}
-              aria-label="Dismiss MCP connection notice"
-              onClick={() => setDismissedMcpSignature(unauthedSignature)}
-              style={{
-                flexShrink: 0,
-                width: 20,
-                minWidth: 20,
-                height: 20,
-                color: token.colorWarning,
-              }}
-            />
-          </Flex>
+            style={{ marginBottom: token.marginXS }}
+          />
         )}
 
         {/* Row 2 — Prompt textarea */}
@@ -1620,6 +1594,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
         <div
           style={{
             display: 'flex',
+            flexWrap: 'wrap',
             alignItems: 'center',
             gap: token.sizeUnit,
             marginTop: token.sizeUnit * 2,
@@ -1730,54 +1705,72 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
             )}
           </Space>
 
-          {/* Spacer */}
-          <div style={{ flex: 1 }} />
-
           {/* Right group */}
-          <Space size={4}>
-            {showStop && (
-              <Tooltip title={stopTooltip}>
-                <Button
-                  danger
-                  aria-label="Stop"
-                  aria-busy={stopRequestInFlight || isStopping}
-                  size={actionSize}
-                  style={touchActionStyle}
-                  icon={
-                    stopRequestInFlight || isStopping ? <Spin size="small" /> : <StopOutlined />
-                  }
-                  onClick={onStop}
-                  disabled={connectionDisabled || !isRunning || stopRequestInFlight}
+          <Flex
+            align="center"
+            gap={token.marginXS}
+            style={{ marginInlineStart: 'auto', flexShrink: 0 }}
+          >
+            {/* Reserve the compact slot so activity changes never move controls.
+                Spin inherits the shared reduced-motion rule in index.css. */}
+            <Flex
+              align="center"
+              justify="center"
+              style={{ width: token.controlHeightXS, flexShrink: 0 }}
+            >
+              {showActivity && (
+                <span role="status" aria-label="Agent is working" style={{ display: 'flex' }}>
+                  <Spin size="small" aria-hidden="true" />
+                </span>
+              )}
+            </Flex>
+            {/* Flex avoids inline baseline/descender space around the controls. */}
+            <Flex align="center" gap={token.sizeUnit}>
+              {showStop && (
+                <Tooltip title={stopTooltip}>
+                  <Button
+                    danger
+                    aria-label="Stop"
+                    aria-busy={stopRequestInFlight || isStopping}
+                    size={actionSize}
+                    style={touchActionStyle}
+                    icon={
+                      stopRequestInFlight || isStopping ? <Spin size="small" /> : <StopOutlined />
+                    }
+                    onClick={onStop}
+                    disabled={connectionDisabled || !isRunning || stopRequestInFlight}
+                  >
+                    Stop
+                  </Button>
+                </Tooltip>
+              )}
+              <Tooltip title={sendTooltip}>
+                <Badge
+                  count={queuedTasks.length > 0 ? queuedTasks.length : 0}
+                  size="small"
+                  offset={[-2, 2]}
+                  styles={{ root: { display: 'inline-flex' } }}
+                  style={{
+                    boxShadow: 'none',
+                    backgroundColor: token.colorTextTertiary,
+                    fontSize: 10,
+                  }}
                 >
-                  Stop
-                </Button>
+                  <Button
+                    type="primary"
+                    aria-label={sendLabel}
+                    size={actionSize}
+                    style={touchActionStyle}
+                    icon={<SendOutlined />}
+                    onClick={onSendPrompt}
+                    disabled={sendDisabled}
+                  >
+                    {sendLabel}
+                  </Button>
+                </Badge>
               </Tooltip>
-            )}
-            <Tooltip title={sendTooltip}>
-              <Badge
-                count={queuedTasks.length > 0 ? queuedTasks.length : 0}
-                size="small"
-                offset={[-2, 2]}
-                style={{
-                  boxShadow: 'none',
-                  backgroundColor: token.colorTextTertiary,
-                  fontSize: 10,
-                }}
-              >
-                <Button
-                  type="primary"
-                  aria-label={sendLabel}
-                  size={actionSize}
-                  style={touchActionStyle}
-                  icon={<SendOutlined />}
-                  onClick={onSendPrompt}
-                  disabled={sendDisabled}
-                >
-                  {sendLabel}
-                </Button>
-              </Badge>
-            </Tooltip>
-          </Space>
+            </Flex>
+          </Flex>
         </div>
       </div>
 

@@ -7,6 +7,7 @@ import { KNOWLEDGE_TRANSFER, OWNERSHIP_TRANSFER_SERVICES } from '@agor/core/type
  * Extracted from index.ts for maintainability.
  */
 
+import { resolveOpenCodeCapabilities } from '@agor/agentic-tool-opencode/daemon';
 import { AGENTIC_TOOL_DISPLAY_NAMES } from '@agor/agentic-tools';
 import { projectClaudeResultResponse, projectNormalizedSdkResponse } from '@agor/core';
 import { analyticsLogger } from '@agor/core/analytics';
@@ -182,7 +183,7 @@ import {
   validateSessionUnixUsername,
 } from './utils/branch-authorization.js';
 import { captureBranchRemovalRealtimeVisibility as captureBranchRemovalVisibility } from './utils/branch-removal-realtime.js';
-import { emitServiceEvent } from './utils/emit-service-event.js';
+import { emitServiceEvent, publishCommittedServiceEvent } from './utils/emit-service-event.js';
 import { bindPrimaryOwnerToCreatedBy, injectCreatedBy } from './utils/inject-created-by.js';
 import {
   captureMarketplaceInvalidationTargets as captureMarketplaceTargets,
@@ -364,7 +365,6 @@ export function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
  * session metadata (name, model_config, permission_config, callback_config).
  *
  * Sources:
- *   - `/sessions/:id/prompt`  → `tasks`
  *   - `/sessions/:id/stop`    → `status`, `ready_for_prompt`
  *   - executor status updates → `status`, `ready_for_prompt`
  *     (claude/copilot permission-hooks, see packages/executor)
@@ -377,7 +377,10 @@ export function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
  *   - `'session'`           → can patch own session's prompt-flow fields
  *   - `'view'` or `'none'`  → denied
  *
- * Any mixed-field patch (e.g. `{ tasks: [...], name: 'x' }`) fails the
+ * `tasks` is not among them: it is server-managed (dispatch appends it in the
+ * Task repository) and the sessions service rejects it from every caller.
+ *
+ * Any mixed-field patch (e.g. `{ status: 'idle', name: 'x' }`) fails the
  * `isPromptFlowPatchOnly` check and falls through to the strict `'all'` path,
  * so widening the whitelist here cannot accidentally leak metadata writes.
  *
@@ -387,7 +390,6 @@ export function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
  * writes are independently bound to the exact signed task context.
  */
 export const PROMPT_FLOW_PATCH_FIELDS: readonly string[] = [
-  'tasks',
   'status',
   'ready_for_prompt',
   'sdk_session_id',
@@ -682,23 +684,37 @@ export const CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES = [
   ['opencode-models', 'openCodeAuth'],
 ] as const satisfies ReadonlyArray<readonly [string, Parameters<typeof rejectInConstrainedHa>[1]]>;
 
+/** Hosted OpenCode keeps no daemon-local native state, so any replica may serve its settings. */
+export function constrainedHaGateApplies(
+  feature: (typeof CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES)[number][1],
+  config: Parameters<typeof resolveOpenCodeCapabilities>[0]
+): boolean {
+  return (
+    feature !== 'openCodeAuth' || resolveOpenCodeCapabilities(config).mode !== 'managed-projection'
+  );
+}
+
 const taskFieldSet = (...fields: (keyof Task)[]) => new Set<string>(fields);
 
-const EXECUTOR_TASK_PATCH_FIELDS = taskFieldSet(
-  'status',
-  'completed_at',
-  'git_state',
-  'message_range',
-  'model',
-  'raw_sdk_response',
-  'normalized_sdk_response',
-  'computed_context_window',
-  'duration_ms',
-  'agent_session_id',
-  'error_message',
-  'report',
-  'permission_request'
-);
+const EXECUTOR_TASK_PATCH_FIELDS = new Set([
+  ...taskFieldSet(
+    'status',
+    'completed_at',
+    'git_state',
+    'message_range',
+    'model',
+    'raw_sdk_response',
+    'normalized_sdk_response',
+    'computed_context_window',
+    'duration_ms',
+    'agent_session_id',
+    'error_message',
+    'report',
+    'permission_request'
+  ),
+  // Transport-only: TasksService.patch consumes it and accepts the checkpoint with completion.
+  'opencode_checkpoint',
+]);
 
 const EXTERNAL_TASK_CREATE_FIELDS = taskFieldSet('session_id', 'full_prompt', 'status');
 
@@ -1360,6 +1376,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
 
   if (deployment.mode === 'ha') {
     for (const [path, feature] of CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES) {
+      if (!constrainedHaGateApplies(feature, config)) continue;
       safeService(path)?.hooks({ before: { all: [rejectInConstrainedHa(deployment, feature)] } });
     }
   }
@@ -1987,6 +2004,11 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         boardObjectAccess('delete board objects'),
       ],
     },
+    after: {
+      // Repos/MCP creation inserts placement in the same outer transaction as
+      // the branch. Remote publishers must not authorize it before commit.
+      create: [publishCommittedServiceEvent],
+    },
   });
 
   // ============================================================================
@@ -2394,17 +2416,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     // Feathers' automatic event fires when this nested method returns, not when
     // that transaction commits. Replace only this event with the existing queue;
     // rollback drops it, and successful commit emits it exactly once.
-    const event = context.event;
-    context.event = null;
-    emitServiceEvent(app, {
-      path: 'branches',
-      event,
-      method: context.method,
-      id: context.id,
-      data: context.dispatch ?? context.result,
-      params: context.params,
-    });
-    return context;
+    return publishCommittedServiceEvent(context);
   };
 
   app.service('branches').hooks({
@@ -2434,7 +2446,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       ],
     },
     after: {
-      create: [invalidateRealtimeBranchFromResult],
+      create: [invalidateRealtimeBranchFromResult, publishCommittedServiceEvent],
       update: [
         invalidateRealtimeBranchFromResult,
         publishMarketplaceInvalidation,
@@ -3502,7 +3514,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   // Schedules hooks
   // ============================================================================
   // Schedules inherit RBAC from the parent branch (same model as
-  // sessions). See docs/internal/schedules-first-class-design-2026-05-24.md §4.4.
+  // sessions).
 
   const scheduleRepository = new ScheduleRepository(db);
 
@@ -3589,6 +3601,8 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       reportTerminationComplete: [requireTaskScopedExecutorRuntimeToken()],
       reportRuntimeTelemetry: [requireTaskScopedExecutorRuntimeToken()],
       reportSdkHealthFailure: [requireTaskScopedExecutorRuntimeToken()],
+      beginOpenCodeCheckpoint: [requireTaskScopedExecutorRuntimeToken()],
+      acknowledgeOpenCodeCleanup: [requireTaskScopedExecutorRuntimeToken()],
       remove: [
         requireMinimumRole(ROLES.MEMBER, 'delete tasks'),
         // RBAC: deleting a task requires 'all' permission on the branch

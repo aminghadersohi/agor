@@ -170,7 +170,7 @@ function configLoadError(configPath: string, error: unknown): Error {
       `${configPath} is masked by Agor's executor sandbox and is intentionally out of reach. ` +
         'Code inside the sandbox must not read the daemon config — it receives configuration ' +
         'via payload.resolvedConfig and DAEMON_URL. Run this on the daemon host instead. ' +
-        `See context/explorations/executor-sandboxing.md. (underlying error: ${detail})`
+        `See https://agor.live/guide/multiplayer-unix-isolation. (underlying error: ${detail})`
     );
   }
   return new Error(`Failed to load config: ${detail}`);
@@ -590,12 +590,24 @@ function validateConfig(config: AgorConfig): void {
     }
   };
   const legacyConfig = config as LegacyConfig;
-  only(config.agentic_tools, 'agentic_tools', ['installed', 'claude_subscription_oauth']);
+  only(config.agentic_tools, 'agentic_tools', [
+    'installed',
+    'claude_subscription_oauth',
+    'opencode_hosted_native_state',
+  ]);
   if (
     config.agentic_tools?.claude_subscription_oauth !== undefined &&
     typeof config.agentic_tools.claude_subscription_oauth !== 'boolean'
   ) {
     throw new Error('Config error: agentic_tools.claude_subscription_oauth must be a boolean');
+  }
+  if (
+    config.agentic_tools?.opencode_hosted_native_state !== undefined &&
+    !['checkpointed', 'disabled'].includes(config.agentic_tools.opencode_hosted_native_state)
+  ) {
+    throw new Error(
+      "Config error: agentic_tools.opencode_hosted_native_state must be 'checkpointed' or 'disabled'"
+    );
   }
   if (config.agentic_tools?.installed !== undefined) {
     if (!Array.isArray(config.agentic_tools.installed)) {
@@ -715,12 +727,21 @@ function validateConfig(config: AgorConfig): void {
     'mcpToolSearch',
     'instanceLabel',
     'instanceDescription',
+    'externalAppLink',
+    'externalAppLabel',
     'impersonation_token_expiry_ms',
     'cors_allow_sandpack',
     'cors_origins',
     'trust_proxy_hops',
+    'websocket_compression',
     ...RETIRED_CONFIG_KEYS.daemon,
   ]);
+  if (
+    config.daemon?.websocket_compression !== undefined &&
+    typeof config.daemon.websocket_compression !== 'boolean'
+  ) {
+    throw new Error('Config error: daemon.websocket_compression must be a boolean');
+  }
   only(config.ui, 'ui', ['base_url', 'port', 'host']);
   only(config.uploads, 'uploads', ['location', 'max_age_days', 'max_file_size_mb']);
   only(config.external_launch, 'external_launch', [
@@ -1519,6 +1540,10 @@ export function resolveEffectiveConfig(
     'AGOR_STATSD_ENABLED'
   );
   const statsdPort = parseOptionalPortEnvironmentValue(env.AGOR_STATSD_PORT, 'AGOR_STATSD_PORT');
+  const websocketCompression = parseOptionalBooleanEnvironmentValue(
+    env.AGOR_WEBSOCKET_COMPRESSION,
+    'AGOR_WEBSOCKET_COMPRESSION'
+  );
   const apmTraceServices = parseOptionalApmTraceDepthEnvironmentValue(env.AGOR_APM_TRACE_SERVICES);
   const externalLaunch = resolveEffectiveExternalLaunchConfig(config.external_launch, env);
 
@@ -1597,6 +1622,11 @@ export function resolveEffectiveConfig(
       ...(env.AGOR_JWT_SECRET ? { jwtSecret: env.AGOR_JWT_SECRET } : {}),
       ...(env.AGOR_MASTER_SECRET ? { masterSecret: env.AGOR_MASTER_SECRET } : {}),
       ...(env.INSTANCE_LABEL ? { instanceLabel: env.INSTANCE_LABEL } : {}),
+      ...(env.EXTERNAL_APP_LINK ? { externalAppLink: env.EXTERNAL_APP_LINK } : {}),
+      ...(env.EXTERNAL_APP_LABEL ? { externalAppLabel: env.EXTERNAL_APP_LABEL } : {}),
+      ...(websocketCompression !== undefined
+        ? { websocket_compression: websocketCompression }
+        : {}),
     },
     ui: { ...defaults.ui, ...config.ui },
     deployment: {
@@ -2245,7 +2275,6 @@ export function ensureBranchCloneDepthAllowed(
 //   2. paths.data_home in config.yaml
 //   3. AGOR_HOME (backward compatible default)
 //
-// @see context/explorations/executor-expansion.md
 // =============================================================================
 
 /**

@@ -685,21 +685,26 @@ export async function handleGitClone(
 
       if (payload.params.repoId) {
         // Daemon pre-created the row in `cloneRepository` so failures stay
-        // queryable. Fill post-clone fields but keep it `cloning` until the
-        // synchronous operator permission handoff below completes.
+        // queryable. Fill post-clone fields and mark it `ready` in ONE patch:
+        // two patches publish independently and can reach clients out of
+        // order, leaving them stuck on `cloning` (#2941).
         repoId = payload.params.repoId;
         console.log(
-          `[git.clone] Patching pre-created repo ${shortId(repoId)} with cloned metadata: ` +
+          `[git.clone] Patching pre-created repo ${shortId(repoId)} to ready: ` +
             `slug=${slug} default_branch=${defaultBranch}` +
             (payload.params.default_branch ? ' (user-supplied)' : ' (auto-detected)')
         );
         await client.service('repos').patch(repoId, {
-          name: repoName,
+          // The daemon owns the display name, including names customized
+          // between attempts. Clone finalization only supplies filesystem facts.
           local_path: cloneResult.path,
           default_branch: defaultBranch,
-          clone_status: 'cloning',
+          clone_status: 'ready',
+          ...(payload.params.cloneGeneration
+            ? { clone_generation: payload.params.cloneGeneration }
+            : {}),
           // Explicit null clears any prior `clone_error` (e.g. from a retry
-          // through the daemon's failed-row replace path). `deepMerge` in
+          // through the daemon's in-place retry path). `deepMerge` in
           // `RepoRepository.update` propagates the null; `repoToInsert`
           // coerces it back to `undefined` so the stored shape stays
           // aligned with the `clone_error?: RepoCloneError` invariant.
@@ -728,9 +733,6 @@ export async function handleGitClone(
         });
         repoId = repoRecord.repo_id;
         console.log(`[git.clone] Repo record created: ${repoId}`);
-      }
-
-      if (repoId) {
         await client.service('repos').patch(repoId, { clone_status: 'ready' });
       }
     }
@@ -761,6 +763,9 @@ export async function handleGitClone(
         const category = categorizeGitError(rawMessage);
         await client.service('repos').patch(payload.params.repoId, {
           clone_status: 'failed',
+          ...(payload.params.cloneGeneration
+            ? { clone_generation: payload.params.cloneGeneration }
+            : {}),
           clone_error: {
             // simple-git wraps git's exit code in the message rather than
             // surfacing it as a numeric field; default to 1 since the

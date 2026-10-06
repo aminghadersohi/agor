@@ -19,6 +19,9 @@ export interface AgorAgenticToolsSettings {
    * Default: enabled; false is an explicit opt-out. Provider approval remains a release prerequisite.
    */
   claude_subscription_oauth?: boolean;
+
+  /** Hosted OpenCode with checkpointed native state. Default: enabled when every hosted prerequisite holds; 'disabled' opts out. */
+  opencode_hosted_native_state?: 'checkpointed' | 'disabled';
 }
 
 /**
@@ -109,6 +112,12 @@ export interface AgorDaemonSettings {
    * Displayed as a popover around the instance label Tag. */
   instanceDescription?: string;
 
+  /** External app link (e.g. a hosting console) shown in the settings menu; opens in a new tab. */
+  externalAppLink?: string;
+
+  /** Settings-menu label for `externalAppLink` (defaults to the link itself). */
+  externalAppLabel?: string;
+
   /** Maximum expiry for impersonation tokens in ms (default: 3600000 = 1 hour, capped at 1 hour) */
   impersonation_token_expiry_ms?: number;
 
@@ -141,6 +150,16 @@ export interface AgorDaemonSettings {
    * Default: 0 (do not trust X-Forwarded-* headers).
    */
   trust_proxy_hops?: number;
+
+  /**
+   * Compress Socket.IO WebSocket frames with RFC 7692 permessage-deflate
+   * (default: true). The zlib profile is fixed by the daemon; this is only an
+   * on/off switch. Each compressing socket holds up to ~224 KiB of zlib state
+   * (~192 KiB deflate + up to ~32 KiB inflate, depending on the window each
+   * client negotiates; buffers and bookkeeping excluded), and a broadcast is
+   * compressed once per recipient. A change applies to new connections only. Env override: `AGOR_WEBSOCKET_COMPRESSION`.
+   */
+  websocket_compression?: boolean;
 }
 
 /**
@@ -447,7 +466,7 @@ export interface AgorDatabaseSettings {
  *   each session gets a per-owner home overlay (`sandbox.home_mode: per_user`),
  *   and the branch is mounted per the caller's effective permission tier.
  *   Linux only. See
- *   `context/explorations/executor-sandboxing.md`.
+ *   `context/guides/rbac-and-unix-isolation.md`.
  */
 export type UnixUserMode = 'simple' | 'delegated' | 'sandbox';
 
@@ -506,7 +525,7 @@ export interface AgorSandboxIncludeSettings {
  *
  * Agor resolves `include.*` / `protect_secrets` / `isolate_branches` into
  * bubblewrap bind mounts + masks using paths it already knows. See
- * `context/explorations/executor-sandboxing.md`.
+ * `context/guides/rbac-and-unix-isolation.md`.
  */
 export interface AgorSandboxSettings {
   /** Master switch. Default: false (open filesystem; tool approval flows still apply). */
@@ -799,8 +818,7 @@ export interface AgorExecutionSettings {
    *
    * v0.20+ default already allows both `worktree` and `clone` with
    * `default_mode: worktree`, so this block is only needed when an
-   * operator wants to deviate. See `context/explorations/clone-redesign.md`
-   * for the storage-model design.
+   * operator wants to deviate.
    *
    * @example Disable clone mode entirely (security-gradient deployment)
    * ```yaml
@@ -824,7 +842,7 @@ export interface AgorExecutionSettings {
 
   /**
    * OS-level executor sandbox policy (SRT: bubblewrap / Seatbelt). Disabled by
-   * default. Global, single-policy. See `context/explorations/executor-sandboxing.md`.
+   * default. Global, single-policy. See `context/guides/rbac-and-unix-isolation.md`.
    */
   sandbox?: AgorSandboxSettings;
 }
@@ -1117,7 +1135,6 @@ export interface AgorCorsSettings {
  * `security.git_config_parameters` shape. Mirrors `security.csp`: `extras`
  * appends to safe defaults, `override` replaces them. Mutually exclusive.
  *
- * Defaults + rationale: `docs/internal/credential-leak-defenses-2026-05-11.md`.
  * Don't bake credential-bearing values (e.g. `http.proxy=http://user:pass@…`)
  * here — the daemon redacts them from logs but the env var itself isn't
  * routed through the encrypted env-file path.
@@ -1146,8 +1163,6 @@ export interface AgorSecuritySettings {
  *
  * Allows separation of daemon operating files from git data files.
  * This enables different storage backends (e.g., local SSD for daemon, EFS for branches).
- *
- * @see context/explorations/executor-expansion.md
  */
 export interface AgorPathSettings {
   /**

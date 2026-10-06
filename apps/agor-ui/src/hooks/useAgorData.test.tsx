@@ -26,7 +26,16 @@ import { agorStore, useAgorStore } from '../store/agorStore';
 // Session `patched`/`updated` writes are coalesced to one flush per frame (see
 // realtimeBatch); flush synchronously in tests that assert the post-patch store.
 import { flushRealtimeNow } from '../store/realtimeBatch';
+import { makeBranchesForBoardSelector } from '../store/selectors';
 import { useAgorData } from './useAgorData';
+
+// The opened-transcript prefetch retains a real reactive session; the mock
+// client doesn't model one. Default: ready at once (no deferral). Tests below
+// drive `ready` explicitly to pin the ordering.
+const transcriptPrefetch = vi.hoisted(() => ({
+  prefetchOpenedTranscript: vi.fn(() => ({ ready: Promise.resolve(), release: vi.fn() })),
+}));
+vi.mock('../store/openedTranscriptPrefetch', () => transcriptPrefetch);
 
 const STANDALONE_AUTHORITY_SCOPE = '__standalone__:__standalone__:0';
 
@@ -282,6 +291,29 @@ it('does not resurrect deletion from an in-flight OAuth realtime refetch', async
     expect(agorStore.getState().userAuthenticatedMcpServerIds.has('server-1')).toBe(false);
   } finally {
     unmount();
+  }
+});
+it('drops an OAuth status answer that lands after unmount, even in the next mount', async () => {
+  const userA = makeMockClient({
+    'mcp-servers/oauth-status': { authenticated_server_ids: ['server-a'] } as never,
+  });
+  const held = deferred();
+  userA.onFetch('mcp-servers/oauth-status', 'find', () => held.promise);
+  const first = renderHook(() => useAgorData(userA.client));
+  await waitFor(() => expect(userA.fetchCount('mcp-servers/oauth-status', 'find')).toBe(1));
+  first.unmount();
+
+  const userB = makeMockClient({
+    'mcp-servers/oauth-status': { authenticated_server_ids: [] } as never,
+  });
+  const second = renderHook(() => useAgorData(userB.client));
+  try {
+    await waitForInitialLoad(second.result);
+    held.resolve();
+    await flush();
+    expect(agorStore.getState().userAuthenticatedMcpServerIds.has('server-a')).toBe(false);
+  } finally {
+    second.unmount();
   }
 });
 it('does not rescan OAuth grants on an idle 60-second timer', async () => {
@@ -1378,6 +1410,7 @@ describe('useAgorData — skip-apply-on-race hydration', () => {
     expect(fetchArguments('sessions', 'find')).toContainEqual({
       query: {
         archived: false,
+        lean: true,
         $limit: 50,
         $count: false,
         $sort: { updated_at: -1 },
@@ -1385,6 +1418,8 @@ describe('useAgorData — skip-apply-on-race hydration', () => {
     });
     for (const args of fetchArguments('sessions', 'findAll')) {
       expect((args as { query: Record<string, unknown> }).query.$count).toBeUndefined();
+      // Store-feeding session lists never carry the bulky single-session context.
+      expect((args as { query: Record<string, unknown> }).query.lean).toBe(true);
     }
 
     expect(agorStore.getState().sessionById.has('s-1')).toBe(true);
@@ -1793,6 +1828,49 @@ describe('useAgorData — lean boards list + objects hydration', () => {
   });
 });
 
+describe('useAgorData — session and branch hydration flags', () => {
+  it('marks both flags again once the silent resync after an identity change lands', async () => {
+    const seed: Record<string, unknown[]> = {
+      'sessions:find': [makeSession()],
+      'sessions:findAll': [makeSession()],
+      'branches:findAll': [makeBranch()],
+    };
+    const gate = deferred();
+    const { client, onFetch, fetchCount } = makeMockClient(seed);
+    const { result, rerender } = renderHook(
+      ({ userId, generation }) =>
+        useAgorData(client, {
+          authenticatedUserId: userId,
+          authenticatedUserRole: 'member',
+          authGeneration: generation,
+          connectionReady: true,
+        }),
+      { initialProps: { userId: 'user-a', generation: 1 } }
+    );
+    await waitForInitialLoad(result);
+    await flush();
+    expect(agorStore.getState().sessionsHydrated).toBe(true);
+    expect(agorStore.getState().branchesHydrated).toBe(true);
+
+    // Hold the resync's full session fetch so the reset flags can be observed first.
+    const calls = fetchCount('sessions', 'findAll');
+    onFetch('sessions', 'findAll', (call) => (call > calls ? gate.promise : undefined));
+    rerender({ userId: 'user-b', generation: 2 });
+    await flush();
+    expect(agorStore.getState().sessionsHydrated).toBe(false);
+    expect(agorStore.getState().branchesHydrated).toBe(false);
+
+    await act(async () => {
+      gate.resolve();
+      await gate.promise;
+    });
+    await flush();
+    expect(agorStore.getState().sessionById.has('s-1')).toBe(true);
+    expect(agorStore.getState().sessionsHydrated).toBe(true);
+    expect(agorStore.getState().branchesHydrated).toBe(true);
+  });
+});
+
 describe('session MCP initialization events', () => {
   it('replaces attachments immediately, preserves unrelated sessions, and clears explicit empty selection', async () => {
     const { client, emit, listeners } = makeMockClient({
@@ -1890,4 +1968,173 @@ describe('session MCP initialization events', () => {
       expect(agorStore.getState().sessionMcpServerIds.size).toBe(0);
     }
   );
+});
+
+describe('useAgorData — opened session transcript priority', () => {
+  const OPEN_ID = '01a0dc28-31f3-71d9-bee6-d301b0524806';
+  const OPEN_SHORT = '01a0dc28';
+
+  function deferredPrefetch() {
+    let resolve!: () => void;
+    const ready = new Promise<void>((done) => {
+      resolve = done;
+    });
+    const release = vi.fn();
+    transcriptPrefetch.prefetchOpenedTranscript.mockReturnValueOnce({ ready, release });
+    return { resolve, release };
+  }
+
+  it('holds the global hydration until the opened transcript is ready', async () => {
+    const session = makeSession({ session_id: OPEN_ID });
+    const { client, fetchCount } = makeMockClient({ 'sessions:find': [session] });
+    const prefetch = deferredPrefetch();
+
+    const { result } = renderHook(() => useAgorData(client, { directSessionId: OPEN_SHORT }));
+    await waitForInitialLoad(result);
+
+    expect(transcriptPrefetch.prefetchOpenedTranscript).toHaveBeenLastCalledWith(client, OPEN_ID);
+    expect(fetchCount('sessions', 'findAll')).toBe(0);
+    expect(fetchCount('branches', 'findAll')).toBe(0);
+    expect(fetchCount('boards', 'findAll')).toBe(1); // the gated lean list only
+    expect(agorStore.getState().sessionsHydrated).toBe(false);
+    expect(agorStore.getState().branchesHydrated).toBe(false);
+
+    await act(async () => prefetch.resolve());
+    await waitFor(() => expect(fetchCount('sessions', 'findAll')).toBe(1));
+    expect(fetchCount('branches', 'findAll')).toBe(1);
+    expect(fetchCount('boards', 'findAll')).toBe(2);
+    await waitFor(() => {
+      expect(agorStore.getState().sessionsHydrated).toBe(true);
+      expect(agorStore.getState().branchesHydrated).toBe(true);
+    });
+  });
+
+  it('skips the deferred hydration and releases the prefetch on unmount', async () => {
+    const session = makeSession({ session_id: OPEN_ID });
+    const { client, fetchCount } = makeMockClient({ 'sessions:find': [session] });
+    const prefetch = deferredPrefetch();
+
+    const { result, unmount } = renderHook(() => useAgorData(client, { directSessionId: OPEN_ID }));
+    await waitForInitialLoad(result);
+    unmount();
+    expect(prefetch.release).toHaveBeenCalled();
+
+    await act(async () => prefetch.resolve());
+    expect(fetchCount('sessions', 'findAll')).toBe(0);
+    expect(fetchCount('branches', 'findAll')).toBe(0);
+  });
+
+  it('abandons a load unmounted during the light batch (no prefetch, no maps, no hydration)', async () => {
+    transcriptPrefetch.prefetchOpenedTranscript.mockClear();
+    const session = makeSession({ session_id: OPEN_ID });
+    const { client, fetchCount, onFetch } = makeMockClient({ 'sessions:find': [session] });
+    const light = deferred();
+    onFetch('sessions', 'find', () => light.promise);
+
+    const { unmount } = renderHook(() => useAgorData(client, { directSessionId: OPEN_ID }));
+    await waitFor(() => expect(fetchCount('sessions', 'find')).toBe(1));
+    unmount();
+    await act(async () => {
+      light.resolve();
+      await new Promise((done) => setTimeout(done, 100));
+      await flush();
+    });
+
+    expect(transcriptPrefetch.prefetchOpenedTranscript).not.toHaveBeenCalled();
+    expect(fetchCount('cards', 'findAll')).toBe(0); // heavy batch never started
+    expect(agorStore.getState().sessionById.size).toBe(0);
+    expect(fetchCount('sessions', 'findAll')).toBe(0);
+    expect(fetchCount('branches', 'findAll')).toBe(0);
+  });
+
+  it('abandons a load unmounted during the heavy batch (prefetch released, nothing applied)', async () => {
+    transcriptPrefetch.prefetchOpenedTranscript.mockClear();
+    const session = makeSession({ session_id: OPEN_ID });
+    const { client, fetchCount, onFetch } = makeMockClient({ 'sessions:find': [session] });
+    const heavy = deferred();
+    onFetch('cards', 'findAll', () => heavy.promise);
+    const release = vi.fn();
+    // `ready` settles at once, so a resumed load would start the global sets.
+    transcriptPrefetch.prefetchOpenedTranscript.mockReturnValueOnce({
+      ready: Promise.resolve(),
+      release,
+    });
+
+    const { unmount } = renderHook(() => useAgorData(client, { directSessionId: OPEN_ID }));
+    await waitFor(() => expect(fetchCount('cards', 'findAll')).toBe(1));
+    expect(transcriptPrefetch.prefetchOpenedTranscript).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(release).toHaveBeenCalled();
+    await act(async () => {
+      heavy.resolve();
+      // Let a resumed load pass its requestAnimationFrame yield and the
+      // deferred hydration start.
+      await new Promise((done) => setTimeout(done, 100));
+      await flush();
+    });
+
+    expect(transcriptPrefetch.prefetchOpenedTranscript).toHaveBeenCalledTimes(1);
+    expect(agorStore.getState().sessionById.size).toBe(0);
+    expect(fetchCount('sessions', 'findAll')).toBe(0);
+    expect(fetchCount('branches', 'findAll')).toBe(0);
+  });
+
+  it('does not prefetch or defer without a session route', async () => {
+    transcriptPrefetch.prefetchOpenedTranscript.mockClear();
+    const { client, fetchCount } = makeMockClient({ sessions: [makeSession()] });
+
+    const { result } = renderHook(() => useAgorData(client));
+    await waitForInitialLoad(result);
+
+    expect(transcriptPrefetch.prefetchOpenedTranscript).not.toHaveBeenCalled();
+    await waitFor(() => expect(fetchCount('sessions', 'findAll')).toBe(1));
+  });
+});
+
+describe('branch creation on an already-open board', () => {
+  // The services are independently authorized/published, so readiness and
+  // placement may overtake the branch create. No order needs a refresh.
+  it.each([
+    ['branch', 'placement', 'ready'],
+    ['branch', 'ready', 'placement'],
+    ['placement', 'branch', 'ready'],
+    ['placement', 'ready', 'branch'],
+    ['ready', 'branch', 'placement'],
+    ['ready', 'placement', 'branch'],
+  ])('keeps one placed, ready card for %s -> %s -> %s', async (...order) => {
+    const { client, emit, fetchCount } = makeMockClient();
+    const { result, unmount } = renderHook(() => useAgorData(client));
+    try {
+      await waitForInitialLoad(result);
+      const select = makeBranchesForBoardSelector('board-1');
+      expect(select(agorStore.getState())).toEqual([]);
+      const beforeBranches = fetchCount('branches', 'findAll');
+      const beforePlacements = fetchCount('board-objects', 'findAll');
+      const branch = makeBranch({ board_id: 'board-1', filesystem_status: 'creating' });
+      const ready = { ...branch, filesystem_status: 'ready' };
+      const placement = makeBoardObject({ zone_id: 'zone-tasks' });
+      const events: Record<string, () => void> = {
+        branch: () => emit('branches', 'created', branch),
+        placement: () => emit('board-objects', 'created', placement),
+        ready: () => emit('branches', 'patched', ready),
+      };
+      for (const event of order) act(events[event]);
+      // Delayed/replayed creates must not roll back ready state or duplicate
+      // a placement. Branch updates do not carry the board-object record.
+      act(events.branch);
+      act(events.placement);
+      expect(select(agorStore.getState())).toEqual([ready]);
+      expect(agorStore.getState().boardObjectsByBoardId.get('board-1')).toEqual([placement]);
+      const moved = { ...placement, position: { x: 80, y: 120 }, zone_id: 'zone-review' };
+      act(() => emit('board-objects', 'patched', moved));
+      act(events.placement); // old create cannot undo newer placement
+      act(events.ready); // readiness never replaces placement
+      expect(agorStore.getState().boardObjectByBranchId.get(branch.branch_id)).toEqual(moved);
+      expect(select(agorStore.getState())).toHaveLength(1);
+      expect(fetchCount('branches', 'findAll')).toBe(beforeBranches);
+      expect(fetchCount('board-objects', 'findAll')).toBe(beforePlacements);
+    } finally {
+      unmount();
+    }
+  });
 });

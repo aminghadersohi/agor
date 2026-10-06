@@ -112,7 +112,7 @@ describe('createPermissionHandler', () => {
     );
   });
 
-  it('terminalizes the task without attempting a post-revocation session patch on timeout', async () => {
+  it('records the elapsed approval timeout without a post-revocation session patch', async () => {
     const sessionId = 'test-session' as SessionID;
     const taskId = 'test-task' as TaskID;
     const tasksService = { patch: vi.fn().mockResolvedValue(undefined) };
@@ -123,6 +123,7 @@ describe('createPermissionHandler', () => {
         waitForDecision: vi.fn().mockResolvedValue({
           allow: false,
           timedOut: true,
+          timeoutMs: 600_000,
           remember: false,
           decidedBy: 'system',
         }),
@@ -148,6 +149,7 @@ describe('createPermissionHandler', () => {
     expect(tasksService.patch).toHaveBeenNthCalledWith(2, taskId, {
       status: 'timed_out',
       completed_at: expect.any(String),
+      error_message: 'Permission request timed out after 600000ms.',
     });
     expect(sessionsService.patch).toHaveBeenCalledTimes(1);
     expect(sessionsService.patch).toHaveBeenNthCalledWith(1, sessionId, {

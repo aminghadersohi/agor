@@ -1,10 +1,11 @@
 import type { ActiveUser, AgorClient, Board, BoardID, Branch, User } from '@agor-live/client';
 import { hasMinimumRole, ROLES } from '@agor-live/client';
-import { BulbOutlined, ShopOutlined } from '@ant-design/icons';
+import { BulbOutlined, ExportOutlined, ShopOutlined } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import { Button, Divider, Layout, Popover, Space, Tag, Tooltip, theme } from 'antd';
-import { memo, useMemo } from 'react';
+import { type CSSProperties, memo, useMemo } from 'react';
 import { useHref, useNavigate } from 'react-router-dom';
+import { resolveExternalAppLink } from '@/utils/externalAppLink';
 import { mapToArray } from '@/utils/mapHelpers';
 import { useConnectionDisabled } from '../../contexts/ConnectionContext';
 import { useMCPCatalogModal } from '../../contexts/MCPCatalogModalContext';
@@ -27,6 +28,15 @@ import { NavbarComposeButton } from './NavbarComposeButton';
 import { SettingsDropdown } from './SettingsDropdown';
 
 const { Header } = Layout;
+
+/** Labels can be up to 80 characters; the full text stays in the title/popover. */
+const INSTANCE_LABEL_STYLE: CSSProperties = {
+  marginLeft: 8,
+  maxWidth: 200,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  verticalAlign: 'middle',
+};
 
 export interface AppHeaderProps {
   user?: User | null;
@@ -61,6 +71,9 @@ export interface AppHeaderProps {
   instanceLabel?: string;
   /** Instance description (markdown) shown in popover around the instance label */
   instanceDescription?: string;
+  /** Settings-menu link to an external app (e.g. a hosting console), opened in a new tab */
+  externalAppLink?: string;
+  externalAppLabel?: string;
   /** Session-creation seam behind the navbar compose affordance. */
   onCreateSession?: (
     config: NewSessionConfig,
@@ -144,6 +157,8 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
   onUserClick,
   instanceLabel,
   instanceDescription,
+  externalAppLink,
+  externalAppLabel,
   onCreateSession,
 }) => {
   const { token } = theme.useToken();
@@ -167,11 +182,13 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
   // store-derived `boards`, so unrelated App re-renders can't hand us a fresh
   // recents array and defeat React.memo. The localStorage-backed recents list is
   // shared across hook instances, so this stays in sync with App's visit tracker.
-  const { recentBoards } = useRecentBoards(boards, currentBoardId ?? '');
+  const { recentBoards } = useRecentBoards(boards, currentBoardId ?? '', user?.user_id);
   // Single source of truth for "is the daemon usable right now?". Captures
   // disconnected, the 1.5s reconnect grace window, and out-of-sync. Don't
   // gate off raw `connected` — it stays true through the grace window.
   const mutationDisabled = useConnectionDisabled();
+
+  const externalApp = resolveExternalAppLink(externalAppLink, externalAppLabel);
 
   const settingsItems: MenuProps['items'] = [
     ...(eventStreamEnabled
@@ -205,6 +222,19 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
       disabled: mutationDisabled,
       onClick: onSettingsClick,
     },
+    ...(externalApp
+      ? [
+          {
+            key: 'external-app',
+            extra: <ExportOutlined />,
+            label: (
+              <a href={externalApp.href} target="_blank" rel="noopener noreferrer">
+                {externalApp.label}
+              </a>
+            ),
+          },
+        ]
+      : []),
   ];
 
   return (
@@ -249,12 +279,12 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
               trigger="hover"
               placement="bottomLeft"
             >
-              <Tag color="cyan" style={{ cursor: 'help', marginLeft: 8 }}>
+              <Tag color="cyan" style={{ ...INSTANCE_LABEL_STYLE, cursor: 'help' }}>
                 {instanceLabel}
               </Tag>
             </Popover>
           ) : (
-            <Tag color="cyan" style={{ marginLeft: 8 }}>
+            <Tag color="cyan" title={instanceLabel} style={INSTANCE_LABEL_STYLE}>
               {instanceLabel}
             </Tag>
           ))}

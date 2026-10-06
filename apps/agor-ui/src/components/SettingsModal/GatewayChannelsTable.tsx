@@ -1724,7 +1724,7 @@ const DiscordSetupFields: React.FC<{
             label="Allowed role IDs"
             name="discord_allowed_role_ids"
             rules={[{ validator: validateAuthorAllowlist }]}
-            tooltip="At least one user or role allowlist entry is required."
+            tooltip="At least one user or role allowlist entry is required. Add the Guild ID to admit every member (@everyone)."
           >
             <Select mode="tags" tokenSeparators={[',', ' ']} placeholder="Role snowflakes" />
           </Form.Item>
@@ -4150,6 +4150,9 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
           ...(values.codexNetworkAccess !== undefined
             ? { codexNetworkAccess: values.codexNetworkAccess as boolean }
             : {}),
+          ...(values.codexIncludePlugins !== undefined
+            ? { codexIncludePlugins: values.codexIncludePlugins as boolean }
+            : {}),
         };
 
     const usesAlignedIdentity = Boolean(
@@ -4366,6 +4369,7 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
       codexSandboxMode: channel.agentic_config?.codexSandboxMode,
       codexApprovalPolicy: channel.agentic_config?.codexApprovalPolicy,
       codexNetworkAccess: channel.agentic_config?.codexNetworkAccess,
+      codexIncludePlugins: channel.agentic_config?.codexIncludePlugins,
       agenticToolPresetId: channel.agentic_config?.presetId ?? INLINE_AGENTIC_CONFIGURATION,
       // Env vars: values are masked by the API, so on edit we show the
       // existing keys with empty values — the user re-enters values to update.

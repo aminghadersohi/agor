@@ -9,7 +9,13 @@
 import { generateId, shortId } from '@agor/core';
 import { AGOR_MCP_SERVER_NAME } from '@agor/core/mcp';
 import type { Message, MessageID, SessionID, TaskID } from '@agor/core/types';
-import { MessageRole, PermissionScope, PermissionStatus, TaskStatus } from '@agor/core/types';
+import {
+  MessageRole,
+  PermissionScope,
+  PermissionStatus,
+  permissionTimeoutMessage,
+  TaskStatus,
+} from '@agor/core/types';
 import type {
   MCPServerRepository,
   MessagesRepository,
@@ -277,6 +283,9 @@ export function createCanUseToolCallback(
         await deps.tasksService.patch(taskId, {
           status: TaskStatus.TIMED_OUT,
           completed_at: new Date().toISOString(),
+          ...(decision.timeoutMs
+            ? { error_message: permissionTimeoutMessage(decision.timeoutMs) }
+            : {}),
         });
 
         return {

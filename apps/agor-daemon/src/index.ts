@@ -702,7 +702,6 @@ async function startDaemonWithOwnedMetrics(
   app.configure(rest());
 
   // JWT secret: env > existing config value > fail-fast with operator-actionable remediation.
-  // and context/explorations/daemon-fs-decoupling.md §1.5 (H3).
   //
   // Failing-fast is critical: a fresh JWT secret on every restart invalidates
   // every issued token, which silently breaks every active session.
@@ -758,10 +757,14 @@ async function startDaemonWithOwnedMetrics(
     buildInfo: DAEMON_BUILD_INFO,
     workIdentity: distributedWorkIdentity,
     multiTenancy,
+    websocketCompression: effectiveConfig.daemon?.websocket_compression !== false,
     ...(realtimeRuntime
       ? { adapter: realtimeRuntime.adapter, onServerCreated: (io) => realtimeRuntime.attach(io) }
       : {}),
   });
+  if (effectiveConfig.daemon?.websocket_compression === false) {
+    console.log('WebSocket compression disabled via config (daemon.websocket_compression=false)');
+  }
   app.configure(socketio(socketIOConfig.serverOptions, socketIOConfig.callback));
   configureChannels(app);
   configureSwagger(app, { version: DAEMON_VERSION, port: DAEMON_PORT });
