@@ -469,3 +469,40 @@ it('retains prompt disclosure and surrounding message order when history supplie
     .join('|');
   expect(text).toMatch(/Earlier event[\s\S]*Long prompt text[\s\S]*Later user message/);
 });
+
+it('focus chat keeps the conversation and approvals but drops tool and turn chrome', () => {
+  const activity = message(1, MessageRole.ASSISTANT, [
+    { type: 'tool_use', id: 'call-1', name: 'Read', input: {} },
+  ]);
+  const approval = {
+    ...message(3, MessageRole.SYSTEM, {
+      request_id: 'approval',
+      tool_name: 'Bash',
+      tool_input: { command: 'echo synthetic' },
+      status: PermissionStatus.PENDING,
+    }),
+    type: 'permission_request',
+  } as Message;
+  render(
+    view({
+      simple: true,
+      task: {
+        ...task,
+        status: TaskStatus.AWAITING_PERMISSION,
+        report: 'Synthetic report',
+        git_state: { ...task.git_state, commit_message: 'Synthetic commit' },
+      },
+      sessionId: task.session_id,
+      onPermissionDecision: vi.fn(),
+      taskMessagesLoaded: true,
+      taskMessages: [messages[0], activity, { ...messages[1], index: 2 }, approval],
+    })
+  );
+  expect(screen.getByText('Retained prompt')).toBeVisible();
+  expect(screen.getByText('Visible answer')).toBeVisible();
+  expect(screen.getByRole('button', { name: /Approve/ })).toBeVisible();
+  expect(screen.queryByRole('button', { name: /tool call/i })).toBeNull();
+  expect(screen.queryByRole('region', { name: 'Turn metadata' })).toBeNull();
+  expect(screen.queryByText('Synthetic report')).toBeNull();
+  expect(screen.queryByText('Synthetic commit')).toBeNull();
+});
