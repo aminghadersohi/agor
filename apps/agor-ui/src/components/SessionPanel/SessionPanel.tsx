@@ -988,6 +988,18 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   const canManageFrontDesk =
     frontDesk.view?.can_manage === true && (isFrontDesk || !session.archived);
   const moreMenuItems: MenuProps['items'] = [
+    // A phone header has no room for another 44px target; offer the toggle here.
+    ...(isMobileShell
+      ? [
+          {
+            key: 'focus-chat',
+            icon: <MessageOutlined />,
+            label: 'Focus chat',
+            onClick: toggleSimpleChat,
+          },
+          { type: 'divider' as const },
+        ]
+      : []),
     ...(branch
       ? [
           {
@@ -1700,7 +1712,7 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
                 />
               </Tooltip>
             )}
-            {!simpleChat && (
+            {!simpleChat && !isMobileShell && (
               <Tooltip title="Focus chat">
                 <Button
                   type="text"

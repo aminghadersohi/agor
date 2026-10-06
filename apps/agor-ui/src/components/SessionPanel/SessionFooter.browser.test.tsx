@@ -80,8 +80,8 @@ describe('SessionFooter simple mode layout (real browser)', () => {
     );
 
     expect(screen.getByRole('textbox', { name: 'Message' })).toBeVisible();
-    expect(screen.getByRole('button', { name: /stop stop/i })).toBeVisible();
-    expect(screen.getByRole('button', { name: /send queue/i })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Queue' })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Attach files' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'More options' })).toBeVisible();
 
@@ -89,8 +89,8 @@ describe('SessionFooter simple mode layout (real browser)', () => {
     expect(shell.scrollWidth).toBeLessThanOrEqual(shell.clientWidth + 1);
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
 
-    const stopRect = screen.getByRole('button', { name: /stop stop/i }).getBoundingClientRect();
-    const queueRect = screen.getByRole('button', { name: /send queue/i }).getBoundingClientRect();
+    const stopRect = screen.getByRole('button', { name: 'Stop' }).getBoundingClientRect();
+    const queueRect = screen.getByRole('button', { name: 'Queue' }).getBoundingClientRect();
     const stopCenter = stopRect.top + stopRect.height / 2;
     const queueCenter = queueRect.top + queueRect.height / 2;
     expect(Math.abs(stopCenter - queueCenter)).toBeLessThanOrEqual(1);
