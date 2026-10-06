@@ -363,7 +363,7 @@ describe('SessionPanel search control', () => {
   });
 
   it('toggles a remembered conversation-first view without losing the session', () => {
-    localStorage.removeItem('agor.session.simple-chat');
+    localStorage.removeItem('agor.session.focus-chat.v2');
     renderPanel();
 
     fireEvent.click(screen.getByRole('button', { name: 'Focus chat' }));
@@ -371,11 +371,11 @@ describe('SessionPanel search control', () => {
     expect(screen.getByText('Session content')).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Search session' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Show full session details' })).toBeVisible();
-    expect(localStorage.getItem('agor.session.simple-chat')).toBe('true');
+    expect(localStorage.getItem('agor.session.focus-chat.v2')).toBe('true');
 
     fireEvent.click(screen.getByRole('button', { name: 'Show full session details' }));
     expect(screen.getByRole('button', { name: 'Focus chat' })).toBeVisible();
-    expect(localStorage.getItem('agor.session.simple-chat')).toBe('false');
+    expect(localStorage.getItem('agor.session.focus-chat.v2')).toBe('false');
   });
 });
 
