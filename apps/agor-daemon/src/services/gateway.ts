@@ -3939,8 +3939,8 @@ export class GatewayService {
    * lookup starts returning an arbitrary one of them — which, for a reply to
    * a direct message, means answering somewhere else entirely.
    *
-   * The per-Task answer is durable: admission stamps the mapping it resolved
-   * onto `gateway_task_source.thread_session_map_id`. Resolution order is
+   * The per-Task mapping identity is durable: admission stamps the resolved
+   * mapping onto `gateway_task_source.thread_session_map_id`. Resolution order is
    * therefore the stamp, or the Task's channel+thread coordinates for older
    * Tasks. A known destination that is no longer valid must not fall back to
    * another audience. Only Tasks without gateway provenance use the Session.
@@ -3948,6 +3948,12 @@ export class GatewayService {
    * The stamped row is re-checked against the Task's Session rather than
    * trusted outright: a mapping that has since been repointed at another
    * Session is no longer this Task's reply address.
+   *
+   * This does not freeze Slack's physical send target: getActiveSlackThreadId
+   * reads the row's mutable slack_active_thread_id, updated on each inbound.
+   * Tasks sharing a seed/reply-alias row therefore follow its latest active
+   * thread, not necessarily their own admission thread. Per-Task Slack alias
+   * targets and status/stream metadata contention remain separate follow-ups.
    */
   private async resolveOutboundMapping(input: {
     /** Stable operation name, for the fallback log. */
@@ -3978,13 +3984,20 @@ export class GatewayService {
           source.thread_id
         )) ??
         (await this.findGatewayReplyAliasMapping(source.gateway_channel_id, source.thread_id));
-      return byThread?.session_id === input.sessionId ? byThread : null;
+      if (byThread?.session_id === input.sessionId) return byThread;
+      this.logOutboundAddressingOnce(
+        `thread_unresolved:${input.purpose}:${input.sessionId}`,
+        `[gateway] Task reply thread unresolved purpose=${input.purpose} ` +
+          `session_id=${shortId(input.sessionId)} reason=${byThread ? 'session_mismatch' : 'missing'}`,
+        'warn'
+      );
+      return null;
     }
 
     const { mapping, ambiguous } = await this.threadMapRepo.findBySessionAmbiguityAware(
       input.sessionId
     );
-    if (mapping) {
+    if (mapping && (source || ambiguous)) {
       // `ambiguous` is the load-bearing bit: it means the Session genuinely
       // had more than one thread, so the destination was picked rather than
       // derived.

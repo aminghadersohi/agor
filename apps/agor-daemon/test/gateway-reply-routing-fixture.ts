@@ -342,12 +342,86 @@ export const replyRoutingScenarios: ReplyRoutingScenario[] = [
       await scoped((scopedDb) =>
         new ThreadSessionMapRepository(scopedDb).delete(fixture.dmMapping.id)
       );
-      for (const task of [fixture.dmTask, fixture.unstampedTask]) {
-        expect(await route({ task_id: task.task_id, message: 'private' })).toEqual({
-          routed: false,
-        });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        for (const task of [fixture.dmTask, fixture.unstampedTask, fixture.unstampedTask]) {
+          expect(await route({ task_id: task.task_id, message: 'private' })).toEqual({
+            routed: false,
+          });
+        }
+        expect(sends).toEqual([]);
+        expect(warn.mock.calls.map(([line]) => line)).toEqual([
+          expect.stringMatching(
+            /Stamped reply mapping unusable purpose=route_message .*reason=missing/
+          ),
+          expect.stringMatching(
+            /Task reply thread unresolved purpose=route_message .*reason=missing/
+          ),
+        ]);
+      } finally {
+        warn.mockRestore();
       }
-      expect(sends).toEqual([]);
+    },
+  },
+  {
+    name: 'does not log ordinary single-mapping canvas replies as degraded addressing',
+    async run(db, sends) {
+      const { fixture, scoped, route } = await start(db, sends);
+      await scoped(async (scopedDb) => {
+        const mappings = new ThreadSessionMapRepository(scopedDb);
+        await mappings.delete(fixture.dmMapping.id);
+        await mappings.delete(fixture.seedMapping.id);
+      });
+      const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        expect(await route({ message: 'canvas reply' })).toEqual({
+          routed: true,
+          channelType: 'slack',
+        });
+        expect(sends).toEqual([{ threadId: PUBLIC_THREAD, text: 'canvas reply' }]);
+        expect(
+          [...log.mock.calls, ...warn.mock.calls].filter(
+            ([line]) =>
+              typeof line === 'string' && line.includes('Outbound routed by session, not task')
+          )
+        ).toEqual([]);
+      } finally {
+        log.mockRestore();
+        warn.mockRestore();
+      }
+    },
+  },
+  {
+    name: 'Slack Tasks sharing an alias row follow its latest active thread',
+    async run(db, sends) {
+      const { fixture, scoped, route } = await start(db, sends);
+      await scoped((scopedDb) =>
+        new ThreadSessionMapRepository(scopedDb).update(fixture.seedMapping.id, {
+          metadata: { ...fixture.seedMapping.metadata, slack_active_thread_id: SEED_INBOUND_ALIAS },
+        })
+      );
+      const secondTask = await scoped((scopedDb) =>
+        new TaskRepository(scopedDb).create({
+          task_id: generateId() as TaskID,
+          session_id: fixture.sessionId,
+          created_by: fixture.seedTask.created_by,
+          full_prompt: 'another seed reply',
+          status: TaskStatus.COMPLETED,
+          metadata: {
+            gateway_task_source: {
+              ...fixture.seedTask.metadata!.gateway_task_source!,
+              thread_id: SEED_THREAD,
+            },
+          },
+        })
+      );
+      await route({ task_id: fixture.seedTask.task_id, message: 'alias reply' });
+      await route({ task_id: secondTask.task_id, message: 'second reply' });
+      expect(sends).toEqual([
+        { threadId: SEED_INBOUND_ALIAS, text: 'alias reply' },
+        { threadId: SEED_INBOUND_ALIAS, text: 'second reply' },
+      ]);
     },
   },
   {
