@@ -373,7 +373,7 @@ Artifact filesystem operations include containment guards:
 
 - **Path traversal protection**: All file paths are resolved and validated to stay within the branch boundary
 - **Symlink filtering**: Symbolic links are skipped during file enumeration to prevent filesystem escape
-- **Text and size validation**: Binary files are rejected before transport (instead of being lossy-decoded as UTF-8), and the executor enforces bounded file-count, per-file, total-source, and serialized-request limits below the shared Socket.IO ceiling
+- **Text and size validation**: Binary files and invalid UTF-8 are rejected before transport (instead of being lossy-decoded). Re-save text in other encodings as UTF-8. The executor accepts at most 1,000 source files to bound per-file filesystem work, independently of byte size; even empty files count. Per-file, total-source, and serialized-request byte limits separately keep requests below the shared Socket.IO ceiling.
 - **Browser sandboxing**: Artifacts render in [Sandpack's](https://sandpack.codesandbox.io/) in-browser bundler, isolated from the host
 
 ---

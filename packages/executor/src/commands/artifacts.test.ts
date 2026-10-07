@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_ARTIFACT_FILE_BYTES,
   MAX_ARTIFACT_FILE_COUNT,
   MAX_ARTIFACT_TOTAL_BYTES,
   readArtifactTree,
@@ -53,17 +54,72 @@ describe('executor artifact filesystem operations', () => {
     );
   });
 
-  it('bounds artifact file count and total source bytes', async () => {
-    const countRoot = await mkdtemp(join(tmpdir(), 'agor-artifact-'));
-    await Promise.all(
-      Array.from({ length: MAX_ARTIFACT_FILE_COUNT + 1 }, (_, index) =>
-        writeFile(join(countRoot, `fictional-${index}.txt`), '')
-      )
+  it('bounds file count independently of source bytes and serialized request size', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agor-artifact-'));
+    const files = Object.fromEntries(
+      Array.from({ length: MAX_ARTIFACT_FILE_COUNT }, (_, index) => [`/fictional-${index}.txt`, ''])
     );
-    await expect(readArtifactTree(countRoot)).rejects.toThrow(/more than .* files/i);
+    await Promise.all(Object.keys(files).map((path) => writeFile(join(root, path.slice(1)), '')));
+    expect(await readArtifactTree(root)).toEqual(files);
 
-    const sizeRoot = await mkdtemp(join(tmpdir(), 'agor-artifact-'));
-    await writeFile(join(sizeRoot, 'fictional.txt'), 'x'.repeat(MAX_ARTIFACT_TOTAL_BYTES + 1));
-    await expect(readArtifactTree(sizeRoot)).rejects.toThrow(/per-file limit|total limit/i);
+    const extraFiles = Object.fromEntries(
+      Array.from({ length: 200 }, (_, index) => [`/extra-${index}.txt`, ''])
+    );
+    // Even 1,200 empty files fit comfortably in the byte budget.
+    expect(Buffer.byteLength(JSON.stringify({ files: { ...files, ...extraFiles } }))).toBeLessThan(
+      MAX_ARTIFACT_TOTAL_BYTES
+    );
+    await Promise.all(
+      Object.keys(extraFiles).map((path) => writeFile(join(root, path.slice(1)), ''))
+    );
+    await expect(readArtifactTree(root)).rejects.toThrow(
+      `Artifact contains more than ${MAX_ARTIFACT_FILE_COUNT} files. This file-count limit bounds filesystem work independently of byte size; reduce the number of source files.`
+    );
+  });
+
+  it('enforces the per-file byte limit inclusively', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agor-artifact-'));
+    const content = 'x'.repeat(MAX_ARTIFACT_FILE_BYTES);
+    await writeFile(join(root, 'fictional.txt'), content);
+    expect(await readArtifactTree(root)).toEqual({ '/fictional.txt': content });
+
+    await writeFile(join(root, 'fictional.txt'), `${content}x`);
+    await expect(readArtifactTree(root)).rejects.toMatchObject({
+      message: `Artifact file /fictional.txt is ${MAX_ARTIFACT_FILE_BYTES + 1} bytes, exceeding the ${MAX_ARTIFACT_FILE_BYTES}-byte per-file limit`,
+    });
+  });
+
+  it('enforces the aggregate byte limit with individually valid files', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agor-artifact-'));
+    const first = 'x'.repeat(Math.floor(MAX_ARTIFACT_TOTAL_BYTES / 2));
+    const second = 'x'.repeat(MAX_ARTIFACT_TOTAL_BYTES - first.length);
+    expect(Math.max(first.length, second.length + 1)).toBeLessThanOrEqual(MAX_ARTIFACT_FILE_BYTES);
+    await writeFile(join(root, 'first.txt'), first);
+    await writeFile(join(root, 'second.txt'), second);
+    expect(await readArtifactTree(root)).toEqual({
+      '/first.txt': first,
+      '/second.txt': second,
+    });
+
+    await writeFile(join(root, 'second.txt'), `${second}x`);
+    await expect(readArtifactTree(root)).rejects.toMatchObject({
+      message: `Artifact source is ${MAX_ARTIFACT_TOTAL_BYTES + 1} bytes, exceeding the ${MAX_ARTIFACT_TOTAL_BYTES}-byte total limit`,
+    });
+  });
+
+  it('reports invalid UTF-8 with encoding-specific remediation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agor-artifact-'));
+    await writeFile(join(root, 'latin1.css'), Buffer.from('/* café */', 'latin1'));
+
+    await expect(readArtifactTree(root)).rejects.toThrow(
+      'Artifact file /latin1.css is not valid UTF-8 text. Re-save text files as UTF-8; embed binary assets as data URLs in a source file or use a controlled external URL.'
+    );
+  });
+
+  it('preserves UTF-8 text including a leading BOM', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agor-artifact-'));
+    const content = '\uFEFF/* café */';
+    await writeFile(join(root, 'utf8.css'), content);
+    expect(await readArtifactTree(root)).toEqual({ '/utf8.css': content });
   });
 });
