@@ -327,6 +327,22 @@ If you continue to see authentication errors, please contact your Agor administr
     // finalization `for await` did on break (see the `finally` below).
     const iterator = result[Symbol.asyncIterator]();
     let awaitingPostResultContinuation = false;
+    // On resume, the CLI can replay a `<task-notification>` for background work
+    // the previous process left unfinished BEFORE Agor's prompt. That preamble
+    // ends with its own zero-turn success `result` while the real prompt is still
+    // queued. Treating it as end-of-turn fails the Task as `missing_assistant`
+    // and tears the CLI down mid-turn, so hold it (once per query) for the
+    // continuation grace and let the real turn's `result` settle the query. If
+    // nothing follows, the held result is replayed exactly as it would have been.
+    let preambleResultDeferred = false;
+    let deferredPreambleResult: SDKResultMessage | undefined;
+    const replayDeferredPreambleResult = async (): Promise<ProcessedEvent[]> => {
+      const held = deferredPreambleResult;
+      deferredPreambleResult = undefined;
+      if (!held) return [];
+      const events = await processor.process(held);
+      return events.filter((event) => event.type !== 'end');
+    };
     try {
       while (true) {
         let iteration: Awaited<ReturnType<typeof iterator.next>> | typeof AWAIT_TIMEOUT;
@@ -390,6 +406,11 @@ If you continue to see authentication errors, please contact your Agor administr
             // ignore — interrupt is advisory here
           }
           result.releaseInput();
+          // A held resume preamble with no real turn after it settles exactly as
+          // it would have without the hold (missing-assistant notice + result).
+          for (const event of await replayDeferredPreambleResult()) {
+            yield event;
+          }
           // If continuation results were collected before the wait went silent,
           // re-emit their aggregate so the terminal patch keeps cumulative
           // usage/cost. A single result was already yielded raw and is its own
@@ -408,6 +429,9 @@ If you continue to see authentication errors, please contact your Agor administr
           // Generator closed on its own (e.g. subprocess exited). Release the
           // held input so nothing downstream waits on stdin, then settle.
           result.releaseInput();
+          for (const event of await replayDeferredPreambleResult()) {
+            yield event;
+          }
           if (abortController?.signal.aborted) {
             yield { type: 'stopped' } as ProcessedEvent;
           } else if (sdkResults.length === 0) {
@@ -438,6 +462,25 @@ If you continue to see authentication errors, please contact your Agor administr
         for (let index = 0; index < (lifecycleTransition.tasksSettled ?? 0); index++) {
           onActivity?.('progress', 'background_task.complete');
         }
+        if (
+          msg.type === 'result' &&
+          !preambleResultDeferred &&
+          msg.subtype === 'success' &&
+          msg.is_error !== true &&
+          msg.num_turns === 0 &&
+          processor.getState().assistantMessageCount === 0
+        ) {
+          preambleResultDeferred = true;
+          deferredPreambleResult = msg;
+          sdkResults.push(msg);
+          awaitingPostResultContinuation = true;
+          console.log(
+            `⏳ [claude-code] zero-turn result before any assistant turn for session ${shortId(sessionId)}; holding it as a resume preamble`
+          );
+          continue;
+        }
+        // Any later result supersedes the held preamble; it stays in the aggregate.
+        if (msg.type === 'result') deferredPreambleResult = undefined;
         // Process message through processor
         const events = await processor.process(msg);
 
