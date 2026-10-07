@@ -651,3 +651,122 @@ describe('ClaudePromptService background task query lifetime', () => {
     expect(activity).toHaveBeenCalledWith('progress', 'background_task.complete');
   });
 });
+
+describe('ClaudePromptService resume preamble result', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function preambleResult(uuid = 'preamble'): SDKMessage {
+    return { ...sdkResult(uuid), num_turns: 0 } as SDKMessage;
+  }
+
+  const assistantTurn = {
+    type: 'assistant',
+    message: {
+      id: 'msg-1',
+      role: 'assistant',
+      model: 'claude-sonnet-4-6',
+      content: [{ type: 'text', text: 'real answer' }],
+    },
+    parent_tool_use_id: null,
+    uuid: 'assistant-1',
+    session_id: 'sdk-session',
+  } as unknown as SDKMessage;
+
+  async function drain(query: ReturnType<typeof fakeQuery>) {
+    vi.mocked(setupQuery).mockResolvedValue({
+      query: query as never,
+      resolvedModel: 'claude-sonnet-4-6',
+      getStderrMetadata: () => ({ hasStderr: false, byteLength: 0 }),
+    });
+    const events: Array<Record<string, unknown> & { type: string }> = [];
+    for await (const event of service().promptSessionStreaming(sessionId, 'prompt')) {
+      events.push(event as never);
+    }
+    return events;
+  }
+
+  it('holds a zero-turn preamble result and settles on the real turn', async () => {
+    const query = fakeQuery([preambleResult(), assistantTurn, sdkResult('real-result')]);
+    const events = await drain(query);
+
+    const completes = events.filter((event) => event.type === 'complete');
+    expect(completes).toHaveLength(1);
+    expect(completes[0]).toMatchObject({ content: [{ type: 'text', text: 'real answer' }] });
+    expect(completes[0].isSynthesizedResult).toBeUndefined();
+    const results = events.filter((event) => event.type === 'result');
+    expect(results).toHaveLength(1);
+    // The preamble's accounting is folded into the terminal aggregate.
+    expect(results[0].raw_sdk_message).toMatchObject({
+      num_turns: 1,
+      usage: { input_tokens: 20, output_tokens: 10 },
+    });
+    expect(query.getContextUsage).toHaveBeenCalledTimes(1);
+    expect(query.releaseInput).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles a held preamble as missing-assistant when no real turn follows', async () => {
+    vi.useFakeTimers();
+    try {
+      const query = fakeQuery((transportClosed) =>
+        (async function* () {
+          yield preambleResult();
+          await transportClosed;
+        })()
+      );
+      const drained = drain(query);
+      await vi.advanceTimersByTimeAsync(ClaudePromptService.POST_RESULT_CONTINUATION_GRACE_MS - 10);
+      expect(query.releaseInput).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(20);
+      const events = await drained;
+
+      expect(events.map((event) => event.type)).toEqual(['complete', 'result']);
+      expect(events[0].isSynthesizedResult).toBe(true);
+      expect(events[1].raw_sdk_message).toMatchObject({ uuid: 'preamble', num_turns: 0 });
+      expect(query.releaseInput).toHaveBeenCalledTimes(1);
+      expect(query.return).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('replays a held preamble when the stream closes without another result', async () => {
+    const query = fakeQuery([preambleResult()]);
+    const events = await drain(query);
+    expect(events.map((event) => event.type)).toEqual(['complete', 'result']);
+    expect(events[0].isSynthesizedResult).toBe(true);
+    expect(query.releaseInput).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds only one preamble per query', async () => {
+    const query = fakeQuery([
+      preambleResult('first'),
+      preambleResult('second'),
+      sdkResult('must-not-consume'),
+    ]);
+    const events = await drain(query);
+    const completes = events.filter((event) => event.type === 'complete');
+    expect(completes).toHaveLength(1);
+    expect(completes[0].isSynthesizedResult).toBe(true);
+    const results = events.filter((event) => event.type === 'result');
+    expect(results).toHaveLength(1);
+    expect(results[0].raw_sdk_message).toMatchObject({ num_turns: 0 });
+    expect(JSON.stringify(events)).not.toContain('must-not-consume');
+  });
+
+  it('does not hold zero-turn error results', async () => {
+    const query = fakeQuery([
+      { ...preambleResult('error'), is_error: true } as SDKMessage,
+      sdkResult('must-not-consume'),
+    ]);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const events = await drain(query);
+      const results = events.filter((event) => event.type === 'result');
+      expect(results).toHaveLength(1);
+      expect(results[0].raw_sdk_message).toMatchObject({ uuid: 'error' });
+      expect(events.some((event) => event.type === 'complete')).toBe(false);
+    } finally {
+      error.mockRestore();
+    }
+  });
+});
