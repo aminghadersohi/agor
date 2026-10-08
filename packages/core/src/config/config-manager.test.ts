@@ -154,12 +154,16 @@ describe('resolveEffectiveConfig', () => {
       AGOR_RBAC_ENABLED: 'true',
       AGOR_UNIX_USER_MODE: 'delegated',
       INSTANCE_LABEL: 'replica-a',
+      EXTERNAL_APP_LINK: 'https://console.example.test/',
+      EXTERNAL_APP_LABEL: 'Open Agor Cloud',
     });
     expect(resolved.daemon).toMatchObject({
       host: 'env-host',
       port: 4321,
       mcpEnabled: true,
       instanceLabel: 'replica-a',
+      externalAppLink: 'https://console.example.test/',
+      externalAppLabel: 'Open Agor Cloud',
     });
     expect(resolved.execution).toMatchObject({ branch_rbac: true, unix_user_mode: 'delegated' });
     expect(resolved.multi_tenancy?.mode).toBe('static');
@@ -2613,5 +2617,35 @@ describe('resolveBranchStorageConfig + ensureBranchStorageModeAllowed', () => {
     expect(resolveBranchStorageConfig().allowShallowClones).toBe(false);
     expect(() => ensureBranchCloneDepthAllowed(undefined)).not.toThrow();
     expect(() => ensureBranchCloneDepthAllowed(1)).toThrow(/full clone/);
+  });
+});
+
+describe('external cleanup command configuration', () => {
+  it('accepts a bounded cleanup command alongside a remote launcher', () => {
+    expect(() =>
+      assertValidEffectiveExecutionConfig({
+        execution: {
+          executor_command_template: 'launcher',
+          executor_cleanup_command_template: 'cleanup',
+          executor_cleanup_timeout_ms: 30000,
+          executor_response: {
+            external_protocol: 'executor-response-v1',
+            origin_url: 'http://daemon.internal:3030',
+          },
+        },
+      })
+    ).not.toThrow();
+  });
+  it.each([0, 999, 120001, NaN, 1.5])('rejects invalid cleanup deadline %s', (timeout) => {
+    expect(() =>
+      assertValidEffectiveExecutionConfig({ execution: { executor_cleanup_timeout_ms: timeout } })
+    ).toThrow('executor_cleanup_timeout_ms');
+  });
+  it('rejects cleanup without remote launch configuration', () => {
+    expect(() =>
+      assertValidEffectiveExecutionConfig({
+        execution: { executor_cleanup_command_template: 'cleanup' },
+      })
+    ).toThrow('executor_command_template');
   });
 });

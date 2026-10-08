@@ -8,9 +8,10 @@
 import { Ajv } from '@feathersjs/schema';
 import type { TObject, TProperties } from '@feathersjs/typebox';
 import { getValidator, Type } from '@feathersjs/typebox';
-import { MESSAGE_PAGINATION, PAGINATION } from '../config/constants';
+import { MESSAGE_PAGINATION, PAGINATION, TASK_PAGINATION } from '../config/constants';
 import { AGENTIC_TOOL_NAMES, PERSISTED_AGENTIC_TOOL_NAMES } from '../types/agentic-tool';
 import {
+  KNOWLEDGE_ARCHIVE_FILTERS,
   KNOWLEDGE_DOCUMENT_KINDS,
   KNOWLEDGE_DOCUMENT_SORT_FIELDS,
   KNOWLEDGE_DOCUMENT_STATUSES,
@@ -173,6 +174,12 @@ export const taskQuerySchema = Type.Intersect(
             {
               $gt: Type.Optional(CommonSchemas.uuid),
               $lte: CommonSchemas.uuid,
+            },
+            { additionalProperties: false }
+          ),
+          Type.Object(
+            {
+              $in: Type.Array(CommonSchemas.uuid, { maxItems: TASK_PAGINATION.MAX_TASK_IDS }),
             },
             { additionalProperties: false }
           ),
@@ -472,6 +479,9 @@ export const mcpServerQuerySchema = createQuerySchema(
  */
 export const knowledgeDocumentQuerySchema = createQuerySchema(
   Type.Object({
+    archive_filter: Type.Optional(
+      Type.Union(KNOWLEDGE_ARCHIVE_FILTERS.map((value) => Type.Literal(value)))
+    ),
     namespace_id: Type.Optional(CommonSchemas.uuid),
     namespace_slug: Type.Optional(Type.String({ maxLength: 255 })),
     path: Type.Optional(Type.String({ maxLength: 1024 })),

@@ -251,6 +251,31 @@ describe('messageQueryValidator', () => {
 });
 
 describe('taskQueryValidator', () => {
+  it('accepts a bounded task_id $in page and rejects an oversized one', async () => {
+    await typedValidateQuery(taskQueryValidator)({
+      params: {
+        query: {
+          session_id: '019e8e1c-0000-7000-8000-000000000000',
+          task_id: { $in: ['019e8e1d-0000-7000-8000-000000000000'] },
+        },
+      },
+    });
+    await expect(
+      typedValidateQuery(taskQueryValidator)({
+        params: {
+          query: {
+            task_id: {
+              $in: Array.from(
+                { length: 101 },
+                (_, i) => `019e8e1d-0000-7000-8000-${String(i).padStart(12, '0')}`
+              ),
+            },
+          },
+        },
+      })
+    ).rejects.toThrow();
+  });
+
   it('preserves bounded hydration cursors and rejects unsupported fields', async () => {
     const valid = {
       params: {
@@ -344,6 +369,15 @@ it('preserves transcript queue exclusion and opt-in session accounting', async (
 });
 
 describe('knowledgeDocumentQueryValidator', () => {
+  it.each(['active', 'archived', 'all'])(
+    'preserves explicit archive filter %s',
+    async (archive_filter) => {
+      expect(await knowledgeDocumentQueryValidator({ archive_filter })).toEqual({ archive_filter });
+    }
+  );
+  it('rejects invalid archive filters instead of widening discovery', async () => {
+    await expect(knowledgeDocumentQueryValidator({ archive_filter: 'anything' })).rejects.toThrow();
+  });
   it('coerces REST list and hydration params', async () => {
     expect(
       await knowledgeDocumentQueryValidator({

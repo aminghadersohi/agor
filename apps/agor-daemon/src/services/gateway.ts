@@ -63,7 +63,9 @@ import {
   buildDiscordLegacyThreadKey,
   buildDiscordMessageThreadKey,
   DISCORD_METADATA_KEY,
+  type DiscordAuthorityMetadata,
   DiscordDirectMessageError,
+  DiscordThreadUnavailableError,
   extractDiscordStarterMessageId,
   formatGatewayContext,
   formatGatewayFollowUpRoutingMessage,
@@ -73,6 +75,7 @@ import {
   gatewayListenerFailure,
   getConnector,
   hasConnector,
+  isPermanentProviderRefusal,
   isSlackInboundReactionEventType,
   isSlackWriteTargetAllowed,
   normalizeOutbound,
@@ -91,6 +94,7 @@ import type {
   AuthenticatedParams,
   BranchPermissionLevel,
   ChannelType,
+  DiscordGatewayConfig,
   GatewayChannel,
   GatewayOutboundMessage,
   GatewayOutboundMessageID,
@@ -117,12 +121,16 @@ import type {
 import {
   compareDiscordSnowflakes,
   DEFAULT_DISCORD_CATCH_UP,
+  DISCORD_NO_REPLY_SENTINEL,
+  discordResponseModeAdmits,
   discordSnowflakeTimestampMs,
   GATEWAY_USER_ALIGNMENT_CONFIG_KEYS,
   hasMinimumRole,
   isDiscordDirectMessagesEnabled,
+  isDiscordNoReply,
   isDiscordSnowflake,
   isTerminalTaskStatus,
+  previousDiscordSnowflake,
   ROLES,
   SessionStatus,
   TaskStatus,
@@ -242,9 +250,14 @@ class GatewayPromptAuthorizationError extends Forbidden {
 /**
  * Outbound routing data (session → platform)
  */
+/** The immutable gateway coordinates a gateway-admitted Task carries. */
+type GatewayTaskSource = NonNullable<Task['metadata']>['gateway_task_source'];
+
 interface RouteMessageData {
   session_id: string;
   message_id?: string;
+  /** The Task this message belongs to; carries the reply address. */
+  task_id?: string;
   message: string;
   metadata?: Record<string, unknown>;
 }
@@ -504,6 +517,46 @@ function hasListeningConfig(channel: GatewayChannel): boolean {
   }
 }
 
+/**
+ * A Discord channel message without a bot mention that its channel's response
+ * mode admits, re-derived from fresh channel config rather than trusted from
+ * the connector.
+ */
+function discordResponseModeAdmitsMetadata(
+  config: Record<string, unknown>,
+  metadata: DiscordAuthorityMetadata
+): boolean {
+  const channelId = metadata[DISCORD_METADATA_KEY.channelId];
+  const messageId = metadata[DISCORD_METADATA_KEY.messageId];
+  const isThread = metadata[DISCORD_METADATA_KEY.isThread];
+  const parentChannelId = metadata[DISCORD_METADATA_KEY.parentChannelId];
+  if (
+    metadata[DISCORD_METADATA_KEY.hasMention] !== false ||
+    typeof channelId !== 'string' ||
+    typeof messageId !== 'string' ||
+    typeof isThread !== 'boolean'
+  ) {
+    return false;
+  }
+  return discordResponseModeAdmits(config as DiscordGatewayConfig, {
+    channelId,
+    messageId,
+    isThread,
+    ...(typeof parentChannelId === 'string' ? { parentChannelId } : {}),
+  });
+}
+
+/** A Discord channel message the bot was not mentioned in (admitted by a response mode). */
+function isUnmentionedDiscordInbound(
+  channel: GatewayChannel,
+  metadata: Record<string, unknown> | undefined
+): boolean {
+  return (
+    channel.channel_type === 'discord' &&
+    parseDiscordAuthorityMetadata(metadata)?.[DISCORD_METADATA_KEY.hasMention] === false
+  );
+}
+
 function discordInboundMetadataIsAuthoritative(
   channel: GatewayChannel,
   data: PostMessageData
@@ -544,7 +597,12 @@ function discordInboundMetadataIsAuthoritative(
   ) {
     return false;
   }
-  if (!userAllowlist.includes(authorId) && !roles.some((role) => roleAllowlist.includes(role))) {
+  // The guild ID is Discord's @everyone role, which never appears in member roles.
+  if (
+    !userAllowlist.includes(authorId) &&
+    !roleAllowlist.includes(guildId) &&
+    !roles.some((role) => roleAllowlist.includes(role))
+  ) {
     return false;
   }
   if (metadata[DISCORD_METADATA_KEY.directMessage] === true) {
@@ -567,7 +625,8 @@ function discordInboundMetadataIsAuthoritative(
     allowedChannels.length === 0 ||
     allowedChannels.some((id) => !snowflake(id)) ||
     metadata[DISCORD_METADATA_KEY.guildId] !== guildId ||
-    metadata[DISCORD_METADATA_KEY.hasMention] !== true
+    (metadata[DISCORD_METADATA_KEY.hasMention] !== true &&
+      !discordResponseModeAdmitsMetadata(config, metadata))
   )
     return false;
   if (isThread) {
@@ -719,6 +778,9 @@ const SLACK_GATEWAY_REPLY_NOTE =
 
 const GATEWAY_STARTUP_BOOTSTRAP_HINT =
   'Startup/bootstrap note: Follow any startup/bootstrap instructions defined by the working directory before answering the gateway message above.';
+
+/** Prompt note for a Discord message admitted by a response mode without a mention. */
+const DISCORD_UNADDRESSED_NOTE = `This Discord message did not mention you; the channel is set to let you answer anyway, and every message you write is posted. Reply only if you can genuinely help. If people are already handling it or you have nothing useful to add, write nothing else at all: your only message must be exactly ${DISCORD_NO_REPLY_SENTINEL}, and nothing will be posted.`;
 
 function prependSlackGatewayReplyNote(prompt: string): string {
   if (prompt.includes(SLACK_GATEWAY_REPLY_NOTE)) return prompt;
@@ -1300,6 +1362,10 @@ export class GatewayService {
    * Terminal states always bypass this throttle.
    */
   private slackProgressLastUpdate = new Map<string, number>();
+  /** Throttle state for {@link logOutboundAddressingOnce}. */
+  private outboundAddressingLogged = new Map<string, number>();
+  /** Per-tenant, per-Task gateway coordinates; see {@link gatewayTaskSource}. */
+  private gatewayTaskSources = new Map<string, GatewayTaskSource | null>();
   private slackProgressQueues = new Map<string, Promise<void>>();
   private slackStreamsByTask = new Map<string, SlackStreamState>();
   private slackStreamStatusRefreshLast = new Map<string, number>();
@@ -1317,6 +1383,11 @@ export class GatewayService {
   private mcpSlackSweepCursor = 0;
   private static SLACK_PROGRESS_MIN_UPDATE_MS = 2500;
   private static SLACK_STREAM_STATUS_REFRESH_MS = 300;
+  /** How often one key may re-report a degraded outbound addressing decision. */
+  private static OUTBOUND_ADDRESSING_LOG_MS = 10 * 60_000;
+  /** Hard caps so neither bookkeeping map can grow without bound. */
+  private static OUTBOUND_ADDRESSING_LOG_MAX = 512;
+  private static GATEWAY_TASK_SOURCE_CACHE_MAX = 512;
   private static SLACK_STREAMED_MESSAGE_CACHE_MAX = 500;
 
   constructor(db: TenantScopeAwareDatabase, app: Application) {
@@ -2364,7 +2435,13 @@ export class GatewayService {
       }
       const session = await this.sessionRepo.findById(task.session_id);
       const channel = source ? await this.channelRepo.findById(source.gateway_channel_id) : null;
-      const mapping = session ? await this.threadMapRepo.findBySession(session.session_id) : null;
+      const mapping = session
+        ? await this.resolveOutboundMapping({
+            purpose: 'mcp_slack_recovery_notice',
+            sessionId: session.session_id,
+            task,
+          })
+        : null;
       const server = await this.mcpServerRepo.findById(recovery.mcp_server_id);
       const [principal, credentialUser] = session
         ? await Promise.all([
@@ -2552,7 +2629,6 @@ export class GatewayService {
   // would be a second thing to keep in step. The card's presentation lives in
   // `services/mcp-slack-connect-card.ts`.
   //
-  // See `docs/internal/slack-mcp-oauth-connect-2026-09-16.md` §7.
   // ==========================================================================
 
   /**
@@ -2769,8 +2845,15 @@ export class GatewayService {
   ): Promise<void> {
     if (slackConversationIsDirectMessage(slack.channelId, slack.conversationType)) return;
     try {
-      const mapping = await this.threadMapRepo.findBySession(sessionId);
-      if (!mapping || mapping.thread_id !== slack.threadId) return;
+      // Asked thread-first, not session-first: this is a question about one
+      // thread, and `(channel_id, thread_id)` is the key that answers it
+      // exactly. Session-first could only ever confirm the thread by accident
+      // once a session held more than one mapping.
+      const mapping = await this.threadMapRepo.findByChannelAndThread(
+        slack.gatewayChannelId,
+        slack.threadId
+      );
+      if (!mapping || mapping.session_id !== sessionId) return;
       const claimed = await this.threadMapRepo.claimMetadataFlag(
         mapping.id,
         MCP_SLACK_CONNECT_SHARED_WARNING_KEY,
@@ -3436,7 +3519,11 @@ export class GatewayService {
           await Promise.all([
             this.sessionRepo.findById(task.session_id),
             this.channelRepo.findById(notice.gateway_channel_id),
-            this.threadMapRepo.findBySession(task.session_id),
+            this.resolveOutboundMapping({
+              purpose: 'mcp_slack_oauth_result',
+              sessionId: task.session_id,
+              task,
+            }),
             this.mcpServerRepo.findById(notice.mcp_server_id),
             this.usersRepo.findById(notice.principal_user_id),
             this.usersRepo.findById(notice.credential_user_id),
@@ -3957,6 +4044,140 @@ export class GatewayService {
   }
 
   /**
+   * Where does this outbound message go?
+   *
+   * Historically every outbound path answered that by asking which thread the
+   * *Session* is mapped to. `(channel_id, thread_id)` is unique but
+   * `session_id` is not, so the moment one Session serves two threads that
+   * lookup starts returning an arbitrary one of them — which, for a reply to
+   * a direct message, means answering somewhere else entirely.
+   *
+   * The per-Task mapping identity is durable: admission stamps the resolved
+   * mapping onto `gateway_task_source.thread_session_map_id`. Resolution order is
+   * therefore the stamp, or the Task's channel+thread coordinates for older
+   * Tasks. A known destination that is no longer valid must not fall back to
+   * another audience. Only Tasks without gateway provenance use the Session.
+   *
+   * The stamped row is re-checked against the Task's Session rather than
+   * trusted outright: a mapping that has since been repointed at another
+   * Session is no longer this Task's reply address.
+   *
+   * This does not freeze Slack's physical send target: getActiveSlackThreadId
+   * reads the row's mutable slack_active_thread_id, updated on each inbound.
+   * Tasks sharing a seed/reply-alias row therefore follow its latest active
+   * thread, not necessarily their own admission thread. Per-Task Slack alias
+   * targets and status/stream metadata contention remain separate follow-ups.
+   */
+  private async resolveOutboundMapping(input: {
+    /** Stable operation name, for the fallback log. */
+    purpose: string;
+    sessionId: string;
+    /** The Task whose reply this is, already loaded where the caller has it. */
+    task?: Task | null;
+    taskId?: string | null;
+  }): Promise<ThreadSessionMap | null> {
+    const source = await this.gatewayTaskSource(input);
+
+    if (source?.thread_session_map_id) {
+      const stamped = await this.threadMapRepo.findById(source.thread_session_map_id);
+      if (stamped && stamped.session_id === input.sessionId) return stamped;
+      this.logOutboundAddressingOnce(
+        `stamp:${input.purpose}:${input.sessionId}`,
+        `[gateway] Stamped reply mapping unusable purpose=${input.purpose} ` +
+          `session_id=${shortId(input.sessionId)} reason=${stamped ? 'session_mismatch' : 'missing'}`,
+        'warn'
+      );
+      return null;
+    }
+
+    if (source?.gateway_channel_id && source.thread_id) {
+      const byThread =
+        (await this.threadMapRepo.findByChannelAndThread(
+          source.gateway_channel_id,
+          source.thread_id
+        )) ??
+        (await this.findGatewayReplyAliasMapping(source.gateway_channel_id, source.thread_id));
+      if (byThread?.session_id === input.sessionId) return byThread;
+      this.logOutboundAddressingOnce(
+        `thread_unresolved:${input.purpose}:${input.sessionId}`,
+        `[gateway] Task reply thread unresolved purpose=${input.purpose} ` +
+          `session_id=${shortId(input.sessionId)} reason=${byThread ? 'session_mismatch' : 'missing'}`,
+        'warn'
+      );
+      return null;
+    }
+
+    const { mapping, ambiguous } = await this.threadMapRepo.findBySessionAmbiguityAware(
+      input.sessionId
+    );
+    if (mapping && (source || ambiguous)) {
+      // `ambiguous` is the load-bearing bit: it means the Session genuinely
+      // had more than one thread, so the destination was picked rather than
+      // derived.
+      this.logOutboundAddressingOnce(
+        `session:${input.purpose}:${input.sessionId}`,
+        `[gateway] Outbound routed by session, not task purpose=${input.purpose} ` +
+          `session_id=${shortId(input.sessionId)} ` +
+          `task_context=${source ? 'unstamped' : 'absent'} ambiguous=${ambiguous}`,
+        ambiguous ? 'warn' : 'log'
+      );
+    }
+    return mapping;
+  }
+
+  /**
+   * This Task's immutable gateway coordinates, read once per Task.
+   *
+   * Memoized because the streaming path resolves a destination per chunk, and
+   * `gateway_task_source` is written at admission and never rewritten — so a
+   * second read of the same Task can only return what the first one did. The
+   * mapping row behind it is deliberately NOT memoized: that one does change.
+   */
+  private async gatewayTaskSource(input: {
+    task?: Task | null;
+    taskId?: string | null;
+  }): Promise<GatewayTaskSource> {
+    if (input.task) return input.task.metadata?.gateway_task_source;
+    if (!input.taskId) return undefined;
+
+    // Keyed by tenant as well as Task: the entry is tenant data read through a
+    // tenant-scoped repository, so one tenant's read must never answer another
+    // tenant's lookup, even for an id that tenant cannot see.
+    const cacheKey = `${getCurrentTenantId() ?? ''}\0${input.taskId}`;
+    const cached = this.gatewayTaskSources.get(cacheKey);
+    if (cached !== undefined) return cached ?? undefined;
+
+    const task = await this.taskRepo.findById(input.taskId);
+    if (!task) return undefined;
+    const source = task.metadata?.gateway_task_source;
+    if (this.gatewayTaskSources.size >= GatewayService.GATEWAY_TASK_SOURCE_CACHE_MAX) {
+      this.gatewayTaskSources.clear();
+    }
+    this.gatewayTaskSources.set(cacheKey, source ?? null);
+    return source;
+  }
+
+  /**
+   * Report a degraded outbound addressing decision, at most once in a while
+   * per key.
+   *
+   * Throttled because the streaming path resolves a destination per chunk, and
+   * a per-chunk log is exactly the implementation chatter the logging policy
+   * rules out.
+   */
+  private logOutboundAddressingOnce(key: string, line: string, level: 'warn' | 'log'): void {
+    const now = Date.now();
+    const last = this.outboundAddressingLogged.get(key) ?? 0;
+    if (now - last < GatewayService.OUTBOUND_ADDRESSING_LOG_MS) return;
+    if (this.outboundAddressingLogged.size >= GatewayService.OUTBOUND_ADDRESSING_LOG_MAX) {
+      this.outboundAddressingLogged.clear();
+    }
+    this.outboundAddressingLogged.set(key, now);
+    if (level === 'warn') console.warn(line);
+    else console.log(line);
+  }
+
+  /**
    * Update Slack's native assistant status/stream chrome for a gateway thread.
    *
    * We expose a short, Slack-safe tool summary and TodoWrite plan state, never
@@ -4052,7 +4273,11 @@ export class GatewayService {
   private async updateProgressNow(data: GatewayProgressData): Promise<void> {
     if (!(await this.shouldQueryGatewayRouting())) return;
 
-    const mapping = await this.threadMapRepo.findBySession(data.session_id);
+    const mapping = await this.resolveOutboundMapping({
+      purpose: 'slack_progress',
+      sessionId: data.session_id,
+      taskId: data.task_id,
+    });
     if (!mapping) return;
 
     const channel = await this.channelRepo.findById(mapping.channel_id);
@@ -4181,7 +4406,11 @@ export class GatewayService {
 
     const taskKey = taskId ?? this.slackStreamTaskByMessage.get(messageId) ?? messageId;
 
-    const mapping = await this.threadMapRepo.findBySession(sessionId);
+    const mapping = await this.resolveOutboundMapping({
+      purpose: 'slack_stream',
+      sessionId,
+      taskId: taskId ?? this.slackStreamTaskByMessage.get(messageId),
+    });
     if (!mapping) return;
 
     const channel = await this.channelRepo.findById(mapping.channel_id);
@@ -4359,6 +4588,29 @@ export class GatewayService {
       throw new Error(
         'Insufficient branch permission: gateway outbound emits require branch all permission or admin access'
       );
+    }
+  }
+
+  /**
+   * Admit an inbound message. An unmentioned Discord message is ordinary
+   * chatter: when it is denied (Forbidden), it ends quietly instead of failing
+   * the listener, matching the suppressed notices inside create().
+   */
+  private async createQuietlyIfUnmentioned(
+    channel: GatewayChannel,
+    metadata: Record<string, unknown> | undefined,
+    data: Parameters<GatewayService['create']>[0]
+  ): Promise<PostMessageResult> {
+    try {
+      return await this.create(data);
+    } catch (error) {
+      if (!(error instanceof Forbidden) || !isUnmentionedDiscordInbound(channel, metadata)) {
+        throw error;
+      }
+      console.debug(
+        `[gateway] IGNORED: denied unmentioned Discord message: channel=${shortId(channel.id)}`
+      );
+      return { success: false, sessionId: '', created: false };
     }
   }
 
@@ -4617,6 +4869,13 @@ export class GatewayService {
     const discordMetadata =
       channel.channel_type === 'discord' ? parseDiscordAuthorityMetadata(data.metadata) : null;
     const discordDm = discordMetadata?.[DISCORD_METADATA_KEY.directMessage] === true;
+    // Admitted by a channel response mode without mentioning the bot.
+    // These stay quiet: no lifecycle, denial, or error notices, and a denial
+    // ends the event instead of failing the listener.
+    const discordUnaddressed =
+      !!discordMetadata &&
+      !discordDm &&
+      discordResponseModeAdmitsMetadata(channel.config as Record<string, unknown>, discordMetadata);
 
     // Slack emoji reactions are a mapped-thread-only signal gated by the
     // channel's inbound_reactions flag. The connector filters them already;
@@ -4790,7 +5049,8 @@ export class GatewayService {
     if (
       channel.channel_type === 'discord' &&
       !discordDm &&
-      discordMetadata?.[DISCORD_METADATA_KEY.hasMention] !== true
+      discordMetadata?.[DISCORD_METADATA_KEY.hasMention] !== true &&
+      !discordUnaddressed
     ) {
       console.debug(
         `[gateway] IGNORED: Discord message without explicit mention: channel=${shortId(channel.id)}, thread=${data.thread_id}`
@@ -4858,7 +5118,7 @@ export class GatewayService {
         console.error(
           `[gateway] Channel "${channel.name}" has no agor_user_id and alignment is OFF. Cannot process message.`
         );
-        this.sendSystemMessage(channel, data.thread_id, errMsg);
+        if (!discordUnaddressed) this.sendSystemMessage(channel, data.thread_id, errMsg);
         // For GitHub: edit the Processing comment with the error
         if (channel.channel_type === 'github' && data.metadata?.processing_comment_id) {
           try {
@@ -5038,7 +5298,7 @@ export class GatewayService {
         await this.requireInboundPromptAuthority(channel, existingMapping.session_id, user.user_id);
       } catch (error) {
         if (!(error instanceof GatewayPromptAuthorizationError)) throw error;
-        if (!isSlackReaction) {
+        if (!isSlackReaction && !discordUnaddressed) {
           await this.sendPromptAuthorizationDenied(channel, data, error.userMessage);
         }
         return { success: false, sessionId: '', created: false };
@@ -5253,7 +5513,7 @@ export class GatewayService {
       }
 
       const sessionUrl = await this.fetchExistingSessionUrlForGatewayUser(sessionId, user);
-      if (sessionUrl && channel.channel_type !== 'slack' && !discordDm) {
+      if (sessionUrl && channel.channel_type !== 'slack' && !discordDm && !discordUnaddressed) {
         this.sendSystemMessage(
           channel,
           data.thread_id,
@@ -5383,7 +5643,6 @@ export class GatewayService {
         agentic_tool_preset_id: resolvedPresetId,
         permission_config: gatewayPermissionConfig,
         model_config: gatewayModelConfig,
-        tasks: [],
         // Denormalized gateway metadata (immutable snapshot at creation time)
         // Avoids N+1 lookups when rendering board cards
         custom_context: {
@@ -5584,7 +5843,7 @@ export class GatewayService {
 
       const sessionUrl = await this.fetchExistingSessionUrlForGatewayUser(sessionId, user);
 
-      if (sessionUrl || channel.channel_type === 'slack') {
+      if ((sessionUrl || channel.channel_type === 'slack') && !discordUnaddressed) {
         this.sendSystemMessage(
           channel,
           data.thread_id,
@@ -5702,9 +5961,13 @@ export class GatewayService {
           });
           discordCursorToWrite = liveCursor;
         } else if (connector?.fetchProviderHistory) {
+          const starterMessageId = extractDiscordStarterMessageId(mappingMetadata);
+          // A first in-thread read includes the starter: a forum post's opener lives in the post.
           const afterCursor =
             mappingForCursor?.discord_last_admitted_message_id ??
-            extractDiscordStarterMessageId(mappingMetadata);
+            (starterMessageId && discordMetadata?.[DISCORD_METADATA_KEY.isThread] === true
+              ? previousDiscordSnowflake(starterMessageId)
+              : starterMessageId);
           if (!afterCursor) {
             throw new GatewayCatchUpError(
               'incomplete',
@@ -5903,6 +6166,9 @@ export class GatewayService {
       if (channel.channel_type === 'slack') {
         promptText = prependSlackGatewayReplyNote(promptText);
       }
+      if (discordUnaddressed) {
+        promptText = `${DISCORD_UNADDRESSED_NOTE}\n\n${promptText}`;
+      }
 
       // Prepend MCP auth warning to the initial prompt so the agent is aware
       if (created && mcpAuthWarning) {
@@ -5951,6 +6217,11 @@ export class GatewayService {
               gateway_channel_id: channel.id,
               channel_type: channel.channel_type as ChannelType,
               thread_id: data.thread_id,
+              // The reply address, decided here and only here. Every outbound
+              // path resolves this id rather than asking which thread the
+              // Session belongs to, because that question stops having one
+              // answer as soon as a Session serves more than one thread.
+              ...(mappingForCursor ? { thread_session_map_id: mappingForCursor.id } : {}),
               provider_user_id: data.user_name ?? 'unknown',
               ...(typeof data.metadata?.slack_message_ts === 'string'
                 ? { provider_message_id: data.metadata.slack_message_ts }
@@ -6046,7 +6317,7 @@ export class GatewayService {
       }
     } catch (error) {
       if (error instanceof GatewayPromptAuthorizationError) {
-        if (!isSlackReaction) {
+        if (!isSlackReaction && !discordUnaddressed) {
           await this.sendPromptAuthorizationDenied(channel, data, error.userMessage);
         }
         this.updateProgressAfterCommit({
@@ -6063,7 +6334,9 @@ export class GatewayService {
       console.error(
         `[gateway] Failed to send prompt to session: channel_id=${channel.id} code=${safeError}`
       );
-      this.sendSystemMessage(channel, data.thread_id, `Error sending prompt: ${safeError}`);
+      if (!discordUnaddressed) {
+        this.sendSystemMessage(channel, data.thread_id, `Error sending prompt: ${safeError}`);
+      }
       this.updateProgressAfterCommit({
         session_id: sessionId,
         state: 'failed',
@@ -6135,8 +6408,12 @@ export class GatewayService {
       return { routed: false };
     }
 
-    // Look up session in thread_session_map
-    const mapping = await this.threadMapRepo.findBySession(data.session_id);
+    // Resolve this message's reply address (see resolveOutboundMapping).
+    const mapping = await this.resolveOutboundMapping({
+      purpose: 'route_message',
+      sessionId: data.session_id,
+      taskId: data.task_id,
+    });
 
     if (!mapping) {
       // No mapping → cheap no-op (session is not gateway-connected)
@@ -6171,11 +6448,15 @@ export class GatewayService {
     if (data.message_id && (await this.deliveryRepo.findByMessageId(data.message_id))) {
       return { routed: true, channelType: 'discord' };
     }
-
     if (params?.provider) {
       if (!transportedSession || transportedSession.branch_id !== channel.target_branch_id) {
         throw new Forbidden('Gateway outbound access denied');
       }
+    }
+
+    // The agent chose not to answer: no delivery intent exists, and nothing is posted.
+    if (channel.channel_type === 'discord' && isDiscordNoReply(data.message)) {
+      return { routed: true, channelType: 'discord' };
     }
 
     // Check if we have a connector for this channel type
@@ -6274,7 +6555,11 @@ export class GatewayService {
 
   /** Deliver one task's terminal reply by editing its exact provider acknowledgement. */
   async flushOutboundBuffer(sessionId: string, options: FlushOutboundBufferOptions): Promise<void> {
-    const mapping = await this.threadMapRepo.findBySession(sessionId);
+    const mapping = await this.resolveOutboundMapping({
+      purpose: 'flush_outbound_buffer',
+      sessionId,
+      taskId: options.taskId,
+    });
     if (!mapping) return;
 
     const channel = await this.channelRepo.findById(mapping.channel_id);
@@ -7104,6 +7389,7 @@ export class GatewayService {
           let eventId: import('@agor/core/types').GatewayInboundEventID | undefined;
           let metadata = msg.metadata;
           let deliveryMetadata: Record<string, unknown> | undefined;
+          let unaddressedDropped = false;
           if (this.durableListenerOwnership) {
             if (!lease || !msg.providerEventId) {
               throw new Error(
@@ -7176,11 +7462,32 @@ export class GatewayService {
                   skipProviderThreadMaterialization?: boolean;
                 }) => Promise<Record<string, unknown> | undefined>)
               | undefined;
-            const prepared = await prepareDelivery?.({
-              ...(skipProviderThreadMaterialization
-                ? { skipProviderThreadMaterialization: true }
-                : {}),
-            });
+            let prepared: Record<string, unknown> | undefined;
+            try {
+              prepared = await prepareDelivery?.({
+                ...(skipProviderThreadMaterialization
+                  ? { skipProviderThreadMaterialization: true }
+                  : {}),
+              });
+            } catch (error) {
+              // An unmentioned message admitted by a response mode is ordinary
+              // chatter: when its thread definitively cannot be verified, end
+              // the event quietly instead of failing the listener. Transient
+              // provider failures still fail so the event is retried.
+              if (
+                !(
+                  error instanceof DiscordThreadUnavailableError ||
+                  isPermanentProviderRefusal(error)
+                ) ||
+                !isUnmentionedDiscordInbound(channel, msg.metadata)
+              ) {
+                throw error;
+              }
+              console.debug(
+                `[gateway] IGNORED: unverifiable thread for an unmentioned Discord message: channel=${shortId(channel.id)} code=${gatewayFailureCode(error)}`
+              );
+              unaddressedDropped = true;
+            }
             if (prepared) {
               if (eventId && lease) {
                 const recorded = await this.inboundEventRepo.recordDeliveryMetadata({
@@ -7207,30 +7514,33 @@ export class GatewayService {
             throw new Error('Gateway listener ownership lost before inbound routing');
           }
 
-          const result = await this.create({
-            channel_key: channel.channel_key,
-            thread_id:
-              channel.channel_type === 'discord' &&
-              typeof parseDiscordAuthorityMetadata(metadata)?.[DISCORD_METADATA_KEY.threadId] ===
-                'string'
-                ? (parseDiscordAuthorityMetadata(metadata)?.[
+          const result: PostMessageResult = unaddressedDropped
+            ? { success: false, sessionId: '', created: false }
+            : await this.createQuietlyIfUnmentioned(channel, msg.metadata, {
+                channel_key: channel.channel_key,
+                thread_id:
+                  channel.channel_type === 'discord' &&
+                  typeof parseDiscordAuthorityMetadata(metadata)?.[
                     DISCORD_METADATA_KEY.threadId
-                  ] as string)
-                : msg.threadId,
-            text: msg.text,
-            user_name: msg.userId,
-            ...(msg.files ? { files: msg.files } : {}),
-            metadata,
-            ...(eventId && lease
-              ? {
-                  gateway_inbound_event_id: eventId,
-                  idempotency_task_id: gatewayInboundTaskId(eventId),
-                  idempotency_session_id: gatewayInboundSessionId(eventId),
-                  listener_claim_token: lease.claim_token,
-                  listener_channel_id: channel.id,
-                }
-              : {}),
-          });
+                  ] === 'string'
+                    ? (parseDiscordAuthorityMetadata(metadata)?.[
+                        DISCORD_METADATA_KEY.threadId
+                      ] as string)
+                    : msg.threadId,
+                text: msg.text,
+                user_name: msg.userId,
+                ...(msg.files ? { files: msg.files } : {}),
+                metadata,
+                ...(eventId && lease
+                  ? {
+                      gateway_inbound_event_id: eventId,
+                      idempotency_task_id: gatewayInboundTaskId(eventId),
+                      idempotency_session_id: gatewayInboundSessionId(eventId),
+                      listener_claim_token: lease.claim_token,
+                      listener_channel_id: channel.id,
+                    }
+                  : {}),
+              });
 
           if (eventId && lease) {
             const completed = await this.inboundEventRepo.complete({

@@ -170,7 +170,7 @@ function configLoadError(configPath: string, error: unknown): Error {
       `${configPath} is masked by Agor's executor sandbox and is intentionally out of reach. ` +
         'Code inside the sandbox must not read the daemon config — it receives configuration ' +
         'via payload.resolvedConfig and DAEMON_URL. Run this on the daemon host instead. ' +
-        `See context/explorations/executor-sandboxing.md. (underlying error: ${detail})`
+        `See https://agor.live/guide/multiplayer-unix-isolation. (underlying error: ${detail})`
     );
   }
   return new Error(`Failed to load config: ${detail}`);
@@ -727,8 +727,8 @@ function validateConfig(config: AgorConfig): void {
     'mcpToolSearch',
     'instanceLabel',
     'instanceDescription',
-    'navbarLogoLink',
-    'navbarLogoTooltip',
+    'externalAppLink',
+    'externalAppLabel',
     'impersonation_token_expiry_ms',
     'cors_allow_sandpack',
     'cors_origins',
@@ -877,6 +877,8 @@ function validateConfig(config: AgorConfig): void {
     'daemon_writes_user_message',
     'permission_timeout_ms',
     'executor_command_template',
+    'executor_cleanup_command_template',
+    'executor_cleanup_timeout_ms',
     'executor_storage',
     'delegated_branch_deletion',
     'executor_command_nonzero_may_have_dispatched',
@@ -1622,8 +1624,8 @@ export function resolveEffectiveConfig(
       ...(env.AGOR_JWT_SECRET ? { jwtSecret: env.AGOR_JWT_SECRET } : {}),
       ...(env.AGOR_MASTER_SECRET ? { masterSecret: env.AGOR_MASTER_SECRET } : {}),
       ...(env.INSTANCE_LABEL ? { instanceLabel: env.INSTANCE_LABEL } : {}),
-      ...(env.NAVBAR_LOGO_LINK ? { navbarLogoLink: env.NAVBAR_LOGO_LINK } : {}),
-      ...(env.NAVBAR_LOGO_TOOLTIP ? { navbarLogoTooltip: env.NAVBAR_LOGO_TOOLTIP } : {}),
+      ...(env.EXTERNAL_APP_LINK ? { externalAppLink: env.EXTERNAL_APP_LINK } : {}),
+      ...(env.EXTERNAL_APP_LABEL ? { externalAppLabel: env.EXTERNAL_APP_LABEL } : {}),
       ...(websocketCompression !== undefined
         ? { websocket_compression: websocketCompression }
         : {}),
@@ -1714,6 +1716,24 @@ export function assertValidEffectiveExecutionConfig(config: AgorConfig): void {
 
   if (!execution) return;
 
+  if (
+    execution.executor_cleanup_command_template !== undefined &&
+    (typeof execution.executor_cleanup_command_template !== 'string' ||
+      !execution.executor_cleanup_command_template.trim() ||
+      !execution.executor_command_template)
+  ) {
+    throw new Error(
+      'execution.executor_cleanup_command_template requires a nonempty command and executor_command_template'
+    );
+  }
+  if (
+    execution.executor_cleanup_timeout_ms !== undefined &&
+    (!Number.isInteger(execution.executor_cleanup_timeout_ms) ||
+      execution.executor_cleanup_timeout_ms < 1000 ||
+      execution.executor_cleanup_timeout_ms > 120000)
+  ) {
+    throw new Error('execution.executor_cleanup_timeout_ms must be an integer from 1000 to 120000');
+  }
   const response = resolveExecutorResponseConfig(execution.executor_response);
 
   // Enforced here, NOT in the raw config.yaml parse: one shared config.yaml
@@ -2275,7 +2295,6 @@ export function ensureBranchCloneDepthAllowed(
 //   2. paths.data_home in config.yaml
 //   3. AGOR_HOME (backward compatible default)
 //
-// @see context/explorations/executor-expansion.md
 // =============================================================================
 
 /**

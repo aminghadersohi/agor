@@ -39,14 +39,16 @@ export interface AuthConfig {
   };
 }
 
-interface InstanceConfig {
+export interface InstanceConfig {
   label?: string;
   description?: string;
-  navbarLogoLink?: string;
-  navbarLogoTooltip?: string;
+  externalAppLink?: string;
+  externalAppLabel?: string;
 }
 
 export interface FeaturesConfig {
+  /** Deployment support only; branch reads and request admission check the remaining requirements. */
+  permanentBranchDeletion?: import('@agor/core/types').BranchMaintenanceCapability;
   /** Instance-owned informational copy; never a capability or repository override. */
   environmentDisclaimerMarkdown?: string;
   environmentCommands?: ReturnType<
@@ -370,13 +372,18 @@ export function retryAuthConfig(): void {
   void fetchAuthConfigOnce();
 }
 
-/** One shared health snapshot for the whole UI; consumers never refetch or drift. */
-export function useAuthConfig(): AuthConfigState {
-  const state = useSyncExternalStore(
+/** Subscribe without fetching, for presentational components also used outside the app shell. */
+export function useAuthConfigSnapshot(): AuthConfigState {
+  return useSyncExternalStore(
     subscribe,
     () => snapshot,
     () => snapshot
   );
+}
+
+/** One shared health snapshot for the whole UI; consumers never refetch or drift. */
+export function useAuthConfig(): AuthConfigState {
+  const state = useAuthConfigSnapshot();
   useEffect(() => {
     void fetchAuthConfigOnce();
   }, []);

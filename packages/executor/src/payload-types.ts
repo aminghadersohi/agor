@@ -22,6 +22,7 @@ import {
   BRANCH_CLEANUP_COMMAND_MAX_LENGTH,
   BRANCH_DELETION_COMMAND,
   ENVIRONMENT_COMMAND_BUDGET as ENV_BUDGET,
+  EXECUTOR_ADMISSION_CLASSES,
 } from '@agor/core/types';
 import { z } from 'zod';
 
@@ -129,6 +130,13 @@ export type PermissionMode = z.infer<typeof PermissionModeSchema>;
 export const BasePayloadSchema = z.object({
   /** Executor command identifier */
   command: z.string(),
+
+  /**
+   * Admission class the daemon stamps on templated launches so a gating
+   * launcher can count the run. Never trusted by the executor itself: the
+   * admission check uses the executor's own command map.
+   */
+  admissionClass: z.enum(EXECUTOR_ADMISSION_CLASSES).optional(),
 
   /** Invocation lifecycle selected by the daemon host. */
   executorMode: z.enum(['autonomous', 'request']).optional(),
@@ -247,7 +255,8 @@ export const GitClonePayloadSchema = BasePayloadSchema.extend({
     /**
      * Import executable environment configuration from the cloned
      * `.agor.yml`. This capability is derived by the daemon from the
-     * initiating user's admin role and defaults closed for direct callers.
+     * initiating user's admin role for initial registration only; recovery
+     * preserves saved configuration. Defaults closed for direct callers.
      */
     importEnvironmentConfig: z.boolean().optional().default(false),
 
@@ -260,6 +269,9 @@ export const GitClonePayloadSchema = BasePayloadSchema.extend({
      * `{ status: 'pending' }` response.
      */
     repoId: z.string().optional(),
+
+    /** Echo on terminal reports to fence superseded clone attempts. */
+    cloneGeneration: z.number().int().positive().optional(),
 
     /** User ID of the requesting user (for per-user credential resolution) */
     userId: z.string().uuid().optional(),
@@ -415,6 +427,16 @@ const BranchMaintenanceParamsSchema = z.object({
   generation: z.number().int().positive(),
   executionId: z.string().uuid(),
   deadlineAt: z.number().positive(),
+  delegatedStorage: z
+    .object({
+      tenantDataRoot: z.string().min(1),
+      branchesRoot: z.string().min(1),
+      branchPath: z.string().min(1),
+      repoPath: z.string().min(1),
+      storageMode: z.literal('clone'),
+    })
+    .strict()
+    .optional(),
 });
 const BranchCleanupParamsSchema = BranchMaintenanceParamsSchema.extend({
   filesystemAction: z.literal('cleaned'),

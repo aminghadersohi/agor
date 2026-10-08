@@ -274,9 +274,9 @@ export interface AppProps {
   instanceLabel?: string;
   /** Instance description (markdown) shown in popover around the instance label */
   instanceDescription?: string;
-  /** Navbar logo destination; the logo goes Home when unset */
-  navbarLogoLink?: string;
-  navbarLogoTooltip?: string;
+  /** Settings-menu link to an external app, opened in a new tab */
+  externalAppLink?: string;
+  externalAppLabel?: string;
   /** Whether the web terminal is enabled on this instance (execution.allow_web_terminal) */
   webTerminalEnabled?: boolean;
   branchStorageConfig?: BranchStorageConfig;
@@ -391,8 +391,8 @@ export const App: React.FC<AppProps> = ({
   onReopenOnboarding,
   instanceLabel,
   instanceDescription,
-  navbarLogoLink,
-  navbarLogoTooltip,
+  externalAppLink,
+  externalAppLabel,
   webTerminalEnabled = false,
   branchStorageConfig,
   uploadPolicy,
@@ -1108,6 +1108,7 @@ export const App: React.FC<AppProps> = ({
       codexSandboxMode: result.codexSandboxMode,
       codexApprovalPolicy: result.codexApprovalPolicy,
       codexNetworkAccess: result.codexNetworkAccess,
+      codexIncludePlugins: result.codexIncludePlugins,
     };
 
     try {
@@ -1462,8 +1463,8 @@ export const App: React.FC<AppProps> = ({
           onUserClick={handleHeaderUserClick}
           instanceLabel={instanceLabel}
           instanceDescription={instanceDescription}
-          navbarLogoLink={navbarLogoLink}
-          navbarLogoTooltip={navbarLogoTooltip}
+          externalAppLink={externalAppLink}
+          externalAppLabel={externalAppLabel}
           onCreateSession={stableOnCreateSession}
         />
         {topBanner}
