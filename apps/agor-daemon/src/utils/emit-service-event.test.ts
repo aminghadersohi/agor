@@ -216,4 +216,16 @@ describe('board patch custom actions', () => {
     expect(noOpGuard).toBeGreaterThan(-1);
     expect(noOpGuard).toBeLessThan(firstLayoutEvent);
   });
+
+  it('authorizes every layout placement before the atomic write', () => {
+    const source = readFileSync(new URL('../register-hooks.ts', import.meta.url), 'utf8');
+    const layoutAction = source.slice(
+      source.indexOf("if (_action === 'applyLayout'"),
+      source.indexOf("if (_action === 'setZoneLayoutDefaults'")
+    );
+    const authorization = layoutAction.indexOf('await authorizeBoardLayoutPlacements(');
+    expect(authorization).toBeGreaterThan(-1);
+    expect(authorization).toBeLessThan(layoutAction.indexOf('applyBoardLayout('));
+    expect(layoutAction).toContain('boardLayoutPlacementIds({ placements, expected }');
+  });
 });
