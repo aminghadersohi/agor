@@ -432,6 +432,11 @@ interface ArrangeZoneContentsOptions {
   userInitiated?: boolean;
   /** Synchronous owner token required for background writes only. */
   observerLease?: AutoZoneObserverLease;
+  /**
+   * The ticket of the action this arrange follows up (a deferred re-pack).
+   * Without one, the arrange is its own action and captures a ticket now.
+   */
+  ticket?: BoardWriteTicket;
   /** Internal bounded-conflict recovery state; never exposed by UI controls. */
   recovery?: LayoutRecoveryState;
 }
@@ -864,8 +869,10 @@ export const useBoardObjects = ({
           zone?.type === 'zone' &&
           normalizeZoneLayoutPolicy(zone.layout).preset !== 'compact_list';
         if (shouldRepackExpandedGrid) {
+          // The re-pack is part of this expand: it writes under the expand's
+          // ticket, so an unload (even one followed by a reload) cancels it.
           setTimeout(() => {
-            void arrangeZoneContentsRef.current?.(zoneId, { silent: true });
+            void arrangeZoneContentsRef.current?.(zoneId, { silent: true, ticket });
           }, EXPANDED_REPACK_DELAY_MS);
         }
         if (options.silent) return;
@@ -1114,7 +1121,7 @@ export const useBoardObjects = ({
       if (!currentBoard || !client || persistedZone?.type !== 'zone') return;
       // A layout is a board write: its ticket is captured when it starts and
       // checked again right before the atomic layout request.
-      const ticket = options.recovery?.ticket ?? guardRef.current.capture();
+      const ticket = options.recovery?.ticket ?? options.ticket ?? guardRef.current.capture();
       if (!ticket || ticket.boardId !== currentBoard.board_id) return;
       const intent =
         options.recovery?.intent ?? beginZoneLayoutIntent(zoneId, options.userInitiated === true);

@@ -3851,6 +3851,39 @@ describe('explicit density changes own any required re-pack', () => {
     if (ys.length === 2) expect(ys[1] - ys[0]).toBeGreaterThan(56);
   });
 
+  it('drops the deferred re-pack when the board reloads after the expand', async () => {
+    vi.useFakeTimers();
+    const { client, patch } = makeClient();
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({ [zoneId]: zone('grid') }),
+          client: client as never,
+          boardObjectsForBoard: placements as never,
+          nodes: nodes as never,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact(zoneId, false);
+    });
+    // The expand's ticket ends with this partition lifetime; a reload's new
+    // lifetime must not revive the write the expand scheduled.
+    act(() => {
+      agorStore.getState().resetBoardPartitions();
+      loadBoard();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    expect(Object.values(layoutPlacements(patch))).toEqual([]);
+  });
+
   it('does not re-pack when the toolbar collapses the contents', async () => {
     // Collapsing shrinks every item, which cannot create an overlap; a re-pack
     // there would move worktrees the user did not ask to move.
