@@ -171,6 +171,17 @@ an explicit mapping-review point.
   launcher exit or delay may not prove that remote work was not created. A
   durable observation marker removes that ambiguous dispatch from subsequent
   deadline scans so it cannot hot-loop or starve other candidates.
+- With the daemon opt-in `AGOR_EXECUTOR_LAUNCH_REFUSED_EXIT=75`, a templated
+  launcher exit `75` means admission was refused and nothing was created. The
+  prompt `onExit` requests termination with cause `launch_refused` and verified
+  absence instead of `heartbeat_lost`. The coordinator skips the OpenCode
+  integration's unverified-termination reason only for that requested cause, so
+  the task settles `failed` with `termination: 'verified'` for every agent.
+- A refusal claims only while no executor is connected (no `dispatching`
+  status fence), so a Stop that arrived first keeps its `user_stop` request and
+  the refusal settles it `stopped` with verified absence. Only that verified
+  path persists `launch_refused`, so the reconciler resumes a stranded
+  `launch_refused` request after a daemon restart with the same absence proof.
 - Connected active tasks heartbeat every 10 seconds by default. A scoped
   executor continues heartbeat and pulse telemetry while `stopping` until its
   provider cleanup returns and it reports quiescence.

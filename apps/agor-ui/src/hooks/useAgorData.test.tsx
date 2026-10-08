@@ -334,6 +334,28 @@ it('does not rescan OAuth grants on an idle 60-second timer', async () => {
   }
 });
 
+describe('useAgorData — network recovery', () => {
+  it('lets the first successful reconnect finish a failed bootstrap and clear its error', async () => {
+    const { client, emitIo, onFetch } = makeMockClient();
+    onFetch('boards', 'findAll', (call) =>
+      call === 1 ? Promise.reject(new Error('Network unavailable')) : undefined
+    );
+    const { result, unmount } = renderHook(() => useAgorData(client));
+    try {
+      await waitFor(() => expect(result.current.error).toBe('Network unavailable'));
+      expect(result.current.initialLoadComplete).toBe(false);
+
+      act(() => emitIo('connect'));
+      await waitFor(() => {
+        expect(result.current.error).toBeNull();
+        expect(result.current.initialLoadComplete).toBe(true);
+      });
+    } finally {
+      unmount();
+    }
+  });
+});
+
 describe('useAgorData — socket-event bailouts', () => {
   it('scopes the real cold mobile board load before fetching board entities', async () => {
     const boardId = '01a012d8-1b9b-7909-b6f4-2024dfc7c51e';
