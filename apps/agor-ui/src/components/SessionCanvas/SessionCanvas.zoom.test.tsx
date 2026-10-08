@@ -8,6 +8,8 @@ import type { Node, NodeDragHandler } from 'reactflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { agorStore } from '../../store/agorStore';
+import { boardScopeKey } from '../../store/scopeMerge';
+import { boardCoverage } from '../../test/userScopeCoverage';
 import SessionCanvas, { isCanvasSelectionControlTarget } from './SessionCanvas';
 
 const permissionState = vi.hoisted(() => ({ canEdit: true }));
@@ -79,7 +81,12 @@ beforeEach(() => {
   nodesStateOverride = undefined;
   onNodesChangeInternalSpy.mockClear();
   setNodesUnsafeSpy.mockClear();
-  agorStore.setState({ userById: new Map(), commentById: new Map() });
+  agorStore.setState({
+    userById: new Map(),
+    commentById: new Map(),
+    // Structural edits need the board's partition loaded.
+    coverage: new Map([[boardScopeKey('board-1'), boardCoverage()]]),
+  });
 });
 
 function createLayoutPatch() {
@@ -401,6 +408,8 @@ describe('SessionCanvas zoom shortcuts', () => {
 
     function renderDragCanvas(board: Board, client: AgorClient, getNodes: () => Node[]) {
       nodesStateOverride = getNodes();
+      // A drag persists only into a loaded board partition.
+      agorStore.getState().setCoverage(boardScopeKey(board.board_id), boardCoverage());
       const view = render(
         <ConnectionProvider value={connected}>
           <SessionCanvas board={board} client={client} branches={[]} />

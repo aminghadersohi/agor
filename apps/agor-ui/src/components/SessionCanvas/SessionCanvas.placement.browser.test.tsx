@@ -2,15 +2,26 @@ import type { AgorClient, Board, BoardEntityObject, Branch, Repo, User } from '@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { App } from 'antd';
 import 'reactflow/dist/style.css';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { userEvent } from 'vitest/browser';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { EMPTY_MAPS } from '../../store/agorMaps';
 import { boardObjectPatched } from '../../store/agorRealtimeActions';
 import { agorStore } from '../../store/agorStore';
+import { captureLoadLifetime } from '../../store/loadLifetime';
+import { setRealtimeAuthorityScope } from '../../store/realtimeBatch';
+import { boardScopeKey } from '../../store/scopeMerge';
+import { boardCoverage } from '../../test/userScopeCoverage';
 import SessionCanvas from './SessionCanvas';
 
-afterEach(cleanup);
+beforeEach(() => setRealtimeAuthorityScope('placement-owner:member:1'));
+afterEach(() => {
+  cleanup();
+  setRealtimeAuthorityScope(null);
+});
+
+/** The board's partition, loaded under the current lifetime: it holds the board's rows. */
+const loadedPartition = () => boardCoverage('loaded', captureLoadLifetime() ?? undefined);
 
 it('persists two real pointer drags when the first PATCH completes during the second debounce', async () => {
   const user = { user_id: 'placement-owner', role: 'member' } as User;
@@ -47,6 +58,8 @@ it('persists two real pointer drags when the first PATCH completes during the se
     branchById: new Map([[branch.branch_id, branch]]),
     repoById: new Map([[repo.repo_id, repo]]),
     boardObjectsByBoardId: new Map([[board.board_id, [initial]]]),
+    // Structural edits need the board's partition loaded.
+    coverage: new Map([[boardScopeKey(board.board_id), loadedPartition()]]),
   });
   let release!: () => void;
   const pending = new Promise<void>((resolve) => {
@@ -169,6 +182,8 @@ it('shows skipped-default warnings from an always_new drop response', async () =
     branchById: new Map([[branch.branch_id, branch]]),
     repoById: new Map([[repo.repo_id, repo]]),
     boardObjectsByBoardId: new Map([[board.board_id, [initial]]]),
+    // Structural edits need the board's partition loaded.
+    coverage: new Map([[boardScopeKey(board.board_id), loadedPartition()]]),
   });
   // This is a real-browser consumer regression, not daemon E2E: only the
   // transport response is stubbed. No prompt/provider is invoked.

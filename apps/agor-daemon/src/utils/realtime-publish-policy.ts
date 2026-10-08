@@ -3,6 +3,7 @@ import {
   BRANCH_DELETION_REPORT_SERVICE,
   ENVIRONMENT_COMMAND_REPORT_SERVICE,
   KNOWLEDGE_TRANSFER,
+  MCP_OAUTH_RELAY,
   OWNERSHIP_TRANSFER_SERVICES,
   type UserRole,
 } from '@agor/core/types';
@@ -192,7 +193,7 @@ export const REALTIME_PUBLISH_POLICY = {
   },
   'mcp-servers': {
     audience: 'tenant',
-    why: 'useAgorData tracks server rows, and useMcpMemberPolicy refetches its caller-specific capability on the empty member-policy invalidation. Secrets are stripped from context.dispatch unconditionally by redactMCPServerSecretFields — the audience is tenant-wide, so row payloads must never carry credentials.',
+    why: 'Removal is ID/owner-only and narrowed to the private owner/admins by resolvePublishScope (explicit null owner means shared). useAgorData tracks server rows, and useMcpMemberPolicy refetches its caller-specific capability on the empty member-policy invalidation. Secrets are stripped from context.dispatch unconditionally by redactMCPServerSecretFields — the audience is tenant-wide, so row payloads must never carry credentials.',
   },
   'gateway-channels': {
     audience: 'tenant',
@@ -405,6 +406,14 @@ export const REALTIME_PUBLISH_POLICY = {
   'agentic-tool-presets': { audience: 'none', why: 'Read-mostly presets; no socket subscriber.' },
   templates: { audience: 'none', why: 'Static template list.' },
   leaderboard: { audience: 'none', why: 'Analytics rollup, polled.' },
+  'branch-counts': {
+    audience: 'none',
+    why: 'Per-caller RBAC-scoped aggregate; refetched on branch events.',
+  },
+  'session-counts': {
+    audience: 'none',
+    why: 'Per-caller RBAC-scoped aggregate; refetched on session events.',
+  },
   'thread-session-map': { audience: 'none', why: 'Gateway-internal thread bookkeeping.' },
   gateway: { audience: 'none', why: 'Inbound/outbound message routing; no socket subscriber.' },
   file: { audience: 'none', why: 'Reads a file out of a branch worktree for the caller.' },
@@ -576,6 +585,7 @@ export function isRealtimePublishAllowed(path: string | null | undefined): boole
 export const NON_SERVICE_REGISTERED_PATHS: ReadonlySet<string> = new Set([
   '', // SPA fallback
   'static', // express.static
+  MCP_OAUTH_RELAY.deliveryPath.slice(1), // Signed raw-body Express callback; no service events.
 ]);
 
 export class RealtimePublishPolicyCoverageError extends Error {

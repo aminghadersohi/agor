@@ -16,7 +16,13 @@ import type { Database } from '../db/client';
 import { EXECUTOR_RESPONSE_PROTOCOL } from '../executor-protocol';
 import type { AgenticToolName } from '../types';
 import { normalizeHttpBaseUrl } from '../utils/url';
-import { ensureAgorHome, ensureAgorHomeSync, getAgorHome, getConfigPath } from './agor-home';
+import {
+  agorHomePath,
+  ensureAgorHome,
+  ensureAgorHomeSync,
+  getAgorHome,
+  getConfigPath,
+} from './agor-home';
 import { getDefaultAnalyticsConfig } from './analytics-defaults.js';
 import { validateAnalyticsHeaders, validateAnalyticsMetadata } from './analytics-validation.js';
 import { DAEMON, ENVIRONMENT, MCP_TOKEN } from './constants';
@@ -164,7 +170,7 @@ function configLoadError(configPath: string, error: unknown): Error {
       `${configPath} is masked by Agor's executor sandbox and is intentionally out of reach. ` +
         'Code inside the sandbox must not read the daemon config — it receives configuration ' +
         'via payload.resolvedConfig and DAEMON_URL. Run this on the daemon host instead. ' +
-        `See context/explorations/executor-sandboxing.md. (underlying error: ${detail})`
+        `See https://agor.live/guide/multiplayer-unix-isolation. (underlying error: ${detail})`
     );
   }
   return new Error(`Failed to load config: ${detail}`);
@@ -240,8 +246,9 @@ function parseAndValidateConfig(content: string): AgorConfig {
   return finalConfig;
 }
 
+export { AGOR_HOME_ENV, AGOR_HOME_MODE } from './agor-home';
 /** Shared state-home paths and creation policy. */
-export { ensureAgorHome, ensureAgorHomeSync, getAgorHome, getConfigPath };
+export { agorHomePath, ensureAgorHome, ensureAgorHomeSync, getAgorHome, getConfigPath };
 
 /**
  * Validate config and throw helpful errors for deprecated/invalid settings
@@ -542,6 +549,7 @@ function validateConfig(config: AgorConfig): void {
     'ui',
     'database',
     'external_launch',
+    'mcp_oauth_relay',
     'identity',
     'execution',
     'security',
@@ -583,12 +591,24 @@ function validateConfig(config: AgorConfig): void {
     }
   };
   const legacyConfig = config as LegacyConfig;
-  only(config.agentic_tools, 'agentic_tools', ['installed', 'claude_subscription_oauth']);
+  only(config.agentic_tools, 'agentic_tools', [
+    'installed',
+    'claude_subscription_oauth',
+    'opencode_hosted_native_state',
+  ]);
   if (
     config.agentic_tools?.claude_subscription_oauth !== undefined &&
     typeof config.agentic_tools.claude_subscription_oauth !== 'boolean'
   ) {
     throw new Error('Config error: agentic_tools.claude_subscription_oauth must be a boolean');
+  }
+  if (
+    config.agentic_tools?.opencode_hosted_native_state !== undefined &&
+    !['checkpointed', 'disabled'].includes(config.agentic_tools.opencode_hosted_native_state)
+  ) {
+    throw new Error(
+      "Config error: agentic_tools.opencode_hosted_native_state must be 'checkpointed' or 'disabled'"
+    );
   }
   if (config.agentic_tools?.installed !== undefined) {
     if (!Array.isArray(config.agentic_tools.installed)) {
@@ -708,12 +728,21 @@ function validateConfig(config: AgorConfig): void {
     'mcpToolSearch',
     'instanceLabel',
     'instanceDescription',
+    'externalAppLink',
+    'externalAppLabel',
     'impersonation_token_expiry_ms',
     'cors_allow_sandpack',
     'cors_origins',
     'trust_proxy_hops',
+    'websocket_compression',
     ...RETIRED_CONFIG_KEYS.daemon,
   ]);
+  if (
+    config.daemon?.websocket_compression !== undefined &&
+    typeof config.daemon.websocket_compression !== 'boolean'
+  ) {
+    throw new Error('Config error: daemon.websocket_compression must be a boolean');
+  }
   only(config.ui, 'ui', ['base_url', 'port', 'host']);
   only(config.uploads, 'uploads', ['location', 'max_age_days', 'max_file_size_mb']);
   only(config.external_launch, 'external_launch', [
@@ -739,6 +768,7 @@ function validateConfig(config: AgorConfig): void {
     'return_host_param',
   ]);
   assertValidRawExternalLaunchConfig(config.external_launch);
+  only(config.mcp_oauth_relay, 'mcp_oauth_relay', ['callback_origin']);
   only(config.identity, 'identity', [
     'user_lifecycle',
     'role_authority',
@@ -849,6 +879,8 @@ function validateConfig(config: AgorConfig): void {
     'daemon_writes_user_message',
     'permission_timeout_ms',
     'executor_command_template',
+    'executor_cleanup_command_template',
+    'executor_cleanup_timeout_ms',
     'executor_storage',
     'delegated_branch_deletion',
     'executor_command_nonzero_may_have_dispatched',
@@ -1478,12 +1510,12 @@ export function getDefaultConfig(): AgorConfig {
     },
     multi_tenancy: {
       filesystem_isolation_enabled: false,
-      tenants_base_folder: '~/.agor/tenants',
+      tenants_base_folder: agorHomePath('tenants'),
       mode: 'static',
       static_tenant_id: 'default',
     },
     uploads: {
-      location: '~/.agor',
+      location: getAgorHome(),
       max_age_days: 30,
       max_file_size_mb: 50,
     },
@@ -1512,6 +1544,10 @@ export function resolveEffectiveConfig(
     'AGOR_STATSD_ENABLED'
   );
   const statsdPort = parseOptionalPortEnvironmentValue(env.AGOR_STATSD_PORT, 'AGOR_STATSD_PORT');
+  const websocketCompression = parseOptionalBooleanEnvironmentValue(
+    env.AGOR_WEBSOCKET_COMPRESSION,
+    'AGOR_WEBSOCKET_COMPRESSION'
+  );
   const apmTraceServices = parseOptionalApmTraceDepthEnvironmentValue(env.AGOR_APM_TRACE_SERVICES);
   const externalLaunch = resolveEffectiveExternalLaunchConfig(config.external_launch, env);
 
@@ -1590,6 +1626,11 @@ export function resolveEffectiveConfig(
       ...(env.AGOR_JWT_SECRET ? { jwtSecret: env.AGOR_JWT_SECRET } : {}),
       ...(env.AGOR_MASTER_SECRET ? { masterSecret: env.AGOR_MASTER_SECRET } : {}),
       ...(env.INSTANCE_LABEL ? { instanceLabel: env.INSTANCE_LABEL } : {}),
+      ...(env.EXTERNAL_APP_LINK ? { externalAppLink: env.EXTERNAL_APP_LINK } : {}),
+      ...(env.EXTERNAL_APP_LABEL ? { externalAppLabel: env.EXTERNAL_APP_LABEL } : {}),
+      ...(websocketCompression !== undefined
+        ? { websocket_compression: websocketCompression }
+        : {}),
     },
     ui: { ...defaults.ui, ...config.ui },
     deployment: {
@@ -1606,6 +1647,7 @@ export function resolveEffectiveConfig(
     },
     identity: { ...defaults.identity, ...config.identity },
     ...(externalLaunch ? { external_launch: externalLaunch } : {}),
+    ...(config.mcp_oauth_relay ? { mcp_oauth_relay: { ...config.mcp_oauth_relay } } : {}),
     execution: {
       ...defaults.execution,
       ...config.execution,
@@ -1677,6 +1719,24 @@ export function assertValidEffectiveExecutionConfig(config: AgorConfig): void {
 
   if (!execution) return;
 
+  if (
+    execution.executor_cleanup_command_template !== undefined &&
+    (typeof execution.executor_cleanup_command_template !== 'string' ||
+      !execution.executor_cleanup_command_template.trim() ||
+      !execution.executor_command_template)
+  ) {
+    throw new Error(
+      'execution.executor_cleanup_command_template requires a nonempty command and executor_command_template'
+    );
+  }
+  if (
+    execution.executor_cleanup_timeout_ms !== undefined &&
+    (!Number.isInteger(execution.executor_cleanup_timeout_ms) ||
+      execution.executor_cleanup_timeout_ms < 1000 ||
+      execution.executor_cleanup_timeout_ms > 120000)
+  ) {
+    throw new Error('execution.executor_cleanup_timeout_ms must be an integer from 1000 to 120000');
+  }
   const response = resolveExecutorResponseConfig(execution.executor_response);
 
   // Enforced here, NOT in the raw config.yaml parse: one shared config.yaml
@@ -2225,7 +2285,7 @@ export function ensureBranchCloneDepthAllowed(
 //
 // AGOR_HOME vs AGOR_DATA_HOME:
 //
-// AGOR_HOME (~/.agor by default):
+// AGOR_HOME (env var; ~/.agor by default, see getAgorHome()):
 //   - Daemon operating files: config.yaml, agor.db, logs/
 //   - Fast local storage (SSD)
 //
@@ -2238,7 +2298,6 @@ export function ensureBranchCloneDepthAllowed(
 //   2. paths.data_home in config.yaml
 //   3. AGOR_HOME (backward compatible default)
 //
-// @see context/explorations/executor-expansion.md
 // =============================================================================
 
 /**
@@ -2327,7 +2386,7 @@ export function resolveTenantsBaseFolderFromConfig(
   config: { readonly multi_tenancy?: { readonly tenants_base_folder?: string } },
   agorHome = getAgorHome()
 ): string {
-  const configuredBase = config.multi_tenancy?.tenants_base_folder || '~/.agor/tenants';
+  const configuredBase = config.multi_tenancy?.tenants_base_folder || agorHomePath('tenants');
   const expandedBase = expandHomePath(configuredBase);
   return path.isAbsolute(expandedBase) ? expandedBase : path.resolve(agorHome, expandedBase);
 }
