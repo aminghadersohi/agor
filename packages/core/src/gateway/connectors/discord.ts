@@ -33,6 +33,8 @@ import type {
 } from '../../types/gateway';
 import {
   discordOutboundChannelTarget,
+  discordResponseModeAdmits,
+  discordResponseModeMayAdmit,
   isDiscordDirectMessagesEnabled,
   isDiscordSnowflake,
   isDiscordThreadCoordinates,
@@ -47,6 +49,7 @@ import type {
   GatewaySendReceipt,
   InboundFile,
   InboundMessage,
+  InboundSkippedFile,
 } from '../connector';
 import type { DiscordDeliveryNonce } from '../discord-identifiers';
 import {
@@ -72,6 +75,9 @@ import {
 } from './discord-history';
 
 const DISCORD_MESSAGE_LIMIT = 2000;
+/** Prompt text for a message that carries attachments but no words. */
+const DISCORD_ATTACHMENT_ONLY_TEXT = '(attachments only, no text)';
+const DISCORD_CHANNEL_INFO_CACHE_LIMIT = 1_000;
 const DISCORD_TEXT_CHANNEL_TYPE = DiscordChannelType.GuildText;
 const DISCORD_FORUM_CHANNEL_TYPE = DiscordChannelType.GuildForum;
 const DISCORD_PUBLIC_THREAD_TYPES = new Set<number>([
@@ -141,6 +147,15 @@ export function createDiscordRest(token: string, makeRequest?: RESTOptions['make
     rejectOnRateLimit: (data) => /^\/guilds\/[^/]+\/members\/[^/]+$/.test(data.route),
     ...(makeRequest ? { makeRequest } : {}),
   }).setToken(token);
+}
+
+/**
+ * A summon's thread or starter message definitively cannot be verified (gone,
+ * moved, or not a public child of the configured parent). Provider outages
+ * and rate limits surface as their own errors instead, so callers can retry those.
+ */
+export class DiscordThreadUnavailableError extends Error {
+  readonly name = 'DiscordThreadUnavailableError';
 }
 
 export class DiscordDirectMessageError extends Error {
@@ -245,7 +260,30 @@ function snowflake(value: unknown): string | undefined {
 const DISCORD_ATTACHMENT_CDN_HOST = 'cdn.discordapp.com';
 const DISCORD_ATTACHMENT_PATH = /^\/attachments\/\d{17,20}\/\d{17,20}\/.+$/;
 const DISCORD_SIGNED_ATTACHMENT_QUERY = new Set(['ex', 'is', 'hm']);
-const DISCORD_IMAGE_MIMES = new Set(['image/png', 'image/jpeg']);
+/**
+ * Attachment types handed to the agent: images and text-like files. Mirrors
+ * the daemon's gateway ingestion allowlist, which re-checks each download.
+ */
+const DISCORD_READABLE_MIMES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'text/plain',
+  'text/markdown',
+  'text/csv',
+  'application/json',
+]);
+const DISCORD_READABLE_EXTENSIONS: ReadonlyArray<[RegExp, string]> = [
+  [/\.png$/, 'image/png'],
+  [/\.jpe?g$/, 'image/jpeg'],
+  [/\.gif$/, 'image/gif'],
+  [/\.webp$/, 'image/webp'],
+  [/\.(txt|log)$/, 'text/plain'],
+  [/\.(md|markdown)$/, 'text/markdown'],
+  [/\.csv$/, 'text/csv'],
+  [/\.json$/, 'application/json'],
+];
 
 /**
  * Discord attachment URLs are signed CDN URLs, not arbitrary user-provided
@@ -287,40 +325,57 @@ function discordAttachmentMime(contentType: unknown, filename: string): string |
   }
   const normalized =
     typeof contentType === 'string' ? contentType.split(';')[0].trim().toLowerCase() : '';
-  if (normalized) return DISCORD_IMAGE_MIMES.has(normalized) ? normalized : undefined;
+  if (normalized) return DISCORD_READABLE_MIMES.has(normalized) ? normalized : undefined;
   const lowerName = filename.toLowerCase();
-  if (lowerName.endsWith('.png')) return 'image/png';
-  if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) return 'image/jpeg';
-  return undefined;
+  return DISCORD_READABLE_EXTENSIONS.find(([pattern]) => pattern.test(lowerName))?.[1];
 }
 
-/** Normalize the strictly supported live Discord attachment subset. */
-export function extractDiscordInboundFiles(rawAttachments: unknown): InboundFile[] | undefined {
+/**
+ * Split a live message's attachments into files the agent can read and files
+ * that are skipped (with a reason), so a message is never dropped because of
+ * an attachment and the user can be told what was not read. Returns
+ * undefined only when the attachment list itself is malformed.
+ */
+export function partitionDiscordInboundFiles(
+  rawAttachments: unknown,
+  filesEnabled: boolean
+): { files: InboundFile[]; skipped: InboundSkippedFile[] } | undefined {
   if (!Array.isArray(rawAttachments)) return undefined;
   const files: InboundFile[] = [];
+  const skipped: InboundSkippedFile[] = [];
   for (const rawAttachment of rawAttachments) {
     const attachment = asRecord(rawAttachment);
     const id = snowflake(attachment?.id);
     const filename = attachment?.filename;
     const size = attachment?.size;
     const url = attachment?.url;
+    const name =
+      typeof filename === 'string' && filename.length > 0 && filename.length <= 255
+        ? filename
+        : 'attachment';
     if (
       !id ||
-      typeof filename !== 'string' ||
-      filename.length === 0 ||
-      filename.length > 255 ||
+      name !== filename ||
       !Number.isSafeInteger(size) ||
       (size as number) < 0 ||
       typeof url !== 'string' ||
       !isAllowedDiscordAttachmentUrl(url)
     ) {
-      return undefined;
+      skipped.push({ name, reason: 'invalid' });
+      continue;
     }
-    const mimetype = discordAttachmentMime(attachment?.content_type, filename);
-    if (!mimetype) return undefined;
-    files.push({ id, name: filename, mimetype, size: size as number, url_private_download: url });
+    if (!filesEnabled) {
+      skipped.push({ name, reason: 'files_disabled' });
+      continue;
+    }
+    const mimetype = discordAttachmentMime(attachment?.content_type, name);
+    if (!mimetype) {
+      skipped.push({ name, reason: 'unsupported_type' });
+      continue;
+    }
+    files.push({ id, name, mimetype, size: size as number, url_private_download: url });
   }
-  return files;
+  return { files, skipped };
 }
 
 function hasUnsupportedDiscordRichPayload(message: Record<string, unknown>): boolean {
@@ -625,6 +680,19 @@ function channelKind(
   return undefined;
 }
 
+/** Allowed channels given a `starters`/`all` response mode that are not forums. */
+function nonForumResponseModeChannels(
+  config: DiscordGatewayConfig,
+  channels: Array<{ channelId: string; channel: Record<string, unknown> | null }>
+): string[] {
+  return channels
+    .filter(({ channelId, channel }) => {
+      const mode = config.response_modes?.[channelId];
+      return (mode === 'starters' || mode === 'all') && !isForumChannel(channel);
+    })
+    .map(({ channelId }) => channelId);
+}
+
 /** True when outbound is on and its default target is one of these allowed forum channels. */
 function isForumDefaultOutboundTarget(
   config: DiscordGatewayConfig,
@@ -860,7 +928,7 @@ export class DiscordConnector implements GatewayConnector {
       coordinates.parent_channel_id !== parentChannelId ||
       !DISCORD_PUBLIC_THREAD_TYPES.has(thread?.type as number)
     ) {
-      throw new Error(
+      throw new DiscordThreadUnavailableError(
         'Discord provider thread is not a verified public child of the configured parent'
       );
     }
@@ -938,16 +1006,38 @@ export class DiscordConnector implements GatewayConnector {
     }
   }
 
+  /**
+   * Remember a looked-up channel. Response modes can look up many unrelated
+   * channels and threads, so the oldest lookups are evicted past a bound;
+   * allowlisted parents are re-read on demand.
+   */
+  private cacheChannelInfo(channelId: string, channel: Record<string, unknown>): void {
+    this.channelInfoCache.delete(channelId);
+    this.channelInfoCache.set(channelId, channel);
+    while (this.channelInfoCache.size > DISCORD_CHANNEL_INFO_CACHE_LIMIT) {
+      const oldest = this.channelInfoCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.channelInfoCache.delete(oldest);
+    }
+  }
+
+  /** A cached channel lookup, refreshed as most recently used. */
+  private cachedChannelInfo(channelId: string): Record<string, unknown> | undefined {
+    const channel = this.channelInfoCache.get(channelId);
+    if (channel) this.cacheChannelInfo(channelId, channel);
+    return channel;
+  }
+
   /** An allowlisted parent channel record, from the listener's cache when present. */
   private async getAllowedParentChannel(
     parentChannelId: string
   ): Promise<Record<string, unknown> | null> {
     if (!configuredChannelIds(this.config).includes(parentChannelId)) return null;
-    const cached = this.channelInfoCache.get(parentChannelId);
+    const cached = this.cachedChannelInfo(parentChannelId);
     if (cached) return cached;
     const parent = await this.getProviderRecord(Routes.channel(parentChannelId));
     if (parent?.id !== parentChannelId) return null;
-    this.channelInfoCache.set(parentChannelId, parent);
+    this.cacheChannelInfo(parentChannelId, parent);
     return parent;
   }
 
@@ -957,16 +1047,20 @@ export class DiscordConnector implements GatewayConnector {
     starterMessageId: string
   ): Promise<VerifiedDiscordThread> {
     const thread = await this.getProviderRecord(Routes.channel(threadChannelId));
-    if (!thread) throw new Error('Discord public thread is inaccessible');
+    if (!thread) throw new DiscordThreadUnavailableError('Discord public thread is inaccessible');
     const verified = await this.verifyPublicThread(thread, parentChannelId, starterMessageId);
     const parent = await this.getAllowedParentChannel(parentChannelId);
-    if (!parent) throw new Error('Discord public thread parent is inaccessible');
+    if (!parent) {
+      throw new DiscordThreadUnavailableError('Discord public thread parent is inaccessible');
+    }
     const starterChannelId = isForumChannel(parent) ? threadChannelId : parentChannelId;
     const starter = await this.getProviderRecord(
       Routes.channelMessage(starterChannelId, starterMessageId)
     );
     if (!starter || starter.id !== starterMessageId || starter.channel_id !== starterChannelId) {
-      throw new Error('Discord public thread starter message is inaccessible or malformed');
+      throw new DiscordThreadUnavailableError(
+        'Discord public thread starter message is inaccessible or malformed'
+      );
     }
     return verified;
   }
@@ -1406,6 +1500,7 @@ export class DiscordConnector implements GatewayConnector {
     metadata?: Record<string, unknown>;
     text?: string;
     files?: InboundFile[];
+    skippedFiles?: InboundSkippedFile[];
     prepareDelivery?: InboundMessage['prepareDelivery'];
   }> {
     const author = asRecord(message.author);
@@ -1437,20 +1532,33 @@ export class DiscordConnector implements GatewayConnector {
 
     const rawContent = typeof message.content === 'string' ? message.content : '';
     const mentioned = hasStructuredDiscordBotMention(message, botUserId);
-    if (!directMessage && !mentioned) return { accepted: false };
+    // Drop unmentioned chatter before any further check or channel lookup
+    // unless a forum response mode could admit it.
+    if (
+      !directMessage &&
+      !mentioned &&
+      !discordResponseModeMayAdmit(this.config, { channelId, messageId })
+    ) {
+      return { accepted: false };
+    }
     const rawAttachments = message.attachments;
     if (rawAttachments !== undefined && !Array.isArray(rawAttachments)) {
       return { accepted: false };
     }
     if (hasUnsupportedDiscordRichPayload(message)) return { accepted: false };
+    // Attachments never drop a message: readable files go to the agent and
+    // the rest are reported as skipped so the user can be told.
     let files: InboundFile[] | undefined;
+    let skippedFiles: InboundSkippedFile[] | undefined;
     if (Array.isArray(rawAttachments) && rawAttachments.length > 0) {
-      if (this.config.files !== true) return { accepted: false };
-      files = extractDiscordInboundFiles(rawAttachments);
-      if (!files) return { accepted: false };
+      const partitioned = partitionDiscordInboundFiles(rawAttachments, this.config.files === true);
+      if (!partitioned) return { accepted: false };
+      if (partitioned.files.length > 0) files = partitioned.files;
+      if (partitioned.skipped.length > 0) skippedFiles = partitioned.skipped;
     }
-    const text = stripStructuredDiscordBotMention(rawContent, botUserId);
-    if (!text) return { accepted: false };
+    const strippedText = stripStructuredDiscordBotMention(rawContent, botUserId);
+    if (!strippedText && !files && !skippedFiles) return { accepted: false };
+    const text = strippedText || DISCORD_ATTACHMENT_ONLY_TEXT;
 
     const allowedUsers = Array.isArray(this.config.allowed_user_ids)
       ? this.config.allowed_user_ids.filter((id): id is string => typeof id === 'string')
@@ -1493,6 +1601,7 @@ export class DiscordConnector implements GatewayConnector {
         threadId: buildDiscordDirectMessageThreadKey(channelId, authorId),
         text,
         ...(files ? { files } : {}),
+        ...(skippedFiles ? { skippedFiles } : {}),
         metadata: buildDiscordDirectMessageMetadata({
           channelId,
           messageId,
@@ -1507,11 +1616,11 @@ export class DiscordConnector implements GatewayConnector {
     let isThread = false;
     let parentId: string | undefined;
     if (!configuredChannelIdsList.includes(channelId)) {
-      let channel = this.channelInfoCache.get(channelId);
+      let channel = this.cachedChannelInfo(channelId);
       if (!channel) {
         try {
           channel = asRecord(await this.transport.rest.get(Routes.channel(channelId))) ?? undefined;
-          if (channel) this.channelInfoCache.set(channelId, channel);
+          if (channel) this.cacheChannelInfo(channelId, channel);
         } catch {
           return { accepted: false };
         }
@@ -1523,9 +1632,21 @@ export class DiscordConnector implements GatewayConnector {
         configuredChannelIdsList.includes(parentId ?? '');
     }
     if (!configuredChannelIdsList.includes(channelId) && !isThread) return { accepted: false };
+    if (
+      !mentioned &&
+      !discordResponseModeAdmits(this.config, {
+        channelId,
+        ...(parentId ? { parentChannelId: parentId } : {}),
+        messageId,
+        isThread,
+      })
+    ) {
+      return { accepted: false };
+    }
 
     const reference = asRecord(message.message_reference);
     const referencedMessageId = snowflake(reference?.message_id);
+
     const threadId = isThread
       ? existingThreadId(parentId!, channelId)
       : messageThreadId(channelId, referencedMessageId ?? messageId);
@@ -1534,6 +1655,7 @@ export class DiscordConnector implements GatewayConnector {
       threadId,
       text,
       ...(files ? { files } : {}),
+      ...(skippedFiles ? { skippedFiles } : {}),
       metadata: buildDiscordInboundMetadata({
         guildId: guildId!,
         channelId,
@@ -1544,6 +1666,7 @@ export class DiscordConnector implements GatewayConnector {
         isThread,
         ...(isThread && parentId ? { parentChannelId: parentId } : {}),
         ...(referencedMessageId ? { replyToMessageId: referencedMessageId } : {}),
+        hasMention: mentioned,
       }),
       prepareDelivery: async (context) =>
         this.prepareInboundDelivery(
@@ -1575,6 +1698,9 @@ export class DiscordConnector implements GatewayConnector {
       userId: String(asRecord(message.author)?.id ?? ''),
       timestamp: toIsoTimestamp(message.timestamp),
       ...(result.files && result.files.length > 0 ? { files: result.files } : {}),
+      ...(result.skippedFiles && result.skippedFiles.length > 0
+        ? { skippedFiles: result.skippedFiles }
+        : {}),
       metadata: result.metadata,
       prepareDelivery: result.prepareDelivery,
     };
@@ -1654,8 +1780,23 @@ export class DiscordConnector implements GatewayConnector {
         'The default proactive target must be a text channel; forum channels cannot receive proactive messages.'
       );
     }
+    if (
+      nonForumResponseModeChannels(
+        this.config,
+        configuredChannels.map((channel, index) => ({
+          channelId: allowedChannelIds[index]!,
+          channel,
+        }))
+      ).length > 0
+    ) {
+      throw new GatewayListenerError(
+        'discord_response_mode_invalid',
+        'permanent',
+        'Response modes (starters or all) apply to forum channels only; set text channels back to mention.'
+      );
+    }
     configuredChannels.forEach((channel, index) => {
-      if (channel) this.channelInfoCache.set(allowedChannelIds[index], channel);
+      if (channel) this.cacheChannelInfo(allowedChannelIds[index], channel);
     });
     // Discord transport resume is deliberately process-local. Listener
     // ownership and event idempotency remain durable, but transport session
@@ -1846,6 +1987,15 @@ export class DiscordConnector implements GatewayConnector {
                   'One or more allowed channels is not a public text or forum channel, or lacks a required permission: view, history, and thread replies everywhere; send and public-thread creation in text channels.',
               },
             ]),
+        ...(nonForumResponseModeChannels(this.config, channels).length > 0
+          ? [
+              {
+                capability: 'response_modes',
+                reason:
+                  'Response modes (starters or all) apply to forum channels only; set text channels back to mention.',
+              },
+            ]
+          : []),
         ...(forumOutboundTarget
           ? [
               {

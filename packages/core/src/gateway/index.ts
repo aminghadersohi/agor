@@ -15,6 +15,7 @@ export type {
   InboundFile,
   InboundMessage,
   InboundPreparationContext,
+  InboundSkippedFile,
   OutboundPayload,
 } from './connector';
 export { normalizeOutbound, normalizeSendReceipt } from './connector';
@@ -23,8 +24,9 @@ export {
   chunkDiscordMessage,
   DiscordConnector,
   DiscordDirectMessageError,
-  extractDiscordInboundFiles,
+  DiscordThreadUnavailableError,
   isAllowedDiscordAttachmentUrl,
+  partitionDiscordInboundFiles,
   stripDiscordBotMention,
 } from './connectors/discord';
 export type {
@@ -130,7 +132,11 @@ export {
   type GatewayListenerFailureKind,
   gatewayListenerFailure,
 } from './listener-error';
-export { gatewayFailureCode, sanitizeGatewayProviderError } from './provider-error';
+export {
+  gatewayFailureCode,
+  isPermanentProviderRefusal,
+  sanitizeGatewayProviderError,
+} from './provider-error';
 export { redactGatewayChannelSecrets } from './redaction';
 export {
   formatGatewayFollowUpRoutingMessage,

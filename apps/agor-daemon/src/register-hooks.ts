@@ -560,6 +560,8 @@ export const TENANT_OWNED_SERVICE_PATHS = [
   'kb/indexing/status',
   'kb/indexing/reindex',
   'leaderboard',
+  'branch-counts',
+  'session-counts',
 ];
 
 // These endpoints perform network/process work after their tenant DB reads,
@@ -3566,6 +3568,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       reorderQueued: manageTaskQueueGuards,
       connectExecutor: [requireTaskScopedExecutorRuntimeToken()],
       reportTerminationComplete: [requireTaskScopedExecutorRuntimeToken()],
+      reportExecutorInterruption: [requireTaskScopedExecutorRuntimeToken()],
       reportRuntimeTelemetry: [requireTaskScopedExecutorRuntimeToken()],
       reportSdkHealthFailure: [requireTaskScopedExecutorRuntimeToken()],
       beginOpenCodeCheckpoint: [requireTaskScopedExecutorRuntimeToken()],

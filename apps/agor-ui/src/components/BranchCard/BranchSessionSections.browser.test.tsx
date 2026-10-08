@@ -12,11 +12,13 @@ import { BranchSessionSections } from './BranchSessionSections';
 const branch = {
   branch_id: 'fictional-branch',
   name: 'fictional/long-running-qa',
+  created_by: 'fictional-user',
   filesystem_status: 'ready',
 } as Branch;
 
 const runningSession = {
   session_id: 'fictional-session',
+  created_by: 'fictional-user',
   branch_id: branch.branch_id,
   title: 'Fictional long-running browser QA',
   agentic_tool: 'codex',
@@ -212,7 +214,13 @@ it.each(['dirty', 'failure'])(
       },
       io: { on: () => {}, off: () => {} },
     } as unknown as AgorClient;
-    const { result } = renderHook(() => useAgorData(client));
+    const { result } = renderHook(() =>
+      useAgorData(client, {
+        authenticatedUserId: 'fictional-user',
+        authenticatedUserRole: 'member',
+        authGeneration: 1,
+      })
+    );
     await waitFor(() => expect(result.current.initialLoadComplete).toBe(true));
     // Let the initial background hydration finish before injecting the race.
     await act(async () => new Promise<void>((resolve) => setTimeout(resolve, 0)));
@@ -267,7 +275,7 @@ it.each(['dirty', 'failure'])(
     // on the runner completing an assertion before the retry delay elapses.
     expect(rowSpinner()).toBe(spinner);
     await act(async () => confirm());
-    act(() => flushRealtimeNow());
+    act(() => flushRealtimeNow('fictional-user:member:1'));
     await waitFor(() => expect(rowSpinner()).toBeNull());
     expect(spinner!.isConnected).toBe(false);
     expect(agorStore.getState().sessionById.get(runningSession.session_id)?.status).toBe('idle');
