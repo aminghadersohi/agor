@@ -13,6 +13,7 @@ import { userEvent } from 'vitest/browser';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { __setAuthConfigForTests } from '../../hooks/useAuthConfig';
 import { agorStore } from '../../store/agorStore';
+import { markBoardLoaded } from '../../test/userScopeCoverage';
 import SessionCanvas from './SessionCanvas';
 
 afterEach(cleanup);
@@ -26,6 +27,8 @@ const CURRENT_USER = {
 beforeEach(() => {
   __setAuthConfigForTests({ requireAuth: false }, { branchRbac: false });
   agorStore.setState({ userById: new Map([[CURRENT_USER.user_id, CURRENT_USER]]) });
+  // Structural canvas edits wait for the board partition to load.
+  markBoardLoaded('fictional-browser-board');
 });
 
 describe('SessionCanvas selected-zone drag (real browser)', () => {
