@@ -16,6 +16,7 @@ import type {
   AgenticToolPreset,
   Artifact,
   Board,
+  BoardBranchCount,
   BoardCapabilityPolicies,
   BoardComment,
   BoardCommentCreate,
@@ -39,6 +40,7 @@ import type {
   Group,
   GroupMembership,
   KnowledgeDocument,
+  KnowledgeDocumentArchivePatch,
   KnowledgeDocumentVersion,
   KnowledgeEmbeddingStatus,
   KnowledgeIndexingStatus,
@@ -80,6 +82,7 @@ import type {
   SchedulePatchData,
   SdkHealthFailureInput,
   Session,
+  SessionCount,
   SessionID,
   SessionUpdate,
   Task,
@@ -273,6 +276,16 @@ export interface BranchPermissionsService {
   ): Promise<BranchCapabilityPolicy>;
 }
 
+/** Per-board active branch counts (find only; RBAC-scoped, never published). */
+export interface BranchCountsService {
+  find(params?: Params): Promise<BoardBranchCount[]>;
+}
+
+/** Active session counts per branch or board (find only; RBAC-scoped, never published). */
+export interface SessionCountsService {
+  find(params: { query: { group_by: 'branch_id' | 'board_id' } }): Promise<SessionCount[]>;
+}
+
 export interface WorkspacePreferencesService {
   find(params?: Params): Promise<CapabilityPolicyWorkspacePreferences>;
   patch(
@@ -294,6 +307,8 @@ export interface ServiceTypes {
   'repos/clone': Repo;
   'repos/local': Repo;
   branches: Branch;
+  'branch-counts': BoardBranchCount;
+  'session-counts': SessionCount;
   schedules: Schedule;
   'gateway-channels': GatewayChannel;
   users: User;
@@ -547,6 +562,11 @@ export interface SessionsService
 export interface TasksService extends AgorService<Task> {
   /** Claim a daemon-dispatched task after executor authentication. */
   connectExecutor(data: { task_id: string }, params?: Params): Promise<Task>;
+  /** Request fenced containment after an unexpected executor signal. */
+  reportExecutorInterruption(
+    data: import('../types/task').ExecutorInterruptionInput,
+    params?: Params
+  ): Promise<Task>;
   /** Report that a requested cooperative stop has fully quiesced SDK work. */
   reportTerminationComplete(
     data: import('../types/task').ExecutorTerminationCompleteInput,
@@ -631,8 +651,7 @@ export interface ReposService extends AgorService<Repo> {
       zoneId?: string;
       environment_variant?: string;
       /**
-       * Branch storage model — see
-       * context/explorations/clone-redesign.md.
+       * Branch storage model.
        * 'worktree' (default) = native `git worktree add`.
        * 'clone' = self-standing `git clone` with its own `.git/`.
        */
@@ -869,6 +888,8 @@ export interface AgorClient
   service(path: 'repos/clone'): ReposCloneService;
   service(path: 'repos/local'): ReposLocalService;
   service(path: 'branches'): BranchesService;
+  service(path: 'branch-counts'): BranchCountsService;
+  service(path: 'session-counts'): SessionCountsService;
   service(path: 'boards'): BoardsService;
   service(path: 'boards/:id/ownership' | 'branches/:id/ownership'): OwnershipTransferService;
   service(path: 'boards/:id/permissions'): BoardPermissionsService;
@@ -876,6 +897,15 @@ export interface AgorClient
   service(path: 'workspace-preferences'): WorkspacePreferencesService;
   service(path: 'schedules'): SchedulesService;
   service(path: 'gateway-channels'): GatewayChannelsService;
+  service(
+    path: 'kb/documents'
+  ): AgorService<
+    KnowledgeDocument,
+    CreatePayload<Omit<KnowledgeDocument, 'archived' | 'archived_at'>>,
+    UpdatePayload<Omit<KnowledgeDocument, 'archived' | 'archived_at'>>,
+    | PatchPayload<Omit<KnowledgeDocument, 'archived' | 'archived_at'>>
+    | KnowledgeDocumentArchivePatch
+  >;
   service(path: 'kb/settings'): KnowledgeSettingsService;
   service(path: 'kb/indexing/status'): KnowledgeIndexingStatusService;
   service(path: 'kb/indexing/reindex'): KnowledgeReindexService;
@@ -1391,6 +1421,7 @@ function extendTasksService(client: AgorClient): void {
     tasksService.methods(
       'connectExecutor',
       'reportTerminationComplete',
+      'reportExecutorInterruption',
       'reportRuntimeTelemetry',
       'reportSdkHealthFailure',
       'beginOpenCodeCheckpoint',

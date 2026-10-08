@@ -46,6 +46,7 @@ import {
   NotFound,
   Unavailable,
 } from '@agor/core/feathers';
+import { assertSearchTerms, idFilterValues } from '@agor/core/lib/feathers-validation';
 import { isMCPServerNotUsableError } from '@agor/core/mcp';
 import {
   formatModelToolMismatchWarning,
@@ -86,10 +87,10 @@ import { DrizzleService, type Query } from '../adapters/drizzle';
 import {
   branchSdkHomeUnsupportedReason,
   hasSecureLocalCredentialOverlay,
+  isHostedOpenCode,
   resolveBranchSdkHomeIncompatibility,
   resolveNewSessionSdkHomeScope,
   resolveSdkHomeConfig,
-  usesExecutionHomeOnly,
 } from '../branch-sdk-home.js';
 import { requireActiveAgenticTool } from '../utils/agentic-tool-runtime.js';
 import {
@@ -127,6 +128,7 @@ function sessionConfigurationSource(
       codexSandboxMode: data.permission_config?.codex?.sandboxMode,
       codexApprovalPolicy: data.permission_config?.codex?.approvalPolicy,
       codexNetworkAccess: data.permission_config?.codex?.networkAccess,
+      codexIncludePlugins: data.permission_config?.codex?.includePlugins,
     },
   };
 }
@@ -170,6 +172,26 @@ function assertSessionReadShapeNotWritten(data: object): void {
   }
 }
 
+/**
+ * `tasks` is the Session's dispatch log: the Task repository appends each Task
+ * in the transaction that claims its dispatch, and nothing else writes it.
+ * Clients (the lean transcript) place history by its positions, so no caller
+ * may replace it, whatever its permission or provider.
+ */
+const SESSION_TASKS_SERVER_MANAGED = 'tasks is server-managed: only dispatch appends to it';
+
+function assertSessionTasksNotWritten(data: object): void {
+  if (Object.hasOwn(data, 'tasks')) throw new BadRequest(SESSION_TASKS_SERVER_MANAGED);
+}
+
+/** A new Session starts with no dispatched Tasks; an empty list is accepted for compatibility. */
+function withoutCreateTasks<T extends object>(data: T): T {
+  if (!Object.hasOwn(data, 'tasks')) return data;
+  const { tasks, ...rest } = data as T & { tasks?: unknown };
+  if (!Array.isArray(tasks) || tasks.length > 0) throw new BadRequest(SESSION_TASKS_SERVER_MANAGED);
+  return rest as T;
+}
+
 function normalizeCreateMcpServerIds(value: unknown): MCPServerID[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
@@ -198,6 +220,7 @@ export type SessionParams = QueryParams<{
   agentic_tool?: Session['agentic_tool'];
   board_id?: string;
   include_usage?: boolean | 'true' | 'false';
+  include_tasks_complete?: boolean | 'true' | 'false';
   /** List-only projection; see `LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS`. */
   lean?: boolean;
   include_last_message?: boolean | 'true' | 'false'; // Opt-in last message enrichment
@@ -230,7 +253,7 @@ export type SessionParams = QueryParams<{
  * (SQL board filter + recency sort + limit/offset) rather than the generic
  * in-memory path. We only divert the loader's bounded list queries — those that
  * sort by `updated_at` and/or scope to a `board_id`/`branch_id` — and only when the rest of
- * the query is a shape findPage fully models (archived/status + pagination). Anything
+ * the query is a shape findPage fully models (archived/status/created_by + pagination). Anything
  * with extra filters, operators, or `$select` falls through to the existing path
  * so we never silently drop semantics findPage doesn't implement.
  */
@@ -242,13 +265,27 @@ function shouldSqlPageSessionQuery(query?: Record<string, unknown>, forcePage = 
   const wantsCreatedAt = !!sort && sort.created_at !== undefined;
   const wantsBoard = query.board_id !== undefined;
   const wantsBranch = query.branch_id !== undefined;
-  if (!wantsRecency && !wantsCreatedAt && !wantsBoard && !wantsBranch && !forcePage) return false;
+  const wantsSessions = query.session_id !== undefined;
+  const wantsSearch = query.search !== undefined;
+  if (
+    !wantsRecency &&
+    !wantsCreatedAt &&
+    !wantsBoard &&
+    !wantsBranch &&
+    !wantsSessions &&
+    !wantsSearch &&
+    !forcePage
+  )
+    return false;
 
   const allowedKeys = new Set([
     'archived',
     'status',
     'board_id',
     'branch_id',
+    'session_id',
+    'created_by',
+    'search',
     '$sort',
     '$limit',
     '$count',
@@ -264,16 +301,10 @@ function shouldSqlPageSessionQuery(query?: Record<string, unknown>, forcePage = 
   )
     return false;
   if (wantsBoard && typeof query.board_id !== 'string') return false;
-  if (wantsBranch) {
-    const branchFilter = query.branch_id;
-    const validExact = typeof branchFilter === 'string';
-    const validSet =
-      branchFilter !== null &&
-      typeof branchFilter === 'object' &&
-      Array.isArray((branchFilter as { $in?: unknown }).$in) &&
-      (branchFilter as { $in: unknown[] }).$in.every((id) => typeof id === 'string');
-    if (!validExact && !validSet) return false;
-  }
+  if (query.created_by !== undefined && typeof query.created_by !== 'string') return false;
+  if (wantsSearch && typeof query.search !== 'string') return false;
+  if (wantsSessions && idFilterValues(query.session_id) === undefined) return false;
+  if (wantsBranch && idFilterValues(query.branch_id) === undefined) return false;
   if (sort) {
     const sortKeys = Object.keys(sort);
     if (sortKeys.length !== 1 || !['updated_at', 'created_at'].includes(sortKeys[0])) return false;
@@ -459,7 +490,11 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     // the mutation boundary rather than waiting for a confusing launch-time
     // refusal.
     if (existing.sdk_home_scope === 'branch') {
-      const unsupportedReason = branchSdkHomeUnsupportedReason(nextTool);
+      const config =
+        typeof (this.app as { get?: unknown }).get === 'function'
+          ? this.app.get('config')
+          : ({} as import('@agor/core/config').AgorConfig);
+      const unsupportedReason = branchSdkHomeUnsupportedReason(nextTool, isHostedOpenCode(config));
       if (unsupportedReason) {
         throw new BadRequest(
           `${nextTool} cannot use this session's branch SDK home because ${unsupportedReason}.`
@@ -497,6 +532,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (Object.hasOwn(data, 'sdk_home_scope')) {
       throw new BadRequest('sdk_home_scope is server-managed and cannot be set by clients');
     }
+    data = withoutCreateTasks(data);
     assertSessionReadShapeNotWritten(data);
     const explicitMcpServerIds = normalizeCreateMcpServerIds(
       (data as { mcpServerIds?: unknown }).mcpServerIds
@@ -609,7 +645,6 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         branchSdkHomeIntent: branch.sdk_home ?? null,
         enabledForNewSessions: sdkHomeConfig.enabledForNewSessions,
         inheritedScope: params?._sdkHomeScope,
-        executionHomeOnly: usesExecutionHomeOnly(agenticTool, config),
       });
       if (admission.scope === 'branch') {
         // Admission must reject credential/state combinations before it
@@ -622,6 +657,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         const unsupportedReason = await resolveBranchSdkHomeIncompatibility({
           tool: agenticTool,
           delegated,
+          hostedOpenCode: isHostedOpenCode(config),
           secureLocalCredentialOverlay: hasSecureLocalCredentialOverlay(config),
           userId: createData.created_by as UserID | undefined,
           db: scoped,
@@ -1110,7 +1146,6 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         contextFiles: [...(parent.contextFiles || [])],
         permission_config: inherited.permission_config,
         model_config: inherited.model_config,
-        tasks: [],
         // Don't copy sdk_session_id - fork will get its own via forkSession:true
       },
       { ...params, _agenticConfigResolved: true, _sdkHomeScope: parent.sdk_home_scope }
@@ -1128,7 +1163,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
 
     // Copy parent's env var *names* to forked session.
     // Names resolve at execution time against the child session's owner's
-    // env vars (see env-var-access.md), so when a cross-user fork happens
+    // env vars, so when a cross-user fork happens
     // these names are looked up under the caller's namespace, not the parent
     // owner's — no leakage of parent credentials into a fork the caller owns.
     const parentEnvSelections = await this.sessionEnvSelectionRepo.listNames(
@@ -1174,7 +1209,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       data.modelConfig !== undefined ||
       data.codexSandboxMode !== undefined ||
       data.codexApprovalPolicy !== undefined ||
-      data.codexNetworkAccess !== undefined;
+      data.codexNetworkAccess !== undefined ||
+      data.codexIncludePlugins !== undefined;
     const inheritedPresetId =
       // Explicit inline selection detaches from the parent's preset. The
       // materializer still enforces the workspace's inline-configuration policy.
@@ -1223,6 +1259,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
                   codexSandboxMode: data.codexSandboxMode,
                   codexApprovalPolicy: data.codexApprovalPolicy,
                   codexNetworkAccess: data.codexNetworkAccess,
+                  codexIncludePlugins: data.codexIncludePlugins,
                 },
               }
             : { reference: USER_DEFAULT_AGENTIC_CONFIGURATION },
@@ -1255,7 +1292,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     const callbackConfig = {
       ...(data.enableCallback !== undefined ? { enabled: data.enableCallback } : {}),
       ...(isCallbackEnabled
-        ? { callback_session_id: parent.session_id, callback_created_by: parent.created_by }
+        ? { callback_session_id: parent.session_id, callback_created_by: created_by }
         : {}),
       ...(data.includeLastMessage !== undefined
         ? { include_last_message: data.includeLastMessage }
@@ -1291,7 +1328,6 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
           children: [],
         },
         contextFiles: [...(parent.contextFiles || [])],
-        tasks: [],
         permission_config: permissionConfig,
         model_config: modelConfig,
         callback_config: callbackConfig,
@@ -1826,6 +1862,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (Object.hasOwn(data, 'sdk_home_scope')) {
       throw new BadRequest('sdk_home_scope is immutable and server-managed');
     }
+    assertSessionTasksNotWritten(data);
     assertSessionReadShapeNotWritten(data);
     let replaceAgenticConfig = false;
     if (
@@ -1969,6 +2006,13 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         session.session_id
       );
     }
+    const includeTasksComplete = params?.query?.include_tasks_complete;
+    if (includeTasksComplete === true || includeTasksComplete === 'true') {
+      sessionWithRelationships.tasks_complete = await this.taskRepo.isSessionTaskListComplete(
+        session.session_id,
+        session.tasks
+      );
+    }
 
     // Only enrich with last message if explicitly requested
     if (includeLastMessage === true || includeLastMessage === 'true') {
@@ -2033,6 +2077,10 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (query?.$count !== undefined && !sqlPage) {
       throw new BadRequest('$count is supported only for SQL-paginated session queries');
     }
+    if (query?.search !== undefined && !sqlPage) {
+      throw new BadRequest('search is supported only for SQL-paginated session queries');
+    }
+    assertSearchTerms(query?.search);
     if (sqlPage) {
       if (
         query?.$count === false &&
@@ -2047,11 +2095,9 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       const sortSpec = query?.$sort as { updated_at?: 1 | -1; created_at?: 1 | -1 } | undefined;
       const branchFilter = query?.branch_id;
       const branchIds =
-        branchFilter &&
-        typeof branchFilter === 'object' &&
-        Array.isArray((branchFilter as { $in?: unknown }).$in)
-          ? ((branchFilter as { $in: BranchID[] }).$in ?? [])
-          : undefined;
+        typeof branchFilter === 'string'
+          ? undefined
+          : (idFilterValues(branchFilter) as BranchID[] | undefined);
       const { limit, skip } = this.pageWindow(query ?? {});
       const { data, total } = await this.sessionRepo.findPage({
         includeTotal: query?.$count !== false,
@@ -2059,6 +2105,12 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         boardId: query?.board_id as string | undefined,
         branchId: typeof branchFilter === 'string' ? (branchFilter as BranchID) : undefined,
         branchIds,
+        sessionIds:
+          query?.session_id !== undefined
+            ? (idFilterValues(query.session_id) as SessionID[])
+            : undefined,
+        createdBy: query?.created_by as UserID | undefined,
+        search: query?.search as string | undefined,
         archived: query?.archived as boolean | undefined,
         sortUpdatedAt: sortSpec?.updated_at,
         sortCreatedAt: sortSpec?.created_at,

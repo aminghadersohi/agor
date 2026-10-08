@@ -1,16 +1,24 @@
-/** Hosted OpenCode native state: live SQLite on scratch, immutable per-turn checkpoints in the owner's home. */
+/** Hosted OpenCode native state: live SQLite on scratch, immutable per-turn checkpoints in the owner's or branch SDK home. */
 
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, lstat, mkdir, open, rename, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import type { OpenCodeCheckpointManifest, OpenCodeCheckpointObject } from '@agor/core/types';
+import type {
+  OpenCodeCheckpointManifest,
+  OpenCodeCheckpointObject,
+  SessionSdkHomeScope,
+} from '@agor/core/types';
 import { OPENCODE_VERSION } from '../shared/known-models.js';
 
 /** Cloud pins this to the Job's bounded emptyDir; there is no temp-directory fallback. */
 export const OPENCODE_SCRATCH_ROOT_ENV = 'AGOR_OPENCODE_SCRATCH_ROOT';
+/** The launcher pins this to the branch SDK home's OpenCode directory for shared Sessions. */
+export const OPENCODE_CHECKPOINT_ROOT_ENV = 'AGOR_OPENCODE_CHECKPOINT_ROOT';
 const DB_FILE = 'opencode.db';
+/** OpenCode tables that hold tokens; a checkpoint may reach collaborators, so they must stay empty. */
+const CREDENTIAL_TABLES = ['account', 'control_account', 'credential', 'session_share'];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export class OpenCodeNativeStateError extends Error {
@@ -24,13 +32,14 @@ export interface OpenCodeNativeStateLayout {
   scratchRoot: string;
   xdg: { data: string; config: string; cache: string; state: string };
   liveDbPath: string;
-  /** Persistent `$HOME/.agor/opencode/sessions` directory of the Session owner. */
+  /** Persistent checkpoint directory: `$HOME/.agor/opencode/sessions` of the owner, or the branch SDK home's. */
   sessionsDir: string;
 }
 
 export function resolveOpenCodeNativeStateLayout(input: {
   sessionId: string;
   taskId: string;
+  sdkHomeScope: SessionSdkHomeScope;
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
 }): OpenCodeNativeStateLayout {
@@ -39,16 +48,34 @@ export function resolveOpenCodeNativeStateLayout(input: {
       'OpenCode native state requires canonical session and task ids'
     );
   }
-  const scratch = (input.env ?? process.env)[OPENCODE_SCRATCH_ROOT_ENV]?.trim();
+  const env = input.env ?? process.env;
+  const scratch = env[OPENCODE_SCRATCH_ROOT_ENV]?.trim();
   if (!scratch || !isAbsolute(scratch)) {
     // Never fall back to TMPDIR: it may point at the persistent network home.
     throw new OpenCodeNativeStateError(
       `${OPENCODE_SCRATCH_ROOT_ENV} must be an absolute path on Job-local storage`
     );
   }
-  const home = input.homeDir ?? homedir();
-  if (!home || !isAbsolute(home)) {
-    throw new OpenCodeNativeStateError('OpenCode native state requires an absolute home directory');
+  let sessionsDir: string;
+  if (input.sdkHomeScope === 'branch') {
+    const root = env[OPENCODE_CHECKPOINT_ROOT_ENV]?.trim();
+    if (!root || !isAbsolute(root)) {
+      // Never fall back to the caller's home: teammates' turns could not restore from it.
+      throw new OpenCodeNativeStateError(
+        `${OPENCODE_CHECKPOINT_ROOT_ENV} must be an absolute path in the branch SDK home`
+      );
+    }
+    sessionsDir = join(root, 'sessions');
+  } else if (input.sdkHomeScope === 'execution_home') {
+    const home = input.homeDir ?? homedir();
+    if (!home || !isAbsolute(home)) {
+      throw new OpenCodeNativeStateError(
+        'OpenCode native state requires an absolute home directory'
+      );
+    }
+    sessionsDir = join(home, '.agor', 'opencode', 'sessions');
+  } else {
+    throw new OpenCodeNativeStateError('OpenCode native state requires a known SDK-home scope');
   }
   const scratchRoot = join(scratch, input.taskId);
   return {
@@ -62,7 +89,7 @@ export function resolveOpenCodeNativeStateLayout(input: {
       state: join(scratchRoot, 'xdg-state'),
     },
     liveDbPath: join(scratchRoot, DB_FILE),
-    sessionsDir: join(home, '.agor', 'opencode', 'sessions'),
+    sessionsDir,
   };
 }
 
@@ -129,7 +156,7 @@ export async function restoreOpenCodeCheckpoint(
     await copyFile(source, layout.liveDbPath);
   } catch (error) {
     throw new OpenCodeNativeStateError(
-      'OpenCode native state unavailable: the saved conversation is missing from your home',
+      'OpenCode native state unavailable: the saved conversation is missing from its checkpoint store',
       { cause: error }
     );
   }
@@ -165,6 +192,14 @@ async function checkpointLiveDatabase(dbPath: string, openCodeSessionId: string)
       throw new OpenCodeNativeStateError(
         'OpenCode checkpoint does not contain the completed session'
       );
+    }
+    for (const table of CREDENTIAL_TABLES) {
+      const exists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get(table);
+      if (exists && db.prepare(`SELECT 1 FROM "${table}" LIMIT 1`).get()) {
+        throw new OpenCodeNativeStateError('OpenCode checkpoint contains stored credentials');
+      }
     }
     const checkpoint = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy?: number };
     if (checkpoint?.busy) {
