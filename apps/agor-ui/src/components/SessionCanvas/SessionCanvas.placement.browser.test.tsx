@@ -128,10 +128,12 @@ it('persists two real pointer drags when the first PATCH completes during the se
   expect(expected).not.toEqual(patch.mock.calls[0][1].position);
   await act(async () => release());
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
-  expect(patch.mock.calls[1][1].position).toEqual(expected);
-  expect(agorStore.getState().boardObjectsByBoardId.get(board.board_id)?.[0].position).toEqual(
-    expected
-  );
+  // Grid snapping can yield -0 for a pointer just above an axis; JSON sends it as 0.
+  const unsigned = (p?: { x: number; y: number }) => p && { x: p.x + 0, y: p.y + 0 };
+  expect(unsigned(patch.mock.calls[1][1].position)).toEqual(expected);
+  expect(
+    unsigned(agorStore.getState().boardObjectsByBoardId.get(board.board_id)?.[0].position)
+  ).toEqual(expected);
   await waitFor(() =>
     expect(node.style.transform).toBe(`translate(${expected.x}px, ${expected.y}px)`)
   );
