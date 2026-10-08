@@ -1975,21 +1975,19 @@ export const useBoardObjects = ({
       }
       const ticket = guardRef.current.capture();
       if (!ticket || ticket.boardId !== currentBoard.board_id) return;
+      // Justifying takes control of an Auto Zone. `applyLayout` commits
+      // geometry only, so the Manual transition is persisted first through
+      // the durable demotion; otherwise the zone stays Auto and its next tidy
+      // undoes the alignment.
+      if (policy.mode === 'auto' && !(await demoteAutoZone(zoneId))) return;
       const viewportIntentToken = onUserLayoutStart?.();
-      const demotingAutoZone = policy.mode === 'auto';
-      if (demotingAutoZone) {
-        manuallyControlledZoneIdsRef.current.add(zoneId);
-        autoZoneDeferralRef.current?.cancel(zoneId);
-        expectedAutoLayoutSignaturesRef.current.delete(zoneId);
-        skipNextAutoArrangeRef.current.delete(zoneId);
-      }
 
       const changedById = new Map(changedNodes.map((node) => [node.id, node]));
       onArrangeNodes?.(changedNodes, 180);
       setNodes((nodes) => nodes.map((node) => changedById.get(node.id) ?? node));
 
       try {
-        const canvasObjects = Object.fromEntries(
+        const objects = Object.fromEntries(
           children.flatMap(({ node, isCanvasObject }) => {
             if (!isCanvasObject) return [];
             const changed = changedById.get(node.id);
@@ -2000,18 +1998,6 @@ export const useBoardObjects = ({
             ];
           })
         );
-        const objects = {
-          ...(demotingAutoZone
-            ? {
-                [zoneId]: {
-                  ...persistedZone,
-                  layout: { ...policy, mode: 'manual' as const },
-                  layout_binding: 'override' as const,
-                },
-              }
-            : {}),
-          ...canvasObjects,
-        };
         const placements = Object.fromEntries(
           changedNodes.flatMap((node) => {
             const placement = placementByNodeId.get(node.id);
@@ -2036,7 +2022,6 @@ export const useBoardObjects = ({
           ),
         };
         if (!guardRef.current.isCurrent(ticket)) {
-          if (demotingAutoZone) manuallyControlledZoneIdsRef.current.delete(zoneId);
           guardRef.current.warnDropped();
           return;
         }
@@ -2061,7 +2046,6 @@ export const useBoardObjects = ({
             : `Justified ${changedNodes.length} items to the ${label}.`
         );
       } catch (error) {
-        if (demotingAutoZone) manuallyControlledZoneIdsRef.current.delete(zoneId);
         console.error('Failed to justify zone contents:', error);
         showError('Failed to justify zone contents');
       }
@@ -2070,6 +2054,7 @@ export const useBoardObjects = ({
       boardObjectsForBoard,
       client,
       completeUserLayout,
+      demoteAutoZone,
       onArrangeNodes,
       onUserLayoutStart,
       setNodes,

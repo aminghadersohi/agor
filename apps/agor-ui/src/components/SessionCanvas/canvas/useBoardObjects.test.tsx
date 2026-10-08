@@ -182,6 +182,69 @@ describe('justifyZoneContents production path', () => {
     expect(showSuccess).toHaveBeenCalledWith('Justified 2 items to the center.');
   });
 
+  describe('in an Auto Zone', () => {
+    const autoZone = { ...zone, layout: { mode: 'auto', preset: 'grid' } };
+    const narrow = { ...branch, width: 380 } satisfies Node;
+    const placement = {
+      object_id: 'placement-branch',
+      branch_id: branch.id,
+      zone_id: zoneId,
+      position: narrow.position,
+    };
+
+    function renderAutoJustify(routed: ReturnType<typeof makeRoutedClient>) {
+      return renderHook(
+        () =>
+          useBoardObjects({
+            board: makeBoard({ [zoneId]: autoZone }),
+            client: routed.client,
+            boardObjectsForBoard: [placement] as never,
+            nodes: [narrow],
+            setNodes: vi.fn(),
+            deletedObjectsRef: { current: new Set<string>() },
+            guard: useBoardMutationGuard('board-1', true),
+          }),
+        { wrapper }
+      );
+    }
+    const actions = (patch: { mock: { calls: unknown[][] } }) =>
+      patch.mock.calls.map((call) => (call[1] as { _action?: string })._action);
+
+    it('persists the Manual demotion before committing the justified geometry', async () => {
+      const routed = makeRoutedClient();
+      const view = renderAutoJustify(routed);
+
+      await act(async () => view.result.current.justifyZoneContents(zoneId, 'middle'));
+
+      expect(actions(routed.boardsPatch)).toEqual(['upsertObject', 'applyLayout']);
+      expect(routed.boardsPatch.mock.calls[0]?.[1]).toMatchObject({
+        objectId: zoneId,
+        objectData: { layout: { mode: 'manual', preset: 'grid' }, layout_binding: 'override' },
+      });
+      expect(layoutPlacements(routed.boardsPatch)).toMatchObject({
+        'placement-branch': { position: { x: 100, y: 100 } },
+      });
+      // Geometry-only layout writes never carry the policy change.
+      expect(layoutWrites(routed.boardsPatch)[0]?.objects).toEqual({});
+    });
+
+    it('leaves the contents alone when the demotion cannot be persisted', async () => {
+      const routed = makeRoutedClient();
+      routed.boardsPatch.mockImplementation((boardId: string, data: Record<string, unknown>) =>
+        data?._action === 'upsertObject'
+          ? Promise.reject(new Error('network down'))
+          : mockBoardPatchResult(boardId, data)
+      );
+      const view = renderAutoJustify(routed);
+
+      await act(async () => view.result.current.justifyZoneContents(zoneId, 'middle'));
+
+      expect(actions(routed.boardsPatch)).toEqual(['upsertObject']);
+      expect(showError).toHaveBeenCalledWith('Failed to disable Auto Zone');
+      expect(showSuccess).not.toHaveBeenCalled();
+    });
+  });
+
   it('aligns inside configured Grid cells and commits one authoritative batch', async () => {
     const gridZone = {
       ...zone,
