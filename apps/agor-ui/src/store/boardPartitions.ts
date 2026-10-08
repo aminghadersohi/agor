@@ -26,7 +26,7 @@
  * of reads.
  */
 import type { AgorClient, Board, Branch, CardWithType, Session } from '@agor-live/client';
-import { PAGINATION } from '@agor-live/client';
+import { PAGINATION, PAGINATION_CHURN_MESSAGE } from '@agor-live/client';
 import { debounceWithMaxWait } from '../utils/debounceWithMaxWait';
 import { fencedRead, type HydratedCollection, touchedIdsSince } from './agorHydration';
 import { type AgorState, agorStore } from './agorStore';
@@ -308,7 +308,6 @@ export function requestBoardReload(
 // Unarchiving onto a loaded board marks it incomplete (`markArrivalIncomplete`),
 // so its reload reads the restored placement.
 export const BOARD_OBJECT_PAGE_LIMIT = 100;
-const PAGINATION_CHURN_MESSAGE = 'Paginated findAll() changed while pages were being read';
 const MAX_PAGINATION_CHURN_RESTARTS = 2;
 
 // Offset pagination fails when membership changes between pages (a branch

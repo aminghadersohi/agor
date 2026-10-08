@@ -590,6 +590,68 @@ export function useAgorData(
       if (silent) markWholesaleReplacement();
       let resyncFailed = false;
 
+      // Secondary reads (see the comment at the call below). Started once per
+      // load: on the happy path after the essential reads land, or, on a
+      // silent resync whose essential read threw, from the catch below —
+      // otherwise these slices would stay stale until the next resync.
+      let secondaryReadsStarted = false;
+      const startSecondaryReads = () => {
+        if (secondaryReadsStarted) return;
+        secondaryReadsStarted = true;
+        void runAuthorityHydration(
+          'agentic-tool-settings',
+          ['agenticToolSettings'],
+          () => client.service('agentic-tool-settings').findAll(),
+          (settings) => agorStore.getState().setAgenticToolSettings(settings)
+        );
+
+        void runAuthorityHydration(
+          'mcp-servers',
+          ['mcpServers'],
+          () =>
+            client.service('mcp-servers').findAll({ query: { $limit: PAGINATION.DEFAULT_LIMIT } }),
+          (list) => {
+            agorStore.getState().applyMaps((prev) => ({
+              ...prev,
+              mcpServerById: buildById(list, 'mcp_server_id', prev.mcpServerById),
+            }));
+            agorStore.getState().markHydrated('mcpServersHydrated');
+          }
+        );
+        void runAuthorityHydration(
+          'gateway-channels',
+          ['gatewayChannels'],
+          () =>
+            client
+              .service('gateway-channels')
+              .findAll({ query: { $limit: PAGINATION.DEFAULT_LIMIT } }),
+          (list) => {
+            agorStore.getState().applyMaps((prev) => ({
+              ...prev,
+              gatewayChannelById: buildById(list, 'id', prev.gatewayChannelById),
+            }));
+            agorStore.getState().markHydrated('gatewayChannelsHydrated');
+          }
+        );
+        void runAuthorityHydration(
+          'artifacts',
+          ['artifacts'],
+          () =>
+            client.service('artifacts').findAll({
+              query: {
+                $limit: PAGINATION.DEFAULT_LIMIT,
+                $select: [...ARTIFACT_METADATA_LIST_FIELDS],
+              },
+            }),
+          (list) =>
+            agorStore.getState().applyMaps((prev) => ({
+              ...prev,
+              artifactById: buildById(list, 'artifact_id', prev.artifactById),
+            }))
+        );
+        void refetchOAuthDurableState(fetchAuthorityScope);
+      };
+
       try {
         if (!silent) {
           agorStore.getState().setLoading(true);
@@ -989,58 +1051,7 @@ export function useAgorData(
         // clobber a newer realtime upsert, and a fetch resolving after logout is
         // dropped instead of repopulating the previous tenant. The apply sets the
         // hydration gate, so it only flips once a quiet, current snapshot lands.
-        void runAuthorityHydration(
-          'agentic-tool-settings',
-          ['agenticToolSettings'],
-          () => client.service('agentic-tool-settings').findAll(),
-          (settings) => agorStore.getState().setAgenticToolSettings(settings)
-        );
-
-        void runAuthorityHydration(
-          'mcp-servers',
-          ['mcpServers'],
-          () =>
-            client.service('mcp-servers').findAll({ query: { $limit: PAGINATION.DEFAULT_LIMIT } }),
-          (list) => {
-            agorStore.getState().applyMaps((prev) => ({
-              ...prev,
-              mcpServerById: buildById(list, 'mcp_server_id', prev.mcpServerById),
-            }));
-            agorStore.getState().markHydrated('mcpServersHydrated');
-          }
-        );
-        void runAuthorityHydration(
-          'gateway-channels',
-          ['gatewayChannels'],
-          () =>
-            client
-              .service('gateway-channels')
-              .findAll({ query: { $limit: PAGINATION.DEFAULT_LIMIT } }),
-          (list) => {
-            agorStore.getState().applyMaps((prev) => ({
-              ...prev,
-              gatewayChannelById: buildById(list, 'id', prev.gatewayChannelById),
-            }));
-            agorStore.getState().markHydrated('gatewayChannelsHydrated');
-          }
-        );
-        void runAuthorityHydration(
-          'artifacts',
-          ['artifacts'],
-          () =>
-            client.service('artifacts').findAll({
-              query: {
-                $limit: PAGINATION.DEFAULT_LIMIT,
-                $select: [...ARTIFACT_METADATA_LIST_FIELDS],
-              },
-            }),
-          (list) =>
-            agorStore.getState().applyMaps((prev) => ({
-              ...prev,
-              artifactById: buildById(list, 'artifact_id', prev.artifactById),
-            }))
-        );
-        void refetchOAuthDurableState(fetchAuthorityScope);
+        startSecondaryReads();
 
         // User scope: the rest of my sessions, my branches, every
         // teammate I can view, and the branches my sessions and comment
@@ -1129,6 +1140,9 @@ export function useAgorData(
           // failure so the next TOKENS_REFRESHED_EVENT (or reconnect) retries.
           console.warn('[useAgorData] silent refetch failed:', err);
           lastSilentFetchFailedRef.current = true;
+          // The essential reads failed before the secondary ones were issued;
+          // they are independent of them, so still refresh those slices.
+          startSecondaryReads();
         } else {
           debugFinishStatus = 'error';
           debugFinishError = err;

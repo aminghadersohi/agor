@@ -402,6 +402,35 @@ describe('useAgorData — network recovery', () => {
       unmount();
     }
   });
+
+  it('still issues the secondary reads when an essential read rejects on a silent resync', async () => {
+    const { client, emitIo, onFetch, fetchCount } = makeMockClient();
+    const secondary = ['agentic-tool-settings', 'mcp-servers', 'gateway-channels', 'artifacts'];
+    const { result, unmount } = renderHook(() => useAgorData(client));
+    try {
+      await waitForInitialLoad(result);
+      await flush();
+      for (const name of secondary) expect(fetchCount(name, 'findAll')).toBe(1);
+
+      onFetch('board-comments', 'findAll', () => Promise.reject(new Error('Network unavailable')));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        act(() => emitIo('connect'));
+        await waitFor(() => expect(fetchCount('board-comments', 'findAll')).toBe(2));
+        await waitFor(() => {
+          for (const name of secondary) expect(fetchCount(name, 'findAll')).toBe(2);
+        });
+        expect(warn).toHaveBeenCalledWith(
+          '[useAgorData] silent refetch failed:',
+          expect.objectContaining({ message: 'Network unavailable' })
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    } finally {
+      unmount();
+    }
+  });
 });
 
 describe('useAgorData — socket-event bailouts', () => {

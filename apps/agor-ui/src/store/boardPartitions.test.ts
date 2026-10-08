@@ -1,4 +1,5 @@
 import type { Board, BoardEntityObject, Branch, CardWithType, Session } from '@agor-live/client';
+import { PAGINATION_CHURN_MESSAGE } from '@agor-live/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BOARD,
@@ -85,7 +86,6 @@ const snapshotOf = (overrides: Partial<BoardPartitionSnapshot> = {}): BoardParti
 });
 
 const never = () => false;
-const PAGINATION_CHURN = 'Paginated findAll() changed while pages were being read';
 
 /** A partition load's apply: a complete replace of the board. */
 const replacePartition = (
@@ -318,7 +318,7 @@ describe('loadBoardPartition', () => {
   });
 
   it('restarts only the placement read when its pages churn, a bounded number of times', async () => {
-    const churn = () => Promise.reject(new Error(PAGINATION_CHURN));
+    const churn = () => Promise.reject(new Error(PAGINATION_CHURN_MESSAGE));
     let failures = 1;
     const { client, callsTo } = fakeFeathersClient(
       {
