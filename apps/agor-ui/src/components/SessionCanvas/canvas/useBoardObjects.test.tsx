@@ -193,19 +193,25 @@ describe('justifyZoneContents production path', () => {
     };
 
     function renderAutoJustify(routed: ReturnType<typeof makeRoutedClient>) {
-      return renderHook(
-        () =>
+      const setNodes = vi.fn();
+      const onArrangeNodes = vi.fn();
+      const onUserLayoutStart = vi.fn();
+      const view = renderHook(
+        ({ nodes }) =>
           useBoardObjects({
             board: makeBoard({ [zoneId]: autoZone }),
             client: routed.client,
             boardObjectsForBoard: [placement] as never,
-            nodes: [narrow],
-            setNodes: vi.fn(),
+            nodes,
+            setNodes,
+            onArrangeNodes,
+            onUserLayoutStart,
             deletedObjectsRef: { current: new Set<string>() },
             guard: useBoardMutationGuard('board-1', true),
           }),
-        { wrapper }
+        { wrapper, initialProps: { nodes: [narrow] } }
       );
+      return { ...view, setNodes, onArrangeNodes, onUserLayoutStart };
     }
     const actions = (patch: { mock: { calls: unknown[][] } }) =>
       patch.mock.calls.map((call) => (call[1] as { _action?: string })._action);
@@ -242,6 +248,43 @@ describe('justifyZoneContents production path', () => {
       expect(actions(routed.boardsPatch)).toEqual(['upsertObject']);
       expect(showError).toHaveBeenCalledWith('Failed to disable Auto Zone');
       expect(showSuccess).not.toHaveBeenCalled();
+    });
+
+    it('leaves fresh canvas nodes untouched when the board reloads during the demotion save', async () => {
+      const routed = makeRoutedClient();
+      let finishDemotion!: () => void;
+      routed.boardsPatch.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishDemotion = resolve;
+          })
+      );
+      const view = renderAutoJustify(routed);
+      let justify!: Promise<void>;
+      act(() => {
+        justify = view.result.current.justifyZoneContents(zoneId, 'middle');
+      });
+      expect(actions(routed.boardsPatch)).toEqual(['upsertObject']);
+
+      act(() => {
+        agorStore.getState().resetBoardPartitions();
+        loadBoard();
+      });
+      const freshNodes = [{ ...narrow, position: { x: 140, y: 180 } }];
+      view.rerender({ nodes: freshNodes });
+      await act(async () => {
+        finishDemotion();
+        await justify;
+      });
+
+      expect(view.setNodes).not.toHaveBeenCalled();
+      expect(view.onArrangeNodes).not.toHaveBeenCalled();
+      expect(view.onUserLayoutStart).not.toHaveBeenCalled();
+      expect(actions(routed.boardsPatch)).toEqual(['upsertObject']);
+      expect(showSuccess).not.toHaveBeenCalled();
+      expect(showWarning).toHaveBeenCalledWith(
+        'This board reloaded; your last change was not saved.'
+      );
     });
   });
 

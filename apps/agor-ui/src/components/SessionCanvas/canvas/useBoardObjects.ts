@@ -1980,6 +1980,10 @@ export const useBoardObjects = ({
       // the durable demotion; otherwise the zone stays Auto and its next tidy
       // undoes the alignment.
       if (policy.mode === 'auto' && !(await demoteAutoZone(zoneId))) return;
+      if (!guardRef.current.isCurrent(ticket)) {
+        guardRef.current.warnDropped();
+        return;
+      }
       const viewportIntentToken = onUserLayoutStart?.();
 
       const changedById = new Map(changedNodes.map((node) => [node.id, node]));
