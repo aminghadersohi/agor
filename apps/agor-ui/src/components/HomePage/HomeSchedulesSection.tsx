@@ -9,7 +9,6 @@ import {
   SettingOutlined,
 } from '@ant-design/icons';
 import {
-  Alert,
   App,
   Badge,
   Button,
@@ -19,7 +18,6 @@ import {
   Flex,
   Grid,
   Radio,
-  Skeleton,
   Space,
   Typography,
   theme,
@@ -30,6 +28,7 @@ import { useAgorStore } from '../../store/agorStore';
 import { selectBranchById, selectSessionById, selectUserById } from '../../store/selectors';
 import { formatRelativeTime } from '../../utils/time';
 import { AdaptiveSettingsModal } from '../SettingsModal/AdaptiveSettingsModal';
+import { HomeCard, HomeSection, HomeSectionError, HomeSkeleton } from './HomeSection';
 
 const HOME_SCHEDULE_LIMIT = 12;
 
@@ -187,40 +186,37 @@ export function HomeSchedulesSection({
   );
 
   return (
-    <section aria-labelledby="home-schedules-title" style={{ marginTop: token.marginLG }}>
-      <Flex
-        justify="space-between"
-        align="center"
-        gap={token.marginSM}
-        style={{ marginBottom: token.marginSM }}
-      >
-        <div style={{ minWidth: 0 }}>
-          <Typography.Title id="home-schedules-title" level={5} style={{ margin: 0 }}>
-            Schedules
-          </Typography.Title>
-          <Typography.Text type="secondary">
-            {preference?.mode === 'selected' ? 'Selected automations' : 'Upcoming automations'}
-          </Typography.Text>
-        </div>
-        <Button icon={<SettingOutlined />} onClick={openManager} disabled={!currentUser || !client}>
+    <HomeSection
+      id="home-schedules"
+      title="Schedules"
+      info={
+        preference?.mode === 'selected'
+          ? 'Automations you chose to show on Home.'
+          : 'Upcoming automations in this workspace.'
+      }
+      extra={
+        <Button
+          size="small"
+          icon={<SettingOutlined />}
+          onClick={openManager}
+          disabled={!currentUser || !client}
+        >
           Choose
         </Button>
-      </Flex>
-
+      }
+    >
       {error && (
-        <Alert
-          type="error"
-          showIcon
-          title="Schedules could not load"
-          description={error}
-          action={<Button onClick={() => void fetchSchedules()}>Retry</Button>}
-          style={{ marginBottom: token.marginSM }}
-        />
+        <div style={{ marginBottom: token.marginSM }}>
+          <HomeSectionError
+            message={`Schedules could not load: ${error}`}
+            onRetry={() => void fetchSchedules()}
+          />
+        </div>
       )}
       {loading ? (
-        <Skeleton active paragraph={{ rows: 3 }} />
+        <HomeSkeleton rows={3} />
       ) : visibleSchedules.length === 0 ? (
-        <Card size="small">
+        <HomeCard padded>
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
             description={
@@ -229,7 +225,7 @@ export function HomeSchedulesSection({
                 : 'No schedules in this workspace yet'
             }
           />
-        </Card>
+        </HomeCard>
       ) : (
         <Flex vertical gap={token.marginSM}>
           {visibleSchedules.map((schedule) => {
@@ -238,11 +234,7 @@ export function HomeSchedulesSection({
               ? sessionById.get(schedule.last_run_session_id)
               : undefined;
             return (
-              <Card
-                key={schedule.schedule_id}
-                size="small"
-                styles={{ body: { padding: compact ? token.paddingSM : token.paddingMD } }}
-              >
+              <HomeCard key={schedule.schedule_id} padded>
                 <Flex vertical gap={token.marginSM}>
                   <Flex justify="space-between" align="center" gap={token.marginSM}>
                     <Typography.Text
@@ -345,7 +337,7 @@ export function HomeSchedulesSection({
                     </Card>
                   </Flex>
                 </Flex>
-              </Card>
+              </HomeCard>
             );
           })}
           {schedules.length > HOME_SCHEDULE_LIMIT && preference?.mode !== 'selected' && (
@@ -410,6 +402,6 @@ export function HomeSchedulesSection({
           )}
         </Flex>
       </AdaptiveSettingsModal>
-    </section>
+    </HomeSection>
   );
 }
