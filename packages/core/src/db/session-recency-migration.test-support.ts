@@ -73,6 +73,13 @@ export async function seedHistoricalSessionRecency(db: Database) {
     branch_unique_id: 1,
     path: '/tmp/recency',
   });
+  // The current repository reads and writes sessions.attention_generation,
+  // which is journalled after this historical schema. Carry it only while the
+  // repository seeds, so the snapshot below is the genuine prior shape.
+  await executeRaw(
+    db,
+    sql`ALTER TABLE sessions ADD COLUMN attention_generation integer DEFAULT 0 NOT NULL`
+  );
   const sessions = new SessionRepository(db);
   const parent = await sessions.create({
     branch_id: branch.branch_id,
@@ -102,6 +109,7 @@ export async function seedHistoricalSessionRecency(db: Database) {
     db,
     sql`UPDATE sessions SET updated_at = NULL WHERE session_id = ${parent.session_id}`
   );
+  await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
   const rows = rawRows(
     await executeRaw(
       db,

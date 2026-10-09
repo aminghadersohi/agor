@@ -5,7 +5,12 @@
  * unchanged, so Home subscribers stay quiet through unrelated store patches.
  */
 import type { BoardComment, Branch, Session } from '@agor-live/client';
-import { getTeammateConfig, isGatewaySession, SessionStatus } from '@agor-live/client';
+import {
+  getTeammateConfig,
+  isGatewaySession,
+  SessionStatus,
+  sessionHasUnseenAttention,
+} from '@agor-live/client';
 import { commentMentionsUser } from '../utils/commentMentions';
 import { getTimeMs } from '../utils/entityTime';
 import { isSessionFailed } from '../utils/sessionStatus';
@@ -24,9 +29,12 @@ const isFailure = (session: Session) =>
 /**
  * A finished run the person started and hasn't opened yet. Failed and timed-out
  * sessions also rest with `ready_for_prompt` set, but they are never unread results.
+ * "Opened" is per viewer (`sessionHasUnseenAttention`); `ready_for_prompt` only
+ * says the run has settled and no follow-up has started.
  */
 export const isUnreadResult = (session: Session): boolean =>
   !!session.ready_for_prompt &&
+  sessionHasUnseenAttention(session) &&
   !isFailure(session) &&
   isSessionStartedByUser(session) &&
   !isGatewaySession(session);

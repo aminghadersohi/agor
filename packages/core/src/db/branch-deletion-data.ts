@@ -80,6 +80,7 @@ export const BRANCH_DELETION_DATA_STEPS: readonly DataStep[] = [
   clear('kb_namespaces', 'namespace_id', 'branch_id', 'ob'),
   del('session_mcp_servers', 'session_id,mcp_server_id', 'session_id IN (SELECT id FROM os)'),
   del('session_env_selections', 'session_id,env_var_name', 'session_id IN (SELECT id FROM os)'),
+  del('session_attention_states', 'user_id,session_id', 'session_id IN (SELECT id FROM os)'),
   del('session_memories', 'memory_id', 'session_id IN (SELECT id FROM os)'),
   del('session_reminders', 'reminder_id', 'session_id IN (SELECT id FROM os)'),
   del(

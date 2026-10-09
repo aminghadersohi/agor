@@ -69,9 +69,10 @@ describe('tenantPortabilityForeignKeys', () => {
     // Change-detector, refreshed for amin_dev_next-20260926. The 2026-09-24
     // integration derived 126 (fork PR #46's three-subject profile_images and
     // PR #2564's completion_subscriptions on top of personal/main); fork PR
-    // #53's branch_front_desk_sessions adds its three FKs. The substantive
+    // #53's branch_front_desk_sessions adds its three FKs, and the restored
+    // session_attention_states adds its two (user and session). The substantive
     // assertions below are independent of it.
-    expect(foreignKeys).toHaveLength(129);
+    expect(foreignKeys).toHaveLength(131);
     expect(Object.isFrozen(foreignKeys)).toBe(true);
     const structuralKeys = foreignKeys.map((foreignKey) =>
       [
@@ -179,6 +180,27 @@ describe('tenantPortabilityForeignKeys', () => {
           childColumns: ['tenant_id', 'user_id'],
           parentTable: 'users',
           parentColumns: ['tenant_id', 'user_id'],
+          onDelete: 'cascade',
+        }),
+      ])
+    );
+  });
+
+  it('moves per-user session attention with both of its tenant-bound parents', () => {
+    expect(tenantPortabilityForeignKeys()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          childTable: 'session_attention_states',
+          childColumns: ['tenant_id', 'user_id'],
+          parentTable: 'users',
+          parentColumns: ['tenant_id', 'user_id'],
+          onDelete: 'cascade',
+        }),
+        expect.objectContaining({
+          childTable: 'session_attention_states',
+          childColumns: ['tenant_id', 'session_id'],
+          parentTable: 'sessions',
+          parentColumns: ['tenant_id', 'session_id'],
           onDelete: 'cascade',
         }),
       ])

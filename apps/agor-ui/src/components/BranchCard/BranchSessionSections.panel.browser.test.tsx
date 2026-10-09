@@ -39,7 +39,10 @@ function makeSession(
 }
 
 const sessions: Session[] = [
-  makeSession('root', 'Security agor', { ready_for_prompt: true }),
+  makeSession('root', 'Security agor', {
+    ready_for_prompt: true,
+    attention_generation: 1,
+  }),
   makeSession('abuse', 'Astra recheck — Abuse/availability', { parent: 'root' }),
   makeSession('fixes', 'Availability fixes and regression proof — Astra xhigh', {
     parent: 'abuse',
@@ -49,6 +52,7 @@ const sessions: Session[] = [
     parent: 'abuse',
     agentic_tool: 'claude-code',
     ready_for_prompt: true,
+    attention_generation: 1,
   }),
   makeSession('exec', 'Astra recheck — Execution authority', { parent: 'root' }),
   makeSession('exec-impl', 'Execution security — implementation and regression validation', {
@@ -383,6 +387,7 @@ it('applies the same row treatment to scheduled runs and flat search results', a
       scheduled_from_branch: true,
       scheduled_run_at: 1_780_527_200_000,
       ready_for_prompt: true,
+      attention_generation: 1,
     }),
   ]);
 

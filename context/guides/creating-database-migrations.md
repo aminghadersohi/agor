@@ -117,7 +117,7 @@ Validate enum values at the application layer instead — Drizzle schema `enum` 
 From `9026` up, both journals and every migration file they name are
 byte-identical to the deployed amin_dev history, so merging main into amin_dev
 changes no migration. Never move, renumber, or edit an entry in that range;
-append new migrations above `1790208000001`. (In both journals
+append new migrations above `1790208000020`. (In both journals
 `0113_callback_ownership_reconciliation` sits at Postgres `1790129000215` /
 SQLite `1790129000214`, not the `1789344000007` the section above names.)
 
@@ -135,6 +135,15 @@ SQLite `0114_restore_session_indexes`, `9030_branch_front_desk_sessions`).
 verified in place (Postgres raises on a different shape). A ledger that carries
 the retired hashes next to anything else in that range is refused rather than
 rewound; reconcile it by hand or restore a backup.
+
+`9032_session_attention_states` (both journals at `1790208000020`, idx 9040)
+restores per-user session attention. Some fork databases already carry its
+table and `sessions.attention_generation` from an earlier deploy journalled
+below their watermark, so the Postgres file is conditional and verifies the
+shape before its backfill. SQLite cannot add a column conditionally: tests that
+rewind the SQLite ledger below it must drop `session_attention_states` and
+`sessions.attention_generation` first, as they already do for
+`user_api_keys.source`.
 
 ### New tenant-table FKs must be made `DEFERRABLE INITIALLY IMMEDIATE` (Postgres)
 

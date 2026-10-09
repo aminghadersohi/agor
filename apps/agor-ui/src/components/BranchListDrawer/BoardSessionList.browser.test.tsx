@@ -39,7 +39,10 @@ function makeSession(id: string, title: string, overrides: Partial<Session> = {}
 
 const sessions = [
   makeSession('read', 'Resync Teams gateway with advanced main'),
-  makeSession('ready', 'Final independent Teams PostgreSQL QA', { ready_for_prompt: true }),
+  makeSession('ready', 'Final independent Teams PostgreSQL QA', {
+    ready_for_prompt: true,
+    attention_generation: 1,
+  }),
   makeSession('waiting', 'Independent PostgreSQL QA for Teams gateway', {
     status: 'awaiting_permission',
   }),

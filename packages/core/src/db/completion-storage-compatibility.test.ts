@@ -25,6 +25,9 @@ dbTest('retains inert draft completion rows across SQLite initialization', async
   await executeRaw(db, sql`ALTER TABLE profile_images DROP COLUMN theme`);
   // And upstream's OpenCode checkpoint table, re-stamped above it.
   await executeRaw(db, sql`DROP TABLE opencode_checkpoint_attempts`);
+  // And the restored session attention (SQLite cannot ADD COLUMN conditionally).
+  await executeRaw(db, sql`DROP TABLE session_attention_states`);
+  await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
   await executeRaw(
     db,
     sql`CREATE TRIGGER boards_primary_owner_immutable BEFORE UPDATE OF primary_owner_user_id ON boards BEGIN SELECT RAISE(ABORT, 'immutable'); END`
@@ -60,6 +63,9 @@ dbTest('adds inert completion storage after main ownership transfer', async ({ d
   await executeRaw(db, sql`ALTER TABLE profile_images DROP COLUMN theme`);
   // And upstream's OpenCode checkpoint table, re-stamped above it.
   await executeRaw(db, sql`DROP TABLE opencode_checkpoint_attempts`);
+  // And the restored session attention (SQLite cannot ADD COLUMN conditionally).
+  await executeRaw(db, sql`DROP TABLE session_attention_states`);
+  await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
   await runMigrations(db, { allowOfflineCutover: true });
   expect(rawRows(await executeRaw(db, sql`SELECT * FROM completion_subscriptions`))).toEqual([]);
 });
