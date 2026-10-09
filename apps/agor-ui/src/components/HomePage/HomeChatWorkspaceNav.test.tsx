@@ -18,6 +18,13 @@ const board = {
   archived: false,
 } as unknown as Board;
 
+const teammateBranch = {
+  ...branch,
+  custom_context: {
+    teammate: { kind: 'teammate', displayName: 'Support operator', emoji: '🧭' },
+  },
+} as unknown as Branch;
+
 const session = {
   session_id: 'session-1',
   branch_id: branch.branch_id,
@@ -84,6 +91,7 @@ describe('HomeChatWorkspaceNav', () => {
         onManage={vi.fn()}
         onExit={vi.fn()}
         onShowOnBoard={vi.fn()}
+        onBoardClick={vi.fn()}
       />
     );
 
@@ -113,6 +121,7 @@ describe('HomeChatWorkspaceNav', () => {
         onManage={vi.fn()}
         onExit={vi.fn()}
         onShowOnBoard={onShowOnBoard}
+        onBoardClick={vi.fn()}
       />
     );
 
@@ -130,6 +139,7 @@ describe('HomeChatWorkspaceNav', () => {
         onManage={onManage}
         onExit={vi.fn()}
         onShowOnBoard={vi.fn()}
+        onBoardClick={vi.fn()}
       />
     );
 
@@ -146,6 +156,7 @@ describe('HomeChatWorkspaceNav', () => {
         onManage={vi.fn()}
         onExit={onExit}
         onShowOnBoard={vi.fn()}
+        onBoardClick={vi.fn()}
       />
     );
 
@@ -163,6 +174,7 @@ describe('HomeChatWorkspaceNav', () => {
         onManage={onManage}
         onExit={vi.fn()}
         onShowOnBoard={vi.fn()}
+        onBoardClick={vi.fn()}
       />
     );
 
@@ -175,5 +187,112 @@ describe('HomeChatWorkspaceNav', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Manage Support triage in collection' }));
     expect(onManage).toHaveBeenCalledWith(session.session_id);
+  });
+
+  it('uses sibling native controls for disclosure and board navigation', async () => {
+    const onBoardClick = vi.fn();
+    const { container } = render(
+      <HomeChatWorkspaceNav
+        currentUser={user}
+        activeSessionId={session.session_id}
+        onSessionClick={vi.fn()}
+        onManage={vi.fn()}
+        onExit={vi.fn()}
+        onShowOnBoard={vi.fn()}
+        onBoardClick={onBoardClick}
+      />
+    );
+
+    const disclosure = screen.getByRole('button', {
+      name: 'Collapse sessions for support-worktree',
+    });
+    const boardControl = screen.getByRole('button', { name: 'Open Support board' });
+
+    expect(disclosure).toHaveAttribute('type', 'button');
+    expect(boardControl).toHaveAttribute('type', 'button');
+    expect(disclosure.tabIndex).toBe(0);
+    expect(boardControl.tabIndex).toBe(0);
+    expect(disclosure.contains(boardControl)).toBe(false);
+    expect(container.querySelector('button button')).toBeNull();
+
+    disclosure.focus();
+    expect(disclosure).toHaveFocus();
+    fireEvent.click(disclosure);
+    expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+    expect(onBoardClick).not.toHaveBeenCalled();
+
+    boardControl.focus();
+    expect(boardControl).toHaveFocus();
+    fireEvent.click(boardControl);
+    expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+    expect(onBoardClick).toHaveBeenCalledWith(board.board_id);
+
+    fireEvent.mouseEnter(boardControl);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Open Support board');
+  });
+
+  it('opens the branch board from a teammate avatar too', () => {
+    agorStore.setState({ branchById: new Map([[teammateBranch.branch_id, teammateBranch]]) });
+    const onBoardClick = vi.fn();
+    render(
+      <HomeChatWorkspaceNav
+        currentUser={user}
+        activeSessionId={session.session_id}
+        onSessionClick={vi.fn()}
+        onManage={vi.fn()}
+        onExit={vi.fn()}
+        onShowOnBoard={vi.fn()}
+        onBoardClick={onBoardClick}
+      />
+    );
+
+    const boardControl = screen.getByRole('button', { name: 'Open Support board' });
+    expect(within(boardControl).getByText('🧭')).toBeInTheDocument();
+    fireEvent.click(boardControl);
+
+    expect(onBoardClick).toHaveBeenCalledWith(board.board_id);
+    expect(
+      screen.getByRole('button', { name: 'Collapse sessions for Support operator' })
+    ).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it.each([
+    {
+      name: 'the branch has no board',
+      branch: { ...branch, board_id: undefined } as unknown as Branch,
+      boards: new Map([[board.board_id, board]]),
+    },
+    {
+      name: 'the target board is archived',
+      branch,
+      boards: new Map([[board.board_id, { ...board, archived: true } as Board]]),
+    },
+    {
+      name: 'the target board is unavailable',
+      branch,
+      boards: new Map<string, Board>(),
+    },
+  ])('keeps the identity icon non-interactive when $name', ({ branch: unavailable, boards }) => {
+    agorStore.setState({
+      boardById: boards,
+      branchById: new Map([[unavailable.branch_id, unavailable]]),
+    });
+    render(
+      <HomeChatWorkspaceNav
+        currentUser={user}
+        activeSessionId={session.session_id}
+        onSessionClick={vi.fn()}
+        onManage={vi.fn()}
+        onExit={vi.fn()}
+        onShowOnBoard={vi.fn()}
+        onBoardClick={vi.fn()}
+      />
+    );
+
+    const disclosure = screen.getByRole('button', {
+      name: 'Collapse sessions for support-worktree',
+    });
+    expect(screen.queryByRole('button', { name: /Open .* board/ })).not.toBeInTheDocument();
+    expect(within(disclosure.parentElement!).getAllByRole('button')).toEqual([disclosure]);
   });
 });

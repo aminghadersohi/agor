@@ -706,6 +706,18 @@ describe('Chat workspace', () => {
     expect(currentPath).toBe('/');
   });
 
+  it('opens a branch board from its identity in the rail', async () => {
+    renderApp(chatWorkspacePath(SESSION_1 as SessionID));
+    await settle();
+
+    fireEvent.click(document.querySelector('[aria-label="Open Beta board"]') as HTMLElement);
+    await settle();
+
+    expect(currentPath).toBe('/b/beta/');
+    expect(canvasBoardName()).toBe('Beta');
+    expect(chatRailIsShowing()).toBe(false);
+  });
+
   it('still lets the board switcher leave the workspace', async () => {
     renderApp(chatWorkspacePath(SESSION_1 as SessionID));
     await settle();
