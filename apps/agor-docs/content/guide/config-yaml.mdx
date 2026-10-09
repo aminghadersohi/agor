@@ -254,11 +254,16 @@ connection and in-flight admission transactions to close, then start the new dae
 with the **same identity**. A new boot is accepted only when the old lock is gone.
 There is no lease expiry or automatic cross-host takeover. If a severed connection
 remains alive at PostgreSQL, restart refuses rather than assuming the old owner died.
-The owned topology uses the existing non-destructive PostgreSQL Task startup/shutdown
-policy: it does not rewrite running Tasks as restart orphans, intentionally terminate
-executors at daemon shutdown, retry prompts, or replay a committed dispatch. Executor
-survival still depends on the operator's process supervisor; ownership does not prove
-external work stopped. Ordinary Task runtime supervision remains separate.
+Because ownership proves this daemon is the only one, the owned topology keeps the
+single-daemon Task startup/shutdown contract while ownership is `owned` at boot:
+graceful shutdown contains the daemon's tracked local executors, and startup releases
+its executor-owned Tasks (including `stopping` Tasks whose termination was left
+unverified) as `stopped` with unverified termination, returns their Sessions to idle,
+and queues `execution.restart_recovery` exactly as a standalone daemon does. It never
+replays a committed dispatch. Executor survival still depends on the operator's process
+supervisor; ownership does not prove external work stopped. A lost or unbound owner, HA,
+or auth-resolved tenancy keeps the non-destructive shared PostgreSQL policy. Ordinary
+Task runtime supervision remains separate.
 
 #### Offline upgrade, verification, and rollback
 
