@@ -42,6 +42,8 @@ const session = (id: string, extra: Partial<Session> = {}) =>
     genealogy: { children: [] },
     scheduled_from_branch: false,
     ready_for_prompt: false,
+    // A settled run carries a generation this viewer has not acknowledged yet.
+    attention_generation: extra.ready_for_prompt ? 1 : 0,
     agentic_tool: 'claude-code',
     last_updated: new Date().toISOString(),
     ...extra,
@@ -220,7 +222,7 @@ describe('MobileApp Home wiring', () => {
     expect(await screen.findByTestId('board-page')).toHaveTextContent('board-2');
   });
 
-  it('clears a finished result’s flag when it is opened', async () => {
+  it('opens a finished result without clearing its shared ready flag', async () => {
     seed({ sessions: [session('done', { ready_for_prompt: true })] });
     renderPhoneHome();
     const needs = screen.getByRole('region', { name: 'Needs you' });
@@ -228,7 +230,8 @@ describe('MobileApp Home wiring', () => {
       fireEvent.click(within(needs).getByRole('button', { name: /^Session done/ }));
     });
     expect(await screen.findByTestId('session-page')).toHaveTextContent('done');
-    expect(patch).toHaveBeenCalledWith('done', { ready_for_prompt: false });
+    // The session page acknowledges it per viewer; the shared flag is promptability.
+    expect(patch).not.toHaveBeenCalledWith('done', { ready_for_prompt: false });
   });
 
   it('renders the teammates directory at /m/teammates/ with a back arrow to Home', async () => {

@@ -11,13 +11,18 @@ const REPLAYED = [
   '0113_callback_ownership_reconciliation',
   '9030_branch_front_desk_sessions',
 ];
-// Upstream migrations this fork journals above the deployed tail. Neither
-// retired order ran them, so the repair replays them after the slice.
+// Migrations this fork journals above the deployed tail (upstream's API-key
+// pair, the fork's profile image theme, upstream's re-stamped OpenCode
+// checkpoint table, then the restored session attention). Neither retired
+// order ran them, so the repair replays them after the slice. Session
+// attention is conditional and verified in place, so its objects need no
+// rewinding here.
 const UPSTREAM_TAIL = [
   '0115_api_key_host_tenant_discovery',
   '0116_user_api_key_source',
   '9031_profile_image_themes',
   '0117_opencode_checkpoint_attempts',
+  '9032_session_attention_states',
 ];
 
 // Fork main journalled front desk at 1790129000214 and profile images at

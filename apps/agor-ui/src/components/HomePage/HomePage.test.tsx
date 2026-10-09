@@ -28,6 +28,13 @@ vi.mock('../../hooks/useIdleReady', () => ({ useIdleReady: () => true }));
 
 beforeEach(resetHome);
 
+/** What the daemon returns once the viewer has seen the session's generation 1. */
+const acknowledged = async (id: string) => ({
+  session_id: id,
+  attention_generation: 1,
+  seen_attention_generation: 1,
+});
+
 describe('HomePage', () => {
   it('shows rows before hydration but never “all caught up” or counts', () => {
     seed({ sessions: [session('idle')], hydrated: false });
@@ -297,6 +304,7 @@ describe('HomePage', () => {
 
   it('marks only finished sessions the user started as read, from the row menu on phones', async () => {
     const patch = vi.fn(() => Promise.resolve());
+    const acknowledgeAttention = vi.fn(acknowledged);
     const client = {
       service: () => ({
         patch,
@@ -304,6 +312,7 @@ describe('HomePage', () => {
         get: () => new Promise(() => {}),
         getPrimaryTeammate: async () => null,
       }),
+      sessions: { acknowledgeAttention },
     } as unknown as AgorClient;
     seed({
       sessions: [
@@ -316,7 +325,12 @@ describe('HomePage', () => {
     expect(menus).toHaveLength(1);
     fireEvent.click(menus[0]);
     fireEvent.click(await screen.findByText('Mark as read'));
-    expect(patch).toHaveBeenCalledWith('done', { ready_for_prompt: false });
+    // Read state is per viewer; the shared ready flag is left to promptability.
+    expect(acknowledgeAttention).toHaveBeenCalledWith('done');
+    expect(patch).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(agorStore.getState().sessionById.get('done')?.viewer_seen_attention_generation).toBe(1)
+    );
   });
 
   it('says what a permission request asks for, from the latest task', async () => {
@@ -394,9 +408,10 @@ describe('HomePage', () => {
 
   it('groups finished results per branch behind the latest, and marks them all as read', async () => {
     asDesktop();
-    const patch = vi.fn(() => Promise.resolve());
+    const acknowledgeAttention = vi.fn(acknowledged);
     const client = {
-      service: () => ({ patch, find: async () => [], getPrimaryTeammate: async () => null }),
+      service: () => ({ find: async () => [], getPrimaryTeammate: async () => null }),
+      sessions: { acknowledgeAttention },
     } as unknown as AgorClient;
     seed({
       sessions: [1, 2, 3].map((i) =>
@@ -411,7 +426,7 @@ describe('HomePage', () => {
     expect(within(needs).getByText('Session r3')).toBeInTheDocument();
     expect(within(needs).getByText('Session r1')).toBeInTheDocument();
     fireEvent.click(within(needs).getByRole('button', { name: 'Mark all as read' }));
-    expect(patch.mock.calls.map(([id]) => id).sort()).toEqual(['r1', 'r2', 'r3']);
+    expect(acknowledgeAttention.mock.calls.map(([id]) => id).sort()).toEqual(['r1', 'r2', 'r3']);
   });
 
   it('puts row actions in the ⋯ menu on phones, so times stay in one column', async () => {
@@ -623,15 +638,17 @@ describe('HomePage', () => {
     asDesktop();
     let inFlight = 0;
     let peak = 0;
-    const patch = vi.fn(async (id: string) => {
+    const acknowledgeAttention = vi.fn(async (id: string) => {
       inFlight++;
       peak = Math.max(peak, inFlight);
       await new Promise((resolve) => setTimeout(resolve, 1));
       inFlight--;
       if (id === 'd1' || id === 'd2') throw new Error('forbidden');
+      return acknowledged(id);
     });
     const client = {
-      service: () => ({ patch, find: async () => [], getPrimaryTeammate: async () => null }),
+      service: () => ({ find: async () => [], getPrimaryTeammate: async () => null }),
+      sessions: { acknowledgeAttention },
     } as unknown as AgorClient;
     const sessions = Array.from({ length: 8 }, (_, i) =>
       session(`d${i}`, { ready_for_prompt: true, branch_id: `b-${i}` })
@@ -646,7 +663,7 @@ describe('HomePage', () => {
     renderHome({ client });
     fireEvent.click(screen.getByRole('button', { name: 'Mark all as read' }));
     expect(await screen.findByText('Couldn’t mark 2 of 8 as read')).toBeInTheDocument();
-    expect(patch).toHaveBeenCalledTimes(8);
+    expect(acknowledgeAttention).toHaveBeenCalledTimes(8);
     expect(peak).toBeLessThanOrEqual(4);
     expect(screen.getAllByText(/Couldn’t mark/)).toHaveLength(1);
   });

@@ -38,7 +38,12 @@ it('backfills SQLite recency atomically without losing children, indexes or fiel
     expect(await indexes()).toEqual(beforeIndexes);
     await runMigrations(db);
     expect(await rows()).toEqual(
-      fixture.rows.map((row) => ({ ...row, updated_at: row.updated_at ?? row.created_at }))
+      fixture.rows.map((row) => ({
+        ...row,
+        updated_at: row.updated_at ?? row.created_at,
+        // Added after this schema by 9032_session_attention_states.
+        attention_generation: 0,
+      }))
     );
     expect(
       rawRows(

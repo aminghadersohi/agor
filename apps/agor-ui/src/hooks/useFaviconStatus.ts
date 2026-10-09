@@ -3,7 +3,7 @@
  *
  * Updates favicon with dot overlays to indicate status:
  * - White dot (lower-left): Agent actively working
- * - Green dot (lower-right): Ready for prompt (completed work, needs attention)
+ * - Green dot (lower-right): a result the current user has not opened yet
  * - No dots: Nothing active on current board
  */
 

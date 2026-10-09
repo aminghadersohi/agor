@@ -33,6 +33,7 @@ import type { BranchStorageConfig } from '@/utils/branchStorage';
 import { AppActionsProvider } from '../../contexts/AppActionsContext';
 import { useRegisterBoardSwitcher } from '../../contexts/CanvasNavigationContext';
 import type { NewSessionConfig, SessionCreationResult } from '../../domain/sessionCreation';
+import { useAcknowledgeOpenSessionAttention } from '../../hooks/useAcknowledgeOpenSessionAttention';
 import { useAppNavigation } from '../../hooks/useAppNavigation';
 import { useBoardTitle } from '../../hooks/useBoardTitle';
 import { useEventStream } from '../../hooks/useEventStream';
@@ -1165,6 +1166,7 @@ export const App: React.FC<AppProps> = ({
     useAgorStore(
       useMemo(() => makeSessionSelector(effectiveSelectedSessionId), [effectiveSelectedSessionId])
     ) ?? null;
+  useAcknowledgeOpenSessionAttention(client, selectedSession);
   const selectedSessionBranchId = selectedSession?.branch_id;
   const selectedSessionBranch =
     useAgorStore(

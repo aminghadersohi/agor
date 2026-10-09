@@ -12,6 +12,7 @@ import { useIsMobileViewport } from '../../hooks/useIsMobileViewport';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useStableCallback } from '../../hooks/useStableCallback';
 import { useUserLocalStorage } from '../../hooks/useUserLocalStorage';
+import { sessionAttentionAcknowledged } from '../../store/agorRealtimeActions';
 import {
   type AgorState,
   agorStore,
@@ -368,14 +369,20 @@ export const HomePage = memo(function HomePage({
     },
     [onSessionClick, setOpenedFailures]
   );
+  // Read state is per viewer: acknowledging never clears the shared ready flag,
+  // which failed and timed-out sessions need to accept a follow-up.
+  const acknowledge = useCallback(
+    async (sessionId: string) => {
+      if (!client) return;
+      sessionAttentionAcknowledged(await client.sessions.acknowledgeAttention(sessionId));
+    },
+    [client]
+  );
   const markRead = useCallback(
     (sessionId: string) => {
-      client
-        ?.service('sessions')
-        .patch(sessionId, { ready_for_prompt: false })
-        .catch(() => showError('Couldn’t mark as read'));
+      acknowledge(sessionId).catch(() => showError('Couldn’t mark as read'));
     },
-    [client, showError]
+    [acknowledge, showError]
   );
   const [markingAll, setMarkingAll] = useState(false);
   const markAllRead = useCallback(async () => {
@@ -385,15 +392,13 @@ export const HomePage = memo(function HomePage({
       .map((s) => s.session_id);
     setMarkingAll(true);
     try {
-      const failed = await runWithLimit(ids, MARK_ALL_CONCURRENCY, (id) =>
-        client.service('sessions').patch(id, { ready_for_prompt: false })
-      );
+      const failed = await runWithLimit(ids, MARK_ALL_CONCURRENCY, acknowledge);
       if (failed.length === ids.length && failed.length) showError('Couldn’t mark as read');
       else if (failed.length) showError(`Couldn’t mark ${failed.length} of ${ids.length} as read`);
     } finally {
       setMarkingAll(false);
     }
-  }, [client, userId, showError]);
+  }, [client, userId, showError, acknowledge]);
   const showMoreWork = useCallback(() => setWorkLimit((limit) => limit + MY_WORK_PAGE), []);
   const archive = useCallback((sessionId: string) => confirmArchive(sessionId), [confirmArchive]);
   const showRunning = useCallback(() => {

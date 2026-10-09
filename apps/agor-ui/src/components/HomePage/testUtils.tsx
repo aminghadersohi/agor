@@ -55,6 +55,8 @@ export const session = (id: string, extra: Partial<Session> = {}) =>
     genealogy: { children: [] },
     scheduled_from_branch: false,
     ready_for_prompt: false,
+    // A settled run carries a generation this viewer has not acknowledged yet.
+    attention_generation: extra.ready_for_prompt ? 1 : 0,
     agentic_tool: 'claude-code',
     last_updated: recent(5),
     ...extra,
