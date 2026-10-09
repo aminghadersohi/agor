@@ -15,11 +15,13 @@ import {
   cleanupOrphanStatuses,
   createEnvironmentHealthMonitor,
   initializeEnvironmentHealthMonitor,
+  isOwnedStandalonePostgres,
   prepareTaskRuntimeStartup,
   type StartupContext,
   shouldContainLocalExecutorsOnShutdown,
   shouldReconnectSocketClientsOnShutdown,
   startup,
+  usesSingleDaemonTaskRuntime,
 } from './startup.js';
 import * as gitCredentialScan from './utils/git-remote-credential-scan.js';
 
@@ -139,6 +141,22 @@ function makeStartupContextWithGuardedDb(fixtures: StartupFixtures = {}) {
   return { ctx, baseDb, tasksService, sessionsService };
 }
 
+/**
+ * The single daemon that holds standalone PostgreSQL power ownership. Its
+ * Task runtime policy is `shared_postgres`, but no other replica can exist.
+ */
+function makeOwnedStandalonePostgres(ctx: StartupContext): StartupContext {
+  ctx.taskRuntimePolicy = 'shared_postgres';
+  ctx.environmentHealthMonitorPolicy = 'standalone';
+  ctx.config.database = { dialect: 'postgresql' };
+  ctx.config.deployment = {
+    mode: 'standalone',
+    standalone_power_host_id: '00000000-0000-4000-8000-000000000001',
+  };
+  ctx.config.multi_tenancy = { mode: 'static', static_tenant_id: 'startup-tenant' };
+  return ctx;
+}
+
 function makeTask(overrides: Partial<Task>): Task {
   return {
     task_id: 'task-1',
@@ -185,6 +203,134 @@ describe('startup tenant database scope', () => {
     expect(tasksService.settleTermination).not.toHaveBeenCalled();
     expect(sessionsService.find).not.toHaveBeenCalled();
     expect(sessionsService.patch).not.toHaveBeenCalled();
+  });
+
+  it('settles stale stopping Tasks and their Sessions at boot on the owned standalone PostgreSQL host', async () => {
+    // A previous boot's reconciler parked this Task as `unverified`: no other
+    // daemon can settle it, so before this fix it stayed `stopping` forever.
+    const stuck = makeTask({
+      task_id: 'stuck-stopping',
+      session_id: 'stuck-session',
+      status: TaskStatus.STOPPING,
+      sdk_failure: {
+        reason: 'termination_unverified',
+        detected_at: '2026-10-06T22:14:41.000Z',
+        termination: 'unverified',
+      },
+      termination_request: { cause: 'heartbeat_lost', requested_at: '2026-10-06T22:14:40.000Z' },
+    } as Partial<Task>);
+    const running = makeTask({ task_id: 'running-1', session_id: 'running-session' });
+    const { ctx, tasksService, sessionsService } = makeStartupContextWithGuardedDb({
+      orphanedTasks: [stuck, running],
+      sessionsById: {
+        'stuck-session': makeSession({
+          session_id: 'stuck-session',
+          status: SessionStatus.STOPPING,
+          tasks: [stuck.task_id] as Session['tasks'],
+        }),
+        'running-session': makeSession({
+          session_id: 'running-session',
+          status: SessionStatus.RUNNING,
+          tasks: [running.task_id] as Session['tasks'],
+        }),
+      },
+    });
+    makeOwnedStandalonePostgres(ctx);
+    ctx.config.execution = { restart_recovery: { enabled: true, resume_after_crash: true } };
+
+    const result = await prepareTaskRuntimeStartup(ctx);
+
+    expect(result).not.toBeNull();
+    expect(ctx.powerPolicyController.assertOwnershipInTransaction).toHaveBeenCalledOnce();
+    expect(tasksService.settleTermination).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: 'stuck-stopping',
+        outcome: 'restart_unverified',
+        sdkFailure: expect.objectContaining({ termination: 'unverified' }),
+      }),
+      expect.objectContaining({ suppressTerminalQueueProcessing: true })
+    );
+    // Only interrupted dispatching/running work is offered restart recovery.
+    const stuckSettlement = (
+      tasksService.settleTermination.mock.calls as unknown as [{ taskId: string }][]
+    ).find(([input]) => input.taskId === 'stuck-stopping');
+    expect(stuckSettlement?.[0]).not.toHaveProperty('restartRecovery');
+    expect(tasksService.settleTermination).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: 'running-1',
+        outcome: 'restart_unverified',
+        restartRecovery: expect.objectContaining({ source_task_id: 'running-1', state: 'pending' }),
+      }),
+      expect.anything()
+    );
+    expect(sessionsService.patch).toHaveBeenCalledWith(
+      'stuck-session',
+      { status: SessionStatus.IDLE, ready_for_prompt: true },
+      expect.anything()
+    );
+    expect(result?.sessionsResetFromOrphanedTasks).toBe(2);
+  });
+
+  it.each<[string, (ctx: StartupContext) => void]>([
+    ['the deployment is HA', (ctx) => (ctx.config.deployment!.mode = 'ha')],
+    [
+      'environment observation is distributed',
+      (ctx) => (ctx.environmentHealthMonitorPolicy = 'shared_postgres'),
+    ],
+    [
+      'no standalone power host is configured',
+      (ctx) => delete ctx.config.deployment!.standalone_power_host_id,
+    ],
+    ['the database is not PostgreSQL', (ctx) => (ctx.config.database = { dialect: 'sqlite' })],
+    [
+      'tenants are resolved from auth',
+      (ctx) =>
+        (ctx.config.multi_tenancy = {
+          mode: 'required_from_auth',
+          static_tenant_id: 'startup-tenant',
+          auth_claim: 'tenant_id',
+        }),
+    ],
+    [
+      'power ownership was lost',
+      (ctx) =>
+        (ctx.powerPolicyController = {
+          ...ctx.powerPolicyController,
+          status: () => ({ ownership: 'lost', held: false }),
+        } as unknown as StartupContext['powerPolicyController']),
+    ],
+    [
+      'no power owner is attached',
+      (ctx) =>
+        (ctx.powerPolicyController = {
+          ...ctx.powerPolicyController,
+          status: () => ({ held: false }),
+        } as unknown as StartupContext['powerPolicyController']),
+    ],
+  ])('keeps shared PostgreSQL startup non-destructive when %s', async (_label, mutate) => {
+    const { ctx, tasksService, sessionsService } = makeStartupContextWithGuardedDb({
+      orphanedTasks: [makeTask({ status: TaskStatus.STOPPING })],
+    });
+    makeOwnedStandalonePostgres(ctx);
+    mutate(ctx);
+
+    expect(isOwnedStandalonePostgres(ctx)).toBe(false);
+    expect(usesSingleDaemonTaskRuntime(ctx)).toBe(false);
+    await expect(prepareTaskRuntimeStartup(ctx)).resolves.toBeNull();
+    expect(ctx.powerPolicyController.assertOwnershipInTransaction).not.toHaveBeenCalled();
+    expect(tasksService.getOrphaned).not.toHaveBeenCalled();
+    expect(tasksService.settleTermination).not.toHaveBeenCalled();
+    expect(sessionsService.find).not.toHaveBeenCalled();
+    expect(sessionsService.patch).not.toHaveBeenCalled();
+  });
+
+  it('applies the single-daemon shutdown containment contract to the owned host only', () => {
+    const { ctx } = makeStartupContextWithGuardedDb();
+    makeOwnedStandalonePostgres(ctx);
+    expect(isOwnedStandalonePostgres(ctx)).toBe(true);
+    expect(usesSingleDaemonTaskRuntime(ctx)).toBe(true);
+    expect(shouldContainLocalExecutorsOnShutdown('shared_postgres', true)).toBe(true);
+    expect(shouldContainLocalExecutorsOnShutdown('shared_postgres', false)).toBe(false);
   });
 
   it.each([
