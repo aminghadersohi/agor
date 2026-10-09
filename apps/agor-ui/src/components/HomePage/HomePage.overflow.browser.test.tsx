@@ -101,7 +101,24 @@ function seed() {
       ],
     ]),
     userById: new Map([
-      [ME, { user_id: ME, name: 'Ada Lovelace' } as User],
+      [
+        ME,
+        {
+          user_id: ME,
+          name: 'Ada Lovelace',
+          preferences: {
+            chat_collections: {
+              collections: [
+                {
+                  collection_id: 'crew',
+                  name: `Crew for ${LONG}`,
+                  session_ids: ['idle', 'fail', 'run'],
+                },
+              ],
+            },
+          },
+        } as unknown as User,
+      ],
       ['u2', { user_id: 'u2', name: 'Grace Hopper' } as User],
     ]),
     sessionsHydrated: true,
@@ -140,6 +157,7 @@ async function renderHomeAt(width: number, dark: boolean) {
                 onBranchClick={vi.fn()}
                 onSessionClick={vi.fn()}
                 onCreateSession={vi.fn()}
+                onManageChatCollections={vi.fn()}
               />
             </div>
           </MemoryRouter>
@@ -149,6 +167,7 @@ async function renderHomeAt(width: number, dark: boolean) {
   );
   await screen.findByRole('heading', { name: 'Knowledge' });
   await screen.findByText('Rexy');
+  await screen.findByRole('heading', { name: 'Chat collections' });
   return screen.getByTestId('viewport');
 }
 

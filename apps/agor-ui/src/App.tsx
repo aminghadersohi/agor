@@ -25,6 +25,7 @@ import type {
 } from '@agor-live/client';
 import {
   boardPath,
+  CHAT_WORKSPACE_PATH_SEGMENT,
   ENTITY_PATH_SEGMENTS,
   hasMinimumRole,
   isAgenticToolName,
@@ -2426,6 +2427,13 @@ function AppContent() {
             />
             <Route
               path={`/${ENTITY_PATH_SEGMENTS.artifact}/:artifactShortId/`}
+              element={desktopAppElement}
+            />
+            {/* Chat workspace: the same session target as `/s/`, with the
+                pinned-chat rail in place of the board canvas. */}
+            <Route path={`/${CHAT_WORKSPACE_PATH_SEGMENT}/`} element={desktopAppElement} />
+            <Route
+              path={`/${CHAT_WORKSPACE_PATH_SEGMENT}/:sessionShortId/`}
               element={desktopAppElement}
             />
 

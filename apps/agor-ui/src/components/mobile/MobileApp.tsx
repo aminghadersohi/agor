@@ -48,6 +48,7 @@ import type { BranchUpdate } from '../BranchModal/useBranchModalForm';
 import { type HomeLocationState, HomePage } from '../HomePage';
 import { PowerStatusIndicator } from '../PowerStatusIndicator';
 import { PrimaryTeammatePicker } from '../SettingsModal/PrimaryTeammatePicker';
+import { TeammateChatCollectionsModal } from '../TeammateChatCollections';
 import { TeammatesDirectory } from '../TeammatesDirectory';
 import { mobilePageStyle } from './constants';
 import { MobileBoardPage } from './MobileBoardPage';
@@ -159,6 +160,13 @@ export const MobileApp: React.FC<MobileAppProps> = ({
   const [moreOpen, setMoreOpen] = useState(false);
   const [askPickerOpen, setAskPickerOpen] = useState(false);
   const [newSessionBranchId, setNewSessionBranchId] = useState<string | null>(null);
+  // Chat collections manager; a session id opens it on "add this session".
+  const [chatCollections, setChatCollections] = useState<{ sessionId?: string } | null>(null);
+  const openChatCollections = useCallback(
+    (sessionId?: string) => setChatCollections({ sessionId }),
+    []
+  );
+  const manageChatCollections = useCallback(() => setChatCollections({}), []);
   const [branchEditor, setBranchEditor] = useState<{
     branchId: string;
     tab: BranchModalTab;
@@ -454,6 +462,7 @@ export const MobileApp: React.FC<MobileAppProps> = ({
                   onAllBoards={openBoardList}
                   onSeeAllSessions={openSessionList}
                   onSeeAllTeammates={openTeammates}
+                  onManageChatCollections={manageChatCollections}
                 />
               )}
             />
@@ -561,6 +570,7 @@ export const MobileApp: React.FC<MobileAppProps> = ({
                   onUpdateSessionEnvSelections={onUpdateSessionEnvSelections}
                   onOpenBranch={(branchId, tab = 'general') => setBranchEditor({ branchId, tab })}
                   onOpenAgenticToolSettings={onOpenAgenticToolSettings}
+                  onPinToChatCollection={openChatCollections}
                 />
               }
             />
@@ -696,6 +706,14 @@ export const MobileApp: React.FC<MobileAppProps> = ({
             setBranchEditor(null);
             onOpenWorkspaceSettings('repos');
           }}
+        />
+
+        <TeammateChatCollectionsModal
+          open={!!chatCollections}
+          client={client}
+          currentUser={user}
+          preselectedSessionId={chatCollections?.sessionId}
+          onClose={() => setChatCollections(null)}
         />
       </Layout>
     </MobileHeaderAccessory.Provider>

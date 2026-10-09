@@ -44,6 +44,7 @@ import { HomePinnedArtifactsSection } from './HomePinnedArtifactsSection';
 import { HomeRecentBoards } from './HomeRecentBoards';
 import { HomeSchedulesSection } from './HomeSchedulesSection';
 import { HomeFrame } from './HomeSection';
+import { HomeTeammateChatsSection } from './HomeTeammateChatsSection';
 import { HomeTeammatesSection } from './HomeTeammates';
 import { HOME_MAIN_COLUMN_BASIS, HOME_PAGE_TITLE_LEVEL, HOME_RAIL_BASIS } from './homeLayout';
 import { OnboardingCard } from './OnboardingCard';
@@ -103,6 +104,10 @@ export interface HomePageProps {
   onSeeAllSessions?: () => void;
   /** Opens the teammates directory; the rail's "See all" hides without it. */
   onSeeAllTeammates?: () => void;
+  /** Opens the chat collections manager; the rail's collections hide without it. */
+  onManageChatCollections?: () => void;
+  /** Opens a session pinned in a chat collection. Defaults to `onSessionClick`. */
+  onOpenChatSession?: (sessionId: string) => void;
 }
 
 const scrollToSection = (id: string) =>
@@ -205,6 +210,8 @@ export const HomePage = memo(function HomePage({
   onAllBoards,
   onSeeAllSessions,
   onSeeAllTeammates,
+  onManageChatCollections,
+  onOpenChatSession,
 }: HomePageProps) {
   const { token } = theme.useToken();
   const { showError } = useThemedMessage();
@@ -567,6 +574,13 @@ export const HomePage = memo(function HomePage({
               onOpenBoard={onBoardClick}
               onSeeAll={onSeeAllTeammates}
             />
+            {onManageChatCollections && (
+              <HomeTeammateChatsSection
+                currentUser={currentUser}
+                onOpenSession={onOpenChatSession ?? onSessionClick}
+                onManage={onManageChatCollections}
+              />
+            )}
             <HomeKnowledgeSection client={client} connected={connected} />
           </Flex>
         )}
