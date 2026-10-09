@@ -28,7 +28,13 @@ import {
   type TenantScopedDatabase,
   UsersRepository,
 } from '@agor/core/db';
-import { type Schedule, type SessionID, TaskStatus } from '@agor/core/types';
+import {
+  type Schedule,
+  type Session,
+  type SessionID,
+  SessionStatus,
+  TaskStatus,
+} from '@agor/core/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { SchedulerService } from '../services/scheduler.js';
 import { prepareTaskRuntimeStartup, type StartupContext } from '../startup.js';
@@ -384,6 +390,105 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       expect(
         (await inTenant(s.tenant, (tx) => new TaskRepository(tx).findById(s.task.task_id)))?.status
       ).toBe(TaskStatus.RUNNING);
+    });
+
+    it('releases a parked unverified stopping Task at boot only on the owned single host', async () => {
+      const s = await seed();
+      const owner = await acquire(s.tenant);
+      // Reproduce a previous boot's reconciler parking the Task as unverified.
+      await inTenant(s.tenant, async (tx) => {
+        const tasks = new TaskRepository(tx);
+        await tasks.update(s.task.task_id, { status: TaskStatus.RUNNING });
+        await new SessionRepository(tx).update(s.session.session_id, {
+          status: SessionStatus.STOPPING,
+          ready_for_prompt: false,
+        });
+        await tasks.claimTermination({
+          taskId: s.task.task_id,
+          cause: 'heartbeat_lost',
+          errorMessage: 'Fictional heartbeat loss',
+        });
+        await tasks.claimTerminationCoordination({
+          taskId: s.task.task_id,
+          claimToken: 'previous-boot-claim',
+          leaseDurationMs: 60_000,
+          instanceId: 'previous-daemon',
+          bootId: 'previous-boot',
+        });
+        const parked = await tasks.settleTermination({
+          taskId: s.task.task_id,
+          outcome: 'unverified',
+          coordinationToken: 'previous-boot-claim',
+          errorMessage: 'Fictional unverified containment',
+          sdkFailure: {
+            reason: 'termination_unverified',
+            detected_at: new Date().toISOString(),
+            termination: 'unverified',
+          },
+        });
+        expect(parked).toMatchObject({ outcome: 'unverified', task: { status: 'stopping' } });
+      });
+
+      const scoped = createTenantScopedDatabaseProxy(db);
+      const tasks = new TaskRepository(scoped);
+      const sessions = new SessionRepository(scoped);
+      const sessionsService = {
+        get: async (id: string) => sessions.findById(id),
+        find: async ({
+          query,
+        }: {
+          query: { status: Session['status']; ready_for_prompt?: boolean };
+        }) =>
+          (await sessions.findByStatus(query.status)).filter(
+            (session) =>
+              query.ready_for_prompt === undefined ||
+              session.ready_for_prompt === query.ready_for_prompt
+          ),
+        patch: async (id: string, data: Partial<Session>) => sessions.update(id, data),
+      };
+      const tasksService = {
+        getOrphaned: () => tasks.findOrphaned(),
+        get: async (id: string) => tasks.findById(id),
+        settleTermination: (input: Parameters<TaskRepository['settleTermination']>[0]) =>
+          tasks.settleTermination(input),
+      };
+      const ctx = {
+        app: {
+          service: (name: string) => (name === 'tasks' ? tasksService : sessionsService),
+        },
+        db: scoped,
+        sessionsService,
+        config: {
+          database: { dialect: 'postgresql' },
+          deployment: { mode: 'ha', standalone_power_host_id: HOST_A },
+          multi_tenancy: { mode: 'static', static_tenant_id: s.tenant },
+        },
+        taskRuntimePolicy: 'shared_postgres',
+        environmentHealthMonitorPolicy: 'standalone',
+        powerPolicyController: await controller(s.tenant, owner),
+      } as unknown as StartupContext;
+      const current = () =>
+        inTenant(s.tenant, async (tx) => ({
+          task: await new TaskRepository(tx).findById(s.task.task_id),
+          session: await new SessionRepository(tx).findById(s.session.session_id),
+        }));
+
+      // HA: another replica may own the Task, so boot must not touch it.
+      await expect(prepareTaskRuntimeStartup(ctx)).resolves.toBeNull();
+      expect((await current()).task?.status).toBe(TaskStatus.STOPPING);
+
+      ctx.config.deployment!.mode = 'standalone';
+      const result = await prepareTaskRuntimeStartup(ctx);
+      expect(result?.orphanedTasks.map((task) => task.task_id)).toEqual([s.task.task_id]);
+      const after = await current();
+      expect(after.task).toMatchObject({
+        status: TaskStatus.STOPPED,
+        sdk_failure: { termination: 'unverified' },
+      });
+      expect(after.session).toMatchObject({
+        status: SessionStatus.IDLE,
+        ready_for_prompt: true,
+      });
     });
 
     it('holds real schedule materialization and coalesces missed occurrences without duplicate Sessions', async () => {
