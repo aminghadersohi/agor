@@ -140,8 +140,43 @@ type EnvironmentHealthMonitorFactory = (
  * then losing the process-local evidence would force another replica to claim
  * uncertainty. Actual survival still depends on the execution substrate.
  */
-export function shouldContainLocalExecutorsOnShutdown(policy: TaskRuntimePolicy): boolean {
-  return policy === 'standalone';
+export function shouldContainLocalExecutorsOnShutdown(
+  policy: TaskRuntimePolicy,
+  ownedStandalonePostgres = false
+): boolean {
+  return policy === 'standalone' || ownedStandalonePostgres;
+}
+
+/**
+ * A `shared_postgres` Task runtime that is provably the only daemon: a static
+ * single-tenant standalone deployment on PostgreSQL whose exclusive power-host
+ * ownership is currently held. No other replica can own its Tasks, so it keeps
+ * the single-daemon contracts (local environment observation, boot repair,
+ * shutdown containment). Ownership is acquired during database initialization,
+ * before startup; shutdown marks it lost, so evaluate this once at startup.
+ */
+export function isOwnedStandalonePostgres(
+  ctx: Pick<
+    StartupContext,
+    'taskRuntimePolicy' | 'environmentHealthMonitorPolicy' | 'config' | 'powerPolicyController'
+  >
+): boolean {
+  return (
+    ctx.taskRuntimePolicy === 'shared_postgres' &&
+    ctx.environmentHealthMonitorPolicy === 'standalone' &&
+    ctx.config.database?.dialect === 'postgresql' &&
+    ctx.config.deployment?.mode !== 'ha' &&
+    Boolean(ctx.config.deployment?.standalone_power_host_id) &&
+    resolveMultiTenancyConfig(ctx.config).mode === 'static' &&
+    ctx.powerPolicyController?.status().ownership === 'owned'
+  );
+}
+
+/** Whether this daemon owns every active Task: standalone, or the owned standalone PostgreSQL host. */
+export function usesSingleDaemonTaskRuntime(
+  ctx: Parameters<typeof isOwnedStandalonePostgres>[0]
+): boolean {
+  return ctx.taskRuntimePolicy === 'standalone' || isOwnedStandalonePostgres(ctx);
 }
 
 /** Preserve standalone's terminal Socket.IO disconnect while HA invites failover reconnect. */
@@ -174,15 +209,10 @@ export function createEnvironmentHealthMonitor(
     });
   }
 ): EnvironmentHealthMonitor | null {
-  const ownedStandalonePostgres =
-    ctx.taskRuntimePolicy === 'shared_postgres' &&
-    ctx.environmentHealthMonitorPolicy === 'standalone' &&
-    ctx.config.database?.dialect === 'postgresql' &&
-    ctx.config.deployment?.mode !== 'ha' &&
-    Boolean(ctx.config.deployment?.standalone_power_host_id) &&
-    resolveMultiTenancyConfig(ctx.config).mode === 'static' &&
-    ctx.powerPolicyController?.status().ownership === 'owned';
-  if (ctx.taskRuntimePolicy !== ctx.environmentHealthMonitorPolicy && !ownedStandalonePostgres) {
+  if (
+    ctx.taskRuntimePolicy !== ctx.environmentHealthMonitorPolicy &&
+    !isOwnedStandalonePostgres(ctx)
+  ) {
     return null;
   }
   return factory(ctx.environmentHealthMonitorPolicy, ctx.app, ctx);
@@ -676,7 +706,7 @@ export function initializeEnvironmentHealthMonitor(
 export async function prepareTaskRuntimeStartup(
   ctx: StartupContext
 ): Promise<OrphanCleanupResult | null> {
-  if (ctx.taskRuntimePolicy !== 'standalone') return null;
+  if (!usesSingleDaemonTaskRuntime(ctx)) return null;
   return runStartupTenantDatabaseScope(ctx, async () => {
     await ctx.powerPolicyController.assertOwnershipInTransaction(ctx.db);
     return cleanupOrphanStatuses(ctx);
@@ -698,9 +728,17 @@ export async function startup(ctx: StartupContext): Promise<void> {
 
   // 1. Preserve the historical single-daemon active-runtime repair only
   // behind its explicit policy. A shared PostgreSQL replica starting is not
-  // evidence that any Task, Session, queue item, or executor is orphaned.
+  // evidence that any Task, Session, queue item, or executor is orphaned; the
+  // owned standalone PostgreSQL host is the only daemon, so for it it is.
+  // Decided once here: shutdown marks power ownership lost.
+  const ownedStandalonePostgres = isOwnedStandalonePostgres(ctx);
+  const singleDaemonTaskRuntime = usesSingleDaemonTaskRuntime(ctx);
   const orphanCleanupResult = await prepareTaskRuntimeStartup(ctx);
-  if (ctx.taskRuntimePolicy !== 'standalone') {
+  if (ownedStandalonePostgres) {
+    console.log(
+      '[startup] owned standalone PostgreSQL host: single-daemon startup cleanup and restart recovery enabled'
+    );
+  } else if (!singleDaemonTaskRuntime) {
     console.log(
       '[startup] shared PostgreSQL task runtime: startup cleanup and restart notices disabled'
     );
@@ -998,9 +1036,9 @@ export async function startup(ctx: StartupContext): Promise<void> {
         await knowledgeEmbeddingIndexer.stop();
       }
 
-      // The process-global sentinel is meaningful only for a standalone daemon.
+      // The process-global sentinel is meaningful only for a single daemon.
       // In shared mode it cannot identify which replica owned any Task.
-      if (ctx.taskRuntimePolicy === 'standalone') {
+      if (singleDaemonTaskRuntime) {
         await writeCleanShutdownSentinel(signal);
       }
 
@@ -1016,8 +1054,10 @@ export async function startup(ctx: StartupContext): Promise<void> {
       sessionAutoArchiveWorker?.stop();
       sessionReminderWorker?.stop();
 
-      if (shouldContainLocalExecutorsOnShutdown(ctx.taskRuntimePolicy)) {
-        // Preserve the historical standalone shutdown contract.
+      if (shouldContainLocalExecutorsOnShutdown(ctx.taskRuntimePolicy, ownedStandalonePostgres)) {
+        // Preserve the historical single-daemon shutdown contract. The next
+        // boot's repair may queue restart recovery, which must not race a
+        // surviving executor of the same Session.
         await containAllTrackedExecutors(app);
       } else if (ctx.taskRuntimePolicy === 'shared_postgres') {
         // A shared replica cannot discard verified process-local evidence
