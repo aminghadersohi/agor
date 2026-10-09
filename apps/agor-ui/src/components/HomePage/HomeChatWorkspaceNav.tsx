@@ -14,11 +14,11 @@ import { Button, Flex, Tooltip, Typography, theme } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_BACKGROUNDS } from '../../constants/ui';
 import { useAgorStore } from '../../store/agorStore';
-import { selectBranchById } from '../../store/selectors';
+import { selectBoardById, selectBranchById } from '../../store/selectors';
 import { getSessionDisplayTitle } from '../../utils/sessionTitle';
 import { isDarkTheme } from '../../utils/theme';
 import { formatRelativeTimeSafe } from '../../utils/time';
-import { BoardTile } from '../BoardTile';
+import { BoardTile, getBoardEmoji } from '../BoardTile';
 import { SessionRowLogo, SessionStatusMark } from '../SessionRow';
 import {
   useChatCollections,
@@ -52,11 +52,14 @@ export interface HomeChatWorkspaceNavProps {
   onManage: (sessionId?: string) => void;
   onExit: () => void;
   onShowOnBoard: (sessionId: string) => void;
+  /** Opens a branch's board from its identity in the tree. */
+  onBoardClick: (boardId: string) => void;
 }
 
 /**
  * The chat workspace's left rail: collection → branch or teammate → pinned session, beside
- * the open conversation. Only pinned sessions appear; finding more happens in Manage.
+ * the open conversation. Only pinned sessions appear; finding more happens in Manage. A
+ * branch's avatar or board tile opens its board, apart from the expand/collapse control.
  */
 export function HomeChatWorkspaceNav({
   currentUser,
@@ -65,9 +68,11 @@ export function HomeChatWorkspaceNav({
   onManage,
   onExit,
   onShowOnBoard,
+  onBoardClick,
 }: HomeChatWorkspaceNavProps) {
   const { token } = theme.useToken();
   const branchById = useAgorStore(selectBranchById);
+  const boardById = useAgorStore(selectBoardById);
   const { collections } = useChatCollections(currentUser);
   const pinned = usePinnedCollections(collections);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
@@ -146,6 +151,15 @@ export function HomeChatWorkspaceNav({
     font: 'inherit',
     cursor: 'pointer',
     textAlign: 'left',
+  };
+  // A branch's identity (teammate avatar or board tile) over the disclosure's second column.
+  const identitySlot: React.CSSProperties = {
+    gridArea: '1 / 2',
+    position: 'relative',
+    width: IDENTITY_SIZE,
+    height: IDENTITY_SIZE,
+    display: 'grid',
+    placeItems: 'center',
   };
 
   return (
@@ -251,36 +265,82 @@ export function HomeChatWorkspaceNav({
                           const branchExpanded = expandedKeys.has(key);
                           const teammate = getTeammateConfig(branch);
                           const branchLabel = teammate?.displayName || branch.name;
+                          const board = branch.board_id
+                            ? boardById.get(branch.board_id)
+                            : undefined;
+                          const openableBoard = board && !board.archived ? board : undefined;
+                          const identity = teammate ? (
+                            <TeammateIdentityAvatar
+                              aria-hidden
+                              branch={branch}
+                              size={IDENTITY_SIZE}
+                            />
+                          ) : (
+                            <BoardTile
+                              board={board}
+                              emoji={board ? getBoardEmoji(board) : undefined}
+                              size={IDENTITY_SIZE}
+                            />
+                          );
                           return (
                             <div key={key}>
-                              <button
-                                type="button"
-                                className="agor-home-pressable"
-                                aria-expanded={branchExpanded}
-                                aria-label={`${branchExpanded ? 'Collapse' : 'Expand'} sessions for ${branchLabel}`}
-                                onClick={() => toggleExpanded(key)}
-                                style={rowButton}
+                              {/* Disclosure and board are sibling controls: the identity sits
+                                  over the disclosure's empty second column. */}
+                              <div
+                                style={{
+                                  display: 'grid',
+                                  gridTemplateColumns: rowGrid,
+                                  alignItems: 'center',
+                                  columnGap: token.marginXS,
+                                  paddingInline: token.paddingXS,
+                                }}
                               >
-                                {disclosureIcon(branchExpanded)}
-                                {teammate ? (
-                                  <TeammateIdentityAvatar
-                                    aria-hidden
-                                    branch={branch}
-                                    size={IDENTITY_SIZE}
-                                  />
-                                ) : (
-                                  <BoardTile size={IDENTITY_SIZE} />
-                                )}
-                                <Typography.Text ellipsis style={{ minWidth: 0 }}>
-                                  {branchLabel}
-                                </Typography.Text>
-                                <Typography.Text
-                                  type="secondary"
-                                  style={{ fontSize: token.fontSizeSM }}
+                                <button
+                                  type="button"
+                                  className="agor-home-pressable"
+                                  aria-expanded={branchExpanded}
+                                  aria-label={`${branchExpanded ? 'Collapse' : 'Expand'} sessions for ${branchLabel}`}
+                                  onClick={() => toggleExpanded(key)}
+                                  style={{
+                                    ...rowButton,
+                                    gridArea: '1 / 1 / 2 / -1',
+                                    width: `calc(100% + ${2 * token.paddingXS}px)`,
+                                    marginInline: -token.paddingXS,
+                                  }}
                                 >
-                                  {sessions.length}
-                                </Typography.Text>
-                              </button>
+                                  {disclosureIcon(branchExpanded)}
+                                  <span aria-hidden />
+                                  <Typography.Text ellipsis style={{ minWidth: 0 }}>
+                                    {branchLabel}
+                                  </Typography.Text>
+                                  <Typography.Text
+                                    type="secondary"
+                                    style={{ fontSize: token.fontSizeSM }}
+                                  >
+                                    {sessions.length}
+                                  </Typography.Text>
+                                </button>
+                                {openableBoard ? (
+                                  <Tooltip title={`Open ${openableBoard.name} board`}>
+                                    <Button
+                                      type="text"
+                                      aria-label={`Open ${openableBoard.name} board`}
+                                      onClick={() => onBoardClick(openableBoard.board_id)}
+                                      style={{
+                                        ...identitySlot,
+                                        minWidth: IDENTITY_SIZE,
+                                        padding: 0,
+                                      }}
+                                    >
+                                      {identity}
+                                    </Button>
+                                  </Tooltip>
+                                ) : (
+                                  <span aria-hidden style={identitySlot}>
+                                    {identity}
+                                  </span>
+                                )}
+                              </div>
 
                               {branchExpanded && (
                                 <Flex

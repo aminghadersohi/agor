@@ -1660,6 +1660,7 @@ export const App: React.FC<AppProps> = ({
                         onManage={openChatCollections}
                         onExit={handleHomeClick}
                         onShowOnBoard={handleSessionClick}
+                        onBoardClick={handleHomeBoardClick}
                       />
                     ) : isHomeSurface ? (
                       <HomePage
