@@ -297,9 +297,9 @@ containment settles as `failed`. If absence cannot be verified, the task stays
 explicitly force-fail it by typing `STOP`. Force-fail changes durable status to
 `failed`; it does not prove or guarantee process termination. A daemon restart
 can logically release orphaned work as `stopped`, but records that termination
-was not verified. This last release exists only in explicit `standalone`
-compatibility mode; shared PostgreSQL startup never treats another replica's
-work as orphaned.
+was not verified. This last release exists only for a single daemon: explicit
+`standalone` compatibility mode, or the owned standalone PostgreSQL host below.
+Shared PostgreSQL startup never treats another replica's work as orphaned.
 
 An abrupt local-launcher-daemon loss is not absence proof. If its execution
 substrate survives the launcher and callbacks route to the fleet, the detached
@@ -308,11 +308,13 @@ does not guarantee that process survival. If it does not reconnect, a non-owner 
 resume the durable request after the owner grace/lease, but without an
 authoritative handle it must leave containment unverified.
 
-The explicitly owned standalone macOS PostgreSQL power topology also uses the
-non-destructive `shared_postgres` Task startup/shutdown policy. Its exclusive host
-ownership is acquired before bootstrap and new admissions are transactionally
-fenced; owner disconnect never settles or retries running Tasks. This does not
-make its deployment HA. See the UPS section of the configuration guide and
+The explicitly owned standalone macOS PostgreSQL power topology runs the
+`shared_postgres` Task runtime, but while its exclusive host ownership is `owned`
+at boot (`isOwnedStandalonePostgres` in `startup.ts`) it keeps the single-daemon
+startup repair, clean-shutdown sentinel, and shutdown containment: no other
+replica can own its Tasks. Ownership is acquired before bootstrap and new
+admissions are transactionally fenced; owner disconnect never settles or retries
+running Tasks. This does not make its deployment HA. See the UPS section of the configuration guide and
 `packages/core/src/db/standalone-power-owner.ts`.
 
 Standalone graceful shutdown preserves historical local executor
@@ -386,8 +388,9 @@ Preserve these invariants:
    rollouts are unsupported.
 10. Supervision does not imply automatic retry, prompt replay, or exactly-once
     external effects.
-11. Daemon startup is non-destructive in shared PostgreSQL policy; queues and
-    Session projection change only from authoritative Task outcomes.
+11. Daemon startup is non-destructive in shared PostgreSQL policy (except on the
+    owned standalone PostgreSQL host); queues and Session projection change only
+    from authoritative Task outcomes.
 
 ## Code map
 
