@@ -1,0 +1,1 @@
+export { TeammateChatCollectionsModal } from './TeammateChatCollectionsModal';

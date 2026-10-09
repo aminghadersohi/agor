@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { ArtifactID, BoardID, BranchID, SessionID } from '../types/id';
 import {
+  CHAT_WORKSPACE_PATH_SEGMENT,
+  chatWorkspacePath,
   deriveLoopbackReachableOrigin,
   getArtifactFullscreenUrl,
   getArtifactUrl,
@@ -12,6 +14,7 @@ import {
   isAllowedHealthCheckUrl,
   normalizeHttpBaseUrl,
   normalizeOptionalHttpUrl,
+  sessionPath,
 } from './url';
 
 describe('getMcpSlackRecoveryUrl', () => {
@@ -30,6 +33,15 @@ const SESSION_ID = '01927f9d-0000-7000-8000-000000000001' as SessionID;
 const BRANCH_ID = '01927f9d-0000-7000-8000-000000000002' as BranchID;
 const BOARD_ID = '01927f9d-0000-7000-8000-000000000003' as BoardID;
 const ARTIFACT_ID = '01927f9d-0000-7000-8000-000000000004' as ArtifactID;
+
+describe('chatWorkspacePath', () => {
+  it('addresses the workspace root and the same short session ID as sessionPath', () => {
+    expect(chatWorkspacePath()).toBe(`/${CHAT_WORKSPACE_PATH_SEGMENT}/`);
+    expect(chatWorkspacePath(null)).toBe('/chats/');
+    const short = sessionPath(SESSION_ID).split('/')[2];
+    expect(chatWorkspacePath(SESSION_ID)).toBe(`/chats/${short}/`);
+  });
+});
 
 describe('entity URL builders — fullUrl double-prefix regression', () => {
   it('produces correct session URL when baseUrl has no /ui suffix', () => {

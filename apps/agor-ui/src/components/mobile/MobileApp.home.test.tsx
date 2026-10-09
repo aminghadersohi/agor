@@ -26,7 +26,8 @@ vi.mock('./SessionPage', () => ({
 }));
 vi.mock('./MobileNavTree', () => ({ MobileNavTree: () => null }));
 vi.mock('../BranchModal', () => ({ BranchModal: () => null }));
-vi.mock('../../hooks/useIdleReady', () => ({ useIdleReady: () => false }));
+const idleReady = vi.hoisted(() => ({ value: false }));
+vi.mock('../../hooks/useIdleReady', () => ({ useIdleReady: () => idleReady.value }));
 
 const ME = 'user-1';
 const user = { user_id: ME, name: 'Kasia Designer', role: 'member' } as User;
@@ -154,6 +155,7 @@ function renderPhoneHome(entries = ['/m']) {
 }
 
 beforeEach(() => {
+  idleReady.value = false;
   Element.prototype.scrollIntoView = vi.fn();
   localStorage.clear();
   patch.mockClear();
@@ -253,5 +255,35 @@ describe('MobileApp Home wiring', () => {
     renderPhoneHome(['/m/teammates']);
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     expect(await screen.findByText(/Good (morning|afternoon|evening), Kasia/)).toBeInTheDocument();
+  });
+
+  it('lists chat collections on phone Home, opens their sessions and manages them', async () => {
+    idleReady.value = true;
+    seed({ sessions: [session('pinned', { title: 'Pinned thread' })] });
+    agorStore.setState({
+      userById: new Map([
+        [
+          ME,
+          {
+            ...user,
+            preferences: {
+              chat_collections: {
+                collections: [{ collection_id: 'crew', name: 'Crew', session_ids: ['pinned'] }],
+              },
+            },
+          } as User,
+        ],
+      ]),
+    });
+    renderPhoneHome();
+
+    const crew = await screen.findByRole('region', { name: 'Crew' });
+    fireEvent.click(within(crew).getByRole('button', { name: /Pinned thread/ }));
+    expect(await screen.findByTestId('session-page')).toHaveTextContent('pinned');
+
+    act(() => history.back());
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage' }));
+    expect(await screen.findByText('Manage chat collections')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Collection name' })).toHaveValue('Crew');
   });
 });

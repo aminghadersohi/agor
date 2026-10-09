@@ -42,6 +42,24 @@ const EMPTY_USER_MAP = new Map<string, User>();
 // reference for tasks whose messages haven't been loaded — otherwise `|| []`
 // would mint a fresh array on every render and thrash TaskBlock's React.memo.
 const EMPTY_MESSAGES: Message[] = [];
+const MAX_REMEMBERED_CONVERSATION_SCROLLS = 100;
+/** In-memory reading positions for the chat workspace; never persisted, bounded LRU. */
+const rememberedConversationScrolls = new Map<
+  SessionID,
+  { atBottom: boolean; scrollTop: number }
+>();
+
+function rememberConversationScroll(
+  sessionId: SessionID,
+  value: { atBottom: boolean; scrollTop: number }
+): void {
+  rememberedConversationScrolls.delete(sessionId);
+  rememberedConversationScrolls.set(sessionId, value);
+  const oldest = rememberedConversationScrolls.keys().next().value;
+  if (rememberedConversationScrolls.size > MAX_REMEMBERED_CONVERSATION_SCROLLS && oldest) {
+    rememberedConversationScrolls.delete(oldest);
+  }
+}
 
 const EMPTY_TASKS: Task[] = [];
 
@@ -144,6 +162,9 @@ export interface ConversationViewProps {
 
   /** Hide operational detail and keep the transcript conversation-first. */
   simple?: boolean;
+
+  /** Remember deliberate scroll-away positions while switching among workspace chats. */
+  rememberScrollPosition?: boolean;
 }
 
 const ConversationViewInner = React.memo<ConversationViewProps>(
@@ -167,6 +188,7 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
     onOpenAgenticToolSettings,
     compact = false,
     simple = false,
+    rememberScrollPosition = false,
   }) => {
     const { token } = theme.useToken();
     const [copied, copy] = useCopyToClipboard();
@@ -322,11 +344,43 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
     // mounts. handleScrollToBottom also clears the escape so the library's
     // persistent observer reliably follows lazy/streamed growth from there.
     const hasContent = tasks.length > 0 && !initialHydrationPending;
+
+    // Capture the outgoing chat before its transcript DOM goes away (a session
+    // switch remounts this view). Only in-memory viewport state is kept: chats
+    // left at the tail reopen at the new tail, while a chat deliberately
+    // scrolled away from the bottom returns to that reading position.
+    useLayoutEffect(() => {
+      if (!rememberScrollPosition || !sessionId) return;
+      return () => {
+        const scroller = scrollRef.current;
+        if (!scroller) return;
+        rememberConversationScroll(sessionId, {
+          atBottom: state.isAtBottom && !state.escapedFromLock,
+          scrollTop: scroller.scrollTop,
+        });
+      };
+    }, [rememberScrollPosition, scrollRef, sessionId, state]);
+
     useEffect(() => {
-      if (isActive && sessionId && hasContent) {
-        handleScrollToBottom();
+      if (!isActive || !sessionId || !hasContent) return;
+      const remembered = rememberScrollPosition
+        ? rememberedConversationScrolls.get(sessionId)
+        : undefined;
+      if (remembered && !remembered.atBottom) {
+        stopScroll();
+        if (scrollRef.current) scrollRef.current.scrollTop = remembered.scrollTop;
+        return;
       }
-    }, [isActive, sessionId, hasContent, handleScrollToBottom]);
+      handleScrollToBottom();
+    }, [
+      isActive,
+      sessionId,
+      hasContent,
+      handleScrollToBottom,
+      rememberScrollPosition,
+      scrollRef,
+      stopScroll,
+    ]);
 
     const loading = currentReactiveState ? currentReactiveState.loading : !!sessionId;
     const error = currentReactiveState?.error || null;

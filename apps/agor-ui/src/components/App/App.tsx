@@ -78,7 +78,7 @@ import {
   buildTeammateFirstSessionTitle,
 } from '../../utils/teammateBootstrapPrompt';
 import { createTeammateBranch } from '../../utils/teammateCreation';
-import { isTeammatesRoute } from '../../utils/uiRoutes';
+import { isChatWorkspaceRoute, isTeammatesRoute } from '../../utils/uiRoutes';
 import { getUserDefaultConfigurationSource } from '../AgenticToolConfigurationPicker/useAgenticConfigurationSources';
 import { AppHeader } from '../AppHeader';
 import type { BoardTeammatePanelTab } from '../BoardTeammatePanel';
@@ -90,7 +90,7 @@ import type { BranchTabConfig } from '../CreateDialog/tabs/BranchTab';
 import type { TeammateTabResult } from '../CreateDialog/tabs/TeammateTab';
 import { EnvironmentLogsModal } from '../EnvironmentLogsModal';
 import { EventStreamPanel } from '../EventStreamPanel';
-import { HomePage } from '../HomePage';
+import { HomeChatWorkspaceNav, HomePage } from '../HomePage';
 import { NewSessionButton } from '../NewSessionButton';
 import { NewSessionModal } from '../NewSessionModal';
 import { SessionCanvas, type SessionCanvasRef } from '../SessionCanvas';
@@ -98,6 +98,7 @@ import { SessionPanel } from '../SessionPanel';
 import { PendingToolChoicePanel } from '../SessionPanel/PendingToolChoicePanel';
 import { SessionSettingsModal } from '../SessionSettingsModal';
 import { SettingsModal } from '../SettingsModal';
+import { TeammateChatCollectionsModal } from '../TeammateChatCollections';
 import { TeammatesDirectory } from '../TeammatesDirectory';
 import { TerminalModal, WEB_TERMINAL_MIN_ROLE } from '../TerminalModal';
 import { ThemeEditorModal } from '../ThemeEditorModal';
@@ -297,6 +298,8 @@ const LEFT_PANEL_MIN_WIDTH_PX = 320;
 const LEFT_PANEL_MAX_SIZE_PERCENT = 45;
 const SESSION_PANEL_MIN_WIDTH_PX = 360;
 const SESSION_PANEL_MAX_SIZE_PERCENT = 75;
+/** The chat workspace's conversation takes at least this much of the viewport beside its rail. */
+const CHAT_WORKSPACE_SESSION_MIN_PERCENT = 68;
 const SESSION_PANEL_MIN_SIZE_FLOOR_PERCENT = 15;
 // Matches the canvas panel's own `minSize` below — kept as one constant so
 // the two cannot drift apart.
@@ -555,9 +558,13 @@ export const App: React.FC<AppProps> = ({
     useMemo(() => makeBoardSelector(teammateTargetBoardId), [teammateTargetBoardId])
   );
   const isHomeSurface = isRootHomePath && !hasExplicitEntityTarget;
-  const headerBoardId = isHomeSurface ? '' : currentBoardId;
-  const wasHomeSurfaceRef = useRef(isHomeSurface);
-  const isLeavingHomeSurface = wasHomeSurfaceRef.current && !isHomeSurface;
+  // `/chats/` and `/chats/<session>/` render the pinned-chat rail in place of
+  // the board canvas; for shell chrome it behaves like Home.
+  const isChatWorkspaceSurface = isChatWorkspaceRoute(shellSurfacePath);
+  const isHomeLikeSurface = isHomeSurface || isChatWorkspaceSurface;
+  const headerBoardId = isHomeLikeSurface ? '' : currentBoardId;
+  const wasHomeSurfaceRef = useRef(isHomeLikeSurface);
+  const isLeavingHomeSurface = wasHomeSurfaceRef.current && !isHomeLikeSurface;
   const [homeExitSidePanelDeferred, setHomeExitSidePanelDeferred] = useState(false);
   const [homeExitPanelDetailsDeferred, setHomeExitPanelDetailsDeferred] = useState(false);
 
@@ -566,8 +573,8 @@ export const App: React.FC<AppProps> = ({
       setHomeExitSidePanelDeferred(true);
       setHomeExitPanelDetailsDeferred(true);
     }
-    wasHomeSurfaceRef.current = isHomeSurface;
-  }, [isLeavingHomeSurface, isHomeSurface]);
+    wasHomeSurfaceRef.current = isHomeLikeSurface;
+  }, [isLeavingHomeSurface, isHomeLikeSurface]);
 
   useEffect(() => {
     if (!homeExitSidePanelDeferred) return;
@@ -604,13 +611,14 @@ export const App: React.FC<AppProps> = ({
   const leftPanelCollapsed =
     commentsPanelCollapsed ||
     suppressLeftPanel ||
-    isHomeSurface ||
+    isHomeLikeSurface ||
     isLeavingHomeSurface ||
     homeExitSidePanelDeferred;
   // The rail only makes sense when there's a board to open the panel onto,
   // and stays hidden entirely while a modal-first flow suppresses the panel
   // (suppressLeftPanel) — same gating the old floating knob used.
-  const leftPanelRailVisible = leftPanelCollapsed && !!currentBoard && !suppressLeftPanel;
+  const leftPanelRailVisible =
+    leftPanelCollapsed && !!currentBoard && !suppressLeftPanel && !isChatWorkspaceSurface;
   const leftPanelCollapsedSize = leftPanelRailVisible ? leftPanelRailSize : 0;
 
   // Ref for programmatically controlling the comments panel
@@ -645,7 +653,9 @@ export const App: React.FC<AppProps> = ({
   );
 
   const effectiveSessionPanelSize = clampPercent(
-    sessionPanelSize,
+    isChatWorkspaceSurface
+      ? Math.max(sessionPanelSize, CHAT_WORKSPACE_SESSION_MIN_PERCENT)
+      : sessionPanelSize,
     sessionPanelMinSize,
     SESSION_PANEL_MAX_SIZE_PERCENT
   );
@@ -681,6 +691,14 @@ export const App: React.FC<AppProps> = ({
   const [branchModalTab, setBranchModalTab] = useState<BranchModalTab | undefined>(undefined);
   const [logsModalBranchId, setLogsModalBranchId] = useState<string | null>(null);
   const [themeEditorOpen, setThemeEditorOpen] = useState(false);
+  // Chat collections manager; a session id opens it on "add this session".
+  const [chatCollections, setChatCollections] = useState<{ sessionId?: string } | null>(null);
+  const openChatCollections = useCallback(
+    (sessionId?: string) => setChatCollections({ sessionId }),
+    []
+  );
+  const manageChatCollections = useCallback(() => setChatCollections({}), []);
+  const closeChatCollections = useCallback(() => setChatCollections(null), []);
 
   // Initialize event stream panel state from localStorage (collapsed by default)
   const [eventStreamPanelCollapsed, setEventStreamPanelCollapsed] = useLocalStorage<boolean>(
@@ -761,6 +779,15 @@ export const App: React.FC<AppProps> = ({
   const handleHomeBranchClick = useCallback(
     (branchId: string) => navigation.goToBranch(branchId),
     [navigation]
+  );
+
+  const handleChatWorkspaceSessionClick = useCallback(
+    (sessionId: string) => {
+      clearOpenedSessionFlags(client, sessionId);
+      setPendingToolChoiceBranchId(null);
+      navigation.goToChatWorkspace(sessionId);
+    },
+    [client, navigation]
   );
 
   const handleCreateBoardTeammate = useCallback(() => {
@@ -889,8 +916,10 @@ export const App: React.FC<AppProps> = ({
   // the panel is the same as navigating to the board we're already on.
   const handleCloseSessionPanel = useCallback(() => {
     setPendingToolChoiceBranchId(null);
-    if (currentBoardId) navigation.goToBoard(currentBoardId);
-  }, [navigation, currentBoardId]);
+    // Inside the chat workspace, closing keeps the rail: back to `/chats/`.
+    if (isChatWorkspaceSurface) navigation.goToChatWorkspace();
+    else if (currentBoardId) navigation.goToBoard(currentBoardId);
+  }, [navigation, currentBoardId, isChatWorkspaceSurface]);
 
   const handleCloseTerminal = () => {
     setTerminalOpen(false);
@@ -1623,6 +1652,15 @@ export const App: React.FC<AppProps> = ({
                         onOpenBoard={handleHomeBoardClick}
                         onBack={handleTeammatesBack}
                       />
+                    ) : isChatWorkspaceSurface ? (
+                      <HomeChatWorkspaceNav
+                        currentUser={user}
+                        activeSessionId={effectiveSelectedSessionId}
+                        onSessionClick={handleChatWorkspaceSessionClick}
+                        onManage={openChatCollections}
+                        onExit={handleHomeClick}
+                        onShowOnBoard={handleSessionClick}
+                      />
                     ) : isHomeSurface ? (
                       <HomePage
                         client={client}
@@ -1635,6 +1673,8 @@ export const App: React.FC<AppProps> = ({
                         onOpenCreateDialog={handleHomeOpenCreateDialog}
                         onOpenSettings={openSettings}
                         onSeeAllTeammates={handleSeeAllTeammates}
+                        onManageChatCollections={manageChatCollections}
+                        onOpenChatSession={handleChatWorkspaceSessionClick}
                       />
                     ) : (
                       <SessionCanvas
@@ -1668,7 +1708,7 @@ export const App: React.FC<AppProps> = ({
                         onCommentSelect={handleCommentSelect}
                       />
                     )}
-                    {!isHomeSurface && (
+                    {!isHomeLikeSurface && (
                       <NewSessionButton
                         onClick={() => {
                           const center = sessionCanvasRef.current?.getViewportCenter();
@@ -1720,6 +1760,11 @@ export const App: React.FC<AppProps> = ({
                               sessionMcpServerIds={selectedSessionMcpServerIds}
                               open={!!effectiveSelectedSessionId}
                               onClose={handleCloseSessionPanel}
+                              onPinToChatCollection={openChatCollections}
+                              onOpenChatWorkspace={
+                                isChatWorkspaceSurface ? undefined : handleChatWorkspaceSessionClick
+                              }
+                              preferFocusChat={isChatWorkspaceSurface}
                               uploadPolicy={uploadPolicy}
                             />
                           </div>
@@ -1902,6 +1947,13 @@ export const App: React.FC<AppProps> = ({
           />
         )}
         <ThemeEditorModal open={themeEditorOpen} onClose={() => setThemeEditorOpen(false)} />
+        <TeammateChatCollectionsModal
+          open={!!chatCollections}
+          client={client}
+          currentUser={user}
+          preselectedSessionId={chatCollections?.sessionId}
+          onClose={closeChatCollections}
+        />
         <SharedUserSettingsModal
           open={effectiveUserSettingsOpen}
           initialTab={userSettingsInitialTool ?? initialUserSettingsTab}

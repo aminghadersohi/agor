@@ -25,7 +25,7 @@
  * re-renders on every stream patch.
  */
 import type { Artifact, ArtifactID, Branch, BranchID, Session, SessionID } from '@agor-live/client';
-import { artifactPath, branchPath, sessionPath } from '@agor-live/client';
+import { artifactPath, branchPath, chatWorkspacePath, sessionPath } from '@agor-live/client';
 import { useCallback, useMemo, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useRecenterMap } from '../contexts/CanvasNavigationContext';
@@ -77,6 +77,8 @@ export interface AppNavigation {
   goHome: (opts?: NavigationOpts) => void;
   /** Navigate to the teammates directory on the current shell: `/teammates` or `/m/teammates`. */
   goToTeammates: (opts?: NavigationOpts) => void;
+  /** Desktop chat workspace: `/chats/<short>/`, or the bare rail `/chats/` without a session. */
+  goToChatWorkspace: (sessionId?: string | null, opts?: NavigationOpts) => void;
   /** Home on the current shell: back one entry when this one was opened from Home, else replacing this entry. */
   goBack: () => void;
 }
@@ -169,6 +171,13 @@ export function useAppNavigation({
     [pushPath]
   );
 
+  const goToChatWorkspace = useCallback(
+    (sessionId?: string | null, opts?: NavigationOpts) => {
+      pushPath(chatWorkspacePath(sessionId as SessionID | null | undefined), opts);
+    },
+    [pushPath]
+  );
+
   // Only an entry pushed from Home pops: after a Settings round trip the previous entry is Settings.
   const goBack = useCallback(() => {
     const canPop =
@@ -245,7 +254,25 @@ export function useAppNavigation({
   );
 
   return useMemo(
-    () => ({ goToSession, goToBranch, goToArtifact, goToBoard, goHome, goToTeammates, goBack }),
-    [goToSession, goToBranch, goToArtifact, goToBoard, goHome, goToTeammates, goBack]
+    () => ({
+      goToSession,
+      goToBranch,
+      goToArtifact,
+      goToBoard,
+      goHome,
+      goToTeammates,
+      goToChatWorkspace,
+      goBack,
+    }),
+    [
+      goToSession,
+      goToBranch,
+      goToArtifact,
+      goToBoard,
+      goHome,
+      goToTeammates,
+      goToChatWorkspace,
+      goBack,
+    ]
   );
 }

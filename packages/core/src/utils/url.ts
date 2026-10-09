@@ -64,6 +64,19 @@ export const ENTITY_PATH_SEGMENTS = {
   knowledge: 'kb',
 } as const;
 
+/**
+ * Leading segment of the pinned-chat workspace surface. Not an entry in
+ * `ENTITY_PATH_SEGMENTS` because it addresses a *surface*, not an entity:
+ * `/chats/<sessionShort>/` and `/s/<sessionShort>/` name the same session
+ * and differ only in the chrome rendered around it.
+ *
+ * That equivalence is why this lives here rather than as a string literal
+ * at each call site — the URL⇄state sync has to recognize the chat path as
+ * an already-canonical spelling of the open session, or it rewrites it to
+ * `/s/...` and ejects the user from the workspace.
+ */
+export const CHAT_WORKSPACE_PATH_SEGMENT = 'chats';
+
 // ---------------------------------------------------------------------------
 // Path builders — produce the `/<entity>/<id>/` shape with no `/ui`
 // prefix and no base URL. Used by both the UI router (which adds `/ui`
@@ -81,6 +94,14 @@ export function boardPath(boardId: BoardID, boardSlug?: string | null): string {
  *  switches to its branch's board, and opens the conversation panel. */
 export function sessionPath(sessionId: SessionID): string {
   return `/${ENTITY_PATH_SEGMENTS.session}/${shortId(sessionId)}/`;
+}
+
+/** `/chats/` or `/chats/<sessionShort>/` — the pinned-chat workspace.
+ *  Same session target as `sessionPath`, rendered with the chat rail
+ *  instead of the board canvas. */
+export function chatWorkspacePath(sessionId?: SessionID | null): string {
+  const base = `/${CHAT_WORKSPACE_PATH_SEGMENT}/`;
+  return sessionId ? `${base}${shortId(sessionId)}/` : base;
 }
 
 /** `/w/<branchShort>/` — branch deep link. App resolves the

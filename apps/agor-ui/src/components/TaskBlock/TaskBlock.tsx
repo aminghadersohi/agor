@@ -55,6 +55,8 @@ const { Paragraph } = Typography;
 // Default-param `= new Map()` would mint a fresh Map per render and defeat
 // the MessageBlock memos below whenever the prop is omitted.
 const EMPTY_USER_MAP = new Map<string, User>();
+/** Child-session callbacks in focus chat read as activity, not conversation. */
+const SIMPLE_CALLBACK_OPACITY = 0.84;
 
 function MetadataList({ children, gap }: { children: React.ReactNode; gap: number }) {
   const items = React.Children.toArray(children).filter((item) => item !== '');
@@ -720,6 +722,8 @@ export const TaskBlock = React.memo<TaskBlockProps>(
   }) => {
     const { token } = theme.useToken();
     const runtimeLive = shouldRenderLiveTaskProgress(task);
+    // Focus chat keeps child-session callbacks visible but subdued.
+    const isSimpleCallback = simple && task.metadata?.is_agor_callback === true;
     const currentUser = currentUserId ? userById.get(currentUserId) : undefined;
     const canRequestMcpReconnect =
       currentUserId === task.created_by || hasMinimumRole(currentUser?.role, ROLES.ADMIN);
@@ -1127,7 +1131,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
                 teammateAvatarUrl={teammateAvatarUrl}
                 client={client}
                 onOpenAgenticToolSettings={onOpenAgenticToolSettings}
-                compact={compact}
+                compact={compact || isSimpleCallback}
                 defaultTextExpanded={defaultTextExpanded}
                 showAvatar={!groupedAvatarMessageIds.has(block.message.message_id)}
               />
@@ -1297,7 +1301,13 @@ export const TaskBlock = React.memo<TaskBlockProps>(
       // A turn boundary is the biggest break in the transcript, so it gets more
       // room than the gaps between blocks inside one. Collapses against the
       // neighbouring turn rather than summing with it.
-      <div data-task-block={task.task_id} style={{ marginBlockStart: token.margin }}>
+      <div
+        data-task-block={task.task_id}
+        style={{
+          marginBlockStart: token.margin,
+          opacity: isSimpleCallback ? SIMPLE_CALLBACK_OPACITY : undefined,
+        }}
+      >
         {/* Focus chat omits the tool timeline entirely, including its lazy loader. */}
         {!promptMessageId && !simple && toolDisclosure}
         <ContextUsageRule
