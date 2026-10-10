@@ -20,7 +20,11 @@ import {
   BranchRepository,
   bindRepositoryToTenantUnitOfWork,
   EntityNotFoundError,
+  eq,
   getCurrentTenantId,
+  lockRowForUpdate,
+  MCPServerRepository,
+  mcpServers,
   runWithTenantDatabaseScope,
   runWithTenantDatabaseTransaction,
   SessionEnvSelectionRepository,
@@ -42,7 +46,8 @@ import {
   NotFound,
   Unavailable,
 } from '@agor/core/feathers';
-import { MCPServerNotUsableError } from '@agor/core/mcp';
+import { assertSearchTerms, idFilterValues } from '@agor/core/lib/feathers-validation';
+import { isMCPServerNotUsableError } from '@agor/core/mcp';
 import {
   formatModelToolMismatchWarning,
   getCodexModelSelectionError,
@@ -50,6 +55,7 @@ import {
   isResolvedModelConfig,
   lintModelToolMatch,
 } from '@agor/core/models';
+import { resolveSessionMcpServerIds } from '@agor/core/sessions';
 import type {
   AgenticToolName,
   AuthenticatedParams,
@@ -73,6 +79,7 @@ import {
   isAgenticToolDefaultConfigurationReference,
   isSessionExecuting,
   SessionStatus,
+  toLeanSessionListRow,
   USER_DEFAULT_AGENTIC_CONFIGURATION,
 } from '@agor/core/types';
 import { assertExecutionHomeKeySatisfiesMode } from '@agor/core/unix';
@@ -80,6 +87,7 @@ import { DrizzleService, type Query } from '../adapters/drizzle';
 import {
   branchSdkHomeUnsupportedReason,
   hasSecureLocalCredentialOverlay,
+  isHostedOpenCode,
   resolveBranchSdkHomeIncompatibility,
   resolveNewSessionSdkHomeScope,
   resolveSdkHomeConfig,
@@ -120,6 +128,7 @@ function sessionConfigurationSource(
       codexSandboxMode: data.permission_config?.codex?.sandboxMode,
       codexApprovalPolicy: data.permission_config?.codex?.approvalPolicy,
       codexNetworkAccess: data.permission_config?.codex?.networkAccess,
+      codexIncludePlugins: data.permission_config?.codex?.includePlugins,
     },
   };
 }
@@ -151,6 +160,38 @@ export function assertSessionArchiveStateUsesDedicatedOperation(data: SessionUpd
   }
 }
 
+/**
+ * `read_shape` marks a lean `sessions.find` row (`SESSION_LIST_ROW_SHAPE`) and is
+ * set only by that read projection. It is never stored, so a write carrying it
+ * could only echo it back on the response and the realtime event, where it
+ * would mark a full row as lean.
+ */
+function assertSessionReadShapeNotWritten(data: object): void {
+  if (Object.hasOwn(data, 'read_shape')) {
+    throw new BadRequest('read_shape is a read projection marker and cannot be written');
+  }
+}
+
+/**
+ * `tasks` is the Session's dispatch log: the Task repository appends each Task
+ * in the transaction that claims its dispatch, and nothing else writes it.
+ * Clients (the lean transcript) place history by its positions, so no caller
+ * may replace it, whatever its permission or provider.
+ */
+const SESSION_TASKS_SERVER_MANAGED = 'tasks is server-managed: only dispatch appends to it';
+
+function assertSessionTasksNotWritten(data: object): void {
+  if (Object.hasOwn(data, 'tasks')) throw new BadRequest(SESSION_TASKS_SERVER_MANAGED);
+}
+
+/** A new Session starts with no dispatched Tasks; an empty list is accepted for compatibility. */
+function withoutCreateTasks<T extends object>(data: T): T {
+  if (!Object.hasOwn(data, 'tasks')) return data;
+  const { tasks, ...rest } = data as T & { tasks?: unknown };
+  if (!Array.isArray(tasks) || tasks.length > 0) throw new BadRequest(SESSION_TASKS_SERVER_MANAGED);
+  return rest as T;
+}
+
 function normalizeCreateMcpServerIds(value: unknown): MCPServerID[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
@@ -179,6 +220,9 @@ export type SessionParams = QueryParams<{
   agentic_tool?: Session['agentic_tool'];
   board_id?: string;
   include_usage?: boolean | 'true' | 'false';
+  include_tasks_complete?: boolean | 'true' | 'false';
+  /** List-only projection; see `LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS`. */
+  lean?: boolean;
   include_last_message?: boolean | 'true' | 'false'; // Opt-in last message enrichment
   last_message_truncation_length?: number; // Default: 500 chars, min: 50, max: 10000
   /** Marks a `remove` as the delete half of a "switch tool" swap (see `remove`). */
@@ -209,7 +253,7 @@ export type SessionParams = QueryParams<{
  * (SQL board filter + recency sort + limit/offset) rather than the generic
  * in-memory path. We only divert the loader's bounded list queries — those that
  * sort by `updated_at` and/or scope to a `board_id`/`branch_id` — and only when the rest of
- * the query is a shape findPage fully models (archived/status + pagination). Anything
+ * the query is a shape findPage fully models (archived/status/created_by + pagination). Anything
  * with extra filters, operators, or `$select` falls through to the existing path
  * so we never silently drop semantics findPage doesn't implement.
  */
@@ -221,13 +265,27 @@ function shouldSqlPageSessionQuery(query?: Record<string, unknown>, forcePage = 
   const wantsCreatedAt = !!sort && sort.created_at !== undefined;
   const wantsBoard = query.board_id !== undefined;
   const wantsBranch = query.branch_id !== undefined;
-  if (!wantsRecency && !wantsCreatedAt && !wantsBoard && !wantsBranch && !forcePage) return false;
+  const wantsSessions = query.session_id !== undefined;
+  const wantsSearch = query.search !== undefined;
+  if (
+    !wantsRecency &&
+    !wantsCreatedAt &&
+    !wantsBoard &&
+    !wantsBranch &&
+    !wantsSessions &&
+    !wantsSearch &&
+    !forcePage
+  )
+    return false;
 
   const allowedKeys = new Set([
     'archived',
     'status',
     'board_id',
     'branch_id',
+    'session_id',
+    'created_by',
+    'search',
     '$sort',
     '$limit',
     '$count',
@@ -243,16 +301,10 @@ function shouldSqlPageSessionQuery(query?: Record<string, unknown>, forcePage = 
   )
     return false;
   if (wantsBoard && typeof query.board_id !== 'string') return false;
-  if (wantsBranch) {
-    const branchFilter = query.branch_id;
-    const validExact = typeof branchFilter === 'string';
-    const validSet =
-      branchFilter !== null &&
-      typeof branchFilter === 'object' &&
-      Array.isArray((branchFilter as { $in?: unknown }).$in) &&
-      (branchFilter as { $in: unknown[] }).$in.every((id) => typeof id === 'string');
-    if (!validExact && !validSet) return false;
-  }
+  if (query.created_by !== undefined && typeof query.created_by !== 'string') return false;
+  if (wantsSearch && typeof query.search !== 'string') return false;
+  if (wantsSessions && idFilterValues(query.session_id) === undefined) return false;
+  if (wantsBranch && idFilterValues(query.branch_id) === undefined) return false;
   if (sort) {
     const sortKeys = Object.keys(sort);
     if (sortKeys.length !== 1 || !['updated_at', 'created_at'].includes(sortKeys[0])) return false;
@@ -333,10 +385,16 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
   private taskRepo: TaskRepository;
   private db: TenantScopeAwareDatabase;
   private deploymentAvailable: (tool: AgenticToolName) => boolean;
+  private deploymentToolUnsupported: (tool: AgenticToolName) => BadRequest | undefined;
 
   private assertDeploymentToolConfigured(tool: AgenticToolName): void {
-    if (this.deploymentAvailable(tool)) return;
-    throw new BadRequest(deploymentAgenticToolUnavailableMessage(tool));
+    if (!this.deploymentAvailable(tool)) {
+      throw new BadRequest(deploymentAgenticToolUnavailableMessage(tool));
+    }
+    // An installed tool can still be unsupported by this deployment's topology;
+    // refuse with its structured reason instead of failing the first prompt.
+    const unsupported = this.deploymentToolUnsupported(tool);
+    if (unsupported) throw unsupported;
   }
 
   private assertSupportedModelConfig(
@@ -372,7 +430,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
   constructor(
     db: TenantScopeAwareDatabase,
     app: Application,
-    deploymentAvailable: (tool: AgenticToolName) => boolean = () => true
+    deploymentAvailable: (tool: AgenticToolName) => boolean = () => true,
+    deploymentToolUnsupported: (tool: AgenticToolName) => BadRequest | undefined = () => undefined
   ) {
     const sessionRepo = new SessionRepository(db);
     super(sessionRepo, {
@@ -388,6 +447,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     this.sessionRepo = sessionRepo;
     this.db = db;
     this.deploymentAvailable = deploymentAvailable;
+    this.deploymentToolUnsupported = deploymentToolUnsupported;
     this.app = app;
     // Custom service-to-service methods such as setMCPServers() can run with
     // tenant identity but without a request-scoped database transaction. Bind
@@ -430,7 +490,11 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     // the mutation boundary rather than waiting for a confusing launch-time
     // refusal.
     if (existing.sdk_home_scope === 'branch') {
-      const unsupportedReason = branchSdkHomeUnsupportedReason(nextTool);
+      const config =
+        typeof (this.app as { get?: unknown }).get === 'function'
+          ? this.app.get('config')
+          : ({} as import('@agor/core/config').AgorConfig);
+      const unsupportedReason = branchSdkHomeUnsupportedReason(nextTool, isHostedOpenCode(config));
       if (unsupportedReason) {
         throw new BadRequest(
           `${nextTool} cannot use this session's branch SDK home because ${unsupportedReason}.`
@@ -468,6 +532,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (Object.hasOwn(data, 'sdk_home_scope')) {
       throw new BadRequest('sdk_home_scope is server-managed and cannot be set by clients');
     }
+    data = withoutCreateTasks(data);
+    assertSessionReadShapeNotWritten(data);
     const explicitMcpServerIds = normalizeCreateMcpServerIds(
       (data as { mcpServerIds?: unknown }).mcpServerIds
     );
@@ -489,8 +555,9 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       agentic_tool_preset_id: configurationReference,
       model_config: originalModelConfig,
       mcpServerIds: _requestedMcpServerIds,
+      mcp_defaults_skipped: _ignoredMcpWarning,
       ...sessionData
-    } = data as CreateSessionInput;
+    } = data as CreateSessionInput & Pick<Session, 'mcp_defaults_skipped'>;
     let createData: Partial<Session> = { ...sessionData };
     if (params?._agenticConfigResolved) {
       createData = {
@@ -558,6 +625,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     // the session that caused adoption (or the inverse). The live deployment
     // flag is consulted only here; executor startup reads the immutable stamp.
     const tenantId = params?.tenant?.tenant_id ?? getCurrentTenantId();
+    const attachedMcpServerIds: MCPServerID[] = [];
+    let skippedMcpDefaults = 0;
     const created = await runWithTenantDatabaseTransaction(this.db, tenantId, async (scoped) => {
       const branchRepo = new BranchRepository(scoped);
       const branch = await branchRepo.findById(createData.branch_id as BranchID);
@@ -588,6 +657,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         const unsupportedReason = await resolveBranchSdkHomeIncompatibility({
           tool: agenticTool,
           delegated,
+          hostedOpenCode: isHostedOpenCode(config),
           secureLocalCredentialOverlay: hasSecureLocalCredentialOverlay(config),
           userId: createData.created_by as UserID | undefined,
           db: scoped,
@@ -606,21 +676,66 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         sdk_home_scope: admission.scope,
       });
 
-      // Attach in-transaction: a bad server rolls the create back, not a silent drop (#2629).
-      if (explicitMcpServerIds && explicitMcpServerIds.length > 0) {
-        const mcpRepo = new SessionMCPServerRepository(scoped);
+      // Omission preserves provenance: only defaults read here may be skipped.
+      // Never accept a client-supplied "inherited" list or fall through to user
+      // defaults after a configured branch list turns out to be entirely stale.
+      const user =
+        explicitMcpServerIds === undefined && createdSession.created_by
+          ? await new UsersRepository(scoped).findById(createdSession.created_by)
+          : undefined;
+      const serverIds = normalizeCreateMcpServerIds(
+        resolveSessionMcpServerIds({
+          explicit: explicitMcpServerIds,
+          branch,
+          user,
+        })
+      )!;
+      const mcpRepo = new SessionMCPServerRepository(scoped);
+      // Resolve and deduplicate before sorting: mixed UUID/prefix spellings
+      // must not give concurrent creators opposite canonical lock orders.
+      // Keep the number of distinct requested defaults per canonical ID so a
+      // deletion after resolution preserves the skipped-default count.
+      const canonicalIds = new Map<MCPServerID, number>();
+      const handleMcpError = (error: unknown, count: number) => {
+        if (isMCPServerNotUsableError(error)) {
+          throw new Forbidden('That MCP server is private to another user');
+        }
+        if (error instanceof EntityNotFoundError && error.entityType === 'MCPServer') {
+          if (explicitMcpServerIds === undefined) {
+            skippedMcpDefaults += count;
+            return;
+          }
+          throw new NotFound(
+            'That MCP server was not found. Remove the unavailable selection from MCP Servers and try again.'
+          );
+        }
+        throw error;
+      };
+      const serverRepo = new MCPServerRepository(scoped);
+      for (const requestedId of serverIds) {
         try {
-          for (const serverId of explicitMcpServerIds) {
-            await mcpRepo.addServer(createdSession.session_id, serverId);
-          }
+          const serverId = await serverRepo.resolveCanonicalId(requestedId);
+          canonicalIds.set(serverId, (canonicalIds.get(serverId) ?? 0) + 1);
         } catch (error) {
-          if (error instanceof MCPServerNotUsableError) {
-            throw new Forbidden('That MCP server is private to another user');
-          }
-          if (error instanceof EntityNotFoundError) {
-            throw new NotFound('That MCP server was not found');
-          }
-          throw error;
+          handleMcpError(error, 1);
+        }
+      }
+      // Lock in canonical order, in this same tenant transaction. A concurrent
+      // delete either wins first (typed missing below) or waits for attachment.
+      // SQLite's IMMEDIATE transaction already serializes writers. Do not catch
+      // FK/storage errors: PostgreSQL would have aborted the transaction.
+      for (const serverId of [...canonicalIds.keys()].sort()) {
+        try {
+          await lockRowForUpdate(
+            scoped,
+            scoped,
+            mcpServers,
+            eq(mcpServers.mcp_server_id, serverId)
+          );
+          await mcpRepo.addServer(createdSession.session_id, serverId);
+          attachedMcpServerIds.push(serverId);
+        } catch (error) {
+          handleMcpError(error, canonicalIds.get(serverId)!);
         }
       }
 
@@ -629,8 +744,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (Array.isArray(created)) {
       throw new Error('Single-session creation returned multiple sessions');
     }
-    if (explicitMcpServerIds && explicitMcpServerIds.length > 0) {
-      for (const serverId of explicitMcpServerIds) {
+    if (attachedMcpServerIds.length > 0) {
+      for (const serverId of attachedMcpServerIds) {
         emitServiceEvent(this.app, {
           path: 'session-mcp-servers',
           event: 'created',
@@ -645,6 +760,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         });
       }
     }
+    // Enrich the fresh DTO without losing its non-enumerable tenant marker.
+    if (skippedMcpDefaults > 0) created.mcp_defaults_skipped = skippedMcpDefaults;
     return created;
   }
 
@@ -1009,6 +1126,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
 
     const forkedSession = await this.create(
       {
+        mcpServerIds: [], // Fork copies its parent below, not fresh-session defaults.
         agentic_tool: parentTool,
         agentic_tool_preset_id: inherited.agentic_tool_preset_id,
         status: SessionStatus.IDLE,
@@ -1028,7 +1146,6 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         contextFiles: [...(parent.contextFiles || [])],
         permission_config: inherited.permission_config,
         model_config: inherited.model_config,
-        tasks: [],
         // Don't copy sdk_session_id - fork will get its own via forkSession:true
       },
       { ...params, _agenticConfigResolved: true, _sdkHomeScope: parent.sdk_home_scope }
@@ -1046,7 +1163,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
 
     // Copy parent's env var *names* to forked session.
     // Names resolve at execution time against the child session's owner's
-    // env vars (see env-var-access.md), so when a cross-user fork happens
+    // env vars, so when a cross-user fork happens
     // these names are looked up under the caller's namespace, not the parent
     // owner's — no leakage of parent credentials into a fork the caller owns.
     const parentEnvSelections = await this.sessionEnvSelectionRepo.listNames(
@@ -1092,7 +1209,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       data.modelConfig !== undefined ||
       data.codexSandboxMode !== undefined ||
       data.codexApprovalPolicy !== undefined ||
-      data.codexNetworkAccess !== undefined;
+      data.codexNetworkAccess !== undefined ||
+      data.codexIncludePlugins !== undefined;
     const inheritedPresetId =
       // Explicit inline selection detaches from the parent's preset. The
       // materializer still enforces the workspace's inline-configuration policy.
@@ -1141,6 +1259,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
                   codexSandboxMode: data.codexSandboxMode,
                   codexApprovalPolicy: data.codexApprovalPolicy,
                   codexNetworkAccess: data.codexNetworkAccess,
+                  codexIncludePlugins: data.codexIncludePlugins,
                 },
               }
             : { reference: USER_DEFAULT_AGENTIC_CONFIGURATION },
@@ -1173,7 +1292,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     const callbackConfig = {
       ...(data.enableCallback !== undefined ? { enabled: data.enableCallback } : {}),
       ...(isCallbackEnabled
-        ? { callback_session_id: parent.session_id, callback_created_by: parent.created_by }
+        ? { callback_session_id: parent.session_id, callback_created_by: created_by }
         : {}),
       ...(data.includeLastMessage !== undefined
         ? { include_last_message: data.includeLastMessage }
@@ -1191,6 +1310,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
 
     const spawnedSession = await this.create(
       {
+        mcpServerIds: [], // Spawn applies its separate explicit/parent policy below.
         agentic_tool: targetTool,
         agentic_tool_preset_id: resolved.agentic_tool_preset_id,
         status: SessionStatus.IDLE,
@@ -1208,7 +1328,6 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
           children: [],
         },
         contextFiles: [...(parent.contextFiles || [])],
-        tasks: [],
         permission_config: permissionConfig,
         model_config: modelConfig,
         callback_config: callbackConfig,
@@ -1743,6 +1862,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (Object.hasOwn(data, 'sdk_home_scope')) {
       throw new BadRequest('sdk_home_scope is immutable and server-managed');
     }
+    assertSessionTasksNotWritten(data);
+    assertSessionReadShapeNotWritten(data);
     let replaceAgenticConfig = false;
     if (
       (id === null || Array.isArray(id)) &&
@@ -1885,6 +2006,13 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         session.session_id
       );
     }
+    const includeTasksComplete = params?.query?.include_tasks_complete;
+    if (includeTasksComplete === true || includeTasksComplete === 'true') {
+      sessionWithRelationships.tasks_complete = await this.taskRepo.isSessionTaskListComplete(
+        session.session_id,
+        session.tasks
+      );
+    }
 
     // Only enrich with last message if explicitly requested
     if (includeLastMessage === true || includeLastMessage === 'true') {
@@ -1906,8 +2034,28 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
   /**
    * Override find to include durable remote relationships in list results.
    * Note: Last message is NOT included in list operations - only on single GET.
+   *
+   * `lean: true` is a list-only projection that omits bulky single-session
+   * `custom_context` keys from every row and stamps each row with the
+   * `read_shape` marker (see `toLeanSessionListRow` / `SessionListRow`). It is not
+   * a column, so it is removed from the query before any filter sees it, and
+   * it never widens visibility: rows come from the same scoped read either way.
+   * The result object itself is preserved so its enrichment marker survives.
    */
   async find(params?: SessionParams): Promise<Paginated<Session> | Session[]> {
+    const query = params?.query as Record<string, unknown> | undefined;
+    if (!query || !('lean' in query)) return this.findRows(params);
+    const { lean, ...rest } = query;
+    const result = await this.findRows({ ...params, query: rest } as SessionParams);
+    if (lean !== true) return result;
+    const rows = Array.isArray(result) ? result : result.data;
+    for (let index = 0; index < rows.length; index += 1) {
+      rows[index] = toLeanSessionListRow(rows[index]);
+    }
+    return result;
+  }
+
+  private async findRows(params?: SessionParams): Promise<Paginated<Session> | Session[]> {
     // SQL-pushdown path for the recency-sorted / board-scoped list queries the
     // first-paint loader issues. The before-hook stamps a marker here so the
     // same SQL path can compose branch visibility into the query.
@@ -1929,6 +2077,10 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (query?.$count !== undefined && !sqlPage) {
       throw new BadRequest('$count is supported only for SQL-paginated session queries');
     }
+    if (query?.search !== undefined && !sqlPage) {
+      throw new BadRequest('search is supported only for SQL-paginated session queries');
+    }
+    assertSearchTerms(query?.search);
     if (sqlPage) {
       if (
         query?.$count === false &&
@@ -1943,11 +2095,9 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       const sortSpec = query?.$sort as { updated_at?: 1 | -1; created_at?: 1 | -1 } | undefined;
       const branchFilter = query?.branch_id;
       const branchIds =
-        branchFilter &&
-        typeof branchFilter === 'object' &&
-        Array.isArray((branchFilter as { $in?: unknown }).$in)
-          ? ((branchFilter as { $in: BranchID[] }).$in ?? [])
-          : undefined;
+        typeof branchFilter === 'string'
+          ? undefined
+          : (idFilterValues(branchFilter) as BranchID[] | undefined);
       const { limit, skip } = this.pageWindow(query ?? {});
       const { data, total } = await this.sessionRepo.findPage({
         includeTotal: query?.$count !== false,
@@ -1955,6 +2105,12 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         boardId: query?.board_id as string | undefined,
         branchId: typeof branchFilter === 'string' ? (branchFilter as BranchID) : undefined,
         branchIds,
+        sessionIds:
+          query?.session_id !== undefined
+            ? (idFilterValues(query.session_id) as SessionID[])
+            : undefined,
+        createdBy: query?.created_by as UserID | undefined,
+        search: query?.search as string | undefined,
         archived: query?.archived as boolean | undefined,
         sortUpdatedAt: sortSpec?.updated_at,
         sortCreatedAt: sortSpec?.created_at,
@@ -2056,7 +2212,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
 export function createSessionsService(
   db: TenantScopeAwareDatabase,
   app: Application,
-  deploymentAvailable: (tool: AgenticToolName) => boolean = () => true
+  deploymentAvailable: (tool: AgenticToolName) => boolean = () => true,
+  deploymentToolUnsupported: (tool: AgenticToolName) => BadRequest | undefined = () => undefined
 ): SessionsService {
-  return new SessionsService(db, app, deploymentAvailable);
+  return new SessionsService(db, app, deploymentAvailable, deploymentToolUnsupported);
 }

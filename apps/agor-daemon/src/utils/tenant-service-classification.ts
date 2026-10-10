@@ -1,3 +1,4 @@
+import { BRANCH_WORKSPACE_NOTIFICATION_DISMISS_SERVICE } from '@agor/core/types';
 import {
   TENANT_IDENTITY_ONLY_SERVICE_PATHS,
   TENANT_OWNED_SERVICE_PATHS,
@@ -120,6 +121,10 @@ export interface TenantServiceClassification {
  * place to be wrong. This table is for services registered outside both.
  */
 export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassification> = {
+  [BRANCH_WORKSPACE_NOTIFICATION_DISMISS_SERVICE]: {
+    scopeClass: 'scoped',
+    why: 'Registered through the tenant-scoped authenticated route registrar; metadata-only acknowledgement.',
+  },
   // --------------------------------------------------------------------------
   // The two Slack lanes' browser preflights. Registered with a bare `app.use`
   // plus a `requireAuth` hook, so nothing upstream arms a scope: each opens one
@@ -158,6 +163,10 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
   // --------------------------------------------------------------------------
   // Catalog connect. Probes a remote endpoint before writing anything.
   // --------------------------------------------------------------------------
+  'repos/clone': {
+    scopeClass: 'scoped',
+    why: 'Authenticated tenant-scoped route; atomic clone claim and commit-bound executor dispatch.',
+  },
   'mcp-catalog/connect': {
     scopeClass: 'identity-only',
     why: 'Probes the entry endpoint over the network before installing; every write goes through a service that opens its own unit.',
@@ -221,6 +230,16 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
   'branches/:id/retry-provisioning': {
     scopeClass: 'identity-only',
     why: 'Long route that crosses the executor spawn boundary: the authorization read, the repo lookup, the failed -> creating CAS and the dispatch each open their own short unit via reposService.withTenantDatabase, so no transaction is held across the spawn.',
+  },
+
+  // --------------------------------------------------------------------------
+  // Repository `.agor.yml` import. The file is read by an executor, so like
+  // retry-provisioning above it is a long route: no request-long transaction
+  // is held across the spawn.
+  // --------------------------------------------------------------------------
+  'repos/:id/import-agor-yml': {
+    scopeClass: 'identity-only',
+    why: 'Long route across the executor spawn that reads .agor.yml: registered with tenant identity and write admission only. The repo read, branch authorization (branches service) and the launch preparation (workspace-access check, delegated-home lookup, sandbox mounts) each open their own short unit; the executor reaches the daemon only through a command token carrying the tenant_id claim; the environment write runs in withFreshTenantWrite after the spawn. Admin-only, enforced in the route hook and again in ReposService.importFromAgorYml.',
   },
 };
 
@@ -294,10 +313,8 @@ export const UNCLASSIFIED_SERVICE_BASELINE: readonly string[] = [
   'board-comments/:id/toggle-reaction', // BASELINE-ENTRY
   'board-comments/:id/reposition', // BASELINE-ENTRY
   'repos/local', // BASELINE-ENTRY
-  'repos/clone', // BASELINE-ENTRY
   'repos/:id/branches', // BASELINE-ENTRY
   'repos/:id/branches/:name', // BASELINE-ENTRY
-  'repos/:id/import-agor-yml', // BASELINE-ENTRY
   'repos/:id/export-agor-yml', // BASELINE-ENTRY
   'artifacts/:id/payload', // BASELINE-ENTRY
   'artifacts/:id/console', // BASELINE-ENTRY

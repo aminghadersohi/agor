@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, vi } from 'vitest';
 import { generateId } from '../../lib/ids';
-import { ENVIRONMENT_COMMAND_BUDGET as BUDGET, environmentStartConfirmation } from '../../types';
+import {
+  ENVIRONMENT_COMMAND_BUDGET as BUDGET,
+  EXECUTOR_LAUNCH_REFUSED_MESSAGE,
+  environmentStartConfirmation,
+} from '../../types';
 import { dbTest } from '../test-helpers';
 import { BranchRepository } from './branches';
 import { EnvironmentCommandRepository } from './environment-commands';
@@ -9,6 +13,29 @@ import { EnvironmentHealthRepository } from './environment-health';
 
 afterEach(() => vi.useRealTimers());
 describe('shared environment command admission and transitions', () => {
+  dbTest('allows a 90-second cold start without lengthening command execution', async ({ db }) => {
+    const { branch, user } = await seedEnvironmentCommandBranch(db);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const commands = new EnvironmentCommandRepository(db);
+    const attemptId = generateId();
+    const admittedAt = Date.now();
+    const admitted = await commands.admit({
+      branch,
+      action: 'start',
+      attemptId,
+      userId: user.user_id,
+    });
+    expect(Date.parse(admitted.command_attempt!.claim_deadline) - admittedAt).toBe(180_000);
+    vi.setSystemTime(admittedAt + 90_000);
+    expect(await commands.expire(branch.branch_id)).toBe(false);
+    const claimed = await commands.report({
+      branch_id: branch.branch_id,
+      attempt_id: attemptId,
+      action: 'start',
+      kind: 'claim',
+    });
+    expect(Date.parse(claimed.command_attempt!.command_deadline) - Date.now()).toBe(300_000);
+  });
   dbTest(
     'serializes competing admissions/claims, fences stale reports, and ignores duplicate results',
     async ({ db }) => {
@@ -118,6 +145,37 @@ describe('shared environment command admission and transitions', () => {
       ).rejects.toThrow('still active');
     }
   );
+
+  dbTest('fails a refused unclaimed attempt but never releases a claimed one', async ({ db }) => {
+    const { branch, user } = await seedEnvironmentCommandBranch(db);
+    const commands = new EnvironmentCommandRepository(db);
+    const refusedId = generateId();
+    await commands.admit({ branch, action: 'start', attemptId: refusedId, userId: user.user_id });
+    await commands.dispatchFailed(branch.branch_id, refusedId, 'launch_refused');
+    const refused = (await new BranchRepository(db).findById(branch.branch_id))!
+      .environment_instance!;
+    expect(refused.last_command).toMatchObject({
+      attempt_id: refusedId,
+      status: 'failed',
+      message: EXECUTOR_LAUNCH_REFUSED_MESSAGE,
+    });
+    expect(refused.command_attempt).toMatchObject({ finished_at: expect.any(String) });
+    expect(refused.command_attempt?.claimed_at).toBeUndefined();
+
+    const claimedId = generateId();
+    await commands.admit({ branch, action: 'stop', attemptId: claimedId, userId: user.user_id });
+    await commands.report({
+      branch_id: branch.branch_id,
+      attempt_id: claimedId,
+      action: 'stop',
+      kind: 'claim',
+    });
+    await commands.dispatchFailed(branch.branch_id, claimedId, 'launch_refused');
+    const claimed = (await new BranchRepository(db).findById(branch.branch_id))!
+      .environment_instance!;
+    expect(claimed.command_attempt).toMatchObject({ id: claimedId });
+    expect(claimed.command_attempt?.finished_at).toBeUndefined();
+  });
 
   dbTest(
     'independently expires lost claim/result and never lets late claims run',

@@ -9,7 +9,6 @@ import type {
 } from '@agor-live/client';
 import { getDefaultPermissionMode, mapToCodexPermissionConfig } from '@agor-live/client';
 import type { NewSessionConfig } from '../../domain/sessionCreation';
-import { resolveSessionMcpServerIds } from '../../utils/resolveQuickStartMcpServerIds';
 import {
   type AgenticFormValues,
   buildConfigFromFormValues,
@@ -52,19 +51,20 @@ export function getNewSessionToolSwitchValues(
       codexSandboxMode: undefined,
       codexApprovalPolicy: undefined,
       codexNetworkAccess: undefined,
+      codexIncludePlugins: undefined,
     }),
   };
 }
 
-/** What an untouched session-start form holds for this caller, tool, and branch. */
+/** Untouched form values; MCP inheritance remains server-owned until edited. */
 export function getNewSessionDefaultValues(
   user: User | null | undefined,
-  tool: AgenticToolName,
-  branch?: Pick<Branch, 'mcp_server_ids'> | null
+  tool: AgenticToolName
 ): NewSessionFormValues {
   return {
     ...getNewSessionAgenticDefaults(user, tool),
-    mcpServerIds: resolveSessionMcpServerIds(user?.default_mcp_server_ids, branch),
+    // Keep inherited IDs out of the explicit request; the picker previews them.
+    mcpServerIds: undefined,
   };
 }
 
@@ -83,7 +83,7 @@ export function buildNewSessionConfig({
   user,
   tool,
   branch,
-  values = getNewSessionDefaultValues(user, tool, branch),
+  values = getNewSessionDefaultValues(user, tool),
   initialPrompt,
   attachmentFiles,
 }: BuildNewSessionConfigOptions): NewSessionConfig {
@@ -112,8 +112,7 @@ export function buildNewSessionConfig({
     effort: isInline
       ? undefined
       : ((values.effort as EffortLevel | undefined) ?? agentDefaults?.modelConfig?.effort),
-    mcpServerIds:
-      values.mcpServerIds ?? resolveSessionMcpServerIds(user?.default_mcp_server_ids, branch),
+    mcpServerIds: values.mcpServerIds,
     permissionMode,
     attachmentFiles: attachmentFiles && attachmentFiles.length > 0 ? attachmentFiles : undefined,
   };
@@ -128,6 +127,9 @@ export function buildNewSessionConfig({
       (values.codexApprovalPolicy as CodexApprovalPolicy | undefined) ??
       agentDefaults?.codexApprovalPolicy ??
       codexDefaults.approvalPolicy;
+    config.codexIncludePlugins =
+      values.codexIncludePlugins ??
+      (isInline ? false : (agentDefaults?.codexIncludePlugins ?? false));
     config.codexNetworkAccess =
       values.codexNetworkAccess ?? agentDefaults?.codexNetworkAccess ?? codexDefaults.networkAccess;
   }
