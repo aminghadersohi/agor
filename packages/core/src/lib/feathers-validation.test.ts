@@ -178,14 +178,12 @@ describe('branchQueryValidator', () => {
     ]);
   });
 
-  it('strips unsupported operators sitting beside a branch_id batch', async () => {
-    const context = {
-      params: { query: { branch_id: { $in: ['019e8e1c'], $nin: ['019e8e1d'] } } },
-    };
-
-    await typedValidateQuery(branchQueryValidator)(context);
-
-    expect(context.params.query).toEqual({ branch_id: { $in: ['019e8e1c'] } });
+  it('rejects unsupported operators sitting beside a branch_id batch', async () => {
+    await expect(
+      typedValidateQuery(branchQueryValidator)({
+        params: { query: { branch_id: { $in: ['019e8e1c'], $nin: ['019e8e1d'] } } },
+      })
+    ).rejects.toThrow(/branch_id/);
   });
 
   it('rejects filters it does not model instead of dropping them', async () => {

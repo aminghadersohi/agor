@@ -23,6 +23,7 @@ import { userEvent } from 'vitest/browser';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { __setAuthConfigForTests } from '../../hooks/useAuthConfig';
 import { agorStore } from '../../store/agorStore';
+import { markBoardLoaded } from '../../test/userScopeCoverage';
 import { CANVAS_LAYOUT_CONTROLS_CLASS } from './canvas/SelectionLayoutPopover';
 import SessionCanvas from './SessionCanvas';
 
@@ -94,6 +95,10 @@ const CURRENT_USER = {
 beforeEach(() => {
   __setAuthConfigForTests({ requireAuth: false }, { branchRbac: false });
   agorStore.setState({ userById: new Map([[CURRENT_USER.user_id, CURRENT_USER]]) });
+  // Structural canvas edits wait for the board partition to load.
+  markBoardLoaded('fictional-console-board');
+  markBoardLoaded('fictional-arrange-popover-board');
+  markBoardLoaded('fictional-production-layout-board');
 });
 
 const geometry = (payload: Record<string, unknown>) =>

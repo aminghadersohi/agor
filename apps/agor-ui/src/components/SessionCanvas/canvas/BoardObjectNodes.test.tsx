@@ -39,9 +39,9 @@ function renderZone(
     selected?: boolean;
     canEdit?: boolean;
     onUpdate?: ReturnType<typeof vi.fn>;
+    data?: Record<string, unknown>;
     beginBoardWrite?: ReturnType<typeof vi.fn>;
     onDraftLost?: ReturnType<typeof vi.fn>;
-    data?: Record<string, unknown>;
   }
 ) {
   const wrapper = ({ children }: { children: ReactNode }) => (

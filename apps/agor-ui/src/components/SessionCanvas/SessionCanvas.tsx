@@ -2594,12 +2594,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 return;
               }
 
-              // An unloaded board's geometry may be stale: no write.
-              const ticket = boardGuard.capture();
-              if (!ticket) return;
               const currentPosition =
                 node.type === 'zone' ? persistedZone : entityBoardObject?.position;
               if (!currentPosition) return;
+              // An unloaded board's geometry may be stale: no write.
+              const ticket = boardGuard.capture();
+              if (!ticket) return;
 
               // Accumulate the complete rect so a left/top handle persists
               // origin and dimensions together in the zone's one board patch.
@@ -2699,6 +2699,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       },
       [
         board,
+        boardGuard,
         boardObjectByBranch,
         boardObjectByCard,
         cancelPendingLayoutRecovery,
@@ -2708,7 +2709,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         onNodesChangeInternal,
         preserveAutoZoneFrameOnce,
         setNodes,
-        boardGuard,
       ]
     );
 
@@ -3260,17 +3260,17 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             }
 
             // Persist every changed canvas object from the gesture as one
-            // authoritative geometry transaction/realtime batch.
-            // Only moves whose ticket is still current join it.
-            const currentObjectUpdates = Object.entries(canvasObjectUpdates).filter(([nodeId]) =>
-              mayDispatch(nodeId)
+            // authoritative geometry transaction/realtime batch, made only of
+            // moves whose ticket is still current.
+            const currentCanvasObjectUpdates = Object.entries(canvasObjectUpdates).filter(
+              ([nodeId]) => mayDispatch(nodeId)
             );
-            if (currentObjectUpdates.length > 0) {
+            if (currentCanvasObjectUpdates.length > 0) {
+              const { ticket } = updates[currentCanvasObjectUpdates[0][0]];
               const batch: BoardLayoutBatch = {
-                objects: Object.fromEntries(currentObjectUpdates),
+                objects: Object.fromEntries(currentCanvasObjectUpdates),
                 placements: {},
               };
-              const { ticket } = updates[currentObjectUpdates[0][0]];
               const result = (await client.service('boards').patch(ticket.boardId, {
                 _action: 'applyLayout',
                 ...batch,
@@ -3731,6 +3731,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           affectedNodeIds: arrangedNodes.map((node) => node.id),
         });
         if (!layoutGeometryChanged(layoutIntent.before, layoutIntent.after)) return;
+        // Planned from this board's loaded geometry: no ticket, no write.
+        const ticket = boardGuard.capture();
+        if (!ticket) return;
         setNodes((currentNodes) =>
           currentNodes.map((node) => arrangedNodeById.get(node.id) ?? node)
         );
@@ -3798,12 +3801,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           }
         }
         if (Object.keys(canvasObjectUpdates).length > 0 || Object.keys(entityUpdates).length > 0) {
-          // Captured right before the request: an unloaded board writes nothing.
-          const ticket = boardGuard.capture();
-          if (!ticket || ticket.boardId !== board.board_id) {
-            boardGuard.warnDropped();
-            return;
-          }
           await client.service('boards').patch(ticket.boardId, {
             _action: 'applyLayout',
             objects: canvasObjectUpdates,
@@ -4038,12 +4035,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             width,
             height,
             label: 'New Zone',
-            layout: inheritedLayout,
-            layout_binding: 'inherit',
             // biome-ignore lint/plugin/noHardcodedColorLiteral: persisted neutral default for user-editable zone palettes
             borderColor: '#d9d9d9',
             // biome-ignore lint/plugin/noHardcodedColorLiteral: persisted translucent default for user-editable zone palettes
             backgroundColor: '#d9d9d91a', // 10% opacity
+            layout: inheritedLayout,
+            layout_binding: 'inherit',
           };
 
           // Optimistic update: built like a hydrated node, so an editor
@@ -4415,6 +4412,35 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       }
     }, [canMutateBoard, canMutateComments, activeTool]);
 
+    useEffect(() => {
+      const handleEscape = (event: KeyboardEvent) => {
+        if (event.key !== 'Escape') return;
+        const gesture = marqueeGestureRef.current;
+        if (!gesture) return;
+        applySelectedNodeIds(gesture.initialSelectedIds);
+        marqueeGestureRef.current = null;
+        setMarqueeSelection(null);
+      };
+      window.addEventListener('keydown', handleEscape);
+      return () => window.removeEventListener('keydown', handleEscape);
+    }, [applySelectedNodeIds]);
+
+    const guideWrapperRect = reactFlowWrapperRef.current?.getBoundingClientRect();
+    const documentWidth = document.documentElement.clientWidth || window.innerWidth || 1024;
+    const documentHeight = document.documentElement.clientHeight || window.innerHeight || 768;
+    const hasMeasuredGuideWidth = !!guideWrapperRect && guideWrapperRect.width > 0;
+    const hasMeasuredGuideHeight = !!guideWrapperRect && guideWrapperRect.height > 0;
+    const guideViewportBounds = {
+      left: hasMeasuredGuideWidth ? Math.max(0, -guideWrapperRect.left) : 0,
+      top: hasMeasuredGuideHeight ? Math.max(0, -guideWrapperRect.top) : 0,
+      right: hasMeasuredGuideWidth
+        ? Math.min(guideWrapperRect.width, documentWidth - guideWrapperRect.left)
+        : documentWidth,
+      bottom: hasMeasuredGuideHeight
+        ? Math.min(guideWrapperRect.height, documentHeight - guideWrapperRect.top)
+        : documentHeight,
+    };
+
     const handleWorkflowConnect = useCallback(
       (connection: Connection) => {
         if (
@@ -4581,35 +4607,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       showSuccess,
       showWarning,
     ]);
-
-    useEffect(() => {
-      const handleEscape = (event: KeyboardEvent) => {
-        if (event.key !== 'Escape') return;
-        const gesture = marqueeGestureRef.current;
-        if (!gesture) return;
-        applySelectedNodeIds(gesture.initialSelectedIds);
-        marqueeGestureRef.current = null;
-        setMarqueeSelection(null);
-      };
-      window.addEventListener('keydown', handleEscape);
-      return () => window.removeEventListener('keydown', handleEscape);
-    }, [applySelectedNodeIds]);
-
-    const guideWrapperRect = reactFlowWrapperRef.current?.getBoundingClientRect();
-    const documentWidth = document.documentElement.clientWidth || window.innerWidth || 1024;
-    const documentHeight = document.documentElement.clientHeight || window.innerHeight || 768;
-    const hasMeasuredGuideWidth = !!guideWrapperRect && guideWrapperRect.width > 0;
-    const hasMeasuredGuideHeight = !!guideWrapperRect && guideWrapperRect.height > 0;
-    const guideViewportBounds = {
-      left: hasMeasuredGuideWidth ? Math.max(0, -guideWrapperRect.left) : 0,
-      top: hasMeasuredGuideHeight ? Math.max(0, -guideWrapperRect.top) : 0,
-      right: hasMeasuredGuideWidth
-        ? Math.min(guideWrapperRect.width, documentWidth - guideWrapperRect.left)
-        : documentWidth,
-      bottom: hasMeasuredGuideHeight
-        ? Math.min(guideWrapperRect.height, documentHeight - guideWrapperRect.top)
-        : documentHeight,
-    };
 
     return (
       <div

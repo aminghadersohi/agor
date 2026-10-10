@@ -102,9 +102,6 @@ interface ZoneNodeData extends Omit<ZoneBoardObject, 'type'> {
     ticket: BoardWriteTicket | null
   ) => void;
   onReorder?: (objectId: string, op: LayerOp) => void;
-  onArrangeContents?: (objectId: string) => void;
-  onJustifyContents?: (objectId: string, justification: ZoneContentJustification) => void;
-  onSetContentsCompact?: (objectId: string, compact: boolean) => void;
   /**
    * Capture the board write ticket when an edit begins (label editor, config
    * or delete dialog): a write from before a board reload is then dropped.
@@ -115,6 +112,9 @@ interface ZoneNodeData extends Omit<ZoneBoardObject, 'type'> {
    * deleted, e.g. by a reload): the canvas shows the draft to copy or discard.
    */
   onDraftLost?: (draft: { objectId: string; zoneName: string; text: string }) => void;
+  onArrangeContents?: (objectId: string) => void;
+  onJustifyContents?: (objectId: string, justification: ZoneContentJustification) => void;
+  onSetContentsCompact?: (objectId: string, compact: boolean) => void;
   /** Effective board.edit capability. Omitted only by isolated tests/fixtures. */
   canEdit?: boolean;
   /** Number of other zones whose rectangles intersect this zone. */

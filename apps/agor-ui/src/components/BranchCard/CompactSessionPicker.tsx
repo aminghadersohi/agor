@@ -4,7 +4,7 @@ import { Badge, Button, Empty, Popover, Typography, theme } from 'antd';
 import { useMemo, useState } from 'react';
 import { REACT_FLOW_NO_DRAG_CLASS } from '../../utils/reactFlowDragClasses';
 import { formatRelativeTimeSafe } from '../../utils/time';
-import { StatusDot } from './StatusDot';
+import { SessionStatusMark } from '../SessionRow/sessionRowPresentation';
 
 const { Text } = Typography;
 
@@ -106,7 +106,7 @@ export const CompactSessionPicker = ({
                   textAlign: 'left',
                 }}
               >
-                <StatusDot status={session.status} />
+                <SessionStatusMark session={session} />
                 <span style={{ flex: 1, minWidth: 0 }}>
                   <Text
                     ellipsis={{ tooltip: session.title || session.session_id }}

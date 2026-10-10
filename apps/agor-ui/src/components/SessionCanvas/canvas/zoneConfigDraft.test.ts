@@ -1,4 +1,5 @@
 // biome-ignore-all lint/plugin/noHardcodedColorLiteral: persisted zone color fixtures
+import { normalizeZoneLayoutPolicy } from '@agor/core/layout/zone-layout';
 import type { ZoneBoardObject } from '@agor-live/client';
 import { describe, expect, it } from 'vitest';
 import {
@@ -174,11 +175,38 @@ describe('zone configuration draft copy', () => {
         'Border color: #123456',
         'Fill color: #abcdef',
         'Label size: 22',
+        'Layout: zone override',
+        `Layout settings: ${JSON.stringify(normalizeZoneLayoutPolicy(undefined))}`,
       ].join('\n')
     );
     const plain = { ...zone, trigger: undefined, borderColor: undefined, fontSize: undefined };
     expect(formatZoneConfigDraft(createZoneConfigDraft(plain, 'Plain'))).toBe(
-      ['Name: Plain', 'Prompt template: (none)', 'Locked: yes', 'Fill color: #abcdef'].join('\n')
+      [
+        'Name: Plain',
+        'Prompt template: (none)',
+        'Locked: yes',
+        'Fill color: #abcdef',
+        'Layout: zone override',
+        `Layout settings: ${JSON.stringify(normalizeZoneLayoutPolicy(undefined))}`,
+      ].join('\n')
     );
+  });
+
+  it('carries an edited layout and its binding, so a layout-only draft can be copied', () => {
+    const inherited = { ...zone, layout_binding: 'inherit' as const };
+    const draft = createZoneConfigDraft(inherited, inherited.label, {
+      mode: 'auto',
+      preset: 'compact_list',
+    });
+    expect(formatZoneConfigDraft(draft)).toContain('Layout: board default');
+    const edited = {
+      ...draft,
+      layoutBinding: 'override' as const,
+      layout: { ...draft.layout, columnGap: 4 },
+    };
+    const text = formatZoneConfigDraft(edited);
+    expect(text).toContain('Layout: zone override');
+    expect(text).toContain('"columnGap":4');
+    expect(text).toContain('"preset":"compact_list"');
   });
 });

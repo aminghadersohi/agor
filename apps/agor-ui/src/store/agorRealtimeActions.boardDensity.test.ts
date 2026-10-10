@@ -1,9 +1,9 @@
 import type { BoardEntityObject } from '@agor-live/client';
-import { describe, expect, it } from 'vitest';
-import { withTestAuthority } from '../test/harness';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { markBoardLoaded } from '../test/userScopeCoverage';
 import { boardObjectPatched } from './agorRealtimeActions';
 import { agorStore } from './agorStore';
+import { setRealtimeAuthorityScope } from './realtimeBatch';
 
 const placement = (compact: boolean): BoardEntityObject =>
   ({
@@ -16,7 +16,14 @@ const placement = (compact: boolean): BoardEntityObject =>
     created_at: '2026-09-01T00:00:00.000Z',
   }) as BoardEntityObject;
 
-withTestAuthority();
+beforeEach(() => {
+  agorStore.getState().reset();
+  // Realtime placement events apply only to a board partition loaded under
+  // the current realtime authority.
+  setRealtimeAuthorityScope('user-1:member:1');
+  markBoardLoaded('board-1');
+});
+afterEach(() => setRealtimeAuthorityScope(null));
 
 describe('generic card density realtime', () => {
   it('updates both placement indexes and keeps a repeated echo reference-stable', () => {
@@ -25,8 +32,6 @@ describe('generic card density realtime', () => {
       boardObjectById: new Map([[expanded.object_id, expanded]]),
       boardObjectsByBoardId: new Map([['board-1', [expanded]]]),
     });
-    // Realtime writes are admitted only to rows a loaded scope holds.
-    markBoardLoaded('board-1');
 
     const collapsed = placement(true);
     boardObjectPatched(collapsed);

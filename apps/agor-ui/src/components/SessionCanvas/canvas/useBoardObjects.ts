@@ -31,6 +31,7 @@ import type { AgorClient, Board, BoardEntityObject, BoardObject, Card } from '@a
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Node } from 'reactflow';
 import {
+  BOARD_RELOADED_WARNING,
   type BoardMutationGuard,
   type BoardWriteResult,
   useBoardMutationGuard,
@@ -435,6 +436,11 @@ interface ArrangeZoneContentsOptions {
   userInitiated?: boolean;
   /** Synchronous owner token required for background writes only. */
   observerLease?: AutoZoneObserverLease;
+  /**
+   * The ticket of the action this arrange follows up (a deferred re-pack).
+   * Without one, the arrange is its own action and captures a ticket now.
+   */
+  ticket?: BoardWriteTicket;
   /** Internal bounded-conflict recovery state; never exposed by UI controls. */
   recovery?: LayoutRecoveryState;
 }
@@ -454,6 +460,8 @@ interface LayoutIntentToken {
 interface LayoutRecoveryState {
   attempt: number;
   intent: LayoutIntentToken;
+  /** The board-write ticket of the original request; a replan never captures a new one. */
+  ticket: BoardWriteTicket;
   source: AuthoritativeLayoutSource;
   viewportIntentToken?: number;
 }
@@ -506,16 +514,6 @@ export const useBoardObjects = ({
   const artifactGuard = useBoardMutationGuard(board?.board_id, true);
   const artifactGuardRef = useRef(artifactGuard);
   artifactGuardRef.current = artifactGuard;
-  /**
-   * A layout/density write's ticket, captured synchronously right before its
-   * request (no await in between) for the board the write was planned on.
-   * Layout writes also carry their own `expected` snapshot, so a plan made
-   * before a partition reload is refused by the daemon rather than applied.
-   */
-  const captureWriteTicket = useCallback((boardId: string | undefined) => {
-    const ticket = guardRef.current.capture();
-    return ticket && ticket.boardId === boardId ? ticket : null;
-  }, []);
 
   const { showError, showSuccess, showWarning } = useThemedMessage();
   // `handleUpdateObject` re-packs a zone after expanding it, but
@@ -634,7 +632,6 @@ export const useBoardObjects = ({
   // unchanged board references, and serializing every object on every canvas
   // render is prohibitively expensive on large boards.
   const boardObjects = board?.objects;
-  const boardZoneLayoutDefaults = board?.zone_layout_defaults;
 
   const completeUserLayout = useCallback(
     (input: {
@@ -746,12 +743,9 @@ export const useBoardObjects = ({
 
       const pending = zoneDemotionPromisesRef.current.get(zoneId);
       if (pending) return pending;
+      const ticket = guardRef.current.capture();
+      if (!ticket || ticket.boardId !== currentBoard.board_id) return false;
 
-      const ticket = captureWriteTicket(currentBoard.board_id);
-      if (!ticket) {
-        guardRef.current.warnDropped();
-        return false;
-      }
       manuallyControlledZoneIdsRef.current.add(zoneId);
       autoZoneDeferralRef.current?.cancel(zoneId);
       expectedAutoLayoutSignaturesRef.current.delete(zoneId);
@@ -781,7 +775,7 @@ export const useBoardObjects = ({
       zoneDemotionPromisesRef.current.set(zoneId, demotion);
       return demotion;
     },
-    [client, captureWriteTicket, showError]
+    [client, showError]
   );
 
   /** Change one capable worktree/card's density without allowing auto-layout to undo it. */
@@ -815,19 +809,21 @@ export const useBoardObjects = ({
         return;
       }
       if ((placement.compact === true) === compact) return;
+      const ticket = guardRef.current.capture();
+      if (!ticket) return;
       if (placement.zone_id && !(await demoteAutoZone(placement.zone_id))) return;
-      if (!captureWriteTicket(placement.board_id)) {
-        guardRef.current.warnDropped();
-        return;
-      }
       try {
-        await client.service('board-objects').patch(placement.object_id, { compact });
+        await guardRef.current.write(
+          ticket,
+          () => client.service('board-objects').patch(placement.object_id, { compact }),
+          BOARD_RELOADED_WARNING
+        );
       } catch (error) {
         console.error('Failed to update card density:', error);
         showError('Failed to update card density');
       }
     },
-    [client, captureWriteTicket, deferAutoZone, demoteAutoZone, showError]
+    [client, deferAutoZone, demoteAutoZone, showError]
   );
 
   /**
@@ -853,18 +849,22 @@ export const useBoardObjects = ({
         );
       });
       if (targets.length === 0) return;
+      const ticket = guardRef.current.capture();
+      if (!ticket) return;
       if (options.manualInteraction !== false && !(await demoteAutoZone(zoneId))) return;
-      if (!captureWriteTicket(boardRef.current?.board_id)) {
-        if (!options.silent) guardRef.current.warnDropped();
-        return;
-      }
 
       try {
-        await Promise.all(
-          targets.map((placement) =>
-            client.service('board-objects').patch(placement.object_id, { compact })
-          )
+        const sent = await guardRef.current.write(
+          ticket,
+          () =>
+            Promise.all(
+              targets.map((placement) =>
+                client.service('board-objects').patch(placement.object_id, { compact })
+              )
+            ),
+          options.silent ? undefined : BOARD_RELOADED_WARNING
         );
+        if (!sent) return;
         // Expanding restores every item's full height while the positions still
         // carry compact_list's one-row spacing, so the items overlap and spill
         // out of the zone. `handleUpdateObject` already re-packs when a *preset*
@@ -884,8 +884,10 @@ export const useBoardObjects = ({
           zone?.type === 'zone' &&
           normalizeZoneLayoutPolicy(zone.layout).preset !== 'compact_list';
         if (shouldRepackExpandedGrid) {
+          // The re-pack is part of this expand: it writes under the expand's
+          // ticket, so an unload (even one followed by a reload) cancels it.
           setTimeout(() => {
-            void arrangeZoneContentsRef.current?.(zoneId, { silent: true });
+            void arrangeZoneContentsRef.current?.(zoneId, { silent: true, ticket });
           }, EXPANDED_REPACK_DELAY_MS);
         }
         if (options.silent) return;
@@ -898,7 +900,7 @@ export const useBoardObjects = ({
         showError('Failed to update zone density');
       }
     },
-    [boardObjectsForBoard, captureWriteTicket, client, demoteAutoZone, showError, showSuccess]
+    [boardObjectsForBoard, client, demoteAutoZone, showError, showSuccess]
   );
 
   /**
@@ -1132,6 +1134,10 @@ export const useBoardObjects = ({
       const currentBoard = options.recovery?.source.board ?? boardRef.current;
       const persistedZone = currentBoard?.objects?.[zoneId];
       if (!currentBoard || !client || persistedZone?.type !== 'zone') return;
+      // A layout is a board write: its ticket is captured when it starts and
+      // checked again right before the atomic layout request.
+      const ticket = options.recovery?.ticket ?? options.ticket ?? guardRef.current.capture();
+      if (!ticket || ticket.boardId !== currentBoard.board_id) return;
       const intent =
         options.recovery?.intent ?? beginZoneLayoutIntent(zoneId, options.userInitiated === true);
       if (!options.recovery && options.userInitiated) {
@@ -1735,6 +1741,11 @@ export const useBoardObjects = ({
             if (expectedLayoutRegistered) clearExpectedAutoLayouts([zoneId]);
             return;
           }
+          if (!guardRef.current.isCurrent(ticket)) {
+            if (expectedLayoutRegistered) clearExpectedAutoLayouts([zoneId]);
+            if (options.userInitiated) guardRef.current.warnDropped();
+            return;
+          }
           const batch: BoardLayoutBatch = {
             objects,
             placements,
@@ -1743,12 +1754,6 @@ export const useBoardObjects = ({
               new Map(sourcePlacements.map((placement) => [placement.object_id, placement]))
             ),
           };
-          const ticket = captureWriteTicket(currentBoard.board_id);
-          if (!ticket) {
-            if (expectedLayoutRegistered) clearExpectedAutoLayouts([zoneId]);
-            if (options.userInitiated) guardRef.current.warnDropped();
-            return;
-          }
           const result = (await client.service('boards').patch(ticket.boardId, {
             _action: 'applyLayout',
             ...batch,
@@ -1822,6 +1827,7 @@ export const useBoardObjects = ({
                 recovery: {
                   attempt: attempt + 1,
                   intent,
+                  ticket,
                   source,
                   viewportIntentToken,
                 },
@@ -1845,7 +1851,6 @@ export const useBoardObjects = ({
       }
     },
     [
-      captureWriteTicket,
       acknowledgeExpectedAutoLayouts,
       beginZoneLayoutIntent,
       boardObjectsForBoard,
@@ -1983,21 +1988,25 @@ export const useBoardObjects = ({
         );
         return;
       }
-      const viewportIntentToken = onUserLayoutStart?.();
-      const demotingAutoZone = policy.mode === 'auto';
-      if (demotingAutoZone) {
-        manuallyControlledZoneIdsRef.current.add(zoneId);
-        autoZoneDeferralRef.current?.cancel(zoneId);
-        expectedAutoLayoutSignaturesRef.current.delete(zoneId);
-        skipNextAutoArrangeRef.current.delete(zoneId);
+      const ticket = guardRef.current.capture();
+      if (!ticket || ticket.boardId !== currentBoard.board_id) return;
+      // Justifying takes control of an Auto Zone. `applyLayout` commits
+      // geometry only, so the Manual transition is persisted first through
+      // the durable demotion; otherwise the zone stays Auto and its next tidy
+      // undoes the alignment.
+      if (policy.mode === 'auto' && !(await demoteAutoZone(zoneId))) return;
+      if (!guardRef.current.isCurrent(ticket)) {
+        guardRef.current.warnDropped();
+        return;
       }
+      const viewportIntentToken = onUserLayoutStart?.();
 
       const changedById = new Map(changedNodes.map((node) => [node.id, node]));
       onArrangeNodes?.(changedNodes, 180);
       setNodes((nodes) => nodes.map((node) => changedById.get(node.id) ?? node));
 
       try {
-        const canvasObjects = Object.fromEntries(
+        const objects = Object.fromEntries(
           children.flatMap(({ node, isCanvasObject }) => {
             if (!isCanvasObject) return [];
             const changed = changedById.get(node.id);
@@ -2008,18 +2017,6 @@ export const useBoardObjects = ({
             ];
           })
         );
-        const objects = {
-          ...(demotingAutoZone
-            ? {
-                [zoneId]: {
-                  ...persistedZone,
-                  layout: { ...policy, mode: 'manual' as const },
-                  layout_binding: 'override' as const,
-                },
-              }
-            : {}),
-          ...canvasObjects,
-        };
         const placements = Object.fromEntries(
           changedNodes.flatMap((node) => {
             const placement = placementByNodeId.get(node.id);
@@ -2043,8 +2040,7 @@ export const useBoardObjects = ({
             new Map(boardObjectsForBoard.map((placement) => [placement.object_id, placement]))
           ),
         };
-        const ticket = captureWriteTicket(currentBoard.board_id);
-        if (!ticket) {
+        if (!guardRef.current.isCurrent(ticket)) {
           guardRef.current.warnDropped();
           return;
         }
@@ -2069,16 +2065,15 @@ export const useBoardObjects = ({
             : `Justified ${changedNodes.length} items to the ${label}.`
         );
       } catch (error) {
-        if (demotingAutoZone) manuallyControlledZoneIdsRef.current.delete(zoneId);
         console.error('Failed to justify zone contents:', error);
         showError('Failed to justify zone contents');
       }
     },
     [
-      captureWriteTicket,
       boardObjectsForBoard,
       client,
       completeUserLayout,
+      demoteAutoZone,
       onArrangeNodes,
       onUserLayoutStart,
       setNodes,
@@ -2127,6 +2122,8 @@ export const useBoardObjects = ({
       const currentBoard = recovery?.source.board ?? boardRef.current;
       const ownsInFlight = !recovery;
       if (!currentBoard || !client || (ownsInFlight && boardArrangementInFlightRef.current)) return;
+      const ticket = recovery?.ticket ?? guardRef.current.capture();
+      if (!ticket || ticket.boardId !== currentBoard.board_id) return;
       const intent = recovery?.intent ?? beginBoardLayoutIntent();
       if (!layoutIntentIsCurrent(intent)) return;
       const viewportIntentToken =
@@ -2575,8 +2572,7 @@ export const useBoardObjects = ({
           ),
         };
         if (!layoutIntentIsCurrent(intent)) return;
-        const ticket = captureWriteTicket(currentBoard.board_id);
-        if (!ticket) {
+        if (!guardRef.current.isCurrent(ticket)) {
           if (userInitiated) guardRef.current.warnDropped();
           return;
         }
@@ -2629,6 +2625,7 @@ export const useBoardObjects = ({
                 recovery: {
                   attempt: attempt + 1,
                   intent,
+                  ticket,
                   source,
                   viewportIntentToken,
                 },
@@ -2658,7 +2655,6 @@ export const useBoardObjects = ({
       }
     },
     [
-      captureWriteTicket,
       acknowledgeExpectedAutoLayouts,
       beginBoardLayoutIntent,
       boardObjectsForBoard,
@@ -3005,7 +3001,7 @@ export const useBoardObjects = ({
           trigger: objectData.type === 'zone' ? objectData.trigger : undefined,
           layout: objectData.type === 'zone' ? objectData.layout : undefined,
           layout_binding: objectData.type === 'zone' ? objectData.layout_binding : undefined,
-          boardZoneLayoutDefaults,
+          boardZoneLayoutDefaults: board?.zone_layout_defaults,
           pinnedItemCount,
           positionableItemCount,
           densityExpandableItemCount,
@@ -3052,9 +3048,9 @@ export const useBoardObjects = ({
       setZoneContentsCompact,
       eraserMode,
       activeUrlTargetArtifactId,
-      boardZoneLayoutDefaults,
       onEditMarkdown,
       onZoneDraftLost,
+      board?.zone_layout_defaults,
       canEdit,
       guard.capture,
       artifactGuard.capture,
@@ -3131,7 +3127,6 @@ export const useBoardObjects = ({
       if (!ticket || !client) return;
 
       const objectId = `zone-${Date.now()}`;
-      const inheritedLayout = normalizeZoneLayoutPolicy(boardRef.current?.zone_layout_defaults);
       const objectData: BoardObject = {
         type: 'zone',
         x,
@@ -3139,7 +3134,7 @@ export const useBoardObjects = ({
         width: 400,
         height: 600,
         label: 'New Zone',
-        layout: inheritedLayout,
+        layout: normalizeZoneLayoutPolicy(boardRef.current?.zone_layout_defaults),
         layout_binding: 'inherit',
         // No color specified - will use theme default
       };
