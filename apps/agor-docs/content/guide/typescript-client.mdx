@@ -46,6 +46,71 @@ console.log(`Session ${session.session_id} started`);
 
 REST clients exit cleanly without keeping a socket open. Perfect for CLI tools and short-lived scripts.
 
+### Bounded session lists without totals
+
+For a recent-session slice, `sessions.find` accepts `$count: false` to skip the
+exact count and return a bounded array rather than `{ data, total, limit, skip }`:
+
+```ts
+const recent = await client.service('sessions').find({
+  query: { archived: false, $sort: { updated_at: -1 }, $limit: 50, $count: false },
+});
+```
+
+The default remains exact-count pagination. No-count requests still enforce the
+server's default/max page size and preserve authorization. `$limit: 0` returns an
+empty array without counting. This option supports the SQL list filters
+`archived`, `status`, `board_id`, and `branch_id` (a string or `$in` list), sorting
+by `updated_at` or `created_at`, and non-negative integer `$limit`/`$skip`.
+Other query shapes are rejected when `$count` is supplied. Use this with `find`,
+not `findAll`: an array has no continuation metadata and represents only one slice.
+
+### Lean session list rows
+
+Session rows carry a few large, single-session `custom_context` values. A list that
+does not need them can ask for lean rows:
+
+```ts
+import { isSessionListRow } from '@agor-live/client';
+
+const result = await client.service('sessions').find({
+  query: { archived: false, $sort: { updated_at: -1 }, $limit: 50, lean: true },
+});
+// `find` returns a page ({ data, total, ... }) or, without pagination, an array.
+const rows = Array.isArray(result) ? result : result.data;
+for (const row of rows) {
+  if (isSessionListRow(row)) {
+    // read_shape === 'session-list-v1': scheduled_run, slash_commands and
+    // skills are withheld here, not absent. Use sessions.get(row.session_id).
+  }
+}
+```
+
+`lean: true` works with any `sessions.find` query. It can only remove data, never
+add it. It does not change which sessions you can see, and it does not change
+filtering or pagination. On each row it:
+
+- **withholds** `custom_context.scheduled_run` (the scheduler's run snapshot) and
+  `custom_context.slash_commands` / `custom_context.skills` (the agent SDK's command and
+  skill lists). The rest of `custom_context`, such as `gateway_source` or your own
+  template fields, is kept.
+- **marks** the row with `read_shape: 'session-list-v1'`. The mark is there even when
+  the session never had those keys, so "withheld" and "absent" can't be confused.
+  Full records never carry it, and only the server sets it: `create`, `patch`, and
+  `update` reject a `read_shape` field with 400.
+
+Use `isSessionListRow(row)` / `hasFullSessionDetails(row)` (types: `SessionListRow`)
+before trusting a missing withheld key. To get the complete record, call
+`client.service('sessions').get(id)`: `get` always returns the full session, and so do a
+`find` without `lean` and realtime `created`/`patched` events. Patch with
+`custom_context` only when you mean to change it. Do not send back the trimmed
+context from a lean row.
+
+The MCP tool `agor_sessions_list` also takes a `lean` flag, but it is a **different,
+smaller format** for agents. It returns a short fixed set of fields (by default,
+`lean: true`), drops `custom_context` completely, and has no `read_shape` mark. Do not
+treat one format as the other. Agents should use `agor_sessions_get` for full details.
+
 ### Driving the executor without MCP
 
 Two equivalent ways to send work to a session. Pick whichever fits your harness:
@@ -88,11 +153,11 @@ const client = createClient(url, true, {
   socketAuthentication: { accessToken },
 });
 
-client.service('messages').on('created', (msg) => {
+client.service('messages').on('created', msg => {
   console.log('[message]', msg.session_id, msg.role, msg.content?.slice(0, 80));
 });
 
-client.service('sessions').on('patched', (session) => {
+client.service('sessions').on('patched', session => {
   console.log('[session]', session.session_id, session.status);
 });
 ```
@@ -127,19 +192,20 @@ handle.release();
 
 What you get on `handle.state`:
 
-| Field | Description |
-|---|---|
-| `session` | The full `Session` model (status, current task, agent config, …) |
-| `tasks` | All tasks for this session, ordered |
-| `messagesByTask` | `Map<taskId, Message[]>`, hydrated lazily or eagerly per `taskHydration` option |
-| `queuedTasks` | Tasks queued but not yet running, ordered by `queue_position` |
-| `streamingMessages` | In-flight assistant messages with live `content` + `thinkingContent` |
-| `toolsByTask` | Tool executions per task, with `executing` / `complete` status |
-| `connected`, `loading`, `error`, `lastSyncedAt` | Connection + sync metadata |
+| Field                                           | Description                                                                     |
+| ----------------------------------------------- | ------------------------------------------------------------------------------- |
+| `session`                                       | The full `Session` model (status, current task, agent config, …)                |
+| `tasks`                                         | All tasks for this session, ordered                                             |
+| `messagesByTask`                                | `Map<taskId, Message[]>`, hydrated lazily or eagerly per `taskHydration` option |
+| `queuedTasks`                                   | Tasks queued but not yet running, ordered by `queue_position`                   |
+| `streamingMessages`                             | In-flight assistant messages with live `content` + `thinkingContent`            |
+| `toolsByTask`                                   | Tool executions per task, with `executing` / `complete` status                  |
+| `connected`, `loading`, `error`, `lastSyncedAt` | Connection + sync metadata                                                      |
 
 `retainReactiveSession()` is reference-counted. Multiple subscribers on the same session ID share one handle and one set of socket listeners. Call `release()` when you're done; the handle tears itself down when the last consumer releases.
 
 This is what you'd reach for if you wanted to:
+
 - Build a custom session viewer in your own React/Vue/Svelte app
 - Mirror Agor sessions into a Slack or terminal UI
 - Pipe live tool calls into your own observability stack
@@ -147,10 +213,10 @@ This is what you'd reach for if you wanted to:
 
 ## Authentication
 
-| Strategy | When to use | How |
-|---|---|---|
-| **API Key** | Scripts, services, CI | Pass to `createRestClient(url, apiKey)`, or set `AGOR_API_KEY=agor_sk_…` and use `getApiKeyFromEnv()` |
-| **JWT** | Browser apps after REST login | Pass `socketAuthentication: { accessToken }` to `createClient()` |
+| Strategy    | When to use                   | How                                                                                                   |
+| ----------- | ----------------------------- | ----------------------------------------------------------------------------------------------------- |
+| **API Key** | Scripts, services, CI         | Pass to `createRestClient(url, apiKey)`, or set `AGOR_API_KEY=agor_sk_…` and use `getApiKeyFromEnv()` |
+| **JWT**     | Browser apps after REST login | Pass `socketAuthentication: { accessToken }` to `createClient()`                                      |
 
 Authentication is required on every endpoint. There is no anonymous strategy.
 
@@ -182,11 +248,11 @@ Helpers worth knowing:
 
 ## When to reach for which client
 
-| You are… | Use… |
-|---|---|
-| An agent running inside a session | [Agor MCP Server](/guide/internal-mcp) (already injected) |
-| A Node script poking at the daemon | `createRestClient()` |
-| A live dashboard or custom UI | `createClient()` + reactive sessions |
+| You are…                            | Use…                                                                        |
+| ----------------------------------- | --------------------------------------------------------------------------- |
+| An agent running inside a session   | [Agor MCP Server](/guide/internal-mcp) (already injected)                   |
+| A Node script poking at the daemon  | `createRestClient()`                                                        |
+| A live dashboard or custom UI       | `createClient()` + reactive sessions                                        |
 | A long-lived service routing events | `createClient()` with service `.on('created' \| 'patched' \| 'removed', …)` |
 
 ## Related

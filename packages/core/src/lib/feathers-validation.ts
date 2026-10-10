@@ -5,11 +5,20 @@
  * Prevents NoSQL injection by validating query structure and values.
  */
 
+import { BadRequest } from '@feathersjs/errors';
 import { Ajv } from '@feathersjs/schema';
 import type { TObject, TProperties } from '@feathersjs/typebox';
 import { getValidator, Type } from '@feathersjs/typebox';
-import { MESSAGE_PAGINATION, PAGINATION } from '../config/constants';
+import { MESSAGE_PAGINATION, PAGINATION, TASK_PAGINATION } from '../config/constants';
+import { MAX_SEARCH_TOKENS, uniqueSearchTokens } from '../search/searchable-fields';
 import { AGENTIC_TOOL_NAMES, PERSISTED_AGENTIC_TOOL_NAMES } from '../types/agentic-tool';
+import {
+  KNOWLEDGE_ARCHIVE_FILTERS,
+  KNOWLEDGE_DOCUMENT_KINDS,
+  KNOWLEDGE_DOCUMENT_SORT_FIELDS,
+  KNOWLEDGE_DOCUMENT_STATUSES,
+  KNOWLEDGE_VISIBILITIES,
+} from '../types/knowledge';
 import { MAX_PRESENCE_BOARD_SUBSCRIPTIONS } from '../types/presence';
 
 /**
@@ -23,9 +32,10 @@ export const queryValidator = new Ajv({
 });
 
 /**
- * Message queries reject unknown fields instead of silently removing them.
- * Silently turning a misspelled filter into a broad transcript query is both
- * surprising and potentially expensive.
+ * Message, task, session and branch queries reject unknown fields instead of
+ * silently removing them. Silently turning a misspelled or unsupported filter
+ * (`$or`, an unknown column) into a broad inventory query is both surprising
+ * and potentially expensive.
  */
 export const strictQueryValidator = new Ajv({
   coerceTypes: true,
@@ -77,6 +87,13 @@ export const CommonSchemas = {
     Type.Literal('allow-all'),
   ]),
 
+  // Daemon search text: no control characters (NUL ends a SQLite LIKE
+  // pattern, so `'%\0%'` matches every row); tab, LF and CR separate terms.
+  searchText: Type.String({
+    maxLength: 255,
+    pattern: '^[^\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f]*$',
+  }),
+
   // Timestamps
   timestamp: Type.Integer({ minimum: 0 }),
 
@@ -84,19 +101,37 @@ export const CommonSchemas = {
   boolean: Type.Boolean(),
 };
 
+const sortDirectionSchema = Type.Union([Type.Literal(1), Type.Literal(-1)]);
+
 /**
- * Helper to create query schemas with common Feathers operators
+ * Helper to create query schemas with common Feathers operators.
+ *
+ * `sortFields` narrows `$sort` to the columns a service can order by in SQL;
+ * without it any field name is accepted (in-memory adapter sorting).
+ * `maxSkip` lifts the default offset ceiling for services that page in SQL
+ * and whose complete listings are walked page by page with `findAll()`.
  */
-export function createQuerySchema<T extends TProperties>(properties: TObject<T>) {
+export function createQuerySchema<T extends TProperties>(
+  properties: TObject<T>,
+  options: { sortFields?: readonly string[]; maxSkip?: number } = {}
+) {
+  const sort = options.sortFields
+    ? Type.Object(
+        Object.fromEntries(
+          options.sortFields.map((field) => [field, Type.Optional(sortDirectionSchema)])
+        ),
+        { additionalProperties: false }
+      )
+    : Type.Record(Type.String(), sortDirectionSchema);
   return Type.Intersect(
     [
       properties,
       Type.Object({
         $limit: Type.Optional(Type.Integer({ minimum: 0, maximum: PAGINATION.MAX_LIMIT })),
-        $skip: Type.Optional(Type.Integer({ minimum: 0, maximum: PAGINATION.MAX_SKIP })),
-        $sort: Type.Optional(
-          Type.Record(Type.String(), Type.Union([Type.Literal(1), Type.Literal(-1)]))
+        $skip: Type.Optional(
+          Type.Integer({ minimum: 0, maximum: options.maxSkip ?? PAGINATION.MAX_SKIP })
         ),
+        $sort: Type.Optional(sort),
         $select: Type.Optional(Type.Array(Type.String())),
       }),
     ],
@@ -105,12 +140,44 @@ export function createQuerySchema<T extends TProperties>(properties: TObject<T>)
 }
 
 /**
+ * A uuid, or a bounded `{ $in: [...] }` id list (`PAGINATION.MAX_ID_LIST`).
+ * Larger sets are split by the caller rather than raising the cap.
+ */
+const uuidOrIdList = () =>
+  Type.Union([
+    CommonSchemas.uuid,
+    Type.Object(
+      { $in: Type.Array(CommonSchemas.uuid, { maxItems: PAGINATION.MAX_ID_LIST }) },
+      { additionalProperties: false }
+    ),
+  ]);
+
+/**
+ * A scalar id or `{ $in: [...] }` id-list filter as an id array; undefined
+ * when malformed. The schemas above admit only these two shapes; services use
+ * this for internal callers too.
+ */
+export function idFilterValues(filter: unknown): string[] | undefined {
+  if (typeof filter === 'string') return [filter];
+  const ids =
+    filter !== null && typeof filter === 'object' ? (filter as { $in?: unknown }).$in : undefined;
+  return Array.isArray(ids) && ids.every((id) => typeof id === 'string') ? ids : undefined;
+}
+
+/**
  * Session query schema
  */
 export const sessionQuerySchema = createQuerySchema(
   Type.Object({
+    // Session-only opt-out of exact totals; coerces REST boolean strings.
+    $count: Type.Optional(CommonSchemas.boolean),
     include_usage: Type.Optional(CommonSchemas.boolean),
-    session_id: Type.Optional(CommonSchemas.uuid),
+    // Get-only: reports `tasks_complete` (see Session.tasks_complete).
+    include_tasks_complete: Type.Optional(CommonSchemas.boolean),
+    // List-only projection: omit bulky single-session custom_context keys
+    // (see LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS). Not a column filter.
+    lean: Type.Optional(CommonSchemas.boolean),
+    session_id: Type.Optional(uuidOrIdList()),
     status: Type.Optional(CommonSchemas.sessionStatus),
     agentic_tool: Type.Optional(CommonSchemas.persistedAgenticTool),
     board_id: Type.Optional(CommonSchemas.uuid),
@@ -119,13 +186,13 @@ export const sessionQuerySchema = createQuerySchema(
     forked_from_session_id: Type.Optional(CommonSchemas.uuid),
     schedule_id: Type.Optional(CommonSchemas.uuid),
     created_by: Type.Optional(CommonSchemas.uuid),
+    // Every token in `SEARCHABLE_FIELDS.session` (SQL page only).
+    search: Type.Optional(CommonSchemas.searchText),
     archived: Type.Optional(CommonSchemas.boolean),
     created_at: Type.Optional(CommonSchemas.timestamp),
     updated_at: Type.Optional(CommonSchemas.timestamp),
     // Marks a `remove` as the delete half of a "switch tool" swap so the
-    // service can refuse it if a task landed on the session mid-swap. Declared
-    // here so the query validator (`removeAdditional: 'all'`) doesn't strip it
-    // before the service's guard sees it.
+    // service can refuse it if a task landed on the session mid-swap.
     _swapReplace: Type.Optional(CommonSchemas.boolean),
   })
 );
@@ -144,6 +211,12 @@ export const taskQuerySchema = Type.Intersect(
             {
               $gt: Type.Optional(CommonSchemas.uuid),
               $lte: CommonSchemas.uuid,
+            },
+            { additionalProperties: false }
+          ),
+          Type.Object(
+            {
+              $in: Type.Array(CommonSchemas.uuid, { maxItems: TASK_PAGINATION.MAX_TASK_IDS }),
             },
             { additionalProperties: false }
           ),
@@ -183,6 +256,7 @@ export const taskQuerySchema = Type.Intersect(
               status: taskSortDirection,
               created_at: taskSortDirection,
               created_by: taskSortDirection,
+              queue_position: taskSortDirection,
             },
             { additionalProperties: false }
           )
@@ -210,7 +284,6 @@ const messageRoleSchema = Type.Union([
   Type.Literal('assistant'),
   Type.Literal('system'),
 ]);
-const sortDirectionSchema = Type.Union([Type.Literal(1), Type.Literal(-1)]);
 const messageSelectableFieldSchema = Type.Union(
   [
     'message_id',
@@ -297,7 +370,13 @@ export const messageQuerySchema = Type.Object(
  */
 export const branchQuerySchema = createQuerySchema(
   Type.Object({
-    branch_id: Type.Optional(CommonSchemas.uuid),
+    branch_id: Type.Optional(uuidOrIdList()),
+    created_by: Type.Optional(CommonSchemas.uuid),
+    // Teammate marker filter (`BranchRepository.findTeammateBranches`); only `true`.
+    teammate: Type.Optional(Type.Literal(true)),
+    // Every token, over `SEARCHABLE_FIELDS.branch`, the branch id, unique id and
+    // path, and its repo's slug and name (SQL page only; `BranchRepository.findPage`).
+    search: Type.Optional(CommonSchemas.searchText),
     repo_id: Type.Optional(CommonSchemas.uuid),
     board_id: Type.Optional(CommonSchemas.uuid),
     zone_id: Type.Optional(Type.String({ maxLength: 255 })),
@@ -305,7 +384,19 @@ export const branchQuerySchema = createQuerySchema(
     archived: Type.Optional(CommonSchemas.boolean),
     created_at: Type.Optional(CommonSchemas.timestamp),
     updated_at: Type.Optional(CommonSchemas.timestamp),
+    // `remove` only: permanent deletion always removes owned files; the
+    // service rejects `false` (`BranchesService.remove`).
+    deleteFromFilesystem: Type.Optional(CommonSchemas.boolean),
   })
+);
+
+/** `branch-counts` takes no query: every count is of the caller's visible boards. */
+export const branchCountsQuerySchema = Type.Object({}, { additionalProperties: false });
+
+/** `session-counts` takes only its grouping. */
+export const sessionCountsQuerySchema = Type.Object(
+  { group_by: Type.Union([Type.Literal('branch_id'), Type.Literal('board_id')]) },
+  { additionalProperties: false }
 );
 
 /**
@@ -347,9 +438,9 @@ export const userQuerySchema = createQuerySchema(
   Type.Object({
     user_id: Type.Optional(CommonSchemas.uuid),
     email: Type.Optional(Type.String({ maxLength: 255 })),
-    search: Type.Optional(Type.String({ maxLength: 255 })),
-    query: Type.Optional(Type.String({ maxLength: 255 })),
-    q: Type.Optional(Type.String({ maxLength: 255 })),
+    search: Type.Optional(CommonSchemas.searchText),
+    query: Type.Optional(CommonSchemas.searchText),
+    q: Type.Optional(CommonSchemas.searchText),
     limit: Type.Optional(Type.Integer({ minimum: 0, maximum: 10000 })),
     skip: Type.Optional(Type.Integer({ minimum: 0, maximum: 10000 })),
     offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 10000 })),
@@ -437,6 +528,44 @@ export const mcpServerQuerySchema = createQuerySchema(
 );
 
 /**
+ * Knowledge document query schema: list filters for `find`, hydration options
+ * shared by `find`/`get`. Page size is further clamped by the service's
+ * KNOWLEDGE_DOCUMENT_PAGINATION.
+ */
+export const knowledgeDocumentQuerySchema = createQuerySchema(
+  Type.Object({
+    archive_filter: Type.Optional(
+      Type.Union(KNOWLEDGE_ARCHIVE_FILTERS.map((value) => Type.Literal(value)))
+    ),
+    namespace_id: Type.Optional(CommonSchemas.uuid),
+    namespace_slug: Type.Optional(Type.String({ maxLength: 255 })),
+    path: Type.Optional(Type.String({ maxLength: 1024 })),
+    kind: Type.Optional(Type.Union(KNOWLEDGE_DOCUMENT_KINDS.map((kind) => Type.Literal(kind)))),
+    visibility: Type.Optional(
+      Type.Union(KNOWLEDGE_VISIBILITIES.map((visibility) => Type.Literal(visibility)))
+    ),
+    status: Type.Optional(
+      Type.Union(KNOWLEDGE_DOCUMENT_STATUSES.map((status) => Type.Literal(status)))
+    ),
+    archived: Type.Optional(CommonSchemas.boolean),
+    include_my_drafts: Type.Optional(CommonSchemas.boolean),
+    includeMyDrafts: Type.Optional(CommonSchemas.boolean),
+    include_other_user_drafts: Type.Optional(CommonSchemas.boolean),
+    includeOtherUserDrafts: Type.Optional(CommonSchemas.boolean),
+    include_content: Type.Optional(CommonSchemas.boolean),
+    include_links: Type.Optional(CommonSchemas.boolean),
+    include_indexing: Type.Optional(CommonSchemas.boolean),
+    includeIndexing: Type.Optional(CommonSchemas.boolean),
+    version: Type.Optional(
+      Type.Union([Type.Integer({ minimum: 1 }), Type.String({ minLength: 1, maxLength: 64 })])
+    ),
+  }),
+  // Page size stays bounded; the offset does not, so a findAll() walk over a
+  // large Knowledge base can continue past PAGINATION.MAX_SKIP.
+  { sortFields: KNOWLEDGE_DOCUMENT_SORT_FIELDS, maxSkip: Number.MAX_SAFE_INTEGER }
+);
+
+/**
  * MCP catalog query schema: deliberately empty.
  *
  * `find` takes no parameters — it returns the whole catalog and the browser
@@ -455,10 +584,18 @@ export const mcpCatalogQuerySchema = Type.Object({}, { additionalProperties: fal
 /**
  * Create validators for each schema
  */
-export const sessionQueryValidator = getValidator(sessionQuerySchema, queryValidator);
+export const sessionQueryValidator = getValidator(sessionQuerySchema, strictQueryValidator);
 export const taskQueryValidator = getValidator(taskQuerySchema, strictQueryValidator);
 export const messageQueryValidator = getValidator(messageQuerySchema, strictQueryValidator);
-export const branchQueryValidator = getValidator(branchQuerySchema, queryValidator);
+export const branchQueryValidator = getValidator(branchQuerySchema, strictQueryValidator);
+export const branchCountsQueryValidator = getValidator(
+  branchCountsQuerySchema,
+  strictQueryValidator
+);
+export const sessionCountsQueryValidator = getValidator(
+  sessionCountsQuerySchema,
+  strictQueryValidator
+);
 export const boardQueryValidator = getValidator(boardQuerySchema, queryValidator);
 export const userQueryValidator = getValidator(userQuerySchema, queryValidator);
 export const boardObjectQueryValidator = getValidator(boardObjectQuerySchema, queryValidator);
@@ -466,6 +603,20 @@ export const boardCommentQueryValidator = getValidator(boardCommentQuerySchema, 
 export const repoQueryValidator = getValidator(repoQuerySchema, queryValidator);
 export const mcpServerQueryValidator = getValidator(mcpServerQuerySchema, queryValidator);
 export const mcpCatalogQueryValidator = getValidator(mcpCatalogQuerySchema, queryValidator);
+export const knowledgeDocumentQueryValidator = getValidator(
+  knowledgeDocumentQuerySchema,
+  queryValidator
+);
+
+/**
+ * Reject a `search` of more than `MAX_SEARCH_TOKENS` distinct terms: each one
+ * is a substring test of every candidate row (`searchCondition`).
+ */
+export function assertSearchTerms(search: unknown): void {
+  if (typeof search === 'string' && uniqueSearchTokens(search).length > MAX_SEARCH_TOKENS) {
+    throw new BadRequest(`search accepts at most ${MAX_SEARCH_TOKENS} distinct terms`);
+  }
+}
 
 /**
  * Wrap validateQuery to produce a FeathersJS-compatible hook function.

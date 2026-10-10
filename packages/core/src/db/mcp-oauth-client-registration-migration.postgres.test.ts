@@ -376,18 +376,31 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       });
 
       // This fixture reuses the database upgraded by the preceding test. Remove
-      // later Slack recovery, consent-attribution, and cleanup policy additions as well as
-      // rewinding the ledger: the old head did not have these future columns.
+      // later Slack recovery, Slack connect, consent-attribution, and cleanup policy
+      // additions as well as rewinding the ledger: the old head did not have these
+      // future columns. Every migration landing after OLD_HEAD_WATERMARK that adds a
+      // column has to be undone here, or its replay collides with the column the
+      // upgraded database already carries.
       await executeRaw(db, sql`ALTER TABLE tasks DROP COLUMN mcp_slack_recovery_due_at`);
+      await executeRaw(db, sql`ALTER TABLE messages DROP COLUMN mcp_slack_connect_due_at`);
       await executeRaw(db, sql`ALTER TABLE user_mcp_oauth_tokens DROP COLUMN granted_by_user_id`);
       await executeRaw(db, sql`DROP POLICY IF EXISTS branch_maintenance_discovery ON branches`);
+      await executeRaw(
+        db,
+        sql`DROP POLICY IF EXISTS api_key_host_tenant_discovery ON app_variables`
+      );
+      await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
       await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN deletion_status`);
       await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN deletion_error`);
       await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN deletion_updated_at`);
       await executeRaw(db, sql`ALTER TABLE repos DROP COLUMN cleanup_policy`);
       await executeRaw(db, sql`ALTER TABLE branches DROP COLUMN cleanup_protected`);
+      // Rewind 0112's schema too: replaying its ledger must recreate the table.
+      await executeRaw(db, sql`DROP TABLE kb_import_receipts`);
 
       await executeRaw(db, sql`DROP TABLE user_provider_oauth_grants`);
+      // 0117 is newer than this watermark; replaying the chain must recreate it.
+      await executeRaw(db, sql`DROP TABLE opencode_checkpoint_attempts`);
       await withPostgresTestTransaction(db, recreateHistoricalClaudeAuthority);
       await withPostgresTestTransaction(db, restoreHistoricalOwnerImmutability);
 
@@ -507,6 +520,10 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
         'RLS policy',
         `DROP POLICY mcp_oauth_client_registration_maintenance_delete
          ON mcp_oauth_client_registrations`,
+      ],
+      [
+        'nullability',
+        'ALTER TABLE mcp_oauth_client_registrations ALTER COLUMN binding_version DROP NOT NULL',
       ],
     ])('rejects a malformed final DCR %s', async (_label, mutation) => {
       if (!db || !isPostgresDatabase(db)) {

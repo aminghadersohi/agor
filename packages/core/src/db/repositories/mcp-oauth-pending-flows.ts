@@ -378,10 +378,30 @@ export class MCPOAuthPendingFlowRepository {
 
   /** Provider returned an authorization error before an exchange was attempted. */
   async failPendingForCallback(stateHash: string, failureCode: string): Promise<boolean> {
+    await this.bindCallbackStateFingerprint(stateHash);
+    return this.failPending(stateHash, failureCode);
+  }
+
+  /** Fail the caller's own pending attempt from its authenticated tenant scope. */
+  async failPendingForUser(
+    tenantId: string,
+    userId: UserID,
+    stateHash: string,
+    failureCode: string
+  ): Promise<boolean> {
+    return this.failPending(stateHash, failureCode, { tenantId, userId });
+  }
+
+  private async failPending(
+    stateHash: string,
+    failureCode: string,
+    expected?: { tenantId: string; userId: UserID }
+  ): Promise<boolean> {
     assertStateHash(stateHash);
     assertAuthorityFailureCode(failureCode, 'MCP OAuth');
+    const tenantPredicate = expected ? sql`AND tenant_id = ${expected.tenantId}` : sql``;
+    const userPredicate = expected ? sql`AND user_id = ${expected.userId}` : sql``;
     try {
-      await this.bindCallbackStateFingerprint(stateHash);
       const result = await executeRaw(
         this.db,
         sql`
@@ -395,6 +415,8 @@ export class MCPOAuthPendingFlowRepository {
               updated_at = CURRENT_TIMESTAMP,
               finished_at = CURRENT_TIMESTAMP
           WHERE state_hash = ${stateHash}
+            ${tenantPredicate}
+            ${userPredicate}
             AND status = 'pending'
           RETURNING attempt_id
         `
@@ -515,10 +537,16 @@ export class MCPOAuthPendingFlowRepository {
       // inputs and the expired/ambiguous outputs created at this transaction's
       // exact database time; mutation metadata gives us counts without making
       // those cross-tenant rows part of the application result.
+      //
+      // `authorization_never_returned`, not `authorization_timed_out`: this
+      // row is still `pending`, which means no callback ever reached Agor.
+      // That is the only observable proxy for a front-channel rejection —
+      // notably a redirect URI the provider does not have registered for our
+      // client, which it refuses on its own page and never redirects back.
       const expired = await update(this.db, mcpOauthPendingFlows)
         .set({
           status: 'expired',
-          failure_code: 'authorization_timed_out',
+          failure_code: 'authorization_never_returned',
           sealed_material: null,
           updated_at: sql`CURRENT_TIMESTAMP`,
           finished_at: sql`CURRENT_TIMESTAMP`,

@@ -2,6 +2,7 @@
  * Tests for command router
  */
 
+import { EXECUTOR_COMMAND_ADMISSION } from '@agor/core/types';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('@agor/agentic-tool-opencode/runtime', () => ({
@@ -36,6 +37,12 @@ import {
 } from './index.js';
 
 describe('Command Registry', () => {
+  it('registers exactly the commands that have an admission class', () => {
+    expect(new Set(getRegisteredCommands())).toEqual(
+      new Set(Object.keys(EXECUTOR_COMMAND_ADMISSION))
+    );
+  });
+
   it('should have all expected commands registered', () => {
     const commands = getRegisteredCommands();
     expect(commands).toContain('prompt');
@@ -103,7 +110,13 @@ describe('executeCommand - environment.lifecycle', () => {
       branchPath: '/data/agor/worktrees/repo/feature-x',
       action: 'start',
       startCommand: 'docker compose up -d --build',
-      appUrl: 'http://localhost:3000',
+      attempt: {
+        id: '550e8400-e29b-41d4-a716-446655440001',
+        claimDeadline: '2026-01-01T00:00:00.000Z',
+        commandDeadline: '2026-01-01T00:05:00.000Z',
+        resultDeadline: '2026-01-01T00:06:00.000Z',
+        externalJobDeadlineMs: 365000,
+      },
     },
   };
 

@@ -1,4 +1,4 @@
-import { OWNERSHIP_TRANSFER_SERVICES } from '@agor/core/types';
+import { KNOWLEDGE_TRANSFER, OWNERSHIP_TRANSFER_SERVICES } from '@agor/core/types';
 /**
  * Service Hooks Registration
  *
@@ -7,6 +7,7 @@ import { OWNERSHIP_TRANSFER_SERVICES } from '@agor/core/types';
  * Extracted from index.ts for maintainability.
  */
 
+import { resolveOpenCodeCapabilities } from '@agor/agentic-tool-opencode/daemon';
 import { AGENTIC_TOOL_DISPLAY_NAMES } from '@agor/agentic-tools';
 import { projectClaudeResultResponse, projectNormalizedSdkResponse } from '@agor/core';
 import { analyticsLogger } from '@agor/core/analytics';
@@ -25,6 +26,7 @@ import {
 import {
   ArtifactRepository,
   assertTenantWritable,
+  attachHiddenTenant,
   BoardCommentsRepository,
   BoardObjectRepository,
   BoardRepository,
@@ -63,6 +65,7 @@ import {
   boardObjectQueryValidator,
   boardQueryValidator,
   branchQueryValidator,
+  knowledgeDocumentQueryValidator,
   mcpCatalogQueryValidator,
   mcpServerQueryValidator,
   messageQueryValidator,
@@ -81,11 +84,13 @@ import type {
   AuthenticatedParams,
   Board,
   BoardID,
+  BoardImportResult,
   Branch,
   DeepReadonly,
   GatewayChannel,
   HookContext,
   MCPServer,
+  Message,
   MessageID,
   Paginated,
   Params,
@@ -159,7 +164,6 @@ import {
   ensureCanCreateSession,
   ensureCanModifySchedule,
   ensureCanPromptInSession,
-  ensureCanPromptTargetSession,
   ensureCanView,
   ensureSessionImmutability,
   loadBranch,
@@ -175,10 +179,11 @@ import {
   scopeReadToAccessibleBoardsSql,
   scopeScheduleQuery,
   setSessionUnixUsername,
+  stampCallbackPrincipal,
   validateSessionUnixUsername,
 } from './utils/branch-authorization.js';
 import { captureBranchRemovalRealtimeVisibility as captureBranchRemovalVisibility } from './utils/branch-removal-realtime.js';
-import { emitServiceEvent } from './utils/emit-service-event.js';
+import { emitServiceEvent, publishCommittedServiceEvent } from './utils/emit-service-event.js';
 import { bindPrimaryOwnerToCreatedBy, injectCreatedBy } from './utils/inject-created-by.js';
 import {
   captureMarketplaceInvalidationTargets as captureMarketplaceTargets,
@@ -191,6 +196,7 @@ import {
 import {
   redactMcpRecoveryTopology,
   stripMcpSlackRecoveryNotice,
+  stripWidgetSlackConnectDelivery,
 } from './utils/mcp-recovery-redaction.js';
 import {
   didMcpPrincipalRoleChange,
@@ -359,7 +365,6 @@ export function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
  * session metadata (name, model_config, permission_config, callback_config).
  *
  * Sources:
- *   - `/sessions/:id/prompt`  → `tasks`
  *   - `/sessions/:id/stop`    → `status`, `ready_for_prompt`
  *   - executor status updates → `status`, `ready_for_prompt`
  *     (claude/copilot permission-hooks, see packages/executor)
@@ -372,7 +377,10 @@ export function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
  *   - `'session'`           → can patch own session's prompt-flow fields
  *   - `'view'` or `'none'`  → denied
  *
- * Any mixed-field patch (e.g. `{ tasks: [...], name: 'x' }`) fails the
+ * `tasks` is not among them: it is server-managed (dispatch appends it in the
+ * Task repository) and the sessions service rejects it from every caller.
+ *
+ * Any mixed-field patch (e.g. `{ status: 'idle', name: 'x' }`) fails the
  * `isPromptFlowPatchOnly` check and falls through to the strict `'all'` path,
  * so widening the whitelist here cannot accidentally leak metadata writes.
  *
@@ -382,7 +390,6 @@ export function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
  * writes are independently bound to the exact signed task context.
  */
 export const PROMPT_FLOW_PATCH_FIELDS: readonly string[] = [
-  'tasks',
   'status',
   'ready_for_prompt',
   'sdk_session_id',
@@ -542,6 +549,7 @@ export const TENANT_OWNED_SERVICE_PATHS = [
   'thread-session-map',
   'gateway-outbound-messages',
   'session-env-selections',
+  KNOWLEDGE_TRANSFER.path,
   'kb/namespaces',
   'kb/documents',
   'kb/graph',
@@ -552,6 +560,8 @@ export const TENANT_OWNED_SERVICE_PATHS = [
   'kb/indexing/status',
   'kb/indexing/reindex',
   'leaderboard',
+  'branch-counts',
+  'session-counts',
 ];
 
 // These endpoints perform network/process work after their tenant DB reads,
@@ -676,23 +686,37 @@ export const CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES = [
   ['opencode-models', 'openCodeAuth'],
 ] as const satisfies ReadonlyArray<readonly [string, Parameters<typeof rejectInConstrainedHa>[1]]>;
 
+/** Hosted OpenCode keeps no daemon-local native state, so any replica may serve its settings. */
+export function constrainedHaGateApplies(
+  feature: (typeof CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES)[number][1],
+  config: Parameters<typeof resolveOpenCodeCapabilities>[0]
+): boolean {
+  return (
+    feature !== 'openCodeAuth' || resolveOpenCodeCapabilities(config).mode !== 'managed-projection'
+  );
+}
+
 const taskFieldSet = (...fields: (keyof Task)[]) => new Set<string>(fields);
 
-const EXECUTOR_TASK_PATCH_FIELDS = taskFieldSet(
-  'status',
-  'completed_at',
-  'git_state',
-  'message_range',
-  'model',
-  'raw_sdk_response',
-  'normalized_sdk_response',
-  'computed_context_window',
-  'duration_ms',
-  'agent_session_id',
-  'error_message',
-  'report',
-  'permission_request'
-);
+const EXECUTOR_TASK_PATCH_FIELDS = new Set([
+  ...taskFieldSet(
+    'status',
+    'completed_at',
+    'git_state',
+    'message_range',
+    'model',
+    'raw_sdk_response',
+    'normalized_sdk_response',
+    'computed_context_window',
+    'duration_ms',
+    'agent_session_id',
+    'error_message',
+    'report',
+    'permission_request'
+  ),
+  // Transport-only: TasksService.patch consumes it and accepts the checkpoint with completion.
+  'opencode_checkpoint',
+]);
 
 const EXTERNAL_TASK_CREATE_FIELDS = taskFieldSet('session_id', 'full_prompt', 'status');
 
@@ -960,6 +984,37 @@ function redactMCPServerPayload(result: any): any {
  * property for a redaction gate. Which methods it is registered on is pinned
  * separately in `register-hooks.mcp-headers-redaction.test.ts`.
  */
+/**
+ * Keep the authoritative Message result intact while projecting the external
+ * caller response without the widget's Slack connect delivery state.
+ *
+ * Mirrors `createRedactTaskMcpRecoveryAfter`: `context.dispatch` is what the
+ * external caller receives, while `context.result` stays whole for
+ * audience-specific publishers (which do their own strip).
+ */
+export const redactMessageSlackConnect = async (context: HookContext): Promise<HookContext> => {
+  if (!context.params.provider) return context;
+  const project = (value: unknown): unknown =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? stripWidgetSlackConnectDelivery(value as Message)
+      : value;
+  let dispatch: unknown = context.result;
+  if (Array.isArray(context.result)) {
+    dispatch = (context.result as Message[]).map(project);
+  } else if (
+    context.result &&
+    typeof context.result === 'object' &&
+    Array.isArray((context.result as { data?: unknown }).data)
+  ) {
+    const page = context.result as { data: Message[] } & Record<string, unknown>;
+    dispatch = { ...page, data: page.data.map(project) };
+  } else {
+    dispatch = project(context.result);
+  }
+  context.dispatch = dispatch;
+  return context;
+};
+
 export const redactMCPServerSecretFields = async (context: HookContext) => {
   if (context.event) {
     context.dispatch = redactMCPServerPayload(context.result);
@@ -1323,6 +1378,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
 
   if (deployment.mode === 'ha') {
     for (const [path, feature] of CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES) {
+      if (!constrainedHaGateApplies(feature, config)) continue;
       safeService(path)?.hooks({ before: { all: [rejectInConstrainedHa(deployment, feature)] } });
     }
   }
@@ -1431,7 +1487,10 @@ export function registerHooks(ctx: RegisterHooksContext): void {
                 path === 'gateway' ||
                 path === BRANCH_DELETION_REPORT_SERVICE ||
                 path === BRANCH_CLEANUP_REPORT_SERVICE ||
-                (path === 'branches' && context.method === 'clean');
+                (path === 'branches' && context.method === 'clean') ||
+                // Avatar sync opens short tenant units around Slack I/O;
+                // ordinary users CRUD and settings mutations remain scoped.
+                (path === 'users' && context.method === 'syncAvatars');
               return (external ? tenantIdentityAround : tenantDatabaseScopeAround)(context, next);
             },
           ],
@@ -1466,7 +1525,19 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   // (`required_from_auth` still runs the full `registerTenantHooks` path.)
   const registerTenantDatabaseScopeForOwnedServices = (): void => {
     for (const path of tenantOwnedServicePaths) {
-      safeService(path)?.hooks({ around: { all: [tenantDatabaseScopeAround] } });
+      safeService(path)?.hooks({
+        around: {
+          all: [
+            async (context: HookContext, next: () => Promise<void>) => {
+              const scope =
+                path === 'users' && context.method === 'syncAvatars'
+                  ? tenantIdentityAround
+                  : tenantDatabaseScopeAround;
+              return scope(context, next);
+            },
+          ],
+        },
+      });
     }
   };
 
@@ -1884,6 +1955,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       ],
     },
     after: {
+      all: [redactMessageSlackConnect],
       create: [gatewayRouteHook],
       patch: [
         async (context: HookContext<Board>) => {
@@ -1948,6 +2020,11 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         requireMinimumRole(ROLES.MEMBER, 'delete board objects'),
         boardObjectAccess('delete board objects'),
       ],
+    },
+    after: {
+      // Repos/MCP creation inserts placement in the same outer transaction as
+      // the branch. Remote publishers must not authorize it before commit.
+      create: [publishCommittedServiceEvent],
     },
   });
 
@@ -2350,6 +2427,15 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     captureMarketplaceInvalidationTargets,
   ];
 
+  const publishCommittedBoardMove = (context: HookContext): HookContext => {
+    if (!context.event || !context.data || !Object.hasOwn(context.data, 'board_id')) return context;
+    // Board moves can join an outer admission transaction (e.g. unarchive).
+    // Feathers' automatic event fires when this nested method returns, not when
+    // that transaction commits. Replace only this event with the existing queue;
+    // rollback drops it, and successful commit emits it exactly once.
+    return publishCommittedServiceEvent(context);
+  };
+
   app.service('branches').hooks({
     before: {
       all: [typedValidateQuery(branchQueryValidator), requireAuth],
@@ -2377,9 +2463,17 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       ],
     },
     after: {
-      create: [invalidateRealtimeBranchFromResult],
-      update: [invalidateRealtimeBranchFromResult, publishMarketplaceInvalidation],
-      patch: [invalidateRealtimeBranchFromResult, publishMarketplaceInvalidation],
+      create: [invalidateRealtimeBranchFromResult, publishCommittedServiceEvent],
+      update: [
+        invalidateRealtimeBranchFromResult,
+        publishMarketplaceInvalidation,
+        publishCommittedBoardMove,
+      ],
+      patch: [
+        invalidateRealtimeBranchFromResult,
+        publishMarketplaceInvalidation,
+        publishCommittedBoardMove,
+      ],
       remove: [
         invalidateRealtimeBranchFromResult,
         publishMarketplaceInvalidation,
@@ -2394,7 +2488,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   type BranchCustomHookRegistrar = {
     hooks(options: {
       before: Record<
-        'updateEnvironment' | 'ensureTeammateKnowledgeNamespace' | 'clean',
+        'ensureTeammateKnowledgeNamespace' | 'clean',
         Array<(context: HookContext) => HookContext>
       >;
     }): void;
@@ -2402,7 +2496,6 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   (app.service('branches') as unknown as BranchCustomHookRegistrar).hooks({
     before: {
       clean: [requireMinimumRole(ROLES.MEMBER, 'clean branches')],
-      updateEnvironment: [requireMinimumRole(ROLES.MEMBER, 'update branch environments')],
       ensureTeammateKnowledgeNamespace: [
         requireMinimumRole(ROLES.MEMBER, 'create teammate knowledge namespaces'),
       ],
@@ -2427,9 +2520,14 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     },
   } as never);
 
+  safeService(KNOWLEDGE_TRANSFER.path)?.hooks({
+    before: { all: [requireAuth, requireMinimumRole(ROLES.MEMBER, 'transfer knowledge')] },
+    after: { create: [suppressKnowledgeCommandRealtimeEvent] },
+  });
+
   safeService('kb/documents')?.hooks({
     before: {
-      all: [requireAuth],
+      all: [typedValidateQuery(knowledgeDocumentQueryValidator), requireAuth],
       create: [requireMinimumRole(ROLES.MEMBER, 'create knowledge documents')],
       patch: [requireMinimumRole(ROLES.MEMBER, 'update knowledge documents')],
       update: [requireMinimumRole(ROLES.MEMBER, 'update knowledge documents')],
@@ -2592,12 +2690,34 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       create: [redactMCPServerSecretFieldsForGatewayMode],
       patch: [abortMcpInFlightAfterWrite, redactMCPServerSecretFieldsForGatewayMode],
       update: [abortMcpInFlightAfterWrite, redactMCPServerSecretFieldsForGatewayMode],
-      // `remove` returns the deleted row: the adapter loads it in full before
-      // deleting so it can return it, and that same object becomes the
-      // `removed` payload broadcast to every authenticated connection in the
-      // tenant. Without this it is the one method that hands out raw `env`,
-      // `headers`, and `auth` — a delete is not an exemption from redaction.
-      remove: [abortMcpInFlightAfterWrite, redactMCPServerSecretFieldsForGatewayMode],
+      // Removal still returns a redacted row to the authorized caller. Its
+      // realtime eviction is a separate minimal, ownership-scoped payload.
+      remove: [
+        abortMcpInFlightAfterWrite,
+        redactMCPServerSecretFieldsForGatewayMode,
+        (context: HookContext) => {
+          // Catalog deletion joins a transaction. Never publish its removal
+          // before commit (or publish anything if that transaction rolls back).
+          const event = context.event;
+          if (event) {
+            context.event = null;
+            emitServiceEvent(app, {
+              path: 'mcp-servers',
+              event,
+              method: 'remove',
+              id: context.id,
+              // Ownership is the pre-delete audience snapshot. No private
+              // configuration is needed to evict a deleted row from clients.
+              data: {
+                mcp_server_id: (context.result as MCPServer).mcp_server_id,
+                owner_user_id: (context.result as MCPServer).owner_user_id ?? null,
+              },
+              params: context.params,
+            });
+          }
+          return context;
+        },
+      ],
     },
   });
 
@@ -2988,6 +3108,14 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   };
 
   app.service('users').hooks({
+    around: {
+      all: [
+        async (context: HookContext, next: () => Promise<void>) => {
+          if (context.method === 'syncAvatars') return tenantWriteAdmissionAround(context, next);
+          return next();
+        },
+      ],
+    },
     before: {
       all: [typedValidateQuery(userQueryValidator), authenticateUsersRequestWhenCredentialed],
       find: [
@@ -3065,12 +3193,20 @@ export function registerHooks(ctx: RegisterHooksContext): void {
             | { refreshAvatarFromSettings?: (userId: UserID) => Promise<unknown> }
             | undefined;
           if (avatarService?.refreshAvatarFromSettings) {
-            avatarService.refreshAvatarFromSettings(user.user_id).catch((error: unknown) => {
-              console.warn(
-                `[users/avatar-sync] Failed to refresh avatar for new user ${shortId(user.user_id)}:`,
-                error instanceof Error ? error.message : String(error)
-              );
-            });
+            // Never let fire-and-forget work inherit a transaction that is
+            // about to commit (or refresh a user whose mutation rolls back).
+            deferWithTenantContext(
+              context.params,
+              async () => {
+                await avatarService.refreshAvatarFromSettings!(user.user_id);
+              },
+              (error) => {
+                console.warn(
+                  `[users/avatar-sync] Failed to refresh avatar for new user ${shortId(user.user_id)}:`,
+                  error instanceof Error ? error.message : String(error)
+                );
+              }
+            );
           }
           return context;
         },
@@ -3138,12 +3274,20 @@ export function registerHooks(ctx: RegisterHooksContext): void {
             | { refreshAvatarFromSettings?: (userId: UserID) => Promise<unknown> }
             | undefined;
           if (avatarService?.refreshAvatarFromSettings) {
-            avatarService.refreshAvatarFromSettings(user.user_id).catch((error: unknown) => {
-              console.warn(
-                `[users/avatar-sync] Failed to refresh avatar for updated user ${shortId(user.user_id)}:`,
-                error instanceof Error ? error.message : String(error)
-              );
-            });
+            // Never let fire-and-forget work inherit a transaction that is
+            // about to commit (or refresh a user whose mutation rolls back).
+            deferWithTenantContext(
+              context.params,
+              async () => {
+                await avatarService.refreshAvatarFromSettings!(user.user_id);
+              },
+              (error) => {
+                console.warn(
+                  `[users/avatar-sync] Failed to refresh avatar for updated user ${shortId(user.user_id)}:`,
+                  error instanceof Error ? error.message : String(error)
+                );
+              }
+            );
           }
           return context;
         },
@@ -3199,25 +3343,8 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       }
       return ensureBranchPermission('all', 'update session metadata', superadminOpts)(context);
     },
-    // Validate user has prompt permission on callback target session's branch.
-    // Skip for internal calls (no provider) — patches from dispatchCompletionCallbacks
-    // spread the existing callback_config (which includes callback_session_id) and must
-    // not be blocked by this check.
-    async (context: HookContext) => {
-      const patchCbConfig = (context.data as Record<string, unknown> | undefined)
-        ?.callback_config as { callback_session_id?: string } | undefined;
-      if (patchCbConfig?.callback_session_id && context.params.provider) {
-        const userId =
-          (context.params as { user?: { user_id: string } }).user?.user_id || 'unknown';
-        await ensureCanPromptTargetSession(
-          patchCbConfig.callback_session_id,
-          userId,
-          context.app,
-          branchRepository
-        );
-      }
-      return context;
-    },
+    // Internal callback dispatch patches skip this (no provider).
+    stampCallbackPrincipal(branchRepository),
   ];
 
   app.service('sessions').hooks({
@@ -3264,25 +3391,9 @@ export function registerHooks(ctx: RegisterHooksContext): void {
             }
           }
 
-          // Validate user has prompt permission on callback target session's branch.
-          // Skip for internal calls (no provider) — those are trusted system calls.
-          const cbConfig = (context.data as Record<string, unknown> | undefined)?.callback_config as
-            | { callback_session_id?: string }
-            | undefined;
-          if (cbConfig?.callback_session_id && context.params.provider) {
-            // Use authenticated user, NOT context.data.created_by (which could be client-supplied)
-            const authenticatedUserId =
-              (context.params as { user?: { user_id: string } }).user?.user_id || 'unknown';
-            await ensureCanPromptTargetSession(
-              cbConfig.callback_session_id,
-              authenticatedUserId,
-              context.app,
-              branchRepository
-            );
-          }
-
           return context;
         },
+        stampCallbackPrincipal(branchRepository),
       ],
       update: sessionWriteGuards,
       patch: sessionWriteGuards,
@@ -3411,7 +3522,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   // Schedules hooks
   // ============================================================================
   // Schedules inherit RBAC from the parent branch (same model as
-  // sessions). See docs/internal/schedules-first-class-design-2026-05-24.md §4.4.
+  // sessions).
 
   const scheduleRepository = new ScheduleRepository(db);
 
@@ -3459,6 +3570,15 @@ export function registerHooks(ctx: RegisterHooksContext): void {
 
   const tasksService = app.service('tasks') as FeathersService<Application, TasksServiceImpl>;
   const redactTaskMcpRecoveryAfter = createRedactTaskMcpRecoveryAfter(sessionsRepository);
+  // Queue management has the same capability as tasks.remove: Branch Manager
+  // ('all'), not mere prompt access. MCP retains the acting user's provider.
+  const manageTaskQueueGuards = [
+    requireMinimumRole(ROLES.MEMBER, 'manage queued tasks'),
+    resolveSessionContext(),
+    loadSession(sessionsRepository),
+    loadBranchFromSession(branchRepository),
+    ensureBranchPermission('all', 'manage queued tasks', superadminOpts),
+  ];
   tasksService.hooks({
     before: {
       all: [typedValidateQuery(taskQueryValidator), requireAuth],
@@ -3483,10 +3603,15 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         loadBranchFromSession(branchRepository),
         ensureCanPromptInSession({ ...superadminOpts, branchRepository }),
       ],
+      cancelQueued: manageTaskQueueGuards,
+      reorderQueued: manageTaskQueueGuards,
       connectExecutor: [requireTaskScopedExecutorRuntimeToken()],
       reportTerminationComplete: [requireTaskScopedExecutorRuntimeToken()],
+      reportExecutorInterruption: [requireTaskScopedExecutorRuntimeToken()],
       reportRuntimeTelemetry: [requireTaskScopedExecutorRuntimeToken()],
       reportSdkHealthFailure: [requireTaskScopedExecutorRuntimeToken()],
+      beginOpenCodeCheckpoint: [requireTaskScopedExecutorRuntimeToken()],
+      acknowledgeOpenCodeCleanup: [requireTaskScopedExecutorRuntimeToken()],
       remove: [
         requireMinimumRole(ROLES.MEMBER, 'delete tasks'),
         // RBAC: deleting a task requires 'all' permission on the branch
@@ -3629,6 +3754,23 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         id: context.id,
       });
     }
+  };
+
+  // Import custom methods don't publish automatically; emit `created` manually.
+  // `import_skipped` is diagnostics for the importing caller only, so it stays
+  // out of the broadcast board (keeping the hidden tenant marker).
+  const emitImportedBoardCreated = async (context: HookContext<Board>) => {
+    const result = context.result as BoardImportResult | undefined;
+    if (result) {
+      const { import_skipped: _importSkipped, ...board } = result;
+      emitServiceEvent(app, {
+        path: 'boards',
+        event: 'created',
+        data: attachHiddenTenant(board, result),
+        params: context.params,
+      });
+    }
+    return context;
   };
 
   const boardUpdateAuthorization = [
@@ -3832,34 +3974,8 @@ export function registerHooks(ctx: RegisterHooksContext): void {
           return context;
         },
       ],
-      fromBlob: [
-        clearRealtimeBranchVisibility,
-        async (context: HookContext<Board>) => {
-          if (context.result) {
-            emitServiceEvent(app, {
-              path: 'boards',
-              event: 'created',
-              data: context.result,
-              params: context.params,
-            });
-          }
-          return context;
-        },
-      ],
-      fromYaml: [
-        clearRealtimeBranchVisibility,
-        async (context: HookContext<Board>) => {
-          if (context.result) {
-            emitServiceEvent(app, {
-              path: 'boards',
-              event: 'created',
-              data: context.result,
-              params: context.params,
-            });
-          }
-          return context;
-        },
-      ],
+      fromBlob: [clearRealtimeBranchVisibility, emitImportedBoardCreated],
+      fromYaml: [clearRealtimeBranchVisibility, emitImportedBoardCreated],
       setPrimaryTeammate: [
         clearRealtimeBranchVisibility,
         // Replacing an attached primary is cache-only because its board_id is

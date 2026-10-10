@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { BranchName, RepoSlug } from '../types';
 import {
+  defaultsToPublicTeammateTemplate,
+  extractGitHubSlugFromUrl,
   extractSlugFromUrl,
   formatRepoReference,
   isValidGitUrl,
@@ -340,6 +342,41 @@ describe('extractSlugFromUrl', () => {
   });
 });
 
+describe('extractGitHubSlugFromUrl', () => {
+  it.each([
+    ['https://github.com/preset-io/agor.git', 'preset-io/agor'],
+    ['http://github.com/preset-io/agor', 'preset-io/agor'],
+    ['git://github.com/preset-io/agor.git', 'preset-io/agor'],
+    ['ssh://git@github.com/preset-io/agor.git', 'preset-io/agor'],
+    ['ssh://git@github.com:22/preset-io/agor.git', 'preset-io/agor'],
+    ['git@github.com:preset-io/agor.git', 'preset-io/agor'],
+  ])('derives a credential-free slug from %s', (remoteUrl, expected) => {
+    expect(extractGitHubSlugFromUrl(remoteUrl)).toBe(expected);
+  });
+
+  it('never includes HTTP credentials in the derived identity', () => {
+    const credential = 'github_pat_secret-that-must-not-render';
+    const slug = extractGitHubSlugFromUrl(
+      `https://x-access-token:${credential}@github.com/preset-io/agor.git`
+    );
+    expect(slug).toBe('preset-io/agor');
+    expect(slug).not.toContain(credential);
+  });
+
+  it.each([
+    'https://gitlab.com/preset-io/agor.git',
+    'git@github.com.evil.example:preset-io/agor.git',
+    'https://github.com.evil.example/preset-io/agor.git',
+    'file:///github.com/preset-io/agor.git',
+    'https://github.com/preset-io/agor/extra.git',
+    'https://github.com/preset-io/agor.git?token=secret',
+    'agor',
+    '',
+  ])('rejects a non-canonical GitHub remote: %s', (remoteUrl) => {
+    expect(extractGitHubSlugFromUrl(remoteUrl)).toBeUndefined();
+  });
+});
+
 describe('isValidSlug', () => {
   describe('valid slugs', () => {
     it('should accept simple slug', () => {
@@ -401,6 +438,13 @@ describe('isValidSlug', () => {
 
     it('should reject slug with multiple slashes', () => {
       expect(isValidSlug('org/sub/repo')).toBe(false);
+    });
+
+    it('should reject dot path segments that escape a filesystem root', () => {
+      for (const slug of ['../repo', './repo', 'org/..', 'org/.', '../..']) {
+        expect(isValidSlug(slug)).toBe(false);
+      }
+      expect(isValidSlug('..org/repo..')).toBe(true);
     });
 
     it('should reject slug with spaces', () => {
@@ -714,5 +758,22 @@ describe('integration scenarios', () => {
 
     expect(pathParsed.type).toBe('path');
     expect(slugParsed.type).toBe('managed');
+  });
+});
+
+describe('defaultsToPublicTeammateTemplate', () => {
+  it.each([
+    ['https://github.com/acme/agor-teammate-private.git', true],
+    ['git@github.com:acme/agor-teammate-private.git', true],
+    ['ssh://git@github.com/acme/agor-assistant-private.git', true],
+    ['http://github.com/acme/agor-teammate-private.git', true],
+    ['org-123@github.com:acme/Agor-Teammate-Private.git', true],
+    ['https://github.acme.internal/acme/agor-teammate-private.git', false],
+    ['https://gitlab.com/acme/agor-teammate-private.git', false],
+    ['https://github.com/agor-teammate-private-labs/handbook.git', false],
+    ['https://github.com/acme/agor-teammate-private-archive.git', false],
+    ['https://github.com/acme/handbook.git', false],
+  ])('%s → %s', (remote_url, expected) => {
+    expect(defaultsToPublicTeammateTemplate({ remote_url })).toBe(expected);
   });
 });

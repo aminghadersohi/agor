@@ -52,6 +52,14 @@ export async function markStoppedSessionPromptableNoDrain(
   );
 }
 
+/** The authenticated caller; MCP calls come from an agent acting for that user, REST from the CLI or API. */
+export function stopRequester(params: Params): TerminationInput['requestedBy'] {
+  const userId = (params as { user?: { user_id?: string } }).user?.user_id;
+  if (!userId) return { requested_via: 'agor' };
+  const via = params.provider === 'mcp' ? 'mcp' : params.provider === 'socketio' ? 'ui' : 'api';
+  return { requested_by_user_id: userId, requested_via: via };
+}
+
 /**
  * Stop semantics, in one place:
  * - target only the active task for the session;
@@ -102,9 +110,7 @@ export async function stopSessionPreserveQueue(
   const queuedTasks = await deps.taskRepo.findQueued(sessionId);
 
   if (targetTasksArray.length === 0) {
-    console.warn(
-      `⚠️  [Stop] No active tasks for session ${shortId(sessionId)}, resetting to IDLE${options.reason ? ` (reason: ${options.reason})` : ''}`
-    );
+    console.warn(`⚠️  [Stop] No active tasks for session ${shortId(sessionId)}, resetting to IDLE`);
     await deps.runInFreshTenantWriteDatabase(() =>
       markStoppedSessionPromptableNoDrain(deps.sessionsService, sessionId, params)
     );
@@ -128,7 +134,7 @@ export async function stopSessionPreserveQueue(
   }
 
   console.log(
-    `🛑 [Stop] Stopping task ${shortId(latestTask.task_id)} for session ${shortId(sessionId)}${options.reason ? ` (reason: ${options.reason})` : ''}`
+    `🛑 [Stop] Stopping task ${shortId(latestTask.task_id)} for session ${shortId(sessionId)}`
   );
 
   requireActiveAgenticTool(session.agentic_tool);
@@ -139,6 +145,7 @@ export async function stopSessionPreserveQueue(
     taskId: latestTask.task_id,
     cause: 'user_stop',
     errorMessage: options.reason ?? 'Stopped by user.',
+    requestedBy: stopRequester(params),
     params,
     runInFreshTenantWriteDatabase: deps.runInFreshTenantWriteDatabase,
   });

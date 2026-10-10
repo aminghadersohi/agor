@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { KNOWLEDGE_DOCUMENT_PAGINATION, PAGINATION } from '../config/constants';
 import { MAX_PRESENCE_BOARD_SUBSCRIPTIONS } from '../types/presence';
 import {
   boardObjectQueryValidator,
   boardQueryValidator,
+  branchCountsQueryValidator,
   branchQueryValidator,
+  knowledgeDocumentQueryValidator,
   mcpCatalogQueryValidator,
   mcpServerQueryValidator,
   messageQueryValidator,
@@ -94,14 +97,7 @@ describe('boardObjectQueryValidator', () => {
 describe('branchQueryValidator', () => {
   it('preserves zone_id for service-level virtual zone filtering', async () => {
     const context = {
-      params: {
-        query: {
-          repo_id: '019e8e1c',
-          zone_id: 'zone-review',
-          archived: 'false',
-          unknown: 'removed',
-        },
-      },
+      params: { query: { repo_id: '019e8e1c', zone_id: 'zone-review', archived: 'false' } },
     };
 
     await typedValidateQuery(branchQueryValidator)(context);
@@ -111,6 +107,44 @@ describe('branchQueryValidator', () => {
       zone_id: 'zone-review',
       archived: false,
     });
+  });
+
+  it('rejects filters it does not model instead of dropping them', async () => {
+    for (const query of [
+      { archived: false, unknown: 'value' },
+      { $or: [{ board_id: '019e8e1c' }] },
+      { name: { $ne: 'main' } },
+    ]) {
+      await expect(branchQueryValidator(query)).rejects.toThrow(/validation failed/);
+    }
+  });
+
+  it("keeps remove's deleteFromFilesystem so the service sees it", async () => {
+    expect(await branchQueryValidator({ deleteFromFilesystem: 'false' })).toEqual({
+      deleteFromFilesystem: false,
+    });
+  });
+});
+
+describe('search text', () => {
+  it('rejects NUL and other control characters; whitespace stays a separator', async () => {
+    for (const validator of [sessionQueryValidator, branchQueryValidator]) {
+      for (const search of ['zz\u0000', 'a\u0001b', 'a\u001bb', 'a\u007fb']) {
+        await expect(validator({ search })).rejects.toThrow(/validation failed/);
+      }
+      expect(await validator({ search: 'login\tfix\nflow' })).toEqual({
+        search: 'login\tfix\nflow',
+      });
+    }
+  });
+});
+
+describe('branchCountsQueryValidator', () => {
+  it('takes no query: a filter it would ignore is rejected', async () => {
+    expect(await branchCountsQueryValidator({})).toEqual({});
+    await expect(branchCountsQueryValidator({ board_id: '019e8e1c' })).rejects.toThrow(
+      /validation failed/
+    );
   });
 });
 
@@ -148,27 +182,37 @@ describe('userQueryValidator', () => {
 });
 
 describe('sessionQueryValidator', () => {
+  it.each([false, 'false', true, 'true'])('preserves and coerces $count=%s', async ($count) => {
+    const context = { params: { query: { $count } } };
+    await typedValidateQuery(sessionQueryValidator)(context);
+    expect(context.params.query.$count).toBe($count === true || $count === 'true');
+  });
+
+  it('rejects invalid count options', async () => {
+    await expect(sessionQueryValidator({ $count: 'sometimes' })).rejects.toThrow();
+  });
+
   it('preserves the _swapReplace marker so the switch-tool guard can see it', async () => {
     // Regression: `removeAdditional: 'all'` silently stripped `_swapReplace`
     // before it reached SessionsService.remove, making the swap-safety guard
-    // dead on the external client path. It must now survive validation (and
-    // coerce the REST string form) while genuinely unknown props are dropped.
-    const context = {
-      params: {
-        query: {
-          session_id: '019e8e1c',
-          _swapReplace: 'true',
-          unknown: 'removed',
-        },
-      },
-    };
+    // dead on the external client path. It must survive validation (and
+    // coerce the REST string form).
+    const context = { params: { query: { session_id: '019e8e1c', _swapReplace: 'true' } } };
 
     await typedValidateQuery(sessionQueryValidator)(context);
 
-    expect(context.params.query).toEqual({
-      session_id: '019e8e1c',
-      _swapReplace: true,
-    });
+    expect(context.params.query).toEqual({ session_id: '019e8e1c', _swapReplace: true });
+  });
+
+  it('rejects filters it does not model instead of dropping them', async () => {
+    for (const query of [
+      { session_id: '019e8e1c', unknown: 'value' },
+      { $or: [{ created_by: '019e8e1c' }, { status: 'idle' }] },
+      { archived_reason: 'branch_archived' },
+      { status: { $ne: 'idle' } },
+    ]) {
+      await expect(sessionQueryValidator(query)).rejects.toThrow(/validation failed/);
+    }
   });
 });
 
@@ -239,6 +283,31 @@ describe('messageQueryValidator', () => {
 });
 
 describe('taskQueryValidator', () => {
+  it('accepts a bounded task_id $in page and rejects an oversized one', async () => {
+    await typedValidateQuery(taskQueryValidator)({
+      params: {
+        query: {
+          session_id: '019e8e1c-0000-7000-8000-000000000000',
+          task_id: { $in: ['019e8e1d-0000-7000-8000-000000000000'] },
+        },
+      },
+    });
+    await expect(
+      typedValidateQuery(taskQueryValidator)({
+        params: {
+          query: {
+            task_id: {
+              $in: Array.from(
+                { length: 101 },
+                (_, i) => `019e8e1d-0000-7000-8000-${String(i).padStart(12, '0')}`
+              ),
+            },
+          },
+        },
+      })
+    ).rejects.toThrow();
+  });
+
   it('preserves bounded hydration cursors and rejects unsupported fields', async () => {
     const valid = {
       params: {
@@ -329,4 +398,72 @@ it('preserves transcript queue exclusion and opt-in session accounting', async (
   const session = { params: { query: { include_usage: 'true' } } };
   await typedValidateQuery(sessionQueryValidator)(session);
   expect(session.params.query.include_usage).toBe(true);
+});
+
+describe('knowledgeDocumentQueryValidator', () => {
+  it.each(['active', 'archived', 'all'])(
+    'preserves explicit archive filter %s',
+    async (archive_filter) => {
+      expect(await knowledgeDocumentQueryValidator({ archive_filter })).toEqual({ archive_filter });
+    }
+  );
+  it('rejects invalid archive filters instead of widening discovery', async () => {
+    await expect(knowledgeDocumentQueryValidator({ archive_filter: 'anything' })).rejects.toThrow();
+  });
+  it('coerces REST list and hydration params', async () => {
+    expect(
+      await knowledgeDocumentQueryValidator({
+        namespace_slug: 'team',
+        kind: 'memory',
+        archived: 'false',
+        include_content: 'true',
+        version: '3',
+        $limit: '50',
+        $skip: '100',
+        $sort: { updated_at: '-1', path: '1' },
+      })
+    ).toMatchObject({
+      namespace_slug: 'team',
+      kind: 'memory',
+      archived: false,
+      include_content: true,
+      $limit: 50,
+      $skip: 100,
+      $sort: { updated_at: -1, path: 1 },
+    });
+  });
+
+  it('strips unknown filters and unsupported sort columns instead of widening them', async () => {
+    expect(
+      await knowledgeDocumentQueryValidator({
+        uri: 'agor://kb/team/a.md',
+        $sort: { content_text: 1, title: 1 },
+      })
+    ).toEqual({ $sort: { title: 1 } });
+  });
+
+  it('accepts findAll() continuation offsets past the shared skip ceiling', async () => {
+    const continuation = PAGINATION.MAX_SKIP + KNOWLEDGE_DOCUMENT_PAGINATION.MAX_LIMIT;
+    await expect(
+      knowledgeDocumentQueryValidator({
+        $limit: String(KNOWLEDGE_DOCUMENT_PAGINATION.MAX_LIMIT),
+        $skip: String(continuation),
+      })
+    ).resolves.toEqual({ $limit: KNOWLEDGE_DOCUMENT_PAGINATION.MAX_LIMIT, $skip: continuation });
+    // Schemas without an override keep the shared ceiling.
+    await expect(boardQueryValidator({ $skip: continuation })).rejects.toThrow();
+  });
+
+  it.each([
+    { $limit: -1 },
+    { $limit: 'all' },
+    { $limit: 10001 },
+    { $skip: 1.5 },
+    { $skip: -1 },
+    { $sort: { path: 0 } },
+    { kind: 'unknown' },
+    { include_content: 'maybe' },
+  ])('rejects malformed document queries: %j', async (query) => {
+    await expect(knowledgeDocumentQueryValidator(query)).rejects.toThrow();
+  });
 });

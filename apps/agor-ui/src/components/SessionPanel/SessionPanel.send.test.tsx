@@ -6,8 +6,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppActionsProvider } from '../../contexts/AppActionsContext';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { agorStore } from '../../store/agorStore';
+import { SOCKET_DISCONNECTED_ERROR } from '../../utils/connectionErrors';
 import { getPromptDraft, savePromptDraft, stagePromptDraftSeed } from '../../utils/promptDrafts';
 import type { UploadFilesToSessionResult } from '../FileUpload/upload';
+import { sendPromptWithReconciliation } from './promptReconciliation';
 import SessionPanel from './SessionPanel';
 
 const uploadMockState = vi.hoisted(() => ({
@@ -605,26 +607,30 @@ describe('SessionPanel composer send', () => {
     expect(onBtwFork).not.toHaveBeenCalled();
   });
 
-  it('shows unsupported file intake errors before upload/send', async () => {
+  it('shows oversized file intake errors before upload/send', async () => {
     const onSendPrompt = vi.fn();
     renderSessionPanel({ onSendPrompt });
 
     fireEvent.drop(screen.getByLabelText('Composer attachments and input drop zone'), {
       dataTransfer: {
         types: ['Files'],
-        files: [new File(['<script>'], 'unsafe.html', { type: 'text/html' })],
+        files: [
+          new File([new Uint8Array(51 * 1024 * 1024)], 'huge.bin', {
+            type: 'application/octet-stream',
+          }),
+        ],
       },
     });
 
     await waitFor(() => {
       expect(
-        screen.getAllByText(/unsafe.html: Unsupported file type: text\/html/).length
+        screen.getAllByText(/huge.bin: File is 51 MB; the per-file limit is 50 MB/).length
       ).toBeGreaterThan(0);
     });
 
     expect(uploadMockState.uploadFilesToSession).not.toHaveBeenCalled();
     expect(onSendPrompt).not.toHaveBeenCalled();
-    expect(screen.queryByLabelText('Preview unsafe.html')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Preview huge.bin')).not.toBeInTheDocument();
   });
 
   it('shows a visible cap error and rejects an incoming batch over 10 files', async () => {
@@ -658,12 +664,14 @@ describe('SessionPanel composer send', () => {
     expect(onSendPrompt).not.toHaveBeenCalled();
   });
 
-  it('prioritizes the visible cap error for mixed invalid and over-cap batches', async () => {
+  it('prioritizes the visible cap error for mixed oversized and over-cap batches', async () => {
     const onSendPrompt = vi.fn();
     renderSessionPanel({ onSendPrompt });
 
     const files = [
-      new File(['<svg />'], 'bad.svg', { type: 'image/svg+xml' }),
+      new File([new Uint8Array(51 * 1024 * 1024)], 'huge.bin', {
+        type: 'application/octet-stream',
+      }),
       ...Array.from(
         { length: 11 },
         (_, index) =>
@@ -687,7 +695,7 @@ describe('SessionPanel composer send', () => {
       ).toBeGreaterThan(0);
     });
 
-    expect(screen.queryByText(/bad.svg: Unsupported file type/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/huge.bin: File is/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Preview pending-00.txt')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Preview pending-10.txt')).not.toBeInTheDocument();
     expect(uploadMockState.uploadFilesToSession).not.toHaveBeenCalled();
@@ -709,5 +717,57 @@ describe('responsive shared prompt input', () => {
     } finally {
       viewport.mockRestore();
     }
+  });
+});
+
+describe('SessionPanel send after a lost connection', () => {
+  beforeEach(() => {
+    agorStore.getState().reset();
+    localStorage.clear();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  // Outcome matrix lives in promptReconciliation.test.ts; this proves the composer wiring.
+  function sendThroughLostConnection(landed: boolean) {
+    const showError = vi.fn();
+    const find = vi.fn(async ({ query }: { query: { $limit: number } }) => ({
+      data:
+        query.$limit === 1 || !landed
+          ? []
+          : [
+              {
+                task_id: 'task-1',
+                session_id: 'session-1',
+                created_by: 'user-a',
+                full_prompt: 'Ship it',
+              },
+            ],
+    }));
+    const client = { io: { connected: true }, service: () => ({ find }) } as unknown as AgorClient;
+    const onSendPrompt = (sessionId: string, prompt: string) =>
+      sendPromptWithReconciliation({
+        send: () => Promise.reject(new Error(SOCKET_DISCONNECTED_ERROR)),
+        getClient: () => client,
+        attempt: { sessionId, userId: 'user-a', prompt },
+        showError,
+        reconnectTimeoutMs: 50,
+      });
+    const view = renderSessionPanel({ onSendPrompt });
+    const textarea = screen.getByPlaceholderText(/Prompt here/i);
+    fireEvent.change(textarea, { target: { value: 'Ship it' } });
+    fireEvent.click(view.container.querySelector('button.ant-btn-primary') as HTMLButtonElement);
+    return { showError, textarea };
+  }
+
+  it('clears the composer without a toast when the prompt landed', async () => {
+    const { showError, textarea } = sendThroughLostConnection(true);
+    await waitFor(() => expect(textarea).toHaveValue(''));
+    expect(showError).not.toHaveBeenCalled();
+  });
+
+  it('keeps the text with one toast when the outcome is unknown', async () => {
+    const { showError, textarea } = sendThroughLostConnection(false);
+    await waitFor(() => expect(showError).toHaveBeenCalledOnce());
+    expect(textarea).toHaveValue('Ship it');
   });
 });

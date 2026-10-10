@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   AgenticToolInvokePayloadSchema,
+  BranchFilesReadPayloadSchema,
   EnvironmentLifecyclePayloadSchema,
   EnvironmentLogsPayloadSchema,
   ExecutorPayloadSchema,
@@ -24,6 +25,36 @@ import {
   parseExecutorPayload,
   ZellijAttachPayloadSchema,
 } from './payload-types.js';
+
+describe('BranchFilesReadPayloadSchema', () => {
+  const payload = {
+    command: 'branch.files.read',
+    sessionToken: 'jwt-token-here',
+    params: {
+      branchId: '550e8400-e29b-41d4-a716-446655440000',
+      filePath: 'src/example.ts',
+    },
+  };
+
+  it('accepts a staged source-control preview', () => {
+    expect(
+      BranchFilesReadPayloadSchema.parse({
+        ...payload,
+        params: { ...payload.params, gitStatusSource: 'staged' },
+      }).params.gitStatusSource
+    ).toBe('staged');
+  });
+
+  it('defaults to the combined preview and rejects unknown snapshots', () => {
+    expect(BranchFilesReadPayloadSchema.parse(payload).params.gitStatusSource).toBe('combined');
+    expect(() =>
+      BranchFilesReadPayloadSchema.parse({
+        ...payload,
+        params: { ...payload.params, gitStatusSource: 'unknown' },
+      })
+    ).toThrow();
+  });
+});
 
 describe('PromptPayloadSchema', () => {
   it('should parse valid prompt payload', () => {
@@ -70,6 +101,27 @@ describe('PromptPayloadSchema', () => {
     expect(result.agenticToolContext).toEqual({ nativeHome: '/data/agor' });
     expect(result.params.permissionMode).toBe('auto');
     expect(result.params.promptOrigin).toEqual({ kind: 'channel', server: 'slack' });
+  });
+
+  it('keeps the informational model verbatim and leaves it optional', () => {
+    const base = {
+      command: 'prompt',
+      sessionToken: 'jwt-token-here',
+      params: {
+        sessionId: '550e8400-e29b-41d4-a716-446655440000',
+        taskId: '550e8400-e29b-41d4-a716-446655440001',
+        prompt: 'Hello!',
+        tool: 'claude-code',
+        cwd: '/home/user/project',
+      },
+    };
+
+    const withModel = PromptPayloadSchema.parse({
+      ...base,
+      params: { ...base.params, model: 'claude-opus-4-7[1m]' },
+    });
+    expect(withModel.params.model).toBe('claude-opus-4-7[1m]');
+    expect(PromptPayloadSchema.parse(base).params.model).toBeUndefined();
   });
 
   it('rejects malformed prompt provenance at the private executor boundary', () => {
@@ -307,7 +359,13 @@ describe('EnvironmentLifecyclePayloadSchema', () => {
         branchPath: '/data/agor/worktrees/repo/feature',
         action: 'start',
         startCommand: 'docker compose up -d --build',
-        appUrl: 'http://localhost:3000',
+        attempt: {
+          id: '550e8400-e29b-41d4-a716-446655440001',
+          claimDeadline: '2026-01-01T00:00:00.000Z',
+          commandDeadline: '2026-01-01T00:05:00.000Z',
+          resultDeadline: '2026-01-01T00:06:00.000Z',
+          externalJobDeadlineMs: 485000,
+        },
       },
     };
 
@@ -324,7 +382,15 @@ describe('EnvironmentLifecyclePayloadSchema', () => {
         sessionToken: 'jwt-token-here',
         params: {
           branchId: '550e8400-e29b-41d4-a716-446655440000',
+          branchPath: '/data/agor/worktrees/repo/feature',
           action: 'start',
+          attempt: {
+            id: '550e8400-e29b-41d4-a716-446655440001',
+            claimDeadline: '2026-01-01T00:00:00.000Z',
+            commandDeadline: '2026-01-01T00:05:00.000Z',
+            resultDeadline: '2026-01-01T00:06:00.000Z',
+            externalJobDeadlineMs: 485000,
+          },
         },
       })
     ).toThrow();
@@ -702,11 +768,26 @@ describe('GitRepoRealignOriginPayloadSchema', () => {
         repoPath: '/managed/repos/repo',
         remoteUrl: 'https://example.com/org/repo.git',
         repoSlug: 'org/repo',
+        reposRoot: '/managed/repos',
       },
     });
 
     expect(result).not.toHaveProperty('sessionToken');
     expect(result.params.repoPath).toBe('/managed/repos/repo');
+  });
+
+  it('requires the tenant repos root that bounds repoPath', () => {
+    expect(() =>
+      GitRepoRealignOriginPayloadSchema.parse({
+        command: 'git.repo.realign-origin',
+        params: {
+          repoId: '550e8400-e29b-41d4-a716-446655440000',
+          repoPath: '/managed/repos/repo',
+          remoteUrl: 'https://example.com/org/repo.git',
+          repoSlug: 'org/repo',
+        },
+      })
+    ).toThrow();
   });
 });
 

@@ -1,9 +1,12 @@
+import type { AgorClient } from '@agor/core/client';
 import { generateId } from '@agor/core/ids/browser';
 import {
   type Message,
   MessageRole,
   type ReactiveSessionHandle,
   type ReactiveSessionState,
+  releaseReactiveSession,
+  retainReactiveSession,
   type Task,
   TaskStatus,
 } from '@agor-live/client';
@@ -19,10 +22,12 @@ import { App, ConfigProvider, Flex, theme } from 'antd';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { page, userEvent } from 'vitest/browser';
+import { IDENTITY_AVATAR_SIZE } from '../../constants/ui';
 import { AgentChain } from '../AgentChain';
 import { MessageBlock } from '../MessageBlock';
-import { ContextWindowPill, ModelPill } from '../Pill';
-import { LeanTurnMetadata } from '../TaskBlock/LeanTurnMetadata';
+import { ModelPill } from '../Pill';
+import { ContextUsageRule } from '../TaskBlock/ContextUsageRule';
+import { TaskBlock } from '../TaskBlock/TaskBlock';
 import { ConversationView } from './ConversationView';
 
 function TestSurface({ children }: { children: ReactElement }) {
@@ -65,6 +70,11 @@ const tasks: Task[] = Array.from({ length: 20 }, (_, index) => ({
   full_prompt: `Prompt ${index}`,
   created_by: '',
   status: TaskStatus.COMPLETED,
+  message_range: {
+    start_index: index * 2,
+    end_index: index * 2 + 1,
+    start_timestamp: '2026-09-01T00:00:00Z',
+  },
   created_at: '2026-09-01T00:00:00.000Z',
   model: 'synthetic-model',
   git_state: { ref_at_start: 'main', sha_at_start: 'test' },
@@ -114,6 +124,7 @@ const handle = {
   loadOlderTasks,
   loadTaskMessages,
   unloadTaskMessages: () => {},
+  retainTaskDetails: () => () => {},
   resync: async () => {},
 } as unknown as ReactiveSessionHandle;
 let currentHandle = handle;
@@ -189,7 +200,7 @@ it('fences an old page request when navigating to another session', async () => 
         finishNew = resolve;
       })
   );
-  currentHandle = { ...handle, loadOlderTasks: oldLoad } as ReactiveSessionHandle;
+  currentHandle = { ...handle, loadOlderTasks: oldLoad } as unknown as ReactiveSessionHandle;
   const view = (id: typeof sessionId) => (
     <div style={{ height: 'calc(100dvh - 32px)', display: 'flex', flexDirection: 'column' }}>
       <ConversationView client={null} sessionId={id} />
@@ -199,7 +210,7 @@ it('fences an old page request when navigating to another session', async () => 
   fireEvent.click(screen.getByRole('button', { name: /Load older history/ }));
   expect(oldLoad).toHaveBeenCalledTimes(1);
   const nextId = generateId();
-  currentHandle = { ...handle, loadOlderTasks: newLoad } as ReactiveSessionHandle;
+  currentHandle = { ...handle, loadOlderTasks: newLoad } as unknown as ReactiveSessionHandle;
   state = { ...state, sessionId: nextId };
   rerender(view(nextId));
   fireEvent.click(screen.getByRole('button', { name: /Load older history/ }));
@@ -232,7 +243,7 @@ it('keeps a long user prompt and its full-size avatar within the transcript widt
   );
   const root = container.querySelector('.ant-bubble')!;
   const avatar = root.querySelector('.ant-avatar')!;
-  expect(avatar.getBoundingClientRect().width).toBe(40);
+  expect(avatar.getBoundingClientRect().width).toBe(IDENTITY_AVATAR_SIZE);
   expect(avatar.getBoundingClientRect().right).toBeLessThanOrEqual(
     root.getBoundingClientRect().right + 1
   );
@@ -261,105 +272,86 @@ it('keeps the tool disclosure after an empty load and reopens without another re
   expect(screen.getByText('Prompt 19')).toBeVisible();
 });
 
-it('reveals existing metadata pills without layout shift through focus, hover and touch', async () => {
-  const metadata = (
-    <Flex gap="small" style={{ width: 'max-content', flexShrink: 0 }}>
-      <ModelPill model="synthetic-model" />
-      <ContextWindowPill used={60000} limit={100000} />
-      <ModelPill model="another-long-synthetic-model-name" />
-    </Flex>
-  );
-  render(
-    <LeanTurnMetadata metadata={metadata}>
-      <p>Prompt for metadata</p>
-    </LeanTurnMetadata>
-  );
-  expect(screen.getByText('synthetic-model')).not.toBeVisible();
-  const prompt = screen.getByText('Prompt for metadata');
-  const before = prompt.parentElement!.getBoundingClientRect();
-  await userEvent.tab();
-  await waitFor(() => expect(screen.getByText('synthetic-model')).toBeVisible());
-  expect(getComputedStyle(prompt.parentElement!).paddingBottom).toBe('0px');
-  expect(prompt.parentElement!.getBoundingClientRect().height).toBe(before.height);
-  expect(prompt.parentElement!.getBoundingClientRect().top).toBe(before.top);
-  const row = screen.getByRole('region', { name: 'Turn metadata' });
-  const overlay = row.parentElement!;
-  expect(getComputedStyle(overlay).position).toBe('absolute');
-  await waitFor(() =>
-    expect(overlay.getBoundingClientRect().top).toBe(
-      prompt.parentElement!.getBoundingClientRect().bottom
-    )
-  );
-  expect(overlay.getBoundingClientRect().top).toBeGreaterThanOrEqual(
-    prompt.getBoundingClientRect().bottom
-  );
-  expect(row.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth);
-  const pills = row.firstElementChild!;
-  if (row.scrollWidth > row.clientWidth) {
-    // Leftmost pills remain reachable rather than being clipped by end alignment.
-    expect(pills.getBoundingClientRect().left).toBe(row.getBoundingClientRect().left);
-  } else {
-    expect(pills.getBoundingClientRect().right).toBe(row.getBoundingClientRect().right);
-  }
-  if (window.innerWidth === 320) expect(row.scrollWidth).toBeGreaterThan(row.clientWidth);
-  await page.screenshot({ path: `./.vitest/lean-metadata-${window.innerWidth}.png` });
-  cleanup();
-  render(
-    <LeanTurnMetadata metadata={metadata}>
-      <p>Prompt for metadata</p>
-    </LeanTurnMetadata>
-  );
-  expect(screen.queryByRole('button', { name: 'Show turn metadata' })).toBeNull();
-  const touchPrompt = screen.getByText('Prompt for metadata');
-  fireEvent.pointerDown(touchPrompt, { pointerType: 'touch', clientX: 10, clientY: 10 });
-  fireEvent.pointerUp(touchPrompt, { pointerType: 'touch', clientX: 10, clientY: 60 });
-  expect(screen.getByText('synthetic-model')).not.toBeVisible();
-  fireEvent.pointerDown(touchPrompt, { pointerType: 'touch', clientX: 10, clientY: 10 });
-  fireEvent.pointerUp(touchPrompt, { pointerType: 'touch', clientX: 10, clientY: 10 });
-  await waitFor(() => expect(screen.getByText('synthetic-model')).toBeVisible());
-  fireEvent.keyDown(touchPrompt, { key: 'Escape' });
-  await waitFor(() => expect(screen.getByText('synthetic-model')).not.toBeVisible());
-  cleanup();
-  render(
-    <LeanTurnMetadata metadata={metadata}>
-      <p>Prompt for metadata</p>
-    </LeanTurnMetadata>
-  );
-  await userEvent.hover(screen.getByText('Prompt for metadata'));
-  await waitFor(() => expect(screen.getByText('synthetic-model')).toBeVisible());
-  const fadingOverlay = screen.getByRole('region', { name: 'Turn metadata' }).parentElement!;
-  expect(getComputedStyle(fadingOverlay).transitionProperty).toContain('visibility');
-  await userEvent.unhover(screen.getByText('Prompt for metadata'));
-  expect(fadingOverlay.style.pointerEvents).toBe('none');
-  expect(getComputedStyle(fadingOverlay).transitionDelay.split(',').at(-1)?.trim()).not.toBe('0s');
-  await waitFor(() => expect(screen.getByText('synthetic-model')).not.toBeVisible());
+const footer = (metadata: ReactElement) => (
+  <ContextUsageRule
+    used={60000}
+    limit={100000}
+    snapshot={undefined}
+    metadata={metadata}
+    usageLabel="60%"
+  >
+    <p>The assistant answer</p>
+  </ContextUsageRule>
+);
+
+const longMetadata = (
+  <Flex wrap={false} gap="small" style={{ width: 'max-content', flexShrink: 0 }}>
+    <ModelPill model="synthetic-model" />
+    <ModelPill model="another-long-synthetic-model-name" />
+    <ModelPill model="a-third-even-longer-synthetic-model-name" />
+    <ModelPill model="and-a-fourth-synthetic-model-name-for-good-measure" />
+  </Flex>
+);
+
+it('keeps historical metadata visible and compact while the sole gauge follows the latest turn', () => {
+  const withUsage = (task: Task) =>
+    ({
+      ...task,
+      computed_context_window: 22_000,
+      normalized_sdk_response: {
+        contextWindowLimit: 100_000,
+        tokenUsage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      },
+    }) as unknown as Task;
+  const first = withUsage(tasks[18]);
+  const second = { ...tasks[19], status: TaskStatus.RUNNING };
+  state = { ...state, tasks: [first], hasOlderTasks: false };
+  const { container } = render(<ConversationView client={null} sessionId={sessionId} />);
+  const oldTurn = container.querySelector<HTMLElement>(`[data-task-block="${first.task_id}"]`)!;
+  const oldAnswer = screen.getByText(/Answer 18\./);
+  const oldFooter = oldTurn.querySelector<HTMLElement>('[aria-label="Turn metadata"]')!;
+  const oldRowHeight = oldFooter.parentElement!.getBoundingClientRect().height;
+  expect(oldFooter).toBeVisible();
+  expect(oldTurn.querySelector('[data-testid="context-usage-rule"]')).not.toBeNull();
+
+  act(() => update({ ...state, tasks: [first, second] }));
+  expect(container.querySelectorAll('[data-testid="context-usage-rule"]')).toHaveLength(0);
+  expect(container.querySelectorAll('[data-testid="turn-usage-label"]')).toHaveLength(0);
+  expect(screen.getByText(/Answer 18\./)).toBe(oldAnswer);
+  expect(oldFooter).toBeVisible();
+  expect(oldFooter).toHaveTextContent('synthetic-model');
+  expect(oldFooter).toHaveTextContent('test');
+  expect(oldFooter.parentElement!.getBoundingClientRect().height).toBeLessThan(30);
+  expect(oldFooter.parentElement!.getBoundingClientRect().height).toBeCloseTo(oldRowHeight, 0);
+
+  act(() => update({ ...state, tasks: [tasks[17], first, withUsage(second)] }));
+  expect(container.querySelectorAll('[data-testid="context-usage-rule"]')).toHaveLength(1);
+  expect(container.querySelectorAll('[data-testid="turn-usage-label"]')).toHaveLength(1);
+  expect(oldTurn.querySelector('[data-testid="context-usage-rule"]')).toBeNull();
+  expect(oldFooter).toBeVisible();
+  expect(screen.getByText(/Answer 18\./)).toBe(oldAnswer);
+  const newest = container.querySelector<HTMLElement>(`[data-task-block="${second.task_id}"]`)!;
+  expect(newest.querySelector('[data-testid="turn-usage-label"]')).toHaveTextContent('22%');
 });
 
-it('floats metadata over the following row, but reserves space for approval controls', async () => {
-  const view = (reserveSpace: boolean) => (
-    <div>
-      <LeanTurnMetadata reserveSpace={reserveSpace} metadata={<span>Metadata pills</span>}>
-        <div>Prompt</div>
-      </LeanTurnMetadata>
-      <button type="button" style={{ display: 'block' }}>
-        Following controls
-      </button>
+it('keeps long metadata visible and scrollable without clipping or moving the next turn', () => {
+  const { container } = render(
+    <div style={{ width: Math.min(window.innerWidth, 390) }}>
+      {footer(longMetadata)}
+      <p>The next turn</p>
     </div>
   );
-  const { rerender } = render(view(false));
-  await userEvent.hover(screen.getByText('Prompt'));
-  const overlay = screen.getByRole('region', { name: 'Turn metadata' }).parentElement!;
-  await waitFor(() =>
-    expect(overlay.getBoundingClientRect().top).toBe(
-      screen.getByRole('button', { name: 'Following controls' }).getBoundingClientRect().top
-    )
-  );
-  await userEvent.hover(screen.getByText('Metadata pills'));
-  expect(screen.getByText('Metadata pills')).toBeVisible();
-  rerender(view(true));
-  expect(overlay.getBoundingClientRect().bottom).toBeLessThanOrEqual(
-    screen.getByRole('button', { name: 'Following controls' }).getBoundingClientRect().top
-  );
+  const row = screen.getByRole('region', { name: 'Turn metadata' });
+  const line = screen.getByTestId('context-usage-rule');
+  const nextTop = screen.getByText('The next turn').getBoundingClientRect().top;
+  expect(row).toBeVisible();
+  expect(line).toBeVisible();
+  expect(row.scrollWidth).toBeGreaterThan(row.clientWidth);
+  expect(row.scrollHeight).toBeLessThanOrEqual(row.clientHeight + 1);
+  row.scrollLeft = row.scrollWidth;
+  expect(row.scrollLeft).toBeGreaterThan(0);
+  expect(screen.getByText('The next turn').getBoundingClientRect().top).toBe(nextTop);
+  expect(container.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
 });
 
 it('keeps familiar icon-led tool rows and results inside the quiet outer disclosure', async () => {
@@ -385,7 +377,8 @@ it('keeps familiar icon-led tool rows and results inside the quiet outer disclos
   const tool = screen.getByRole('button', { name: /Read/ });
   expect(tool.querySelector('.anticon')).not.toBeNull();
   expect(tool).toHaveAttribute('aria-expanded', 'false');
-  const label = screen.getByText('1 tool call');
+  const label = screen.getByText('Tool calls');
+  expect(header.querySelector('.ant-tag')?.textContent).toBe('1');
   const caret = header.querySelector('.anticon-up')!;
   expect(getComputedStyle(label).fontSize).toBe(
     getComputedStyle(tool.querySelector('strong')!).fontSize
@@ -599,14 +592,14 @@ it('shows exceptional outcomes beneath their turn without floating top icons or 
   state = { ...state, tasks: [{ ...tasks[19], status: TaskStatus.STOPPED }], hasOlderTasks: false };
   const { container } = render(<ConversationView client={null} sessionId={sessionId} />);
   const root = container.querySelector('[data-task-block]')!;
-  const stopped = screen.getByText('Turn stopped');
+  const stopped = screen.getByText('The agent was stopped. Any edits are kept.');
   expect(stopped).toBeVisible();
   const outcome = root.querySelector<HTMLElement>('[data-turn-outcome]')!;
-  expect(outcome).toHaveClass('ant-alert-warning');
+  expect(outcome).toHaveAttribute('data-notice-type', 'neutral');
   expect(
     Math.abs(outcome.getBoundingClientRect().left - root.getBoundingClientRect().left)
   ).toBeLessThan(1);
-  expect(getComputedStyle(outcome).fontSize).toBe('14px');
+  expect(getComputedStyle(stopped).fontSize).toBe('12px');
   expect(root.querySelector(':scope > .anticon')).toBeNull();
   expect(stopped.getBoundingClientRect().top).toBeGreaterThan(
     screen.getByText(/Answer 19\./).getBoundingClientRect().bottom
@@ -618,13 +611,438 @@ it('shows exceptional outcomes beneath their turn without floating top icons or 
         {
           ...state.tasks[0],
           status: TaskStatus.FAILED,
+          executor_connected_at: state.tasks[0].created_at,
           error_message: 'Synthetic failure: ' + 'long-diagnostic-'.repeat(50),
         },
       ],
     })
   );
-  expect(screen.getByRole('alert')).toHaveTextContent('Turn failed');
-  expect(screen.getByRole('alert')).toHaveClass('ant-alert-error');
+  expect(outcome).toHaveTextContent('The agent hit a problem.');
+  expect(outcome).toHaveAttribute('data-notice-type', 'error');
+  await userEvent.click(screen.getByRole('button', { name: 'Details' }));
+  expect(screen.getByText(/^Synthetic failure: long-diagnostic-/)).toBeVisible();
   expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
   await page.screenshot({ path: `./.vitest/lean-outcome-${window.innerWidth}.png` });
+});
+
+it('retains the recorded count through lazy loading and retry without double count text', async () => {
+  const load = vi.fn().mockRejectedValue(new Error('offline'));
+  render(
+    <TaskBlock
+      task={{ ...tasks[0], recorded_tool_count: 42 }}
+      taskMessages={[]}
+      taskMessagesLoaded={false}
+      onLoadTaskMessages={load}
+    />
+  );
+  fireEvent.click(screen.getByRole('button', { name: '42 tool calls' }));
+  const loading = screen.getByRole('button', { name: 'Loading tool activity…' });
+  expect(loading.querySelector('.ant-tag')?.textContent).toBe('42');
+  expect(loading).toBeDisabled();
+  const retry = await screen.findByRole('button', { name: 'Couldn’t load tool activity · Retry' });
+  expect(retry.querySelector('.ant-tag')?.textContent).toBe('42');
+  expect(retry.textContent?.match(/42/g)).toHaveLength(1);
+  expect(load).toHaveBeenCalledTimes(1);
+});
+
+it('keeps history text choices, keyboard disclosure and scroll anchors with multiline markdown', async () => {
+  const longMessages = new Map(
+    [...messages].map(([taskId, rows], turn) => [
+      taskId,
+      rows.map((message, index) => ({
+        ...message,
+        content: [
+          `History ${turn} message ${index}`,
+          '',
+          '```text',
+          'synthetic code',
+          '```',
+          '',
+          '| Column | Value |',
+          '| --- | --- |',
+          '| synthetic | table |',
+          '',
+          ...Array.from(
+            { length: 12 },
+            (_, line) =>
+              `Paragraph ${turn}-${index}-${line}. ${'Long prose wraps naturally. '.repeat(8)}\n`
+          ),
+          `Tail ${turn}-${index}`,
+        ].join('\n'),
+      })),
+    ])
+  );
+  state = { ...state, messagesByTask: longMessages };
+  render(
+    <div style={{ height: 'calc(100dvh - 32px)', display: 'flex', flexDirection: 'column' }}>
+      <ConversationView client={null} sessionId={sessionId} />
+    </div>
+  );
+  expect(screen.getAllByRole('button', { name: 'show more' })).toHaveLength(18);
+  expect(screen.getByText('Tail 19-0')).toBeInTheDocument();
+  expect(screen.getByText('Tail 19-1')).toBeInTheDocument();
+  expect(screen.queryByText('Tail 10-0')).not.toBeInTheDocument();
+  const viewport = screen.getByTestId('conversation-scroll-container');
+  await waitFor(
+    () =>
+      expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThan(24),
+    { timeout: 10000 }
+  );
+
+  // Escape bottom follow before interacting with historical text.
+  act(() => {
+    viewport.scrollTop -= 100;
+    fireEvent.scroll(viewport);
+  });
+  const expand = screen.getAllByRole('button', { name: 'show more' })[0];
+  expand.focus();
+  await page.screenshot({ path: `./.vitest/history-collapsed-${window.innerWidth}.png` });
+  await userEvent.keyboard('{Enter}');
+  expect(expand).toHaveAttribute('aria-expanded', 'true');
+  expect(screen.getByText('Tail 10-0')).toBeInTheDocument();
+  await userEvent.keyboard(' ');
+  expect(expand).toHaveAttribute('aria-expanded', 'false');
+  await userEvent.click(expand);
+  expect(screen.getByText('Tail 10-0')).toBeInTheDocument();
+  expect(viewport.querySelector('pre')).not.toBeNull();
+  expect(viewport.querySelector('table')).not.toBeNull();
+
+  // Reconnect/tool hydration does not expand unrelated history or reset choice.
+  act(() =>
+    update({
+      ...state,
+      messagesByTask: new Map(longMessages),
+      loadedTaskIds: new Set(tasks.map((t) => t.task_id)),
+    })
+  );
+  expect(screen.getByText('Tail 10-0')).toBeInTheDocument();
+  expect(screen.queryByText('Tail 11-0')).not.toBeInTheDocument();
+
+  act(() => {
+    viewport.scrollTop = 150;
+    fireEvent.scroll(viewport);
+  });
+  let anchor: HTMLElement | undefined;
+  let top = 0;
+  act(() => {
+    viewport.scrollTop = 60;
+    anchor = Array.from(viewport.querySelectorAll<HTMLElement>('[data-task-block]')).find(
+      (element) => element.getBoundingClientRect().bottom >= viewport.getBoundingClientRect().top
+    );
+    top = anchor!.getBoundingClientRect().top;
+    fireEvent.scroll(viewport);
+  });
+  await waitFor(() => expect(screen.getByText('History 0 message 0')).toBeInTheDocument());
+  await waitFor(() => expect(Math.abs(anchor!.getBoundingClientRect().top - top)).toBeLessThan(3));
+  expect(screen.queryByText('Tail 0-0')).not.toBeInTheDocument();
+  expect(screen.getByText('Tail 10-0')).toBeInTheDocument();
+
+  const current = viewport.querySelector<HTMLElement>(`[data-task-block="${tasks[19].task_id}"]`)!;
+  const height = current.getBoundingClientRect().height;
+  const readerTop = viewport.scrollTop;
+  const nextTask = { ...tasks[19], task_id: generateId(), status: TaskStatus.RUNNING };
+  act(() => update({ ...state, tasks: [...state.tasks, nextTask] }));
+  expect(current.getBoundingClientRect().height).toBe(height);
+  expect(screen.getByText('Tail 19-0')).toBeInTheDocument();
+  expect(screen.getByText('Tail 19-1')).toBeInTheDocument();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(Math.abs(viewport.scrollTop - readerTop)).toBeLessThan(3);
+  expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 1);
+  await page.screenshot({ path: `./.vitest/history-see-more-${window.innerWidth}.png` });
+});
+
+it('follows a long live response without clamping the current prompt or losing persisted identity', async () => {
+  const task = { ...tasks[19], status: TaskStatus.RUNNING };
+  const rows = messages.get(task.task_id)!;
+  const prompt = {
+    ...rows[0],
+    content: Array.from(
+      { length: 20 },
+      (_, i) => `Live prompt ${i}\n\n${'Synthetic prompt prose. '.repeat(6)}`
+    ).join('\n\n'),
+  };
+  const response = rows[1];
+  state = {
+    ...state,
+    tasks: [task],
+    messagesByTask: new Map([[task.task_id, [prompt]]]),
+    hasOlderTasks: false,
+  };
+  render(
+    <div style={{ height: 'calc(100dvh - 32px)', display: 'flex', flexDirection: 'column' }}>
+      <ConversationView client={null} sessionId={sessionId} />
+    </div>
+  );
+  const viewport = screen.getByTestId('conversation-scroll-container');
+  for (const length of [5, 25, 35]) {
+    const content = Array.from(
+      { length },
+      (_, i) => `Live answer ${i}\n\n${'Synthetic answer prose. '.repeat(6)}`
+    ).join('\n\n');
+    act(() =>
+      update({
+        ...state,
+        streamingMessages: new Map([
+          [
+            response.message_id,
+            {
+              message_id: response.message_id,
+              role: MessageRole.ASSISTANT,
+              session_id: sessionId,
+              task_id: task.task_id,
+              content,
+              thinkingContent: '',
+              isStreaming: true,
+              timestamp: response.timestamp,
+              index: response.index,
+            },
+          ],
+        ]),
+      })
+    );
+    expect(screen.getByText(`Live answer ${length - 1}`)).toBeInTheDocument();
+    expect(screen.getByText('Live prompt 19')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'show more' })).not.toBeInTheDocument();
+    await waitFor(
+      () =>
+        expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThan(24),
+      { timeout: 10000 }
+    );
+  }
+  const content = state.streamingMessages.get(response.message_id)!.content;
+  act(() =>
+    update({
+      ...state,
+      tasks: [tasks[19]],
+      streamingMessages: new Map(),
+      messagesByTask: new Map([[task.task_id, [prompt, { ...response, content }]]]),
+    })
+  );
+  expect(screen.getByText('Live answer 34')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'show more' })).not.toBeInTheDocument();
+  await page.screenshot({ path: `./.vitest/history-live-expanded-${window.innerWidth}.png` });
+});
+
+it('bounds long code, tables and single-line prose previews while preserving full expansion', async () => {
+  const base = messages.get(tasks[0].task_id)![1];
+  const code = [
+    '```text',
+    ...Array.from({ length: 200 }, (_, i) => `code-line-${i}`),
+    '```',
+    '',
+    'After code fence',
+  ].join('\n');
+  const table = [
+    '| Row | Value |',
+    '| --- | --- |',
+    ...Array.from({ length: 200 }, (_, i) => `| row-${i} | value-${i} |`),
+  ].join('\n');
+  render(
+    <div>
+      <MessageBlock message={{ ...base, content: code }} defaultTextExpanded={false} />
+      <MessageBlock
+        message={{ ...base, message_id: generateId(), content: table }}
+        defaultTextExpanded={false}
+      />
+      <MessageBlock
+        message={{ ...base, message_id: generateId(), content: 'Wrapped prose '.repeat(200) }}
+        defaultTextExpanded={false}
+      />
+      <MessageBlock
+        message={{ ...base, message_id: generateId(), content: 'Short message' }}
+        defaultTextExpanded={false}
+      />
+    </div>
+  );
+  await waitFor(() => expect(screen.getByText('code-line-0')).toBeInTheDocument());
+  expect(screen.queryByText('code-line-199')).not.toBeInTheDocument();
+  expect(screen.queryByText('After code fence')).not.toBeInTheDocument();
+  expect(screen.queryByText('row-199')).not.toBeInTheDocument();
+  expect(screen.queryByText('Wrapped prose '.repeat(200).trim())).not.toBeInTheDocument();
+  expect(screen.getByText('Short message')).toBeInTheDocument();
+  expect(screen.getAllByRole('button', { name: 'show more' })).toHaveLength(3);
+  expect(screen.queryByRole('button', { name: 'Download file' })).not.toBeInTheDocument();
+  await userEvent.click(screen.getAllByRole('button', { name: 'show more' })[0]);
+  expect(screen.getByText('After code fence')).toBeInTheDocument();
+  expect(screen.getByText('code-line-199')).toBeInTheDocument();
+  await userEvent.click(screen.getAllByRole('button', { name: 'show more' })[0]);
+  expect(screen.getByText('row-199')).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: 'show more' }));
+  expect(screen.getByText('Wrapped prose '.repeat(200).trim())).toBeInTheDocument();
+  expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
+});
+
+it('collapses tall low-character history and medium prose with shorter previews', async () => {
+  const base = messages.get(tasks[0].task_id)![1];
+  const words = Array.from({ length: 50 }, (_, i) => `Word${i}`);
+  const tall = words.join('  \n');
+  const prose = 'Synthetic prose for a medium-length historical response. '.repeat(28).trim();
+  expect(tall.length).toBeLessThan(1200);
+  expect(prose.length).toBeGreaterThan(1200);
+  expect(prose.length).toBeLessThan(2000);
+  const view = render(
+    <div>
+      <MessageBlock message={{ ...base, content: tall }} defaultTextExpanded={false} />
+      <MessageBlock
+        message={{ ...base, message_id: generateId(), content: prose }}
+        defaultTextExpanded={false}
+      />
+    </div>
+  );
+  const articles = view.container.querySelectorAll('article');
+  expect(articles[0].textContent).toContain('Word9');
+  expect(articles[0].textContent).not.toContain('Word10');
+  expect(articles[0].getBoundingClientRect().height).toBeLessThan(300);
+  expect(articles[1].textContent!.length).toBeLessThanOrEqual(700);
+  expect(screen.getAllByRole('button', { name: 'show more' })).toHaveLength(2);
+  await page.screenshot({ path: `./.vitest/history-dual-budget-${window.innerWidth}.png` });
+  await userEvent.click(screen.getAllByRole('button', { name: 'show more' })[0]);
+  expect(articles[0].textContent).toContain('Word49');
+  await userEvent.click(screen.getByRole('button', { name: 'show more' }));
+  expect(screen.getByText(prose)).toBeInTheDocument();
+});
+
+it('keeps synthetic streamed and persisted text visible while settling the thinking cache', async () => {
+  const task = { ...tasks[0], status: TaskStatus.RUNNING };
+  const saved: Message[] = [];
+  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const service = (name: string, methods: Record<string, unknown>) => ({
+    ...methods,
+    on: (event: string, handler: (...args: unknown[]) => void) =>
+      handlers.set(`${name}:${event}`, handler),
+    removeListener: (event: string) => handlers.delete(`${name}:${event}`),
+  });
+  const services: Record<string, unknown> = {
+    sessions: service('sessions', {
+      get: async () => ({ session_id: sessionId, tasks: [task.task_id] }),
+    }),
+    tasks: service('tasks', { findAll: async () => [task] }),
+    messages: service('messages', { findAll: async () => saved }),
+    'session-streams': {
+      create: async () => ({ session_id: sessionId }),
+      remove: async () => ({}),
+    },
+  };
+  const client = {
+    io: { connected: true, on: () => {}, off: () => {} },
+    service: (name: string) =>
+      name.includes('/tasks/queue') ? { find: async () => ({ data: [] }) } : services[name],
+  } as unknown as AgorClient;
+  const live = retainReactiveSession(client, sessionId, { taskHydration: 'lazy' });
+  await live.ready();
+  currentHandle = live;
+  state = live.state;
+  const unsubscribe = live.subscribe(() => update(live.state));
+  const emit = (event: string, messageId: string, extra = {}) =>
+    act(() => {
+      handlers.get(`messages:${event}`)?.({
+        session_id: sessionId,
+        task_id: task.task_id,
+        message_id: messageId,
+        role: MessageRole.ASSISTANT,
+        timestamp: task.created_at,
+        ...extra,
+      });
+    });
+  try {
+    const thoughtId = generateId();
+    const textId = generateId();
+    emit('thinking:start', thoughtId);
+    emit('thinking:chunk', thoughtId, { chunk: 'Invented violet pebble' });
+    // Thinking-only live payloads are not currently rendered by AgentChain /
+    // MessageBlock (empty text). This fixture proves client activity and the
+    // real transcript text handoff, not thinking-only UI visibility.
+    expect(live.getStreamingMessage(thoughtId)?.isThinking).toBe(true);
+    emit('thinking:end', thoughtId);
+    expect(live.getStreamingMessage(thoughtId)?.isStreaming).toBe(false);
+    render(<ConversationView client={null} sessionId={sessionId} />);
+    emit('streaming:start', textId);
+    emit('streaming:chunk', textId, { chunk: 'Invented amber square' });
+    expect(screen.getByText('Invented amber square')).toBeVisible();
+    emit('streaming:end', textId);
+    const message = {
+      ...messages.get(task.task_id)![1],
+      message_id: textId,
+      content: 'Invented amber square',
+    };
+    saved.push(message);
+    act(() => handlers.get('messages:created')?.(message));
+    act(() => handlers.get('tasks:patched')?.({ ...task, status: TaskStatus.COMPLETED }));
+    expect(live.state.streamingMessages.size).toBe(0);
+    expect(screen.getByText('Invented amber square')).toBeVisible();
+    expect(screen.queryByText(/Extended Thinking/)).not.toBeInTheDocument();
+    await page.screenshot({
+      path: `./.vitest/synthetic-stream-lifecycle-${window.innerWidth}.png`,
+    });
+  } finally {
+    unsubscribe();
+    releaseReactiveSession(client, sessionId, { taskHydration: 'lazy' });
+  }
+});
+
+it('pins turn detail only while a reader expands it and releases on collapse and unmount', async () => {
+  const release = vi.fn();
+  const retain = vi.fn(() => release);
+  const [prompt, answer] = messages.get(tasks[0].task_id)!;
+  const turn = [
+    prompt,
+    {
+      ...answer,
+      message_id: generateId(),
+      content: [
+        { type: 'text', text: 'Editing now' },
+        { type: 'tool_use', id: 'edit', name: 'Edit', input: { file_path: '/a.ts' } },
+      ],
+    },
+    {
+      ...answer,
+      message_id: generateId(),
+      content: [{ type: 'tool_use', id: 'read', name: 'Read', input: { file_path: '/b.ts' } }],
+    },
+    {
+      ...answer,
+      message_id: generateId(),
+      content: [
+        { type: 'thinking', text: 'Synthetic reasoning' },
+        { type: 'text', text: 'Reasoned answer' },
+      ],
+    },
+  ] as Message[];
+  const view = render(
+    <TaskBlock
+      task={{ ...tasks[0], recorded_tool_count: 2 }}
+      taskMessages={turn}
+      taskMessagesLoaded
+      onLoadTaskMessages={() => {}}
+      onRetainTaskDetails={retain}
+    />
+  );
+  // A default-open edit body is not a reader's request to keep the turn.
+  expect(screen.getByText('Editing now')).toBeVisible();
+  expect(retain).not.toHaveBeenCalled();
+  const chain = screen.getByRole('button', { name: '1 tool call' });
+  await userEvent.click(chain);
+  await waitFor(() => expect(retain).toHaveBeenCalledTimes(1));
+  expect(retain).toHaveBeenCalledWith(tasks[0].task_id);
+  await userEvent.click(chain);
+  await waitFor(() => expect(release).toHaveBeenCalledTimes(1));
+  await userEvent.click(screen.getByText('Extended Thinking'));
+  await waitFor(() => expect(retain).toHaveBeenCalledTimes(2));
+  await userEvent.click(screen.getByText('Extended Thinking'));
+  await waitFor(() => expect(release).toHaveBeenCalledTimes(2));
+  // The default-open edit stays beside the answer with the chain collapsed.
+  // Collapsing it pins nothing; a reader's reopening does.
+  const edit = screen.getByRole('button', { name: /Edit.*\/a\.ts/, expanded: true });
+  await userEvent.click(edit);
+  expect(edit).toHaveAttribute('aria-expanded', 'false');
+  await userEvent.click(edit);
+  expect(edit).toHaveAttribute('aria-expanded', 'true');
+  await waitFor(() => expect(retain).toHaveBeenCalledTimes(3));
+  await userEvent.click(edit);
+  await waitFor(() => expect(release).toHaveBeenCalledTimes(3));
+  await userEvent.click(edit);
+  await userEvent.click(chain);
+  await waitFor(() => expect(retain).toHaveBeenCalledTimes(5));
+  view.unmount();
+  expect(release).toHaveBeenCalledTimes(5);
 });

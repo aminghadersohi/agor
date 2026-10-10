@@ -1,3 +1,4 @@
+import type { EnvironmentLifecycleResult } from '../environment/lifecycle-result';
 import type { BranchEnvironmentInstance } from './branch';
 import type { BranchID, UserID } from './id';
 
@@ -6,9 +7,14 @@ export const ENVIRONMENT_COMMAND_ACTIONS = ['start', 'stop', 'nuke'] as const;
 export type EnvironmentCommandAction = (typeof ENVIRONMENT_COMMAND_ACTIONS)[number];
 export const ENVIRONMENT_COMMAND_REPORT_SERVICE = 'environment-command-reports';
 export const ENVIRONMENT_COMMAND_BUDGET = {
-  launchMs: 10_000,
-  claimMs: 60_000,
+  /** Admission only: the launcher must not wait for the executor to start. */
+  launchMs: 30_000,
+  /** Includes admission overhead, cold-node scheduling, and image pulls. */
+  claimMs: 180_000,
+  /** External/HA jobs keep their existing short execution envelope. */
   commandMs: 300_000,
+  /** Standalone commands historically had no cap; bound them without breaking slow cold starts. */
+  standaloneCommandMs: 25 * 60_000,
   cleanupMs: 5_000,
   reportMs: 30_000,
   outputBytes: 32_768,
@@ -20,6 +26,8 @@ export interface EnvironmentCommandAttempt {
   action: EnvironmentCommandAction;
   requested_by: UserID;
   requested_at: string;
+  /** Persisted so every replica and executor uses the admitted command budget. */
+  command_budget_ms?: number;
   claim_deadline: string;
   command_deadline: string;
   result_deadline: string;
@@ -45,7 +53,7 @@ export type EnvironmentCommandReport = {
       output?: string;
       truncated?: boolean;
       message: string;
-      access_urls?: Array<{ name: string; url: string }>;
+      lifecycle_result?: EnvironmentLifecycleResult;
     }
 );
 

@@ -7,9 +7,19 @@
 
 import { randomUUID } from 'node:crypto';
 import { constants, existsSync, readdirSync } from 'node:fs';
-import { lstat, mkdir, mkdtemp, open, readdir, readFile, rm, stat } from 'node:fs/promises';
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { simpleGit } from 'simple-git';
 import { resolveGitBinary } from './git-binary';
 import {
@@ -724,6 +734,8 @@ export function categorizeGitError(stderr: string): RepoCloneErrorCategory {
     s.includes('authentication failed') ||
     s.includes('could not read username') ||
     s.includes('could not read password') ||
+    // Git with credential.interactive=false and no credential, e.g. a private remote without a token.
+    s.includes('unable to get password from user') ||
     s.includes('terminal prompts disabled') ||
     s.includes('fatal: authentication') ||
     s.includes('http basic') ||
@@ -957,12 +969,19 @@ export function buildAuthenticatedGitTransportEnvironment(
 function createGitClient(
   baseDir: string | undefined,
   spawnEnv: Record<string, string>,
-  timeoutMs?: number
+  timeoutMs?: number,
+  abort?: AbortSignal
 ): { git: ReturnType<typeof simpleGit> } {
   const git = simpleGit({
     baseDir,
     binary: getGitBinary(),
+    abort,
     config: [],
+    // simple-git 4 rejects explicitly supplied GIT_* (and editor/pager) keys
+    // unless named here. `spawnEnv` is the exact child environment built by
+    // this module, so admit precisely its keys; the unsafe flags below remain
+    // the second opt-in for any vulnerability category those keys touch.
+    allowEnvironment: Object.keys(spawnEnv),
     ...(timeoutMs === undefined ? {} : { timeout: { block: timeoutMs } }),
     unsafe: {
       // simple-git's scanner cannot distinguish Agor's fixed defensive
@@ -992,11 +1011,17 @@ function createGitClient(
  */
 export function createGit(
   baseDir?: string,
-  timeoutMs?: number
+  timeoutMs?: number,
+  abort?: AbortSignal
 ): { git: ReturnType<typeof simpleGit> } {
   const localConfig: [string, string][] = [...FIXED_GIT_SECURITY_CONFIG];
   if (baseDir) localConfig.push(['safe.directory', baseDir]);
-  return createGitClient(baseDir, buildFixedGitEnvironment(localConfig, process.env), timeoutMs);
+  return createGitClient(
+    baseDir,
+    buildFixedGitEnvironment(localConfig, process.env),
+    timeoutMs,
+    abort
+  );
 }
 
 /**
@@ -1262,6 +1287,29 @@ export async function cloneRepo(options: CloneOptions): Promise<CloneResult> {
     const isValid = await isGitRepo(targetPath);
 
     if (isValid) {
+      const origin = await getRemoteUrl(targetPath);
+      const canonical = (url: string) =>
+        stripGitUrlCredentials(url)
+          .replace(/\/+$/, '')
+          .replace(/\.git$/, '');
+      if (!origin || canonical(origin) !== canonical(cloneUrl)) {
+        throw new Error(
+          'The existing repository directory belongs to a different remote. Ask an administrator to inspect repository storage; no files were changed.'
+        );
+      }
+      // A previous user's successful clone is not this user's authorization.
+      // Probe in the clean credential-only transport, never inside cached Git config.
+      const refs = await listRemoteRef(
+        cloneUrl,
+        options.branch ? `refs/heads/${options.branch}` : '*',
+        options.env,
+        'heads'
+      );
+      if (options.branch && !refs.trim()) {
+        throw new Error(
+          `Remote branch '${options.branch}' was not found. Check repository access and the default branch.`
+        );
+      }
       await scrubGitConfigRemoteCredentials(targetPath);
       // Repository already exists and is valid — reuse it. If the caller
       // pinned a branch, the working tree has to actually be on that branch
@@ -1273,6 +1321,17 @@ export async function cloneRepo(options: CloneOptions): Promise<CloneResult> {
       console.log(`Repository already exists at ${targetPath}, using existing clone`);
 
       const existingGit = createGit(targetPath).git;
+      // A clone interrupted between object transfer and checkout still has .git.
+      // Never call that ready or reset it over potential user work on retry.
+      await existingGit.revparse(['--verify', 'HEAD^{commit}']);
+      if (
+        !options.bare &&
+        (await existingGit.status()).files.some((file) => file.index !== ' ' && file.index !== '?')
+      ) {
+        throw new Error(
+          'The existing repository checkout is incomplete or has staged changes. Ask an administrator to inspect and recover it; no files were removed or reset.'
+        );
+      }
 
       if (options.branch) {
         const branches = await existingGit.branch();
@@ -1323,7 +1382,7 @@ export async function cloneRepo(options: CloneOptions): Promise<CloneResult> {
       // Directory exists but is not a valid git repo
       throw new Error(
         `Directory exists but is not a valid git repository: ${targetPath}\n` +
-          `Please delete this directory manually and try again.`
+          `Ask an administrator to inspect the repository storage and recover the clone. No files were removed.`
       );
     }
     // Git supports retrying a clone into an existing empty real directory.
@@ -1485,6 +1544,30 @@ export interface EnsureRemoteUrlResult {
   previousUrl: string | undefined;
 }
 
+function isStrictlyInsideDirectory(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+/**
+ * Canonicalize a managed repository path and prove it lies strictly inside
+ * `allowedRoot` after resolving symlinks, so a stored path cannot select a
+ * repository outside the caller's tenant.
+ */
+export async function resolveContainedRepoPath(
+  repoPath: string,
+  allowedRoot: string
+): Promise<string> {
+  if (!isAbsolute(repoPath)) {
+    throw new Error('Repository path is outside the managed repositories root');
+  }
+  const [root, repository] = await Promise.all([realpath(allowedRoot), realpath(repoPath)]);
+  if (!isStrictlyInsideDirectory(root, repository)) {
+    throw new Error('Repository path is outside the managed repositories root');
+  }
+  return repository;
+}
+
 /**
  * Realign `remote.<name>.url` to `expectedUrl`, leaving other remotes alone.
  * No-op when already matching; deliberately does NOT create the remote when
@@ -1560,7 +1643,9 @@ export async function createBranch(
   /** Separately bounded credentials for the selected source transport. */
   sourceEnv: UserGitEnvironment | undefined = env,
   /** Resolver identity: names (including hexadecimal branch names) are not kinds. */
-  resolvedSource?: Pick<ResolvedGitRef, 'kind' | 'remoteName'>
+  resolvedSource?: Pick<ResolvedGitRef, 'kind' | 'remoteName'>,
+  /** Filesystem recovery must fail rather than delete a ref that appeared during I/O. */
+  preserveExistingBranch = false
 ): Promise<void> {
   console.log('🔍 createBranch called with:', {
     repoPath,
@@ -1774,6 +1859,12 @@ export async function createBranch(
           );
         }
 
+        if (preserveExistingBranch) {
+          throw new Error(
+            `Local branch '${ref}' appeared during filesystem recovery; refusing to replace it. Retry recovery.`
+          );
+        }
+
         // Branch exists but is orphaned — delete it and retry.
         // `git branch -D` doesn't support `--`; ref was validated above.
         console.log(`🧹 Deleting orphaned branch '${ref}' and retrying branch creation...`);
@@ -1813,8 +1904,7 @@ export async function createBranch(
  * Branch storage mode = 'clone' produces a working directory whose `.git/`
  * is a real directory (not a `gitdir:` pointer file), with its own
  * `.git/config`, refs, and credentials surface. Closes the cross-branch
- * leak vectors that the Layer A defenses exist to mitigate. See
- * `context/explorations/clone-redesign.md` §1.
+ * leak vectors that the Layer A defenses exist to mitigate.
  */
 export interface CreateBranchAsCloneOptions {
   /** Remote URL to clone from (https://, ssh://, git@host:path, file://, or local path). */
@@ -2260,7 +2350,9 @@ export async function restoreBranchFilesystem(
   baseRemoteUrl?: string,
   baseRefType: 'branch' | 'tag' = 'branch',
   /** Canonical tenant-owned destination remote from the database. */
-  destinationRemoteUrl?: string
+  destinationRemoteUrl?: string,
+  /** Internal policy: only a trusted, admitted filesystem recovery may preserve a retained tip. */
+  preserveLocalRef = false
 ): Promise<RestoreBranchResult> {
   // Validate refs early — this function both passes them to createBranch
   // (which re-validates) and to ls-remote (which does not).
@@ -2281,6 +2373,21 @@ export async function restoreBranchFilesystem(
     throw new Error('Credential-bearing branch restore requires destinationRemoteUrl');
   }
   const { git } = createGit(repoPath);
+
+  // Ordinary restore keeps destination fast-forward/refusal semantics below.
+  // Recovery reattaches retained history before remote I/O, without resetting it.
+  if (preserveLocalRef && (await resolveCommitSha(git, `refs/heads/${ref}`))) {
+    try {
+      await createBranch(repoPath, branchPath, ref, false, false);
+      return { success: true, strategy: 'checkout' };
+    } catch (error) {
+      return {
+        success: false,
+        strategy: 'checkout',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
 
   // Step 1: Fetch from remote
   try {
@@ -2348,6 +2455,11 @@ export async function restoreBranchFilesystem(
       }
       destinationSha = fetchedSha;
       const localSha = await resolveCommitSha(git, `refs/heads/${ref}`);
+      if (preserveLocalRef && localSha) {
+        throw new Error(
+          `Local branch '${ref}' appeared during filesystem recovery; refusing to move it. Retry recovery.`
+        );
+      }
       if (localSha && localSha !== destinationSha) {
         try {
           const ancestor = (await git.raw(['merge-base', localSha, destinationSha])).trim();
@@ -2374,7 +2486,8 @@ export async function restoreBranchFilesystem(
         safeDestinationRemoteUrl,
         destinationSha,
         env,
-        { kind: 'remote_branch', remoteName: 'origin' }
+        { kind: 'remote_branch', remoteName: 'origin' },
+        preserveLocalRef
       );
       return { success: true, strategy: 'checkout' };
     }
@@ -2391,7 +2504,11 @@ export async function restoreBranchFilesystem(
       env,
       baseRefType,
       baseRemoteUrl,
-      safeDestinationRemoteUrl
+      safeDestinationRemoteUrl,
+      undefined,
+      env,
+      undefined,
+      preserveLocalRef
     );
     return { success: true, strategy: 'create' };
   } catch (error) {
@@ -2517,7 +2634,11 @@ export async function cleanBranch(branchPath: string): Promise<{ filesRemoved: n
 }
 
 /** Ignored-only cleanup. No preview, file list, output parser, or warning-as-success. */
-export async function cleanIgnoredWorkspace(branchPath: string, timeoutMs: number): Promise<void> {
+export async function cleanIgnoredWorkspace(
+  branchPath: string,
+  timeoutMs: number,
+  options: { selfContainedClone?: boolean } = {}
+): Promise<void> {
   const { git } = createGit(branchPath, timeoutMs);
   git.outputHandler((_command, stdout, stderr) => {
     // simple-git normally buffers every chunk before invoking its parser. This
@@ -2528,7 +2649,16 @@ export async function cleanIgnoredWorkspace(branchPath: string, timeoutMs: numbe
       stream.resume();
     }
   });
-  await git.raw(['clean', '-fdX']);
+  // External cleanup runs outside the branch-shell sandbox. Pin the worktree
+  // explicitly so mutable core.worktree configuration cannot redirect deletion.
+  // The caller verifies that .git is a real in-branch directory before entry.
+  await git.raw([
+    ...(options.selfContainedClone
+      ? [`--git-dir=${join(branchPath, '.git')}`, `--work-tree=${branchPath}`]
+      : []),
+    'clean',
+    '-fdX',
+  ]);
 }
 
 /**
@@ -2742,12 +2872,40 @@ export async function removeBranchWorkspace(options: {
   const { branchPath, branchesRoot, repoPath, storageMode } = options;
   const target = await resolveManagedBranchDeletionPath(branchPath, branchesRoot);
   const { realpath } = await import('node:fs/promises');
-  // Require the authoritative repo to be available; canonicalize its root, not
-  // the victim (whose symlink descendants are rejected by the validator).
-  const repository = await realpath(repoPath);
-  if (repository === target || repository.startsWith(`${target}${sep}`))
-    throw new Error('Cannot delete the shared base repository');
+  // A clone is self-contained, so its base checkout may be absent from an
+  // external executor. Worktrees still require it to remove Git registration.
+  // Check both the declared location and a live canonical location before
+  // deleting: neither may point into the victim workspace.
+  const declaredRepository = resolve(repoPath);
+  const assertOutsideTarget = (candidate: string) => {
+    if (candidate === target || candidate.startsWith(`${target}${sep}`))
+      throw new Error('Cannot delete the shared base repository');
+  };
+  assertOutsideTarget(declaredRepository);
+  let repository: string | undefined;
+  try {
+    repository = await realpath(repoPath);
+  } catch (error) {
+    if (storageMode === 'worktree' || (error as NodeJS.ErrnoException).code !== 'ENOENT')
+      throw error;
+    // The checkout itself can be absent, but an existing ancestor could still
+    // be a symlink into the branch slated for removal.
+    let ancestor = dirname(declaredRepository);
+    for (;;) {
+      try {
+        assertOutsideTarget(await realpath(ancestor));
+        break;
+      } catch (ancestorError) {
+        if ((ancestorError as NodeJS.ErrnoException).code !== 'ENOENT') throw ancestorError;
+        const parent = dirname(ancestor);
+        if (parent === ancestor) throw ancestorError;
+        ancestor = parent;
+      }
+    }
+  }
+  if (repository) assertOutsideTarget(repository);
   if (storageMode === 'worktree') {
+    if (!repository) throw new Error('Shared base repository is unavailable');
     const registrations = await listGitWorktrees(repository);
     if (registrations.some((item) => resolve(item.path) === target)) {
       await removeGitWorktree(repository, target);

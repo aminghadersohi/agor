@@ -9,8 +9,10 @@ import type {
   SchedulerInitializationFailureCode,
   SchedulerInitializationStage,
   Session,
+  SessionCount,
   SessionID,
   SessionUpdate,
+  UserID,
   UUID,
 } from '@agor/core/types';
 import { SessionStatus } from '@agor/core/types';
@@ -29,6 +31,7 @@ import {
   sql,
 } from 'drizzle-orm';
 import { getBaseUrl } from '../../config/config-manager';
+import { PAGINATION } from '../../config/constants';
 import { generateId, shortId } from '../../lib/ids';
 import { getSessionUrl } from '../../utils/url';
 import { lockBranchForAdmission } from '../branch-admission';
@@ -37,8 +40,10 @@ import {
   deleteFrom,
   insert,
   isPostgresDatabase,
+  jsonExtract,
   lockRowForUpdate,
   runDatabaseTransaction,
+  searchCondition,
   select,
   txAsDb,
   update,
@@ -52,6 +57,7 @@ import {
   sessions,
   tasks,
 } from '../schema';
+import { tenantInventoryCondition } from '../tenant-inventory-condition';
 import {
   AmbiguousIdError,
   attachHiddenTenant,
@@ -61,7 +67,7 @@ import {
   RepositoryError,
   resolveByShortIdPrefix,
 } from './base';
-import { inVisibleBranchSet } from './branch-access';
+import { inVisibleBranchSet, visibleBranchReferenceAccessExists } from './branch-access';
 import { deepMerge } from './merge-utils';
 import {
   extractMessageText,
@@ -119,16 +125,56 @@ function isSessionTimestampNeutralPatch(updates: SessionUpdate): boolean {
 
 /** Options for the SQL-backed session list page used by board/branch views. */
 export interface SessionPageOptions {
+  /** Omit the exact count for bounded consumers that do not need totals. */
+  includeTotal?: boolean;
   status?: SessionStatus;
   boardId?: string;
   branchId?: BranchID;
   branchIds?: BranchID[];
+  /** Restrict to these session ids (an empty set yields no rows). */
+  sessionIds?: SessionID[];
+  /** Restrict to sessions created by this user (a filter, never an access grant). */
+  createdBy?: UserID;
+  /** Restrict to sessions matching this search (`SEARCHABLE_FIELDS.session`). */
+  search?: string;
   archived?: boolean;
   sortUpdatedAt?: 1 | -1;
   sortCreatedAt?: 1 | -1;
   limit?: number;
   skip?: number;
   visibleToUserId?: UUID;
+}
+
+/**
+ * Whether `findPage` probes each candidate's branch instead of first building
+ * the caller's visible-branch set. The set has a fixed cost even for a few
+ * rows; a probe costs per candidate examined, so it is used only where that
+ * count is small:
+ * - an exact id list of at most `MAX_ID_LIST` (bounded by its length);
+ * - an uncounted, unscoped page of the caller's own sessions with `archived`
+ *   set and sorted by `updated_at`, so the `(archived, updated_at)` index
+ *   yields rows in order and the scan stops after about `skip + limit` own
+ *   rows. A heuristic, not a hard bound: own rows on branches the caller has
+ *   since lost still cost a probe each.
+ */
+function probesVisibilityPerRow(opts: SessionPageOptions): boolean {
+  if (opts.sessionIds !== undefined) return opts.sessionIds.length <= PAGINATION.MAX_ID_LIST;
+  // Checked here, not assumed from findPage's no-count guard: a missing,
+  // fractional or negative window must not pass as a small page.
+  const { limit, skip = 0 } = opts;
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 0) return false;
+  if (!Number.isInteger(skip) || skip < 0) return false;
+  return (
+    opts.createdBy !== undefined &&
+    opts.createdBy === opts.visibleToUserId &&
+    opts.includeTotal === false &&
+    opts.archived !== undefined &&
+    opts.sortUpdatedAt !== undefined &&
+    opts.boardId === undefined &&
+    opts.branchId === undefined &&
+    opts.branchIds === undefined &&
+    limit + skip <= PAGINATION.MAX_ID_LIST
+  );
 }
 
 /**
@@ -219,6 +265,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
    */
   private sessionToInsert(session: Partial<Session>): SessionInsert {
     const now = Date.now();
+    const createdAt = new Date(session.created_at ?? now);
     const sessionId = session.session_id ?? generateId();
 
     if (!session.branch_id) {
@@ -230,8 +277,8 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
 
     return {
       session_id: sessionId,
-      created_at: new Date(session.created_at ? session.created_at : now),
-      updated_at: session.last_updated ? new Date(session.last_updated) : new Date(now),
+      created_at: createdAt,
+      updated_at: session.last_updated ? new Date(session.last_updated) : createdAt,
       status: session.status ?? SessionStatus.IDLE,
       agentic_tool: session.agentic_tool ?? 'claude-code',
       agentic_tool_preset_id: session.agentic_tool_preset_id ?? null,
@@ -584,33 +631,71 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
    * @returns `{ data, total }` where `total` is the full match count (so Feathers
    *          pagination and the client `findAll` loop behave correctly).
    */
-  async findPage(opts: SessionPageOptions): Promise<{ data: Session[]; total: number }> {
+  async findPage(
+    opts: SessionPageOptions & { includeTotal: false }
+  ): Promise<{ data: Session[]; total?: never }>;
+  async findPage(
+    opts: SessionPageOptions & { includeTotal?: true }
+  ): Promise<{ data: Session[]; total: number }>;
+  async findPage(opts: SessionPageOptions): Promise<{ data: Session[]; total?: number }>;
+  async findPage(opts: SessionPageOptions): Promise<{ data: Session[]; total?: number }> {
     try {
-      if (opts.branchIds?.length === 0) return { data: [], total: 0 };
+      if (opts.includeTotal === false && (!Number.isInteger(opts.limit) || opts.limit! < 0)) {
+        throw new Error('No-count session queries require a non-negative integer limit');
+      }
+      const tenantCondition = tenantInventoryCondition(this.db, sessions);
+      if (opts.branchIds?.length === 0 || opts.sessionIds?.length === 0)
+        return opts.includeTotal === false ? { data: [] } : { data: [], total: 0 };
       const baseUrl = await getBaseUrl(this.db);
 
       const conditions = [];
+      if (tenantCondition) conditions.push(tenantCondition);
       if (opts.status !== undefined) conditions.push(eq(sessions.status, opts.status));
       if (opts.boardId !== undefined) conditions.push(eq(branches.board_id, opts.boardId));
       if (opts.branchId !== undefined) conditions.push(eq(sessions.branch_id, opts.branchId));
       if (opts.branchIds !== undefined)
         conditions.push(inArray(sessions.branch_id, opts.branchIds));
+      if (opts.sessionIds !== undefined)
+        conditions.push(inArray(sessions.session_id, opts.sessionIds));
+      if (opts.createdBy !== undefined) conditions.push(eq(sessions.created_by, opts.createdBy));
       if (opts.archived !== undefined) conditions.push(eq(sessions.archived, opts.archived));
       if (opts.visibleToUserId) {
+        // Same branch.view policy either way; only the evaluation shape differs.
+        // Outer board/branch filters already pin the branch, so the probe
+        // needs no scope. Parity: sessions.visibility-parity-test-helpers.ts.
         conditions.push(
-          inVisibleBranchSet(this.db, opts.visibleToUserId, sessions.branch_id, opts)
+          probesVisibilityPerRow(opts)
+            ? visibleBranchReferenceAccessExists(this.db, opts.visibleToUserId, sessions.branch_id)
+            : inVisibleBranchSet(this.db, opts.visibleToUserId, sessions.branch_id, opts)
         );
       }
-      const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+      let whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+      if (opts.search !== undefined) {
+        // Over the rows every other condition (visibility included) admits.
+        whereClause = searchCondition(this.db, {
+          id: sessions.session_id,
+          from: sql`${sessions} left join ${branches} on ${sessions.branch_id} = ${branches.branch_id}`,
+          scope: whereClause,
+          search: opts.search,
+          fields: [
+            jsonExtract(this.db, sessions.data, 'title'),
+            jsonExtract(this.db, sessions.data, 'description'),
+            sessions.agentic_tool,
+          ],
+        });
+      }
 
-      // Total matching rows — drives Feathers pagination + the findAll loop.
-      // biome-ignore lint/suspicious/noExplicitAny: Conditional query builder shape differs with the RBAC join
-      const countQuery: any = select(this.db, { count: sql<number>`count(*)` })
-        .from(sessions)
-        .leftJoin(branches, eq(sessions.branch_id, branches.branch_id));
-      const countRow = await (whereClause ? countQuery.where(whereClause) : countQuery).one();
-      const total = Number(countRow?.count ?? 0);
-      if (opts.limit === 0) return { data: [], total };
+      // Exact totals remain the default for existing Feathers/findAll callers.
+      let total: number | undefined;
+      if (opts.includeTotal !== false) {
+        // biome-ignore lint/suspicious/noExplicitAny: Conditional query builder shape differs with the RBAC join
+        const countQuery: any = select(this.db, { count: sql<number>`count(*)` })
+          .from(sessions)
+          .leftJoin(branches, eq(sessions.branch_id, branches.branch_id));
+        const countRow = await (whereClause ? countQuery.where(whereClause) : countQuery).one();
+        total = Number(countRow?.count ?? 0);
+      }
+      if (opts.limit === 0) return { data: [], ...(total === undefined ? {} : { total }) };
 
       // Page of rows, recency-sorted in SQL on the real `updated_at` column.
       // biome-ignore lint/suspicious/noExplicitAny: Conditional query builder shape differs with the RBAC join
@@ -618,10 +703,9 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         .from(sessions)
         .leftJoin(branches, eq(sessions.branch_id, branches.branch_id));
       if (whereClause) dataQuery = dataQuery.where(whereClause);
-      const logicalUpdatedAt = sql`COALESCE(${sessions.updated_at}, ${sessions.created_at})`;
       if (opts.sortUpdatedAt !== undefined) {
         dataQuery = dataQuery.orderBy(
-          opts.sortUpdatedAt === -1 ? desc(logicalUpdatedAt) : asc(logicalUpdatedAt),
+          opts.sortUpdatedAt === -1 ? desc(sessions.updated_at) : asc(sessions.updated_at),
           asc(sessions.session_id)
         );
       } else if (opts.sortCreatedAt !== undefined) {
@@ -647,13 +731,42 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         }
       );
 
-      return { data, total };
+      return { data, ...(total === undefined ? {} : { total }) };
     } catch (error) {
       throw new RepositoryError(
         `Failed to find sessions page: ${error instanceof Error ? error.message : String(error)}`,
         error
       );
     }
+  }
+
+  /**
+   * Count active (non-archived) sessions per branch or per board (the
+   * session's branch's board), for settings tables. With `visibleToUserId`,
+   * only sessions on branches the caller can view count, the same visibility
+   * as `findPage`; tenancy comes from the tenant condition and RLS.
+   */
+  async countActive(opts: {
+    groupBy: 'branch_id' | 'board_id';
+    visibleToUserId?: UUID;
+  }): Promise<SessionCount[]> {
+    const key = opts.groupBy === 'board_id' ? branches.board_id : sessions.branch_id;
+    const conditions = [eq(sessions.archived, false), isNotNull(key)];
+    const tenantCondition = tenantInventoryCondition(this.db, sessions);
+    if (tenantCondition) conditions.push(tenantCondition);
+    if (opts.visibleToUserId) {
+      conditions.push(inVisibleBranchSet(this.db, opts.visibleToUserId, sessions.branch_id));
+    }
+    const rows = await select(this.db, { id: key, session_count: sql<number>`count(*)` })
+      .from(sessions)
+      .leftJoin(branches, eq(sessions.branch_id, branches.branch_id))
+      .where(and(...conditions))
+      .groupBy(key)
+      .all();
+    return (rows as Array<{ id: string; session_count: number | string }>).map((row) => ({
+      id: row.id,
+      session_count: Number(row.session_count),
+    }));
   }
 
   /**
@@ -877,7 +990,13 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         // IMPORTANT: Receiver-side merge for nested objects (permission_config, model_config, etc.)
         // This prevents partial updates from losing existing nested fields.
         // Strategy: Objects = deep merge, Arrays = replace, Primitives = replace
-        const { sdk_session_id: sdkSessionIdUpdate, ...genericUpdates } = updates;
+        // `read_shape` is a lean-list read marker, never a stored field: drop it
+        // so the merged (returned) session cannot be mistaken for a lean row.
+        const {
+          sdk_session_id: sdkSessionIdUpdate,
+          read_shape: _readShape,
+          ...genericUpdates
+        } = updates as Partial<Session> & { read_shape?: unknown };
         const merged = deepMerge(current, genericUpdates);
         if (sdkSessionIdUpdate === null) {
           delete merged.sdk_session_id;

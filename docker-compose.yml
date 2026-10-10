@@ -109,9 +109,11 @@ services:
       # Daemon configuration
       - NODE_ENV=development
       # Exact triple gate for the deliberately fixed development-only admin.
-      # Production Compose files do not carry these defaults.
-      - AGOR_ADMIN_PASSWORD=admin
-      - AGOR_ALLOW_DEVELOPMENT_DEFAULT_ADMIN=true
+      # Production Compose files do not carry these defaults. Remote/public
+      # development substrates can override both values with a generated
+      # bootstrap password and a disabled fixed-default gate.
+      - AGOR_ADMIN_PASSWORD=${AGOR_ADMIN_PASSWORD:-admin}
+      - AGOR_ALLOW_DEVELOPMENT_DEFAULT_ADMIN=${AGOR_ALLOW_DEVELOPMENT_DEFAULT_ADMIN:-true}
       - DAEMON_PORT=${DAEMON_PORT:-3030}
       - DAEMON_HOST=${DAEMON_HOST:-0.0.0.0}
       - CORS_ORIGIN=${CORS_ORIGIN:-*}
@@ -172,7 +174,7 @@ services:
       - AGOR_UNIX_USER_MODE=${AGOR_UNIX_USER_MODE:-}
       # OS-level executor filesystem sandbox (bubblewrap). AGOR_SANDBOX_ENABLED=true
       # → execution.sandbox.enabled: true (resolved in memory). Used by the
-      # `sandbox` .agor.yml env variant. See context/explorations/executor-sandboxing.md.
+      # `sandbox` .agor.yml env variant. See context/guides/rbac-and-unix-isolation.md.
       - AGOR_SANDBOX_ENABLED=${AGOR_SANDBOX_ENABLED:-}
       # AGOR_SANDBOX_HOME_MODE=per_user overlays a private, persistent per-owner
       # persistent private home inside the sandbox. Default (unset/shared) uses

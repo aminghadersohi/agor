@@ -7,24 +7,30 @@ import {
 import type { Application } from '@agor/core/feathers';
 import {
   type AuthenticatedParams,
+  ENVIRONMENT_COMMAND_BUDGET,
+  EXECUTOR_LAUNCH_REFUSED_MESSAGE,
   environmentCommandTokenId,
   type TenantID,
 } from '@agor/core/types';
 import { afterEach, describe, expect, vi } from 'vitest';
 import { seedEnvironmentCommandBranch } from '../../../../packages/core/src/db/repositories/environment-commands.test-support';
 import { dbTest } from '../../../../packages/core/src/db/test-helpers';
+import { ExecutorLaunchRefusedError } from '../utils/environment-command-dispatch.js';
 import { BranchesService } from './branches';
 import { EnvironmentCommandReportsService } from './environment-command-reports';
 
-const { dispatch, query } = vi.hoisted(() => ({
+const { dispatch, query, spawn } = vi.hoisted(() => ({
   dispatch: vi.fn(async () => undefined),
   query: vi.fn(),
+  spawn: vi.fn(),
 }));
 vi.mock('../utils/spawn-executor.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../utils/spawn-executor.js')>()),
   requestExecutor: query,
+  spawnExecutor: spawn,
 }));
-vi.mock('../utils/environment-command-dispatch.js', () => ({
+vi.mock('../utils/environment-command-dispatch.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/environment-command-dispatch.js')>()),
   dispatchEnvironmentCommand: dispatch,
 }));
 afterEach(() => vi.clearAllMocks());
@@ -40,6 +46,161 @@ const config = {
 };
 
 describe('executor-owned command reports', () => {
+  dbTest('uses the same attempt-scoped report protocol for a local executor', async ({ db }) => {
+    const { branch, user } = await seedEnvironmentCommandBranch(db);
+    const app = {
+      get: () => ({
+        deployment: { mode: 'single' },
+        execution: {
+          unix_user_mode: 'simple',
+          managed_envs_execution_mode: 'hybrid',
+          environment_command_job_deadline_ms: 365000,
+        },
+      }),
+      sessionTokenService: { generateCommandToken: vi.fn(async () => 'test-credential') },
+      service: () => ({ emit: vi.fn() }),
+    } as unknown as Application;
+    const service = new BranchesService(db, app);
+    vi.spyOn(service, 'get').mockImplementation(
+      async () => (await new BranchRepository(db).findById(branch.branch_id))! as never
+    );
+    vi.spyOn(service as never, 'resolveEnvironmentExecutorContext').mockResolvedValue({
+      env: {},
+      branchFsAccess: 'write',
+    } as never);
+    const params = {
+      provider: 'rest',
+      tenant: { tenant_id: tenantId, source: 'explicit' },
+      user: { ...user, role: 'member' },
+    } as AuthenticatedParams;
+
+    await runWithTenantContext(tenantId, async () => {
+      const admitted = await service.startEnvironment(branch.branch_id, params);
+      const attempt = admitted.environment_instance!.command_attempt!;
+      expect(attempt.command_budget_ms).toBe(ENVIRONMENT_COMMAND_BUDGET.standaloneCommandMs);
+      expect(spawn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          command: 'environment.lifecycle',
+          sessionToken: 'test-credential',
+          params: expect.objectContaining({
+            action: 'start',
+            attempt: expect.objectContaining({ id: attempt.id }),
+          }),
+        }),
+        expect.objectContaining({
+          templateVariables: expect.objectContaining({ branch_id: branch.branch_id }),
+        })
+      );
+      expect(
+        (
+          app as unknown as {
+            sessionTokenService: { generateCommandToken: ReturnType<typeof vi.fn> };
+          }
+        ).sessionTokenService.generateCommandToken
+      ).toHaveBeenCalledWith(
+        environmentCommandTokenId('start', attempt.id),
+        user.user_id,
+        branch.branch_id,
+        ENVIRONMENT_COMMAND_BUDGET.launchMs +
+          ENVIRONMENT_COMMAND_BUDGET.claimMs +
+          ENVIRONMENT_COMMAND_BUDGET.standaloneCommandMs +
+          ENVIRONMENT_COMMAND_BUDGET.cleanupMs +
+          ENVIRONMENT_COMMAND_BUDGET.reportMs
+      );
+    });
+  });
+
+  dbTest('settles a JSON webhook through the same typed lifecycle result', async ({ db }) => {
+    const { branch, user } = await seedEnvironmentCommandBranch(db);
+    const app = {
+      get: () => ({
+        deployment: { mode: 'single' },
+        execution: { managed_envs_execution_mode: 'hybrid' },
+      }),
+      service: () => ({ emit: vi.fn() }),
+    } as unknown as Application;
+    const service = new BranchesService(db, app);
+    vi.spyOn(service, 'get').mockImplementation(
+      async () => (await new BranchRepository(db).findById(branch.branch_id))! as never
+    );
+    vi.spyOn(service as never, 'resolveEnvironmentCommand').mockResolvedValue({
+      kind: 'webhook',
+      url: 'https://controller.example.test/start',
+    } as never);
+    vi.spyOn(service as never, 'executeEnvironmentWebhook').mockResolvedValue({
+      body: JSON.stringify({
+        app: 'https://space-5000.app.github.dev',
+        health: 'https://space-3000.app.github.dev/health',
+      }),
+      contentType: 'application/json',
+      truncated: false,
+      status: 200,
+    } as never);
+    const params = {
+      provider: 'rest',
+      tenant: { tenant_id: tenantId, source: 'explicit' },
+      user: { ...user, role: 'member' },
+    } as AuthenticatedParams;
+
+    await runWithTenantContext(tenantId, async () => {
+      const result = await service.startEnvironment(branch.branch_id, params);
+      expect(result.environment_instance).toMatchObject({
+        status: 'starting',
+        health_url: 'https://space-3000.app.github.dev/health',
+        access_urls: [{ name: 'App', url: 'https://space-5000.app.github.dev/' }],
+        last_command: { status: 'succeeded' },
+      });
+    });
+  });
+
+  dbTest(
+    'records a refused launch as failed and unclaimed, and any other handoff failure as unknown',
+    async ({ db }) => {
+      const { branch, user } = await seedEnvironmentCommandBranch(db);
+      const app = {
+        get: () => config,
+        sessionTokenService: { generateCommandToken: vi.fn(async () => 'test-credential') },
+        service: () => ({ emit: vi.fn() }),
+      } as unknown as Application;
+      const service = new BranchesService(db, app);
+      vi.spyOn(service, 'get').mockImplementation(
+        async () => (await new BranchRepository(db).findById(branch.branch_id))! as never
+      );
+      vi.spyOn(service as never, 'resolveEnvironmentExecutorContext').mockResolvedValue({
+        env: {},
+        branchFsAccess: 'write',
+        delegatedHomeKey: 'opaque-test-home',
+      } as never);
+      const params = {
+        provider: 'rest',
+        tenant: { tenant_id: tenantId, source: 'explicit' },
+        user: { ...user, role: 'member' },
+      } as AuthenticatedParams;
+      await runWithTenantContext(tenantId, async () => {
+        dispatch.mockRejectedValueOnce(new ExecutorLaunchRefusedError());
+        const refused = (await service.startEnvironment(branch.branch_id, params))
+          .environment_instance!;
+        expect(refused).toMatchObject({
+          status: 'error',
+          last_error: EXECUTOR_LAUNCH_REFUSED_MESSAGE,
+          last_command: {
+            action: 'start',
+            status: 'failed',
+            message: EXECUTOR_LAUNCH_REFUSED_MESSAGE,
+          },
+          command_attempt: { finished_at: expect.any(String) },
+        });
+        expect(refused.command_attempt?.claimed_at).toBeUndefined();
+
+        dispatch.mockRejectedValueOnce(new Error('Environment launcher did not confirm admission'));
+        const lost = (await service.stopEnvironment(branch.branch_id, params))
+          .environment_instance!;
+        expect(lost.last_command).toMatchObject({ action: 'stop', status: 'unknown' });
+        expect(lost.last_error).toContain('Remote outcome is unknown');
+      });
+    }
+  );
+
   dbTest(
     'returns admitted state without a claim/result waiter and settles through another service instance',
     async ({ db }) => {
@@ -121,6 +282,29 @@ describe('executor-owned command reports', () => {
         } as AuthenticatedParams;
         const scope = { branch_id: branch.branch_id, attempt_id: attempt.id, action: 'start' };
         await reporter.create({ ...scope, kind: 'claim' }, reportParams);
+        const otherUserId = generateId();
+        await expect(
+          reporter.create(
+            {
+              ...scope,
+              kind: 'result',
+              outcome: 'succeeded',
+              message: 'another actor tried to settle the attempt',
+            },
+            {
+              ...reportParams,
+              user: { ...reportParams.user!, user_id: otherUserId, role: 'admin' },
+              authentication: {
+                ...reportParams.authentication!,
+                payload: { ...reportParams.authentication!.payload, sub: otherUserId },
+              },
+            } as AuthenticatedParams
+          )
+        ).rejects.toThrow('actor changed');
+        const revokedParams = {
+          ...reportParams,
+          user: { ...reportParams.user!, role: 'viewer' as const },
+        } as AuthenticatedParams;
         await reporter.create(
           {
             ...scope,
@@ -129,11 +313,11 @@ describe('executor-owned command reports', () => {
             message: 'remote trigger exited zero',
             access_urls: [{ name: 'Preview', url: 'https://preview.example.test' }],
           },
-          reportParams
+          revokedParams
         );
         expect((await service.get(branch.branch_id)).environment_instance).toMatchObject({
           status: 'running',
-          access_urls: [{ name: 'Preview', url: 'https://preview.example.test' }],
+          access_urls: [{ name: 'App', url: 'https://preview.example.test/' }],
         });
         expect(emit).toHaveBeenCalledWith(
           'patched',

@@ -1,14 +1,20 @@
+import { getBranchesDir, getTenantDataRoot } from '@agor/core/config';
 import {
   BoardRepository,
   BranchRepository,
   CapabilityPolicyRepository,
+  createTenantScopedDatabaseProxy,
+  type Database,
   GroupRepository,
   generateId,
   RepoRepository,
+  SessionRepository,
+  TaskRepository,
+  UserPrimaryTeammateRepository,
   UsersRepository,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
-import type { BranchID, EffectiveBranchAccess, Params, TenantID } from '@agor/core/types';
+import type { BranchID, EffectiveBranchAccess, Params, TenantID, UserID } from '@agor/core/types';
 import { capabilityPolicyPresetCapabilities } from '@agor/core/types';
 import { beforeEach, expect, vi } from 'vitest';
 import { seedEnvironmentCommandBranch } from '../../../../packages/core/src/db/repositories/environment-commands.test-support';
@@ -29,9 +35,16 @@ vi.mock('../utils/spawn-executor', () => ({
 const tenant = { tenant_id: 'default' as TenantID, source: 'explicit' as const };
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(requestExecutor).mockResolvedValue({ success: true, data: { exists: true } });
+  vi.mocked(requestExecutor).mockImplementation(async (payload) => ({
+    success: true,
+    data: {
+      branchId: (payload.params as { branchId: BranchID }).branchId,
+      exists: true,
+      kind: 'directory',
+    },
+  }));
 });
-function setup(db: ConstructorParameters<typeof BranchesService>[0], allowSuperadmin = false) {
+function setup(db: Database, allowSuperadmin = false) {
   const archiveBranchSessions = vi.fn().mockResolvedValue({ count: 0 });
   const emit = vi.fn();
   const app = {
@@ -40,14 +53,24 @@ function setup(db: ConstructorParameters<typeof BranchesService>[0], allowSupera
     sessionTokenService: { generateCommandToken: vi.fn().mockResolvedValue('fixture-token') },
     service: () => ({ emit, archiveBranchSessions }),
   } as unknown as Application;
-  const service = new BranchesService(db, app);
-  vi.spyOn(service as never, 'resolveEnvironmentExecutorContext').mockResolvedValue({
-    env: {},
-    executionUserId: 'fixture',
-    branchFsAccess: 'write',
-    sandboxMounts: {},
-  } as never);
-  return { service, emit, archiveBranchSessions };
+  const service = new BranchesService(
+    createTenantScopedDatabaseProxy(db, { requireScope: true }),
+    app
+  );
+  const context = vi
+    .spyOn(
+      service as unknown as {
+        resolveEnvironmentExecutorContext: (typeof service)['resolveEnvironmentExecutorContext'];
+      },
+      'resolveEnvironmentExecutorContext'
+    )
+    .mockResolvedValue({
+      env: {},
+      executionUserId: 'fixture' as UserID,
+      branchFsAccess: 'write',
+      sandboxMounts: {},
+    });
+  return { service, app, emit, archiveBranchSessions, context };
 }
 
 test('clean rejects policy, protection, public overrides, and busy activity before dispatch; accepts only one worker', async ({
@@ -80,8 +103,13 @@ test('clean rejects policy, protection, public overrides, and busy activity befo
   await expect(service.clean(input, { user, tenant })).rejects.toThrow('environment is active');
   expect(spawnExecutor).not.toHaveBeenCalled();
   await branches.update(branch.branch_id, { environment_instance: { status: 'stopped' } });
-  vi.mocked(requestExecutor).mockResolvedValueOnce({ success: true, data: { exists: false } });
-  await expect(service.clean(input, { user, tenant })).rejects.toThrow('unavailable');
+  vi.mocked(requestExecutor).mockResolvedValueOnce({
+    success: true,
+    data: { branchId: branch.branch_id, exists: false, kind: 'missing' },
+  });
+  await expect(service.clean(input, { user, tenant })).rejects.toThrow(
+    'not visible to the executor'
+  );
   const result = await service.clean(input, { user, tenant });
   expect(result.status).toBe('accepted');
   expect(spawnExecutor).toHaveBeenCalledOnce();
@@ -98,6 +126,18 @@ test('clean rejects policy, protection, public overrides, and busy activity befo
   expect((await branches.findById(branch.branch_id))?.archived).toBe(false);
   expect((await branches.findById(branch.branch_id))?.filesystem_status).toBe('ready');
   await expect(service.clean(input, { user, tenant })).rejects.toThrow('already active');
+  const archiveParams = { user, tenant };
+  markBranchArchiveDeleteAuthorized(archiveParams, branch.branch_id, 'archive');
+  await expect(
+    service.archiveOrDelete(
+      branch.branch_id,
+      {
+        metadataAction: 'archive',
+        filesystemAction: 'preserved',
+      },
+      archiveParams
+    )
+  ).rejects.toThrow('already active');
   expect(spawnExecutor).toHaveBeenCalledOnce();
 });
 
@@ -192,6 +232,7 @@ test('archive removal uses the shared workspace worker and does not claim filesy
     expect.anything()
   );
   const sent = vi.mocked(spawnExecutor).mock.calls[0]![0] as { params: Record<string, unknown> };
+  expect(requestExecutor).not.toHaveBeenCalled();
   expect(sent.params).not.toHaveProperty('cwd');
   expect(sent.params).not.toHaveProperty('cleanup');
   expect(await new BranchRepository(db).findById(branch.branch_id)).toMatchObject({
@@ -200,6 +241,191 @@ test('archive removal uses the shared workspace worker and does not claim filesy
     workspace_operation: { status: 'accepted' },
   });
 });
+
+for (const filesystemAction of ['cleaned'] as const) {
+  for (const failure of ['missing', 'executor'] as const) {
+    test(`archive ${filesystemAction}: ${failure} preflight does not archive or destroy; explicit Preserve can retry`, async ({
+      db,
+    }) => {
+      const { branch, user } = await seedEnvironmentCommandBranch(db);
+      const { service, archiveBranchSessions } = setup(db);
+      await new RepoRepository(db).update(branch.repo_id, {
+        cleanup_policy: { enabled: true, command: 'git clean -fdX', allow_branch_protection: true },
+      });
+      vi.mocked(requestExecutor).mockResolvedValueOnce(
+        failure === 'missing'
+          ? { success: true, data: { branchId: branch.branch_id, exists: false, kind: 'missing' } }
+          : { success: false, error: { code: 'EXECUTOR_TIMEOUT', message: 'not absence proof' } }
+      );
+      const params = { user, tenant };
+      markBranchArchiveDeleteAuthorized(params, branch.branch_id, 'archive');
+      await expect(
+        service.archiveOrDelete(
+          branch.branch_id,
+          {
+            metadataAction: 'archive',
+            filesystemAction,
+          },
+          params
+        )
+      ).rejects.toThrow(failure === 'missing' ? 'not visible' : 'did not respond');
+      const branches = new BranchRepository(db);
+      expect(await branches.findById(branch.branch_id)).toMatchObject({
+        archived: false,
+        filesystem_status: 'ready',
+        workspace_operation: { status: 'failed', filesystem_action: filesystemAction },
+      });
+      expect(archiveBranchSessions).not.toHaveBeenCalled();
+      expect(spawnExecutor).not.toHaveBeenCalled();
+      // A read-only preflight failure releases its claim, unlike an unknown
+      // destructive invocation. Retrying Preserve must not probe files again.
+      markBranchArchiveDeleteAuthorized(params, branch.branch_id, 'archive');
+      await service.archiveOrDelete(
+        branch.branch_id,
+        {
+          metadataAction: 'archive',
+          filesystemAction: 'preserved',
+        },
+        params
+      );
+      expect(requestExecutor).toHaveBeenCalledOnce();
+      expect(spawnExecutor).not.toHaveBeenCalled();
+      expect(await branches.findById(branch.branch_id)).toMatchObject({
+        archived: true,
+        filesystem_status: 'ready',
+        workspace_operation: { status: 'succeeded', filesystem_action: 'preserved' },
+      });
+    });
+  }
+}
+
+test('delegated Preserve needs no executor; legacy linked worktree changes remain unsupported', async ({
+  db,
+}) => {
+  const { branch, user } = await seedEnvironmentCommandBranch(db);
+  const { service, app, context } = setup(db);
+  vi.spyOn(app, 'get').mockReturnValue({ execution: { unix_user_mode: 'delegated' } });
+  context.mockRejectedValue(new Error('executor identity unavailable'));
+  const branches = new BranchRepository(db);
+  await branches.update(branch.branch_id, { environment_instance: { status: 'running' } });
+  const busyParams = { user, tenant };
+  markBranchArchiveDeleteAuthorized(busyParams, branch.branch_id, 'archive');
+  await expect(
+    service.archiveOrDelete(
+      branch.branch_id,
+      {
+        metadataAction: 'archive',
+        filesystemAction: 'preserved',
+      },
+      busyParams
+    )
+  ).rejects.toThrow('environment is active');
+  expect((await branches.findById(branch.branch_id))?.archived).toBe(false);
+  await branches.update(branch.branch_id, { environment_instance: { status: 'stopped' } });
+  for (const filesystemAction of ['cleaned', 'deleted'] as const) {
+    const params = { user, tenant };
+    markBranchArchiveDeleteAuthorized(params, branch.branch_id, 'archive');
+    await expect(
+      service.archiveOrDelete(
+        branch.branch_id,
+        {
+          metadataAction: 'archive',
+          filesystemAction,
+        },
+        params
+      )
+    ).rejects.toThrow('self-contained clone');
+  }
+  const params = { user, tenant };
+  markBranchArchiveDeleteAuthorized(params, branch.branch_id, 'archive');
+  await expect(
+    service.archiveOrDelete(
+      branch.branch_id,
+      {
+        metadataAction: 'archive',
+        filesystemAction: 'preserved',
+      },
+      params
+    )
+  ).resolves.toMatchObject({ archived: true, filesystem_status: 'ready' });
+  expect(context).not.toHaveBeenCalled();
+  expect(requestExecutor).not.toHaveBeenCalled();
+  expect(spawnExecutor).not.toHaveBeenCalled();
+});
+
+for (const execution of [
+  { execution: { unix_user_mode: 'delegated' } },
+  { execution: { executor_command_template: 'fixture-launcher' } },
+  { deployment: { mode: 'ha', ha: { execution_topology: 'external' } } },
+]) {
+  for (const action of ['clean', 'archive-clean', 'archive-delete'] as const) {
+    test(`external ${JSON.stringify(execution)} ${action}: forwards caller home and bounded clone storage`, async ({
+      db,
+    }) => {
+      const { branch, user } = await seedEnvironmentCommandBranch(db);
+      const { service, app, context } = setup(db);
+      vi.spyOn(app, 'get').mockReturnValue(execution);
+      context.mockResolvedValue({
+        env: {},
+        executionUserId: user.user_id,
+        branchFsAccess: 'write',
+        sandboxMounts: {},
+        delegatedHomeKey: 'fixture-caller-home',
+      });
+      await new BranchRepository(db).update(branch.branch_id, { storage_mode: 'clone' });
+      await new RepoRepository(db).update(branch.repo_id, {
+        cleanup_policy: { enabled: true, command: 'git clean -fdX', allow_branch_protection: true },
+      });
+      const params = { user, tenant };
+      if (action === 'clean') await service.clean({ branchId: branch.branch_id }, params);
+      else {
+        markBranchArchiveDeleteAuthorized(params, branch.branch_id, 'archive');
+        await service.archiveOrDelete(
+          branch.branch_id,
+          {
+            metadataAction: 'archive',
+            filesystemAction: action === 'archive-delete' ? 'deleted' : 'cleaned',
+          },
+          params
+        );
+      }
+      expect(spawnExecutor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          params: expect.objectContaining({
+            delegatedStorage: {
+              tenantDataRoot: getTenantDataRoot(tenant.tenant_id),
+              branchesRoot: getBranchesDir(tenant.tenant_id),
+              branchPath: branch.path,
+              repoPath: '/tmp/environment-test',
+              storageMode: 'clone',
+            },
+          }),
+        }),
+        expect.objectContaining({
+          delegatedHomeKey: 'fixture-caller-home',
+          templateVariables: {
+            branch_id: branch.branch_id,
+            user_id: user.user_id,
+            branch_fs_access: 'write',
+          },
+        })
+      );
+      if (action === 'archive-delete') expect(requestExecutor).not.toHaveBeenCalled();
+      else
+        expect(requestExecutor).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            delegatedHomeKey: 'fixture-caller-home',
+          })
+        );
+      expect(await new BranchRepository(db).findById(branch.branch_id)).toMatchObject({
+        archived: action !== 'clean',
+        filesystem_status: 'ready',
+        workspace_operation: { status: 'accepted' },
+      });
+    });
+  }
+}
 
 for (const binding of ['inherit', 'override'] as const) {
   for (const authority of ['owner', 'direct', 'group', 'superadmin', 'superadmin-owner'] as const) {
@@ -352,3 +578,78 @@ for (const binding of ['inherit', 'override'] as const) {
     });
   }
 }
+
+test('explicit Manager retirement clears revoked collaborators preferences, preserves files and retains board protection', async ({
+  db,
+}) => {
+  const { branch, user } = await seedEnvironmentCommandBranch(db);
+  const { service } = setup(db);
+  const branches = new BranchRepository(db);
+  const boards = new BoardRepository(db);
+  const prefs = new UserPrimaryTeammateRepository(db);
+  const collaborator = await new UsersRepository(db).create({
+    email: 'retirement-peer@example.test',
+    role: 'member',
+  });
+  const board = await boards.create({ name: 'Retirement', created_by: user.user_id });
+  await branches.update(branch.branch_id, {
+    board_id: board.board_id,
+    custom_context: { teammate: { kind: 'teammate', displayName: 'Fixture' } },
+  });
+  await setTestBranchUserRole(
+    db,
+    branch.branch_id,
+    collaborator.user_id,
+    'collaborator',
+    'write',
+    user.user_id
+  );
+  await prefs.setPrimaryTeammate(collaborator.user_id, branch.branch_id, { source: 'explicit' });
+  await expect(
+    service.retireTeammate(branch.branch_id, { user: collaborator, tenant })
+  ).rejects.toThrow(/Manager/);
+  // Revocation does not require cooperation from the preference holder.
+  await setTestBranchUserRole(
+    db,
+    branch.branch_id,
+    collaborator.user_id,
+    'viewer',
+    'none',
+    user.user_id
+  );
+  await boards.setPrimaryTeammate(board.board_id, branch.branch_id);
+  await expect(service.retireTeammate(branch.branch_id, { user, tenant })).rejects.toThrow(
+    'Primary teammate is protected'
+  );
+  expect(await prefs.getBranchId(collaborator.user_id)).toBe(branch.branch_id);
+  expect((await branches.findById(branch.branch_id))?.archived).toBe(false);
+  await boards.clearPrimaryTeammate(board.board_id);
+  const session = await new SessionRepository(db).create({
+    branch_id: branch.branch_id,
+    created_by: user.user_id,
+    agentic_tool: 'codex',
+  });
+  const task = await new TaskRepository(db).create({
+    session_id: session.session_id,
+    created_by: user.user_id,
+    status: 'queued',
+  });
+  await expect(service.retireTeammate(branch.branch_id, { user, tenant })).rejects.toThrow(
+    'unfinished tasks'
+  );
+  expect(await prefs.getBranchId(collaborator.user_id)).toBe(branch.branch_id);
+  expect((await branches.findById(branch.branch_id))?.archived).toBe(false);
+  await new TaskRepository(db).update(task.task_id, { status: 'stopped' });
+  await service.retireTeammate(branch.branch_id, { user, tenant });
+  expect(await prefs.getBranchId(collaborator.user_id)).toBeNull();
+  expect(await branches.findById(branch.branch_id)).toMatchObject({
+    archived: true,
+    path: branch.path,
+    filesystem_status: 'ready',
+  });
+  expect(spawnExecutor).not.toHaveBeenCalled();
+  expect(requestExecutor).not.toHaveBeenCalled();
+  await expect(
+    prefs.setPrimaryTeammate(user.user_id, branch.branch_id, { source: 'explicit' })
+  ).rejects.toThrow(/active/);
+});

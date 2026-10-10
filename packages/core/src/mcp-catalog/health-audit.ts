@@ -7,8 +7,10 @@ import {
 } from '../tools/mcp/oauth-mcp-transport';
 import { assertSafeOutboundUrl, UnsafeOutboundUrlError } from '../utils/safe-outbound-fetch';
 import { probeRemoteAuth, type RemoteAuthProbeResult } from './auth-probe';
+import { isCatalogEntryVisible } from './query';
 
 export type CatalogHealthStatus =
+  | 'skipped-hidden'
   | 'ready'
   | 'credential-required'
   | 'oauth-now-available'
@@ -18,15 +20,18 @@ export type CatalogHealthStatus =
   | 'oauth-metadata-not-ready';
 
 export type CatalogHealthReason =
+  | 'catalog_entry_hidden'
   | 'probe_failed'
   | 'auth_mismatch'
   | 'credential_not_verified'
+  | 'configured_client_not_verified'
   | 'metadata_unavailable'
   | 'metadata_incompatible'
   | 'endpoint_override_mismatch'
   | 'issuer_mismatch'
   | 'pkce_required'
   | 'client_registration_required'
+  | 'redirect_uri_mismatch'
   | `external_${MCPExternalErrorCategory}`
   | 'unexpected_error';
 
@@ -72,6 +77,14 @@ async function assertOAuthMetadataReady(
   const validated = await validateMCPOAuthMetadata(discovery, entry.remote_url, {
     compatibilityMode,
   });
+  if (entry.oauth?.configured_client) {
+    if (validated.issuer !== entry.oauth.configured_client.issuer)
+      throw new OAuthConfigurationError(
+        'issuer_mismatch',
+        'Configured app issuer no longer matches its reviewed recipe'
+      );
+    return; // Customer app input is required; the audit never registers a client.
+  }
   if (entry.oauth?.client_id) return;
   if (entry.oauth?.dcr_mode === 'disabled' || !validated.registrationEndpoint) {
     throw new OAuthConfigurationError(
@@ -136,6 +149,18 @@ export async function auditCatalogHealth(
   const results = new Array<CatalogHealthResult>(entries.length);
   let nextIndex = 0;
   const auditOne = async (entry: MCPCatalogEntry): Promise<CatalogHealthResult> => {
+    // Live health gates the offered catalog, not deliberately unavailable
+    // providers. The caller still validates ALL definitions before this audit;
+    // this skip does not change saved-install/runtime OAuth policy.
+    if (!isCatalogEntryVisible(entry)) {
+      return {
+        name: entry.name,
+        status: 'skipped-hidden',
+        expectedAuth: entry.auth_type,
+        observedAuth: 'unknown',
+        reason: 'catalog_entry_hidden',
+      };
+    }
     const observed = entry.remote_url
       ? await probe(entry.remote_url)
       : ({ authType: 'unknown' } satisfies RemoteAuthProbeResult);
@@ -177,6 +202,8 @@ export async function auditCatalogHealth(
         };
       }
       if (reviewedBearerOAuth) return { ...base, status: 'oauth-now-available' };
+      if (entry.oauth?.configured_client)
+        return { ...base, status: 'credential-required', reason: 'configured_client_not_verified' };
     }
 
     // The public challenge was checked, but only an authenticated initialize

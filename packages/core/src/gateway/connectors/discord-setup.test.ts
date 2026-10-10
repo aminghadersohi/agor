@@ -28,6 +28,39 @@ describe('Discord setup artifact', () => {
     );
     expect(artifact.messageContent.required).toBe(true);
     expect(artifact.draft.config.catch_up).toBeTruthy();
+    expect(artifact.draft.config.files).toBe(false);
+    expect(artifact.draft.config.direct_messages_enabled).toBe(false);
+    expect(artifact.draft.config.agent_tools).toEqual({ channel_history: false });
+  });
+
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    'keeps DM (%s) and channel-history (%s) opt-ins independent',
+    (directMessagesEnabled, channelHistory) => {
+      const artifact = buildDiscordSetupArtifact({
+        ...decisions,
+        directMessagesEnabled,
+        channelHistory,
+      });
+      expect(artifact.validation).toEqual({ ok: true, errors: [] });
+      expect(artifact.draft.config.direct_messages_enabled).toBe(directMessagesEnabled);
+      expect(artifact.draft.config.agent_tools).toEqual({ channel_history: channelHistory });
+    }
+  );
+
+  it('carries the explicit inbound-image opt-in without changing the default', () => {
+    const artifact = buildDiscordSetupArtifact({
+      ...decisions,
+      files: true,
+      directMessagesEnabled: true,
+    });
+    expect(artifact.validation).toEqual({ ok: true, errors: [] });
+    expect(artifact.draft.config.files).toBe(true);
+    expect(artifact.draft.config.direct_messages_enabled).toBe(true);
   });
 
   it('requires a parent, author allowlist, and fixed or mapped identity', () => {
@@ -118,6 +151,21 @@ describe('Discord connection verification', () => {
     ['wrong installation identity', { ...verified, verifiedInstallationId: '999999999999999999' }],
   ])('fails closed for %s', (_label, result) => {
     expect(evaluateDiscordConnectionVerification(result, applicationId).verified).toBe(false);
+  });
+
+  it('names the probe failures when verification did not succeed', () => {
+    const result = evaluateDiscordConnectionVerification(
+      {
+        ...verified,
+        ok: false,
+        failures: [{ capability: 'outbound_target', reason: 'The default target is a forum.' }],
+      },
+      applicationId
+    );
+    expect(result).toMatchObject({
+      verified: false,
+      failure: { reason: 'Discord verification did not succeed: The default target is a forum.' },
+    });
   });
 
   it('accepts only the exact verified application identity', () => {

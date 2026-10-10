@@ -3,10 +3,12 @@ import { resolveMultiTenancyConfig } from '@agor/core/config';
 import {
   BoardRepository,
   BranchRepository,
+  SessionRepository,
   type TenantScopeAwareDatabase,
   UsersRepository,
 } from '@agor/core/db';
 import {
+  type Application,
   AuthenticationService,
   authenticate,
   errorHandler,
@@ -18,6 +20,7 @@ import {
 import type { HookContext, UserID } from '@agor/core/types';
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import { DrizzleService } from '../src/adapters/drizzle.js';
 import { RuntimeJWTStrategy } from '../src/auth/runtime-jwt-strategy.js';
 import { setupMCPRoutes } from '../src/mcp/server.js';
 import { type RegisterHooksContext, registerHooks } from '../src/register-hooks.js';
@@ -26,6 +29,7 @@ import { createBoardsService } from '../src/services/boards.js';
 import { BranchesService } from '../src/services/branches.js';
 import { setupCapabilityPolicyServices } from '../src/services/capability-policies.js';
 import { setupBoardEffectiveAccessService } from '../src/services/groups.js';
+import { TASKS_SERVICE_TRANSPORT_METHODS, TasksService } from '../src/services/tasks.js';
 import { createUsersService } from '../src/services/users.js';
 import { configureChannels, createSocketIOConfig } from '../src/setup/socketio.js';
 
@@ -36,7 +40,9 @@ export async function boardMetadataTestApp(
   db: TenantScopeAwareDatabase,
   config: RegisterHooksContext['config'],
   withSocketIO = false,
-  withMcp = false
+  withMcp = false,
+  withTasks = false,
+  configure?: (app: Application) => Promise<void>
 ) {
   const app = feathersExpress(feathers());
   app.use(express.json());
@@ -64,6 +70,16 @@ export async function boardMetadataTestApp(
       },
     });
   }
+  const sessionsRepository = new SessionRepository(db);
+  if (withTasks) {
+    app.unuse('sessions');
+    app.unuse('tasks');
+    app.use(
+      'sessions',
+      new DrizzleService(sessionsRepository, { id: 'session_id', resourceType: 'Session' })
+    );
+    app.use('tasks', new TasksService(db, app), { methods: [...TASKS_SERVICE_TRANSPORT_METHODS] });
+  }
   app.use('users', createUsersService(db, app, config));
   const authentication = new AuthenticationService(app);
   authentication.register(
@@ -87,6 +103,7 @@ export async function boardMetadataTestApp(
   app.use('board-objects', new BoardObjectsService(db, app));
   setupBoardEffectiveAccessService(app, new BoardRepository(db), { allowSuperadmin: false });
   setupCapabilityPolicyServices(app, db, { allowSuperadmin: false });
+  await configure?.(app);
   registerHooks({
     db,
     app,
@@ -103,7 +120,9 @@ export async function boardMetadataTestApp(
     boardsService: boardsService as unknown as RegisterHooksContext['boardsService'],
     branchRepository: new BranchRepository(db),
     usersRepository: new UsersRepository(db),
-    sessionsRepository: {} as RegisterHooksContext['sessionsRepository'],
+    sessionsRepository: withTasks
+      ? sessionsRepository
+      : ({} as RegisterHooksContext['sessionsRepository']),
   });
   if (withMcp) setupMCPRoutes(app, db, true, config);
   app.use(errorHandler());

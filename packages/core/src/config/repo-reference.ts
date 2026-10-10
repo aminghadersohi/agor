@@ -7,7 +7,8 @@
  * 3. Slug + branch: anthropics/agor:feat-auth
  */
 
-import type { BranchName, RepoSlug, UUID } from '../types';
+import type { BranchName, Repo, RepoSlug, UUID } from '../types';
+import { TEAMMATE_FRAMEWORK_PRIVATE_FORK_NAMES } from '../types/branch';
 
 /**
  * Parsed repo reference
@@ -102,6 +103,66 @@ export function extractSlugFromUrl(url: string): RepoSlug {
 }
 
 /**
+ * Derive a GitHub `owner/repository` identity from a github.com git remote.
+ *
+ * Unlike {@link extractSlugFromUrl}, this deliberately validates the remote
+ * host before returning anything. Provider integrations must not accidentally
+ * treat a GitLab/Bitbucket path as a same-named GitHub repository. The return
+ * value contains only path components, so HTTP userinfo or other credentials
+ * from a legacy remote URL can never enter rendered commands.
+ *
+ * Supported forms include HTTPS, `ssh://`, `git://`, and scp-style SSH:
+ *
+ * @example
+ * extractGitHubSlugFromUrl('https://github.com/preset-io/agor.git')
+ * // => 'preset-io/agor'
+ *
+ * @example
+ * extractGitHubSlugFromUrl('git@github.com:preset-io/agor.git')
+ * // => 'preset-io/agor'
+ */
+export function extractGitHubSlugFromUrl(url: string): RepoSlug | undefined {
+  const value = url.trim();
+  if (!value) return undefined;
+
+  let remotePath: string | undefined;
+
+  // Git's scp-style syntax is not understood by the WHATWG URL parser.
+  const scpMatch = value.match(/^(?:[^@\s/:]+@)?github\.com:([^?#]+)$/i);
+  if (scpMatch) {
+    remotePath = scpMatch[1];
+  } else {
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      return undefined;
+    }
+
+    if (
+      parsed.hostname.toLowerCase() !== 'github.com' ||
+      !['http:', 'https:', 'ssh:', 'git:'].includes(parsed.protocol) ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      return undefined;
+    }
+    remotePath = parsed.pathname;
+  }
+
+  const slug = remotePath.replace(/^\/+|\/+$/g, '').replace(/\.git$/i, '');
+  return isValidSlug(slug) ? (slug as RepoSlug) : undefined;
+}
+
+/** Exact-name content rule (selection uses isPrivateTeammateFrameworkFork): github.com private forks start from the public template. */
+export function defaultsToPublicTeammateTemplate(repo: Pick<Repo, 'remote_url'>): boolean {
+  const name = extractGitHubSlugFromUrl(repo.remote_url ?? '')
+    ?.split('/')[1]
+    ?.toLowerCase();
+  return (TEAMMATE_FRAMEWORK_PRIVATE_FORK_NAMES as readonly string[]).includes(name ?? '');
+}
+
+/**
  * Validate slug format (org/name)
  *
  * @param slug - Repository slug to validate
@@ -109,11 +170,12 @@ export function extractSlugFromUrl(url: string): RepoSlug {
  */
 /**
  * Regex for valid repo slugs (org/name format matching GitHub naming rules).
- * Supports: alphanumeric, hyphens, underscores, dots. Safe for filesystem paths.
+ * Supports: alphanumeric, hyphens, underscores, dots. Rejects `.`/`..` segments
+ * so a slug is safe to join onto a filesystem root.
  *
  * Shared across repo-reference validation and config resource schemas.
  */
-export const REPO_SLUG_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
+export const REPO_SLUG_PATTERN = /^(?!\.\.?\/)[a-zA-Z0-9._-]+\/(?!\.\.?$)[a-zA-Z0-9._-]+$/;
 
 export function isValidSlug(slug: string): boolean {
   return REPO_SLUG_PATTERN.test(slug);

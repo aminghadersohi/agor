@@ -1,4 +1,10 @@
-import type { AgorClient, Board, Branch, Session, User } from '@agor-live/client';
+import {
+  type AgorClient,
+  type Board,
+  type Branch,
+  summarizeBoardImportSkips,
+  type User,
+} from '@agor-live/client';
 import {
   CopyOutlined,
   DeleteOutlined,
@@ -22,11 +28,11 @@ import { AdaptiveSettingsModal } from './AdaptiveSettingsModal';
 import { ResponsiveSettingsHeader } from './ResponsiveSettingsHeader';
 import { ResponsiveTable } from './ResponsiveTable';
 import { SettingsActionGroup } from './SettingsActionGroup';
+import { useSessionCounts } from './useBranchPage';
 
 interface BoardsTableProps {
   client: AgorClient | null;
   boardById: Map<string, Board>;
-  sessionsByBranch: Map<string, Session[]>;
   branchById: Map<string, Branch>;
   currentUser?: User | null;
   onCreate?: (board: Partial<Board>) => void;
@@ -39,7 +45,6 @@ interface BoardsTableProps {
 export const BoardsTable: React.FC<BoardsTableProps> = ({
   client,
   boardById,
-  sessionsByBranch,
   branchById,
   currentUser,
   onCreate,
@@ -49,33 +54,12 @@ export const BoardsTable: React.FC<BoardsTableProps> = ({
   onUnarchive,
 }) => {
   const { modal } = App.useApp();
-  const { showSuccess, showError } = useThemedMessage();
+  const { showSuccess, showError, showWarning } = useThemedMessage();
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editingBoard, setEditingBoard] = useState<Board | null>(null);
   const [archiveFilter, setArchiveFilter] = useState<'active' | 'archived' | 'all'>('active');
   const [searchTerm, setSearchTerm] = useState('');
   const [form] = Form.useForm();
-
-  // Calculate session count per board (branch-centric model). Build the
-  // board buckets once so opening Settings is O(branches + sessions) instead
-  // of O(boards × branches).
-  const boardSessionCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-
-    for (const branch of branchById.values()) {
-      if (!branch.board_id) continue;
-      counts.set(
-        branch.board_id,
-        (counts.get(branch.board_id) ?? 0) + (sessionsByBranch.get(branch.branch_id)?.length ?? 0)
-      );
-    }
-
-    for (const board of boardById.values()) {
-      if (!counts.has(board.board_id)) counts.set(board.board_id, 0);
-    }
-
-    return counts;
-  }, [boardById, sessionsByBranch, branchById]);
 
   const handleCreate = () => {
     // Validate all fields (not just 'name') so custom_context JSON rules run.
@@ -179,15 +163,16 @@ export const BoardsTable: React.FC<BoardsTableProps> = ({
 
     try {
       const boardsService = client.service('boards');
-      let board: Board;
+      const board = file.name.endsWith('.json')
+        ? await boardsService.fromBlob(JSON.parse(content))
+        : await boardsService.fromYaml({ yaml: content });
 
-      if (file.name.endsWith('.json')) {
-        board = await boardsService.fromBlob(JSON.parse(content));
+      const skippedSummary = summarizeBoardImportSkips(board.import_skipped);
+      if (skippedSummary) {
+        showWarning(`Board imported: ${board.name}. ${skippedSummary}`, { duration: 8 });
       } else {
-        board = await boardsService.fromYaml({ yaml: content });
+        showSuccess(`Board imported: ${board.name}`);
       }
-
-      showSuccess(`Board imported: ${board.name}`);
       onCreate?.(board);
     } catch (error) {
       showError(`Import failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -221,6 +206,7 @@ export const BoardsTable: React.FC<BoardsTableProps> = ({
       (board) => board.board_id,
     ]);
   }, [boardById, archiveFilter, searchTerm]);
+  const boardSessionCounts = useSessionCounts(client, 'board_id');
 
   const columns = [
     {
@@ -251,7 +237,7 @@ export const BoardsTable: React.FC<BoardsTableProps> = ({
       title: 'Sessions',
       key: 'sessions',
       width: 100,
-      render: (_: unknown, board: Board) => boardSessionCounts.get(board.board_id) || 0,
+      render: (_: unknown, board: Board) => boardSessionCounts.get(board.board_id) ?? null,
     },
     {
       title: 'Actions',

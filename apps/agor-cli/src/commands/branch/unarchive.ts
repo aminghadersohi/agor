@@ -60,14 +60,12 @@ export default class BranchUnarchive extends BaseCommand {
       // Query sessions service for count
       const sessionsService = client.service('sessions');
       try {
-        const allSessions = await sessionsService.findAll({
-          query: {
-            branch_id: branch.branch_id,
-            archived: true,
-            archived_reason: 'branch_archived',
-            $limit: 10000,
-          },
-        });
+        // The service has no `archived_reason` filter: narrow here.
+        const allSessions = (
+          await sessionsService.findAll({
+            query: { branch_id: branch.branch_id, archived: true, $limit: 10000 },
+          })
+        ).filter((session) => session.archived_reason === 'branch_archived');
 
         if (allSessions.length > 0) {
           this.log(
@@ -88,7 +86,10 @@ export default class BranchUnarchive extends BaseCommand {
         boardId: flags['board-id'],
       });
 
-      this.log(chalk.green(`✓ Unarchived branch "${branch.name}"`));
+      this.log(chalk.green(`✓ Unarchive accepted for "${branch.name}"`));
+      this.log(
+        'Filesystem restoration is asynchronous. Wait for filesystem_status ready before starting work; inspect the branch for failures.'
+      );
       this.log('');
 
       // Cleanup

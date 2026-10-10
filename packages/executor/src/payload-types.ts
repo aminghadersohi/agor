@@ -21,6 +21,8 @@ import {
   BRANCH_CLEANUP_COMMAND,
   BRANCH_CLEANUP_COMMAND_MAX_LENGTH,
   BRANCH_DELETION_COMMAND,
+  ENVIRONMENT_COMMAND_BUDGET as ENV_BUDGET,
+  EXECUTOR_ADMISSION_CLASSES,
 } from '@agor/core/types';
 import { z } from 'zod';
 
@@ -129,6 +131,13 @@ export const BasePayloadSchema = z.object({
   /** Executor command identifier */
   command: z.string(),
 
+  /**
+   * Admission class the daemon stamps on templated launches so a gating
+   * launcher can count the run. Never trusted by the executor itself: the
+   * admission check uses the executor's own command map.
+   */
+  admissionClass: z.enum(EXECUTOR_ADMISSION_CLASSES).optional(),
+
   /** Invocation lifecycle selected by the daemon host. */
   executorMode: z.enum(['autonomous', 'request']).optional(),
 
@@ -170,6 +179,15 @@ export const PromptPayloadSchema = BasePayloadSchema.extend({
     taskId: z.string().uuid(),
     prompt: z.string(),
     tool: ToolTypeSchema,
+    /**
+     * Informational copy of the session's configured model
+     * (`session.model_config.model`, verbatim), so an external launcher may
+     * record it. It is the configured value, not the one the runtime resolves,
+     * and for OpenCode it omits the provider. The executor never reads it:
+     * handlers keep reading the model from the session. Older executors drop it
+     * because this schema is non-strict.
+     */
+    model: z.string().optional(),
     permissionMode: PermissionModeSchema.optional(),
     cwd: z.string(),
     messageSource: z.enum(['gateway', 'agor']).optional(),
@@ -246,7 +264,8 @@ export const GitClonePayloadSchema = BasePayloadSchema.extend({
     /**
      * Import executable environment configuration from the cloned
      * `.agor.yml`. This capability is derived by the daemon from the
-     * initiating user's admin role and defaults closed for direct callers.
+     * initiating user's admin role for initial registration only; recovery
+     * preserves saved configuration. Defaults closed for direct callers.
      */
     importEnvironmentConfig: z.boolean().optional().default(false),
 
@@ -259,6 +278,9 @@ export const GitClonePayloadSchema = BasePayloadSchema.extend({
      * `{ status: 'pending' }` response.
      */
     repoId: z.string().optional(),
+
+    /** Echo on terminal reports to fence superseded clone attempts. */
+    cloneGeneration: z.number().int().positive().optional(),
 
     /** User ID of the requesting user (for per-user credential resolution) */
     userId: z.string().uuid().optional(),
@@ -414,6 +436,16 @@ const BranchMaintenanceParamsSchema = z.object({
   generation: z.number().int().positive(),
   executionId: z.string().uuid(),
   deadlineAt: z.number().positive(),
+  delegatedStorage: z
+    .object({
+      tenantDataRoot: z.string().min(1),
+      branchesRoot: z.string().min(1),
+      branchPath: z.string().min(1),
+      repoPath: z.string().min(1),
+      storageMode: z.literal('clone'),
+    })
+    .strict()
+    .optional(),
 });
 const BranchCleanupParamsSchema = BranchMaintenanceParamsSchema.extend({
   filesystemAction: z.literal('cleaned'),
@@ -497,6 +529,7 @@ export const BranchFilesReadPayloadSchema = BasePayloadSchema.extend({
   params: z.object({
     branchId: z.string().uuid(),
     filePath: z.string().min(1),
+    gitStatusSource: z.enum(['combined', 'workingTree', 'staged']).optional().default('combined'),
   }),
 });
 
@@ -656,7 +689,7 @@ export type BranchAgorYmlExportPayload = z.infer<typeof BranchAgorYmlExportPaylo
 // ═══════════════════════════════════════════════════════════
 
 /**
- * Environment lifecycle payload - run shell-based start/stop/restart/nuke
+ * Environment lifecycle payload - run shell-based start/stop/nuke
  * commands from the executor. Webhook lifecycle commands stay daemon-owned.
  */
 export const EnvironmentLifecyclePayloadSchema = BasePayloadSchema.extend({
@@ -671,46 +704,38 @@ export const EnvironmentLifecyclePayloadSchema = BasePayloadSchema.extend({
       branchId: z.string().uuid(),
 
       /** Branch checkout path. Executor refetches the branch but this avoids ambiguity. */
-      branchPath: z.string().optional(),
+      branchPath: z.string(),
 
       /** Lifecycle action */
-      action: z.enum(['start', 'stop', 'restart', 'nuke']),
-      /** Only the asynchronous delegated path carries durable attempt authority. */
-      attempt: z
-        .object({
-          id: z.string().uuid(),
-          claimDeadline: z.string().datetime(),
-          commandDeadline: z.string().datetime(),
-          resultDeadline: z.string().datetime(),
-          externalJobDeadlineMs: z.number().int().min(305000).max(365000),
-        })
-        .optional(),
+      action: z.enum(['start', 'stop', 'nuke']),
+      /** Durable, daemon-issued attempt authority for every execution mode. */
+      attempt: z.object({
+        id: z.string().uuid(),
+        claimDeadline: z.string().datetime(),
+        commandDeadline: z.string().datetime(),
+        resultDeadline: z.string().datetime(),
+        externalJobDeadlineMs: z
+          .number()
+          .int()
+          .min(ENV_BUDGET.commandMs + ENV_BUDGET.cleanupMs)
+          .max(ENV_BUDGET.claimMs + ENV_BUDGET.commandMs + ENV_BUDGET.cleanupMs),
+      }),
 
-      /** Shell start command. Required for start/restart. */
+      /** Shell start command. Required for start. */
       startCommand: z.string().optional(),
 
-      /** Shell stop command. Required for stop and used before restart when present. */
+      /** Shell stop command. Required for stop. */
       stopCommand: z.string().optional(),
 
       /** Shell nuke command. Required for nuke. */
       nukeCommand: z.string().optional(),
-
-      /** Static app URL rendered by the daemon/branch snapshot. */
-      appUrl: z.string().optional(),
     })
     .superRefine((params, ctx) => {
-      if (params.attempt && (!params.branchPath || params.action === 'restart')) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['attempt'],
-          message: 'Asynchronous commands require branchPath and support only Start, Stop, or Nuke',
-        });
-      }
-      if ((params.action === 'start' || params.action === 'restart') && !params.startCommand) {
+      if (params.action === 'start' && !params.startCommand) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['startCommand'],
-          message: 'startCommand is required for start/restart',
+          message: 'startCommand is required for start',
         });
       }
       if (params.action === 'stop' && !params.stopCommand) {
@@ -774,6 +799,8 @@ export const GitRepoRealignOriginPayloadSchema = BasePayloadSchema.extend({
     remoteUrl: z.string().min(1),
     /** Redacted human-readable identifier for the security log. */
     repoSlug: z.string().min(1),
+    /** Tenant-scoped managed repositories root that must contain `repoPath`. */
+    reposRoot: z.string().min(1),
   }),
 });
 
@@ -961,6 +988,7 @@ export const BranchDeletePayloadSchema = BasePayloadSchema.extend({
     /** Existing tenant storage anchor; branch-homes itself is lazily created. */
     tenantDataRoot: z.string(),
     storageMode: z.enum(['clone', 'worktree']),
+    verifyDelegatedStorageMounts: z.boolean().optional(),
   }),
 });
 export type BranchDeletePayload = z.infer<typeof BranchDeletePayloadSchema>;

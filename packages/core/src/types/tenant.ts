@@ -12,7 +12,12 @@ export const MAX_TENANT_ID_LENGTH = 128;
 
 export interface TenantContext {
   tenant_id: TenantID;
-  source: 'static' | 'auth_claim' | 'trusted_header' | 'explicit';
+  /**
+   * `trusted_host` is a routing hint only: the tenant whose launch-observed
+   * public URL owns the trusted request Host. It admits a personal API key for
+   * verification inside that tenant and never authenticates on its own.
+   */
+  source: 'static' | 'auth_claim' | 'trusted_header' | 'trusted_host' | 'explicit';
 }
 
 /** Cloud-owned routing observation, persisted per tenant after verified launch. */
@@ -24,5 +29,17 @@ export interface TenantPublicRouting {
 
 /** Preserve the assertion's tenant binding even if app_variables is imported. */
 export interface StoredTenantPublicRouting extends TenantPublicRouting {
+  tenant_id: TenantID | string;
+}
+
+/** Display label observed from a verified launch, persisted per tenant. */
+export interface TenantDisplay {
+  label: string;
+  /** Signed assertion iat; orders observations exactly like routing. */
+  assertion_issued_at: number;
+}
+
+/** Same tenant binding as {@link StoredTenantPublicRouting}. */
+export interface StoredTenantDisplay extends TenantDisplay {
   tenant_id: TenantID | string;
 }

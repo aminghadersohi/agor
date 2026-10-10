@@ -1,5 +1,4 @@
 import { materializeAgenticToolConfiguration } from '@agor/agentic-tools/config';
-import { getBaseUrl } from '@agor/core/config';
 import type { TenantScopeAwareDatabase } from '@agor/core/db';
 import {
   getCurrentTenantDatabaseScope,
@@ -40,12 +39,13 @@ vi.mock('@agor/core/gateway', async (importOriginal) => {
   };
 });
 
+// `getBaseUrl` is deliberately NOT mocked — see the note in `gateway.test.ts`.
+// The origin below comes from `AGOR_BASE_URL` through the real resolver.
 vi.mock('@agor/core/config', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agor/core/config')>();
   return {
     ...actual,
     assertInlineAgenticConfigurationAllowed: vi.fn(async () => undefined),
-    getBaseUrl: vi.fn(async () => 'https://agor.example.com'),
   };
 });
 
@@ -180,6 +180,7 @@ function makeGitHubHarness(existingMapping: ThreadSessionMap | null = null) {
     findByChannelAndThread: vi.fn(async () => mapping),
     findByThread: vi.fn(async () => null),
     findBySession: vi.fn(async () => mapping),
+    findBySessionAmbiguityAware: vi.fn(async () => ({ mapping, ambiguous: false })),
     findById: vi.fn(async () => mapping),
     updateLastMessage: vi.fn(async () => undefined),
     updateMetadata: vi.fn(async (_id: string, metadata: Record<string, unknown>) => {
@@ -349,14 +350,13 @@ function handleGitHubInbound(
 
 beforeEach(() => {
   vi.stubEnv('AGOR_MASTER_SECRET', 'gateway-test-master-secret');
+  vi.stubEnv('AGOR_BASE_URL', 'https://agor.example.com');
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   vi.mocked(materializeAgenticToolConfiguration).mockClear();
-  vi.mocked(getBaseUrl).mockReset();
-  vi.mocked(getBaseUrl).mockResolvedValue('https://agor.example.com');
   vi.mocked(getConnector).mockReset();
 });
 
@@ -868,7 +868,7 @@ describe('GatewayService GitHub integration', () => {
       })
     );
 
-    expect(harness.threadMapRepo.findBySession).toHaveBeenCalledOnce();
+    expect(harness.threadMapRepo.findBySessionAmbiguityAware).toHaveBeenCalledOnce();
     expect(harness.messagesRepo.findByTaskId).not.toHaveBeenCalled();
     expect(harness.channelRepo.findById).not.toHaveBeenCalled();
   });
