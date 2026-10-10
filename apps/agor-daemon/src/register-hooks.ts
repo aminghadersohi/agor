@@ -165,6 +165,10 @@ import {
   requireMinimumRole,
 } from './utils/authorization.js';
 import {
+  authorizeBoardLayoutPlacements,
+  boardLayoutPlacementIds,
+} from './utils/board-layout-authorization.js';
+import {
   cacheBranchAccess,
   ensureBranchPermission,
   ensureCanCreateSession,
@@ -4102,6 +4106,12 @@ export function registerHooks(ctx: RegisterHooksContext): void {
 
           if (_action === 'applyLayout' && objects && placements) {
             if (!context.id) throw new Error('Board ID required');
+            await authorizeBoardLayoutPlacements(
+              { boardRepository, boardObjectsRepository },
+              context,
+              boardIdentifierFromHookContext(context),
+              boardLayoutPlacementIds({ placements, expected } as BoardLayoutBatch)
+            );
             const result = await boardsService!.applyBoardLayout(
               context.id as string,
               {

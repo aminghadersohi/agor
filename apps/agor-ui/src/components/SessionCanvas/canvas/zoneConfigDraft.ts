@@ -65,6 +65,10 @@ export function formatZoneConfigDraft(draft: ZoneConfigDraft): string {
   if (draft.borderColor) lines.push(`Border color: ${draft.borderColor}`);
   if (draft.backgroundColor) lines.push(`Fill color: ${draft.backgroundColor}`);
   if (draft.fontSize !== undefined) lines.push(`Label size: ${draft.fontSize}`);
+  lines.push(
+    `Layout: ${draft.layoutBinding === 'inherit' ? 'board default' : 'zone override'}`,
+    `Layout settings: ${JSON.stringify(normalizeZoneLayoutPolicy(draft.layout))}`
+  );
   return lines.join('\n');
 }
 

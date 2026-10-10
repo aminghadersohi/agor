@@ -427,9 +427,9 @@ describe('SessionCanvas zoom shortcuts', () => {
     };
 
     function renderDragCanvas(board: Board, client: AgorClient, getNodes: () => Node[]) {
-      // Structural edits need the board's partition loaded.
-      agorStore.getState().setCoverage(boardScopeKey(board.board_id), boardCoverage());
       nodesStateOverride = getNodes();
+      // A drag persists only into a loaded board partition.
+      agorStore.getState().setCoverage(boardScopeKey(board.board_id), boardCoverage());
       const view = render(
         <ConnectionProvider value={connected}>
           <SessionCanvas board={board} client={client} branches={[]} />

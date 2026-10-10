@@ -202,6 +202,8 @@ export const ZoneConfigModal = ({
       locked: values.locked ?? initial.draft.locked,
       triggerBehavior: values.triggerBehavior ?? initial.draft.triggerBehavior,
       triggerTemplate: values.triggerTemplate ?? initial.draft.triggerTemplate,
+      layout: layoutPolicy,
+      layoutBinding,
       triggerAgent,
       borderColor,
       backgroundColor,

@@ -655,6 +655,43 @@ describe('ZoneConfigModal draft and save lifecycle', () => {
     expect(draftReaderRef.current).toBeNull();
   });
 
+  it('exposes a layout-only draft to the zone node through draftReaderRef', async () => {
+    const draftReaderRef: { current: (() => string | null) | null } = { current: null };
+    render(
+      <AntdApp>
+        <ZoneConfigModal
+          open
+          objectId="zone-1"
+          zoneName="Review"
+          zoneData={{
+            type: 'zone',
+            x: 0,
+            y: 0,
+            width: 620,
+            height: 900,
+            label: 'Review',
+            layout_binding: 'inherit',
+            layout: { mode: 'auto', preset: 'compact_list', gap: 8 },
+          }}
+          boardZoneLayoutDefaults={{ mode: 'auto', preset: 'compact_list', gap: 8 }}
+          onUpdate={vi.fn()}
+          onCancel={vi.fn()}
+          draftReaderRef={draftReaderRef}
+        />
+      </AntdApp>
+    );
+    await waitFor(() => expect(draftReaderRef.current?.()).toBeNull());
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Layout' }));
+    fireEvent.click(await screen.findByRole('switch', { name: 'Use board defaults' }));
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Horizontal gap' }), {
+      target: { value: '4' },
+    });
+
+    await waitFor(() => expect(draftReaderRef.current?.()).toContain('Layout: zone override'));
+    expect(draftReaderRef.current?.()).toContain('"columnGap":4');
+  });
+
   it('does not close a replacement zone when an old request completes', async () => {
     let resolve!: (value: boolean) => void;
     const v = mount(

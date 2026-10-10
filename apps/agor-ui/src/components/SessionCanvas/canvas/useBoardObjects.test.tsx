@@ -43,18 +43,6 @@ function loadBoard() {
   agorStore.getState().setCoverage(boardScopeKey('board-1'), boardCoverage());
 }
 
-/**
- * `useBoardObjects` with the canvas's board.edit write guard, for tests that
- * don't exercise the guard itself (the board's partition is loaded above).
- */
-function useBoardObjectsUnderTest(
-  props: Omit<Parameters<typeof useBoardObjects>[0], 'guard'> & { canEdit?: boolean }
-) {
-  const { canEdit = true, ...rest } = props;
-  const guard = useBoardMutationGuard(rest.board?.board_id, canEdit);
-  return useBoardObjects({ ...rest, guard });
-}
-
 beforeEach(() => {
   // Board writes need the board's partition loaded (`useBoardMutationGuard`).
   agorStore.setState({ coverage: new Map() });
@@ -92,13 +80,14 @@ describe('justifyZoneContents production path', () => {
     const setNodes = vi.fn();
     const hook = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: makeBoard({ [zoneId]: zone }),
           client: routed.client,
           boardObjectsForBoard: placements as never,
           nodes,
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -193,6 +182,112 @@ describe('justifyZoneContents production path', () => {
     expect(showSuccess).toHaveBeenCalledWith('Justified 2 items to the center.');
   });
 
+  describe('in an Auto Zone', () => {
+    const autoZone = { ...zone, layout: { mode: 'auto', preset: 'grid' } };
+    const narrow = { ...branch, width: 380 } satisfies Node;
+    const placement = {
+      object_id: 'placement-branch',
+      branch_id: branch.id,
+      zone_id: zoneId,
+      position: narrow.position,
+    };
+
+    function renderAutoJustify(routed: ReturnType<typeof makeRoutedClient>) {
+      const setNodes = vi.fn();
+      const onArrangeNodes = vi.fn();
+      const onUserLayoutStart = vi.fn();
+      const view = renderHook(
+        ({ nodes }) =>
+          useBoardObjects({
+            board: makeBoard({ [zoneId]: autoZone }),
+            client: routed.client,
+            boardObjectsForBoard: [placement] as never,
+            nodes,
+            setNodes,
+            onArrangeNodes,
+            onUserLayoutStart,
+            deletedObjectsRef: { current: new Set<string>() },
+            guard: useBoardMutationGuard('board-1', true),
+          }),
+        { wrapper, initialProps: { nodes: [narrow] } }
+      );
+      return { ...view, setNodes, onArrangeNodes, onUserLayoutStart };
+    }
+    const actions = (patch: { mock: { calls: unknown[][] } }) =>
+      patch.mock.calls.map((call) => (call[1] as { _action?: string })._action);
+
+    it('persists the Manual demotion before committing the justified geometry', async () => {
+      const routed = makeRoutedClient();
+      const view = renderAutoJustify(routed);
+
+      await act(async () => view.result.current.justifyZoneContents(zoneId, 'middle'));
+
+      expect(actions(routed.boardsPatch)).toEqual(['upsertObject', 'applyLayout']);
+      expect(routed.boardsPatch.mock.calls[0]?.[1]).toMatchObject({
+        objectId: zoneId,
+        objectData: { layout: { mode: 'manual', preset: 'grid' }, layout_binding: 'override' },
+      });
+      expect(layoutPlacements(routed.boardsPatch)).toMatchObject({
+        'placement-branch': { position: { x: 100, y: 100 } },
+      });
+      // Geometry-only layout writes never carry the policy change.
+      expect(layoutWrites(routed.boardsPatch)[0]?.objects).toEqual({});
+    });
+
+    it('leaves the contents alone when the demotion cannot be persisted', async () => {
+      const routed = makeRoutedClient();
+      routed.boardsPatch.mockImplementation((boardId: string, data: Record<string, unknown>) =>
+        data?._action === 'upsertObject'
+          ? Promise.reject(new Error('network down'))
+          : mockBoardPatchResult(boardId, data)
+      );
+      const view = renderAutoJustify(routed);
+
+      await act(async () => view.result.current.justifyZoneContents(zoneId, 'middle'));
+
+      expect(actions(routed.boardsPatch)).toEqual(['upsertObject']);
+      expect(showError).toHaveBeenCalledWith('Failed to disable Auto Zone');
+      expect(showSuccess).not.toHaveBeenCalled();
+    });
+
+    it('leaves fresh canvas nodes untouched when the board reloads during the demotion save', async () => {
+      const routed = makeRoutedClient();
+      let finishDemotion!: () => void;
+      routed.boardsPatch.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishDemotion = resolve;
+          })
+      );
+      const view = renderAutoJustify(routed);
+      let justify!: Promise<void>;
+      act(() => {
+        justify = view.result.current.justifyZoneContents(zoneId, 'middle');
+      });
+      expect(actions(routed.boardsPatch)).toEqual(['upsertObject']);
+
+      act(() => {
+        agorStore.getState().resetBoardPartitions();
+        loadBoard();
+      });
+      const freshNodes = [{ ...narrow, position: { x: 140, y: 180 } }];
+      view.rerender({ nodes: freshNodes });
+      await act(async () => {
+        finishDemotion();
+        await justify;
+      });
+
+      expect(view.setNodes).not.toHaveBeenCalled();
+      expect(view.onArrangeNodes).not.toHaveBeenCalled();
+      expect(view.onUserLayoutStart).not.toHaveBeenCalled();
+      expect(actions(routed.boardsPatch)).toEqual(['upsertObject']);
+      expect(showSuccess).not.toHaveBeenCalled();
+      expect(showWarning).toHaveBeenCalledWith(
+        'This board reloaded; your last change was not saved.'
+      );
+    });
+  });
+
   it('aligns inside configured Grid cells and commits one authoritative batch', async () => {
     const gridZone = {
       ...zone,
@@ -216,13 +311,14 @@ describe('justifyZoneContents production path', () => {
     const routed = makeRoutedClient();
     const view = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: makeBoard({ [zoneId]: gridZone }),
           client: routed.client,
           boardObjectsForBoard: placements as never,
           nodes: gridNodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -357,13 +453,14 @@ describe('stale layout recovery production path', () => {
     const setNodes = vi.fn();
     const view = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client: { service } as never,
           boardObjectsForBoard: [stalePlacement] as never,
           nodes: staleNodes,
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -954,7 +1051,7 @@ describe('batchUpdateObjectPositions', () => {
     });
     const { result } = renderHook(
       () => {
-        const guard = useBoardMutationGuard(board.board_id, true);
+        const guard = useBoardMutationGuard('board-1', true);
         return {
           guard,
           objects: useBoardObjects({
@@ -1034,7 +1131,7 @@ describe('arrangeZoneContents', () => {
     ];
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [
@@ -1056,6 +1153,7 @@ describe('arrangeZoneContents', () => {
           nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -1130,7 +1228,7 @@ describe('arrangeZoneContents', () => {
     try {
       const { result } = renderHook(
         () =>
-          useBoardObjectsUnderTest({
+          useBoardObjects({
             board,
             client,
             boardObjectsForBoard: [
@@ -1144,6 +1242,7 @@ describe('arrangeZoneContents', () => {
             nodes: initialNodes,
             setNodes,
             deletedObjectsRef: { current: new Set<string>() },
+            guard: useBoardMutationGuard('board-1', true),
           }),
         { wrapper }
       );
@@ -1208,7 +1307,7 @@ describe('arrangeZoneContents', () => {
     };
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [
@@ -1236,6 +1335,7 @@ describe('arrangeZoneContents', () => {
           deletedObjectsRef: { current: new Set<string>() },
           onArrangeNodes,
           onUserLayoutComplete,
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -1384,7 +1484,7 @@ describe('arrangeZoneContents', () => {
     };
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [
@@ -1404,6 +1504,7 @@ describe('arrangeZoneContents', () => {
           nodes: renderedNodes,
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -1495,7 +1596,7 @@ describe('arrangeZoneContents', () => {
     ];
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [
@@ -1511,6 +1612,7 @@ describe('arrangeZoneContents', () => {
           nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -1572,13 +1674,14 @@ describe('arrangeZoneContents', () => {
     ];
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [],
           nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -1647,7 +1750,7 @@ describe('arrangeZoneContents', () => {
     const onArrangeNodes = vi.fn();
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [
@@ -1665,6 +1768,7 @@ describe('arrangeZoneContents', () => {
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
           onArrangeNodes,
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -1732,7 +1836,7 @@ describe('arrangeZoneContents', () => {
     const setNodes = vi.fn();
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [
@@ -1749,6 +1853,7 @@ describe('arrangeZoneContents', () => {
           nodes: initialNodes,
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -1816,7 +1921,7 @@ describe('arrangeZoneContents', () => {
     };
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [
@@ -1842,6 +1947,7 @@ describe('arrangeZoneContents', () => {
           nodes: initialNodes,
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -1927,7 +2033,7 @@ describe('arrangeZoneContents', () => {
     };
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [
@@ -1953,6 +2059,7 @@ describe('arrangeZoneContents', () => {
           nodes: initialNodes,
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -2027,7 +2134,7 @@ describe('arrangeZoneContents', () => {
     const onArrangeNodes = vi.fn();
     renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: makeBoard({
             zone: {
               type: 'zone',
@@ -2053,6 +2160,7 @@ describe('arrangeZoneContents', () => {
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
           onArrangeNodes,
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -2139,7 +2247,7 @@ describe('arrangeZoneContents', () => {
     };
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [
@@ -2167,6 +2275,7 @@ describe('arrangeZoneContents', () => {
           nodes: initialNodes,
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -2264,7 +2373,7 @@ describe('arrangeZoneContents', () => {
     };
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [
@@ -2292,6 +2401,7 @@ describe('arrangeZoneContents', () => {
           nodes: initialNodes,
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -2358,7 +2468,7 @@ describe('arrangeZoneContents', () => {
     ];
     const { rerender, unmount } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [
@@ -2384,6 +2494,7 @@ describe('arrangeZoneContents', () => {
           nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -2444,13 +2555,14 @@ describe('arrangeZoneContents', () => {
     ];
     const { rerender } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [],
           nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -2588,13 +2700,14 @@ describe('arrangeZoneContents', () => {
     setMeasuredHeight(300);
     const view = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: placements as never,
           nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -2677,13 +2790,14 @@ describe('arrangeZoneContents', () => {
 
     const reloaded = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: placements as never,
           nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -2763,25 +2877,27 @@ describe('arrangeZoneContents', () => {
     const observerClient = makeRoutedClient();
     const owner = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: ownerBoard,
           client: ownerClient.client,
           boardObjectsForBoard: [],
           nodes: ownerNodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard(ownerBoard.board_id, true),
         }),
       { wrapper }
     );
     const observer = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: makeBoard({ zone, artifact }),
           client: observerClient.client,
           boardObjectsForBoard: [],
           nodes: ownerNodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -2886,13 +3002,14 @@ describe('arrangeZoneContents', () => {
     const setNodes = vi.fn();
     const view = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [],
           nodes,
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -2957,7 +3074,7 @@ describe('arrangeZoneContents', () => {
 
     const view = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [
@@ -2975,6 +3092,7 @@ describe('arrangeZoneContents', () => {
           nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -3053,13 +3171,14 @@ describe('arrangeZoneContents', () => {
 
     const view = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [],
           nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -3126,13 +3245,14 @@ describe('direct manipulation of automatic zones', () => {
   ) {
     return renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client: client as never,
           boardObjectsForBoard: [placement] as never,
           nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -3219,13 +3339,14 @@ describe('direct manipulation of automatic zones', () => {
     });
     const { result, unmount } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [placement, secondPlacement] as never,
           nodes: initialNodes,
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -3274,7 +3395,7 @@ describe('direct manipulation of automatic zones', () => {
     const setNodes = vi.fn();
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: makeBoard({
             [zoneId]: { ...autoZone, layout: { ...autoZone.layout, preset: 'grid' } },
           }),
@@ -3283,6 +3404,7 @@ describe('direct manipulation of automatic zones', () => {
           nodes: [droppedChild],
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -3330,7 +3452,7 @@ describe('direct manipulation of automatic zones', () => {
     });
     const { result, rerender } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [placement] as never,
@@ -3343,6 +3465,7 @@ describe('direct manipulation of automatic zones', () => {
           ],
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -3411,7 +3534,7 @@ describe('setZoneContentsCompact', () => {
   function renderCompact(client: unknown, boardObjectsForBoard: unknown[] = placements) {
     return renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: makeBoard({
             'zone-1': { type: 'zone', x: 0, y: 0, width: 400, height: 300, label: 'Z' },
           }),
@@ -3433,6 +3556,7 @@ describe('setZoneContentsCompact', () => {
           ],
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -3573,13 +3697,14 @@ describe('handleUpdateObject density/preset orthogonality', () => {
   function renderUpdate(boardPreset: string, boardObjectsForBoard: unknown[], client: unknown) {
     return renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: makeBoard({ [zoneId]: zone(boardPreset) }),
           client: client as never,
           boardObjectsForBoard: boardObjectsForBoard as never,
           nodes: [],
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -3607,13 +3732,14 @@ describe('handleUpdateObject density/preset orthogonality', () => {
     const { client, patch } = makeClient();
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: makeBoard({ [zoneId]: zone('compact_list', 'auto') }),
           client,
           boardObjectsForBoard: collapsed as never,
           nodes: [],
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -3765,13 +3891,14 @@ describe('explicit density changes own any required re-pack', () => {
     const setNodes = vi.fn();
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: makeBoard({ [zoneId]: zone('compact_list') }),
           client: client as never,
           boardObjectsForBoard: placements as never,
           nodes: nodes as never,
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -3800,13 +3927,14 @@ describe('explicit density changes own any required re-pack', () => {
     const { client, patch } = makeClient();
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: makeBoard({ [zoneId]: zone('grid') }),
           client: client as never,
           boardObjectsForBoard: placements as never,
           nodes: nodes as never,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -3829,6 +3957,39 @@ describe('explicit density changes own any required re-pack', () => {
     if (ys.length === 2) expect(ys[1] - ys[0]).toBeGreaterThan(56);
   });
 
+  it('drops the deferred re-pack when the board reloads after the expand', async () => {
+    vi.useFakeTimers();
+    const { client, patch } = makeClient();
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board: makeBoard({ [zoneId]: zone('grid') }),
+          client: client as never,
+          boardObjectsForBoard: placements as never,
+          nodes: nodes as never,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
+        }),
+      { wrapper }
+    );
+
+    await act(async () => {
+      await result.current.setZoneContentsCompact(zoneId, false);
+    });
+    // The expand's ticket ends with this partition lifetime; a reload's new
+    // lifetime must not revive the write the expand scheduled.
+    act(() => {
+      agorStore.getState().resetBoardPartitions();
+      loadBoard();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    expect(Object.values(layoutPlacements(patch))).toEqual([]);
+  });
+
   it('does not re-pack when the toolbar collapses the contents', async () => {
     // Collapsing shrinks every item, which cannot create an overlap; a re-pack
     // there would move worktrees the user did not ask to move.
@@ -3836,7 +3997,7 @@ describe('explicit density changes own any required re-pack', () => {
     const { client, patch } = makeClient();
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: makeBoard({ [zoneId]: zone('grid') }),
           client: client as never,
           boardObjectsForBoard: [
@@ -3858,6 +4019,7 @@ describe('explicit density changes own any required re-pack', () => {
           nodes: nodes as never,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -3877,13 +4039,14 @@ describe('explicit density changes own any required re-pack', () => {
     const { client, patch } = makeClient();
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: makeBoard({ [zoneId]: zone('grid') }),
           client: client as never,
           boardObjectsForBoard: placements as never,
           nodes: nodes as never,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -3996,13 +4159,14 @@ describe('arrangeBoardZones production path', () => {
       const routed = makeRoutedClient();
       const view = renderHook(
         () =>
-          useBoardObjectsUnderTest({
+          useBoardObjects({
             board,
             client: routed.client,
             boardObjectsForBoard: placements,
             nodes,
             setNodes: vi.fn(),
             deletedObjectsRef: { current: new Set<string>() },
+            guard: useBoardMutationGuard('board-1', true),
           }),
         { wrapper }
       );
@@ -4061,13 +4225,14 @@ describe('arrangeBoardZones production path', () => {
     ];
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [],
           nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -4124,13 +4289,14 @@ describe('arrangeBoardZones production path', () => {
     ];
     const unlocked = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: unlockedBoard,
           client: unlockedClient.client,
           boardObjectsForBoard: [],
           nodes: unlockedNodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard(unlockedBoard.board_id, true),
         }),
       { wrapper }
     );
@@ -4148,13 +4314,14 @@ describe('arrangeBoardZones production path', () => {
     );
     const locked = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: unlockedBoard,
           client: lockedClient.client,
           boardObjectsForBoard: [],
           nodes: lockedNodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard(unlockedBoard.board_id, true),
         }),
       { wrapper }
     );
@@ -4183,7 +4350,7 @@ describe('arrangeBoardZones production path', () => {
     };
     const { result, rerender } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [],
@@ -4191,6 +4358,7 @@ describe('arrangeBoardZones production path', () => {
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
           onUserLayoutComplete,
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -4268,7 +4436,7 @@ describe('arrangeBoardZones production path', () => {
     ];
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [],
@@ -4277,6 +4445,7 @@ describe('arrangeBoardZones production path', () => {
           deletedObjectsRef: { current: new Set<string>() },
           onUserLayoutStart,
           onUserLayoutComplete,
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -4350,7 +4519,7 @@ describe('arrangeBoardZones production path', () => {
     ];
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [
@@ -4364,6 +4533,7 @@ describe('arrangeBoardZones production path', () => {
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
           onUserLayoutComplete,
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -4420,25 +4590,27 @@ describe('arrangeBoardZones production path', () => {
     const toolbar = makeRoutedClient();
     const directView = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client: direct.client,
           boardObjectsForBoard: [],
           nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
     const toolbarView = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client: toolbar.client,
           boardObjectsForBoard: [],
           nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -4470,7 +4642,7 @@ describe('arrangeBoardZones production path', () => {
     });
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [],
@@ -4495,6 +4667,7 @@ describe('arrangeBoardZones production path', () => {
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
           onUserLayoutComplete,
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -4577,13 +4750,14 @@ describe('arrangeBoardZones production path', () => {
     ];
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [],
           nodes,
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -4620,7 +4794,7 @@ describe('arrangeBoardZones production path', () => {
     });
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client,
           boardObjectsForBoard: [],
@@ -4636,6 +4810,7 @@ describe('arrangeBoardZones production path', () => {
           ],
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -4728,7 +4903,7 @@ describe('arrangeBoardZones production path', () => {
     const onUserLayoutComplete = vi.fn();
     const view = renderHook(
       (props: { board: Board; nodes: Node[] }) =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: props.board,
           client,
           boardObjectsForBoard: [
@@ -4755,6 +4930,7 @@ describe('arrangeBoardZones production path', () => {
           deletedObjectsRef: { current: new Set<string>() },
           onArrangeNodes,
           onUserLayoutComplete,
+          guard: useBoardMutationGuard(props.board.board_id, true),
         }),
       { wrapper, initialProps: { board, nodes } }
     );
@@ -4802,7 +4978,7 @@ describe('arrangeBoardZones production path', () => {
     const zoneId = 'zone-auto';
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: makeBoard({
             [zoneId]: {
               type: 'zone',
@@ -4837,6 +5013,7 @@ describe('arrangeBoardZones production path', () => {
           ],
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );
@@ -4899,13 +5076,14 @@ describe('whole-board stale layout recovery', () => {
     const setNodes = vi.fn();
     const view = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board: staleBoard,
           client: { service } as never,
           boardObjectsForBoard: [],
           nodes: staleNodes,
           setNodes,
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard(staleBoard.board_id, true),
         }),
       { wrapper }
     );
@@ -4974,13 +5152,14 @@ describe('board object finite-geometry node boundary', () => {
     });
     const { result } = renderHook(
       () =>
-        useBoardObjectsUnderTest({
+        useBoardObjects({
           board,
           client: makeClient().client,
           boardObjectsForBoard: [],
           nodes: [],
           setNodes: vi.fn(),
           deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
         }),
       { wrapper }
     );

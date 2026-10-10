@@ -317,9 +317,9 @@ function resize(...zones: Array<[string, number, number]>) {
       zones.map(([id, width, height]) => ({
         type: 'dimensions',
         id,
-        dimensions: { width, height },
-        // Only an interactive resize persists; measurement updates don't.
+        // Only an interactive resize persists geometry.
         resizing: true,
+        dimensions: { width, height },
       }))
     );
   });

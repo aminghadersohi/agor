@@ -1826,6 +1826,8 @@ describe('useAgorData — socket-event bailouts', () => {
     const { client, emit } = makeMockClient({ boards: [board], 'board-objects': [placement] });
     const { result } = renderHook(() => useAgorData(client));
     await waitForInitialLoad(result);
+    // Placement rows apply only to a board partition that holds them.
+    markBoardLoaded('board-1');
     let notifications = 0;
     const unsubscribe = agorStore.subscribe(() => {
       notifications += 1;

@@ -2009,6 +2009,7 @@ describe('agor_branches_set_zone', () => {
             return { get: async () => ({ board_id: 'board-1', objects: { review: zone } }) };
           if (name === 'board-objects')
             return {
+              // Collision-aware placement reads occupants before firing the trigger.
               find: async () => ({ data: [] }),
               findByBranchId: async () => ({ object_id: 'object-1' }),
               patch: async () => ({}),
