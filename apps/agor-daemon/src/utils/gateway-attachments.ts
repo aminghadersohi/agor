@@ -54,6 +54,8 @@ export interface AttachmentIngestResult {
    * Optional for the same upstream-sync reason as `skipped`.
    */
   undelivered?: UndeliveredAttachment[];
+  /** Discord: names of the attachments counted in `failed`, so the user can be told. */
+  failedNames?: string[];
 }
 
 /** Why one inbound attachment did not reach the session. */
@@ -72,7 +74,6 @@ export interface UndeliveredAttachment {
 }
 
 const MAX_REDIRECT_HOPS = 3;
-const DISCORD_IMAGE_MIMES = new Set(['image/png', 'image/jpeg']);
 export const DISCORD_ATTACHMENT_DOWNLOAD_TIMEOUT_MS = 15_000;
 const MAX_TIMER_MS = 2_147_483_647;
 
@@ -274,7 +275,8 @@ function discordImageMime(rawMime: string): string {
 }
 
 /**
- * Download only the live Discord PNG/JPEG subset. Discord's URL is already
+ * Download the live Discord attachments the gateway can ingest (images and
+ * text-like files, as for Slack). Discord's URL is already
  * signed, so this path deliberately sends no Authorization header and
  * validates every manually-followed redirect against the same signed CDN
  * policy.
@@ -302,6 +304,7 @@ export async function ingestDiscordInboundImages(args: {
   }
   const limits = getUploadLimits();
   const uploads: UploadMetadata[] = [];
+  const failedNames: string[] = [];
   let failed = 0;
   let declaredTotalBytes = 0;
   let actualTotalBytes = 0;
@@ -309,6 +312,7 @@ export async function ingestDiscordInboundImages(args: {
   for (const [index, file] of args.files.entries()) {
     if (index >= MAX_UPLOAD_FILES_PER_REQUEST) {
       failed++;
+      failedNames.push(file.name);
       console.warn(
         `[gateway] Skipping Discord attachment: message exceeds ${MAX_UPLOAD_FILES_PER_REQUEST}-file limit`
       );
@@ -321,16 +325,18 @@ export async function ingestDiscordInboundImages(args: {
       file.size > limits.maxTotalBytes - declaredTotalBytes
     ) {
       failed++;
+      failedNames.push(file.name);
       console.warn(
         '[gateway] Skipping Discord attachment: declared size exceeds the upload limits'
       );
       continue;
     }
     if (
-      (file.mimetype !== 'image/png' && file.mimetype !== 'image/jpeg') ||
+      !isAllowedIngestMime(file.mimetype) ||
       !isAllowedDiscordAttachmentUrl(file.url_private_download)
     ) {
       failed++;
+      failedNames.push(file.name);
       console.warn('[gateway] Skipping Discord attachment: unsupported type or URL');
       continue;
     }
@@ -353,7 +359,7 @@ export async function ingestDiscordInboundImages(args: {
       );
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const contentType = discordImageMime(response.headers.get('content-type') ?? '');
-      if (!DISCORD_IMAGE_MIMES.has(contentType)) {
+      if (!isAllowedIngestMime(contentType)) {
         throw new Error(`unexpected content-type ${contentType || 'unknown'}`);
       }
       const declaredLength = Number.parseInt(response.headers.get('content-length') ?? '', 10);
@@ -437,6 +443,7 @@ export async function ingestDiscordInboundImages(args: {
       }
     } catch (error) {
       failed++;
+      failedNames.push(file.name);
       console.warn('[gateway] Failed to ingest Discord attachment:', error);
     } finally {
       clearTimeout(timeout);
@@ -444,7 +451,7 @@ export async function ingestDiscordInboundImages(args: {
     }
   }
 
-  return { uploads, failed };
+  return { uploads, failed, failedNames };
 }
 
 /**

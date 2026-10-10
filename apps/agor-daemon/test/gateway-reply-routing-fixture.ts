@@ -47,7 +47,7 @@ import type {
   UUID,
 } from '@agor/core/types';
 import { SessionStatus, TaskStatus } from '@agor/core/types';
-import { expect } from 'vitest';
+import { expect, vi } from 'vitest';
 import { GatewayService } from '../src/services/gateway';
 
 /** Single-tenant on both engines: these suites are not about tenant isolation. */
@@ -331,8 +331,132 @@ export const replyRoutingScenarios: ReplyRoutingScenario[] = [
 
       const result = await route({ task_id: fixture.dmTask.task_id, message: 'stale stamp' });
 
-      expect(result).toEqual({ routed: true, channelType: 'slack' });
-      expect(sends).toEqual([{ threadId: PUBLIC_THREAD, text: 'stale stamp' }]);
+      expect(result).toEqual({ routed: false });
+      expect(sends).toEqual([]);
+    },
+  },
+  {
+    name: 'does not send a deleted destination to another thread',
+    async run(db, sends) {
+      const { fixture, scoped, route } = await start(db, sends);
+      await scoped((scopedDb) =>
+        new ThreadSessionMapRepository(scopedDb).delete(fixture.dmMapping.id)
+      );
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        for (const task of [fixture.dmTask, fixture.unstampedTask, fixture.unstampedTask]) {
+          expect(await route({ task_id: task.task_id, message: 'private' })).toEqual({
+            routed: false,
+          });
+        }
+        expect(sends).toEqual([]);
+        expect(warn.mock.calls.map(([line]) => line)).toEqual([
+          expect.stringMatching(
+            /Stamped reply mapping unusable purpose=route_message .*reason=missing/
+          ),
+          expect.stringMatching(
+            /Task reply thread unresolved purpose=route_message .*reason=missing/
+          ),
+        ]);
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  },
+  {
+    name: 'does not log ordinary single-mapping canvas replies as degraded addressing',
+    async run(db, sends) {
+      const { fixture, scoped, route } = await start(db, sends);
+      await scoped(async (scopedDb) => {
+        const mappings = new ThreadSessionMapRepository(scopedDb);
+        await mappings.delete(fixture.dmMapping.id);
+        await mappings.delete(fixture.seedMapping.id);
+      });
+      const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        expect(await route({ message: 'canvas reply' })).toEqual({
+          routed: true,
+          channelType: 'slack',
+        });
+        expect(sends).toEqual([{ threadId: PUBLIC_THREAD, text: 'canvas reply' }]);
+        expect(
+          [...log.mock.calls, ...warn.mock.calls].filter(
+            ([line]) =>
+              typeof line === 'string' && line.includes('Outbound routed by session, not task')
+          )
+        ).toEqual([]);
+      } finally {
+        log.mockRestore();
+        warn.mockRestore();
+      }
+    },
+  },
+  {
+    name: 'Slack Tasks sharing an alias row follow its latest active thread',
+    async run(db, sends) {
+      const { fixture, scoped, route } = await start(db, sends);
+      await scoped((scopedDb) =>
+        new ThreadSessionMapRepository(scopedDb).update(fixture.seedMapping.id, {
+          metadata: { ...fixture.seedMapping.metadata, slack_active_thread_id: SEED_INBOUND_ALIAS },
+        })
+      );
+      const secondTask = await scoped((scopedDb) =>
+        new TaskRepository(scopedDb).create({
+          task_id: generateId() as TaskID,
+          session_id: fixture.sessionId,
+          created_by: fixture.seedTask.created_by,
+          full_prompt: 'another seed reply',
+          status: TaskStatus.COMPLETED,
+          metadata: {
+            gateway_task_source: {
+              ...fixture.seedTask.metadata!.gateway_task_source!,
+              thread_id: SEED_THREAD,
+            },
+          },
+        })
+      );
+      await route({ task_id: fixture.seedTask.task_id, message: 'alias reply' });
+      await route({ task_id: secondTask.task_id, message: 'second reply' });
+      expect(sends).toEqual([
+        { threadId: SEED_INBOUND_ALIAS, text: 'alias reply' },
+        { threadId: SEED_INBOUND_ALIAS, text: 'second reply' },
+      ]);
+    },
+  },
+  {
+    name: 'resolves a pre-stamp seed Task through its reply alias',
+    async run(db, sends) {
+      const { fixture, scoped, route } = await start(db, sends);
+      await scoped((scopedDb) =>
+        new TaskRepository(scopedDb).update(fixture.seedTask.task_id, {
+          metadata: {
+            gateway_task_source: {
+              ...fixture.seedTask.metadata!.gateway_task_source!,
+              thread_session_map_id: undefined,
+            },
+          },
+        })
+      );
+      await route({ task_id: fixture.seedTask.task_id, message: 'legacy alias' });
+      expect(sends).toEqual([{ threadId: SEED_THREAD, text: 'legacy alias' }]);
+    },
+  },
+  {
+    name: 'propagates a destination read failure without sending elsewhere',
+    async run(db, sends) {
+      const { fixture, route } = await start(db, sends);
+      const read = vi
+        .spyOn(ThreadSessionMapRepository.prototype, 'findById')
+        .mockRejectedValueOnce(new Error('read unavailable'));
+      try {
+        await expect(
+          route({ task_id: fixture.dmTask.task_id, message: 'private' })
+        ).rejects.toThrow('read unavailable');
+        expect(sends).toEqual([]);
+      } finally {
+        read.mockRestore();
+      }
     },
   },
 ];

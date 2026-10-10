@@ -2,7 +2,6 @@ import {
   type AgorClient,
   type Board,
   type Branch,
-  type Session,
   summarizeBoardImportSkips,
   type User,
 } from '@agor-live/client';
@@ -34,7 +33,6 @@ import { SettingsActionGroup } from './SettingsActionGroup';
 interface BoardsTableProps {
   client: AgorClient | null;
   boardById: Map<string, Board>;
-  sessionsByBranch: Map<string, Session[]>;
   branchById: Map<string, Branch>;
   currentUser?: User | null;
   onCreate?: (board: Partial<Board>) => void;

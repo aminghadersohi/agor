@@ -205,7 +205,7 @@ describe('register-services OAuth callback URL regression', () => {
   });
 
   it('uses durable hashed state claims on PostgreSQL and never broadcasts raw flow state', () => {
-    expect(codeOnly).toMatch(/durableOAuthFlows\.claimForCallback\s*\(\s*state\s*\)/);
+    expect(codeOnly).toMatch(/durableOAuthFlows!?\.claimForCallback\s*\(\s*state\s*\)/);
     expect(codeOnly).toMatch(/cacheToken:\s*false/);
     expect(codeOnly).toMatch(/attempt_id:\s*pendingFlow\.attemptId/);
     expect(codeOnly).toMatch(/reservation_token:\s*opts\.browserReservation\.reservationToken/);
@@ -221,7 +221,7 @@ describe('register-services OAuth callback URL regression', () => {
 
   it('keeps provider capability material out of callback logs', () => {
     const callbackBody = rawSource.slice(
-      rawSource.indexOf('const oauthCallbackHandler'),
+      rawSource.indexOf('const handleOAuthCallback'),
       rawSource.indexOf("app.use('/mcp-servers',")
     );
     const loggedExpressions = [...callbackBody.matchAll(/console\.(?:log|warn|error)\(([^;]+)\)/g)]
@@ -232,7 +232,7 @@ describe('register-services OAuth callback URL regression', () => {
 
   it('persists the grant and notifies the initiating UI before serving the closing page', () => {
     const callbackBody = rawSource.slice(
-      rawSource.indexOf('const oauthCallbackHandler'),
+      rawSource.indexOf('const handleOAuthCallback'),
       rawSource.indexOf("app.use('/mcp-servers',")
     );
     const successBody = callbackBody.slice(
@@ -246,7 +246,7 @@ describe('register-services OAuth callback URL regression', () => {
     const hintIndex = successBody.indexOf("code: 'runtime_authority_hint'");
     const notifyIndex = successBody.indexOf('emitOAuthCompletion(pendingFlow, true)');
     const resolveIndex = successBody.indexOf('pendingFlow.tokenResolve?.(tokenResponse)');
-    const renderIndex = successBody.indexOf('sendOAuthResultPage(');
+    const renderIndex = successBody.indexOf('sendResult(');
 
     expect(persistIndex).toBeGreaterThanOrEqual(0);
     expect(hintIndex).toBeGreaterThan(persistIndex);
@@ -258,24 +258,22 @@ describe('register-services OAuth callback URL regression', () => {
 
   it('marks callback responses no-store and renders denied/error states without success mode', () => {
     const callbackBody = codeOnly.slice(
-      codeOnly.indexOf('const oauthCallbackHandler'),
+      codeOnly.indexOf('const handleOAuthCallback'),
       codeOnly.indexOf("app.use('/mcp-servers',")
     );
 
     expect(callbackBody).toMatch(
       /setHeader\s*\(\s*['"]Cache-Control['"]\s*,\s*['"]no-store['"]\s*\)/
     );
+    expect(callbackBody).toMatch(/if\s*\(\s*error\s*\)[\s\S]*sendResult\s*\(\s*res\s*,\s*false/);
     expect(callbackBody).toMatch(
-      /if\s*\(\s*error\s*\)[\s\S]*sendOAuthResultPage\s*\(\s*res\s*,\s*false/
-    );
-    expect(callbackBody).toMatch(
-      /if\s*\(\s*!code\s*\|\|\s*!state\s*\)[\s\S]*sendOAuthResultPage\s*\(\s*res\s*,\s*false/
+      /if\s*\(\s*!code\s*\|\|\s*!state\s*\)[\s\S]*sendResult\s*\(\s*res\s*,\s*false/
     );
   });
 
   it('never treats a browser error parameter as DCR invalidation evidence', () => {
     const callbackBody = codeOnly.slice(
-      codeOnly.indexOf('const oauthCallbackHandler'),
+      codeOnly.indexOf('const handleOAuthCallback'),
       codeOnly.indexOf("app.use('/mcp-servers',")
     );
     const frontChannelErrorBranch = callbackBody.slice(
@@ -283,9 +281,7 @@ describe('register-services OAuth callback URL regression', () => {
       callbackBody.indexOf('if (!code || !state)')
     );
 
-    expect(frontChannelErrorBranch).toMatch(
-      /durableOAuthFlows\.claimForCallback\s*\(\s*state\s*\)/
-    );
+    expect(frontChannelErrorBranch).toMatch(/claim\s*\(\s*state\s*\)/);
     expect(frontChannelErrorBranch).toMatch(
       /durableOAuthFlows\.finish\s*\(\s*claimed\.flow\s*,\s*['"]failed['"]\s*,\s*['"]authorization_denied['"]/
     );

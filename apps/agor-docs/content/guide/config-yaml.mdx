@@ -63,14 +63,21 @@ Hosted deployments run OpenCode by default when they use auth-derived
 multi-tenancy, delegated execution with an executor command template, and
 `execution.executor_storage.user_home: persistent-per-user`. The executor image
 must set `AGOR_OPENCODE_SCRATCH_ROOT` to Job-local storage and ship Node 22.13 or
-newer. With a missing prerequisite, OpenCode reports itself as unavailable
+newer. With `sdk_home_mode: per_branch`, the launcher must also set
+`AGOR_OPENCODE_CHECKPOINT_ROOT` to `<branch_sdk_home>/opencode` for branch-scoped
+runs. With a missing prerequisite, OpenCode reports itself as unavailable
 everywhere. To turn hosted OpenCode off:
 
 ```yaml
 agentic_tools:
   opencode_hosted_native_state: disabled
-``` See
-[OpenCode in hosted workspaces](/guide/sdk-comparison#hosted-workspaces).
+```
+
+See [OpenCode in hosted workspaces](/guide/sdk-comparison#hosted-workspaces).
+
+With `persistent-per-user` homes, the launcher should also set
+`AGOR_EXECUTOR_SCRATCH_ROOT` to Job-local storage so Gemini's per-task temporary
+directory stays off the shared home; see [Gemini Beta](/guide/sdk-comparison#gemini-beta).
 
 For Claude subscription sign-in, two storage modes are supported:
 

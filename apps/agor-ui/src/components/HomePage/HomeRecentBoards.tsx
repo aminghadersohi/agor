@@ -2,22 +2,23 @@ import type { Board } from '@agor-live/client';
 import { Badge, Button, Flex, Typography, theme } from 'antd';
 import { memo, useMemo } from 'react';
 import { agorStore, shallow, useAgorStore, useStoreWithEqualityFn } from '../../store/agorStore';
-import { makeBoardSessionActivitySelector } from '../../store/selectors';
+import { makeOwnBoardActivitySelector } from '../../store/selectors';
 import { BoardTile, getBoardEmoji } from '../BoardTile';
 import { glassCardStyle } from '../GlassSurface/glassStyles';
 import { HomeLink, useHomeCompact } from './HomeSection';
 import { HOME_BOARD_PILL_MAX_WIDTH } from './homeLayout';
 import { useBoardTeammate } from './useBoardTeammate';
 
-const RecentBoardPill: React.FC<{ board: Board; onClick: (boardId: string) => void }> = ({
-  board,
-  onClick,
-}) => {
+const RecentBoardPill: React.FC<{
+  board: Board;
+  userId?: string;
+  onClick: (boardId: string) => void;
+}> = ({ board, userId, onClick }) => {
   const { token } = theme.useToken();
   const isMobile = useHomeCompact();
   const activity = useStoreWithEqualityFn(
     agorStore,
-    useMemo(() => makeBoardSessionActivitySelector(board.board_id), [board.board_id]),
+    useMemo(() => makeOwnBoardActivitySelector(board.board_id, userId), [board.board_id, userId]),
     shallow
   );
   const teammate = useBoardTeammate(board);
@@ -53,10 +54,13 @@ const RecentBoardPill: React.FC<{ board: Board; onClick: (boardId: string) => vo
 /** One slim row of the caller's last visited boards, and always the way to all of them. */
 export const HomeRecentBoards = memo(function HomeRecentBoards({
   recentBoardIds,
+  userId,
   onBoardClick,
   onAllBoards,
 }: {
   recentBoardIds: string[];
+  /** The caller: the dots show only their running / needs-you sessions. */
+  userId?: string;
   onBoardClick: (boardId: string) => void;
   onAllBoards: () => void;
 }) {
@@ -80,7 +84,12 @@ export const HomeRecentBoards = memo(function HomeRecentBoards({
         </Typography.Text>
       )}
       {boards.map((board) => (
-        <RecentBoardPill key={board.board_id} board={board} onClick={onBoardClick} />
+        <RecentBoardPill
+          key={board.board_id}
+          board={board}
+          userId={userId}
+          onClick={onBoardClick}
+        />
       ))}
       <HomeLink onClick={onAllBoards}>All boards</HomeLink>
     </Flex>

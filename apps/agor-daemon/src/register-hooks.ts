@@ -166,7 +166,6 @@ import {
   ensureCanCreateSession,
   ensureCanModifySchedule,
   ensureCanPromptInSession,
-  ensureCanPromptTargetSession,
   ensureCanView,
   ensureSessionImmutability,
   loadBranch,
@@ -182,10 +181,11 @@ import {
   scopeReadToAccessibleBoardsSql,
   scopeScheduleQuery,
   setSessionUnixUsername,
+  stampCallbackPrincipal,
   validateSessionUnixUsername,
 } from './utils/branch-authorization.js';
 import { captureBranchRemovalRealtimeVisibility as captureBranchRemovalVisibility } from './utils/branch-removal-realtime.js';
-import { emitServiceEvent } from './utils/emit-service-event.js';
+import { emitServiceEvent, publishCommittedServiceEvent } from './utils/emit-service-event.js';
 import { bindPrimaryOwnerToCreatedBy, injectCreatedBy } from './utils/inject-created-by.js';
 import {
   captureMarketplaceInvalidationTargets as captureMarketplaceTargets,
@@ -367,7 +367,6 @@ export function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
  * session metadata (name, model_config, permission_config, callback_config).
  *
  * Sources:
- *   - `/sessions/:id/prompt`  → `tasks`
  *   - `/sessions/:id/stop`    → `status`, `ready_for_prompt`
  *   - executor status updates → `status`, `ready_for_prompt`
  *     (claude/copilot permission-hooks, see packages/executor)
@@ -380,7 +379,10 @@ export function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
  *   - `'session'`           → can patch own session's prompt-flow fields
  *   - `'view'` or `'none'`  → denied
  *
- * Any mixed-field patch (e.g. `{ tasks: [...], name: 'x' }`) fails the
+ * `tasks` is not among them: it is server-managed (dispatch appends it in the
+ * Task repository) and the sessions service rejects it from every caller.
+ *
+ * Any mixed-field patch (e.g. `{ status: 'idle', name: 'x' }`) fails the
  * `isPromptFlowPatchOnly` check and falls through to the strict `'all'` path,
  * so widening the whitelist here cannot accidentally leak metadata writes.
  *
@@ -390,7 +392,6 @@ export function validateBranchEnvPolicyHook(config: DeepReadonly<AgorConfig>) {
  * writes are independently bound to the exact signed task context.
  */
 export const PROMPT_FLOW_PATCH_FIELDS: readonly string[] = [
-  'tasks',
   'auto_archive_at',
   'status',
   'ready_for_prompt',
@@ -585,6 +586,8 @@ export const TENANT_OWNED_SERVICE_PATHS = [
   'kb/indexing/status',
   'kb/indexing/reindex',
   'leaderboard',
+  'branch-counts',
+  'session-counts',
 ];
 
 // These endpoints perform network/process work after their tenant DB reads,
@@ -1522,7 +1525,10 @@ export function registerHooks(ctx: RegisterHooksContext): void {
                 path === 'gateway' ||
                 path === BRANCH_DELETION_REPORT_SERVICE ||
                 path === BRANCH_CLEANUP_REPORT_SERVICE ||
-                (path === 'branches' && context.method === 'clean');
+                (path === 'branches' && context.method === 'clean') ||
+                // Avatar sync opens short tenant units around Slack I/O;
+                // ordinary users CRUD and settings mutations remain scoped.
+                (path === 'users' && context.method === 'syncAvatars');
               return (external ? tenantIdentityAround : tenantDatabaseScopeAround)(context, next);
             },
           ],
@@ -1557,7 +1563,19 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   // (`required_from_auth` still runs the full `registerTenantHooks` path.)
   const registerTenantDatabaseScopeForOwnedServices = (): void => {
     for (const path of tenantOwnedServicePaths) {
-      safeService(path)?.hooks({ around: { all: [tenantDatabaseScopeAround] } });
+      safeService(path)?.hooks({
+        around: {
+          all: [
+            async (context: HookContext, next: () => Promise<void>) => {
+              const scope =
+                path === 'users' && context.method === 'syncAvatars'
+                  ? tenantIdentityAround
+                  : tenantDatabaseScopeAround;
+              return scope(context, next);
+            },
+          ],
+        },
+      });
     }
   };
 
@@ -2041,6 +2059,11 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         requireMinimumRole(ROLES.MEMBER, 'delete board objects'),
         boardObjectAccess('delete board objects'),
       ],
+    },
+    after: {
+      // Repos/MCP creation inserts placement in the same outer transaction as
+      // the branch. Remote publishers must not authorize it before commit.
+      create: [publishCommittedServiceEvent],
     },
   });
 
@@ -2594,17 +2617,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     // Feathers' automatic event fires when this nested method returns, not when
     // that transaction commits. Replace only this event with the existing queue;
     // rollback drops it, and successful commit emits it exactly once.
-    const event = context.event;
-    context.event = null;
-    emitServiceEvent(app, {
-      path: 'branches',
-      event,
-      method: context.method,
-      id: context.id,
-      data: context.dispatch ?? context.result,
-      params: context.params,
-    });
-    return context;
+    return publishCommittedServiceEvent(context);
   };
 
   app.service('branches').hooks({
@@ -2634,7 +2647,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       ],
     },
     after: {
-      create: [invalidateRealtimeBranchFromResult],
+      create: [invalidateRealtimeBranchFromResult, publishCommittedServiceEvent],
       update: [
         invalidateRealtimeBranchFromResult,
         publishMarketplaceInvalidation,
@@ -3281,6 +3294,14 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   };
 
   app.service('users').hooks({
+    around: {
+      all: [
+        async (context: HookContext, next: () => Promise<void>) => {
+          if (context.method === 'syncAvatars') return tenantWriteAdmissionAround(context, next);
+          return next();
+        },
+      ],
+    },
     before: {
       all: [typedValidateQuery(userQueryValidator), authenticateUsersRequestWhenCredentialed],
       find: [
@@ -3358,12 +3379,20 @@ export function registerHooks(ctx: RegisterHooksContext): void {
             | { refreshAvatarFromSettings?: (userId: UserID) => Promise<unknown> }
             | undefined;
           if (avatarService?.refreshAvatarFromSettings) {
-            avatarService.refreshAvatarFromSettings(user.user_id).catch((error: unknown) => {
-              console.warn(
-                `[users/avatar-sync] Failed to refresh avatar for new user ${shortId(user.user_id)}:`,
-                error instanceof Error ? error.message : String(error)
-              );
-            });
+            // Never let fire-and-forget work inherit a transaction that is
+            // about to commit (or refresh a user whose mutation rolls back).
+            deferWithTenantContext(
+              context.params,
+              async () => {
+                await avatarService.refreshAvatarFromSettings!(user.user_id);
+              },
+              (error) => {
+                console.warn(
+                  `[users/avatar-sync] Failed to refresh avatar for new user ${shortId(user.user_id)}:`,
+                  error instanceof Error ? error.message : String(error)
+                );
+              }
+            );
           }
           return context;
         },
@@ -3431,12 +3460,20 @@ export function registerHooks(ctx: RegisterHooksContext): void {
             | { refreshAvatarFromSettings?: (userId: UserID) => Promise<unknown> }
             | undefined;
           if (avatarService?.refreshAvatarFromSettings) {
-            avatarService.refreshAvatarFromSettings(user.user_id).catch((error: unknown) => {
-              console.warn(
-                `[users/avatar-sync] Failed to refresh avatar for updated user ${shortId(user.user_id)}:`,
-                error instanceof Error ? error.message : String(error)
-              );
-            });
+            // Never let fire-and-forget work inherit a transaction that is
+            // about to commit (or refresh a user whose mutation rolls back).
+            deferWithTenantContext(
+              context.params,
+              async () => {
+                await avatarService.refreshAvatarFromSettings!(user.user_id);
+              },
+              (error) => {
+                console.warn(
+                  `[users/avatar-sync] Failed to refresh avatar for updated user ${shortId(user.user_id)}:`,
+                  error instanceof Error ? error.message : String(error)
+                );
+              }
+            );
           }
           return context;
         },
@@ -3493,25 +3530,8 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       }
       return ensureBranchPermission('all', 'update session metadata', superadminOpts)(context);
     },
-    // Validate user has prompt permission on callback target session's branch.
-    // Skip for internal calls (no provider) — patches from dispatchCompletionCallbacks
-    // spread the existing callback_config (which includes callback_session_id) and must
-    // not be blocked by this check.
-    async (context: HookContext) => {
-      const patchCbConfig = (context.data as Record<string, unknown> | undefined)
-        ?.callback_config as { callback_session_id?: string } | undefined;
-      if (patchCbConfig?.callback_session_id && context.params.provider) {
-        const userId =
-          (context.params as { user?: { user_id: string } }).user?.user_id || 'unknown';
-        await ensureCanPromptTargetSession(
-          patchCbConfig.callback_session_id,
-          userId,
-          context.app,
-          branchRepository
-        );
-      }
-      return context;
-    },
+    // Internal callback dispatch patches skip this (no provider).
+    stampCallbackPrincipal(branchRepository),
   ];
 
   app.service('sessions').hooks({
@@ -3559,25 +3579,9 @@ export function registerHooks(ctx: RegisterHooksContext): void {
             }
           }
 
-          // Validate user has prompt permission on callback target session's branch.
-          // Skip for internal calls (no provider) — those are trusted system calls.
-          const cbConfig = (context.data as Record<string, unknown> | undefined)?.callback_config as
-            | { callback_session_id?: string }
-            | undefined;
-          if (cbConfig?.callback_session_id && context.params.provider) {
-            // Use authenticated user, NOT context.data.created_by (which could be client-supplied)
-            const authenticatedUserId =
-              (context.params as { user?: { user_id: string } }).user?.user_id || 'unknown';
-            await ensureCanPromptTargetSession(
-              cbConfig.callback_session_id,
-              authenticatedUserId,
-              context.app,
-              branchRepository
-            );
-          }
-
           return context;
         },
+        stampCallbackPrincipal(branchRepository),
       ],
       update: sessionWriteGuards,
       patch: sessionWriteGuards,
@@ -3710,7 +3714,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
   // Schedules hooks
   // ============================================================================
   // Schedules inherit RBAC from the parent branch (same model as
-  // sessions). See docs/internal/schedules-first-class-design-2026-05-24.md §4.4.
+  // sessions).
 
   const scheduleRepository = new ScheduleRepository(db);
 
@@ -3795,6 +3799,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       reorderQueued: manageTaskQueueGuards,
       connectExecutor: [requireTaskScopedExecutorRuntimeToken()],
       reportTerminationComplete: [requireTaskScopedExecutorRuntimeToken()],
+      reportExecutorInterruption: [requireTaskScopedExecutorRuntimeToken()],
       reportRuntimeTelemetry: [requireTaskScopedExecutorRuntimeToken()],
       reportSdkHealthFailure: [requireTaskScopedExecutorRuntimeToken()],
       beginOpenCodeCheckpoint: [requireTaskScopedExecutorRuntimeToken()],

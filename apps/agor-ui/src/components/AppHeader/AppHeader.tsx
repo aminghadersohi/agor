@@ -1,10 +1,17 @@
 import type { ActiveUser, AgorClient, Board, BoardID, Branch, User } from '@agor-live/client';
 import { hasMinimumRole, ROLES } from '@agor-live/client';
-import { BulbOutlined, PlayCircleOutlined, ShopOutlined } from '@ant-design/icons';
+import {
+  BulbOutlined,
+  ExportOutlined,
+  PlayCircleOutlined,
+  PlusOutlined,
+  ShopOutlined,
+} from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import { Button, Divider, Layout, Popover, Space, Tag, Tooltip, theme } from 'antd';
 import { type CSSProperties, memo, useMemo } from 'react';
 import { useHref, useNavigate } from 'react-router-dom';
+import { resolveExternalAppLink } from '@/utils/externalAppLink';
 import { mapToArray } from '@/utils/mapHelpers';
 import { useConnectionDisabled } from '../../contexts/ConnectionContext';
 import { useMCPCatalogModal } from '../../contexts/MCPCatalogModalContext';
@@ -18,6 +25,7 @@ import { BoardTile, getBoardEmoji, getBoardTeammate } from '../BoardTile';
 import { BrandLogo } from '../BrandLogo';
 import { BrandMark } from '../BrandMark';
 import { ConnectionStatus } from '../ConnectionStatus';
+import { CreateMenu, type CreateModalKind } from '../CreateMenu';
 import { GlobalUserMenu } from '../GlobalUserMenu';
 import { startIdleGlyphScreensaver } from '../IdleGlyphScreensaver';
 import { MarkdownRenderer } from '../MarkdownRenderer';
@@ -37,17 +45,6 @@ const INSTANCE_LABEL_STYLE: CSSProperties = {
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   verticalAlign: 'middle',
-};
-
-const logoStyle: CSSProperties = {
-  height: 54,
-  padding: 0,
-  display: 'flex',
-  alignItems: 'center',
-  gap: 10,
-  background: 'transparent',
-  border: 0,
-  cursor: 'pointer',
 };
 
 export interface AppHeaderProps {
@@ -83,9 +80,11 @@ export interface AppHeaderProps {
   instanceLabel?: string;
   /** Instance description (markdown) shown in popover around the instance label */
   instanceDescription?: string;
-  /** Navbar logo destination (e.g. a hosting console); the logo goes Home when unset */
-  navbarLogoLink?: string;
-  navbarLogoTooltip?: string;
+  /** Settings-menu link to an external app (e.g. a hosting console), opened in a new tab */
+  externalAppLink?: string;
+  externalAppLabel?: string;
+  /** Opens the shared create menu's dedicated modal for the picked flow. */
+  onCreate?: (kind: CreateModalKind) => void;
   /** Session-creation seam behind the navbar compose affordance. */
   onCreateSession?: (
     config: NewSessionConfig,
@@ -171,9 +170,10 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
   onUserClick,
   instanceLabel,
   instanceDescription,
-  navbarLogoLink,
-  navbarLogoTooltip,
+  externalAppLink,
+  externalAppLabel,
   onCreateSession,
+  onCreate,
 }) => {
   const { token } = theme.useToken();
   const navigate = useNavigate();
@@ -202,15 +202,7 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
   // gate off raw `connected` — it stays true through the grace window.
   const mutationDisabled = useConnectionDisabled();
 
-  // Deployment-configured logo destination; only absolute http(s) URLs are honored.
-  const logoLink =
-    navbarLogoLink && /^https?:\/\//i.test(navbarLogoLink) ? navbarLogoLink : undefined;
-  const logo = (
-    <>
-      <BrandMark size={50} />
-      <BrandLogo level={3} style={{ marginTop: -6 }} />
-    </>
-  );
+  const externalApp = resolveExternalAppLink(externalAppLink, externalAppLabel);
 
   const settingsItems: MenuProps['items'] = [
     ...(eventStreamEnabled
@@ -250,6 +242,19 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
       disabled: mutationDisabled,
       onClick: onSettingsClick,
     },
+    ...(externalApp
+      ? [
+          {
+            key: 'external-app',
+            extra: <ExportOutlined />,
+            label: (
+              <a href={externalApp.href} target="_blank" rel="noopener noreferrer">
+                {externalApp.label}
+              </a>
+            ),
+          },
+        ]
+      : []),
   ];
 
   return (
@@ -264,17 +269,24 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
       }}
     >
       <Space size={16} align="center">
-        {logoLink ? (
-          <Tooltip title={navbarLogoTooltip} placement="bottomLeft">
-            <a href={logoLink} aria-label={navbarLogoTooltip || 'Agor'} style={logoStyle}>
-              {logo}
-            </a>
-          </Tooltip>
-        ) : (
-          <button type="button" aria-label="Go to Home" onClick={onHomeClick} style={logoStyle}>
-            {logo}
-          </button>
-        )}
+        <button
+          type="button"
+          aria-label="Go to Home"
+          onClick={onHomeClick}
+          style={{
+            height: 54,
+            padding: 0,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            background: 'transparent',
+            border: 0,
+            cursor: 'pointer',
+          }}
+        >
+          <BrandMark size={50} />
+          <BrandLogo level={3} style={{ marginTop: -6 }} />
+        </button>
         {instanceLabel &&
           (instanceDescription ? (
             <Popover
@@ -356,11 +368,29 @@ const AppHeaderInner: React.FC<AppHeaderProps> = ({
           />
         )}
         <AppHeaderGlobalSearch
+          client={presenceClient}
           currentUserId={currentUserId}
           branchById={branchById}
           boardById={boardById}
           onSettingsClick={onSettingsClick}
         />
+        {onCreate && hasMinimumRole(user?.role, ROLES.MEMBER) && (
+          <Tooltip title="Create new">
+            <CreateMenu
+              onSelect={onCreate}
+              isAdmin={hasMinimumRole(user?.role, ROLES.ADMIN)}
+              disabled={mutationDisabled}
+            >
+              <Button
+                type="text"
+                icon={<PlusOutlined style={{ fontSize: token.fontSizeLG }} />}
+                aria-label="Create new"
+                disabled={mutationDisabled}
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+              />
+            </CreateMenu>
+          </Tooltip>
+        )}
         <Tooltip title="Knowledge Base">
           <Button
             type="text"
