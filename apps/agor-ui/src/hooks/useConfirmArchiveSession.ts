@@ -25,8 +25,9 @@ export function useConfirmArchiveSession(client: AgorClient | null) {
         onStart?.();
         try {
           const result = await archiveSession(sessionId as SessionID);
-          // A refusal (e.g. the session still owns unfinished tasks) carries its reason.
           if (result.reconciliation === 'failed') {
+            // Surface the daemon's reason (e.g. "stop the running session
+            // first") instead of a generic failure.
             showError(result.error);
           } else if (result.reconciliation === 'refresh-required') {
             showWarning(ARCHIVE_REFRESH_WARNING);
