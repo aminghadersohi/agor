@@ -1515,11 +1515,15 @@ export function useAgorData(
       const existing = terminalReconciliations.get(sessionId);
       if (existing) {
         existing.generation++;
-        return;
+        if (!existing.exhausted) return;
+        // A fresh event after exhaustion earns just one more read, at the
+        // final backoff delay. Coalesce events during that delay/read without
+        // resetting the retry budget or starting concurrent confirmations.
+        cancelTerminalReconciliation(sessionId);
       }
       const pending = {
         generation: 0,
-        attempts: 0,
+        attempts: existing ? 3 : 0,
         exhausted: false,
         timer: undefined as ReturnType<typeof setTimeout> | undefined,
       };
@@ -1535,7 +1539,7 @@ export function useAgorData(
         if (pending.attempts >= 4) {
           pending.exhausted = true;
           console.warn(
-            '[useAgorData] Session status confirmation exhausted; focus the window or reload to retry.'
+            '[useAgorData] Session status confirmation exhausted; a new terminal event, window focus, or reload can retry.'
           );
           return;
         }
@@ -1566,7 +1570,8 @@ export function useAgorData(
           retry();
         }
       };
-      void confirm();
+      if (existing) retry();
+      else void confirm();
     };
     const recoverTerminalReconciliations = () => {
       if (!subscriptionIsCurrent() || terminalReconciliationCancelled) return;

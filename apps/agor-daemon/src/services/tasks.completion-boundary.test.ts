@@ -39,25 +39,15 @@ it.each([false, true])(
       expect(getCurrentTenantDatabaseScope()).toBe(originalScope);
       await executeRaw(db, sql`INSERT INTO completion_fixture VALUES ('archive')`);
     });
-    const patchSession = vi.fn(async () => {
-      expect(getCurrentTenantDatabaseScope()).toBe(originalScope);
-      await executeRaw(db, sql`INSERT INTO completion_fixture VALUES ('projection')`);
-      return session;
-    });
+    const patchSession = vi.fn();
     let injectionVerified = false;
     let originVerified = false;
     const inject = vi.fn(async () => {
       expect(getCurrentTenantDatabaseScope()).not.toBe(originalScope);
       expect(getCurrentTenantId()).toBe('tenant-completion');
-      // No 'projection' row: upstream PR #2620 deleted projectTerminalSession,
-      // which reached this fixture through app.service('sessions').patch, and
-      // projects the terminal Session status atomically in the repository
-      // update instead — the call this fixture stubs as the 'task' row. PR
-      // #2620 branches from a main that predates this file, so it could not
-      // carry the update itself.
       expect(
         rawRows(await executeRaw(db, sql`SELECT id FROM completion_fixture ORDER BY id`))
-      ).toEqual([{ id: 'archive' }, { id: 'task' }]);
+      ).toEqual([{ id: 'archive' }, { id: 'projection' }, { id: 'task' }]);
       await expect(
         runWithTenantDatabaseScope(db, 'foreign-tenant', async () => {})
       ).rejects.toThrow('active tenant');
@@ -79,7 +69,11 @@ it.each([false, true])(
     Reflect.set(service, 'id', 'task_id');
     Reflect.set(service, 'repository', {
       update: async () => {
+        expect(getCurrentTenantDatabaseScope()).toBe(originalScope);
+        // TaskRepository owns both writes atomically; the service only
+        // publishes the resulting Session, never patches it a second time.
         await executeRaw(db, sql`INSERT INTO completion_fixture VALUES ('task')`);
+        await executeRaw(db, sql`INSERT INTO completion_fixture VALUES ('projection')`);
         return task;
       },
     });
@@ -105,6 +99,7 @@ it.each([false, true])(
           { suppressTerminalQueueProcessing: true }
         );
         expect(archive).toHaveBeenCalledOnce();
+        expect(patchSession).not.toHaveBeenCalled();
         expect(inject).not.toHaveBeenCalled();
         expect(origin).not.toHaveBeenCalled();
         if (rollback) throw new Error('fixture rollback');
