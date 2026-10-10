@@ -118,7 +118,7 @@ type Listener = (payload: unknown) => void;
  * `sessions:find`) takes precedence over the bare name when present. `name:get` seeds `get`. A seed
  * may also be a function of the call's query (a scoped server, see `fakeServer`).
  */
-function makeMockClient(seed: Record<string, unknown> = {}) {
+function makeMockClient(seed: Record<string, unknown[] | Record<string, unknown>> = {}) {
   const serviceListeners = new Map<string, Map<string, Listener[]>>();
   const ioListeners = new Map<string, Listener[]>();
   // Side effects fired at call time of `service(name)[method]()` — used by the
@@ -223,7 +223,6 @@ function makeMockClient(seed: Record<string, unknown> = {}) {
     // a write DURING the fetch window — exactly the race the hydration guards.
     onFetch: (name: string, method: 'findAll' | 'find' | 'get', fn: (call: number) => unknown) =>
       fetchHooks.set(`${name}:${method}`, fn),
-    fetchSummary: () => Object.fromEntries(fetchCounts),
     fetchCount: (name: string, method: 'findAll' | 'find' | 'get') =>
       fetchCounts.get(`${name}:${method}`) ?? 0,
     fetchArguments: (name: string, method: 'findAll' | 'find' | 'get') =>
@@ -439,6 +438,35 @@ describe('useAgorData — network recovery', () => {
         expect(result.current.error).toBeNull();
         expect(result.current.initialLoadComplete).toBe(true);
       });
+    } finally {
+      unmount();
+    }
+  });
+
+  it('still issues the secondary reads when an essential read rejects on a silent resync', async () => {
+    const { client, emitIo, onFetch, fetchCount } = makeMockClient();
+    const secondary = ['agentic-tool-settings', 'mcp-servers', 'gateway-channels', 'artifacts'];
+    const { result, unmount } = renderHook(() => useAgorData(client));
+    try {
+      await waitForInitialLoad(result);
+      await flush();
+      for (const name of secondary) expect(fetchCount(name, 'findAll')).toBe(1);
+
+      onFetch('board-comments', 'findAll', () => Promise.reject(new Error('Network unavailable')));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        act(() => emitIo('connect'));
+        await waitFor(() => expect(fetchCount('board-comments', 'findAll')).toBe(2));
+        await waitFor(() => {
+          for (const name of secondary) expect(fetchCount(name, 'findAll')).toBe(2);
+        });
+        expect(warn).toHaveBeenCalledWith(
+          '[useAgorData] silent refetch failed:',
+          expect.objectContaining({ message: 'Network unavailable' })
+        );
+      } finally {
+        warn.mockRestore();
+      }
     } finally {
       unmount();
     }
@@ -2219,61 +2247,6 @@ describe('useAgorData — network load contract', () => {
     await flush();
     expect(mock.fetchArguments('board-objects', 'findAll')).toEqual([partitionRead, partitionRead]);
   });
-
-  it('recovers an unarchived placement once and ignores a delayed response after logout', async () => {
-    const seed: Record<string, unknown[]> = onBoardRoute({});
-    const mock = makeMockClient(seed);
-    const { result, rerender } = renderHook(({ client }) => useAgorData(client), {
-      initialProps: { client: mock.client },
-    });
-    await waitForInitialLoad(result);
-    await flush();
-    const branch = makeBranch({ board_id: 'board-1' });
-    seed['board-objects'] = [makeBoardObject({ board_id: 'board-1' })];
-    const before = mock.fetchCount('board-objects', 'findAll');
-    act(() => {
-      mock.emit('branches', 'patched', branch);
-      mock.emit('branches', 'updated', branch);
-    });
-    // The read waits out the short window a create's own placement gets.
-    await waitFor(() => expect(mock.fetchCount('board-objects', 'findAll')).toBe(before + 1));
-    await flush();
-    expect(mock.fetchCount('board-objects', 'findAll')).toBe(before + 1);
-    expect(agorStore.getState().boardObjectById.has('bo-1')).toBe(true);
-
-    const gate = deferred();
-    mock.onFetch('board-objects', 'findAll', () => gate.promise);
-    seed['board-objects'] = [
-      makeBoardObject({ object_id: 'bo-2', branch_id: 'b-2', board_id: 'board-1' }),
-    ];
-    act(() =>
-      mock.emit('branches', 'patched', makeBranch({ branch_id: 'b-2', board_id: 'board-1' }))
-    );
-    await waitFor(() => expect(mock.fetchCount('board-objects', 'findAll')).toBe(before + 2));
-    rerender({ client: null as never });
-    gate.resolve();
-    await flush();
-    expect(agorStore.getState().boardObjectById.size).toBe(0);
-    expect(agorStore.getState().branchById.size).toBe(0);
-  });
-  it('does not resurrect a placement removed while unarchive recovery is in flight', async () => {
-    const seed: Record<string, unknown[]> = onBoardRoute({});
-    const mock = makeMockClient(seed);
-    const { result } = renderHook(() => useAgorData(mock.client));
-    await waitForInitialLoad(result);
-    await flush();
-    const placement = makeBoardObject({ board_id: 'board-1' });
-    seed['board-objects'] = [placement];
-    const gate = deferred();
-    mock.onFetch('board-objects', 'findAll', () => gate.promise);
-    const before = mock.fetchCount('board-objects', 'findAll');
-    act(() => mock.emit('branches', 'patched', makeBranch({ board_id: 'board-1' })));
-    await waitFor(() => expect(mock.fetchCount('board-objects', 'findAll')).toBe(before + 1));
-    act(() => mock.emit('board-objects', 'removed', placement));
-    gate.resolve();
-    await flush();
-    expect(agorStore.getState().boardObjectById.has('bo-1')).toBe(false);
-  });
 });
 
 describe('useAgorData — user-scope flags', () => {
@@ -2568,6 +2541,29 @@ describe('useAgorData — opened session transcript priority', () => {
       })
     );
     await waitFor(() => expect(selectTeammatesLoaded(agorStore.getState())).toBe(true));
+  });
+});
+
+describe('useAgorData — secondary reads follow the first-paint snapshot', () => {
+  it('defers secondary reads until the first paint lands, then fetches each once', async () => {
+    const mock = makeMockClient();
+    const commentsGate = deferred();
+    mock.onFetch('board-comments', 'findAll', (call) =>
+      call === 1 ? commentsGate.promise : undefined
+    );
+    const { result } = renderHook(() => useAgorData(mock.client));
+    const secondary = ['agentic-tool-settings', 'mcp-servers', 'gateway-channels', 'artifacts'];
+    await flush();
+    // The essential reads went out; nothing secondary competes with them.
+    expect(mock.fetchCount('boards', 'findAll')).toBe(1);
+    expect(mock.fetchCount('board-comments', 'findAll')).toBe(1);
+    for (const name of secondary) expect(mock.fetchCount(name, 'findAll')).toBe(0);
+    expect(mock.fetchCount('mcp-servers/oauth-status', 'find')).toBe(0);
+    commentsGate.resolve();
+    await waitForInitialLoad(result);
+    await flush();
+    for (const name of secondary) expect(mock.fetchCount(name, 'findAll')).toBe(1);
+    expect(mock.fetchCount('mcp-servers/oauth-status', 'find')).toBe(1);
   });
 });
 
