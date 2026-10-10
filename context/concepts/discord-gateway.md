@@ -41,7 +41,7 @@ transport progress; only the mapping cursor proves context reached Agor.
 1. **Trigger.** Only a live `MESSAGE_CREATE` from the configured guild with a
    structured bot mention outside inline/fenced code. Message Content intent is
    mandatory (`message_content_enabled: true`); never rely on the mention-only
-   content exception. Strip only the bot mention; an empty summon is ignored.
+   content exception. Strip only the bot mention; an empty summon without attachments is ignored.
    Bots/self, webhooks, private threads, other guilds, unconfigured parents, and
    unsupported message types are ignored. Missed events never become background
    Tasks.
@@ -58,8 +58,9 @@ transport progress; only the mapping cursor proves context reached Agor.
    look up a thread started by the summon message, and only then create once
    and record immediately. If the thread can't be proven, reject and keep the
    cursor — never guess.
-5. **History.** Fetch REST history strictly after the cursor through the live
-   mention, sort oldest-first by Snowflake, dedupe the mention, and label it
+5. **History.** Fetch REST history after the cursor (the first in-thread read
+   includes the starter, since a forum post's opener lives inside the post)
+   through the live mention, sort oldest-first by Snowflake, dedupe the mention, and label it
    untrusted. Bounds (pages, messages, bytes, timeout, rate-limit retries/delay)
    are enforced; a cap hit before covering the interval is **incomplete**, not
    a truncated success. Any failure → reject admission, cursor unchanged.

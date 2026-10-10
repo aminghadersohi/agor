@@ -2685,9 +2685,8 @@ a.radarBlip .blipName {
 }
 
 /* --- Home hero (design handoff 2a) ----------------------------------------
- * The pitch sits directly on the full-bleed video (no glass card), with one
- * primary CTA, a text link, a copyable install command, and the landing
- * pages as a quiet hairline row along the bottom edge. */
+ * A borderless, content-width veil separates the pitch from the product loop;
+ * the landing pages remain a quiet hairline row along the bottom edge. */
 .homeHero {
   position: relative;
   display: flex;
@@ -2701,13 +2700,17 @@ a.radarBlip .blipName {
   inset: 0;
   background: url("/videos/agor-hero-poster.jpg") center top / cover no-repeat;
   pointer-events: none;
-  /* Soft-focus the product loop so it reads as atmosphere behind the pitch.
-   * The slight scale pushes blur's feathered edges past the clipped hero. */
-  filter: blur(5px);
-  transform: scale(1.03);
   /* Clips the tilting video; cqw units below resolve against this width. */
   overflow: hidden;
   container-type: inline-size;
+}
+
+/* Opt-in (?heroBlur=true): soft-focus the product loop so it reads as
+ * atmosphere. The slight scale pushes blur's feathered edges past the
+ * clipped hero. Off by default, so the board itself shows behind the pitch. */
+.homeHeroVideoBlur {
+  filter: blur(5px);
+  transform: scale(1.03);
 }
 
 /* A slow "walking past a monitor" tilt. Perspective lives inside the
@@ -2718,6 +2721,19 @@ a.radarBlip .blipName {
  * room for subpixel rounding. Height never binds before width does.
  * Retuning: change θ (angle), d (depth: smaller = more dramatic) or the
  * duration, then recompute S from the formula and round up. */
+/* The tilt is one animated number, --hero-tilt (-1 → 1, i.e. -6° → 6°),
+ * registered so it interpolates. The video's rotation and the depth blur
+ * below both read it, so they stay in step. */
+@property --hero-tilt {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+
+.homeHeroVideo {
+  animation: homeHeroTilt 12s cubic-bezier(0.37, 0, 0.63, 1) infinite alternate;
+}
+
 .homeHeroVideo video {
   display: block;
   width: 100%;
@@ -2725,16 +2741,58 @@ a.radarBlip .blipName {
   object-fit: cover;
   object-position: center top;
   transform-origin: 50% 50%;
-  animation: homeHeroTilt 12s cubic-bezier(0.37, 0, 0.63, 1) infinite alternate;
+  transform: perspective(150cqw) rotateY(calc(var(--hero-tilt) * 6deg)) scale(1.045);
 }
 
 @keyframes homeHeroTilt {
   from {
-    transform: perspective(150cqw) rotateY(-6deg) scale(1.045);
+    --hero-tilt: -1;
   }
   to {
-    transform: perspective(150cqw) rotateY(6deg) scale(1.045);
+    --hero-tilt: 1;
   }
+}
+
+/* Depth of field: the edge turning away (left as the tilt goes negative,
+ * right as it goes positive) softens; the near side and middle stay sharp.
+ * A blurred backdrop masked toward the far edge, its strength following
+ * the tilt. */
+.homeHeroDepth {
+  position: absolute;
+  inset: 0;
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  --far-left: max(0, calc(var(--hero-tilt) * -1));
+  --far-right: max(0, var(--hero-tilt));
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    rgb(0 0 0 / var(--far-left)) 0%,
+    transparent 42%,
+    transparent 58%,
+    rgb(0 0 0 / var(--far-right)) 100%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    rgb(0 0 0 / var(--far-left)) 0%,
+    transparent 42%,
+    transparent 58%,
+    rgb(0 0 0 / var(--far-right)) 100%
+  );
+}
+
+/* Browsers that can't animate --hero-tilt (see HomeHero): no tilt, no
+ * depth blur, just the video. */
+.homeHeroVideoStill {
+  animation: none;
+}
+
+.homeHeroVideoStill .homeHeroDepth {
+  display: none;
+}
+
+/* The opt-in full blur already softens everything. */
+.homeHeroVideoBlur .homeHeroDepth {
+  display: none;
 }
 
 /* Legibility scrim: a soft wash behind the centered pitch, and a deepening
@@ -2767,13 +2825,37 @@ a.radarBlip .blipName {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 28px;
-  padding: 136px 24px 40px;
+  padding: 108px 24px 28px;
   text-align: center;
 }
 
-.homeBadge {
-  /* The Agor mark (HeroLogo) sits here now; spacing only. */
+.homePitchContent {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 28px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 40px 24px;
+  border-radius: 24px;
+  /* Brand-dark tint, without an outline or shadow: a veil, not a raised card. */
+  background: rgba(7, 16, 15, 0.65);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+/* Without local blur, suppress the video's competing UI text with tint alone. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .homePitchContent {
+    background: rgba(7, 16, 15, 0.86);
+  }
+}
+
+.homePitch .homeBadge {
+  /* Give the open-line mark enough presence beside the large headline, without
+   * enlarging the shared HeroLogo on other pages or crowding small screens. */
+  width: clamp(72px, 6.2vw, 88px);
+  height: clamp(72px, 6.2vw, 88px);
   margin-bottom: -4px;
 }
 
@@ -2793,7 +2875,7 @@ a.radarBlip .blipName {
 }
 
 .homeSub {
-  max-width: 58ch;
+  max-width: 48ch;
   margin: 0;
   color: #cfd8d9;
   font: 300 clamp(1.2rem, 2vw, 1.5rem) / 1.4 var(--font-body-stack);
@@ -2899,7 +2981,7 @@ a.radarBlip .blipName {
 }
 
 .homeKickerMuted {
-  color: #5f7d7a;
+  color: #a1b9b5;
   font-size: 12px;
 }
 
@@ -3040,9 +3122,13 @@ a.radarBlip .blipName {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .homeHeroVideo video {
-    display: none;
+  .homeHeroVideo {
     animation: none;
+  }
+
+  .homeHeroVideo video,
+  .homeHeroDepth {
+    display: none;
   }
 
   .homeHero a.homeRowItem:hover,
@@ -3073,13 +3159,27 @@ a.radarBlip .blipName {
 /* Short laptop screens: keep the bottom row above the fold. */
 @media (max-height: 780px) and (min-width: 640px) {
   .homePitch {
-    gap: 20px;
-    padding-top: 108px;
-    padding-bottom: 24px;
+    padding-top: 84px;
+    padding-bottom: 16px;
+  }
+
+  .homePitchContent {
+    gap: 12px;
+    padding-top: 18px;
+    padding-bottom: 18px;
+  }
+
+  .homePitch .homeBadge {
+    width: 64px;
+    height: 64px;
+  }
+
+  .homePitch h1 {
+    font-size: clamp(2.9rem, 6vw, 4.5rem);
   }
 
   .homeTiers {
-    gap: 28px;
+    gap: 20px;
   }
 
   .homeHero a.homePrimary,
@@ -3091,8 +3191,13 @@ a.radarBlip .blipName {
 
 @media (max-width: 639px) {
   .homePitch {
+    padding: 88px 16px 28px;
+  }
+
+  .homePitchContent {
     gap: 22px;
-    padding-top: 112px;
+    padding: 24px 16px;
+    border-radius: 20px;
   }
 
   .homePitch h1 {
@@ -3115,8 +3220,8 @@ a.radarBlip .blipName {
     width: 100%;
   }
 
-  /* Tiers span the column; Cloud buttons stack full width (above), the
-   * Community Edition pair stays side by side. */
+  /* Cloud buttons stack full width; keep the quieter CE pair together where
+   * space permits, and let it wrap naturally on the smallest phones. */
   .homeTiers {
     align-self: stretch;
     align-items: stretch;
@@ -3126,6 +3231,11 @@ a.radarBlip .blipName {
   .homeTier {
     align-items: stretch;
     text-align: center;
+  }
+
+  .homeHero a.homeCeBtn {
+    padding: 10px 12px;
+    font-size: 14px;
   }
 
   .homeHero a.homePrimary,
@@ -3206,4 +3316,54 @@ a.radarBlip .blipName {
  * their first frame, so they play as the terminal hands over the page. */
 :global(html[data-crt-intro="locked"]) .homeHero :is(*, *::before, *::after) {
   animation-play-state: paused;
+}
+
+/* Privacy Policy · Terms of Use · Cookie settings (FooterLegal). */
+.footerLegal {
+  color: #6f928c;
+}
+
+/* Footer layout: brand, then credit and legal links, down the left; the
+ * link columns down the right; the trademark note across the bottom. On
+ * phones (one column) it's brand, links, credit and legal, note. */
+.landingFooter {
+  row-gap: 28px;
+}
+
+.footerBrand {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.footerLinks {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
+.footerMeta {
+  grid-column: 1;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* Lines up with the brand text, past the logo. */
+  padding-left: 58px;
+}
+
+.footerMeta .footerCredit {
+  margin: 0;
+}
+
+/* Matches the footer's one-column breakpoint. */
+@media (max-width: 980px) {
+  .footerBrand,
+  .footerLinks,
+  .footerMeta {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .footerMeta {
+    padding-left: 0;
+  }
 }

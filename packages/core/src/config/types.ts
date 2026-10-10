@@ -308,6 +308,13 @@ export const AgorUserLifecycleAuthority = {
 export type AgorUserLifecycleAuthority =
   (typeof AgorUserLifecycleAuthority)[keyof typeof AgorUserLifecycleAuthority];
 
+/** Which system owns user avatars, independently of account lifecycle. */
+export const AgorAvatarAuthority = {
+  INTERNAL: 'internal',
+  EXTERNAL: 'external',
+} as const;
+export type AgorAvatarAuthority = (typeof AgorAvatarAuthority)[keyof typeof AgorAvatarAuthority];
+
 /** Which system owns the effective Agor role. */
 export const AgorRoleAuthority = {
   INTERNAL: 'internal',
@@ -348,12 +355,14 @@ export interface AgorExternalIdentitySettings {
  * Deployment-owned authority contract for user identity.
  *
  * The section is optional. Omitting it preserves Agor's normal local user,
- * role, and password authority. The only external profile supported in v1 is
+ * role, and password authority. The supported external account profile is
  * deliberately coherent: external lifecycle, claim-owned roles, disabled
  * local login, and verified launch-time JIT provisioning.
  */
 export interface AgorIdentitySettings {
   user_lifecycle?: AgorUserLifecycleAuthority;
+  /** Defaults to user_lifecycle. Internal avatars are never projected from launch claims. */
+  avatar_authority?: AgorAvatarAuthority;
   role_authority?: AgorRoleAuthority;
   local_auth?: AgorLocalAuthMode;
   /** Named policy for newly assigned local passwords. Defaults to `secure`. */
@@ -361,7 +370,7 @@ export interface AgorIdentitySettings {
   external?: AgorExternalIdentitySettings;
 }
 
-export const IDENTITY_AUTHORITY_CONTRACT_VERSION = 1 as const;
+export const IDENTITY_AUTHORITY_CONTRACT_VERSION = 2 as const;
 
 /** Stable identifiers returned in externally-managed mutation errors. */
 export const AgorIdentityCapability = {
@@ -370,6 +379,7 @@ export const AgorIdentityCapability = {
   USER_IDENTITY_WRITE: 'users.identity.write',
   USER_ROLE_WRITE: 'users.role.write',
   USER_PASSWORD_WRITE: 'users.password.write',
+  USER_AVATAR_WRITE: 'users.avatar.write',
   USER_AVATAR_SETTINGS_WRITE: 'users.avatar-settings.write',
   USER_SELF_CONFIGURATION_WRITE: 'users.self-configuration.write',
 } as const;
@@ -380,6 +390,7 @@ export type AgorIdentityCapability =
 export interface ResolvedIdentityAuthority {
   contractVersion: typeof IDENTITY_AUTHORITY_CONTRACT_VERSION;
   userLifecycle: AgorUserLifecycleAuthority;
+  avatarAuthority: AgorAvatarAuthority;
   roleAuthority: AgorRoleAuthority;
   localAuth: AgorLocalAuthMode;
   external?: {
@@ -393,6 +404,7 @@ export interface ResolvedIdentityAuthority {
       identityWrite: boolean;
       roleWrite: boolean;
       passwordWrite: boolean;
+      avatarWrite: boolean;
       avatarSettingsWrite: boolean;
       selfConfigurationWrite: true;
     };
@@ -751,6 +763,15 @@ export interface AgorExecutionSettings {
    */
   executor_command_template?: string;
 
+  /** Trusted, synchronous remote containment command. Context is JSON on stdin (no interpolation).
+   * Exit 0 asserts all execution for the exact tenant/task is stopped and cannot start later.
+   * Nonzero/timeout means unknown. Run once; further attempts require explicit user retry.
+   * Uses the launcher's sanitized environment. Not used for local execution.
+   */
+  executor_cleanup_command_template?: string;
+  /** Total cleanup command deadline, 1000..120000ms. Default 30000ms. */
+  executor_cleanup_timeout_ms?: number;
+
   /**
    * Filesystem guarantees provided to every executor invocation.
    *
@@ -769,7 +790,11 @@ export interface AgorExecutionSettings {
    */
   delegated_branch_deletion?: boolean;
 
-  /** A nonzero template launcher may still have submitted remote work. Default: false. */
+  /**
+   * An ordinary nonzero template launcher exit may still have submitted remote
+   * work. Default: false. Signal/null and shell-style >=128 exits are always
+   * ambiguous, irrespective of this assertion; none is OOM evidence.
+   */
   executor_command_nonzero_may_have_dispatched?: boolean;
 
   /**
@@ -1537,6 +1562,14 @@ export interface AgorConfig {
 
   /** Generic external one-time launch-code authentication. */
   external_launch?: AgorExternalLaunchSettings;
+  /**
+   * Optional hosted callback relay. App credentials and user tokens stay in this
+   * runtime. The Cell identity and RS256 signing key come from the existing
+   * `AGOR_CLOUD_CELL_ID` / `AGOR_CLOUD_RUNTIME_*` environment.
+   */
+  mcp_oauth_relay?: {
+    callback_origin: string;
+  };
 
   /** User identity, lifecycle, role, and local-login authority. */
   identity?: AgorIdentitySettings;

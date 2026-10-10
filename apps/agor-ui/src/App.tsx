@@ -48,6 +48,7 @@ import { MCPCatalogModalHost } from './components/Marketplace/MCPCatalogModalHos
 import { OnboardingBanners } from './components/OnboardingBanners';
 import { type OnboardingCompletionResult, OnboardingWizard } from './components/OnboardingWizard';
 import { buildPromptWithAttachments } from './components/SessionPanel/composerAttachments';
+import { sendPromptWithReconciliation } from './components/SessionPanel/promptReconciliation';
 import { SettingsModal } from './components/SettingsModal';
 import { StreamdownPortalApp } from './components/StreamdownPortalApp';
 import { getDaemonUrl } from './config/daemon';
@@ -84,6 +85,7 @@ import {
   type OnboardingOperationOwner,
   useOnboardingLifecycle,
 } from './hooks/useOnboardingLifecycle';
+import { usePinnedOpenRows } from './hooks/usePinnedRows';
 import { useSurfaceBranding } from './hooks/useSurfaceBranding';
 import { useUnarchiveBranch } from './hooks/useUnarchiveBranch';
 import { repoPatched, sessionCreated } from './store/agorRealtimeActions';
@@ -101,6 +103,7 @@ import {
 } from './surfaces/surfaceRegistry';
 import { useWorkspaceSurfaceLifecycle } from './surfaces/useWorkspaceSurfaceLifecycle';
 import type { CreateRepoOptions } from './types';
+import { formatActionError } from './utils/connectionErrors';
 import { createRepository } from './utils/createRepository';
 import {
   enrichAuthenticatedUser,
@@ -328,6 +331,7 @@ function AppContent() {
     loginForAuthorityCycle,
     logout,
     logoutForAuthorityCycle,
+    reconcileStoredCredentials,
     refreshCurrentUserForAuthorityCycle,
   } = useAuth();
 
@@ -345,7 +349,11 @@ function AppContent() {
   } = useAgorClient({
     accessToken: authenticated ? accessToken : null,
     authorityGeneration: authenticationGeneration,
+    reconcileCredentials: reconcileStoredCredentials,
+    isAuthorityGenerationCurrent: isAuthenticationGenerationCurrent,
   });
+  const clientRef = useRef(client);
+  clientRef.current = client;
   const startEnvironmentWithConfirmation = useEnvironmentStart(client);
   const handleUnarchiveBranch = useUnarchiveBranch(client);
   // Authenticated callers see their tenant's label; pre-login config is the fallback.
@@ -431,7 +439,11 @@ function AppContent() {
 
   const directSessionIdFromPath =
     location.pathname.match(/^\/(?:s|m\/session)\/([^/]+)\/?$/)?.[1] ?? null;
+  const directBranchIdFromPath = location.pathname.match(/^\/w\/([^/]+)\/?$/)?.[1] ?? null;
   const authenticatedUserCanListUsers = hasMinimumRole(user?.role, ROLES.MEMBER);
+  // A deep link's target (and an open session's branch) stays while routed
+  // to, whatever scope evicts; a short id is pinned once the UI resolves it.
+  usePinnedOpenRows({ sessions: [directSessionIdFromPath], branches: [directBranchIdFromPath] });
 
   // Pass the stable client lifetime, not `connected ? client : null`:
   // useAgorData owns reconnect refetches and `null` is reserved for logout /
@@ -447,6 +459,7 @@ function AppContent() {
   } = useAgorData(client, {
     enabled: workspaceSurfaceShouldRun && !(user?.must_change_password && passwordWriteAvailable),
     directSessionId: directSessionIdFromPath,
+    directBranchId: directBranchIdFromPath,
     authenticatedUserId: user?.user_id,
     authenticatedUserRole: user?.role,
     authGeneration,
@@ -1012,7 +1025,7 @@ function AppContent() {
   }
 
   // Show connection error
-  if (connectionError) {
+  if (connectionError && !hasLoadedOnce) {
     return (
       <div
         style={{
@@ -1111,9 +1124,7 @@ function AppContent() {
     if (outcome.status === 'cancelled') return null;
     if (outcome.status === 'create-failed') {
       if (!shouldContinue()) return null;
-      showError(
-        `Failed to create session: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`
-      );
+      showError(formatActionError('create the session', outcome.error, { idempotent: false }));
       return null;
     }
 
@@ -1150,8 +1161,7 @@ function AppContent() {
       await forkSession(sessionId as SessionID, prompt);
       showSuccess('Session forked successfully!');
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to fork session';
-      showError(`Failed to fork session: ${message}`);
+      showError(formatActionError('fork the session', err, { idempotent: false }));
       throw err;
     }
   };
@@ -1162,8 +1172,7 @@ function AppContent() {
       await btwForkSession(sessionId as SessionID, prompt);
       showSuccess('Side question sent via btw fork');
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to create btw fork';
-      showError(`Failed to create btw fork: ${message}`);
+      showError(formatActionError('start the side question', err, { idempotent: false }));
       throw err;
     }
   };
@@ -1176,8 +1185,7 @@ function AppContent() {
       await spawnSession(sessionId as SessionID, spawnConfig);
       showSuccess('Subsession session spawned successfully!');
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to spawn session';
-      showError(`Failed to spawn session: ${message}`);
+      showError(formatActionError('spawn the subsession', err, { idempotent: false }));
       throw err;
     }
   };
@@ -1191,18 +1199,14 @@ function AppContent() {
     if (!client || !currentUser) return false;
     const operationUserId = currentUser.user_id;
     const operationAuthenticationGeneration = authenticationGeneration;
-    try {
-      await client.sessions.prompt(sessionId, prompt, { permissionMode });
-      return isAuthenticationOwnerCurrent(operationUserId, operationAuthenticationGeneration);
-    } catch (error) {
-      if (isAuthenticationOwnerCurrent(operationUserId, operationAuthenticationGeneration)) {
-        showError(
-          `Failed to send prompt: ${error instanceof Error ? error.message : String(error)}`
-        );
-        console.error('Prompt error:', error);
-      }
-      return false;
-    }
+    return sendPromptWithReconciliation({
+      send: () => client.sessions.prompt(sessionId, prompt, { permissionMode }),
+      getClient: () => clientRef.current,
+      attempt: { sessionId, userId: operationUserId, prompt },
+      showError,
+      isCurrent: () =>
+        isAuthenticationOwnerCurrent(operationUserId, operationAuthenticationGeneration),
+    });
   };
 
   // Handle update session
@@ -1514,8 +1518,14 @@ function AppContent() {
       );
     } catch (error) {
       showError(
-        `Failed to ${options.metadataAction} branch: ${error instanceof Error ? error.message : String(error)}`,
-        { key: 'archive-delete' }
+        formatActionError(
+          options.metadataAction === 'archive' ? 'archive the branch' : 'delete the branch',
+          error,
+          { idempotent: true }
+        ),
+        {
+          key: 'archive-delete',
+        }
       );
       throw error;
     }
@@ -1533,9 +1543,7 @@ function AppContent() {
       await client.service('branches').patch(branchId, updates as Partial<Branch>);
       if (!options.silent) showSuccess('Branch updated successfully!');
     } catch (error) {
-      showError(
-        `Failed to update branch: ${error instanceof Error ? error.message : String(error)}`
-      );
+      showError(formatActionError('update the branch', error, { idempotent: true }));
     }
   };
 
@@ -1585,10 +1593,9 @@ function AppContent() {
       destroy('create-branch');
       return branch;
     } catch (error) {
-      showError(
-        `Failed to create branch: ${error instanceof Error ? error.message : String(error)}`,
-        { key: 'create-branch' }
-      );
+      showError(formatActionError('create the branch', error, { idempotent: false }), {
+        key: 'create-branch',
+      });
       return null;
     }
   };
@@ -1794,12 +1801,18 @@ function AppContent() {
   };
 
   // Handle update session-MCP server relationships
-  const handleUpdateSessionMcpServers = async (sessionId: string, mcpServerIds: string[]) => {
+  const handleUpdateSessionMcpServers = async (
+    sessionId: string,
+    mcpServerIds: string[],
+    baselineIds?: string[]
+  ) => {
     if (!client) return;
 
     try {
-      // Get current session-MCP relationships for this session
-      const currentIds = agorStore.getState().sessionMcpServerIds.get(sessionId) || [];
+      // Diff against the links the user was shown (the settings form's
+      // baseline), never against links that loaded after they last looked.
+      const currentIds =
+        baselineIds ?? agorStore.getState().sessionMcpServerIds.get(sessionId) ?? [];
       await updateSessionMcpServers(client, sessionId, currentIds, mcpServerIds);
 
       // Note: Don't show success message here - it's part of the session settings save
@@ -2217,6 +2230,11 @@ function AppContent() {
                   topBanner={onboardingBanners}
                   onSendPrompt={handleSendPrompt}
                   onCreateSession={handleCreateSession}
+                  onCreateBranch={handleCreateBranch}
+                  onCreateBoard={handleCreateBoard}
+                  onCreateRepo={handleCreateRepo}
+                  onCreateLocalRepo={handleCreateLocalRepo}
+                  branchStorageConfig={featuresConfig?.branchStorage}
                   onForkSession={handleForkSession}
                   onBtwForkSession={handleBtwForkSession}
                   onSpawnSession={handleSpawnSession}

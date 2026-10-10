@@ -42,6 +42,7 @@ import { AgorPasswordPolicyProfile } from './password-policy';
 import { isPlainConfigRecord } from './plain-record';
 import {
   type AgorApmSettings,
+  AgorAvatarAuthority,
   type AgorConfig,
   AgorExternalIdentityProvider,
   AgorExternalIdentityProvisioning,
@@ -549,6 +550,7 @@ function validateConfig(config: AgorConfig): void {
     'ui',
     'database',
     'external_launch',
+    'mcp_oauth_relay',
     'identity',
     'execution',
     'security',
@@ -767,8 +769,10 @@ function validateConfig(config: AgorConfig): void {
     'return_host_param',
   ]);
   assertValidRawExternalLaunchConfig(config.external_launch);
+  only(config.mcp_oauth_relay, 'mcp_oauth_relay', ['callback_origin']);
   only(config.identity, 'identity', [
     'user_lifecycle',
+    'avatar_authority',
     'role_authority',
     'local_auth',
     'password_policy',
@@ -780,6 +784,12 @@ function validateConfig(config: AgorConfig): void {
     !Object.values(AgorUserLifecycleAuthority).includes(config.identity.user_lifecycle)
   ) {
     throw new Error('Config error: identity.user_lifecycle must be internal or external');
+  }
+  if (
+    config.identity?.avatar_authority !== undefined &&
+    !Object.values(AgorAvatarAuthority).includes(config.identity.avatar_authority)
+  ) {
+    throw new Error('Config error: identity.avatar_authority must be internal or external');
   }
   if (
     config.identity?.role_authority !== undefined &&
@@ -877,6 +887,8 @@ function validateConfig(config: AgorConfig): void {
     'daemon_writes_user_message',
     'permission_timeout_ms',
     'executor_command_template',
+    'executor_cleanup_command_template',
+    'executor_cleanup_timeout_ms',
     'executor_storage',
     'delegated_branch_deletion',
     'executor_command_nonzero_may_have_dispatched',
@@ -1643,6 +1655,7 @@ export function resolveEffectiveConfig(
     },
     identity: { ...defaults.identity, ...config.identity },
     ...(externalLaunch ? { external_launch: externalLaunch } : {}),
+    ...(config.mcp_oauth_relay ? { mcp_oauth_relay: { ...config.mcp_oauth_relay } } : {}),
     execution: {
       ...defaults.execution,
       ...config.execution,
@@ -1714,6 +1727,24 @@ export function assertValidEffectiveExecutionConfig(config: AgorConfig): void {
 
   if (!execution) return;
 
+  if (
+    execution.executor_cleanup_command_template !== undefined &&
+    (typeof execution.executor_cleanup_command_template !== 'string' ||
+      !execution.executor_cleanup_command_template.trim() ||
+      !execution.executor_command_template)
+  ) {
+    throw new Error(
+      'execution.executor_cleanup_command_template requires a nonempty command and executor_command_template'
+    );
+  }
+  if (
+    execution.executor_cleanup_timeout_ms !== undefined &&
+    (!Number.isInteger(execution.executor_cleanup_timeout_ms) ||
+      execution.executor_cleanup_timeout_ms < 1000 ||
+      execution.executor_cleanup_timeout_ms > 120000)
+  ) {
+    throw new Error('execution.executor_cleanup_timeout_ms must be an integer from 1000 to 120000');
+  }
   const response = resolveExecutorResponseConfig(execution.executor_response);
 
   // Enforced here, NOT in the raw config.yaml parse: one shared config.yaml

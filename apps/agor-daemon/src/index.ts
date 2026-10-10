@@ -66,6 +66,7 @@ import {
 import { buildGitConfigParameters } from '@agor/core/git/pure';
 import { registerHandlebarsHelpers } from '@agor/core/templates/handlebars-helpers';
 import type { HookContext, User } from '@agor/core/types';
+import { MCP_OAUTH_RELAY } from '@agor/core/types';
 import cors from 'cors';
 import express from 'express';
 import expressStaticGzip from 'express-static-gzip';
@@ -106,6 +107,7 @@ import { startOpenSourceTelemetryUsageSummaryInterval } from './utils/open-sourc
 import { assertRealtimePublishPolicyCoverage } from './utils/realtime-publish-policy.js';
 import { resolveSandboxProtectedDataRoots } from './utils/sandbox-context.js';
 import { configureDaemonUrl, configureExecutor } from './utils/spawn-executor.js';
+import { configureLaunchRefusedExit } from './utils/task-launch-state.js';
 import { assertTenantServiceClassification } from './utils/tenant-service-classification.js';
 import { configureUploadStagingStoreFromConfig } from './utils/upload-staging.js';
 import { registerAllWidgets } from './widgets/index.js';
@@ -372,6 +374,7 @@ async function startDaemonWithOwnedMetrics(
   // their own config-threading code. Local-subprocess remains the default
   // when execution.executor_command_template is unset (no behavior change
   // for existing deployments).
+  configureLaunchRefusedExit(process.env);
   configureExecutor(effectiveConfig.execution, {
     requireTenantContext: multiTenancy.mode === 'required_from_auth',
     localResponseOriginUrl: deriveLoopbackReachableOrigin(DAEMON_HOST, DAEMON_PORT),
@@ -607,6 +610,28 @@ async function startDaemonWithOwnedMetrics(
   // template payloads). 10MB is the balance: tight enough to bound a single
   // attacker request while allowing real prompts and templates. Multipart uploads bypass this
   // limit (multer parses the body itself) and are capped separately.
+  // Body-bound Cloud assertion verification must see exact bytes, before the
+  // general JSON parser. This route has its own service authentication, not a
+  // browser/session login bypass, and never reflects callback material.
+  app.use(
+    MCP_OAUTH_RELAY.deliveryPath,
+    ((_req: express.Request, res: express.Response, next: express.NextFunction) => {
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Referrer-Policy', 'no-referrer');
+      next();
+    }) as never,
+    express.raw({ type: 'application/json', limit: '16kb', inflate: false }),
+    ((req: express.Request, res: express.Response) => {
+      const handler = (app as unknown as Record<string, unknown>).mcpOAuthRelayCallbackHandler as
+        | ((req: express.Request, res: express.Response) => Promise<void>)
+        | undefined;
+      if (req.method !== 'POST' || !handler) {
+        res.status(404).end();
+        return;
+      }
+      void handler(req, res);
+    }) as never
+  );
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
