@@ -48,6 +48,7 @@ import {
   isValidGitRepo,
   redactGitUrlCredentials,
   removeBranchWorkspace,
+  resolveContainedRepoPath,
   resolveGitRef,
   restoreBranchFilesystem,
   scanGitConfigRemoteCredentials,
@@ -444,7 +445,7 @@ export async function handleGitRepoRealignOrigin(
   payload: GitRepoRealignOriginPayload,
   options: CommandOptions
 ): Promise<ExecutorResult> {
-  const { repoId, repoPath, remoteUrl, repoSlug } = payload.params;
+  const { repoId, repoPath, remoteUrl, repoSlug, reposRoot } = payload.params;
 
   if (options.dryRun) {
     return {
@@ -458,7 +459,8 @@ export async function handleGitRepoRealignOrigin(
   }
 
   try {
-    const result = await ensureGitRemoteUrl(repoPath, 'origin', remoteUrl);
+    const managedRepoPath = await resolveContainedRepoPath(repoPath, reposRoot);
+    const result = await ensureGitRemoteUrl(managedRepoPath, 'origin', remoteUrl);
     if (result.changed) {
       const { redactUrlUserinfo } = await import('@agor/core/config');
       console.warn(
@@ -881,6 +883,7 @@ export async function handleGitBranchAdd(
   let sourceResolutionAdmitted = false;
   let localHome = false;
   let filesystemRecovery = false;
+  let gitEnv: UserGitEnvironment = {};
 
   try {
     // Connect to daemon
@@ -914,6 +917,7 @@ export async function handleGitBranchAdd(
 
     // Fetch per-user git credentials via Feathers RPC
     const env = await fetchUserGitEnvironment(client);
+    gitEnv = env;
 
     // Get parameters
     const repoId = payload.params.repoId;
@@ -991,14 +995,35 @@ export async function handleGitBranchAdd(
     const resolveStartingRef = () => {
       // Persisted source identity is a locator, not credential authority. Resolve
       // it without the mutable cache, and bound credentials independently just as
-      // we do for the eventual clone transport. Older rows retain the legacy path.
-      if (restoreMode && branchRecord.base_source) {
+      // we do for the eventual clone transport. A teammate retry retains the
+      // selected source instead of reinterpreting its now-persisted bare ref.
+      // Older rows without provenance retain the legacy path.
+      if ((restoreMode || getTeammateConfig(branchRecord)) && branchRecord.base_source) {
         const source = branchRecord.base_source;
         return resolveGitRef(undefined, source.name, {
           refType: refType || 'branch',
           remote: { url: source.remote_url },
           remoteOnly: true,
           env: gitEnvironmentForRemote(source.remote_url, [remoteUrl, sourceRemoteUrl], env),
+        });
+      }
+      // Omission, not the spelling "main", identifies the teammate default.
+      // Registered metadata is the source authority; mutable cache remotes and
+      // local branches are not. Resolve its live tip, then let the materializer
+      // fetch from this exact URL and consume the pinned SHA. No local reset or
+      // stale-cache fallback, and no assumption that its remote is named origin.
+      if (
+        shouldCreateBranch &&
+        getTeammateConfig(branchRecord) &&
+        !branchRecord.base_ref &&
+        !sourceRemoteUrl &&
+        remoteUrl
+      ) {
+        return resolveGitRef(undefined, sourceBranch, {
+          refType: refType || 'branch',
+          remote: { url: remoteUrl },
+          remoteOnly: true,
+          env,
         });
       }
       return resolveGitRef(resolutionPath, requestedStartingRef, {
@@ -1221,7 +1246,10 @@ export async function handleGitBranchAdd(
       },
     };
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = cloneDiagnostic(
+      error instanceof Error ? error.message : String(error),
+      gitEnv
+    );
     console.error('[git.branch.add] Failed:', errorMessage);
 
     // Fallback: preserve the historical empty-directory recovery behavior

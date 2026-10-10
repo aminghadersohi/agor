@@ -1,9 +1,12 @@
+import type { AgorClient } from '@agor/core/client';
 import { generateId } from '@agor/core/ids/browser';
 import {
   type Message,
   MessageRole,
   type ReactiveSessionHandle,
   type ReactiveSessionState,
+  releaseReactiveSession,
+  retainReactiveSession,
   type Task,
   TaskStatus,
 } from '@agor-live/client';
@@ -19,10 +22,11 @@ import { App, ConfigProvider, Flex, theme } from 'antd';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { page, userEvent } from 'vitest/browser';
+import { IDENTITY_AVATAR_SIZE } from '../../constants/ui';
 import { AgentChain } from '../AgentChain';
 import { MessageBlock } from '../MessageBlock';
-import { ContextWindowPill, ModelPill } from '../Pill';
-import { LeanTurnMetadata } from '../TaskBlock/LeanTurnMetadata';
+import { ModelPill } from '../Pill';
+import { ContextUsageRule } from '../TaskBlock/ContextUsageRule';
 import { TaskBlock } from '../TaskBlock/TaskBlock';
 import { ConversationView } from './ConversationView';
 
@@ -238,7 +242,7 @@ it('keeps a long user prompt and its full-size avatar within the transcript widt
   );
   const root = container.querySelector('.ant-bubble')!;
   const avatar = root.querySelector('.ant-avatar')!;
-  expect(avatar.getBoundingClientRect().width).toBe(40);
+  expect(avatar.getBoundingClientRect().width).toBe(IDENTITY_AVATAR_SIZE);
   expect(avatar.getBoundingClientRect().right).toBeLessThanOrEqual(
     root.getBoundingClientRect().right + 1
   );
@@ -267,105 +271,86 @@ it('keeps the tool disclosure after an empty load and reopens without another re
   expect(screen.getByText('Prompt 19')).toBeVisible();
 });
 
-it('reveals existing metadata pills without layout shift through focus, hover and touch', async () => {
-  const metadata = (
-    <Flex gap="small" style={{ width: 'max-content', flexShrink: 0 }}>
-      <ModelPill model="synthetic-model" />
-      <ContextWindowPill used={60000} limit={100000} />
-      <ModelPill model="another-long-synthetic-model-name" />
-    </Flex>
-  );
-  render(
-    <LeanTurnMetadata metadata={metadata}>
-      <p>Prompt for metadata</p>
-    </LeanTurnMetadata>
-  );
-  expect(screen.getByText('synthetic-model')).not.toBeVisible();
-  const prompt = screen.getByText('Prompt for metadata');
-  const before = prompt.parentElement!.getBoundingClientRect();
-  await userEvent.tab();
-  await waitFor(() => expect(screen.getByText('synthetic-model')).toBeVisible());
-  expect(getComputedStyle(prompt.parentElement!).paddingBottom).toBe('0px');
-  expect(prompt.parentElement!.getBoundingClientRect().height).toBe(before.height);
-  expect(prompt.parentElement!.getBoundingClientRect().top).toBe(before.top);
-  const row = screen.getByRole('region', { name: 'Turn metadata' });
-  const overlay = row.parentElement!;
-  expect(getComputedStyle(overlay).position).toBe('absolute');
-  await waitFor(() =>
-    expect(overlay.getBoundingClientRect().top).toBe(
-      prompt.parentElement!.getBoundingClientRect().bottom
-    )
-  );
-  expect(overlay.getBoundingClientRect().top).toBeGreaterThanOrEqual(
-    prompt.getBoundingClientRect().bottom
-  );
-  expect(row.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth);
-  const pills = row.firstElementChild!;
-  if (row.scrollWidth > row.clientWidth) {
-    // Leftmost pills remain reachable rather than being clipped by end alignment.
-    expect(pills.getBoundingClientRect().left).toBe(row.getBoundingClientRect().left);
-  } else {
-    expect(pills.getBoundingClientRect().right).toBe(row.getBoundingClientRect().right);
-  }
-  if (window.innerWidth === 320) expect(row.scrollWidth).toBeGreaterThan(row.clientWidth);
-  await page.screenshot({ path: `./.vitest/lean-metadata-${window.innerWidth}.png` });
-  cleanup();
-  render(
-    <LeanTurnMetadata metadata={metadata}>
-      <p>Prompt for metadata</p>
-    </LeanTurnMetadata>
-  );
-  expect(screen.queryByRole('button', { name: 'Show turn metadata' })).toBeNull();
-  const touchPrompt = screen.getByText('Prompt for metadata');
-  fireEvent.pointerDown(touchPrompt, { pointerType: 'touch', clientX: 10, clientY: 10 });
-  fireEvent.pointerUp(touchPrompt, { pointerType: 'touch', clientX: 10, clientY: 60 });
-  expect(screen.getByText('synthetic-model')).not.toBeVisible();
-  fireEvent.pointerDown(touchPrompt, { pointerType: 'touch', clientX: 10, clientY: 10 });
-  fireEvent.pointerUp(touchPrompt, { pointerType: 'touch', clientX: 10, clientY: 10 });
-  await waitFor(() => expect(screen.getByText('synthetic-model')).toBeVisible());
-  fireEvent.keyDown(touchPrompt, { key: 'Escape' });
-  await waitFor(() => expect(screen.getByText('synthetic-model')).not.toBeVisible());
-  cleanup();
-  render(
-    <LeanTurnMetadata metadata={metadata}>
-      <p>Prompt for metadata</p>
-    </LeanTurnMetadata>
-  );
-  await userEvent.hover(screen.getByText('Prompt for metadata'));
-  await waitFor(() => expect(screen.getByText('synthetic-model')).toBeVisible());
-  const fadingOverlay = screen.getByRole('region', { name: 'Turn metadata' }).parentElement!;
-  expect(getComputedStyle(fadingOverlay).transitionProperty).toContain('visibility');
-  await userEvent.unhover(screen.getByText('Prompt for metadata'));
-  expect(fadingOverlay.style.pointerEvents).toBe('none');
-  expect(getComputedStyle(fadingOverlay).transitionDelay.split(',').at(-1)?.trim()).not.toBe('0s');
-  await waitFor(() => expect(screen.getByText('synthetic-model')).not.toBeVisible());
+const footer = (metadata: ReactElement) => (
+  <ContextUsageRule
+    used={60000}
+    limit={100000}
+    snapshot={undefined}
+    metadata={metadata}
+    usageLabel="60%"
+  >
+    <p>The assistant answer</p>
+  </ContextUsageRule>
+);
+
+const longMetadata = (
+  <Flex wrap={false} gap="small" style={{ width: 'max-content', flexShrink: 0 }}>
+    <ModelPill model="synthetic-model" />
+    <ModelPill model="another-long-synthetic-model-name" />
+    <ModelPill model="a-third-even-longer-synthetic-model-name" />
+    <ModelPill model="and-a-fourth-synthetic-model-name-for-good-measure" />
+  </Flex>
+);
+
+it('keeps historical metadata visible and compact while the sole gauge follows the latest turn', () => {
+  const withUsage = (task: Task) =>
+    ({
+      ...task,
+      computed_context_window: 22_000,
+      normalized_sdk_response: {
+        contextWindowLimit: 100_000,
+        tokenUsage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      },
+    }) as unknown as Task;
+  const first = withUsage(tasks[18]);
+  const second = { ...tasks[19], status: TaskStatus.RUNNING };
+  state = { ...state, tasks: [first], hasOlderTasks: false };
+  const { container } = render(<ConversationView client={null} sessionId={sessionId} />);
+  const oldTurn = container.querySelector<HTMLElement>(`[data-task-block="${first.task_id}"]`)!;
+  const oldAnswer = screen.getByText(/Answer 18\./);
+  const oldFooter = oldTurn.querySelector<HTMLElement>('[aria-label="Turn metadata"]')!;
+  const oldRowHeight = oldFooter.parentElement!.getBoundingClientRect().height;
+  expect(oldFooter).toBeVisible();
+  expect(oldTurn.querySelector('[data-testid="context-usage-rule"]')).not.toBeNull();
+
+  act(() => update({ ...state, tasks: [first, second] }));
+  expect(container.querySelectorAll('[data-testid="context-usage-rule"]')).toHaveLength(0);
+  expect(container.querySelectorAll('[data-testid="turn-usage-label"]')).toHaveLength(0);
+  expect(screen.getByText(/Answer 18\./)).toBe(oldAnswer);
+  expect(oldFooter).toBeVisible();
+  expect(oldFooter).toHaveTextContent('synthetic-model');
+  expect(oldFooter).toHaveTextContent('test');
+  expect(oldFooter.parentElement!.getBoundingClientRect().height).toBeLessThan(30);
+  expect(oldFooter.parentElement!.getBoundingClientRect().height).toBeCloseTo(oldRowHeight, 0);
+
+  act(() => update({ ...state, tasks: [tasks[17], first, withUsage(second)] }));
+  expect(container.querySelectorAll('[data-testid="context-usage-rule"]')).toHaveLength(1);
+  expect(container.querySelectorAll('[data-testid="turn-usage-label"]')).toHaveLength(1);
+  expect(oldTurn.querySelector('[data-testid="context-usage-rule"]')).toBeNull();
+  expect(oldFooter).toBeVisible();
+  expect(screen.getByText(/Answer 18\./)).toBe(oldAnswer);
+  const newest = container.querySelector<HTMLElement>(`[data-task-block="${second.task_id}"]`)!;
+  expect(newest.querySelector('[data-testid="turn-usage-label"]')).toHaveTextContent('22%');
 });
 
-it('floats metadata over the following row, but reserves space for approval controls', async () => {
-  const view = (reserveSpace: boolean) => (
-    <div>
-      <LeanTurnMetadata reserveSpace={reserveSpace} metadata={<span>Metadata pills</span>}>
-        <div>Prompt</div>
-      </LeanTurnMetadata>
-      <button type="button" style={{ display: 'block' }}>
-        Following controls
-      </button>
+it('keeps long metadata visible and scrollable without clipping or moving the next turn', () => {
+  const { container } = render(
+    <div style={{ width: Math.min(window.innerWidth, 390) }}>
+      {footer(longMetadata)}
+      <p>The next turn</p>
     </div>
   );
-  const { rerender } = render(view(false));
-  await userEvent.hover(screen.getByText('Prompt'));
-  const overlay = screen.getByRole('region', { name: 'Turn metadata' }).parentElement!;
-  await waitFor(() =>
-    expect(overlay.getBoundingClientRect().top).toBe(
-      screen.getByRole('button', { name: 'Following controls' }).getBoundingClientRect().top
-    )
-  );
-  await userEvent.hover(screen.getByText('Metadata pills'));
-  expect(screen.getByText('Metadata pills')).toBeVisible();
-  rerender(view(true));
-  expect(overlay.getBoundingClientRect().bottom).toBeLessThanOrEqual(
-    screen.getByRole('button', { name: 'Following controls' }).getBoundingClientRect().top
-  );
+  const row = screen.getByRole('region', { name: 'Turn metadata' });
+  const line = screen.getByTestId('context-usage-rule');
+  const nextTop = screen.getByText('The next turn').getBoundingClientRect().top;
+  expect(row).toBeVisible();
+  expect(line).toBeVisible();
+  expect(row.scrollWidth).toBeGreaterThan(row.clientWidth);
+  expect(row.scrollHeight).toBeLessThanOrEqual(row.clientHeight + 1);
+  row.scrollLeft = row.scrollWidth;
+  expect(row.scrollLeft).toBeGreaterThan(0);
+  expect(screen.getByText('The next turn').getBoundingClientRect().top).toBe(nextTop);
+  expect(container.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
 });
 
 it('keeps familiar icon-led tool rows and results inside the quiet outer disclosure', async () => {
@@ -911,4 +896,82 @@ it('collapses tall low-character history and medium prose with shorter previews'
   expect(articles[0].textContent).toContain('Word49');
   await userEvent.click(screen.getByRole('button', { name: 'show more' }));
   expect(screen.getByText(prose)).toBeInTheDocument();
+});
+
+it('keeps synthetic streamed and persisted text visible while settling the thinking cache', async () => {
+  const task = { ...tasks[0], status: TaskStatus.RUNNING };
+  const saved: Message[] = [];
+  const handlers = new Map<string, (...args: unknown[]) => void>();
+  const service = (name: string, methods: Record<string, unknown>) => ({
+    ...methods,
+    on: (event: string, handler: (...args: unknown[]) => void) =>
+      handlers.set(`${name}:${event}`, handler),
+    removeListener: (event: string) => handlers.delete(`${name}:${event}`),
+  });
+  const services: Record<string, unknown> = {
+    sessions: service('sessions', {
+      get: async () => ({ session_id: sessionId, tasks: [task.task_id] }),
+    }),
+    tasks: service('tasks', { findAll: async () => [task] }),
+    messages: service('messages', { findAll: async () => saved }),
+    'session-streams': {
+      create: async () => ({ session_id: sessionId }),
+      remove: async () => ({}),
+    },
+  };
+  const client = {
+    io: { connected: true, on: () => {}, off: () => {} },
+    service: (name: string) =>
+      name.includes('/tasks/queue') ? { find: async () => ({ data: [] }) } : services[name],
+  } as unknown as AgorClient;
+  const live = retainReactiveSession(client, sessionId, { taskHydration: 'lazy' });
+  await live.ready();
+  currentHandle = live;
+  state = live.state;
+  const unsubscribe = live.subscribe(() => update(live.state));
+  const emit = (event: string, messageId: string, extra = {}) =>
+    act(() => {
+      handlers.get(`messages:${event}`)?.({
+        session_id: sessionId,
+        task_id: task.task_id,
+        message_id: messageId,
+        role: MessageRole.ASSISTANT,
+        timestamp: task.created_at,
+        ...extra,
+      });
+    });
+  try {
+    const thoughtId = generateId();
+    const textId = generateId();
+    emit('thinking:start', thoughtId);
+    emit('thinking:chunk', thoughtId, { chunk: 'Invented violet pebble' });
+    // Thinking-only live payloads are not currently rendered by AgentChain /
+    // MessageBlock (empty text). This fixture proves client activity and the
+    // real transcript text handoff, not thinking-only UI visibility.
+    expect(live.getStreamingMessage(thoughtId)?.isThinking).toBe(true);
+    emit('thinking:end', thoughtId);
+    expect(live.getStreamingMessage(thoughtId)?.isStreaming).toBe(false);
+    render(<ConversationView client={null} sessionId={sessionId} />);
+    emit('streaming:start', textId);
+    emit('streaming:chunk', textId, { chunk: 'Invented amber square' });
+    expect(screen.getByText('Invented amber square')).toBeVisible();
+    emit('streaming:end', textId);
+    const message = {
+      ...messages.get(task.task_id)![1],
+      message_id: textId,
+      content: 'Invented amber square',
+    };
+    saved.push(message);
+    act(() => handlers.get('messages:created')?.(message));
+    act(() => handlers.get('tasks:patched')?.({ ...task, status: TaskStatus.COMPLETED }));
+    expect(live.state.streamingMessages.size).toBe(0);
+    expect(screen.getByText('Invented amber square')).toBeVisible();
+    expect(screen.queryByText(/Extended Thinking/)).not.toBeInTheDocument();
+    await page.screenshot({
+      path: `./.vitest/synthetic-stream-lifecycle-${window.innerWidth}.png`,
+    });
+  } finally {
+    unsubscribe();
+    releaseReactiveSession(client, sessionId, { taskHydration: 'lazy' });
+  }
 });
