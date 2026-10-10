@@ -1,5 +1,5 @@
 import type { AgorClient, Branch, Session } from '@agor-live/client';
-import { act, cleanup, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../index.css';
@@ -12,11 +12,13 @@ import { BranchSessionSections } from './BranchSessionSections';
 const branch = {
   branch_id: 'fictional-branch',
   name: 'fictional/long-running-qa',
+  created_by: 'fictional-user',
   filesystem_status: 'ready',
 } as Branch;
 
 const runningSession = {
   session_id: 'fictional-session',
+  created_by: 'fictional-user',
   branch_id: branch.branch_id,
   title: 'Fictional long-running browser QA',
   agentic_tool: 'codex',
@@ -54,9 +56,9 @@ function renderIndicator(session: Session) {
 }
 
 function rowSpinner(): HTMLElement | null {
-  return screen
-    .getByLabelText(/Open session Fictional long-running browser QA/i)
-    .querySelector('.ant-spin-dot-spin');
+  return within(
+    screen.getByLabelText(/Open session Fictional long-running browser QA/i)
+  ).queryByRole('img', { name: 'Running' });
 }
 
 afterEach(cleanup);
@@ -66,7 +68,8 @@ describe('Branch Session active indicator in a real browser', () => {
     const view = renderIndicator(runningSession);
     const firstSpinner = rowSpinner();
     expect(firstSpinner).not.toBeNull();
-    expect(firstSpinner?.querySelectorAll(':scope > .ant-spin-dot-item')).toHaveLength(4);
+    expect(firstSpinner).toHaveClass('anticon-spin');
+    expect(firstSpinner).toBeVisible();
 
     const style = getComputedStyle(firstSpinner!);
     expect(style.animationName).toBe('spinRotate');
@@ -145,20 +148,20 @@ describe('Branch Session active indicator in a real browser', () => {
       }
     });
     const reducedCss = mediaRules.map((rule) => rule.cssText).join('\n');
-    expect(reducedCss).toContain('.ant-spin .ant-spin-dot-spin');
+    expect(reducedCss).toContain('.anticon.anticon-spin');
     const spinnerRule = mediaRules
       .flatMap((rule) => Array.from(rule.cssRules))
       .find(
         (rule): rule is CSSStyleRule =>
-          rule instanceof CSSStyleRule && rule.selectorText.includes('.ant-spin-dot-spin')
+          rule instanceof CSSStyleRule && rule.selectorText.includes('.anticon.anticon-spin')
       );
     expect(spinnerRule?.style.animationName).toBe('none');
 
-    // Ant's four unequal-opacity dots remain visible as a nonanimated active
-    // mark; reduced motion removes only rotation, not the affordance itself.
-    const dots = rowSpinner()?.querySelectorAll<HTMLElement>(':scope > .ant-spin-dot-item');
-    expect(dots).toHaveLength(4);
-    expect(new Set(Array.from(dots ?? [], (dot) => getComputedStyle(dot).opacity)).size).toBe(4);
+    // The shared Session row uses a loading icon, not Ant Spin's four dots.
+    // Reduced motion removes its rotation, not its visible progress glyph.
+    expect(rowSpinner()).toHaveClass('anticon-spin');
+    expect(rowSpinner()).toBeVisible();
+    expect(rowSpinner()?.querySelector('svg')).not.toBeNull();
   });
 });
 
@@ -211,7 +214,13 @@ it.each(['dirty', 'failure'])(
       },
       io: { on: () => {}, off: () => {} },
     } as unknown as AgorClient;
-    const { result } = renderHook(() => useAgorData(client));
+    const { result } = renderHook(() =>
+      useAgorData(client, {
+        authenticatedUserId: 'fictional-user',
+        authenticatedUserRole: 'member',
+        authGeneration: 1,
+      })
+    );
     await waitFor(() => expect(result.current.initialLoadComplete).toBe(true));
     // Let the initial background hydration finish before injecting the race.
     await act(async () => new Promise<void>((resolve) => setTimeout(resolve, 0)));
@@ -266,7 +275,7 @@ it.each(['dirty', 'failure'])(
     // on the runner completing an assertion before the retry delay elapses.
     expect(rowSpinner()).toBe(spinner);
     await act(async () => confirm());
-    act(() => flushRealtimeNow());
+    act(() => flushRealtimeNow('fictional-user:member:1'));
     await waitFor(() => expect(rowSpinner()).toBeNull());
     expect(spinner!.isConnected).toBe(false);
     expect(agorStore.getState().sessionById.get(runningSession.session_id)?.status).toBe('idle');
