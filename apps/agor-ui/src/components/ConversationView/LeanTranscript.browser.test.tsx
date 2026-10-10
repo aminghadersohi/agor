@@ -124,6 +124,7 @@ const handle = {
   loadOlderTasks,
   loadTaskMessages,
   unloadTaskMessages: () => {},
+  retainTaskDetails: () => () => {},
   resync: async () => {},
 } as unknown as ReactiveSessionHandle;
 let currentHandle = handle;
@@ -591,14 +592,14 @@ it('shows exceptional outcomes beneath their turn without floating top icons or 
   state = { ...state, tasks: [{ ...tasks[19], status: TaskStatus.STOPPED }], hasOlderTasks: false };
   const { container } = render(<ConversationView client={null} sessionId={sessionId} />);
   const root = container.querySelector('[data-task-block]')!;
-  const stopped = screen.getByText('Turn stopped');
+  const stopped = screen.getByText('The agent was stopped. Any edits are kept.');
   expect(stopped).toBeVisible();
   const outcome = root.querySelector<HTMLElement>('[data-turn-outcome]')!;
-  expect(outcome).toHaveClass('ant-alert-warning');
+  expect(outcome).toHaveAttribute('data-notice-type', 'neutral');
   expect(
     Math.abs(outcome.getBoundingClientRect().left - root.getBoundingClientRect().left)
   ).toBeLessThan(1);
-  expect(getComputedStyle(outcome).fontSize).toBe('14px');
+  expect(getComputedStyle(stopped).fontSize).toBe('12px');
   expect(root.querySelector(':scope > .anticon')).toBeNull();
   expect(stopped.getBoundingClientRect().top).toBeGreaterThan(
     screen.getByText(/Answer 19\./).getBoundingClientRect().bottom
@@ -610,13 +611,16 @@ it('shows exceptional outcomes beneath their turn without floating top icons or 
         {
           ...state.tasks[0],
           status: TaskStatus.FAILED,
+          executor_connected_at: state.tasks[0].created_at,
           error_message: 'Synthetic failure: ' + 'long-diagnostic-'.repeat(50),
         },
       ],
     })
   );
-  expect(screen.getByRole('alert')).toHaveTextContent('Turn failed');
-  expect(screen.getByRole('alert')).toHaveClass('ant-alert-error');
+  expect(outcome).toHaveTextContent('The agent hit a problem.');
+  expect(outcome).toHaveAttribute('data-notice-type', 'error');
+  await userEvent.click(screen.getByRole('button', { name: 'Details' }));
+  expect(screen.getByText(/^Synthetic failure: long-diagnostic-/)).toBeVisible();
   expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
   await page.screenshot({ path: `./.vitest/lean-outcome-${window.innerWidth}.png` });
 });
@@ -974,4 +978,71 @@ it('keeps synthetic streamed and persisted text visible while settling the think
     unsubscribe();
     releaseReactiveSession(client, sessionId, { taskHydration: 'lazy' });
   }
+});
+
+it('pins turn detail only while a reader expands it and releases on collapse and unmount', async () => {
+  const release = vi.fn();
+  const retain = vi.fn(() => release);
+  const [prompt, answer] = messages.get(tasks[0].task_id)!;
+  const turn = [
+    prompt,
+    {
+      ...answer,
+      message_id: generateId(),
+      content: [
+        { type: 'text', text: 'Editing now' },
+        { type: 'tool_use', id: 'edit', name: 'Edit', input: { file_path: '/a.ts' } },
+      ],
+    },
+    {
+      ...answer,
+      message_id: generateId(),
+      content: [{ type: 'tool_use', id: 'read', name: 'Read', input: { file_path: '/b.ts' } }],
+    },
+    {
+      ...answer,
+      message_id: generateId(),
+      content: [
+        { type: 'thinking', text: 'Synthetic reasoning' },
+        { type: 'text', text: 'Reasoned answer' },
+      ],
+    },
+  ] as Message[];
+  const view = render(
+    <TaskBlock
+      task={{ ...tasks[0], recorded_tool_count: 2 }}
+      taskMessages={turn}
+      taskMessagesLoaded
+      onLoadTaskMessages={() => {}}
+      onRetainTaskDetails={retain}
+    />
+  );
+  // A default-open edit body is not a reader's request to keep the turn.
+  expect(screen.getByText('Editing now')).toBeVisible();
+  expect(retain).not.toHaveBeenCalled();
+  const chain = screen.getByRole('button', { name: '1 tool call' });
+  await userEvent.click(chain);
+  await waitFor(() => expect(retain).toHaveBeenCalledTimes(1));
+  expect(retain).toHaveBeenCalledWith(tasks[0].task_id);
+  await userEvent.click(chain);
+  await waitFor(() => expect(release).toHaveBeenCalledTimes(1));
+  await userEvent.click(screen.getByText('Extended Thinking'));
+  await waitFor(() => expect(retain).toHaveBeenCalledTimes(2));
+  await userEvent.click(screen.getByText('Extended Thinking'));
+  await waitFor(() => expect(release).toHaveBeenCalledTimes(2));
+  // The default-open edit stays beside the answer with the chain collapsed.
+  // Collapsing it pins nothing; a reader's reopening does.
+  const edit = screen.getByRole('button', { name: /Edit.*\/a\.ts/, expanded: true });
+  await userEvent.click(edit);
+  expect(edit).toHaveAttribute('aria-expanded', 'false');
+  await userEvent.click(edit);
+  expect(edit).toHaveAttribute('aria-expanded', 'true');
+  await waitFor(() => expect(retain).toHaveBeenCalledTimes(3));
+  await userEvent.click(edit);
+  await waitFor(() => expect(release).toHaveBeenCalledTimes(3));
+  await userEvent.click(edit);
+  await userEvent.click(chain);
+  await waitFor(() => expect(retain).toHaveBeenCalledTimes(5));
+  view.unmount();
+  expect(release).toHaveBeenCalledTimes(5);
 });

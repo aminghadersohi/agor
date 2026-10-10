@@ -1,8 +1,10 @@
+import type { AgorClient } from '@agor-live/client';
 import { CloseOutlined, SearchOutlined } from '@ant-design/icons';
 import { Button, Input, type InputRef, Tooltip, theme } from 'antd';
 import type React from 'react';
 import { useEffect, useInsertionEffect, useMemo, useRef, useState } from 'react';
 import { useAppNavigation } from '../../hooks/useAppNavigation';
+import { OPEN_GLOBAL_SEARCH_EVENT, onShellPicker } from '../../utils/shellEvents';
 import { GLOBAL_SEARCH_LISTBOX_ID, GlobalSearchDropdown, rowDomId } from './GlobalSearchDropdown';
 import { SearchChipRow } from './SearchChipRow';
 import {
@@ -16,6 +18,8 @@ import { useRecents } from './useRecents';
 import { flattenResults, hasAnyEntries } from './utils';
 
 interface GlobalSearchProps extends GlobalSearchEntityMaps {
+  /** Searches the daemon too; without it, only the loaded maps. */
+  client?: AgorClient | null;
   currentUserId?: string;
   /**
    * Open the Settings modal — used as a coarse landing for entity types
@@ -44,7 +48,10 @@ function useSearchCallback<T extends (...args: never[]) => unknown>(callback: T)
 }
 
 /** Keep native listeners and stable close state outside entity-bearing render scopes. */
-function useSearchPopover(setQuery: React.Dispatch<React.SetStateAction<string>>) {
+function useSearchPopover(
+  setQuery: React.Dispatch<React.SetStateAction<string>>,
+  setActiveChip: React.Dispatch<React.SetStateAction<ChipFilter>>
+) {
   const [open, setOpen] = useState(false);
   const inputRef = useRef<InputRef | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -60,6 +67,15 @@ function useSearchPopover(setQuery: React.Dispatch<React.SetStateAction<string>>
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, []);
+
+  useEffect(
+    () =>
+      onShellPicker(OPEN_GLOBAL_SEARCH_EVENT, (chip) => {
+        setActiveChip(chip ?? 'all');
+        setOpen(true);
+      }),
+    [setActiveChip]
+  );
 
   // Focus the input whenever the popover opens — covers both icon click
   // and Cmd+K. Uses rAF because the Input mounts in the same render tick.
@@ -100,11 +116,11 @@ function useSearchPopover(setQuery: React.Dispatch<React.SetStateAction<string>>
 /**
  * Navbar global-search input + dropdown.
  *
- * Implementation per docs/internal/global-search-design-2026-05-23.md.
  * V1 scaffolding: client-side filtering over in-memory entity maps, sectioned
  * dropdown, type + scope chips, Cmd+K to focus.
  */
 export const GlobalSearch: React.FC<GlobalSearchProps> = ({
+  client,
   currentUserId,
   sessionById,
   branchById,
@@ -115,9 +131,11 @@ export const GlobalSearch: React.FC<GlobalSearchProps> = ({
 }) => {
   const { token } = theme.useToken();
   const [query, setQuery] = useState('');
-  const { open, setOpen, inputRef, containerRef, handleClose, handleToggle } =
-    useSearchPopover(setQuery);
   const [activeChip, setActiveChip] = useState<ChipFilter>('all');
+  const { open, setOpen, inputRef, containerRef, handleClose, handleToggle } = useSearchPopover(
+    setQuery,
+    setActiveChip
+  );
   const [ownedByMe, setOwnedByMe] = useState(true);
   const [selectedIndex, setSelectedIndex] = useState(0);
 
@@ -129,6 +147,7 @@ export const GlobalSearch: React.FC<GlobalSearchProps> = ({
   });
 
   const { results, counts, hasAnyResults, debouncedQuery, flush } = useGlobalSearch({
+    client,
     query,
     ownedByMe,
     activeTypeChip: activeChip,
@@ -141,6 +160,7 @@ export const GlobalSearch: React.FC<GlobalSearchProps> = ({
   });
 
   const recents = useRecents({
+    client,
     currentUserId,
     sessionById,
     branchById,
