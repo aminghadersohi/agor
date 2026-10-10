@@ -103,6 +103,7 @@ function createPostgresStyleSessionRow(overrides?: Partial<SessionRow> & { tenan
     scheduler_init_attempt_count: 0,
     scheduler_init_retry_at: null,
     ready_for_prompt: false,
+    attention_generation: 0,
     archived: false,
     archived_reason: null,
     auto_archive: 'never',
@@ -215,6 +216,21 @@ describe('SessionRepository.create', () => {
     );
 
     expect(created.sdk_home_scope).toBe('branch');
+  });
+
+  dbTest('starts attention generation for a session created in a settled state', async ({ db }) => {
+    const repo = new SessionRepository(db);
+    const branch = await createTestBranch(db);
+
+    const created = await repo.create(
+      createSessionData({
+        branch_id: branch.branch_id,
+        status: SessionStatus.FAILED,
+        ready_for_prompt: true,
+      })
+    );
+
+    expect(created.attention_generation).toBe(1);
   });
 
   dbTest('should generate session_id if not provided', async ({ db }) => {

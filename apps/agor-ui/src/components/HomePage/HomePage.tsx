@@ -12,6 +12,7 @@ import { useIsMobileViewport } from '../../hooks/useIsMobileViewport';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useStableCallback } from '../../hooks/useStableCallback';
 import { useUserLocalStorage } from '../../hooks/useUserLocalStorage';
+import { sessionAttentionAcknowledged } from '../../store/agorRealtimeActions';
 import {
   type AgorState,
   agorStore,
@@ -21,12 +22,19 @@ import {
 } from '../../store/agorStore';
 import {
   compareHomeNeeds,
+  HOME_RECENT_BOARDS,
   type HomeCommentNeed,
   type HomeSessionNeed,
   isUnreadResult,
   lastRunStartedAt,
+  liveBoardIds,
   makeHomeBucketsSelector,
 } from '../../store/selectors';
+import {
+  selectHomeBranchesLoaded,
+  selectMySessionsLoaded,
+  selectMySessionsTruncated,
+} from '../../store/userScope';
 import { useThemedMessage } from '../../utils/message';
 import { runWithLimit } from '../../utils/promisePool';
 import {
@@ -35,18 +43,25 @@ import {
   requestShellPicker,
 } from '../../utils/shellEvents';
 import { patchUserPreferences } from '../../utils/userPreferences';
+import type { CreateModalKind } from '../CreateMenu';
 import { HomeAskBox } from './HomeAskBox';
 import { HomeKnowledgeSection } from './HomeKnowledgeSection';
 import { HomeMyWork, MY_WORK_PAGE, type MyWorkTab } from './HomeMyWork';
 import { HomeNeedsYou, NEEDS_MAX, NEEDS_PREVIEW, type NeedsFilter } from './HomeNeedsYou';
+import { HomePinnedArtifactsSection } from './HomePinnedArtifactsSection';
 import { HomeRecentBoards } from './HomeRecentBoards';
 import { HomeSchedulesSection } from './HomeSchedulesSection';
 import { HomeFrame } from './HomeSection';
+import { HomeTeammateChatsSection } from './HomeTeammateChatsSection';
 import { HomeTeammatesSection } from './HomeTeammates';
-import { HOME_MAIN_COLUMN_BASIS, HOME_PAGE_TITLE_LEVEL, HOME_RAIL_BASIS } from './homeLayout';
+import {
+  formatCount,
+  HOME_MAIN_COLUMN_BASIS,
+  HOME_PAGE_TITLE_LEVEL,
+  HOME_RAIL_BASIS,
+} from './homeLayout';
 import { OnboardingCard } from './OnboardingCard';
 
-const RECENT_BOARDS = 5;
 const ONBOARDING_HIDDEN_KEY = 'agor:onboarding-card-hidden';
 // Longer than the 7-day failure window, since a later patch can keep an old failure in view.
 const OPENED_FAILURES_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -72,8 +87,6 @@ const asOpenedFailures = (stored: unknown): Record<string, OpenedFailure> =>
 const isHomeWorkView = (value: unknown): value is HomeWorkView =>
   HOME_WORK_VIEWS.includes(value as HomeWorkView);
 
-type CreateTab = 'teammate' | 'branch' | 'board' | 'repository';
-
 /** Route state other surfaces use to land on part of Home. */
 export interface HomeLocationState {
   needsFilter?: NeedsFilter;
@@ -92,8 +105,8 @@ export interface HomePageProps {
     config: NewSessionConfig,
     boardId: string
   ) => Promise<SessionCreationResult | null>;
-  /** Board and teammate onboarding steps; phones have no create dialog. */
-  onOpenCreateDialog?: (tab: CreateTab, boardId?: string) => void;
+  /** Board and teammate onboarding steps open the shared create modals. */
+  onOpenCreateDialog?: (kind: CreateModalKind) => void;
   onOpenSettings?: (section: 'repos' | 'mcp' | 'users') => void;
   /** Defaults to the header board switcher. */
   onAllBoards?: () => void;
@@ -101,6 +114,10 @@ export interface HomePageProps {
   onSeeAllSessions?: () => void;
   /** Opens the teammates directory; the rail's "See all" hides without it. */
   onSeeAllTeammates?: () => void;
+  /** Opens the chat collections manager; the rail's collections hide without it. */
+  onManageChatCollections?: () => void;
+  /** Opens a session pinned in a chat collection. Defaults to `onSessionClick`. */
+  onOpenChatSession?: (sessionId: string) => void;
 }
 
 const scrollToSection = (id: string) =>
@@ -116,7 +133,11 @@ function greeting(date = new Date()) {
   return hour < 12 ? 'morning' : hour < 18 ? 'afternoon' : 'evening';
 }
 
-const selectHydrated = (s: AgorState) => s.sessionsHydrated && s.branchesHydrated;
+// Counts wait for the user scope: all of my sessions and every branch they or
+// my comment threads reference (never for the whole workspace).
+const selectHydrated = (s: AgorState) => selectMySessionsLoaded(s) && selectHomeBranchesLoaded(s);
+// My sessions hit the single read's cap: session counts are lower bounds ("N+").
+const selectTruncated = selectMySessionsTruncated;
 
 /** Onboarding steps the caller can perform, subscribed only while the card can still show. */
 const HomeOnboarding: React.FC<{
@@ -203,6 +224,8 @@ export const HomePage = memo(function HomePage({
   onAllBoards,
   onSeeAllSessions,
   onSeeAllTeammates,
+  onManageChatCollections,
+  onOpenChatSession,
 }: HomePageProps) {
   const { token } = theme.useToken();
   const { showError } = useThemedMessage();
@@ -269,17 +292,11 @@ export const HomePage = memo(function HomePage({
   const [onboardingHidden, setOnboardingHidden] = useLocalStorage(ONBOARDING_HIDDEN_KEY, false);
 
   const hydrated = useAgorStore(selectHydrated);
+  const truncated = useAgorStore(selectTruncated);
   // Visit history that still names live boards; when none do, recent sessions stand in.
   const visitedBoardIds = useStoreWithEqualityFn(
     agorStore,
-    useMemo(
-      () => (s: AgorState) =>
-        recentBoardIds.filter((id) => {
-          const board = s.boardById.get(id);
-          return !!board && !board.archived;
-        }),
-      [recentBoardIds]
-    ),
+    useMemo(() => (s: AgorState) => liveBoardIds(s, recentBoardIds), [recentBoardIds]),
     shallow
   );
   const buckets = useStoreWithEqualityFn(
@@ -291,7 +308,7 @@ export const HomePage = memo(function HomePage({
           now,
           needsLimit: needsExpanded ? NEEDS_MAX : NEEDS_PREVIEW,
           recentLimit: workLimit,
-          boardsLimit: visitedBoardIds.length ? 0 : RECENT_BOARDS,
+          boardsLimit: visitedBoardIds.length ? 0 : HOME_RECENT_BOARDS,
           query: deferredQuery,
           onlyStartedByMe,
           openedFailures: openedRuns,
@@ -367,14 +384,20 @@ export const HomePage = memo(function HomePage({
     },
     [onSessionClick, setOpenedFailures]
   );
+  // Read state is per viewer: acknowledging never clears the shared ready flag,
+  // which failed and timed-out sessions need to accept a follow-up.
+  const acknowledge = useCallback(
+    async (sessionId: string) => {
+      if (!client) return;
+      sessionAttentionAcknowledged(await client.sessions.acknowledgeAttention(sessionId));
+    },
+    [client]
+  );
   const markRead = useCallback(
     (sessionId: string) => {
-      client
-        ?.service('sessions')
-        .patch(sessionId, { ready_for_prompt: false })
-        .catch(() => showError('Couldn’t mark as read'));
+      acknowledge(sessionId).catch(() => showError('Couldn’t mark as read'));
     },
-    [client, showError]
+    [acknowledge, showError]
   );
   const [markingAll, setMarkingAll] = useState(false);
   const markAllRead = useCallback(async () => {
@@ -384,15 +407,13 @@ export const HomePage = memo(function HomePage({
       .map((s) => s.session_id);
     setMarkingAll(true);
     try {
-      const failed = await runWithLimit(ids, MARK_ALL_CONCURRENCY, (id) =>
-        client.service('sessions').patch(id, { ready_for_prompt: false })
-      );
+      const failed = await runWithLimit(ids, MARK_ALL_CONCURRENCY, acknowledge);
       if (failed.length === ids.length && failed.length) showError('Couldn’t mark as read');
       else if (failed.length) showError(`Couldn’t mark ${failed.length} of ${ids.length} as read`);
     } finally {
       setMarkingAll(false);
     }
-  }, [client, userId, showError]);
+  }, [client, userId, showError, acknowledge]);
   const showMoreWork = useCallback(() => setWorkLimit((limit) => limit + MY_WORK_PAGE), []);
   const archive = useCallback((sessionId: string) => confirmArchive(sessionId), [confirmArchive]);
   const showRunning = useCallback(() => {
@@ -445,23 +466,32 @@ export const HomePage = memo(function HomePage({
         ) : (
           !newUser && (
             <Flex align="center" gap={token.marginXS} wrap>
-              <Button type="text" size="small" style={textButton} onClick={jumpToNeeds}>
-                {needsCount ? (
-                  <span>
-                    <Typography.Text strong>{needsCount}</Typography.Text> need you
-                  </span>
-                ) : (
-                  'All caught up'
-                )}
-              </Button>
+              {/* Truncated with nothing found: not provably caught up, so no zero state. */}
+              {(needsCount > 0 || !truncated) && (
+                <Button type="text" size="small" style={textButton} onClick={jumpToNeeds}>
+                  {needsCount ? (
+                    <span>
+                      <Typography.Text strong>{formatCount(needsCount, truncated)}</Typography.Text>{' '}
+                      need you
+                    </span>
+                  ) : (
+                    'All caught up'
+                  )}
+                </Button>
+              )}
               {buckets.runningCount > 0 && (
                 <>
-                  <Typography.Text type="secondary" aria-hidden>
-                    ·
-                  </Typography.Text>
+                  {(needsCount > 0 || !truncated) && (
+                    <Typography.Text type="secondary" aria-hidden>
+                      ·
+                    </Typography.Text>
+                  )}
                   <Button type="text" size="small" style={textButton} onClick={showRunning}>
                     <span>
-                      <Typography.Text strong>{buckets.runningCount}</Typography.Text> running
+                      <Typography.Text strong>
+                        {formatCount(buckets.runningCount, truncated)}
+                      </Typography.Text>{' '}
+                      running
                     </span>
                   </Button>
                 </>
@@ -472,6 +502,7 @@ export const HomePage = memo(function HomePage({
       </div>
       <HomeRecentBoards
         recentBoardIds={visitedBoardIds.length ? visitedBoardIds : buckets.boardIds}
+        userId={userId}
         onBoardClick={onBoardClick}
         onAllBoards={allBoards}
       />
@@ -505,6 +536,7 @@ export const HomePage = memo(function HomePage({
               expanded={needsExpanded}
               onExpandedChange={setNeedsExpanded}
               hydrated={hydrated}
+              truncated={truncated}
               onOpenSession={onSessionClick}
               onOpenFailure={openFailure}
               onOpenComment={openComment}
@@ -516,6 +548,12 @@ export const HomePage = memo(function HomePage({
             />
           )}
           {onboarding}
+          <HomePinnedArtifactsSection
+            client={client}
+            currentUserId={userId}
+            onBoardClick={onBoardClick}
+            onSessionClick={onSessionClick}
+          />
           <HomeMyWork
             recent={buckets.recent}
             recentCount={buckets.recentCount}
@@ -523,6 +561,7 @@ export const HomePage = memo(function HomePage({
             runningCount={buckets.runningCount}
             runningMatchCount={buckets.runningMatchCount}
             hydrated={hydrated}
+            truncated={truncated}
             tab={tab}
             onTabChange={setTab}
             view={workView}
@@ -555,6 +594,13 @@ export const HomePage = memo(function HomePage({
               onOpenBoard={onBoardClick}
               onSeeAll={onSeeAllTeammates}
             />
+            {onManageChatCollections && (
+              <HomeTeammateChatsSection
+                currentUser={currentUser}
+                onOpenSession={onOpenChatSession ?? onSessionClick}
+                onManage={onManageChatCollections}
+              />
+            )}
             <HomeKnowledgeSection client={client} connected={connected} />
           </Flex>
         )}

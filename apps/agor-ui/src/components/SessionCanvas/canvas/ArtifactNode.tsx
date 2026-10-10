@@ -1,4 +1,5 @@
 import type {
+  AgorClient,
   ArtifactBoardObject,
   ArtifactID,
   ArtifactPayload,
@@ -18,6 +19,8 @@ import {
   LoadingOutlined,
   LockOutlined,
   MessageOutlined,
+  PushpinFilled,
+  PushpinOutlined,
   ReloadOutlined,
   UnlockOutlined,
   WarningOutlined,
@@ -29,7 +32,18 @@ import {
   type SandpackSetup,
   useSandpack,
 } from '@codesandbox/sandpack-react';
-import { Alert, Badge, Button, Card, Popconfirm, Spin, Tooltip, Typography, theme } from 'antd';
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Dropdown,
+  Popconfirm,
+  Spin,
+  Tooltip,
+  Typography,
+  theme,
+} from 'antd';
 import { compressToBase64 } from 'lz-string';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { NodeResizer } from 'reactflow';
@@ -44,12 +58,15 @@ import {
 import { ArtifactStaticPreview } from '@/components/artifacts/ArtifactStaticPreview';
 import { useStaticPreviewReadiness } from '@/components/artifacts/useStaticPreviewReadiness';
 import { getDaemonUrl } from '@/config/daemon';
+import { useAgorStore } from '@/store/agorStore';
 import { getAuthHeaders } from '@/utils/authHeaders';
 import { copyToClipboard } from '@/utils/clipboard';
+import { readHomeArtifactIds, withHomeArtifactPin } from '@/utils/homeArtifactPreferences';
 import { useThemedMessage } from '@/utils/message';
 import { ensureSandpackCryptoSubtle } from '@/utils/sandpackCrypto';
 import { uiRouteHref } from '@/utils/uiRoutes';
 import { useMutationGate } from '../../../contexts/ConnectionContext';
+import type { BoardWriteTicket } from '../../../store/boardMutationGuard';
 import { ArtifactConsentModal } from '../../ArtifactConsentModal/ArtifactConsentModal';
 import { useStableSandpackProviderInputs } from './utils/sandpackDefaults';
 
@@ -74,7 +91,17 @@ export interface ArtifactNodeData {
   x: number;
   y: number;
   /** Lifecycle-safe delete: removes filesystem + board object + DB record */
-  onDeleteArtifact?: (objectId: string, artifactId: string) => void;
+  /** `ticket`: captured when the confirmation opened (`null` is refused). */
+  onDeleteArtifact?: (
+    objectId: string,
+    artifactId: string,
+    ticket: BoardWriteTicket | null
+  ) => void;
+  /** Capture the write ticket when the delete confirmation opens. */
+  beginArtifactDelete?: () => BoardWriteTicket | null;
+  /** Client + viewer id for toggling this artifact in the viewer's Home pins. */
+  client?: AgorClient | null;
+  currentUserId?: string;
 }
 
 const MIN_WIDTH = 300;
@@ -183,6 +210,13 @@ export const ArtifactNode = ({
   const { token } = theme.useToken();
   const mutationGate = useMutationGate();
   const layoutMutationDisabled = !mutationGate.canMutate || !data.canEdit;
+  const { showError, showSuccess } = useThemedMessage();
+  const currentUser = useAgorStore((state) =>
+    data.currentUserId ? state.userById.get(data.currentUserId) : undefined
+  );
+  const pinnedToHome = readHomeArtifactIds(currentUser?.preferences).includes(
+    data.artifactId as ArtifactID
+  );
   const [interactMode, setInteractMode] = useState(false);
   const [payload, setPayload] = useState<ArtifactPayload | null>(null);
   const [loading, setLoading] = useState(true);
@@ -190,6 +224,8 @@ export const ArtifactNode = ({
   const [consentOpen, setConsentOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const staticIframeRef = useRef<HTMLIFrameElement | null>(null);
+  // Captured when the delete confirmation opens: a board reload drops it.
+  const [deleteTicket, setDeleteTicket] = useState<BoardWriteTicket | null>(null);
   const lastHashRef = useRef<string | null>(null);
   const sandpackConfig = payload?.sandpack_config;
   const sandpackOptions = sandpackConfig?.options;
@@ -311,6 +347,33 @@ export const ArtifactNode = ({
     );
   }, [data.artifactId]);
 
+  // Home pins are a per-user preference, not a board mutation, so they are
+  // not gated on board.edit — only on the connection being able to write.
+  const handleToggleHomePin = useCallback(async () => {
+    if (!data.client || !data.currentUserId || !currentUser) return;
+    const nextPinned = !pinnedToHome;
+    try {
+      await data.client.service('users').patch(data.currentUserId, {
+        preferences: withHomeArtifactPin(
+          currentUser.preferences,
+          data.artifactId as ArtifactID,
+          nextPinned
+        ),
+      });
+      showSuccess(nextPinned ? 'Pinned artifact to Home' : 'Removed artifact from Home');
+    } catch (err) {
+      showError(err instanceof Error ? err.message : 'Could not update Home pins');
+    }
+  }, [
+    currentUser,
+    data.artifactId,
+    data.client,
+    data.currentUserId,
+    pinnedToHome,
+    showError,
+    showSuccess,
+  ]);
+
   // Title bar — always rendered, regardless of load state. When the
   // payload hasn't come back yet (initial fetch in flight, or the row's
   // files column got corrupted and getPayload threw), the user still
@@ -389,6 +452,36 @@ export const ArtifactNode = ({
             />
           </Tooltip>
         )}
+        {data.client && data.currentUserId && (
+          <Dropdown
+            trigger={['click']}
+            disabled={!mutationGate.canMutate}
+            menu={{
+              items: [
+                {
+                  key: 'home-pin',
+                  icon: pinnedToHome ? <PushpinFilled /> : <PushpinOutlined />,
+                  label: pinnedToHome ? 'Remove from Home' : 'Pin to Home',
+                },
+              ],
+              onClick: ({ key, domEvent }) => {
+                domEvent.stopPropagation();
+                if (key === 'home-pin') void handleToggleHomePin();
+              },
+            }}
+          >
+            <Tooltip title="Home placement">
+              <Button
+                type="text"
+                size="small"
+                aria-label="Artifact placement"
+                icon={pinnedToHome ? <PushpinFilled /> : <PushpinOutlined />}
+                disabled={!mutationGate.canMutate}
+                onClick={(e) => e.stopPropagation()}
+              />
+            </Tooltip>
+          </Dropdown>
+        )}
         <Tooltip title="Open fullscreen">
           <Button
             type="text"
@@ -442,6 +535,8 @@ export const ArtifactNode = ({
             open={deleteConfirmOpen}
             destroyOnHidden
             onOpenChange={(open) => {
+              if (open && mutationGate.canMutate)
+                setDeleteTicket(data.beginArtifactDelete?.() ?? null);
               if (!open || mutationGate.canMutate) setDeleteConfirmOpen(open);
             }}
             title="Delete artifact?"
@@ -449,7 +544,7 @@ export const ArtifactNode = ({
             onConfirm={(e) => {
               e?.stopPropagation();
               if (!mutationGate.canMutate) return;
-              data.onDeleteArtifact?.(data.objectId, data.artifactId);
+              data.onDeleteArtifact?.(data.objectId, data.artifactId, deleteTicket);
             }}
             onCancel={(e) => e?.stopPropagation()}
             okText="Delete"

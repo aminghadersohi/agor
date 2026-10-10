@@ -7,7 +7,13 @@ import type {
   SpawnConfig,
   User,
 } from '@agor-live/client';
-import { getTeammateConfig, isSessionExecuting, isTeammate } from '@agor-live/client';
+import {
+  getTeammateConfig,
+  isSessionExecuting,
+  isTeammate,
+  SessionStatus,
+  sessionHasUnseenAttention,
+} from '@agor-live/client';
 import {
   BranchesOutlined,
   CodeOutlined,
@@ -61,7 +67,10 @@ interface BranchCardProps {
   onCreateSession?: (branchId: string) => void;
   onForkSession?: (sessionId: string, prompt: string) => Promise<void>;
   onSpawnSession?: (sessionId: string, config: string | Partial<SpawnConfig>) => Promise<void>;
-  onArchiveOrDelete?: (branchId: string, options: BranchArchiveOrDeleteOptions) => void;
+  onArchiveOrDelete?: (
+    branchId: string,
+    options: BranchArchiveOrDeleteOptions
+  ) => void | Promise<void>;
   onOpenSettings?: (branchId: string) => void;
   onOpenSessionSettings?: (sessionId: string) => void;
   onOpenTerminal?: (commands: string[], branchId?: string) => void;
@@ -191,6 +200,28 @@ const BranchCardComponent = ({
   // Archive/Delete modal state
   const [archiveDeleteModalOpen, setArchiveDeleteModalOpen] = useState(false);
   const [archiveDeleteModalMounted, setArchiveDeleteModalMounted] = useState(false);
+  const [pendingOperation, setPendingOperation] = useState<'archiving' | 'deleting' | null>(null);
+  const mutationPendingRef = React.useRef(false);
+  // Local pending covers the request before realtime arrives (and session
+  // activity stopping). Persisted deletion continues after request acceptance.
+  const operation = pendingOperation ?? (branch.deletion_status === 'deleting' ? 'deleting' : null);
+  const isOperating = operation !== null;
+
+  const handleArchiveOrDelete = async (options: BranchArchiveOrDeleteOptions) => {
+    if (!onArchiveOrDelete || mutationPendingRef.current || isOperating) return;
+    mutationPendingRef.current = true;
+    setPendingOperation(options.metadataAction === 'archive' ? 'archiving' : 'deleting');
+    setArchiveDeleteModalOpen(false);
+    try {
+      await onArchiveOrDelete(branch.branch_id, options);
+    } catch {
+      // The mutation owner reports errors. Consume its rejection here so the
+      // event handler does not leak it, and restore the card for inspection/retry.
+    } finally {
+      mutationPendingRef.current = false;
+      setPendingOperation(null);
+    }
+  };
 
   const [storedPeekedSessionIds, setStoredPeekedSessionIds] = useLocalStorage<string[]>(
     `${PEEK_SESSIONS_STORAGE_KEY_PREFIX}${branch.branch_id}`,
@@ -276,23 +307,33 @@ const BranchCardComponent = ({
   const isAgent = isTeammate(branch);
 
   // True when one of this branch's sessions is the currently opened
-  // conversation. Drives the "focused" highlight on the canvas card and
-  // also suppresses the louder ready-for-prompt/needs-attention glow —
-  // there's no point screaming for attention at the branch you're
-  // already looking at.
+  // conversation. Drives the focused selection outline.
   const isFocused = useMemo(
     () => activeSessions.some((s) => s.session_id === selectedSessionId),
     [activeSessions, selectedSessionId]
   );
 
-  // Check if branch needs attention (newly created OR has ready sessions)
-  // Don't highlight if a session from this branch is currently open in the drawer
-  const needsAttention = useMemo(() => {
-    const hasReadySession = activeSessions.some((s) => s.ready_for_prompt === true);
-    const shouldHighlight = (branch.needs_attention || hasReadySession) && !isFocused;
-
-    return shouldHighlight;
-  }, [activeSessions, branch.needs_attention, isFocused]);
+  // Opening one session clears only that session for this viewer; unread output
+  // in another session keeps the worktree highlighted.
+  const unseenSessionCount = useMemo(
+    () => activeSessions.filter(sessionHasUnseenAttention).length,
+    [activeSessions]
+  );
+  // Unseen results and unresolved terminal failures are distinct. Reading a
+  // failed/timed-out result clears its badge, but the worktree halo remains
+  // until follow-up work starts and shared promptability resets. The atomic
+  // terminal projection owns this ready/status pair; it is not read state.
+  const hasUnresolvedTerminalAttention = useMemo(
+    () =>
+      activeSessions.some(
+        (session) =>
+          session.ready_for_prompt === true &&
+          (session.status === SessionStatus.FAILED || session.status === SessionStatus.TIMED_OUT)
+      ),
+    [activeSessions]
+  );
+  // An in-flight branch operation (archive/delete/etc.) suppresses the halo.
+  const needsAttention = !isOperating && (unseenSessionCount > 0 || hasUnresolvedTerminalAttention);
 
   const isDarkMode = isDarkTheme(token);
   // AntD exposes `colorPrimaryBg` as the subtle primary surface token.
@@ -301,11 +342,12 @@ const BranchCardComponent = ({
   const runningCardBackgroundColor = isDarkMode
     ? `color-mix(in srgb, ${token.colorPrimaryBg} 67%, ${token.colorBgBase})`
     : token.colorPrimaryBg;
-  const cardBackgroundColor = hasRunningSession
-    ? runningCardBackgroundColor
-    : isAgent
-      ? token.colorInfoBg
-      : undefined;
+  const cardBackgroundColor =
+    hasRunningSession && !isOperating
+      ? runningCardBackgroundColor
+      : isAgent
+        ? token.colorInfoBg
+        : undefined;
 
   // Memoize glow shadow string to avoid recomputing color normalization on every render
   const attentionGlowShadow = useMemo(() => {
@@ -372,7 +414,7 @@ const BranchCardComponent = ({
 
   // Compose card chrome from independent visual channels so multiple
   // states can stack cleanly:
-  //   • `boxShadow` — attention halo for needs_attention / awaiting prompt
+  //   • `boxShadow` — unseen results or unresolved terminal attention
   //   • `outline`   — dashed selected state (focused OR active URL target)
   //   • border longhands — accent stripe on the left, zone color elsewhere
   // outline + box-shadow are paint-only, so they don't disturb layout
@@ -476,7 +518,7 @@ const BranchCardComponent = ({
                 flexShrink: 0,
               }}
             >
-              {isCreating || branch.deletion_status === 'deleting' || hasRunningSession ? (
+              {isOperating || isCreating || hasRunningSession ? (
                 <Spin size="large" />
               ) : isAgent && teammateConfig?.emoji ? (
                 <span style={{ fontSize: 32 }}>{teammateConfig.emoji}</span>
@@ -553,6 +595,7 @@ const BranchCardComponent = ({
               className={REACT_FLOW_NO_DRAG_CLASS}
               aria-label={compact ? 'Expand card' : 'Collapse card'}
               icon={compact ? <PlusSquareOutlined /> : <MinusSquareOutlined />}
+              disabled={isOperating}
               onClick={(e) => {
                 e.stopPropagation();
                 onToggleCompact(branch.branch_id, !compact);
@@ -572,6 +615,7 @@ const BranchCardComponent = ({
                 type="text"
                 size="small"
                 icon={<PushpinFilled style={{ color: visiblePinColor }} />}
+                disabled={isOperating}
                 onClick={(e) => {
                   e.stopPropagation();
                   onUnpin?.(branch.branch_id);
@@ -595,6 +639,7 @@ const BranchCardComponent = ({
                 type="text"
                 size="small"
                 icon={<CodeOutlined />}
+                disabled={isOperating}
                 onClick={(e) => {
                   e.stopPropagation();
                   onOpenTerminal([], branch.branch_id);
@@ -623,6 +668,7 @@ const BranchCardComponent = ({
                 type="text"
                 size="small"
                 icon={<EditOutlined />}
+                disabled={isOperating}
                 onClick={(e) => {
                   e.stopPropagation();
                   onOpenSettings(branch.branch_id);
@@ -637,7 +683,7 @@ const BranchCardComponent = ({
                     ? 'View deletion status or retry'
                     : 'Archive or delete branch'
                 }
-                disabled={connectionDisabled}
+                disabled={connectionDisabled || isOperating}
                 onClick={() => {
                   setArchiveDeleteModalMounted(true);
                   setArchiveDeleteModalOpen(true);
@@ -648,13 +694,19 @@ const BranchCardComponent = ({
         </Space>
       </div>
 
-      <BranchWorkspaceStatus branch={branch} />
-      {branch.deletion_status && (
+      {!isOperating && (
+        <BranchWorkspaceStatus
+          branch={branch}
+          client={client}
+          currentUser={currentUserId ? userById.get(currentUserId) : null}
+        />
+      )}
+      {!isOperating && branch.deletion_status === 'deletion_failed' && (
         <div
           role="status"
           style={{ color: isFailed ? token.colorError : token.colorTextSecondary, marginBottom: 8 }}
         >
-          {branch.deletion_status === 'deletion_failed' ? 'Deletion failed' : 'Deleting…'}
+          Deletion failed
           {branch.deletion_error && <div>{branch.deletion_error}</div>}
         </div>
       )}
@@ -677,19 +729,21 @@ const BranchCardComponent = ({
             <EnvironmentPill
               repo={repo}
               branch={branch}
-              onEdit={onOpenSettings ? () => onOpenSettings(branch.branch_id) : undefined}
+              onEdit={
+                !isOperating && onOpenSettings ? () => onOpenSettings(branch.branch_id) : undefined
+              }
               onStartEnvironment={onStartEnvironment}
               onStopEnvironment={onStopEnvironment}
               onViewLogs={onViewLogs}
               onNukeEnvironment={onNukeEnvironment}
-              connectionDisabled={connectionDisabled}
+              connectionDisabled={connectionDisabled || isOperating}
               showNukeEnvironment={false}
             />
           </Space>
         </div>
       )}
 
-      <BranchFilesystemRecovery branch={branch} client={client} />
+      {!isOperating && <BranchFilesystemRecovery branch={branch} client={client} />}
 
       {/* Notes */}
       {!compact && branch.notes && (
@@ -709,9 +763,16 @@ const BranchCardComponent = ({
         <div
           ref={sessionSectionsRef}
           className={REACT_FLOW_NO_DRAG_CLASS}
-          style={sectionsReady ? undefined : { minHeight: sessionShellMinHeight }}
+          style={isOperating || sectionsReady ? undefined : { minHeight: sessionShellMinHeight }}
         >
-          {sectionsReady ? (
+          {isOperating ? (
+            <Space role="status" aria-live="polite" style={{ paddingBlock: token.paddingSM }}>
+              {inPopover && <Spin size="small" />}
+              <Typography.Text type="secondary">
+                {operation === 'archiving' ? 'Archiving branch…' : 'Deleting branch…'}
+              </Typography.Text>
+            </Space>
+          ) : sectionsReady ? (
             <BranchSessionSections
               branch={branch}
               sessions={sessions}
@@ -741,7 +802,7 @@ const BranchCardComponent = ({
         </div>
       )}
 
-      {!compact && !inPopover && !panelMode && peekedSessions.length > 0 && (
+      {!compact && !isOperating && !inPopover && !panelMode && peekedSessions.length > 0 && (
         <BranchSessionPeekSection
           client={client}
           sessions={peekedSessions}
@@ -761,10 +822,7 @@ const BranchCardComponent = ({
           branch={branch}
           sessionCount={sessions.length}
           environmentRunning={branch.environment_instance?.status === 'running'}
-          onConfirm={(options) => {
-            onArchiveOrDelete?.(branch.branch_id, options);
-            setArchiveDeleteModalOpen(false);
-          }}
+          onConfirm={handleArchiveOrDelete}
           onCancel={() => setArchiveDeleteModalOpen(false)}
           afterClose={() => setArchiveDeleteModalMounted(false)}
         />

@@ -1,5 +1,5 @@
 import type { Session } from '@agor-live/client';
-import { isSessionExecuting, SessionStatus } from '@agor-live/client';
+import { isSessionExecuting, SessionStatus, sessionHasUnseenAttention } from '@agor-live/client';
 import { ExclamationCircleOutlined, LoadingOutlined } from '@ant-design/icons';
 import type { GlobalToken } from 'antd';
 import { theme } from 'antd';
@@ -22,13 +22,18 @@ export { isSessionFailed };
 export const isSessionRowFailed = (session: Session): boolean =>
   isSessionFailed(session) && !isSessionExecuting(session);
 
-/** Read rows recede one gentle step; active, failed, timed-out, ready and selected rows stay full strength. */
+/**
+ * Read rows recede one gentle step; active, failed, timed-out, selected rows and
+ * rows with a result this viewer has not seen yet stay full strength. "Seen" is
+ * per user (session_attention_states), not the shared ready_for_prompt flag,
+ * which now only means the session has settled and can take a prompt.
+ */
 export const isSessionRowRead = (session: Session, selected: boolean): boolean =>
   !(
     isSessionExecuting(session) ||
     isSessionFailed(session) ||
     session.status === SessionStatus.TIMED_OUT ||
-    session.ready_for_prompt ||
+    sessionHasUnseenAttention(session) ||
     selected
   );
 
@@ -59,7 +64,9 @@ function getStatusMarkKind(session: Session): StatusMarkKind | null {
   if (isSessionExecuting(session)) return 'waiting';
   if (isSessionFailed(session)) return 'failed';
   if (session.status === SessionStatus.TIMED_OUT) return 'timed-out';
-  if (session.ready_for_prompt) return 'ready';
+  // Only until this viewer has opened the result; the shared ready_for_prompt
+  // flag stays set on every settled session and would mark them all.
+  if (sessionHasUnseenAttention(session)) return 'ready';
   return null;
 }
 

@@ -1,5 +1,7 @@
 import type { BoardEntityObject } from '@agor-live/client';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { withTestAuthority } from '../test/harness';
+import { markBoardLoaded } from '../test/userScopeCoverage';
 import { boardObjectPatched } from './agorRealtimeActions';
 import { agorStore } from './agorStore';
 
@@ -14,22 +16,22 @@ const placement = (compact: boolean): BoardEntityObject =>
     created_at: '2026-09-01T00:00:00.000Z',
   }) as BoardEntityObject;
 
-beforeEach(() => agorStore.getState().reset());
+withTestAuthority();
 
 describe('generic card density realtime', () => {
   it('updates both placement indexes and keeps a repeated echo reference-stable', () => {
     const expanded = placement(false);
     agorStore.getState().replaceMaps({
       boardObjectById: new Map([[expanded.object_id, expanded]]),
-      boardObjectByCardId: new Map([['card-1', expanded]]),
       boardObjectsByBoardId: new Map([['board-1', [expanded]]]),
     });
+    // Realtime writes are admitted only to rows a loaded scope holds.
+    markBoardLoaded('board-1');
 
     const collapsed = placement(true);
     boardObjectPatched(collapsed);
     const afterCollapse = agorStore.getState();
     expect(afterCollapse.boardObjectById.get(collapsed.object_id)?.compact).toBe(true);
-    expect(afterCollapse.boardObjectByCardId.get('card-1')?.compact).toBe(true);
     expect(afterCollapse.boardObjectsByBoardId.get('board-1')?.[0]?.compact).toBe(true);
 
     const stableMap = afterCollapse.boardObjectById;

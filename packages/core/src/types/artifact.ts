@@ -9,8 +9,7 @@
  * `agor.config.js` Handlebars sidecar. Env vars are declared on the artifact row
  * (`required_env_vars`) and synthesized into `.env` at render time. Daemon
  * capabilities are declared explicitly via `agor_grants`. See
- * `apps/agor-docs/pages/guide/artifacts.mdx` and
- * `docs/internal/artifacts-roadmap-2026-05-09.md`.
+ * `apps/agor-docs/content/guide/artifacts.mdx`.
  */
 
 import type { SandpackTemplate } from './board';
@@ -42,7 +41,7 @@ export interface ArtifactBindingBase {
  * the binding's `id`, never an argument. A toggle is therefore two declared
  * bindings (`enabled: true` and `enabled: false`), not one binding with a
  * caller-supplied boolean. See
- * `context/explorations/artifact-interaction-bindings.md`.
+ * `context/concepts/artifact-interaction-bindings.md`.
  */
 export type ArtifactActionEffect =
   | { kind: 'schedule_run'; schedule_id: ScheduleID }

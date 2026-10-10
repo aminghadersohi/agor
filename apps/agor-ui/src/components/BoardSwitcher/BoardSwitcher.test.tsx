@@ -1,6 +1,7 @@
 import type { AgorClient, Board, User } from '@agor-live/client';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { setRealtimeAuthorityScope } from '../../store/realtimeBatch';
 import { OPEN_BOARD_SWITCHER_EVENT, requestShellPicker } from '../../utils/shellEvents';
 import { BoardSwitcher } from './BoardSwitcher';
 
@@ -271,5 +272,25 @@ describe('BoardSwitcher current-board edit shortcut', () => {
     renderSwitcher();
     const edit = await screen.findByRole('button', { name: /Edit current board:/ });
     expect(edit).toBeVisible();
+  });
+});
+
+describe('BoardSwitcher branch-count badges (Step 3)', () => {
+  afterEach(() => setRealtimeAuthorityScope(null));
+
+  // Fork: counts come from the server-authoritative board list projection
+  // (BoardListCounts), so they are right with the store's maps empty and need
+  // no client-side aggregate read.
+  it('reads each board count from the board list projection with the store empty', async () => {
+    setRealtimeAuthorityScope('owner-1:member:1');
+    const find = vi.fn(async () => []);
+    const client = {
+      service: () => ({ find, findAll: find, on: vi.fn(), off: vi.fn() }),
+    } as unknown as AgorClient;
+    const { container } = renderSwitcher(client);
+    fireEvent.click(container.querySelector('button.ant-dropdown-trigger') as HTMLButtonElement);
+    const item = await screen.findByRole('menuitem');
+    expect(within(item).getByRole('img', { name: '3 worktrees' })).toBeInTheDocument();
+    expect(within(item).getByRole('img', { name: '4 active sessions' })).toBeInTheDocument();
   });
 });

@@ -17,6 +17,8 @@ import {
 import { resolveExecutorBranch, resolvePathInsideBranch } from './branch-filesystem.js';
 import type { CommandOptions } from './index.js';
 
+// Bound per-file stat/read/decode work even when source files are empty.
+// This is an independent work limit, not a Socket.IO frame-size estimate.
 export const MAX_ARTIFACT_FILE_COUNT = 1_000;
 export const MAX_ARTIFACT_FILE_BYTES = EXECUTOR_REQUEST_DATA_BUDGET_BYTES;
 export const MAX_ARTIFACT_TOTAL_BYTES = EXECUTOR_REQUEST_DATA_BUDGET_BYTES;
@@ -35,11 +37,11 @@ function decodeArtifactTextFile(buffer: Buffer, relativePath: string): string {
     );
   }
   try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer);
   } catch {
     throw new Error(
-      `Unsupported binary artifact file: /${relativePath}. Sandpack artifact files must be UTF-8 text. ` +
-        'Embed binary assets as data URLs in a source file or use a controlled external URL.'
+      `Artifact file /${relativePath} is not valid UTF-8 text. ` +
+        'Re-save text files as UTF-8; embed binary assets as data URLs in a source file or use a controlled external URL.'
     );
   }
 }
@@ -61,7 +63,10 @@ async function readArtifactDirectory(
       if (relativePath === 'agor.artifact.json' || relativePath === '.env') continue;
       state.fileCount += 1;
       if (state.fileCount > MAX_ARTIFACT_FILE_COUNT) {
-        throw new Error(`Artifact contains more than ${MAX_ARTIFACT_FILE_COUNT} files`);
+        throw new Error(
+          `Artifact contains more than ${MAX_ARTIFACT_FILE_COUNT} files. ` +
+            'This file-count limit bounds filesystem work independently of byte size; reduce the number of source files.'
+        );
       }
       if (stats.size > MAX_ARTIFACT_FILE_BYTES) {
         throw new Error(

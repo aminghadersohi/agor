@@ -37,6 +37,7 @@ import { useAgorStore } from '../../store/agorStore';
 import { selectMcpServerById, selectRepoById, selectUserById } from '../../store/selectors';
 import { copyToClipboard } from '../../utils/clipboard';
 import { useThemedMessage } from '../../utils/message';
+import { canSessionStartTurn } from '../../utils/sessionTurn';
 import { BranchHeaderPill } from '../BranchHeaderPill';
 import { BranchMetadataRow } from '../BranchMetadataRow';
 import { ConversationView } from '../ConversationView';
@@ -68,6 +69,8 @@ export interface SessionPanelContentProps {
   isOpen: boolean;
   /** Conversation-first presentation that hides branch and task chrome. */
   simple?: boolean;
+  /** Preserve per-chat reading positions inside the dedicated chat workspace. */
+  rememberScrollPosition?: boolean;
 }
 
 export const SessionPanelContent = React.memo<SessionPanelContentProps>(
@@ -87,6 +90,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
     inputValueRef,
     isOpen,
     simple = false,
+    rememberScrollPosition = false,
   }) => {
     const { token } = theme.useToken();
     const teammateAvatarUrl = useTeammateProfileImageUrl(branch, 'small');
@@ -633,6 +637,8 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
             teammateAvatarUrl={teammateAvatarUrl}
             onOpenAgenticToolSettings={onOpenAgenticToolSettings}
             simple={simple}
+            rememberScrollPosition={rememberScrollPosition}
+            canStartTurn={canSessionStartTurn(session, queuedTasks.length)}
           />
         </SessionConversationLayout>
 

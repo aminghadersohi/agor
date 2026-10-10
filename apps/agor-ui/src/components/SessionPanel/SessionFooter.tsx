@@ -14,9 +14,7 @@ import { getDefaultModelForTool, SessionStatus } from '@agor-live/client';
 import {
   BranchesOutlined,
   ClockCircleOutlined,
-  CloseOutlined,
   EllipsisOutlined,
-  ExclamationCircleOutlined,
   ForkOutlined,
   IdcardOutlined,
   LockOutlined,
@@ -52,6 +50,7 @@ import { useIsMobileViewport } from '../../hooks/useIsMobileViewport';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { reducedMotionSurface, usePrefersReducedMotion } from '../../hooks/usePrefersReducedMotion';
 import { MOBILE_TOUCH_TARGET } from '../../utils/deviceDetection';
+import { CompactNotice } from '../CompactNotice';
 import { EffortSelector } from '../EffortSelector';
 import { glassSurfaceStyle } from '../GlassSurface/glassStyles';
 import type { ModelConfig } from '../ModelSelector';
@@ -62,6 +61,7 @@ import { getModelDisplayName } from '../Pill/modelDisplay';
 import { SessionIdsList } from '../SessionIds';
 import { Tag } from '../Tag';
 import { PowerHoldTag } from './PowerHoldTag';
+import { RecoveryActions } from './RecoveryActions';
 import { SessionMcpFooterControl } from './SessionMcpFooterControl';
 import { SessionUsagePopover } from './SessionUsagePopover';
 
@@ -81,6 +81,10 @@ export interface SessionFooterProps {
   isRunning: boolean;
   isStopping: boolean;
   stopRequestInFlight: boolean;
+  recoveryTask?: Task;
+  recoveryError?: string | null;
+  canReopenSession?: boolean;
+  onRetryCleanup?: () => void;
   hasInput: boolean;
   composerAttachmentsPresent?: boolean;
   composerAttachmentUploading?: boolean;
@@ -112,6 +116,8 @@ export interface SessionFooterProps {
   promptInputSlot: React.ReactNode;
   /** Minimal composer presentation for conversation-first mode. */
   simple?: boolean;
+  /** Keep the pinned session actions in the bar even in simple mode (the chat workspace). */
+  showSessionActions?: boolean;
 }
 
 // Height of the mobile info-bar chips (MCP / effort / model) so they line up.
@@ -135,6 +141,10 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   isRunning,
   isStopping,
   stopRequestInFlight,
+  recoveryTask,
+  recoveryError,
+  canReopenSession,
+  onRetryCleanup,
   hasInput,
   composerAttachmentsPresent = false,
   composerAttachmentUploading = false,
@@ -162,6 +172,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   onCodexPermissionChange,
   promptInputSlot,
   simple = false,
+  showSessionActions = false,
 }) => {
   const managedByPreset = Boolean(session.agentic_tool_preset_id);
   const supportsLiveEffort = Boolean(toolCaps?.reasoningEffortLevels?.length);
@@ -188,6 +199,8 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   const pinnedItems = prefs.pinnedItems;
   // The phone bar keeps only Attach; the other pinned actions stay in the controls sheet.
   const barPinnedItems = isMobile ? pinnedItems.filter((item) => item === 'upload') : pinnedItems;
+  // Focus chat hides the pinned actions unless the host keeps them (the chat workspace).
+  const showPinnedItems = !simple || showSessionActions;
   const togglePin = (id: string) => {
     setPref({
       pinnedItems: pinnedItems.includes(id)
@@ -1331,10 +1344,11 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
     : stopRequestInFlight
       ? 'Stopping...'
       : isStopping
-        ? 'Stopping... (Click again to retry if stuck)'
+        ? 'Agor is checking that the previous work has stopped.'
         : 'Stop Execution';
 
-  const showStop = isRunning || stopRequestInFlight;
+  const recoveryFailed = recoveryTask?.sdk_failure?.termination === 'unverified';
+  const showStop = !recoveryFailed && (isRunning || stopRequestInFlight);
   // isRunning also includes stopping for the action controls. Only advertise
   // active work here, not permission/input waits or a stale offline state.
   const showActivity =
@@ -1368,6 +1382,15 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
         marginRight: -token.sizeUnit * (simple ? 4 : 6),
       }}
     >
+      <RecoveryActions
+        task={recoveryTask}
+        busy={stopRequestInFlight}
+        disconnected={connectionDisabled}
+        canReopen={canReopenSession}
+        onRetry={onRetryCleanup}
+        onReopen={onStop}
+        error={recoveryError}
+      />
       {/* Context window gradient overlay */}
       {!simple && footerGradient && (
         <div
@@ -1578,51 +1601,19 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
           </div>
         )}
 
-        {/* Unauthorized MCP servers block their tools silently. Surface it as a
-            gentle, dismissable warning banner above the composer: a compact,
-            contained AntD Alert-style box (warning bg + border + radius) with the
-            close × sitting inside it, not a full-size alarm. Longhand border
-            props keep it token-driven without the CSS-var `border` shorthand that
-            trips jsdom's parser in tests. */}
+        {/* Unauthorized MCP servers block their tools silently; nudge above the composer. */}
         {showMcpNotice && (
-          <Flex
-            align="center"
-            gap={token.sizeXS}
+          <CompactNotice
+            type="warning"
+            message={mcpNoticeMessage}
+            onDismiss={() => setDismissedMcpSignature(unauthedSignature)}
+            dismissLabel="Dismiss MCP connection notice"
             data-testid="mcp-disconnected-notice"
             role="status"
             aria-live="polite"
             aria-atomic="true"
-            style={{
-              marginBottom: token.sizeUnit * 2,
-              padding: `${token.sizeXXS}px ${token.sizeSM}px`,
-              background: token.colorWarningBg,
-              borderWidth: token.lineWidth,
-              borderStyle: 'solid',
-              borderColor: token.colorWarningBorder,
-              borderRadius: token.borderRadiusSM,
-            }}
-          >
-            <ExclamationCircleOutlined
-              style={{ fontSize: 12, color: token.colorWarning, flexShrink: 0 }}
-            />
-            <Typography.Text type="warning" style={{ fontSize: 12, flex: 1, minWidth: 0 }}>
-              {mcpNoticeMessage}
-            </Typography.Text>
-            <Button
-              type="text"
-              size="small"
-              icon={<CloseOutlined style={{ fontSize: 11 }} />}
-              aria-label="Dismiss MCP connection notice"
-              onClick={() => setDismissedMcpSignature(unauthedSignature)}
-              style={{
-                flexShrink: 0,
-                width: 20,
-                minWidth: 20,
-                height: 20,
-                color: token.colorWarning,
-              }}
-            />
-          </Flex>
+            style={{ marginBottom: token.marginXS }}
+          />
         )}
 
         {/* Row 2 — Prompt textarea */}
@@ -1640,7 +1631,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
         >
           {/* Left group */}
           <Space size={4}>
-            {!simple && barPinnedItems.includes('upload') && (
+            {showPinnedItems && barPinnedItems.includes('upload') && (
               <Tooltip
                 title={
                   composerAttachmentUploading
@@ -1663,7 +1654,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                 />
               </Tooltip>
             )}
-            {!simple && barPinnedItems.includes('advanced-upload') && (
+            {showPinnedItems && barPinnedItems.includes('advanced-upload') && (
               <Tooltip
                 title={
                   composerAttachmentUploading
@@ -1685,7 +1676,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                 />
               </Tooltip>
             )}
-            {!simple &&
+            {showPinnedItems &&
               barPinnedItems.includes('fork') &&
               toolCaps?.supportsSessionFork !== false && (
                 <Tooltip title={connectionDisabled ? 'Disconnected from daemon' : 'Fork Session'}>
@@ -1702,7 +1693,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                 </Tooltip>
               )}
             {/* Dynamically pinned items */}
-            {!simple &&
+            {showPinnedItems &&
               barPinnedItems.includes('btw-fork') &&
               toolCaps?.supportsSessionFork !== false && (
                 <Tooltip title="BTW fork">
@@ -1718,7 +1709,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                   />
                 </Tooltip>
               )}
-            {!simple &&
+            {showPinnedItems &&
               barPinnedItems.includes('spawn') &&
               toolCaps?.supportsChildSpawn !== false && (
                 <Tooltip title="Spawn subsession">
@@ -1774,7 +1765,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                 <Tooltip title={stopTooltip}>
                   <Button
                     danger
-                    aria-label="Stop"
+                    aria-label={isStopping ? 'Recovering' : 'Stop'}
                     aria-busy={stopRequestInFlight || isStopping}
                     size={actionSize}
                     style={touchActionStyle}
@@ -1782,9 +1773,21 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                       stopRequestInFlight || isStopping ? <Spin size="small" /> : <StopOutlined />
                     }
                     onClick={onStop}
-                    disabled={connectionDisabled || !isRunning || stopRequestInFlight}
+                    disabled={connectionDisabled || !isRunning || stopRequestInFlight || isStopping}
                   >
-                    Stop
+                    {/* Reserve the longest label so recovery does not move the controls. */}
+                    <span style={{ display: 'inline-grid' }}>
+                      <span aria-hidden="true" style={{ gridArea: '1 / 1', visibility: 'hidden' }}>
+                        Recovering…
+                      </span>
+                      <span style={{ gridArea: '1 / 1' }}>
+                        {isStopping
+                          ? recoveryTask?.termination_request?.cause === 'user_stop'
+                            ? 'Stopping…'
+                            : 'Recovering…'
+                          : 'Stop'}
+                      </span>
+                    </span>
                   </Button>
                 </Tooltip>
               )}

@@ -43,7 +43,7 @@ interface Fixtures {
   user?: Partial<User> | null;
   channel?: Partial<GatewayChannel> | null;
   server?: Partial<MCPServer> | null;
-  mapping?: { channel_id: string; thread_id: string } | null;
+  mapping?: { session_id?: SessionID; channel_id?: string; thread_id?: string } | null;
 }
 
 function repositories(fixtures: Fixtures = {}): SlackMCPOAuthAuthorityRepositories {
@@ -111,6 +111,10 @@ describe('shared Slack MCP OAuth authority read', () => {
     [
       'a thread mapped to another channel',
       { mapping: { channel_id: 'gateway-2', thread_id: THREAD } },
+    ],
+    [
+      'a thread mapped to another session',
+      { mapping: { session_id: 'session-other' as SessionID } },
     ],
     ['a disabled server', { server: { enabled: false } }],
     ['a server converted away from OAuth', { server: { auth: { type: 'bearer' } } }],

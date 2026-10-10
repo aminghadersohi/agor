@@ -1,4 +1,11 @@
-import { type BoardID, boardPath, type SessionID, sessionPath } from '@agor-live/client';
+import {
+  type BoardID,
+  boardPath,
+  CHAT_WORKSPACE_PATH_SEGMENT,
+  chatWorkspacePath,
+  type SessionID,
+  sessionPath,
+} from '@agor-live/client';
 import { matchPath, type NavigateFunction } from 'react-router-dom';
 import { resolveUiRuntime, routerBasenameForRuntime } from '../config/urlRuntime';
 import { resolveBoardFromUrlPure, resolveSessionFromShortIdPure } from './urlResolution';
@@ -48,6 +55,16 @@ const TEAMMATES_ROUTE_PATHS = [TEAMMATES_ROUTE_PATH, MOBILE_TEAMMATES_ROUTE_PATH
 export const isTeammatesRoute = (pathname: string): boolean =>
   TEAMMATES_ROUTE_PATHS.some((path) => matchPath({ path, end: true }, pathname) !== null);
 
+/** Whether `pathname` is the desktop chat workspace: `/chats/` or `/chats/<sessionShort>/`. */
+export const isChatWorkspaceRoute = (pathname: string): boolean =>
+  matchPath({ path: `/${CHAT_WORKSPACE_PATH_SEGMENT}`, end: true }, pathname) !== null ||
+  matchPath({ path: `/${CHAT_WORKSPACE_PATH_SEGMENT}/:sessionShortId`, end: true }, pathname) !==
+    null;
+
+/** `/chats/<short>/` names the open session, so it compares equal to its own canonical form. */
+export const isChatWorkspacePathFor = (pathname: string, sessionId: string | null): boolean =>
+  `${pathname.replace(/\/$/, '')}/` === chatWorkspacePath(sessionId as SessionID | null);
+
 type ResponsiveRouteEntities = {
   boards: Iterable<{ board_id: string; slug?: string }>;
   sessions: Iterable<{ session_id: string }>;
@@ -71,7 +88,8 @@ export function responsiveRoutePath(
       // the same ambiguity-safe resolver once the initial board list arrives.
       return `/m/board/${boardId ?? boardToken}`;
     }
-    const sessionToken = pathname.match(/^\/s\/([^/]+)\/?$/)?.[1];
+    // Phones have no chat workspace rail; its session opens full screen.
+    const sessionToken = pathname.match(/^\/(?:s|chats)\/([^/]+)\/?$/)?.[1];
     if (sessionToken) {
       const sessions = new Map(
         Array.from(entities.sessions, (session) => [session.session_id, session])

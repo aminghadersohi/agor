@@ -2,10 +2,21 @@ import { createClient, createRestClient } from '@agor-live/client';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  AUTH_REVALIDATE_REQUESTED_EVENT,
   resetRefreshFailureState,
   TOKENS_REFRESH_UNRECOVERABLE_EVENT,
 } from '../utils/singleFlightRefresh';
+import { RefreshSupersededError } from '../utils/tokenRefresh';
 import { SERVICE_CALL_ACK_TIMEOUT_MS, useAgorClient } from './useAgorClient';
+import type { CredentialReconciliation } from './useAuth';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 // Keep every real export; only stub the client factory so the hook wires a
 // controllable mock instead of opening a real socket.
@@ -408,9 +419,16 @@ describe('weak-network recovery', () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.clearAllMocks();
+    refreshTokensMock.mockReset();
+    localStorage.clear();
   });
 
-  async function connectedSeam() {
+  async function connectedSeam(
+    auth: Pick<
+      Parameters<typeof useAgorClient>[0],
+      'reconcileCredentials' | 'isAuthorityGenerationCurrent'
+    > = {}
+  ) {
     const seam = makeSeamClient();
     vi.mocked(createClient).mockReturnValue(seam.client as never);
     const hook = renderHook(() =>
@@ -418,6 +436,7 @@ describe('weak-network recovery', () => {
         url: 'http://daemon.test',
         accessToken: 'token',
         authorityGeneration: 1,
+        ...auth,
       })
     );
     await act(async () => {});
@@ -498,6 +517,43 @@ describe('weak-network recovery', () => {
     await act(() => vi.advanceTimersByTimeAsync(30_000));
     expect(io.connect).toHaveBeenCalledTimes(count + 1);
   });
+  it('starts a fresh reconnect budget on Retry after exhaustion and recovers from a transient failure', async () => {
+    vi.useFakeTimers();
+    const { io, fireIo, result, rejectNextConnect } = await connectedSeam();
+    const kick = () =>
+      act(() => {
+        io.connected = false;
+        fireIo('disconnect', 'io server disconnect');
+      });
+
+    // Brief successful handshakes must not reset the ten-attempt budget.
+    for (let attempt = 0; attempt < 10; attempt++) {
+      kick();
+      await act(() => vi.advanceTimersByTimeAsync(Math.min(500 * 2 ** attempt, 30_000)));
+    }
+    kick();
+    expect(io.connect).toHaveBeenCalledTimes(11);
+    expect(result.current.connecting).toBe(false);
+    expect(result.current.error).toContain('after multiple attempts');
+
+    // A rejected namespace cannot auto-reconnect; a transient REST refresh
+    // failure must schedule another handshake rather than give up again.
+    localStorage.setItem('agor-refresh-token', 'refresh');
+    vi.mocked(createRestClient).mockResolvedValue({} as never);
+    refreshTokensMock.mockRejectedValueOnce(new Error('network error'));
+    rejectNextConnect(Object.assign(new Error('expired'), { code: 401 }));
+    await act(async () => result.current.retryConnection());
+    expect(io.connect).toHaveBeenCalledTimes(12);
+    expect(result.current.error).toBeNull();
+    expect(result.current.connecting).toBe(true);
+
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    expect(io.connect).toHaveBeenCalledTimes(13);
+    expect(result.current.connected).toBe(true);
+    expect(result.current.connecting).toBe(false);
+    expect(result.current.error).toBeNull();
+  });
+
   it('pauses manual retries offline and resumes without replacing the client', async () => {
     vi.useFakeTimers();
     const { io, fireIo, result } = await connectedSeam();
@@ -535,6 +591,128 @@ describe('weak-network recovery', () => {
     expect(io.connect).toHaveBeenCalledTimes(2);
     expect(result.current.connected).toBe(true);
     localStorage.clear();
+    refreshTokensMock.mockReset();
+  });
+
+  it('resumes the handshake with the useAuth-reconciled token when a same-authority refresh is superseded', async () => {
+    vi.useFakeTimers();
+    const reconcile = deferred<CredentialReconciliation>();
+    const reconcileCredentials = vi.fn(() => reconcile.promise);
+    const { io, fireIo, result } = await connectedSeam({ reconcileCredentials });
+    localStorage.setItem('agor-refresh-token', 'refresh-old');
+    vi.mocked(createRestClient).mockResolvedValue({} as never);
+    refreshTokensMock.mockRejectedValueOnce(new RefreshSupersededError());
+    // Another tab has since rotated and stored fresh credentials.
+    localStorage.setItem('agor-access-token', 'access-from-other-tab');
+    act(() => {
+      io.connected = false;
+      fireIo('disconnect', 'transport close');
+      fireIo('connect_error', Object.assign(new Error('expired'), { code: 401 }));
+    });
+    await act(async () => {});
+    expect(reconcileCredentials).toHaveBeenCalledTimes(1);
+    // The stored token is never adopted directly; recovery waits for useAuth.
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    expect(io.connect).toHaveBeenCalledTimes(1);
+    expect(result.current.error).toBeNull();
+    expect(result.current.connecting).toBe(true);
+
+    await act(async () => {
+      reconcile.resolve({
+        status: 'authenticated',
+        accessToken: 'access-from-other-tab',
+        authenticationGeneration: 1,
+      });
+    });
+    await act(() => vi.advanceTimersByTimeAsync(500));
+    expect(io.connect).toHaveBeenCalledTimes(2);
+    expect(result.current.connected).toBe(true);
+    const tokenSource = vi.mocked(createClient).mock.calls.at(-1)?.[2]
+      ?.socketAuthentication?.accessToken;
+    expect((tokenSource as () => string | null | undefined)()).toBe('access-from-other-tab');
+    localStorage.clear();
+    refreshTokensMock.mockReset();
+  });
+
+  it('never reconnects a binding whose authority reconciliation replaced', async () => {
+    vi.useFakeTimers();
+    const reconcileCredentials = vi.fn(
+      async (): Promise<CredentialReconciliation> => ({
+        status: 'authenticated',
+        accessToken: 'access-user-b',
+        authenticationGeneration: 2,
+      })
+    );
+    const { io, fireIo, result } = await connectedSeam({ reconcileCredentials });
+    localStorage.setItem('agor-refresh-token', 'refresh-old');
+    vi.mocked(createRestClient).mockResolvedValue({} as never);
+    refreshTokensMock.mockRejectedValueOnce(new RefreshSupersededError());
+    act(() => {
+      io.connected = false;
+      fireIo('disconnect', 'transport close');
+      fireIo('connect_error', Object.assign(new Error('expired'), { code: 401 }));
+    });
+    await act(() => vi.advanceTimersByTimeAsync(31_000));
+    expect(io.connect).toHaveBeenCalledTimes(1);
+    const tokenSource = vi.mocked(createClient).mock.calls.at(-1)?.[2]
+      ?.socketAuthentication?.accessToken;
+    expect((tokenSource as () => string | null | undefined)()).toBe('token');
+    expect(result.current.error).toBeNull();
+    localStorage.clear();
+    refreshTokensMock.mockReset();
+  });
+
+  it('does not reconnect with a refresh result once useAuth replaced the authority', async () => {
+    vi.useFakeTimers();
+    let currentGeneration = 1;
+    const { io, fireIo } = await connectedSeam({
+      isAuthorityGenerationCurrent: (generation) => generation === currentGeneration,
+    });
+    localStorage.setItem('agor-refresh-token', 'refresh-of-other-identity');
+    vi.mocked(createRestClient).mockResolvedValue({} as never);
+    refreshTokensMock.mockImplementationOnce(async () => {
+      // The refreshed identity differs, so useAuth adopts it as a new authority.
+      currentGeneration = 2;
+      return { accessToken: 'access-other', refreshToken: 'refresh-next', user: { user_id: 'u2' } };
+    });
+    act(() => {
+      io.connected = false;
+      fireIo('disconnect', 'transport close');
+      fireIo('connect_error', Object.assign(new Error('expired'), { code: 401 }));
+    });
+    await act(() => vi.advanceTimersByTimeAsync(31_000));
+    expect(io.connect).toHaveBeenCalledTimes(1);
+    const tokenSource = vi.mocked(createClient).mock.calls.at(-1)?.[2]
+      ?.socketAuthentication?.accessToken;
+    expect((tokenSource as () => string | null | undefined)()).toBe('token');
+    localStorage.clear();
+    refreshTokensMock.mockReset();
+  });
+
+  it('stands down without an error when a superseded refresh left no stored credentials', async () => {
+    vi.useFakeTimers();
+    const { io, fireIo, result } = await connectedSeam();
+    localStorage.setItem('agor-refresh-token', 'refresh-old');
+    vi.mocked(createRestClient).mockResolvedValue({} as never);
+    refreshTokensMock.mockImplementationOnce(async () => {
+      localStorage.clear();
+      throw new RefreshSupersededError();
+    });
+    const revalidate = vi.fn();
+    window.addEventListener(AUTH_REVALIDATE_REQUESTED_EVENT, revalidate);
+    act(() => {
+      io.connected = false;
+      fireIo('disconnect', 'transport close');
+      fireIo('connect_error', Object.assign(new Error('expired'), { code: 401 }));
+    });
+    await act(async () => {});
+    await act(() => vi.advanceTimersByTimeAsync(31_000));
+    window.removeEventListener(AUTH_REVALIDATE_REQUESTED_EVENT, revalidate);
+    expect(result.current.error).toBeNull();
+    expect(result.current.connecting).toBe(false);
+    expect(io.connect).toHaveBeenCalledTimes(1);
+    // Nothing else notices a cross-tab sign-out, so useAuth must be asked.
+    expect(revalidate).toHaveBeenCalledTimes(1);
     refreshTokensMock.mockReset();
   });
 });

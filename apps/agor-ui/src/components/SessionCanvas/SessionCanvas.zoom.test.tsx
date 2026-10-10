@@ -8,6 +8,8 @@ import type { Node, NodeDragHandler } from 'reactflow';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { agorStore } from '../../store/agorStore';
+import { boardScopeKey } from '../../store/scopeMerge';
+import { boardCoverage } from '../../test/userScopeCoverage';
 import SessionCanvas, { isCanvasSelectionControlTarget } from './SessionCanvas';
 
 const permissionState = vi.hoisted(() => ({ canEdit: true }));
@@ -79,7 +81,12 @@ beforeEach(() => {
   nodesStateOverride = undefined;
   onNodesChangeInternalSpy.mockClear();
   setNodesUnsafeSpy.mockClear();
-  agorStore.setState({ userById: new Map(), commentById: new Map() });
+  agorStore.setState({
+    userById: new Map(),
+    commentById: new Map(),
+    // Structural edits need the board's partition loaded.
+    coverage: new Map([[boardScopeKey('board-1'), boardCoverage()]]),
+  });
 });
 
 // The fork's SessionCanvas subscribes to zone-workflow-transitions and to the
@@ -420,6 +427,8 @@ describe('SessionCanvas zoom shortcuts', () => {
     };
 
     function renderDragCanvas(board: Board, client: AgorClient, getNodes: () => Node[]) {
+      // Structural edits need the board's partition loaded.
+      agorStore.getState().setCoverage(boardScopeKey(board.board_id), boardCoverage());
       nodesStateOverride = getNodes();
       const view = render(
         <ConnectionProvider value={connected}>

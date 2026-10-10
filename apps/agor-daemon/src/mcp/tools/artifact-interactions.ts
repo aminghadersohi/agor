@@ -7,7 +7,7 @@
  * It checks only what the conversion needs. The artifacts service validates
  * the result — shape and branch membership — before anything is written, for
  * this surface and REST alike. See
- * `context/explorations/artifact-interaction-bindings.md`.
+ * `context/concepts/artifact-interaction-bindings.md`.
  *
  * Kept free of service imports so the tool entry stays light.
  */

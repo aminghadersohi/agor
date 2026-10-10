@@ -11,10 +11,12 @@ import type {
   SchedulerInitializationStage,
   Session,
   SessionCallbackRetargetResult,
+  SessionCount,
   SessionID,
   SessionRelationshipID,
   SessionReparentResult,
   SessionUpdate,
+  UserID,
   UUID,
 } from '@agor/core/types';
 import { SessionStatus } from '@agor/core/types';
@@ -33,6 +35,7 @@ import {
   sql,
 } from 'drizzle-orm';
 import { getBaseUrl } from '../../config/config-manager';
+import { PAGINATION } from '../../config/constants';
 import { generateId, shortId } from '../../lib/ids';
 import { getSessionUrl } from '../../utils/url';
 import { lockBranchForAdmission } from '../branch-admission';
@@ -41,8 +44,10 @@ import {
   deleteFrom,
   insert,
   isPostgresDatabase,
+  jsonExtract,
   lockRowForUpdate,
   runDatabaseTransaction,
+  searchCondition,
   select,
   txAsDb,
   update,
@@ -67,7 +72,11 @@ import {
   RepositoryError,
   resolveByShortIdPrefix,
 } from './base';
-import { branchCapabilityCondition, inVisibleBranchSet } from './branch-access';
+import {
+  branchCapabilityCondition,
+  inVisibleBranchSet,
+  visibleBranchReferenceAccessExists,
+} from './branch-access';
 import { deepMerge } from './merge-utils';
 import {
   extractMessageText,
@@ -129,10 +138,11 @@ export type SessionArchiveStateUpdate = {
 };
 
 /**
- * Patches that only acknowledge UI attention state should not make a session
- * look recently active. Keep this intentionally value-aware: setting
+ * Patches that only clear the shared ready_for_prompt flag should not make a
+ * session look recently active. Keep this intentionally value-aware: setting
  * ready_for_prompt=true is emitted by task/stop/executor completion paths and
- * is activity; clearing it is the session-open/highlight acknowledgement path.
+ * is activity; clearing it is a legacy acknowledgement path (current clients
+ * acknowledge per user via session_attention_states instead).
  *
  * Do not add title/description/model/permission fields here — those are
  * user-visible session metadata changes and should continue to affect recency.
@@ -150,6 +160,12 @@ export interface SessionPageOptions {
   boardId?: string;
   branchId?: BranchID;
   branchIds?: BranchID[];
+  /** Restrict to these session ids (an empty set yields no rows). */
+  sessionIds?: SessionID[];
+  /** Restrict to sessions created by this user (a filter, never an access grant). */
+  createdBy?: UserID;
+  /** Restrict to sessions matching this search (`SEARCHABLE_FIELDS.session`). */
+  search?: string;
   archived?: boolean;
   sortUpdatedAt?: 1 | -1;
   sortCreatedAt?: 1 | -1;
@@ -169,6 +185,38 @@ export interface PowerEssentialSessionSearchOptions {
 export interface VisiblePowerEssentialSession {
   slotOccupied: boolean;
   selected?: PowerEssentialSessionOption;
+}
+
+/**
+ * Whether `findPage` probes each candidate's branch instead of first building
+ * the caller's visible-branch set. The set has a fixed cost even for a few
+ * rows; a probe costs per candidate examined, so it is used only where that
+ * count is small:
+ * - an exact id list of at most `MAX_ID_LIST` (bounded by its length);
+ * - an uncounted, unscoped page of the caller's own sessions with `archived`
+ *   set and sorted by `updated_at`, so the `(archived, updated_at)` index
+ *   yields rows in order and the scan stops after about `skip + limit` own
+ *   rows. A heuristic, not a hard bound: own rows on branches the caller has
+ *   since lost still cost a probe each.
+ */
+function probesVisibilityPerRow(opts: SessionPageOptions): boolean {
+  if (opts.sessionIds !== undefined) return opts.sessionIds.length <= PAGINATION.MAX_ID_LIST;
+  // Checked here, not assumed from findPage's no-count guard: a missing,
+  // fractional or negative window must not pass as a small page.
+  const { limit, skip = 0 } = opts;
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 0) return false;
+  if (!Number.isInteger(skip) || skip < 0) return false;
+  return (
+    opts.createdBy !== undefined &&
+    opts.createdBy === opts.visibleToUserId &&
+    opts.includeTotal === false &&
+    opts.archived !== undefined &&
+    opts.sortUpdatedAt !== undefined &&
+    opts.boardId === undefined &&
+    opts.branchId === undefined &&
+    opts.branchIds === undefined &&
+    limit + skip <= PAGINATION.MAX_ID_LIST
+  );
 }
 
 /**
@@ -327,6 +375,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         power_priority_updated_at: row.power_priority_updated_at?.toISOString(),
         power_priority_updated_by:
           (row.power_priority_updated_by as Session['power_priority_updated_by']) ?? undefined,
+        attention_generation: row.attention_generation ?? 0,
         archived: Boolean(row.archived), // Convert SQLite integer (0/1) to boolean
         // Active rows have no semantic archive cause. Ignore stale values
         // left by historical callers that cleared `archived` with undefined;
@@ -390,6 +439,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         ? new Date(session.power_priority_updated_at)
         : null,
       power_priority_updated_by: session.power_priority_updated_by ?? null,
+      attention_generation: session.attention_generation ?? 0,
       archived: session.archived ?? false, // Default false for new sessions
       archived_reason: session.archived_reason ?? null,
       auto_archive: session.auto_archive ?? 'never',
@@ -443,7 +493,11 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
    */
   async create(data: Partial<Session>): Promise<Session> {
     try {
-      const insertData = this.sessionToInsert(data);
+      const insertData = this.sessionToInsert({
+        ...data,
+        // Server-owned: callers cannot seed an arbitrary generation.
+        attention_generation: data.ready_for_prompt === true ? 1 : 0,
+      });
       await runDatabaseTransaction(
         this.db,
         async (tx) => {
@@ -736,7 +790,7 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         throw new Error('No-count session queries require a non-negative integer limit');
       }
       const tenantCondition = tenantInventoryCondition(this.db, sessions);
-      if (opts.branchIds?.length === 0)
+      if (opts.branchIds?.length === 0 || opts.sessionIds?.length === 0)
         return opts.includeTotal === false ? { data: [] } : { data: [], total: 0 };
       const baseUrl = await getBaseUrl(this.db);
 
@@ -747,13 +801,35 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
       if (opts.branchId !== undefined) conditions.push(eq(sessions.branch_id, opts.branchId));
       if (opts.branchIds !== undefined)
         conditions.push(inArray(sessions.branch_id, opts.branchIds));
+      if (opts.sessionIds !== undefined)
+        conditions.push(inArray(sessions.session_id, opts.sessionIds));
+      if (opts.createdBy !== undefined) conditions.push(eq(sessions.created_by, opts.createdBy));
       if (opts.archived !== undefined) conditions.push(eq(sessions.archived, opts.archived));
       if (opts.visibleToUserId) {
+        // Same branch.view policy either way; only the evaluation shape differs.
+        // Outer board/branch filters already pin the branch, so the probe
+        // needs no scope. Parity: sessions.visibility-parity-test-helpers.ts.
         conditions.push(
-          inVisibleBranchSet(this.db, opts.visibleToUserId, sessions.branch_id, opts)
+          probesVisibilityPerRow(opts)
+            ? visibleBranchReferenceAccessExists(this.db, opts.visibleToUserId, sessions.branch_id)
+            : inVisibleBranchSet(this.db, opts.visibleToUserId, sessions.branch_id, opts)
         );
       }
-      const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+      let whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+      if (opts.search !== undefined) {
+        // Over the rows every other condition (visibility included) admits.
+        whereClause = searchCondition(this.db, {
+          id: sessions.session_id,
+          from: sql`${sessions} left join ${branches} on ${sessions.branch_id} = ${branches.branch_id}`,
+          scope: whereClause,
+          search: opts.search,
+          fields: [
+            jsonExtract(this.db, sessions.data, 'title'),
+            jsonExtract(this.db, sessions.data, 'description'),
+            sessions.agentic_tool,
+          ],
+        });
+      }
 
       // Exact totals remain the default for existing Feathers/findAll callers.
       let total: number | undefined;
@@ -808,6 +884,35 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         error
       );
     }
+  }
+
+  /**
+   * Count active (non-archived) sessions per branch or per board (the
+   * session's branch's board), for settings tables. With `visibleToUserId`,
+   * only sessions on branches the caller can view count, the same visibility
+   * as `findPage`; tenancy comes from the tenant condition and RLS.
+   */
+  async countActive(opts: {
+    groupBy: 'branch_id' | 'board_id';
+    visibleToUserId?: UUID;
+  }): Promise<SessionCount[]> {
+    const key = opts.groupBy === 'board_id' ? branches.board_id : sessions.branch_id;
+    const conditions = [eq(sessions.archived, false), isNotNull(key)];
+    const tenantCondition = tenantInventoryCondition(this.db, sessions);
+    if (tenantCondition) conditions.push(tenantCondition);
+    if (opts.visibleToUserId) {
+      conditions.push(inVisibleBranchSet(this.db, opts.visibleToUserId, sessions.branch_id));
+    }
+    const rows = await select(this.db, { id: key, session_count: sql<number>`count(*)` })
+      .from(sessions)
+      .leftJoin(branches, eq(sessions.branch_id, branches.branch_id))
+      .where(and(...conditions))
+      .groupBy(key)
+      .all();
+    return (rows as Array<{ id: string; session_count: number | string }>).map((row) => ({
+      id: row.id,
+      session_count: Number(row.session_count),
+    }));
   }
 
   /**
@@ -1039,8 +1144,16 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
           auto_archive_at: autoArchiveAtUpdate,
           auto_archive_after_seconds: autoArchiveAfterSecondsUpdate,
           read_shape: _readShape,
+          // Server-owned: the generation only advances on the ready edge below,
+          // and the viewer acknowledgement lives in session_attention_states.
+          attention_generation: _callerAttentionGeneration,
+          viewer_seen_attention_generation: _callerSeenAttentionGeneration,
           ...genericUpdates
-        } = updates as Partial<Session> & { read_shape?: unknown };
+        } = updates as Partial<Session> & {
+          read_shape?: unknown;
+          attention_generation?: unknown;
+          viewer_seen_attention_generation?: unknown;
+        };
         const merged = deepMerge(current, genericUpdates);
         if (sdkSessionIdUpdate === null) {
           delete merged.sdk_session_id;
@@ -1070,6 +1183,14 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
           }
         }
 
+        // A false -> true transition is the single persisted generation edge
+        // for output/attention. Repeated terminal projections are idempotent,
+        // while a later task start resets ready_for_prompt before its own
+        // completion advances the generation again.
+        if (updates.ready_for_prompt === true && current.ready_for_prompt === false) {
+          merged.attention_generation = current.attention_generation + 1;
+        }
+
         const insertData = this.sessionToInsert(merged);
 
         // STEP 3: Write merged session (within same transaction)
@@ -1077,10 +1198,12 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         // Previously used an explicit column allowlist that silently dropped
         // columns like archived/archived_reason, causing data to revert on reload.
         // Refresh updated_at for meaningful updates. sessionToInsert() preserves
-        // the old timestamp from the merged session, so timestamp-neutral UI
-        // acknowledgements (currently only ready_for_prompt:false) can keep
-        // recency ordering stable. Meaningful activity/settings/status patches
-        // still advance it; without that, the staleness check in query-builder.ts
+        // the old timestamp from the merged session, so timestamp-neutral
+        // patches (currently only ready_for_prompt:false) keep recency ordering
+        // stable. Caller-private read acknowledgement lives in
+        // session_attention_states and never patches this shared row.
+        // Meaningful activity/settings/status patches still advance it; without
+        // that, the staleness check in query-builder.ts
         // (hoursSinceUpdate > 24) would erroneously clear sdk_session_id and
         // disconnect agents from their history.
         const shouldRefreshLastUpdated = !isSessionTimestampNeutralPatch(updates);

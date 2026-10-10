@@ -201,6 +201,10 @@ export interface SessionsServiceImpl
     streaming: boolean;
   }>;
   materializeAgenticToolPreset(session: Session, params?: FeathersParams): Promise<Session>;
+  acknowledgeAttention(
+    id: string,
+    params?: FeathersParams
+  ): Promise<import('@agor/core/types').SessionAttentionAcknowledgement>;
   // Event emitter methods (FeathersJS EventEmitter interface - any[] for event args flexibility)
   // biome-ignore lint/suspicious/noExplicitAny: FeathersJS event handlers accept variable arguments
   on(event: string, handler: (...args: any[]) => void): this;
@@ -219,6 +223,10 @@ export interface TasksServiceImpl extends Service<Task, Partial<Task>, FeathersP
     params?: FeathersParams
   ): Promise<TaskDispatchClaimResult>;
   connectExecutor(data: { task_id: string }, params?: FeathersParams): Promise<Task>;
+  reportExecutorInterruption(
+    data: import('@agor/core/types').ExecutorInterruptionInput,
+    params?: FeathersParams
+  ): Promise<Task>;
   reportTerminationComplete(
     data: import('@agor/core/types').ExecutorTerminationCompleteInput,
     params?: FeathersParams
@@ -263,6 +271,17 @@ export interface TasksServiceImpl extends Service<Task, Partial<Task>, FeathersP
     input: TaskTerminationCoordinationClaimInput,
     params?: FeathersParams
   ): Promise<TaskTerminationCoordinationClaimResult>;
+  retryTermination(
+    taskId: string,
+    requestedAt: string,
+    revision: string,
+    params?: FeathersParams
+  ): Promise<Task | null>;
+  beginCleanupAttempt(
+    taskId: string,
+    claimToken: string,
+    params?: FeathersParams
+  ): Promise<Task | null>;
   settleTermination(
     input: TerminationSettlementInput,
     params?: FeathersParams

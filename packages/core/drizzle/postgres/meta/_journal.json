@@ -904,6 +904,13 @@
       "when": 1790208000011,
       "tag": "0117_opencode_checkpoint_attempts",
       "breakpoints": true
+    },
+    {
+      "idx": 9040,
+      "version": "7",
+      "when": 1790208000020,
+      "tag": "9032_session_attention_states",
+      "breakpoints": true
     }
   ]
 }
