@@ -228,3 +228,26 @@ describe('lean session list rows in the store', () => {
     expect(stored.custom_context).not.toHaveProperty('slash_commands');
   });
 });
+
+describe('caller-private session attention state', () => {
+  it('preserves the viewer acknowledgement across shared session patches', () => {
+    const existing = {
+      ...makeSession('s1', 'A'),
+      attention_generation: 2,
+      viewer_seen_attention_generation: 2,
+    } as Session;
+    const maps = buildSessionMaps([existing]);
+
+    const result = applySessionPatchToMaps({ ...EMPTY_MAPS, ...maps }, {
+      ...makeSession('s1', 'A', 'idle'),
+      attention_generation: 3,
+      // Shared realtime session events intentionally omit this per-user field.
+      viewer_seen_attention_generation: undefined,
+    } as Session);
+
+    expect(result.sessionById.get('s1')).toMatchObject({
+      attention_generation: 3,
+      viewer_seen_attention_generation: 2,
+    });
+  });
+});

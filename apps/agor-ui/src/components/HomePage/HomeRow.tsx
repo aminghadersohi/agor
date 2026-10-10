@@ -30,6 +30,7 @@ import { SessionRowLogo, SessionStatusMark } from '../SessionRow';
 import { UserIdentityAvatar } from '../UserIdentityAvatar';
 import { HomeLink, useHomeCompact } from './HomeSection';
 import {
+  HOME_BOARD_PILL_MAX_WIDTH,
   HOME_META_PILL_MAX_WIDTH_COMPACT,
   HOME_NEED_DOT_SIZE,
   HOME_ROW_LEAD,
@@ -221,13 +222,19 @@ export const HomeContext: React.FC<{
   branchId?: string;
   boardId?: string | null;
   showBoard?: boolean;
-}> = ({ branchId, boardId, showBoard = true }) => {
+  /** Caps the chips tighter than phones do, for narrow columns such as the side rail. */
+  narrow?: boolean;
+}> = ({ branchId, boardId, showBoard = true, narrow = false }) => {
   const compact = useHomeCompact();
   const branch = useAgorStore(useMemo(() => makeBranchSelector(branchId), [branchId]));
   const resolvedBoardId = boardId ?? branch?.board_id;
   const board = useAgorStore(useMemo(() => makeBoardSelector(resolvedBoardId), [resolvedBoardId]));
   const teammate = branch ? getTeammateConfig(branch) : null;
-  const maxWidth = compact ? HOME_META_PILL_MAX_WIDTH_COMPACT : undefined;
+  const maxWidth = narrow
+    ? HOME_BOARD_PILL_MAX_WIDTH.compact
+    : compact
+      ? HOME_META_PILL_MAX_WIDTH_COMPACT
+      : undefined;
   return (
     <>
       {teammate ? (
@@ -323,6 +330,8 @@ interface HomeSessionRowProps {
   title?: string;
   /** Grouped rows already show branch and board in their headers. */
   showContext?: boolean;
+  /** Narrow column (the side rail): context chips cap their width as on phones. */
+  narrow?: boolean;
   /** Off when every row in view uses the same agent. */
   showLogo?: boolean;
   indent?: number;
@@ -340,6 +349,7 @@ export const HomeSessionRow = memo(function HomeSessionRow({
   detail: sharedDetail,
   title = getSessionDisplayTitle(session, { includeAgentFallback: true }),
   showContext = true,
+  narrow = false,
   showLogo = true,
   indent,
   expand,
@@ -468,7 +478,11 @@ export const HomeSessionRow = memo(function HomeSessionRow({
               </Typography.Text>
             )}
             {showContext && (
-              <HomeContext branchId={session.branch_id} boardId={session.branch_board_id} />
+              <HomeContext
+                branchId={session.branch_id}
+                boardId={session.branch_board_id}
+                narrow={narrow}
+              />
             )}
             {origin && (
               <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>

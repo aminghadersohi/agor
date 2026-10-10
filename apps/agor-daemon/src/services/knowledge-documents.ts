@@ -8,6 +8,7 @@
 import { KNOWLEDGE_DOCUMENT_PAGINATION } from '@agor/core/config';
 import {
   type CreateKnowledgeDocumentInput,
+  isDatabaseUniqueConstraintError,
   isPostgresDatabaseHandle,
   KnowledgeAttributionRepository,
   type KnowledgeDocumentFilters,
@@ -59,6 +60,10 @@ import {
   isKnowledgeAdmin,
   resolveKnowledgeNamespacePermission,
 } from './knowledge-access.js';
+import {
+  KnowledgeDocumentOwnerOnlyEditError,
+  KnowledgeDocumentVersionMismatchError,
+} from './knowledge-errors.js';
 
 export type KnowledgeDocumentParams = QueryParams<{
   namespace_id?: KnowledgeNamespaceID;
@@ -528,8 +533,9 @@ export class KnowledgeDocumentsService extends DrizzleService<
       current?.version_id === String(expectedVersion) ||
       String(current?.version_number) === String(expectedVersion);
     if (!matches) {
-      throw new BadRequest(
-        `Knowledge document version mismatch: expected ${expectedVersion}, current is ${current?.version_number ?? 'none'}`
+      throw new KnowledgeDocumentVersionMismatchError(
+        expectedVersion,
+        current?.version_number ?? 'none'
       );
     }
   }
@@ -631,12 +637,35 @@ export class KnowledgeDocumentsService extends DrizzleService<
     params?: KnowledgeDocumentParams
   ): Promise<KnowledgeDocument> {
     const write = (service: KnowledgeDocumentsService) => service.writePutDocument(data, params);
-    const result =
-      typeof data.content_text === 'string'
-        ? await this.runPolicyDependentWrite(write)
-        : await write(this);
-    if (typeof data.content_text === 'string') this.wakeIndexer();
-    return result;
+    try {
+      const result =
+        typeof data.content_text === 'string'
+          ? await this.runPolicyDependentWrite(write)
+          : await write(this);
+      if (typeof data.content_text === 'string') this.wakeIndexer();
+      return result;
+    } catch (error) {
+      // `expected_version: 0` is a create-only precondition. Two callers can
+      // both observe no document before one wins the unique namespace/path
+      // insert. Translate only a confirmed collision on this target into the
+      // same stable optimistic-concurrency signal used by ordinary updates.
+      if (String(data.expected_version) === '0' && isDatabaseUniqueConstraintError(error)) {
+        const expectedVersion = data.expected_version as string | number;
+        const concurrent = await this.resolveDocumentRef({
+          document_id: data.document_id,
+          uri: data.uri,
+          namespace_slug: data.namespace_slug,
+          path: data.path,
+        });
+        if (concurrent) {
+          // The retrying caller will re-read through normal document
+          // authorization. Do not disclose the concurrent document's version
+          // from this lower-level identity-collision check.
+          throw new KnowledgeDocumentVersionMismatchError(expectedVersion, 'unknown');
+        }
+      }
+      throw error;
+    }
   }
 
   private async writePutDocument(
@@ -659,6 +688,9 @@ export class KnowledgeDocumentsService extends DrizzleService<
       await this.assertActiveDocument(existing);
       this.assertCanChangeGovernance(existing, data, params?.user as User | undefined);
       if (!(await this.canEdit(existing, params?.user as User | undefined))) {
+        if (existing.edit_policy === 'owner') {
+          throw new KnowledgeDocumentOwnerOnlyEditError();
+        }
         throw new Forbidden('You do not have permission to update this knowledge document');
       }
       await this.assertExpectedVersion(existing, data.expected_version);

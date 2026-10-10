@@ -12,6 +12,7 @@ import { useIsMobileViewport } from '../../hooks/useIsMobileViewport';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useStableCallback } from '../../hooks/useStableCallback';
 import { useUserLocalStorage } from '../../hooks/useUserLocalStorage';
+import { sessionAttentionAcknowledged } from '../../store/agorRealtimeActions';
 import {
   type AgorState,
   agorStore,
@@ -39,9 +40,11 @@ import { HomeAskBox } from './HomeAskBox';
 import { HomeKnowledgeSection } from './HomeKnowledgeSection';
 import { HomeMyWork, MY_WORK_PAGE, type MyWorkTab } from './HomeMyWork';
 import { HomeNeedsYou, NEEDS_MAX, NEEDS_PREVIEW, type NeedsFilter } from './HomeNeedsYou';
+import { HomePinnedArtifactsSection } from './HomePinnedArtifactsSection';
 import { HomeRecentBoards } from './HomeRecentBoards';
 import { HomeSchedulesSection } from './HomeSchedulesSection';
 import { HomeFrame } from './HomeSection';
+import { HomeTeammateChatsSection } from './HomeTeammateChatsSection';
 import { HomeTeammatesSection } from './HomeTeammates';
 import { HOME_MAIN_COLUMN_BASIS, HOME_PAGE_TITLE_LEVEL, HOME_RAIL_BASIS } from './homeLayout';
 import { OnboardingCard } from './OnboardingCard';
@@ -101,6 +104,10 @@ export interface HomePageProps {
   onSeeAllSessions?: () => void;
   /** Opens the teammates directory; the rail's "See all" hides without it. */
   onSeeAllTeammates?: () => void;
+  /** Opens the chat collections manager; the rail's collections hide without it. */
+  onManageChatCollections?: () => void;
+  /** Opens a session pinned in a chat collection. Defaults to `onSessionClick`. */
+  onOpenChatSession?: (sessionId: string) => void;
 }
 
 const scrollToSection = (id: string) =>
@@ -203,6 +210,8 @@ export const HomePage = memo(function HomePage({
   onAllBoards,
   onSeeAllSessions,
   onSeeAllTeammates,
+  onManageChatCollections,
+  onOpenChatSession,
 }: HomePageProps) {
   const { token } = theme.useToken();
   const { showError } = useThemedMessage();
@@ -367,14 +376,20 @@ export const HomePage = memo(function HomePage({
     },
     [onSessionClick, setOpenedFailures]
   );
+  // Read state is per viewer: acknowledging never clears the shared ready flag,
+  // which failed and timed-out sessions need to accept a follow-up.
+  const acknowledge = useCallback(
+    async (sessionId: string) => {
+      if (!client) return;
+      sessionAttentionAcknowledged(await client.sessions.acknowledgeAttention(sessionId));
+    },
+    [client]
+  );
   const markRead = useCallback(
     (sessionId: string) => {
-      client
-        ?.service('sessions')
-        .patch(sessionId, { ready_for_prompt: false })
-        .catch(() => showError('Couldn’t mark as read'));
+      acknowledge(sessionId).catch(() => showError('Couldn’t mark as read'));
     },
-    [client, showError]
+    [acknowledge, showError]
   );
   const [markingAll, setMarkingAll] = useState(false);
   const markAllRead = useCallback(async () => {
@@ -384,15 +399,13 @@ export const HomePage = memo(function HomePage({
       .map((s) => s.session_id);
     setMarkingAll(true);
     try {
-      const failed = await runWithLimit(ids, MARK_ALL_CONCURRENCY, (id) =>
-        client.service('sessions').patch(id, { ready_for_prompt: false })
-      );
+      const failed = await runWithLimit(ids, MARK_ALL_CONCURRENCY, acknowledge);
       if (failed.length === ids.length && failed.length) showError('Couldn’t mark as read');
       else if (failed.length) showError(`Couldn’t mark ${failed.length} of ${ids.length} as read`);
     } finally {
       setMarkingAll(false);
     }
-  }, [client, userId, showError]);
+  }, [client, userId, showError, acknowledge]);
   const showMoreWork = useCallback(() => setWorkLimit((limit) => limit + MY_WORK_PAGE), []);
   const archive = useCallback((sessionId: string) => confirmArchive(sessionId), [confirmArchive]);
   const showRunning = useCallback(() => {
@@ -516,6 +529,12 @@ export const HomePage = memo(function HomePage({
             />
           )}
           {onboarding}
+          <HomePinnedArtifactsSection
+            client={client}
+            currentUserId={userId}
+            onBoardClick={onBoardClick}
+            onSessionClick={onSessionClick}
+          />
           <HomeMyWork
             recent={buckets.recent}
             recentCount={buckets.recentCount}
@@ -555,6 +574,13 @@ export const HomePage = memo(function HomePage({
               onOpenBoard={onBoardClick}
               onSeeAll={onSeeAllTeammates}
             />
+            {onManageChatCollections && (
+              <HomeTeammateChatsSection
+                currentUser={currentUser}
+                onOpenSession={onOpenChatSession ?? onSessionClick}
+                onManage={onManageChatCollections}
+              />
+            )}
             <HomeKnowledgeSection client={client} connected={connected} />
           </Flex>
         )}

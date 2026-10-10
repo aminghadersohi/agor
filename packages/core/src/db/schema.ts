@@ -56,6 +56,7 @@ export const boardObjects = schema.boardObjects;
 export const zoneWorkflowTransitions = schema.zoneWorkflowTransitions;
 export const zoneWorkflowAdvances = schema.zoneWorkflowAdvances;
 export const sessionMcpServers = schema.sessionMcpServers;
+export const sessionAttentionStates = schema.sessionAttentionStates;
 export const sessionRelationships = schema.sessionRelationships;
 export const sessionEnvSelections = schema.sessionEnvSelections;
 export const userMcpOauthTokens = schema.userMcpOauthTokens;

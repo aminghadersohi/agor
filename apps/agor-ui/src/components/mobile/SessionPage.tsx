@@ -11,6 +11,7 @@ import { Alert, Button, Flex, Spin } from 'antd';
 import { useCallback, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { type AppActionsContextValue, AppActionsProvider } from '../../contexts/AppActionsContext';
+import { useAcknowledgeOpenSessionAttention } from '../../hooks/useAcknowledgeOpenSessionAttention';
 import { usePermissionDecision } from '../../hooks/usePermissionDecision';
 import { useAgorStore } from '../../store/agorStore';
 import { makeSessionMcpServerIdsSelector } from '../../store/selectors';
@@ -40,6 +41,8 @@ interface SessionPageProps {
   onUpdateSessionEnvSelections?: (sessionId: string, envVarNames: string[]) => void;
   onOpenBranch?: AppActionsContextValue['onOpenBranch'];
   onOpenAgenticToolSettings?: AppActionsContextValue['onOpenAgenticToolSettings'];
+  /** Pin this session into a Home chat collection. */
+  onPinToChatCollection?: (sessionId: string) => void;
 }
 
 const EMPTY_MCP_IDS: string[] = [];
@@ -66,6 +69,7 @@ export const SessionPage: React.FC<SessionPageProps> = ({
   onUpdateSessionEnvSelections,
   onOpenBranch,
   onOpenAgenticToolSettings,
+  onPinToChatCollection,
 }) => {
   const { sessionId } = useParams<{ sessionId: string }>();
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -78,6 +82,8 @@ export const SessionPage: React.FC<SessionPageProps> = ({
   const session = resolvedSessionId ? sessionById.get(resolvedSessionId) : undefined;
   const branch = session?.branch_id ? (branchById.get(session.branch_id) ?? null) : null;
   const canonicalSessionId = session?.session_id;
+  // Opening a session on this device acknowledges it for the viewer everywhere.
+  useAcknowledgeOpenSessionAttention(client, session);
 
   const sessionMcpServerIds =
     useAgorStore(
@@ -164,6 +170,7 @@ export const SessionPage: React.FC<SessionPageProps> = ({
           sessionMcpServerIds={sessionMcpServerIds}
           open
           onClose={closeSession}
+          onPinToChatCollection={onPinToChatCollection}
         />
       </div>
       <SessionSettingsModal

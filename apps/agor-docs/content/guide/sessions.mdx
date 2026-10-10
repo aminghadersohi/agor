@@ -560,6 +560,12 @@ without creating a session, avoiding repeated retries while their configuration 
 Conversations open with the latest ten turns, showing user and assistant messages.
 Scroll up or select **Load older history** to read earlier turns.
 
+Reopening a conversation whose earlier turns you already loaded mounts only its
+newest 30 turns. **Show older tasks** reveals 30 more while preserving your
+reading position; once every loaded turn is shown, **Load older history** fetches
+further back. The top-navigation button reveals all loaded turns and jumps to the
+beginning. This is a rendering limit only: loaded turns stay loaded.
+
 Expand **Tool calls** to load a turn's recorded tool activity. Tool groups are
 collapsed by default; inside an open group, file edits show their diffs. Expand
 **Reasoning** where available to read the agent's reasoning. Active turns show
