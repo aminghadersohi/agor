@@ -133,6 +133,7 @@ import {
   DAEMON,
   MESSAGE_PAGINATION,
   PAGINATION,
+  PAGINATION_CHURN_MESSAGE,
 } from '../config/constants';
 
 /**
@@ -1484,7 +1485,7 @@ function extendFindAllOnService(service: AgorService<unknown>, rawPath: string):
       }
 
       if (nextResult.total !== total || nextResult.skip !== nextSkip) {
-        throw new Error('Paginated findAll() changed while pages were being read');
+        throw new Error(PAGINATION_CHURN_MESSAGE);
       }
       if (nextResult.data.length === 0) {
         throw new Error('Paginated findAll() ended before the advertised total');
