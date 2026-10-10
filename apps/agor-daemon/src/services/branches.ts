@@ -2035,6 +2035,9 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
         );
       }
       if (!needsFiles) {
+        // Branch-scoped attachment closure touches no disk and cannot close a
+        // shared-path sibling's terminals, including on the overlap escape.
+        this.closeBranchTerminals(id, String(tenantId));
         await this.withTenantDatabase(params, () =>
           new BranchWorkspaceOperationRepository(this.db).finishPreserve(admission.claim)
         );
