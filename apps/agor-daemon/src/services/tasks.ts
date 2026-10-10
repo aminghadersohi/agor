@@ -19,6 +19,7 @@ import {
   PAGINATION,
   resolveExecutorHeartbeatConfig,
   resolveSdkWatchdogConfig,
+  TASK_PAGINATION,
 } from '@agor/core/config';
 import {
   assertTenantWritable,
@@ -56,6 +57,7 @@ import type {
   BranchID,
   CancelQueuedTasksInput,
   ContentBlock,
+  ExecutorInterruptionInput,
   ExecutorTerminationCompleteInput,
   MessageID,
   OpenCodeCheckpointAdmission,
@@ -201,6 +203,7 @@ export const TASKS_SERVICE_TRANSPORT_METHODS = [
   'reorderQueued',
   'connectExecutor',
   'reportTerminationComplete',
+  'reportExecutorInterruption',
   'reportRuntimeTelemetry',
   'reportSdkHealthFailure',
   'beginOpenCodeCheckpoint',
@@ -413,6 +416,18 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     }
     if (typeof query.task_id === 'string') {
       pageOptions.taskId = query.task_id as TaskID;
+    } else if (query.task_id && typeof query.task_id === 'object' && '$in' in query.task_id) {
+      // A page of one Session's dispatch order (the lean transcript).
+      const ids = query.task_id.$in;
+      if (
+        typeof sessionId !== 'string' ||
+        !Array.isArray(ids) ||
+        ids.length > TASK_PAGINATION.MAX_TASK_IDS ||
+        !ids.every((id: unknown) => typeof id === 'string')
+      ) {
+        throw new BadRequest('task_id $in requires an exact session_id and a bounded ID list');
+      }
+      pageOptions.taskIds = ids as TaskID[];
     } else if (query.task_id && typeof query.task_id === 'object') {
       if (typeof sessionId !== 'string') {
         throw new BadRequest('Task hydration cursors require an exact session_id filter');
@@ -671,6 +686,40 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     return result;
   }
 
+  /** Internal only; the authenticated Stop route owns retry authorization. */
+  async retryTermination(
+    taskId: string,
+    requestedAt: string,
+    revision: string,
+    params?: TaskParams
+  ): Promise<Task | null> {
+    const task = await this.taskRepo.retryTermination(taskId, requestedAt, revision);
+    if (task) await this.publishRecoveryTask(task, params);
+    return task;
+  }
+
+  async beginCleanupAttempt(
+    taskId: string,
+    claimToken: string,
+    params?: TaskParams
+  ): Promise<Task | null> {
+    const task = await this.taskRepo.beginCleanupAttempt(taskId, claimToken);
+    if (task) await this.publishRecoveryTask(task, params);
+    return task;
+  }
+
+  private async publishRecoveryTask(task: Task, params?: TaskParams): Promise<void> {
+    await this.runAfterTenantDatabaseCommit('publish cleanup progress', async () => {
+      emitServiceEvent(this.app, {
+        path: 'tasks',
+        event: 'patched',
+        data: task,
+        id: task.task_id,
+        params,
+      });
+    });
+  }
+
   async settleTermination(
     input: TerminationSettlementInput,
     params?: TaskParams
@@ -684,6 +733,11 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
 
     await this.runAfterTenantDatabaseCommit('publish termination settlement', async () => {
       if (result.outcome === 'unverified') {
+        getDaemonMetrics(this.app).increment('executor.cleanup_failures', 1, {
+          mode: result.task.executor_mode ?? 'local',
+          helper_configured: !!this.app.get('config')?.execution?.executor_cleanup_command_template,
+          helper_attempted: !!result.task.termination_request?.cleanup_attempt,
+        });
         console.warn(
           `[task.termination] event=settled task_id=${shortId(result.task.task_id)} ` +
             `outcome=unverified mode=${result.task.executor_mode ?? 'local'} ` +
@@ -1809,17 +1863,18 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       // re-stamps `is_agor_callback` and `source` onto the synthesized
       // user-message row so the UI's callback styling (MessageBlock.tsx) holds.
       //
-      // IMPORTANT: queued_by_user_id = the person who set up the callback
-      // (task attribution), NOT the target session owner. Execution still runs
-      // in the target session's immutable execution context. Falls back to its creator
-      // for backward compat (legacy sessions without callback_created_by).
+      // IMPORTANT: created_by is the executor principal (identity, env, and
+      // credentials), so it is the server-stamped callback setter — never the
+      // target session owner, who did not ask for this work. Callbacks without a
+      // stored setter (legacy rows, internal writes) run as the user whose task
+      // completed; queue admission rechecks that principal's authority on the target.
       const taskCallback = task.metadata?.completion_callback;
       const callbackCreator =
         (taskCallback?.target_session_id === targetSessionId
           ? taskCallback.requested_by_user_id
           : undefined) ??
         childSession.callback_config?.callback_created_by ??
-        targetSession.created_by;
+        task.created_by;
       const directCallbackTaskId = completionCallbackTaskId(task.task_id, targetSessionId);
       const existingDirectCallback = await this.taskRepo.findById(directCallbackTaskId);
       if (
@@ -2017,6 +2072,37 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       });
     }
     return connection.task;
+  }
+
+  async reportExecutorInterruption(
+    data: ExecutorInterruptionInput,
+    params?: TaskParams
+  ): Promise<Task> {
+    if (data.signal !== 'SIGTERM' && data.signal !== 'SIGINT') {
+      throw new BadRequest('invalid executor interruption signal');
+    }
+    const tenantId = getCurrentTenantId() ?? params?.tenant?.tenant_id;
+    const current = await this.get(data.task_id, params);
+    if (isTerminalTaskStatus(current.status)) return current;
+    const session = await this.app.service('sessions').get(current.session_id, params);
+    // The task-scoped runtime hook authenticates this report. The existing
+    // row-locked claim preserves a winning Stop/completion and owns all release;
+    // receiving a signal itself never proves that the provider has stopped.
+    return beginExecutorTermination({
+      app: this.app,
+      taskId: data.task_id,
+      cause: 'executor_interrupted',
+      errorMessage: `Executor received ${data.signal}; execution was interrupted.`,
+      sdkFailure: {
+        reason: 'executor_interrupted',
+        detected_at: new Date().toISOString(),
+        tool: session.agentic_tool,
+        last_pulse: current.latest_executor_pulse,
+        termination: 'requested',
+      },
+      params,
+      runInFreshTenantWriteDatabase: (work) => withFreshTenantWrite(this.db, tenantId, work),
+    });
   }
 
   async reportTerminationComplete(
@@ -2257,7 +2343,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       userId
     );
     if (admission.outcome !== 'admitted') return admission;
-    // Only the selected provider's key is decrypted, and only for its owner's admitted executor.
+    // Only the selected provider's key is decrypted, and only for the prompter's admitted executor.
     const session = await new SessionRepository(this.db).findById(sessionId);
     const provider = session?.model_config?.provider?.trim();
     const key =

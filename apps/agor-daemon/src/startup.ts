@@ -28,11 +28,16 @@ import {
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
 import type { Id, Paginated, Session, SessionID, Task, TenantContext } from '@agor/core/types';
-import { isTerminalTaskStatus, SessionStatus, TaskStatus } from '@agor/core/types';
+import {
+  DAEMON_RESTART_RELEASED_MESSAGE,
+  isTerminalTaskStatus,
+  SessionStatus,
+  TaskStatus,
+} from '@agor/core/types';
 import {
   hasSecureLocalCredentialOverlay,
+  isHostedOpenCode,
   resolveSdkHomeConfig,
-  usesExecutionHomeOnly,
 } from './branch-sdk-home.js';
 import type {
   Application,
@@ -357,7 +362,7 @@ async function cleanupOrphanStatusesInTenantScope(
                 last_pulse: task.latest_executor_pulse,
                 termination: 'unverified',
               },
-          errorMessage: 'Daemon restart released this Task without verifying executor termination.',
+          errorMessage: DAEMON_RESTART_RELEASED_MESSAGE,
           ...(shouldQueueRecovery
             ? {
                 restartRecovery: {
@@ -959,7 +964,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
     unixUserMode: config.execution?.unix_user_mode ?? 'simple',
     sdkHomeMode: resolveSdkHomeConfig(config).mode,
     secureLocalCredentialOverlay: hasSecureLocalCredentialOverlay(config),
-    executionHomeOnly: (tool) => usesExecutionHomeOnly(tool, config),
+    hostedOpenCode: isHostedOpenCode(config),
     // Static mode keeps the historical single-tenant scope. Auth-resolved
     // multi-tenant mode leaves this undefined so the scheduler discovers due
     // schedule tenant metadata at the DB boundary on each tick.

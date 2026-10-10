@@ -468,7 +468,7 @@ describe('OpenCodeModelSelector', () => {
 
     expect(find).not.toHaveBeenCalled();
     expect(
-      screen.getByText(/execution uses the immutable session owner's opencode credentials/i)
+      screen.getByText(/owner's provider availability is not shown to collaborators/i)
     ).toBeTruthy();
     expect(screen.queryByRole('button', { name: /use opencode default/i })).toBeNull();
     expect(screen.getByLabelText('OpenCode provider ID')).toBeTruthy();
@@ -544,7 +544,7 @@ describe('OpenCodeModelSelector', () => {
 
     expect(staleCatalogSeenDuringCommit).toEqual([false]);
     expect(
-      screen.getByText(/execution uses the immutable session owner's opencode credentials/i)
+      screen.getByText(/owner's provider availability is not shown to collaborators/i)
     ).toBeTruthy();
   });
 });

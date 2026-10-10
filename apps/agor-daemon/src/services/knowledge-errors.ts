@@ -1,4 +1,4 @@
-import { BadRequest, Forbidden } from '@agor/core/feathers';
+import { Conflict, Forbidden } from '@agor/core/feathers';
 
 /**
  * Stable domain signal for Knowledge optimistic-concurrency failures.
@@ -6,7 +6,7 @@ import { BadRequest, Forbidden } from '@agor/core/feathers';
  * Callers that can safely retry must use this type rather than matching the
  * user-facing message, which may change independently of retry behavior.
  */
-export class KnowledgeDocumentVersionMismatchError extends BadRequest {
+export class KnowledgeDocumentVersionMismatchError extends Conflict {
   constructor(
     public readonly expectedVersion: string | number,
     public readonly currentVersion: string | number | 'none'

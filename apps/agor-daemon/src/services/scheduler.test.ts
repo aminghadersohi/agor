@@ -1266,6 +1266,7 @@ describe('materializeScheduleAgenticToolConfig', () => {
             sandboxMode: 'danger-full-access',
             approvalPolicy: 'never',
             networkAccess: true,
+            includePlugins: false,
           },
         },
         model_config: {

@@ -13,7 +13,10 @@ import { ReactFlowProvider, useReactFlow, useViewport } from 'reactflow';
 import { AppHeader } from '../../components/AppHeader';
 import { ProfileImageNetworkProvider } from '../../components/ProfileImage/ProfileImageNetworkContext';
 import { SessionCanvas } from '../../components/SessionCanvas';
-import type { StaticRemoteCursor } from '../../components/SessionCanvas/canvas/RemoteCursorLayer';
+import {
+  DEMO_TIP_STYLE,
+  type StaticRemoteCursor,
+} from '../../components/SessionCanvas/canvas/RemoteCursorLayer';
 import { SessionSettingsModal } from '../../components/SessionSettingsModal';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { agorStore } from '../../store/agorStore';
@@ -171,6 +174,9 @@ const DemoScreenPointer = ({ scene, t }: { scene: SceneDefinition; t: number }) 
 
   return (
     <div
+      data-demo-cursor="viewer"
+      data-demo-color="#14b8a6"
+      data-demo-ripple={ripple}
       style={{
         position: 'fixed',
         left: 0,
@@ -181,6 +187,7 @@ const DemoScreenPointer = ({ scene, t }: { scene: SceneDefinition; t: number }) 
         pointerEvents: 'none',
       }}
     >
+      <i data-demo-cursor-tip style={DEMO_TIP_STYLE} />
       {ripple > 0 && ripple <= 1 && (
         <span
           style={{
@@ -226,6 +233,9 @@ const DemoScreenCursors = ({ scene, t }: { scene: SceneDefinition; t: number }) 
         return (
           <div
             key={user.user_id}
+            data-demo-cursor={user.user_id}
+            data-demo-color={cursor.color}
+            data-demo-ripple={ripple}
             style={{
               position: 'fixed',
               left: 0,
@@ -237,6 +247,7 @@ const DemoScreenCursors = ({ scene, t }: { scene: SceneDefinition; t: number }) 
             }}
           >
             <div style={{ position: 'relative', width: 24, height: 24 }}>
+              <i data-demo-cursor-tip style={DEMO_TIP_STYLE} />
               {ripple > 0 && ripple <= 1 && (
                 <span
                   style={{
@@ -321,6 +332,9 @@ const settingsSession = demoSessions.find(
 export const MarketingVideoPage = () => {
   const params = new URLSearchParams(window.location.search);
   const sceneName = params.get('scene') ?? 'multiplayer';
+  // ?cursors=off: hide every cursor but keep its tip measurable, for the
+  // cursor-free renditions the home page's live cursors act over.
+  const hideCursors = params.get('cursors') === 'off';
   const play = params.get('play') === '1';
   const scene = SCENES[sceneName] ?? multiplayerScene;
 
@@ -534,6 +548,9 @@ export const MarketingVideoPage = () => {
               <DemoScreenPointer scene={scene} t={t} />
               <DemoScreenCursors scene={scene} t={t} />
               <DemoGlobalVeil scene={scene} t={t} />
+              {hideCursors && (
+                <style>{'[data-demo-cursor] * { visibility: hidden !important; }'}</style>
+              )}
             </Layout>
           </ProfileImageNetworkProvider>
         </ConnectionProvider>

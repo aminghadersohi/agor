@@ -94,6 +94,13 @@ export type SessionStopOutcome = (typeof SESSION_STOP_OUTCOMES)[number];
 /** Authenticated Session Stop endpoint request. */
 export type SessionStopRequest =
   | {
+      retry_cleanup: true;
+      expected_task_id: TaskID;
+      termination_requested_at: string;
+      recovery_revision: string;
+      force_unverified?: false;
+    }
+  | {
       force_unverified?: false;
       reason?: string;
       expected_task_id?: TaskID;
@@ -103,6 +110,7 @@ export type SessionStopRequest =
     }
   | {
       force_unverified: true;
+      recovery_revision?: string;
       task_id: TaskID;
       termination_requested_at: string;
       confirmation: string;
@@ -275,6 +283,13 @@ export interface Session {
   /** Read-only, opt-in aggregate over all tasks, independent of transcript paging. */
   usage_summary?: SessionUsageSummary;
 
+  /**
+   * Read-only, opt-in (`include_tasks_complete` on get): `tasks` lists every
+   * dispatched Task of this Session, once each, in dispatch order. False for a
+   * legacy row whose list lost or misnames Tasks; absent from older daemons.
+   */
+  tasks_complete?: boolean;
+
   /** Unique session identifier (UUIDv7) */
   session_id: SessionID;
 
@@ -384,7 +399,7 @@ export interface Session {
     /** Permission mode for agent tool execution (Claude/Gemini unified mode)
      *  Tool-level permissions are handled by SDK via settings.json files */
     mode?: PermissionMode;
-    /** Codex-specific dual permission config (sandboxMode + approvalPolicy + networkAccess) */
+    /** Codex-specific runtime settings (sandbox, approvals, network and native plugins). */
     codex?: {
       /** Sandbox mode controls WHERE Codex can write (filesystem boundaries) */
       sandboxMode: CodexSandboxMode;
@@ -392,6 +407,8 @@ export interface Session {
       approvalPolicy: CodexApprovalPolicy;
       /** Network access controls whether outbound HTTP/HTTPS requests are allowed (workspace-write only) */
       networkAccess?: boolean;
+      /** Allow native plugins; false/omitted vetoes loading, true respects native settings. */
+      includePlugins?: boolean;
     };
   } | null;
 
@@ -602,11 +619,12 @@ export interface Session {
      */
     callback_session_id?: SessionID;
     /**
-     * User ID of the person who set up this callback.
+     * User ID of the person who set up this callback. Server-managed: the
+     * daemon discards client-supplied values and stamps the authenticated
+     * caller after checking they may prompt the callback target.
      *
-     * Used as queued_by_user_id when the callback is delivered, so the
-     * resulting task is attributed to the callback setter, not the target
-     * session owner. Execution still uses the target session's home and credentials.
+     * Becomes the delivered callback Task's `created_by`, i.e. its executor
+     * principal (identity, environment, and credentials).
      */
     callback_created_by?: string;
     /**
@@ -727,6 +745,7 @@ export type CreateSessionInput = Omit<
   | 'model_config'
   | 'sdk_home_scope'
   | 'usage_summary'
+  | 'tasks_complete'
   | 'mcp_defaults_skipped'
   | 'attention_generation'
   | 'viewer_seen_attention_generation'
@@ -744,6 +763,7 @@ export type SessionUpdate = Omit<
   | 'sdk_session_id'
   | 'sdk_home_scope'
   | 'usage_summary'
+  | 'tasks_complete'
   | 'mcp_defaults_skipped'
   | 'attention_generation'
   | 'viewer_seen_attention_generation'
@@ -1158,6 +1178,7 @@ export interface SpawnConfig {
 
   /** Codex network access (codex only) */
   codexNetworkAccess?: boolean;
+  codexIncludePlugins?: boolean;
 
   /** MCP server IDs to attach to spawned session */
   mcpServerIds?: string[];

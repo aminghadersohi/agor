@@ -28,6 +28,7 @@ vi.mock('@agor/core/db', () => ({
 
 vi.mock('@agor/core/feathers', () => ({
   BadRequest: class BadRequest extends Error {},
+  Conflict: class Conflict extends Error {},
   Forbidden: class Forbidden extends Error {},
   NotFound: class NotFound extends Error {},
 }));
