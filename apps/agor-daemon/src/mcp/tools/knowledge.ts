@@ -22,6 +22,8 @@ import {
   buildKnowledgeDocumentUri,
   getTeammateConfig,
   isTeammate,
+  KNOWLEDGE_ARCHIVE_BULK_LIMIT,
+  KNOWLEDGE_ARCHIVE_FILTERS,
   KNOWLEDGE_DOCUMENT_KINDS,
   KNOWLEDGE_DOCUMENT_STATUSES,
   KNOWLEDGE_DOCUMENT_URI_PREFIX,
@@ -47,6 +49,7 @@ import {
   hasKnowledgeNamespacePermission,
   resolveKnowledgeNamespacePermission,
 } from '../../services/knowledge-access.js';
+import { isKnowledgeDocumentVersionMismatchError } from '../../services/knowledge-errors.js';
 import { issueExecutorCommandToken } from '../../services/session-token-service.js';
 import {
   TEAMMATE_MEMORY_PATH_TEMPLATE,
@@ -449,6 +452,7 @@ type KnowledgeTreeDoc = {
   uri?: string;
   reference_uri?: string;
   status?: string;
+  archived?: boolean;
 };
 
 type KnowledgeTreeFolder = {
@@ -474,6 +478,7 @@ function compactKnowledgeTreeDoc(row: Record<string, unknown>): KnowledgeTreeDoc
 
   const doc: KnowledgeTreeDoc = {
     type: 'doc',
+    ...(typeof document.archived === 'boolean' ? { archived: document.archived } : {}),
     path,
   };
   if (document.icon_emoji !== undefined) doc.icon = coerceString(document.icon_emoji) ?? null;
@@ -787,6 +792,37 @@ function escapeHtmlAttr(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }
 
+const TEAMMATE_MEMORY_APPEND_MAX_ATTEMPTS = 3;
+
+type ExistingMemoryDocument = {
+  content: string;
+  expectedVersion: string | number;
+};
+
+function existingMemoryDocument(
+  result: HydratedKnowledgeDocumentResult | undefined
+): ExistingMemoryDocument | null {
+  if (!result) return null;
+  if (typeof result.content !== 'string') {
+    throw new Error('Cannot append teammate memory without the existing document content');
+  }
+  const version = result.current_version;
+  const expectedVersion =
+    typeof version?.version_id === 'string' && version.version_id.length > 0
+      ? version.version_id
+      : typeof version?.version_number === 'number' &&
+          Number.isInteger(version.version_number) &&
+          version.version_number > 0
+        ? version.version_number
+        : undefined;
+  // Without a version the write would be unconditional and could silently
+  // drop a concurrent append.
+  if (expectedVersion === undefined) {
+    throw new Error('Cannot append teammate memory without an existing document version');
+  }
+  return { content: result.content, expectedVersion };
+}
+
 const TEAMMATE_POLICY_RANK: Record<TeammateKnowledgeGrantAccess, number> = {
   none: 0,
   read: 1,
@@ -1040,100 +1076,115 @@ export function registerKnowledgeTools(server: McpServer, ctx: McpContext): void
     const docsService = getOptionalService(ctx, 'kb/documents');
     if (!docsService) throw new Error('Knowledge documents service is not registered');
 
-    let existingContent = `# ${date}\n`;
-    let expectedVersion: string | number | undefined;
-    let documentExists = false;
-    try {
-      const existing = (await callCustomMethod(
-        docsService,
-        'getDocument',
-        {
-          namespace_slug: namespace.slug,
-          path: docPath,
-          include_content: true,
-        },
-        mcpParams(ctx)
-      )) as HydratedKnowledgeDocumentResult | undefined;
-      if (existing) {
-        documentExists = true;
-        existingContent = typeof existing.content === 'string' ? existing.content : existingContent;
-        expectedVersion = existing.current_version?.version_id;
-      }
-    } catch (error) {
-      if (!isNotFoundError(error)) throw error;
-    }
-
     const now = new Date().toISOString();
     const category = args.category ?? 'note';
     const tags = (args.tags ?? []).map((tag) => tag.trim()).filter(Boolean);
-    const appended: Array<{ text: string; hash: string; deduped: boolean }> = [];
-    const blocks: string[] = [];
-    bullets.forEach((bullet, index) => {
+    const entries = bullets.map((bullet, index) => {
       const key = args.idempotencyKey ? `${args.idempotencyKey}:${index}` : `${category}:${bullet}`;
       const hash = memoryEntryHash(key);
-      if (existingContent.includes(`hash="${hash}"`)) {
-        appended.push({ text: bullet, hash, deduped: true });
-        return;
-      }
       const id = args.idempotencyKey
         ? createHash('sha256').update(key).digest('hex').slice(0, 24)
         : randomUUID();
       const tagText = tags.map((tag) => ` #${tag.replace(/\s+/g, '-')}`).join('');
       const importance =
         args.importance && args.importance !== 'normal' ? ` (${args.importance})` : '';
-      blocks.push(
-        `<!-- agor-memory-entry id="${escapeHtmlAttr(id)}" hash="${hash}" -->\n` +
+      return {
+        text: bullet,
+        hash,
+        block:
+          `<!-- agor-memory-entry id="${escapeHtmlAttr(id)}" hash="${hash}" -->\n` +
           `- [${now}] ${category}${importance}: ${bullet}${tagText}\n` +
           `  - source: agor://session/${ctx.sessionId}\n` +
-          '<!-- /agor-memory-entry -->'
-      );
-      appended.push({ text: bullet, hash, deduped: false });
+          '<!-- /agor-memory-entry -->',
+      };
     });
 
-    const nextContent = blocks.length
-      ? `${existingContent.replace(/\s*$/, '\n\n')}${blocks.join('\n\n')}\n`
-      : existingContent;
-    if (blocks.length > 0) {
-      const result = await callCustomMethod(
-        docsService,
-        'putDocument',
-        {
-          namespace_slug: namespace.slug,
-          path: docPath,
-          // Appending is a content operation, so it must not restate document
-          // governance. Creation defaults apply only on first write: replaying
-          // them on every append silently republished a memory document its
-          // owner had set to private/owner, and undid retitles and drafting.
-          // Omitted fields are preserved by the repository's merge on update.
-          ...(documentExists
-            ? {}
-            : {
-                title: date,
-                kind: 'memory',
-                // Daily memory is personal operational context, so it is
-                // created private/owner. The namespace's `visibility_default`
-                // governs ordinary docs and is the wrong signal here, and
-                // `kb.default_visibility` only mirrors it (teammate namespaces
-                // are created public), so neither is an opt-in to publish.
-                // Only the memory-specific fields, which nothing
-                // auto-populates, can widen this.
-                visibility: teammate?.kb?.memory_visibility ?? 'private',
-                edit_policy: teammate?.kb?.memory_edit_policy ?? 'owner',
-                status: 'published',
-              }),
-          content_text: nextContent,
-          expected_version: expectedVersion,
-          metadata: {
-            teammate_memory: true,
-            teammate_branch_id: branch.branch_id,
-            memory_date: date,
+    // Appends are read-modify-write under optimistic concurrency. Another
+    // session appending to the same daily document between our read and write
+    // makes the version stale; re-read and re-apply rather than failing.
+    for (let attempt = 1; attempt <= TEAMMATE_MEMORY_APPEND_MAX_ATTEMPTS; attempt += 1) {
+      let existingResult: HydratedKnowledgeDocumentResult | undefined;
+      try {
+        existingResult = (await callCustomMethod(
+          docsService,
+          'getDocument',
+          {
+            namespace_slug: namespace.slug,
+            path: docPath,
+            include_content: true,
           },
-        },
-        mcpParams(ctx)
-      );
-      return textResult({ namespace: namespace.slug, path: docPath, appended, document: result });
+          mcpParams(ctx)
+        )) as HydratedKnowledgeDocumentResult | undefined;
+      } catch (error) {
+        if (!isNotFoundError(error)) throw error;
+      }
+
+      const existing = existingMemoryDocument(existingResult);
+      const existingContent = existing?.content ?? `# ${date}\n`;
+      const appended = entries.map(({ text, hash }) => ({
+        text,
+        hash,
+        deduped: existingContent.includes(`hash="${hash}"`),
+      }));
+      const blocks = entries
+        .filter(({ hash }) => !existingContent.includes(`hash="${hash}"`))
+        .map(({ block }) => block);
+      if (blocks.length === 0) {
+        return textResult({ namespace: namespace.slug, path: docPath, appended });
+      }
+
+      const nextContent = `${existingContent.replace(/\s*$/, '\n\n')}${blocks.join('\n\n')}\n`;
+      try {
+        const result = await callCustomMethod(
+          docsService,
+          'putDocument',
+          {
+            namespace_slug: namespace.slug,
+            path: docPath,
+            // Appending is a content operation, so it must not restate document
+            // governance. Creation defaults apply only on first write: replaying
+            // them on every append silently republished a memory document its
+            // owner had set to private/owner, and undid retitles and drafting.
+            // Omitted fields are preserved by the repository's merge on update.
+            ...(existing
+              ? { expected_version: existing.expectedVersion }
+              : {
+                  title: date,
+                  kind: 'memory',
+                  // Daily memory is personal operational context, so it is
+                  // created private/owner. The namespace's `visibility_default`
+                  // governs ordinary docs and is the wrong signal here, and
+                  // `kb.default_visibility` only mirrors it (teammate namespaces
+                  // are created public), so neither is an opt-in to publish.
+                  // Only the memory-specific fields, which nothing
+                  // auto-populates, can widen this.
+                  visibility: teammate?.kb?.memory_visibility ?? 'private',
+                  edit_policy: teammate?.kb?.memory_edit_policy ?? 'owner',
+                  status: 'published',
+                  // Version zero is a create-only precondition. If another
+                  // append creates the daily document first, putDocument
+                  // rejects instead of overwriting it with this stale content.
+                  expected_version: 0,
+                }),
+            content_text: nextContent,
+            metadata: {
+              teammate_memory: true,
+              teammate_branch_id: branch.branch_id,
+              memory_date: date,
+            },
+          },
+          mcpParams(ctx)
+        );
+        return textResult({ namespace: namespace.slug, path: docPath, appended, document: result });
+      } catch (error) {
+        if (isKnowledgeDocumentVersionMismatchError(error)) {
+          if (attempt < TEAMMATE_MEMORY_APPEND_MAX_ATTEMPTS) continue;
+          break;
+        }
+        throw error;
+      }
     }
-    return textResult({ namespace: namespace.slug, path: docPath, appended });
+    throw new Error('Cannot append teammate memory because the document changed concurrently');
   };
 
   server.registerTool(
@@ -1322,7 +1373,11 @@ export function registerKnowledgeTools(server: McpServer, ctx: McpContext): void
         includeArchived: z
           .boolean()
           .optional()
-          .describe('Include archived documents (admins only; default: false)'),
+          .describe('Compatibility alias for archiveFilter:all'),
+        archiveFilter: z
+          .enum(KNOWLEDGE_ARCHIVE_FILTERS)
+          .optional()
+          .describe('active (default), archived only, or all; permissions still apply'),
         limit: z
           .number({
             error: 'limit must be a positive integer when provided.',
@@ -1344,6 +1399,7 @@ export function registerKnowledgeTools(server: McpServer, ctx: McpContext): void
         q: '',
         namespace_slug: coerceString(args.namespace),
         include_archived: args.includeArchived === true,
+        ...(args.archiveFilter ? { archive_filter: args.archiveFilter } : {}),
         include_my_drafts: args.includeMyDrafts !== false,
         include_other_user_drafts: args.includeOtherUserDrafts === true,
         limit: (args.limit ?? 25) + 1,
@@ -1421,7 +1477,11 @@ export function registerKnowledgeTools(server: McpServer, ctx: McpContext): void
         includeArchived: z
           .boolean()
           .optional()
-          .describe('Include archived documents (default: false)'),
+          .describe('Compatibility alias for archiveFilter:all'),
+        archiveFilter: z
+          .enum(KNOWLEDGE_ARCHIVE_FILTERS)
+          .optional()
+          .describe('active (default), archived only, or all; permissions still apply'),
         limit: mcpLimit(20, 100),
         mode: z
           .enum(['text', 'semantic', 'hybrid'])
@@ -1438,6 +1498,7 @@ export function registerKnowledgeTools(server: McpServer, ctx: McpContext): void
       const query: Record<string, unknown> = {
         q: coerceString(args.query) ?? '',
         include_archived: args.includeArchived === true,
+        ...(args.archiveFilter ? { archive_filter: args.archiveFilter } : {}),
       };
       if (args.namespace) query.namespace_slug = coerceString(args.namespace);
       if (args.pathPrefix) query.path_prefix = coerceString(args.pathPrefix);
@@ -1752,11 +1813,118 @@ export function registerKnowledgeTools(server: McpServer, ctx: McpContext): void
     }
   );
 
+  const archiveTargetSchema = z
+    .object({
+      documentId: mcpRequiredId('documentId', 'Knowledge document'),
+      expectedVersion: mcpOptionalVersionToken(
+        'expectedVersion',
+        'Optional current content version guard'
+      ),
+      expectedArchived: z
+        .boolean()
+        .optional()
+        .describe('Optional archive-state guard; already-satisfied retries are no-ops'),
+    })
+    .strict();
+
+  server.registerTool(
+    'agor_kb_archive',
+    {
+      description:
+        'Archive or restore one explicitly identified Knowledge document. Set archived:false to restore. Owner/admin plus namespace write access required. Idempotent metadata-only PATCH; preserves identity, content, history and grants. Already-satisfied retries are no-ops. Archived namespace documents are not restored.',
+      annotations: { idempotentHint: true },
+      inputSchema: archiveTargetSchema.extend({ archived: z.boolean() }),
+    },
+    async (args) => {
+      const service = getOptionalService(ctx, 'kb/documents');
+      if (!service?.patch)
+        return knowledgeNotImplementedResult('agor_kb_archive', ['kb/documents.patch']);
+      return textResult(
+        await service.patch(
+          args.documentId,
+          {
+            archived: args.archived,
+            ...(args.expectedVersion !== undefined
+              ? { expected_version: args.expectedVersion }
+              : {}),
+            ...(args.expectedArchived !== undefined
+              ? { expected_archived: args.expectedArchived }
+              : {}),
+          },
+          await knowledgeWriteParams(ctx)
+        )
+      );
+    }
+  );
+
+  server.registerTool(
+    'agor_kb_archive_bulk',
+    {
+      description:
+        'Archive or restore 1–50 explicitly identified Knowledge documents (archived:false restores). Not atomic: each item is separately authorized and committed through PATCH; returns per-item results and continues after errors. No query/all-results mutation. Retries of already-satisfied targets are no-ops. Not-found and unauthorized targets share one error code.',
+      annotations: { idempotentHint: true },
+      inputSchema: z
+        .object({
+          archived: z.boolean(),
+          targets: z
+            .array(archiveTargetSchema)
+            .min(1)
+            .max(KNOWLEDGE_ARCHIVE_BULK_LIMIT)
+            .refine(
+              (targets) =>
+                new Set(targets.map((target) => target.documentId)).size === targets.length,
+              'Duplicate document IDs are not allowed'
+            ),
+        })
+        .strict(),
+    },
+    async (args) => {
+      const service = getOptionalService(ctx, 'kb/documents');
+      if (!service?.patch)
+        return knowledgeNotImplementedResult('agor_kb_archive_bulk', ['kb/documents.patch']);
+      const params = await knowledgeWriteParams(ctx);
+      const results = [];
+      for (const target of args.targets) {
+        try {
+          const document = await service.patch(
+            target.documentId,
+            {
+              archived: args.archived,
+              ...(target.expectedVersion !== undefined
+                ? { expected_version: target.expectedVersion }
+                : {}),
+              ...(target.expectedArchived !== undefined
+                ? { expected_archived: target.expectedArchived }
+                : {}),
+            },
+            params
+          );
+          results.push({ documentId: target.documentId, ok: true, document });
+        } catch (error) {
+          const code = (error as { code?: number })?.code;
+          results.push({
+            documentId: target.documentId,
+            ok: false,
+            error:
+              code === 403 || code === 404
+                ? 'not_found_or_forbidden'
+                : code === 409
+                  ? 'conflict'
+                  : code === 400
+                    ? 'invalid_request'
+                    : 'failed',
+          });
+        }
+      }
+      return textResult({ atomic: false, results });
+    }
+  );
+
   server.registerTool(
     'agor_kb_put',
     {
       description:
-        'Create or update a markdown Knowledge document. Idempotent upsert keyed by documentId, URI, or namespace + path when the backend implements putDocument. To build the knowledge graph, embed links to other KB docs in the markdown — each resolvable link becomes a "references" edge automatically on save. Prefer the rename-proof form [label](agor://kb/document/<documentId>); [label](agor://kb/<namespace>/<path>) also works but breaks if the target moves. Get a doc\'s reference_uri from agor_kb_search or agor_kb_get.',
+        'Create or update a markdown Knowledge document. Archived paths remain reserved: restore with agor_kb_archive first; ordinary upsert never restores. Idempotent upsert keyed by documentId, URI, or namespace + path when the backend implements putDocument. To build the knowledge graph, embed links to other KB docs in the markdown — each resolvable link becomes a "references" edge automatically on save. Prefer the rename-proof form [label](agor://kb/document/<documentId>); [label](agor://kb/<namespace>/<path>) also works but breaks if the target moves. Get a doc\'s reference_uri from agor_kb_search or agor_kb_get.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         documentId: mcpOptionalId('documentId', 'Existing Knowledge document'),

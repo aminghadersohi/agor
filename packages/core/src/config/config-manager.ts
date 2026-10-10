@@ -47,6 +47,7 @@ import {
 import { resolveRestartRecoverySettings } from './restart-recovery';
 import {
   type AgorApmSettings,
+  AgorAvatarAuthority,
   type AgorConfig,
   AgorExternalIdentityProvider,
   AgorExternalIdentityProvisioning,
@@ -175,7 +176,7 @@ function configLoadError(configPath: string, error: unknown): Error {
       `${configPath} is masked by Agor's executor sandbox and is intentionally out of reach. ` +
         'Code inside the sandbox must not read the daemon config — it receives configuration ' +
         'via payload.resolvedConfig and DAEMON_URL. Run this on the daemon host instead. ' +
-        `See context/explorations/executor-sandboxing.md. (underlying error: ${detail})`
+        `See https://agor.live/guide/multiplayer-unix-isolation. (underlying error: ${detail})`
     );
   }
   return new Error(`Failed to load config: ${detail}`);
@@ -554,6 +555,7 @@ function validateConfig(config: AgorConfig): void {
     'ui',
     'database',
     'external_launch',
+    'mcp_oauth_relay',
     'identity',
     'execution',
     'security',
@@ -732,8 +734,8 @@ function validateConfig(config: AgorConfig): void {
     'mcpToolSearch',
     'instanceLabel',
     'instanceDescription',
-    'navbarLogoLink',
-    'navbarLogoTooltip',
+    'externalAppLink',
+    'externalAppLabel',
     'impersonation_token_expiry_ms',
     'cors_allow_sandpack',
     'cors_origins',
@@ -772,8 +774,10 @@ function validateConfig(config: AgorConfig): void {
     'return_host_param',
   ]);
   assertValidRawExternalLaunchConfig(config.external_launch);
+  only(config.mcp_oauth_relay, 'mcp_oauth_relay', ['callback_origin']);
   only(config.identity, 'identity', [
     'user_lifecycle',
+    'avatar_authority',
     'role_authority',
     'local_auth',
     'password_policy',
@@ -785,6 +789,12 @@ function validateConfig(config: AgorConfig): void {
     !Object.values(AgorUserLifecycleAuthority).includes(config.identity.user_lifecycle)
   ) {
     throw new Error('Config error: identity.user_lifecycle must be internal or external');
+  }
+  if (
+    config.identity?.avatar_authority !== undefined &&
+    !Object.values(AgorAvatarAuthority).includes(config.identity.avatar_authority)
+  ) {
+    throw new Error('Config error: identity.avatar_authority must be internal or external');
   }
   if (
     config.identity?.role_authority !== undefined &&
@@ -884,6 +894,8 @@ function validateConfig(config: AgorConfig): void {
     'daemon_writes_user_message',
     'permission_timeout_ms',
     'executor_command_template',
+    'executor_cleanup_command_template',
+    'executor_cleanup_timeout_ms',
     'executor_storage',
     'delegated_branch_deletion',
     'executor_command_nonzero_may_have_dispatched',
@@ -1661,8 +1673,8 @@ export function resolveEffectiveConfig(
       ...(env.AGOR_JWT_SECRET ? { jwtSecret: env.AGOR_JWT_SECRET } : {}),
       ...(env.AGOR_MASTER_SECRET ? { masterSecret: env.AGOR_MASTER_SECRET } : {}),
       ...(env.INSTANCE_LABEL ? { instanceLabel: env.INSTANCE_LABEL } : {}),
-      ...(env.NAVBAR_LOGO_LINK ? { navbarLogoLink: env.NAVBAR_LOGO_LINK } : {}),
-      ...(env.NAVBAR_LOGO_TOOLTIP ? { navbarLogoTooltip: env.NAVBAR_LOGO_TOOLTIP } : {}),
+      ...(env.EXTERNAL_APP_LINK ? { externalAppLink: env.EXTERNAL_APP_LINK } : {}),
+      ...(env.EXTERNAL_APP_LABEL ? { externalAppLabel: env.EXTERNAL_APP_LABEL } : {}),
       ...(websocketCompression !== undefined
         ? { websocket_compression: websocketCompression }
         : {}),
@@ -1682,6 +1694,7 @@ export function resolveEffectiveConfig(
     },
     identity: { ...defaults.identity, ...config.identity },
     ...(externalLaunch ? { external_launch: externalLaunch } : {}),
+    ...(config.mcp_oauth_relay ? { mcp_oauth_relay: { ...config.mcp_oauth_relay } } : {}),
     execution: {
       ...defaults.execution,
       ...config.execution,
@@ -1760,6 +1773,24 @@ export function assertValidEffectiveExecutionConfig(
     assertPowerManagementActivationSupported(config);
   }
 
+  if (
+    execution.executor_cleanup_command_template !== undefined &&
+    (typeof execution.executor_cleanup_command_template !== 'string' ||
+      !execution.executor_cleanup_command_template.trim() ||
+      !execution.executor_command_template)
+  ) {
+    throw new Error(
+      'execution.executor_cleanup_command_template requires a nonempty command and executor_command_template'
+    );
+  }
+  if (
+    execution.executor_cleanup_timeout_ms !== undefined &&
+    (!Number.isInteger(execution.executor_cleanup_timeout_ms) ||
+      execution.executor_cleanup_timeout_ms < 1000 ||
+      execution.executor_cleanup_timeout_ms > 120000)
+  ) {
+    throw new Error('execution.executor_cleanup_timeout_ms must be an integer from 1000 to 120000');
+  }
   const response = resolveExecutorResponseConfig(execution.executor_response);
 
   // Enforced here, NOT in the raw config.yaml parse: one shared config.yaml
@@ -2321,7 +2352,6 @@ export function ensureBranchCloneDepthAllowed(
 //   2. paths.data_home in config.yaml
 //   3. AGOR_HOME (backward compatible default)
 //
-// @see context/explorations/executor-expansion.md
 // =============================================================================
 
 /**

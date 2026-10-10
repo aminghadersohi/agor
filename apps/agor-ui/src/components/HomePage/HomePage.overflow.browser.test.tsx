@@ -7,6 +7,7 @@ import { page } from 'vitest/browser';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { buildSessionMaps, EMPTY_MAPS } from '../../store/agorMaps';
 import { agorStore } from '../../store/agorStore';
+import { userScopeCoverage } from '../../test/userScopeCoverage';
 import { MOBILE_TOUCH_TARGET } from '../../utils/deviceDetection';
 import { HomePage } from './HomePage';
 
@@ -26,6 +27,8 @@ const session = (id: string, extra: Partial<Session>) =>
     genealogy: { children: [] },
     scheduled_from_branch: false,
     ready_for_prompt: false,
+    // A settled run carries a generation this viewer has not acknowledged yet.
+    attention_generation: extra.ready_for_prompt ? 1 : 0,
     agentic_tool: 'claude-code',
     last_updated: new Date(now - 60_000).toISOString(),
     ...extra,
@@ -99,11 +102,27 @@ function seed() {
       ],
     ]),
     userById: new Map([
-      [ME, { user_id: ME, name: 'Ada Lovelace' } as User],
+      [
+        ME,
+        {
+          user_id: ME,
+          name: 'Ada Lovelace',
+          preferences: {
+            chat_collections: {
+              collections: [
+                {
+                  collection_id: 'crew',
+                  name: `Crew for ${LONG}`,
+                  session_ids: ['idle', 'fail', 'run'],
+                },
+              ],
+            },
+          },
+        } as unknown as User,
+      ],
       ['u2', { user_id: 'u2', name: 'Grace Hopper' } as User],
     ]),
-    sessionsHydrated: true,
-    branchesHydrated: true,
+    coverage: userScopeCoverage({ sessions: true, references: true, teammates: true }),
   } as never);
 }
 
@@ -138,6 +157,7 @@ async function renderHomeAt(width: number, dark: boolean) {
                 onBranchClick={vi.fn()}
                 onSessionClick={vi.fn()}
                 onCreateSession={vi.fn()}
+                onManageChatCollections={vi.fn()}
               />
             </div>
           </MemoryRouter>
@@ -147,6 +167,7 @@ async function renderHomeAt(width: number, dark: boolean) {
   );
   await screen.findByRole('heading', { name: 'Knowledge' });
   await screen.findByText('Rexy');
+  await screen.findByRole('heading', { name: 'Chat collections' });
   return screen.getByTestId('viewport');
 }
 

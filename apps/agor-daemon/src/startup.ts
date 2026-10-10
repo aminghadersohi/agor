@@ -28,11 +28,16 @@ import {
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
 import type { Id, Paginated, Session, SessionID, Task, TenantContext } from '@agor/core/types';
-import { isTerminalTaskStatus, SessionStatus, TaskStatus } from '@agor/core/types';
+import {
+  DAEMON_RESTART_RELEASED_MESSAGE,
+  isTerminalTaskStatus,
+  SessionStatus,
+  TaskStatus,
+} from '@agor/core/types';
 import {
   hasSecureLocalCredentialOverlay,
+  isHostedOpenCode,
   resolveSdkHomeConfig,
-  usesExecutionHomeOnly,
 } from './branch-sdk-home.js';
 import type {
   Application,
@@ -357,7 +362,7 @@ async function cleanupOrphanStatusesInTenantScope(
                 last_pulse: task.latest_executor_pulse,
                 termination: 'unverified',
               },
-          errorMessage: 'Daemon restart released this Task without verifying executor termination.',
+          errorMessage: DAEMON_RESTART_RELEASED_MESSAGE,
           ...(shouldQueueRecovery
             ? {
                 restartRecovery: {
@@ -453,12 +458,11 @@ async function cleanupOrphanStatusesInTenantScope(
   // Fix sessions that are IDLE but not promptable *because a kill interrupted
   // them* — the daemon died during the stop path after writing status=idle but
   // before writing ready_for_prompt=true, or the executor exit raced the stop
-  // endpoint. IDLE + ready_for_prompt=false is NOT inherently orphaned state:
-  // the UI also uses ready_for_prompt as the unread/attention flag (opening a
-  // conversation patches it false, branch cards highlight while it's true —
-  // see SessionPromptState in @agor/core/types), so it is the normal resting
-  // state of every read session. Discriminate by the session's most recent
-  // task: only sessions whose latest task was non-terminal at boot (just
+  // endpoint. IDLE + ready_for_prompt=false is not inherently orphaned state:
+  // newly initialized sessions can be idle before their first settled turn.
+  // Per-user read acknowledgement is stored separately and never mutates this
+  // flag. Discriminate by the session's most recent task: only sessions whose
+  // latest task was non-terminal at boot (just
   // orphan-stopped above, or still in an executing state) were
   // actually interrupted; read sessions have a terminal latest task from a
   // previous run and must be left untouched.
@@ -960,7 +964,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
     unixUserMode: config.execution?.unix_user_mode ?? 'simple',
     sdkHomeMode: resolveSdkHomeConfig(config).mode,
     secureLocalCredentialOverlay: hasSecureLocalCredentialOverlay(config),
-    executionHomeOnly: (tool) => usesExecutionHomeOnly(tool, config),
+    hostedOpenCode: isHostedOpenCode(config),
     // Static mode keeps the historical single-tenant scope. Auth-resolved
     // multi-tenant mode leaves this undefined so the scheduler discovers due
     // schedule tenant metadata at the DB boundary on each tick.

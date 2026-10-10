@@ -147,6 +147,7 @@ export const sessions = pgTable(
 
     // UI state (materialized for efficient highlighting queries)
     ready_for_prompt: t.bool('ready_for_prompt').notNull().default(false),
+    attention_generation: integer('attention_generation').notNull().default(0),
 
     // Kept in schema parity even though V1 activation is standalone SQLite.
     power_priority: text('power_priority', { enum: ['normal', 'essential'] })
@@ -940,6 +941,7 @@ export const repos = pgTable(
         // Async clone lifecycle: 'cloning' → 'ready' | 'failed'. Undefined for
         // legacy rows and for local-type repos. See packages/core/src/types/repo.ts.
         clone_status?: 'cloning' | 'ready' | 'failed';
+        clone_generation?: number;
         clone_error?: {
           exit_code: number;
           category: 'auth_failed' | 'not_found' | 'network' | 'git_unavailable' | 'unknown';
@@ -1095,7 +1097,7 @@ export const branches = pgTable(
       .$type<'none' | 'read' | 'write'>()
       .default('read'),
 
-    // Branch storage model — see context/explorations/clone-redesign.md.
+    // Branch storage model.
     // 'worktree' = native `git worktree add` (shared base .git/config — legacy default).
     // 'clone'    = self-standing `git clone` (own .git/ — closes cross-branch leak vectors).
     //
@@ -1419,7 +1421,7 @@ export const users = pgTable(
         //
         // Writes always produce the object form. Scope validation lives in the app
         // layer — no SQL CHECK constraint — so adding future scope values stays
-        // schema-free. See `context/explorations/env-var-access.md`.
+        // schema-free.
         env_vars?: Record<
           string,
           | string // legacy
@@ -1451,6 +1453,7 @@ export const users = pgTable(
             codexSandboxMode?: string;
             codexApprovalPolicy?: string;
             codexNetworkAccess?: boolean;
+            codexIncludePlugins?: boolean;
           };
           gemini?: {
             modelConfig?: {
@@ -1495,6 +1498,35 @@ export const users = pgTable(
     executionHomeTenantUnique: uniqueIndex('users_tenant_unix_username_unique').on(
       table.tenant_id,
       table.unix_username
+    ),
+  })
+);
+
+/** Per-user acknowledgement of a session's latest attention-producing result. */
+export const sessionAttentionStates = pgTable(
+  'session_attention_states',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    user_id: varchar('user_id', { length: 36 }).notNull(),
+    session_id: varchar('session_id', { length: 36 }).notNull(),
+    seen_attention_generation: integer('seen_attention_generation').notNull().default(0),
+    seen_at: t.timestamp('seen_at').notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.tenant_id, table.user_id, table.session_id] }),
+    tenantUserFk: foreignKey({
+      name: 'session_attention_states_tenant_user_fk',
+      columns: [table.tenant_id, table.user_id],
+      foreignColumns: [users.tenant_id, users.user_id],
+    }).onDelete('cascade'),
+    tenantSessionFk: foreignKey({
+      name: 'session_attention_states_tenant_session_fk',
+      columns: [table.tenant_id, table.session_id],
+      foreignColumns: [sessions.tenant_id, sessions.session_id],
+    }).onDelete('cascade'),
+    sessionIdx: index('session_attention_states_tenant_session_idx').on(
+      table.tenant_id,
+      table.session_id
     ),
   })
 );
@@ -3804,6 +3836,8 @@ export const kbGraphEdges = pgTable(
  */
 export type SessionRow = typeof sessions.$inferSelect;
 export type SessionInsert = typeof sessions.$inferInsert;
+export type SessionAttentionStateRow = typeof sessionAttentionStates.$inferSelect;
+export type SessionAttentionStateInsert = typeof sessionAttentionStates.$inferInsert;
 export type SessionRelationshipRow = typeof sessionRelationships.$inferSelect;
 export type SessionRelationshipInsert = typeof sessionRelationships.$inferInsert;
 export type TaskRow = typeof tasks.$inferSelect;

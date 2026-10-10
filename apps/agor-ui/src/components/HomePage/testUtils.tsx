@@ -7,6 +7,7 @@ import { vi } from 'vitest';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { buildSessionMaps, EMPTY_MAPS } from '../../store/agorMaps';
 import { agorStore } from '../../store/agorStore';
+import { userScopeCoverage } from '../../test/userScopeCoverage';
 import { resetAccessCacheForTests } from '../../utils/accessCache';
 import { HomePage, type HomePageProps } from './HomePage';
 
@@ -55,6 +56,8 @@ export const session = (id: string, extra: Partial<Session> = {}) =>
     genealogy: { children: [] },
     scheduled_from_branch: false,
     ready_for_prompt: false,
+    // A settled run carries a generation this viewer has not acknowledged yet.
+    attention_generation: extra.ready_for_prompt ? 1 : 0,
     agentic_tool: 'claude-code',
     last_updated: recent(5),
     ...extra,
@@ -101,8 +104,7 @@ export function seed({
     branchById: new Map(branches.map((b) => [b.branch_id, b])),
     boardById: new Map(boards.map((b) => [b.board_id, b])),
     userById: new Map([[ME, user]]),
-    sessionsHydrated: hydrated,
-    branchesHydrated: hydrated,
+    coverage: userScopeCoverage({ sessions: hydrated, references: hydrated, teammates: hydrated }),
   } as never);
 }
 

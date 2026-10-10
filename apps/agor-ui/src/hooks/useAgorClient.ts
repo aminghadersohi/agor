@@ -13,9 +13,11 @@ import {
   markAuthenticationUnrecoverable,
   RefreshUnrecoverableError,
   refreshTokensSingleFlight,
+  requestAuthRevalidation,
 } from '../utils/singleFlightRefresh';
-import { getStoredRefreshToken } from '../utils/tokenRefresh';
+import { getStoredRefreshToken, SupersededAuthenticationError } from '../utils/tokenRefresh';
 import { announceSessionStreamsCapability } from './sessionStreamsCapability';
+import type { CredentialReconciliation } from './useAuth';
 
 /**
  * Socket.IO silently drops a plain acknowledgement callback when the socket
@@ -42,6 +44,14 @@ interface UseAgorClientOptions {
   accessToken?: string | null;
   /** Identity of the authenticated authority represented by accessToken. */
   authorityGeneration: number;
+  /**
+   * useAuth-owned reconciliation with stored credentials. Handshake recovery
+   * waits for it whenever its refresh was superseded, instead of adopting a
+   * stored token that may belong to a different authority.
+   */
+  reconcileCredentials?: () => Promise<CredentialReconciliation>;
+  /** True while `generation` is still useAuth's current authority. */
+  isAuthorityGenerationCurrent?: (generation: number) => boolean;
 }
 
 interface BoundAgorClient {
@@ -49,6 +59,7 @@ interface BoundAgorClient {
   url: string;
   authorityGeneration: number;
   accessTokenRef: { current: string | null | undefined };
+  resetReconnectBudget: () => void;
 }
 
 /**
@@ -59,6 +70,11 @@ interface BoundAgorClient {
  */
 export function useAgorClient(options: UseAgorClientOptions): UseAgorClientResult {
   const { url = getDaemonUrl(), accessToken, authorityGeneration } = options;
+  // Latest auth callbacks, read at recovery time without rebuilding the socket.
+  const reconcileCredentialsRef = useRef(options.reconcileCredentials);
+  reconcileCredentialsRef.current = options.reconcileCredentials;
+  const isAuthorityGenerationCurrentRef = useRef(options.isAuthorityGenerationCurrent);
+  isAuthorityGenerationCurrentRef.current = options.isAuthorityGenerationCurrent;
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(!!accessToken);
   const [authGeneration, setAuthGeneration] = useState(0);
@@ -107,7 +123,7 @@ export function useAgorClient(options: UseAgorClientOptions): UseAgorClientResul
     // socket.io does NOT auto-reconnect for that reason, so we kick it
     // ourselves — but without backoff+cap the loop can run at network speed
     // if the server keeps closing the socket (e.g. auth failures, crash loop,
-    // config mismatch). Reset only after a stable connection.
+    // config mismatch). Reset after a stable connection or explicit user Retry.
     let manualReconnectAttempts = 0;
     let stableConnectionTimer: ReturnType<typeof setTimeout> | null = null;
     const clearStableConnectionTimer = () => {
@@ -179,6 +195,11 @@ export function useAgorClient(options: UseAgorClientOptions): UseAgorClientResul
     // with the rotated token. Transport reconnects remain automatic; only the
     // old post-connect Feathers reauthentication transition is gone.
     let handshakeAuthRecovery: Promise<void> | null = null;
+    // useAuth may have replaced the authority this binding was built for
+    // (for example a refresh result belonging to another tab's sign-in). Such
+    // a binding is retired by effect cleanup and must never reconnect.
+    const isBindingAuthorityCurrent = () =>
+      isAuthorityGenerationCurrentRef.current?.(authorityGeneration) ?? true;
     const recoverRejectedHandshake = (connectError: unknown): Promise<void> => {
       if (!isDefiniteAuthFailure(connectError)) return Promise.reject(connectError);
       if (handshakeAuthRecovery) return handshakeAuthRecovery;
@@ -191,7 +212,7 @@ export function useAgorClient(options: UseAgorClientOptions): UseAgorClientResul
       handshakeAuthRecovery = createRestClient(url)
         .then((restClient) => refreshTokensSingleFlight(restClient, refreshToken))
         .then(async (result) => {
-          if (!mounted) return;
+          if (!mounted || !isBindingAuthorityCurrent()) return;
           try {
             await reconnectWithAuthenticatedHandshake(result.accessToken);
           } catch (error) {
@@ -237,6 +258,11 @@ export function useAgorClient(options: UseAgorClientOptions): UseAgorClientResul
         url,
         authorityGeneration,
         accessTokenRef: connectionAccessTokenRef,
+        resetReconnectBudget: () => {
+          manualReconnectAttempts = 0;
+          clearManualReconnectTimer();
+          resumeManualReconnect = null;
+        },
       };
       clientBindingRef.current = binding;
 
@@ -360,6 +386,60 @@ export function useAgorClient(options: UseAgorClientOptions): UseAgorClientResul
                 scheduleManualReconnect();
                 return;
               }
+              if (recoveryError instanceof SupersededAuthenticationError) {
+                // The credentials this recovery started with were replaced
+                // (another tab rotated them or signed in/out, or this tab's
+                // own login/logout won). useAuth owns that reconciliation:
+                // keep this handshake pending until it settles, and never
+                // copy a stored token into this authority's binding.
+                const standDown = () => {
+                  setConnecting(false);
+                  clearDisconnectGrace();
+                  setConnected(false);
+                };
+                const reconcile = reconcileCredentialsRef.current;
+                if (!reconcile) {
+                  standDown();
+                  requestAuthRevalidation();
+                  return;
+                }
+                reconcile().then(
+                  (outcome) => {
+                    if (!mounted) return;
+                    if (outcome.status === 'unresolved') {
+                      // Could not confirm the credentials yet; retry on the
+                      // bounded reconnect budget (recovery re-enters here).
+                      scheduleManualReconnect();
+                      return;
+                    }
+                    if (outcome.status !== 'authenticated') {
+                      // Signed out, or a local login/logout owns the next
+                      // authority; useAuth rebuilds or tears down this client.
+                      standDown();
+                      return;
+                    }
+                    if (
+                      outcome.authenticationGeneration !== authorityGeneration ||
+                      !isBindingAuthorityCurrent()
+                    ) {
+                      // Changed authority: useAuth advanced the generation,
+                      // and effect cleanup retires this binding and builds
+                      // one for the new authority. Stay "reconnecting".
+                      return;
+                    }
+                    // Same authority with a reconciled credential: resume
+                    // the pending handshake with it.
+                    connectionAccessTokenRef.current = outcome.accessToken;
+                    scheduleManualReconnect();
+                  },
+                  (reconcileError) => {
+                    if (!mounted) return;
+                    console.error('Failed to reconcile stored credentials:', reconcileError);
+                    scheduleManualReconnect();
+                  }
+                );
+                return;
+              }
               if (recoveryError instanceof RefreshUnrecoverableError) {
                 setError('Authentication could not be restored. Please sign in again.');
               } else {
@@ -429,8 +509,12 @@ export function useAgorClient(options: UseAgorClientOptions): UseAgorClientResul
    * Useful when auto-reconnect fails or user wants to force reconnect
    */
   const retryConnection = () => {
-    const client = visibleBinding?.client;
+    if (!visibleBinding) return;
+    const client = visibleBinding.client;
     if (!client?.io) return;
+
+    // Reset only this authority's client, including any pending retry timer.
+    visibleBinding.resetReconnectBudget();
 
     // If already connected, disconnect first
     if (client.io.connected) {

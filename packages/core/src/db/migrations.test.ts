@@ -1851,6 +1851,9 @@ describe('front desk / profile image watermark reconciliation', () => {
       await executeRaw(db, sql`ALTER TABLE profile_images DROP COLUMN theme`);
       // And upstream's OpenCode checkpoint table, re-stamped above it.
       await executeRaw(db, sql`DROP TABLE opencode_checkpoint_attempts`);
+      // And the restored session attention (SQLite cannot ADD COLUMN conditionally).
+      await executeRaw(db, sql`DROP TABLE session_attention_states`);
+      await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
       await runMigrations(db, { allowOfflineCutover: true });
       expect(Number(await tableCount())).toBe(1);
 
@@ -1866,6 +1869,9 @@ describe('front desk / profile image watermark reconciliation', () => {
       await executeRaw(db, sql`ALTER TABLE profile_images DROP COLUMN theme`);
       // And upstream's OpenCode checkpoint table, re-stamped above it.
       await executeRaw(db, sql`DROP TABLE opencode_checkpoint_attempts`);
+      // And the restored session attention (SQLite cannot ADD COLUMN conditionally).
+      await executeRaw(db, sql`DROP TABLE session_attention_states`);
+      await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
       await runMigrations(db, { allowOfflineCutover: true });
       expect(Number(await tableCount())).toBe(1);
     } finally {

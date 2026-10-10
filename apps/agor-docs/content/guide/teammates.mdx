@@ -6,10 +6,6 @@ heroImage: '/screenshots/teammates-list.png'
 
 # Teammates
 
-<div style={{ padding: '12px 16px', borderLeft: '4px solid #3b82f6', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.12)', margin: '16px 0' }}>
-  <strong>Rename note:</strong> In July 2026, Agor renamed <strong>Assistants</strong> to <strong>Teammates</strong>. If you arrived from <code>/guide/assistants</code>, this is the canonical guide. Older references to <code>assistant</code> may still appear where they describe LLM message roles or provider protocol terms.
-</div>
-
 An **AI teammate** is a persistent AI companion that lives in your Agor workspace. While a normal branch is _where_ code gets written, an AI teammate is a _who_, a persistent entity with memory, skills, and the ability to orchestrate work across your entire workspace.
 
 <img
@@ -204,6 +200,27 @@ Click any teammate's branch card to open its modal. The **Teammate** tab shows:
 ### Boards
 
 Teammates appear as branch cards on boards, distinguished by a robot icon and blue border. We recommend giving each teammate its own board for clarity.
+
+### Keep several conversations on Home
+
+The board sidebar stays focused on that board's primary teammate. For a cross-workspace view, use
+**Chat collections** in Home's side column. Create named collections, then pin sessions from
+different teammates, branches, or gateway channels to each collection. Use **Add to chat collection**
+in a desktop or mobile session header (on a phone with the full session view, it's in **More
+actions**), or use **Manage** on Home to edit several collections at once. The picker shows the 50
+most recently active sessions by default; search still finds older sessions and matches titles,
+teammates, branches, statuses, and session IDs. On a phone, Home lists your collections once you
+have one, and a pinned session opens full screen.
+
+On desktop, selecting a saved conversation opens the **Chat workspace** (`/chats/`): collections and
+session names stay in a compact tree on the left while the canonical session opens in
+[Focus chat](/guide/rich-chat-ux) on the right. Switching rows changes conversations without
+returning to a board, and each teammate's avatar or branch's board tile in the tree opens its board.
+Collections store only session references, never a second copy of messages or
+context. Existing session permissions still apply, renaming a source session does not break its
+collection link, and unavailable or archived sessions are not shown. Use **Show on board** from the
+chat workspace to return to the session's branch, or **Open in chat workspace** from a board session
+to move in the other direction.
 
 ## Real-world examples
 

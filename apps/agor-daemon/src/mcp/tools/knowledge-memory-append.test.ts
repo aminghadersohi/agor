@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { KnowledgeDocumentVersionMismatchError } from '../../services/knowledge-errors.js';
 
 /**
  * `agor_teammate_memory_append` must never restate document governance.
@@ -26,6 +27,9 @@ vi.mock('@agor/core/db', () => ({
 }));
 
 vi.mock('@agor/core/feathers', () => ({
+  BadRequest: class BadRequest extends Error {},
+  Conflict: class Conflict extends Error {},
+  Forbidden: class Forbidden extends Error {},
   NotFound: class NotFound extends Error {},
 }));
 
@@ -132,6 +136,15 @@ function createFakeDocumentsService(seed?: Partial<StoredDocument>) {
   const putDocument = vi.fn(async (data: Record<string, unknown>) => {
     const docPath = String(data.path);
     const existing = store.get(docPath);
+    // Optimistic concurrency, as in KnowledgeDocumentsService: version zero
+    // is create-only, any other token must match the current version.
+    const expected = data.expected_version;
+    if (expected !== undefined && expected !== '') {
+      const current = existing?.version_id ?? 'none';
+      if (existing ? String(expected) !== existing.version_id : String(expected) !== '0') {
+        throw new KnowledgeDocumentVersionMismatchError(expected as string | number, current);
+      }
+    }
     versionCounter += 1;
 
     if (existing) {
@@ -479,5 +492,130 @@ describe('agor_teammate_memory_append governance preservation', () => {
     await append({ bullets: 'Deduped bullet', date: MEMORY_DATE, idempotencyKey: 'fixture-key' });
     expect(documents.putDocument).toHaveBeenCalledTimes(1);
     expect(documents.read()?.visibility).toBe('private');
+  });
+});
+
+describe('agor_teammate_memory_append concurrent writes', () => {
+  /** Simulate another session's append landing between our read and write. */
+  function concurrentAppendBeforeFirstWrite(
+    documents: ReturnType<typeof createFakeDocumentsService>
+  ) {
+    const write = documents.putDocument.getMockImplementation()!;
+    documents.putDocument.mockImplementationOnce(async (data: Record<string, unknown>) => {
+      const current = documents.read();
+      await write({
+        path: MEMORY_PATH,
+        ...(current
+          ? { expected_version: current.version_id }
+          : { visibility: 'private', edit_policy: 'owner', kind: 'memory', title: MEMORY_DATE }),
+        content_text: `${current?.content ?? `# ${MEMORY_DATE}\n`}\nConcurrent bullet\n`,
+      });
+      return write(data);
+    });
+  }
+
+  it('re-reads and re-applies after a concurrent append instead of failing', async () => {
+    const documents = createFakeDocumentsService({ visibility: 'private', edit_policy: 'owner' });
+    concurrentAppendBeforeFirstWrite(documents);
+    const append = await captureAppendHandler({ documents: documents.service });
+
+    await append({ bullets: 'Our bullet', date: MEMORY_DATE });
+
+    expect(documents.getDocument).toHaveBeenCalledTimes(2);
+    expect(documents.putDocument).toHaveBeenCalledTimes(2);
+    const retry = documents.putDocument.mock.calls[1][0] as Record<string, unknown>;
+    expect(retry.expected_version).not.toBe('version-1');
+    const stored = documents.read();
+    expect(stored?.content).toContain('Concurrent bullet');
+    expect(stored?.content).toContain('Our bullet');
+    expect(stored?.visibility).toBe('private');
+  });
+
+  it('turns a create race into an append to the winning document without restating governance', async () => {
+    const documents = createFakeDocumentsService();
+    concurrentAppendBeforeFirstWrite(documents);
+    const append = await captureAppendHandler({
+      documents: documents.service,
+      memoryVisibility: 'public',
+    });
+
+    await append({ bullets: 'Our bullet', date: MEMORY_DATE });
+
+    const create = documents.putDocument.mock.calls[0][0] as Record<string, unknown>;
+    expect(create.expected_version).toBe(0);
+    const retry = documents.putDocument.mock.calls[1][0] as Record<string, unknown>;
+    for (const field of GOVERNANCE_FIELDS) expect(retry).not.toHaveProperty(field);
+    const stored = documents.read();
+    expect(stored?.visibility).toBe('private');
+    expect(stored?.content).toContain('Concurrent bullet');
+    expect(stored?.content).toContain('Our bullet');
+  });
+
+  it('retries a typed conflict even when its user-facing wording changes', async () => {
+    const documents = createFakeDocumentsService({ visibility: 'private', edit_policy: 'owner' });
+    const conflict = new KnowledgeDocumentVersionMismatchError('version-1', 2);
+    conflict.message = 'Optimistic concurrency wording changed';
+    documents.putDocument.mockRejectedValueOnce(conflict);
+    const append = await captureAppendHandler({ documents: documents.service });
+
+    await append({ bullets: 'Our bullet', date: MEMORY_DATE });
+
+    expect(documents.putDocument).toHaveBeenCalledTimes(2);
+    expect(documents.read()?.content).toContain('Our bullet');
+  });
+
+  it('stops after the bounded retry budget is exhausted', async () => {
+    const documents = createFakeDocumentsService({ visibility: 'private', edit_policy: 'owner' });
+    documents.putDocument.mockRejectedValue(new KnowledgeDocumentVersionMismatchError('v', 2));
+    const append = await captureAppendHandler({ documents: documents.service });
+
+    await expect(append({ bullets: 'Our bullet', date: MEMORY_DATE })).rejects.toThrow(
+      /document changed concurrently/
+    );
+    expect(documents.getDocument).toHaveBeenCalledTimes(3);
+    expect(documents.putDocument).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry failures other than a version mismatch', async () => {
+    const documents = createFakeDocumentsService({ visibility: 'private', edit_policy: 'owner' });
+    const failure = new Error('Synthetic storage failure');
+    documents.putDocument.mockRejectedValue(failure);
+    const append = await captureAppendHandler({ documents: documents.service });
+
+    await expect(append({ bullets: 'Our bullet', date: MEMORY_DATE })).rejects.toBe(failure);
+    expect(documents.getDocument).toHaveBeenCalledTimes(1);
+    expect(documents.putDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['missing current version', undefined],
+    ['missing current version fields', {}],
+    ['invalid zero version number', { version_number: 0 }],
+  ])('fails closed before an unconditional write with %s', async (_, currentVersion) => {
+    const documents = createFakeDocumentsService({ visibility: 'private', edit_policy: 'owner' });
+    documents.getDocument.mockResolvedValueOnce({
+      content: `# ${MEMORY_DATE}\n`,
+      current_version: currentVersion,
+    } as never);
+    const append = await captureAppendHandler({ documents: documents.service });
+
+    await expect(append({ bullets: 'Our bullet', date: MEMORY_DATE })).rejects.toThrow(
+      /without an existing document version/
+    );
+    expect(documents.putDocument).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the existing document content is unavailable', async () => {
+    const documents = createFakeDocumentsService({ visibility: 'private', edit_policy: 'owner' });
+    documents.getDocument.mockResolvedValueOnce({
+      content: null,
+      current_version: { version_id: 'version-1' },
+    } as never);
+    const append = await captureAppendHandler({ documents: documents.service });
+
+    await expect(append({ bullets: 'Our bullet', date: MEMORY_DATE })).rejects.toThrow(
+      /without the existing document content/
+    );
+    expect(documents.putDocument).not.toHaveBeenCalled();
   });
 });

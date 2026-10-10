@@ -1,3 +1,4 @@
+import type { AgorClient } from '@agor-live/client';
 import { CloseOutlined, SearchOutlined } from '@ant-design/icons';
 import { Button, Input, type InputRef, Tooltip, theme } from 'antd';
 import type React from 'react';
@@ -17,6 +18,8 @@ import { useRecents } from './useRecents';
 import { flattenResults, hasAnyEntries } from './utils';
 
 interface GlobalSearchProps extends GlobalSearchEntityMaps {
+  /** Searches the daemon too; without it, only the loaded maps. */
+  client?: AgorClient | null;
   currentUserId?: string;
   /**
    * Open the Settings modal — used as a coarse landing for entity types
@@ -113,11 +116,11 @@ function useSearchPopover(
 /**
  * Navbar global-search input + dropdown.
  *
- * Implementation per docs/internal/global-search-design-2026-05-23.md.
  * V1 scaffolding: client-side filtering over in-memory entity maps, sectioned
  * dropdown, type + scope chips, Cmd+K to focus.
  */
 export const GlobalSearch: React.FC<GlobalSearchProps> = ({
+  client,
   currentUserId,
   sessionById,
   branchById,
@@ -144,6 +147,7 @@ export const GlobalSearch: React.FC<GlobalSearchProps> = ({
   });
 
   const { results, counts, hasAnyResults, debouncedQuery, flush } = useGlobalSearch({
+    client,
     query,
     ownedByMe,
     activeTypeChip: activeChip,
@@ -156,6 +160,7 @@ export const GlobalSearch: React.FC<GlobalSearchProps> = ({
   });
 
   const recents = useRecents({
+    client,
     currentUserId,
     sessionById,
     branchById,

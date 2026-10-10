@@ -21,7 +21,7 @@ import {
   UsersRepository,
   update,
 } from '@agor/core/db';
-import { BadRequest, Forbidden, NotFound } from '@agor/core/feathers';
+import { BadRequest, Conflict, Forbidden } from '@agor/core/feathers';
 import type { KnowledgeDocument, User, UserID } from '@agor/core/types';
 import { parseKnowledgeUri, ROLES } from '@agor/core/types';
 import { describe, expect, vi } from 'vitest';
@@ -29,6 +29,10 @@ import { dbTest } from '../../../../packages/core/src/db/test-helpers';
 import { knowledgeChunkerOptionsFromSettings, knowledgeUnitsForMarkdown } from '../knowledge/units';
 import { type KnowledgeDocumentParams, KnowledgeDocumentsService } from './knowledge-documents';
 import { KnowledgeEmbeddingIndexer } from './knowledge-embedding-indexer';
+import {
+  KnowledgeDocumentOwnerOnlyEditError,
+  KnowledgeDocumentVersionMismatchError,
+} from './knowledge-errors';
 import { KnowledgeGraphService } from './knowledge-graph';
 import { KnowledgeIndexingStatusService } from './knowledge-indexing';
 import { KnowledgeNamespacesService } from './knowledge-namespaces';
@@ -515,6 +519,49 @@ describe('KnowledgeDocumentsService permissions', () => {
   });
 
   dbTest(
+    'explains that namespace write access does not bypass owner-only document editing',
+    async ({ db }) => {
+      const owner = await seedUser(db, 'owner');
+      const other = await seedUser(db, 'other');
+      const namespace = await new KnowledgeNamespaceRepository(db).create({
+        slug: 'shared-owner-only',
+        display_name: 'Shared owner-only',
+        visibility_default: 'public',
+        others_can: 'write',
+        owner_user_id: owner.user_id as UserID,
+      });
+      const service = new KnowledgeDocumentsService(db);
+      await service.putDocument(
+        {
+          namespace_slug: namespace.slug,
+          path: 'memory/today.md',
+          content_text: '# Today\n',
+          visibility: 'public',
+          edit_policy: 'owner',
+        },
+        params(owner)
+      );
+
+      const denied = await service
+        .putDocument(
+          {
+            namespace_slug: namespace.slug,
+            path: 'memory/today.md',
+            content_text: '# Today\n\nOther writer append',
+            expected_version: 1,
+          },
+          params(other)
+        )
+        .catch((error: unknown) => error);
+      expect(denied).toBeInstanceOf(KnowledgeDocumentOwnerOnlyEditError);
+      expect(denied).toMatchObject({
+        message:
+          'This knowledge document uses owner-only editing. Only the document owner or an admin can update it.',
+      });
+    }
+  );
+
+  dbTest(
     'does not treat private documents with public edit policy as world-editable',
     async ({ db }) => {
       const owner = await seedUser(db, 'owner');
@@ -617,6 +664,117 @@ describe('KnowledgeDocumentsService permissions', () => {
       expect('content' in hydrated ? hydrated.content : null).toBe('# Guide\n\nUpdated');
     }
   );
+
+  dbTest(
+    'rejects a create-only upsert race before changing existing document governance',
+    async ({ db }) => {
+      const owner = await seedUser(db, 'owner');
+      const namespace = await new KnowledgeNamespaceRepository(db).create({
+        slug: 'create-only-policy-race',
+        display_name: 'Create-only policy race',
+        visibility_default: 'private',
+        owner_user_id: owner.user_id as UserID,
+      });
+      const service = new KnowledgeDocumentsService(db);
+      const existing = await service.putDocument(
+        {
+          namespace_slug: namespace.slug,
+          path: 'memory/today.md',
+          content_text: '# Today\n\nPrivate memory',
+          edit_policy: 'owner',
+        },
+        params(owner)
+      );
+
+      await expect(
+        service.putDocument(
+          {
+            namespace_slug: namespace.slug,
+            path: 'memory/today.md',
+            content_text: '# Today\n\nStale replacement',
+            visibility: 'public',
+            edit_policy: 'public',
+            expected_version: 0,
+          },
+          params(owner)
+        )
+      ).rejects.toBeInstanceOf(KnowledgeDocumentVersionMismatchError);
+
+      await expect(
+        service.getDocument(
+          {
+            document_id: existing.document_id,
+            include_content: true,
+          },
+          params(owner)
+        )
+      ).resolves.toMatchObject({
+        visibility: 'private',
+        edit_policy: 'owner',
+        content: '# Today\n\nPrivate memory',
+      });
+    }
+  );
+
+  dbTest(
+    'translates a confirmed create-only unique collision into a typed version mismatch',
+    async ({ db }) => {
+      const owner = await seedUser(db, 'owner');
+      const existing = await seedDocument(db, owner, {
+        path: 'memory/today.md',
+        content_text: '# Today\n',
+      });
+      const service = new KnowledgeDocumentsService(db);
+      const internals = service as unknown as {
+        runPolicyDependentWrite: () => Promise<never>;
+        resolveDocumentRef: () => Promise<KnowledgeDocument | null>;
+      };
+      vi.spyOn(internals, 'runPolicyDependentWrite').mockRejectedValue({
+        cause: { code: '23505' },
+      });
+      vi.spyOn(internals, 'resolveDocumentRef').mockResolvedValue(existing);
+
+      await expect(
+        service.putDocument(
+          {
+            namespace_slug: 'synthetic-race',
+            path: 'memory/today.md',
+            content_text: '# Today\n\nConcurrent append',
+            expected_version: 0,
+          },
+          params(owner)
+        )
+      ).rejects.toMatchObject({
+        name: 'KnowledgeDocumentVersionMismatchError',
+        expectedVersion: 0,
+        currentVersion: 'unknown',
+      });
+    }
+  );
+
+  dbTest('does not translate an unrelated unique constraint failure', async ({ db }) => {
+    const owner = await seedUser(db, 'owner');
+    const service = new KnowledgeDocumentsService(db);
+    const collision = { cause: { code: '23505' } };
+    const internals = service as unknown as {
+      runPolicyDependentWrite: () => Promise<never>;
+      resolveDocumentRef: () => Promise<KnowledgeDocument | null>;
+    };
+    vi.spyOn(internals, 'runPolicyDependentWrite').mockRejectedValue(collision);
+    vi.spyOn(internals, 'resolveDocumentRef').mockResolvedValue(null);
+
+    await expect(
+      service.putDocument(
+        {
+          namespace_slug: 'synthetic-unrelated-collision',
+          path: 'memory/today.md',
+          content_text: '# Today\n',
+          expected_version: 0,
+        },
+        params(owner)
+      )
+    ).rejects.toBe(collision);
+  });
 
   dbTest(
     'projects human and assistant authors on document and history service responses',
@@ -817,7 +975,7 @@ describe('KnowledgeDocumentsService permissions', () => {
   );
 
   dbTest(
-    'hides archived documents from direct get and recreates same path through upsert',
+    'preserves archived direct links and reserves the path until explicit restoration',
     async ({ db }) => {
       const owner = await seedUser(db, 'owner');
       const namespace = await seedNamespace(db, 'archive-style');
@@ -828,15 +986,21 @@ describe('KnowledgeDocumentsService permissions', () => {
         params(owner)
       );
       await service.remove(created.document_id, params(owner));
-      await expect(service.get(created.document_id, params(owner))).rejects.toBeInstanceOf(
-        NotFound
-      );
-
-      const recreated = await service.putDocument(
+      expect(await service.get(created.document_id, params(owner))).toMatchObject({
+        archived: true,
+      });
+      await expect(
+        service.putDocument(
+          { namespace_slug: namespace.slug, path: 'same.md', content_text: 'new' },
+          params(owner)
+        )
+      ).rejects.toBeInstanceOf(Conflict);
+      await service.patch(created.document_id, { archived: false }, params(owner));
+      const updated = await service.putDocument(
         { namespace_slug: namespace.slug, path: 'same.md', content_text: 'new' },
         params(owner)
       );
-      expect(recreated.document_id).not.toBe(created.document_id);
+      expect(updated.document_id).toBe(created.document_id);
     }
   );
 
@@ -1336,49 +1500,54 @@ describe('KnowledgeSearchService and KnowledgeVersionsService permissions', () =
     }
   );
 
-  dbTest('scopes search results and ignores non-admin include_archived', async ({ db }) => {
-    const owner = await seedUser(db, 'owner');
-    const other = await seedUser(db, 'other');
-    const admin = await seedUser(db, 'admin', ROLES.ADMIN);
-    const publicDoc = await seedDocument(db, owner, {
-      visibility: 'public',
-      path: 'public.md',
-      content_text: 'sharedterm public',
-    });
-    const privateDoc = await seedDocument(db, owner, {
-      visibility: 'private',
-      path: 'private.md',
-      content_text: 'sharedterm private',
-    });
-    const archivedDoc = await seedDocument(db, owner, {
-      visibility: 'public',
-      path: 'archived.md',
-      content_text: 'archivedterm',
-    });
-    await new KnowledgeDocumentRepository(db).delete(archivedDoc.document_id);
+  dbTest(
+    'scopes active and explicitly archived search results for all authorized readers',
+    async ({ db }) => {
+      const owner = await seedUser(db, 'owner');
+      const other = await seedUser(db, 'other');
+      const admin = await seedUser(db, 'admin', ROLES.ADMIN);
+      const publicDoc = await seedDocument(db, owner, {
+        visibility: 'public',
+        path: 'public.md',
+        content_text: 'sharedterm public',
+      });
+      const privateDoc = await seedDocument(db, owner, {
+        visibility: 'private',
+        path: 'private.md',
+        content_text: 'sharedterm private',
+      });
+      const archivedDoc = await seedDocument(db, owner, {
+        visibility: 'public',
+        path: 'archived.md',
+        content_text: 'archivedterm',
+      });
+      await new KnowledgeDocumentRepository(db).delete(archivedDoc.document_id);
 
-    const search = new KnowledgeSearchService(db);
-    const otherResults = await search.find(params(other, { q: 'sharedterm' }));
-    expect(otherResults.map((result) => result.document.document_id)).toEqual([
-      publicDoc.document_id,
-    ]);
+      const search = new KnowledgeSearchService(db);
+      const otherResults = await search.find(params(other, { q: 'sharedterm' }));
+      expect(otherResults.map((result) => result.document.document_id)).toEqual([
+        publicDoc.document_id,
+      ]);
 
-    const ownerResults = await search.find(params(owner, { q: 'sharedterm' }));
-    expect(new Set(ownerResults.map((result) => result.document.document_id))).toEqual(
-      new Set([publicDoc.document_id, privateDoc.document_id])
-    );
+      const ownerResults = await search.find(params(owner, { q: 'sharedterm' }));
+      expect(new Set(ownerResults.map((result) => result.document.document_id))).toEqual(
+        new Set([publicDoc.document_id, privateDoc.document_id])
+      );
 
-    expect(await search.find(params(other, { q: 'archivedterm', include_archived: true }))).toEqual(
-      []
-    );
-    expect(
-      (await search.find(params(admin, { q: 'archivedterm', include_archived: true })))[0].document
-        .document_id
-    ).toBe(archivedDoc.document_id);
-  });
+      expect(await search.find(params(other, { q: 'archivedterm' }))).toEqual([]);
+      expect(
+        (await search.find(params(other, { q: 'archivedterm', include_archived: true })))[0]
+          .document.document_id
+      ).toBe(archivedDoc.document_id);
+      expect(
+        (await search.find(params(admin, { q: 'archivedterm', include_archived: true })))[0]
+          .document.document_id
+      ).toBe(archivedDoc.document_id);
+    }
+  );
 
   dbTest(
-    'hides private and archived history while honoring include_content and limit',
+    'protects private history and preserves archived history with include_content and limit',
     async ({ db }) => {
       const owner = await seedUser(db, 'owner');
       const other = await seedUser(db, 'other');
@@ -1403,7 +1572,7 @@ describe('KnowledgeSearchService and KnowledgeVersionsService permissions', () =
       expect(redacted[0].content_text).toBeNull();
 
       await new KnowledgeDocumentRepository(db).delete(doc.document_id);
-      expect(await versions.find(params(owner, { document_id: doc.document_id }))).toEqual([]);
+      expect(await versions.find(params(owner, { document_id: doc.document_id }))).toHaveLength(2);
     }
   );
 

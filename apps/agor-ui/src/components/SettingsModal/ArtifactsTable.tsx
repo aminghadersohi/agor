@@ -28,6 +28,7 @@ import { mapToArray, mapToSortedArray } from '@/utils/mapHelpers';
 import { filterBySettingsSearch } from '@/utils/settingsSearch';
 import { uiRouteHref } from '@/utils/uiRoutes';
 import { useAppNavigation } from '../../hooks/useAppNavigation';
+import { useEnsureBranches } from '../../hooks/useEnsureRows';
 import { ArtifactBindingsList } from '../artifacts/ArtifactBindingsList';
 import { boardSelectFilter, boardSelectOptions, getBoardEmoji } from '../BoardTile';
 import { HighlightMatch } from '../HighlightMatch';
@@ -70,7 +71,7 @@ type BindingsState =
   | { status: 'error'; message: string };
 
 export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
-  client,
+  client = null,
   artifactById,
   branchById,
   boardById,
@@ -85,6 +86,11 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
   const [bindings, setBindings] = useState<BindingsState | null>(null);
   const bindingsRequestRef = useRef(0);
   const [form] = Form.useForm();
+  // The store holds only the loaded scopes' branches: read the ones artifacts name.
+  useEnsureBranches(
+    client,
+    Array.from(artifactById.values(), (artifact) => artifact.branch_id ?? '')
+  );
 
   // Reuses the `artifactById` prop so we don't read the same data via
   // both props and context. Only goToArtifact is used from this table.

@@ -384,14 +384,13 @@ export interface Branch {
   color_override?: string;
 
   /**
-   * Whether this branch needs attention (highlighted state)
+   * Legacy/manual branch-level attention marker.
    *
    * Set to true when:
    * - Branch is newly created
-   * - Any session in the branch has ready_for_prompt=true
-   *
    * Cleared when user interacts with the branch card.
-   * Used to draw attention to new or ready branches on the board.
+   * Session-output badges and glow use caller-scoped session attention
+   * generations instead of this shared flag.
    */
   needs_attention: boolean;
 
@@ -436,6 +435,8 @@ export interface Branch {
 
   /** Set only by permanent deletion; remains fenced after partial failure. */
   deletion_status?: BranchDeletionStatus;
+  /** Read-only runtime support, projected by branches.get; never a grant or readiness proof. */
+  maintenance_capabilities?: import('./branch-cleanup').BranchMaintenanceCapabilities;
   /** Bounded, sanitized latest error; never used to decide recovery. */
   deletion_error?: string;
   deletion_updated_at?: string;
@@ -509,7 +510,6 @@ export interface Branch {
   others_fs_access?: 'none' | 'read' | 'write';
 
   // ===== Branch Storage Mode =====
-  // See context/explorations/clone-redesign.md.
 
   /**
    * How this branch's filesystem is materialised.
@@ -935,6 +935,7 @@ export type RepoEnvironmentConfig = RepoEnvironmentConfigV1;
 /** Public framework repository that owns Agor's built-in teammate templates. */
 export const TEAMMATE_FRAMEWORK_REPO_SLUG = 'preset-io/agor-teammate';
 export const TEAMMATE_FRAMEWORK_REPO_URL = 'https://github.com/preset-io/agor-teammate.git';
+export const TEAMMATE_FRAMEWORK_DEFAULT_BRANCH = 'main';
 
 /** Exact public template identity, never a name/slug substring match. */
 export function isCanonicalTeammateFrameworkRepo(repo: Pick<Repo, 'remote_url'>): boolean {
@@ -946,6 +947,18 @@ export function isCanonicalTeammateFrameworkRepo(repo: Pick<Repo, 'remote_url'>)
     `ssh://git@github.com/${TEAMMATE_FRAMEWORK_REPO_SLUG}.git`,
     `ssh://git@github.com/${TEAMMATE_FRAMEWORK_REPO_SLUG}`,
   ].includes(repo.remote_url ?? '');
+}
+
+export const TEAMMATE_FRAMEWORK_PRIVATE_FORK_NAMES = [
+  'agor-teammate-private',
+  'agor-assistant-private',
+] as const;
+
+/** Loose name match for repo selection; the content rule is the exact defaultsToPublicTeammateTemplate. */
+export function isPrivateTeammateFrameworkFork(repo: Pick<Repo, 'slug' | 'remote_url'>): boolean {
+  return TEAMMATE_FRAMEWORK_PRIVATE_FORK_NAMES.some(
+    (name) => !!repo.slug?.includes(name) || !!repo.remote_url?.includes(name)
+  );
 }
 
 export type TeammateKnowledgeGrantAccess = 'none' | 'read' | 'write';
@@ -1045,6 +1058,26 @@ export const isPersistedAgent = isTeammate;
  * Supports canonical (`custom_context.teammate`) plus legacy
  * (`custom_context.assistant` / `custom_context.agent`) storage.
  */
+/**
+ * One row of `branch-counts.find()`: the number of active (non-archived)
+ * branches on a board, counting only branches the caller can view on boards
+ * the caller can view. Backs the board-switcher and mobile nav-tree badges.
+ */
+export interface BoardBranchCount {
+  board_id: BoardID;
+  branch_count: number;
+}
+
+/**
+ * One row of `session-counts.find({ group_by })`: the active sessions on a
+ * branch, or on a board's branches, that the caller can view.
+ */
+export interface SessionCount {
+  /** The branch id or board id, per `group_by`. */
+  id: string;
+  session_count: number;
+}
+
 export function getTeammateConfig(branch: {
   custom_context?: Record<string, unknown>;
 }): TeammateConfig | null {

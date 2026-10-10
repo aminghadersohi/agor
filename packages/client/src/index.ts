@@ -30,7 +30,9 @@ import type {
 } from '@agor/core/types';
 import {
   attachReactiveSessionApi,
+  LEAN_TRANSCRIPT_TASK_WINDOW,
   type ReactiveAgorClient,
+  type ReactiveContextWindow,
   type ReactiveLoadedTaskIds,
   type ReactiveMessagesByTask,
   type ReactiveSessionHandle,
@@ -75,6 +77,7 @@ export { getGatewayCredentialPresentation } from '@agor/core/types';
 export * from './models';
 export type {
   ReactiveAgorClient,
+  ReactiveContextWindow,
   ReactiveLoadedTaskIds,
   ReactiveMessagesByTask,
   ReactiveSessionHandle,
@@ -102,6 +105,7 @@ export {
   attachReactiveSessionApi,
   getApiKeyFromEnv,
   isDaemonRunning,
+  LEAN_TRANSCRIPT_TASK_WINDOW,
   preloadRestClientTransport,
   releaseReactiveSession,
   retainReactiveSession,

@@ -2,15 +2,30 @@ import type { AgorClient, Board, BoardEntityObject, Branch, Repo, User } from '@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { App } from 'antd';
 import 'reactflow/dist/style.css';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { userEvent } from 'vitest/browser';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { EMPTY_MAPS } from '../../store/agorMaps';
 import { boardObjectPatched } from '../../store/agorRealtimeActions';
 import { agorStore } from '../../store/agorStore';
+import { captureLoadLifetime } from '../../store/loadLifetime';
+import { setRealtimeAuthorityScope } from '../../store/realtimeBatch';
+import { boardScopeKey } from '../../store/scopeMerge';
+import { boardCoverage } from '../../test/userScopeCoverage';
 import SessionCanvas from './SessionCanvas';
 
-afterEach(cleanup);
+beforeEach(() => setRealtimeAuthorityScope('placement-owner:member:1'));
+afterEach(() => {
+  cleanup();
+  setRealtimeAuthorityScope(null);
+});
+
+/** The board's partition, loaded under the current lifetime: it holds the board's rows. */
+const loadedPartition = () => boardCoverage('loaded', captureLoadLifetime() ?? undefined);
+
+// CSS (and the PATCH JSON transport) serializes -0 as 0. Keep exact coordinate
+// equality without treating that serialization difference as a lost drag.
+const normalizeSignedZero = ({ x, y }: { x: number; y: number }) => ({ x: x + 0, y: y + 0 });
 
 it('persists two real pointer drags when the first PATCH completes during the second debounce', async () => {
   const user = { user_id: 'placement-owner', role: 'member' } as User;
@@ -47,6 +62,8 @@ it('persists two real pointer drags when the first PATCH completes during the se
     branchById: new Map([[branch.branch_id, branch]]),
     repoById: new Map([[repo.repo_id, repo]]),
     boardObjectsByBoardId: new Map([[board.board_id, [initial]]]),
+    // Structural edits need the board's partition loaded.
+    coverage: new Map([[boardScopeKey(board.board_id), loadedPartition()]]),
   });
   let release!: () => void;
   const pending = new Promise<void>((resolve) => {
@@ -119,23 +136,15 @@ it('persists two real pointer drags when the first PATCH completes during the se
   const transform = node.style.transform.match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/);
   expect(transform).not.toBeNull();
   const expected = { x: Number(transform![1]), y: Number(transform![2]) };
-  // `expected` is reparsed out of a CSS transform string, which has no way to
-  // spell -0 (`String(-0) === '0'`). A drag that lands exactly on an axis can
-  // legitimately yield -0, so that round-trip silently flips the sign and
-  // `toEqual` treats -0 and 0 as different. Adding +0 maps -0 to 0 and leaves
-  // every other value untouched; -0 and 0 are the same board position, and
-  // JSON serialization collapses them anyway.
-  const normalize = (position: { x: number; y: number }) => ({
-    x: position.x + 0,
-    y: position.y + 0,
-  });
-  expect(expected).not.toEqual(normalize(patch.mock.calls[0][1].position));
+  expect(expected).not.toEqual(normalizeSignedZero(patch.mock.calls[0][1].position!));
   await act(async () => release());
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
-  expect(normalize(patch.mock.calls[1][1].position)).toEqual(expected);
-  expect(
-    normalize(agorStore.getState().boardObjectsByBoardId.get(board.board_id)![0].position!)
-  ).toEqual(expected);
+  expect(normalizeSignedZero(patch.mock.calls[1][1].position!)).toEqual(expected);
+  const storedPosition = agorStore
+    .getState()
+    .boardObjectsByBoardId.get(board.board_id)?.[0].position;
+  expect(storedPosition).toBeDefined();
+  expect(normalizeSignedZero(storedPosition!)).toEqual(expected);
   await waitFor(() =>
     expect(node.style.transform).toBe(`translate(${expected.x}px, ${expected.y}px)`)
   );
@@ -186,6 +195,8 @@ it('shows skipped-default warnings from an always_new drop response', async () =
     branchById: new Map([[branch.branch_id, branch]]),
     repoById: new Map([[repo.repo_id, repo]]),
     boardObjectsByBoardId: new Map([[board.board_id, [initial]]]),
+    // Structural edits need the board's partition loaded.
+    coverage: new Map([[boardScopeKey(board.board_id), loadedPartition()]]),
   });
   // This is a real-browser consumer regression, not daemon E2E: only the
   // transport response is stubbed. No prompt/provider is invoked.

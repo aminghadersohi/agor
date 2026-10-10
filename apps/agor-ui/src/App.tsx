@@ -25,6 +25,7 @@ import type {
 } from '@agor-live/client';
 import {
   boardPath,
+  CHAT_WORKSPACE_PATH_SEGMENT,
   ENTITY_PATH_SEGMENTS,
   hasMinimumRole,
   isAgenticToolName,
@@ -50,8 +51,9 @@ import { MCPCatalogModalHost } from './components/Marketplace/MCPCatalogModalHos
 import { OnboardingBanners } from './components/OnboardingBanners';
 import type { OnboardingCompletionResult } from './components/OnboardingWizard';
 import { buildPromptWithAttachments } from './components/SessionPanel/composerAttachments';
+import { sendPromptWithReconciliation } from './components/SessionPanel/promptReconciliation';
 import { StreamdownPortalApp } from './components/StreamdownPortalApp';
-import { getDaemonUrl } from './config/daemon';
+import { describeUnreachableDaemonOrigin, getDaemonUrl } from './config/daemon';
 import { CanvasNavigationProvider } from './contexts/CanvasNavigationContext';
 import { ConnectionProvider } from './contexts/ConnectionContext';
 import { MCPCatalogModalProvider } from './contexts/MCPCatalogModalContext';
@@ -85,6 +87,7 @@ import {
   type OnboardingOperationOwner,
   useOnboardingLifecycle,
 } from './hooks/useOnboardingLifecycle';
+import { usePinnedOpenRows } from './hooks/usePinnedRows';
 import { useSurfaceBranding } from './hooks/useSurfaceBranding';
 import { useUnarchiveBranch } from './hooks/useUnarchiveBranch';
 import { repoPatched, sessionCreated } from './store/agorRealtimeActions';
@@ -101,11 +104,13 @@ import {
 } from './surfaces/surfaceRegistry';
 import { useWorkspaceSurfaceLifecycle } from './surfaces/useWorkspaceSurfaceLifecycle';
 import type { CreateRepoOptions } from './types';
-import { cloneErrorHint } from './utils/cloneErrorHint';
+import { formatActionError } from './utils/connectionErrors';
+import { createRepository } from './utils/createRepository';
 import {
   enrichAuthenticatedUser,
   hasObservedOnboardingCompletion,
 } from './utils/currentUserAuthority';
+import { ensureOnboardingFrameworkRepo } from './utils/ensureOnboardingFrameworkRepo';
 import { completeLocalPasswordChange } from './utils/forcePasswordChange';
 import { useThemedMessage } from './utils/message';
 import { buildCompletedOnboardingPreferences } from './utils/onboardingGoals';
@@ -126,7 +131,6 @@ import {
 } from './utils/sessionUpdateNotifications';
 import { afterStartupSignInDispatched } from './utils/startupSignIn';
 import { getRouterBasename, isMobileShellPath } from './utils/uiRoutes';
-import { waitForFrameworkRepoReady } from './utils/waitForFrameworkRepoReady';
 
 type RouteModuleKey = RouteSurfaceId | 'mobile';
 
@@ -349,6 +353,7 @@ function AppContent() {
     loginForAuthorityCycle,
     logout,
     logoutForAuthorityCycle,
+    reconcileStoredCredentials,
     refreshCurrentUserForAuthorityCycle,
   } = useAuth();
 
@@ -366,7 +371,11 @@ function AppContent() {
   } = useAgorClient({
     accessToken: authenticated ? accessToken : null,
     authorityGeneration: authenticationGeneration,
+    reconcileCredentials: reconcileStoredCredentials,
+    isAuthorityGenerationCurrent: isAuthenticationGenerationCurrent,
   });
+  const clientRef = useRef(client);
+  clientRef.current = client;
   const startEnvironmentWithConfirmation = useEnvironmentStart(client);
   const handleUnarchiveBranch = useUnarchiveBranch(client);
   // Authenticated callers see their tenant's label; pre-login config is the fallback.
@@ -452,7 +461,11 @@ function AppContent() {
 
   const directSessionIdFromPath =
     location.pathname.match(/^\/(?:s|m\/session)\/([^/]+)\/?$/)?.[1] ?? null;
+  const directBranchIdFromPath = location.pathname.match(/^\/w\/([^/]+)\/?$/)?.[1] ?? null;
   const authenticatedUserCanListUsers = hasMinimumRole(user?.role, ROLES.MEMBER);
+  // A deep link's target (and an open session's branch) stays while routed
+  // to, whatever scope evicts; a short id is pinned once the UI resolves it.
+  usePinnedOpenRows({ sessions: [directSessionIdFromPath], branches: [directBranchIdFromPath] });
 
   // Pass the stable client lifetime, not `connected ? client : null`:
   // useAgorData owns reconnect refetches and `null` is reserved for logout /
@@ -468,6 +481,7 @@ function AppContent() {
   } = useAgorData(client, {
     enabled: workspaceSurfaceShouldRun && !(user?.must_change_password && passwordWriteAvailable),
     directSessionId: directSessionIdFromPath,
+    directBranchId: directBranchIdFromPath,
     authenticatedUserId: user?.user_id,
     authenticatedUserRole: user?.role,
     authGeneration,
@@ -644,164 +658,15 @@ function AppContent() {
     onboardingSeedResultRef.current.clear();
   }, [onboardingWizardOwner]);
 
-  // Clone a repository (framework repo, GitHub repos, etc.). Defined here —
-  // above the early returns and the onboarding auto-clone hook below — so it can
-  // be passed directly to `useEnsureFrameworkRepo` without a ref indirection
-  // that could race the hook's one-shot clone effect.
   const handleCreateRepo = useCallback(
-    async (data: CreateRepoRequest, options: CreateRepoOptions = {}) => {
-      if (options.shouldApply && !options.shouldApply()) return;
-      if (!client) {
-        showError('Not connected to daemon — cannot clone repository');
-        return;
-      }
-
-      // POST /repos/clone returns `{ status: 'pending', repo_id }` immediately;
-      // the daemon pre-creates the repo row with `clone_status: 'cloning'` and
-      // the executor patches it to `'ready'`/`'failed'`. Listen for `patched`
-      // (the durable outcome) — `created` only fires for the placeholder now,
-      // unless the row is a legacy `create_local` (no `clone_status`).
-      // `repo:cloneError` is kept as a belt-and-suspenders fallback so older
-      // executors that don't patch still surface failures.
-      const toastKey = `clone-repo-${data.slug}`;
-      const CLONE_TIMEOUT_MS = 120_000;
-      if (!options.silent) showLoading(`Cloning ${data.slug}...`, { key: toastKey });
-
-      const reposService = client.service('repos');
-      let settled = false;
-
-      const cleanup = () => {
-        reposService.removeListener('created', handleCreated);
-        reposService.removeListener('patched', handlePatched);
-        client.io.off('repo:cloneError', handleCloneError);
-        clearTimeout(timeoutHandle);
-      };
-      const handleCreated = (repo: Repo) => {
-        if (settled || repo.slug !== data.slug) return;
-        if (options.shouldApply && !options.shouldApply()) {
-          settled = true;
-          cleanup();
-          return;
-        }
-        // Skip the `'cloning'` placeholder — `handlePatched` will declare the
-        // outcome once the executor finishes. `undefined` covers legacy rows
-        // and any direct executor-path that bypasses the placeholder.
-        if (repo.clone_status === 'cloning') return;
-        settled = true;
-        if (!options.silent) showSuccess(`Cloned ${data.slug}`, { key: toastKey });
-        cleanup();
-      };
-      const handlePatched = (repo: Repo) => {
-        if (settled || repo.slug !== data.slug) return;
-        if (options.shouldApply && !options.shouldApply()) {
-          settled = true;
-          cleanup();
-          return;
-        }
-        if (repo.clone_status === 'ready') {
-          settled = true;
-          if (!options.silent) showSuccess(`Cloned ${data.slug}`, { key: toastKey });
-          cleanup();
-        } else if (repo.clone_status === 'failed') {
-          settled = true;
-          const err = repo.clone_error;
-          // Keep Git's first-line diagnostic, then add category-specific
-          // remediation. In particular, TLS failures need a CA-store hint;
-          // never suggest disabling certificate verification.
-          const hint = cloneErrorHint(err);
-          if (!options.silent || options.showErrors) {
-            showError(`Failed to clone ${data.slug}: ${err?.message ?? 'unknown error'}${hint}`, {
-              key: toastKey,
-            });
-          }
-          cleanup();
-        }
-      };
-      const handleCloneError = (payload: {
-        slug?: string;
-        url?: string;
-        error?: string;
-        clone_error?: Repo['clone_error'];
-      }) => {
-        if (settled) return;
-        if (options.shouldApply && !options.shouldApply()) {
-          settled = true;
-          cleanup();
-          return;
-        }
-        if (payload.slug !== data.slug && payload.url !== data.url) return;
-        settled = true;
-        const hint = cloneErrorHint(payload.clone_error);
-        if (!options.silent || options.showErrors) {
-          showError(
-            `Failed to clone ${data.slug}: ${payload.clone_error?.message ?? payload.error ?? 'unknown error'}${hint}`,
-            { key: toastKey }
-          );
-        }
-        cleanup();
-      };
-      const timeoutHandle = setTimeout(() => {
-        if (settled) return;
-        if (options.shouldApply && !options.shouldApply()) {
-          settled = true;
-          cleanup();
-          return;
-        }
-        settled = true;
-        if (!options.silent || options.showErrors) {
-          showError(`Clone of ${data.slug} timed out after 2 minutes. Check daemon logs.`, {
-            key: toastKey,
-          });
-        }
-        cleanup();
-      }, CLONE_TIMEOUT_MS);
-
-      reposService.on('created', handleCreated);
-      reposService.on('patched', handlePatched);
-      client.io.on('repo:cloneError', handleCloneError);
-
-      try {
-        const result = await client.service('repos/clone').create({
-          url: data.url,
-          slug: data.slug,
-          default_branch: data.default_branch,
-        });
-        if (options.shouldApply && !options.shouldApply()) {
-          settled = true;
-          cleanup();
-          return;
-        }
-
-        // Daemon short-circuits with `status: 'exists'` when a repo with this
-        // slug is already registered — no `repos.created` event will fire, so
-        // resolve the loading toast here instead of waiting for the timeout.
-        if (result?.status === 'exists' && !settled) {
-          settled = true;
-          if (!options.silent) {
-            showWarning(`Repository "${data.slug}" is already added`, { key: toastKey });
-          }
-          cleanup();
-        }
-        return result;
-      } catch (error) {
-        if (options.shouldApply && !options.shouldApply()) {
-          settled = true;
-          cleanup();
-          return;
-        }
-        if (!settled) {
-          settled = true;
-          if (!options.silent || options.showErrors) {
-            showError(
-              `Failed to clone repository: ${error instanceof Error ? error.message : String(error)}`,
-              { key: toastKey }
-            );
-          }
-          cleanup();
-        }
-        throw error;
-      }
-    },
+    (data: CreateRepoRequest, options: CreateRepoOptions = {}) =>
+      createRepository(
+        client,
+        data,
+        options,
+        { showError, showLoading, showSuccess, showWarning },
+        repoPatched
+      ),
     [client, showError, showLoading, showSuccess, showWarning]
   );
 
@@ -819,15 +684,20 @@ function AppContent() {
     () => (frameworkRepo ? [frameworkRepo] : EMPTY_REPOS),
     [frameworkRepo]
   );
-  // Suppress loading/success toasts for the onboarding auto-clone — a fresh user
-  // mid-wizard shouldn't see "Cloning…"/"Cloned" toasts from behind the modal.
-  // Keep failures visible: a CA/Git/auth error needs to be actionable now.
+  // Prefetch is not a user request: no global toasts. Keep local status and
+  // durable repo diagnostics; completion below owns required-step errors.
   const onboardingCreateRepo = useCallback(
-    (data: CreateRepoRequest) => handleCreateRepo(data, { silent: true, showErrors: true }),
-    [handleCreateRepo]
+    (data: CreateRepoRequest) =>
+      handleCreateRepo(data, {
+        silent: true,
+        shouldApply: () =>
+          !!onboardingWizardOwner && isOnboardingOwnerCurrent(onboardingWizardOwner),
+      }),
+    [handleCreateRepo, onboardingWizardOwner, isOnboardingOwnerCurrent]
   );
-  useEnsureFrameworkRepo(frameworkRepoList, onboardingCreateRepo, {
+  const frameworkSetup = useEnsureFrameworkRepo(frameworkRepoList, onboardingCreateRepo, {
     enabled: onboardingWizardOpen && canRunOnboarding,
+    ownerKey: onboardingWizardOwner,
   });
 
   // Handle wizard completion
@@ -860,42 +730,24 @@ function AppContent() {
     }
     if (!isCurrentUser()) return;
 
-    // Seed the user's first AI teammate on the board they just named. The
-    // framework repo has been cloning in the background since the wizard opened
-    // (useEnsureFrameworkRepo above). This is best-effort: any failure must NOT
-    // block completion — seedOnboardingTeammate falls back to a non-fatal
-    // warning so the user can always finish and add a teammate later. It reuses
-    // the wizard's board (createTeammateBranch's optional `boardId`) so the user
-    // never ends up with two boards for one teammate.
-    //
-    // Resolve the framework repo FRESH and READY-ONLY at completion time. The
-    // daemon pre-creates the repo row as `clone_status: 'cloning'`, so the
-    // render-time `frameworkRepo` above is truthy the instant the wizard opens —
-    // branching from it before the clone lands would fail with a bare "Failed to
-    // create branch". `readyOnly` skips the cloning/failed placeholder so the
-    // `!frameworkRepo` guard in seedOnboardingTeammate takes the graceful path.
-    let readyFrameworkRepo = findFrameworkRepo(agorStore.getState().repoById, {
-      readyOnly: true,
-    })?.[1];
-
-    // A fresh user can finish the wizard while the background clone is just a
-    // beat from done. If we have a teammate to seed but no ready repo yet, wait
-    // for readiness with a HARD deadline before falling back to the warning, so
-    // the common near-miss still yields a teammate. The wizard stays in its
-    // loading state throughout, so a short wait reads as part of setup.
-    // The wait re-reads the server: the store can miss the clone's ready event (#2941).
-    if (!readyFrameworkRepo && result.teammateName?.trim() && client) {
-      readyFrameworkRepo = await waitForFrameworkRepoReady({
-        getRepoById: () => agorStore.getState().repoById,
-        subscribe: (listener) => agorStore.subscribe(listener),
-        fetchRepos: () =>
-          client.service('repos').findAll({ query: { $limit: PAGINATION.DEFAULT_LIMIT } }),
-        applyRepo: (repo) => {
-          if (isCurrentUser()) repoPatched(repo);
-        },
-        deadlineMs: 20_000,
-      });
-    }
+    // A named teammate is a required step. Re-read shared metadata, retry a
+    // settled failure in place, and keep the wizard open on a contextual error.
+    // Prefetch failure must not masquerade as completed onboarding.
+    const readyFrameworkRepo = result.teammateName?.trim()
+      ? await ensureOnboardingFrameworkRepo({
+          getRepoById: () => agorStore.getState().repoById,
+          subscribe: (listener) => agorStore.subscribe(listener),
+          fetchRepos: () =>
+            client.service('repos').findAll({ query: { $limit: PAGINATION.DEFAULT_LIMIT } }),
+          applyRepo: (repo) => {
+            if (isCurrentUser()) repoPatched(repo);
+          },
+          createRepo: (data) =>
+            handleCreateRepo(data, { silent: true, shouldApply: isCurrentUser }),
+          isCurrent: isCurrentUser,
+          deadlineMs: 20_000,
+        })
+      : undefined;
     if (!isCurrentUser()) return;
 
     const slackGatewayIntent = await resolveOnboardingSlackIntent(
@@ -907,9 +759,8 @@ function AppContent() {
     const retainedSeed = onboardingSeedResultRef.current.get(result.boardId);
     // Always end onboarding inside the first-task composer: if the user skipped
     // the LLM step, fall back to their governed default agent so the pre-seeded
-    // bootstrap session still opens. When no model is connected, that session's
-    // first turn surfaces the inline connect-model panel (MissingCredentialPanel)
-    // rather than dropping the user on a bare board with a passive banner.
+    // session still opens. Without a configured model, keep the starter as an
+    // editable draft instead of manufacturing a failed credential-less turn.
     const bootstrapAgent =
       result.agent ??
       resolveAvailableUserAgenticTool(
@@ -927,6 +778,7 @@ function AppContent() {
       sourceBranch: result.sourceBranch,
       sourceRemoteUrl: result.sourceRemoteUrl,
       agent: bootstrapAgent,
+      startInitialTurn: result.agent != null,
       suggestedIntegrations: result.suggestedIntegrations,
       // Goals drive the first-session prompt; [] (skipped) yields the generic
       // follow-the-user guidance. Passed straight from the wizard.
@@ -969,9 +821,20 @@ function AppContent() {
       ...(sessionId ? { sessionId } : {}),
     });
 
+    if (
+      result.teammateName?.trim() &&
+      (!seeded.workspaceReady || !branchId || (bootstrapAgent && !sessionId))
+    ) {
+      throw new Error(
+        branchId
+          ? 'Your board and teammate are saved, but setup has not finished. Check the teammate workspace status; if setup failed, use Retry on that teammate, then finish onboarding again.'
+          : 'Your board is saved, but the teammate workspace could not be created. Check repository setup and your board permissions, then try again.'
+      );
+    }
+
     // Completion is the commit point of the client-side saga. Do it only after
-    // durable teammate work has either succeeded or reached its documented
-    // best-effort fallback, so closing/reloading during provisioning leaves an
+    // required teammate work has succeeded (or the user skipped naming one),
+    // so closing/reloading during provisioning leaves an
     // incomplete wizard that can resume instead of a falsely completed user.
     // Fetch immediately before the whole-preferences patch to preserve any
     // unrelated setting changed while the wizard was open.
@@ -1127,6 +990,15 @@ function AppContent() {
   // If we already have a config cached, continue with that even if there's an error
   if (authConfigError && !authConfig) {
     const unsupportedIdentityContract = identityContractState === IdentityContractState.UNSUPPORTED;
+    // A loopback daemon URL served to a remote browser can never connect, no
+    // matter how healthy the daemon is. Say so, instead of a generic retry.
+    const unreachableDaemonHint =
+      typeof window === 'undefined'
+        ? null
+        : describeUnreachableDaemonOrigin({
+            daemonUrl: getDaemonUrl(),
+            pageOrigin: window.location.origin,
+          });
     return (
       <div
         style={{
@@ -1139,6 +1011,7 @@ function AppContent() {
       >
         <DaemonConfigurationAlert
           unsupportedIdentityContract={unsupportedIdentityContract}
+          unreachableDaemonHint={unreachableDaemonHint}
           onRetry={retryAuthConfig}
         />
       </div>
@@ -1283,9 +1156,7 @@ function AppContent() {
     if (outcome.status === 'cancelled') return null;
     if (outcome.status === 'create-failed') {
       if (!shouldContinue()) return null;
-      showError(
-        `Failed to create session: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`
-      );
+      showError(formatActionError('create the session', outcome.error, { idempotent: false }));
       return null;
     }
 
@@ -1322,8 +1193,7 @@ function AppContent() {
       await forkSession(sessionId as SessionID, prompt);
       showSuccess('Session forked successfully!');
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to fork session';
-      showError(`Failed to fork session: ${message}`);
+      showError(formatActionError('fork the session', err, { idempotent: false }));
       throw err;
     }
   };
@@ -1334,8 +1204,7 @@ function AppContent() {
       await btwForkSession(sessionId as SessionID, prompt);
       showSuccess('Side question sent via btw fork');
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to create btw fork';
-      showError(`Failed to create btw fork: ${message}`);
+      showError(formatActionError('start the side question', err, { idempotent: false }));
       throw err;
     }
   };
@@ -1348,8 +1217,7 @@ function AppContent() {
       await spawnSession(sessionId as SessionID, spawnConfig);
       showSuccess('Subsession session spawned successfully!');
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to spawn session';
-      showError(`Failed to spawn session: ${message}`);
+      showError(formatActionError('spawn the subsession', err, { idempotent: false }));
       throw err;
     }
   };
@@ -1363,18 +1231,14 @@ function AppContent() {
     if (!client || !currentUser) return false;
     const operationUserId = currentUser.user_id;
     const operationAuthenticationGeneration = authenticationGeneration;
-    try {
-      await client.sessions.prompt(sessionId, prompt, { permissionMode });
-      return isAuthenticationOwnerCurrent(operationUserId, operationAuthenticationGeneration);
-    } catch (error) {
-      if (isAuthenticationOwnerCurrent(operationUserId, operationAuthenticationGeneration)) {
-        showError(
-          `Failed to send prompt: ${error instanceof Error ? error.message : String(error)}`
-        );
-        console.error('Prompt error:', error);
-      }
-      return false;
-    }
+    return sendPromptWithReconciliation({
+      send: () => client.sessions.prompt(sessionId, prompt, { permissionMode }),
+      getClient: () => clientRef.current,
+      attempt: { sessionId, userId: operationUserId, prompt },
+      showError,
+      isCurrent: () =>
+        isAuthenticationOwnerCurrent(operationUserId, operationAuthenticationGeneration),
+    });
   };
 
   // Handle update session
@@ -1686,8 +1550,14 @@ function AppContent() {
       );
     } catch (error) {
       showError(
-        `Failed to ${options.metadataAction} branch: ${error instanceof Error ? error.message : String(error)}`,
-        { key: 'archive-delete' }
+        formatActionError(
+          options.metadataAction === 'archive' ? 'archive the branch' : 'delete the branch',
+          error,
+          { idempotent: true }
+        ),
+        {
+          key: 'archive-delete',
+        }
       );
       throw error;
     }
@@ -1705,9 +1575,7 @@ function AppContent() {
       await client.service('branches').patch(branchId, updates as Partial<Branch>);
       if (!options.silent) showSuccess('Branch updated successfully!');
     } catch (error) {
-      showError(
-        `Failed to update branch: ${error instanceof Error ? error.message : String(error)}`
-      );
+      showError(formatActionError('update the branch', error, { idempotent: true }));
     }
   };
 
@@ -1757,10 +1625,9 @@ function AppContent() {
       destroy('create-branch');
       return branch;
     } catch (error) {
-      showError(
-        `Failed to create branch: ${error instanceof Error ? error.message : String(error)}`,
-        { key: 'create-branch' }
-      );
+      showError(formatActionError('create the branch', error, { idempotent: false }), {
+        key: 'create-branch',
+      });
       return null;
     }
   };
@@ -1966,12 +1833,18 @@ function AppContent() {
   };
 
   // Handle update session-MCP server relationships
-  const handleUpdateSessionMcpServers = async (sessionId: string, mcpServerIds: string[]) => {
+  const handleUpdateSessionMcpServers = async (
+    sessionId: string,
+    mcpServerIds: string[],
+    baselineIds?: string[]
+  ) => {
     if (!client) return;
 
     try {
-      // Get current session-MCP relationships for this session
-      const currentIds = agorStore.getState().sessionMcpServerIds.get(sessionId) || [];
+      // Diff against the links the user was shown (the settings form's
+      // baseline), never against links that loaded after they last looked.
+      const currentIds =
+        baselineIds ?? agorStore.getState().sessionMcpServerIds.get(sessionId) ?? [];
       await updateSessionMcpServers(client, sessionId, currentIds, mcpServerIds);
 
       // Note: Don't show success message here - it's part of the session settings save
@@ -2072,6 +1945,8 @@ function AppContent() {
       currentUser={currentUser}
       onUserSettingsClick={() => setOpenUserSettings(true)}
       onLogout={logout}
+      externalAppLink={headerInstanceConfig?.externalAppLink}
+      externalAppLabel={headerInstanceConfig?.externalAppLabel}
     />
   );
 
@@ -2081,6 +1956,8 @@ function AppContent() {
       currentUser={currentUser}
       onUserSettingsClick={() => setOpenUserSettings(true)}
       onLogout={logout}
+      externalAppLink={headerInstanceConfig?.externalAppLink}
+      externalAppLabel={headerInstanceConfig?.externalAppLabel}
     />
   );
 
@@ -2189,8 +2066,8 @@ function AppContent() {
       onRetryConnection={retryConnection}
       instanceLabel={headerInstanceConfig?.label}
       instanceDescription={headerInstanceConfig?.description}
-      navbarLogoLink={headerInstanceConfig?.navbarLogoLink}
-      navbarLogoTooltip={headerInstanceConfig?.navbarLogoTooltip}
+      externalAppLink={headerInstanceConfig?.externalAppLink}
+      externalAppLabel={headerInstanceConfig?.externalAppLabel}
       webTerminalEnabled={featuresConfig?.webTerminal === true}
       branchStorageConfig={featuresConfig?.branchStorage}
       uploadPolicy={featuresConfig?.uploadPolicy}
@@ -2289,6 +2166,7 @@ function AppContent() {
           <OnboardingWizard
             key={`${onboardingWizardOwner?.userId ?? '__anon__'}:${onboardingWizardOwner?.authenticationGeneration ?? authenticationGeneration}:${onboardingWizardOwner?.activationGeneration ?? 0}`}
             open={onboardingWizardOpen}
+            repositorySetupNotice={frameworkSetup.error}
             isCurrent={() =>
               !!onboardingWizardOwner && isOnboardingOwnerCurrent(onboardingWizardOwner)
             }
@@ -2394,6 +2272,11 @@ function AppContent() {
                   topBanner={onboardingBanners}
                   onSendPrompt={handleSendPrompt}
                   onCreateSession={handleCreateSession}
+                  onCreateBranch={handleCreateBranch}
+                  onCreateBoard={handleCreateBoard}
+                  onCreateRepo={handleCreateRepo}
+                  onCreateLocalRepo={handleCreateLocalRepo}
+                  branchStorageConfig={featuresConfig?.branchStorage}
                   onForkSession={handleForkSession}
                   onBtwForkSession={handleBtwForkSession}
                   onSpawnSession={handleSpawnSession}
@@ -2407,6 +2290,8 @@ function AppContent() {
                   onToggleReaction={handleToggleReaction}
                   onDeleteComment={handleDeleteComment}
                   onLogout={logout}
+                  externalAppLink={headerInstanceConfig?.externalAppLink}
+                  externalAppLabel={headerInstanceConfig?.externalAppLabel}
                   onOpenWorkspaceSettings={setSettingsTabToOpen}
                   onOpenUserSettings={() => setOpenUserSettings(true)}
                   onOpenAgenticToolSettings={(tool) => {
@@ -2444,6 +2329,13 @@ function AppContent() {
             />
             <Route
               path={`/${ENTITY_PATH_SEGMENTS.artifact}/:artifactShortId/`}
+              element={desktopAppElement}
+            />
+            {/* Chat workspace: the same session target as `/s/`, with the
+                pinned-chat rail in place of the board canvas. */}
+            <Route path={`/${CHAT_WORKSPACE_PATH_SEGMENT}/`} element={desktopAppElement} />
+            <Route
+              path={`/${CHAT_WORKSPACE_PATH_SEGMENT}/:sessionShortId/`}
               element={desktopAppElement}
             />
 

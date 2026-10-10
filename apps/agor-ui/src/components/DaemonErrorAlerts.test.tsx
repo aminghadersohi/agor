@@ -38,4 +38,21 @@ describe('daemon error alerts', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(onRetry).toHaveBeenCalledOnce();
   });
+
+  it('names the configured daemon URL a remote browser cannot reach, keeping retry', () => {
+    const onRetry = vi.fn();
+    render(
+      <DaemonConfigurationAlert
+        unsupportedIdentityContract={false}
+        unreachableDaemonHint="Set VITE_DAEMON_URL to an address this browser can reach."
+        onRetry={onRetry}
+      />
+    );
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not fetch daemon configuration');
+    expect(screen.getByRole('alert')).toHaveTextContent('Set VITE_DAEMON_URL');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('Please try again.');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(onRetry).toHaveBeenCalledOnce();
+  });
 });

@@ -54,6 +54,7 @@ describe('realtime routing boundary', () => {
       'oauth:disconnected',
       'marketplace:invalidated',
       'marketplace:changed',
+      'session-attention:acknowledged',
     ]);
     const target = { emit: vi.fn() };
     emitHaNativeSocketEvent(target, 'cursor-left', {

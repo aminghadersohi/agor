@@ -4,18 +4,21 @@
  * Exercise the real router and sync effects, with layout-heavy surfaces mocked.
  */
 import type { Board, Branch, Session, SessionID, User } from '@agor-live/client';
-import { sessionPath } from '@agor-live/client';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { chatWorkspacePath, sessionPath } from '@agor-live/client';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { App as AntApp } from 'antd';
 import { forwardRef, useLayoutEffect } from 'react';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CanvasNavigationProvider, useRecenterMap } from '../../contexts/CanvasNavigationContext';
+import { ConnectionProvider } from '../../contexts/ConnectionContext';
 import { ThemeProvider } from '../../contexts/ThemeContext';
 import { useAppNavigation } from '../../hooks/useAppNavigation';
 import { useSettingsRoute } from '../../hooks/useSettingsRoute';
 import { EMPTY_MAPS } from '../../store/agorMaps';
 import { agorStore } from '../../store/agorStore';
+import { USER_SCOPE_KEYS } from '../../store/scopeMerge';
+import { userScopeCoverage } from '../../test/userScopeCoverage';
 import { resetAccessCacheForTests } from '../../utils/accessCache';
 import { App } from './App';
 
@@ -33,10 +36,46 @@ vi.mock('../SessionCanvas', () => ({
   }),
 }));
 vi.mock('../SessionPanel', () => ({
-  SessionPanel: (props: { session?: { session_id?: string } | null; open?: boolean }) =>
-    props.open ? (
-      <div data-testid="session-panel" data-session={props.session?.session_id ?? ''} />
-    ) : null,
+  SessionPanel: (props: {
+    session?: { session_id?: string } | null;
+    open?: boolean;
+    preferFocusChat?: boolean;
+    onClose?: () => void;
+    onPinToChatCollection?: (sessionId: string) => void;
+    onOpenChatWorkspace?: (sessionId: string) => void;
+  }) => {
+    if (!props.open) return null;
+    const id = props.session?.session_id ?? '';
+    return (
+      <div
+        data-testid="session-panel"
+        data-session={id}
+        data-focus-chat={String(!!props.preferFocusChat)}
+      >
+        <button type="button" data-testid="panel-close" onClick={props.onClose}>
+          close
+        </button>
+        {props.onPinToChatCollection && (
+          <button
+            type="button"
+            data-testid="panel-pin"
+            onClick={() => props.onPinToChatCollection?.(id)}
+          >
+            pin
+          </button>
+        )}
+        {props.onOpenChatWorkspace && (
+          <button
+            type="button"
+            data-testid="panel-open-workspace"
+            onClick={() => props.onOpenChatWorkspace?.(id)}
+          >
+            workspace
+          </button>
+        )}
+      </div>
+    );
+  },
 }));
 vi.mock('../SessionPanel/PendingToolChoicePanel', () => ({
   PendingToolChoicePanel: () => null,
@@ -46,14 +85,12 @@ vi.mock('../BoardTeammatePanel', () => ({
   BoardTeammatePanel: () => null,
   TeammatePanelRail: () => null,
 }));
-vi.mock('../NewSessionButton', () => ({ NewSessionButton: () => null }));
 vi.mock('../SettingsModal', () => ({
   SettingsModal: (props: { open?: boolean }) =>
     props.open ? <div data-testid="settings-modal" /> : null,
   UserSettingsModal: () => null,
 }));
 vi.mock('../BranchModal', () => ({ BranchModal: () => null }));
-vi.mock('../CreateDialog', () => ({ CreateDialog: () => null }));
 vi.mock('../NewSessionModal', () => ({ NewSessionModal: () => null }));
 vi.mock('../SessionSettingsModal', () => ({ SessionSettingsModal: () => null }));
 vi.mock('../TerminalModal', () => ({
@@ -62,6 +99,12 @@ vi.mock('../TerminalModal', () => ({
 }));
 vi.mock('../ThemeEditorModal', () => ({ ThemeEditorModal: () => null }));
 vi.mock('../EnvironmentLogsModal', () => ({ EnvironmentLogsModal: () => null }));
+vi.mock('../TeammateChatCollections', () => ({
+  TeammateChatCollectionsModal: (props: { open?: boolean; preselectedSessionId?: string }) =>
+    props.open ? (
+      <div data-testid="chat-collections-modal" data-session={props.preselectedSessionId ?? ''} />
+    ) : null,
+}));
 vi.mock('../../hooks/useTaskCompletionChime', () => ({ useTaskCompletionChime: () => {} }));
 // react-resizable-panels needs real layout measurements jsdom cannot provide,
 // and throws from the imperative handles App drives in effects.
@@ -152,9 +195,19 @@ function seedStore() {
       [BRANCH_B, [session2]],
     ]),
     userById: new Map([[user.user_id, user]]),
-    sessionsHydrated: true,
-    branchesHydrated: true,
+    coverage: mySessionsHeld(
+      userScopeCoverage({ sessions: true, references: true, teammates: true })
+    ),
   } as never);
+}
+
+/** My sessions belong to the loaded user scope (so no eviction drops them). */
+function mySessionsHeld(coverage: ReturnType<typeof userScopeCoverage>) {
+  const entry = coverage.get(USER_SCOPE_KEYS.sessions)!;
+  return coverage.set(USER_SCOPE_KEYS.sessions, {
+    ...entry,
+    members: { sessions: new Set([SESSION_1, SESSION_2]) },
+  });
 }
 
 /** Someone else's teammate on Alpha, so Home's rail shows "See all 1". */
@@ -225,6 +278,15 @@ function CrossBoardRecenter() {
   );
 }
 
+const CONNECTED = {
+  connected: true,
+  connecting: false,
+  authGeneration: 1,
+  outOfSync: false,
+  capturedSha: null,
+  currentSha: null,
+};
+
 /** Route table mirrors `apps/agor-ui/src/App.tsx` — the bugs live in how
  *  these paths resolve, so an approximation would not reproduce them. */
 function renderApp(initialPath: string) {
@@ -232,24 +294,28 @@ function renderApp(initialPath: string) {
     <App client={null} user={user} connected={true} availableAgents={[]} initialBoardId="" />
   );
   return render(
-    <ThemeProvider>
-      <AntApp>
-        <MemoryRouter initialEntries={[initialPath]}>
-          <CanvasNavigationProvider>
-            <PathSpy />
-            <RouteControls />
-            <CrossBoardRecenter />
-            <Routes>
-              <Route path="/b/:boardParam/" element={el} />
-              <Route path="/s/:sessionShortId/" element={el} />
-              <Route path="/w/:branchShortId/" element={el} />
-              <Route path="/a/:artifactShortId/" element={el} />
-              <Route path="/*" element={el} />
-            </Routes>
-          </CanvasNavigationProvider>
-        </MemoryRouter>
-      </AntApp>
-    </ThemeProvider>
+    <ConnectionProvider value={CONNECTED}>
+      <ThemeProvider>
+        <AntApp>
+          <MemoryRouter initialEntries={[initialPath]}>
+            <CanvasNavigationProvider>
+              <PathSpy />
+              <RouteControls />
+              <CrossBoardRecenter />
+              <Routes>
+                <Route path="/b/:boardParam/" element={el} />
+                <Route path="/s/:sessionShortId/" element={el} />
+                <Route path="/w/:branchShortId/" element={el} />
+                <Route path="/a/:artifactShortId/" element={el} />
+                <Route path="/chats/" element={el} />
+                <Route path="/chats/:sessionShortId/" element={el} />
+                <Route path="/*" element={el} />
+              </Routes>
+            </CanvasNavigationProvider>
+          </MemoryRouter>
+        </AntApp>
+      </ThemeProvider>
+    </ConnectionProvider>
   );
 }
 
@@ -262,6 +328,7 @@ async function settle() {
 }
 
 const homeIsShowing = () => !!screen.queryByText(/Good (morning|afternoon|evening), Tester/);
+const chatRailIsShowing = () => !!document.querySelector('nav[aria-label="Chat collections"]');
 const canvasBoardName = () =>
   screen.queryByTestId('session-canvas')?.getAttribute('data-board') ?? null;
 const openSessionId = () =>
@@ -532,5 +599,219 @@ describe('Home navigation with a session open', () => {
 
     expect(canvasBoardName()).toBe('Beta');
     expect(currentPath).toBe('/b/beta/');
+  });
+});
+
+/** Pins both sessions into one collection, in the store copy of the user. */
+function seedChatCollection() {
+  agorStore.setState({
+    userById: new Map([
+      [
+        USER_ID,
+        {
+          ...user,
+          preferences: {
+            chat_collections: {
+              collections: [
+                { collection_id: 'crew', name: 'Crew', session_ids: [SESSION_1, SESSION_2] },
+              ],
+            },
+          },
+        } as User,
+      ],
+    ]),
+  } as never);
+}
+
+/** Opens a pinned session from Home's Chat collections rail section. */
+async function openPinnedFromHome(title: string) {
+  const crew = await screen.findByLabelText('Crew');
+  const row = Array.from(crew.querySelectorAll<HTMLElement>('[data-home-row]')).find((el) =>
+    el.getAttribute('aria-label')?.startsWith(title)
+  );
+  if (!row) throw new Error(`"${title}" is not pinned on Home`);
+  fireEvent.click(row);
+  await settle();
+}
+
+describe('Chat workspace', () => {
+  beforeEach(seedChatCollection);
+
+  it('opens a pinned Home session beside the collection rail in focus chat', async () => {
+    renderApp('/');
+    await settle();
+    await openPinnedFromHome('Orbit standup');
+
+    expect(currentPath).toBe(chatWorkspacePath(SESSION_1 as SessionID));
+    expect(chatRailIsShowing()).toBe(true);
+    expect(openSessionId()).toBe(SESSION_1);
+    expect(screen.getByTestId('session-panel').getAttribute('data-focus-chat')).toBe('true');
+    expect(screen.queryByTestId('session-canvas')).toBeNull();
+    expect(homeIsShowing()).toBe(false);
+  });
+
+  it('switches conversations from the rail without leaving the workspace', async () => {
+    renderApp(chatWorkspacePath(SESSION_1 as SessionID));
+    await settle();
+    expect(openSessionId()).toBe(SESSION_1);
+
+    fireEvent.click(screen.getByText('Signal triage').closest('button') as HTMLElement);
+    await settle();
+
+    expect(currentPath).toBe(chatWorkspacePath(SESSION_2 as SessionID));
+    expect(openSessionId()).toBe(SESSION_2);
+    expect(chatRailIsShowing()).toBe(true);
+  });
+
+  it('survives an unrelated board patch', async () => {
+    renderApp(chatWorkspacePath(SESSION_1 as SessionID));
+    await settle();
+
+    act(() => {
+      const next = new Map(agorStore.getState().boardById);
+      next.set(BOARD_A, { ...boardA, name: 'Alpha renamed' } as Board);
+      agorStore.setState({ boardById: next });
+    });
+    await settle();
+
+    expect(currentPath).toBe(chatWorkspacePath(SESSION_1 as SessionID));
+    expect(chatRailIsShowing()).toBe(true);
+    expect(openSessionId()).toBe(SESSION_1);
+  });
+
+  it('keeps the workspace rendered behind the settings modal', async () => {
+    renderApp(chatWorkspacePath(SESSION_1 as SessionID));
+    await settle();
+
+    fireEvent.click(screen.getByTestId('open-settings'));
+    await settle();
+
+    expect(screen.getByTestId('settings-modal')).toBeTruthy();
+    expect(chatRailIsShowing()).toBe(true);
+    expect(openSessionId()).toBe(SESSION_1);
+    expect(screen.queryByTestId('session-canvas')).toBeNull();
+  });
+
+  it('keeps the workspace root when the session panel closes', async () => {
+    renderApp(chatWorkspacePath(SESSION_1 as SessionID));
+    await settle();
+
+    fireEvent.click(screen.getByTestId('panel-close'));
+    await settle();
+
+    expect(currentPath).toBe(chatWorkspacePath());
+    expect(chatRailIsShowing()).toBe(true);
+    expect(openSessionId()).toBeNull();
+  });
+
+  it('shows the open session on its board', async () => {
+    renderApp(chatWorkspacePath(SESSION_1 as SessionID));
+    await settle();
+
+    fireEvent.click(
+      document.querySelector('[aria-label="Show active session on board"]') as HTMLElement
+    );
+    await settle();
+    expect(currentPath).toBe(sessionPath(SESSION_1 as SessionID));
+    expect(canvasBoardName()).toBe('Alpha');
+    expect(chatRailIsShowing()).toBe(false);
+  });
+
+  it('returns Home from the rail', async () => {
+    renderApp(chatWorkspacePath());
+    await settle();
+    expect(chatRailIsShowing()).toBe(true);
+    expect(currentPath).toBe(chatWorkspacePath());
+    // The rail's back link, by its icon: "Home" text appears elsewhere in the shell.
+    fireEvent.click(screen.getByLabelText('arrow-left').closest('button') as HTMLElement);
+    await settle();
+    expect(currentPath).toBe('/');
+  });
+
+  it('opens a branch board from its identity in the rail', async () => {
+    renderApp(chatWorkspacePath(SESSION_1 as SessionID));
+    await settle();
+
+    fireEvent.click(document.querySelector('[aria-label="Open Beta board"]') as HTMLElement);
+    await settle();
+
+    expect(currentPath).toBe('/b/beta/');
+    expect(canvasBoardName()).toBe('Beta');
+    expect(chatRailIsShowing()).toBe(false);
+  });
+
+  it('still lets the board switcher leave the workspace', async () => {
+    renderApp(chatWorkspacePath(SESSION_1 as SessionID));
+    await settle();
+
+    await pickBoardFromSwitcher('Beta');
+
+    expect(currentPath).toBe('/b/beta/');
+    expect(canvasBoardName()).toBe('Beta');
+    expect(chatRailIsShowing()).toBe(false);
+  });
+
+  it('opens a board session in the workspace and pins it from the panel', async () => {
+    renderApp(sessionPath(SESSION_2 as SessionID));
+    await settle();
+    expect(screen.getByTestId('session-panel').getAttribute('data-focus-chat')).toBe('false');
+
+    fireEvent.click(screen.getByTestId('panel-pin'));
+    expect(screen.getByTestId('chat-collections-modal').getAttribute('data-session')).toBe(
+      SESSION_2
+    );
+
+    fireEvent.click(screen.getByTestId('panel-open-workspace'));
+    await settle();
+    expect(currentPath).toBe(chatWorkspacePath(SESSION_2 as SessionID));
+    expect(chatRailIsShowing()).toBe(true);
+    // Already in the workspace, the panel no longer offers to open it.
+    expect(screen.queryByTestId('panel-open-workspace')).toBeNull();
+  });
+
+  it('manages collections from Home and from the rail', async () => {
+    renderApp('/');
+    await settle();
+    fireEvent.click(await screen.findByText('Manage'));
+    expect(screen.getByTestId('chat-collections-modal').getAttribute('data-session')).toBe('');
+  });
+});
+
+describe('Create entry points open the focused modals', () => {
+  // Text queries: role queries trip jsdom's CSS parser on AntD's button styles here.
+  it('opens the board modal from the Home onboarding step', async () => {
+    agorStore.setState({
+      boardById: new Map(),
+      branchById: new Map(),
+      sessionById: new Map(),
+      sessionsByBranch: new Map(),
+    } as never);
+    renderApp('/');
+    await settle();
+
+    const step = screen.getByText('Create your first board').parentElement as HTMLElement;
+    fireEvent.click(within(step).getByText('Create'));
+    await settle();
+
+    // The create modals load on first open.
+    expect(await screen.findByText('New board')).toBeTruthy();
+  });
+
+  it('opens the board modal from the navbar create menu on Home', async () => {
+    renderApp('/');
+    await settle();
+    expect(homeIsShowing()).toBe(true);
+
+    fireEvent.click(document.querySelector('[aria-label="Create new"]') as HTMLElement);
+    await settle();
+    const item = Array.from(document.querySelectorAll('[role="menuitem"]')).find(
+      (el) => el.textContent === 'Board'
+    );
+    if (!item) throw new Error('Board not offered by the create menu');
+    fireEvent.click(item);
+    await settle();
+
+    // The create modals load on first open.
+    expect(await screen.findByText('New board')).toBeTruthy();
   });
 });

@@ -18,7 +18,12 @@
 
 import { generateId, shortId } from '@agor/core';
 import type { Message, MessageID, SessionID, TaskID, ToolPermission } from '@agor/core/types';
-import { MessageRole, PermissionStatus, TaskStatus } from '@agor/core/types';
+import {
+  MessageRole,
+  PermissionStatus,
+  permissionTimeoutMessage,
+  TaskStatus,
+} from '@agor/core/types';
 import type {
   PermissionHandler,
   PermissionRequest,
@@ -388,6 +393,9 @@ export function createPermissionHandler(
         await deps.tasksService.patch(taskId, {
           status: TaskStatus.TIMED_OUT,
           completed_at: new Date().toISOString(),
+          ...(decision.timeoutMs
+            ? { error_message: permissionTimeoutMessage(decision.timeoutMs) }
+            : {}),
         });
 
         return {

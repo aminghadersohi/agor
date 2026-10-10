@@ -55,6 +55,7 @@ import type {
   GatewayContext,
   InboundFile,
   InboundMessage,
+  InboundSkippedFile,
   SlackThreadHistoryRequest,
   SlackThreadHistoryResult,
 } from '@agor/core/gateway';
@@ -63,7 +64,9 @@ import {
   buildDiscordLegacyThreadKey,
   buildDiscordMessageThreadKey,
   DISCORD_METADATA_KEY,
+  type DiscordAuthorityMetadata,
   DiscordDirectMessageError,
+  DiscordThreadUnavailableError,
   extractDiscordStarterMessageId,
   formatGatewayContext,
   formatGatewayFollowUpRoutingMessage,
@@ -73,6 +76,7 @@ import {
   gatewayListenerFailure,
   getConnector,
   hasConnector,
+  isPermanentProviderRefusal,
   isSlackInboundReactionEventType,
   isSlackWriteTargetAllowed,
   normalizeOutbound,
@@ -91,6 +95,7 @@ import type {
   AuthenticatedParams,
   BranchPermissionLevel,
   ChannelType,
+  DiscordGatewayConfig,
   GatewayChannel,
   GatewayOutboundMessage,
   GatewayOutboundMessageID,
@@ -119,12 +124,16 @@ import type {
 import {
   compareDiscordSnowflakes,
   DEFAULT_DISCORD_CATCH_UP,
+  DISCORD_NO_REPLY_SENTINEL,
+  discordResponseModeAdmits,
   discordSnowflakeTimestampMs,
   GATEWAY_USER_ALIGNMENT_CONFIG_KEYS,
   hasMinimumRole,
   isDiscordDirectMessagesEnabled,
+  isDiscordNoReply,
   isDiscordSnowflake,
   isTerminalTaskStatus,
+  previousDiscordSnowflake,
   ROLES,
   SessionStatus,
   TaskStatus,
@@ -217,6 +226,8 @@ interface PostMessageData {
   text: string;
   user_name?: string;
   files?: InboundFile[];
+  /** Attachments the connector did not pass on (Discord), named so the user can be told. */
+  skipped_files?: InboundSkippedFile[];
   metadata?: Record<string, unknown>;
   /** Daemon-internal durable identities for a claimed provider occurrence. */
   idempotency_task_id?: TaskID;
@@ -538,6 +549,46 @@ function hasListeningConfig(channel: GatewayChannel): boolean {
   }
 }
 
+/**
+ * A Discord channel message without a bot mention that its channel's response
+ * mode admits, re-derived from fresh channel config rather than trusted from
+ * the connector.
+ */
+function discordResponseModeAdmitsMetadata(
+  config: Record<string, unknown>,
+  metadata: DiscordAuthorityMetadata
+): boolean {
+  const channelId = metadata[DISCORD_METADATA_KEY.channelId];
+  const messageId = metadata[DISCORD_METADATA_KEY.messageId];
+  const isThread = metadata[DISCORD_METADATA_KEY.isThread];
+  const parentChannelId = metadata[DISCORD_METADATA_KEY.parentChannelId];
+  if (
+    metadata[DISCORD_METADATA_KEY.hasMention] !== false ||
+    typeof channelId !== 'string' ||
+    typeof messageId !== 'string' ||
+    typeof isThread !== 'boolean'
+  ) {
+    return false;
+  }
+  return discordResponseModeAdmits(config as DiscordGatewayConfig, {
+    channelId,
+    messageId,
+    isThread,
+    ...(typeof parentChannelId === 'string' ? { parentChannelId } : {}),
+  });
+}
+
+/** A Discord channel message the bot was not mentioned in (admitted by a response mode). */
+function isUnmentionedDiscordInbound(
+  channel: GatewayChannel,
+  metadata: Record<string, unknown> | undefined
+): boolean {
+  return (
+    channel.channel_type === 'discord' &&
+    parseDiscordAuthorityMetadata(metadata)?.[DISCORD_METADATA_KEY.hasMention] === false
+  );
+}
+
 function discordInboundMetadataIsAuthoritative(
   channel: GatewayChannel,
   data: PostMessageData
@@ -578,7 +629,12 @@ function discordInboundMetadataIsAuthoritative(
   ) {
     return false;
   }
-  if (!userAllowlist.includes(authorId) && !roles.some((role) => roleAllowlist.includes(role))) {
+  // The guild ID is Discord's @everyone role, which never appears in member roles.
+  if (
+    !userAllowlist.includes(authorId) &&
+    !roleAllowlist.includes(guildId) &&
+    !roles.some((role) => roleAllowlist.includes(role))
+  ) {
     return false;
   }
   if (metadata[DISCORD_METADATA_KEY.directMessage] === true) {
@@ -601,7 +657,8 @@ function discordInboundMetadataIsAuthoritative(
     allowedChannels.length === 0 ||
     allowedChannels.some((id) => !snowflake(id)) ||
     metadata[DISCORD_METADATA_KEY.guildId] !== guildId ||
-    metadata[DISCORD_METADATA_KEY.hasMention] !== true
+    (metadata[DISCORD_METADATA_KEY.hasMention] !== true &&
+      !discordResponseModeAdmitsMetadata(config, metadata))
   )
     return false;
   if (isThread) {
@@ -753,6 +810,39 @@ const SLACK_GATEWAY_REPLY_NOTE =
 
 const GATEWAY_STARTUP_BOOTSTRAP_HINT =
   'Startup/bootstrap note: Follow any startup/bootstrap instructions defined by the working directory before answering the gateway message above.';
+
+const DISCORD_SKIPPED_FILE_REASON: Record<InboundSkippedFile['reason'], string> = {
+  unsupported_type: 'unsupported file type',
+  files_disabled: 'attachments are turned off for this channel',
+  invalid: 'could not be read',
+};
+
+/**
+ * Attachment names are user-controlled and the note sits outside the
+ * untrusted-data wrapper, so quote them as bounded JSON strings without
+ * control or markup characters.
+ */
+function formatDiscordUnreadAttachment(name: string, reason: string): string {
+  const safeName = name
+    .replace(/[\p{Cc}\p{Zl}\p{Zp}<>`]/gu, ' ')
+    .trim()
+    .slice(0, 100);
+  return `${JSON.stringify(safeName || 'attachment')} (${reason})`;
+}
+
+/**
+ * Prompt note naming the attachments the agent could not read. The user must
+ * hear about them, so it overrides the option to stay silent.
+ */
+function formatDiscordUnreadAttachmentsNote(unread: string[], filesEnabled: boolean): string {
+  const hint = filesEnabled
+    ? 'Images (PNG, JPEG, GIF, WebP) and text files (.txt, .log, .md, .csv, .json) can be read; suggest one of those or pasting the text.'
+    : 'Attachments are turned off for this channel; suggest pasting the text instead.';
+  return `(Attachments you could not read: ${unread.join('; ')}. Tell the user which files you could not read, even if you would otherwise stay silent. ${hint})`;
+}
+
+/** Prompt note for a Discord message admitted by a response mode without a mention. */
+const DISCORD_UNADDRESSED_NOTE = `This Discord message did not mention you; the channel is set to let you answer anyway, and every message you write is posted. Reply only if you can genuinely help. If people are already handling it or you have nothing useful to add, write nothing else at all: your only message must be exactly ${DISCORD_NO_REPLY_SENTINEL}, and nothing will be posted.`;
 
 function prependSlackGatewayReplyNote(prompt: string): string {
   if (prompt.includes(SLACK_GATEWAY_REPLY_NOTE)) return prompt;
@@ -1565,7 +1655,7 @@ export class GatewayService {
     channel: GatewayChannel,
     threadId: string,
     text: string,
-    opts?: { suppressSlack?: boolean; suppressDiscord?: boolean }
+    opts?: { suppressSlack?: boolean; suppressDiscord?: boolean; followUpHint?: boolean }
   ): Promise<void> {
     // GitHub and Shortcut have their own editable ack comment (the connector's
     // "Processing" / "👀 on it" comment that becomes the final reply), so they
@@ -1586,7 +1676,7 @@ export class GatewayService {
         getConnector(channel.channel_type as ChannelType, channel.config);
       await connector.sendMessage({
         threadId,
-        ...formatGatewaySystemPayload(channel.channel_type as ChannelType, text),
+        ...formatGatewaySystemPayload(channel.channel_type as ChannelType, text, opts),
       });
     } catch (error) {
       // Ignore — debug messages are best-effort
@@ -2601,7 +2691,6 @@ export class GatewayService {
   // would be a second thing to keep in step. The card's presentation lives in
   // `services/mcp-slack-connect-card.ts`.
   //
-  // See `docs/internal/slack-mcp-oauth-connect-2026-09-16.md` §7.
   // ==========================================================================
 
   /**
@@ -4025,15 +4114,21 @@ export class GatewayService {
    * lookup starts returning an arbitrary one of them — which, for a reply to
    * a direct message, means answering somewhere else entirely.
    *
-   * The per-Task answer is durable: admission stamps the mapping it resolved
-   * onto `gateway_task_source.thread_session_map_id`. Resolution order is
-   * therefore the stamp, then the Task's own channel+thread coordinates (which
-   * are uniquely indexed), and only then the Session, which is a guess and is
-   * logged as one.
+   * The per-Task mapping identity is durable: admission stamps the resolved
+   * mapping onto `gateway_task_source.thread_session_map_id`. Resolution order is
+   * therefore the stamp, or the Task's channel+thread coordinates for older
+   * Tasks. A known destination that is no longer valid must not fall back to
+   * another audience. Only Tasks without gateway provenance use the Session.
    *
    * The stamped row is re-checked against the Task's Session rather than
    * trusted outright: a mapping that has since been repointed at another
    * Session is no longer this Task's reply address.
+   *
+   * This does not freeze Slack's physical send target: getActiveSlackThreadId
+   * reads the row's mutable slack_active_thread_id, updated on each inbound.
+   * Tasks sharing a seed/reply-alias row therefore follow its latest active
+   * thread, not necessarily their own admission thread. Per-Task Slack alias
+   * targets and status/stream metadata contention remain separate follow-ups.
    */
   private async resolveOutboundMapping(input: {
     /** Stable operation name, for the fallback log. */
@@ -4046,9 +4141,7 @@ export class GatewayService {
     const source = await this.gatewayTaskSource(input);
 
     if (source?.thread_session_map_id) {
-      const stamped = await this.threadMapRepo
-        .findById(source.thread_session_map_id)
-        .catch(() => null);
+      const stamped = await this.threadMapRepo.findById(source.thread_session_map_id);
       if (stamped && stamped.session_id === input.sessionId) return stamped;
       this.logOutboundAddressingOnce(
         `stamp:${input.purpose}:${input.sessionId}`,
@@ -4056,19 +4149,30 @@ export class GatewayService {
           `session_id=${shortId(input.sessionId)} reason=${stamped ? 'session_mismatch' : 'missing'}`,
         'warn'
       );
+      return null;
     }
 
     if (source?.gateway_channel_id && source.thread_id) {
-      const byThread = await this.threadMapRepo
-        .findByChannelAndThread(source.gateway_channel_id, source.thread_id)
-        .catch(() => null);
-      if (byThread && byThread.session_id === input.sessionId) return byThread;
+      const byThread =
+        (await this.threadMapRepo.findByChannelAndThread(
+          source.gateway_channel_id,
+          source.thread_id
+        )) ??
+        (await this.findGatewayReplyAliasMapping(source.gateway_channel_id, source.thread_id));
+      if (byThread?.session_id === input.sessionId) return byThread;
+      this.logOutboundAddressingOnce(
+        `thread_unresolved:${input.purpose}:${input.sessionId}`,
+        `[gateway] Task reply thread unresolved purpose=${input.purpose} ` +
+          `session_id=${shortId(input.sessionId)} reason=${byThread ? 'session_mismatch' : 'missing'}`,
+        'warn'
+      );
+      return null;
     }
 
     const { mapping, ambiguous } = await this.threadMapRepo.findBySessionAmbiguityAware(
       input.sessionId
     );
-    if (mapping) {
+    if (mapping && (source || ambiguous)) {
       // `ambiguous` is the load-bearing bit: it means the Session genuinely
       // had more than one thread, so the destination was picked rather than
       // derived.
@@ -4105,7 +4209,7 @@ export class GatewayService {
     const cached = this.gatewayTaskSources.get(cacheKey);
     if (cached !== undefined) return cached ?? undefined;
 
-    const task = await this.taskRepo.findById(input.taskId).catch(() => null);
+    const task = await this.taskRepo.findById(input.taskId);
     if (!task) return undefined;
     const source = task.metadata?.gateway_task_source;
     if (this.gatewayTaskSources.size >= GatewayService.GATEWAY_TASK_SOURCE_CACHE_MAX) {
@@ -4550,6 +4654,29 @@ export class GatewayService {
   }
 
   /**
+   * Admit an inbound message. An unmentioned Discord message is ordinary
+   * chatter: when it is denied (Forbidden), it ends quietly instead of failing
+   * the listener, matching the suppressed notices inside create().
+   */
+  private async createQuietlyIfUnmentioned(
+    channel: GatewayChannel,
+    metadata: Record<string, unknown> | undefined,
+    data: Parameters<GatewayService['create']>[0]
+  ): Promise<PostMessageResult> {
+    try {
+      return await this.create(data);
+    } catch (error) {
+      if (!(error instanceof Forbidden) || !isUnmentionedDiscordInbound(channel, metadata)) {
+        throw error;
+      }
+      console.debug(
+        `[gateway] IGNORED: denied unmentioned Discord message: channel=${shortId(channel.id)}`
+      );
+      return { success: false, sessionId: '', created: false };
+    }
+  }
+
+  /**
    * Gateway calls the Session and Prompt services internally, so their
    * provider-only RBAC hooks do not run. Keep inbound admission on the same
    * normalized branch policy as browser, REST, MCP, and scheduler callers.
@@ -4833,6 +4960,22 @@ export class GatewayService {
     const discordMetadata =
       channel.channel_type === 'discord' ? parseDiscordAuthorityMetadata(data.metadata) : null;
     const discordDm = discordMetadata?.[DISCORD_METADATA_KEY.directMessage] === true;
+    // Admitted by a channel response mode without mentioning the bot. These
+    // stay quiet on failure: no denial or error notices, and a denial ends the
+    // event instead of failing the listener.
+    const discordUnaddressed =
+      !!discordMetadata &&
+      !discordDm &&
+      discordResponseModeAdmitsMetadata(channel.config as Record<string, unknown>, discordMetadata);
+    // DMs and forum posts in `all` mode are answered without a mention, so the
+    // session-created notice does not tell people to mention the bot.
+    const discordParentChannelId = discordMetadata?.[DISCORD_METADATA_KEY.parentChannelId];
+    const discordFollowUpsNeedNoMention =
+      discordDm ||
+      (discordMetadata?.[DISCORD_METADATA_KEY.isThread] === true &&
+        typeof discordParentChannelId === 'string' &&
+        (channel.config as DiscordGatewayConfig).response_modes?.[discordParentChannelId] ===
+          'all');
 
     // Slack emoji reactions are a mapped-thread-only signal gated by the
     // channel's inbound_reactions flag. The connector filters them already;
@@ -5006,7 +5149,8 @@ export class GatewayService {
     if (
       channel.channel_type === 'discord' &&
       !discordDm &&
-      discordMetadata?.[DISCORD_METADATA_KEY.hasMention] !== true
+      discordMetadata?.[DISCORD_METADATA_KEY.hasMention] !== true &&
+      !discordUnaddressed
     ) {
       console.debug(
         `[gateway] IGNORED: Discord message without explicit mention: channel=${shortId(channel.id)}, thread=${data.thread_id}`
@@ -5074,7 +5218,7 @@ export class GatewayService {
         console.error(
           `[gateway] Channel "${channel.name}" has no agor_user_id and alignment is OFF. Cannot process message.`
         );
-        this.sendSystemMessage(channel, data.thread_id, errMsg);
+        if (!discordUnaddressed) this.sendSystemMessage(channel, data.thread_id, errMsg);
         // For GitHub: edit the Processing comment with the error
         if (channel.channel_type === 'github' && data.metadata?.processing_comment_id) {
           try {
@@ -5254,7 +5398,7 @@ export class GatewayService {
         await this.requireInboundPromptAuthority(channel, existingMapping.session_id, user.user_id);
       } catch (error) {
         if (!(error instanceof GatewayPromptAuthorizationError)) throw error;
-        if (!isSlackReaction) {
+        if (!isSlackReaction && !discordUnaddressed) {
           await this.sendPromptAuthorizationDenied(channel, data, error.userMessage);
         }
         return { success: false, sessionId: '', created: false };
@@ -5468,13 +5612,28 @@ export class GatewayService {
         }
       }
 
-      const sessionUrl = await this.fetchExistingSessionUrlForGatewayUser(sessionId, user);
-      if (sessionUrl && channel.channel_type !== 'slack' && !discordDm) {
-        this.sendSystemMessage(
-          channel,
-          data.thread_id,
-          formatGatewayFollowUpRoutingMessage(sessionId, sessionUrl)
-        );
+      // Like Slack, Discord shows the session link once, when it is created. A
+      // redelivered first message may have stopped before posting it, so a
+      // recovery announces the session instead.
+      if (channel.channel_type !== 'slack' && channel.channel_type !== 'discord') {
+        const sessionUrl = await this.fetchExistingSessionUrlForGatewayUser(sessionId, user);
+        if (sessionUrl) {
+          this.sendSystemMessage(
+            channel,
+            data.thread_id,
+            formatGatewayFollowUpRoutingMessage(sessionId, sessionUrl)
+          );
+        }
+      } else if (channel.channel_type === 'discord' && recoveringInitialDelivery) {
+        const sessionUrl = await this.fetchExistingSessionUrlForGatewayUser(sessionId, user);
+        if (sessionUrl) {
+          this.sendSystemMessage(
+            channel,
+            data.thread_id,
+            formatGatewaySessionCreatedMessage(sessionId, sessionUrl),
+            { followUpHint: !discordFollowUpsNeedNoMention }
+          );
+        }
       }
     } else {
       // New thread → create session via FeathersJS service
@@ -5599,7 +5758,6 @@ export class GatewayService {
         agentic_tool_preset_id: resolvedPresetId,
         permission_config: gatewayPermissionConfig,
         model_config: gatewayModelConfig,
-        tasks: [],
         // Denormalized gateway metadata (immutable snapshot at creation time)
         // Avoids N+1 lookups when rendering board cards
         custom_context: {
@@ -5802,11 +5960,17 @@ export class GatewayService {
 
       const sessionUrl = await this.fetchExistingSessionUrlForGatewayUser(sessionId, user);
 
-      if (sessionUrl || channel.channel_type === 'slack') {
+      // On Discord only the event that created the session announces it, so a
+      // concurrent message that lost the thread race does not repeat the link.
+      if (
+        (sessionUrl || channel.channel_type === 'slack') &&
+        (created || channel.channel_type !== 'discord')
+      ) {
         this.sendSystemMessage(
           channel,
           data.thread_id,
-          formatGatewaySessionCreatedMessage(sessionId, sessionUrl)
+          formatGatewaySessionCreatedMessage(sessionId, sessionUrl),
+          { followUpHint: !discordFollowUpsNeedNoMention }
         );
       }
 
@@ -5924,9 +6088,13 @@ export class GatewayService {
           });
           discordCursorToWrite = liveCursor;
         } else if (connector?.fetchProviderHistory) {
+          const starterMessageId = extractDiscordStarterMessageId(mappingMetadata);
+          // A first in-thread read includes the starter: a forum post's opener lives in the post.
           const afterCursor =
             mappingForCursor?.discord_last_admitted_message_id ??
-            extractDiscordStarterMessageId(mappingMetadata);
+            (starterMessageId && discordMetadata?.[DISCORD_METADATA_KEY.isThread] === true
+              ? previousDiscordSnowflake(starterMessageId)
+              : starterMessageId);
           if (!afterCursor) {
             throw new GatewayCatchUpError(
               'incomplete',
@@ -6093,34 +6261,45 @@ export class GatewayService {
         undeliveredAttachments.skipped_mime_types.push(...skippedMimeTypes);
       }
 
-      // Discord inbound images use the provider's signed CDN URL and the
+      // Discord inbound attachments use the provider's signed CDN URL and the
       // same tenant/session/branch-scoped staging plus executor materializer
-      // as browser and Slack uploads. The capability is opt-in; unsupported
-      // or mixed rich payloads are rejected by the connector before reaching
-      // this boundary, while individual download failures degrade the prompt.
-      if (
-        channel.channel_type === 'discord' &&
-        channelConfig.files === true &&
-        data.files &&
-        data.files.length > 0
-      ) {
-        const ingestion = await ingestDiscordInboundImages({
-          files: data.files,
-          tenantId: requireCurrentTenantId() as TenantID,
-          sessionId,
-          branchId: channel.target_branch_id,
-          createdBy: channel.agor_user_id ?? user.user_id,
-        });
-        if (ingestion.uploads.length > 0) {
-          promptText = buildPromptWithAttachments(promptText, ingestion.uploads);
-          console.log(
-            `[gateway] Ingested ${ingestion.uploads.length} Discord image attachment(s) for session ${shortId(sessionId)}`
-          );
+      // as browser and Slack uploads. The capability is opt-in. Every
+      // attachment the agent cannot read (skipped by the connector, or failed
+      // here) is named in the prompt so the agent tells the user.
+      if (channel.channel_type === 'discord') {
+        const unread = (data.skipped_files ?? []).map((file) =>
+          formatDiscordUnreadAttachment(file.name, DISCORD_SKIPPED_FILE_REASON[file.reason])
+        );
+        if (channelConfig.files !== true) {
+          for (const file of data.files ?? []) {
+            unread.push(
+              formatDiscordUnreadAttachment(file.name, DISCORD_SKIPPED_FILE_REASON.files_disabled)
+            );
+          }
+        } else if (data.files && data.files.length > 0) {
+          const ingestion = await ingestDiscordInboundImages({
+            files: data.files,
+            tenantId: requireCurrentTenantId() as TenantID,
+            sessionId,
+            branchId: channel.target_branch_id,
+            createdBy: channel.agor_user_id ?? user.user_id,
+          });
+          if (ingestion.uploads.length > 0) {
+            promptText = buildPromptWithAttachments(promptText, ingestion.uploads);
+            console.log(
+              `[gateway] Ingested ${ingestion.uploads.length} Discord attachment(s) for session ${shortId(sessionId)}`
+            );
+          }
+          for (const name of ingestion.failedNames ?? []) {
+            unread.push(
+              formatDiscordUnreadAttachment(name, 'could not be downloaded or is too large')
+            );
+          }
+          undeliveredAttachments.failed += ingestion.failed;
         }
-        if (ingestion.failed > 0) {
-          promptText = `${promptText}\n\n(an attachment could not be fetched)`;
+        if (unread.length > 0) {
+          promptText = `${promptText}\n\n${formatDiscordUnreadAttachmentsNote(unread, channelConfig.files === true)}`;
         }
-        undeliveredAttachments.failed += ingestion.failed;
       }
 
       // Prepend gateway context block so the agent knows the message source.
@@ -6144,6 +6323,9 @@ export class GatewayService {
 
       if (channel.channel_type === 'slack') {
         promptText = prependSlackGatewayReplyNote(promptText);
+      }
+      if (discordUnaddressed) {
+        promptText = `${DISCORD_UNADDRESSED_NOTE}\n\n${promptText}`;
       }
 
       // Prepend MCP auth warning to the initial prompt so the agent is aware
@@ -6301,7 +6483,7 @@ export class GatewayService {
       }
     } catch (error) {
       if (error instanceof GatewayPromptAuthorizationError) {
-        if (!isSlackReaction) {
+        if (!isSlackReaction && !discordUnaddressed) {
           await this.sendPromptAuthorizationDenied(channel, data, error.userMessage);
         }
         this.updateProgressAfterCommit({
@@ -6318,7 +6500,9 @@ export class GatewayService {
       console.error(
         `[gateway] Failed to send prompt to session: channel_id=${channel.id} code=${safeError}`
       );
-      this.sendSystemMessage(channel, data.thread_id, `Error sending prompt: ${safeError}`);
+      if (!discordUnaddressed) {
+        this.sendSystemMessage(channel, data.thread_id, `Error sending prompt: ${safeError}`);
+      }
       this.updateProgressAfterCommit({
         session_id: sessionId,
         state: 'failed',
@@ -6430,11 +6614,15 @@ export class GatewayService {
     if (data.message_id && (await this.deliveryRepo.findByMessageId(data.message_id))) {
       return { routed: true, channelType: 'discord' };
     }
-
     if (params?.provider) {
       if (!transportedSession || transportedSession.branch_id !== channel.target_branch_id) {
         throw new Forbidden('Gateway outbound access denied');
       }
+    }
+
+    // The agent chose not to answer: no delivery intent exists, and nothing is posted.
+    if (channel.channel_type === 'discord' && isDiscordNoReply(data.message)) {
+      return { routed: true, channelType: 'discord' };
     }
 
     // Check if we have a connector for this channel type
@@ -7367,6 +7555,7 @@ export class GatewayService {
           let eventId: import('@agor/core/types').GatewayInboundEventID | undefined;
           let metadata = msg.metadata;
           let deliveryMetadata: Record<string, unknown> | undefined;
+          let unaddressedDropped = false;
           if (this.durableListenerOwnership) {
             if (!lease || !msg.providerEventId) {
               throw new Error(
@@ -7439,11 +7628,32 @@ export class GatewayService {
                   skipProviderThreadMaterialization?: boolean;
                 }) => Promise<Record<string, unknown> | undefined>)
               | undefined;
-            const prepared = await prepareDelivery?.({
-              ...(skipProviderThreadMaterialization
-                ? { skipProviderThreadMaterialization: true }
-                : {}),
-            });
+            let prepared: Record<string, unknown> | undefined;
+            try {
+              prepared = await prepareDelivery?.({
+                ...(skipProviderThreadMaterialization
+                  ? { skipProviderThreadMaterialization: true }
+                  : {}),
+              });
+            } catch (error) {
+              // An unmentioned message admitted by a response mode is ordinary
+              // chatter: when its thread definitively cannot be verified, end
+              // the event quietly instead of failing the listener. Transient
+              // provider failures still fail so the event is retried.
+              if (
+                !(
+                  error instanceof DiscordThreadUnavailableError ||
+                  isPermanentProviderRefusal(error)
+                ) ||
+                !isUnmentionedDiscordInbound(channel, msg.metadata)
+              ) {
+                throw error;
+              }
+              console.debug(
+                `[gateway] IGNORED: unverifiable thread for an unmentioned Discord message: channel=${shortId(channel.id)} code=${gatewayFailureCode(error)}`
+              );
+              unaddressedDropped = true;
+            }
             if (prepared) {
               if (eventId && lease) {
                 const recorded = await this.inboundEventRepo.recordDeliveryMetadata({
@@ -7470,30 +7680,34 @@ export class GatewayService {
             throw new Error('Gateway listener ownership lost before inbound routing');
           }
 
-          const result = await this.create({
-            channel_key: channel.channel_key,
-            thread_id:
-              channel.channel_type === 'discord' &&
-              typeof parseDiscordAuthorityMetadata(metadata)?.[DISCORD_METADATA_KEY.threadId] ===
-                'string'
-                ? (parseDiscordAuthorityMetadata(metadata)?.[
+          const result: PostMessageResult = unaddressedDropped
+            ? { success: false, sessionId: '', created: false }
+            : await this.createQuietlyIfUnmentioned(channel, msg.metadata, {
+                channel_key: channel.channel_key,
+                thread_id:
+                  channel.channel_type === 'discord' &&
+                  typeof parseDiscordAuthorityMetadata(metadata)?.[
                     DISCORD_METADATA_KEY.threadId
-                  ] as string)
-                : msg.threadId,
-            text: msg.text,
-            user_name: msg.userId,
-            ...(msg.files ? { files: msg.files } : {}),
-            metadata,
-            ...(eventId && lease
-              ? {
-                  gateway_inbound_event_id: eventId,
-                  idempotency_task_id: gatewayInboundTaskId(eventId),
-                  idempotency_session_id: gatewayInboundSessionId(eventId),
-                  listener_claim_token: lease.claim_token,
-                  listener_channel_id: channel.id,
-                }
-              : {}),
-          });
+                  ] === 'string'
+                    ? (parseDiscordAuthorityMetadata(metadata)?.[
+                        DISCORD_METADATA_KEY.threadId
+                      ] as string)
+                    : msg.threadId,
+                text: msg.text,
+                user_name: msg.userId,
+                ...(msg.files ? { files: msg.files } : {}),
+                ...(msg.skippedFiles ? { skipped_files: msg.skippedFiles } : {}),
+                metadata,
+                ...(eventId && lease
+                  ? {
+                      gateway_inbound_event_id: eventId,
+                      idempotency_task_id: gatewayInboundTaskId(eventId),
+                      idempotency_session_id: gatewayInboundSessionId(eventId),
+                      listener_claim_token: lease.claim_token,
+                      listener_channel_id: channel.id,
+                    }
+                  : {}),
+              });
 
           if (eventId && lease) {
             const completed = await this.inboundEventRepo.complete({

@@ -200,7 +200,7 @@ describe('ForkSpawnModal configuration defaults', { timeout: 10_000 }, () => {
         />
       );
       fireEvent.click(screen.getByText('Custom config'));
-      const networkSwitch = await screen.findByRole('switch');
+      const networkSwitch = await screen.findByRole('switch', { name: 'Enable Network Access' });
       expect(networkSwitch).toHaveAttribute('aria-checked', String(toggle || network));
       expect(screen.getByLabelText('Sandbox Mode').closest('.ant-select')).toHaveTextContent(
         defaults ? 'read-only' : 'workspace-write'
@@ -235,7 +235,7 @@ describe('ForkSpawnModal configuration defaults', { timeout: 10_000 }, () => {
       />
     );
     fireEvent.click(screen.getByText('Custom config'));
-    fireEvent.click(await screen.findByRole('switch'));
+    fireEvent.click(await screen.findByRole('switch', { name: 'Enable Network Access' }));
     fireEvent.click(screen.getByText('Same as parent'));
     fireEvent.click(screen.getByRole('button', { name: 'Spawn Session' }));
     // The fork's spawn defaults (child auto-archive, parent callback delivery)

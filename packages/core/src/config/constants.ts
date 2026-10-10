@@ -134,6 +134,15 @@ export const PAGINATION = {
    * Default limit for CLI list commands - reasonable for terminal display
    */
   CLI_DEFAULT_LIMIT: 50,
+
+  /**
+   * Maximum ids in one `{ $in: [...] }` id-list read (`session_id`,
+   * `branch_id`). Larger sets are split into chunks by the caller.
+   */
+  MAX_ID_LIST: 200,
+
+  /** Maximum rows returned by one `branches.find({ teammate: true })` read. */
+  MAX_TEAMMATE_BRANCHES: 1_000,
 } as const;
 
 /**
@@ -158,6 +167,15 @@ export const MESSAGE_PAGINATION = {
   MAX_TASK_IDS: 100,
   DEFAULT_LIMIT: 100,
   MAX_LIMIT: 1_000,
+} as const;
+
+/**
+ * Tasks loaded by ID: the lean transcript reads a page of its Session's
+ * dispatch order (`Session.tasks`) in one session-scoped `task_id: { $in }`.
+ */
+export const TASK_PAGINATION = {
+  /** Maximum task IDs in one session-scoped Task query. */
+  MAX_TASK_IDS: 100,
 } as const;
 
 /**

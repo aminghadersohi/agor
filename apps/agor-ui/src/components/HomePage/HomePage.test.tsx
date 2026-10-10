@@ -3,6 +3,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildSessionMaps } from '../../store/agorMaps';
 import { agorStore } from '../../store/agorStore';
+import { userScopeCoverage } from '../../test/userScopeCoverage';
 import {
   OPEN_BOARD_SWITCHER_EVENT,
   OPEN_GLOBAL_SEARCH_EVENT,
@@ -28,6 +29,13 @@ vi.mock('../../hooks/useIdleReady', () => ({ useIdleReady: () => true }));
 
 beforeEach(resetHome);
 
+/** What the daemon returns once the viewer has seen the session's generation 1. */
+const acknowledged = async (id: string) => ({
+  session_id: id,
+  attention_generation: 1,
+  seen_attention_generation: 1,
+});
+
 describe('HomePage', () => {
   it('shows rows before hydration but never “all caught up” or counts', () => {
     seed({ sessions: [session('idle')], hydrated: false });
@@ -36,9 +44,39 @@ describe('HomePage', () => {
     expect(screen.queryByText(/caught up/i)).not.toBeInTheDocument();
     expect(screen.getByText('Session idle')).toBeInTheDocument();
 
-    act(() => agorStore.setState({ sessionsHydrated: true, branchesHydrated: true }));
+    act(() =>
+      agorStore.setState({ coverage: userScopeCoverage({ sessions: true, references: true }) })
+    );
     expect(screen.getByText('You’re all caught up.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /All caught up/ })).toBeInTheDocument();
+  });
+
+  it('renders truncated counts as N+ and never claims “all caught up”', () => {
+    seed({
+      sessions: [
+        session('perm', { status: 'awaiting_permission' }),
+        session('run', { status: 'running' }),
+      ],
+    });
+    act(() =>
+      agorStore.setState({
+        coverage: userScopeCoverage({ sessions: 'capped', references: true, teammates: true }),
+      })
+    );
+    renderHome();
+    expect(screen.getByRole('button', { name: '1+ need you' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '1+ running' })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Running 1+' })).toBeInTheDocument();
+
+    // Nothing found in the capped read is not proof that nothing needs me.
+    act(() => {
+      seed({ sessions: [session('idle')] });
+      agorStore.setState({
+        coverage: userScopeCoverage({ sessions: 'capped', references: true, teammates: true }),
+      });
+    });
+    expect(screen.queryByText(/caught up/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Nothing needs you in your most recent sessions.')).toBeInTheDocument();
   });
 
   it('hides Needs you and the status line for new users', () => {
@@ -158,6 +196,36 @@ describe('HomePage', () => {
     // Neither run comes back: each was recorded against its own last run.
     act(() => agorStore.setState(buildSessionMaps(failures)));
     await waitFor(() => expect(within(needs).queryByText(/failed on/)).not.toBeInTheDocument());
+  });
+
+  it.each([
+    [
+      'timed_out',
+      'Permission request timed out after 600000ms.',
+      'Timed out · The agent stopped waiting for approval.',
+    ],
+    [
+      'failed',
+      'Agor could not confirm a successful response. Provider detail: error_max_turns',
+      'Failed · Agor could not confirm a successful response.',
+    ],
+  ] as const)('shows a readable cause for a %s run', async (status, errorMessage, label) => {
+    const run = session('r1', {
+      status,
+      created_at: recent(60),
+      last_updated: recent(1),
+      tasks: ['t1'],
+    });
+    const client = {
+      service: (name: string) =>
+        name === 'tasks'
+          ? { get: async () => ({ error_message: errorMessage }) }
+          : { find: async () => [], getPrimaryTeammate: async () => null },
+    } as unknown as AgorClient;
+    seed({ sessions: [run] });
+    renderHome({ client });
+    const needs = screen.getByRole('region', { name: 'Needs you' });
+    expect(await within(needs).findByText(label)).toBeInTheDocument();
   });
 
   it('expands a failure group to each failure, and opening an older one records only it', async () => {
@@ -297,6 +365,7 @@ describe('HomePage', () => {
 
   it('marks only finished sessions the user started as read, from the row menu on phones', async () => {
     const patch = vi.fn(() => Promise.resolve());
+    const acknowledgeAttention = vi.fn(acknowledged);
     const client = {
       service: () => ({
         patch,
@@ -304,6 +373,7 @@ describe('HomePage', () => {
         get: () => new Promise(() => {}),
         getPrimaryTeammate: async () => null,
       }),
+      sessions: { acknowledgeAttention },
     } as unknown as AgorClient;
     seed({
       sessions: [
@@ -316,7 +386,12 @@ describe('HomePage', () => {
     expect(menus).toHaveLength(1);
     fireEvent.click(menus[0]);
     fireEvent.click(await screen.findByText('Mark as read'));
-    expect(patch).toHaveBeenCalledWith('done', { ready_for_prompt: false });
+    // Read state is per viewer; the shared ready flag is left to promptability.
+    expect(acknowledgeAttention).toHaveBeenCalledWith('done');
+    expect(patch).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(agorStore.getState().sessionById.get('done')?.viewer_seen_attention_generation).toBe(1)
+    );
   });
 
   it('says what a permission request asks for, from the latest task', async () => {
@@ -394,9 +469,10 @@ describe('HomePage', () => {
 
   it('groups finished results per branch behind the latest, and marks them all as read', async () => {
     asDesktop();
-    const patch = vi.fn(() => Promise.resolve());
+    const acknowledgeAttention = vi.fn(acknowledged);
     const client = {
-      service: () => ({ patch, find: async () => [], getPrimaryTeammate: async () => null }),
+      service: () => ({ find: async () => [], getPrimaryTeammate: async () => null }),
+      sessions: { acknowledgeAttention },
     } as unknown as AgorClient;
     seed({
       sessions: [1, 2, 3].map((i) =>
@@ -411,7 +487,7 @@ describe('HomePage', () => {
     expect(within(needs).getByText('Session r3')).toBeInTheDocument();
     expect(within(needs).getByText('Session r1')).toBeInTheDocument();
     fireEvent.click(within(needs).getByRole('button', { name: 'Mark all as read' }));
-    expect(patch.mock.calls.map(([id]) => id).sort()).toEqual(['r1', 'r2', 'r3']);
+    expect(acknowledgeAttention.mock.calls.map(([id]) => id).sort()).toEqual(['r1', 'r2', 'r3']);
   });
 
   it('puts row actions in the ⋯ menu on phones, so times stay in one column', async () => {
@@ -551,6 +627,45 @@ describe('HomePage', () => {
     expect(within(recentBoards).getByRole('button', { name: 'Launch board' })).toBeInTheDocument();
   });
 
+  it('shows the fallback at first paint, before the user scope completes', () => {
+    // Only the gated page of my sessions is in the store; no branch is loaded.
+    seed({
+      sessions: [session('a', { branch_board_id: 'b-a' } as Partial<Session>)],
+      boards: [{ board_id: 'b-a', name: 'Launch board', archived: false } as Board],
+      hydrated: false,
+    });
+    renderHome();
+    const recentBoards = screen.getByRole('group', { name: 'Recent boards' });
+    expect(within(recentBoards).getByRole('button', { name: 'Launch board' })).toBeInTheDocument();
+  });
+
+  it('marks recent boards only with my running or needs-you sessions', () => {
+    seed({
+      sessions: [
+        session('mine-ready', {
+          branch_board_id: 'b-a',
+          ready_for_prompt: true,
+        } as Partial<Session>),
+        session('theirs-running', {
+          branch_id: 'branch-2',
+          branch_board_id: 'b-b',
+          created_by: 'someone',
+          status: 'running',
+        } as Partial<Session>),
+      ],
+      boards: [
+        { board_id: 'b-a', name: 'Launch board', archived: false } as Board,
+        { board_id: 'b-b', name: 'Team board', archived: false } as Board,
+      ],
+    });
+    renderHome({ recentBoardIds: ['b-a', 'b-b'] });
+    const recentBoards = screen.getByRole('group', { name: 'Recent boards' });
+    expect(
+      within(recentBoards).getByRole('button', { name: 'Launch board, needs you' })
+    ).toBeInTheDocument();
+    expect(within(recentBoards).getByRole('button', { name: 'Team board' })).toBeInTheDocument();
+  });
+
   it('falls back too when every visited board is gone or archived', () => {
     seed({
       sessions: [session('a', { branch_board_id: 'b-a' } as Partial<Session>)],
@@ -623,15 +738,17 @@ describe('HomePage', () => {
     asDesktop();
     let inFlight = 0;
     let peak = 0;
-    const patch = vi.fn(async (id: string) => {
+    const acknowledgeAttention = vi.fn(async (id: string) => {
       inFlight++;
       peak = Math.max(peak, inFlight);
       await new Promise((resolve) => setTimeout(resolve, 1));
       inFlight--;
       if (id === 'd1' || id === 'd2') throw new Error('forbidden');
+      return acknowledged(id);
     });
     const client = {
-      service: () => ({ patch, find: async () => [], getPrimaryTeammate: async () => null }),
+      service: () => ({ find: async () => [], getPrimaryTeammate: async () => null }),
+      sessions: { acknowledgeAttention },
     } as unknown as AgorClient;
     const sessions = Array.from({ length: 8 }, (_, i) =>
       session(`d${i}`, { ready_for_prompt: true, branch_id: `b-${i}` })
@@ -646,7 +763,7 @@ describe('HomePage', () => {
     renderHome({ client });
     fireEvent.click(screen.getByRole('button', { name: 'Mark all as read' }));
     expect(await screen.findByText('Couldn’t mark 2 of 8 as read')).toBeInTheDocument();
-    expect(patch).toHaveBeenCalledTimes(8);
+    expect(acknowledgeAttention).toHaveBeenCalledTimes(8);
     expect(peak).toBeLessThanOrEqual(4);
     expect(screen.getAllByText(/Couldn’t mark/)).toHaveLength(1);
   });

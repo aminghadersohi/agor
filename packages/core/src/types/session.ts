@@ -94,6 +94,13 @@ export type SessionStopOutcome = (typeof SESSION_STOP_OUTCOMES)[number];
 /** Authenticated Session Stop endpoint request. */
 export type SessionStopRequest =
   | {
+      retry_cleanup: true;
+      expected_task_id: TaskID;
+      termination_requested_at: string;
+      recovery_revision: string;
+      force_unverified?: false;
+    }
+  | {
       force_unverified?: false;
       reason?: string;
       expected_task_id?: TaskID;
@@ -103,6 +110,7 @@ export type SessionStopRequest =
     }
   | {
       force_unverified: true;
+      recovery_revision?: string;
       task_id: TaskID;
       termination_requested_at: string;
       confirmation: string;
@@ -275,6 +283,13 @@ export interface Session {
   /** Read-only, opt-in aggregate over all tasks, independent of transcript paging. */
   usage_summary?: SessionUsageSummary;
 
+  /**
+   * Read-only, opt-in (`include_tasks_complete` on get): `tasks` lists every
+   * dispatched Task of this Session, once each, in dispatch order. False for a
+   * legacy row whose list lost or misnames Tasks; absent from older daemons.
+   */
+  tasks_complete?: boolean;
+
   /** Unique session identifier (UUIDv7) */
   session_id: SessionID;
 
@@ -386,7 +401,7 @@ export interface Session {
     /** Permission mode for agent tool execution (Claude/Gemini unified mode)
      *  Tool-level permissions are handled by SDK via settings.json files */
     mode?: PermissionMode;
-    /** Codex-specific dual permission config (sandboxMode + approvalPolicy + networkAccess) */
+    /** Codex-specific runtime settings (sandbox, approvals, network and native plugins). */
     codex?: {
       /** Sandbox mode controls WHERE Codex can write (filesystem boundaries) */
       sandboxMode: CodexSandboxMode;
@@ -394,6 +409,8 @@ export interface Session {
       approvalPolicy: CodexApprovalPolicy;
       /** Network access controls whether outbound HTTP/HTTPS requests are allowed (workspace-write only) */
       networkAccess?: boolean;
+      /** Allow native plugins; false/omitted vetoes loading, true respects native settings. */
+      includePlugins?: boolean;
     };
   } | null;
 
@@ -545,9 +562,9 @@ export interface Session {
   /**
    * Whether this session is ready to receive a new prompt
    *
-   * Set to true when a task completes successfully, indicating the agent is ready for more work.
-   * Cleared when the user opens the conversation drawer (acknowledging completion).
-   * Used to highlight branch cards to show which sessions need attention.
+   * Set to true when a task settles and the session can accept more work. This
+   * includes failure and timeout outcomes, not only successful completion.
+   * This is runtime promptability state, not per-user acknowledgement state.
    */
   ready_for_prompt: boolean;
 
@@ -556,6 +573,21 @@ export interface Session {
   /** Durable attribution for the latest priority change. */
   power_priority_updated_at?: string;
   power_priority_updated_by?: UserID;
+
+  /**
+   * Monotonic generation advanced whenever a session transitions from active work
+   * to a result that needs human attention. Successful output, failures, timeouts,
+   * and interrupted/recovered work all advance the same signal so operational
+   * failures cannot disappear from the board.
+   */
+  attention_generation: number;
+
+  /**
+   * Caller-scoped acknowledgement generation, enriched on authenticated reads.
+   * It is intentionally absent from shared realtime session events; clients retain
+   * their last caller-scoped value while applying those shared patches.
+   */
+  viewer_seen_attention_generation?: number;
 
   // ===== Callback Configuration =====
 
@@ -589,11 +621,12 @@ export interface Session {
      */
     callback_session_id?: SessionID;
     /**
-     * User ID of the person who set up this callback.
+     * User ID of the person who set up this callback. Server-managed: the
+     * daemon discards client-supplied values and stamps the authenticated
+     * caller after checking they may prompt the callback target.
      *
-     * Used as queued_by_user_id when the callback is delivered, so the
-     * resulting task is attributed to the callback setter, not the target
-     * session owner. Execution still uses the target session's home and credentials.
+     * Becomes the delivered callback Task's `created_by`, i.e. its executor
+     * principal (identity, environment, and credentials).
      */
     callback_created_by?: string;
     /**
@@ -714,7 +747,10 @@ export type CreateSessionInput = Omit<
   | 'model_config'
   | 'sdk_home_scope'
   | 'usage_summary'
+  | 'tasks_complete'
   | 'mcp_defaults_skipped'
+  | 'attention_generation'
+  | 'viewer_seen_attention_generation'
 > & {
   agentic_tool?: AgenticToolName;
   agentic_tool_preset_id?: AgenticToolConfigurationReference | null;
@@ -726,7 +762,13 @@ export type CreateSessionInput = Omit<
 /** Session patch semantics: omit/undefined preserves, string sets, null clears. */
 export type SessionUpdate = Omit<
   Partial<Session>,
-  'sdk_session_id' | 'sdk_home_scope' | 'usage_summary' | 'mcp_defaults_skipped'
+  | 'sdk_session_id'
+  | 'sdk_home_scope'
+  | 'usage_summary'
+  | 'tasks_complete'
+  | 'mcp_defaults_skipped'
+  | 'attention_generation'
+  | 'viewer_seen_attention_generation'
 > & {
   sdk_session_id?: string | null;
 };
@@ -735,10 +777,9 @@ export type SessionUpdate = Omit<
  * Minimal persisted session state needed to decide whether a new task can
  * start immediately.
  *
- * `ready_for_prompt` is intentionally not equivalent to promptability: the UI
- * also uses it as an attention/acknowledgement flag (for example timed-out
- * permission requests can set it true). Use this helper instead of checking
- * either field directly at task-execution boundaries.
+ * `ready_for_prompt` is not equivalent to an idle status: failed or timed-out
+ * sessions use it to indicate that the prior task has settled and prompting
+ * may resume. Caller-private attention acknowledgement is tracked separately.
  */
 export type SessionPromptState = Pick<Session, 'status' | 'ready_for_prompt'>;
 
@@ -761,6 +802,20 @@ export function isSessionPromptable<T extends SessionPromptState>(
   session: T
 ): session is T & PromptableSessionState {
   return sessionCanStartTask(session.status, session.ready_for_prompt);
+}
+
+/** Whether this session has attention-producing output unseen by the current viewer. */
+export function sessionHasUnseenAttention(
+  session: Pick<Session, 'attention_generation' | 'viewer_seen_attention_generation'>
+): boolean {
+  return session.attention_generation > (session.viewer_seen_attention_generation ?? 0);
+}
+
+/** Caller-private result returned and broadcast when a session is acknowledged. */
+export interface SessionAttentionAcknowledgement {
+  session_id: SessionID;
+  attention_generation: number;
+  seen_attention_generation: number;
 }
 
 export const EXECUTING_SESSION_STATUSES: ReadonlySet<SessionStatus> = new Set<SessionStatus>([
@@ -1125,6 +1180,7 @@ export interface SpawnConfig {
 
   /** Codex network access (codex only) */
   codexNetworkAccess?: boolean;
+  codexIncludePlugins?: boolean;
 
   /** MCP server IDs to attach to spawned session */
   mcpServerIds?: string[];

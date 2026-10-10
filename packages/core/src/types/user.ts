@@ -1,6 +1,6 @@
 import type { CodexApprovalPolicy, CodexNetworkAccess, CodexSandboxMode } from './agentic-tool';
 import { type AgenticToolName, DEFAULT_AGENTIC_TOOL_NAME, isAgenticToolName } from './agentic-tool';
-import type { BranchID, UserID } from './id';
+import type { ArtifactID, BranchID, SessionID, UserID } from './id';
 import type { OpenCodeConfig } from './opencode-ollama';
 import type { ProfileImageID } from './profile-image';
 import type { ScheduleID } from './schedule';
@@ -175,6 +175,8 @@ export interface DefaultAgenticToolConfig {
   codexApprovalPolicy?: CodexApprovalPolicy;
   /** Codex-specific: network access */
   codexNetworkAccess?: CodexNetworkAccess;
+  /** Include native Codex plugins. Default false; true respects native plugin settings. */
+  codexIncludePlugins?: boolean;
 }
 
 /**
@@ -518,8 +520,12 @@ export interface UserPreferences {
   use_slack_avatar?: boolean;
   /** User-owned choice of which canonical schedules appear in the Home overview. */
   home_schedules?: HomeSchedulePreferences;
+  /** Lightweight, user-owned groupings of canonical sessions shown on Home. */
+  chat_collections?: ChatCollectionPreferences;
   /** Home "My work" layout. Undefined defaults to list. */
   homeWorkView?: HomeWorkView;
+  /** Artifact shortcuts pinned to Home by this user. */
+  home_artifact_ids?: ArtifactID[];
   // Future preferences can be added here
   [key: string]: unknown;
 }
@@ -527,6 +533,19 @@ export interface UserPreferences {
 export interface HomeSchedulePreferences {
   mode: 'all' | 'selected';
   schedule_ids: ScheduleID[];
+}
+
+/** A named Home collection of existing sessions, including teammate and gateway sessions. */
+export interface ChatCollection {
+  collection_id: string;
+  name: string;
+  /** References only: messages and transcripts remain owned by their canonical sessions. */
+  session_ids: SessionID[];
+}
+
+/** User preference envelope for Home chat collections. */
+export interface ChatCollectionPreferences {
+  collections: ChatCollection[];
 }
 
 /** Stable external identity link stored with a local user. */
@@ -675,8 +694,6 @@ export function resolveUserPrimaryAgenticTool(user: User | null | undefined): Ag
  * v0.5 only validates 'global' and 'session'. Other values (repo, mcp_server,
  * artifact_feature, executor) are *reserved* — present in the type for forward
  * compatibility but not yet selectable in the UI or resolved by the daemon.
- *
- * See `context/explorations/env-var-access.md`.
  */
 export type EnvVarScope =
   | 'global'
@@ -806,7 +823,7 @@ export interface UpdateUserInput extends Partial<BaseUserFields> {
  * Session-scope env var selection (many-to-many row).
  *
  * v0.5: env vars are still keyed by name inside `users.data.env_vars` (no `env_vars.id`
- * yet — see `context/explorations/env-var-access.md`), so selections reference vars by
+ * yet), so selections reference vars by
  * `env_var_name` scoped implicitly via `session.created_by`. When v1 promotes env vars
  * to their own table this becomes `env_var_id`.
  */

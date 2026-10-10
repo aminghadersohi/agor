@@ -8,6 +8,7 @@ import { ThemeProvider } from '../../contexts/ThemeContext';
 import { recentBoardsStorageKey } from '../../hooks/useRecentBoards';
 import { buildSessionMaps, EMPTY_MAPS } from '../../store/agorMaps';
 import { agorStore } from '../../store/agorStore';
+import { userScopeCoverage } from '../../test/userScopeCoverage';
 import { resetAccessCacheForTests } from '../../utils/accessCache';
 import { MobileApp } from './MobileApp';
 
@@ -26,7 +27,8 @@ vi.mock('./SessionPage', () => ({
 }));
 vi.mock('./MobileNavTree', () => ({ MobileNavTree: () => null }));
 vi.mock('../BranchModal', () => ({ BranchModal: () => null }));
-vi.mock('../../hooks/useIdleReady', () => ({ useIdleReady: () => false }));
+const idleReady = vi.hoisted(() => ({ value: false }));
+vi.mock('../../hooks/useIdleReady', () => ({ useIdleReady: () => idleReady.value }));
 
 const ME = 'user-1';
 const user = { user_id: ME, name: 'Kasia Designer', role: 'member' } as User;
@@ -42,6 +44,8 @@ const session = (id: string, extra: Partial<Session> = {}) =>
     genealogy: { children: [] },
     scheduled_from_branch: false,
     ready_for_prompt: false,
+    // A settled run carries a generation this viewer has not acknowledged yet.
+    attention_generation: extra.ready_for_prompt ? 1 : 0,
     agentic_tool: 'claude-code',
     last_updated: new Date().toISOString(),
     ...extra,
@@ -80,8 +84,7 @@ function seed({
       ['board-2', { board_id: 'board-2', name: 'Ops', archived: false } as Board],
     ]),
     userById: new Map([[ME, user]]),
-    sessionsHydrated: true,
-    branchesHydrated: true,
+    coverage: userScopeCoverage({ sessions: true, references: true, teammates: true }),
   } as never);
 }
 
@@ -152,6 +155,7 @@ function renderPhoneHome(entries = ['/m']) {
 }
 
 beforeEach(() => {
+  idleReady.value = false;
   Element.prototype.scrollIntoView = vi.fn();
   localStorage.clear();
   patch.mockClear();
@@ -202,8 +206,8 @@ describe('MobileApp Home wiring', () => {
       sessions: [session('idle')],
       comments: [mention('c1', { branch_id: 'branch-unloaded', board_id: 'board-2' })],
     });
-    // Before branches hydrate, a comment's branch may not be in the store yet.
-    agorStore.setState({ branchesHydrated: false });
+    // Before the user scope resolves it, a comment's branch may not be in the store yet.
+    agorStore.setState({ coverage: userScopeCoverage({ sessions: true, teammates: true }) });
     renderPhoneHome();
     fireEvent.click(await screen.findByRole('button', { name: /mentioned you/ }));
     expect(await screen.findByTestId('board-page')).toHaveTextContent('board-2');
@@ -220,7 +224,7 @@ describe('MobileApp Home wiring', () => {
     expect(await screen.findByTestId('board-page')).toHaveTextContent('board-2');
   });
 
-  it('clears a finished result’s flag when it is opened', async () => {
+  it('opens a finished result without clearing its shared ready flag', async () => {
     seed({ sessions: [session('done', { ready_for_prompt: true })] });
     renderPhoneHome();
     const needs = screen.getByRole('region', { name: 'Needs you' });
@@ -228,7 +232,8 @@ describe('MobileApp Home wiring', () => {
       fireEvent.click(within(needs).getByRole('button', { name: /^Session done/ }));
     });
     expect(await screen.findByTestId('session-page')).toHaveTextContent('done');
-    expect(patch).toHaveBeenCalledWith('done', { ready_for_prompt: false });
+    // The session page acknowledges it per viewer; the shared flag is promptability.
+    expect(patch).not.toHaveBeenCalledWith('done', { ready_for_prompt: false });
   });
 
   it('renders the teammates directory at /m/teammates/ with a back arrow to Home', async () => {
@@ -250,5 +255,35 @@ describe('MobileApp Home wiring', () => {
     renderPhoneHome(['/m/teammates']);
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     expect(await screen.findByText(/Good (morning|afternoon|evening), Kasia/)).toBeInTheDocument();
+  });
+
+  it('lists chat collections on phone Home, opens their sessions and manages them', async () => {
+    idleReady.value = true;
+    seed({ sessions: [session('pinned', { title: 'Pinned thread' })] });
+    agorStore.setState({
+      userById: new Map([
+        [
+          ME,
+          {
+            ...user,
+            preferences: {
+              chat_collections: {
+                collections: [{ collection_id: 'crew', name: 'Crew', session_ids: ['pinned'] }],
+              },
+            },
+          } as User,
+        ],
+      ]),
+    });
+    renderPhoneHome();
+
+    const crew = await screen.findByRole('region', { name: 'Crew' });
+    fireEvent.click(within(crew).getByRole('button', { name: /Pinned thread/ }));
+    expect(await screen.findByTestId('session-page')).toHaveTextContent('pinned');
+
+    act(() => history.back());
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage' }));
+    expect(await screen.findByText('Manage chat collections')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Collection name' })).toHaveValue('Crew');
   });
 });
