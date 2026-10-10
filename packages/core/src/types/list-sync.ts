@@ -34,7 +34,8 @@ export const LIST_SYNC_QUERY_KEY = '$sync';
 
 /**
  * Collections served as versioned lists, with each one's id field. These are
- * the full sets the workspace store hydrates and re-reads on reconnect.
+ * the sets the workspace store reads in full (a board's partition, comments,
+ * the board list) and reads again on reconnect.
  */
 export const LIST_SYNC_ID_FIELDS = {
   sessions: 'session_id',

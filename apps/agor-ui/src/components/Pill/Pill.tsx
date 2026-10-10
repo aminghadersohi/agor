@@ -24,8 +24,9 @@ import {
   UnorderedListOutlined,
   UserOutlined,
 } from '@ant-design/icons';
-import { Badge, Collapse, Popover, Tooltip, theme } from 'antd';
+import { Badge, Button, Collapse, Popover, Tooltip, theme } from 'antd';
 import type React from 'react';
+import { useRef, useState } from 'react';
 import { copyToClipboard } from '../../utils/clipboard';
 import { resolveContextWindowPercentage } from '../../utils/contextWindow';
 import { parseGitStateSha } from '../../utils/gitState';
@@ -235,7 +236,8 @@ const ContextWindowPopoverContent: React.FC<{
   limit: number;
   percentage: number;
   taskMetadata?: ContextWindowPillProps['taskMetadata'];
-}> = ({ used, limit, percentage, taskMetadata }) => {
+  onEscape: () => void;
+}> = ({ used, limit, percentage, taskMetadata, onEscape }) => {
   const { token } = theme.useToken();
 
   // Build collapsible items for advanced sections
@@ -343,7 +345,14 @@ const ContextWindowPopoverContent: React.FC<{
   }
 
   return (
-    <div style={{ width: 400, maxWidth: '90vw' }}>
+    <div
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return;
+        event.stopPropagation();
+        onEscape();
+      }}
+      style={{ width: 400, maxWidth: '90vw' }}
+    >
       {/* Primary info - always visible */}
       <div style={{ marginBottom: 16 }}>
         <div style={{ fontWeight: 600, fontSize: '1.05em', marginBottom: 8 }}>
@@ -426,6 +435,13 @@ export const ContextWindowPill: React.FC<ContextWindowPillProps> = ({
   taskMetadata,
   style,
 }) => {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  // Restore focus only for keyboard dismissal, never for hover or outside clicks.
+  const closeWithKeyboard = () => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
   // Prefer the executor-supplied snapshot — its totalTokens/maxTokens are
   // authoritative (agent-reported), and its `percentage` matches the agent's
   // own "Context XX% used" display (e.g. Codex applies a baseline subtraction
@@ -448,7 +464,7 @@ export const ContextWindowPill: React.FC<ContextWindowPillProps> = ({
   };
 
   const pill = (
-    <Tag color={getColor()} style={style}>
+    <Tag color={getColor()} style={{ ...style, marginInlineEnd: 0 }}>
       {hasLimit ? `${percentage}%` : '?'}
     </Tag>
   );
@@ -461,14 +477,35 @@ export const ContextWindowPill: React.FC<ContextWindowPillProps> = ({
           limit={effectiveLimit}
           percentage={percentage}
           taskMetadata={taskMetadata}
+          onEscape={closeWithKeyboard}
         />
       }
       title={null}
-      trigger="hover"
+      trigger={['hover', 'click']}
+      open={open}
+      onOpenChange={setOpen}
       placement="top"
       mouseEnterDelay={0.3}
     >
-      {pill}
+      <Button
+        ref={triggerRef}
+        type="text"
+        aria-label={`Context window ${hasLimit ? `${percentage}% used` : 'usage unknown'}; show token breakdown`}
+        aria-expanded={open}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.stopPropagation();
+            closeWithKeyboard();
+          }
+        }}
+        style={{
+          padding: 0,
+          height: 'auto',
+          color: 'inherit',
+        }}
+      >
+        {pill}
+      </Button>
     </Popover>
   );
 };
@@ -837,6 +874,8 @@ interface EntityPillProps extends BasePillProps {
   code?: boolean;
   ariaLabel?: string;
   'aria-label'?: string;
+  /** Neutral fill for dense lists where the pill sits below the row title. */
+  quiet?: boolean;
 }
 
 export const EntityPill: React.FC<EntityPillProps> = ({
@@ -851,6 +890,7 @@ export const EntityPill: React.FC<EntityPillProps> = ({
   code = false,
   ariaLabel,
   'aria-label': ariaLabelProp,
+  quiet = false,
   style,
 }) => {
   const { token } = theme.useToken();
@@ -867,7 +907,8 @@ export const EntityPill: React.FC<EntityPillProps> = ({
   return (
     <Tag
       icon={emoji ? undefined : icon}
-      color={color}
+      color={quiet ? undefined : color}
+      variant={quiet ? 'filled' : undefined}
       title={title}
       aria-label={resolvedAriaLabel}
       role={interactive ? 'button' : undefined}
@@ -877,6 +918,7 @@ export const EntityPill: React.FC<EntityPillProps> = ({
         maxWidth: compact ? '100%' : undefined,
         marginInlineEnd: compact ? 0 : undefined,
         cursor: interactive ? 'pointer' : 'default',
+        color: quiet ? token.colorTextSecondary : undefined,
         ...style,
       }}
       onClick={onClick}
@@ -904,11 +946,13 @@ export const EntityPill: React.FC<EntityPillProps> = ({
 };
 
 interface BranchPillProps extends BasePillProps {
+  quiet?: boolean;
   branch: string;
   compact?: boolean;
   title?: string;
   emoji?: string | null;
   onClick?: (e: EntityPillInteractionEvent) => void;
+  maxWidth?: number;
 }
 
 export const BranchPill: React.FC<BranchPillProps> = ({
@@ -917,9 +961,12 @@ export const BranchPill: React.FC<BranchPillProps> = ({
   title,
   emoji,
   onClick,
+  maxWidth,
+  quiet,
   style,
 }) => (
   <EntityPill
+    quiet={quiet}
     icon={<BranchesOutlined />}
     color={ENTITY_PILL_COLORS.branch}
     label={branch}
@@ -927,12 +974,15 @@ export const BranchPill: React.FC<BranchPillProps> = ({
     compact={compact}
     title={title}
     onClick={onClick}
+    maxWidth={maxWidth}
     code
     style={style}
   />
 );
 
 interface BoardPillProps extends BasePillProps {
+  quiet?: boolean;
+  maxWidth?: number;
   board: {
     name: string;
   };
@@ -950,9 +1000,13 @@ export const BoardPill: React.FC<BoardPillProps> = ({
   compact = false,
   title,
   onClick,
+  maxWidth,
+  quiet,
   style,
 }) => (
   <EntityPill
+    quiet={quiet}
+    maxWidth={maxWidth}
     icon={<NeutralBoardIcon />}
     color={ENTITY_PILL_COLORS.board}
     label={board.name}
@@ -998,11 +1052,13 @@ export const UserPill: React.FC<UserPillProps> = ({
 };
 
 interface TeammatePillProps extends BasePillProps {
+  quiet?: boolean;
   name: string;
   emoji?: string | null;
   compact?: boolean;
   title?: string;
   onClick?: (e: EntityPillInteractionEvent) => void;
+  maxWidth?: number;
 }
 
 export const TeammatePill: React.FC<TeammatePillProps> = ({
@@ -1011,9 +1067,12 @@ export const TeammatePill: React.FC<TeammatePillProps> = ({
   compact = false,
   title,
   onClick,
+  maxWidth,
+  quiet,
   style,
 }) => (
   <EntityPill
+    quiet={quiet}
     icon={<RobotOutlined />}
     color={ENTITY_PILL_COLORS.teammate}
     label={name}
@@ -1021,6 +1080,7 @@ export const TeammatePill: React.FC<TeammatePillProps> = ({
     compact={compact}
     title={title ?? name}
     onClick={onClick}
+    maxWidth={maxWidth}
     code
     style={style}
   />

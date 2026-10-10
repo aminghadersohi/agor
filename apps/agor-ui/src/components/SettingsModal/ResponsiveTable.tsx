@@ -1,4 +1,14 @@
-import { Button, Empty, Flex, Spin, Table, type TableProps, Typography, theme } from 'antd';
+import {
+  Button,
+  Empty,
+  Flex,
+  Pagination,
+  Spin,
+  Table,
+  type TableProps,
+  Typography,
+  theme,
+} from 'antd';
 import { useState } from 'react';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { COMPACT_SETTINGS_MEDIA_QUERY } from '../../utils/deviceDetection';
@@ -8,7 +18,9 @@ import { pressableProps } from '../../utils/pressableProps';
  * Drop-in AntD Table replacement that stacks rows into cards below the settings
  * family's compact breakpoint (AntD `md`), so wide tables fit a phone and 768px+
  * keeps the desktop table. Cards expose the same columns, forward `onRow`, and
- * paginate. A table using rowSelection / expandable stays a Table at every width.
+ * paginate (a server-paged table — controlled `current` and `total` — gets a pager
+ * instead of "Load more"). A table using rowSelection / expandable stays a Table
+ * at every width.
  */
 
 type Row = Record<string, unknown>;
@@ -41,7 +53,13 @@ function pageSizeFor(pagination: TableProps<object>['pagination']): number {
   return pagination.pageSize ?? pagination.defaultPageSize ?? DEFAULT_MOBILE_PAGE_SIZE;
 }
 
-export function ResponsiveTable<RecordType extends object>(props: TableProps<RecordType>) {
+export function ResponsiveTable<RecordType extends object>({
+  primaryColumnKey,
+  ...props
+}: TableProps<RecordType> & {
+  /** Composed identity cells use the full card width instead of a label/value pair. */
+  primaryColumnKey?: React.Key;
+}) {
   const isCompact = useMediaQuery(COMPACT_SETTINGS_MEDIA_QUERY);
   const { token } = theme.useToken();
   const [visibleCount, setVisibleCount] = useState(() => pageSizeFor(props.pagination));
@@ -75,7 +93,12 @@ export function ResponsiveTable<RecordType extends object>(props: TableProps<Rec
   const actionCols = cols.filter(isActionColumn);
 
   const paginationDisabled = pagination === false;
-  const visibleRows = paginationDisabled ? rows : rows.slice(0, visibleCount);
+  // A controlled `current` with a `total` means the rows are one server page.
+  const serverPage =
+    pagination && pagination.current !== undefined && pagination.total !== undefined
+      ? pagination
+      : null;
+  const visibleRows = paginationDisabled || serverPage ? rows : rows.slice(0, visibleCount);
 
   const keyFor = (record: Row, index: number): React.Key => {
     if (typeof rowKey === 'function') {
@@ -112,6 +135,18 @@ export function ResponsiveTable<RecordType extends object>(props: TableProps<Rec
                   ? col.render(cellValue(record, col.dataIndex), record, index)
                   : (cellValue(record, col.dataIndex) as React.ReactNode);
                 if (content == null || content === '') return null;
+                if (col.key === primaryColumnKey && primaryColumnKey !== undefined) {
+                  return (
+                    <div key={col.key} style={{ minWidth: 0 }}>
+                      <dt style={{ margin: 0 }}>
+                        <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                          {col.title}
+                        </Typography.Text>
+                      </dt>
+                      <dd style={{ margin: 0, minWidth: 0 }}>{content}</dd>
+                    </div>
+                  );
+                }
                 return (
                   <Flex
                     key={col.key ?? colIndex}
@@ -148,7 +183,18 @@ export function ResponsiveTable<RecordType extends object>(props: TableProps<Rec
           </div>
         );
       })}
-      {!paginationDisabled && visibleCount < rows.length && (
+      {serverPage && (
+        <Flex justify="center">
+          <Pagination
+            simple
+            current={serverPage.current}
+            pageSize={serverPage.pageSize}
+            total={serverPage.total}
+            onChange={serverPage.onChange}
+          />
+        </Flex>
+      )}
+      {!paginationDisabled && !serverPage && visibleCount < rows.length && (
         <Button block onClick={() => setVisibleCount((c) => c + pageSizeFor(pagination))}>
           Load more ({rows.length - visibleCount})
         </Button>

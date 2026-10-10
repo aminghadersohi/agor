@@ -20,6 +20,7 @@ export interface NewSessionConfig {
   codexSandboxMode?: CodexSandboxMode;
   codexApprovalPolicy?: CodexApprovalPolicy;
   codexNetworkAccess?: boolean;
+  codexIncludePlugins?: boolean;
   envVarNames?: string[];
   /** Files are uploaded only after the session exists; never send them in the create payload. */
   attachmentFiles?: File[];
@@ -87,4 +88,11 @@ export async function runSessionCreationStages({
       ? { status: 'initialization-failed', session, prompt, error }
       : { status: 'cancelled' };
   }
+}
+
+/** Safe, identity-free warning returned only by the authoritative create boundary. */
+export function getSessionCreationWarning(session: Session): string | undefined {
+  return session.mcp_defaults_skipped
+    ? `Session created. ${session.mcp_defaults_skipped} unavailable default MCP server(s) were skipped. Review MCP Servers in branch settings or your user defaults.`
+    : undefined;
 }

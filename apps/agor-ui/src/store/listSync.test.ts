@@ -70,6 +70,20 @@ describe('findAllVersioned', () => {
     expect(warm[1]).toEqual({ card_id: 'c2', title: 'gamma' });
   });
 
+  it('holds versions per read scope, ignoring paging', async () => {
+    const t = setup([{ card_id: 'c1', title: 'alpha' }]);
+    const readScope = (query: Record<string, unknown>) =>
+      findAllVersioned<Card>(t.client, 'cards', query, t.live);
+    const rows = await readScope({ board_id: 'board-a', $limit: 100 });
+    t.store.set('c1', rows[0]);
+    // Another board's read neither offers nor forgets board-a's versions.
+    await readScope({ $limit: 100, board_id: 'board-b' });
+    expect(t.sentKnown()).toBe('');
+    // Same scope, different key order and page size: offered again.
+    await readScope({ $limit: 5, board_id: 'board-a' });
+    expect(t.sentKnown()).toBe(v('a'));
+  });
+
   it('only claims versions whose live row is unchanged', async () => {
     const t = setup([
       { card_id: 'c1', title: 'alpha' },

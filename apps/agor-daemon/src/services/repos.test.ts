@@ -1,7 +1,11 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getCurrentTenantId, runWithTenantContext } from '@agor/core/db';
+import {
+  getCurrentTenantDatabaseScope,
+  getCurrentTenantId,
+  runWithTenantContext,
+} from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
 import type { AuthenticatedParams, Branch } from '@agor/core/types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -38,6 +42,7 @@ vi.mock('@agor/core/config', async (importOriginal) => {
 
 const repositoryMocks = vi.hoisted(() => ({
   deleteRepo: vi.fn(),
+  claimClone: vi.fn(),
   findAllBranchesByRepoId: vi.fn(),
   lockRepoForBranchInventory: vi.fn(),
   resolveBranchUserAccess: vi.fn(),
@@ -86,6 +91,7 @@ vi.mock('@agor/core/db', async (importOriginal) => {
     RepoRepository: vi.fn().mockImplementation(function RepoRepository() {
       return {
         create: vi.fn(),
+        claimClone: repositoryMocks.claimClone,
         findById: vi.fn(),
         findAll: vi.fn(async () => []),
         update: vi.fn(),
@@ -108,6 +114,10 @@ const tenantScopeMocks = vi.hoisted(() => {
   );
   return { withFreshTenantWrite };
 });
+const sandboxMountMocks = vi.hoisted(() => ({ resolve: vi.fn(async () => ({})) }));
+vi.mock('../utils/branch-executor-sandbox.js', () => ({
+  resolveBranchExecutorSandboxMounts: sandboxMountMocks.resolve,
+}));
 vi.mock('../utils/executor-delegated-home.js', () => ({
   resolveDelegatedExecutionHomeKey: delegatedHomeMocks.resolve,
 }));
@@ -132,6 +142,7 @@ beforeEach(() => {
   executorMocks.requestExecutor.mockReset();
   executorMocks.spawnExecutorFireAndForget.mockReset();
   delegatedHomeMocks.resolve.mockReset().mockResolvedValue(undefined);
+  sandboxMountMocks.resolve.mockReset().mockResolvedValue({});
   repositoryMocks.resolveBranchUserAccess.mockReset().mockResolvedValue({
     can: 'all',
     fs_access: 'write',
@@ -191,8 +202,13 @@ describe('ReposService .agor.yml normalized branch access', () => {
   };
 
   function service() {
+    // Minimal handle for the real tenant-scope wrapper to open a unit on.
+    const db = {
+      run: vi.fn(),
+      transaction: vi.fn(async (work: (scoped: unknown) => Promise<unknown>) => work(db)),
+    };
     return new ReposService(
-      {} as never,
+      db as never,
       {
         get: () => ({}),
         service: vi.fn(),
@@ -219,6 +235,25 @@ describe('ReposService .agor.yml normalized branch access', () => {
       source: 'direct',
     });
     executorMocks.requestExecutor.mockResolvedValue({ success: true, data: {} });
+    const sandboxMounts = {
+      sandboxHomeStore: `/data/tenants/default/homes/${user.user_id}`,
+      sandboxWorktreesRoot: '/data/worktrees',
+      sandboxBaseRepoPath: '/data/repos/preset-io/agor',
+    };
+    // Export enters on a long route with tenant identity only; launch
+    // preparation must open its own short tenant database unit, and the
+    // executor must run outside it.
+    let resolvedInScope = false;
+    let executedInScope = true;
+    sandboxMountMocks.resolve.mockImplementation(async () => {
+      const scope = getCurrentTenantDatabaseScope();
+      resolvedInScope = scope?.kind === 'tenant' && scope.tenantId === 'default';
+      return sandboxMounts;
+    });
+    executorMocks.requestExecutor.mockImplementation(async () => {
+      executedInScope = getCurrentTenantDatabaseScope() !== undefined;
+      return { success: true, data: {} };
+    });
     const instance = service();
 
     await runWithTenantContext('default', () =>
@@ -241,6 +276,8 @@ describe('ReposService .agor.yml normalized branch access', () => {
         params: expect.objectContaining({
           cwd: branch.path,
           principalBranchAccess: access.fs_access,
+          // A per-user sandbox refuses to launch without the caller's home store.
+          ...sandboxMounts,
         }),
       }),
       expect.objectContaining({
@@ -251,6 +288,11 @@ describe('ReposService .agor.yml normalized branch access', () => {
         },
       })
     );
+    expect(sandboxMountMocks.resolve).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantId: 'default', executionUserId: user.user_id, branch })
+    );
+    expect(resolvedInScope).toBe(true);
+    expect(executedInScope).toBe(false);
   });
 
   it('fails export closed when write access is missing', async () => {
@@ -263,17 +305,19 @@ describe('ReposService .agor.yml normalized branch access', () => {
     const instance = service();
 
     await expect(
-      (
-        instance as unknown as {
-          runAgorYmlExecutorCommand(
-            repoInput: typeof repo,
-            branchInput: typeof branch,
-            command: 'branch.agor-yml.export',
-            params: Record<string, unknown>,
-            serviceParams: unknown
-          ): Promise<unknown>;
-        }
-      ).runAgorYmlExecutorCommand(repo, branch, 'branch.agor-yml.export', {}, { user })
+      runWithTenantContext('default', () =>
+        (
+          instance as unknown as {
+            runAgorYmlExecutorCommand(
+              repoInput: typeof repo,
+              branchInput: typeof branch,
+              command: 'branch.agor-yml.export',
+              params: Record<string, unknown>,
+              serviceParams: unknown
+            ): Promise<unknown>;
+          }
+        ).runAgorYmlExecutorCommand(repo, branch, 'branch.agor-yml.export', {}, { user })
+      )
     ).rejects.toThrow('branch filesystem write access required');
     expect(executorMocks.requestExecutor).not.toHaveBeenCalled();
   });
@@ -626,6 +670,19 @@ describe('ReposService.createBranch Git lifecycle execution', () => {
 });
 
 describe('ReposService.cloneRepository Git lifecycle execution', () => {
+  beforeEach(() => {
+    repositoryMocks.claimClone.mockReset().mockImplementation(async (data) => ({
+      repo: {
+        ...data,
+        repo_id: '550e8400-e29b-41d4-a716-446655440001',
+        clone_status: 'cloning',
+        clone_generation: 1,
+      },
+      acquired: true,
+      created: true,
+    }));
+  });
+
   it('creates managed storage without delegated user routing', async () => {
     executorMocks.spawnExecutorFireAndForget.mockClear();
 
@@ -642,13 +699,9 @@ describe('ReposService.cloneRepository Git lifecycle execution', () => {
       }),
     } as unknown as Application;
     const service = new ReposService({} as never, app);
-    vi.spyOn(service, 'create').mockResolvedValue({
-      repo_id: '550e8400-e29b-41d4-a716-446655440001',
-      slug: 'preset-io/agor-teammate',
-    } as never);
 
     await service.cloneRepository({ url: 'https://github.com/preset-io/agor-teammate.git' }, {
-      user: { user_id: '550e8400-e29b-41d4-a716-446655440004' },
+      user: { user_id: '550e8400-e29b-41d4-a716-446655440004', role: 'member' },
     } as never);
 
     expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledWith(
@@ -674,10 +727,6 @@ describe('ReposService.cloneRepository Git lifecycle execution', () => {
       }),
     } as unknown as Application;
     const service = new ReposService({} as never, app);
-    vi.spyOn(service, 'create').mockResolvedValue({
-      repo_id: '550e8400-e29b-41d4-a716-446655440001',
-      slug: 'preset-io/agor-admin-clone',
-    } as never);
 
     await service.cloneRepository({ url: 'https://github.com/preset-io/agor-admin-clone.git' }, {
       provider: 'rest',
@@ -698,11 +747,12 @@ describe('ReposService.cloneRepository Git lifecycle execution', () => {
 
   it('persists clone-exit failure in a fresh write-gated tenant unit', async () => {
     executorMocks.spawnExecutorFireAndForget.mockClear();
-    const db = { marker: 'base-db' };
+    const db = { marker: 'base-db', run: vi.fn() };
     const current = {
       repo_id: '550e8400-e29b-41d4-a716-446655440001',
       slug: 'preset-io/agor-failed-clone',
       clone_status: 'cloning',
+      clone_generation: 1,
     };
     const repos = {
       get: vi.fn(async () => current),
@@ -720,11 +770,10 @@ describe('ReposService.cloneRepository Git lifecycle execution', () => {
       }),
     } as unknown as Application;
     const service = new ReposService(db as never, app);
-    vi.spyOn(service, 'create').mockResolvedValue(current as never);
 
     await service.cloneRepository({ url: 'https://github.com/preset-io/agor-failed-clone.git' }, {
       tenant: { tenant_id: 'tenant-a', source: 'explicit' },
-      user: { user_id: '550e8400-e29b-41d4-a716-446655440004' },
+      user: { user_id: '550e8400-e29b-41d4-a716-446655440004', role: 'member' },
     } as never);
     const spawnOptions = executorMocks.spawnExecutorFireAndForget.mock.calls.at(-1)?.[1] as
       | { onExit?: (code: number | null) => Promise<void> | void }
@@ -740,10 +789,11 @@ describe('ReposService.cloneRepository Git lifecycle execution', () => {
     expect(repos.get).toHaveBeenCalledWith(current.repo_id);
     expect(repos.patch).toHaveBeenCalledWith(current.repo_id, {
       clone_status: 'failed',
+      clone_generation: 1,
       clone_error: {
         exit_code: 17,
         category: 'unknown',
-        message: 'Clone exited with code 17 before reporting an error.',
+        message: 'Repository setup worker exited (17) before reporting an outcome.',
       },
     });
   });

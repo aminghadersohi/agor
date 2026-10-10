@@ -1,8 +1,17 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import { describe, expect, it, vi } from 'vitest';
 
+const branchCommandMocks = vi.hoisted(() => ({
+  findBranch: vi.fn(),
+  ensureAccess: vi.fn(async () => 'read'),
+  resolveSandboxMounts: vi.fn(async () => ({})),
+}));
+
 vi.mock('@agor/core/db', () => ({
-  BranchRepository: class FakeBranchRepository {},
+  BranchRepository: class FakeBranchRepository {
+    findById = branchCommandMocks.findBranch;
+  },
+  getCurrentTenantId: () => 'default',
 }));
 
 vi.mock('@agor/core/feathers', () => ({
@@ -11,6 +20,10 @@ vi.mock('@agor/core/feathers', () => ({
 
 vi.mock('../../utils/branch-workspace-path.js', () => ({
   resolveBranchWorkspacePath: vi.fn(),
+  ensureBranchWorkspaceAccess: branchCommandMocks.ensureAccess,
+}));
+vi.mock('../../utils/branch-executor-sandbox.js', () => ({
+  resolveBranchExecutorSandboxMounts: branchCommandMocks.resolveSandboxMounts,
 }));
 vi.mock('../../utils/executor-delegated-home.js', () => ({
   resolveDelegatedExecutionHomeKey: vi.fn(async () => undefined),
@@ -50,6 +63,8 @@ vi.mock('@agor/core/types', () => ({
     branch.assistant,
   isTeammate: (branch: { teammate?: unknown; assistant?: unknown }) =>
     Boolean(branch.teammate ?? branch.assistant),
+  KNOWLEDGE_ARCHIVE_FILTERS: ['active', 'archived', 'all'],
+  KNOWLEDGE_ARCHIVE_BULK_LIMIT: 50,
   KNOWLEDGE_DOCUMENT_KINDS: ['doc', 'note'],
   KNOWLEDGE_DOCUMENT_STATUSES: ['draft', 'published'],
   KNOWLEDGE_DOCUMENT_URI_PREFIX: 'agor://kb/document/',
@@ -1057,5 +1072,132 @@ describe('Knowledge MCP input schemas', () => {
     );
     expect(result[0].current_version).not.toHaveProperty('content_text');
     expect(result[0].snippet).toBe('knowledge body');
+  });
+});
+
+describe('Knowledge MCP branch executor commands', () => {
+  it('mounts the caller home store when a per-user sandbox is enabled', async () => {
+    const branch = {
+      branch_id: 'branch-1',
+      repo_id: 'repo-1',
+      path: '/data/worktrees/org/repo/branch-1',
+    };
+    const sandboxMounts = {
+      sandboxHomeStore: '/data/tenants/default/homes/user-1',
+      sandboxWorktreesRoot: '/data/worktrees',
+    };
+    branchCommandMocks.findBranch.mockResolvedValue(branch);
+    branchCommandMocks.resolveSandboxMounts.mockResolvedValue(sandboxMounts);
+    const { resolveBranchId } = await import('../resolve-ids.js');
+    vi.mocked(resolveBranchId).mockResolvedValue('branch-1' as never);
+    const { requestExecutor } = await import('../../utils/spawn-executor.js');
+    vi.mocked(requestExecutor).mockResolvedValue({ success: false, error: { message: 'stop' } });
+    const config = { execution: { sandbox: { enabled: true, home_mode: 'per_user' } } };
+    const tools = await captureKnowledgeTools(
+      {},
+      { app: { services: {}, service: () => ({}), get: () => config } }
+    );
+
+    await expect(
+      tools.agor_kb_publish_from_worktree.handler?.({ branchId: 'branch-1', subpath: 'doc.md' })
+    ).rejects.toThrow('branch.knowledge.read failed: stop');
+
+    expect(branchCommandMocks.resolveSandboxMounts).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantId: 'default', executionUserId: 'user-1', branch })
+    );
+    expect(requestExecutor).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: 'branch.knowledge.read',
+        params: expect.objectContaining({ cwd: branch.path, ...sandboxMounts }),
+      }),
+      expect.any(Object)
+    );
+  });
+});
+
+describe('Knowledge archive MCP contracts', () => {
+  it('exposes reversible single PATCH with optional guards and trusted caller params', async () => {
+    const patch = vi.fn().mockResolvedValue({ document_id: 'doc-1', archived: false });
+    const baseServiceParams = { user: { user_id: 'owner' }, tenant: { tenant_id: 'tenant-a' } };
+    const tools = await captureKnowledgeTools({ 'kb/documents': { patch } }, { baseServiceParams });
+    await tools.agor_kb_archive.handler!({
+      documentId: 'doc-1',
+      archived: false,
+      expectedVersion: 2,
+      expectedArchived: true,
+    });
+    expect(patch).toHaveBeenCalledWith(
+      'doc-1',
+      { archived: false, expected_version: 2, expected_archived: true },
+      baseServiceParams
+    );
+  });
+
+  it('bounds explicit targets and rejects empty, duplicate, wildcard and excess requests', async () => {
+    const tools = await captureKnowledgeTools();
+    const schema = tools.agor_kb_archive_bulk.cfg.inputSchema!;
+    expect(schema.safeParse({ archived: true, targets: [] }).success).toBe(false);
+    expect(
+      schema.safeParse({
+        archived: true,
+        targets: [{ documentId: 'same' }, { documentId: 'same' }],
+      }).success
+    ).toBe(false);
+    expect(
+      schema.safeParse({
+        archived: true,
+        targets: Array.from({ length: 51 }, (_, index) => ({ documentId: `doc-${index}` })),
+      }).success
+    ).toBe(false);
+    expect(
+      schema.safeParse({ archived: true, query: {}, targets: [{ documentId: 'doc-1' }] }).success
+    ).toBe(false);
+    expect(schema.safeParse({ archived: false, targets: [{ documentId: 'doc-1' }] }).success).toBe(
+      true
+    );
+  });
+
+  it('continues after failed items, redacts not-found/forbidden identically and supports retries', async () => {
+    const patch = vi.fn(async (id: string) => {
+      if (id === 'denied') throw Object.assign(new Error('private title'), { code: 403 });
+      if (id === 'foreign') throw Object.assign(new Error('tenant-b document'), { code: 404 });
+      if (id === 'conflict') throw Object.assign(new Error('stale'), { code: 409 });
+      return { document_id: id, archived: true };
+    });
+    const tools = await captureKnowledgeTools({ 'kb/documents': { patch } });
+    const args = {
+      archived: true,
+      targets: ['allowed', 'denied', 'foreign', 'conflict', 'last'].map((documentId) => ({
+        documentId,
+      })),
+    };
+    const first = await tools.agor_kb_archive_bulk.handler!(args);
+    expect(first).toEqual(await tools.agor_kb_archive_bulk.handler!(args));
+    const payload = JSON.parse((first as { content: Array<{ text: string }> }).content[0].text);
+    expect(payload).toMatchObject({
+      atomic: false,
+      results: [
+        { documentId: 'allowed', ok: true },
+        { documentId: 'denied', ok: false, error: 'not_found_or_forbidden' },
+        { documentId: 'foreign', ok: false, error: 'not_found_or_forbidden' },
+        { documentId: 'conflict', ok: false, error: 'conflict' },
+        { documentId: 'last', ok: true },
+      ],
+    });
+    expect(JSON.stringify(payload)).not.toContain('private title');
+    expect(patch).toHaveBeenCalledTimes(10);
+  });
+
+  it('forwards archive filters to search and tree, including archived-only', async () => {
+    const find = vi.fn().mockResolvedValue([]);
+    const tools = await captureKnowledgeTools({ 'kb/search': { find } });
+    await tools.agor_kb_search.handler!({ query: '', archiveFilter: 'archived' });
+    expect(find).toHaveBeenLastCalledWith(
+      expect.objectContaining({ query: expect.objectContaining({ archive_filter: 'archived' }) })
+    );
+    await tools.agor_kb_tree.handler!({ namespace: 'team', archiveFilter: 'all' });
+    expect(find).toHaveBeenLastCalledWith(
+      expect.objectContaining({ query: expect.objectContaining({ archive_filter: 'all' }) })
+    );
   });
 });

@@ -21,6 +21,7 @@ import {
 } from '@agor/core/gateway/slack-manifest';
 import {
   DEFAULT_DISCORD_CATCH_UP,
+  type DiscordResponseMode,
   MAX_DISCORD_CATCH_UP,
   MIN_DISCORD_CATCH_UP,
   validateDiscordConfig,
@@ -46,7 +47,9 @@ import type {
 } from '@agor-live/client';
 import {
   GATEWAY_REDACTED_SENTINEL,
+  hasMinimumRole,
   isAgenticToolName,
+  ROLES,
   resolveDiscordAgentTools,
   resolveSlackAgentTools,
   SLACK_AGENT_TOOL_DEFAULTS,
@@ -103,6 +106,7 @@ import { useThemedMessage } from '@/utils/message';
 import { sanitizeSecretValue } from '@/utils/sanitizeSecret';
 import { filterBySettingsSearch } from '@/utils/settingsSearch';
 import { ACCESS_TOKEN_KEY } from '@/utils/tokenRefresh';
+import { useEnsureBranches } from '../../hooks/useEnsureRows';
 import { buildModelConfigFromFormValues, getFormValuesFromConfig } from '../AgenticToolConfigForm';
 import {
   AgenticToolConfigurationPicker,
@@ -111,18 +115,19 @@ import {
 import { getUserDefaultConfigurationSource } from '../AgenticToolConfigurationPicker/useAgenticConfigurationSources';
 import { AgentSelectionGrid } from '../AgentSelectionGrid';
 import { AVAILABLE_AGENTS } from '../AgentSelectionGrid/availableAgents';
-import { HighlightMatch } from '../HighlightMatch';
 import { JSONEditor, validateJSON } from '../JSONEditor';
 import { AdaptiveSettingsModal } from './AdaptiveSettingsModal';
 import { BranchSelect } from './BranchSelect';
 import { ResponsiveSettingsHeader } from './ResponsiveSettingsHeader';
 import { ResponsiveTable } from './ResponsiveTable';
 import { SettingsActionGroup } from './SettingsActionGroup';
+import { SettingsIdentity } from './SettingsIdentity';
 import { UserSelect } from './UserSelect';
 
 interface GatewayChannelsTableProps {
   client: AgorClient | null;
   gatewayChannelById: Map<string, GatewayChannel>;
+  /** The store's branches (targets ensured by id); only match a search against a target name. */
   branchById: Map<string, Branch>;
   userById: Map<string, User>;
   mcpServerById: Map<string, MCPServer>;
@@ -163,27 +168,6 @@ function getChannelTypeIcon(type: ChannelType): React.ReactNode {
       return <ThunderboltOutlined />;
     default:
       return <MessageOutlined />;
-  }
-}
-
-function getChannelTypeColor(type: ChannelType): string {
-  switch (type) {
-    case 'slack':
-      return 'purple';
-    case 'github':
-      return 'default';
-    case 'teams':
-      return 'geekblue';
-    case 'shortcut':
-      return 'gold';
-    case 'discord':
-      return 'blue';
-    case 'whatsapp':
-      return 'green';
-    case 'telegram':
-      return 'cyan';
-    default:
-      return 'default';
   }
 }
 
@@ -455,7 +439,10 @@ function createStepFields(
   if (type === 'discord' && step === 2) {
     return [
       'discord_allowed_channel_ids',
+      'discord_respond_starters_channel_ids',
+      'discord_respond_all_channel_ids',
       'discord_files',
+      'discord_direct_messages_enabled',
       'discord_channel_history',
       'discord_align_users',
       ...(alignDiscordUsers ? ['discord_user_map'] : ['agor_user_id']),
@@ -503,9 +490,12 @@ const CONNECTION_PROBE_FIELDS = new Set<string>([
   'discord_allowed_channel_ids',
   'discord_allowed_user_ids',
   'discord_allowed_role_ids',
+  'discord_respond_starters_channel_ids',
+  'discord_respond_all_channel_ids',
   'discord_message_content_enabled',
   'discord_thread_mode',
   'discord_files',
+  'discord_direct_messages_enabled',
   'discord_channel_history',
   'discord_thread_auto_archive_minutes',
   'discord_align_users',
@@ -664,6 +654,11 @@ const ConnectionTestResultView: React.FC<{ result: GatewayConnectionTestResult }
                 <strong>{result.appTokenValid ? 'valid' : 'not verified'}</strong>
               </div>
             )}
+            {result.directMessages && (
+              <Typography.Text>
+                Direct messages: {result.directMessages.enabled ? 'On' : 'Off'}
+              </Typography.Text>
+            )}
             {result.channelAccess && result.channelAccess.length > 0 && (
               <Typography.Paragraph
                 type="secondary"
@@ -674,9 +669,12 @@ const ConnectionTestResultView: React.FC<{ result: GatewayConnectionTestResult }
                 {result.channelAccess.map((c, i) => (
                   <span key={c.channelId}>
                     {i > 0 ? ', ' : ''}
-                    <code>{c.channelId}</code>:{' '}
+                    <code>{c.channelId}</code>
+                    {c.kind ? ` (${c.kind})` : ''}:{' '}
                     {c.permissions
-                      ? `view ${c.permissions.view ? 'ok' : 'no'}, send ${c.permissions.send ? 'ok' : 'no'}, history ${c.permissions.readHistory ? 'ok' : 'no'}, public threads ${c.permissions.createPublicThreads ? 'ok' : 'no'}, thread replies ${c.permissions.sendInThreads ? 'ok' : 'no'}`
+                      ? c.kind === 'forum'
+                        ? `view ${c.permissions.view ? 'ok' : 'no'}, history ${c.permissions.readHistory ? 'ok' : 'no'}, post replies ${c.permissions.sendInThreads ? 'ok' : 'no'}`
+                        : `view ${c.permissions.view ? 'ok' : 'no'}, send ${c.permissions.send ? 'ok' : 'no'}, history ${c.permissions.readHistory ? 'ok' : 'no'}, public threads ${c.permissions.createPublicThreads ? 'ok' : 'no'}, thread replies ${c.permissions.sendInThreads ? 'ok' : 'no'}`
                       : c.ok
                         ? 'ok'
                         : 'no access'}
@@ -1713,14 +1711,28 @@ const DiscordSetupFields: React.FC<{
           <CompactAlert
             type="info"
             heading="Grant minimum access"
-            description="Invite the bot to the guild and each allowed public text channel with View Channel, Read Message History, Send Messages, Create Public Threads, and Send Messages in Threads. The probe can inspect these bits, but cannot prove future event delivery, role matchability, or an end-to-end Agor session."
+            description="Invite the bot to the guild and each allowed channel with View Channel, Read Message History, and Send Messages in Threads, plus Send Messages and Create Public Threads in text channels. Forum channels need only the first three; the bot answers mentions inside their posts. The probe can inspect these bits, but cannot prove future event delivery, role matchability, or an end-to-end Agor session."
             style={{ marginBottom: 16 }}
           />
           <Form.Item
-            label="Allowed public text channel IDs"
+            label="Allowed public channel IDs"
             name="discord_allowed_channel_ids"
             rules={[{ validator: validateNonEmptySnowflakes }]}
-            tooltip="One or more public text channels. Inbound and outbound traffic is restricted to this list."
+            tooltip="One or more public text or forum channels. Inbound and outbound traffic is restricted to this list; proactive messages can target text channels only."
+          >
+            <Select mode="tags" tokenSeparators={[',', ' ']} placeholder="Channel snowflakes" />
+          </Form.Item>
+          <Form.Item
+            label="Answer new forum posts in"
+            name="discord_respond_starters_channel_ids"
+            tooltip="Allowed forum channels where the bot answers each new post without a mention. Follow-ups in the post still need a mention. Forum channels only; text channels stay mention-only."
+          >
+            <Select mode="tags" tokenSeparators={[',', ' ']} placeholder="Channel snowflakes" />
+          </Form.Item>
+          <Form.Item
+            label="Answer every forum message in"
+            name="discord_respond_all_channel_ids"
+            tooltip="Allowed forum channels where the bot answers every message from allowed authors in their posts, without a mention. It may stay silent when it has nothing useful to add. Forum channels only; text channels stay mention-only."
           >
             <Select mode="tags" tokenSeparators={[',', ' ']} placeholder="Channel snowflakes" />
           </Form.Item>
@@ -1736,7 +1748,7 @@ const DiscordSetupFields: React.FC<{
             label="Allowed role IDs"
             name="discord_allowed_role_ids"
             rules={[{ validator: validateAuthorAllowlist }]}
-            tooltip="At least one user or role allowlist entry is required."
+            tooltip="At least one user or role allowlist entry is required. Add the Guild ID to admit every member (@everyone)."
           >
             <Select mode="tags" tokenSeparators={[',', ' ']} placeholder="Role snowflakes" />
           </Form.Item>
@@ -1776,14 +1788,24 @@ const DiscordSetupFields: React.FC<{
               ))}
             </Select>
           </Form.Item>
+          <Form.Item
+            name="discord_direct_messages_enabled"
+            label="Direct messages"
+            valuePropName="checked"
+            initialValue={false}
+            help="Allowed current server members can DM the bot. DM sessions are visible to people with access to the target branch."
+          >
+            <Switch />
+          </Form.Item>
           <Form.Item name="discord_files" valuePropName="checked" initialValue={false}>
             <Checkbox>
-              Enable inbound PNG/JPEG image attachments (<code>files:true</code>)
+              Enable inbound image and text attachments (<code>files:true</code>)
             </Checkbox>
           </Form.Item>
           <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
-            Only a message with text and supported PNG/JPEG attachments is admitted. Unsupported or
-            mixed rich payloads are rejected; existing text-only channels remain
+            Images (PNG, JPEG, GIF, WebP) and text files (.txt, .log, .md, .csv, .json) are passed
+            to the agent. Other files are not read, and the agent tells the user which ones it
+            skipped; existing text-only channels remain
             <code> files:false</code>.
           </Typography.Text>
           <Form.Item name="discord_channel_history" valuePropName="checked" initialValue={false}>
@@ -1793,8 +1815,9 @@ const DiscordSetupFields: React.FC<{
           </Form.Item>
           <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
             Agents on this channel's branch can read recent messages from the allowed channels and
-            public threads under them through a tool that never exposes the bot token. Messages are
-            untrusted content and are kept only in the reading session's transcript.
+            public threads under them, and list the posts (titles, tags, authors) of allowed forums,
+            through tools that never expose the bot token. This content is untrusted and is kept
+            only in the reading session's transcript.
           </Typography.Text>
           <Typography.Text strong style={{ display: 'block', margin: '16px 0 8px' }}>
             Bounded Discord REST catch-up
@@ -1874,7 +1897,7 @@ const DiscordSetupFields: React.FC<{
           <CompactAlert
             type="info"
             heading="Capabilities"
-            description={`Files: ${filesEnabled ? 'PNG/JPEG inbound images enabled (files:true)' : 'disabled (files:false)'}. Agent tools: ${channelHistoryEnabled ? 'channel history enabled (agent_tools.channel_history:true)' : 'none'}.`}
+            description={`Files: ${filesEnabled ? 'inbound image and text attachments enabled (files:true)' : 'disabled (files:false)'}. Agent tools: ${channelHistoryEnabled ? 'channel history enabled (agent_tools.channel_history:true)' : 'none'}.`}
             style={{ marginTop: 12 }}
           />
         </div>
@@ -1908,8 +1931,8 @@ const DiscordSetupFields: React.FC<{
             />
           </Form.Item>
           <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
-            Proactive sends target an allowlisted parent channel and create a durable seed. The
-            first human reply consumes that seed; it does not create a summon thread.
+            Proactive sends target an allowlisted text channel and create a durable seed. The first
+            human reply consumes that seed; it does not create a summon thread.
           </Typography.Text>
           <Form.Item
             label="Enable proactive outbound"
@@ -1922,7 +1945,7 @@ const DiscordSetupFields: React.FC<{
           <Form.Item
             label="Default outbound target"
             name="discord_default_outbound_target"
-            tooltip="Optional. Must be channel:<snowflake> and match one allowed channel. Discord thread targets are rejected."
+            tooltip="Optional. Must be channel:<snowflake> and match one allowed text channel. Forum channels and Discord thread targets are rejected."
           >
             <Input placeholder="channel:123456789012345678" />
           </Form.Item>
@@ -2025,12 +2048,32 @@ function toDiscordSetupDecisions(values: Record<string, unknown>): DiscordSetupD
     alignUsers,
     userMap: alignUsers ? userMap : undefined,
     files: readFormBoolean(values.discord_files, false),
+    directMessagesEnabled: readFormBoolean(values.discord_direct_messages_enabled, false),
     channelHistory: readFormBoolean(values.discord_channel_history, false),
+    responseModes: discordResponseModesFromForm(values),
     outboundEnabled: readFormBoolean(values.discord_outbound_enabled, false),
     defaultOutboundTarget: readFormString(values.discord_default_outbound_target) || null,
     catchUp: catch_up,
     threadAutoArchiveMinutes: readFormNumber(values.discord_thread_auto_archive_minutes, 1440),
   };
+}
+
+/**
+ * Response modes from the form; a channel in both fields answers every
+ * message. Entries outside the allowed channels are kept so validation
+ * reports them instead of silently dropping them.
+ */
+function discordResponseModesFromForm(
+  values: Record<string, unknown>
+): Record<string, DiscordResponseMode> {
+  const modes: Record<string, DiscordResponseMode> = {};
+  for (const id of readFormStringArray(values.discord_respond_starters_channel_ids)) {
+    modes[id] = 'starters';
+  }
+  for (const id of readFormStringArray(values.discord_respond_all_channel_ids)) {
+    modes[id] = 'all';
+  }
+  return modes;
 }
 
 function discordConfigFromFormValues(values: Record<string, unknown>): Record<string, unknown> {
@@ -2050,7 +2093,6 @@ const ChannelFormFields: React.FC<{
   mode: 'create' | 'edit';
   channelType: ChannelType;
   onChannelTypeChange: (type: ChannelType) => void;
-  branchById: Map<string, Branch>;
   userById: Map<string, User>;
   mcpServerById: Map<string, MCPServer>;
   selectedAgent: AgenticToolName | null;
@@ -2080,7 +2122,6 @@ const ChannelFormFields: React.FC<{
   mode,
   channelType,
   onChannelTypeChange,
-  branchById,
   userById,
   mcpServerById,
   selectedAgent,
@@ -2289,7 +2330,7 @@ const ChannelFormFields: React.FC<{
                 : undefined
             }
           >
-            <BranchSelect branchById={branchById} />
+            <BranchSelect client={client} />
           </Form.Item>
 
           {/* Platform-specific identity sections own Slack/GitHub/Shortcut/Discord identity. */}
@@ -3674,6 +3715,7 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
     currentUser ? `${currentUser.user_id}:${currentUser.role}` : null
   );
   const operationGuard = useAuthorityOperationGuard(callerAuthority.operationScope);
+  const canManage = !!currentUser && hasMinimumRole(currentUser.role, ROLES.ADMIN);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editingChannel, setEditingChannel] = useState<GatewayChannel | null>(null);
@@ -3705,11 +3747,6 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
     },
     [createForm, editForm, editModalOpen, userById]
   );
-  const [referencedBranchesById, setReferencedBranchesById] = useState<Map<string, Branch>>(
-    () => new Map()
-  );
-  const loadingReferencedBranchIds = useRef<Set<string>>(new Set());
-  const referencedBranchesByIdRef = useRef<Map<string, Branch>>(new Map());
 
   // ── Unified create-wizard step (0 = universal "Channel" step) ──
   const [createStep, setCreateStep] = useState(0);
@@ -3730,73 +3767,6 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
   // unless it still matches, so reopening the modal on another channel can't
   // be overwritten by a slower earlier response.
   const slackAppInfoChannelIdRef = useRef<string | null>(null);
-
-  // Keep referenced target branches resolvable in CRUD even when archived branches
-  // are excluded from the core store.
-  useEffect(() => {
-    referencedBranchesByIdRef.current = referencedBranchesById;
-  }, [referencedBranchesById]);
-
-  useEffect(() => {
-    const operation = operationGuard.begin();
-    if (!client || !operation.isCurrent()) return;
-
-    const targetIds = new Set<string>();
-    for (const channel of gatewayChannelById.values()) {
-      if (channel.target_branch_id) {
-        targetIds.add(channel.target_branch_id);
-      }
-    }
-
-    const missingIds = Array.from(targetIds).filter(
-      (id) => !branchById.has(id) && !referencedBranchesByIdRef.current.has(id)
-    );
-    if (missingIds.length === 0) return;
-
-    void Promise.all(
-      missingIds.map(async (id) => {
-        if (loadingReferencedBranchIds.current.has(id)) return null;
-        loadingReferencedBranchIds.current.add(id);
-        try {
-          const branch = (await client.service('branches').get(id)) as Branch;
-          return branch;
-        } catch {
-          return null;
-        } finally {
-          loadingReferencedBranchIds.current.delete(id);
-        }
-      })
-    ).then((results) => {
-      if (!operation.isCurrent()) return;
-      const resolved = results.filter((wt): wt is Branch => wt !== null);
-      if (resolved.length === 0) return;
-
-      setReferencedBranchesById((prev) => {
-        const next = new Map(prev);
-        for (const wt of resolved) {
-          next.set(wt.branch_id, wt);
-        }
-        return next;
-      });
-    });
-
-    return () => {
-      operation.cancel();
-    };
-  }, [client, gatewayChannelById, branchById, operationGuard]);
-
-  const branchOptionsById = useMemo(() => {
-    const merged = new Map<string, Branch>();
-    for (const wt of branchById.values()) {
-      merged.set(wt.branch_id, wt);
-    }
-    for (const wt of referencedBranchesById.values()) {
-      if (!merged.has(wt.branch_id)) {
-        merged.set(wt.branch_id, wt);
-      }
-    }
-    return merged;
-  }, [referencedBranchesById, branchById]);
 
   // No automatic credential fetch — user provides App ID and PEM manually
 
@@ -3834,9 +3804,6 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
     setSelectedAgent('claude-code');
     setRequiresSupportedToolSelection(false);
     setCreating(false);
-    setReferencedBranchesById(new Map());
-    referencedBranchesByIdRef.current = new Map();
-    loadingReferencedBranchIds.current.clear();
     resetCreateFlow();
   }, [createForm, currentUser?.role, currentUser?.user_id, editForm, resetCreateFlow]);
 
@@ -4182,6 +4149,9 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
           ...(values.codexNetworkAccess !== undefined
             ? { codexNetworkAccess: values.codexNetworkAccess as boolean }
             : {}),
+          ...(values.codexIncludePlugins !== undefined
+            ? { codexIncludePlugins: values.codexIncludePlugins as boolean }
+            : {}),
         };
 
     const usesAlignedIdentity = Boolean(
@@ -4347,6 +4317,7 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
   };
 
   const handleEdit = (channel: GatewayChannel) => {
+    if (!canManage) return;
     resetConnectionTest();
     setEditingChannel(channel);
     setChannelType(channel.channel_type);
@@ -4397,6 +4368,7 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
       codexSandboxMode: channel.agentic_config?.codexSandboxMode,
       codexApprovalPolicy: channel.agentic_config?.codexApprovalPolicy,
       codexNetworkAccess: channel.agentic_config?.codexNetworkAccess,
+      codexIncludePlugins: channel.agentic_config?.codexIncludePlugins,
       agenticToolPresetId: channel.agentic_config?.presetId ?? INLINE_AGENTIC_CONFIGURATION,
       // Env vars: values are masked by the API, so on edit we show the
       // existing keys with empty values — the user re-enters values to update.
@@ -4482,11 +4454,21 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
         catchUp.rate_limit_max_total_delay_ms ??
         DEFAULT_DISCORD_CATCH_UP.rate_limit_max_total_delay_ms;
       formValues.discord_files = config?.files === true;
+      formValues.discord_direct_messages_enabled = config?.direct_messages_enabled === true;
       formValues.discord_channel_history = resolveDiscordAgentTools(
         config?.agent_tools
       ).channel_history;
       formValues.discord_outbound_enabled = config?.outbound_enabled ?? false;
       formValues.discord_default_outbound_target = config?.default_outbound_target;
+      const responseModes = Object.entries(
+        (config?.response_modes as Record<string, string> | undefined) ?? {}
+      );
+      formValues.discord_respond_starters_channel_ids = responseModes
+        .filter(([, mode]) => mode === 'starters')
+        .map(([id]) => id);
+      formValues.discord_respond_all_channel_ids = responseModes
+        .filter(([, mode]) => mode === 'all')
+        .map(([id]) => id);
     }
 
     editForm.setFieldsValue(formValues);
@@ -4540,13 +4522,8 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
     }
   };
 
-  const handleToggleEnabled = (channel: GatewayChannel) => {
-    const operation = operationGuard.begin();
-    if (!operation.isCurrent()) return;
-    onUpdate?.(channel.id, { enabled: !channel.enabled }, operation.isCurrent);
-  };
-
   const handleDelete = (channelId: string) => {
+    if (!canManage) return;
     const operation = operationGuard.begin();
     if (!operation.isCurrent()) return;
     onDelete?.(channelId, operation.isCurrent);
@@ -4554,75 +4531,46 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
 
   const columns = [
     {
-      title: '',
-      key: 'status',
-      width: 40,
+      title: 'Channel',
+      key: 'name',
       render: (_: unknown, channel: GatewayChannel) => (
-        <Badge
-          status={channel.enabled ? 'success' : 'default'}
-          title={channel.enabled ? 'Enabled' : 'Disabled'}
+        <SettingsIdentity
+          name={channel.name}
+          query={searchTerm}
+          icon={getChannelTypeIcon(channel.channel_type)}
+          metadata={<Tag>{channel.channel_type}</Tag>}
         />
       ),
     },
     {
-      title: 'Name',
-      dataIndex: 'name',
-      key: 'name',
-      width: 180,
-      render: (name: string) => <HighlightMatch text={name} query={searchTerm} />,
-    },
-    {
-      title: 'Type',
-      dataIndex: 'channel_type',
-      key: 'channel_type',
-      width: 120,
-      render: (type: ChannelType) => (
-        <Tag icon={getChannelTypeIcon(type)} color={getChannelTypeColor(type)}>
-          {type.charAt(0).toUpperCase() + type.slice(1)}
-        </Tag>
-      ),
-    },
-    {
-      title: 'Target Branch',
-      dataIndex: 'target_branch_id',
-      key: 'target_branch_id',
-      width: 180,
-      render: (branchId: string) => {
-        const wt = branchOptionsById.get(branchId);
+      title: 'Created by',
+      key: 'creator',
+      width: 150,
+      render: (_: unknown, channel: GatewayChannel) => {
+        const creator = userById.get(channel.created_by);
+        const name = creator?.name || creator?.email || 'Unknown user';
         return (
-          <Typography.Text type="secondary">
-            <HighlightMatch
-              text={
-                wt
-                  ? `${wt.name || wt.ref || branchId}${wt.archived ? ' (archived)' : ''}`
-                  : branchId
-              }
-              query={searchTerm}
-            />
+          <Typography.Text ellipsis={{ tooltip: name }} style={{ display: 'block' }}>
+            {name}
           </Typography.Text>
         );
       },
     },
     {
-      title: 'Last Message',
-      dataIndex: 'last_message_at',
-      key: 'last_message_at',
-      width: 160,
-      render: (time: string | null) =>
-        time ? (
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {new Date(time).toLocaleString()}
-          </Typography.Text>
-        ) : (
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            Never
-          </Typography.Text>
-        ),
+      title: 'Enabled',
+      key: 'enabled',
+      width: 94,
+      render: (_: unknown, channel: GatewayChannel) => (
+        <Badge
+          status={channel.enabled ? 'success' : 'default'}
+          text={channel.enabled ? 'Enabled' : 'Disabled'}
+        />
+      ),
     },
     {
       title: 'Actions',
       key: 'actions',
-      width: 96,
+      width: 80,
       render: (_: unknown, channel: GatewayChannel) => (
         <SettingsActionGroup>
           <Button
@@ -4631,14 +4579,11 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
             icon={<EditOutlined />}
             onClick={() => handleEdit(channel)}
             title="Edit"
-          />
-          <Switch
-            size="small"
-            checked={channel.enabled}
-            onChange={() => handleToggleEnabled(channel)}
-            title={channel.enabled ? 'Disable' : 'Enable'}
+            aria-label="Edit"
+            disabled={!canManage}
           />
           <Popconfirm
+            disabled={!canManage}
             title="Delete gateway channel?"
             description={`Are you sure you want to delete "${channel.name}"? All thread mappings will be lost.`}
             onConfirm={() => handleDelete(channel.id)}
@@ -4646,47 +4591,71 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
             cancelText="Cancel"
             okButtonProps={{ danger: true }}
           >
-            <Button type="text" size="small" icon={<DeleteOutlined />} danger title="Delete" />
+            <Button
+              type="text"
+              size="small"
+              icon={<DeleteOutlined />}
+              danger
+              title="Delete"
+              disabled={!canManage}
+              aria-label="Delete"
+            />
           </Popconfirm>
         </SettingsActionGroup>
       ),
     },
   ];
 
+  // The store holds only the loaded scopes' branches: read the channels' targets.
+  useEnsureBranches(
+    client,
+    Array.from(gatewayChannelById.values(), (channel) => channel.target_branch_id)
+  );
   const channels = useMemo(() => {
-    const sorted = mapToSortedArray(gatewayChannelById, (a, b) =>
-      a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+    const sorted = mapToSortedArray(
+      gatewayChannelById,
+      (a, b) =>
+        a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id.localeCompare(b.id)
     );
     return filterBySettingsSearch(sorted, searchTerm, [
       (channel) => channel.name,
       (channel) => channel.channel_type,
-      (channel) => channel.channel_key,
       (channel) => (channel.enabled ? 'enabled' : 'disabled'),
       (channel) => channel.last_message_at,
       (channel) => {
-        const branch = branchOptionsById.get(channel.target_branch_id);
+        const branch = branchById.get(channel.target_branch_id);
         return [branch?.name, branch?.ref, channel.target_branch_id];
       },
-      (channel) => JSON.stringify(channel.config ?? {}),
+      (channel) => userById.get(channel.created_by)?.name,
+      (channel) => (channel.agor_user_id ? userById.get(channel.agor_user_id)?.name : undefined),
     ]);
-  }, [gatewayChannelById, searchTerm, branchOptionsById]);
+  }, [gatewayChannelById, searchTerm, branchById, userById]);
 
   return (
     <div>
       <ResponsiveSettingsHeader
         description="Route messages from Slack, Discord, GitHub, Microsoft Teams, and other platforms to Agor sessions."
         actions={(compact) => (
-          <Space wrap style={{ width: compact ? '100%' : undefined }}>
+          <Space
+            wrap
+            style={{ width: compact ? '100%' : undefined, maxWidth: '100%' }}
+            styles={{ item: { minWidth: 0, maxWidth: '100%' } }}
+          >
             <Input
               allowClear
-              placeholder="Search name, type, target branch, key, or config"
+              placeholder="Search name, type, target branch, or person"
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
-              style={{ width: compact ? '100%' : 360, flex: compact ? '1 1 100%' : undefined }}
+              style={{
+                width: compact ? '100%' : 360,
+                maxWidth: '100%',
+                flex: compact ? '1 1 100%' : undefined,
+              }}
             />
             <Button
               type="primary"
               icon={<PlusOutlined />}
+              disabled={!canManage}
               onClick={() => {
                 resetConnectionTest();
                 createForm.setFieldValue('mcpServerIds', currentUser?.default_mcp_server_ids ?? []);
@@ -4699,28 +4668,6 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
         )}
       />
 
-      <CompactAlert
-        type="warning"
-        style={{ marginBottom: 16 }}
-        heading="Beta Feature — Security Notice"
-        expandable
-        description={
-          <>
-            The Message Gateway is a <strong>beta feature</strong>. Connecting external messaging
-            platforms grants anyone who can message your bot potential access to Agor sessions and
-            the underlying branch environment.{' '}
-            <Typography.Link
-              href="https://agor.live/guide/message-gateway"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Read the full security guidance
-            </Typography.Link>{' '}
-            before enabling channels in production.
-          </>
-        }
-      />
-
       {channels.length === 0 ? (
         <div
           style={{
@@ -4731,7 +4678,7 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
         >
           <MessageOutlined style={{ fontSize: 48, marginBottom: 16, display: 'block' }} />
           <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
-            No channels configured.
+            {searchTerm ? 'No matching channels.' : 'No channels configured.'}
           </Typography.Text>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             Add a channel to route messages from Slack, Discord, Teams, or other platforms to Agor
@@ -4740,9 +4687,11 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
         </div>
       ) : (
         <ResponsiveTable
+          primaryColumnKey="name"
           dataSource={channels}
           columns={columns}
-          scroll={{ x: 1050 }}
+          tableLayout="fixed"
+          key={searchTerm}
           rowKey="id"
           pagination={{ defaultPageSize: 10, showSizeChanger: true }}
           size="small"
@@ -4796,7 +4745,6 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
             mode="create"
             channelType={channelType}
             onChannelTypeChange={handleChannelTypeChange}
-            branchById={branchOptionsById}
             userById={userById}
             mcpServerById={mcpServerById}
             selectedAgent={selectedAgent}
@@ -4844,6 +4792,14 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
             style={{ marginTop: 16 }}
           />
         )}
+        {editingChannel && (
+          <Typography.Paragraph type="secondary">
+            Last message:{' '}
+            {editingChannel.last_message_at
+              ? new Date(editingChannel.last_message_at).toLocaleString()
+              : 'Never'}
+          </Typography.Paragraph>
+        )}
         <Form
           form={editForm}
           layout="vertical"
@@ -4858,7 +4814,6 @@ export const GatewayChannelsTable: React.FC<GatewayChannelsTableProps> = ({
             mode="edit"
             channelType={channelType}
             onChannelTypeChange={setChannelType}
-            branchById={branchOptionsById}
             userById={userById}
             mcpServerById={mcpServerById}
             selectedAgent={selectedAgent}

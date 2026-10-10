@@ -2,11 +2,15 @@
  * Versioned full-set reads for the workspace store (protocol:
  * `@agor/core/types` list-sync).
  *
- * Every whole-collection read the store makes (the background hydration after
- * first paint, and the resync after a socket reconnect) goes through
- * `findAllVersioned`. It returns exactly the rows a plain `findAll` would. It
+ * The store's unbounded reads (a board partition, the board list, comments)
+ * go through `findAllVersioned`, so reading the same set again — a reconnect
+ * resync re-reads the displayed board, the board list and comments — sends
+ * only what changed. It returns exactly the rows a plain `findAll` would. It
  * tells the daemon which row versions this client already holds, and the
  * daemon sends a slot index instead of each such row.
+ *
+ * Versions are held per read scope: the collection plus its query (minus
+ * paging), e.g. one board's sessions. A re-read of that scope offers them.
  *
  * A version is "held" only while the store's live row is still the object it
  * was recorded with (or shallow-equal to it, which implies identical content).
@@ -45,8 +49,26 @@ export interface ListSyncClient {
 
 export type LiveRowLookup = (path: ListSyncPath, id: string) => Row | undefined;
 
-const heldVersions = new Map<ListSyncPath, Map<string, HeldVersion>>();
+/** Held versions per read scope (see `scopeKey`). */
+const heldVersions = new Map<string, Map<string, HeldVersion>>();
 let daemonLacksListSync = false;
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+/** The read scope a query selects: its collection and filters, not its paging. */
+function scopeKey(path: ListSyncPath, query: Record<string, unknown>): string {
+  const { $limit: _limit, $skip: _skip, ...scope } = query;
+  return `${path}\u0000${stableStringify(scope)}`;
+}
 
 /** The store's current row for a versioned collection. */
 export const liveStoreRow: LiveRowLookup = (path, id) => {
@@ -79,9 +101,9 @@ function isBadRequest(error: unknown): boolean {
 }
 
 /**
- * Read a whole collection, transferring only rows this client doesn't already
- * hold. `query` must describe the full set the store keeps for `path`: held
- * versions for rows outside it are forgotten.
+ * Read every row a query selects, transferring only rows this client doesn't
+ * already hold from its previous read of the same scope (same `path` and
+ * query, ignoring paging).
  */
 export async function findAllVersioned<T extends Row>(
   client: ListSyncClient,
@@ -90,15 +112,16 @@ export async function findAllVersioned<T extends Row>(
   liveRow: LiveRowLookup = liveStoreRow
 ): Promise<T[]> {
   const service = client.service(path) as FindService;
+  const scope = scopeKey(path, query);
   if (daemonLacksListSync) {
-    heldVersions.delete(path);
+    heldVersions.delete(scope);
     return (await service.findAll({ query })) as T[];
   }
 
   const idField = LIST_SYNC_ID_FIELDS[path];
   const knownIds: string[] = [];
   const knownVersions: string[] = [];
-  for (const [id, held] of heldVersions.get(path) ?? []) {
+  for (const [id, held] of heldVersions.get(scope) ?? []) {
     if (knownIds.length >= LIST_SYNC_MAX_KNOWN) break;
     const live = liveRow(path, id);
     if (live && (live === held.row || shallowEqualEntity(live, held.row))) {
@@ -123,13 +146,13 @@ export async function findAllVersioned<T extends Row>(
       if (!isBadRequest(error)) throw error;
       // A daemon that predates versioned reads rejects the unknown key.
       daemonLacksListSync = true;
-      heldVersions.delete(path);
+      heldVersions.delete(scope);
       return (await service.findAll({ query })) as T[];
     }
     if (!isListSyncPage<T>(page)) {
       // A daemon that predates versioned reads ignored the key: plain rows.
       daemonLacksListSync = true;
-      heldVersions.delete(path);
+      heldVersions.delete(scope);
       if (Array.isArray(page)) return page as T[];
       return (await service.findAll({ query })) as T[];
     }
@@ -147,7 +170,7 @@ export async function findAllVersioned<T extends Row>(
         const live = id === undefined ? undefined : liveRow(path, id);
         if (!live) continue; // removed locally while the read was in flight
         rows.push(live as T);
-        const held = heldVersions.get(path)?.get(id);
+        const held = heldVersions.get(scope)?.get(id);
         if (held && (live === held.row || shallowEqualEntity(live, held.row))) {
           nextHeld.set(id, { version: knownVersions[entry], row: live });
         }
@@ -169,6 +192,6 @@ export async function findAllVersioned<T extends Row>(
     if (page.data.length === 0 || skip >= page.total) break;
   }
 
-  heldVersions.set(path, nextHeld);
+  heldVersions.set(scope, nextHeld);
   return rows;
 }

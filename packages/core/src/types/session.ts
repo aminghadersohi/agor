@@ -53,6 +53,13 @@ export type SessionStopOutcome = (typeof SESSION_STOP_OUTCOMES)[number];
 /** Authenticated Session Stop endpoint request. */
 export type SessionStopRequest =
   | {
+      retry_cleanup: true;
+      expected_task_id: TaskID;
+      termination_requested_at: string;
+      recovery_revision: string;
+      force_unverified?: false;
+    }
+  | {
       force_unverified?: false;
       reason?: string;
       expected_task_id?: TaskID;
@@ -62,6 +69,7 @@ export type SessionStopRequest =
     }
   | {
       force_unverified: true;
+      recovery_revision?: string;
       task_id: TaskID;
       termination_requested_at: string;
       confirmation: string;
@@ -228,8 +236,18 @@ export interface SessionUsageSummary {
 }
 
 export interface Session {
+  /** Create-response-only warning count; not persisted. No server identity is disclosed. */
+  mcp_defaults_skipped?: number;
+
   /** Read-only, opt-in aggregate over all tasks, independent of transcript paging. */
   usage_summary?: SessionUsageSummary;
+
+  /**
+   * Read-only, opt-in (`include_tasks_complete` on get): `tasks` lists every
+   * dispatched Task of this Session, once each, in dispatch order. False for a
+   * legacy row whose list lost or misnames Tasks; absent from older daemons.
+   */
+  tasks_complete?: boolean;
 
   /** Unique session identifier (UUIDv7) */
   session_id: SessionID;
@@ -340,7 +358,7 @@ export interface Session {
     /** Permission mode for agent tool execution (Claude/Gemini unified mode)
      *  Tool-level permissions are handled by SDK via settings.json files */
     mode?: PermissionMode;
-    /** Codex-specific dual permission config (sandboxMode + approvalPolicy + networkAccess) */
+    /** Codex-specific runtime settings (sandbox, approvals, network and native plugins). */
     codex?: {
       /** Sandbox mode controls WHERE Codex can write (filesystem boundaries) */
       sandboxMode: CodexSandboxMode;
@@ -348,6 +366,8 @@ export interface Session {
       approvalPolicy: CodexApprovalPolicy;
       /** Network access controls whether outbound HTTP/HTTPS requests are allowed (workspace-write only) */
       networkAccess?: boolean;
+      /** Allow native plugins; false/omitted vetoes loading, true respects native settings. */
+      includePlugins?: boolean;
     };
   } | null;
 
@@ -537,11 +557,12 @@ export interface Session {
      */
     callback_session_id?: SessionID;
     /**
-     * User ID of the person who set up this callback.
+     * User ID of the person who set up this callback. Server-managed: the
+     * daemon discards client-supplied values and stamps the authenticated
+     * caller after checking they may prompt the callback target.
      *
-     * Used as queued_by_user_id when the callback is delivered, so the
-     * resulting task is attributed to the callback setter, not the target
-     * session owner. Execution still uses the target session's home and credentials.
+     * Becomes the delivered callback Task's `created_by`, i.e. its executor
+     * principal (identity, environment, and credentials).
      */
     callback_created_by?: string;
     /**
@@ -636,19 +657,25 @@ export type SchedulerInitializationFailureCode =
 /** Session data accepted before defaults and configuration references are materialized. */
 export type CreateSessionInput = Omit<
   Partial<Session>,
-  'agentic_tool' | 'agentic_tool_preset_id' | 'model_config' | 'sdk_home_scope' | 'usage_summary'
+  | 'agentic_tool'
+  | 'agentic_tool_preset_id'
+  | 'model_config'
+  | 'sdk_home_scope'
+  | 'usage_summary'
+  | 'tasks_complete'
+  | 'mcp_defaults_skipped'
 > & {
   agentic_tool?: AgenticToolName;
   agentic_tool_preset_id?: AgenticToolConfigurationReference | null;
   model_config?: Partial<NonNullable<Session['model_config']>> | null;
-  /** MCP server IDs to attach in the same create call (issue #2629). */
+  /** Strict explicit selection (including []); omit to inherit branch then user defaults. */
   mcpServerIds?: string[];
 };
 
 /** Session patch semantics: omit/undefined preserves, string sets, null clears. */
 export type SessionUpdate = Omit<
   Partial<Session>,
-  'sdk_session_id' | 'sdk_home_scope' | 'usage_summary'
+  'sdk_session_id' | 'sdk_home_scope' | 'usage_summary' | 'tasks_complete' | 'mcp_defaults_skipped'
 > & {
   sdk_session_id?: string | null;
 };
@@ -781,25 +808,70 @@ export const LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS = [
   'skills',
 ] as const;
 
+export type LeanSessionListOmittedContextKey =
+  (typeof LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS)[number];
+
+/** `read_shape` stamped on every row of `sessions.find({ lean: true })`. */
+export const SESSION_LIST_ROW_SHAPE = 'session-list-v1';
+
 /**
- * Project a session row for a lean list. Returns the same row when there is
- * nothing to omit; otherwise a shallow copy with a trimmed `custom_context`.
- * The copy keeps every own property descriptor, including non-enumerable ones
- * such as the hidden `tenant_id` the daemon's tenant after-hook checks.
+ * A row from `sessions.find({ lean: true })`: a session summary whose
+ * `custom_context` has the `LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS` withheld.
+ *
+ * Every lean row carries `read_shape` — also when the stored context never had
+ * those keys — so a consumer can tell "withheld" from "absent". Full rows
+ * (`sessions.get`, a find without `lean`, realtime events) never carry it.
+ * Read withheld keys only after `hasFullSessionDetails`, or from `sessions.get`.
  */
-export function toLeanSessionListRow<T extends Pick<Session, 'custom_context'>>(session: T): T {
+export type SessionListRow = Omit<Session, 'custom_context'> & {
+  custom_context?: Record<string, unknown> & {
+    gateway_source?: GatewaySource;
+  } & { [K in LeanSessionListOmittedContextKey]?: never };
+  readonly read_shape: typeof SESSION_LIST_ROW_SHAPE;
+};
+
+/** True when `row` is a lean list row (its withheld context keys are unknown). */
+export function isSessionListRow(row: Session | SessionListRow): row is SessionListRow {
+  return (row as { read_shape?: unknown }).read_shape === SESSION_LIST_ROW_SHAPE;
+}
+
+/**
+ * True when `row` is a full session record, so a missing withheld
+ * `custom_context` key (e.g. `scheduled_run`) really is absent.
+ */
+export function hasFullSessionDetails(row: Session | SessionListRow): boolean {
+  return !isSessionListRow(row);
+}
+
+/**
+ * Project a session row for a lean list: a copy with the withheld
+ * `custom_context` keys removed and the enumerable, read-only `read_shape`
+ * marker set. The copy keeps every own property descriptor, including
+ * non-enumerable ones such as the hidden `tenant_id` the daemon's tenant
+ * after-hook checks. The withheld keys are always removed, whatever
+ * `read_shape` the input claims, so a forged marker cannot carry them through.
+ */
+export function toLeanSessionListRow(session: Session | SessionListRow): SessionListRow {
+  const { read_shape: _claimed, ...descriptors } = Object.getOwnPropertyDescriptors(
+    session
+  ) as PropertyDescriptorMap;
+  const copy = Object.create(Object.getPrototypeOf(session), descriptors) as Record<
+    string,
+    unknown
+  >;
   const context = session.custom_context;
-  if (!context || !LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS.some((key) => key in context)) {
-    return session;
+  if (context && LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS.some((key) => key in context)) {
+    const lean: Record<string, unknown> = { ...context };
+    for (const key of LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS) delete lean[key];
+    copy.custom_context = lean;
   }
-  const lean: Record<string, unknown> = { ...context };
-  for (const key of LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS) delete lean[key];
-  const copy = Object.create(
-    Object.getPrototypeOf(session),
-    Object.getOwnPropertyDescriptors(session)
-  ) as T;
-  copy.custom_context = lean;
-  return copy;
+  Object.defineProperty(copy, 'read_shape', {
+    value: SESSION_LIST_ROW_SHAPE,
+    enumerable: true,
+    writable: false,
+    configurable: false,
+  });
+  return copy as unknown as SessionListRow;
 }
 
 /**
@@ -929,6 +1001,7 @@ export interface SpawnConfig {
 
   /** Codex network access (codex only) */
   codexNetworkAccess?: boolean;
+  codexIncludePlugins?: boolean;
 
   /** MCP server IDs to attach to spawned session */
   mcpServerIds?: string[];
